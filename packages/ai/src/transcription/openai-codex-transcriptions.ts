@@ -5,6 +5,7 @@ import {
 	CODEX_DESKTOP_ORIGINATOR,
 	CODEX_DESKTOP_USER_AGENT,
 	getCodexAccountId,
+	isCodexAccessToken,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { withAuth } from "../auth-retry";
@@ -76,9 +77,9 @@ function uploadFileName(request: TranscriptionRequest): string {
  * The endpoint takes only `file` and `language` and reports no usage or segments, so prompt, temperature,
  * response format and timestamp options are not forwarded and the result carries text with zero usage.
  *
- * A `baseUrl` that is not on the ChatGPT origin is refused: it means `providers.openai-codex` points at a relay,
- * and the key configured for that relay outranks the stored OAuth login, so sending it to chatgpt.com would
- * disclose it and fail anyway.
+ * A `baseUrl` off the ChatGPT origin is refused. A resolved credential that is not a Codex
+ * access token is refused even on that origin: `providers.openai-codex.api` can keep the
+ * STT row on chatgpt.com while the provider-wide `apiKey` is still a relay secret.
  */
 export async function transcribeOpenAICodex(
 	model: Model<Api>,
@@ -98,6 +99,11 @@ export async function transcribeOpenAICodex(
 	const response = await withAuth(
 		options.apiKey,
 		async key => {
+			if (!isCodexAccessToken(key)) {
+				throw new AIError.ConfigurationError(
+					`${model.provider}/${model.id} only accepts a ChatGPT/Codex login; the resolved credential is not a Codex access token. Remove providers.${model.provider}.apiKey or pick another speech-to-text model`,
+				);
+			}
 			const headers: Record<string, string> = {
 				Authorization: `Bearer ${key}`,
 				Accept: "application/json",

@@ -169,6 +169,39 @@ describe("openai-codex-transcriptions transport", () => {
 		expect(called).toBe(false);
 	});
 
+	it("refuses a non-Codex credential on the canonical ChatGPT URL instead of posting it", async () => {
+		let called = false;
+		const fetchImpl: FetchImpl = async () => {
+			called = true;
+			return Response.json({ text: "ok" });
+		};
+		// providers.openai-codex.api scopes the relay URL to Responses, so the STT row stays on chatgpt.com
+		// while cascade.ts still resolves the provider-wide relay key.
+		const failure = transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/flac", fileName: "a.flac", responseFormat: "json" },
+			{ apiKey: "relay-key", fetch: fetchImpl },
+		);
+		await expect(failure).rejects.toThrow("not a Codex access token");
+		expect(called).toBe(false);
+	});
+
+	it("accepts a Codex token that has a profile email and no account id", async () => {
+		const payload = btoa(JSON.stringify({ "https://api.openai.com/profile": { email: "owner@example.com" } }));
+		let called = false;
+		const fetchImpl: FetchImpl = async () => {
+			called = true;
+			return Response.json({ text: "ok" });
+		};
+		const result = await transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+			{ apiKey: `header.${payload}.signature`, fetch: fetchImpl },
+		);
+		expect(result.text).toBe("ok");
+		expect(called).toBe(true);
+	});
+
 	it("surfaces backend ASR failures as TranscriptionApiError with the upstream detail", async () => {
 		const fetchImpl: FetchImpl = async () => Response.json({ detail: "Error in ASR API" }, { status: 500 });
 		const failure = transcribeAudio(

@@ -110,6 +110,28 @@ export function getCodexAccountId(accessToken: string): string | undefined {
 	}
 }
 
+const JWT_PROFILE_CLAIM = "https://api.openai.com/profile";
+
+/**
+ * Whether `accessToken` is a ChatGPT/Codex access token, not an arbitrary provider key.
+ *
+ * Login accepts a token that carries `chatgpt_account_id` or a profile email and
+ * omits the other (#11847). A relay `apiKey` has neither, so it must not be posted
+ * to chatgpt.com just because the model URL stayed canonical.
+ */
+export function isCodexAccessToken(accessToken: string): boolean {
+	if (getCodexAccountId(accessToken) !== undefined) return true;
+	try {
+		const parts = accessToken.split(".");
+		if (parts.length !== 3) return false;
+		const payload = JSON.parse(Buffer.from(parts[1] ?? "", "base64").toString("utf-8")) as Record<string, unknown>;
+		const profile = payload[JWT_PROFILE_CLAIM] as { email?: unknown } | undefined;
+		return typeof profile?.email === "string" && profile.email.trim().length > 0;
+	} catch {
+		return false;
+	}
+}
+
 /** Residency claim value of an account that is not region-pinned. */
 const CODEX_UNCONSTRAINED_RESIDENCY = "no_constraint";
 
