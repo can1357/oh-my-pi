@@ -73,7 +73,7 @@ export interface SessionMoney {
 /**
  * One tool's cuts and holdouts, with the share of each whose `plain` capped (showed less than the whole output). A
  * capped result's cut hides lines beyond plain's page too, which the agent would fetch under plain as well, so its
- * baseline is measured apart once enough holdouts back it (see {@link expectedRecovered}).
+ * baseline is measured apart once enough holdouts back every size bin with cuts (see {@link expectedRecovered}).
  */
 interface ToolCell {
 	cuts: number;
@@ -108,7 +108,9 @@ function emptyToolCell(): ToolCell {
 
 /**
  * Tokens a tool's cuts get fetched back anyway: each size bin (plain-capped or not) at its own holdouts' per-cut rate
- * once it has {@link MIN_HOLDOUTS} of them, a thinner bin at the tool's pooled rate.
+ * when every bin with cuts has {@link MIN_HOLDOUTS} of them, else every cut at the tool's pooled rate. The pooled rate
+ * weighs the bins by the holdouts' capped share, which the holdout coin makes the cuts' share in expectation, so it is
+ * unbiased only applied to all of the tool's cuts, never to one thin bin beside the other's own rate.
  */
 function expectedRecovered(
 	cuts: number,
@@ -118,11 +120,14 @@ function expectedRecovered(
 	cappedHoldouts: number,
 	cappedBaseline: number,
 ): number {
-	const pooled = holdouts > 0 ? baseline / holdouts : 0;
+	const uncappedCuts = cuts - cappedCuts;
 	const uncappedHoldouts = holdouts - cappedHoldouts;
-	const uncappedRate = uncappedHoldouts >= MIN_HOLDOUTS ? (baseline - cappedBaseline) / uncappedHoldouts : pooled;
-	const cappedRate = cappedHoldouts >= MIN_HOLDOUTS ? cappedBaseline / cappedHoldouts : pooled;
-	return uncappedRate * (cuts - cappedCuts) + cappedRate * cappedCuts;
+	const binned =
+		(uncappedCuts === 0 || uncappedHoldouts >= MIN_HOLDOUTS) && (cappedCuts === 0 || cappedHoldouts >= MIN_HOLDOUTS);
+	if (!binned) return holdouts > 0 ? (baseline / holdouts) * cuts : 0;
+	const uncapped = uncappedCuts > 0 ? ((baseline - cappedBaseline) / uncappedHoldouts) * uncappedCuts : 0;
+	const capped = cappedCuts > 0 ? (cappedBaseline / cappedHoldouts) * cappedCuts : 0;
+	return uncapped + capped;
 }
 
 /** The cell of `tool` in `cells`, created empty when missing. */
@@ -213,9 +218,9 @@ function recoveredOf(cells: ToolCells): number {
 
 /**
  * Holdout-adjusted net savings: each tool's applied cuts (scored and score-free) recover tokens; held-out would-be
- * cuts of the same tool and size bin (plain-capped or not; a bin under {@link MIN_HOLDOUTS} holdouts pools the tool's)
- * show how many the agent fetches back anyway. Intervals resample experiment sessions jointly. `byTool` lists `tools`
- * in their order.
+ * cuts of the same tool and size bin (plain-capped or not; the tool's pooled holdouts while a bin with cuts has under
+ * {@link MIN_HOLDOUTS}) show how many the agent fetches back anyway. Intervals resample experiment sessions jointly.
+ * `byTool` lists `tools` in their order.
  */
 export function computeAdjusted(
 	evaluated: readonly Evaluated[],

@@ -228,7 +228,7 @@ export function WhereSavingsWent({ stats, stale }: Omit<SavingsProps, "range">) 
 			footer={
 				unit === "usd"
 					? "Recoveries are priced as carried context; extra turns are requests that only recovered; Spotlight cost is its own scoring bill. What comes back anyway is the recovery $ in proportion to the tokens held-out results fetch regardless."
-					: `Recovered tokens are the full results of the recovery calls (estimated as chars ÷ 4 where no exact count exists). What comes back anyway is, per tool, the tokens a held-out result gets fetched back times the cuts, apart for results plain capped and shown whole; a side with under ${formatInteger(adjusted.minHoldouts)} held-out results takes the tool's pooled rate.`
+					: `Recovered tokens are the full results of the recovery calls (estimated as chars ÷ 4 where no exact count exists). What comes back anyway is, per tool, the tokens a held-out result gets fetched back times the cuts, apart for results plain capped and shown whole; while a side with cuts has under ${formatInteger(adjusted.minHoldouts)} held-out results, all the tool's cuts take its pooled rate.`
 			}
 		>
 			<Waterfall steps={steps} format={unit === "usd" ? formatCost : formatCompact} />
@@ -280,7 +280,7 @@ function ToolNetList({
 							`${formatInteger(row.cuts)} cuts fetched back ${formatCompact(row.recoveredTokens)} tokens`,
 							baseline === null
 								? "No held-out baseline yet"
-								: `${formatInteger(row.holdouts)} held-out results get ${formatCompact(baseline)} each fetched back anyway, pooled (cuts are priced apart by whether plain capped them)`,
+								: `${formatInteger(row.holdouts)} held-out results get ${formatCompact(baseline)} each fetched back anyway, pooled (cuts are priced apart by whether plain capped them once each side with cuts has enough held out)`,
 							excessInterval === "" ? "" : `Beyond the baseline: ${excessInterval} (90%)`,
 						]
 							.filter(Boolean)
