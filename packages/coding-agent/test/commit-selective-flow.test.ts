@@ -1,7 +1,9 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { commitSelection } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
@@ -27,15 +29,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 /** Raw bytes of one committed blob, so binary content can be compared exactly. */
 async function gitBlob(cwd: string, spec: string): Promise<Buffer> {
-	const env = { ...process.env, HOME: cwd, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
-	const proc = Bun.spawn(["git", "-C", cwd, "cat-file", "blob", spec], { env, stdout: "pipe", stderr: "pipe" });
-	const [out, err, code] = await Promise.all([
-		new Response(proc.stdout).arrayBuffer(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	if (code !== 0) throw new Error(`git cat-file blob ${spec} failed (${code}): ${err}`);
-	return Buffer.from(out);
+	return (await vcs.requireGit(cwd).showBlob(spec)).data;
 }
 
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Fixed an old bug\n";
@@ -323,11 +317,7 @@ describe("selective commit flow", () => {
 		await Bun.write(path.join(root, "big.txt"), `${"c".repeat(4 * 1024 * 1024)}\n`);
 		await Bun.write(path.join(root, "gone.bin"), binary([0, 5, 5]));
 
-		const outcome = await commitSelection(
-			draft,
-			{ subject: "chore: assets" },
-			{ journal, agent: { agent: "Main" } },
-		);
+		const outcome = await commitSelection(draft, { subject: "chore: assets" }, { journal, agent: { agent: "Main" } });
 
 		expect(outcome.paths).toEqual(["big.txt", "gone.bin", "logo.bin"]);
 		expect([...(await gitBlob(root, "HEAD:logo.bin"))]).toEqual([...draftedLogo]);
@@ -352,14 +342,32 @@ describe("selective commit flow", () => {
 		// The file keeps being edited after the draft captured it.
 		await Bun.write(path.join(root, "added.bin"), Buffer.from([0, 8, 8, 8]));
 
-		const outcome = await commitSelection(
-			draft,
-			{ subject: "feat: asset" },
-			{ journal, agent: { agent: "Main" } },
-		);
+		const outcome = await commitSelection(draft, { subject: "feat: asset" }, { journal, agent: { agent: "Main" } });
 
 		expect(outcome.paths).toEqual(["added.bin"]);
 		expect([...(await gitBlob(root, "HEAD:added.bin"))]).toEqual([0, 1, 2]);
+	});
+
+	it("does not render patches for whole files while drafting", async () => {
+		const { root, journal } = await emptyRepo();
+		await Bun.write(path.join(root, "seed.txt"), "seed\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		await Bun.write(path.join(root, "selected.bin"), Buffer.from([0, 1]));
+		await Bun.write(path.join(root, "unselected.bin"), Buffer.from([0, 2]));
+
+		const diffText = vi.spyOn(VcsGitRepo.prototype, "diffText");
+		const diffNoIndex = vi.spyOn(VcsGitRepo.prototype, "diffNoIndex");
+		try {
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			draft.take({ path: "selected.bin" });
+			// Untracked whole files used to be rendered in full here, including the
+			// unselected one. Drafting must only snapshot their bytes.
+			expect(diffText).not.toHaveBeenCalled();
+			expect(diffNoIndex).not.toHaveBeenCalled();
+		} finally {
+			vi.restoreAllMocks();
+		}
 	});
 
 	it("refuses a whole-file commit when a newer commit changed that file", async () => {
@@ -398,11 +406,7 @@ describe("selective commit flow", () => {
 		await Bun.write(path.join(root, "logo.bin"), Buffer.from([0xff, 3, 3, 3]));
 		await git(root, ["add", "logo.bin"]);
 
-		const outcome = await commitSelection(
-			draft,
-			{ subject: "chore: logo" },
-			{ journal, agent: { agent: "Main" } },
-		);
+		const outcome = await commitSelection(draft, { subject: "chore: logo" }, { journal, agent: { agent: "Main" } });
 
 		expect(outcome.paths).toEqual(["logo.bin"]);
 		expect([...(await gitBlob(root, "HEAD:logo.bin"))]).toEqual([0xff, 2, 2]);
@@ -424,11 +428,7 @@ describe("selective commit flow", () => {
 		await git(root, ["add", "notes.txt"]);
 		await git(root, ["commit", "-q", "-m", "other"]);
 
-		const outcome = await commitSelection(
-			draft,
-			{ subject: "chore: logo" },
-			{ journal, agent: { agent: "Main" } },
-		);
+		const outcome = await commitSelection(draft, { subject: "chore: logo" }, { journal, agent: { agent: "Main" } });
 
 		expect(outcome.paths).toEqual(["logo.bin"]);
 		expect([...(await gitBlob(root, "HEAD:logo.bin"))]).toEqual([0xff, 2, 2]);

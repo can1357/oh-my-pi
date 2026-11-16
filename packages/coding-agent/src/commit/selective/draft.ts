@@ -70,12 +70,18 @@ export interface FileState {
 	mode: string;
 }
 
+/** A blob and its git mode on one side of a whole-file change. */
+export interface WholeFileState {
+	id: string;
+	mode: string;
+}
+
 /** Content to commit for one path; produced by {@link Draft.selection}. */
 export type SelectedChange =
 	/** HEAD's state (`null`: absent) → the selected state (`null`: deleted). */
 	| { kind: "text"; path: string; before: FileState | null; after: FileState | null }
-	/** Committed as `patch` captured it at draft time; `added` when HEAD lacks the path. */
-	| { kind: "whole"; path: string; added: boolean; patch: string };
+	/** Frozen blobs captured at draft time (`null`: absent). */
+	| { kind: "whole"; path: string; before: WholeFileState | null; after: WholeFileState | null };
 
 /**
  * Why a file has no line attribution and is committed whole: binary, non-UTF-8, or oversized
@@ -91,7 +97,7 @@ export interface SelectionTarget {
 	grep?: string;
 }
 
-interface FileChange {
+interface FileChangeBase {
 	path: string;
 	head: string | null;
 	work: string | null;
@@ -99,13 +105,6 @@ interface FileChange {
 	headMode: string | null;
 	/** Git mode in the worktree; `null` when the file is deleted. */
 	mode: string | null;
-	/** Set exactly when `attribution` is absent: the file selects whole. */
-	whole?: WholeReason;
-	/** Appliable patch from HEAD to the whole-file content, frozen at draft time; set alongside `whole`. */
-	patch?: string;
-	/** Line attribution of the content change. */
-	attribution?: Attribution;
-	classification?: Classification;
 	selected: Set<number>;
 	wholeSelected: boolean;
 	/** Agents with recorded edits of this path. */
@@ -113,6 +112,28 @@ interface FileChange {
 	/** Call window covering the last modification of a file no usable record explains. */
 	hint?: CallRecord;
 }
+
+interface TextFileChange extends FileChangeBase {
+	/** Line attribution of the content change. */
+	attribution: Attribution;
+	classification?: Classification;
+	whole?: never;
+}
+
+interface WholeFileChange extends FileChangeBase {
+	head: null;
+	work: null;
+	/** Frozen object ids and the display reason; always present for a whole-file change. */
+	whole: {
+		reason: WholeReason;
+		before: WholeFileState | null;
+		after: WholeFileState | null;
+	};
+	attribution?: never;
+	classification?: never;
+}
+
+type FileChange = TextFileChange | WholeFileChange;
 
 /**
  * Content of `bytes` as text, or `undefined` when it must be handled as an opaque whole file.
@@ -316,6 +337,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 			byPath.get(entry.path) ?? [],
 			source.journal,
 			windowCall,
+			source.signal,
 		);
 		if (result === "skip") skipped.push(entry.path);
 		else if (result) files.push(result);
@@ -364,6 +386,7 @@ async function loadFile(
 	records: readonly ChangeRecord[],
 	journal: ChangeJournal | null,
 	windowCall: (ms: number | undefined) => CallRecord | undefined,
+	signal?: AbortSignal,
 ): Promise<FileChange | "skip" | undefined> {
 	const absolute = path.join(root, file);
 	let workBytes: Uint8Array | null = null;
@@ -372,8 +395,10 @@ async function loadFile(
 	try {
 		const stat = await fs.lstat(absolute);
 		mtimeMs = stat.mtimeMs;
-		if (stat.isSymbolicLink()) mode = SYMLINK_MODE;
-		else if (!stat.isFile()) return "skip";
+		if (stat.isSymbolicLink()) {
+			mode = SYMLINK_MODE;
+			workBytes = await fs.readlink(absolute, { encoding: "buffer" });
+		} else if (!stat.isFile()) return "skip";
 		else {
 			mode = stat.mode & 0o111 ? "100755" : "100644";
 			workBytes = await fs.readFile(absolute);
@@ -390,22 +415,32 @@ async function loadFile(
 		wholeSelected: false,
 		editors: [...new Set(records.map(record => record.agent))],
 	};
-	// The patch is rendered now, not at commit time: other agents keep editing the
-	// worktree, and the commit must contain exactly what this draft captured.
-	const whole = async (reason: WholeReason): Promise<FileChange> => ({
-		...base,
-		head: null,
-		work: null,
-		whole: reason,
-		patch:
-			head.sha === null || head.mode === null
-				? await repo.diffNoIndex("/dev/null", file, true)
-				: await repo.diffText({ base: head.sha, files: [file], binary: true }),
-		hint: records.length === 0 ? windowCall(mtimeMs) : undefined,
-	});
+	// Freeze the bytes just read, not a rendered patch: drafts retain only a blob id,
+	// and selected paths render from the object database when the commit is built.
+	const whole = async (reason: WholeReason): Promise<FileChange> => {
+		let before: WholeFileState | null = null;
+		if (head.sha !== null && head.mode !== null) {
+			const id = await repo.resolveRef(`${head.sha}:${file}`, signal);
+			if (!id) throw new Error(`Could not resolve ${file} at draft HEAD ${head.sha}.`);
+			before = { id, mode: head.mode };
+		}
+		let after: WholeFileState | null = null;
+		if (mode !== null) {
+			if (workBytes === null) throw new Error(`Could not capture ${file} for the draft.`);
+			after = { id: await repo.writeBlob(workBytes, signal), mode };
+		}
+		return {
+			...base,
+			head: null,
+			work: null,
+			whole: { reason, before, after },
+			hint: records.length === 0 ? windowCall(mtimeMs) : undefined,
+		};
+	};
 	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
 	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) return whole("symlink");
-	const headBytes = head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`)).data : null;
+	const headBytes =
+		head.sha && head.mode ? (await repo.showBlob(`${head.sha}:${file}`, undefined, signal)).data : null;
 	const headText = headBytes === null ? null : decodeText(headBytes);
 	const workText = workBytes === null ? null : decodeText(workBytes);
 	if (headText === undefined || workText === undefined) return whole("content");
@@ -464,8 +499,8 @@ function modeChange(file: FileChange): string {
 }
 
 /** What a whole-file change is, for the summary and `show()`. */
-function wholeLabel(file: FileChange): string {
-	switch (file.whole) {
+function wholeLabel(file: WholeFileChange): string {
+	switch (file.whole.reason) {
 		case "symlink":
 			return "symlink";
 		case "mode":
@@ -520,8 +555,13 @@ export class Draft {
 		const changes: SelectedChange[] = [];
 		for (const file of this.#files) {
 			if (!file.attribution) {
-				if (file.wholeSelected && file.patch !== undefined) {
-					changes.push({ kind: "whole", path: file.path, added: file.headMode === null, patch: file.patch });
+				if (file.wholeSelected) {
+					changes.push({
+						kind: "whole",
+						path: file.path,
+						before: file.whole.before,
+						after: file.whole.after,
+					});
 				}
 				continue;
 			}

@@ -10,6 +10,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
@@ -63,9 +64,19 @@ function shortSha(sha: string | null): string {
 	return sha?.slice(0, 10) ?? "(no commits yet)";
 }
 
-function patchFor(change: SelectedChange): string {
+async function patchFor(repo: VcsGitRepo, change: SelectedChange, signal?: AbortSignal): Promise<string> {
 	if (change.kind === "text") return formatTextPatch(change.path, change.before, change.after);
-	return change.patch;
+	return repo.diffBlobs(
+		{
+			path: change.path,
+			oldId: change.before?.id,
+			newId: change.after?.id,
+			oldMode: change.before?.mode,
+			newMode: change.after?.mode,
+		},
+		true,
+		signal,
+	);
 }
 
 /**
@@ -84,7 +95,7 @@ export async function commitSelection(
 	const repo = vcs.requireGit(draft.root);
 	const patches: Array<{ path: string; patch: string }> = [];
 	for (const change of changes) {
-		const patch = patchFor(change);
+		const patch = await patchFor(repo, change, context.signal);
 		if (patch) patches.push({ path: change.path, patch });
 	}
 	if (patches.length === 0) throw new Error("The selection matches HEAD; nothing to commit.");

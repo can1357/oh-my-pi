@@ -1060,19 +1060,24 @@ fn apply_patches_to_map(
 			}
 			continue;
 		}
-		let source_bytes = match source.as_ref() {
-			Some(entry) => blob_bytes(repo, entry.id)?,
-			None => Vec::new(),
-		};
 		// A literal binary block does not look at the bytes it replaces. Direct
 		// applies refuse it unless those bytes are the blob the patch was built
 		// from, so a newer commit or staged copy is not overwritten. Three-way is
 		// left alone: a delta that fails to apply still merges from the recorded
 		// blob.
 		if !options.three_way {
-			ensure_binary_preimage(repo, patch, &source_bytes, options.reverse)
-				.map_err(ApplyFailure::into_error)?;
+			ensure_binary_preimage(
+				repo,
+				patch,
+				source.as_ref().map(|entry| entry.id),
+				options.reverse,
+			)
+			.map_err(ApplyFailure::into_error)?;
 		}
+		let source_bytes = match source.as_ref() {
+			Some(entry) => blob_bytes(repo, entry.id)?,
+			None => Vec::new(),
+		};
 		let direct = apply_file_bytes(patch, &source_bytes, options.reverse);
 		let bytes = match direct {
 			Ok(bytes) => bytes,
@@ -1133,7 +1138,7 @@ fn patch_sides(
 fn ensure_binary_preimage(
 	repo: &gix::Repository,
 	patch: &FilePatch,
-	source: &[u8],
+	source: Option<gix::ObjectId>,
 	reverse: bool,
 ) -> std::result::Result<(), ApplyFailure> {
 	if patch.binary.is_empty() {
@@ -1165,21 +1170,20 @@ fn ensure_binary_preimage(
 	.unwrap_or("file");
 	// An all-zero id is a creation: the preimage is absent, not the empty blob.
 	if preimage.bytes().all(|byte| byte == b'0') {
-		if source.is_empty() {
+		if source.is_none() {
 			return Ok(());
 		}
 		return Err(ApplyFailure::Context(format!(
-			"binary patch applies to an empty '{path}' but it is not empty"
+			"binary patch creates '{path}' but it already exists"
 		)));
 	}
-	let actual = gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, source)
-		.map_err(|err| ApplyFailure::Invalid(format!("cannot hash binary preimage: {err}")))?;
 	let expected = gix::ObjectId::from_hex(preimage.as_bytes()).map_err(|_| {
 		ApplyFailure::Invalid("binary patch index line has an invalid object id".into())
 	})?;
-	if actual == expected {
+	if source.as_ref() == Some(&expected) {
 		return Ok(());
 	}
+	let actual = source.map_or_else(|| "absent".to_owned(), |id| id.to_hex().to_string());
 	Err(ApplyFailure::Context(format!(
 		"binary patch for '{path}' expects {preimage}, which does not match the current contents \
 		 ({actual})"
@@ -3320,11 +3324,30 @@ mod tests {
 		perms.set_mode(0o755);
 		fs::set_permissions(&path, perms).expect("chmod");
 		let repository = repo(temp.path());
-		let patch = repository
+		let worktree_patch = repository
 			.diff_text(&DiffOptions { binary: true, ..DiffOptions::default() })
 			.expect("render mode patch");
-		assert!(patch.contains("old mode 100644\nnew mode 100755\n"), "{patch}");
-		assert!(patch.contains(preimage.trim()), "mode patch must name the unchanged blob: {patch}");
+		assert!(worktree_patch.contains("old mode 100644\nnew mode 100755\n"), "{worktree_patch}");
+		assert!(
+			worktree_patch.contains(preimage.trim()),
+			"mode patch must name the unchanged blob: {worktree_patch}"
+		);
+		let new_id = repository
+			.write_blob(bytes)
+			.expect("freeze mode-change bytes");
+		let patch = repository
+			.diff_blobs(
+				&crate::types::BlobChange {
+					path:     "data.bin".to_owned(),
+					old_id:   Some(preimage.trim().to_owned()),
+					new_id:   Some(new_id),
+					old_mode: Some("100644".to_owned()),
+					new_mode: Some("100755".to_owned()),
+				},
+				true,
+			)
+			.expect("render frozen mode patch");
+		assert_eq!(patch, worktree_patch);
 		reset(temp.path());
 
 		let cached =

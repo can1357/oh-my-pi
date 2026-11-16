@@ -175,6 +175,15 @@ pub struct VcsShowResult {
 	pub data:      Buffer,
 	pub truncated: bool,
 }
+/// One same-path change between blobs already stored in the object database.
+#[napi(object)]
+pub struct VcsBlobChange {
+	pub path:     String,
+	pub old_id:   Option<String>,
+	pub new_id:   Option<String>,
+	pub old_mode: Option<String>,
+	pub new_mode: Option<String>,
+}
 /// Diff generation options.
 #[napi(object)]
 #[derive(Default)]
@@ -344,6 +353,17 @@ impl From<core::NumstatEntry> for VcsNumstatEntry {
 impl From<core::ShowResult> for VcsShowResult {
 	fn from(v: core::ShowResult) -> Self {
 		Self { data: v.bytes.into(), truncated: v.truncated }
+	}
+}
+impl From<VcsBlobChange> for core::BlobChange {
+	fn from(v: VcsBlobChange) -> Self {
+		Self {
+			path:     v.path,
+			old_id:   v.old_id,
+			new_id:   v.new_id,
+			old_mode: v.old_mode,
+			new_mode: v.new_mode,
+		}
 	}
 }
 impl From<VcsDiffOptions> for core::DiffOptions {
@@ -1053,6 +1073,12 @@ impl VcsGitRepo {
 		})
 	}
 
+	/// Write bytes as a blob and return its full object id.
+	#[napi]
+	pub fn write_blob(&self, data: Uint8Array, signal: Option<Unknown>) -> Promise<String> {
+		blocking("vcs.writeBlob", self.inner.clone(), signal, move |r| r.write_blob(&data))
+	}
+
 	/// Read commit and patch bytes.
 	#[napi]
 	pub fn show_commit(
@@ -1093,6 +1119,21 @@ impl VcsGitRepo {
 	) -> Promise<String> {
 		blocking("vcs.diffNoIndex", self.inner.clone(), signal, move |repo| {
 			repo.diff_no_index(Path::new(&left), Path::new(&right), binary)
+		})
+	}
+
+	/// Render a same-path patch between blobs already stored in the object
+	/// database.
+	#[napi]
+	pub fn diff_blobs(
+		&self,
+		change: VcsBlobChange,
+		binary: bool,
+		signal: Option<Unknown>,
+	) -> Promise<String> {
+		let change = change.into();
+		blocking("vcs.diffBlobs", self.inner.clone(), signal, move |repo| {
+			repo.diff_blobs(&change, binary)
 		})
 	}
 
