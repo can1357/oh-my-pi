@@ -44,6 +44,7 @@ import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
 import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
+import { advisorToolLabel } from "./advisor-tool-label";
 
 /**
  * Max wrapped rows of a turn-ending provider error rendered inline in the
@@ -1074,6 +1075,10 @@ export class AssistantMessageComponent extends Container {
 					if (!this.#hideThinkingBlock) children.push(...(this.#thinkingExtensions.get(index) ?? []));
 				} else if (content.type === "image" && content.data && content.mimeType && this.#showImages) {
 					children.push(this.#nativeImages.get(`i${index}`, content.data, content.mimeType));
+				} else {
+					const advisorLabel = advisorToolLabel(message.content, index);
+					if (advisorLabel)
+						children.push(node("text", { spans: [span(advisorLabel, "muted")] }, undefined, `a${index}`));
 				}
 			}
 			if (this.#showImages && this.#showToolResultImages) {
@@ -2125,6 +2130,12 @@ export class AssistantMessageComponent extends Container {
 			} else if (content.type === "image" && content.data && content.mimeType) {
 				this.#renderImageEntries([{ image: content, key: `native:${i}` }], hasRenderedContent);
 				hasRenderedContent ||= this.#showImages;
+			} else {
+				const advisorLabel = advisorToolLabel(message.content, i);
+				if (advisorLabel) {
+					this.#contentContainer.addChild(new Text(theme.fg("dim", advisorLabel), 1, 0));
+					hasRenderedContent = true;
+				}
 			}
 		}
 		for (const [index, block] of previousFigures) {

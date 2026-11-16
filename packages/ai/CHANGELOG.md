@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Anthropic advisor tool: set `advisor: { model }` (`fable`, `opus`, `sonnet`, … or a model id) and Claude consults that model server-side mid-turn. Advisor calls and results replay across turns, paused turns resume, and advisor tokens are priced at the advisor model's rates ([#19386](https://github.com/can1357/oh-my-pi/pull/19386) by [@psukhopompos](https://github.com/psukhopompos))
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes

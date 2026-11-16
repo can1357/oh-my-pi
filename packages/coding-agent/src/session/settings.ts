@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import type { AnthropicAdvisorOptions } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
@@ -1016,6 +1017,38 @@ export const cfgProvidersAnthropicServerSideFallback = register({
 			"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
 	},
 });
+
+/**
+ * Anthropic advisor tool (`advisor_20260301`): the model the executor may
+ * consult server-side at decision points. A family alias resolves per
+ * request to the strongest advisor the API accepts for that request's model,
+ * so a Sonnet or Haiku subagent and an Opus main turn each get a valid pair.
+ * `/advisor tool <model|off>` is the quick switch.
+ */
+export const cfgProvidersAnthropicAdvisor = register({
+	id: "providers.anthropic.advisor",
+	type: "string",
+	default: "off",
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Anthropic Advisor Tool",
+		description:
+			"Model Claude consults server-side before committing to an approach, when stuck, and before finishing (Anthropic `advisor-tool-2026-03-01` beta). Applies to main-loop and subagent turns on first-party Anthropic models whose pairing the API accepts; other turns run without it. Advisor tokens bill at the advisor model's rates.",
+		options: [
+			{ value: "off", label: "Off", description: "No advisor tool. Default." },
+			{ value: "fable", label: "Fable", description: "Strongest accepted Claude Fable model." },
+			{ value: "opus", label: "Opus", description: "Strongest accepted Claude Opus model." },
+			{ value: "sonnet", label: "Sonnet", description: "Strongest accepted Claude Sonnet model." },
+		],
+	},
+});
+
+/** The advisor tool option for the primary loop, or undefined when off. */
+export function anthropicAdvisorOption(scope: ScopeLike): AnthropicAdvisorOptions | undefined {
+	const model = cfgProvidersAnthropicAdvisor.get(scope).trim();
+	return model && model !== "off" ? { model } : undefined;
+}
 
 /**
  * Anthropic subscription slow mode (`off` | `auto`). Deliberately has no

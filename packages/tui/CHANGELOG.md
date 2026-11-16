@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added transcript lines for Anthropic advisor-tool consultations (consulting, reviewed, plaintext advice, or unavailable) ([#19386](https://github.com/can1357/oh-my-pi/pull/19386) by [@psukhopompos](https://github.com/psukhopompos))
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

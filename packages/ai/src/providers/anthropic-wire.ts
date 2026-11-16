@@ -86,6 +86,9 @@ export type ToolSearchServerToolUseBlockParam = ServerToolUseBlockParam & {
 	name: "tool_search_tool_regex" | "tool_search_tool_bm25";
 };
 
+/** Advisor-tool (`advisor_20260301`) call; `input` is always empty. */
+export type AdvisorServerToolUseBlockParam = ServerToolUseBlockParam & { name: "advisor" };
+
 /** Native web-search result replayed inside an assistant turn. */
 export type WebSearchToolResultBlockParam = {
 	type: "web_search_tool_result";
@@ -97,6 +100,18 @@ export type WebSearchToolResultBlockParam = {
 /** Native tool-search result replayed inside an assistant turn. */
 export type ToolSearchToolResultBlockParam = {
 	type: "tool_search_tool_result";
+	tool_use_id: string;
+	content: unknown;
+	[key: string]: unknown;
+};
+
+/**
+ * Advisor guidance returned to the executor: `advisor_result` (plaintext),
+ * `advisor_redacted_result` (encrypted), or `advisor_tool_result_error`.
+ * Replayed verbatim; the server decrypts redacted advice for the executor.
+ */
+export type AdvisorToolResultBlockParam = {
+	type: "advisor_tool_result";
 	tool_use_id: string;
 	content: unknown;
 	[key: string]: unknown;
@@ -122,7 +137,9 @@ export type AnthropicServerToolHistoryBlockParam =
 	| WebSearchServerToolUseBlockParam
 	| WebSearchToolResultBlockParam
 	| ToolSearchServerToolUseBlockParam
-	| ToolSearchToolResultBlockParam;
+	| ToolSearchToolResultBlockParam
+	| AdvisorServerToolUseBlockParam
+	| AdvisorToolResultBlockParam;
 
 /** True when a block is complete Anthropic server-tool history omp can replay. */
 export function isAnthropicServerToolHistoryBlock(block: {
@@ -136,10 +153,15 @@ export function isAnthropicServerToolHistoryBlock(block: {
 		const supportedName =
 			block.name === "web_search" ||
 			block.name === "tool_search_tool_regex" ||
-			block.name === "tool_search_tool_bm25";
+			block.name === "tool_search_tool_bm25" ||
+			block.name === "advisor";
 		return supportedName && typeof block.id === "string" && block.id.length > 0;
 	}
-	if (block.type === "web_search_tool_result" || block.type === "tool_search_tool_result") {
+	if (
+		block.type === "web_search_tool_result" ||
+		block.type === "tool_search_tool_result" ||
+		block.type === "advisor_tool_result"
+	) {
 		return typeof block.tool_use_id === "string" && block.tool_use_id.length > 0 && Object.hasOwn(block, "content");
 	}
 	return false;
@@ -195,6 +217,7 @@ export type ContentBlockParam =
 	| ServerToolUseBlockParam
 	| WebSearchToolResultBlockParam
 	| ToolSearchToolResultBlockParam
+	| AdvisorToolResultBlockParam
 	| ToolAdditionBlockParam
 	| ToolRemovalBlockParam
 	| ThinkingBlockParam
@@ -238,6 +261,13 @@ export type Tool = {
 	eager_input_streaming?: boolean;
 	/** Withhold this tool until a later `tool_addition` block references it. */
 	defer_loading?: boolean;
+};
+
+/** Server-run advisor tool: the executor consults `model` mid-generation. */
+export type AdvisorTool = {
+	type: "advisor_20260301";
+	name: "advisor";
+	model: string;
 };
 
 export type ToolChoiceAuto = { type: "auto"; disable_parallel_tool_use?: boolean };
@@ -343,7 +373,7 @@ export type MessageCreateParams = {
 	top_k?: number;
 	stop_sequences?: string[];
 	stream?: boolean;
-	tools?: Tool[];
+	tools?: Array<Tool | AdvisorTool>;
 	tool_choice?: ToolChoice;
 	metadata?: Metadata;
 	thinking?: ThinkingConfigParam;

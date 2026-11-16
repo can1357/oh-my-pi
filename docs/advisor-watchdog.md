@@ -4,6 +4,10 @@ The advisor subsystem attaches one or more optional reviewer models to a session
 
 An advisor does not approve actions or mutate primary session state directly. Its default investigative toolset is `read`, `grep`, and `glob`, plus `recall` when the active memory backend provides it, but a `WATCHDOG.yml` roster entry may grant any built-in — including mutating tools such as `edit`, `write`, `bash`, and `eval`. Those tools run in an isolated advisor `ToolSession`, but they honor the session's normal approval mode and per-tool policies; grant them only when the advisor model and workspace are trusted (see [Tools and isolation](#tools-and-isolation)).
 
+## Anthropic advisor tool
+
+`providers.anthropic.advisor` (`/advisor tool <model|off>`) is a separate feature: Anthropic's server-side advisor tool, as in Claude Code's `/advisor`. The executing Claude model decides when to consult the advisor model, Anthropic runs the consultation inside the same request, and the advice returns in the assistant turn (encrypted for Fable/Mythos and newer Opus advisors). It has no tools, no `WATCHDOG.yml` roster, and no client-side review loop. The rest of this page covers the `advisor.*` reviewer only. See [Settings](./settings.md) for the key.
+
 ## Implementation files
 
 - [`src/advisor/runtime.ts`](../packages/coding-agent/src/advisor/runtime.ts)

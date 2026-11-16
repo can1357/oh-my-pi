@@ -95,6 +95,7 @@ const OPTION_TIERS = {
 	antigravityEndpointMode: "server",
 	fallbacks: "server",
 	disableServerSideFallback: "server",
+	advisor: "server",
 	textVerbosity: "server",
 } as const satisfies Record<keyof SimpleStreamOptions, OptionTier>;
 
