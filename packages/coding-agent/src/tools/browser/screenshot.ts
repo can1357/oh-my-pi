@@ -246,8 +246,8 @@ function coordinateNote(
 	}
 	if (area === "viewport") {
 		if (!frame) return undefined;
-		const zoom = (frame.width / frame.viewport.width).toFixed(2);
-		return `It shows the ${frame.viewport.width}x${frame.viewport.height} viewport at ${zoom}x: clickAt, mouseMove and drag points are read on this image; pass {css: true} for CSS pixels.`;
+		// No scale factor: a rounded one invites multiplying page positions by it, which lands pixels off.
+		return `This image is the ${frame.viewport.width}x${frame.viewport.height} viewport rescaled: clickAt, mouseMove and drag points are positions on this image. Pass {css: true} with a position measured on the page (box, evaluate) instead of rescaling it.`;
 	}
 	const target = SCREENSHOT_AREA_TARGET[area];
 	if (resized.paddedContent) return paddedMapping(resized, resized.paddedContent, scale, target);

@@ -48,7 +48,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 - `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once. `<select>` elements: `select`, not `fill`.
 - `clickAt`, `mouseMove`, `drag` `{x, y}` points: the position as read off the tab's latest screenshot.
   - That is viewport CSS pixels, unless the screenshot's line says it is scaled.
-  - After a scaled screenshot, values measured on the page (`box`, `evaluate`) need `css: true`: `clickAt(x, y, {css: true})`, `{x, y, css: true}`.
+  - After a scaled screenshot, pass values measured on the page (`box`, `evaluate`) with `css: true` instead of scaling them: `clickAt(x, y, {css: true})`, `{x, y, css: true}`.
 - `waitFor*` resolve as soon as the condition holds: after a click or navigation wait for the expected text, URL, or selector, never a fixed sleep.
 - The cell's own `wait(handles)` waits for agents and completions, not time; `wait(ms | predicate)` sleeps or polls only inside `tab.run`.
 - URL patterns (`waitForUrl`, `waitForResponse`, `requests({filter})`): a string with `*` is a glob (`*` within a path segment, `**` across: `"**/cart.php"`), any other string a substring; or a RegExp. `route` strings are always globs.
