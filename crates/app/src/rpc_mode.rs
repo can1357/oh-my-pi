@@ -949,13 +949,17 @@ fn con_text(runtime: &RpcRuntime, name: &str) -> Option<Str> {
 	}
 }
 
-fn set_con(runtime: &RpcRuntime, name: &str, value: &str) -> Result<(), String> {
+fn set_con(runtime: &RpcRuntime, name: &str, value: omp_con::Value) -> Result<(), String> {
 	let Some(con) = &runtime.con else {
 		return Err("RPC control plane is unavailable".into());
 	};
-	con.exec(&format!("{name} {value}"), omp_con::Source::Session)
+	con.set(name, value, omp_con::Origin::Session)
 		.map(|_| ())
 		.map_err(|error| crate::fault(error).into())
+}
+
+fn known_thinking_level(level: &str) -> bool {
+	matches!(omp_agent::AI_THINKING.spec().hint, omp_con::Hint::Suggest(levels) if levels.contains(&level))
 }
 
 fn todo_phases(dom: &Dom) -> Vec<Value> {
@@ -2128,7 +2132,7 @@ where
 							"set_fast_mode" => {
 								let enabled = request.params.get("enabled").and_then(Value::as_bool);
 								let response = match enabled {
-									Some(enabled) => match set_con(&runtime, "ai_fastmode", if enabled { "true" } else { "false" }) {
+									Some(enabled) => match set_con(&runtime, "ai_fastmode", omp_con::Value::Bool(enabled)) {
 										Ok(()) => RpcResponse::success(
 											id,
 											command.as_str(),
@@ -2195,11 +2199,11 @@ where
 									let (_, key, thinking) = &runtime.model_cycle[runtime.model_cycle_index];
 									let key = key.clone();
 									let thinking = thinking.clone();
-									match set_con(&runtime, "ai_model", key.as_str()) {
+									match set_con(&runtime, "ai_model", omp_con::Value::Str(key.clone())) {
 										Ok(()) => {
 											runtime.model = key.clone();
 											if let Some(thinking) = &thinking {
-												let _ = set_con(&runtime, "ai_thinking", thinking.as_str());
+												let _ = set_con(&runtime, "ai_thinking", omp_con::Value::Str(thinking.clone()));
 											}
 											outgoing_tx.send(Outgoing::Frame(json!({ "type": "model_changed" }))).into_diagnostic()?;
 											RpcResponse::success(id, command.as_str(), json!({
@@ -2216,7 +2220,7 @@ where
 							"set_thinking_level" => {
 								let level = request.params.get("level").and_then(Value::as_str);
 								let response = match level {
-									Some(level) => match set_con(&runtime, "ai_thinking", level) {
+									Some(level) if known_thinking_level(level) => match set_con(&runtime, "ai_thinking", omp_con::Value::Str(Str::new(level))) {
 										Ok(()) => {
 											outgoing_tx.send(Outgoing::Frame(json!({
 												"type": "thinking_level_changed",
@@ -2226,6 +2230,7 @@ where
 										},
 										Err(source) => RpcResponse::error(id, command.as_str(), source, Some(RpcErrorCode::new("config_error"))),
 									},
+									Some(level) => RpcResponse::error(id, command.as_str(), format!("unknown thinking level `{level}`"), Some(RpcErrorCode::new("config_error"))),
 									None => RpcResponse::error(id, command.as_str(), "set_thinking_level requires `level`", Some(RpcErrorCode::new("invalid_params"))),
 								};
 								outgoing_tx.send(Outgoing::Frame(serde_json::to_value(response).into_diagnostic()?)).into_diagnostic()?;
@@ -2237,7 +2242,7 @@ where
 									.and_then(|current| LEVELS.iter().position(|level| *level == current))
 									.map_or(0, |index| (index + 1) % LEVELS.len());
 								let level = LEVELS[index];
-								let response = match set_con(&runtime, "ai_thinking", level) {
+								let response = match set_con(&runtime, "ai_thinking", omp_con::Value::Str(Str::new_static(level))) {
 									Ok(()) => RpcResponse::success(id, command.as_str(), json!({ "level": level })).into_diagnostic()?,
 									Err(source) => RpcResponse::error(id, command.as_str(), source, Some(RpcErrorCode::new("config_error"))),
 								};
@@ -3098,7 +3103,7 @@ fn apply_model(
 	outgoing: &flume::Sender<Outgoing>,
 	key: &str,
 ) -> Result<(), String> {
-	set_con(runtime, "ai_model", key)?;
+	set_con(runtime, "ai_model", omp_con::Value::Str(Str::new(key)))?;
 	runtime.model = Str::new(key);
 	// A closed writer means the host is gone; nothing is left to tell.
 	let _ = outgoing.send(Outgoing::Frame(json!({ "type": "model_changed" })));
@@ -3851,5 +3856,45 @@ mod tests {
 			decided.decision.and_then(|decision| decision.decided_by),
 			Some(Str::new_static("stdio"))
 		);
+	}
+	#[test]
+	fn set_con_does_not_run_a_second_statement_from_the_value() {
+		let runtime = super::RpcRuntime {
+			con:                  Some(std::sync::Arc::new(omp_con::Ctx::new())),
+			catalog:              None,
+			model:                Str::new_static("test/model"),
+			model_cycle:          Vec::new(),
+			model_cycle_index:    0,
+			project:              std::path::PathBuf::from("."),
+			session_name:         None,
+			automatic_compaction: true,
+			auto_retry:           true,
+			steering_mode:        Str::new_static("one-at-a-time"),
+			follow_up_mode:       Str::new_static("one-at-a-time"),
+			interrupt_mode:       Str::new_static("immediate"),
+			skills:               None,
+		};
+		let before = super::con_value(&runtime, "sv_sandbox_mode");
+		assert!(before.is_some(), "sv_sandbox_mode is registered");
+		let _ = super::set_con(
+			&runtime,
+			"ai_thinking",
+			omp_con::Value::Str(Str::new_static("high;sv_sandbox_mode off")),
+		);
+		assert_eq!(
+			super::con_value(&runtime, "sv_sandbox_mode"),
+			before,
+			"a set_thinking_level value ran a second console statement"
+		);
+	}
+
+	#[test]
+	fn set_thinking_level_accepts_only_the_listed_levels() {
+		for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+			assert!(super::known_thinking_level(level), "{level} is a listed level");
+		}
+		for level in ["high;sv_sandbox_mode off", "high\nsv_sandbox_mode off", "turbo", ""] {
+			assert!(!super::known_thinking_level(level), "{level:?} is refused");
+		}
 	}
 }
