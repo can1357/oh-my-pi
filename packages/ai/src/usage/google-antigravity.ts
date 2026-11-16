@@ -517,7 +517,10 @@ async function fetchAntigravityUsage(input: UsageFetchParams, ctx: UsageFetchCon
 	const accessToken = resolveAccessToken(input);
 	if (!accessToken) return null;
 
-	const baseUrl = input.baseUrl?.replace(/\/+$/, "");
+	// `antigravity-cli` models carry the ACP transport URL (`https://antigravity.google`)
+	// as their baseUrl, so honoring it would send `loadCodeAssist` and the quota
+	// requests to a host that does not serve them. Quota stays on Cloud Code.
+	const baseUrl = input.provider === "antigravity-cli" ? undefined : input.baseUrl?.replace(/\/+$/, "");
 	const endpoints = baseUrl ? [baseUrl] : [DEFAULT_ENDPOINT, "https://daily-cloudcode-pa.sandbox.googleapis.com"];
 	// `antigravity-cli` credentials hold only the agy OAuth grant, so the Cloud
 	// Code project has to be discovered before the quota endpoints can be used.

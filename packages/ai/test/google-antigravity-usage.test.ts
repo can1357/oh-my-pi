@@ -659,10 +659,10 @@ const antigravityCliCredential = () =>
 	makeCredential({ projectId: undefined, email: undefined, accountId: undefined });
 
 function routedFetch(routes: Record<string, unknown>) {
-	const calls: { path: string; body: string }[] = [];
+	const calls: { url: string; path: string; body: string }[] = [];
 	const fetchImpl: FetchImpl = async (url, init) => {
 		const body = String(init?.body ?? "");
-		calls.push({ path: new URL(url).pathname, body });
+		calls.push({ url, path: new URL(url).pathname, body });
 		const key = Object.keys(routes).find(path => new URL(url).pathname.endsWith(path));
 		if (key === undefined) return new Response("not found", { status: 404 });
 		return new Response(JSON.stringify(routes[key]), {
@@ -740,6 +740,26 @@ describe("antigravity-cli usage", () => {
 
 		expect(calls.map(call => call.path)).toEqual(["/v1internal:loadCodeAssist"]);
 		expect(report).toBeNull();
+	});
+
+	it("keeps quota requests on Cloud Code when the model declares an ACP base URL", async () => {
+		const { calls, fetchImpl } = routedFetch({
+			":loadCodeAssist": { cloudaicompanionProject: "resolved-project" },
+			":retrieveUserQuotaSummary": quotaSummaryFixture,
+		});
+
+		const report = await antigravityCliUsageProvider.fetchUsage(
+			{
+				provider: "antigravity-cli",
+				// The bundled antigravity-cli model exposes its ACP transport URL here.
+				baseUrl: "https://antigravity.google",
+				credential: antigravityCliCredential(),
+			},
+			makeCtx(fetchImpl),
+		);
+
+		expect(calls.every(call => call.url.startsWith("https://daily-cloudcode-pa.googleapis.com/"))).toBe(true);
+		expect(report?.metadata?.projectId).toBe("resolved-project");
 	});
 
 	it("keeps the discovered project on the fetchAvailableModels fallback", async () => {
