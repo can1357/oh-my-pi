@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Deleting or moving a large directory tree inside a project no longer stalls language-server file watching
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
