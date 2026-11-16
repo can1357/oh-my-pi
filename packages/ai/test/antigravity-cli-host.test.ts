@@ -4,7 +4,9 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { antigravityHostIdle, retireAgyHost, streamAntigravityCli } from "@oh-my-pi/pi-ai/providers/antigravity-cli";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { SessionRuntimePool, sessionRuntimeStore } from "@oh-my-pi/pi-ai/providers/antigravity-cli/runtime-pool";
 import {
 	AgyHost,
 	type AgyConnection,
@@ -16,7 +18,14 @@ import {
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
-import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	Message,
+	ProviderSessionState,
+	Tool,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
@@ -704,5 +713,125 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("Antigravity CLI retained hosts", () => {
+	const key = "antigravity-acp:account:default";
+
+	async function retained(options: AgyHostOptions = {}) {
+		const dir = await mkdtemp(path.join(tmpdir(), "agy-retained-test-"));
+		const clock = new Clock();
+		const started = new Queue<FakeAgy>();
+		const states = new Map<string, ProviderSessionState>();
+		const pool = new SessionRuntimePool<AgyHost>(
+			() =>
+				new AgyHost(dir, {
+					startupTimeoutMs: 500,
+					cancelTimeoutMs: 60,
+					announcementTimeoutMs: 30,
+					schedule: clock.schedule,
+					startTransport: async input => {
+						const fake = new FakeAgy(input);
+						started.push(fake);
+						return fake;
+					},
+					...options,
+				}),
+			retireAgyHost,
+			antigravityHostIdle,
+			sessionRuntimeStore(states, (value): value is AgyHost => value instanceof AgyHost),
+		);
+		cleanup.push(async () => {
+			await pool.closeAll();
+			await rm(dir, { recursive: true, force: true });
+		});
+		return { pool, states, dir, clock, started };
+	}
+
+	async function conversation(dir: string, id: string): Promise<string> {
+		const store = conversationStorePath(dir, id);
+		await mkdir(path.dirname(store), { recursive: true });
+		await Bun.write(store, "");
+		return store;
+	}
+
+	it("keeps a leased host out of idle retirement and closes it without its conversation", async () => {
+		const state = await retained();
+		const lease = state.pool.acquire(key);
+		expect(state.states.get(key)).toBe(lease.value);
+		expect(await state.pool.closeIdle(key)).toBe(false);
+
+		const run = step(lease.value, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		expect(await state.pool.closeIdle(key)).toBe(false);
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		const store = await conversation(state.dir, fake.currentId);
+
+		expect(await state.pool.closeIdle(key)).toBe(false);
+		lease.release();
+		expect(await state.pool.closeIdle(key)).toBe(true);
+		expect(fake.closed).toBe(true);
+		expect(state.pool.peek(key)).toBeUndefined();
+		expect(state.states.size).toBe(0);
+		expect(await Bun.file(store).exists()).toBe(true);
+	});
+
+	it("retains a host with a parked tool call and resumes it after an idle sweep", async () => {
+		const state = await retained();
+		const lease = state.pool.acquire(key);
+		const messages = [user("read a.txt")];
+		const first = step(lease.value, messages);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		const output = fake.call();
+		await first.done;
+		lease.release();
+
+		expect(lease.value.hasPendingTurn).toBe(true);
+		expect(await state.pool.closeIdle(key)).toBe(false);
+		expect(state.pool.peek(key)).toBe(lease.value);
+
+		const second = step(lease.value, [...messages, first.writer.output, result(first.writer.output)]);
+		expect(await output).toEqual({ content: [{ type: "text", text: "actual file body" }], isError: false });
+		fake.text("Finished.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(lease.value.hasPendingTurn).toBe(false);
+		expect(await state.pool.closeIdle(key)).toBe(true);
+		expect(fake.promptHistory).toHaveLength(1);
+	});
+
+	it("disposes an explicitly retired host and never hands it out again", async () => {
+		const state = await retained();
+		const lease = state.pool.acquire(key);
+		const run = step(lease.value, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		const store = await conversation(state.dir, fake.currentId);
+		lease.release();
+
+		await state.pool.close(key);
+		expect(fake.closed).toBe(true);
+		expect(state.pool.peek(key)).toBeUndefined();
+		expect(state.states.size).toBe(0);
+		expect(await Bun.file(store).exists()).toBe(false);
+
+		const next = state.pool.acquire(key);
+		expect(next.value).not.toBe(lease.value);
+		next.release();
+	});
+
+	it("fails a stream without credentials before retaining a host", async () => {
+		const result = await streamAntigravityCli(model, { messages: [user("hello")] }, {}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("requires sign-in");
 	});
 });

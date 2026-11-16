@@ -25,6 +25,9 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+### Fixed
+
+- Fixed retained Antigravity CLI hosts so idle sessions release their process, parked tool calls stay live, and a disposed host is never reused ([#PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PLACEHOLDER) by [@SenCha930511](https://github.com/SenCha930511)).
 
 ## [18.20.3] - 2026-11-16
 
