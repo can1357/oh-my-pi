@@ -84,6 +84,31 @@ describe("loadMnemopiConfig embedding variant resolution", () => {
 	});
 });
 
+// The setting's `false` default must not mask the documented env fallback: NIM users who set only
+// the env var would otherwise get an HTTP 400 on every embedding request.
+describe("loadMnemopiConfig embedding input type", () => {
+	function inputTypeFor(overrides: Record<string, unknown>, env: string | undefined): boolean | undefined {
+		const previous = Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE;
+		if (env === undefined) delete Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE;
+		else Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE = env;
+		try {
+			const embeddings = mnemopiConfigFor(overrides).providerOptions.embeddings;
+			return embeddings === false ? undefined : embeddings?.inputType;
+		} finally {
+			if (previous === undefined) delete Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE;
+			else Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE = previous;
+		}
+	}
+
+	it("enables input_type from MNEMOPI_EMBEDDING_INPUT_TYPE when the setting is unset", () => {
+		expect(inputTypeFor({}, "1")).toBe(true);
+	});
+
+	it("lets an explicit setting win over the env var", () => {
+		expect(inputTypeFor({ "mnemopi.embeddingInputType": false }, "1")).toBe(false);
+	});
+});
+
 describe("loadMnemopiConfig database path resolution", () => {
 	it("resolves a blank dbPath to persistent agent storage", () => {
 		const agentDir = "/tmp/mnemopi-blank-db-path-test";

@@ -77,6 +77,7 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 		.path
 		.as_ref()
 		.map_or_default(|path| format!(" for {path}"));
+	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
 	let mut lines = if details.hash_recognized {
 		vec![
 			format!("Edit rejected{path}: file changed between read and edit."),
@@ -110,10 +111,13 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				details.expected_file_hash
 			));
 		}
-		lines.push(current_tag_advice(&details.actual_file_hash));
+		// A tag issued for another file (often the same rows in a sibling
+		// checkout) must not be resent here: that is the wrong-tree write the
+		// origin lines above guard against.
+		let offer_resend = !context.is_empty() && details.tag_origin_paths.is_empty();
+		lines.push(current_tag_advice(&details.actual_file_hash, offer_resend));
 		lines
 	};
-	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
 	if !context.is_empty() {
 		lines.push(String::new());
 		lines.extend(context);
@@ -121,20 +125,34 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 	lines.join("\n")
 }
 
-fn current_tag_advice(actual_file_hash: &str) -> String {
-	format!(
-		"The current file hashes to #{actual_file_hash}. Re-read the file with `read` to copy a \
-		 current [path#tag] header — never invent the tag and never reuse one from a prior session."
-	)
+/// What to do with an unknown tag. It may be real (a restart or store
+/// eviction forgets issued tags), so when the rows are shown the advice
+/// offers the current tag for them instead of sending the model back to
+/// output it already copied from.
+fn current_tag_advice(actual_file_hash: &str, offer_resend: bool) -> String {
+	if offer_resend {
+		format!(
+			"The current file hashes to #{actual_file_hash}. If the rows below are the ones you \
+			 mean, resend the edit under #{actual_file_hash}; otherwise re-read the file with `read` \
+			 and copy its [path#tag] header verbatim."
+		)
+	} else {
+		format!(
+			"The current file hashes to #{actual_file_hash}. Re-read the file with `read` and copy \
+			 its [path#tag] header verbatim."
+		)
+	}
 }
 
-/// Diagnostic for input whose only content is a section header: no ops to
-/// apply, but the file's current tag, as an unknown tag would get.
+/// Diagnostic for input whose only content is a section header.
+///
+/// With no ops to apply, it names the file's current tag to put them under. No
+/// rows are shown, so ops on rows the model has not seen still hit the
+/// seen-line guard.
 pub fn format_header_only_message(path: &str, actual_file_hash: &str) -> String {
 	format!(
 		"Edit rejected for {path}: no ops follow the header; put them under this file's current \
-		 tag, #{actual_file_hash}.\n{}",
-		current_tag_advice(actual_file_hash)
+		 tag, #{actual_file_hash}."
 	)
 }
 
