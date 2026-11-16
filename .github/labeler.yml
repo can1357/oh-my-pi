@@ -139,6 +139,7 @@ area/ci:
           - 'scripts/**'
           - 'tools/**'
           - 'rust-toolchain.toml'
+          - '.cm/**'
 
 # Kinds
 
