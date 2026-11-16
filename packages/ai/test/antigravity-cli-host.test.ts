@@ -603,6 +603,53 @@ describe("AgyHost stateful steps", () => {
 		}
 	});
 
+	it("returns invalid tool arguments to the model and parks a corrected call", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: 2 }, fake.currentId);
+		const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		const [diagnostic, schema] = text.split("Expected schema: ");
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(diagnostic).toContain("read");
+		expect(diagnostic).toContain("path: expected string, received integer");
+		expect(schema).toBe(JSON.stringify(advertised));
+		expect(state.host.hasPendingTurn).toBe(true);
+		const corrected = fake.call("read", { path: "a" });
+		let released = false;
+		void corrected.then(() => {
+			released = true;
+		});
+		await run.done;
+		expect(released).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await corrected).isError).toBe(true);
+	});
+
+	it("bounds a large invalid-arguments diagnostic and keeps the turn active", async () => {
+		const keys = Array.from({ length: 200 }, (_, index) => `key${index}`);
+		const wide: Tool = {
+			name: "wide",
+			description: "Wide schema",
+			parameters: type(Object.fromEntries(keys.map(key => [key, "string"]))),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("wide")], { tools: [wide] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("wide", {}, fake.currentId);
+		const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(text.length).toBeLessThanOrEqual(16_387);
+		expect(text).toContain("more");
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
 	it("close clears pending calls and deadline timers without a later cancel", async () => {
 		const state = await parked({ holdLimitMs: 10 });
 		state.host.close();

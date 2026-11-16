@@ -68,28 +68,46 @@ const tools = [
 ];
 
 describe("McpBridge", () => {
-	it("rejects unknown tools and invalid arguments without calling the host", async () => {
-		let calls = 0;
-		const bridge = new McpBridge(tools, async () => {
-			calls++;
-			return { content: [] };
+	it("rejects unknown tools and forwards argument validation to the host", async () => {
+		const calls: { name: string; args: unknown }[] = [];
+		const bridge = new McpBridge(tools, async (name, args) => {
+			calls.push({ name, args });
+			return { content: [{ type: "text", text: "host rejected" }], isError: true };
 		});
 		cleanups.push(() => bridge.close());
 		const peer = await client(bridge.port);
-		for (const params of [
-			{ name: "missing", arguments: {} },
+		const unknown = await peer.request("tools/call", { name: "missing", arguments: {} });
+		expect(unknown.error?.code).toBe(-32602);
+		expect(unknown.error?.message).toContain("missing");
+		expect(calls).toHaveLength(0);
+		const forwarded = [
 			{ name: "read", arguments: [] },
 			{ name: "read", arguments: { path: 2 } },
 			{ name: "read", arguments: null },
-		]) {
-			expect((await peer.request("tools/call", params)).error?.code).toBe(-32602);
+		];
+		for (const params of forwarded) {
+			expect((await peer.request("tools/call", params)).result).toEqual({
+				content: [{ type: "text", text: "host rejected" }],
+				isError: true,
+			});
 		}
-		expect(calls).toBe(0);
+		expect(calls).toEqual(forwarded.map(params => ({ name: params.name, args: params.arguments })));
 		expect((await peer.request("tools/list")).result).toEqual({ tools });
 	});
 
+	it("bounds an oversized unknown tool name in the error message", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		const name = "x".repeat(1_000);
+		const reply = await peer.request("tools/call", { name, arguments: {} });
+		expect(reply.error?.code).toBe(-32602);
+		expect(reply.error?.message).toContain("x".repeat(128));
+		expect(reply.error?.message.length).toBeLessThanOrEqual(142);
+	});
+
 	it("decodes fragmented UTF-8 and parks the MCP response until its actual result arrives", async () => {
-		const arrived = Promise.withResolvers<{ name: string; args: Record<string, unknown>; id: string | undefined }>();
+		const arrived = Promise.withResolvers<{ name: string; args: unknown; id: string | undefined }>();
 		const result = Promise.withResolvers<McpToolOutput>();
 		const bridge = new McpBridge(tools, async (name, args, id) => {
 			arrived.resolve({ name, args, id });

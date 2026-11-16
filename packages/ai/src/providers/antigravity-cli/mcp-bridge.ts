@@ -5,7 +5,6 @@
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { Socket, TCPSocketListener } from "bun";
-import { validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 
 /** One fixed tool advertised over MCP tools/list. */
 export interface McpToolDefinition {
@@ -23,10 +22,10 @@ export interface McpToolOutput {
 	isError?: boolean;
 }
 
-/** Park a validated call until the host supplies its actual result or cancels it. */
+/** Park a forwarded call until the host supplies its actual result or cancels it. */
 export type McpCallHandler = (
 	name: string,
-	args: Record<string, unknown>,
+	args: unknown,
 	conversationId: string | undefined,
 ) => Promise<McpToolOutput>;
 
@@ -159,14 +158,10 @@ function handleLine(
 		case "tools/call": {
 			const tool = typeof params.name === "string" ? byName.get(params.name) : undefined;
 			if (!tool) {
-				reply({ error: { code: -32602, message: "Unknown tool" } });
+				reply({ error: { code: -32602, message: `Unknown tool: ${String(params.name).slice(0, 128)}` } });
 				return;
 			}
 			const args = params.arguments === undefined ? {} : params.arguments;
-			if (!isRecord(args) || !validateJsonSchemaValue(tool.inputSchema, args).success) {
-				reply({ error: { code: -32602, message: "Invalid tool arguments" } });
-				return;
-			}
 			if (socket.data.requests.has(id)) {
 				reply({ error: { code: -32600, message: "Duplicate request id" } });
 				return;
