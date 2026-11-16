@@ -84,7 +84,7 @@ The tool returns a `text` content block plus optional `details` and image blocks
 - Success, background start (`async: true` or auto-background):
   - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice` in `packages/tui/src/tools/bash.ts`), so the model sees the job's deadline before it waits on the result. The deadline counts from job start, so an auto-backgrounded command has already spent its foreground wait.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
-  - `read proc://` lists owned jobs and project services; `read proc://<id>` inspects status/output without consuming result delivery; `write proc://<id>/kill` cancels the job without requiring `content`.
+  - `read proc://` lists owned jobs and project services; `read proc://<id>` inspects status/output without consuming result delivery; `write proc://<id>/kill` with empty `content` cancels the job.
 - Success, named service (`name`): executes `command` through the user's shell under the launch broker, returning readiness, exit, or readiness timeout with state and log tail. A live name is stopped and restarted with the new spec; exit notifications still auto-deliver. `read proc://<name>` inspects status/logs; `write proc://<name>` sends stdin (appends Enter unless content already ends with newline, including empty content); `write proc://<name>/kill` stops it. `write proc://<name>/mode` accepts `persist`, `session`, or `detached`.
 - Background progress / completion:
   - delivered through `onUpdate` / async job manager, not the initial return.
@@ -125,6 +125,9 @@ bash:
 - By default, `allow` can lower the approval tier for a simple command, but cannot approve a compound command. For example, `match: "git *"` does not approve `git status && rm -rf build`.
 - With `bash.allowCompoundCommands: true` (default `false`) and a configured POSIX shell, literal `&&` chains are evaluated per command. Every segment needs an `allow` rule to allow the chain; an unmatched segment retains normal exec-tier approval. Segment rules remain first-match-wins, any segment or chain-wide deny wins, and prompts are retained. Expansions, other shell operators, and critical command patterns do not gain an allow bypass.
 - `deny` and `prompt` check the complete command and each shell command segment (first matching restriction per segment, with `deny` taking precedence over `prompt` across segments). A rule such as `match: "rm -rf *"` therefore catches `cd /tmp && rm -rf build` and `curl http://example.com; rm -rf build` even when `curl *` matches an earlier `prompt` rule. Operator `deny` rules in `Settings.grantAuthority()` also outrank project-layer rules.
+- Both `bash.patterns` and `bashInterceptor.patterns` support [path-scoped entries](../settings.md#path-scoped-arrays) (`{ path, patterns: [...] }`), allowing repository-specific command rules to live directly in `~/.omp/agent/config.yml`.
+- Leading `KEY=VALUE` assignments on `allow` rules are stripped only when the variable name exactly matches an entry in `bash.allowedEnvVars` or the rule's optional `env: [...]` list (no wildcards). `deny` and `prompt` rules check segments with and without leading bare `KEY=VALUE` assignments, so `FOO=1 rm -rf build` still hits `match: "rm -rf *"`. Wrapper commands such as `env FOO=1 rm -rf build` are not unwrapped.
+- Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` lists are prepended ahead of the global `config.yml` list, so repository-local rules extend your global policy without replacing it.
 
 Use this setting for safety and user control. It remains useful for commands with no appropriate replacement tool, such as destructive removal, network access, deployment scripts, or project-specific scripts.
 
@@ -146,7 +149,7 @@ bashInterceptor:
 
 An interceptor rule only applies when its `tool` is available in the current session. If `read` is disabled, a `cat` rule targeting `read` does not block the Bash call. This makes the interceptor a best-effort capability preference rather than an execution-security boundary.
 
-The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list.
+The built-in default rules route common operations such as `cat` to `read`, `rg` to `grep`, in-place `sed` to `edit`, shell redirection to `write`, and unmanaged services/watchers to named `bash` service mode. See `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/exec/settings.ts` for the complete list. Project and `--config` overlay `bashInterceptor.patterns` entries are prepended ahead of the global list (or `DEFAULT_BASH_INTERCEPTOR_RULES` when the global config leaves `bashInterceptor.patterns` unset). A global list of only path-scoped entries keeps the built-in rules after its own, so prepending onto it keeps them too.
 
 For compatibility with existing custom regexes, the interceptor always checks the complete original command first. It then checks raw, flat command fragments separated by unquoted and unescaped `&&`, `||`, `;`, `|`, `&`, or newlines. It also checks fragments after leading environment assignments are removed:
 
@@ -225,6 +228,7 @@ Choose the setting by the desired outcome:
   - Validates `cwd` with `fs.stat()`.
   - May allocate and write artifact files for full local output (`bash`) and minimizer-preserved raw output (`bash-original`).
   - `scheme://` paths are served per operation by `InternalUrlFilesystem`: file-backed schemes redirect to their backing files (writes only for mutable file-written schemes such as `local://`, within the approved tier); rendered resources are read-only; `realpath`/`readlink` print the physical backing path of file-backed URLs.
+  - A redirect to a handler-written URL (`: > proc://<id>/kill`, `echo hi > agent://<id>`, `printf '{…}' > xd://<tool>`, `cfg://`, `ssh://`, …) opens a write-only handle; on close its bytes (UTF-8 only) reach the scheme's handler as one write, as with the `write` tool. The handler's answer (or refusal reason) is appended to the result as a notice; a refusal also fails the close, so the command exits non-zero. Appends (`>>`) are refused except for devices and message channels, since a handler write replaces its target. A device dispatch (`xd://<tool>`) is refused when `tools.approval.<tool>` is `deny` or `prompt`; the shell cannot ask.
   - A redirect to `out://` (`printf '…' > out://`) opens a write-only handle; on close its text becomes a reply shown to the user as assistant prose after the call. Replies ride every progress frame and the result as `details.replies`, so the transcript draws each once, live and on rebuild. They are accepted only while the call waits on the command (a backgrounded job's writes fail), and a reply past 64 KiB fails with `EFBIG` and is dropped whole.
 - Subprocesses / native bindings / client terminal
   - Non-PTY local execution uses native shell execution via `@oh-my-pi/pi-natives` (`Shell.run()` or `executeShell()`).
@@ -266,7 +270,7 @@ Choose the setting by the desired outcome:
   - matched command -> `ToolError` with `Blocked: <rule.message>` and the original command.
   - invalid interceptor regexes are silently skipped by `compileRules()`.
 - Internal URL filesystem:
-  - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable or handler-owned schemes (and to `out://` when `out.enabled` is off) `EROFS`, oversize `out://` replies `EFBIG`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
+  - failures surface inside the command as errno results: missing entries `ENOENT`, writes to immutable schemes, non-write mutations (`rm`, `mkdir`, …) of handler-owned schemes, and `out://` writes when `out.enabled` is off `EROFS`, appends to replace-only handler URLs and non-UTF-8 handler payloads `EINVAL`, oversize `out://` replies `EFBIG`, schemes above the approved tier `EACCES`, cross-scheme renames/links `EXDEV`, containment escapes `EACCES`. External programs started in a URL working directory fail instead of running on the host.
 - Execution:
   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
@@ -276,7 +280,7 @@ Choose the setting by the desired outcome:
 
 ## Notes
 
-- `strict = true` is set on `BashTool`; `concurrency` is resolved per call: `pty: true` is `"exclusive"` (it takes over the terminal UI), everything else is `"shared"`, so multiple non-pty bash calls in one assistant message run in parallel. When parallel calls overlap on the same shell session key, the first owns the persistent `Shell`; the rest run in isolated one-shot shells (see `shellSessionsInUse` in `bash-executor.ts`).
+- `strict = true` is set on `BashTool`; `concurrency` is resolved per call: `pty: true` is `"exclusive"` (it takes over the terminal UI), everything else is `"shared"`, so multiple non-pty bash calls in one assistant message run in parallel. When parallel calls overlap on the same shell session key, the first owns the persistent `Shell`; the rest run in one-shot forks of it, whose shell state carries back into the persistent `Shell` when they end (see `shellSessionsInUse` and `Shell.adopt()` in `bash-executor.ts`).
 - A bare `skill://<name>` is the skill directory for shell operations; its instructions are `skill://<name>/SKILL.md`.
 - `checkBashInterception()` blocks only when the matching rule's `tool` name is present in `ctx.toolNames`; missing tools disable their corresponding rule.
 - Interceptor configuration syntax is unchanged. It handles common flat command lists, not full shell parsing: heredocs, parameter expansion, command substitution, backticks, grouping, and malformed quoting only receive the existing whole-input check. This is best-effort routing toward dedicated tools, not a security boundary.

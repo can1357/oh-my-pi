@@ -7,6 +7,7 @@ export * from "./identity";
 export * from "./model-cache";
 export * from "./model-manager";
 export * from "./model-thinking";
+export * from "./thinking-capability";
 export * from "./model-tokenizer";
 export * from "./models";
 export * from "./provider-models";

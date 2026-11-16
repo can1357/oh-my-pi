@@ -7,8 +7,11 @@ import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { WatchedFilesForwarder } from "@oh-my-pi/pi-coding-agent/lsp/watched-files";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-/** Real filesystem events need a wall-clock bound; every wait ends as soon as the event arrives. */
-const EVENT_TIMEOUT_MS = 5_000;
+/**
+ * Real filesystem events need a wall-clock bound; every wait ends as soon as the event arrives. Generous
+ * because a loaded machine's event daemon (macOS fseventsd) can lag seconds behind the writes.
+ */
+const EVENT_TIMEOUT_MS = 15_000;
 /**
  * How long a change must stay unreported to count as filtered, well past the forwarder's batch
  * window. The events come from the OS watcher, so fake timers cannot stand in for this wait.
@@ -43,12 +46,39 @@ describe("WatchedFilesForwarder", () => {
 		}
 	}
 
+	/**
+	 * Waits until the OS watcher is live: macOS starts its FSEvents stream after `fs.watch` returns, so a
+	 * change made right after `register` can be lost. Rewrites `sentinel`, which a registered glob must
+	 * match, until it is reported, then forgets the reports; late repeats of the sentinel may still follow.
+	 */
+	async function untilWatching(sent: FileEvent[], sentinel: string): Promise<void> {
+		const deadline = Date.now() + EVENT_TIMEOUT_MS;
+		const uri = fileToUri(sentinel);
+		for (let write = 0; !sent.some(change => change.uri === uri); write++) {
+			if (Date.now() > deadline) throw new Error(`the watcher never reported ${sentinel}`);
+			fsSync.writeFileSync(sentinel, `// ${write}\n`);
+			await Bun.sleep(100);
+		}
+		sent.length = 0;
+	}
+
+	/** URIs of `files` reported more than once. */
+	function repeated(sent: FileEvent[], files: string[]): string[] {
+		const reports = new Map(files.map(file => [fileToUri(file), 0]));
+		for (const change of sent) {
+			const count = reports.get(change.uri);
+			if (count !== undefined) reports.set(change.uri, count + 1);
+		}
+		return [...reports].filter(([, count]) => count > 1).map(([uri]) => uri);
+	}
+
 	it("reports only changes whose path and type the registered watcher asked for", async () => {
 		const { root, sent, forwarder } = setup();
 		// Creates and deletes of TypeScript files only: kind 5 = Create | Delete.
 		await forwarder.register("ts", {
 			watchers: [{ globPattern: `${root.replaceAll("\\", "/")}/**/*.ts`, kind: 5 }],
 		});
+		await untilWatching(sent, path.join(root, "ready.ts"));
 		const file = path.join(root, "src", "a.ts");
 		await fs.mkdir(path.dirname(file));
 
@@ -69,6 +99,12 @@ describe("WatchedFilesForwarder", () => {
 	it("reports files written right after a base directory is created", async () => {
 		const { root, sent, forwarder } = setup();
 		const later = path.join(root, "later", "deep");
+		// A shallow glob at the root opens the same flat root watch the missing base waits through, so its
+		// sentinel proves that watch live before the base is registered.
+		await forwarder.register("ready", {
+			watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "ready.ts" } }],
+		});
+		await untilWatching(sent, path.join(root, "ready.ts"));
 		await forwarder.register("later", {
 			watchers: [{ globPattern: { baseUri: fileToUri(later), pattern: "**/*" } }],
 		});
@@ -89,6 +125,7 @@ describe("WatchedFilesForwarder", () => {
 				{ globPattern: { baseUri: fileToUri(types), pattern: "**/*.ts" } },
 			],
 		});
+		await untilWatching(sent, path.join(root, "ready.ts"));
 
 		const files: string[] = [];
 		for (let d = 0; d < 5; d++) {
@@ -104,9 +141,7 @@ describe("WatchedFilesForwarder", () => {
 		// The duplicate came from a rescan after the base appeared; give it time to land.
 		await Bun.sleep(QUIET_MS);
 
-		const reports = new Map<string, number>();
-		for (const change of sent) reports.set(change.uri, (reports.get(change.uri) ?? 0) + 1);
-		expect([...reports].filter(([, count]) => count > 1)).toEqual([]);
+		expect(repeated(sent, files)).toEqual([]);
 	});
 
 	it("does not report a directory as changed when only its entries changed", async () => {
@@ -114,6 +149,7 @@ describe("WatchedFilesForwarder", () => {
 		const dir = path.join(root, "src");
 		await fs.mkdir(dir);
 		await forwarder.register("all", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*" } }] });
+		await untilWatching(sent, path.join(root, "ready.ts"));
 
 		const file = path.join(dir, "a.ts");
 		await Bun.write(file, "export {};\n");
@@ -122,12 +158,15 @@ describe("WatchedFilesForwarder", () => {
 		await waitForEvent(sent, { uri: fileToUri(file), type: FileChangeType.Changed });
 		await Bun.sleep(QUIET_MS);
 
-		expect(sent.filter(change => change.uri === fileToUri(dir))).toEqual([]);
+		// FSEvents may replay the directory's creation, made just before the watch started; nothing else may name it.
+		const reported = sent.filter(change => change.uri === fileToUri(dir) && change.type !== FileChangeType.Created);
+		expect(reported).toEqual([]);
 	});
 
 	it("reports every file of a burst written while the event loop is busy", async () => {
 		const { root, sent, forwarder } = setup();
 		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		await untilWatching(sent, path.join(root, "ready.ts"));
 		// Written synchronously, as a package install would from another process: the
 		// watcher must keep reading while JS is busy (libuv's Windows watcher drops most of these).
 		const files: string[] = [];
@@ -145,7 +184,7 @@ describe("WatchedFilesForwarder", () => {
 		const created = () => new Set(sent.filter(change => change.type === FileChangeType.Created).map(c => c.uri));
 		while (created().size < expected.size && Date.now() < deadline) await Bun.sleep(50);
 		expect([...expected].filter(uri => !created().has(uri))).toEqual([]);
-	}, 15_000);
+	}, 30_000);
 
 	it("reports the files of a directory moved into the watched tree, and the directory when moved out", async () => {
 		const { root, sent, forwarder } = setup();
@@ -158,6 +197,7 @@ describe("WatchedFilesForwarder", () => {
 		await forwarder.register("ts", {
 			watchers: [{ globPattern: { baseUri: fileToUri(watched), pattern: "**/*.ts" } }],
 		});
+		await untilWatching(sent, path.join(watched, "ready.ts"));
 
 		// Moving a directory raises one event for the directory, none for the files it holds.
 		const moved = path.join(watched, "src", "pkg");
@@ -166,9 +206,12 @@ describe("WatchedFilesForwarder", () => {
 			await waitForEvent(sent, { uri: fileToUri(path.join(moved, file)), type: FileChangeType.Created });
 		}
 		await Bun.sleep(QUIET_MS);
-		const reports = new Map<string, number>();
-		for (const change of sent) reports.set(change.uri, (reports.get(change.uri) ?? 0) + 1);
-		expect([...reports].filter(([, count]) => count > 1)).toEqual([]);
+		expect(
+			repeated(
+				sent,
+				files.map(file => path.join(moved, file)),
+			),
+		).toEqual([]);
 
 		// Only Windows says a vanished entry was a directory; elsewhere it is gone before it can be asked.
 		if (process.platform !== "win32") return;
@@ -206,6 +249,7 @@ describe("WatchedFilesForwarder", () => {
 				{ globPattern: { baseUri: fileToUri(types), pattern: "**/*.d.ts" } },
 			],
 		});
+		await untilWatching(sent, path.join(root, "ready.ts"));
 
 		const skipped = path.join(root, "node_modules", "pkg", "index.ts");
 		const wanted = path.join(types, "foo", "index.d.ts");
@@ -219,6 +263,7 @@ describe("WatchedFilesForwarder", () => {
 	it("does not report a file created and removed within one batch as existing", async () => {
 		const { root, sent, forwarder } = setup();
 		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		await untilWatching(sent, path.join(root, "ready.ts"));
 		const transient = path.join(root, "transient.ts");
 		const kept = path.join(root, "kept.ts");
 		fsSync.writeFileSync(transient, "export {};\n");
@@ -236,6 +281,7 @@ describe("WatchedFilesForwarder", () => {
 	it("resolves relative glob patterns against the workspace roots and stops after unregister", async () => {
 		const { root, sent, forwarder } = setup();
 		await forwarder.register("rel", { watchers: [{ globPattern: "**/*.py" }] });
+		await untilWatching(sent, path.join(root, "ready.py"));
 		const first = path.join(root, "one.py");
 		await Bun.write(first, "x = 1\n");
 		await waitForEvent(sent, { uri: fileToUri(first), type: FileChangeType.Created });
@@ -250,6 +296,7 @@ describe("WatchedFilesForwarder", () => {
 	it("does not echo a write the client reported itself, but reports a later change to the same file", async () => {
 		const { root, sent, forwarder } = setup();
 		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		await untilWatching(sent, path.join(root, "ready.ts"));
 		const own = path.join(root, "own.ts");
 		const marker = path.join(root, "marker.ts");
 		fsSync.writeFileSync(own, "export {};\n");

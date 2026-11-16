@@ -739,10 +739,17 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 		const counterKey = getAntigravityCounterKeyForModel(context?.modelId);
 		return `counter:${counterKey ?? "unknown"}`;
 	},
-	// One scope per backend counter, judged by the same limits ranking uses
-	// for it. A 429 can carry a retry-after at the weekly reset while Google
-	// restores the quota days earlier; the next `/usage` fetch then lifts the
-	// block instead of the account idling until the clock runs out.
+	// One scope per backend counter. A 429 can carry a retry-after at the
+	// weekly reset while Google restores the quota days earlier; the next
+	// `/usage` fetch then lifts the block instead of the account idling until
+	// the clock runs out.
+	//
+	// Argon is judged by its own bucket when the report has one. A summary
+	// without it (an account that never used Argon, or a plan with no
+	// separate Argon bucket) leaves ranking unconstrained, but then has no
+	// limits to clear an Argon block by, and a block written under a bucket
+	// that has since disappeared would sit out its retry-after. The shared
+	// Google counter vouches for such a block instead.
 	healableBlockScopes(report) {
 		const counterKeys = new Set<string>(["google-argon"]);
 		for (const limit of report.limits) {
@@ -750,13 +757,13 @@ export const antigravityRankingStrategy: CredentialRankingStrategy = {
 			if (counterKey) counterKeys.add(counterKey.toLowerCase());
 		}
 		return [...counterKeys]
-			.map(counterKey => ({
-				blockScope: `counter:${counterKey}`,
-				limits:
-					counterKey === "google-argon"
-						? getAntigravityArgonLimits(report)
-						: getAntigravityCounterLimits(report, counterKey),
-			}))
+			.map(counterKey => {
+				let limits = getAntigravityCounterLimits(report, counterKey);
+				if (counterKey === "google-argon" && limits.length === 0) {
+					limits = getAntigravityCounterLimits(report, "google");
+				}
+				return { blockScope: `counter:${counterKey}`, limits };
+			})
 			.filter(scope => scope.limits.length > 0);
 	},
 	// Antigravity windows carry `durationMs` when the response identifies them

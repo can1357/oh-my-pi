@@ -2260,10 +2260,8 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
-	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
-	model?: string | string[];
+	/** One exact per-call model, gated by `task.perCallModel`. */
+	model?: string;
 	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
 	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
@@ -2293,10 +2291,8 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
 	/** See {@link TaskItem.model}. */
-	model?: string | string[];
+	model?: string;
 	/** The work (flat form). */
 	task?: string;
 	/** Ordered stages (flat form); see {@link TaskItem.steps}. */
@@ -2413,10 +2409,13 @@ export interface AgentProgress {
 	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
 	tokens: number;
 	/**
-	 * Current per-turn context size: latest assistant message's `usage.totalTokens`.
-	 * This is the number to compare against `contextWindow` — what compaction
-	 * decides on, what the user typically reads as "how full is the context".
-	 * Distinct from `tokens`, which is a lifetime billing-volume counter.
+	 * Current per-turn occupied context: the latest assistant message's
+	 * provider-reported `usage.contextTokens` when present, else its billable
+	 * `totalTokens` minus orchestration tokens (the same accounting session
+	 * compaction uses). This is the number to compare against `contextWindow` —
+	 * what compaction decides on, what the user typically reads as "how full
+	 * is the context". Distinct from `tokens`, which is a lifetime
+	 * billing-volume counter.
 	 */
 	contextTokens?: number;
 	/** Model's context window in tokens, when known. Lets the UI render `<curr>/<window>` gauges. */

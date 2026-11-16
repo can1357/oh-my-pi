@@ -25,9 +25,15 @@ const waitSchema = type({});
 /**
  * Windows (ms) a blocking wait gives its first wake before it returns with
  * nothing new. Each back-to-back idle wait climbs one rung, so the agent gets
- * its turn back early while work warms up, and a wait loop backs off.
+ * its turn back early while work warms up, and a wait loop backs off. A
+ * back-to-back wait that is the only call of its turn takes the top rung at
+ * once: the agent has nothing else to do, so an early return would only cost
+ * it a request. The top rung stays inside a 5-minute prompt-cache lifetime:
+ * an idle return re-reads the whole prompt, and subagents run without the
+ * cache warmer, so a longer window would make every top-rung return a miss.
  */
-const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 300_000] as const;
+const WAIT_LADDER_MS = [5_000, 10_000, 30_000, 60_000, 240_000] as const;
+const WAIT_TOP_RUNG = WAIT_LADDER_MS.length - 1;
 /** A gap this long since the last idle wait returned means the agent worked in between: the ladder restarts at the floor. */
 const WAIT_LADDER_RESET_MS = 60_000;
 /** First rung whose elapsed window appends the progress reminder: one idle wait is patience, a second back-to-back is a loop. */
@@ -142,13 +148,41 @@ function noReplyText(replies: PendingReplies): string {
 }
 
 /**
- * The line an elapsed wait reports: the window it spent and the one a
- * back-to-back wait gets. A bare still-running snapshot reads as an empty
- * result, and agents then start `sleep` jobs to block for longer.
+ * The line an elapsed wait reports: the window it spent, then what to do once
+ * nothing else is left. A bare still-running snapshot reads as an empty
+ * result, and agents then start `sleep` jobs to block for longer. Every result
+ * and message starts the next turn of an `endTurn` caller (see
+ * `ToolSession.tuiTranscript`), so it is told to end its turn; any other
+ * caller, to wait again right away with no other tool call, which takes the
+ * top rung (a minute away from `wait` restarts the ladder at the floor).
  */
-function elapsedReport(what: string, rung: number): string {
-	const next = WAIT_LADDER_MS[Math.min(rung + 1, WAIT_LADDER_MS.length - 1)];
-	return `${what} within ${formatDuration(WAIT_LADDER_MS[rung])}; a back-to-back wait allows up to ${formatDuration(next)}.`;
+function elapsedReport(what: string, rung: number, endTurn: boolean): string {
+	const next = endTurn
+		? "Nothing else left? End your turn: results and messages start your next one."
+		: `Nothing else left? Call \`wait\` right away with no other tool call: it then blocks up to ${formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG])}.`;
+	return `${what} within ${formatDuration(WAIT_LADDER_MS[rung])}. ${next}`;
+}
+
+/**
+ * Whether `toolCallId` is the only tool call of the turn that made it: the
+ * latest assistant message in the caller's context. A call that is not there
+ * (no context, or a call from an eval cell) counts as not alone.
+ */
+function isOnlyCallOfTurn(session: ToolSession, toolCallId: string): boolean {
+	const messages = session.getContextMessages?.() ?? [];
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		let calls = 0;
+		let found = false;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			calls++;
+			found ||= block.id === toolCallId;
+		}
+		return found && calls === 1;
+	}
+	return false;
 }
 
 /** Whether `session` has the `wait` tool active, so prompts may point blocked callers at it. */
@@ -163,7 +197,8 @@ export function hasWaitTool(session: ToolSession): boolean {
  * still answer soon: each one finished its turn, is blocked on the caller
  * itself (the cycle that would park both sides), or is waiting on the user.
  * With nothing new, a wait returns after a window from {@link WAIT_LADDER_MS}
- * that climbs across back-to-back idle waits. A direct message arriving
+ * that climbs across back-to-back idle waits, or takes the top rung when the
+ * wait is the only call of its turn. A direct message arriving
  * mid-wait ends any wait. Messages never ride in the wait's result: each one
  * reaches the caller as a user turn right after it (see `handOffMail`).
  * Broadcast legs and progress notes ask the caller nothing, so they never end
@@ -176,7 +211,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	readonly name = "wait";
 	readonly label = "Wait";
 	readonly summary = "Wait for the next result of a background job or service you started, or a reply you asked for";
-	readonly description = prompt.render(waitDescription);
+	readonly description: string;
 	readonly parameters = waitSchema;
 	readonly strict = true;
 	readonly interruptible = true;
@@ -185,11 +220,19 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	readonly loadMode = "essential";
 	readonly intent = "optional";
 	#idle: IdleStreak | undefined;
+	/** The top-level interactive session: every result and message starts its next turn, so it ends its turn instead of waiting. */
+	readonly #endTurn: boolean;
 
-	constructor(private readonly session: ToolSession) {}
+	constructor(private readonly session: ToolSession) {
+		this.#endTurn = session.tuiTranscript === true;
+		this.description = prompt.render(waitDescription, {
+			endTurn: this.#endTurn,
+			longest: formatDuration(WAIT_LADDER_MS[WAIT_TOP_RUNG]),
+		});
+	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		_params: typeof waitSchema.infer,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<CoordinationDetails>,
@@ -256,6 +299,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 		}
 		return this.#blockUntilWake({
+			toolCallId,
 			jobs,
 			manager,
 			messaging,
@@ -273,6 +317,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	 * With neither jobs nor a service, the block is a reply wait: it also ends once no agent asked can still reply.
 	 */
 	async #blockUntilWake(args: {
+		toolCallId: string;
 		jobs: AsyncJob[];
 		manager: AsyncJobManagerApi | undefined;
 		messaging: WaitMessaging | undefined;
@@ -287,7 +332,11 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	}): Promise<AgentToolResult<CoordinationDetails>> {
 		const { jobs, manager, messaging, serviceRunning, idle, signal, onUpdate, startedAtMs, settledAtEntry } = args;
 		const streak = idle && Date.now() - idle.endedAt < WAIT_LADDER_RESET_MS ? idle : undefined;
-		const rung = streak ? Math.min(streak.rung + 1, WAIT_LADDER_MS.length - 1) : 0;
+		const rung = !streak
+			? 0
+			: isOnlyCallOfTurn(this.session, args.toolCallId)
+				? WAIT_TOP_RUNG
+				: Math.min(streak.rung + 1, WAIT_TOP_RUNG);
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
@@ -411,7 +460,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				if (wake === "timeout") {
 					// The report is one text block (`buildJobResult`); the timeout line joins it.
 					const report = result.content.find(block => block.type === "text")?.text ?? "";
-					const text = `${report}\n\n${elapsedReport("No job finished", rung)}`;
+					const text = `${report}\n\n${elapsedReport("No job finished", rung, this.#endTurn)}`;
 					return this.#elapsed({ ...result, content: [{ type: "text", text }] }, rung, streak);
 				}
 				// A finished service is news even while every watched job still runs.
@@ -421,8 +470,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 			if (wake === "timeout") {
 				const text = replyWait
-					? elapsedReport("No reply", rung)
-					: `${elapsedReport("No service finished", rung)} Read proc:// for status.`;
+					? elapsedReport("No reply", rung, this.#endTurn)
+					: `${elapsedReport("No service finished", rung, this.#endTurn)} Read proc:// for status.`;
 				// A wait that ran out with nothing to report is an idle poll.
 				const result: AgentToolResult<CoordinationDetails> = {
 					content: [{ type: "text", text }],

@@ -14,6 +14,7 @@
 
 import type { Database, Statement } from "bun:sqlite";
 import * as path from "node:path";
+import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { getTimeRangeConfig } from "./aggregator";
 import { initDb } from "./db";
 import { classifyAgentType } from "./parser";
@@ -63,6 +64,7 @@ import {
 	holdoutBaselines,
 	type SessionMoney,
 } from "./spotlight-measures";
+import type { SpotlightWorkerRequest, SpotlightWorkerResponse } from "./spotlight-worker";
 
 const CHARS_PER_TOKEN = 4;
 /** A request whose prompt is under this share of the previous request's follows a compaction. */
@@ -1799,14 +1801,89 @@ function contextPoints(analysis: SessionAnalysis): SpotlightContextPoint[] {
 // Entry points
 // ---------------------------------------------------------------------------
 
-/** `GET /api/stats/spotlight?range=&agent=`; an unknown `agent` measures every transcript. */
+/** The dashboard for a `?range=` and `?agent=`; an unknown `agent` measures every transcript. */
+export function spotlightDashboard(
+	database: Database,
+	range: string | null | undefined,
+	agent: string | null | undefined,
+): SpotlightDashboardStats {
+	const scope: SpotlightAgentScope = agent === "main" || agent === "subagent" ? agent : "all";
+	return buildSpotlightDashboard(database, getTimeRangeConfig(range), scope);
+}
+
+/** `GET /api/stats/spotlight?range=&agent=`, built on the calling thread. */
 export async function getSpotlightDashboardStats(
 	range?: string | null,
 	agent?: string | null,
 ): Promise<SpotlightDashboardStats> {
-	const database = await initDb();
-	const scope: SpotlightAgentScope = agent === "main" || agent === "subagent" ? agent : "all";
-	return buildSpotlightDashboard(database, getTimeRangeConfig(range), scope);
+	return spotlightDashboard(await initDb(), range, agent);
+}
+
+/**
+ * A fresh Spotlight worker: through the CLI entry with its argv selector when the process started from one (source
+ * `cli.ts`, the npm bundle, the compiled binary), else this package's worker module (standalone `omp-stats`, tests,
+ * SDK embedding).
+ */
+function createSpotlightWorker(): Worker {
+	const hostEntry = workerHostEntry();
+	if (hostEntry) {
+		return new Worker(hostEntry, { type: "module", argv: ["__omp_worker_stats_spotlight"] });
+	}
+	return new Worker(new URL("./spotlight-worker.ts", import.meta.url).href, { type: "module" });
+}
+
+/**
+ * Send one request to a fresh worker and terminate it after the reply, so a build's memory goes with it. Aborting
+ * `signal` terminates it early and rejects with the signal's reason.
+ */
+async function askSpotlightWorker(
+	request: SpotlightWorkerRequest,
+	signal?: AbortSignal,
+): Promise<Extract<SpotlightWorkerResponse, { ok: true }>> {
+	signal?.throwIfAborted();
+	const worker = createSpotlightWorker();
+	const { promise, resolve, reject } = Promise.withResolvers<SpotlightWorkerResponse>();
+	const onAbort = () => reject(signal?.reason);
+	signal?.addEventListener("abort", onAbort, { once: true });
+	worker.onmessage = (event: MessageEvent<SpotlightWorkerResponse>) => resolve(event.data);
+	worker.onerror = (event: ErrorEvent) => {
+		reject(event.error instanceof Error ? event.error : new Error(event.message || "spotlight worker error"));
+	};
+	worker.addEventListener("close", () => reject(new Error("spotlight worker exited without replying")));
+	try {
+		worker.postMessage(request);
+		const response = await promise;
+		if (!response.ok) throw new Error(response.error);
+		return response;
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+		worker.terminate();
+	}
+}
+
+/**
+ * `GET /api/stats/spotlight?range=&agent=` as JSON, built on a worker: a build takes seconds, and on the server's
+ * thread it held every other request and ingest until it ended. Aborting `signal` ends the build.
+ */
+export async function buildSpotlightDashboardJson(
+	range: string | null,
+	agent: string | null,
+	signal?: AbortSignal,
+): Promise<string> {
+	// The worker opens the database read-only, so it must already exist with the current schema.
+	await initDb();
+	const response = await askSpotlightWorker({ kind: "build", dbPath: getStatsDbPath(), range, agent }, signal);
+	if (response.kind !== "build") throw new Error(`spotlight worker: expected a build, got ${response.kind}`);
+	return response.json;
+}
+
+/**
+ * Smoke test for `omp --smoke-test`: spawns a Spotlight worker, pings it, and asserts the pong, so install-method CI
+ * catches a worker that fails to load from the compiled binary or npm bundle.
+ */
+export async function smokeTestSpotlightWorker({ timeoutMs = 5_000 }: { timeoutMs?: number } = {}): Promise<void> {
+	const response = await askSpotlightWorker({ kind: "ping" }, AbortSignal.timeout(timeoutMs));
+	if (response.kind !== "pong") throw new Error(`spotlight worker: expected pong, got ${response.kind}`);
 }
 
 /** `GET /api/stats/spotlight/session?file=`; null when the file is not an experiment session. */

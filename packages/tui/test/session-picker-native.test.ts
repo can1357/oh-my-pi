@@ -353,12 +353,16 @@ describe("session selector rename", () => {
 describe("history search picker", () => {
 	const now = Math.floor(Date.now() / 1000);
 	const entries: HistorySearchEntry[] = [
-		{ prompt: "deploy the release\nwith notes", created_at: now - 60, cwd: "/work/app" },
-		{ prompt: "routine status", created_at: now - 7200 },
+		{ id: 1, prompt: "deploy the release\nwith notes", created_at: now - 60, cwd: "/work/app" },
+		{ id: 2, prompt: "routine status", created_at: now - 7200 },
 	];
 	const source = {
 		getRecent: (limit: number) => entries.slice(0, limit),
 		search: (query: string) => entries.filter(e => e.prompt.includes(query)),
+		delete: (id: number) => {
+			const index = entries.findIndex(entry => entry.id === id);
+			if (index >= 0) entries.splice(index, 1);
+		},
 	};
 
 	it("hoists a keyed md picker from the dock and inserts on activate", () => {

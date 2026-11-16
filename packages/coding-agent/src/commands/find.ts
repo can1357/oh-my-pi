@@ -22,6 +22,9 @@ export default class Find extends Command {
 		hidden: Flags.boolean({ description: "Include dot-files and dot-folders" }),
 		json: Flags.boolean({ description: "Emit the full result as JSON" }),
 		quiet: Flags.boolean({ char: "q", description: "Suppress progress on stderr" }),
+		"no-judge": Flags.boolean({ description: "Disallow judge calls without an active session provider" }),
+		"no-spotlight": Flags.boolean({ description: "Disallow Spotlight calls without an active session provider" }),
+		offline: Flags.boolean({ description: "Apply both provider restrictions" }),
 	};
 
 	async run(): Promise<void> {
@@ -33,6 +36,9 @@ export default class Find extends Command {
 			hidden: flags.hidden ?? false,
 			json: flags.json ?? false,
 			quiet: flags.quiet ?? false,
+			noJudge: flags["no-judge"] ?? false,
+			noSpotlight: flags["no-spotlight"] ?? false,
+			offline: flags.offline ?? false,
 		});
 	}
 }

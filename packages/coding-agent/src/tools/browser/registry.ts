@@ -17,7 +17,7 @@ import {
 	removeUserDataDir,
 	type UserAgentOverride,
 } from "./launch";
-import { reapOrphanSharedTargets } from "./orphan-registry";
+import { reapOrphanSharedTargets, type SharedTargetScope } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
@@ -84,6 +84,17 @@ export interface WebKitBrowserHandle extends BrowserHandleCommon {
 }
 
 export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle | WebKitBrowserHandle;
+
+/**
+ * Durable-ownership scope for a browser handle, or undefined when the handle is
+ * not the project-shared broker-owned Chromium (the only browser whose targets
+ * outlive their creating process and thus need cross-process orphan reaping).
+ */
+export function sharedTargetScopeOf(handle: BrowserHandle): SharedTargetScope | undefined {
+	if (!("browser" in handle)) return undefined;
+	if (handle.kind.kind !== "headless" || !handle.sharedDaemon) return undefined;
+	return { projectDir: handle.sharedDaemon.projectDir, daemonName: handle.sharedDaemon.name };
+}
 
 /** Controls bounded browser-handle teardown and identifies the owning resource in timeout diagnostics. */
 export interface ReleaseBrowserOptions {

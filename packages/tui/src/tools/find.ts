@@ -58,6 +58,16 @@ export interface FindHit {
 	truncated: boolean;
 }
 
+/** One literal keyword line from a file the lexical pass already read; unranked and not semantically judged. */
+export interface FindLexicalMatch {
+	/** Display path relative to {@link FindToolDetails.cwd}, or an internal URL under URL scopes. */
+	rel: string;
+	/** 1-based line number in the file. */
+	line: number;
+	/** Verbatim source line, trimmed and clipped. */
+	snippet: string;
+}
+
 /**
  * How much of a search the judge actually covered. `unavailable`: every judge
  * request failed, so an empty result is not evidence of absence. `partial`:
@@ -105,6 +115,8 @@ export interface FindToolDetails {
 	/** Verified-passage probability at or above which a file is a hit. */
 	threshold: number;
 	hits: FindHit[];
+	/** Literal keyword lines from the already-read files, present when every judge request failed. */
+	lexicalFallback?: FindLexicalMatch[];
 	coverage: FindCoverage;
 	stats: FindStats;
 	/** Set when the deadline ended verification; the hits are those verified before it. */
@@ -324,11 +336,19 @@ export const findToolRenderer = {
 				{ icon: "warning", title: "Find", titleColor: "toolTitle", description, meta: emptyMeta },
 				uiTheme,
 			);
+			const fallback = details.lexicalFallback ?? [];
 			const empty =
-				details.coverage === "partial"
-					? "No relevant passages found in the judged files"
-					: "No relevant passages found";
+				fallback.length > 0
+					? "Unranked literal keyword matches (not semantically judged)"
+					: details.coverage === "partial"
+						? "No relevant passages found in the judged files"
+						: "No relevant passages found";
 			const lines = [header, formatEmptyMessage(empty, uiTheme)];
+			for (const match of fallback) {
+				lines.push(
+					`  ${formatStyledPath(`${match.rel}:${match.line}`, uiTheme)} ${uiTheme.fg("toolOutput", replaceTabs(match.snippet))}`,
+				);
+			}
 			for (const failure of stats.failures) lines.push(uiTheme.fg("warning", failure));
 			return new Text(lines.join("\n"), 0, 0);
 		}
@@ -425,11 +445,20 @@ export const findToolRenderer = {
 			keyed(text([span(failure, "warning")], { wrap: "word", role: "omp.tool.notice" }), `fail${i}`),
 		);
 		if (hits.length === 0) {
+			const fallback = (details.lexicalFallback ?? []).map((match, i) =>
+				keyed(
+					text([span(`${match.rel}:${match.line}`, "muted"), span(` ${replaceTabs(match.snippet)}`)], {
+						wrap: "word",
+					}),
+					`lex${i}`,
+				),
+			);
+			const body = [...fallback, ...failures];
 			return {
 				tool: findNativeHead(query, compact(["0 hits", scope, failed])),
 				tone: "warning",
 				inline: true,
-				body: failures.length > 0 ? failures : undefined,
+				body: body.length > 0 ? body : undefined,
 			};
 		}
 		const shown = options.expanded ? hits : hits.slice(0, COLLAPSED_HITS);

@@ -281,9 +281,9 @@ impl Shell {
 	/// session's state (variables, functions, aliases, options, working
 	/// directory) as of its last command boundary: while a command runs, the
 	/// state that command started from. What the fork sets stays in the
-	/// fork. Never waits for a running command. Before this shell has a
-	/// session, the fork starts from this shell's own seed, or as a new
-	/// shell.
+	/// fork until [`Shell::adopt`] carries it back. Never waits for a
+	/// running command. Before this shell has a session, the fork starts
+	/// from this shell's own seed, or as a new shell.
 	#[must_use]
 	pub fn fork(&self) -> Self {
 		let latest = self.active.lock().as_ref().map(|active| active.image.get());
@@ -291,6 +291,33 @@ impl Shell {
 			seed: latest.or_else(|| self.config.seed.clone()),
 			..self.config.clone()
 		})
+	}
+
+	/// Carry what `fork`, a [`Shell::fork`] of this shell whose command
+	/// ended, changed (variables, functions, aliases, options, traps) into
+	/// this shell's session: at the end of the command it runs now, or at
+	/// once between commands, and into every fork taken from here on. A key
+	/// both changed keeps the value of the command that ended last
+	/// ([`LatestImage::adopt`]). `false` when there is nothing to carry from
+	/// or into: `fork` did not start from a session's state or lost its
+	/// session (a failed run), or this shell has no session.
+	pub fn adopt(&self, fork: &Self) -> bool {
+		let Some(base) = &fork.config.seed else {
+			return false;
+		};
+		let Some(state) = fork.active.lock().as_ref().map(|active| active.image.get()) else {
+			return false;
+		};
+		let Some(latest) = self
+			.active
+			.lock()
+			.as_ref()
+			.map(|active| active.image.clone())
+		else {
+			return false;
+		};
+		latest.adopt(base, &state);
+		true
 	}
 
 	pub async fn run(
@@ -518,6 +545,11 @@ async fn run_shell_session(
 		reason = ct.wait() => {
 			tokio_cancel.cancel();
 			let graceful = time::timeout(CANCEL_RUN_GRACE, &mut run_task).await;
+			// A run that wound down by itself leaves the session usable, with
+			// the background jobs earlier commands left running (a cancel
+			// spares them). One that had to be dropped, or that failed, leaves
+			// the session in an unknown state: end it.
+			let usable = matches!(graceful, Ok(Ok(Ok(_))));
 			if graceful.is_err() {
 				// Dropping the run stops the command with `KILL`.
 				run_task.abort();
@@ -527,7 +559,7 @@ async fn run_shell_session(
 			// Use try_lock to avoid deadlocking if another task holds the session.
 			// If we can't acquire the lock, the session will be cleaned up when the
 			// holding task finishes.
-			if let Ok(mut guard) = session.try_lock() {
+			if !usable && let Ok(mut guard) = session.try_lock() {
 				*guard = None;
 				*active.lock() = None;
 			}

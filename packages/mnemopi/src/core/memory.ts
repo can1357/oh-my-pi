@@ -190,28 +190,46 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 				? options.noEmbeddings
 				: nestedEmbeddings?.disabled;
 	const embeddingModel = options.embeddingModel ?? nestedEmbeddings?.model;
+	const embeddingAllowRemote = nestedEmbeddings?.allowRemote;
+	const embeddingAllowLocal = nestedEmbeddings?.allowLocal;
+	const embeddingAllowLocalLoad = nestedEmbeddings?.allowLocalLoad;
 	const embeddingApiUrl = options.embeddingApiUrl ?? nestedEmbeddings?.apiUrl;
 	const embeddingApiKey = options.embeddingApiKey ?? nestedEmbeddings?.apiKey;
 	const embeddingProvider = resolveEmbeddingProvider(nestedEmbeddings?.provider);
 	const embeddingMaxInputChars = nestedEmbeddings?.maxInputChars;
 	const embeddingBatchSize = nestedEmbeddings?.batchSize;
+	const embeddingQueryPrefix = nestedEmbeddings?.queryPrefix;
+	const embeddingInputType = nestedEmbeddings?.inputType;
+	const embeddingOnRequestFailed = nestedEmbeddings?.onRequestFailed;
 
 	const embeddings =
 		embeddingDisabled !== undefined ||
 		embeddingModel !== undefined ||
+		embeddingAllowRemote !== undefined ||
+		embeddingAllowLocal !== undefined ||
+		embeddingAllowLocalLoad !== undefined ||
 		embeddingApiUrl !== undefined ||
 		embeddingApiKey !== undefined ||
 		embeddingProvider !== undefined ||
 		embeddingMaxInputChars !== undefined ||
-		embeddingBatchSize !== undefined
+		embeddingBatchSize !== undefined ||
+		embeddingQueryPrefix !== undefined ||
+		embeddingInputType !== undefined ||
+		embeddingOnRequestFailed !== undefined
 			? {
 					disabled: embeddingDisabled,
 					model: embeddingModel,
+					allowRemote: embeddingAllowRemote,
+					allowLocal: embeddingAllowLocal,
+					allowLocalLoad: embeddingAllowLocalLoad,
 					apiUrl: embeddingApiUrl,
 					apiKey: embeddingApiKey,
 					provider: embeddingProvider,
 					maxInputChars: embeddingMaxInputChars,
 					batchSize: embeddingBatchSize,
+					queryPrefix: embeddingQueryPrefix,
+					inputType: embeddingInputType,
+					onRequestFailed: embeddingOnRequestFailed,
 				}
 			: undefined;
 
@@ -238,6 +256,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 						hasOwn(options, "llmModel")))
 				? true
 				: undefined;
+		const llmAllowRemote = nestedLlm?.allowRemote;
 		const llmBaseUrl = options.llmBaseUrl ?? nestedLlm?.baseUrl;
 		const llmApiKey = options.llmApiKey ?? nestedLlm?.apiKey;
 		const llmMaxTokens = nestedLlm?.maxTokens;
@@ -246,6 +265,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		const llmConsolidationPrompt = nestedLlm?.consolidationPrompt;
 		if (
 			llmEnabled !== undefined ||
+			llmAllowRemote !== undefined ||
 			llmBaseUrl !== undefined ||
 			llmApiKey !== undefined ||
 			llmModel !== undefined ||
@@ -256,6 +276,7 @@ function resolveRuntimeOptions(options: MnemopiOptions): ResolvedMnemopiRuntimeO
 		) {
 			llm = {
 				enabled: llmEnabled,
+				allowRemote: llmAllowRemote,
 				baseUrl: llmBaseUrl,
 				apiKey: llmApiKey,
 				model: llmModel,

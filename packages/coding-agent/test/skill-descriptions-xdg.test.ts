@@ -193,6 +193,20 @@ describe("skill description failure caching and shutdown", () => {
 		expect(new SkillDescriptionCatalog({ store }).render([entry])[0].description).toBe(answer);
 	});
 
+	it("uses descriptions that already fit the preview budget verbatim without scheduling compression", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const entry = {
+			...skill(),
+			description: "Review pull-request diffs for style and correctness; not running existing tests.",
+		};
+		const compress = vi.fn(async () => "Model-compressed rewrite.");
+		const catalog = new SkillDescriptionCatalog({ store, compress: fast(compress) });
+		expect(catalog.render([entry])[0].description).toBe(entry.description);
+		await catalog.waitForPending();
+		expect(compress).not.toHaveBeenCalled();
+		expect(storedDescriptions(store.path)).toEqual([]);
+	});
+
 	it("asks a newly selected model after the previous model's answer was unusable", async () => {
 		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
 		const entry = skill();

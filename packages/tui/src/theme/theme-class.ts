@@ -1,7 +1,7 @@
 import { colorLuma, relativeLuminance } from "@oh-my-pi/pi-utils/color";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
+import { bgAnsi, colorToAnsi, fgAnsi, isLightLuma, resolveToHex } from "./color";
 import {
 	ANSI_COLOR_INDEX,
 	type AnsiColor,
@@ -214,7 +214,7 @@ export class Theme {
 	) {
 		this.statusLineLuminance = colorLuma(bgColors.statusLineBg);
 		this.#statusLineContrastLuminance = relativeLuminance(bgColors.statusLineBg);
-		const slIsLight = this.statusLineLuminance !== undefined && this.statusLineLuminance > 0.5;
+		const slIsLight = isLightLuma(this.statusLineLuminance);
 
 		this.#fgColors = {} as Record<ThemeColor, string>;
 		this.#hexFgColors = {} as Record<ThemeColor, string>;
@@ -257,7 +257,7 @@ export class Theme {
 
 	/** True when the active theme has a light status-line background. */
 	get isLight(): boolean {
-		return this.statusLineLuminance !== undefined && this.statusLineLuminance > 0.5;
+		return isLightLuma(this.statusLineLuminance);
 	}
 
 	/**
@@ -357,7 +357,8 @@ export class Theme {
 	/**
 	 * True when the theme paints `color` with a real foreground — i.e. the token
 	 * exists and is not the empty string (terminal default, `\x1b[39m`). Optional
-	 * tokens absent from the theme JSON are also false. Callers use this to keep
+	 * tokens absent from the theme JSON are also false, except `mdExtensionLink`, which
+	 * `createTheme` derives from `mdLink` and `text`. Callers use this to keep
 	 * terminal-default behavior byte-for-byte when an optional token is unset.
 	 */
 	hasColor(color: ThemeColor): boolean {

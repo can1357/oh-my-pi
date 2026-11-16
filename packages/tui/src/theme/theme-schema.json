@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (all required except thinkingMax and assistantMessageText)",
+			"description": "Theme color definitions (all required except thinkingMax, assistantMessageText and mdExtensionLink)",
 			"required": [
 				"accent",
 				"border",
@@ -202,6 +202,10 @@
 				"mdLink": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Markdown link text"
+				},
+				"mdExtensionLink": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Markdown link text for links an extension handles instead of opening a URL (optional; omitted derives a muted blend of mdLink and text)"
 				},
 				"mdLinkUrl": {
 					"$ref": "#/$defs/colorValue",

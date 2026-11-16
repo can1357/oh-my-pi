@@ -1289,6 +1289,111 @@ async fn uutils_find_display_and_actions_split_paths() {
 	let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `xargs` and `env` run an external program found on `PATH` by name (on
+/// Windows that is a `sh.exe` the shell resolves through `PATHEXT`).
+#[tokio::test(flavor = "multi_thread")]
+async fn uutils_xargs_and_env_run_external_programs() {
+	let tmp = std::env::temp_dir().join(format!("pi-xargs-env-{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&tmp);
+	std::fs::create_dir_all(&tmp).expect("temp dir");
+	let tmp_str = tmp.to_str().expect("utf8");
+
+	let config = ShellConfig {
+		session_env:   None,
+		snapshot_path: None,
+		minimizer:     None,
+		filesystem:    Fs::native(),
+		seed:          None,
+	};
+	let mut session = create_session(&config).await.expect("create_session");
+	session
+		.run_test(format!("cd {}", quote_arg(tmp_str)), &TestStdio::null())
+		.await
+		.expect("cwd");
+	let params = TestStdio::null();
+	let read = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+
+	session
+		.run_test("printf 'a\\n' | xargs sh -c 'echo \"x:$1\"' sh > xargs.txt", &params)
+		.await
+		.expect("xargs");
+	assert_eq!(read("xargs.txt"), "x:a\n", "xargs should run the external sh");
+
+	session
+		.run_test("env PI_ENV_PROBE=ok sh -c 'echo \"$PI_ENV_PROBE\"' > env.txt", &params)
+		.await
+		.expect("env");
+	assert_eq!(read("env.txt"), "ok\n", "env should run the external sh");
+
+	let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// A program under a path past `MAX_PATH` can only be started by its verbatim
+/// `\\?\` name, which accepts no `/`: `env`, `xargs` and `find -exec` must
+/// hand that name to the spawn unchanged.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn uutils_exec_runs_programs_by_verbatim_path() {
+	let tmp = std::env::temp_dir().join(format!("pi-verbatim-exec-{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&tmp);
+	std::fs::create_dir_all(&tmp).expect("temp dir");
+	let tmp_str = tmp.to_str().expect("utf8");
+
+	// `hostname.exe` is a standalone system program: its copy runs anywhere.
+	let system = std::path::PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+		.join("System32")
+		.join("hostname.exe");
+	let expected = std::process::Command::new(&system)
+		.output()
+		.expect("run hostname")
+		.stdout;
+	let mut deep = std::fs::canonicalize(&tmp).expect("canonicalize");
+	while deep.as_os_str().len() < 300 {
+		deep.push("d".repeat(50));
+	}
+	std::fs::create_dir_all(&deep).expect("deep dir");
+	let probe = deep.join("probe.exe");
+	std::fs::copy(&system, &probe).expect("copy hostname.exe");
+	let probe = probe.to_str().expect("utf8");
+	assert!(probe.starts_with(r"\\?\") && probe.len() > 260, "{probe}");
+	let probe = quote_arg(probe);
+
+	let config = ShellConfig {
+		session_env:   None,
+		snapshot_path: None,
+		minimizer:     None,
+		filesystem:    Fs::native(),
+		seed:          None,
+	};
+	let mut session = create_session(&config).await.expect("create_session");
+	session
+		.run_test(format!("cd {}", quote_arg(tmp_str)), &TestStdio::null())
+		.await
+		.expect("cwd");
+	let params = TestStdio::null();
+	let read = |name: &str| std::fs::read(tmp.join(name)).unwrap_or_default();
+
+	session
+		.run_test(format!("env V=ok {probe} > env.txt"), &params)
+		.await
+		.expect("env");
+	assert_eq!(read("env.txt"), expected, "env should run a verbatim-path program");
+
+	session
+		.run_test(format!("printf 'a\\n' | xargs -I{{}} {probe} > xargs.txt"), &params)
+		.await
+		.expect("xargs");
+	assert_eq!(read("xargs.txt"), expected, "xargs should run a verbatim-path program");
+
+	session
+		.run_test(format!("find . -maxdepth 0 -exec {probe} \\; > find.txt"), &params)
+		.await
+		.expect("find");
+	assert_eq!(read("find.txt"), expected, "find -exec should run a verbatim-path program");
+
+	let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// The vendored `sed` builtin must stream pipeline stdin through scripts and
 /// perform `-i` in-place edits (with backup suffix) against the shell
 /// working directory rather than the host process cwd.

@@ -32,6 +32,17 @@ afterEach(async () => {
 });
 
 describe("HistoryStorage.search", () => {
+	it("removes deleted prompts from search and permits reinserting them", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["commit one", "commit two"]);
+		const deleted = storage.search("commit one", 10)[0]!;
+		storage.delete(deleted.id);
+		expect(storage.getRecent(10).map(entry => entry.prompt)).toEqual(["commit two"]);
+		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit two"]);
+		await storage.add("commit one");
+		expect(storage.search("commit", 10).map(entry => entry.prompt)).toEqual(["commit one", "commit two"]);
+	});
+
 	it("matches across punctuation in the query (FTS token alignment)", async () => {
 		const storage = await freshStorage();
 		await seed(storage, ["run git commit --amend now", "unrelated noise"]);
@@ -41,6 +52,14 @@ describe("HistoryStorage.search", () => {
 		// prompt as `git` and `commit` separately.
 		const results = storage.search("git-commit", 10);
 		expect(results.map(r => r.prompt)).toEqual(["run git commit --amend now"]);
+	});
+
+	it("keeps a punctuated term's parts together instead of matching them anywhere", async () => {
+		const storage = await freshStorage();
+		await seed(storage, ["see a/b path", "alpha and beta note", "commit to git", "unrelated"]);
+
+		expect(storage.search("a/b", 10).map(r => r.prompt)).toEqual(["see a/b path"]);
+		expect(storage.search("git-commit", 10)).toEqual([]);
 	});
 
 	it("falls back to substring matching for infix queries FTS prefix cannot reach", async () => {
