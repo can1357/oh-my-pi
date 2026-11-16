@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- File memory banks sync their WAL at checkpoints instead of on every commit (`synchronous=NORMAL`), cutting the disk syncs each turn makes on banks shared by every omp process ([#17973](https://github.com/can1357/oh-my-pi/pull/17973) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added configurable embedding query prefixes and input types for instruction-tuned and asymmetric embedding models, including Qwen3-Embedding, E5, and NVIDIA NIM.
+- Added the `embeddings.onRequestFailed` callback, allowing hosts to handle and surface failed embedding API requests.
+
 ## [18.20.0] - 2026-11-12
 
 ### Fixed

@@ -30,7 +30,9 @@
  * 	onCancel: () => resolve(undefined),
  * });
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { formatKeyHint } from "../app-keybindings";
+import { BracketedPasteHandler } from "../bracketed-paste";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
@@ -60,6 +62,9 @@ import {
 import { actionBar, actionButton, itemIndex } from "../native/overlay";
 import { isNativeRendering } from "../native/state";
 import type { AskDialogInputGuard } from "../overlays/ask-dialog";
+import { compactImageAttachments, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
+import { classifyImagePaste } from "../prompt/custom-editor";
+import { OrderedPastes } from "../prompt/ordered-pastes";
 import { wrapPrefixedLine } from "../render/hanging-wrap";
 import { getEditorTheme, type ThemeColor, theme } from "../theme/theme";
 import { optionMarker } from "../tools/ask";
@@ -110,6 +115,16 @@ export interface HtmlFormDialogOptions {
 	inputGuard?: AskDialogInputGuard;
 	/** Directory relative `<img src>` paths resolve against; the process's when omitted. */
 	cwd?: string;
+	/** Lets the open option note take pasted images; see {@link HtmlFormDialog.attachImage}. */
+	acceptImages?: boolean;
+	/**
+	 * Called for an empty bracketed paste into an open note. Like HookEditor's, the host reserves with
+	 * {@link HtmlFormDialog.beginPaste} synchronously, before its first await, and its
+	 * {@link HtmlFormDialog.attachImage} returns the marker that reserved paste delivers.
+	 */
+	onPasteImage?(): Promise<boolean> | void;
+	/** Called once per file path when a bracketed paste into an open note is only image paths. */
+	onPasteImagePath?(path: string): void | Promise<void>;
 	onSubmit(data: HtmlFormData, notes: OptionNote[]): void;
 	onCancel(): void;
 }
@@ -184,6 +199,23 @@ interface FormTab {
 	label: string;
 	parts: TabPart[];
 	fields: FormField[];
+}
+
+/** A note saved on an option: its text, and the images its `[Image #N]` markers index. */
+interface SavedNote {
+	text: string;
+	images: ImageContent[];
+}
+
+/** The note being edited; dropped when it closes, so nothing of it outlives the note. */
+interface OpenNote {
+	field: ChoiceField;
+	option: number;
+	editor: Editor;
+	/** Saved images of the option plus those pasted since the note opened. */
+	images: ImageContent[];
+	pastes: OrderedPastes;
+	pasteHandler: BracketedPasteHandler;
 }
 
 /** Strip control bytes a model could smuggle into labels (escape sequences, `\r`); keep `\n`. */
@@ -313,8 +345,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	readonly #fieldIndex = new Map<FormField, number>();
 	readonly #checked = new Map<ChoiceField, Set<number>>();
 	readonly #inputs = new Map<TextField, Input>();
-	readonly #notes = new Map<ChoiceField, Map<number, string>>();
-	#noteEditor: { field: ChoiceField; option: number; editor: Editor } | undefined;
+	readonly #notes = new Map<ChoiceField, Map<number, SavedNote>>();
+	#noteEditor: OpenNote | undefined;
 	#savedNoteEditor: Editor | undefined;
 	#useTerminalCursor = false;
 	/** The Other answer's text of each group that offers one. */
@@ -446,14 +478,17 @@ export class HtmlFormDialog implements Component, Focusable {
 			this.#otherChosen(field);
 			const checked = this.#checked.get(field)!;
 			field.options.forEach((option, index) => {
-				const text = notes.get(index)?.trim();
+				const saved = notes.get(index);
+				const text = saved?.text.trim();
 				if (!text || option.disabled || !checked.has(index)) return;
+				const images = saved?.images;
 				selected.push({
 					name: field.name,
 					question: this.#questions.get(field) ?? field.name,
 					option: optionText(option) || option.value,
 					value: option.value,
 					text,
+					...(images?.length ? { images: [...images] } : {}),
 				});
 			});
 		}
@@ -480,7 +515,12 @@ export class HtmlFormDialog implements Component, Focusable {
 			remaining: this.#remaining ?? null,
 			errors: Object.fromEntries([...this.#errors].map(([field, error]) => [field.name, error])),
 			data: this.data(),
-			notes: Object.fromEntries([...this.#notes].map(([field, notes]) => [field.name, Object.fromEntries(notes)])),
+			notes: Object.fromEntries(
+				[...this.#notes].map(([field, notes]) => [
+					field.name,
+					Object.fromEntries([...notes].map(([option, note]) => [option, note.text])),
+				]),
+			),
 			noteEdit: this.#noteEditor
 				? `${this.#noteEditor.field.name}=${this.#noteEditor.field.options[this.#noteEditor.option]!.value}`
 				: undefined,
@@ -507,7 +547,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			return;
 		}
 		if (this.#guardBlocks()) {
-			if (matchesSelectUp(data) || matchesSelectDown(data)) this.#guardReleased = true;
+			if (matchesSelectUp(data) || matchesSelectDown(data)) this.#releaseGuard();
 			else this.#options.inputGuard?.handleInput(data);
 			return;
 		}
@@ -584,7 +624,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		this.#resetCountdown();
 		this.#changed();
 		if (this.#noteEditor && !(event.type === "action" && (event.act === "hide" || event.act === "show"))) {
-			if (event.type === "action" && event.act === "save-note") this.#saveNote();
+			if (event.type === "action" && event.act === "save-note") this.#requestSave();
 			else if (event.type === "action" && event.act === "cancel") this.#closeNote();
 			return;
 		}
@@ -682,6 +722,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	dispose(): void {
+		this.#noteEditor?.pastes.clear();
+		this.#noteEditor = undefined;
 		this.#stopCountdown();
 		if (this.#savedNoteEditor) this.#savedNoteEditor.focused = false;
 		this.#mediaAbort.abort();
@@ -957,10 +999,16 @@ export class HtmlFormDialog implements Component, Focusable {
 		return !this.#guardReleased && (this.#options.inputGuard?.isBlocked() ?? false);
 	}
 
+	/** Tells the guard right away, so its host stops owning the composer before the next render. */
+	#releaseGuard(): void {
+		this.#guardReleased = true;
+		this.#options.inputGuard?.syncPresentation?.(false);
+	}
+
 	/** A pointer pick or action on the form is the user handing the keys over, as up/down does. */
 	#releaseGuardForPointer(): void {
 		if (!this.#guardBlocks()) return;
-		this.#guardReleased = true;
+		this.#releaseGuard();
 		this.#changed();
 	}
 
@@ -976,14 +1024,31 @@ export class HtmlFormDialog implements Component, Focusable {
 		const option =
 			target ?? (stop.kind === "option" ? stop.option : (this.#open?.highlight ?? this.#current(stop.field)));
 		if (option === undefined || stop.field.options[option]?.disabled !== false) return;
+		// Opening a note hands the keys over, as up/down does, so a draft that refills later can't claim pastes.
+		this.#releaseGuard();
 		const editor = (this.#savedNoteEditor ??= new Editor(getEditorTheme()));
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(4);
 		editor.disableSubmit = true;
 		editor.setUseTerminalCursor(this.#useTerminalCursor);
 		editor.onChange = () => this.#resetCountdown();
-		editor.setText(this.#notes.get(stop.field)?.get(option) ?? "", { cursor: "start" });
-		this.#noteEditor = { field: stop.field, option, editor };
+		const saved = this.#notes.get(stop.field)?.get(option);
+		editor.setText(saved?.text ?? "", { cursor: "start" });
+		if (this.#options.acceptImages) editor.atomicTokenPattern = PLACEHOLDER_REGEX;
+		const note: OpenNote = {
+			field: stop.field,
+			option,
+			editor,
+			images: [...(saved?.images ?? [])],
+			pasteHandler: new BracketedPasteHandler(),
+			pastes: new OrderedPastes({
+				deliver: text => editor.pasteText(text),
+				run: () => this.#saveNote(),
+				live: () => this.#noteEditor === note,
+				afterSettle: () => this.#changed(),
+			}),
+		};
+		this.#noteEditor = note;
 		this.#syncControlFocus();
 	}
 
@@ -1014,27 +1079,94 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	#noteEditorInput(data: string): void {
+		const note = this.#noteEditor!;
+		if (this.#options.acceptImages) {
+			const paste = note.pasteHandler.process(data);
+			if (paste.handled) {
+				if (paste.pasteContent !== undefined) this.#notePaste(note, paste.pasteContent);
+				if (paste.remaining.length > 0) this.handleInput(paste.remaining);
+				return;
+			}
+		}
 		if (matchesSelectCancel(data)) this.#closeNote();
-		else if (getKeybindings().matches(data, "tui.input.submit")) this.#saveNote();
-		else this.#noteEditor!.editor.handleInput(data);
+		else if (getKeybindings().matches(data, "tui.input.submit")) this.#requestSave();
+		else note.editor.handleInput(data);
+	}
+
+	#notePaste(note: OpenNote, content: string): void {
+		const { onPasteImage, onPasteImagePath } = this.#options;
+		const image = classifyImagePaste(content);
+		if (image.kind === "clipboard" && onPasteImage) {
+			void onPasteImage();
+			return;
+		}
+		if (image.kind === "paths" && onPasteImagePath) {
+			for (const path of image.paths) void onPasteImagePath(path);
+			return;
+		}
+		note.pastes.paste(content);
+	}
+
+	#requestSave(): void {
+		if (!this.#noteEditor!.pastes.holdAction()) this.#saveNote();
 	}
 
 	#saveNote(): void {
-		const active = this.#noteEditor!;
-		const note = active.editor.getExpandedText().trim();
-		const notes = this.#notes.get(active.field)!;
-		if (note) notes.set(active.option, note);
-		else notes.delete(active.option);
+		const note = this.#noteEditor!;
+		const { text, images } = compactImageAttachments(note.editor.getExpandedText().trim(), note.images);
+		const notes = this.#notes.get(note.field)!;
+		if (text) notes.set(note.option, { text, images });
+		else notes.delete(note.option);
 		this.#closeNote();
 	}
 
 	#closeNote(): void {
-		// The editor is reused: a later note's literal `[Paste #1]` must not expand to this one's paste.
-		this.#noteEditor?.editor.clearPasteState();
-		this.#noteEditor?.editor.setText("");
+		const note = this.#noteEditor;
+		if (note) {
+			note.pastes.clear();
+			// The editor is reused: a later note's literal `[Paste #1]` must not expand to this one's paste.
+			note.editor.clearPasteState();
+			note.editor.setText("");
+		}
 		this.#noteEditor = undefined;
 		this.#syncControlFocus();
 		this.#changed();
+	}
+
+	// ── Pasted images ────────────────────────────────────────────────────────
+
+	/** Whether the form takes a new image paste now: a note is open and the form is shown. */
+	get acceptsImages(): boolean {
+		return !!this.#options.acceptImages && this.#noteEditor !== undefined && !this.#hidden;
+	}
+
+	/**
+	 * Defined only while {@link acceptsImages}. A host routes Ctrl+V and pastes to any focused component that
+	 * has `pasteText`, so with no note open the form must behave as a plain dialog.
+	 */
+	get pasteText(): ((text: string) => void) | undefined {
+		return this.acceptsImages ? text => this.#pasteText(text) : undefined;
+	}
+
+	/**
+	 * Adds an image to the open note; returns its `[Image #N, WxH]` marker for the caller to deliver.
+	 * Takes it while the form is hidden too: a paste reserved before Alt+H still lands in its note.
+	 */
+	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
+		const note = this.#options.acceptImages ? this.#noteEditor : undefined;
+		if (!note) return undefined;
+		note.images.push(image);
+		return formatVisionMarker("image", note.images.length, dims);
+	}
+
+	/** Ordered delivery into the open note; refuses when {@link acceptsImages} is false. */
+	beginPaste(): (text: string | undefined) => boolean {
+		return this.acceptsImages ? this.#noteEditor!.pastes.begin() : () => false;
+	}
+
+	#pasteText(text: string): void {
+		const note = this.#noteEditor;
+		if (note && text) this.#notePaste(note, text);
 	}
 
 	#noteFromPointer(key: string): void {
@@ -1264,6 +1396,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	#setHidden(hidden: boolean): void {
 		if (this.#hidden === hidden) return;
 		this.#hidden = hidden;
+		// A hidden form takes no new paste (see acceptsImages), but one already reserved still lands
+		// in its note, and an Enter held behind it still saves.
 		this.#open = undefined;
 		this.#syncControlFocus();
 	}
@@ -1997,7 +2131,7 @@ export class HtmlFormDialog implements Component, Focusable {
 			const role = field.multi ? "omp.ask.check" : "omp.ask.option";
 			const items = field.options.map((option, optionIndex) => {
 				const isChecked = checked.has(optionIndex);
-				const note = this.#notes.get(field)?.get(optionIndex);
+				const note = this.#notes.get(field)?.get(optionIndex)?.text;
 				return item(`o${optionIndex}`, {
 					label: nativeSpans(option.label),
 					role,
