@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { connect, type Socket } from "node:net";
-import { McpBridge, type McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
+import {
+	McpBridge,
+	type McpToolDefinition,
+	type McpToolOutput,
+} from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 
 interface Reply {
 	id: number;
@@ -66,6 +70,17 @@ const tools = [
 		},
 	},
 ];
+
+const write: McpToolDefinition = {
+	name: "write",
+	description: "Write",
+	inputSchema: {
+		type: "object",
+		properties: { text: { type: "string" } },
+		required: ["text"],
+		additionalProperties: false,
+	},
+};
 
 describe("McpBridge", () => {
 	it("rejects unknown tools and forwards argument validation to the host", async () => {
@@ -176,5 +191,46 @@ describe("McpBridge", () => {
 		await peer.closed;
 		result.resolve({ content: [{ type: "text", text: "late" }] });
 		bridge.close();
+	});
+
+	it("lists and validates the updated tool set on the same connection", async () => {
+		const called: string[] = [];
+		const bridge = new McpBridge(tools, async name => {
+			called.push(name);
+			return { content: [] };
+		});
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
+		bridge.updateTools([...tools, write]);
+		expect((await peer.request("tools/list")).result).toEqual({ tools: [...tools, write] });
+		expect((await peer.request("tools/call", { name: "write", arguments: { text: "body" } })).result).toEqual({
+			content: [],
+		});
+		bridge.updateTools([]);
+		expect((await peer.request("tools/list")).result).toEqual({ tools: [] });
+		expect((await peer.request("tools/call", { name: "read", arguments: { path: "a" } })).error?.code).toBe(-32602);
+		expect(called).toEqual(["write"]);
+	});
+
+	it("rejects duplicate tool names on construction and update", async () => {
+		const duplicate: McpToolDefinition = { name: "read", description: "Other read", inputSchema: {} };
+		expect(() => new McpBridge([...tools, duplicate], async () => ({ content: [] }))).toThrow(
+			"Duplicate Antigravity CLI tool name",
+		);
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		expect(() => bridge.updateTools([...tools, duplicate])).toThrow("Duplicate Antigravity CLI tool name");
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
+	});
+
+	it("ignores tool updates after close", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		await peer.request("ping");
+		bridge.close();
+		expect(() => bridge.updateTools([])).not.toThrow();
 	});
 });

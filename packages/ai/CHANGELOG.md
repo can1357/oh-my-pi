@@ -62,6 +62,9 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+### Changed
+
+- Updated the Antigravity CLI ACP bridge to replace its advertised tool set on a live session, so a tool-set change reuses the warm agy process when no tool call is parked ([#PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PLACEHOLDER) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 

@@ -74,6 +74,8 @@ export interface AgyTransport {
 	connection: AgyConnection;
 	exited: Promise<number>;
 	close(): void;
+	/** Replace the advertised tools on a live process; transports without it are restarted instead. */
+	updateTools?(tools: readonly McpToolDefinition[]): void;
 }
 
 /** Arguments for the production transport or an isolated test transport. */
@@ -224,6 +226,8 @@ export class AgyHost implements ProviderSessionState {
 			const system = (context.systemPrompt ?? []).join("\n\n");
 			const systemKey = system;
 			let plan = planTurn(context.messages, this.#ledger);
+			// A live turn or parked call keeps the tool set it started with.
+			const toolSetHeld = this.#turn !== undefined || this.#pending !== undefined;
 			const parkedTurnMoves =
 				this.#pending?.state !== "detached" &&
 				this.#pending !== undefined &&
@@ -240,11 +244,19 @@ export class AgyHost implements ProviderSessionState {
 				plan = planTurn(context.messages, undefined);
 			}
 			if (plan.kind !== "resume") await this.#setup(this.#abandonTurn());
-			if (
-				this.#process?.toolsKey !== toolsKey ||
-				this.#process.cwd !== cwd ||
-				this.#process.credentialVersion !== options.credentialVersion
-			) {
+			const warm = this.#process;
+			if (warm && warm.cwd === cwd && warm.credentialVersion === options.credentialVersion) {
+				if (warm.toolsKey !== toolsKey) {
+					const updateTools = warm.updateTools;
+					if (toolSetHeld || !updateTools) {
+						await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
+					} else {
+						updateTools(tools);
+						warm.toolsKey = toolsKey;
+						warm.tools = new Map(tools.map(tool => [tool.name, tool]));
+					}
+				}
+			} else {
 				await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
 			}
 			let loadId: string | undefined;
@@ -418,6 +430,7 @@ export class AgyHost implements ProviderSessionState {
 		const agy: AgyProcess = {
 			connection: transport.connection,
 			exited: transport.exited,
+			updateTools: transport.updateTools?.bind(transport),
 			close: () => transport.close(),
 			token,
 			toolsKey,
@@ -825,7 +838,7 @@ async function startTransport(options: AgyTransportOptions): Promise<AgyTranspor
 				}),
 				ndJsonStream(input, child.stdout),
 			);
-			return { connection, exited: child.exited, close };
+			return { connection, exited: child.exited, close, updateTools: tools => bridge.updateTools(tools) };
 		} catch (error) {
 			close();
 			throw error;
