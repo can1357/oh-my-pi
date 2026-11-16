@@ -8,6 +8,8 @@
 
 ### Added
 
+- `/fork pane` and `/fork tab` now open native Herdr Desktop panes and tabs; in headless Herdr Core they start a background terminal and warn that no pane or tab is visible. Terminal launch requests can target a Desktop pane or space explicitly; headless launches reject explicit targets or focus. `focus: true` focuses the new surface, `focus: false` attempts to restore the previously focused pane and warns if restoration fails after launch, and an unset focus follows the Desktop default ([#19201](https://github.com/can1357/oh-my-pi/pull/19201) by [@sapran](https://github.com/sapran)).
+
 - Added `task.agentPrewalkAuto` (agent name -> `on` / `off` / model pattern): the native judge decides per assignment at spawn whether a subagent arms prewalk, handing off to `prewalk.autoTarget` or the given target; unconditional subagent prewalk still wins ([#18913](https://github.com/can1357/oh-my-pi/pull/18913) by [@1vivy](https://github.com/1vivy))
 - Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result
 - `ask` form notes take pasted screenshots again: with a note open, `Ctrl+V` (`Alt+V` on Windows) or the terminal's own paste attaches the image, and it reaches the model after the answers as `[Image #N]`, described for text-only models ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
