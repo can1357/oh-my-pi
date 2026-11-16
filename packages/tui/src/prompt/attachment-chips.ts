@@ -11,7 +11,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
-import { fileHyperlink } from "../render/hyperlink";
+import { fileHyperlink, fileLinkSpan } from "../render/hyperlink";
 import { nativeImageNode } from "../native/blobs";
 import { node, row, span } from "../native/describe";
 import { plainText } from "../native/spans";
@@ -101,7 +101,9 @@ export class AttachmentChipsBand implements Component {
 				});
 			}
 			const head =
-				chip.kind !== "paste" && chip.link ? [span(title, "strong", { href: chip.link })] : [span(title, "strong")];
+				chip.kind !== "paste" && chip.link
+					? [fileLinkSpan({ path: chip.link, kind: "file" }, title, "strong")]
+					: [span(title, "strong")];
 			const children: NativeNode[] = [content];
 			if (caption) children.push(node("text", { spans: [span(caption, "dim")], wrap: "none" }));
 			cards.push(
@@ -145,7 +147,9 @@ export class AttachmentChipsBand implements Component {
 		}
 		const vertical = `${sgr}${theme.symbol("boxRound.vertical")}${RESET_FG}`;
 		const title =
-			chip.kind === "paste" || !chip.link ? `${icon} #${chip.n}` : fileHyperlink(chip.link, `${icon} #${chip.n}`);
+			chip.kind === "paste" || !chip.link
+				? `${icon} #${chip.n}`
+				: fileHyperlink({ path: chip.link, kind: "file" }, `${icon} #${chip.n}`);
 		return [
 			this.#borderRow(sgr, title, "top"),
 			...interior.map(row => vertical + row + vertical),

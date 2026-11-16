@@ -9,6 +9,7 @@ import {
 	type ReadRenderArgs,
 	type ReadToolDetails,
 	readContentCode,
+	readLinkKind,
 	readResultIsMarkdown,
 	readSourceFsPath,
 	splitPathAndSel,
@@ -21,7 +22,14 @@ import {
 	PREVIEW_LIMITS,
 	shortenPath,
 } from "../render/render-utils";
-import { fileHyperlink, renderCodeCell, renderMarkdownCell, urlHyperlinkAlways } from "../render";
+import {
+	type FileLink,
+	type FileLinkKind,
+	fileHyperlink,
+	renderCodeCell,
+	renderMarkdownCell,
+	urlHyperlinkAlways,
+} from "../render";
 import { wrapTreeLine } from "../render/hanging-wrap";
 import { wrapTextWithAnsi } from "../utils";
 import { canonicalizeMessage } from "./thinking-display";
@@ -132,6 +140,8 @@ type ReadEntry = {
 	path: string;
 	displayPaths?: ReadDisplayPathSpec[];
 	linkPath?: string;
+	/** What {@link linkPath} points at; `unknown` until the result arrives. */
+	linkKind: FileLinkKind;
 	status: "pending" | "success" | "warning" | "error";
 	correctedFrom?: string;
 	contentText?: string;
@@ -139,6 +149,8 @@ type ReadEntry = {
 	contentType?: string;
 	/** The call's `raw` arg, which keeps Markdown previews as source. */
 	raw?: boolean;
+	/** Legacy line offset; selectors take precedence when both are present. */
+	offset?: number;
 	conflictCount?: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
@@ -207,6 +219,7 @@ type ReadDisplayTarget = {
 	targetPath: string;
 	basePath: string;
 	linkPath?: string;
+	linkKind: FileLinkKind;
 	selector?: string;
 };
 
@@ -269,16 +282,17 @@ function firstSelectorLine(selector: string | undefined): number | undefined {
 function firstSelectorLineForTargets(targets: ReadDisplayTarget[]): number | undefined {
 	let line: number | undefined;
 	for (const target of targets) {
-		const targetLine = firstSelectorLine(target.selector);
+		const targetLine = firstSelectorLine(target.selector) ?? target.entry.offset;
 		if (targetLine === undefined) continue;
 		if (line === undefined || targetLine < line) line = targetLine;
 	}
 	return line;
 }
 
-function linkPathForTargets(targets: ReadDisplayTarget[]): string | undefined {
+/** The filesystem link of a summary row: its first target that has one. */
+function linkForTargets(targets: ReadDisplayTarget[]): FileLink | undefined {
 	for (const target of targets) {
-		if (target.linkPath) return target.linkPath;
+		if (target.linkPath) return { path: target.linkPath, kind: target.linkKind };
 	}
 	return undefined;
 }
@@ -478,6 +492,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const entry: ReadEntry = {
 			toolCallId,
 			path: displayPath,
+			linkKind: "unknown",
 			status: "pending",
 			presentation: new TranscriptPresentationState(
 				() =>
@@ -559,6 +574,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		entry.path = displayPath;
 		entry.linkPath = path.isAbsolute(rawPath) ? rawPath : undefined;
 		entry.raw = args.raw === true;
+		entry.offset = args.offset;
 		entry.args = args;
 		entry.presentation.markStale();
 		this.#entries.set(toolCallId, entry);
@@ -611,6 +627,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const suffixResolution = getSuffixResolution(details);
 		const displayPaths = getDisplayReadTargets(details, rawDetails);
 		entry.linkPath = readResultLinkPath(rawDetails) ?? entry.linkPath;
+		entry.linkKind = readLinkKind(rawDetails);
 		if (suffixResolution) {
 			entry.path = sanitizeText(displayPathWithSuffixResolution(entry.path, suffixResolution));
 			entry.correctedFrom = suffixResolution.from;
@@ -863,6 +880,12 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		);
 	}
 
+	/** The native link of a summary row's filesystem target, when it has one. */
+	#rowHref(row: ReadSummaryRow): string | undefined {
+		const link = linkForTargets(row.targets);
+		return link && fileHref(link.path, link.kind, { line: firstSelectorLineForTargets(row.targets) });
+	}
+
 	/** Head data for one summary row: the path (+ selector) target, its link, correction and conflicts. */
 	#nativeRowHead(row: ReadSummaryRow): NativeToolHead {
 		const split = splitPathAndSel(row.targetPath);
@@ -872,7 +895,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		return {
 			target: filePath ? `${filePath}${split.sel ? `:${split.sel}` : ""}` : "…",
 			targetKind: "path",
-			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
+			href: this.#rowHref(row) ?? urlHref(split.path),
 			meta: correctedFrom ? [`corrected from ${shortenPath(correctedFrom)}`] : undefined,
 			badges: conflicts
 				? [{ text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}`, tone: "warning" }]
@@ -895,7 +918,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 					: undefined;
 		return fileRow(shortenPath(split.sel ? split.path : row.targetPath), {
 			range: split.sel ? `:${split.sel}` : undefined,
-			href: fileHref(linkPathForTargets(row.targets)) ?? urlHref(split.path),
+			href: this.#rowHref(row) ?? urlHref(split.path),
 			icon: status === "error" ? "x-circle" : undefined,
 			tone: READ_STATUS_TONE[status],
 			chip: conflicts ? { text: `${conflicts} conflict${conflicts === 1 ? "" : "s"}` } : undefined,
@@ -1051,10 +1074,9 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	#nativePathSpans(row: ReadSummaryRow): TspSpan[] {
 		const split = splitPathAndSel(row.targetPath);
 		const filePath = shortenPath(split.sel ? split.path : row.targetPath);
-		const linkPath = linkPathForTargets(row.targets);
 		const spans: TspSpan[] = [];
 		if (filePath) {
-			const href = linkPath ? fileHref(linkPath) : undefined;
+			const href = this.#rowHref(row);
 			spans.push(span(filePath, "path", href ? { href } : undefined));
 		} else {
 			spans.push(span("…", "toolOutput"));
@@ -1139,12 +1161,15 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				const split = splitPathAndSel(pathSpec.path);
 				const entryLinkPath = pathSpec.linkPath ?? (useEntryLinkPath ? entry.linkPath : undefined);
 				const linkPath = readTargetLinkPath(split.path, entryLinkPath);
+				// The result's kind describes the entry's one target; a read of several paths has none per path.
+				const linkKind = useEntryLinkPath ? entry.linkKind : "unknown";
 				for (const selector of splitSelectorDisplayParts(split.sel)) {
 					targets.push({
 						entry,
 						targetPath: selector ? `${split.path}:${selector}` : pathSpec.path,
 						basePath: split.path,
 						linkPath,
+						linkKind,
 						selector,
 					});
 				}
@@ -1268,7 +1293,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			correctedFrom: this.#correctedFromForTargets(row.targets),
 			conflictCount: this.#conflictCountForTargets(row.targets),
 			line: firstSelectorLineForTargets(row.targets),
-			linkPath: linkPathForTargets(row.targets),
+			link: linkForTargets(row.targets),
 			basePath: row.basePath,
 		});
 	}
@@ -1322,7 +1347,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			correctedFrom?: string;
 			conflictCount?: number;
 			line?: number;
-			linkPath?: string;
+			link?: FileLink;
 			/** The path `value` selects from; merged selectors (`1-5,…,9`) do not parse back out of it. */
 			basePath?: string;
 		} = {},
@@ -1337,9 +1362,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const filePath = shortenPath(target.path);
 		const selectors = split.sel ? `${target.query ?? ""}:${split.sel}` : (target.query ?? "");
 		let pathDisplay = filePath ? paint.path(filePath, isUrlLikePath(target.path)) : theme.fg("toolOutput", "…");
-		if (filePath && options.linkPath) {
-			const linkOptions = options.line !== undefined ? { line: options.line } : undefined;
-			pathDisplay = fileHyperlink(options.linkPath, pathDisplay, linkOptions);
+		if (filePath && options.link) {
+			pathDisplay = fileHyperlink({ ...options.link, line: options.line }, pathDisplay);
 		} else if (filePath && isUrlLikePath(target.path)) {
 			// Text mode needs the same URL fallback as the native head, or a
 			// transcript without native rendering keeps the URL unclickable.
@@ -1367,12 +1391,13 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const split = splitPathAndSel(entry.path);
 		const lang = getLanguageFromPath(split.path);
 		const pathValue = shortenPath(entry.path);
+		const linkPath = readTargetLinkPath(split.path, entry.linkPath);
 		const pathDisplay = pathValue
 			? this.#formatPathValue(entry.path, HEADER_PATH_PAINT, {
 					correctedFrom: entry.correctedFrom,
 					conflictCount: entry.conflictCount,
 					line: firstSelectorLine(split.sel),
-					linkPath: readTargetLinkPath(split.path, entry.linkPath),
+					link: linkPath ? { path: linkPath, kind: entry.linkKind } : undefined,
 				})
 			: "";
 		const title = pathDisplay ? `Read ${pathDisplay}` : "Read";

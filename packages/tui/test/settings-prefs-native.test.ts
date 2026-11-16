@@ -1,9 +1,12 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import type { TspPrefsProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { PluginSettingsHost } from "@oh-my-pi/pi-tui/overlays/plugin-settings";
 import type { SettingsDisplayEntry, SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const ENTER = "\n";
@@ -53,6 +56,12 @@ const ENTRIES: SettingsDisplayEntry[] = [
 		ui: { tab: "files", group: "Editing", label: "Edit Mode", description: "" },
 	},
 	{
+		path: "tui.linkMap",
+		type: "record",
+		defaultValue: {},
+		ui: { tab: "shell", label: "Link Map", description: "", editor: "linkMap" },
+	},
+	{
 		path: "providers.order",
 		type: "array",
 		defaultValue: ["a", "b"],
@@ -82,9 +91,12 @@ interface Harness {
 	values: Map<string, unknown>;
 	changes: [string, unknown][];
 	previews: string[];
+	/** Each `setEntry` call: path, key, value. */
+	entryWrites: [string, string, unknown][];
 }
 
-function harness(initial: Record<string, unknown> = {}): Harness {
+/** @param shadowed - record keys a layer above the global config supplies, by that layer's name */
+function harness(initial: Record<string, unknown> = {}, shadowed: Record<string, string> = {}): Harness {
 	const values = new Map<string, unknown>();
 	for (const entry of ENTRIES) values.set(entry.path, entry.defaultValue);
 	for (const key in initial) values.set(key, initial[key]);
@@ -92,7 +104,15 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 		entries: ENTRIES,
 		get: path => values.get(path),
 		set: (path, value) => void values.set(path, value),
+		setEntry: (path, key, value) => {
+			entryWrites.push([path, key, value]);
+			const record = { ...(values.get(path) as Record<string, unknown>) };
+			if (value === undefined) delete record[key];
+			else record[key] = value;
+			values.set(path, record);
+		},
 		unset: path => void values.set(path, ENTRIES.find(entry => entry.path === path)?.defaultValue),
+		shadowingLayer: (_path, key) => shadowed[key],
 		normalizeProviderLimits: () => ({}),
 		validateProviderLimits: () => ({}),
 	};
@@ -114,6 +134,7 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 	};
 	const changes: [string, unknown][] = [];
 	const previews: string[] = [];
+	const entryWrites: [string, string, unknown][] = [];
 	const selector = new SettingsSelectorComponent(
 		{
 			settings,
@@ -129,7 +150,7 @@ function harness(initial: Record<string, unknown> = {}): Harness {
 			onCancel: () => {},
 		},
 	);
-	return { selector, values, changes, previews };
+	return { selector, values, changes, previews, entryWrites };
 }
 
 const PREFS: DescribeContext = {
@@ -285,6 +306,234 @@ describe("settings as a native prefs page", () => {
 		send(selector, { type: "change", key: "", item: "shell.path", value: "/bin/fish" });
 		expect(values.get("shell.path")).toBe("/bin/fish");
 		expect(prefs(selector).props.editing).toBeNull();
+	});
+
+	describe("tui.linkMap editor", () => {
+		const ESC = "\x1b";
+		const BACKSPACE = "\x7f";
+		const type = (selector: SettingsSelectorComponent, keys: string) => {
+			for (const ch of keys) selector.handleInput(ch);
+		};
+		const screen = (selector: SettingsSelectorComponent) => Bun.stripANSI(selector.render(160).join("\n"));
+		const openTarget = (selector: SettingsSelectorComponent, entries: Record<string, string>, key: string) => {
+			const index = Object.keys(entries)
+				.sort((a, b) => a.localeCompare(b))
+				.indexOf(key);
+			for (let i = 0; i < index; i++) selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+		};
+
+		afterEach(() => applyLinkMapSetting({}));
+
+		it("adds, refuses and removes entries without leaving the editor, then shows the count on the row", () => {
+			const { selector, values, changes } = harness({ "tui.linkMap": { "~": "file:///Z:/" } });
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			expect(row(prefs(selector).props, "tui.linkMap").control).toEqual({
+				k: "action",
+				label: "Edit…",
+				act: "edit",
+			});
+
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			expect(screen(selector)).toContain("→ file:///Z:/");
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			type(selector, "/mnt/projects");
+			selector.handleInput(ENTER);
+			// A target with a query is refused on save.
+			type(selector, "ftp?");
+			selector.handleInput(ENTER);
+			expect(values.get("tui.linkMap")).toEqual({ "~": "file:///Z:/" });
+			for (let i = 0; i < 4; i++) selector.handleInput(BACKSPACE);
+			// The sample link follows the target as it is typed, before anything is saved.
+			type(selector, "https://files.contoso.example/projects");
+			expect(screen(selector)).toContain("https://files.contoso.example/projects/example.md");
+			expect(values.get("tui.linkMap")).toEqual({ "~": "file:///Z:/" });
+			selector.handleInput(ENTER);
+			const added = { "~": "file:///Z:/", "/mnt/projects": "https://files.contoso.example/projects" };
+			expect(values.get("tui.linkMap")).toEqual(added);
+			expect(changes.at(-1)).toEqual(["tui.linkMap", added]);
+
+			// Still in the editor: the list shows the new entry, and clearing a target removes its entry.
+			expect(screen(selector)).toContain("→ https://files.contoso.example/projects");
+			selector.handleInput(ENTER);
+			selector.handleInput("\x01");
+			selector.handleInput("\x0b");
+			selector.handleInput(ENTER);
+			expect(values.get("tui.linkMap")).toEqual({ "~": "file:///Z:/" });
+
+			selector.handleInput(ESC);
+			expect(prefs(selector).props.editing).toBeNull();
+			expect(row(prefs(selector).props, "tui.linkMap").control).toEqual({
+				k: "action",
+				label: "Edit…",
+				act: "edit",
+			});
+			expect(screen(selector)).toContain("1 entry: ~");
+		});
+
+		it("keeps an entry a higher layer supplies read-only and saves a new entry on its own", () => {
+			const { selector, entryWrites } = harness(
+				{ "tui.linkMap": { "/work": "file:///W:/" } },
+				{ "/work": "--config overlay" },
+			);
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			// Rows: the higher layer's entry, Add entry…, Test a path…. Choosing the entry does not open its target form.
+			selector.handleInput(ENTER);
+			expect(screen(selector)).not.toContain("/work/example.md");
+			expect(screen(selector)).toContain("--config overlay");
+
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			// Adding the same prefix is refused, naming the layer: a global entry for it would not reach links.
+			type(selector, "/work");
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("--config overlay");
+			for (let i = 0; i < 4; i++) selector.handleInput(BACKSPACE);
+			type(selector, "mnt/projects");
+			selector.handleInput(ENTER);
+			type(selector, "file:///Z:/");
+			selector.handleInput(ENTER);
+			// The save is that one entry: the higher layer's entry is not written along with it.
+			expect(entryWrites).toEqual([["tui.linkMap", "/mnt/projects", "file:///Z:/"]]);
+		});
+
+		it("keeps a refusal visible when a higher layer acquires an equivalent prefix during an open form", () => {
+			const map = { "/work": "file:///W:/" };
+			const shadowed: Record<string, string> = {};
+			const { selector, values, entryWrites, changes } = harness({ "tui.linkMap": map }, shadowed);
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			selector.handleInput(ENTER);
+			values.set("tui.linkMap", { "//work": "file:///Overlay:/", ...map });
+			shadowed["//work"] = "--config overlay";
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("The --config overlay sets //work");
+			// Typing a still-valid target must not clear the layer refusal after Enter.
+			type(selector, "next");
+			expect(screen(selector)).toContain("The --config overlay sets //work");
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("The --config overlay sets //work");
+			expect(entryWrites).toEqual([]);
+			expect(changes).toEqual([]);
+			expect(values.get("tui.linkMap")).toEqual({ "//work": "file:///Overlay:/", ...map });
+		});
+
+		it("refuses a nonempty edit to a later normalized duplicate but removes only that entry when cleared", () => {
+			const map = { "/a/b": "file:///First:/", "/a//b": "file:///Later:/" };
+			const { selector, values, entryWrites, changes } = harness({ "tui.linkMap": map });
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			// Display order must not affect insertion-order ownership.
+			expect(screen(selector)).toContain("ignored: same prefix as /a/b");
+			openTarget(selector, map, "/a//b");
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("/a/b is already the entry for that prefix");
+			type(selector, "next");
+			expect(screen(selector)).toContain("Clear the target to remove this ignored entry.");
+			selector.handleInput(ENTER);
+			expect(entryWrites).toEqual([]);
+			expect(changes).toEqual([]);
+			expect(values.get("tui.linkMap")).toEqual(map);
+			selector.handleInput("\x01");
+			selector.handleInput("\x0b");
+			expect(screen(selector)).not.toContain("already the entry for that prefix");
+			selector.handleInput(ENTER);
+			expect(entryWrites).toEqual([["tui.linkMap", "/a//b", undefined]]);
+			expect(values.get("tui.linkMap")).toEqual({ "/a/b": "file:///First:/" });
+			expect(changes).toEqual([["tui.linkMap", { "/a/b": "file:///First:/" }]]);
+		});
+
+		for (const invalidFirst of [true, false]) {
+			it(`repairs an invalid stored target using its ${invalidFirst ? "earlier" : "later"} insertion position`, () => {
+				const map = invalidFirst
+					? { "/a/b": "bad?", "/a//b": "file:///Valid:/" }
+					: { "/a/b": "file:///Valid:/", "/a//b": "bad?" };
+				const key = invalidFirst ? "/a/b" : "/a//b";
+				const { selector, values, entryWrites, changes } = harness({ "tui.linkMap": map });
+				send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+				send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+				expect(screen(selector)).not.toContain("ignored: same prefix");
+				openTarget(selector, map, key);
+				selector.handleInput(ENTER);
+				expect(screen(selector)).toContain("Use a URI with a scheme");
+				selector.handleInput("\x01");
+				selector.handleInput("\x0b");
+				type(selector, "file:///Repaired:/");
+				selector.handleInput(ENTER);
+				if (invalidFirst) {
+					expect(entryWrites).toEqual([["tui.linkMap", key, "file:///Repaired:/"]]);
+					expect(values.get("tui.linkMap")).toEqual({ ...map, [key]: "file:///Repaired:/" });
+					expect(screen(selector)).toContain("ignored: same prefix as /a/b");
+				} else {
+					expect(screen(selector)).toContain("/a/b is already the entry for that prefix");
+					expect(entryWrites).toEqual([]);
+					expect(changes).toEqual([]);
+					expect(values.get("tui.linkMap")).toEqual(map);
+				}
+			});
+		}
+
+		it.skipIf(process.platform === "win32")(
+			"a rejected home alias does not reserve its other physical prefix",
+			() => {
+				const home = spyOn(os, "homedir").mockReturnValue("/logical/home");
+				const real = spyOn(fs, "realpathSync").mockReturnValue("/physical/home");
+				try {
+					for (const ignoredHasLayer of [false, true]) {
+						const shadowed: Record<string, string> = ignoredHasLayer ? { "~": "--config overlay" } : {};
+						const map = { "/logical/home": "file:///First:/", "~": "file:///Ignored:/" };
+						const { selector, values, entryWrites } = harness({ "tui.linkMap": map }, shadowed);
+						send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+						send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+						expect(screen(selector)).toContain("ignored: same prefix as /logical/home");
+						selector.handleInput(DOWN);
+						selector.handleInput(DOWN);
+						selector.handleInput(ENTER);
+						type(selector, "/physical/home");
+						selector.handleInput(ENTER);
+						expect(screen(selector)).toContain("Link target: /physical/home");
+						type(selector, "file:///Physical:/");
+						selector.handleInput(ENTER);
+						const added = { ...map, "/physical/home": "file:///Physical:/" };
+						expect(entryWrites).toEqual([["tui.linkMap", "/physical/home", "file:///Physical:/"]]);
+						expect(values.get("tui.linkMap")).toEqual(added);
+						expect(screen(selector)).not.toContain("ignored: same prefix as ~");
+						openTarget(selector, added, "/physical/home");
+						selector.handleInput(ENTER);
+						expect(entryWrites).toEqual([
+							["tui.linkMap", "/physical/home", "file:///Physical:/"],
+							["tui.linkMap", "/physical/home", "file:///Physical:/"],
+						]);
+						expect(values.get("tui.linkMap")).toEqual(added);
+					}
+				} finally {
+					real.mockRestore();
+					home.mockRestore();
+				}
+			},
+		);
+
+		it.skipIf(process.platform === "win32")("tests a path against the map links use, and clears every entry", () => {
+			const map = { "/srv/handbook": "https://git.contoso.example/handbook/blob/main" };
+			const { selector, values } = harness({ "tui.linkMap": map });
+			// The host's setting effect pushes the stored map; this harness has none.
+			applyLinkMapSetting(map);
+			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+			// Rows: the entry, Add entry…, Test a path…, Clear all entries.
+			selector.handleInput(DOWN);
+			selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			type(selector, "/srv/handbook/a b.md");
+			selector.handleInput(ENTER);
+			expect(screen(selector)).toContain("https://git.contoso.example/handbook/blob/main/a%20b.md");
+
+			for (let i = 0; i < 3; i++) selector.handleInput(DOWN);
+			selector.handleInput(ENTER);
+			expect(values.get("tui.linkMap")).toEqual({});
+		});
 	});
 
 	it("masks credential arrays in rows and drafts without saving mask glyphs", () => {

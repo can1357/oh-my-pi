@@ -155,7 +155,7 @@ Legacy migration still supported:
 
 ### Definitions (`src/config/registry.ts`)
 
-Each setting is declared once with `register({ id, type, default, env?, protocolDefault?, validate?, pathScoped?, credential?, ui? })` in its domain's settings module (for example `src/tools/settings.ts`, `src/session/settings.ts`, `src/config/model-settings.ts`). `src/config/all-settings.ts` imports every domain in settings-panel order. `register` returns a typed `Setting` handle (`cfgX`); code reads and writes through it rather than by string key:
+Each setting is declared once with `register({ id, type, default, env?, protocolDefault?, validate?, pathScoped?, credential?, operatorOnly?, ui? })` in its domain's settings module (for example `src/tools/settings.ts`, `src/session/settings.ts`, `src/config/model-settings.ts`). `src/config/all-settings.ts` imports every domain in settings-panel order. `register` returns a typed `Setting` handle (`cfgX`); code reads and writes through it rather than by string key:
 
 - `cfgX.get(scope)` — effective value; `scope` is a `Settings` instance or anything carrying one (`AgentSession`, `ToolSession`). Reads are memoized per scope.
 - `cfgX.set(scope, v)` — writes the **global** layer and queues a background save; values the definition's type rejects throw.
@@ -163,7 +163,7 @@ Each setting is declared once with `register({ id, type, default, env?, protocol
 - `cfgX.setEntry(scope, key, v)` / `cfgX.setMember(scope, item, { member })` — write one entry of a record setting (`undefined` removes it) or add/remove one item of a list setting in the global layer; the save changes only that entry or item in `config.yml`, so entries another layer (a `--config` overlay) supplies never land there.
 - `cfgX.override(scope, v)` / `cfgX.clearOverride(scope)` — runtime-only override, never persisted.
 - `cfgX.map(fn)` / `combine({...}, fn)` — memoized derived values; `.listen(scope, cb)` observes changes of a handle or derivation.
-- `cfgX.provenance(scope)` — layer supplying the value: `"env" | "runtime" | "overlay" | "project" | "global" | "default"`.
+- `cfgX.provenance(scope, entry?)` — layer supplying the value, or with `entry` the layer supplying that entry of a record setting: `"env" | "runtime" | "overlay" | "project" | "global" | "default"`.
 - `cfgX.layered(scope)` — the value from the settings layers alone, ignoring the environment variable (what the settings panel shows and edits).
 
 A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load, on every reload, and before every write. A keep-last-good watcher reload, and a save that merges external edits to `config.yml`, keep only the invalid file's layer at its last good values (the warning names the file) while the other layers still refresh. A configured `null` generally counts as unset. Record entries such as model roles and model presets can use `null` in runtime or overlay layers as tombstones that hide lower-layer entries; project/global null entries remain unset.
@@ -175,7 +175,7 @@ Effective precedence, highest first:
 1. Environment variable declared on the definition (`env: "NAME"`), parsed by the setting's type; unparseable text counts as unset. Booleans follow `parseFlag`: empty is unset, `1`/`y`/`true`/`yes`/`on` (lower or upper case) is true, any other text is false
 2. Runtime overrides: in-memory, non-persistent
 3. Config overlays: `PI_CONFIG_FILES` (platform path-list), followed by repeated `omp --config <path>` files; all are loaded as `config.yml`-style YAML for this process only
-4. Project settings: discovered via the settings capability (`settings.json` and `config.yml` from providers)
+4. Project settings: discovered via the settings capability (`settings.json` and `config.yml` from providers). A setting declared `operatorOnly: true` (`tui.linkMap`) is dropped from this layer as it is read, with one warning per project naming the setting and its file
 5. Global settings: the first present file among `~/.omp/agent/config.yml` and `config.yaml`
 6. Definition default
 

@@ -10,6 +10,7 @@ import { col, node, span, text } from "../native/describe";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { plainText, styledSpans } from "../native/spans";
+import { fileLinkSpan } from "../render/hyperlink";
 import type { ContextUsage } from "../status-line/types";
 const PANEL_CHROME_ROWS = 4;
 
@@ -125,6 +126,7 @@ export class SessionInfoOverlay implements Component {
 	readonly #host: SessionInfoOverlayHost;
 	readonly #onClose: () => void;
 	readonly #context: ContextUsage | undefined;
+	readonly #sessionFile: string | undefined;
 	readonly #panel: OverlayPanel;
 	readonly #info: Text;
 	readonly #scrollView: ScrollView;
@@ -135,11 +137,21 @@ export class SessionInfoOverlay implements Component {
 	#lastInfoLines: readonly string[] | undefined;
 	#lastHeight: number | undefined;
 
-	/** `context` adds a context-window meter to the native sheet. */
-	constructor(host: SessionInfoOverlayHost, info: string, onClose: () => void, context?: ContextUsage) {
+	/**
+	 * `context` adds a context-window meter to the native sheet. `sessionFile`, the path behind the
+	 * report's File row, links the native File field.
+	 */
+	constructor(
+		host: SessionInfoOverlayHost,
+		info: string,
+		onClose: () => void,
+		context?: ContextUsage,
+		sessionFile?: string,
+	) {
 		this.#host = host;
 		this.#onClose = onClose;
 		this.#context = context;
+		this.#sessionFile = sessionFile;
 		this.#infoSource = info;
 		this.#info = new Text(info, 0, 0);
 		this.#scrollView = new ScrollView([], {
@@ -228,9 +240,20 @@ export class SessionInfoOverlay implements Component {
 						identity.unshift(identityField("ID", [span(joined(entry.v), "mono")], "id", "Copy session ID"));
 					else if (entry.k === "File") {
 						const path = joined(entry.v);
+						const sessionFile = this.#sessionFile;
 						identity.push(
-							path.includes("/")
-								? identityField("File", [span(path, "path")], "file", `Copy ${path}`)
+							// A Windows path has no `/`; the session file passed as data still marks it as a file.
+							sessionFile !== undefined || path.includes("/")
+								? identityField(
+										"File",
+										[
+											sessionFile === undefined
+												? span(path, "path")
+												: fileLinkSpan({ path: sessionFile, kind: "file" }, path),
+										],
+										"file",
+										`Copy ${path}`,
+									)
 								: identityField("File", [span(path, "muted")], "file"),
 						);
 					} else rest.push(node("kv", { items: [{ k: entry.k, v: entry.v }], role: "omp.info.kv" }));

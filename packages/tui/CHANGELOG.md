@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- File links resolve through `resolveFileLink(link, terminalId?)` (`render/hyperlink`), which replaces `tryFileUri` and `fileUriForTerminal`. `fileHyperlink`, `fileLinkSpan` and `FileListOptions.hyperlinkFn` take a `FileLink` (`{ path, kind, line?, col? }`) in place of a path and position options, and `fileHref` (`tools/native-view`) takes the kind as its second argument. `kind` is required: `file`, `dir`, or `unknown` where the caller cannot tell; a `dir` link never carries a line or column ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `SettingsHost` now requires `setEntry(path, key, value)` and `shadowingLayer(path, key)` ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
+### Added
+
+- `applyLinkMapSetting` (`render/link-map`) maps path prefixes to URI prefixes for file links: `resolveFileLink`, `fileHyperlink` and `fileLinkSpan` send a path under a mapped prefix to that prefix's URI, except for local image open actions. A record setting with `ui.editor: "linkMap"` opens an entry editor in the settings overlay ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `SessionInfoOverlay` takes the session file path as an optional last argument and links the native File field to it ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
+### Fixed
+
+- Link Map target forms keep save refusals visible when a higher config layer takes ownership and reject edits to ignored duplicate entries; clearing the target still removes an ignored global entry. Ignored aliases do not block adding or editing a mapping for an otherwise unclaimed prefix ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Native read links retain selector and legacy offset start lines, while paginated directory reads and directory grep scopes open as folders under VS Code Remote mappings ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added

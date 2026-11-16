@@ -241,7 +241,7 @@ export class EmbedFigure implements Component {
 		if (!page) {
 			const row = theme.fg("dim", truncateToWidth(text, width - 1, Ellipsis.Unicode));
 			if (target?.kind === "url") return ` ${uriHyperlink(target.url, row)}`;
-			return ` ${target?.kind === "file" ? fileHyperlink(target.path, row) : row}`;
+			return ` ${target?.kind === "file" ? fileHyperlink({ path: target.path, kind: "file" }, row) : row}`;
 		}
 		const url = target && embedTargetUrl(target);
 		if (!url) return ` ${theme.fg("dim", truncateToWidth(text, width - 1, Ellipsis.Unicode))}`;

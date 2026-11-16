@@ -319,17 +319,20 @@ function formatEditPathDisplay(
 	// absolute path when known — a relative `rawPath` would otherwise yield a
 	// `file:///rel` URI that resolves against filesystem root instead of cwd.
 	const linkTarget = options?.linkPath || rawPath;
-	const lineLink = options?.firstChangedLine ? { line: options.firstChangedLine } : undefined;
 	const primaryDisplay = rawPath ? formatEditTitlePath(rawPath, options?.maxPathWidth) : "…";
 	let pathDisplay = rawPath
-		? fileHyperlink(linkTarget, uiTheme.fg("accent", primaryDisplay), lineLink)
+		? fileHyperlink(
+				{ path: linkTarget, kind: "file", line: options?.firstChangedLine || undefined },
+				uiTheme.fg("accent", primaryDisplay),
+			)
 		: uiTheme.fg("toolOutput", primaryDisplay);
 	let pathWidth = visibleWidth(primaryDisplay);
 
 	if (options?.rename) {
 		const renameTarget = options.renameLinkPath || options.rename;
 		const renameDisplay = formatEditTitlePath(options.rename, options.maxPathWidth);
-		pathDisplay += ` ${uiTheme.fg("dim", "→")} ${fileHyperlink(renameTarget, uiTheme.fg("accent", renameDisplay))}`;
+		const renameLink = fileHyperlink({ path: renameTarget, kind: "file" }, uiTheme.fg("accent", renameDisplay));
+		pathDisplay += ` ${uiTheme.fg("dim", "→")} ${renameLink}`;
 		pathWidth += visibleWidth(renameDisplay);
 	}
 
@@ -1309,7 +1312,11 @@ export const editToolRenderer = {
 		}
 		const file = editFileParts(result, options, args);
 		return {
-			tool: editToolHead({ ...file, href: fileHref(file.resolvedPath), diagnostics: [file.fileDiagnostics] }),
+			tool: editToolHead({
+				...file,
+				href: fileHref(file.resolvedPath, "file"),
+				diagnostics: [file.fileDiagnostics],
+			}),
 			body: file.body,
 			tone: file.isError ? "error" : undefined,
 		};

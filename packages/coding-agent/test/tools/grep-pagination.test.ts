@@ -43,6 +43,7 @@ describe("grep file pagination", () => {
 
 		const first = await tool.execute("page-1", { pattern: "needle", path: "." });
 		expect(first.details?.files).toEqual(names.slice(0, 20));
+		expect(first.details).toMatchObject({ searchPath: cwd, isDirectory: true });
 		// The walk saw every file; only hot.txt's own cap bit, so the total is exact.
 		expect(textOf(first)).toContain("Showing files 1-20 of 26. Use skip=20 for the next page");
 		expect(textOf(first)).not.toContain("More than");
@@ -59,9 +60,15 @@ describe("grep file pagination", () => {
 		expect(text).toContain(`Search one file alone for up to ${SINGLE_FILE_MATCHES}.`);
 		expect(text).not.toContain("skip=");
 
-		const alone = textOf(await tool.execute("hot-alone", { pattern: "needle", path: "hot.txt" }));
+		const fileResult = await tool.execute("hot-alone", { pattern: "needle", path: "hot.txt" });
+		expect(fileResult.details).toMatchObject({ searchPath: path.join(cwd, "hot.txt"), isDirectory: false });
+		const alone = textOf(fileResult);
 		expect(alone).toContain("needle 29");
 		expect(alone).not.toContain("More than");
+		for (const scope of [".", "hot.txt"]) {
+			const empty = await tool.execute("empty", { pattern: "absent", path: scope });
+			expect(empty.details).toMatchObject({ matchCount: 0, isDirectory: scope === "." });
+		}
 	});
 
 	function newTool(options?: ConstructorParameters<typeof GrepTool>[1]): GrepTool {

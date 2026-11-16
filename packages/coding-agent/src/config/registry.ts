@@ -55,6 +55,10 @@ export interface UiString extends UiBase {
 	options?: ReadonlyArray<SubmenuOption> | "runtime";
 }
 
+export interface UiRecord extends UiBase {
+	editor?: "linkMap";
+}
+
 export interface UiArray extends UiBase {
 	/** Membership choices. Without options or a JSON editor, the array stays config-file only. */
 	options?: ReadonlyArray<SubmenuOption>;
@@ -95,6 +99,12 @@ interface DefinitionBase {
 	 * redaction and settings-panel masking (together with `ui.secret`, see {@link Setting.isCredential}).
 	 */
 	credential?: true;
+	/**
+	 * Only the operator's layers (global config, `--config` overlays, runtime overrides) may set this
+	 * setting: a value in project settings is dropped with a warning when the project layer is read,
+	 * so no reader ever sees it.
+	 */
+	operatorOnly?: true;
 	/**
 	 * Array entries may be objects scoping values to working-directory prefixes
 	 * (`{ path(s)/pathPrefix(es), values | items | <valuesKey> }`, see `config/settings.ts`);
@@ -178,7 +188,7 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	type: "record";
 	default: Readonly<Record<string, T>>;
 	env?: SettingEnv<Readonly<Record<string, T>>>;
-	ui?: UiBase;
+	ui?: UiRecord;
 }
 
 /** Any setting definition accepted by {@link register}. */
@@ -838,9 +848,9 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 		return this.envValue() !== undefined || settingsOf(scope).isConfigured(this);
 	}
 
-	/** Layer supplying the effective value. */
-	provenance(scope: ScopeLike): SettingProvenance {
-		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this);
+	/** Layer supplying the effective value, or with `entry` that entry of this record setting. */
+	provenance(scope: ScopeLike, entry?: string): SettingProvenance {
+		return this.#effectiveEnv(scope) !== undefined ? "env" : settingsOf(scope).getProvenance(this, entry);
 	}
 }
 

@@ -93,6 +93,7 @@ import { resolveTernPane } from "../../tools/browser/tern/kind";
 import { TernError, type TernErrorKind, TernSocketClient } from "../../tools/browser/tern/wire";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
+import { fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { replaceTabs, shortenEmbeddedPaths, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	getChangelogPath,
@@ -581,7 +582,10 @@ export class CommandController {
 		const normalizedPremiumRequests = Math.round((premiumRequests + Number.EPSILON) * 100) / 100;
 
 		let info = "";
-		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
+		const file = stats.sessionFile
+			? fileHyperlink({ path: stats.sessionFile, kind: "file" }, stats.sessionFile)
+			: "In-memory";
+		info += `${theme.fg("dim", "File:")} ${file}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n`;
 		const builds = runtimeIdentityHistory(this.ctx.session.sessionManager.getEntries());
 		const running = currentRuntimeIdentity();
@@ -720,7 +724,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showSessionInfo(info, this.ctx.session.getContextUsage());
+		this.ctx.showSessionInfo(info, this.ctx.session.getContextUsage(), stats.sessionFile);
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {

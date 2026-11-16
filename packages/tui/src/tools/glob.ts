@@ -100,7 +100,7 @@ function describeGlobFiles(
 	const links = files.map((file, i) => {
 		const rawFile = rawFiles[i];
 		return cwd && !file.endsWith("/")
-			? fileHref(path.resolve(cwd, typeof rawFile === "string" ? rawFile : file))
+			? fileHref(path.resolve(cwd, typeof rawFile === "string" ? rawFile : file), "file")
 			: undefined;
 	});
 	if (files.length <= NATIVE_LIST_MAX) {

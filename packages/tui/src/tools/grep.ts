@@ -63,6 +63,8 @@ export interface GrepToolDetails {
 	/** Absolute base directory used during search. Used by the renderer to resolve
 	 * display-relative paths to absolute paths for OSC 8 hyperlinks. */
 	searchPath?: string;
+	/** Whether the resolved search scope is a directory, computed during execution. */
+	isDirectory?: boolean;
 	/** Session cwd at search time. The renderer resolves the display-relative
 	 * (cwd-relative) header/match paths against this for OSC 8 hyperlinks;
 	 * `searchPath` is the scope label target, not the display-path base. */
@@ -121,7 +123,10 @@ function grepSubject(
 	searchPath?: string,
 ): string | undefined {
 	let scope = details?.scopePath || undefined;
-	if (scope && searchPath) scope = fileHyperlink(searchPath, scope);
+	if (scope && searchPath) {
+		const kind = details?.isDirectory === undefined ? "unknown" : details.isDirectory ? "dir" : "file";
+		scope = fileHyperlink({ path: searchPath, kind }, scope);
+	}
 	scope ??= toPathList(args?.path ?? args?.paths).join(", ") || undefined;
 	return formatScopedSubject(subject, scope, uiTheme);
 }

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tui.linkMap`: file links under a mapped path prefix open that prefix's URI in any scheme, so links from a remote session or a sandbox open on your own machine over a mapped drive, a web view or VS Code Remote (for example `/mnt/projects` to `file:///Z:/`). `/settings` → Appearance → Display → Link Map edits the entries, previews a target and tests a path. Project settings cannot set it ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `/session` links its File row to the session transcript ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
+### Changed
+
+- The Agent Hub's output path, an agent definition's file, the extension inspector's path, an attached image's chip and `/debug` report paths are ordinary file links: they follow `tui.linkMap`, `PI_LINK_SCHEME` and `tui.hyperlinks` ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes

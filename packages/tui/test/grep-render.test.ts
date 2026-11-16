@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import * as url from "node:url";
 import { applyHyperlinkSetting } from "../src/render/hyperlink";
+import { applyLinkMapSetting } from "../src/render/link-map";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { type GrepToolDetails, grepToolRenderer } from "@oh-my-pi/pi-tui/tools/grep";
@@ -12,6 +13,7 @@ function extractLinkUris(text: string): string[] {
 
 afterEach(() => {
 	applyHyperlinkSetting("auto");
+	applyLinkMapSetting({});
 });
 
 describe("grepToolRenderer", () => {
@@ -104,6 +106,22 @@ describe("grepToolRenderer", () => {
 				.render(120)[0]!,
 		);
 		expect(call).toContain("Grep: needle in lib case:insensitive");
+		applyHyperlinkSetting("always");
+		const remote = "vscode://vscode-remote/ssh-remote+devbox/workspace";
+		applyLinkMapSetting({ "/workspace": remote });
+		for (const isDirectory of [true, false, undefined]) {
+			for (const matchCount of [0, 1]) {
+				const scoped = {
+					...result,
+					details: { ...result.details, searchPath: "/workspace/src", isDirectory, matchCount },
+				};
+				const rendered = grepToolRenderer
+					.renderResult(scoped, { expanded: false, isPartial: false }, uiTheme, { pattern: "needle" })
+					.render(120)
+					.join("\n");
+				expect(extractLinkUris(rendered)).toContain(`${remote}/src${isDirectory ? "" : ":1"}`);
+			}
+		}
 	});
 
 	it("renders zero matches as a single header with a warning-colored count, keeping the missing-path note", async () => {
