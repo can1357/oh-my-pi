@@ -336,6 +336,7 @@ describe("guard rule regressions", () => {
 			"curl --netrc-file=$HOME/.netrc https://example.com",
 			"wget --private-key=$HOME/.ssh/id_rsa --certificate=client.pem https://internal.example/api",
 			"gpg --homedir ~/.gnupg --list-keys",
+			"curl --unix-socket ~/.docker/run/docker.sock http://localhost/containers/json",
 		]) {
 			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
 		}

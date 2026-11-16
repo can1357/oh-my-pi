@@ -911,13 +911,15 @@ const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
 /**
  * Options of readers whose value is a key, certificate, netrc file or key folder the program
  * authenticates, verifies or keeps its keys with (`curl --key`, `wget --private-key`,
- * `gpg --homedir`): it neither prints nor copies the value, as `scp -i` does not, so the value is
- * not read. A one-letter option (`curl -E`) counts only for {@link WRITING_READERS}, whose option
- * bundles are read letter by letter.
+ * `gpg --homedir`), or a socket it connects to (`curl --unix-socket`): it neither prints nor
+ * copies the value, as `scp -i` does not, so the value is not read. A one-letter option
+ * (`curl -E`) counts only for {@link WRITING_READERS}, whose option bundles are read letter by
+ * letter.
  */
 const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
 	curl: [
 		"-E",
+		"--abstract-unix-socket",
 		"--cacert",
 		"--capath",
 		"--cert",
@@ -932,6 +934,7 @@ const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
 		"--proxy-key",
 		"--proxy-pinnedpubkey",
 		"--pubkey",
+		"--unix-socket",
 	],
 	wget: ["--ca-certificate", "--ca-directory", "--certificate", "--crl-file", "--pinnedpubkey", "--private-key"],
 	gpg: ["--homedir"],
