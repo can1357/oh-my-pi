@@ -38,7 +38,11 @@ describe("xai-oauth bundled catalog (regression)", () => {
 			expect(bundledEntry.provider).toBe("xai-oauth");
 			expect(bundledEntry.api).toBe(seededModel.api);
 			expect(bundledEntry.contextWindow).toBe(seededModel.contextWindow);
-			expect(bundledEntry.reasoning).toBe(seededModel.reasoning);
+			const reasoning = seededModel.reasoning;
+			if (typeof reasoning !== "boolean") {
+				throw new Error(`Curated seed ${seededModel.id} must declare its reasoning capability`);
+			}
+			expect(bundledEntry.reasoning).toBe(reasoning);
 			// Input modality must survive both the curated seed and the bundle.
 			// Without this the static fallback used on offline boot strips
 			// vision capability silently (Codex PR #1127 review).
