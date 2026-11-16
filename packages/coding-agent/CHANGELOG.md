@@ -8,7 +8,7 @@
 
 ### Added
 
-- Host tool adapters can identify the agent and active model role behind each tool call without inferring roles from resolved model IDs ([#19379](https://github.com/can1357/oh-my-pi/pull/19379) by [@andrebrait](https://github.com/andrebrait))
+- Host tool adapters can identify the agent and active model role behind each tool call without inferring roles from resolved model IDs ([ompweb-dev/oh-my-pi#62](https://github.com/ompweb-dev/oh-my-pi/pull/62))
 
 ### Changed
 
