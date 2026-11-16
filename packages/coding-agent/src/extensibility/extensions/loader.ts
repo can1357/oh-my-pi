@@ -31,14 +31,14 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { isFilesystemSourcePath } from "../../tools/path-utils";
 import { InternalUrlRouter } from "../../internal-urls/router";
-import { EventBus } from "../../utils/event-bus";
+import { bindExtensionEventBus, EventBus, type ExtensionEventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { resolveExtensionDirectory } from "./directory-resolution";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
-import { extensionRequestIdentity, runWithExtensionRequestIdentity } from "./request-identity";
+import { registerExtensionRequestIdentity, runWithExtensionRequestIdentity } from "./request-identity";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
@@ -215,17 +215,22 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	readonly #extension: Extension;
+	readonly #runtime: IExtensionRuntime;
+	readonly #cwd: string;
+	readonly events: ExtensionEventBus;
 
 	get pi() {
 		return getCodingAgentApi();
 	}
 
-	constructor(
-		private readonly extension: Extension,
-		private readonly runtime: IExtensionRuntime,
-		private readonly cwd: string,
-		public readonly events: EventBus,
-	) {
+	constructor(extension: Extension, runtime: IExtensionRuntime, cwd: string, eventBus: EventBus) {
+		this.#extension = extension;
+		this.#runtime = runtime;
+		this.#cwd = cwd;
+		this.events = bindExtensionEventBus(eventBus, action =>
+			runWithExtensionRequestIdentity(runtime, extension, action),
+		);
 		// Extensions destructure `pi.on` or forward API methods as callbacks, so every
 		// prototype method must keep its receiver when detached. Walk the prototype
 		// rather than listing methods: a new method is bound without touching this.
@@ -239,27 +244,27 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
-		const list = this.extension.handlers.get(event) ?? [];
+		const list = this.#extension.handlers.get(event) ?? [];
 		list.push(handler);
-		this.extension.handlers.set(event, list);
+		this.#extension.handlers.set(event, list);
 	}
 
 	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
 		const registered = {
 			definition: tool,
-			extensionPath: this.extension.path,
-			sourceInfo: extensionToolSourceInfo(tool, this.extension.resolvedPath),
+			extensionPath: this.#extension.path,
+			sourceInfo: extensionToolSourceInfo(tool, this.#extension.resolvedPath),
 		};
-		this.extension.tools.set(tool.name, registered);
-		for (const listener of this.extension.toolRegistrationListeners ?? []) listener(tool.name);
+		this.#extension.tools.set(tool.name, registered);
+		for (const listener of this.#extension.toolRegistrationListeners ?? []) listener(tool.name);
 	}
 
 	registerFileWriteFallback(handler: FileWriteFallbackHandler): void {
-		this.extension.fileWriteFallbackHandlers.push(handler);
+		this.#extension.fileWriteFallbackHandlers.push(handler);
 	}
 
 	registerFileDeleteFallback(handler: FileDeleteFallbackHandler): void {
-		this.extension.fileDeleteFallbackHandlers.push(handler);
+		this.#extension.fileDeleteFallbackHandlers.push(handler);
 	}
 
 	registerCommand(
@@ -270,11 +275,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: RegisteredCommand["handler"];
 		},
 	): void {
-		this.extension.commands.set(name, { name, ...options });
+		this.#extension.commands.set(name, { name, ...options });
 	}
 
 	setLabel(label: string): void {
-		this.extension.label = label;
+		this.#extension.label = label;
 	}
 
 	registerShortcut(
@@ -284,47 +289,47 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: (ctx: ExtensionContext) => Promise<void> | void;
 		},
 	): void {
-		this.extension.shortcuts.set(shortcut, { shortcut, extensionPath: this.extension.path, ...options });
+		this.#extension.shortcuts.set(shortcut, { shortcut, extensionPath: this.#extension.path, ...options });
 	}
 
 	getShortcutConflict(shortcut: KeyId): ShortcutConflict | undefined {
-		return this.runtime.getShortcutConflict(shortcut, this.extension.path);
+		return this.#runtime.getShortcutConflict(shortcut, this.#extension.path);
 	}
 
 	registerFlag(
 		name: string,
 		options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
 	): void {
-		this.extension.flags.set(name, { name, extensionPath: this.extension.path, ...options });
+		this.#extension.flags.set(name, { name, extensionPath: this.#extension.path, ...options });
 		if (options.default !== undefined) {
-			this.runtime.flagValues.set(name, options.default);
+			this.#runtime.flagValues.set(name, options.default);
 		}
 	}
 
 	registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
-		this.extension.messageRenderers.set(customType, renderer as MessageRenderer);
+		this.#extension.messageRenderers.set(customType, renderer as MessageRenderer);
 	}
 
 	registerAssistantThinkingRenderer(renderer: AssistantThinkingRenderer): void {
-		this.extension.assistantThinkingRenderers.push(renderer);
+		this.#extension.assistantThinkingRenderers.push(renderer);
 	}
 
 	registerAssistantTextRenderer(renderer: AssistantTextRenderer): void {
 		if (typeof renderer !== "function") {
 			throw new TypeError(
-				`registerAssistantTextRenderer expects a function, got ${typeof renderer} (extension ${this.extension.path})`,
+				`registerAssistantTextRenderer expects a function, got ${typeof renderer} (extension ${this.#extension.path})`,
 			);
 		}
-		this.extension.assistantTextRenderers.push(renderer);
+		this.#extension.assistantTextRenderers.push(renderer);
 	}
 
 	registerTranscriptPresenter(presenter: TranscriptPresenter): () => void {
 		if (typeof presenter !== "function") {
 			throw new TypeError(
-				`registerTranscriptPresenter expects a function, got ${typeof presenter} (extension ${this.extension.path})`,
+				`registerTranscriptPresenter expects a function, got ${typeof presenter} (extension ${this.#extension.path})`,
 			);
 		}
-		const presenters = this.extension.transcriptPresenters;
+		const presenters = this.#extension.transcriptPresenters;
 		presenters.push(presenter);
 		notifyTranscriptPresentersChanged();
 		let registered = true;
@@ -348,7 +353,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (STANDARD_LINK_SCHEMES[normalized] === true || InternalUrlRouter.instance().isBuiltin(normalized)) {
 			throw new Error(`registerLinkScheme: "${scheme}" is reserved for standard or omp-internal links`);
 		}
-		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
+		if (!this.#extension.linkSchemes.includes(normalized)) this.#extension.linkSchemes.push(normalized);
 	}
 
 	registerComposerShape(definition: ComposerShapeDefinition): void {
@@ -362,98 +367,97 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (isBuiltinComposerStyle(id)) {
 			throw new Error(`Cannot replace built-in composer shape "${id}"`);
 		}
-		this.extension.composerShapes.set(id, definition);
+		this.#extension.composerShapes.set(id, definition);
 	}
 
 	getFlag(name: string): boolean | string | undefined {
-		if (!this.extension.flags.has(name)) return undefined;
-		return this.runtime.flagValues.get(name);
+		if (!this.#extension.flags.has(name)) return undefined;
+		return this.#runtime.flagValues.get(name);
 	}
 
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 	): void {
-		this.runtime.sendMessage(message, options);
+		this.#runtime.sendMessage(message, options);
 	}
 
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void> {
-		return this.runtime.sendUserMessage(content, options);
+		return this.#runtime.sendUserMessage(content, options);
 	}
 
 	appendEntry(customType: string, data?: unknown): void {
-		this.runtime.appendEntry(customType, data);
+		this.#runtime.appendEntry(customType, data);
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {
-		return execCommand(command, args, options?.cwd ?? this.cwd, options);
+		return execCommand(command, args, options?.cwd ?? this.#cwd, options);
 	}
 
 	getActiveTools(): string[] {
-		return this.runtime.getActiveTools();
+		return this.#runtime.getActiveTools();
 	}
 
 	getAllTools(): ToolInfo[] {
-		return this.runtime.getAllTools();
+		return this.#runtime.getAllTools();
 	}
 
 	setActiveTools(toolNames: string[]): Promise<void> {
-		return this.runtime.setActiveTools(toolNames);
+		return this.#runtime.setActiveTools(toolNames);
 	}
 
 	getCommands() {
-		return this.runtime.getCommands();
+		return this.#runtime.getCommands();
 	}
 
 	setModel(model: Model): Promise<boolean> {
-		return this.runtime.setModel(model);
+		return this.#runtime.setModel(model);
 	}
 
 	getThinkingLevel(): ThinkingLevel | undefined {
-		return this.runtime.getThinkingLevel();
+		return this.#runtime.getThinkingLevel();
 	}
 
 	setThinkingLevel(level: ThinkingLevel, persist?: boolean): void {
-		this.runtime.setThinkingLevel(level, persist);
+		this.#runtime.setThinkingLevel(level, persist);
 	}
 
 	getServiceTiers(): Readonly<ServiceTierByFamily> {
-		return { ...this.runtime.getServiceTiers() };
+		return { ...this.#runtime.getServiceTiers() };
 	}
 
 	setServiceTier(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
 		if (!isServiceTierFamily(family) || (tier !== undefined && !isServiceTierForFamily(family, tier))) {
 			throw new TypeError(`Invalid service tier "${String(tier)}" for family "${String(family)}"`);
 		}
-		this.runtime.setServiceTier(family, tier);
+		this.#runtime.setServiceTier(family, tier);
 	}
 
 	getSessionName(): string | undefined {
-		return this.runtime.getSessionName();
+		return this.#runtime.getSessionName();
 	}
 
 	setSessionName(name: string): Promise<void> {
-		return this.runtime.setSessionName(name);
+		return this.#runtime.setSessionName(name);
 	}
 
 	registerProvider(name: string, config: ProviderConfig): void {
-		this.extension.registersProviders = true;
-		this.runtime.registerProvider(name, config, this.extension.path);
+		this.#extension.registersProviders = true;
+		this.#runtime.registerProvider(name, config, this.#extension.path);
 	}
 
 	unregisterProvider(name: string): void {
-		this.runtime.unregisterProvider(name, this.extension.path);
+		this.#runtime.unregisterProvider(name, this.#extension.path);
 	}
 }
 
 /**
  * Create an Extension object with empty collections.
  */
-function createExtension(extensionPath: string, resolvedPath: string, requestIdentity?: string): Extension {
+function createExtension(extensionPath: string, resolvedPath: string): Extension {
 	return {
 		path: extensionPath,
 		resolvedPath,
-		requestIdentity,
 		handlers: new Map(),
 		tools: new Map(),
 		toolRegistrationListeners: new Set(),
@@ -506,9 +510,10 @@ async function canonicalizeExtensionPath(resolvedPath: string): Promise<string> 
 
 /** Import one extension module and resolve its factory without binding it to a session. */
 export async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
-	const resolvedPath = await canonicalizeExtensionPath(resolvePath(extensionPath, cwd));
+	const resolvedPath = resolvePath(extensionPath, cwd);
+	const canonicalPath = await canonicalizeExtensionPath(resolvedPath);
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
+		const module = (await withHostGuard(() => loadLegacyPiModule(canonicalPath))) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
 
 		if (typeof factory !== "function") {
@@ -516,11 +521,12 @@ export async function importExtensionModule(extensionPath: string, cwd: string):
 				path: extensionPath,
 				factory: null,
 				resolvedPath,
+				canonicalPath,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
 			};
 		}
 
-		return { path: extensionPath, factory, resolvedPath, error: null };
+		return { path: extensionPath, factory, resolvedPath, canonicalPath, error: null };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		return { path: extensionPath, factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
@@ -539,12 +545,12 @@ async function bindExtension(
 		return { extension: null, error: imported.error };
 	}
 	try {
-		const requestIdentity = isFilesystemSourcePath(imported.resolvedPath)
-			? extensionRequestIdentity(imported.resolvedPath)
-			: undefined;
-		const extension = createExtension(extensionPath, imported.resolvedPath, requestIdentity);
+		const extension = createExtension(extensionPath, imported.resolvedPath);
+		if (imported.canonicalPath && isFilesystemSourcePath(imported.resolvedPath)) {
+			registerExtensionRequestIdentity(runtime, extension, imported.canonicalPath);
+		}
 		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-		await runWithExtensionRequestIdentity(requestIdentity, () =>
+		await runWithExtensionRequestIdentity(runtime, extension, () =>
 			withHostGuard(() => runExtensionFactory(factory, api, runtime)),
 		);
 
@@ -567,7 +573,7 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-	await runWithExtensionRequestIdentity(undefined, () => runExtensionFactory(factory, api, runtime));
+	await runWithExtensionRequestIdentity(runtime, extension, () => runExtensionFactory(factory, api, runtime));
 	return extension;
 }
 

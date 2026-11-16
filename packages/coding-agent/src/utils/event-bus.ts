@@ -1,8 +1,4 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import {
-	currentExtensionRequestIdentity,
-	runWithExtensionRequestIdentity,
-} from "../extensibility/extensions/request-identity";
 
 /**
  * Methods are bound arrow fields: upstream Pi's `createEventBus()` returns
@@ -40,15 +36,13 @@ export class EventBus {
 			handlers = new Set();
 			this.#listeners.set(channel, handlers);
 		}
-		const requestIdentity = currentExtensionRequestIdentity();
-		const safeHandler = (data: unknown) =>
-			runWithExtensionRequestIdentity(requestIdentity, async () => {
-				try {
-					await handler(data);
-				} catch (err) {
-					logger.error("Event handler error", { channel, error: String(err) });
-				}
-			});
+		const safeHandler = async (data: unknown) => {
+			try {
+				await handler(data);
+			} catch (err) {
+				logger.error("Event handler error", { channel, error: String(err) });
+			}
+		};
 		handlers.add(safeHandler);
 		if (handlers.size === 1) this.#notifyPresence(channel, true);
 		return () => {
@@ -73,12 +67,10 @@ export class EventBus {
 			watchers = new Set();
 			this.#presenceWatchers.set(channel, watchers);
 		}
-		const requestIdentity = currentExtensionRequestIdentity();
-		const watcher = (present: boolean) => runWithExtensionRequestIdentity(requestIdentity, () => onChange(present));
-		watchers.add(watcher);
+		watchers.add(onChange);
 		return () => {
 			const current = this.#presenceWatchers.get(channel);
-			current?.delete(watcher);
+			current?.delete(onChange);
 			if (current?.size === 0) this.#presenceWatchers.delete(channel);
 		};
 	};
@@ -88,6 +80,20 @@ export class EventBus {
 		this.#listeners.clear();
 		for (const channel of channels) this.#notifyPresence(channel, false);
 	};
+}
+
+export type ExtensionEventBus = Pick<EventBus, "emit" | "on" | "hasListeners" | "watchListeners" | "clear">;
+
+/** Bind listener callbacks to their host-owned extension without exposing that owner to extension code. */
+export function bindExtensionEventBus(eventBus: EventBus, runAsOwner: <T>(action: () => T) => T): ExtensionEventBus {
+	return Object.freeze({
+		emit: eventBus.emit,
+		on: (channel, handler) => eventBus.on(channel, data => runAsOwner(() => handler(data))),
+		hasListeners: eventBus.hasListeners,
+		watchListeners: (channel, onChange) =>
+			eventBus.watchListeners(channel, present => runAsOwner(() => onChange(present))),
+		clear: eventBus.clear,
+	});
 }
 
 /**

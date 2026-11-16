@@ -108,7 +108,7 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import type { ApprovalMode } from "../../tools/approval";
 import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
-import type { EventBus } from "../../utils/event-bus";
+import type { ExtensionEventBus } from "../../utils/event-bus";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -2258,7 +2258,7 @@ export interface ExtensionAPI {
 	unregisterProvider(name: string): void;
 
 	/** Shared event bus for extension communication. */
-	events: EventBus;
+	events: ExtensionEventBus;
 }
 
 // ============================================================================
@@ -2506,8 +2506,6 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 export interface Extension {
 	path: string;
 	resolvedPath: string;
-	/** Opaque ID for a canonical filesystem source; absent for session-local factories. */
-	requestIdentity?: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;
@@ -2537,6 +2535,8 @@ export interface Extension {
 export interface PreparedExtension {
 	path: string;
 	resolvedPath: string;
+	/** Canonical source loaded from disk; retained separately from the lexical reconciliation path. */
+	canonicalPath?: string;
 	factory: ExtensionFactory | null;
 	error: string | null;
 }

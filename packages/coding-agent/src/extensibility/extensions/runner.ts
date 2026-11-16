@@ -45,7 +45,11 @@ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shar
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
-import { runWithExtensionRequestIdentity } from "./request-identity";
+import {
+	captureExtensionRequestIdentity,
+	type ExtensionRequestIdentity,
+	runWithExtensionRequestIdentity,
+} from "./request-identity";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import {
@@ -843,14 +847,19 @@ export class ExtensionRunner {
 			throw new Error(`invokeTool: delegation depth exceeded 8 (recursive invokeTool for "${name}"?)`);
 		}
 		const toolCallId = `invoke-${name}-${Date.now().toString(36)}-${depth}`;
+		const requestIdentity = captureExtensionRequestIdentity(this.runtime);
+		const onUpdate = options?.onUpdate;
+		const scopedOnUpdate: AgentToolUpdateCallback<TDetails> | undefined =
+			onUpdate && requestIdentity.identity ? update => requestIdentity.run(() => onUpdate(update)) : onUpdate;
 		return runWithExtensionRequestIdentity(
+			this.runtime,
 			undefined,
 			async () =>
 				(await resolved.tool.execute(
 					toolCallId,
 					params as never,
 					options?.signal,
-					options?.onUpdate as never,
+					scopedOnUpdate as never,
 					options?.callerContext ?? resolved.makeContext(),
 				)) as AgentToolResult<TDetails>,
 		);
@@ -1142,6 +1151,14 @@ export class ExtensionRunner {
 
 	getUIContext(): ExtensionUIContext {
 		return this.#uiContext;
+	}
+
+	captureRequestIdentity(): ExtensionRequestIdentity {
+		return captureExtensionRequestIdentity(this.runtime);
+	}
+
+	runWithExtensionIdentity<T>(extension: Extension | undefined, action: () => T): T {
+		return runWithExtensionRequestIdentity(this.runtime, extension, action);
 	}
 
 	hasUI(): boolean {
@@ -1785,7 +1802,7 @@ export class ExtensionRunner {
 	}
 
 	#runWithExtensionIdentity<T>(extension: Extension | undefined, action: () => T): T {
-		return runWithExtensionRequestIdentity(extension?.requestIdentity, action);
+		return this.runWithExtensionIdentity(extension, action);
 	}
 
 	/**

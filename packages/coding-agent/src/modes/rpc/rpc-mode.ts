@@ -32,10 +32,7 @@ import {
 	getExtensionUISelectOptionLabel,
 	timedOutAskDialogResult,
 } from "../../extensibility/extensions";
-import {
-	currentExtensionRequestIdentity,
-	runWithExtensionRequestIdentity,
-} from "../../extensibility/extensions/request-identity";
+import type { ExtensionRequestIdentity } from "../../extensibility/extensions/request-identity";
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
@@ -1053,6 +1050,7 @@ export function requestRpcSelect(
 	title: string,
 	options: ExtensionUISelectItem[],
 	dialogOptions?: ExtensionUIDialogOptions,
+	requestIdentity?: ExtensionRequestIdentity,
 ): Promise<string | undefined> {
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const labels = new Array<string>(options.length);
@@ -1084,6 +1082,7 @@ export function requestRpcSelect(
 			timeout: dialogOptions?.timeout,
 		},
 		response => parseValueDialogResponse(response, dialogOptions),
+		requestIdentity,
 	);
 }
 
@@ -1094,6 +1093,7 @@ export function requestRpcInput(
 	title: string,
 	placeholder?: string,
 	dialogOptions?: ExtensionUIDialogOptions,
+	requestIdentity?: ExtensionRequestIdentity,
 ): Promise<string | undefined> {
 	return requestRpcDialog(
 		pendingRequests,
@@ -1108,6 +1108,7 @@ export function requestRpcInput(
 			...(dialogOptions?.secret !== undefined ? { secret: dialogOptions.secret } : {}),
 		},
 		response => parseValueDialogResponse(response, dialogOptions),
+		requestIdentity,
 	);
 }
 
@@ -1179,6 +1180,7 @@ export async function requestRpcAskDialog(
 	output: RpcOutput,
 	questions: ExtensionAskDialogQuestion[],
 	dialogOptions?: ExtensionUIDialogOptions,
+	requestIdentity?: ExtensionRequestIdentity,
 ): Promise<ExtensionAskDialogResult | undefined> {
 	let timedOut = false;
 	const opts: ExtensionUIDialogOptions = {
@@ -1195,6 +1197,7 @@ export async function requestRpcAskDialog(
 		undefined,
 		{ method: "ask", questions, timeout: dialogOptions?.timeout },
 		response => parseAskDialogResponse(response, questions, opts),
+		requestIdentity,
 	);
 	return timedOut ? timedOutAskDialogResult(questions) : result;
 }
@@ -1206,9 +1209,10 @@ export function requestRpcEditor(
 	prefill?: string,
 	dialogOptions?: ExtensionUIDialogOptions,
 	editorOptions?: { promptStyle?: boolean },
+	requestIdentity?: ExtensionRequestIdentity,
 ): Promise<string | undefined> {
 	if (dialogOptions?.signal?.aborted) return Promise.resolve(undefined);
-	const requestIdentity = currentExtensionRequestIdentity();
+	const runInRequestScope = <T>(action: () => T): T => (requestIdentity ? requestIdentity.run(action) : action());
 
 	const id = Snowflake.next() as string;
 	const { promise, resolve, reject } = Promise.withResolvers<string | undefined>();
@@ -1219,14 +1223,14 @@ export function requestRpcEditor(
 		pendingRequests.delete(id);
 	};
 	const finish = (value: string | undefined) =>
-		runWithExtensionRequestIdentity(requestIdentity, () => {
+		runInRequestScope(() => {
 			if (settled) return;
 			settled = true;
 			cleanup();
 			resolve(value);
 		});
 	const fail = (error: Error) =>
-		runWithExtensionRequestIdentity(requestIdentity, () => {
+		runInRequestScope(() => {
 			if (settled) return;
 			settled = true;
 			cleanup();
@@ -1274,10 +1278,10 @@ export function requestRpcDialog<T>(
 	defaultValue: T,
 	request: Record<string, unknown>,
 	parseResponse: (response: RpcExtensionUIResponse) => T,
+	requestIdentity?: ExtensionRequestIdentity,
 ): Promise<T> {
 	if (opts?.signal?.aborted) return Promise.resolve(defaultValue);
-	const requestIdentity = currentExtensionRequestIdentity();
-
+	const runInRequestScope = <R>(action: () => R): R => (requestIdentity ? requestIdentity.run(action) : action());
 	const id = Snowflake.next() as string;
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
 	let timeoutId: NodeJS.Timeout | undefined;
@@ -1297,7 +1301,7 @@ export function requestRpcDialog<T>(
 			targetId: id,
 		} as RpcExtensionUIRequest);
 	const onAbort = () =>
-		runWithExtensionRequestIdentity(requestIdentity, () => {
+		runInRequestScope(() => {
 			cancelHostDialog();
 			cleanup();
 			resolve(defaultValue);
@@ -1307,7 +1311,7 @@ export function requestRpcDialog<T>(
 	if (opts?.timeout !== undefined) {
 		timeoutId = setTimeout(
 			() =>
-				runWithExtensionRequestIdentity(requestIdentity, () => {
+				runInRequestScope(() => {
 					opts.onTimeout?.();
 					cancelHostDialog();
 					cleanup();
@@ -1319,7 +1323,7 @@ export function requestRpcDialog<T>(
 
 	pendingRequests.set(id, {
 		resolve: response =>
-			runWithExtensionRequestIdentity(requestIdentity, () => {
+			runInRequestScope(() => {
 				cleanup();
 				try {
 					resolve(parseResponse(response));
@@ -1327,11 +1331,12 @@ export function requestRpcDialog<T>(
 					reject(err);
 				}
 			}),
-		reject: error => runWithExtensionRequestIdentity(requestIdentity, () => reject(error)),
+		reject: error => runInRequestScope(() => reject(error)),
 	});
 	const { extensionId: _untrustedExtensionId, ...safeRequest } = request;
 	void _untrustedExtensionId;
-	const extensionId = request.method === "select" || request.method === "confirm" ? requestIdentity : undefined;
+	const extensionId =
+		request.method === "select" || request.method === "confirm" ? requestIdentity?.identity : undefined;
 	output({
 		type: "extension_ui_request",
 		id,
@@ -1548,12 +1553,23 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		constructor(
 			private pendingRequests: Map<string, PendingExtensionRequest>,
 			private output: (obj: RpcResponse | RpcExtensionUIRequest | object) => void,
+			private captureRequestIdentity?: () => ExtensionRequestIdentity | undefined,
 		) {}
+
+		#currentRequestIdentity(): ExtensionRequestIdentity | undefined {
+			return this.captureRequestIdentity?.();
+		}
 
 		get askDialog(): ExtensionUIContext["askDialog"] {
 			if (!this.askDialogEnabled) return undefined;
 			return (questions, dialogOptions) =>
-				requestRpcAskDialog(this.pendingRequests, this.output, questions, dialogOptions);
+				requestRpcAskDialog(
+					this.pendingRequests,
+					this.output,
+					questions,
+					dialogOptions,
+					this.#currentRequestIdentity(),
+				);
 		}
 
 		select(
@@ -1561,7 +1577,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			options: ExtensionUISelectItem[],
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcSelect(this.pendingRequests, this.output, title, options, dialogOptions);
+			return requestRpcSelect(
+				this.pendingRequests,
+				this.output,
+				title,
+				options,
+				dialogOptions,
+				this.#currentRequestIdentity(),
+			);
 		}
 
 		confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
@@ -1579,6 +1602,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					if ("confirmed" in response) return response.confirmed;
 					return false;
 				},
+				this.#currentRequestIdentity(),
 			);
 		}
 
@@ -1587,7 +1611,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			placeholder?: string,
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcInput(this.pendingRequests, this.output, title, placeholder, dialogOptions);
+			return requestRpcInput(
+				this.pendingRequests,
+				this.output,
+				title,
+				placeholder,
+				dialogOptions,
+				this.#currentRequestIdentity(),
+			);
 		}
 
 		onTerminalInput(): () => void {
@@ -1699,7 +1730,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			dialogOptions?: ExtensionUIDialogOptions,
 			editorOptions?: { promptStyle?: boolean },
 		): Promise<string | undefined> {
-			return requestRpcEditor(this.pendingRequests, this.output, title, prefill, dialogOptions, editorOptions);
+			return requestRpcEditor(
+				this.pendingRequests,
+				this.output,
+				title,
+				prefill,
+				dialogOptions,
+				editorOptions,
+				this.#currentRequestIdentity(),
+			);
 		}
 
 		addAutocompleteProvider(): void {
@@ -1744,7 +1783,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	// Wire up UI context for tool execution (ask tool, etc.) and extensions.
 	// A single shared instance routes all responses received on stdin to the
 	// correct waiting promise regardless of which code path created the request.
-	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
+	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output, () =>
+		session.extensionRunner?.captureRequestIdentity(),
+	);
 	setToolUIContext?.(rpcUiContext, true);
 	const setAskDialog = (command: RpcCommand & { type: "set_ask_dialog" }): RpcResponse => {
 		rpcUiContext.askDialogEnabled = command.enabled === true;
