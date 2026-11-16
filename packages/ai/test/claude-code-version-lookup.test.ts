@@ -18,7 +18,7 @@ const savedVersion = process.env.PI_AI_CLAUDE_CODE_VERSION;
 function distTagsFetch(respond: () => Promise<Response>): { fetcher: FetchImpl; urls: string[] } {
 	const urls: string[] = [];
 	const fetcher = Object.assign(
-		(input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
+		(input: string | URL | Request, _init?: RequestInit) => {
 			urls.push(String(input));
 			return respond();
 		},
@@ -141,20 +141,26 @@ describe("Claude Code version lookup", () => {
 			Object.assign(async () => latest("2.1.400")(), { preconnect: fetch.preconnect }),
 		);
 		const requests: { url: string; userAgent: string; body: string }[] = [];
-		const providerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-			requests.push({
-				url: String(input),
-				userAgent: new Headers(init?.headers).get("User-Agent") ?? "",
-				body: await new Response(init?.body).text(),
-			});
-			return new Response(
-				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
-				{ status: 400, headers: { "Content-Type": "application/json" } },
-			);
-		}) as typeof fetch;
+		const providerFetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				requests.push({
+					url: String(input),
+					userAgent: new Headers(init?.headers).get("User-Agent") ?? "",
+					body: await new Response(init?.body).text(),
+				});
+				return new Response(
+					JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
+					{ status: 400, headers: { "Content-Type": "application/json" } },
+				);
+			},
+			{ preconnect: fetch.preconnect },
+		);
 
 		try {
-			await streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, { apiKey: "sk-ant-oat-test", fetch: providerFetch }).result();
+			await streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, {
+				apiKey: "sk-ant-oat-test",
+				fetch: providerFetch,
+			}).result();
 			expect(registry.mock.calls.map(([input]) => String(input))).toEqual([DIST_TAGS_URL]);
 		} finally {
 			registry.mockRestore();
@@ -170,17 +176,13 @@ describe("Claude Code version lookup", () => {
 		const registry = spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(async () => latest("2.1.400")(), { preconnect: fetch.preconnect }),
 		);
-		const providerFetch = (async () =>
-			new Response(
-				JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } }),
-				{
-					status: 400,
-					headers: { "Content-Type": "application/json" },
-				},
-			)) as unknown as typeof fetch;
+		const { providerFetch } = captureOAuthRequests();
 
 		try {
-			await streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, { apiKey: "sk-ant-api03-test", fetch: providerFetch }).result();
+			await streamAnthropic(OAUTH_MODEL, OAUTH_CONTEXT, {
+				apiKey: "sk-ant-api03-test",
+				fetch: providerFetch,
+			}).result();
 			expect(registry).not.toHaveBeenCalled();
 		} finally {
 			registry.mockRestore();
