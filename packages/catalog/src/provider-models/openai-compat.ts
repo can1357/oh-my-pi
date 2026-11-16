@@ -4680,8 +4680,9 @@ export function syntheticModelManagerOptions(
 						// even a single tier is a real effort the wire accepts. Only a
 						// vocabulary of `none`/unrecognized values alone is the pure
 						// off-switch: reporting `reasoning: true` there would light up the
-						// effort dial for a dial with one stop. When the wire is silent on
-						// reasoning entirely, the reference gets a vote.
+						// effort dial for a dial with one stop. Otherwise the reference gets
+						// a vote, and a present `supported_features` list without `reasoning`
+						// is the route's explicit no, mirroring the tools rule below.
 						const namedTierCount =
 							(thinking?.efforts.length ?? 0) - (wireEfforts.includes(SYNTHETIC_WIRE_EFFORT_NONE) ? 1 : 0);
 						const reasoning =
@@ -4691,7 +4692,10 @@ export function syntheticModelManagerOptions(
 									? false
 									: typeof entry.supports_reasoning === "boolean"
 										? entry.supports_reasoning
-										: reference?.reasoning;
+										: (reference?.reasoning ??
+											(record.supported_features !== undefined && !features.includes("reasoning")
+												? false
+												: undefined));
 						// The router aliases (`syn:*`) and newly added routes carry no
 						// bundled reference, so these advertised capabilities are the only
 						// truth available. Without them such a model lands non-reasoning
@@ -7011,10 +7015,11 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									headers: mergeCopilotApiHeaders(),
 									// Copilot advertises no reasoning bit. Reviewed Claude
 									// generations get their native ladder rather than a
-									// provisional discovery ladder.
+									// provisional discovery ladder; pre-thinking Claude
+									// (<= 3.5) gets none, so no probe spends requests on it.
 									...(unreferencedIdentity?.class === "anthropic" &&
-									revisionAtLeast(unreferencedIdentity.revision, "3.7")
-										? { reasoning: true }
+									unreferencedIdentity.revision !== undefined
+										? { reasoning: revisionAtLeast(unreferencedIdentity.revision, "3.7") }
 										: {}),
 									...(api === "openai-completions"
 										? {
@@ -8024,13 +8029,13 @@ export function commandCodeModelManagerOptions(config?: CommandCodeModelManagerC
 						name: toModelName(entry.name, defaults.name),
 						api,
 						baseUrl: api === "anthropic-messages" ? basePath : discoveryBaseUrl,
-						// Neutral reasoning: the catalog row carries no
-						// reasoning metadata. Verified effort ids opt back in
-						// through exact `thinking-efforts` in KDL (the cascade
-						// upgrades the target and the engine materializes
-						// `reasoning: true` alongside the ladder); every other
-						// served id keeps no effort dial.
-						reasoning: defaults.reasoning,
+						// No dial by default: the catalog row carries no
+						// reasoning metadata, and the deployment exposes efforts
+						// only for its registry ids (`providers/commandcode.kdl`).
+						// Those opt back in through exact `thinking-efforts` with
+						// `thinking-upgrade-neutral`; every other served id must
+						// keep no effort dial, so it is not left to a probe.
+						reasoning: false,
 						// Keep the discovery default (`["text"]`): the catalog
 						// row carries no modality metadata and a bundled
 						// reference from another host must not advertise image
@@ -8178,9 +8183,11 @@ export function charmHyperModelManagerOptions(
 					return {
 						...defaults,
 						name: toModelName(record.display_name, defaults.name),
-						// Missing vocabulary is not evidence against reasoning; an
-						// advertised off-only vocabulary is authoritative.
-						reasoning: thinking !== undefined ? true : wireEfforts.length > 0 ? false : defaults.reasoning,
+						// A row without an effort vocabulary exposes no dial. The
+						// gateway answers 200 to unadvertised efforts and ignores
+						// them, so a probe would learn silent no-op rungs
+						// (`providers/charm-hyper.kdl`).
+						reasoning: thinking !== undefined,
 						...(thinking && { thinking }),
 						input: capabilities?.vision === true ? ["text", "image"] : ["text"],
 						contextWindow: toPositiveNumber(record.context_window, defaults.contextWindow),
