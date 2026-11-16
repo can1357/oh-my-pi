@@ -60,10 +60,30 @@ impl GitRepo {
 /// `repo.git` would fail to open. The entry also keeps gix deriving the work
 /// tree from it, which the resolved `git_dir` alone cannot for separate git
 /// dirs.
+///
+/// If the process cwd was removed, recover it once before retrying gitoxide.
+/// Never relocate a live cwd when opening another repository.
 fn open_discovered(repo: &GitRepo) -> Result<gix::ThreadSafeRepository> {
-	open_options()
-		.open(&repo.info().git_entry_path)
-		.map_err(|err| Error::backend("git open", err))
+	let entry = &repo.info().git_entry_path;
+	let mut opened = open_options().open(entry);
+	if matches!(
+		&opened,
+		Err(gix::open::Error::NotARepository {
+			source: gix::discover::is_git::Error::CurrentDir(_),
+			..
+		})
+	) {
+		// Concurrent repositories may fail together; only the first repairs cwd.
+		static CWD_RECOVERY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+		let _guard = CWD_RECOVERY
+			.lock()
+			.map_err(|err| Error::backend("git cwd recovery", err))?;
+		if std::env::current_dir().is_err() {
+			std::env::set_current_dir(repo.root())?;
+		}
+		opened = open_options().open(entry);
+	}
+	opened.map_err(|err| Error::backend("git open", err))
 }
 
 /// Load the persisted worktree index straight from disk, reconstructing it from
