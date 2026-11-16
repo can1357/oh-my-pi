@@ -21,9 +21,11 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as natives from "@oh-my-pi/pi-natives";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../src/session/session-manager.ts");
+const SIGNAL_SENDER_FIXTURE = path.join(import.meta.dir, "fixtures/signal-sender-session.ts");
 
 const pendingAssistant: AssistantMessage = {
 	role: "assistant",
@@ -210,6 +212,45 @@ describe("session exit diagnostics", () => {
 			kind: "signal",
 		});
 	});
+
+	// Pull requests test against main's prebuilt addon, which may predate the capture.
+	it.skipIf(process.platform === "win32" || typeof natives.captureSignalSender !== "function")(
+		"records which process sent the SIGTERM",
+		async () => {
+			tempDir = TempDir.createSync("@pi-session-exit-sender-");
+			const child = Bun.spawn([process.execPath, SIGNAL_SENDER_FIXTURE, tempDir.path()], {
+				stdout: "pipe",
+				stderr: "pipe",
+				env: process.env,
+			});
+			let printed = "";
+			const reader = child.stdout.getReader();
+			while (!printed.includes("\n")) {
+				const { value, done } = await reader.read();
+				if (done) break;
+				printed += new TextDecoder().decode(value);
+			}
+			reader.releaseLock();
+			const sessionFile = printed.trim();
+			expect(sessionFile).not.toBe("");
+
+			process.kill(child.pid, "SIGTERM");
+			const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+			expect({ exitCode, stderr }).toMatchObject({ exitCode: 143 });
+
+			const exitEntry = (await Bun.file(sessionFile).text())
+				.split("\n")
+				.filter(line => line.trim())
+				.map(line => JSON.parse(line))
+				.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
+			expect(exitEntry?.data).toMatchObject({
+				reason: "sigterm",
+				kind: "signal",
+				sender: { pid: process.pid, uid: process.getuid?.(), parentPid: process.ppid },
+			});
+			expect(path.basename(process.execPath).startsWith(exitEntry.data.sender.command)).toBe(true);
+		},
+	);
 
 	it("does not materialize an empty session just to write an exit marker", async () => {
 		tempDir = TempDir.createSync("@pi-empty-session-exit-");

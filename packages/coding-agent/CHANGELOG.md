@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Sessions stopped by SIGTERM or SIGHUP on Linux and macOS now record which process sent the signal (pid, uid, and, when it can still be identified, its command name and parent pid) in the `session_exit` entry and the "Session exit recorded" log line ([#9956](https://github.com/can1357/oh-my-pi/issues/9956))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes

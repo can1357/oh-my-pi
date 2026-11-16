@@ -1499,6 +1499,16 @@ export interface CaptureRegion {
   height: number
 }
 
+/**
+ * Records the sender of each later delivery of `signal`, in front of the
+ * handler currently installed for it.
+ *
+ * Returns false, changing nothing, when the signal has no handler (default or
+ * ignored disposition), when the platform has no sender information, or on
+ * failure. Installing twice is a no-op that returns true.
+ */
+export declare function captureSignalSender(signal: number): boolean
+
 /** Clipboard image payload encoded as PNG bytes. */
 export interface ClipboardImage {
   /** PNG-encoded image bytes. */
@@ -4072,6 +4082,21 @@ export interface ShellVizOptions {
   streaming?: boolean
 }
 
+/** The process that sent a signal, as the kernel reported it on delivery. */
+export interface SignalSender {
+  /** Sender process id. */
+  pid: number
+  /** Sender real user id. */
+  uid: number
+  /**
+   * Sender command name (never its arguments), when the process could still
+   * be identified after the signal arrived.
+   */
+  command?: string
+  /** Sender parent process id, under the same condition as `command`. */
+  parentPid?: number
+}
+
 /**
  * Visible slice of a line after ANSI-aware column selection
  * (`sliceWithWidth`).
@@ -4237,6 +4262,15 @@ export interface SvgCell {
   widthPx: number
   heightPx: number
 }
+
+/**
+ * Takes the sender of the latest delivery of `signal`, if a process sent it.
+ *
+ * Absent when no sender was captured: the wrapper is not installed, the kernel
+ * generated the signal (see the module docs per platform), or the sender was
+ * already taken.
+ */
+export declare function takeSignalSender(signal: number): SignalSender | null
 
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {

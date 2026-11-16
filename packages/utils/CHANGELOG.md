@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `postmortem.terminationSignalSender()`, naming the process that sent the SIGTERM or SIGHUP stopping the process ([#9956](https://github.com/can1357/oh-my-pi/issues/9956))
+
 ## [18.21.0] - 2026-11-16
 
 ### Fixed

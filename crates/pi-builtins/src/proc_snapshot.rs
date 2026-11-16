@@ -244,7 +244,8 @@ mod proc_snapshot {
 			sys::pids().filter_map(Self::from_pid).collect()
 		}
 
-		fn from_pid(pid: i32) -> Option<Self> {
+		/// One process, or `None` once it has exited and been reaped.
+		pub fn from_pid(pid: i32) -> Option<Self> {
 			if pid <= 0 {
 				return None;
 			}
@@ -704,7 +705,8 @@ mod proc_snapshot {
 			sys::pids().into_iter().filter_map(Self::from_pid).collect()
 		}
 
-		fn from_pid(pid: i32) -> Option<Self> {
+		/// One process, or `None` once it has exited and been reaped.
+		pub fn from_pid(pid: i32) -> Option<Self> {
 			if let Some(info) = sys::bsdinfo_including_zombies(pid) {
 				return Some(Self {
 					pid,

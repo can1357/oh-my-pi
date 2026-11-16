@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `captureSignalSender` and `takeSignalSender` to report which process sent a signal on Linux and macOS ([#9956](https://github.com/can1357/oh-my-pi/issues/9956))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
