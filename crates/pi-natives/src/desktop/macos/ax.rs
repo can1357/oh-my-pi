@@ -2227,12 +2227,18 @@ fn parse_number(text: &str, current: &CFNumber) -> CoreResult<f64> {
 		})
 }
 
-/// Within float precision: a control that stores the value as `float` reads
-/// back 0.3 as 0.30000001192092896.
+/// Whether `actual` holds `target`: within a few `f64` ulps of it, with no
+/// absolute floor, so an unchanged 0 never passes for 5e-8; or, for a
+/// floating-point number, exactly `target` rounded to `f32`, which is what a
+/// control keeping its value in a `Float` reads back (0.3 as
+/// 0.30000001192092896) whether it publishes a `float` or a `double`. An
+/// integer-valued control is held to the first rule.
 fn number_reached(target: f64, actual: &CFNumber) -> bool {
-	actual.as_f64().is_some_and(|actual| {
-		(actual - target).abs() <= target.abs().max(1.0) * f64::from(f32::EPSILON)
-	})
+	let Some(read) = actual.as_f64() else {
+		return false;
+	};
+	(read - target).abs() <= target.abs() * 4.0 * f64::EPSILON
+		|| (actual.is_float_type() && read == f64::from(target as f32))
 }
 
 /// A read-back that is not the written number: the value the control reached,
@@ -3713,11 +3719,25 @@ mod tests {
 	}
 
 	#[test]
-	fn a_number_read_back_matches_within_float_precision() {
-		assert!(number_reached(0.3, &CFNumber::new_f32(0.3)));
+	fn a_number_read_back_matches_the_target_or_its_f32_rounding() {
+		assert!(number_reached(0.3, &CFNumber::new_f64(0.3)));
 		assert!(number_reached(75.0, &CFNumber::new_i64(75)));
-		assert!(!number_reached(75.5, &CFNumber::new_i64(75)));
+		assert!(number_reached(42.5, &CFNumber::new_f64(42.5)));
+		// A control that keeps a `Float` reads 0.3 back rounded to f32, as a
+		// float or as a double.
+		assert!(number_reached(0.3, &CFNumber::new_f32(0.3)));
+		assert!(number_reached(0.3, &CFNumber::new_f64(f64::from(0.3_f32))));
+		assert!(!number_reached(0.3, &CFNumber::new_f64(0.300_000_1)));
+		// An integer control reads what it rounded to.
+		assert!(!number_reached(42.5, &CFNumber::new_i64(42)));
+		assert!(!number_reached(1_000_000_001.0, &CFNumber::new_i64(1_000_000_000)));
 		assert!(!number_reached(150.0, &CFNumber::new_f64(100.0)));
+		// A small value the control left unchanged, and a large one it missed.
+		assert!(!number_reached(5e-8, &CFNumber::new_f64(0.0)));
+		assert!(!number_reached(5e-8, &CFNumber::new_i64(0)));
+		assert!(!number_reached(1e9, &CFNumber::new_f64(1e9 + 100.0)));
+		assert!(number_reached(0.0, &CFNumber::new_i64(0)));
+		assert!(!number_reached(0.0, &CFNumber::new_f64(1e-300)));
 	}
 
 	#[test]
