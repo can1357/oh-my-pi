@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/commit` and eval `commit` treating files changed by `lsp` renames and applied code actions as someone else's unrecorded changes, so the agent's own rename lines were left out of its commits; the `lsp` tool now records those writes in the change journal like `edit` and `write` do ([#19475](https://github.com/can1357/oh-my-pi/pull/19475) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
