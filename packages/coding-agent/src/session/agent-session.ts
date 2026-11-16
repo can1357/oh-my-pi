@@ -180,7 +180,11 @@ import {
 	type SkillWarning,
 } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
-import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
+import {
+	normalizeToolEventInput,
+	resolveToolEventInput,
+	resolveToolEventName,
+} from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
 import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -5892,15 +5896,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const eventArgs = computer
 			? { actions: computer.actions, pendingSafetyChecks: computer.pendingSafetyChecks }
 			: ctx.args;
+		const toolName = resolveToolEventName(ctx.tool.name);
 		runner.markToolCallEmitted(ctx.toolCall.id, ctx.tool.name);
 		let callResult: Awaited<ReturnType<ExtensionRunner["emitToolCall"]>>;
 		try {
 			callResult = await runner.emitToolCall(
 				{
 					type: "tool_call",
-					toolName: ctx.tool.name,
+					toolName,
 					toolCallId: ctx.toolCall.id,
-					input: normalizeToolEventInput(ctx.tool.name, resolveToolEventInput(ctx.tool, eventArgs)),
+					input: normalizeToolEventInput(toolName, resolveToolEventInput(ctx.tool, eventArgs)),
 				},
 				signal,
 			);

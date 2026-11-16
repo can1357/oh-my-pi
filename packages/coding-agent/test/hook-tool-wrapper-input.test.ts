@@ -7,7 +7,12 @@ import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { HookRunner, type LoadedHook } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+import {
+	HookRunner,
+	type LoadedHook,
+	type ToolCallEvent,
+	type ToolResultEvent,
+} from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 import { HookToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/tool-wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -66,6 +71,67 @@ describe("HookToolWrapper tool_call contract", () => {
 			},
 		} as AgentTool;
 	}
+
+	it("blocks retained apply_patch execution through an edit-filtered legacy hook", async () => {
+		const executed: unknown[] = [];
+		const runner = makeRunner(
+			makeHook(value => {
+				const event = value as ToolCallEvent;
+				if (event.toolName === "edit") return { block: true, reason: "Protected edit" };
+			}),
+		);
+		const wrapped = new HookToolWrapper({ ...makeRecordingTool(executed), name: "apply_patch" }, runner);
+
+		await expect(wrapped.execute("retained-patch", { command: "protected edit" })).rejects.toThrow("Protected edit");
+		expect(executed).toEqual([]);
+	});
+
+	it.each(["success", "error", "throw"] as const)(
+		"runs edit-filtered legacy result hooks for retained apply_patch %s results",
+		async outcome => {
+			const runner = makeRunner(
+				makeHook(value => {
+					const event = value as ToolResultEvent;
+					if (event.toolName !== "edit") return;
+					return {
+						content: [{ type: "text", text: "[REDACTED]" }],
+						additionalContext: event.isError ? "Inspect the failed edit" : "Edit reviewed",
+					};
+				}, "tool_result"),
+			);
+			const tool: AgentTool = {
+				name: "apply_patch",
+				label: "Edit",
+				description: "Retained patch result",
+				parameters: Type.Object({}),
+				execute: async () => {
+					if (outcome === "throw") throw new Error("Patch failed");
+					return {
+						content: [{ type: "text", text: "secret" }],
+						isError: outcome === "error",
+					};
+				},
+			};
+			const delivered: string[] = [];
+			const execution = new HookToolWrapper(tool, runner).execute("retained-result", {}, undefined, undefined, {
+				sessionManager: SessionManager.inMemory(),
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				addAdditionalContext: context => delivered.push(context),
+			});
+			if (outcome === "throw") {
+				await expect(execution).rejects.toThrow("Patch failed");
+			} else {
+				const result = await execution;
+				expect(result.content).toEqual([{ type: "text", text: "[REDACTED]" }]);
+				expect(result.isError === true).toBe(outcome === "error");
+			}
+			expect(delivered).toEqual([outcome === "success" ? "Edit reviewed" : "Inspect the failed edit"]);
+		},
+	);
 
 	it("executes the tool with a non-blocking hook's replacement input", async () => {
 		const executed: unknown[] = [];

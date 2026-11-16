@@ -8,7 +8,7 @@ import {
 	isNonBlankContext,
 } from "@oh-my-pi/pi-agent-core";
 import type { Static, TSchema } from "@oh-my-pi/pi-ai";
-import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
+import { normalizeToolEventInput, resolveToolEventInput, resolveToolEventName } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { HookRunner } from "./runner";
 import type { ToolCallEventResult, ToolResultEventResult } from "./types";
@@ -47,6 +47,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 	) {
 		// Emit tool_call event - hooks can block execution or revise the input the tool runs with.
 		// If hook errors/times out, block by default (fail-safe)
+		const toolName = resolveToolEventName(this.tool.name);
 		let effectiveParams = params;
 		// Forwarded only after the tool returns a non-error result, matching the
 		// extension wrapper and the agent loop.
@@ -55,10 +56,10 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 			try {
 				const callResult = (await this.hookRunner.emitToolCall({
 					type: "tool_call",
-					toolName: this.tool.name,
+					toolName,
 					toolCallId,
 					input: normalizeToolEventInput(
-						this.tool.name,
+						toolName,
 						resolveToolEventInput(this.tool, params as Record<string, unknown>),
 					),
 				})) as ToolCallEventResult | undefined;
@@ -94,10 +95,10 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 			if (this.hookRunner.hasHandlers("tool_result")) {
 				resultResult = (await this.hookRunner.emit({
 					type: "tool_result",
-					toolName: this.tool.name,
+					toolName,
 					toolCallId,
 					input: normalizeToolEventInput(
-						this.tool.name,
+						toolName,
 						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
 					),
 					content: result.content,
@@ -130,10 +131,10 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 			if (this.hookRunner.hasHandlers("tool_result")) {
 				const failure = (await this.hookRunner.emit({
 					type: "tool_result",
-					toolName: this.tool.name,
+					toolName,
 					toolCallId,
 					input: normalizeToolEventInput(
-						this.tool.name,
+						toolName,
 						resolveToolEventInput(this.tool, effectiveParams as Record<string, unknown>),
 					),
 					content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],

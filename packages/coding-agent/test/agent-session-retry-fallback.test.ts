@@ -644,6 +644,8 @@ describe("AgentSession retry fallback", () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
 		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const approvalEvents: string[] = [];
+		const reviewedResult = "Fallback patch reviewed by the edit hook";
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
@@ -662,6 +664,21 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			model: primaryModel,
 			toolNames: ["edit"],
+			extensions: [
+				pi => {
+					pi.on("tool_result", event => {
+						if (event.toolName === "edit" && event.toolCallId === "fallback-patch") {
+							return { content: [{ type: "text", text: reviewedResult }] };
+						}
+					});
+					pi.on("tool_approval_requested", event => {
+						if (event.toolName === "edit") approvalEvents.push(event.type);
+					});
+					pi.on("tool_approval_resolved", event => {
+						if (event.toolName === "edit") approvalEvents.push(event.type);
+					});
+				},
+			],
 			disableExtensionDiscovery: true,
 			skills: [],
 			contextFiles: [],
@@ -735,12 +752,22 @@ describe("AgentSession retry fallback", () => {
 			),
 		).toBe(false);
 		expect(toolResults.every(result => !result.isError)).toBe(true);
+		expect(toolResults.find(result => result.toolCallId === "fallback-patch")?.content).toEqual([
+			{ type: "text", text: reviewedResult },
+		]);
 
 		await session.reconcileBuiltinTools();
 		expect(session.getActiveToolNames()).toContain("apply_patch");
-		cfgToolsApproval.set(settings, { edit: "deny" });
 		const applyPatchTool = session.getToolByName("apply_patch");
 		if (!applyPatchTool) throw new Error("Expected the retained apply_patch tool");
+		cfgToolsApproval.set(settings, { edit: "prompt" });
+		await expect(
+			applyPatchTool.execute("prompted-patch", {
+				input: "*** Begin Patch\n*** Delete File: retry-fallback-edit.txt\n*** End Patch",
+			}),
+		).rejects.toThrow("requires approval");
+		expect(approvalEvents).toEqual(["tool_approval_requested", "tool_approval_resolved"]);
+		cfgToolsApproval.set(settings, { edit: "deny" });
 		await expect(
 			applyPatchTool.execute("denied-patch", {
 				input: "*** Begin Patch\n*** Delete File: retry-fallback-edit.txt\n*** End Patch",
@@ -760,6 +787,92 @@ describe("AgentSession retry fallback", () => {
 		expect(session.getActiveToolNames()).not.toContain("edit");
 		expect(session.getActiveToolNames()).not.toContain("apply_patch");
 	});
+
+	it.each(["model", "direct"] as const)(
+		"blocks retained apply_patch through an edit-filtered protected-path hook for %s calls",
+		async dispatch => {
+			const primaryModel = getBundledModel("openai", "gpt-4o-mini");
+			const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+			const target = path.join(tempDir.path(), "protected-path.txt");
+			await Bun.write(target, "protected\n");
+			const patch = {
+				input: "*** Begin Patch\n*** Update File: protected-path.txt\n@@\n-protected\n+modified\n*** End Patch",
+			};
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+				"edit.modelVariants": { [primaryModel.id]: "apply_patch", [fallbackModel.id]: "hashline" },
+				"tools.xdev": false,
+				"lsp.enabled": false,
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			({ session } = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				authStorage,
+				modelRegistry,
+				settings,
+				model: primaryModel,
+				toolNames: ["edit"],
+				extensions: [
+					pi => {
+						pi.on("tool_call", event => {
+							if (event.toolName !== "edit") return;
+							if (typeof event.input.input === "string" && event.input.input.includes("protected-path.txt")) {
+								return { block: true, reason: "Protected path blocked by edit hook" };
+							}
+						});
+					},
+				],
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				cacheWarming: false,
+			}));
+			const mock = createMockModel();
+			let fallbackRequests = 0;
+			session.agent.streamFn = (model, context, options) => {
+				mock.push(
+					model.id === primaryModel.id
+						? { throw: "overloaded_error: provider returned error 503" }
+						: dispatch === "model" && fallbackRequests++ === 0
+							? { content: [{ type: "toolCall", id: "protected-patch", name: "apply_patch", arguments: patch }] }
+							: { content: ["Finished on the fallback"] },
+				);
+				return mock.stream(model, context, options);
+			};
+			await session.prompt("Continue on the fallback without modifying protected files");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallbackModel.id);
+			const retained = session.getToolByName("apply_patch");
+			if (!retained) throw new Error("Expected the retained apply_patch tool");
+			let directError: unknown;
+			if (dispatch === "direct") {
+				try {
+					await retained.execute("protected-patch", patch);
+				} catch (error) {
+					directError = error;
+				}
+			}
+			expect(await Bun.file(target).text()).toBe("protected\n");
+			if (dispatch === "model") {
+				const result = session.messages.find(message => message.role === "toolResult");
+				expect(result?.role === "toolResult" && result.isError).toBe(true);
+				expect(result?.role === "toolResult" && result.toolName).toBe("apply_patch");
+				expect(JSON.stringify(result)).toContain("Protected path blocked by edit hook");
+			} else {
+				expect(String(directError)).toContain("Protected path blocked by edit hook");
+			}
+		},
+	);
 
 	// Re-rendering the prompt on a fallback hop changes the Model line and every byte after it, so
 	// Anthropic rewrites the whole cached conversation once per hop and again on the restore.

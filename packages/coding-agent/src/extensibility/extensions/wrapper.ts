@@ -27,7 +27,7 @@ import { getApprovalGrants } from "../../tools/approval-cache";
 import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
-import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
+import { normalizeToolEventInput, resolveToolEventInput, resolveToolEventName } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
@@ -262,6 +262,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			(context as LoopAwareToolContext)[LOOP_DISPATCH_CONTEXT] = true;
 		}
 		const loopEmittedToolCall = this.runner.consumeToolCallEmitted(toolCallId, this.tool.name);
+		const toolName = resolveToolEventName(this.tool.name);
 		// Resolve approval settings up front. A `deny` on the original input short-circuits before the
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
@@ -308,10 +309,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				const callResult = (await this.runner.emitToolCall(
 					{
 						type: "tool_call",
-						toolName: this.tool.name,
+						toolName,
 						toolCallId,
 						input: normalizeToolEventInput(
-							this.tool.name,
+							toolName,
 							resolveToolEventInput(this.tool, toolEventArgs(params, context)),
 						),
 					},
@@ -424,7 +425,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				await this.runner.emit({
 					type: "tool_approval_requested",
 					sessionId,
-					toolName: this.tool.name,
+					toolName,
 					toolCallId,
 					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
 					approvalMode,
@@ -436,7 +437,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				await this.runner.emit({
 					type: "tool_approval_resolved",
 					sessionId,
-					toolName: this.tool.name,
+					toolName,
 					toolCallId,
 					approved,
 					...(reason ? { reason } : {}),
@@ -541,10 +542,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const resultResult = await this.runner.emitToolResult(
 				{
 					type: "tool_result",
-					toolName: this.tool.name,
+					toolName,
 					toolCallId,
 					input: normalizeToolEventInput(
-						this.tool.name,
+						toolName,
 						resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
 					),
 					content: result.content,

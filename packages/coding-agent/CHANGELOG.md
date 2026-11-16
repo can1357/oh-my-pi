@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `Tool apply_patch not found` after a retry fallback from a model that edits with `apply_patch` (via `edit.modelVariants`) to one that uses another edit mode: the session now keeps an `apply_patch` tool beside the new mode's `edit` tool, so the fallback model can repeat the patch calls in its transcript ([#19480](https://github.com/can1357/oh-my-pi/pull/19480) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `Tool apply_patch not found` after a retry fallback switched to a model with another edit mode ([#19480](https://github.com/can1357/oh-my-pi/pull/19480) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.21.0] - 2026-11-16
 
