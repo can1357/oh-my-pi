@@ -244,6 +244,36 @@ export const cfgMnemopiEmbeddingApiKey = register({
 	},
 });
 
+export const cfgMnemopiEmbeddingQueryPrefix = register({
+	id: "mnemopi.embeddingQueryPrefix",
+	type: "string",
+	default: undefined,
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Embedding Query Prefix",
+		description:
+			"Text prepended to recall queries before embedding, for instruction-tuned embedders (Qwen3-Embedding, E5); stored memories are embedded unchanged",
+		condition: "mnemopiActive",
+	},
+});
+
+export const cfgMnemopiEmbeddingInputType = register({
+	id: "mnemopi.embeddingInputType",
+	type: "boolean",
+	default: false,
+	// Without the env term the `false` default would mask Mnemopi's own `MNEMOPI_EMBEDDING_INPUT_TYPE` fallback.
+	env: { name: "MNEMOPI_EMBEDDING_INPUT_TYPE", fallback: true },
+	ui: {
+		tab: "memory",
+		group: "Mnemopi",
+		label: "Mnemopi Embedding Input Type",
+		description:
+			"Send input_type (query for recall, passage for stored memories) with embedding API requests; NVIDIA NIM asymmetric embedders require it",
+		condition: "mnemopiActive",
+	},
+});
+
 export const cfgMnemopiLlmMode = register({
 	id: "mnemopi.llmMode",
 	type: "enum",
