@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `apply_patch` edit tool description calling `apply_patch` a shell command and forbidding absolute paths, which sent Codex models to a nonexistent `apply_patch` in `bash` whenever they edited outside the session cwd; it now says the patch is the tool's input and that absolute paths reach files outside the cwd ([#19325](https://github.com/can1357/oh-my-pi/issues/19325), [#19468](https://github.com/can1357/oh-my-pi/pull/19468) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
