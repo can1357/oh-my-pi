@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/sandbox`, which shows the sandbox omp runs in (nono, Docker, Podman, Kubernetes or an unnamed kernel sandbox), whether the working directory and home are writable, the network access and the kernel facts behind it, in a panel you step through; `/sandbox <section>` opens one section (see `docs/sandbox.md`) ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
+### Fixed
+
+- Shortened home paths consistently in `/sandbox` Markdown sections in text and terminal reports ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes

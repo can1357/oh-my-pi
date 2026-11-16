@@ -56,6 +56,7 @@ import { continuesConversation } from "../utils/conversation-position";
 import { ContextViewer } from "@oh-my-pi/pi-tui/overlays/context-viewer";
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
+import { type ReportSectionsInput, SectionsReport } from "@oh-my-pi/pi-tui/overlays/sections-report";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildSessionContextView } from "../../session/context-view";
@@ -270,20 +271,29 @@ export class CommandController {
 	 * arrow/page keys and the wheel, so the main screen is never touched and
 	 * Esc returns to it as it was. Natively it is a focused sheet like
 	 * `/usage`, its body scrolled by the terminal once it is long, closed by
-	 * Esc or Close.
+	 * Esc or Close. A report with `sections` takes the keys that step through
+	 * them, so in text mode it is always the full-screen page.
 	 */
-	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+	showCommandReport(options: {
+		title: string;
+		head?: TspText;
+		body: Component;
+		sections?: ReportSectionsInput;
+	}): void {
 		this.#clearReport();
 		this.#closeReportSheet();
 		const terminal = this.ctx.ui.terminal;
 		const inline = this.ctx.commandReportRows() ?? terminal.rows;
 		let fullScreen = false;
-		const report = new ReportPanel({
+		const panelOptions = {
 			...options,
 			closeKey: appKey(this.ctx.keybindings, "app.interrupt"),
 			onClose: () => this.#closeReportSheet(),
 			maxRows: () => (fullScreen ? terminal.rows : this.ctx.commandReportRows()),
-		});
+		};
+		const report = options.sections
+			? new SectionsReport(options.sections, panelOptions)
+			: new ReportPanel(panelOptions);
 		if (isNativeRendering()) {
 			report.holdFocus();
 			this.#reportSheet = {
@@ -291,7 +301,7 @@ export class CommandController {
 				component: report,
 			};
 			this.ctx.ui.setFocus(report);
-		} else if (report.heightAt(terminal.columns) > inline) {
+		} else if (options.sections || report.heightAt(terminal.columns) > inline) {
 			fullScreen = true;
 			report.holdFocus();
 			this.#showFullscreenSheet(report);

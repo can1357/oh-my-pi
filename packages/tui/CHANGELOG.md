@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `SectionsReport`, a report panel that shows a summary over a list of sections: Up/Down picks a section, Enter opens it in place and Esc returns to the list ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
+### Fixed
+
+- Reset native section-report scrolling when switching between summary and section views without resetting on selection or filter changes ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
