@@ -57,7 +57,8 @@ provider "helmcode" {
 	// runtime resolve the same ladder, and no class-level host ladder (which
 	// sends `xhigh`, a value Helmcode does not document) applies. `/v1/models`
 	// carries no capability data, so a discovered id with no bundled row, no
-	// vendor row, and no ladder below arrives as non-reasoning.
+	// vendor row, and no ladder below gets only the provisional, probe-verified
+	// ladder.
 	thinking-mode "effort"
 	// residue: taxonomy extracts no revision from Helmcode's dotless ids.
 	// `minimal` through `max` only steer this adaptive model; `none` is the
