@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -294,6 +294,101 @@ describe("fallback-only thinking entries", () => {
 		}
 
 		const reopenedManager = await SessionManager.open(target, path.join(tempDir, "reopen-live-switch"));
+		expect(reopenedManager.buildSessionContext().configuredThinkingLevel).toBe(Effort.High);
+		const reopenedSettings = Settings.isolated({
+			defaultThinkingLevel: Effort.Low,
+			modelRoles: { default: PRIMARY },
+		});
+		const { session: reopened } = await createAgentSession(sessionOptions(reopenedManager, reopenedSettings));
+		try {
+			expect(reopened.configuredThinkingLevel()).toBe(Effort.High);
+		} finally {
+			await reopened.dispose();
+		}
+	});
+
+	test("persists an unchanged effort explicitly picked after a live fallback", async () => {
+		freshDir();
+		const sessionManager = SessionManager.inMemory(tempDir);
+		sessionManager.appendModelChange(PRIMARY);
+		const settings = Settings.isolated({
+			defaultThinkingLevel: Effort.Low,
+			modelRoles: { default: PRIMARY },
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		const options = sessionOptions(sessionManager, settings);
+		const primary = options.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const fallback = options.modelRegistry.find("openai-codex", "gpt-5.6-sol");
+		if (!primary || !fallback) throw new Error("Expected bundled fallback test models");
+		options.authStorage.keys.setRuntime("openai-codex", "test-key");
+		settings.setModelRole("default", PRIMARY);
+		cfgRetryFallbackChains.set(settings, { default: [`${fallback.provider}/${fallback.id}:high`] });
+
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			streamFn: (model, context, streamOptions) => {
+				if (model.provider === primary.provider && model.id === primary.id && primaryAttempts === 0) {
+					primaryAttempts += 1;
+					mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+				} else {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				}
+				return mock.stream(model, context, streamOptions);
+			},
+		});
+		const live = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry: options.modelRegistry,
+			thinkingLevel: Effort.Medium,
+		});
+		let target: string;
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			await live.prompt("Trigger the high-effort fallback");
+			await live.waitForIdle();
+			expect(live.model?.id).toBe(fallback.id);
+			expect(live.configuredThinkingLevel()).toBe(Effort.High);
+
+			// High is already in effect from the hop, but picking it explicitly must
+			// adopt it as a saved session choice rather than leave the hop's entry as
+			// the only thinking record.
+			live.setThinkingLevel(Effort.High);
+			const retained = sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "thinking_level_change")
+				.at(-1);
+			expect(retained?.retryFallback).toBe(false);
+			expect(sessionManager.buildSessionContext().configuredThinkingLevel).toBe(Effort.High);
+
+			// The cooldown restore to the primary must keep the adopted level instead
+			// of treating it as the untouched fallback level and reverting to medium.
+			now += 240;
+			await live.prompt("Cooldown expired: restore the primary");
+			await live.waitForIdle();
+			expect(live.model?.id).toBe(primary.id);
+			expect(live.configuredThinkingLevel()).toBe(Effort.High);
+			vi.restoreAllMocks();
+			target = await writeTranscript(sessionManager);
+		} finally {
+			vi.restoreAllMocks();
+			await live.dispose();
+		}
+
+		const reopenedManager = await SessionManager.open(target, path.join(tempDir, "reopen-live-pick"));
 		expect(reopenedManager.buildSessionContext().configuredThinkingLevel).toBe(Effort.High);
 		const reopenedSettings = Settings.isolated({
 			defaultThinkingLevel: Effort.Low,

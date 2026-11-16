@@ -1894,6 +1894,16 @@ export class TurnRecovery {
 		this.#fallbackRoutedFor = undefined;
 	}
 
+	/**
+	 * Records a thinking level explicitly picked while a fallback is active.
+	 * The cooldown restore otherwise treats a pick equal to the level the hop
+	 * applied as untouched and reverts to the pre-fallback level; treating the
+	 * pick as the level to restore keeps it, matching a pick of any other level.
+	 */
+	noteExplicitThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
+		if (this.#activeRetryFallback) this.#activeRetryFallback.originalThinkingLevel = level;
+	}
+
 	/** Checks whether a fallback selector remains in cooldown. */
 	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean {
 		return this.#host.modelRegistry.isSelectorSuppressed(selector.raw);

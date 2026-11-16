@@ -12693,13 +12693,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Selects the session thinking level and optionally persists it as the default. */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#prewalk.releaseHandoff();
-		this.#models.setThinkingLevel(level, persist);
+		// An explicit pick is a saved choice even when it matches the level a
+		// retry-fallback hop (or an unsaved default) left in effect.
+		this.#models.setThinkingLevel(level, persist, { recordUnchanged: true });
+		this.#recovery.noteExplicitThinkingLevel(this.configuredThinkingLevel());
 	}
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		this.#prewalk.releaseHandoff();
-		return this.#models.cycleThinkingLevel();
+		const next = this.#models.cycleThinkingLevel();
+		if (next !== undefined) this.#recovery.noteExplicitThinkingLevel(this.configuredThinkingLevel());
+		return next;
 	}
 
 	/** Lists all selectable effort selectors for the active model. */

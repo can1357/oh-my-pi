@@ -45,6 +45,7 @@ import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
+import { resolveSessionThinking } from "./session-context";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -437,7 +438,7 @@ export class ModelControls {
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
 		await this.setModel(entry.model, entry.role);
 		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
-			this.setThinkingLevel(entry.thinkingLevel);
+			this.setThinkingLevel(entry.thinkingLevel, false, { recordUnchanged: true });
 		}
 	}
 
@@ -504,8 +505,12 @@ export class ModelControls {
 		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
-		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		// Apply the scoped model's configured thinking level, preserving auto. A
+		// scoped level is a configured choice for that model, so record it even when
+		// it matches the effort a fallback hop left in effect.
+		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel, false, {
+			recordUnchanged: !this.#autoThinking && next.thinkingLevel !== undefined,
+		});
 		await this.#host.syncAfterModelChange(previousEditMode);
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
@@ -562,10 +567,32 @@ export class ModelControls {
 	}
 
 	/**
+	 * Whether resume would already restore this selection from a saved entry.
+	 * The level in effect can come from a retry-fallback hop or an unsaved
+	 * default instead, in which case {@link resolveSessionThinking} reports a
+	 * different (or no) saved selection and an explicit pick of the same level
+	 * still needs its own receipt.
+	 */
+	#hasSavedThinkingSelection(
+		thinkingLevel: ThinkingLevel | undefined,
+		configured: ConfiguredThinkingLevel | undefined,
+	): boolean {
+		const resolved = resolveSessionThinking(this.#host.sessionManager.getBranch());
+		return (
+			resolved.hasSavedThinkingEntry &&
+			resolved.thinkingLevel === (thinkingLevel ?? "off") &&
+			resolved.configuredThinkingLevel === configured
+		);
+	}
+
+	/**
 	 * Set the thinking level. `auto` enables per-turn classification. Entering
 	 * auto writes its provisional level plus `configured: "auto"` immediately,
 	 * giving external readers an authoritative selection receipt before the next
 	 * user turn. Later classifications persist only changed concrete resolutions.
+	 * `recordUnchanged` marks an explicit pick: it writes that receipt even when
+	 * the level is already in effect, unless a saved entry already restores the
+	 * same selection on resume.
 	 */
 	setThinkingLevel(
 		level: ConfiguredThinkingLevel | undefined,
@@ -591,7 +618,10 @@ export class ModelControls {
 				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
-			if (isChanging || options?.recordUnchanged === true) {
+			if (
+				isChanging ||
+				(options?.recordUnchanged === true && !this.#hasSavedThinkingSelection(provisional, AUTO_THINKING))
+			) {
 				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, {
 					retryFallback: options?.retryFallback ?? false,
 				});
@@ -620,7 +650,10 @@ export class ModelControls {
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
 		}
-		if (isChanging || options?.recordUnchanged === true) {
+		if (
+			isChanging ||
+			(options?.recordUnchanged === true && !this.#hasSavedThinkingSelection(effectiveLevel, effectiveLevel))
+		) {
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, {
 				retryFallback: options?.retryFallback ?? false,
 			});
