@@ -112,7 +112,10 @@ export class LinkMapSubmenu extends Container {
 		const layerOf = (set: string): string | undefined => this.#settings.shadowingLayer(LINK_MAP_PATH, set);
 		const entries = this.#entries();
 		const ignored = ignoredLinkMapKeys(entries);
-		const same = Object.keys(entries).filter(listed => !ignored.has(listed) && sharesLinkMapPrefix(key, listed));
+		const same = Object.keys(entries).filter(
+			listed =>
+				parseLinkTarget(entries[listed]) !== undefined && !ignored.has(listed) && sharesLinkMapPrefix(key, listed),
+		);
 		const set = [key, ...same].find(layerOf);
 		return set === undefined
 			? undefined
@@ -123,7 +126,10 @@ export class LinkMapSubmenu extends Container {
 	#duplicate(key: string): string | undefined {
 		const entries = this.#entries();
 		const ignored = ignoredLinkMapKeys(entries);
-		const same = Object.keys(entries).find(listed => !ignored.has(listed) && sharesLinkMapPrefix(key, listed));
+		const same = Object.keys(entries).find(
+			listed =>
+				parseLinkTarget(entries[listed]) !== undefined && !ignored.has(listed) && sharesLinkMapPrefix(key, listed),
+		);
 		return same ? sanitizeDisplayLine(`${same} is already the entry for that prefix.`) : undefined;
 	}
 
