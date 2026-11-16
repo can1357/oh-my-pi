@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+
 ## [18.20.3] - 2026-11-16
 
 ### Added
