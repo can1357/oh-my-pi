@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `buttons`, `menu` and `doc` kinds (`TspButtonsProps`, `TspMenuProps` with `TspMenuItem`, `TspDocProps` with `TspDocComment`); `doc` is a text kind. Events: a `doc`'s `change` (`text`), `comment`, `uncomment` and `editing`, and `checked` on a menu row's `action`
+
 ## [18.18.6] - 2026-11-09
 
 ### Added

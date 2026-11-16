@@ -71,6 +71,9 @@ export const TSP_KINDS = [
 	"editor",
 	"input",
 	"button",
+	"buttons",
+	"menu",
+	"doc",
 	"status",
 	"seg",
 	"overlay",
@@ -252,6 +255,31 @@ export interface TspMarkdownProps {
 	stream?: boolean;
 	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
 	marks?: readonly TspSpan[];
+}
+/** A comment drawn on a {@link TspDocProps} document, anchored to a quote of its source. */
+export interface TspDocComment {
+	/** The program's comment id; `comment`/`uncomment` events name it. */
+	id: string;
+	/** The commented source text. */
+	quote: string;
+	/** UTF-16 offset of the quote's first char in `text`; the first occurrence of `quote` when it doesn't match there. */
+	at?: number;
+	note: string;
+}
+/**
+ * A rich Markdown document the user reads, selects, edits in place (double-click, `edit`) and comments on
+ * (`comment`): edits arrive as `change` events with the full source, comments as `comment`/`uncomment`.
+ */
+export interface TspDocProps {
+	/** Markdown source in omp's dialect; the document's own current source is a no-op. */
+	text?: string;
+	/** Double-click enters in-place editing; Esc or a press outside leaves it. */
+	edit?: boolean;
+	/** A still, non-empty selection offers a Comment bubble. */
+	comment?: boolean;
+	comments?: readonly TspDocComment[];
+	/** Scroll heading number `heading` (0-based, document order, all levels) to the top; each new `n` scrolls again. */
+	jump?: { heading: number; n: number };
 }
 /** One marked line of a {@link TspCodeProps.marks}. */
 export interface TspCodeMark {
@@ -473,6 +501,63 @@ export interface TspItemProps {
 	hint?: readonly string[];
 	disabled?: boolean;
 	value?: TspText;
+}
+/**
+ * One row of a {@link TspMenuProps} menu: `"-"` a separator, `{ header }` a dim section title, an action id
+ * (labeled from it), or an item sending its `id` as an `action` event's `act`.
+ */
+export type TspMenuItem =
+	| string
+	| { header: string }
+	| {
+			id: string;
+			label?: string;
+			icon?: string;
+			/** Shortcut keys drawn at the row's right (display only). */
+			keys?: string | readonly string[];
+			/** A second line under the label (a rich row). */
+			detail?: string;
+			/** A check row, checked while true. */
+			checked?: boolean;
+			/** A radio row of this group. */
+			radio?: string;
+			/** Dimmed, not choosable; a string is the reason. */
+			disabled?: boolean | string;
+			danger?: boolean;
+			/** A submenu; the row itself sends nothing. */
+			items?: readonly TspMenuItem[];
+	  };
+/**
+ * A button opening a dropdown of commands. Choosing a row sends `action` (`act` = the row's id, `checked` for
+ * check/radio rows); opening or closing it sends `toggle` with `open`. As the last child of a split
+ * {@link TspButtonsProps} group it draws as the split's menu part. Pointer-only: it never takes focus.
+ */
+export interface TspMenuProps {
+	items?: readonly TspMenuItem[];
+	/** The trigger's label; without `text` and `icon` the trigger is a square … button. */
+	text?: string;
+	icon?: string;
+	trigger?: "default" | "quiet" | "primary";
+	/** A chevron after the label. */
+	caret?: boolean;
+	size?: "sm" | "md";
+	variant?: "default" | "dense";
+	/** Whether the menu shows; a change wins over the user's local open/close. */
+	open?: boolean;
+	/** The highlighted row's id (the program's keyboard cursor). */
+	active?: string;
+	/** Which trigger edge the menu lines up with. */
+	align?: "start" | "end";
+	/** The trigger is dimmed and does not open; a string is the reason. */
+	disabled?: boolean | string;
+}
+/** `button` children drawn as one control: joined, an action with its menu part (`split`), or a toolbar well. */
+export interface TspButtonsProps {
+	variant?: "joined" | "split" | "toolbar";
+	/** The children's size, winning over their own. */
+	size?: "sm" | "md";
+	/** Accessible name of the group. */
+	label?: string;
 }
 export interface TspTabsProps {
 	items: readonly { id: string; label: TspText }[];
@@ -1073,6 +1158,9 @@ export interface TspPropsByKind {
 	editor: TspEditorProps;
 	input: TspInputProps;
 	button: TspButtonProps;
+	buttons: TspButtonsProps;
+	menu: TspMenuProps;
+	doc: TspDocProps;
 	status: TspStatusProps;
 	seg: TspSegProps;
 	overlay: TspOverlayProps;
@@ -1107,7 +1195,7 @@ export type TspPropNode = {
 }[TspKind];
 
 /** Kinds whose primary text the `text` and `splice` ops address (the `text` prop). */
-export const TSP_TEXT_KINDS = ["text", "md", "code", "ansi", "math", "editor", "input", "shimmer"] as const;
+export const TSP_TEXT_KINDS = ["text", "md", "code", "ansi", "math", "editor", "input", "shimmer", "doc"] as const;
 
 /** A node on the wire. */
 export type TspNode = {
@@ -1202,7 +1290,16 @@ export type TspEvent =
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
 	| { ev: "select"; sf: string; id: string; item: string }
 	| { ev: "activate"; sf: string; id: string; item: string }
-	| { ev: "action"; sf: string; id: string; act: string; value?: string; mods?: readonly string[] }
+	/** A click action; a `menu` check or radio row adds its new `checked` state. */
+	| {
+			ev: "action";
+			sf: string;
+			id: string;
+			act: string;
+			value?: string;
+			mods?: readonly string[];
+			checked?: boolean;
+	  }
 	/** A typed value changed by pointer (prefs rows, picker toggles); `null` resets to the default. */
 	| {
 			ev: "change";
@@ -1211,6 +1308,18 @@ export type TspEvent =
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
 	  }
+	/** The user edited a `doc` (~300 ms after typing pauses, and when editing ends): `text` is its full new source. */
+	| { ev: "change"; sf: string; id: string; text: string }
+	/**
+	 * A comment on a `doc`: a new one on `quote` (`at` its UTF-16 offset in the source the user saw), or the
+	 * edited `note` of existing comment `comment`.
+	 */
+	| { ev: "comment"; sf: string; id: string; quote: string; at: number; note: string }
+	| { ev: "comment"; sf: string; id: string; comment: string; note: string }
+	/** Comment `comment` of a `doc` deleted. */
+	| { ev: "uncomment"; sf: string; id: string; comment: string }
+	/** In-place editing of a `doc` started (`on`) or ended. */
+	| { ev: "editing"; sf: string; id: string; on: boolean }
 	/**
 	 * An edit over the terminal's selection in an `editor`/`input` node: replace
 	 * `[from, to)` with `text`, caret to `cursor` (UTF-16 offsets; `len` is the
