@@ -1,0 +1,3 @@
+reason = "When find's model search times out, return literal grep hits for grep_keywords instead of an error; user abort still cancels"
+upstream = "candidate"
+layer = 50
