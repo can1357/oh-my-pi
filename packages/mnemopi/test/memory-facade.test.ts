@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -118,6 +119,84 @@ describe("Mnemopi facade", () => {
 			db.close();
 			if (previousProactiveLinking === undefined) delete process.env.MNEMOPI_PROACTIVE_LINKING;
 			else process.env.MNEMOPI_PROACTIVE_LINKING = previousProactiveLinking;
+		}
+	});
+
+	it("reads a memory from an already-initialized bank opened read-only", async () => {
+		const dbPath = join(tempRoot(), "mnemopi.db");
+		const writer = new Mnemopi({ dbPath, noEmbeddings: true, reconcile: false });
+		let id = "";
+		try {
+			id = writer.remember("readonly bank note");
+			expect(writer.conn.query("SELECT id FROM memory_embedding_generation").get()).toEqual({ id: 1 });
+			await writer.flushExtractions();
+		} finally {
+			writer.close();
+		}
+
+		const db = new Database(dbPath, { readonly: true });
+		const reader = new Mnemopi({ db, reconcile: false });
+		try {
+			expect(reader.get(id)).toMatchObject({ id, content: "readonly bank note" });
+			expect(reader.getStats()).toMatchObject({ total_memories: 1, mode: "beam" });
+		} finally {
+			reader.close();
+			db.close();
+		}
+	});
+
+	it("treats equivalent trigger formatting as current on a read-only open", () => {
+		const dbPath = join(tempRoot(), "mnemopi.db");
+		new Mnemopi({ dbPath, noEmbeddings: true, reconcile: false }).close();
+		const writable = new Database(dbPath);
+		try {
+			writable.run("DROP TRIGGER facts_ad");
+			writable.run(`create trigger facts_ad
+				after delete on facts begin
+				insert into fts_facts(fts_facts,rowid,subject,predicate,object)
+				values ('delete',old.rowid,old.subject,old.predicate,old.object);
+				end`);
+		} finally {
+			writable.close();
+		}
+
+		const db = new Database(dbPath, { readonly: true });
+		const reader = new Mnemopi({ db, reconcile: false });
+		try {
+			expect(reader.getStats()).toMatchObject({ total_memories: 0, mode: "beam" });
+		} finally {
+			reader.close();
+			db.close();
+		}
+	});
+
+	it("replaces a stale trigger on a writable reopen", () => {
+		const dbPath = join(tempRoot(), "mnemopi.db");
+		new Mnemopi({ dbPath, noEmbeddings: true, reconcile: false }).close();
+		const stale = new Database(dbPath);
+		try {
+			stale.run("DROP TRIGGER mem_emb_gen_ai");
+			stale.run(`CREATE TRIGGER mem_emb_gen_ai AFTER INSERT ON memory_embeddings BEGIN
+				SELECT 1;
+			END`);
+		} finally {
+			stale.close();
+		}
+
+		const memory = new Mnemopi({ dbPath, noEmbeddings: true, reconcile: false });
+		try {
+			const before = memory.conn
+				.query<{ gen: number }, []>("SELECT gen FROM memory_embedding_generation WHERE id = 1")
+				.get();
+			memory.conn.run(
+				"INSERT INTO memory_embeddings (memory_id, embedding_json, model) VALUES ('trigger-check', '[]', 'test')",
+			);
+			const after = memory.conn
+				.query<{ gen: number }, []>("SELECT gen FROM memory_embedding_generation WHERE id = 1")
+				.get();
+			expect(after?.gen).toBe((before?.gen ?? 0) + 1);
+		} finally {
+			memory.close();
 		}
 	});
 

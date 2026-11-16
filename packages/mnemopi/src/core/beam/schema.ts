@@ -21,6 +21,93 @@ function runAll(db: Database, statements: readonly string[]): void {
 	}
 }
 
+// INSERT and trigger DDL start a write even when the row or trigger is already current, which a read-only open rejects.
+function seedEmbeddingGeneration(db: Database): void {
+	const existing = db.query("SELECT 1 FROM memory_embedding_generation WHERE id = 1").get();
+	if (existing !== null) return;
+	db.run("INSERT OR IGNORE INTO memory_embedding_generation (id, gen) VALUES (1, 0)");
+}
+
+// Compare tokens case-insensitively and without formatting, but retain quoted literal bytes exactly.
+function canonicalTriggerSql(sql: string): string {
+	const tokens: string[] = [];
+	let index = 0;
+	while (index < sql.length) {
+		const char = sql[index] ?? "";
+		if (char === " " || char === "\n" || char === "\r" || char === "\t") {
+			index += 1;
+			continue;
+		}
+		if (char === "'") {
+			const literalStart = index;
+			index += 1;
+			while (index < sql.length) {
+				if (sql[index] !== "'") {
+					index += 1;
+					continue;
+				}
+				index += 1;
+				if (sql[index] === "'") {
+					index += 1;
+					continue;
+				}
+				break;
+			}
+			tokens.push(sql.slice(literalStart, index));
+			continue;
+		}
+		const code = char.charCodeAt(0);
+		if ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || char === "_") {
+			const wordStart = index;
+			index += 1;
+			while (index < sql.length) {
+				const wordCode = sql.charCodeAt(index);
+				if (
+					(wordCode >= 48 && wordCode <= 57) ||
+					(wordCode >= 65 && wordCode <= 90) ||
+					(wordCode >= 97 && wordCode <= 122) ||
+					sql[index] === "_"
+				) {
+					index += 1;
+					continue;
+				}
+				break;
+			}
+			tokens.push(sql.slice(wordStart, index).toLowerCase());
+			continue;
+		}
+		tokens.push(char);
+		index += 1;
+	}
+
+	let canonical = "";
+	for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+		if (tokens[tokenIndex] === "if" && tokens[tokenIndex + 1] === "not" && tokens[tokenIndex + 2] === "exists") {
+			tokenIndex += 2;
+			continue;
+		}
+		const token = tokens[tokenIndex] ?? "";
+		canonical += `${token.length}:${token}`;
+	}
+	return canonical;
+}
+
+function ensureTrigger(db: Database, name: string, createSql: string): void {
+	const row = db.query("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name) as {
+		sql: string | null;
+	} | null;
+	if (typeof row?.sql === "string" && canonicalTriggerSql(row.sql) === canonicalTriggerSql(createSql)) return;
+	if (!row) {
+		db.run(createSql);
+		return;
+	}
+	// A stale trigger must never disappear if creating its replacement fails.
+	db.transaction(() => {
+		db.run(`DROP TRIGGER IF EXISTS ${name}`);
+		db.run(createSql);
+	})();
+}
+
 export function initBeam(db: Database): void {
 	db.run(`
 		CREATE TABLE IF NOT EXISTS working_memory (
@@ -141,30 +228,50 @@ export function initBeam(db: Database): void {
 			content
 		)
 	`);
-	runAll(db, [
+	ensureTrigger(
+		db,
+		"em_ai",
 		`CREATE TRIGGER IF NOT EXISTS em_ai AFTER INSERT ON episodic_memory BEGIN
 			INSERT INTO fts_episodes(rowid, content) VALUES (new.rowid, new.content);
 		END`,
+	);
+	ensureTrigger(
+		db,
+		"em_ad",
 		`CREATE TRIGGER IF NOT EXISTS em_ad AFTER DELETE ON episodic_memory BEGIN
 			INSERT INTO fts_episodes(fts_episodes, rowid, content) VALUES ('delete', old.rowid, old.content);
 		END`,
+	);
+	ensureTrigger(
+		db,
+		"em_au",
 		`CREATE TRIGGER IF NOT EXISTS em_au AFTER UPDATE ON episodic_memory BEGIN
 			INSERT INTO fts_episodes(fts_episodes, rowid, content) VALUES ('delete', old.rowid, old.content);
 			INSERT INTO fts_episodes(rowid, content) VALUES (new.rowid, new.content);
 		END`,
-		"DROP TRIGGER IF EXISTS wm_ai",
+	);
+	ensureTrigger(
+		db,
+		"wm_ai",
 		`CREATE TRIGGER IF NOT EXISTS wm_ai AFTER INSERT ON working_memory BEGIN
 			INSERT INTO fts_working(id, content) VALUES (new.id, COALESCE(new.embed_text, new.content));
 		END`,
+	);
+	ensureTrigger(
+		db,
+		"wm_ad",
 		`CREATE TRIGGER IF NOT EXISTS wm_ad AFTER DELETE ON working_memory BEGIN
 			DELETE FROM fts_working WHERE id = old.id;
 		END`,
-		"DROP TRIGGER IF EXISTS wm_au",
+	);
+	ensureTrigger(
+		db,
+		"wm_au",
 		`CREATE TRIGGER IF NOT EXISTS wm_au AFTER UPDATE OF content, embed_text ON working_memory BEGIN
 			DELETE FROM fts_working WHERE id = old.id;
 			INSERT INTO fts_working(id, content) VALUES (new.id, COALESCE(new.embed_text, new.content));
 		END`,
-	]);
+	);
 
 	db.run(`
 		CREATE TABLE IF NOT EXISTS memoria_facts (
@@ -297,19 +404,31 @@ export function initBeam(db: Database): void {
 	]);
 	// Counts every embedding write from any connection, so a connection's decoded-vector cache can tell whether a
 	// peer's commit touched vectors (see embedding-cache.ts).
-	runAll(db, [
+	db.run(
 		"CREATE TABLE IF NOT EXISTS memory_embedding_generation (id INTEGER PRIMARY KEY CHECK (id = 1), gen INTEGER NOT NULL)",
-		"INSERT OR IGNORE INTO memory_embedding_generation (id, gen) VALUES (1, 0)",
+	);
+	seedEmbeddingGeneration(db);
+	ensureTrigger(
+		db,
+		"mem_emb_gen_ai",
 		`CREATE TRIGGER IF NOT EXISTS mem_emb_gen_ai AFTER INSERT ON memory_embeddings BEGIN
 			UPDATE memory_embedding_generation SET gen = gen + 1;
 		END`,
+	);
+	ensureTrigger(
+		db,
+		"mem_emb_gen_au",
 		`CREATE TRIGGER IF NOT EXISTS mem_emb_gen_au AFTER UPDATE ON memory_embeddings BEGIN
 			UPDATE memory_embedding_generation SET gen = gen + 1;
 		END`,
+	);
+	ensureTrigger(
+		db,
+		"mem_emb_gen_ad",
 		`CREATE TRIGGER IF NOT EXISTS mem_emb_gen_ad AFTER DELETE ON memory_embeddings BEGIN
 			UPDATE memory_embedding_generation SET gen = gen + 1;
 		END`,
-	]);
+	);
 
 	for (const table of ["working_memory", "episodic_memory"] as const) {
 		addColumnIfMissing(db, table, "author_id", "TEXT DEFAULT NULL");
@@ -343,6 +462,10 @@ export function initBeam(db: Database): void {
 	runAll(db, [
 		"CREATE INDEX IF NOT EXISTS idx_validations_memory ON memory_validations(memory_id)",
 		"CREATE INDEX IF NOT EXISTS idx_validations_validator ON memory_validations(validator)",
+	]);
+	ensureTrigger(
+		db,
+		"trim_validations_to_3",
 		`CREATE TRIGGER IF NOT EXISTS trim_validations_to_3
 		AFTER INSERT ON memory_validations
 		BEGIN
@@ -355,7 +478,7 @@ export function initBeam(db: Database): void {
 				LIMIT 3
 			  );
 		END`,
-	]);
+	);
 
 	db.run(`
 		CREATE TABLE IF NOT EXISTS facts (
@@ -380,16 +503,22 @@ export function initBeam(db: Database): void {
 			subject, predicate, object, content='facts'
 		)
 	`);
-	runAll(db, [
+	ensureTrigger(
+		db,
+		"facts_ai",
 		`CREATE TRIGGER IF NOT EXISTS facts_ai AFTER INSERT ON facts BEGIN
 			INSERT INTO fts_facts(rowid, subject, predicate, object)
 			VALUES (new.rowid, new.subject, new.predicate, new.object);
 		END`,
+	);
+	ensureTrigger(
+		db,
+		"facts_ad",
 		`CREATE TRIGGER IF NOT EXISTS facts_ad AFTER DELETE ON facts BEGIN
 			INSERT INTO fts_facts(fts_facts, rowid, subject, predicate, object)
 			VALUES ('delete', old.rowid, old.subject, old.predicate, old.object);
 		END`,
-	]);
+	);
 
 	for (const table of ["working_memory", "episodic_memory"] as const) {
 		addColumnIfMissing(db, table, "event_date", "TEXT DEFAULT NULL");
