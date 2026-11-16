@@ -5,6 +5,7 @@
 ### Added
 
 - Added `JudgmentResult.cached`, set when every answer came from an answer cache and no provider request was made ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
+- Added parallel, persistent thinking-capability probes for unknown models, including alternate effort and token-budget request formats.
 
 ## [18.20.3] - 2026-11-16
 
