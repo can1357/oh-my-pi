@@ -1,12 +1,8 @@
-// Command Code Provider API deployment contract. Model capabilities and effort
-// ladders follow command-code@1.67.0. The thinking-efforts below reproduce that
-// bundle's effort registry exactly, including the Muse Spark ids it now lists.
-// An id that 1.67.0 serves without an effort dial has no ladder here on
-// purpose, not by oversight (`modelSupportsReasoningEffort` is false for it in
-// that bundle). The one exception is `claude-sonnet-5-5`: served since
-// 2026-09-29 but not yet in the command-code@1.67.0 registry, so its ladder
-// and image input come from Anthropic's first-party catalog. Its price follows
-// command-code@1.88.5 (see the rate table).
+// Command Code deployment policy. Legacy rows retain the command-code@1.67.0
+// census; later corrections cite their provider source below.
+// Newly documented capabilities and prices follow the public client catalog:
+// https://api.commandcode.ai/provider/v1/models?view=client
+// Reviewed catalogVersion 846b2b170b58378cdf0e7f82e310cd512aa7cbad1b8791b2e704665411109678.
 provider "commandcode" {
 	default-model "claude-sonnet-5"
 	env "COMMAND_CODE_API_KEY" "COMMANDCODE_API_KEY"
@@ -320,6 +316,14 @@ provider "commandcode" {
 			cache-read 0.5
 			cache-write 6.25
 		}
+		long-context-window-uncapped #true
+		long-context-cost {
+			input-threshold 272000
+			input 10
+			output 45
+			cache-read 1
+			cache-write 12.5
+		}
 	}
 	models "gpt-5.6-terra" {
 		cost-patch {
@@ -328,6 +332,14 @@ provider "commandcode" {
 			cache-read 0.2
 			cache-write 2.5
 		}
+		long-context-window-uncapped #true
+		long-context-cost {
+			input-threshold 272000
+			input 4
+			output 18
+			cache-read 0.4
+			cache-write 5
+		}
 	}
 	models "gpt-5.6-luna" {
 		cost-patch {
@@ -335,6 +347,14 @@ provider "commandcode" {
 			output 1.2
 			cache-read 0.02
 			cache-write 0.25
+		}
+		long-context-window-uncapped #true
+		long-context-cost {
+			input-threshold 272000
+			input 0.4
+			output 1.8
+			cache-read 0.04
+			cache-write 0.5
 		}
 	}
 	models "gpt-5.5" {
@@ -353,12 +373,12 @@ provider "commandcode" {
 			cache-write 0.0
 		}
 	}
-	// Restate the 64K provider output cap beside the openai class's GPT-5.4
-	// window patch, or the class rule wins the whole limits axis.
+	// The deployment advertises 400K; retain its 64K output cap beside the
+	// host-specific window so the generic OpenAI 1M correction cannot expand it.
 	class "openai" {
 		models "gpt-5.4" {
 			limits-patch {
-				context-window 1000000
+				context-window 400000
 				max-tokens 65536
 			}
 		}
@@ -648,6 +668,13 @@ provider "commandcode" {
 			cache-read 0.1
 			cache-write 0.0
 		}
+		long-context-cost {
+			input-threshold 256000
+			input 2
+			output 6
+			cache-read 0.2
+			cache-write 0
+		}
 	}
 	models "stepfun/Step-3.7-Flash" {
 		cost-patch {
@@ -814,11 +841,10 @@ provider "commandcode" {
 	// tier's `maxContext`, except Haiku 5.5, whose 5x tier above 100K comes from
 	// the classes/anthropic.kdl multiplier and matches the 1.88.5 card. Gemini 4
 	// Argon carries no dated card: 1.88.5 announces no change for it at Google's
-	// 2026-12-01 list-price increase. Claude Fable 5.2, Muse Ember and Gemini 4
-	// Carbon are served but absent from 1.88.5, so they keep the zero discovery
-	// default. Rows priced from 1.67.0 stay on that card even where 1.88.5 adds
-	// a long-context tier (GPT-5.6 Luna/Sol/Terra, Qwen 3.6 Plus): a tier would
-	// cap their default context window at 272K or 256K.
+	// 2026-12-01 list-price increase. The client-catalog corrections below
+	// price deployments missing from 1.88.5. GPT-5.6 premium bands retain the
+	// existing full windows through their exact-id uncapped policy; Qwen 3.6
+	// Plus's premium band is above its advertised 200K window.
 	// ---------------------------------------------------------------------------
 	models "google/gemini-4-argon" {
 		cost-patch {
@@ -944,6 +970,92 @@ provider "commandcode" {
 			output 12.0
 			cache-read 0.5
 			cache-write 5.0
+		}
+	}
+	// Client-catalog additions: retain the public roster, not hidden client aliases.
+	models "claude-fable-5-2" "claude-haiku-5-5" "gpt-6.1-sol" "gpt-6.1-terra" \
+		"meta/muse-ember" "minimax/minimax-m3.1-flash" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+	}
+	models "deepseek/deepseek-v4.1-flash-ultrafast" "moonshotai/Kimi-K3.1-Pro" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "high" "max"
+	}
+	models "inclusionai/ling-3.1-flash" "inclusionai/ling-3.1-flash-1019" \
+		"meta/muse-spark-open" "mistral/mistral-large-4" "nvidia/nemotron-3.5-super-vl" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high"
+	}
+	models "meta/muse-wonder-1.0" "stealth/glyph-cluster:free" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high" "xhigh"
+	}
+	models "Qwen/Qwen3.8-Max-Prime" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "xhigh"
+	}
+	models "Qwen/Qwen4-Max" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "high" "xhigh"
+	}
+	models "thinkingmachines/inkling-2-small:free" {
+		supports-reasoning-effort #true
+		thinking-efforts "low" "medium" "high" "max"
+	}
+	models "claude-fable-5-2" "claude-haiku-5-5" "gpt-6.1-sol" "gpt-6.1-terra" \
+		"meta/muse-ember" "minimax/minimax-m3.1-flash" "deepseek/deepseek-v4.1-flash-ultrafast" \
+		"moonshotai/Kimi-K3.1-Pro" "meta/muse-spark-open" "mistral/mistral-large-4" \
+		"nvidia/nemotron-3.5-super-vl" "meta/muse-wonder-1.0" "Qwen/Qwen3.8-Max-Prime" \
+		"Qwen/Qwen4-Max" "thinkingmachines/inkling-2-small:free" "google/gemini-4-carbon" \
+		"ornith/ornith-1.5-122b" {
+		input-modalities "text" "image"
+	}
+	models "gpt-6.1-sol" "gpt-6.1-terra" {
+		hosted-image #false
+		image-model #false
+	}
+	models "claude-fable-5-2" {
+		cost-patch {
+			input 8
+			output 40
+			cache-read 0.2
+			cache-write 10
+		}
+	}
+	models "google/gemini-4-carbon" {
+		cost-patch {
+			input 2
+			output 10
+			cache-read 0.1
+			cache-write 0
+		}
+	}
+	models "meta/muse-ember" {
+		cost-patch {
+			input 0.1
+			output 0.5
+			cache-read 0.004
+			cache-write 0
+		}
+	}
+	models "Qwen/Qwen4-Max" {
+		cost-patch {
+			input 1.5
+			output 4.5
+			cache-read 0.075
+			cache-write 1.875
+		}
+	}
+	models "tencent/hy4-flash" {
+		input-modalities "text" "image"
+		supports-reasoning-effort #true
+		thinking-efforts "high"
+		cost-patch {
+			input 0.07
+			output 0.281
+			cache-read 0.003
+			cache-write 0
 		}
 	}
 }

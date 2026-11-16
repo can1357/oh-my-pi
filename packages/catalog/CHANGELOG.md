@@ -26,6 +26,10 @@
 
 - Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
 
+### Fixed
+
+- Fixed stale Command Code image inputs, reasoning controls, token prices, and deployment context limits ([#12542](https://github.com/can1357/oh-my-pi/issues/12542)).
+
 ## [18.20.3] - 2026-11-16
 
 ### Added
