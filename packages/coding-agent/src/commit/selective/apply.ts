@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
@@ -88,7 +89,7 @@ export async function commitSelection(
 		throw new Error(
 			draft.skipped.length > 0
 				? `Nothing to commit: only ${draft.skipped.join(", ")} changed (submodule or nested repository), which selective commits skip.`
-				: `Nothing to commit: ${draft.root} has no changes against HEAD.`,
+				: `Nothing to commit: ${shortenPath(draft.root)} has no changes against HEAD.`,
 		);
 	}
 	const repo = vcs.requireGit(draft.root);

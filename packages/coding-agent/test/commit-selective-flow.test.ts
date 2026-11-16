@@ -224,6 +224,12 @@ describe("selective commit flow", () => {
 			/Nothing to commit: .* has no changes against HEAD/,
 		);
 
+		// Error output must not expose the absolute home directory.
+		Object.defineProperty(clean, "root", { value: path.join(os.homedir(), "workspace") });
+		await expect(commitSelection(clean, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing to commit: ~/workspace has no changes against HEAD.",
+		);
+
 		// A nested repository is dirty but skipped: the repository is not clean.
 		const nested = path.join(root, "vendor");
 		await fs.mkdir(nested);
