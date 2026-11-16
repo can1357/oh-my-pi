@@ -47,15 +47,18 @@ async function whileLocked<T>(fn: () => Promise<T> | T): Promise<T> {
 }
 
 /** Run `fn` in a whole-hour timezone, where daily activity reads the hourly rollup. */
-async function inUtc<T>(fn: () => Promise<T>): Promise<T> {
+async function inUtc(fn: () => Promise<void>): Promise<void> {
+	const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 	const previousTz = process.env.TZ;
 	process.env.TZ = "UTC";
 	try {
-		return await fn();
+		await fn();
 	} finally {
-		if (previousTz === undefined) delete process.env.TZ;
-		else process.env.TZ = previousTz;
+		// bun test pins `Date` to UTC with TZ unset; deleting TZ would drop that pin
+		// and run later files in this process in the host's zone.
+		process.env.TZ = previousTz ?? "UTC";
 	}
+	expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(zone);
 }
 
 describe("opening the stats database", () => {

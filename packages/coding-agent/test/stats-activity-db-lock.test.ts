@@ -84,6 +84,7 @@ describe("/usage activity load", () => {
 	it("migrates a stats database written before the hourly rollup and paints its history", async () => {
 		// The rollup is only read in whole-hour timezones; pin one so the stored
 		// rows go through it.
+		const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 		const previousTz = process.env.TZ;
 		process.env.TZ = "UTC";
 		try {
@@ -119,8 +120,10 @@ describe("/usage activity load", () => {
 			expect(requests(events[0])).toBe(1);
 			expect(requests(events[1])).toBe(1);
 		} finally {
-			if (previousTz === undefined) delete process.env.TZ;
-			else process.env.TZ = previousTz;
+			// bun test pins `Date` to UTC with TZ unset; deleting TZ would drop that
+			// pin and run later files in this process in the host's zone.
+			process.env.TZ = previousTz ?? "UTC";
 		}
+		expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(zone);
 	}, 30_000);
 });
