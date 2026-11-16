@@ -14,13 +14,22 @@ import {
 	type AgyStepOptions,
 	type AgyTransport,
 	type AgyTransportOptions,
+	ensureLoopbackBypass,
+	mapAgyError,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
+import { redactSensitiveText } from "@oh-my-pi/pi-ai/providers/antigravity-cli/redact";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
+import {
+	type ContentBlock,
+	type PromptRequest,
+	type PromptResponse,
+	RequestError,
+	type SessionConfigOption,
+} from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
 	api: "antigravity-acp",
@@ -826,5 +835,98 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+	it("redacts OAuth material from a rejected ACP prompt", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const next = step(state.host, [...state.messages, result(state.first.writer.output), user("steer")]);
+		const steer = await state.fake.prompts.next();
+		steer.response.reject(
+			new Error("token exchange failed: refresh_token=live-refresh&access_token=live-access via Bearer ya29.live"),
+		);
+		const failure = await next.done.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		const message = failure instanceof Error ? failure.message : String(failure);
+		expect(message).toContain("refresh_token=***");
+		expect(message).toContain("access_token=***");
+		expect(message).toContain("Bearer ***");
+		expect(message).not.toContain("live-refresh");
+		expect(message).not.toContain("live-access");
+	});
+});
+
+describe("Antigravity CLI child environment", () => {
+	const proxied = (name: string, value = "http://proxy.local:8080") => ({ PATH: "/usr/bin", [name]: value });
+
+	it("returns the environment unchanged when no proxy is set", () => {
+		const env = { PATH: "/usr/bin", AGY_CLI_DISABLE_AUTO_UPDATE: "1" };
+		expect(ensureLoopbackBypass(env)).toBe(env);
+	});
+
+	it("ignores blank proxy variables", () => {
+		const env = proxied("HTTP_PROXY", "  ");
+		expect(ensureLoopbackBypass(env)).toBe(env);
+	});
+
+	it("appends loopback to both bypass spellings for every proxy variable", () => {
+		for (const name of ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]) {
+			const env = { ...proxied(name), NO_PROXY: "corp.example,localhost", no_proxy: "internal.example" };
+			expect(ensureLoopbackBypass(env)).toEqual({
+				...env,
+				NO_PROXY: "corp.example,localhost,internal.example,127.0.0.1,::1",
+				no_proxy: "corp.example,localhost,internal.example,127.0.0.1,::1",
+			});
+		}
+	});
+
+	it("preserves existing bypass entries without duplicating loopback", () => {
+		const env = { ...proxied("HTTPS_PROXY"), NO_PROXY: "localhost, 127.0.0.1 ,::1,example.test" };
+		expect(ensureLoopbackBypass(env)).toEqual({
+			...env,
+			NO_PROXY: "localhost,127.0.0.1,::1,example.test",
+			no_proxy: "localhost,127.0.0.1,::1,example.test",
+		});
+	});
+});
+
+describe("Antigravity CLI error text", () => {
+	it("masks URL userinfo, query secrets, OAuth pairs and bearer tokens", () => {
+		const text = redactSensitiveText(
+			'GET https://user:pass@oauth.example/callback?code=abc&state=xyz&keep=1 failed with refresh_token=rt-secret, {"access_token":"at-secret"} and Authorization: Bearer ya29.secret',
+		);
+		expect(text).toBe(
+			'GET https://***@oauth.example/callback?code=***&state=***&keep=1 failed with refresh_token=***, {"access_token":"***"} and Authorization: Bearer ***',
+		);
+	});
+
+	it("leaves non-secret failure detail intact", () => {
+		expect(redactSensitiveText("agy exited with exit code=1 after quota check timed out")).toBe(
+			"agy exited with exit code=1 after quota check timed out",
+		);
+		expect(redactSensitiveText(undefined)).toBe("");
+	});
+
+	it("redacts the message returned by mapAgyError", () => {
+		const error = new Error(
+			"refresh failed: https://oauth.example/token?refresh_token=rt-secret and Bearer ya29.secret",
+		);
+		const mapped = mapAgyError(error);
+		expect(mapped).not.toBe(error);
+		expect(mapped.message).toBe("refresh failed: https://oauth.example/token?refresh_token=*** and Bearer ***");
+	});
+
+	it("returns an unchanged error and message when nothing is sensitive", () => {
+		const error = new Error("agy exited with exit code=1");
+		expect(mapAgyError(error)).toBe(error);
+		expect(mapAgyError("exit code=1").message).toBe("exit code=1");
+	});
+
+	it("keeps the sign-in hint for an unauthenticated request", () => {
+		const error = new RequestError(-32000, "unauthenticated: access_token=at-secret");
+		expect(mapAgyError(error).message).toBe(
+			"Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.",
+		);
 	});
 });
