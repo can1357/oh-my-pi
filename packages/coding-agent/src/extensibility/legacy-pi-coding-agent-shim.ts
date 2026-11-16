@@ -76,9 +76,11 @@ import { EventBus } from "../utils/event-bus";
 import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
+import type { ExtensionRegistrations } from "./extensions/registrations";
 import type {
 	BashToolResultEvent,
 	EditToolResultEvent,
+	Extension,
 	ExtensionFactory,
 	GrepToolResultEvent,
 	ReadToolResultEvent,
@@ -1071,6 +1073,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 	#state: ResolvedLoaderState;
 	#options: DefaultResourceLoaderOptions;
 	#extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
+	/** Loads {@link getExtensions} handed out (by their registrations, which clones share): a session may own them. */
+	#handedOut = new WeakSet<ExtensionRegistrations>();
 	#skills: Skill[] = [];
 	#skillDiagnostics: ResourceDiagnostic[] = [];
 	#prompts: PromptTemplate[] = [];
@@ -1100,6 +1104,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	getExtensions(): LoadExtensionsResult {
+		for (const { registrations } of this.#extensionsResult.extensions) {
+			if (registrations) this.#handedOut.add(registrations);
+		}
 		return this.#extensionsResult;
 	}
 
@@ -1147,72 +1154,97 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 		const settings = await settingsPromise;
 
-		const [extensionsResult, skillsBase, additionalSkills, prompts, additionalPrompts, agentsFiles] =
-			await Promise.all([
-				this.#loadExtensions(settings),
-				options.noSkills
-					? Promise.resolve({ skills: [], warnings: [] })
-					: discoverSkills(cwd, agentDir, {
-							...cfgSkills.get(settings),
-							disabledExtensions: cfgDisabledExtensions.get(settings),
-						}),
-				this.#loadAdditionalSkills(),
-				options.noPromptTemplates ? Promise.resolve([]) : discoverPromptTemplates(cwd, agentDir),
-				this.#loadAdditionalPromptTemplates(),
-				options.noContextFiles ? Promise.resolve([]) : discoverContextFiles(cwd, agentDir),
-			]);
+		const extensionsLoad = this.#loadExtensions(settings);
+		let fresh: readonly Extension[] = [];
+		let nextExtensions: LoadExtensionsResult;
+		try {
+			const [extensionsResult, skillsBase, additionalSkills, prompts, additionalPrompts, agentsFiles] =
+				await Promise.all([
+					extensionsLoad,
+					options.noSkills
+						? Promise.resolve({ skills: [], warnings: [] })
+						: discoverSkills(cwd, agentDir, {
+								...cfgSkills.get(settings),
+								disabledExtensions: cfgDisabledExtensions.get(settings),
+							}),
+					this.#loadAdditionalSkills(),
+					options.noPromptTemplates ? Promise.resolve([]) : discoverPromptTemplates(cwd, agentDir),
+					this.#loadAdditionalPromptTemplates(),
+					options.noContextFiles ? Promise.resolve([]) : discoverContextFiles(cwd, agentDir),
+				]);
 
-		this.#extensionsResult = options.extensionsOverride
-			? options.extensionsOverride(extensionsResult)
-			: extensionsResult;
+			// A copy: the override may remove loads from `extensionsResult.extensions` in place.
+			fresh = [...extensionsResult.extensions];
+			nextExtensions = options.extensionsOverride ? options.extensionsOverride(extensionsResult) : extensionsResult;
 
-		const skillsBaseResult = {
-			skills: [...skillsBase.skills, ...additionalSkills.skills],
-			diagnostics: [
-				...skillsBase.warnings.map(w => ({
-					type: "warning" as const,
-					message: w.message,
-					path: w.skillPath,
-				})),
-				...additionalSkills.diagnostics,
-			],
-		};
-		const skillsFinal = options.skillsOverride ? options.skillsOverride(skillsBaseResult) : skillsBaseResult;
-		this.#skills = skillsFinal.skills;
-		this.#skillDiagnostics = skillsFinal.diagnostics;
+			const skillsBaseResult = {
+				skills: [...skillsBase.skills, ...additionalSkills.skills],
+				diagnostics: [
+					...skillsBase.warnings.map(w => ({
+						type: "warning" as const,
+						message: w.message,
+						path: w.skillPath,
+					})),
+					...additionalSkills.diagnostics,
+				],
+			};
+			const skillsFinal = options.skillsOverride ? options.skillsOverride(skillsBaseResult) : skillsBaseResult;
+			this.#skills = skillsFinal.skills;
+			this.#skillDiagnostics = skillsFinal.diagnostics;
 
-		const promptsBase = {
-			prompts: [...prompts, ...additionalPrompts.prompts],
-			diagnostics: additionalPrompts.diagnostics,
-		};
-		const promptsFinal = options.promptsOverride ? options.promptsOverride(promptsBase) : promptsBase;
-		this.#prompts = promptsFinal.prompts;
-		this.#promptDiagnostics = promptsFinal.diagnostics;
+			const promptsBase = {
+				prompts: [...prompts, ...additionalPrompts.prompts],
+				diagnostics: additionalPrompts.diagnostics,
+			};
+			const promptsFinal = options.promptsOverride ? options.promptsOverride(promptsBase) : promptsBase;
+			this.#prompts = promptsFinal.prompts;
+			this.#promptDiagnostics = promptsFinal.diagnostics;
 
-		const themesBase = { themes: [] as Theme[], diagnostics: [] as ResourceDiagnostic[] };
-		const themesFinal = options.themesOverride ? options.themesOverride(themesBase) : themesBase;
-		this.#themes = themesFinal.themes;
-		this.#themeDiagnostics = themesFinal.diagnostics;
+			const themesBase = { themes: [] as Theme[], diagnostics: [] as ResourceDiagnostic[] };
+			const themesFinal = options.themesOverride ? options.themesOverride(themesBase) : themesBase;
+			this.#themes = themesFinal.themes;
+			this.#themeDiagnostics = themesFinal.diagnostics;
 
-		const agentsFilesBase = { agentsFiles };
-		const agentsFilesFinal = options.agentsFilesOverride
-			? options.agentsFilesOverride(agentsFilesBase)
-			: agentsFilesBase;
-		this.#agentsFiles = agentsFilesFinal.agentsFiles;
+			const agentsFilesBase = { agentsFiles };
+			const agentsFilesFinal = options.agentsFilesOverride
+				? options.agentsFilesOverride(agentsFilesBase)
+				: agentsFilesBase;
+			this.#agentsFiles = agentsFilesFinal.agentsFiles;
 
-		const baseSystemPrompt = options.systemPrompt;
-		this.#systemPrompt = options.systemPromptOverride
-			? options.systemPromptOverride(baseSystemPrompt)
-			: baseSystemPrompt;
+			const baseSystemPrompt = options.systemPrompt;
+			this.#systemPrompt = options.systemPromptOverride
+				? options.systemPromptOverride(baseSystemPrompt)
+				: baseSystemPrompt;
 
-		const appendSource = options.appendSystemPrompt;
-		const baseAppend =
-			typeof appendSource === "string" ? [appendSource] : Array.isArray(appendSource) ? appendSource : [];
-		this.#appendSystemPrompt = options.appendSystemPromptOverride
-			? options.appendSystemPromptOverride(baseAppend)
-			: baseAppend;
+			const appendSource = options.appendSystemPrompt;
+			const baseAppend =
+				typeof appendSource === "string" ? [appendSource] : Array.isArray(appendSource) ? appendSource : [];
+			this.#appendSystemPrompt = options.appendSystemPromptOverride
+				? options.appendSystemPromptOverride(baseAppend)
+				: baseAppend;
+		} catch (error) {
+			// The current snapshot stays; this reload's own loads, once they exist, have no owner.
+			const loaded = fresh.length > 0 ? fresh : ((await extensionsLoad.catch(() => undefined))?.extensions ?? []);
+			this.#releaseUnowned(loaded, this.#extensionsResult);
+			throw error;
+		}
+		// Commit the extensions last, then tear down the loads neither the new snapshot nor a session
+		// can own: this reload's loads its override dropped, and a replaced snapshot nobody received.
+		const replaced = this.#extensionsResult;
+		this.#extensionsResult = nextExtensions;
+		this.#releaseUnowned([...fresh, ...replaced.extensions], nextExtensions);
 
 		this.#loaded = true;
+	}
+
+	/** Release the `candidates` that `kept` does not retain and no {@link getExtensions} caller received. */
+	#releaseUnowned(candidates: readonly Extension[], kept: LoadExtensionsResult): void {
+		const retained = new Set(kept.extensions.map(extension => extension.registrations));
+		for (const { registrations } of candidates) {
+			if (registrations && !retained.has(registrations) && !this.#handedOut.has(registrations)) {
+				registrations.release();
+			}
+		}
 	}
 
 	async #loadExtensions(settings: Settings): Promise<LoadExtensionsResult> {
@@ -1232,15 +1264,21 @@ export class DefaultResourceLoader implements ResourceLoader {
 		);
 
 		const result = await loadExtensions(paths, cwd, eventBus);
-		for (let i = 0; i < extensionFactories.length; i++) {
-			const loaded = await loadExtensionFromFactory(
-				extensionFactories[i],
-				cwd,
-				eventBus,
-				result.runtime,
-				`<inline-loader-${i}>`,
-			);
-			result.extensions.push(loaded);
+		try {
+			for (let i = 0; i < extensionFactories.length; i++) {
+				const loaded = await loadExtensionFromFactory(
+					extensionFactories[i],
+					cwd,
+					eventBus,
+					result.runtime,
+					`<inline-loader-${i}>`,
+				);
+				result.extensions.push(loaded);
+			}
+		} catch (error) {
+			// The failed load released itself; the loads before it would otherwise never reach `reload()`.
+			for (const extension of result.extensions) extension.registrations?.release();
+			throw error;
 		}
 		return result;
 	}
@@ -1459,7 +1497,9 @@ export async function createAgentSession(
 		rest.preloadedPreparedExtensions === undefined &&
 		rest.preloadedExtensionPaths === undefined
 	) {
-		forwarded.preloadedExtensions = state.extensionsResult;
+		// Through `getExtensions`, which records that a session now owns the snapshot's loads.
+		forwarded.preloadedExtensions =
+			loader instanceof DefaultResourceLoader ? loader.getExtensions() : state.extensionsResult;
 	}
 
 	if (rest.skills === undefined) {
