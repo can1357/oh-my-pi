@@ -1898,6 +1898,115 @@ mod tests {
 	}
 
 	#[test]
+	fn default_skill_frontmatter_drops_agentskills_optional_fields() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path().join("skills");
+		write_skill(
+			&root,
+			"portable",
+			concat!(
+				"name: portable\n",
+				"description: keeps loading\n",
+				"license: MIT\n",
+				"compatibility: linux\n",
+				"metadata:\n",
+				"  omp/models: unused\n",
+				"allowed-tools: bash read\n",
+				"enabled: true",
+			),
+			"body",
+		);
+		let active =
+			discover(&[source(&root, "native", SkillLevel::Project)], &SkillPolicy::default());
+		let skill = active.get("portable").expect("optional Agent Skills fields must not reject");
+		assert_eq!(skill.description.as_str(), "keeps loading");
+		assert_eq!(skill.body.as_str(), "body");
+		assert!(!skill.hidden);
+	}
+
+	#[test]
+	fn agent_plugin_skill_discards_optional_fields_after_validation() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path().join("skills");
+		write_skill(
+			&root,
+			"portable",
+			concat!(
+				"name: portable\n",
+				"description: plugin portable\n",
+				"license: MIT\n",
+				"compatibility: os\n",
+				"metadata:\n",
+				"  key: value\n",
+				"allowed-tools: Read",
+			),
+			"plugin body",
+		);
+		let active = discover(
+			&[source(&root, "agent-plugins", SkillLevel::Project)],
+			&SkillPolicy::default(),
+		);
+		let skill = active.get("portable").expect("validated optional fields are discarded, not fatal");
+		assert_eq!(skill.description.as_str(), "plugin portable");
+		assert_eq!(skill.body.as_str(), "plugin body");
+		assert_eq!(skill.provider.as_str(), "agent-plugins");
+	}
+
+	#[test]
+	fn agent_plugin_skill_rejects_empty_allowed_tools() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path().join("skills");
+		write_skill(
+			&root,
+			"broken",
+			concat!("name: broken\n", "description: empty tools\n", "allowed-tools: \"\""),
+			"body",
+		);
+		let active = discover(
+			&[source(&root, "agent-plugins", SkillLevel::Project)],
+			&SkillPolicy::default(),
+		);
+		assert!(active.get("broken").is_none());
+		assert!(
+			active
+				.warnings
+				.iter()
+				.any(|warning| warning.message.contains("frontmatter is invalid")),
+			"{:?}",
+			active.warnings
+		);
+	}
+
+	#[test]
+	fn agent_plugin_skill_rejects_omp_enabled_as_unknown_field() {
+		let tree = tempfile::tempdir().unwrap();
+		let root = tree.path().join("skills");
+		write_skill(
+			&root,
+			"native-only",
+			concat!(
+				"name: native-only\n",
+				"description: omp enabled is unknown here\n",
+				"enabled: false",
+			),
+			"body",
+		);
+		let active = discover(
+			&[source(&root, "agent-plugins", SkillLevel::Project)],
+			&SkillPolicy::default(),
+		);
+		assert!(active.get("native-only").is_none());
+		assert!(
+			active
+				.warnings
+				.iter()
+				.any(|warning| warning.message.contains("failed to parse Agent Plugin skill frontmatter")),
+			"{:?}",
+			active.warnings
+		);
+	}
+
+	#[test]
 	fn skill_source_table_names_data_directories_only() {
 		let known = [
 			"native",

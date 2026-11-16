@@ -1708,9 +1708,10 @@ mod tests {
 	use omp_proto::toolhost::v1::HookEventId;
 
 	use super::{
-		AgentSettled, DomainReturn, GateDecision, GateError, GateEvent, GateOutcome, HookEvent,
-		HookGate, HookPatch, HookPhase, LifecycleHookError, LifecycleHooks, OnFailure,
-		ProviderFailover, SourceRef, Subscription, When,
+		AgentSettled, DomainReturn, GateDecision, GateError, GateEvent, GateOutcome, HookDecision,
+		HookEvent, HookGate, HookPatch, HookPhase, LifecycleHookError, LifecycleHooks,
+		MODIFY_ROUNDS, OBSERVE_HANDLER_CAP, OnFailure, ProviderFailover, SourceRef, Subscription,
+		When,
 	};
 
 	#[test]
@@ -1719,6 +1720,30 @@ mod tests {
 		let (gate, _receiver) = HookGate::delegated_channel_with_tool_call_timeout(configured);
 		assert_eq!(gate.decision_timeout(HookEventId::HookEventToolCall), configured);
 		assert_eq!(gate.decision_timeout(HookEventId::HookEventToolResult), Duration::from_secs(30));
+	}
+
+	#[test]
+	fn hook_decision_phase_legality_matches_documented_arms() {
+		use HookDecision::{Allow, Defer, Deny, Modify, RequireApproval};
+		use HookPhase::{Approval, Observe, Precheck, Review, Transform};
+
+		assert!(Deny.is_legal_in(Precheck) && Defer.is_legal_in(Precheck));
+		assert!(!Allow.is_legal_in(Precheck) && !Modify.is_legal_in(Precheck));
+		assert!(Modify.is_legal_in(Transform) && Defer.is_legal_in(Transform));
+		assert!(!Deny.is_legal_in(Transform) && !RequireApproval.is_legal_in(Transform));
+		assert!(Allow.is_legal_in(Review) && Deny.is_legal_in(Review) && Defer.is_legal_in(Review));
+		assert!(!Modify.is_legal_in(Review) && !RequireApproval.is_legal_in(Review));
+		assert!(
+			Allow.is_legal_in(Approval)
+				&& Deny.is_legal_in(Approval)
+				&& Defer.is_legal_in(Approval)
+				&& RequireApproval.is_legal_in(Approval)
+		);
+		assert!(!Modify.is_legal_in(Approval));
+		assert!(Defer.is_legal_in(Observe));
+		assert!(!Allow.is_legal_in(Observe) && !Deny.is_legal_in(Observe));
+		assert_eq!(MODIFY_ROUNDS, 1);
+		assert_eq!(OBSERVE_HANDLER_CAP, 64);
 	}
 
 	#[tokio::test]
