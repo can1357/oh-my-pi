@@ -4387,7 +4387,10 @@ export interface VcsStatusSummary {
 /** One blob or symlink of a tree listing. */
 export interface VcsTreeEntry {
   path: string
-  /** Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or `120000`. */
+  /**
+   * Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
+   * `120000`.
+   */
   mode: string
 }
 

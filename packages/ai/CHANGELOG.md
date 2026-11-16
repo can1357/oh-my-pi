@@ -4,12 +4,20 @@
 
 ### Added
 
-- Added the `google-gemini-cli-transcribe` transcription API: Cloud Code Assist (`google-antigravity`, `google-gemini-cli`) serves no transcribe model, so `transcribeAudio` sends the audio as an inline-data part with a verbatim-transcription instruction to the chat model named by the row's `requestModelId`, over the existing `google-gemini-cli` transport (its OAuth, headers, project and endpoint fallback), and strips wrapper quotes or a code fence from the reply ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
 - Added the `xai-stt` transcription API: `transcribeAudio` posts xAI's multipart `POST /v1/stt` (model and language before the file) and maps `{ text, language, duration, words }`; `isTranscriptionApi`/`TRANSCRIPTION_APIS` list the dispatchable transcription APIs, and the auth gateway's `/v1/audio/transcriptions` serves both ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+- Added the `google-gemini-cli-transcribe` transcription API: Cloud Code Assist (`google-antigravity`, `google-gemini-cli`) serves no transcribe model, so `transcribeAudio` sends the audio as an inline-data part with a verbatim-transcription instruction to the chat model named by the row's `requestModelId`, over the existing `google-gemini-cli` transport (its OAuth, headers, project and endpoint fallback), and strips wrapper quotes or a code fence from the reply ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
 - `xai-tts` now sends `speed`, accepts `pcm` output, and allows xAI's current 60,000-character input (was 15,000) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed Mistral (and other OpenAI-compatible) 429s reporting a zero `x-ratelimit-limit-*` allowance being retried for minutes; they now fail on the first request with an error naming the header and suggesting a model or plan switch ([#19300](https://github.com/can1357/oh-my-pi/issues/19300))
+- Fixed pooled Claude accounts presenting one device: an Anthropic OAuth request now reports the device and account id of the credential serving it, including after a rotation inside one call, when caller metadata named the previous account ([#19277](https://github.com/can1357/oh-my-pi/pull/19277) by [@Xytronix](https://github.com/Xytronix))
+### Removed
+
+- Removed `isXdDevicePath` from `providers/cursor-pi-args`; Cursor ranged reads of `xd://` docs now compose line selectors like any other path
 
 ## [18.20.2] - 2026-11-14
 

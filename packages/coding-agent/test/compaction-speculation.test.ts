@@ -1112,6 +1112,6 @@ describe("resolveSpeculationMethod", () => {
 		const settings = cfgCompaction.get(Settings.isolated({ "compaction.methodOrder": ["snapcompact", "soft"] }));
 		// Same declared input; only the second drops images on the wire.
 		expect(resolveSpeculationMethod(getBundledModel("anthropic", "claude-sonnet-4-5"), settings)).toBeUndefined();
-		expect(resolveSpeculationMethod(getBundledModel("deepseek", "deepseek-v4-flash"), settings)).toBe("soft");
+		expect(resolveSpeculationMethod(getBundledModel("fireworks", "deepseek-v4-flash"), settings)).toBe("soft");
 	});
 });

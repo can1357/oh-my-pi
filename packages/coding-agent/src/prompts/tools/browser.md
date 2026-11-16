@@ -17,8 +17,8 @@ BrowserTab, every helper awaited:
 navigation: url title goto back forward reload pushState
 inspection: observe({selector?, compact?, viewportOnly?, includeAll?}) ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?}) a11y extract(format?, {selector?, outline?, filter?}) text html value attr count box styles isVisible isEnabled isChecked
 capture: screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?}) diffScreenshot(baselinePath, {threshold?, output?}) pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})
-interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type fill press keyDown keyUp mouseMove mouseDown mouseUp clickAt wheel scroll drag highlight scrollIntoView select uploadFile
-waiting: waitFor waitForSelector waitForUrl waitForText
+interaction: click(selector, {button?, count?}) dblclick hover focus check uncheck type fill press keyDown keyUp mouseMove mouseDown mouseUp clickAt(x, y, {button?, count?}) wheel scroll drag highlight scrollIntoView select uploadFile
+waiting: waitFor waitForSelector waitForUrl(urlPattern, {timeout?}) waitForText
 frames: frames() → frame tree; frame(selectorOrNameOrUrl) → handle with click fill type press text html value attr count isVisible ariaSnapshot evaluate waitFor waitForSelector screenshot
 dialogs: dialog handleDialog setDialogs
 emulation: emulate(options?) devices()
@@ -29,7 +29,7 @@ downloads: waitForDownload downloads
 diagnostics: console errors clearConsole traceStart traceStop profileStart profileStop metrics
 recording: recordStart(path, options?) recordStop recordRestart(path, options?) recording
 vitals, React: vitals reactEnable reactTree reactInspect reactRenders reactSuspense
-network: route unroute routes requests request clearRequests harStart harStop allowedDomains
+network: route(urlGlob, {abort?, status?, headers?, contentType?, body?, delay?, resourceType?}) unroute routes requests({filter?, type?, method?, status?, since?, limit?}) → metadata request(id) → with bodies clearRequests harStart harStop allowedDomains
 WebMCP (experimental, Chromium only): webmcpList webmcpInvoke webmcpEvents
 execution: evaluate run(fnOrCode, {args?, timeout?})
 elements: id(n) ref("e5") → BrowserElement with click dblclick check uncheck highlight type fill press hover focus select uploadFile scrollIntoView boundingBox isVisible isHidden text html value attr styles isEnabled isChecked evaluate
@@ -47,11 +47,15 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
 - `viewportOnly`: on-screen elements only (ignored on cmux). `includeAll`: non-interactive nodes too. `text()` and `html()` without a selector read `<body>`.
 - `click`: `button` presses another mouse button (`"right"` opens a context menu); `count` clicks more than once. `<select>` elements: `select`, not `fill`.
 - `waitFor*` resolve as soon as the condition holds: after a click or navigation wait for the expected text, URL, or selector, never a fixed sleep.
+- The cell's own `wait(handles)` waits for agents and completions, not time; `wait(ms | predicate)` sleeps or polls only inside `tab.run`.
+- URL patterns (`waitForUrl`, `waitForResponse`, `requests({filter})`): a string with `*` is a glob (`*` within a path segment, `**` across: `"**/cart.php"`), any other string a substring; or a RegExp. `route` strings are always globs.
+- `route` is declarative: matching requests are aborted or fulfilled from its options; it takes no handler.
+  - Watching traffic: `requests()` lists metadata; `request(id)` adds request and response bodies.
 - Navigation and re-renders invalidate observed ids and refs: re-observe, then act in the same cell. `pushState(url)`: SPA navigation without a document load.
 - No dialog policy: alerts and beforeunload prompts auto-accept; confirms and prompts stay pending for `handleDialog`, and page calls fail naming them until answered.
 - `emulate` merges device/viewport, geolocation, offline/network, media, headers/auth, UA, timezone/locale, and CPU overrides.
 - `devices()` lists valid device names.
-- Cookie imports accept objects, raw `Cookie:` headers, DevTools cURL dumps, or JSON arrays.
+- Cookie imports accept objects, arrays of them (`setCookies(await other.cookies())` copies a session), raw `Cookie:` headers, DevTools cURL dumps, or JSON array strings.
 - `waitForDownload` holds the tab until a file arrives, so start it and the downloading click in one `tab.run`:
   `const download = tab.waitForDownload(); await tab.click(selector); return await download;`.
 - Recording: `.mp4` is H.264, `.webm` VP9/VP8; optional cursor overlay and changed-frame contact sheet.
@@ -67,7 +71,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
   - Python passes a JavaScript code string only: `await tab.run(code, timeout=…)`.
   - Executes in an isolated JavaScript tab runtime with raw Puppeteer `page`/`browser` and ordinary Eval helpers.
   - Text it prints shows in the outer Eval cell; screenshots surface as Eval images; helpers and `tab.run` return real structured values.
-  - Raw `page.setRequestInterception` and `page.on("request")` inside `tab.run` coexist with `tab.route` handlers and are cleaned up after that run.
+  - Chromium: raw `page.setRequestInterception` and `page.on("request")` inside `tab.run` coexist with `tab.route` handlers and are cleaned up after that run.
   - `tab.route` persists until `tab.unroute` or tab close.
 - `allowed_domains`: exact hosts and `*.example.com` patterns (bare domain included); other navigation, subresource, fetch, and WebSocket requests abort.
 
@@ -160,7 +164,7 @@ Tern and WebKit tab limits:
 - `pdf` supports only `path` and throws on WebKit; `a11y` covers the main frame.
 - `loadState` restores storage for the current origin only; `webmcp*` throw.
 - `traceStart`/`traceStop`/`profileStart`/`profileStop` are unsupported; clipboard helpers use the system clipboard.
-- Raw `page`/`browser` in `tab.run` are a Puppeteer-like subset: goto, evaluate, content, $, $$, locator, waits, screenshot, keyboard, mouse, cookies.
+- Raw `page`/`browser` in `tab.run` are a Puppeteer-like subset: goto, evaluate, content, $, $$, locator, waits, screenshot, keyboard, mouse, cookies; no event listeners (`page.on`): read `tab.requests()` or wait with `tab.waitForResponse`.
 
 Lifetime:
 
