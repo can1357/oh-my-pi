@@ -1888,6 +1888,8 @@ export class WorkerCore {
 	readonly #onDialogClosed = (event: Protocol.Page.JavascriptDialogClosedEvent): void => {
 		if (this.#beforeUnloadOpen && !event.result) this.#mainFrameNavigationRequested = false;
 		this.#beforeUnloadOpen = false;
+		// The user or another client may have answered it: the page runs again either way.
+		this.#dialogs?.closed();
 	};
 	#isMainFrame(frameId: string): boolean {
 		return this.#page !== undefined && devtoolsFrameId(this.#page.mainFrame()) === frameId;
