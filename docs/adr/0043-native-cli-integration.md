@@ -173,6 +173,8 @@ Task graph: the Kata epic `nkas` (tasks `haza` through `0vgw`).
 
 **Owner direction (2026-11-11):** native vendor CLIs are not wired into core, except the recorded exception `envd/src/codex_app_server/*`. Every other vendor CLI route is an extension over ACP, the Agent SDK, MCP or A2A. The design that follows from it is [docs/design/acp-extension-profiles.md](../design/acp-extension-profiles.md); this amendment records the direction and what it changes in this record. Line numbers below are at `5b0cd838c9`.
 
+**Codex exception (2026-11-16):** the owner's decision on what the exception record must state is recorded under Q2 of [the ACP design](../design/acp-extension-profiles.md).
+
 Consequences of this amendment:
 - The 2026-11-09 amendment says the CLI launch profiles are already data (`sv_delegated_<cli>_program`, line 162 above). The code does not agree. The dsh, Devin and Grok profiles are Rust: `fn dsh_profile` (`crates/driver/src/delegated_acp.rs:151`), `fn devin_profile` (`crates/driver/src/delegated_acp.rs:175`) and an inline Grok registration (`.with_id(GROK_ID)`, `crates/driver/src/delegated_acp.rs:121-138`). Only the program path is a convar (`sv_delegated_dsh_program`, `crates/driver/src/delegated_acp.rs:47`). Read "profiles are data" as the target and not as the state.
 - The target: a launch profile is a signed static `delegated-agents` content row that an extension ships beside `agents`, `lsp-servers` and `dap-adapters` (design §1). Core keeps the generic ACP client, the environment floor, the single policy ACP can represent and an operator-approval gate (design §1.4 and §1.5). With no extension installed nothing registers, as today (design §2.4).
@@ -199,5 +201,8 @@ Owner request, 2026-11-12: a generic ACP client and server with specific profile
 | ACP server (OMP as the agent) | An ACP controller surface exists in `crates/app` (proofs in `crates/app/tests/acp_spine.rs`). This record makes no new decision about it. |
 
 **Gate on design Q18 (extension data supplying the argument vector).** Three fresh-context reviewers (EGM personas; see ADR 0053's evidence section) advised deferring acceptance. The design's three conditions are not controls on their own: one depends on a human reading an approval screen, one (first-party only) cannot be enforced because core cannot tell a first-party extension from another, one is documentation. Before Q18 is accepted, core needs these checks, none of which exist today: an enforcement canary at first open (a forbidden write must be denied); an environment allowlist, not a name denylist; a digest covering every file the launch names and the `[evidence]` block; refusal of an interpreter as the program (a Node bridge with `-e` is arbitrary code); and sanitized text on the approval screen. The executor spawns the child with the user's privileges and no OMP sandbox around it (`crates/envd/src/acp_client/executor.rs`, reviewer-cited, not re-read), and a vendor sandbox may fail open (Grok, `crates/driver/src/delegated_acp.rs:21-32`). The decision stays with the owner.
+
+
+**Ratification status (2026-11-16):** Q18 was one of the unanimous council recommendations. The owner ratification checkbox was left unticked, so this remains a council recommendation and an open gate, not an owner decision.
 
 Where executors are chosen and wired into real work: ADR 0052. Where a delegated agent's work is judged: ADR 0053.
