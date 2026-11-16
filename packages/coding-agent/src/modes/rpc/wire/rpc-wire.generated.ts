@@ -513,7 +513,7 @@ export interface SessionState {
 	tokensPerSecond?: number | null;
 	messageCount?: number;
 	queuedMessageCount?: number;
-	/** Background jobs or deliveries can still inject a follow-up and wake the session. */
+	/** Background jobs, their deliveries, child agents or queued peer messages can still wake the session. */
 	hasPendingAsyncWork?: boolean;
 	/** Idle with nothing queued or pending; same predicate as `session_settled`. */
 	isSettled?: boolean;

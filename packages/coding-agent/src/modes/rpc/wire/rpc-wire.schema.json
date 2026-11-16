@@ -2712,7 +2712,7 @@
 				},
 				"hasPendingAsyncWork": {
 					"type": "boolean",
-					"description": "Background jobs or deliveries can still inject a follow-up and wake the session.",
+					"description": "Background jobs, their deliveries, child agents or queued peer messages can still wake the session.",
 					"default": false
 				},
 				"isSettled": {

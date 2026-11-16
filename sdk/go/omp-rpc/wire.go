@@ -2555,7 +2555,7 @@ type SessionState struct {
 	TokensPerSecond    *float64         `json:"tokensPerSecond"`
 	MessageCount       int64            `json:"messageCount"`
 	QueuedMessageCount int64            `json:"queuedMessageCount"`
-	// Background jobs or deliveries can still inject a follow-up and wake the session.
+	// Background jobs, their deliveries, child agents or queued peer messages can still wake the session.
 	HasPendingAsyncWork bool `json:"hasPendingAsyncWork"`
 	// Idle with nothing queued or pending; same predicate as `session_settled`.
 	IsSettled      bool                `json:"isSettled"`

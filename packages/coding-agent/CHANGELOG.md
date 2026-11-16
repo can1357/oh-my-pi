@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- SDK: `AgentSession` emits `agent_end` once per run (when nothing can resume it) and the new `agent_pause` event for a loop that stops mid-run; `hasPendingAsyncWork()`, `settleAsyncWork()` and `suppressAutoResumeUntilPrompt()` are replaced by `isRunActive`, `wakeSources` and `waitForRunEnd()`, and a user-interrupt `abort()` also ends a run paused on background work. The RPC and JSON print streams, the collab wire and extension `agent_end` keep their per-loop flagged shape
+
 ### Added
 
 - Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result
@@ -10,6 +14,11 @@
 
 - Changed the default local text-to-speech model to Phonon 31M: faster synthesis, a smaller download, and new voices (Kokoro voice settings migrate automatically); the speaking-rate range is now 0.8–1.3×, and old Kokoro caches are removed after the first Phonon install
 - Bash calls that overlap a running or backgrounded call now carry the variables, functions, aliases, options and traps they set into the session's shell (the call that ends last wins a name both set), instead of discarding them with a "Ran in a copy of the busy session shell" notice on every overlapping call; background jobs they start are no longer killed when that copy is garbage-collected
+
+### Fixed
+
+- The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
+- Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
 
 ## [18.20.3] - 2026-11-16
 

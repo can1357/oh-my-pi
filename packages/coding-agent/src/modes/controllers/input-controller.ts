@@ -633,8 +633,9 @@ export class InputController {
 				this.#restoreYieldCompactionOnStop();
 				return;
 			}
-			// The turn is over and only background jobs can resume it; its row
-			// stays mounted, so this is checked before the loader's abort.
+			// The run is paused and only outside work (background jobs, child agents,
+			// peer messages) can resume it; its row stays mounted, so this is checked
+			// before the loader's abort.
 			const awaitingAsyncWork = this.ctx.eventController.isAwaitingAsyncWork();
 			if (this.ctx.loadingAnimation && !awaitingAsyncWork) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
@@ -651,8 +652,8 @@ export class InputController {
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
 			} else if (awaitingAsyncWork) {
-				// End the wait. The jobs keep running; their results land in context
-				// for the next prompt instead of starting a turn.
+				// End the wait: the run ends now. The jobs keep running; their results
+				// land in context for the next prompt instead of starting a turn.
 				void this.ctx.eventController.stopAwaitingAsyncWork();
 			} else if (this.ctx.session.isStreaming) {
 				this.#abortStreamingTurn();

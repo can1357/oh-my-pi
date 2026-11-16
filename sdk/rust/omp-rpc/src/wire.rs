@@ -3136,7 +3136,7 @@ pub struct SessionState {
 	pub message_count: i64,
 	#[serde(rename = "queuedMessageCount", default = "default_session_state_queued_message_count")]
 	pub queued_message_count: i64,
-	/// Background jobs or deliveries can still inject a follow-up and wake the session.
+	/// Background jobs, their deliveries, child agents or queued peer messages can still wake the session.
 	#[serde(rename = "hasPendingAsyncWork", default = "default_session_state_has_pending_async_work")]
 	pub has_pending_async_work: bool,
 	/// Idle with nothing queued or pending; same predicate as `session_settled`.

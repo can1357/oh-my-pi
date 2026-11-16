@@ -667,7 +667,7 @@ class SessionState:
     message_count: int = 0
     queued_message_count: int = 0
     has_pending_async_work: bool = False
-    """Background jobs or deliveries can still inject a follow-up and wake the session."""
+    """Background jobs, their deliveries, child agents or queued peer messages can still wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
     queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))

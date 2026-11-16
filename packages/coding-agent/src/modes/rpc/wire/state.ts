@@ -129,7 +129,10 @@ export const stateDefs = {
 		messageCount: absentAs("number.integer", 0),
 		queuedMessageCount: absentAs("number.integer", 0),
 		hasPendingAsyncWork: absentAs(
-			doc("boolean", "Background jobs or deliveries can still inject a follow-up and wake the session."),
+			doc(
+				"boolean",
+				"Background jobs, their deliveries, child agents or queued peer messages can still wake the session.",
+			),
 			false,
 		),
 		isSettled: absentAs(
