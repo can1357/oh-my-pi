@@ -260,6 +260,8 @@ export class ModelPickerComponent implements Component {
 					? `  No quick roles in the ${editorKey("app.model.cycleForward") || formatKeyHint("ctrl+p")} cycle`
 					: undefined,
 		});
+		// The rail's logos name each row's provider: the rows show the model id alone.
+		this.#browser.setPickerProvider(false);
 		this.#browser.onActivate = item => {
 			const quickRole = this.#quickRoles.get(item.selector);
 			if (quickRole) {
@@ -624,7 +626,7 @@ export class ModelPickerComponent implements Component {
 			density: "snug",
 			layout: "rows",
 			preview: "none",
-			placeholder: mode === "task" ? "Search models for Task subagents…" : "Search models, @ for quick roles…",
+			placeholder: mode === "task" ? "Search Task models…" : "Search, @ for roles…",
 			...(scopes ? { scopes, scope: this.#scope, scopeStyle: "rail" as const } : {}),
 			...this.#browser.pickerRows(catalogue, view, current),
 			level,
@@ -652,12 +654,15 @@ export class ModelPickerComponent implements Component {
 	#levelProps(): TspPickerLevel | null {
 		const slider = this.#slider();
 		if (!slider) return null;
-		const key = `${slider.steps.join(",")}\0${slider.value}\0${slider.disabled ?? ""}`;
+		// The rows leave their provider out: the chip names the highlighted one's.
+		const provider = this.#browser.getSelected()?.model.provider ?? "";
+		const key = `${slider.steps.join(",")}\0${slider.value}\0${slider.disabled ?? ""}\0${provider}`;
 		if (this.#level?.key === key) return this.#level.value;
 		const value: TspPickerLevel = {
 			label: "Thinking",
 			steps: slider.steps.map(id => ({ id, label: THINKING_STEP_LABELS[id] ?? id })),
 			value: slider.value,
+			...(provider ? { detail: provider } : {}),
 			icon: "brain",
 			keys: THINKING_KEYS,
 			...(slider.disabled ? { disabled: slider.disabled } : {}),
