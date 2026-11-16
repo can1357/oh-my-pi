@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Serialized interactive Antigravity CLI sign-in across omp processes so two login flows cannot race.
+- Serialized interactive Antigravity CLI sign-in across omp processes so two login flows cannot race. ([#19412](https://github.com/can1357/oh-my-pi/pull/19412) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
