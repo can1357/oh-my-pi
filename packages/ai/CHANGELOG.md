@@ -64,7 +64,7 @@
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
 ### Fixed
 
-- Fixed Antigravity CLI tool calls hanging when a user-level HTTP proxy is set, redacted OAuth material from CLI failure messages, and answered malformed MCP frames with a JSON-RPC parse error instead of dropping them ([#PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PLACEHOLDER) by [@SenCha930511](https://github.com/SenCha930511)).
+- Fixed Antigravity CLI tool calls hanging when a user-level HTTP proxy is set, redacted OAuth material from CLI failure messages, and answered malformed MCP frames with a JSON-RPC parse error instead of dropping them ([#19424](https://github.com/can1357/oh-my-pi/pull/19424) by [@SenCha930511](https://github.com/SenCha930511)).
 
 ## [18.20.3] - 2026-11-16
 
