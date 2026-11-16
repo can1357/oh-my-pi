@@ -802,9 +802,15 @@ impl HookControlFactory {
 		super::settled::first_continue(&rows, |row| {
 			let row = row.clone();
 			async move {
-				if u32::from(row.event_policy.revision)
-					!= <omp_contract::AgentSettledEvent as omp_contract::HookEvent>::REV
-				{
+				let expected = <omp_contract::AgentSettledEvent as omp_contract::HookEvent>::REV;
+				if u32::from(row.event_policy.revision) != expected {
+					tracing::warn!(
+						extension = %row.identity.extension,
+						hook = %row.name,
+						expected,
+						declared = row.event_policy.revision,
+						"agent_settled hook skipped: event revision mismatch"
+					);
 					return None;
 				}
 				let context = ControlRequestContext {
@@ -2628,24 +2634,33 @@ mod tests {
 	}
 
 	struct SettledDispatcher {
-		calls: AtomicU64,
-		reply: JsonValue,
+		calls:   AtomicU64,
+		reply:   JsonValue,
+		/// Extension names whose callback fails with a protocol error.
+		failing: BTreeSet<&'static str>,
 	}
 
 	#[async_trait::async_trait]
 	impl CallbackDispatcher for SettledDispatcher {
 		async fn dispatch(
 			&self,
-			_target: Arc<ControlConnectionIdentity>,
+			target: Arc<ControlConnectionIdentity>,
 			_dispatch: ControlDispatch,
 		) -> Result<JsonValue, ControlProtocolError> {
 			self.calls.fetch_add(1, Ordering::SeqCst);
+			if self.failing.contains(target.extension.as_str()) {
+				return Err(ControlProtocolError::new("CallbackFailed", "scripted failure"));
+			}
 			Ok(self.reply.clone())
 		}
 	}
 
 	fn settled_factory(reply: JsonValue) -> (Arc<HookControlFactory>, Arc<SettledDispatcher>) {
-		let dispatcher = Arc::new(SettledDispatcher { calls: AtomicU64::new(0), reply });
+		let dispatcher = Arc::new(SettledDispatcher {
+			calls: AtomicU64::new(0),
+			reply,
+			failing: BTreeSet::from(["a-fail"]),
+		});
 		let hooks = HookControlFactory::new(
 			RegistryControlFactory::new(BTreeMap::new()),
 			Arc::clone(&dispatcher) as Arc<dyn CallbackDispatcher>,
@@ -2657,8 +2672,12 @@ mod tests {
 	}
 
 	fn settled_row(revision: u16) -> HookSubscription {
+		settled_named("ext", revision)
+	}
+
+	fn settled_named(ext: &str, revision: u16) -> HookSubscription {
 		let identity = Arc::new(ControlConnectionIdentity {
-			extension:          sf!("ext"),
+			extension:          Str::from(ext),
 			principal:          omp_core::Principal::new(sf!("test"), sf!("Test")),
 			artifact_digest:    sf!("sha256:test"),
 			layer:              sf!("project"),
@@ -2673,7 +2692,7 @@ mod tests {
 			session: sf!("s1"),
 			event: sf!("agent_settled"),
 			phase: sf!("domain"),
-			name: sf!("ext/0"),
+			name: sf!("{ext}/0"),
 			order: 0,
 			on_failure: None,
 			timeout: None,
@@ -2694,6 +2713,13 @@ mod tests {
 	fn install(hooks: &HookControlFactory, row: HookSubscription) {
 		let key = connection_key(&row.identity);
 		hooks.subscriptions.write().insert(key, vec![row]);
+	}
+
+	fn install_all(hooks: &HookControlFactory, rows: Vec<HookSubscription>) {
+		for row in rows {
+			let key = connection_key(&row.identity);
+			hooks.subscriptions.write().insert(key, vec![row]);
+		}
 	}
 
 	fn current_revision() -> u16 {
@@ -2732,6 +2758,32 @@ mod tests {
 		assert_eq!(settled.decision, omp_contract::AgentSettled::Continue);
 		assert_eq!(settled.context.len(), 1);
 		assert_eq!(settled.context[0].body, "x");
+		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
+	}
+
+	#[tokio::test]
+	async fn failed_call_defers_and_a_following_continue_wins() {
+		let (hooks, dispatcher) = settled_factory(json!({"prompt": "x"}));
+		install_all(&hooks, vec![
+			settled_named("a-fail", current_revision()),
+			settled_named("b-ok", current_revision()),
+		]);
+		let reply = hooks
+			.dispatch_agent_settled(&sf!("s1"), 1, &json!({}))
+			.await;
+		assert_eq!(reply.verdict, omp_contract::NativeVerdict::Continue);
+		assert_eq!(reply.context[0].body, "x");
+		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 2);
+	}
+
+	#[tokio::test]
+	async fn failed_call_alone_defers() {
+		let (hooks, dispatcher) = settled_factory(json!({"prompt": "x"}));
+		install(&hooks, settled_named("a-fail", current_revision()));
+		let reply = hooks
+			.dispatch_agent_settled(&sf!("s1"), 1, &json!({}))
+			.await;
+		assert_eq!(reply, omp_contract::NativeReply::default());
 		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
 	}
 }

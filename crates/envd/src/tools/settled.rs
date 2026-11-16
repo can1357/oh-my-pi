@@ -91,6 +91,10 @@ where
 /// In-process host that answers `agent_settled` from the session's Python
 /// hook rows. Holds the factory weakly: the factory owns the gate it is
 /// attached to.
+///
+/// Assumes one admission gate per session (one `EnvServer` per session), so
+/// the session id bound here is the only session the gate serves, and a session
+/// generation that stays constant for the runtime this host was attached in.
 pub(crate) struct AgentSettledHost {
 	hooks:      Weak<HookControlFactory>,
 	session:    Str,
