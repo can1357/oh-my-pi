@@ -22,6 +22,7 @@ use x11rb::{
 	connection::Connection,
 	protocol::{
 		xinput::ConnectionExt as _,
+		xkb::ConnectionExt as _,
 		xproto::{
 			AtomEnum, BUTTON_PRESS_EVENT, BUTTON_RELEASE_EVENT, ButtonPressEvent, ConnectionExt as _,
 			EventMask, InputFocus, KEY_PRESS_EVENT, KEY_RELEASE_EVENT, KeyButMask, KeyPressEvent,
@@ -34,6 +35,7 @@ use x11rb::{
 
 use super::{
 	activity::UserActivity,
+	keyboard_state::NeutralKeyboard,
 	keymap::{self, KeyStep, Keymap},
 	mpx::Mpx,
 	toolkit, uinput,
@@ -91,6 +93,9 @@ pub struct X11Input {
 	/// hot-plug devices is not re-probed (and its hierarchy not churned) on
 	/// every action.
 	mpx_unavailable:  Option<String>,
+	/// Whether this connection speaks XKB, which `XTest` keys need to clear
+	/// the user's locks, latches and layout group ([`NeutralKeyboard`]).
+	xkb:              bool,
 }
 
 /// Keyboard input to plan against a keymap.
@@ -141,6 +146,11 @@ impl X11Input {
 		let keymap = Keymap::core(&conn)?;
 		let atoms = Atoms::intern(&conn)?;
 		let mpx_unavailable = mpx_probe(&conn).err();
+		let xkb = conn
+			.xkb_use_extension(1, 0)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+			.is_some_and(|reply| reply.supported);
 		Ok(Self {
 			conn,
 			root,
@@ -155,6 +165,7 @@ impl X11Input {
 			activity_failed: None,
 			mpx: None,
 			mpx_unavailable,
+			xkb,
 		})
 	}
 
@@ -282,7 +293,7 @@ impl X11Input {
 		self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
 			this.check_user()?;
 			prepare()?;
-			this.xtest_steps(&steps, keys.duration())
+			this.xtest_steps(&steps, keys)
 		})
 	}
 
@@ -385,13 +396,13 @@ impl X11Input {
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => {
 				let steps = keys.plan(&self.keymap)?;
-				self.xtest_steps(&steps, keys.duration())
+				self.xtest_steps(&steps, keys)
 			},
 			(Target::Window(id), DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus) => {
 				let window = parse_window(id)?;
 				let steps = keys.plan(&self.keymap)?;
 				self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
-					this.xtest_steps(&steps, keys.duration())
+					this.xtest_steps(&steps, keys)
 				})
 			},
 			(Target::Window(id), DeliveryMode::Background) => {
@@ -843,17 +854,30 @@ impl X11Input {
 		}
 	}
 
-	fn xtest_steps(&self, steps: &[KeyStep], duration: Duration) -> CoreResult<()> {
+	/// Sends `steps` through `XTest`. A `text` run is typed through a
+	/// [`NeutralKeyboard`], so the user's locks, latches and layout group do not
+	/// change the characters; chords and holds keep them, so a Caps Lock or
+	/// layout-switch chord still toggles them.
+	fn xtest_steps(&self, steps: &[KeyStep], keys: Keys<'_>) -> CoreResult<()> {
 		self.check_released_keys(
 			steps
 				.iter()
 				.filter(|step| step.press)
 				.map(|step| step.keycode),
 		)?;
-		keymap::run_steps_with_hold(steps, duration, |step| {
+		let neutral = (matches!(keys, Keys::Text(_)) && self.xkb)
+			.then(|| NeutralKeyboard::clear(&self.conn, self.keymap.num_lock_mask()))
+			.transpose()?;
+		let sent = keymap::run_steps_with_hold(steps, keys.duration(), |step| {
 			self.xtest_key(step.keycode, step.press)
-		})?;
-		self.conn.flush().map_err(input_failed)
+		})
+		.and_then(|()| self.conn.flush().map_err(input_failed));
+		let Some(neutral) = neutral else {
+			return sent;
+		};
+		// Put back whether or not the keys went out.
+		let restored = neutral.restore();
+		sent.and(restored)
 	}
 
 	/// Synthetic key events carrying the core modifier state each transition
@@ -1888,6 +1912,179 @@ mod tests {
 		input
 			.pointer(&target, PointerEvent::Move { x: 150.0, y: 150.0 }, DeliveryMode::Background)
 			.expect("a plain move");
+	}
+
+	/// `XTest` text reaches the focused window with Caps Lock, a locked
+	/// Control and the second layout group cleared, and the user's locks and
+	/// group are back afterwards. Starts its own `Xvfb` and runs `setxkbmap`:
+	/// `cargo test -p pi-natives -- --ignored neutral_keyboard`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn xtest_text_types_through_a_neutral_keyboard_state() {
+		use std::{
+			io::{BufRead, BufReader},
+			process::{Child, Command, Stdio},
+		};
+
+		use x11rb::protocol::{
+			Event,
+			xkb::{self, ConnectionExt as _},
+			xproto::{CreateWindowAux, ModMask, WindowClass},
+		};
+
+		struct Reaped(Child);
+		impl Drop for Reaped {
+			fn drop(&mut self) {
+				let _ = self.0.kill();
+				let _ = self.0.wait();
+			}
+		}
+		let mut server = Reaped(
+			Command::new("Xvfb")
+				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+				.stdout(Stdio::piped())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("Xvfb starts"),
+		);
+		let mut number = String::new();
+		BufReader::new(server.0.stdout.take().expect("Xvfb stdout"))
+			.read_line(&mut number)
+			.expect("Xvfb reports its display");
+		let display = format!(":{}", number.trim());
+		// Connected first: Xvfb resets the keymap when its last client leaves,
+		// which would undo `setxkbmap` as soon as it exits.
+		let (conn, screen) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let layouts = Command::new("setxkbmap")
+			.args(["-display", &display, "-layout", "us,ru"])
+			.status()
+			.expect("setxkbmap runs");
+		assert!(layouts.success(), "setxkbmap us,ru");
+		let root = conn.setup().roots[screen].root;
+		assert!(
+			conn
+				.xkb_use_extension(1, 0)
+				.unwrap()
+				.reply()
+				.unwrap()
+				.supported
+		);
+		let window = conn.generate_id().unwrap();
+		conn
+			.create_window(
+				0,
+				window,
+				root,
+				0,
+				0,
+				100,
+				100,
+				0,
+				WindowClass::INPUT_OUTPUT,
+				0,
+				&CreateWindowAux::new().event_mask(EventMask::KEY_PRESS),
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+		conn.map_window(window).unwrap().check().unwrap();
+		conn
+			.set_input_focus(InputFocus::PARENT, window, CURRENT_TIME)
+			.unwrap()
+			.check()
+			.unwrap();
+		let user = ModMask::LOCK | ModMask::CONTROL;
+		conn
+			.xkb_latch_lock_state(
+				xkb::ID::USE_CORE_KBD.into(),
+				user,
+				user,
+				true,
+				xkb::Group::M2,
+				ModMask::from(0u16),
+				false,
+				0,
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+
+		let (input_conn, _) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let mut input = X11Input::new(Arc::new(input_conn), root, Some(display)).unwrap();
+		input
+			.type_text(&Target::Desktop, "AbC", DeliveryMode::Foreground)
+			.unwrap();
+
+		let key_states = || {
+			conn.get_input_focus().unwrap().reply().unwrap();
+			let mut states = Vec::new();
+			while let Some(event) = conn.poll_for_event().unwrap() {
+				if let Event::KeyPress(press) = event {
+					states.push(u16::from(press.state));
+				}
+			}
+			states
+		};
+		let states = key_states();
+		assert_eq!(states.len(), 5, "Shift, a, b, Shift, c: {states:x?}");
+		for state in states {
+			assert_eq!(state & u16::from(user), 0, "Caps Lock or Control in {state:#x}");
+			assert_eq!((state >> 13) & 3, 0, "layout group in {state:#x}");
+		}
+		let state = || {
+			conn
+				.xkb_get_state(xkb::ID::USE_CORE_KBD.into())
+				.unwrap()
+				.reply()
+				.unwrap()
+		};
+		let after = state();
+		assert_eq!(after.locked_mods & user, user, "the user's locks are back");
+		assert_eq!(after.locked_group, xkb::Group::M2, "the user's layout group is back");
+
+		// A latched group (a one-shot layout switch) is cleared, not put back.
+		conn
+			.xkb_latch_lock_state(
+				xkb::ID::USE_CORE_KBD.into(),
+				user,
+				ModMask::from(0u16),
+				true,
+				xkb::Group::M1,
+				ModMask::from(0u16),
+				true,
+				1,
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+		assert_eq!(state().latched_group, 1);
+		input
+			.type_text(&Target::Desktop, "x", DeliveryMode::Foreground)
+			.unwrap();
+		let states = key_states();
+		assert_eq!(states.len(), 1, "x: {states:x?}");
+		assert_eq!((states[0] >> 13) & 3, 0, "layout group in {:#x}", states[0]);
+		assert_eq!(state().latched_group, 0, "the latch is used up");
+
+		// A Caps Lock chord still turns Caps Lock off.
+		conn
+			.xkb_latch_lock_state(
+				xkb::ID::USE_CORE_KBD.into(),
+				ModMask::LOCK,
+				ModMask::LOCK,
+				false,
+				xkb::Group::M1,
+				ModMask::from(0u16),
+				false,
+				0,
+			)
+			.unwrap()
+			.check()
+			.unwrap();
+		input
+			.key_chord(&Target::Desktop, &[KeyName::CapsLock], DeliveryMode::Foreground)
+			.unwrap();
+		assert_eq!(state().locked_mods & ModMask::LOCK, ModMask::from(0u16), "Caps Lock is off");
 	}
 }
 
