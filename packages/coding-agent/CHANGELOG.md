@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Long-running subagents no longer copy their whole message list and session journal on every published update
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
