@@ -432,7 +432,6 @@ describe("session worktree helpers (real git)", () => {
 			expect(formatPostCheckoutHookWarning(result)).toBeUndefined();
 		});
 
-		// A real stuck git process: the poll waits on OS state, which fake timers cannot drive.
 		it("cancels while `git --version` is stuck, without running the hook", async () => {
 			const started = path.join(root, "version-started");
 			const { env, head } = await fakeGit(
@@ -440,6 +439,7 @@ describe("session worktree helpers (real git)", () => {
 			);
 			const controller = new AbortController();
 			const pending = runPostCheckoutHook(repo, head, { env, signal: controller.signal });
+			// A real stuck git process: the poll waits on OS state, which fake timers cannot drive.
 			for (let i = 0; i < 200 && !(await Bun.file(started).exists()); i++) await Bun.sleep(25);
 			controller.abort();
 			expect(await pending).toEqual({ status: "cancelled" });
@@ -474,7 +474,6 @@ describe("session worktree helpers (real git)", () => {
 			expect(wt.hookWarning).toBeUndefined();
 		});
 
-		// Real processes: the polls wait on OS state (the hook's child starting, then dying), which fake timers cannot drive.
 		it.each([
 			{ trigger: "the signal aborts", onExit: false },
 			// A detached hook would otherwise outlive omp.
@@ -493,6 +492,7 @@ describe("session worktree helpers (real git)", () => {
 			const pending = createAndFinish(controller.signal);
 			let pid = Number.NaN;
 			for (let i = 0; i < 200 && !(pid > 0); i++) {
+				// Real processes: waits for the hook's child to start, which fake timers cannot drive.
 				await Bun.sleep(50);
 				pid = await readPid(pidFile);
 			}
@@ -505,6 +505,7 @@ describe("session worktree helpers (real git)", () => {
 			const wt = await pending;
 			expect(wt.hookWarning).toBe("Worktree created, but post-checkout hook cancelled");
 			expect(worktreePaths(repo)).toContain(wt.path);
+			// Waits on OS state (the hook's child dying), which fake timers cannot drive.
 			for (let i = 0; i < 100 && isPidAlive(pid); i++) await Bun.sleep(50);
 			expect(isPidAlive(pid)).toBe(false);
 		});

@@ -244,8 +244,7 @@ describe("ptree signal abort handling", () => {
 		},
 	);
 
-	// Real processes: the abort has to reach a background process that outlived its parent, and the poll
-	// waits on OS state (that process dying), which fake timers cannot drive.
+	// Real processes: the abort has to reach a background process that outlived its parent.
 	it.skipIf(process.platform === "win32")(
 		"kills a detached group still holding the pipes when the signal aborts during the exit grace",
 		async () => {
@@ -266,6 +265,7 @@ describe("ptree signal abort handling", () => {
 				const { exitError } = await result;
 
 				expect(exitError?.aborted).toBe(true);
+				// Waits on OS state (that process dying), which fake timers cannot drive.
 				for (let i = 0; i < 40 && isPidAlive(pid); i++) await Bun.sleep(25);
 				expect(isPidAlive(pid)).toBe(false);
 			} finally {
