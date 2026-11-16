@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
 ### Added
 
 - Added support for pasting images into `HtmlFormDialog` option notes when opened with `acceptImages`, including image attachment, removal, and access to retained images through `OptionNote.images`.
