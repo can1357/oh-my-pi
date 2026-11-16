@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AssistantMessage.requestId`, set from Anthropic's `request-id` response header, so a refused or failed turn keeps the id that Anthropic support asks for ([#19383](https://github.com/can1357/oh-my-pi/pull/19383) by [@nnnnoel](https://github.com/nnnnoel))
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
