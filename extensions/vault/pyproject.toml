@@ -1,0 +1,13 @@
+[project]
+name = "omp-vault"
+version = "0.1.0"
+description = "Note-vault graph queries for omp (ADR 0049 D5)"
+requires-python = ">=3.14"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omp_vault"]

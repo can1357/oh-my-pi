@@ -138,6 +138,7 @@ _SMOKE_MODULES = (
 	"omp_sidebar",
 	"omp_hover_cards",
 	"omp_welcome_chrome",
+	"omp_vault",
 )
 
 # Device modules that register at import (succeed under stubs like forge devices).
@@ -150,6 +151,7 @@ _SMOKE_DEVICE_MODULES = (
 	"omp_workflows.device",
 	"omp_green_loop.device",
 	"omp_spec_flow.device",
+	"omp_vault.device",
 )
 
 _REQUIRED_MANIFEST_KEYS = (
@@ -412,6 +414,7 @@ def _smoke_imports(errors: list[str], summary: list[str]) -> None:
 			"ci",
 			"github",
 			"gitlab",
+			"vault",
 			*_RESCUE_WAVE1,
 		}
 	):
