@@ -55,7 +55,7 @@
 - Fixed Tern and WebKit browser calls that incorrectly exposed unsupported page event-listener APIs; errors now identify the supported alternatives.
 - Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
 - Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
-- `/commit`'s selective commit now retries when HEAD moves after the expected-HEAD check, such as inside a `commit-msg` hook, instead of failing the commit ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- `/commit`'s selective commit now retries when HEAD moves after the expected-HEAD check, such as inside a `commit-msg` hook, instead of failing the commit ([#19393](https://github.com/can1357/oh-my-pi/pull/19393) by [@eggpeat](https://github.com/eggpeat))
 - `ida` `exec` output no longer starts with IDA 9.5 `DeprecationWarning`s from omp's preloaded helpers; on IDA 9.5+ `func()` returns a `func_entry_info_t` (same `start_ea`/`end_ea`/`size()`) instead of `func_t`
 - `web_search` no longer returns Perplexity's "Sign up and repeat your request." wall as an answer when the stored Perplexity login or `PERPLEXITY_COOKIES` has expired; it reports the expired login and moves on to the next provider in the chain
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
