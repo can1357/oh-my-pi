@@ -5,8 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
-import { ChangeJournal } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
-import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
+import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -39,12 +38,27 @@ function commitIsRecorded(journalFile: string, sha: string): boolean {
 	return text.split("\n").some(line => {
 		if (!line) return false;
 		try {
-			const record = JSON.parse(line) as { type?: string; sha?: string };
+			const record: JournalRecord = JSON.parse(line);
 			return record.type === "commit" && record.sha === sha;
 		} catch {
 			return false;
 		}
 	});
+}
+
+async function installSubjectRewriteHook(root: string): Promise<void> {
+	await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+	const hook = path.join(root, ".git", "hooks", "commit-msg");
+	await Bun.write(
+		hook,
+		"#!/bin/sh\n" +
+			"cat > \"$1\" <<'EOF'\n" +
+			"fix(notes): kept the rewritten subject\n" +
+			"\n" +
+			"- Hook rewrote the body.\n" +
+			"EOF\n",
+	);
+	await fs.chmod(hook, 0o755);
 }
 
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Fixed an old bug\n";
@@ -312,18 +326,7 @@ describe("selective commit flow", () => {
 		// The commit summary prints outcome.subject. A hook can replace that line;
 		// callers must see the subject on the commit, not the one they submitted.
 		const { root, journal, write } = await emptyRepo();
-		await git(root, ["config", "core.hooksPath", ".git/hooks"]);
-		const hook = path.join(root, ".git", "hooks", "commit-msg");
-		await Bun.write(
-			hook,
-			"#!/bin/sh\n" +
-				"cat > \"$1\" <<'EOF'\n" +
-				"fix(notes): kept the rewritten subject\n" +
-				"\n" +
-				"- Hook rewrote the body.\n" +
-				"EOF\n",
-		);
-		await fs.chmod(hook, 0o755);
+		await installSubjectRewriteHook(root);
 		await write("Main", undefined, "notes.txt", "notes\n");
 		await journal.flush();
 
@@ -347,18 +350,7 @@ describe("selective commit flow", () => {
 		// disk when that read starts, the read is not cancelled, and the subject is the
 		// line the hook stored.
 		const { root, journal, write } = await emptyRepo();
-		await git(root, ["config", "core.hooksPath", ".git/hooks"]);
-		const hook = path.join(root, ".git", "hooks", "commit-msg");
-		await Bun.write(
-			hook,
-			"#!/bin/sh\n" +
-				"cat > \"$1\" <<'EOF'\n" +
-				"fix(notes): kept the rewritten subject\n" +
-				"\n" +
-				"- Hook rewrote the body.\n" +
-				"EOF\n",
-		);
-		await fs.chmod(hook, 0o755);
+		await installSubjectRewriteHook(root);
 		await write("Main", undefined, "notes.txt", "notes\n");
 		await journal.flush();
 
@@ -383,10 +375,10 @@ describe("selective commit flow", () => {
 							return signal === undefined ? target.commitDetails(rev) : target.commitDetails(rev, signal);
 						};
 					}
-					const value = Reflect.get(target, prop, target) as unknown;
+					const value: unknown = Reflect.get(target, prop, target);
 					return typeof value === "function" ? value.bind(target) : value;
 				},
-			}) as VcsGitRepo;
+			});
 		});
 		try {
 			let outcome: CommitOutcome | undefined;
