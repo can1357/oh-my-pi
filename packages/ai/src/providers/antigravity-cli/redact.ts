@@ -29,8 +29,9 @@ const OAUTH_PAIR_KEYS = [
 	"id_token",
 ] as const;
 
-const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/?#\s@]+:[^/?#\s@]+@/gi;
-const SENSITIVE_QUERY_PARAM = new RegExp(`([?&](?:${SENSITIVE_QUERY_KEYS.join("|")})=)([^&#\\s"']*)`, "gi");
+const URL_USERINFO = /(:\/\/)[^/?#\s@]*:[^/?#\s@]*@/gi;
+const SCHEME_CHARACTER = /[a-z0-9+.-]/i;
+const SENSITIVE_QUERY_PARAM = new RegExp(`([?#&](?:${SENSITIVE_QUERY_KEYS.join("|")})=)([^&#\\s"']*)`, "gi");
 const QUOTED_OAUTH_PAIR = new RegExp(
 	`((?:["'])(?:${OAUTH_PAIR_KEYS.join("|")})(?:["'])\\s*:\\s*)("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|[^\\s,}\\]]+)`,
 	"gi",
@@ -41,11 +42,19 @@ const BARE_OAUTH_PAIR = new RegExp(
 );
 const BEARER_TOKEN = /\b(Bearer\s+)\S+/gi;
 
+/** Masks `scheme://user:password@` without scanning the scheme as a backtracking prefix. */
+function redactUrlUserinfo(text: string): string {
+	return text.replace(URL_USERINFO, (match, separator: string, offset: number) => {
+		let start = offset;
+		while (start > 0 && SCHEME_CHARACTER.test(text.charAt(start - 1))) start--;
+		return /[a-z]/i.test(text.slice(start, offset)) ? `${separator}${MASK}@` : match;
+	});
+}
+
 /** Mask credentials in diagnostic text while leaving unrelated failure detail readable. */
 export function redactSensitiveText(text: string | undefined | null): string {
 	if (!text) return "";
-	return text
-		.replace(URL_USERINFO, `$1${MASK}@`)
+	return redactUrlUserinfo(text)
 		.replace(QUOTED_OAUTH_PAIR, `$1"${MASK}"`)
 		.replace(SENSITIVE_QUERY_PARAM, `$1${MASK}`)
 		.replace(BARE_OAUTH_PAIR, `$1$2${MASK}`)

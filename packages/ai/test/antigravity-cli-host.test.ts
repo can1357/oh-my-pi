@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { inspect } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
@@ -901,6 +902,28 @@ describe("Antigravity CLI error text", () => {
 		);
 	});
 
+	it("masks password-only, empty-password and full URL userinfo", () => {
+		expect(redactSensitiveText("https://user:secret@example.com/cb")).toBe("https://***@example.com/cb");
+		expect(redactSensitiveText("https://:secret@example.com/cb")).toBe("https://***@example.com/cb");
+		expect(redactSensitiveText("https://user:@example.com/cb")).toBe("https://***@example.com/cb");
+		expect(redactSensitiveText("https://user@example.com/cb")).toBe("https://user@example.com/cb");
+	});
+
+	it("leaves long malformed URLs unredacted without backtracking", () => {
+		const unterminated = `https://${"a".repeat(50_000)}`;
+		expect(redactSensitiveText(unterminated)).toBe(unterminated);
+		const colonOnly = `https://${"a".repeat(20_000)}:${"b".repeat(20_000)}`;
+		expect(redactSensitiveText(colonOnly)).toBe(colonOnly);
+		const missingPassword = `https://${"a".repeat(50_000)}@`;
+		expect(redactSensitiveText(missingPassword)).toBe(missingPassword);
+	});
+
+	it("masks sensitive query parameters in URL fragments", () => {
+		expect(
+			redactSensitiveText("https://oauth.example/callback#code=abc&state=xyz&token=def&api_key=ghi&keep=1"),
+		).toBe("https://oauth.example/callback#code=***&state=***&token=***&api_key=***&keep=1");
+	});
+
 	it("leaves non-secret failure detail intact", () => {
 		expect(redactSensitiveText("agy exited with exit code=1 after quota check timed out")).toBe(
 			"agy exited with exit code=1 after quota check timed out",
@@ -917,10 +940,39 @@ describe("Antigravity CLI error text", () => {
 		expect(mapped.message).toBe("refresh failed: https://oauth.example/token?refresh_token=*** and Bearer ***");
 	});
 
-	it("returns an unchanged error and message when nothing is sensitive", () => {
+	it("returns a fresh error with the same message when nothing is sensitive", () => {
 		const error = new Error("agy exited with exit code=1");
-		expect(mapAgyError(error)).toBe(error);
+		const mapped = mapAgyError(error);
+		expect(mapped).not.toBe(error);
+		expect(mapped.message).toBe("agy exited with exit code=1");
+		expect(mapped.cause).toBeUndefined();
 		expect(mapAgyError("exit code=1").message).toBe("exit code=1");
+	});
+
+	it("redacts the whole cause chain of a mapped error", () => {
+		const deepest = new Error("deep refresh_token=deep-secret");
+		const middle = new Error("middle access_token=middle-secret", { cause: deepest });
+		const mapped = mapAgyError(new Error("outer code_verifier=outer-secret", { cause: middle }));
+		const inspected = inspect(mapped, { depth: Infinity, showHidden: true });
+		expect(inspected).not.toContain("deep-secret");
+		expect(inspected).not.toContain("middle-secret");
+		expect(inspected).not.toContain("outer-secret");
+		expect(inspected).toContain("refresh_token=***");
+		const cause = mapped.cause;
+		expect(cause).toBeInstanceOf(Error);
+		const middleMessage = cause instanceof Error ? cause.message : "";
+		expect(middleMessage).toContain("access_token=***");
+		expect(middleMessage).not.toContain("middle-secret");
+		const nested = cause instanceof Error ? cause.cause : undefined;
+		expect(nested instanceof Error ? nested.message : "").toBe("deep refresh_token=***");
+	});
+
+	it("stops redacting a cyclic cause chain", () => {
+		const cyclic = new Error("cycle access_token=cycle-secret");
+		cyclic.cause = cyclic;
+		const mapped = mapAgyError(cyclic);
+		expect(inspect(mapped, { depth: Infinity, showHidden: true })).not.toContain("cycle-secret");
+		expect(mapped.cause).toBeUndefined();
 	});
 
 	it("keeps the sign-in hint for an unauthenticated request", () => {

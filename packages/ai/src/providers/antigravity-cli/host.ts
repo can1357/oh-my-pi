@@ -943,14 +943,23 @@ export function describeToolArguments(
 	return message.length > MAX_DIAGNOSTIC_MESSAGE ? `${message.slice(0, MAX_DIAGNOSTIC_MESSAGE)}...` : message;
 }
 
-/** Surface an ACP failure without leaking OAuth material from its message. */
+function redactedCause(cause: unknown, seen: Set<unknown>): Error | undefined {
+	if (cause === undefined || seen.has(cause)) return undefined;
+	if (!(cause instanceof Error)) return new Error(redactSensitiveText(String(cause)));
+	seen.add(cause);
+	const nested = redactedCause(cause.cause, seen);
+	return new Error(redactSensitiveText(cause.message), nested ? { cause: nested } : undefined);
+}
+
+/** Surface an ACP failure as a fresh error whose message and cause chain carry no OAuth material. */
 export function mapAgyError(error: unknown): Error {
 	if (error instanceof RequestError && /not logged in|unauthenticated|authentication required/i.test(error.message)) {
 		return new Error("Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.");
 	}
+	const seen = new Set<unknown>([error]);
+	const cause = error instanceof Error ? redactedCause(error.cause, seen) : undefined;
 	const message = redactSensitiveText(error instanceof Error ? error.message : String(error));
-	if (error instanceof Error && error.message === message) return error;
-	return new Error(message, { cause: error });
+	return new Error(message, cause ? { cause } : undefined);
 }
 
 function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {
