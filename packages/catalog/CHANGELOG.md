@@ -5,6 +5,7 @@
 ### Added
 
 - Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+- Added the advisor models the Anthropic API accepts for each Claude executor, with `resolveAdvisorModel` resolving a family alias to the strongest accepted advisor ([#19386](https://github.com/can1357/oh-my-pi/pull/19386) by [@psukhopompos](https://github.com/psukhopompos))
 
 ## [18.20.3] - 2026-11-16
 
@@ -16,7 +17,6 @@
 
 - Fixed image inputs being dropped for DeepSeek V4 Flash, restoring consistent multimodal image support.
 - Restricted reasoning-effort options for Mistral GLM 5.3, GLM 5.3 Flash, and Mistral Large 4 to the levels supported by those models.
-- Added the advisor models the Anthropic API accepts for each Claude executor, with `resolveAdvisorModel` resolving a family alias to the strongest accepted advisor.
 
 ## [18.20.2] - 2026-11-14
 
