@@ -32,9 +32,18 @@ export interface VibeSpawnLifecycleEvent extends VibeLifecycleBase {
 	createdAt: number;
 }
 
+export interface VibeWorkerUsageTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
 export interface VibeTurnLifecycleEvent extends VibeLifecycleBase {
 	action: "turn-started" | "turn-settled";
 	turn: number;
+	/** Worker's cumulative billed usage as of a turn-settled event. */
+	usage?: VibeWorkerUsageTotals;
 }
 
 export interface VibeTombstoneLifecycleEvent extends VibeLifecycleBase {
@@ -74,7 +83,12 @@ const LifecycleEvent = type({
 	childSessionFile: "string",
 	createdAt: "number",
 })
-	.or({ ...lifecycleBase, action: "'turn-started' | 'turn-settled'", turn: "number.integer >= 1" })
+	.or({
+		...lifecycleBase,
+		action: "'turn-started' | 'turn-settled'",
+		turn: "number.integer >= 1",
+		"usage?": { input: "number", output: "number", cacheRead: "number", cacheWrite: "number" },
+	})
 	.or({
 		...lifecycleBase,
 		action: "'tombstone'",

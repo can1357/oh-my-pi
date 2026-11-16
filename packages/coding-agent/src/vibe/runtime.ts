@@ -1,3 +1,4 @@
+import type { VibeWorkerUsageTotals } from "./lifecycle";
 import {
 	type VibeSessionState,
 	type VibeScreenSnapshot,
@@ -103,6 +104,12 @@ export interface VibeParentSession {
 			Pick<SessionManager, "appendModeChange" | "appendEntriesAtomically" | "recoverPersistenceFromCurrentState">
 		>;
 	asyncJobManager?: AsyncJobManagerApi;
+	/**
+	 * Called once per settled worker turn, before the result self-delivers into
+	 * the parent conversation. Lets the parent session account worker spend
+	 * (goal budgets) at settlement time, before any wake turn baselines it away.
+	 */
+	onVibeWorkerTurnSettled?: () => void | Promise<void>;
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
@@ -114,6 +121,8 @@ interface VibeRestoreCandidate {
 	lastActivityAt: number;
 	inFlight: boolean;
 	tombstoneReason?: VibeTombstoneReason;
+	/** Cumulative worker usage from the latest persisted turn-settled event. */
+	usage?: VibeWorkerUsageTotals;
 }
 
 interface ResolvedVibeWorker {
@@ -162,6 +171,8 @@ interface VibeRecord {
 	};
 	/** Job id of the most recently settled turn (wait snapshots after settle). */
 	lastJobId?: string;
+	/** Cumulative billed usage across this worker's settled turns (record-level, survives park/revive). */
+	usage?: VibeWorkerUsageTotals;
 	/** Messages queued while a turn was in flight; drained into the next turn. */
 	queue: string[];
 	turnCount: number;
@@ -264,6 +275,7 @@ export class VibeSessionRegistry {
 	/** Reset the global registry. Test-only. */
 	static resetGlobalForTests(): void {
 		VibeSessionRegistry.#global = undefined;
+		workerUsageHighWater.clear();
 	}
 
 	/**
@@ -279,6 +291,7 @@ export class VibeSessionRegistry {
 		state?: VibeSessionState;
 		killed?: boolean;
 		jobId?: string;
+		usage?: VibeWorkerUsageTotals;
 	}): void {
 		const now = Date.now();
 		const scope: VibeOwnerScope = {
@@ -304,6 +317,7 @@ export class VibeSessionRegistry {
 			killed: record.killed ?? false,
 			suspended: false,
 			terminalPersisted: false,
+			usage: record.usage,
 		});
 	}
 
@@ -533,6 +547,32 @@ export class VibeSessionRegistry {
 		return ids;
 	}
 
+	/** Every worker record owned by `ownerId`, dead included (usage aggregation). */
+	listWorkerRecordsByOwner(ownerId: string): VibeRecord[] {
+		const records: VibeRecord[] = [];
+		for (const record of this.#records.values()) {
+			if (record.ownerId === ownerId) records.push(record);
+		}
+		return records;
+	}
+
+	/**
+	 * Whether any live worker in this parent's scope has a turn in flight.
+	 * Goal continuation consults this so it never fires while worker results
+	 * are still coming — delivery itself wakes the director.
+	 */
+	hasInFlightTurns(session: VibeParentSession): boolean {
+		const scope = this.ownerScope(session);
+		const manager = session.asyncJobManager;
+		for (const record of this.#records.values()) {
+			if (!matchesScope(record, scope) || record.state === "dead") continue;
+			if (!record.turn) continue;
+			const job = manager?.getJob(record.turn.jobId);
+			if (!manager || !job || job.status === "running") return true;
+		}
+		return false;
+	}
+
 	/**
 	 * Live screen snapshots for rich rendering (the "TV wall"): one entry per
 	 * session in creation order, carrying the in-flight turn's trace, current
@@ -728,6 +768,7 @@ export class VibeSessionRegistry {
 			} else if (event.action === "turn-settled" && event.turn >= candidate.turnCount) {
 				candidate.turnCount = event.turn;
 				candidate.inFlight = false;
+				candidate.usage = event.usage ?? candidate.usage;
 			} else if (event.action === "tombstone") {
 				candidate.tombstoneReason = event.reason;
 			} else if (event.action === "tombstone-revoked" && candidate.tombstoneReason === "mode-exit") {
@@ -794,7 +835,9 @@ export class VibeSessionRegistry {
 				killed: false,
 				suspended: false,
 				terminalPersisted: false,
+				usage: candidate.usage,
 			});
+			if (candidate.usage) seedPersistedWorkerUsage(scope.ownerId, spawn.id, candidate.usage);
 			restored++;
 		}
 		return restored;
@@ -1432,6 +1475,9 @@ export class VibeSessionRegistry {
 		record.turn = undefined;
 		record.live = undefined;
 		record.lastActivityAt = Date.now();
+		// Account worker spend before delivery can start a parent wake turn, so a
+		// goal budget sees it as a delta instead of absorbing it into a new baseline.
+		await session.onVibeWorkerTurnSettled?.();
 		if (record.killed || record.suspended) {
 			record.state = "dead";
 			return;
@@ -1449,6 +1495,7 @@ export class VibeSessionRegistry {
 				...this.#eventBase(record),
 				action: "turn-settled",
 				turn: record.turnCount,
+				usage: record.usage,
 			},
 			record.parentSessionFile,
 		);
@@ -1480,6 +1527,18 @@ export class VibeSessionRegistry {
 		turnIndex: number,
 		result: SingleResult,
 	): Promise<AsyncJobRunResult> {
+		// Record-level accumulation from the executor's billed usage: monotonic
+		// across park/revive, persisted on the turn-settled event below, and the
+		// source for goal-budget aggregation.
+		if (result.usage) {
+			const usage = result.usage;
+			record.usage = {
+				input: (record.usage?.input ?? 0) + (usage.input ?? 0),
+				output: (record.usage?.output ?? 0) + (usage.output ?? 0),
+				cacheRead: (record.usage?.cacheRead ?? 0) + (usage.cacheRead ?? 0),
+				cacheWrite: (record.usage?.cacheWrite ?? 0) + (usage.cacheWrite ?? 0),
+			};
+		}
 		await this.#finishTurn(session, manager, record, settledJobId);
 		const failed = result.exitCode !== 0 || result.aborted === true;
 		const status = result.aborted ? "aborted" : failed ? "failed" : "completed";
@@ -1572,4 +1631,65 @@ export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | nu
 		}
 	}
 	return any ? total : null;
+}
+
+export type { VibeWorkerUsageTotals } from "./lifecycle";
+
+/**
+ * Per-worker cumulative billed usage, keyed `${ownerId}\0${workerId}`. Fed from
+ * each turn's `SingleResult.usage` (record-level accumulation), persisted on
+ * turn-settled lifecycle events, and re-seeded by `rehydrate()`. Per-field
+ * maxima keep the entry monotonic across revives; entries for dead workers are
+ * kept so their spend stays part of the owner's total — dropping a dead or
+ * parked worker from the sum would let that dip mask a live worker's new delta
+ * under GoalRuntime's per-field clamped deltas.
+ */
+const workerUsageHighWater = new Map<string, VibeWorkerUsageTotals>();
+
+function mergeUsageHighWater(key: string, usage: VibeWorkerUsageTotals): void {
+	const previous = workerUsageHighWater.get(key);
+	workerUsageHighWater.set(
+		key,
+		previous
+			? {
+					input: Math.max(previous.input, usage.input),
+					output: Math.max(previous.output, usage.output),
+					cacheRead: Math.max(previous.cacheRead, usage.cacheRead),
+					cacheWrite: Math.max(previous.cacheWrite, usage.cacheWrite),
+				}
+			: usage,
+	);
+}
+
+/**
+ * Seed the worker-usage baseline from one persisted turn-settled event. Called
+ * by {@link VibeSessionRegistry.rehydrate} so that, after a process restart, a
+ * resumed goal's baseline already includes pre-restart worker spend — the first
+ * revived worker turn then charges only its new usage instead of replaying its
+ * whole transcript as a fresh delta.
+ */
+export function seedPersistedWorkerUsage(ownerId: string, id: string, usage: VibeWorkerUsageTotals): void {
+	mergeUsageHighWater(`${ownerId}\0${id}`, usage);
+}
+
+/**
+ * Cumulative billed usage across every vibe worker owned by `ownerId` — live,
+ * parked, dead, and rehydrated alike. Intended for goal-budget accounting in
+ * the parent session: the caller adds it to its own totals, and GoalRuntime
+ * flushes deltas against a persistent baseline so worker spend is charged to
+ * the goal even while the director is idle between turns.
+ */
+export function aggregateVibeWorkerUsage(ownerId: string): VibeWorkerUsageTotals {
+	for (const record of VibeSessionRegistry.global().listWorkerRecordsByOwner(ownerId)) {
+		if (record.usage) mergeUsageHighWater(`${ownerId}\0${record.id}`, record.usage);
+	}
+	const totals: VibeWorkerUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	for (const [key, usage] of workerUsageHighWater) {
+		if (!key.startsWith(`${ownerId}\0`)) continue;
+		totals.input += usage.input;
+		totals.output += usage.output;
+		totals.cacheRead += usage.cacheRead;
+		totals.cacheWrite += usage.cacheWrite;
+	}
+	return totals;
 }

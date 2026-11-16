@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Combined goal mode with vibe mode: `/goal` and `/vibe` compose in either order, keeping the `goal` tool in the director's set while workers drive the objective. Worker-result delivery owns director wake-ups (goal continuation fires only when every worker is idle), goal state rides in the vibe `mode_change` journal entry so one record rehydrates both on resume, exiting vibe pauses an active goal, and a goal's `token_budget` now covers director plus worker spend through record-level usage accounting that survives worker park/revive and process restarts.
+
+### Changed
+
+- Goal budget accounting uses a persistent last-flushed usage baseline instead of a per-turn snapshot, so token spend accruing between turns (for example vibe worker turns settling while the main agent is idle) is charged to the goal instead of being absorbed into the next turn's baseline.
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
