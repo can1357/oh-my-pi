@@ -752,6 +752,14 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	/** Refit to a new column ceiling. */
+	setMaxWidthCells(maxWidthCells: number): void {
+		if (this.#options.maxWidthCells === maxWidthCells) return;
+		this.#options.maxWidthCells = maxWidthCells;
+		this.#native = undefined;
+		this.invalidate();
+	}
+
 	/**
 	 * Refit to a new row ceiling; a SIXEL reserves its rows until the off-thread
 	 * encode lands. A demoted fallback keeps the height already drawn only
