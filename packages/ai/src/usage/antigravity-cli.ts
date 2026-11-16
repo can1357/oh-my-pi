@@ -153,7 +153,7 @@ export const antigravityCliRankingStrategy: CredentialRankingStrategy = {
 
 async function existingAgyBinary(): Promise<string | undefined> {
 	const override = $env.PI_AGY_PATH;
-	if (override) return override;
+	if (override) return path.resolve(override);
 	const directory = path.join(getAntigravityCliDir(), "bin");
 	try {
 		const record: unknown = await Bun.file(path.join(directory, "install.json")).json();

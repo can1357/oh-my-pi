@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { UsageFetchContext, UsageFetchParams, UsageReport } from "../src/usage";
@@ -191,6 +192,9 @@ cat "$QUOTA_OUTPUT"
 				const geminiHome = lines.find(line => line.startsWith("GEMINI_HOME="))?.slice("GEMINI_HOME=".length);
 				expect(geminiHome).toContain("omp-agy-usage-");
 				await expect(fs.access(geminiHome!)).rejects.toThrow();
+				process.env.PI_AGY_PATH = path.relative(process.cwd(), cli);
+				const relative = await fetchAgyUsage(params, context);
+				expect(relative?.limits).toHaveLength(5);
 			} finally {
 				for (const [key, value] of Object.entries(previous)) {
 					if (value === undefined) delete process.env[key];
