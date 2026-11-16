@@ -27,6 +27,10 @@
 
 - The model switcher (alt+p / `/switch`) can now filter models by provider (Tab / Shift+Tab) and set the thinking level for the switch (alt+←/→); in Tern it opens as a drop-up above the composer with a provider rail, a thinking slider, and a Task / Main toggle in its head instead of an action bar.
 
+### Fixed
+
+- Fixed `commit.draft()` hiding files an agent deleted or renamed through bash/eval (`rm`, `mv`) under "Not yours"; they are now listed under Review.
+
 ### Removed
 
 - Removed legacy standalone disassembler tools and their associated prompt instructions

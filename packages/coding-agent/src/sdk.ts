@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { type CallRecord, ChangeJournal, callLabel } from "./commit/selective/journal";
+import { type CallRecord, ChangeJournal, callDetails } from "./commit/selective/journal";
 import { createCommitPrelude } from "./commit/selective/prelude-definition";
 import { cfgDisasmBackend } from "./disasm/active";
 import { createDsmPrelude, releaseDsmReferences } from "./disasm/prelude-definition";
@@ -5157,12 +5157,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		});
 		// Shell-like calls bound the windows in which scripts, formatters, and codegen changed
-		// files on this agent's behalf; selective commits match file mtimes against them.
+		// files on this agent's behalf; selective commits match file ctimes against them, and the
+		// paths their scripts name against deleted files.
 		const shellCalls = new Map<string, Omit<CallRecord, "type" | "agent" | "parent" | "end">>();
 		agent.subscribe(event => {
 			if (event.type === "tool_execution_start") {
 				if (event.toolName !== "bash" && event.toolName !== "eval") return;
-				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), label: callLabel(event.args) });
+				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), ...callDetails(event.args) });
 			} else if (event.type === "tool_execution_end") {
 				const call = shellCalls.get(event.toolCallId);
 				if (!call) return;
