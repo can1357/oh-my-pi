@@ -2,13 +2,15 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added parallel, persistent thinking-capability probes for unknown models, including alternate effort and token-budget request formats.
-
 ### Fixed
 
 - Fixed Claude subscription requests to newly released models failing once with `claude_code_version_too_old`; the current Claude Code version is now looked up from npm ([#19256](https://github.com/can1357/oh-my-pi/pull/19256) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
 
 ## [18.20.3] - 2026-11-16
 
