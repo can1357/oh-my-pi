@@ -1,9 +1,9 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { closeDb, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
+import { installStatsTestIsolation } from "@oh-my-pi/omp-stats/test-support/temp-agent";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getStatsDbPath } from "@oh-my-pi/pi-utils";
-import { installStatsTestIsolation } from "../../stats/test/helpers/temp-agent";
 import type { StatsActivityWorkerInbound, StatsActivityWorkerOutbound } from "../src/stats/activity-protocol";
 import { startStatsActivityWorker } from "../src/stats/activity-worker";
 

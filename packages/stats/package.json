@@ -86,6 +86,10 @@
       "types": "./src/client/*.ts",
       "import": "./src/client/*.ts"
     },
+    "./test-support/temp-agent": {
+      "types": "./test/helpers/temp-agent.ts",
+      "import": "./test/helpers/temp-agent.ts"
+    },
     "./*.js": "./src/*.ts"
   }
 }
