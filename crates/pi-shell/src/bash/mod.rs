@@ -87,7 +87,7 @@ pub use crate::bash::{
 		AstNodeId, CallId, CmdTag, Dialect, IntrinsicId, JobId, ModeId, NativeRef, Platform, RunId,
 		ToolRef, UnitId, Vpid,
 	},
-	image::Image,
+	image::{Image, ImageDiff},
 	mem_store::MemStore,
 	signal::{SigSet, SigTarget, Signal},
 	snapshot::{ExternalizeReport, Lost, RestoreOpts, RestoreReport},

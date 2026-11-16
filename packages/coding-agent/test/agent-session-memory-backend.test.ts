@@ -467,12 +467,13 @@ describe("AgentSession memory backend lifecycle", () => {
 				output: text => {
 					output.push(text);
 				},
-				refreshCommands: () => {},
-				reloadPlugins: async () => {
+				// The last rescope step: a failure here exercises rollback after the memory rebind.
+				refreshCommands: () => {
 					if (current.sessionManager.getCwd() !== destinationCwd) return;
 					destinationDbPath = getMnemopiSessionState(current)!.memory.dbPath!;
 					if (rollback) throw new Error("destination plugin rescope failed");
 				},
+				reloadPlugins: async () => {},
 			});
 		} finally {
 			setProjectDir(originalProjectDir);
