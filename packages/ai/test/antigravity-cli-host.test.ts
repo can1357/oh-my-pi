@@ -405,7 +405,7 @@ describe("AgyHost stateful steps", () => {
 		expect(next.writer.output.content).toEqual([{ type: "text", text: "Steered response." }]);
 	});
 
-	it("steers parked MCP tool-result images as ACP prompt blocks and keeps only text in the MCP reply", async () => {
+	it("steers parked MCP images and links mixed and image-only MCP replies to their prompt envelopes", async () => {
 		const state = await parked();
 		state.fake.autoSteer = false;
 		let released = false;
@@ -429,7 +429,13 @@ describe("AgyHost stateful steps", () => {
 		]);
 		state.prompt.response.resolve({ stopReason: "end_turn" });
 		expect(await state.output).toEqual({
-			content: [{ type: "text", text: "Read image file [image/jpeg]" }],
+			content: [
+				{ type: "text", text: "Read image file [image/jpeg]" },
+				{
+					type: "text",
+					text: expect.stringContaining(`<tool_result id=${JSON.stringify(firstCall.id)} name="read">`),
+				},
+			],
 			isError: false,
 		});
 		state.fake.text("Checking second image.");
@@ -453,7 +459,12 @@ describe("AgyHost stateful steps", () => {
 		const combinedSteer = await state.fake.prompts.next();
 		imageSteer.response.resolve({ stopReason: "end_turn" });
 		expect(await secondOutput).toEqual({
-			content: [{ type: "text", text: "[Image delivered in prompt]" }],
+			content: [
+				{
+					type: "text",
+					text: expect.stringContaining(`<tool_result id=${JSON.stringify(secondCall.id)} name="read">`),
+				},
+			],
 			isError: false,
 		});
 		expect(combinedSteer.request.prompt).toEqual([

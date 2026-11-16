@@ -5,7 +5,7 @@
  * only in a subsequent prompt. Failed drains kill the process and reseed.
  */
 import * as path from "node:path";
-import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	type ContentBlock,
 	ClientSideConnection,
@@ -47,6 +47,7 @@ import {
 	transcriptDigest,
 } from "./reconcile";
 import type { StepWriter } from "./step-writer";
+import toolResultImageReferenceTemplate from "./tool-result-image-reference.md" with { type: "text" };
 
 const AGENT_NAME = "bridge";
 const STARTUP_TIMEOUT_MS = 60_000;
@@ -964,8 +965,15 @@ function toMcpOutput(result: ToolResultMessage): McpToolOutput {
 	const content = result.content.flatMap(part =>
 		part.type === "text" ? [{ type: "text" as const, text: part.text }] : [],
 	);
-	if (content.length === 0 && result.content.some(part => part.type === "image")) {
-		content.push({ type: "text", text: "[Image delivered in prompt]" });
+	if (result.content.some(part => part.type === "image")) {
+		content.push({
+			type: "text",
+			text: prompt.render(toolResultImageReferenceTemplate, {
+				toolCallId: result.toolCallId,
+				toolName: result.toolName,
+				isError: result.isError,
+			}),
+		});
 	}
 	return {
 		content,

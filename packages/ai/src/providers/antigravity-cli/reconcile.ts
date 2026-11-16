@@ -12,6 +12,7 @@ import type {
 	UserMessage,
 } from "../../types";
 import lateToolResultTemplate from "./late-tool-result.md" with { type: "text" };
+import toolResultImagesTemplate from "./tool-result-images.md" with { type: "text" };
 import transcriptTemplate from "./transcript.md" with { type: "text" };
 
 /** The exact leading transcript represented by the live conversation. */
@@ -147,13 +148,16 @@ export function lateToolResultPrompt(result: ToolResultMessage): ContentBlock[] 
 export function toolResultImagesPrompt(result: ToolResultMessage): ContentBlock[] {
 	const images = result.content.filter((part): part is ImageContent => part.type === "image");
 	if (images.length === 0) return [];
-	const error = result.isError ? ' error="true"' : "";
 	return [
 		{
 			type: "text",
-			text: `<tool_result id=${JSON.stringify(result.toolCallId)} name=${JSON.stringify(result.toolName)}${error}>`,
+			text: prompt.render(toolResultImagesTemplate, {
+				toolCallId: result.toolCallId,
+				toolName: result.toolName,
+				isError: result.isError,
+			}),
 		},
-		...images.map((part): ContentBlock => ({ type: "image", data: part.data, mimeType: part.mimeType })),
+		...contentBlocks(images),
 		{ type: "text", text: "</tool_result>" },
 	];
 }
