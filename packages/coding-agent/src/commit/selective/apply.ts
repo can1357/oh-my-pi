@@ -84,10 +84,11 @@ export async function commitSelection(
 	const message = composeMessage(request);
 	const changes = draft.selection();
 	if (changes.length === 0) {
+		if (draft.paths.length > 0) throw new Error("Nothing selected; use take() first.");
 		throw new Error(
-			draft.paths.length === 0
-				? `Nothing to commit: ${draft.root} has no changes against HEAD.`
-				: "Nothing selected; use take() first.",
+			draft.skipped.length > 0
+				? `Nothing to commit: only ${draft.skipped.join(", ")} changed (submodule or nested repository), which selective commits skip.`
+				: `Nothing to commit: ${draft.root} has no changes against HEAD.`,
 		);
 	}
 	const repo = vcs.requireGit(draft.root);

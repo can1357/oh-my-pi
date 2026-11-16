@@ -224,6 +224,17 @@ describe("selective commit flow", () => {
 			/Nothing to commit: .* has no changes against HEAD/,
 		);
 
+		// A nested repository is dirty but skipped: the repository is not clean.
+		const nested = path.join(root, "vendor");
+		await fs.mkdir(nested);
+		await git(nested, ["init", "-q"]);
+		const skippedOnly = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(skippedOnly.skipped).toEqual(["vendor"]);
+		await expect(commitSelection(skippedOnly, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing to commit: only vendor changed (submodule or nested repository), which selective commits skip.",
+		);
+		await fs.rm(nested, { recursive: true });
+
 		// The user's unjournaled edit is a change, just not selected.
 		await Bun.write(path.join(root, "a.ts"), "export const a = 2;\n");
 		const unselected = await createDraft({ cwd: root, journal, caller: "Main" });
