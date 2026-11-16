@@ -2116,10 +2116,11 @@ mod tests {
 
 	#[test]
 	fn test_visible_width_jamo_correction_inside_combining_cluster() {
-		let jamo_cells = if cfg!(target_os = "macos") { 1 } else { 2 };
-		let filler_cells = usize::from(cfg!(target_os = "macos"));
-		assert_eq!(visible_width_u16(&to_u16("\u{3141}\u{0301}"), DEFAULT_TAB_WIDTH), jamo_cells);
-		assert_eq!(visible_width_u16(&to_u16("\u{3164}\u{0301}"), DEFAULT_TAB_WIDTH), filler_cells);
+		// Kitty's widths make the Hangul filler wide like the visible jamo;
+		// macOS's narrow correction applies to both.
+		let cells = if cfg!(target_os = "macos") { 1 } else { 2 };
+		assert_eq!(visible_width_u16(&to_u16("\u{3141}\u{0301}"), DEFAULT_TAB_WIDTH), cells);
+		assert_eq!(visible_width_u16(&to_u16("\u{3164}\u{0301}"), DEFAULT_TAB_WIDTH), cells);
 	}
 
 	#[test]
