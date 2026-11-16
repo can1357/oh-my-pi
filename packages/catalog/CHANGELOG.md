@@ -6,11 +6,21 @@
 
 - Added the `refresh { on-use-only #true }` auth directive, set for Google Antigravity: its accounts refresh only when a request is about to use one ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
 - Added `markPartialDynamicModels()`: a model manager merges a dynamic result marked partial without pruning and caches it non-authoritative ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
-- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added Modal as a hosted inference provider.
 
 ### Changed
 
-- Changed the local speech model `kokoro` to `phonon-31m`
+- Changed the local speech model from Kokoro to Phonon 31M.
+- Improved reasoning capability detection by preserving unverified thinking-level support and using endpoint-specific probe results when available.
+
+### Fixed
+
+- Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
 
 ## [18.20.3] - 2026-11-16
 

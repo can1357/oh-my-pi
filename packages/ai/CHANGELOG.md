@@ -10,6 +10,12 @@
 
 - Fixed the auth broker's background sweep refreshing every Google Antigravity account at once; accounts now refresh only when a request is about to use one ([#19268](https://github.com/can1357/oh-my-pi/pull/19268) by [@Xytronix](https://github.com/Xytronix))
 
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
