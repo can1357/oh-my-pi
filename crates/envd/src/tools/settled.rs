@@ -1,12 +1,17 @@
 //! `agent_settled` hook reply decoding, row selection and first-Continue fold.
 
-use std::{cmp::Ordering, future::Future};
+use std::{
+	cmp::Ordering,
+	future::Future,
+	sync::{Arc, Weak},
+};
 
-use omp_contract::{HookContext, NativeReply, NativeVerdict};
+use omp_contract::{BoxFut, HookContext, NativeHookHost, NativeReply, NativeVerdict};
 use omp_core::Str;
+use omp_proto::toolhost::v1::HookEventId;
 use serde_json::Value as JsonValue;
 
-use super::hooks::HookSubscription;
+use super::hooks::{HookControlFactory, HookSubscription};
 
 /// One decoded Continue reply: the prompt that starts another turn.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,6 +86,41 @@ where
 		};
 	}
 	NativeReply { verdict: NativeVerdict::Defer, context: Vec::new() }
+}
+
+/// In-process host that answers `agent_settled` from the session's Python
+/// hook rows. Holds the factory weakly: the factory owns the gate it is
+/// attached to.
+pub(crate) struct AgentSettledHost {
+	hooks:      Weak<HookControlFactory>,
+	session:    Str,
+	generation: u64,
+}
+
+impl AgentSettledHost {
+	/// Attaches one host to the factory's gate; call once per session gate.
+	pub(crate) fn attach(hooks: &Arc<HookControlFactory>, session: Str, generation: u64) {
+		let host = Arc::new(Self { hooks: Arc::downgrade(hooks), session, generation });
+		hooks
+			.admission_gate()
+			.attach_native(host, &[HookEventId::HookEventAgentSettled]);
+	}
+}
+
+impl NativeHookHost for AgentSettledHost {
+	fn decide<'a>(&'a self, event: HookEventId, payload: &'a JsonValue) -> BoxFut<'a, NativeReply> {
+		Box::pin(async move {
+			if event != HookEventId::HookEventAgentSettled {
+				return NativeReply::default();
+			}
+			let Some(hooks) = self.hooks.upgrade() else {
+				return NativeReply::default();
+			};
+			hooks
+				.dispatch_agent_settled(&self.session, self.generation, payload)
+				.await
+		})
+	}
 }
 
 #[cfg(test)]

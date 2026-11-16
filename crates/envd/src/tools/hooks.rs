@@ -781,6 +781,78 @@ impl HookControlFactory {
 		}
 	}
 
+	/// Asks the session's Python `agent_settled` domain rows, in order, and
+	/// returns the first Continue; no row, a stale revision, a failed call or a
+	/// Settle reply all defer. Awaited inline: nothing outlives the call.
+	pub(crate) async fn dispatch_agent_settled(
+		&self,
+		session: &Str,
+		session_generation: u64,
+		payload: &JsonValue,
+	) -> omp_contract::NativeReply {
+		const EVENT: &str = "agent_settled";
+		let all = self
+			.subscriptions
+			.read()
+			.values()
+			.flat_map(|rows| rows.iter())
+			.cloned()
+			.collect::<Vec<_>>();
+		let rows = super::settled::settled_rows(&all, session.as_str(), session_generation);
+		super::settled::first_continue(&rows, |row| {
+			let row = row.clone();
+			async move {
+				if u32::from(row.event_policy.revision)
+					!= <omp_contract::AgentSettledEvent as omp_contract::HookEvent>::REV
+				{
+					return None;
+				}
+				let context = ControlRequestContext {
+					connection: Arc::clone(&row.identity),
+					request_id: 0,
+					invocation: Some(ControlInvocationAuthority {
+						invocation:        sf!("{EVENT}:{}", Ulid::generate()),
+						phase:             InvocationPhase::EffectsAuthorized,
+						session:           row.session.clone(),
+						turn:              None,
+						event:             Some(Str::new_static(EVENT)),
+						call:              None,
+						device:            None,
+						effects:           Box::new([]),
+						place_kind:        sf!("host"),
+						lifecycle:         LifecyclePhase::Active,
+						roots:             Box::new([]),
+						remote:            false,
+						has_ui:            false,
+						headless:          true,
+						settings:          self.settings_for(&row.identity),
+						secret_settings:   Box::new([]),
+						data:              None,
+						direct_filesystem: None,
+					}),
+				};
+				let mut callback = JsonMap::new();
+				callback.insert("event".to_owned(), JsonValue::String(EVENT.to_owned()));
+				callback.insert("phase".to_owned(), JsonValue::String("domain".to_owned()));
+				callback.insert("name".to_owned(), JsonValue::String(row.name.to_string()));
+				callback.insert("payload".to_owned(), payload.clone());
+				self
+					.callbacks
+					.dispatch_provider_hook(
+						Arc::clone(&row.identity),
+						&context,
+						EVENT,
+						callback,
+						row.concurrency,
+						row.timeout.unwrap_or(row.event_policy.timeout),
+					)
+					.await
+					.ok()
+			}
+		})
+		.await
+	}
+
 	async fn dispatch_provider_domain(
 		&self,
 		event: &'static str,
@@ -2631,7 +2703,9 @@ mod tests {
 	#[tokio::test]
 	async fn no_python_rows_defers() {
 		let (hooks, dispatcher) = settled_factory(json!({"prompt": "x"}));
-		let reply = hooks.dispatch_agent_settled(&sf!("s1"), 1, &json!({})).await;
+		let reply = hooks
+			.dispatch_agent_settled(&sf!("s1"), 1, &json!({}))
+			.await;
 		assert_eq!(reply, omp_contract::NativeReply::default());
 		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 0);
 	}
@@ -2640,7 +2714,9 @@ mod tests {
 	async fn stale_revision_row_is_skipped() {
 		let (hooks, dispatcher) = settled_factory(json!({"prompt": "x"}));
 		install(&hooks, settled_row(current_revision() + 1));
-		let reply = hooks.dispatch_agent_settled(&sf!("s1"), 1, &json!({})).await;
+		let reply = hooks
+			.dispatch_agent_settled(&sf!("s1"), 1, &json!({}))
+			.await;
 		assert_eq!(reply, omp_contract::NativeReply::default());
 		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 0);
 	}
