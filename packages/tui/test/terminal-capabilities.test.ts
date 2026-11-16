@@ -338,9 +338,11 @@ console.log(JSON.stringify({ id: TERMINAL_ID, notifyProtocol: TERMINAL.notifyPro
 		},
 	);
 
+	// Rex has no Unicode placeholders, and tmux forwards direct placements at its
+	// outer cursor, so the recognized client leaves the protocol to the SIXEL probe.
 	it.skipIf(process.platform === "win32")("recognizes a Rex client from tmux client_termname", async () => {
 		const stdout = await resolveInsideFakeTmux("tmux 3.4\txterm-rex");
-		expect(JSON.parse(stdout)).toMatchObject({ id: "rex", imageProtocol: ImageProtocol.Kitty });
+		expect(JSON.parse(stdout)).toMatchObject({ id: "rex", imageProtocol: null });
 	});
 });
 
@@ -654,11 +656,14 @@ describe("tmux image protocol selection", () => {
 	});
 
 	// tmux 3.3+ drops `\x1bPtmux;` envelopes unless `allow-passthrough` is on,
-	// so a Kitty client identity alone must not select Kitty graphics.
-	for (const [name, socket, passthrough, expected] of [
-		["keeps a known Kitty client when tmux forwards passthrough", "5101", "on", ImageProtocol.Kitty],
-		["drops a known Kitty client when tmux blocks passthrough", "5102", "off", null],
-		["keeps a known Kitty client on tmux without the passthrough option", "5103", "", ImageProtocol.Kitty],
+	// so a Kitty client identity alone must not select Kitty graphics. A client
+	// without Unicode placeholders (WezTerm) would get direct placements, which
+	// tmux forwards at its own outer cursor instead of the pane's reserved rows.
+	for (const [name, id, socket, passthrough, expected] of [
+		["keeps a known Kitty client when tmux forwards passthrough", "ghostty", "5101", "on", ImageProtocol.Kitty],
+		["drops a known Kitty client when tmux blocks passthrough", "ghostty", "5102", "off", null],
+		["keeps a known Kitty client on tmux without the passthrough option", "ghostty", "5103", "", ImageProtocol.Kitty],
+		["drops a Kitty client without Unicode placeholders under tmux", "wezterm", "5104", "on", null],
 	] as const) {
 		it.skipIf(process.platform === "win32")(name, async () => {
 			const replies = { "show-options -Apqv -t %7 allow-passthrough": passthrough };
@@ -669,10 +674,26 @@ describe("tmux image protocol selection", () => {
 					TMUX_PANE: "%7",
 					TERM: "tmux-256color",
 				};
-				expect(resolveImageProtocol("ghostty", env, true)).toBe(expected);
+				expect(resolveImageProtocol(id, env, true)).toBe(expected);
 			});
 		});
 	}
+
+	it.skipIf(process.platform === "win32")(
+		"keeps Kitty for a placeholder-less tmux client when placeholders are opted in",
+		async () => {
+			const replies = { "show-options -Apqv -t %7 allow-passthrough": "on" };
+			await withFakeTmux(replies, async binDir => {
+				const env = {
+					PATH: `${binDir}:${Bun.env.PATH ?? ""}`,
+					TMUX: "/tmp/tmux-1000/default,5105,0",
+					TMUX_PANE: "%7",
+					PI_KITTY_PLACEHOLDERS: "1",
+				};
+				expect(resolveImageProtocol("wezterm", env, true)).toBe(ImageProtocol.Kitty);
+			});
+		},
+	);
 
 	it("keeps the GNU screen Kitty fallback", () => {
 		expect(resolveImageProtocol("base", { TERM: "screen-256color" }, true)).toBe(ImageProtocol.Kitty);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed inline images inside tmux on terminals without Kitty Unicode placeholders (WezTerm) being drawn at tmux's cursor instead of their reserved rows; such clients now use SIXEL when tmux renders it for them, otherwise images are skipped ([#19396](https://github.com/can1357/oh-my-pi/issues/19396))
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

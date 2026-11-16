@@ -566,11 +566,17 @@ export function resolveImageProtocol(
 	) {
 		return null;
 	}
-	// Kitty graphics reach a tmux client only through the DCS passthrough
-	// envelope, which tmux drops unless `allow-passthrough` is enabled. A Kitty
-	// client identity alone would otherwise send images into the void.
-	if (imageProtocol === ImageProtocol.Kitty && env.TMUX && !tmuxPaneAllowsPassthrough(env)) {
-		return null;
+	if (imageProtocol === ImageProtocol.Kitty && env.TMUX) {
+		// Kitty graphics reach a tmux client only through the DCS passthrough
+		// envelope, which tmux drops unless `allow-passthrough` is enabled. A Kitty
+		// client identity alone would otherwise send images into the void.
+		if (!tmuxPaneAllowsPassthrough(env)) return null;
+		// tmux forwards a passthrough at its own outer cursor (reset to 1;1 after
+		// every passthrough since 3.3), not at the pane cursor that ESC 7 / CUU /
+		// ESC 8 moves, so a direct `a=p` placement lands outside its reserved
+		// rows. Only Unicode placeholders follow the pane grid; without them,
+		// leave the protocol unresolved so the tmux-gated SIXEL probe decides.
+		if (!detectKittyUnicodePlaceholdersSupport(terminalId, env)) return null;
 	}
 	return imageProtocol;
 }
