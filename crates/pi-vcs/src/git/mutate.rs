@@ -5,6 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
 	ffi::OsStr,
 	fs,
+	io::Write,
 	path::{Path, PathBuf},
 	process::{Command, Stdio},
 };
@@ -301,12 +302,16 @@ impl GitRepo {
 				.ok_or_else(|| Error::backend("git commit", "author identity is not configured"))?
 				.map_err(|err| Error::backend("git commit", err))?
 		};
-		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
-		fs::write(&message_path, message)?;
+		// Not `.git/COMMIT_EDITMSG`: overlapping calls reread whichever message
+		// landed last, including when `no_verify` skips the hook.
+		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
+		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
+		// message, as under `git commit`; only the private copy is read back.
+		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
 		if !options.no_verify {
-			run_commit_hook(self, "commit-msg", &[message_path.as_os_str()], index_path)?;
+			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
 		}
-		let message = fs::read_to_string(&message_path)
+		let message = fs::read_to_string(&message_file.path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let id = if sign {
 			sign_commit(self, &message, tree, &parents, author, committer)?
@@ -1040,6 +1045,46 @@ impl GitRepo {
 			}
 		}
 		Ok(())
+	}
+}
+
+/// One call's commit message. Dropped on every exit, including hook, signer,
+/// and ref-update failures.
+///
+/// `commit-msg` edits the path it is given. Sharing `.git/COMMIT_EDITMSG`
+/// lets an overlapping `commit_create` replace that file between the write
+/// and the reread, so both commits record the other call's subject and body.
+#[must_use = "dropping the guard deletes the commit message file"]
+struct CommitMessageFile {
+	path: PathBuf,
+}
+
+impl CommitMessageFile {
+	fn create(git_dir: &Path, message: &str) -> Result<Self> {
+		use std::sync::atomic::{AtomicU64, Ordering};
+		static NEXT: AtomicU64 = AtomicU64::new(0);
+		let n = NEXT.fetch_add(1, Ordering::Relaxed);
+		let tick = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_nanos());
+		let path = git_dir.join(format!(".omp-commit-msg-{}-{tick}-{n}", std::process::id()));
+		// Close before the guard exists so a failed write can unlink the
+		// partial file on Windows, where an open handle blocks removal.
+		let mut file = fs::OpenOptions::new()
+			.write(true)
+			.create_new(true)
+			.open(&path)?;
+		let written = file.write_all(message.as_bytes());
+		drop(file);
+		let message_file = Self { path };
+		written?;
+		Ok(message_file)
+	}
+}
+
+impl Drop for CommitMessageFile {
+	fn drop(&mut self) {
+		let _ = fs::remove_file(&self.path);
 	}
 }
 

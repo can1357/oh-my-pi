@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed bare URLs swallowing the following word when Korean, Japanese or Chinese text follows a parenthesized URL without a space, as in `(https://example.com/pull/1)가` ([#19336](https://github.com/can1357/oh-my-pi/pull/19336) by [@nnnnoel](https://github.com/nnnnoel))
+
 ## [18.20.3] - 2026-11-16
 
 ### Fixed

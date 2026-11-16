@@ -1,4 +1,4 @@
-The user attached an image as `[Image #{{index}}]` in their visible message.
+The user attached an image as `[Image #{{index}}]` {{#if askAnswer}}to their ask answer{{else}}in their visible message{{/if}}.
 
 Source path: `{{path}}`
 
