@@ -173,8 +173,7 @@ Task graph: the Kata epic `nkas` (tasks `haza` through `0vgw`).
 
 **Owner direction (2026-11-11):** native vendor CLIs are not wired into core, except the recorded exception `envd/src/codex_app_server/*`. Every other vendor CLI route is an extension over ACP, the Agent SDK, MCP or A2A. The design that follows from it is [docs/design/acp-extension-profiles.md](../design/acp-extension-profiles.md); this amendment records the direction and what it changes in this record. Line numbers below are at `5b0cd838c9`.
 
-
-**Owner decision (2026-11-16):** the Codex exception record must state the convar default and unconditional `ExecutorRegistry::from_ctx` registration, and that removing the exception requires changing the unconditional registry initialization. Tie expiry to the existing ADR 0043 exit conditions; reaching an exit alone does not remove always-on code.
+**Codex exception (2026-11-16):** the owner's decision on what the exception record must state is recorded under Q2 of [the ACP design](../design/acp-extension-profiles.md).
 
 Consequences of this amendment:
 - The 2026-11-09 amendment says the CLI launch profiles are already data (`sv_delegated_<cli>_program`, line 162 above). The code does not agree. The dsh, Devin and Grok profiles are Rust: `fn dsh_profile` (`crates/driver/src/delegated_acp.rs:151`), `fn devin_profile` (`crates/driver/src/delegated_acp.rs:175`) and an inline Grok registration (`.with_id(GROK_ID)`, `crates/driver/src/delegated_acp.rs:121-138`). Only the program path is a convar (`sv_delegated_dsh_program`, `crates/driver/src/delegated_acp.rs:47`). Read "profiles are data" as the target and not as the state.
