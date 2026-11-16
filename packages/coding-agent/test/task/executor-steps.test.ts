@@ -99,7 +99,6 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 		},
 		getLastAssistantMessage: () => messages.at(-1),
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
-		settleAsyncWork: async () => {},
 	};
 	vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
 		session: session as unknown as AgentSession,
