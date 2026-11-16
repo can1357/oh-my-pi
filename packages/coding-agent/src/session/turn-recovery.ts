@@ -274,7 +274,7 @@ export interface TurnRecoveryHost {
 	textOutputCommitted(): boolean;
 	thinkingLevel(): ThinkingLevel | undefined;
 	configuredThinkingLevel(): ConfiguredThinkingLevel | undefined;
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined): void;
+	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, options?: { retryFallback?: boolean }): void;
 	/** Hard per-session effort ceiling; fallback recovery must never raise thinking above it. */
 	thinkingLevelCeiling(): Effort | undefined;
 	/** The session never switches to a retry fallback model (a per-call `model` subagent). */
@@ -2275,7 +2275,7 @@ export class TurnRecovery {
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
-		this.#host.setThinkingLevel(nextThinkingLevel);
+		this.#host.setThinkingLevel(nextThinkingLevel, { retryFallback: true });
 		if (!this.#activeRetryFallback) {
 			this.#activeRetryFallback = {
 				role,

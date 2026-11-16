@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -40,7 +40,7 @@ describe("fallback-only thinking entries", () => {
 		});
 	}
 
-	function sessionOptions(sessionManager: SessionManager) {
+	function sessionOptions(sessionManager: SessionManager, settings: Settings = autoSettings()) {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -50,7 +50,7 @@ describe("fallback-only thinking entries", () => {
 			authStorage,
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
 			sessionManager,
-			settings: autoSettings(),
+			settings,
 			disableExtensionDiscovery: true,
 			extensions: [],
 			skills: [],
@@ -143,6 +143,23 @@ describe("fallback-only thinking entries", () => {
 		}
 	});
 
+	test("keeps a user level chosen immediately after a bare fallback", async () => {
+		freshDir();
+		const sessionManager = SessionManager.inMemory(tempDir);
+		sessionManager.appendModelChange(PRIMARY);
+		// A bare fallback can retain the current effort and write no thinking entry.
+		sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		const { session } = await createAgentSession(sessionOptions(sessionManager));
+		try {
+			session.setThinkingLevel(Effort.Low);
+			const context = sessionManager.buildSessionContext();
+			expect(context.thinkingLevel).toBe(Effort.Low);
+			expect(context.configuredThinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("still restores a thinking level recorded before the fallback", async () => {
 		freshDir();
 		const sessionManager = SessionManager.inMemory(tempDir);
@@ -203,6 +220,41 @@ describe("fallback-only thinking entries", () => {
 		}
 	});
 
+	test("does not promote a fallback effort retained by a later model switch", async () => {
+		freshDir();
+		const settings = Settings.isolated({
+			defaultThinkingLevel: Effort.Low,
+			modelRoles: { default: PRIMARY },
+		});
+		const sessionManager = fallbackOnlyTranscript();
+		const { session } = await createAgentSession(sessionOptions(sessionManager, settings));
+		try {
+			expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+			const other = session.modelRegistry.find("anthropic", "claude-sonnet-4-6");
+			if (!other) throw new Error("Expected bundled claude-sonnet-4-6");
+			await session.setModelTemporary(other, Effort.Low);
+			expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+			const context = sessionManager.buildSessionContext();
+			expect(context.thinkingLevel).toBe("off");
+			expect(context.configuredThinkingLevel).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+
+		const target = await writeTranscript(sessionManager);
+		const reopenedManager = await SessionManager.open(target, path.join(tempDir, "reopen-switch"));
+		const reopenedSettings = Settings.isolated({
+			defaultThinkingLevel: Effort.Low,
+			modelRoles: { default: PRIMARY },
+		});
+		const { session: reopened } = await createAgentSession(sessionOptions(reopenedManager, reopenedSettings));
+		try {
+			expect(reopened.configuredThinkingLevel()).toBe(Effort.Low);
+		} finally {
+			await reopened.dispose();
+		}
+	});
+
 	test("switching to a fallback-only session with a different model uses the configured default", async () => {
 		freshDir();
 		const target = await writeTranscript(fallbackOnlyTranscript());
@@ -216,7 +268,9 @@ describe("fallback-only thinking entries", () => {
 			await expect(session.switchSession(target, { model: other })).resolves.toBe(true);
 			expect(session.model?.id).toBe("claude-sonnet-4-6");
 			expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
-			expect(session.sessionManager.buildSessionContext().configuredThinkingLevel).toBe(AUTO_THINKING);
+			const restoredContext = session.sessionManager.buildSessionContext();
+			expect(restoredContext.thinkingLevel).toBe("off");
+			expect(restoredContext.configuredThinkingLevel).toBeUndefined();
 			await session.sessionManager.flush();
 		} finally {
 			await session.dispose();
@@ -229,6 +283,33 @@ describe("fallback-only thinking entries", () => {
 			expect(reopened.configuredThinkingLevel()).toBe(AUTO_THINKING);
 		} finally {
 			await reopened.dispose();
+		}
+	});
+
+	test("persists a concrete effort when an explicit model switch preserves auto", async () => {
+		freshDir();
+		const sessionManager = SessionManager.inMemory(tempDir);
+		sessionManager.appendModelChange(PRIMARY);
+		sessionManager.appendThinkingLevelChange(Effort.Medium, AUTO_THINKING);
+		sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		sessionManager.appendThinkingLevelChange(Effort.XHigh, Effort.XHigh);
+		sessionManager.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		const target = await writeTranscript(sessionManager);
+		const { session } = await createAgentSession(
+			sessionOptions(SessionManager.create(tempDir, path.join(tempDir, "active"))),
+		);
+		try {
+			const other = session.modelRegistry.find("anthropic", "claude-sonnet-4-6");
+			if (!other) throw new Error("Expected bundled claude-sonnet-4-6");
+			await expect(session.switchSession(target, { model: other })).resolves.toBe(true);
+			expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+			const entries = session.sessionManager.getBranch().filter(entry => entry.type === "thinking_level_change");
+			const restored = entries.at(-1);
+			expect(restored?.thinkingLevel).toBe(session.thinkingLevel);
+			expect(restored?.configured).toBe(AUTO_THINKING);
+			expect(session.sessionManager.buildSessionContext().thinkingLevel).toBe(session.thinkingLevel);
+		} finally {
+			await session.dispose();
 		}
 	});
 

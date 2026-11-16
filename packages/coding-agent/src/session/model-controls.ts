@@ -565,7 +565,11 @@ export class ModelControls {
 	 * giving external readers an authoritative selection receipt before the next
 	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+	setThinkingLevel(
+		level: ConfiguredThinkingLevel | undefined,
+		persist: boolean = false,
+		options?: { retryFallback?: boolean },
+	): void {
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -586,7 +590,9 @@ export class ModelControls {
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
 			if (isChanging) {
-				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING);
+				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, {
+					retryFallback: options?.retryFallback ?? false,
+				});
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
 			return;
@@ -609,7 +615,9 @@ export class ModelControls {
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, {
+				retryFallback: options?.retryFallback ?? false,
+			});
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}
@@ -765,7 +773,7 @@ export class ModelControls {
 		this.#thinkingLevel = effort;
 		this.#applyThinkingLevelToAgent(effort);
 		if (shouldPersistResolution) {
-			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING);
+			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING, { retryFallback: false });
 		}
 		this.#host.emit({
 			type: "thinking_level_changed",

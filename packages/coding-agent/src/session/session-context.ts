@@ -286,7 +286,7 @@ interface SavedThinkingLevel {
  * while it is the newest entry; a further hop restores it only when nothing
  * preceded the first hop.
  */
-function resolveSessionThinking(path: readonly SessionEntry[]): {
+export function resolveSessionThinking(path: readonly SessionEntry[]): {
 	thinkingLevel: string | undefined;
 	configuredThinkingLevel: string | undefined;
 	hasSavedThinkingEntry: boolean;
@@ -296,22 +296,22 @@ function resolveSessionThinking(path: readonly SessionEntry[]): {
 	let saved: SavedThinkingLevel | undefined;
 	let preFallbackThinking: SavedThinkingLevel | undefined;
 	let thinkingFromFallbackHop = false;
-	let sawThinkingEntry = false;
 	let previous: SessionEntry | undefined;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel ?? "off";
 			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
-			thinkingFromFallbackHop = previous?.type === "model_change" && previous.resolvedModelIsFallback === true;
-			sawThinkingEntry = true;
+			thinkingFromFallbackHop =
+				entry.retryFallback ?? (previous?.type === "model_change" && previous.resolvedModelIsFallback === true);
 			if (!thinkingFromFallbackHop) saved = { thinkingLevel, configured: configuredThinkingLevel };
 		} else if (entry.type === "model_change") {
 			if (entry.resolvedModelIsFallback === true) {
 				if (!preFallbackThinking && saved) preFallbackThinking = saved;
 			} else {
-				// The effort in effect survives this switch even when no new thinking entry is written.
-				if (sawThinkingEntry) saved = { thinkingLevel, configured: configuredThinkingLevel };
+				// A real saved effort survives this switch even when no new thinking entry is
+				// written. With no saved effort, do not promote a fallback hop's ephemeral one.
+				if (saved) saved = { thinkingLevel, configured: configuredThinkingLevel };
 				preFallbackThinking = undefined;
 			}
 		}
@@ -327,11 +327,6 @@ function resolveSessionThinking(path: readonly SessionEntry[]): {
 	}
 
 	return { thinkingLevel, configuredThinkingLevel, hasSavedThinkingEntry: saved !== undefined };
-}
-
-/** True when the branch recorded a thinking selector that should survive resume. */
-export function sessionBranchHasSavedThinkingEntry(entries: readonly SessionEntry[]): boolean {
-	return resolveSessionThinking(entries).hasSavedThinkingEntry;
 }
 
 export function buildSessionContext(

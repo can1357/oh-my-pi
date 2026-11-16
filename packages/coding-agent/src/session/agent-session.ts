@@ -467,7 +467,7 @@ import {
 	buildSessionContext,
 	getRestorableSessionModels,
 	isTranscriptEntry,
-	sessionBranchHasSavedThinkingEntry,
+	resolveSessionThinking,
 } from "./session-context";
 import {
 	type CacheRefreshOutcome,
@@ -2401,7 +2401,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			textOutputCommitted: () => this.#textOutputCommitted,
 			thinkingLevel: () => this.thinkingLevel,
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
-			setThinkingLevel: level => this.#models.setThinkingLevel(level),
+			setThinkingLevel: (level, options) => this.#models.setThinkingLevel(level, false, options),
 			thinkingLevelCeiling: () => this.#models.thinkingLevelCeiling,
 			modelFallbackDisabled: () => this.#disableModelFallback,
 			isDisposed: () => this.#isDisposed,
@@ -14291,23 +14291,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			// A retry-fallback hop is not a saved selector when nothing was recorded
 			// before it, so the configured default applies. Decide that before an
-			// explicit model is recorded: that write is not a choice to keep the
-			// hop's effort, and reading the branch afterwards treats the effort as
-			// saved while this context still says off.
-			const restoredThinkingFrom = (context: {
-				thinkingLevel?: string;
-				configuredThinkingLevel?: string;
-			}): ConfiguredThinkingLevel | undefined => {
-				const hasThinkingEntry = sessionBranchHasSavedThinkingEntry(this.sessionManager.getBranch());
-				const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
-				const restoredConfigured = context.configuredThinkingLevel;
-				return hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && context.thinkingLevel !== "off")
+			// explicit model is recorded: that write must not adopt the hop's effort.
+			const resolvedThinking = resolveSessionThinking(this.sessionManager.getBranch());
+			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
+			const restoredConfigured = sessionContext.configuredThinkingLevel;
+			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
+				resolvedThinking.hasSavedThinkingEntry ||
+				(defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
 					? restoredConfigured === AUTO_THINKING
 						? AUTO_THINKING
-						: (context.thinkingLevel as ThinkingLevel | undefined)
+						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
-			};
-			const restoredThinkingLevel = restoredThinkingFrom(sessionContext);
+			let persistRestoredThinking = false;
 
 			if (targetModel) {
 				const currentModel = this.model;
@@ -14329,13 +14324,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						: undefined;
 				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
 					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
-					// The model entry would be read as keeping the effort then in effect,
-					// including a backup hop's. Record the selector this switch restored
-					// when that reading would differ, so a later open keeps it too.
-					const adopted = restoredThinkingFrom(this.sessionManager.buildSessionContext());
-					if (restoredThinkingLevel !== undefined && adopted !== restoredThinkingLevel) {
-						this.sessionManager.appendThinkingLevelChange(restoredThinkingLevel, restoredThinkingLevel);
-					}
+					// A genuine pre-fallback choice must survive the explicit model entry.
+					// Fallback-only history stays unsaved and continues to follow the default.
+					const adoptedThinking = resolveSessionThinking(this.sessionManager.getBranch());
+					persistRestoredThinking =
+						restoredThinkingLevel !== undefined &&
+						(adoptedThinking.thinkingLevel !== sessionContext.thinkingLevel ||
+							adoptedThinking.configuredThinkingLevel !== sessionContext.configuredThinkingLevel);
 				}
 			}
 
@@ -14368,6 +14363,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// fall back to the concrete level. With no thinking entry, the global
 			// default applies so fresh sessions still classify their first turn.
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			if (persistRestoredThinking) {
+				// Keep the raw level concrete for transcript readers; `configured` alone
+				// carries auto, matching ModelControls' ordinary auto entries.
+				this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, restoredThinkingLevel, {
+					retryFallback: false,
+				});
+			}
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);

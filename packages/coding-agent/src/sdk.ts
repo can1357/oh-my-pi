@@ -247,7 +247,7 @@ import { kUsageLimitRequestProvider } from "./session/turn-recovery";
 import {
 	getReadableCompactionEntry,
 	getRestorableSessionModels,
-	sessionBranchHasSavedThinkingEntry,
+	resolveSessionThinking,
 } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { cfgOffline } from "./config/auxiliary-model-policy";
@@ -2260,7 +2260,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
 	);
 	const hasExistingSession = existingBranch.length > 0;
-	const hasThinkingEntry = sessionBranchHasSavedThinkingEntry(existingBranch);
+	const hasThinkingEntry = resolveSessionThinking(existingBranch).hasSavedThinkingEntry;
 	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
 	const deferredModelPatterns = Array.isArray(options.modelPattern)

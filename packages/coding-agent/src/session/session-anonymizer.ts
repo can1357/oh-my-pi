@@ -78,6 +78,7 @@ const FIELD_RULES: Record<string, Rule> = {
 	...fields("num", [
 		"version",
 		"resolvedModelIsFallback",
+		"retryFallback",
 		"perCallModel",
 		"display",
 		"synthetic",
