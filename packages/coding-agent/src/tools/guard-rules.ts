@@ -53,6 +53,7 @@ import { getAgentDbPath, getAuthBrokerSnapshotCachePath } from "@oh-my-pi/pi-uti
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "./path-utils";
+import { parseSqlitePathCandidates } from "./sqlite-reader";
 import {
 	parseShellScript,
 	resolveCommandWordPath,
@@ -1363,26 +1364,32 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 /**
  * Applies `credential_read` to a file tool (`read`, `grep`): when any target path is in a
  * credential location, the call keeps `tier` but carries a safety override, like a critical bash
- * command. Internal and web URLs are not files and never match.
+ * command. A database path with a table or query selector (`agent.db:table`, `agent.db?q=...`)
+ * targets the database file. Internal and web URLs are not files and never match.
  */
 export function fileToolApproval(tier: ToolTier, rawPaths: readonly string[], cwd: string): ToolApprovalDecision {
 	const router = InternalUrlRouter.instance();
 	const home = os.homedir();
 	for (const rawPath of rawPaths) {
-		const filePath = splitPathAndSel(rawPath).path;
-		if (filePath === "" || router.canHandle(filePath) || isReadableUrlPath(filePath)) continue;
-		let found: string | undefined;
-		try {
-			found = credentialLocation(resolveToCwd(filePath, cwd), home);
-		} catch {
-			continue;
+		const filePaths = [
+			splitPathAndSel(rawPath).path,
+			...parseSqlitePathCandidates(rawPath).map(candidate => candidate.sqlitePath),
+		];
+		for (const filePath of filePaths) {
+			if (filePath === "" || router.canHandle(filePath) || isReadableUrlPath(filePath)) continue;
+			let found: string | undefined;
+			try {
+				found = credentialLocation(resolveToCwd(filePath, cwd), home);
+			} catch {
+				continue;
+			}
+			if (found)
+				return {
+					tier,
+					override: true,
+					reason: hit("credential_read", `it reads your credentials in ${found}`).reason,
+				};
 		}
-		if (found)
-			return {
-				tier,
-				override: true,
-				reason: hit("credential_read", `it reads your credentials in ${found}`).reason,
-			};
 	}
 	return tier;
 }

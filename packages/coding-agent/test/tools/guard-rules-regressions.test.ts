@@ -6,7 +6,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { parseShellScript } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, TempDir } from "@oh-my-pi/pi-utils";
 
 // Bypasses and false positives found in review of the fixed guard rules.
 
@@ -391,6 +391,18 @@ describe("guard rule regressions", () => {
 				rule: "credential_read",
 			});
 		}
+	});
+
+	it("checks the database a `read` with a SQLite table or query selector opens", () => {
+		const read = new ReadTool(createSession(cwd));
+		const agentDb = getAgentDbPath();
+		for (const readPath of [`${agentDb}:auth_credentials`, `${agentDb}?q=select * from auth_credentials`]) {
+			expect({ readPath, rule: ruleOf(read.approval({ path: readPath })) }).toEqual({
+				readPath,
+				rule: "credential_read",
+			});
+		}
+		expect(read.approval({ path: `${cwd}/notes.db:entries` })).toBe("read");
 	});
 
 	it("runs a substitution from the directory the `cd`s before its command change to", () => {
