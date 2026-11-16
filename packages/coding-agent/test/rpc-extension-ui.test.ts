@@ -660,8 +660,9 @@ export default function(pi) {
       contextWindow: 4096,
       maxTokens: 512,
     }],
-    streamSimple: (model, context) => {
-      void savedContext?.ui.confirm("Provider callback", "Provider-owned dialog");
+    ownerContext: () => savedContext,
+    streamSimple(model, context) {
+      void this.ownerContext()?.ui.confirm("Provider callback", "Provider-owned dialog");
       const stream = createAssistantMessageEventStream();
       const message = {
         role: "assistant",

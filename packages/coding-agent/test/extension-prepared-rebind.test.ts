@@ -71,8 +71,13 @@ describe("prepared extension rebinding", () => {
 		const bindings = Reflect.get(globalThis, bindingsKey) as ExtensionAPI[];
 		expect(bindings).toHaveLength(2);
 		expect(bindings[0]).not.toBe(bindings[1]);
-		expect(bindings[0]?.events).toBe(parentEventBus);
-		expect(bindings[1]?.events).toBe(childEventBus);
+		const deliveries: string[] = [];
+		bindings[0]!.events.on("binding-probe", () => deliveries.push("parent"));
+		bindings[1]!.events.on("binding-probe", () => deliveries.push("child"));
+		parentEventBus.emit("binding-probe", undefined);
+		expect(deliveries).toEqual(["parent"]);
+		childEventBus.emit("binding-probe", undefined);
+		expect(deliveries).toEqual(["parent", "child"]);
 		// Print cwd via Bun, not `pwd`: on Windows Git-for-Windows' pwd.exe reports MSYS paths (`/tmp/...`).
 		const printCwd = ["-e", "process.stdout.write(process.cwd())"];
 		const [parentPwd, childPwd] = await Promise.all([
@@ -139,8 +144,13 @@ describe("prepared extension rebinding", () => {
 
 				// The SDK factory ran again, against the child's own ExtensionAPI.
 				expect(bindings).toHaveLength(2);
-				expect(bindings[0]?.events).toBe(parentEventBus);
-				expect(bindings[1]?.events).toBe(childEventBus);
+				const deliveries: string[] = [];
+				bindings[0]!.events.on("binding-probe", () => deliveries.push("parent"));
+				bindings[1]!.events.on("binding-probe", () => deliveries.push("child"));
+				parentEventBus.emit("binding-probe", undefined);
+				expect(deliveries).toEqual(["parent"]);
+				childEventBus.emit("binding-probe", undefined);
+				expect(deliveries).toEqual(["parent", "child"]);
 				// Only the top-level session announced itself to Warp; the child never did.
 				expect(warpEventSessionIds(write.mock.calls)).toEqual([parent.sessionManager.getSessionId()]);
 			} finally {

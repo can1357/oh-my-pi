@@ -17,7 +17,7 @@ import type {
 	TSchema,
 } from "@oh-my-pi/pi-ai";
 import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
-import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEacces, isEnoent, logger, resolveEquivalentPathAsync } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
 import { isServiceTierFamily, isServiceTierForFamily } from "../../config/service-tier";
@@ -201,23 +201,23 @@ export class ExtensionRuntime implements IExtensionRuntime {
 
 function bindProviderConfig(config: ProviderConfig, runtime: IExtensionRuntime, extension: Extension): ProviderConfig {
 	const bind =
-		<TArgs extends unknown[], TResult>(callback: (...args: TArgs) => TResult) =>
+		<TArgs extends unknown[], TResult>(callback: (...args: TArgs) => TResult, receiver: object) =>
 		(...args: TArgs): TResult =>
-			runWithExtensionRequestIdentity(runtime, extension, () => callback(...args));
+			runWithExtensionRequestIdentity(runtime, extension, () => callback.apply(receiver, args));
 	const oauth = config.oauth;
 	const usage = config.usage;
 	return {
 		...config,
-		...(config.streamSimple ? { streamSimple: bind(config.streamSimple) } : {}),
-		...(config.fetchDynamicModels ? { fetchDynamicModels: bind(config.fetchDynamicModels) } : {}),
+		...(config.streamSimple ? { streamSimple: bind(config.streamSimple, config) } : {}),
+		...(config.fetchDynamicModels ? { fetchDynamicModels: bind(config.fetchDynamicModels, config) } : {}),
 		...(oauth
 			? {
 					oauth: {
 						...oauth,
-						login: bind(oauth.login),
-						...(oauth.refreshToken ? { refreshToken: bind(oauth.refreshToken) } : {}),
-						...(oauth.getApiKey ? { getApiKey: bind(oauth.getApiKey) } : {}),
-						...(oauth.modifyModels ? { modifyModels: bind(oauth.modifyModels) } : {}),
+						login: bind(oauth.login, oauth),
+						...(oauth.refreshToken ? { refreshToken: bind(oauth.refreshToken, oauth) } : {}),
+						...(oauth.getApiKey ? { getApiKey: bind(oauth.getApiKey, oauth) } : {}),
+						...(oauth.modifyModels ? { modifyModels: bind(oauth.modifyModels, oauth) } : {}),
 					},
 				}
 			: {}),
@@ -225,9 +225,11 @@ function bindProviderConfig(config: ProviderConfig, runtime: IExtensionRuntime, 
 			? {
 					usage: {
 						...usage,
-						fetchUsage: bind(usage.fetchUsage),
-						...(usage.parseRateLimitHeaders ? { parseRateLimitHeaders: bind(usage.parseRateLimitHeaders) } : {}),
-						...(usage.supports ? { supports: bind(usage.supports) } : {}),
+						fetchUsage: bind(usage.fetchUsage, usage),
+						...(usage.parseRateLimitHeaders
+							? { parseRateLimitHeaders: bind(usage.parseRateLimitHeaders, usage) }
+							: {}),
+						...(usage.supports ? { supports: bind(usage.supports, usage) } : {}),
 					},
 				}
 			: {}),
@@ -538,19 +540,12 @@ async function runExtensionFactory(
 	}
 }
 
-async function canonicalizeExtensionPath(resolvedPath: string): Promise<string> {
-	if (!isFilesystemSourcePath(resolvedPath)) return resolvedPath;
-	try {
-		return await fs.realpath(resolvedPath);
-	} catch {
-		return path.resolve(resolvedPath);
-	}
-}
-
 /** Import one extension module and resolve its factory without binding it to a session. */
 export async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
-	const canonicalPath = await canonicalizeExtensionPath(resolvedPath);
+	const canonicalPath = isFilesystemSourcePath(resolvedPath)
+		? await resolveEquivalentPathAsync(resolvedPath)
+		: resolvedPath;
 	try {
 		const module = (await withHostGuard(() => loadLegacyPiModule(canonicalPath))) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
@@ -800,8 +795,7 @@ export async function discoverExtensionPaths(
 	// extensions/ symlink plus the same file passed with --extension. Missing
 	// paths keep their lexical key so the loader still reports them.
 	const addPath = async (extPath: string): Promise<void> => {
-		const resolved = path.resolve(extPath);
-		const key = await fs.realpath(resolved).catch(() => resolved);
+		const key = await resolveEquivalentPathAsync(extPath);
 		if (!seen.has(key)) {
 			seen.add(key);
 			allPaths.push(extPath);

@@ -16,6 +16,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -57,7 +58,7 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 	});
 
 	it("creates a distinct Extension and ExtensionAPI per call (fresh eventBus + runtime)", async () => {
-		(globalThis as { __bindings?: { events: EventBus }[] }).__bindings = [];
+		(globalThis as { __bindings?: { events: ExtensionAPI["events"] }[] }).__bindings = [];
 
 		const parentEventBus = new EventBus();
 		const subagentEventBus = new EventBus();
@@ -76,10 +77,15 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 		// MUST NOT be shared, or per-session flags/registrations bleed across.
 		expect(subagent.runtime).not.toBe(parent.runtime);
 
-		// Each factory saw the eventBus passed to its own loadExtensions call.
-		const bindings = (globalThis as { __bindings?: { events: EventBus }[] }).__bindings ?? [];
+		// Each facade routes only through the event bus passed to its loadExtensions call.
+		const bindings = (globalThis as { __bindings?: { events: ExtensionAPI["events"] }[] }).__bindings ?? [];
 		expect(bindings).toHaveLength(2);
-		expect(bindings[0]?.events).toBe(parentEventBus);
-		expect(bindings[1]?.events).toBe(subagentEventBus);
+		const deliveries: string[] = [];
+		bindings[0]!.events.on("binding-probe", () => deliveries.push("parent"));
+		bindings[1]!.events.on("binding-probe", () => deliveries.push("subagent"));
+		parentEventBus.emit("binding-probe", undefined);
+		expect(deliveries).toEqual(["parent"]);
+		subagentEventBus.emit("binding-probe", undefined);
+		expect(deliveries).toEqual(["parent", "subagent"]);
 	});
 });

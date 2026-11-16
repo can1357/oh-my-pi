@@ -191,6 +191,16 @@ export function resolveEquivalentPath(inputPath: string, options?: EquivalentPat
 	}
 }
 
+/** Resolve an existing path through symlinks without blocking; missing paths keep their absolute spelling. */
+export async function resolveEquivalentPathAsync(inputPath: string): Promise<string> {
+	const resolvedPath = path.resolve(inputPath);
+	try {
+		return await fs.promises.realpath(resolvedPath);
+	} catch {
+		return resolvedPath;
+	}
+}
+
 function comparablePath(inputPath: string, options?: EquivalentPathOptions): string {
 	const resolvedPath = resolveEquivalentPath(inputPath, options);
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
