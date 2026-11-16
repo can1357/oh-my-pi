@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced
+- Fixed the `/usage` activity calendar replacing its painted history with "Usage history unavailable" when the refresh after it fails; the history stays, marked not synced ([#19381](https://github.com/can1357/oh-my-pi/pull/19381) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.1] - 2026-11-14
 
