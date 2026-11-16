@@ -747,9 +747,9 @@ What follows are the boundary decisions and helpers `omp.agents` owns.
 
 The decision that declines to settle. Returned from an `agent_settled` hook.
 
-> **Honored today:** `prompt` and `label` only. `visible`, `role` and
+> **Honored today:** `prompt` (a non-empty string; an empty prompt counts as `Settle`) and `label` only. `visible`, `role` and
 > `collapse_prior` are accepted but **not yet honored** (the continuation is
-> appended as a plain user item); the `ctx.pending_continuation` veto and
+> appended as a hidden developer message, `<developer kind=hook>`, not displayed); the `ctx.pending_continuation` veto and
 > `ContinuationPolicy` below are likewise not yet honored. The core cap of 8
 > counts continuations from every source per submission, not per extension.
 
@@ -777,15 +777,17 @@ Multiple extensions may subscribe. Resolution is declared, not incidental:
 
 1. Subscribers run in the catalog's deterministic
    `(layer, publisher, extension_id)` order (`docs/py/05-hooks.md`) — never in
-   load order.
-2. The **first** `Continue` wins. *(Veto not yet honored: later hooks do not
-   see the pending continuation.)* Later hooks see it in
+   load order. *(Divergence: envd currently orders by `(layer, extension, order, name)`,
+   comparing `layer` as a string.)*
+2. The **first** `Continue` wins. *(Veto not yet honored: hooks after the first `Continue` are not called at
+   all, so there is no `pending_continuation` veto yet.)* Later hooks see it in
    `ctx.pending_continuation` and may return `Settle()` to veto it, which is
    how a guard extension overrides a goal extension without either knowing
    about the other.
 3. A hook that raises or times out contributes `Settle()` — `agent_settled` is
    fail-open, because an extension crash must not spin the loop.
-4. If a `Continue` survives, the continuation ledger is consulted.
+4. If a `Continue` survives, the core applies its cap of 8 per submission. *(No continuation
+   ledger is consulted yet.)*
 
 #### `@dataclass(frozen=True, slots=True) class omp.agents.ContinuationPolicy`
 
@@ -800,8 +802,7 @@ continuations since the last *user* item; any real user input resets it.
 
 Two ceilings, and the tighter one always wins. `omp.limits.SETTLE_CONTINUATION_CAP`
 (`8` — `docs/py/05-hooks.md`) is what the Core enforces before it refuses
-further continuation, and no policy can exceed it without a configured session
-override plus the manifest grant. A policy asking for `100` on a default
+further continuation, and no policy can exceed it. *(A configured session override is not honored yet: none exists.)* A policy asking for `100` on a default
 session gets `8` and sees it in `ContinuationLedger.cap`; it is not an error,
 because a goal loop must be able to declare its ambition without knowing the
 deployment. Eight is deliberately low: a loop that genuinely needs a hundred turns of autonomy

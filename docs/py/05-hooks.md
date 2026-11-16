@@ -953,7 +953,7 @@ this event's bit set — useful to skip building an expensive
 |---|---|---|
 | `omp.limits.REENTRANCY_DEPTH` | 4 | Maximum nested CONTROL round-trips from inside a hook. Exceeding raises `omp.ReentrancyError` |
 | `omp.limits.INTERACTIVE_CAP` | `15m` | Wall-clock ceiling (`omp.Duration`) for a suspended deadline budget across all legal interactive round-trips in one hook invocation. Approval waits are excluded: the ticket is Core's (§2.6) |
-| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per session before the core refuses further continuation. The core cap of 8 counts continuations from every source per submission. |
+| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per submission (one run of the loop for one user prompt); the core refuses further continuation past it. The core cap of 8 counts continuations from every source per submission. |
 | `omp.limits.SHUTDOWN_BUDGET` | `2s` | Total budget (`omp.Duration`) for all `session_shutdown` handlers, dispatched concurrently. |
 | `omp.limits.OBSERVE_CAP` | 64 | Maximum `OBSERVE` subscriptions dispatched for one event; beyond it observers are truncated and the truncation journaled. **Gate phases have no truncation cap**: exceeding mandatory gate capacity is an activation-time error, never a runtime truncation (§3.13). A previous revision applied this cap to whole chains, silently dropping policy past the 64th hook — proceeding with "the top 64" of a mandatory policy set is not defensible, and that rule is reversed |
 | `omp.limits.MODIFY_ROUNDS` | 1 | The decision procedure runs exactly once per invocation. There is no re-run after mutation; a transform that needs to see final arguments declares a higher `order` |
@@ -1396,7 +1396,8 @@ with `omp.LifecyclePhase` and `omp.InvocationPhase` owned by [`00-overview.md`](
 and [`03-params.md`](03-params.md), and `omp.HookPhase` in §3.4.
 
 > **Dispatch status:** `agent_settled` hooks are dispatched; a Python `Continue`
-> (object with string `prompt`, optional `label`) appends a user item and runs
+> (object with non-empty string `prompt`, optional `label`; an empty prompt counts as `Settle`) appends a
+> hidden developer message (`<developer kind=hook>`, not displayed) and runs
 > one more turn, `Settle` (`{}`) settles. `role`, `visible` and `collapse_prior`
 > are **not yet honored**, nor is the `ctx.pending_continuation` veto. The core
 > cap of 8 counts continuations from every source per submission.
@@ -1410,7 +1411,11 @@ later hooks observe a pending continuation in `ctx.pending_continuation` and may
 `Settle()`, and a raising or timing-out hook
 contributes `Settle()` — which is why the event is fail-open and why an extension crash can never
 spin the loop. `omp.limits.SETTLE_CONTINUATION_CAP` bounds consecutive continuations; past the cap
-the core refuses, journals the refusal, and settles.
+the core refuses and settles. The refusal is not journaled yet, and no session override of the cap is honored yet.
+
+> **Divergence:** envd currently orders `agent_settled` rows by `(layer, extension, order, name)`, comparing
+> `layer` as a string, not by `(layer, publisher, extension_id)`. Hooks after the first `Continue` are not
+> called, and `ctx.pending_continuation` is not set, so there is no veto yet.
 
 Mutable fields: `before_agent_start.{text, items}` (REPLACE, APPEND),
 `turn_start.enabled_tools` (INTERSECT), `turn_start.{model, route, thinking, deadline}` (REPLACE).
