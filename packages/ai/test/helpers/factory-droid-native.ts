@@ -42,6 +42,7 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "kimi-k3", upstream: "fireworks", effort: "off" },
 	{ model: "kimi-k3", upstream: "baseten", effort: "high" },
 	{ model: "kimi-k3", upstream: "baseten", effort: "off" },
+	{ model: "kimi-k3.1-pro", upstream: "fireworks", effort: "max" },
 	{ model: "nemotron-3-ultra", upstream: "baseten", effort: "high" },
 	{ model: "nemotron-3-ultra", upstream: "baseten", effort: "off" },
 	{ model: "nemotron-3-ultra", upstream: "fireworks", effort: "high" },
@@ -98,6 +99,7 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "claude-haiku-5-5", upstream: "anthropic", effort: "high" },
 	{ model: "claude-sonnet-5-5", upstream: "anthropic", effort: "high" },
 	{ model: "claude-fable-5.1", upstream: "anthropic", effort: "high" },
+	{ model: "claude-fable-5.2", upstream: "anthropic", effort: "high" },
 	// Not capturable on the capture account, so unit tests own them
 	// (factory-droid-anthropic.test.ts):
 	// - claude-sonnet-5-5@vertex_anthropic off: "Requested model was not found
@@ -114,6 +116,7 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "gemini-3.6-flash", upstream: "google", effort: "medium" },
 	{ model: "gemini-3.1-pro-preview", upstream: "google", effort: "low" },
 	{ model: "gemini-4-argon", upstream: "google", effort: "medium" },
+	{ model: "gemini-4-carbon", upstream: "google", effort: "medium" },
 ];
 
 /** Conversation content and per-session values; neither is dialect policy. */
