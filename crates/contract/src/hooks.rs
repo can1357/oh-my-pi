@@ -320,6 +320,10 @@ impl HookEvent for ProviderErrorEvent {
 	}
 }
 
+/// Most consecutive `continue` answers one submission honours before the yield
+/// stands; mirrors `SETTLE_CONTINUATION_CAP` in the Python limits.
+pub const SETTLE_CONTINUATION_CAP: u32 = 8;
+
 /// Hook payload emitted at the candidate-yield seam. Extensions answer
 /// `continue` to run another turn or `settle` (the fail-open default) to let
 /// the yield stand.
@@ -1701,6 +1705,13 @@ pub(crate) const fn event_position(event: HookEventId) -> (usize, u64) {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn settle_cap_matches_the_python_limit() {
+		let limits = include_str!("../../py/python/omp/limits.py");
+		assert_eq!(super::SETTLE_CONTINUATION_CAP, 8);
+		assert!(limits.contains("SETTLE_CONTINUATION_CAP: Final[int] = 8"));
+	}
+
 	use std::{sync::Arc, time::Duration};
 
 	use bytes::Bytes;
