@@ -1054,7 +1054,7 @@ describe("html form", () => {
 				const path = findPath(root, node => node.k === "tabs")!;
 				let tabs: NativeNode = root;
 				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
-				const items = (tabs.p && "items" in tabs.p ? tabs.p.items : undefined) ?? [];
+				const items = (tabs.k === "tabs" ? tabs.p?.items : undefined) ?? [];
 				return items.flatMap(tab =>
 					"id" in tab && typeof tab.label !== "string" && tab.label[0]?.t === "✓ " ? [tab.id] : [],
 				);
@@ -1103,7 +1103,7 @@ describe("html form", () => {
 			const tabs = findPath(root, node => node.k === "tabs")!;
 			let strip: NativeNode = root;
 			for (const key of tabs.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			const items = (strip.k === "tabs" ? strip.p?.items : undefined) ?? [];
 			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
 			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
 			const editorTab = form.describe(CX);
@@ -1160,7 +1160,7 @@ describe("html form", () => {
 			const path = findPath(root, node => node.k === "tabs")!;
 			let strip: NativeNode = root;
 			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			const items = (strip.k === "tabs" ? strip.p?.items : undefined) ?? [];
 			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
 			// The shared tab is named after Name, the question the keyboard reaches.
 			const first = items[0];
@@ -1178,7 +1178,7 @@ describe("html form", () => {
 			const path = findPath(root, node => node.k === "tabs")!;
 			let strip: NativeNode = root;
 			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.p && "items" in strip.p ? strip.p.items : undefined) ?? [];
+			const items = (strip.k === "tabs" ? strip.p?.items : undefined) ?? [];
 			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
 		});
 

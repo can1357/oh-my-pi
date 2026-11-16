@@ -2,10 +2,42 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Deleting or moving a large directory tree inside a project no longer stalls language-server file watching ([#19490](https://github.com/can1357/oh-my-pi/pull/19490) by [@H4vC](https://github.com/H4vC))
+- Long-running subagents use less CPU and memory per update as their sessions grow ([#19486](https://github.com/can1357/oh-my-pi/pull/19486) by [@H4vC](https://github.com/H4vC))
+### Breaking Changes
+
+- Moved binary analysis from standalone `ida`/`ghidra` tools into eval's backend-neutral `dsm` namespace (`xd://eval/dsm`).
+- Replaced `ida.enabled`, `ida.maxOpen`, and `ida.idleCloseSec` with `disassembler.backend`, `disassembler.maxOpen`, and `disassembler.idleCloseSec`; shared database APIs now live under `@oh-my-pi/pi-coding-agent/disasm`.
+
 ### Added
 
+- Added in-place editing and Google-Docs-style comments to the plan review under Tern: double-click the plan to edit it, select text to comment; comments feed Refine.
+- Added Ghidra analysis with automatic Ghidra, JDK, and PyGhidra setup on explicit analysis; Auto prefers an installed IDA Pro, otherwise Ghidra.
+- Share live analysis databases with child agents through `db.handle()` and `dsm.open(handle)`; each owner closes only its own reference.
+
+- Added a `Force Remove` option to `worktree.onExit` that removes worktrees created during the session on exit without asking, even when they have uncommitted changes; new commits stay on the worktree's branch.
 - Dictation accepts `xai-stt` models such as `xai-oauth/grok-voice-transcribe-2.0` instead of warning "Unsupported speech-to-text API"; the `tts` tool keeps its 15,000-character cap, the shared floor across its speech backends ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Dictation with a Google Antigravity or Gemini CLI login: `gemini-3-flash-transcribe` and `gemini-2.5-flash-transcribe` transcribe through a Gemini chat model with the recording attached, since Cloud Code Assist has no transcribe model; Antigravity model-list refreshes keep these rows ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
+
+### Changed
+
+- Changed the plan review: one Approve button (Refine while the plan has comments) whose menu holds the approval choices, a model chip, and **Save** in place of **Save and quit**: Save writes the plan and keeps the review open, without leaving plan mode or clearing the session (also for an extension's `save` answer).
+- Changed the plan review to offer **Refine plan** only while the plan has comments or other feedback, as the first, preselected option.
+- Plain executable reads now show Mach-O/ELF/PE metadata without opening databases or downloading a backend; request `:overview`, a function selector, or `dsm.open()` to start analysis.
+
+- The model switcher (alt+p / `/switch`) can now filter models by provider (Tab / Shift+Tab) and set the thinking level for the switch (←/→); in Tern it opens as a drop-up above the composer with the search in the list, a provider rail topped by a Task / Main toggle, and a thinking slider, without an action bar.
+
+### Fixed
+
+- Fixed `commit.draft()` hiding files an agent deleted or renamed through bash/eval (`rm`, `mv`) under "Not yours"; they are now listed under Review.
+
+### Removed
+
+- Removed legacy standalone disassembler tools and their associated prompt instructions
+- Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet (copy a selection, double-click to edit).
+
 
 ## [18.21.0] - 2026-11-16
 
