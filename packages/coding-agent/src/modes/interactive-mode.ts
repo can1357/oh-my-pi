@@ -28,6 +28,7 @@ import {
 	Loader,
 	Markdown,
 	minFrameIntervalMs,
+	SEGMENT_RESET,
 	Spacer,
 	setTerminalTextSizing,
 	setTuiTight,
@@ -81,9 +82,12 @@ import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { formatModelString, type ResolvedModelRoleValue, resolveModelRoleValue } from "../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	type ResolvedModelRoleValue,
+	resolveModelRoleValue,
+} from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AssistantTextRenderer,
 	AutocompleteProviderFactory,
@@ -112,7 +116,7 @@ import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { GoalModeState } from "../goals/state";
-import { rebindMemoryBackendForCwd } from "../hindsight/backend";
+import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
 import { hasNativeJudge } from "../judgment";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -178,7 +182,6 @@ import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
@@ -189,6 +192,7 @@ import {
 	parseConfiguredThinkingLevel,
 	resolveConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
+import { capturePage } from "../tools/browser/page-shot";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
@@ -245,6 +249,8 @@ import {
 	setTranscriptPresenters,
 } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
+import { wrapTreeLine } from "@oh-my-pi/pi-tui/render/hanging-wrap";
+import { WidthAwareText } from "@oh-my-pi/pi-tui/render/width-aware-text";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
@@ -261,6 +267,7 @@ import {
 	initProgramStatus,
 	resendProgramStatus,
 	setProgramStatusEnabled,
+	setProgramStatusSupported,
 	settleStartupRun,
 } from "../utils/run-status";
 import {
@@ -283,6 +290,7 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { setEmbedHost } from "@oh-my-pi/pi-tui/chat/embed-host";
 import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
@@ -382,15 +390,14 @@ import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
+	ComposerOwner,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ResumeSessionOptions,
-	SessionPickHandler,
 	ShowStatusOptions,
-	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
 	YieldCompaction,
 } from "./types";
@@ -446,6 +453,7 @@ import {
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiCompleteScrollback,
@@ -523,6 +531,7 @@ const cfgLiveUiSettings = combine({
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
+	"tui.renderEmbeds": cfgTuiRenderEmbeds,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"extensionRenderers.transcriptPresenters": cfgExtensionTranscriptPresenters,
 	"tui.autoGraph": cfgTuiAutoGraph,
@@ -1953,6 +1962,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 	approvalOwnsComposer = false;
+	composerOwner?: ComposerOwner;
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
 	}
@@ -2179,6 +2189,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
+		this.#applyEmbedSetting();
 		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
@@ -2712,9 +2723,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerInterval(cfgMotionResolved.get(this.settings).spinnerInterval);
 		initProgramStatus({ startupRun: options.startupRun });
 		setProgramStatusEnabled(cfgTerminalProgramStatus.get(this.settings));
-		// OSC 133;A starts a shell prompt and invalidates working/blocked records.
-		// Only a frame that actually writes the mark needs a replacement; diff
-		// paints that keep the user bubble must not resend on every update.
+		const unsubscribeProgramStatus = this.ui.terminal.onProgramStatusSupport?.(supported => {
+			setProgramStatusSupported(supported);
+			this.ui.requestRender();
+		});
+		if (unsubscribeProgramStatus) this.#eventBusUnsubscribers.push(unsubscribeProgramStatus);
+		// OSC 133;A starts a shell prompt and may drop the current status
+		// record. Confirmed OSC 7501 receivers omit the mark while working or
+		// blocked; only a frame that writes the mark needs a status replacement.
 		this.#eventBusUnsubscribers.push(
 			this.ui.addFrameWriteListener(frame => {
 				if (frame.includes("\x1b]133;A\x07")) resendProgramStatus();
@@ -2922,9 +2938,18 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (event.type === "config_warnings_changed") {
 					this.#syncHeaderExtras();
 				}
-				// A turn the TUI did not submit (an extension message, a background job) leaves
-				// getUserInput pending, so arm the loop's next iteration here instead.
-				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
+				// A terminal provider failure is not a loop yield: resubmitting the
+				// captured prompt would append another user turn (and every @file
+				// attachment) without making progress. Pauses still belong to the
+				// run and must not park the loop.
+				if (event.type === "agent_end") {
+					const last = event.messages.findLast(message => message.role === "assistant");
+					if (last?.stopReason === "error" && this.loopModeEnabled && this.loopPrompt) {
+						this.pauseLoop();
+					} else if (this.onInputCallback) {
+						this.#scheduleLoopAutoSubmit();
+					}
+				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -3046,18 +3071,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.syncIdleMaintenanceView();
 		// Publish native send readiness even when no user input triggers another frame.
 		this.ui.requestRender();
-	}
-
-	/** Reload the title-generation system prompt override for the provided working
-	 *  directory and stash it on the session so first-input titling
-	 *  ({@link input-controller}) and replan-driven refresh
-	 *  ({@link AgentSession.#refreshTitleAfterReplan}) share one source
-	 *  ({@link discoverTitleSystemPromptFile}; issue #3734). */
-	async refreshTitleSystemPrompt(cwd?: string): Promise<void> {
-		const basePath = cwd ?? this.sessionManager.getCwd();
-		const titleSystemPromptSource = discoverTitleSystemPromptFile(basePath);
-		const resolved = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
-		this.session.setTitleSystemPrompt(resolved);
 	}
 
 	/**
@@ -3249,48 +3262,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Everything after chdir is a rescope of cwd-derived state. If any of it
 		// fails, undo the chdir so `false` reliably means "nothing committed";
 		// callers roll back their own session/manager state on false.
+		const scopedSettings = isSettingsInitialized() ? settings : undefined;
 		try {
-			// Re-scope project settings (`.claude/settings.yml` etc.) to the new
-			// directory in place so the active session and every settings reader pick
-			// up the destination project's configuration.
-			if (isSettingsInitialized()) {
-				await settings.reloadForCwd(newCwd);
-				// The reload fired the memory scope hooks; complete the rebind
-				// before the move commits so the next prompt cannot recall or
-				// retain against the source project's memory.
-				await rebindMemoryBackendForCwd(this.session);
-			}
-			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
-			// the next prompt sees everything scoped to the new project directory.
-			clearClaudePluginRootsCache();
-			await this.refreshTitleSystemPrompt(newCwd);
-			await this.session.refreshSkillsAndCommands();
+			await rescopeSessionToCwd(this.session, scopedSettings, newCwd);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
-			// cwd-derived caches (provider globals, plugin roots, capabilities,
-			// skills, slash commands) must all return to the source project so a
-			// `false` result reliably means nothing was committed.
+			// cwd-derived state (memory, plugin roots, agents, extensions, custom
+			// tools, MCP servers, skills, slash commands) must all return to the
+			// source project so a `false` result reliably means nothing was committed.
 			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				if (isSettingsInitialized()) {
-					await settings.reloadForCwd(previousCwd);
-					await rebindMemoryBackendForCwd(this.session);
-				}
-				clearClaudePluginRootsCache();
-				await this.refreshTitleSystemPrompt(previousCwd);
-				await this.session.refreshSkillsAndCommands();
+				await rescopeSessionToCwd(this.session, scopedSettings, previousCwd);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
-					if (isSettingsInitialized()) {
-						await settings.reloadForCwd(actual);
-						await rebindMemoryBackendForCwd(this.session);
-					}
-					clearClaudePluginRootsCache();
-					await this.refreshTitleSystemPrompt(actual);
-					await this.session.refreshSkillsAndCommands();
+					await rescopeSessionToCwd(this.session, scopedSettings, actual);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
@@ -4180,8 +4168,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			pendingSubmissionDispose?.();
 			this.#optimisticUserMessageComponents = [];
 			this.#pendingWorkingMessage = undefined;
-			// A run that only waits on background jobs keeps its working row, which
-			// names the wait; the settle watch or the next run tears it down.
+			// A run paused on outside work keeps its working row, which names the
+			// wait; the next loop or the run's `agent_end` tears it down.
 			if (this.loadingAnimation && !this.#eventController.isAwaitingAsyncWork()) {
 				this.#stopLoadingAnimation(true);
 			}
@@ -4238,9 +4226,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		setTableCharts("smart", request =>
-			mode === "auto" && !hasNativeJudge(this.settings, this.session.modelRegistry)
+			mode === "auto" && !hasNativeJudge(this.settings, this.session.modelRegistry, this.session.model)
 				? undefined
 				: pickTableChart(request, this.session.tableChartJudge()),
+		);
+	}
+
+	/** Lend replies' `<img>` and `<iframe>` tags the session's directory and the headless browser; off, they stay Markdown. */
+	#applyEmbedSetting(): void {
+		setEmbedHost(
+			cfgTuiRenderEmbeds.get(this.settings) ? { cwd: () => this.sessionManager.getCwd(), capturePage } : undefined,
 		);
 	}
 
@@ -4375,6 +4370,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.renderSvg")) {
 			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
+			rebuildChat = true;
+		}
+		if (any("tui.renderEmbeds")) {
+			this.#applyEmbedSetting();
 			rebuildChat = true;
 		}
 		// Components take the extension text renderers when built; the rebuild keeps the streaming
@@ -4909,6 +4908,7 @@ export class InteractiveMode implements InteractiveModeContext {
 						: dictation
 					: undefined,
 			viewing: this.#viewingLineage(),
+			btw: this.#btwController.isFocused(),
 			title: this.sessionManager.getSessionName(),
 		};
 	}
@@ -5061,6 +5061,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.pendingTools.set(id, component);
 		}
 		this.#eventController.reconcileReadGroupAfterRebuild();
+		void this.#btwController.placeNotes();
 		// During the pre-streaming window — after `startPendingSubmission` has
 		// optimistically rendered the user's message but before the user
 		// `message_start` event lands it in `session` entries — any rebuild
@@ -5354,13 +5355,44 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (closedTasks > 0) filled = Math.max(filled, 1);
 		if (closedTasks < totalTasks) filled = Math.min(filled, pathLen - 1);
 
-		const lines = ["", theme.bold(theme.fg("accent", "TODO"))];
-		for (let i = 0; i < contentLines.length; i++) {
-			lines.push(` ${theme.fg(i < filled ? "accent" : "dim", spineGlyphs[i]!)}${contentLines[i]}`);
-		}
+		const title = theme.bold(theme.fg("accent", "TODO"));
 		const tailFilled = Math.max(0, Math.min(filled - contentLines.length, tail.length));
-		lines.push(` ${theme.fg("accent", tail.slice(0, tailFilled))}${theme.fg("dim", tail.slice(tailFilled))}`);
-		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
+		const tailLine = ` ${theme.fg("accent", tail.slice(0, tailFilled))}${theme.fg("dim", tail.slice(tailFilled))}`;
+		// Rows are wrapped here, against the panel width, rather than by `Text`:
+		// `Text` wraps the joined string and restarts every continuation at the
+		// panel edge, cutting the spine and the task rail. A wide row instead
+		// hangs beneath its own content — a task under its checkbox, a stage
+		// under its name — with the spine running on beside it.
+		//
+		// The formatter outlives a theme switch (`ui.invalidate()` re-runs it
+		// without rebuilding the rows), so everything it needs is styled now and
+		// it keeps this theme: `wrapTreeLine` finds a connector by its styled bytes.
+		const rowTheme = theme;
+		const hudRows = contentLines.map((content, i) => {
+			const color = i < filled ? "accent" : "dim";
+			return {
+				content,
+				spine: ` ${theme.fg(color, spineGlyphs[i]!)}`,
+				hang: ` ${theme.fg(color, `${theme.tree.vertical}  `)}`,
+			};
+		});
+		const formatRows = (contentWidth: number): string => {
+			const lines = ["", title];
+			for (const { content, spine, hang } of hudRows) {
+				const rowWidth = Math.max(1, contentWidth - visibleWidth(spine));
+				const rows = wrapTreeLine(content, rowWidth, rowTheme) ?? wrapTextWithAnsi(content, rowWidth);
+				// The inner `Text` carries SGR state from one row into the next, and a
+				// wrapped row can end with a style still open (a bold stage name), so a
+				// row that continues ends in a reset to keep that style off the spine.
+				const last = rows.length - 1;
+				for (let r = 0; r <= last; r++) {
+					lines.push(`${r === 0 ? spine : hang}${rows[r]}${r < last ? SEGMENT_RESET : ""}`);
+				}
+			}
+			lines.push(tailLine);
+			return lines.join("\n");
+		};
+		this.todoContainer.addChild(new WidthAwareText(formatRows, 1, 0));
 
 		// Native: the same stage window as a tree, overall progress as a bar.
 		const describeTask = (todo: TodoItem, id: string): TspTreeNode => {
@@ -5637,7 +5669,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			// (same as the spawn-path ToolSession), not the settings default. This is
 			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
 			// pi/task inheritance tracks the reopened session's model.
-			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
+			getActiveModelString: () =>
+				this.session.model ? formatModelStringWithRouting(this.session.model) : undefined,
 		};
 	}
 
@@ -6929,10 +6962,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Approved plans land in a fresh (or compacted) session whose first user-visible
 		// turn is the synthetic plan-approved prompt — that path bypasses the
 		// input-controller's title generation. Seed an auto-name from the plan title
-		// so the session is not left unnamed. `setSessionName("auto")` is a no-op
-		// when the user has already chosen a name (preserveContext paths).
+		// so the session is not left unnamed, unless automatic titling is disabled
+		// (`--no-title` / PI_NO_TITLE). `setSessionName("auto")` is a no-op when the
+		// user has already chosen a name (preserveContext paths).
 		const seededName = humanizePlanTitle(options.title);
-		if (seededName && !this.sessionManager.getSessionName()) {
+		if (!$env.PI_NO_TITLE && seededName && !this.sessionManager.getSessionName()) {
 			await this.sessionManager.setSessionName(seededName, "auto");
 		}
 
@@ -8481,7 +8515,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.hasAdmittedSubmission ||
 			this.session.isStreaming ||
 			this.session.queuedMessageCount > 0 ||
-			this.session.hasPendingAsyncWork()
+			this.session.isRunActive
 		) {
 			return;
 		}
@@ -9093,6 +9127,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyExtensionLinks();
 		this.#applyTranscriptPresenters();
 		await this.#uiHelpers.renderInitialMessages(options);
+		void this.#btwController.placeNotes();
 		this.syncRetryHintRow();
 		// A switch or tree move that replays the transcript strands a `/compact` queued for the old position.
 		this.#inputController.releaseStaleYieldCompaction();
@@ -9376,6 +9411,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			settings: this.settings,
 			registry: this.session.modelRegistry,
 			getSessionId: () => this.session.sessionId,
+			getSessionProvider: () => this.session.model?.provider,
 		});
 		return this.#sttController;
 	}
@@ -9549,7 +9585,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showGitTui(revision);
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void {
+	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
 	}
 
@@ -9557,8 +9593,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.switchSessionModel(model, thinkingLevel);
 	}
 
-	showPluginSelector(mode?: "install" | "uninstall"): void {
-		void this.#selectorController.showPluginSelector(mode);
+	showPluginSelector(mode?: "install" | "uninstall"): Promise<void> {
+		return this.#selectorController.showPluginSelector(mode);
 	}
 
 	showUserMessageSelector(startAt?: string): void {
@@ -9577,8 +9613,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThinkingSelector();
 	}
 
-	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void {
-		void this.#selectorController.showSessionSelector(source, onSelect);
+	showSessionSelector(source?: ForeignSessionSource): void {
+		void this.#selectorController.showSessionSelector(source);
 	}
 
 	async handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void> {
@@ -9686,6 +9722,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwEscape(): boolean {
 		return this.#btwController.handleEscape();
+	}
+
+	get isBtwFocused(): boolean {
+		return this.#btwController.isFocused();
+	}
+
+	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean> {
+		return this.#btwController.submitFollowUp(question, images);
 	}
 
 	canBranchBtw(): boolean {

@@ -88,3 +88,4 @@ Each judged phase drains through a dispatcher with 16 requests in flight before 
 - Scores are absolute yes/no probabilities from the judge, so they are comparable across calls and batches.
 - Keyword extraction lowercases, drops tokens shorter than three bytes, stopwords, and pure numbers, and stems `-ing`/`-ed`/`-es`/`-s` when the stem keeps at least four characters.
 - Directory folders are never judged; the tree shown to the judge is structure only, which is why the filename batch carries `criteria.folder` for parity with the reference request shape.
+- The lexical scan lists the tree through native `glob()`, so below an ovnfs checkout the ovnfs daemon serving it answers the listing instead of a walk of its NFS mount (`crates/pi-walker/src/ovnfs.rs`), falling back to the native walk on any daemon failure.

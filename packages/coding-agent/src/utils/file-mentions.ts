@@ -9,7 +9,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
+import { countNewlines, formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
 import {
 	formatHashlineHeader,
 	formatNumberedLines,
@@ -73,7 +73,19 @@ async function resolveMentionPath(
 	}
 }
 
-function buildTextOutput(textContent: string): { output: string; lineCount: number } {
+interface TextOutput {
+	/** Source text shown: the head of the file, or a byte prefix of line 1 when `firstLineCut`. */
+	body: string;
+	/** Truncation notice appended after `body`; never source text, so never numbered. */
+	notice: string;
+	lineCount: number;
+	/** Line 1 alone exceeds the byte cap: `body` is a partial line with no whole row to anchor. */
+	firstLineCut: boolean;
+	/** Whole lines in `body` (1..N) when the file was head-truncated; undefined when every line is shown. */
+	shownLines?: number;
+}
+
+function buildTextOutput(textContent: string): TextOutput {
 	const allLines = textContent.split("\n");
 	const totalFileLines = allLines.length;
 	const truncation = truncateHead(textContent);
@@ -82,28 +94,24 @@ function buildTextOutput(textContent: string): { output: string; lineCount: numb
 		const firstLine = allLines[0] ?? "";
 		const firstLineBytes = Buffer.byteLength(firstLine, "utf-8");
 		const snippet = truncateHeadBytes(firstLine, DEFAULT_MAX_BYTES);
-		let outputText = snippet.text;
-
-		if (outputText.length > 0) {
-			outputText += `\n\n[Line 1 is ${formatBytes(firstLineBytes)}, exceeds ${formatBytes(
-				DEFAULT_MAX_BYTES,
-			)} limit. Showing first ${formatBytes(snippet.bytes)} of the line.]`;
-		} else {
-			outputText = `[Line 1 is ${formatBytes(firstLineBytes)}, exceeds ${formatBytes(
-				DEFAULT_MAX_BYTES,
-			)} limit. Unable to display a valid UTF-8 snippet.]`;
-		}
-
-		return { output: outputText, lineCount: totalFileLines };
+		const notice =
+			snippet.text.length > 0
+				? `\n\n[Line 1 is ${formatBytes(firstLineBytes)}, exceeds ${formatBytes(
+						DEFAULT_MAX_BYTES,
+					)} limit. Showing first ${formatBytes(snippet.bytes)} of the line.]`
+				: `[Line 1 is ${formatBytes(firstLineBytes)}, exceeds ${formatBytes(
+						DEFAULT_MAX_BYTES,
+					)} limit. Unable to display a valid UTF-8 snippet.]`;
+		return { body: snippet.text, notice, lineCount: totalFileLines, firstLineCut: true };
 	}
 
-	let outputText = truncation.content;
-
-	if (truncation.truncated) {
-		outputText += formatHeadTruncationNotice(truncation, { startLine: 1, totalFileLines });
-	}
-
-	return { output: outputText, lineCount: totalFileLines };
+	return {
+		body: truncation.content,
+		notice: formatHeadTruncationNotice(truncation, { startLine: 1, totalFileLines }),
+		lineCount: totalFileLines,
+		firstLineCut: false,
+		shownLines: truncation.truncated ? countNewlines(truncation.content) + 1 : undefined,
+	};
 }
 
 async function buildDirectoryListing(absolutePath: string): Promise<{ output: string; lineCount: number }> {
@@ -312,8 +320,8 @@ export async function generateFileMentionMessages(
 					return [];
 				}
 				if (result.ok && result.content.trim().length > 0) {
-					const { output, lineCount } = buildTextOutput(result.content);
-					files.push({ path: resolvedPath, content: output, lineCount });
+					const { body, notice, lineCount } = buildTextOutput(result.content);
+					files.push({ path: resolvedPath, content: body + notice, lineCount });
 				} else {
 					const reason = result.error || `cannot read ${ext} file`;
 					files.push({
@@ -339,12 +347,16 @@ export async function generateFileMentionMessages(
 			const snapshotStore = options?.useHashLines ? options.snapshotStore : undefined;
 			const normalized = snapshotStore ? normalizeToLF(content) : content;
 			const displayText = snapshotStore ? splitAddressableFileLines(normalized).join("\n") : normalized;
-			const textOutput = buildTextOutput(displayText);
-			let { output } = textOutput;
-			const { lineCount } = textOutput;
-			if (snapshotStore) {
-				const tag = snapshotStore.recordSnapshot(absolutePath, normalized);
-				output = `${formatHashlineHeader(resolvedPath, tag)}\n${formatNumberedLines(output)}`;
+			const { body, notice, lineCount, firstLineCut, shownLines } = buildTextOutput(displayText);
+			let output = body + notice;
+			// A cut line 1 has no whole row to anchor, so it gets no tag (as `read` emits no
+			// editable row for it). A head-truncated view records only the rows it shows, so
+			// the hashline guard refuses anchors past them.
+			if (snapshotStore && !firstLineCut) {
+				const seenLines =
+					shownLines === undefined ? undefined : Array.from({ length: shownLines }, (_, i) => i + 1);
+				const tag = snapshotStore.recordSnapshot(absolutePath, normalized, seenLines);
+				output = `${formatHashlineHeader(resolvedPath, tag)}\n${formatNumberedLines(body)}${notice}`;
 			}
 			files.push({ path: resolvedPath, content: output, lineCount });
 		} catch {

@@ -57,12 +57,15 @@ describe("AgentSession prompt admission racing abort", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: mock.stream,
 		});
-		const fallbackRegistry = new ModelRegistry(authStorage);
+		// A real registry keeps the lookups the session runs (fallback-chain
+		// resolution calls find()); tests only script its key resolution.
+		const modelRegistry = new ModelRegistry(authStorage);
+		if (options.modelRegistry) spyOn(modelRegistry, "getApiKey").mockImplementation(options.modelRegistry.getApiKey);
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry: (options.modelRegistry ?? fallbackRegistry) as never,
+			modelRegistry,
 			...(options.extensionRunner ? { extensionRunner: options.extensionRunner as never } : {}),
 		});
 		if (options.clientBridge) {
@@ -70,7 +73,7 @@ describe("AgentSession prompt admission racing abort", () => {
 		}
 		const dropped: string[] = [];
 		session.setPromptDropped(prompt => dropped.push(prompt.text));
-		return { session, dropped, modelRegistry: options.modelRegistry ?? fallbackRegistry };
+		return { session, dropped, modelRegistry };
 	}
 
 	/** Holds image normalization for image-bearing calls until released. */

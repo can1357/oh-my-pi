@@ -17,12 +17,9 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import {
-	overlayTitleSlotContent,
-	parseTitleSlotFromContent,
-	type SessionTitleUpdate,
-	serializeTitleSlot,
-} from "./session-title-slot";
+import { readSessionHeaderIdSync } from "./session-header-id";
+import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
+import { purgeDeletedSessionRows } from "./session-db-purge";
 
 /** Shared base flags for the held transcript descriptor; callers add `O_APPEND` or `O_TRUNC`. */
 const SESSION_WRITE_FLAGS = fs.constants.O_WRONLY | fs.constants.O_CREAT;
@@ -223,7 +220,10 @@ export interface SessionStorage {
 	writeLinesAtomic?(path: string, lines: readonly string[], options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
-	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
+	deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void>;
 	/**
 	 * Run a synchronous session mutation under the backend's cross-process
 	 * lock. Optional because only backends with a process-shared lock can
@@ -587,39 +587,6 @@ testSessionOwnersDir();
 
 function sessionOwnersDir(): string {
 	return testSessionOwnersDir() ?? getSessionOwnersDir();
-}
-
-/** Bytes read to find a header at claim time: the title slot plus a header line fit well inside. */
-const SESSION_HEADER_PREFIX_BYTES = 64 * 1024;
-
-/**
- * The session id in the header of the file at `sessionPath`, read
- * synchronously from a bounded prefix (past the title slot), or `undefined`
- * when there is no readable file or no header in that prefix.
- */
-function readSessionHeaderIdSync(sessionPath: string): string | undefined {
-	let prefix: string;
-	try {
-		const fd = fs.openSync(sessionPath, "r");
-		try {
-			const buf = Buffer.alloc(SESSION_HEADER_PREFIX_BYTES);
-			prefix = buf.toString("utf8", 0, fs.readSync(fd, buf, 0, buf.length, 0));
-		} finally {
-			fs.closeSync(fd);
-		}
-	} catch {
-		return undefined;
-	}
-	if (parseTitleSlotFromContent(prefix)) prefix = prefix.slice(prefix.indexOf("\n") + 1);
-	const end = prefix.indexOf("\n");
-	if (end === -1) return undefined;
-	try {
-		const entry: unknown = JSON.parse(prefix.slice(0, end));
-		if (entry && typeof entry === "object" && "type" in entry && entry.type === "session" && "id" in entry) {
-			return typeof entry.id === "string" ? entry.id : undefined;
-		}
-	} catch {}
-	return undefined;
 }
 
 /**
@@ -1424,9 +1391,27 @@ export class FileSessionStorage implements SessionStorage {
 	 * Delete a session file and its artifacts directory.
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
 	 */
-	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
-		// Delete the session file itself
-		await this.unlink(sessionPath);
+	async deleteSessionWithArtifacts(
+		sessionPath: string,
+		options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
+		// Read the id while the transcript is still here. Rows are purged only
+		// once that transcript is gone, so a failed unlink does not drop
+		// history/stats for a session that is still on disk. A transcript that
+		// is already absent still purges (callers treat ENOENT as success) and
+		// then rethrows, so artifact cleanup does not run for a file this call
+		// did not remove.
+		const sessionId = readSessionHeaderIdSync(sessionPath);
+		let alreadyGone: unknown;
+		try {
+			await this.unlink(sessionPath);
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+			alreadyGone = err;
+		}
+		// Best-effort: a busy dashboard store never fails the delete itself.
+		purgeDeletedSessionRows(sessionPath, { ...options, sessionId });
+		if (alreadyGone) throw alreadyGone;
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
@@ -1801,7 +1786,10 @@ export class MemorySessionStorage implements SessionStorage {
 		this.#files.delete(path);
 		return Promise.resolve();
 	}
-	deleteSessionWithArtifacts(_sessionPath: string): Promise<void> {
+	deleteSessionWithArtifacts(
+		_sessionPath: string,
+		_options?: { historyDbPath?: string; statsDbPath?: string },
+	): Promise<void> {
 		return Promise.resolve();
 	}
 

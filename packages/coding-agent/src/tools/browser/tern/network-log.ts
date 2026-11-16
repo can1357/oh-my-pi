@@ -10,7 +10,8 @@
  * reach the network: of what a capture script reports, only the requests it
  * answered itself (a fulfilling or aborting route, offline emulation) are
  * recorded, since the engine never saw them. Natively observed loads have no
- * body store.
+ * body store and no request body size; their response body size is the
+ * Content-Length the response declared, unknown without one.
  */
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
@@ -95,15 +96,21 @@ const TYPE_BY_FETCH_DEST: Record<string, string> = {
 /**
  * The Puppeteer resource type of a natively observed load. The engine names
  * none: the main document is known, the rest is read off the request's
- * `Sec-Fetch-Dest`, else off the response's MIME type. `fetch` also stands for
- * XHR, which the engine does not tell apart.
+ * `Sec-Fetch-Dest`, else off the response's MIME type. WebKit sends
+ * `Sec-Fetch-Dest` to potentially trustworthy origins only; to the others
+ * (plain http off this machine) it marks a frame's document request with
+ * `Upgrade-Insecure-Requests` instead, so only such a request is a
+ * `subdocument`, and an HTML answer to any other request (an API that answers
+ * `text/html`) is `fetch`. `fetch` also stands for XHR, which the engine does
+ * not tell apart.
  */
 function nativeResourceType(main: boolean, requestHeaders: Record<string, string>, mime: string | undefined): string {
 	if (main) return "document";
 	const byDest = TYPE_BY_FETCH_DEST[requestHeaders["sec-fetch-dest"] ?? ""];
 	if (byDest) return byDest;
+	if (requestHeaders["upgrade-insecure-requests"] === "1") return "subdocument";
 	const type = mime?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-	if (type === "text/html" || type === "application/xhtml+xml") return "subdocument";
+	if (type === "text/html" || type === "application/xhtml+xml") return "fetch";
 	if (type === "text/css") return "stylesheet";
 	if (type.endsWith("javascript") || type.endsWith("ecmascript")) return "script";
 	if (type.startsWith("image/")) return "image";
@@ -206,7 +213,8 @@ export class TernNetworkLog {
 		const id = num(event.id);
 		if (id === undefined) return undefined;
 		const ts = num(event.ts) ?? Date.now();
-		// A load whose `request` event was lost to the server's event ring still gets a record.
+		// A load whose `request` event was lost to the server's event ring still gets a record. The engine
+		// reports no request bodies: their sizes stay unknown.
 		const entryFor = (): TernRequestEntry =>
 			this.#byNativeId.get(id) ??
 			this.#push({
@@ -216,7 +224,7 @@ export class TernNetworkLog {
 				url: typeof event.url === "string" ? event.url : "",
 				resourceType: nativeResourceType(event.main === true, {}, undefined),
 				requestHeaders: {},
-				sizes: { requestBody: 0 },
+				sizes: {},
 			});
 		switch (event.type) {
 			case "request": {
@@ -237,7 +245,7 @@ export class TernNetworkLog {
 						url,
 						resourceType: nativeResourceType(event.main === true, headers, undefined),
 						requestHeaders: headers,
-						sizes: { requestBody: 0 },
+						sizes: {},
 					});
 				}
 				this.#nativeInflight.add(id);
@@ -262,8 +270,12 @@ export class TernNetworkLog {
 				const entry = this.#byNativeId.get(id);
 				this.#nativeInflight.delete(id);
 				if (!entry) return undefined;
+				// The length the response declared (Content-Length), which the engine also gives as 0 for one that
+				// declared none: that size stays unknown.
 				const length = num(event.length);
-				if (length !== undefined) entry.sizes.responseBody = length;
+				if (length !== undefined && (length > 0 || entry.responseHeaders?.["content-length"] !== undefined)) {
+					entry.sizes.responseBody = length;
+				}
 				// Only a server that stamps its events gives a duration: omp reads them in batches.
 				if (num(event.ts) !== undefined) entry.durationMs = Math.max(0, ts - entry.ts);
 				return undefined;

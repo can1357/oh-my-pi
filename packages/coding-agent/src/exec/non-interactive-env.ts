@@ -60,7 +60,28 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
  * Locale pinned for agent commands: byte-order collation, `C` numbers, dates,
  * and English messages like `C`, but UTF-8 text, which `C` would split into bytes.
  */
-const AGENT_LOCALE = "C.UTF-8";
+const AGENT_LOCALE_ENV: Readonly<Record<string, string>> = {
+	LANG: "C.UTF-8",
+	LC_ALL: "C.UTF-8",
+};
+
+/**
+ * {@link AGENT_LOCALE_ENV} for macOS, which ships no `C.UTF-8` (`initdb` and
+ * `perl` reject it): every category is `C` but `LC_CTYPE`, whose `en_US.UTF-8`
+ * is macOS's plain `UTF-8` character table. `LC_ALL` is empty, which POSIX
+ * reads as unset, so an inherited `LC_ALL` cannot mask the categories, and each
+ * category is named so an inherited `LC_*` cannot leak through.
+ */
+const DARWIN_AGENT_LOCALE_ENV: Readonly<Record<string, string>> = {
+	LANG: "C",
+	LC_ALL: "",
+	LC_COLLATE: "C",
+	LC_CTYPE: "en_US.UTF-8",
+	LC_MESSAGES: "C",
+	LC_MONETARY: "C",
+	LC_NUMERIC: "C",
+	LC_TIME: "C",
+};
 
 /** Python stdio defaults for Windows, where the console code page is not UTF-8. */
 const WINDOWS_PYTHON_UTF8_ENV: Readonly<Record<string, string>> = {
@@ -116,7 +137,7 @@ export interface NonInteractiveEnvOptions {
 	/** Env the child inherits from the launcher. */
 	baseEnv?: Record<string, string | undefined>;
 	platform?: NodeJS.Platform;
-	/** Keep the inherited locale instead of pinning {@link AGENT_LOCALE}: user-typed `!` commands. */
+	/** Keep the inherited locale instead of pinning {@link AGENT_LOCALE_ENV}: user-typed `!` commands. */
 	inheritLocale?: boolean;
 }
 
@@ -137,8 +158,7 @@ export function buildNonInteractiveEnv(
 	// on Windows when nothing names a locale.
 	const pinLocale = !inheritLocale || (platform === "win32" && !hasLocaleEnvValue(baseEnv, platform));
 	if (pinLocale && !hasLocaleEnvValue(overrides, platform)) {
-		env.LANG = AGENT_LOCALE;
-		env.LC_ALL = AGENT_LOCALE;
+		Object.assign(env, platform === "darwin" ? DARWIN_AGENT_LOCALE_ENV : AGENT_LOCALE_ENV);
 	}
 
 	if (

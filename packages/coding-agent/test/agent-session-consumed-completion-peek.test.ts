@@ -140,7 +140,7 @@ describe("AgentSession peek at consumed background completions", () => {
 		expect(JSON.stringify(waitResult?.content)).toContain("cell finished");
 	});
 
-	it("reports no pending async work once the only queued result was consumed", async () => {
+	it("reports nothing left to wake the session once the only queued result was consumed", async () => {
 		const subagent = gatedJob("subagent", "task");
 		const active = createSession([{ content: ["Done"] }]);
 		const queued = Promise.withResolvers<void>();
@@ -150,7 +150,7 @@ describe("AgentSession peek at consumed background completions", () => {
 		await queued.promise;
 		manager.consumeJobResults(["subagent"]);
 
-		expect(active.hasPendingAsyncWork()).toBe(false);
+		expect(active.wakeSources).toBeUndefined();
 	});
 
 	it("returns a job's queued completion from a wait whose service refresh the completion cut short", async () => {

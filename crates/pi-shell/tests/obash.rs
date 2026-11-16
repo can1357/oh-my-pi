@@ -27,6 +27,32 @@ fn for_loop_prints_one_two() {
 	assert!(out.status.success());
 }
 
+#[cfg(unix)]
+#[test]
+fn background_commands_keep_fork_environment_and_cwd() {
+	let dir = tempfile::tempdir().unwrap();
+	let out = output(obash().current_dir(dir.path()).args([
+		"-c",
+		r#"export FORK_VALUE=before; unset FORK_LATER
+f() { echo exported:before; }; export -f f
+( /bin/sh -c 'echo "env:$FORK_VALUE:${FORK_LATER-absent}"'; /bin/pwd
+  bash -c f
+  [ "$(dirs -p)" = "$PWD" ] && echo stack:before ) &
+export FORK_VALUE=after FORK_LATER=after; f() { echo exported:after; }
+pushd / >/dev/null; wait"#,
+	]));
+	let text = String::from_utf8_lossy(&out.stdout);
+	let mut lines: Vec<_> = text.lines().collect();
+	lines.sort_unstable();
+	let cwd = fs::canonicalize(dir.path()).unwrap();
+	let mut expected =
+		vec!["env:before:absent", "exported:before", "stack:before", cwd.to_str().unwrap()];
+	expected.sort_unstable();
+	assert_eq!(lines, expected);
+	assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+	assert!(out.status.success());
+}
+
 /// The drive loop's parker waits for the externals (Linux: their pidfds): a
 /// foreground external, a pipeline, a command substitution, and a background
 /// external whose exit a busy foreground loop notices without parking; obash

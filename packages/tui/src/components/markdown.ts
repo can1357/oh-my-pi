@@ -1858,6 +1858,8 @@ export interface MarkdownTheme {
 	/** Color a heading; `depth` is its level, 1–6. Bold/underline/`#` prefix are already applied. */
 	heading: (text: string, depth: number) => string;
 	link: (text: string) => string;
+	/** Color the label of a link an extension handles (a registered extension scheme); defaults to `link`. */
+	extensionLink?: (text: string) => string;
 	linkUrl: (text: string) => string;
 	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
 	resolveLink?: (href: string) => string | undefined;
@@ -4538,7 +4540,10 @@ export class Markdown implements Component {
 					// Its label gets its own (dotted) underline instead of the web-link one.
 					if (href && extensionLinkScheme(href)) {
 						const key = `${this.#extensionLinkBlock}\0${this.#extensionLinkOrdinal++}`;
-						result += formatExtensionLink(this.#theme.link(linkText), href, key) + stylePrefix;
+						const styledLabel = this.#theme.extensionLink
+							? this.#theme.extensionLink(linkText)
+							: this.#theme.link(linkText);
+						result += formatExtensionLink(styledLabel, href, key) + stylePrefix;
 						break;
 					}
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
@@ -4695,8 +4700,19 @@ export class Markdown implements Component {
 				continue;
 			}
 			const rowStart = lines.length;
-			const bullet = token.ordered ? `${startNumber + i}. ` : "- ";
-			const firstPrefix = indent + this.#theme.listBullet(bullet);
+			const marker = token.ordered ? `${startNumber + i}. ` : "- ";
+			// A task item's leading checkbox token draws nothing in #renderListItem;
+			// draw it after the marker so wrapped rows hang under the task text.
+			// `listBullet` only ever sees the bare marker (`- `, `10. `), so themes
+			// that match or replace it never touch the checkbox, which takes the
+			// item's text style instead.
+			const checkbox = item.tokens?.[0];
+			const taskBox = checkbox?.type === "checkbox" ? `[${checkbox.checked ? "x" : " "}] ` : "";
+			const bullet = marker + taskBox;
+			let firstPrefix = indent + this.#theme.listBullet(marker);
+			if (taskBox !== "") {
+				firstPrefix += styleContext ? styleContext.applyText(taskBox) : this.#applyDefaultStyle(taskBox);
+			}
 			// Continuation rows align under the item text, so the hang matches the
 			// actual bullet width (`10. ` is 4 cells, not 2).
 			const continuationIndent = indent + padding(visibleWidth(bullet));

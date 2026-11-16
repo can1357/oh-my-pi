@@ -220,6 +220,7 @@ thread_local! {
 	static CURRENT: RefCell<Option<OperationToken>> = const { RefCell::new(None) };
 	static CLEANUP: Cell<bool> = const { Cell::new(false) };
 	static FOCUS_RETURN: Cell<Option<DesktopFocusReturn>> = const { Cell::new(None) };
+	static TEXT_UNCONFIRMED: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Records where the current operation's takeover left focus.
@@ -232,6 +233,19 @@ pub(crate) fn report_focus_return(report: DesktopFocusReturn) {
 /// none for the next.
 pub(crate) fn take_focus_return() -> Option<DesktopFocusReturn> {
 	FOCUS_RETURN.take()
+}
+
+/// Records why the current operation could not see the target read the text
+/// it typed.
+#[cfg(target_os = "windows")]
+pub(crate) fn report_text_unconfirmed(reason: String) {
+	TEXT_UNCONFIRMED.set(Some(reason));
+}
+
+/// Takes the unconfirmed-text reason of the operation running on this
+/// thread, leaving none for the next.
+pub(crate) fn take_text_unconfirmed() -> Option<String> {
+	TEXT_UNCONFIRMED.take()
 }
 
 pub(crate) struct OperationScope {

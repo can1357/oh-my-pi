@@ -4,11 +4,75 @@
 
 ### Added
 
+- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+
+### Changed
+
+- Changed the local speech model `kokoro` to `phonon-31m`
+- Unknown reasoning capabilities now retain an unverified thinking ladder and can load endpoint-scoped probe results from `models.db`.
+
+### Fixed
+
+- Fixed xAI Grok OAuth `grok-composer-2.5-fast` being listed as non-reasoning; thinking levels from minimal through xhigh are now available.
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added publicly available image-sizing helpers for determining model-delivered image dimensions and fitting images to a specified long edge before coordinate mapping.
+
+### Fixed
+
+- Fixed image inputs being dropped for DeepSeek V4 Flash, restoring consistent multimodal image support.
+- Restricted reasoning-effort options for Mistral GLM 5.3, GLM 5.3 Flash, and Mistral Large 4 to the levels supported by those models.
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added Antigravity CLI models for Gemini, Claude and GPT-OSS with selectable native thinking levels.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added Gemini 4 Hydrogen on Google Antigravity as a single model with selectable low, medium, high, and xhigh thinking levels, priced at $1.50/$7.50 per million tokens.
+- Added Chutes provider support with live model discovery and `/login chutes` authentication using `CHUTES_API_KEY`.
+
+### Changed
+
+- Paused Google Antigravity: login is no longer available and stored credentials are not used until the provider is re-enabled. Use `GEMINI_API_KEY` with Google AI Studio or the `google-vertex` provider instead ([#18341](https://github.com/can1357/oh-my-pi/issues/18341)).
+- Updated Command Code model pricing and usage reporting to match the provider's current rates, including long-context pricing tiers for Claude Haiku 5.5, GPT-6.1 Sol and Terra, Grok 4.7, and Claude Sonnet 5.5.
+- Increased the maximum output for Gemini 4 Argon, Carbon, and Hydrogen on the Gemini API and Vertex AI to 262,144 tokens, enabling substantially longer responses.
+- Updated OpenCode Go Claude Haiku 5.5 to support thinking levels from low through max, including explicit thinking disablement.
+- Updated Devin requests to identify as Devin CLI 3000.12.57, the current stable version.
+
+### Fixed
+
+- Fixed Gemini 4 Argon on Command Code so image attachments are preserved and usage is billed correctly at $2 per million input tokens, $10 per million output tokens, and $0.10 per million cache-read tokens ([#19125](https://github.com/can1357/oh-my-pi/pull/19125) by [@wolfiesch](https://github.com/wolfiesch)).
+- Fixed Factory Droid GPT-6 models failing on the next turn after changing the thinking level during Bedrock or Snowflake sessions ([#19188](https://github.com/can1357/oh-my-pi/pull/19188) by [@will-bogusz](https://github.com/will-bogusz)).
+- Fixed OpenRouter model listings for workspace-restricted API keys so each key shows its correct allowed model roster and maintains an independent model cache ([#19013](https://github.com/can1357/oh-my-pi/pull/19013) by [@YibaiMeng](https://github.com/YibaiMeng)).
+- Fixed OpenCode Go Muse Spark tool-call turns losing encrypted reasoning between steps ([#17748](https://github.com/can1357/oh-my-pi/pull/17748) by [@nico2525nn](https://github.com/nico2525nn)).
+- Fixed Vertex AI Gemini 3 and newer models rejecting replayed or cross-model tool calls that lack a thought signature ([#17150](https://github.com/can1357/oh-my-pi/pull/17150) by [@duck1eee](https://github.com/duck1eee)).
+- Fixed Cursor model listings omitting models available to the provider, including GLM 5.3 and Grok 4.7 ([#18248](https://github.com/can1357/oh-my-pi/pull/18248) by [@joseotaviorf](https://github.com/joseotaviorf)).
+
+## [18.20.0] - 2026-11-12
+
+### Added
+
+- Added the Gemini Decision 1 judge model (`google/gemini-decision-1`, `GEMINI_API_KEY`); assign it to the `judge` role to use it ([#19060](https://github.com/can1357/oh-my-pi/pull/19060) by [@kevcube](https://github.com/kevcube))
 - Added Nace (`nace`) with the `drex-max-v1.1`, `drex-max-finance` and `drex-v2.0` judge models and `/login nace` (`NACE_API_KEY`) ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
+- Added Gemini 4 Hydrogen (`gemini-4-hydrogen`) on Google, Vertex, OpenCode Zen, OpenRouter, Vercel AI Gateway, and Kilo, with low, medium, high, and xhigh thinking levels on the native Google transports.
+
+### Changed
+
+- Factory Droid requests identify as droid 1.7.1 and report the interactive CLI as their surface, and prefix-bound Claude models (Opus, Sonnet and Haiku 5.5, Fable 5.1) on Factory's direct Anthropic route now ask Anthropic to drop stale signed thinking instead of rejecting a turn whose earlier context changed ([#18771](https://github.com/can1357/oh-my-pi/pull/18771) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
 - Fixed `alibaba-token-plan/qwen4-max-preview` (including its `qwen4.0-max-preview` alias) showing no context or output limits, image input, or thinking levels ([#18986](https://github.com/can1357/oh-my-pi/issues/18986)).
+- Fixed Vertex AI Mistral partner models (`mistral-medium-3`, `mistral-small-2503`, `codestral-2`) misrouting to the first-party Gemini endpoint; they now ride the `publishers/mistralai` raw-predict endpoint with ADC auth and an OpenAI-shaped body ([#19010](https://github.com/can1357/oh-my-pi/issues/19010), [#19022](https://github.com/can1357/oh-my-pi/pull/19022) by [@yuzu-octopus](https://github.com/yuzu-octopus)).
+- Added Liquid AI (`liquid`) with the `d1.1` and `d1-ultra` judge models and `/login liquid` (`LIQUID_API_KEY`) ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
 
 ## [18.19.0] - 2026-11-12
 
@@ -19,10 +83,6 @@
 ### Fixed
 
 - Fixed Google Antigravity Gemini 4 Argon models sharing the general Gemini quota scope instead of their dedicated weekly bucket ([#16104](https://github.com/can1357/oh-my-pi/issues/16104)).
-- Added Liquid AI (`liquid`) with the `d1.1` and `d1-ultra` judge models and `/login liquid` (`LIQUID_API_KEY`) ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
-### Changed
-
-- Factory Droid requests identify as droid 1.7.1 and report the interactive CLI as their surface, and prefix-bound Claude models (Opus, Sonnet and Haiku 5.5, Fable 5.1) on Factory's direct Anthropic route now ask Anthropic to drop stale signed thinking instead of rejecting a turn whose earlier context changed ([#18771](https://github.com/can1357/oh-my-pi/pull/18771) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.18.9] - 2026-11-11
 

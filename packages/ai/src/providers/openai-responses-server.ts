@@ -347,8 +347,8 @@ function functionOutputContent(output: string | readonly unknown[] | undefined):
 // ─── parseRequest ───────────────────────────────────────────────────────────
 
 export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
-	// Header capture is centralized in `auth-gateway/server.ts` (the
-	// allow-listed set lands on `options.headers` automatically). We also
+	// The gateway forwards allow-listed request headers itself, for the gateway
+	// token only (`applyCallerTrust` in `auth-gateway/caller-options.ts`). We
 	// consult `headers` here to populate `options.promptCacheKey` when the
 	// client signals a cache identity outside the body — see the
 	// `resolvePromptCacheKey` call further down.

@@ -243,10 +243,11 @@ override matching model tags. These fields do not configure the Anthropic Messag
 - `typesafe`
 - `openrouter-decisions`
 - `openai-decisions`
+- `google-decisions`
 - `workers-ai-systemone`
 
-`typesafe`, `openrouter-decisions`, `openai-decisions`, and `workers-ai-systemone` are judgment APIs, not chat transports: a model declared with one answers judgment requests and is selected by the `judge` model role. `typesafe` posts TypeSafe's System One body to `{baseUrl}/v1/systemone` (any System One server: TypeSafe, OpenJEV, Kev, self-hosted Clef); `openrouter-decisions` posts the same body to `{baseUrl}/decisions`; `openai-decisions` translates questions and answers to OpenAI's Decisions API at `{baseUrl}/decisions` (the bundled `openai/gpt-6-luna-decisions` row sends the wire model `gpt-6-luna`); `workers-ai-systemone` posts the System One body to Cloudflare Workers AI at `{baseUrl}/{model id}`, where `<account>` in the base URL is filled from the stored credential's account id or `CLOUDFLARE_ACCOUNT_ID`. Its `headers` carry gateway routing or custom authentication headers for that traffic.
-Judgment requests can share image attachments with vision-chat requests. Native OpenAI Decisions, TypeSafe Jev, OpenRouter Jev, and Workers AI judges, plus prompted vision-chat models, support images; text-only candidates are skipped for image requests. `Judge.supportsImages` identifies compatible candidates, and a judge chain with no image-capable model fails explicitly rather than dropping images. Prompted judgments normalize images for the selected candidate, including upscaling undersized rasters and converting WebP for models with STB-backed decoders; native judges continue to receive the original image bytes. When constructing a `NativeJudge` directly for System One, set `supportsImages: true`; `createNativeJudge` derives this flag from the catalog.
+`typesafe`, `openrouter-decisions`, `openai-decisions`, `google-decisions`, and `workers-ai-systemone` are judgment APIs, not chat transports: a model declared with one answers judgment requests and is selected by the `judge` model role. `typesafe` posts TypeSafe's System One body to `{baseUrl}/v1/systemone` (any System One server: TypeSafe, OpenJEV, Kev, self-hosted Clef); `openrouter-decisions` posts the same body to `{baseUrl}/decisions`; `openai-decisions` translates questions and answers to OpenAI's Decisions API at `{baseUrl}/decisions` (the bundled `openai/gpt-6-luna-decisions` row sends the wire model `gpt-6-luna`); `google-decisions` translates them to Google's Gemini Decisions API at `{baseUrl}/decisions` with the key in `x-goog-api-key` (the bundled `google/gemini-decision-1` row); `workers-ai-systemone` posts the System One body to Cloudflare Workers AI at `{baseUrl}/{model id}`, where `<account>` in the base URL is filled from the stored credential's account id or `CLOUDFLARE_ACCOUNT_ID`. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+Judgment requests can share image attachments with vision-chat requests. Native OpenAI Decisions, Gemini Decisions, TypeSafe Jev, OpenRouter Jev, and Workers AI judges, plus prompted vision-chat models, support images; text-only candidates are skipped for image requests. `Judge.supportsImages` identifies compatible candidates, and a judge chain with no image-capable model fails explicitly rather than dropping images. Prompted judgments normalize images for the selected candidate, including upscaling undersized rasters and converting WebP for models with STB-backed decoders; native judges continue to receive the original image bytes. When constructing a `NativeJudge` directly for System One, set `supportsImages: true`; `createNativeJudge` derives this flag from the catalog.
 
 Catalog-backed native judges apply the selected model's image bounds. Direct `NativeJudge` constructors can supply `imageInput` bounds explicitly; opting into images does not inherit Jev's size limits for unrelated System One models.
 
@@ -622,6 +623,20 @@ existing native/reference/default fallback.
 Silent endpoints can inherit bundled-reference limits, reasoning, and input modalities; unknown models
 use 128,000 context and 32,768 output as generic chat defaults. Output caps are bounded by the resolved context;
 Anthropic-routed models use an 8,192-token fallback output cap.
+
+When neither configuration, discovery nor the catalog establishes reasoning support, thinking is
+**unverified**, not disabled. The first request with a thinking level (including the session default)
+runs small, separate capability probes before sending your turn. The requested level is tried first;
+all six levels are tested in parallel. If that format fails, alternate effort, toggle or token-budget
+formats are tried for the API. Probes contain only a fixed arithmetic question, never your conversation
+or tools. They add requests and latency on the first use of an unknown model.
+
+Accepted levels, request format and observed reasoning are saved in `models.db`, scoped to provider,
+API, endpoint and wire model ID. Later turns reuse the result and clamp unsupported levels. Positive
+results expire after 30 days; results with no reasoning controls expire after one day. Auth failures,
+rate limits, outages and timeouts are inconclusive and are not saved as lack of support. Parameter
+acceptance counts even if the provider returns no visible reasoning. Explicit capability settings,
+including `reasoning: false`, take precedence over probing.
 
 A row advertising only image output becomes an image-generation runner; embedding-only output
 becomes an embedding runner. Mixed outputs remain chat models. These runners are visible with
@@ -1101,7 +1116,8 @@ An explicit per-request region or a model ARN's region wins. Otherwise an ambien
 `AWS_REGION`/`AWS_DEFAULT_REGION`/the AWS profile is used when compatible with the inference
 profile's geo prefix; a compatible guardrail ARN region or the geo's default region is the
 fallback. Models without a recognized geo prefix use the ambient region, then the guardrail ARN
-region, then `us-east-1`. Set `baseUrl` on `providers.amazon-bedrock` (or on a custom provider using
+region, then a regional `baseUrl` region, then `us-east-1`. Set `baseUrl` on `providers.amazon-bedrock`
+(or on a custom provider using
 `api: bedrock-converse-stream`) to send requests somewhere else instead — a VPC/PrivateLink
 endpoint, a FIPS host, or a gateway. Any path or query string on the `baseUrl` is kept — the path
 as a prefix, the query appended to the final URL (and included in SigV4's canonical request when
@@ -1120,9 +1136,10 @@ with the resolved region — signing has to match the region it sends to, and ev
 model already carries such a `baseUrl`. Use a distinct host (VPC endpoint, `-fips`, gateway) to
 pin an origin exactly.
 
-Region resolution itself is unaffected by `baseUrl`, because SigV4 still signs with a real AWS
-region — set `AWS_REGION` or use a region-scoped model id/ARN if the endpoint expects a specific
-one. A gateway that accepts a bearer token instead of SigV4 needs no AWS signing credentials: set the
+For models without a recognized geo prefix, a regional `baseUrl` sets the region when the ambient
+and guardrail ARN regions are unset. SigV4 signs with that region instead of the `us-east-1` default.
+An ambient region or region-scoped model id/ARN overrides it. A gateway that accepts a bearer token
+instead of SigV4 needs no AWS signing credentials: set the
 provider's `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) and signing is skipped. Region resolution still
 controls AWS's default host.
 

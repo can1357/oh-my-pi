@@ -20,6 +20,7 @@ import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/nat
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { roleCandidatePool } from "../config/model-roles";
@@ -154,15 +155,29 @@ const LEADING_PROSE_THINKING_PREAMBLE_RE =
 	/^[ \t]*(?:(?:here(?:['’]s| is)[ \t]+(?:a|the|my)[ \t]+)|my[ \t]+)?(?:thinking|thought|reasoning)[ \t]+process[ \t]*:?[ \t]*(?:\r?\n|$)/i;
 
 function getTitleModels(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api>[] {
+	const offline = cfgOffline.get(settings);
+	if (offline && !currentModel?.provider) return [];
 	const availableModels = roleCandidatePool("tiny", settings, registry);
 	if (availableModels.length === 0) return [];
 
 	const models = collectOnlineTinyCandidates(["tiny", "commit", "smol"], settings, availableModels).map(
 		candidate => candidate.model,
 	);
+	if (offline) {
+		const seen = new Set(models.map(formatModelStringWithRouting));
+		const sameProviderModels = availableModels.filter(model => model.provider === currentModel?.provider);
+		for (const { model } of collectOnlineTinyCandidates(["tiny", "commit", "smol"], settings, sameProviderModels)) {
+			const key = formatModelStringWithRouting(model);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			models.push(model);
+		}
+	}
 	if (
 		currentModel &&
-		(models.length === 0 || cfgRetryModelFallback.get(settings) !== false) &&
+		(models.length === 0 ||
+			(offline && !models.some(model => model.provider === currentModel.provider)) ||
+			cfgRetryModelFallback.get(settings) !== false) &&
 		!models.some(model => formatModelStringWithRouting(model) === formatModelStringWithRouting(currentModel))
 	) {
 		// Append currentModel and expand its own chain separately — never merge it
@@ -175,7 +190,7 @@ function getTitleModels(registry: ModelRegistry, settings: Settings, currentMode
 			models.push(model);
 		}
 	}
-	return models;
+	return offline ? models.filter(model => model.provider === currentModel?.provider) : models;
 }
 
 /**

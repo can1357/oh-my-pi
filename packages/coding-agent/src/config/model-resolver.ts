@@ -1844,7 +1844,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
-	options?: { exactOnly?: boolean },
+	options?: { exactOnly?: boolean; allowedProvider?: string | null },
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1854,11 +1854,21 @@ export async function resolveModelOverrideWithAuthFallback(
 }> {
 	const disabledProviders = disabledProviderIds(settings);
 	let lookupRegistry: ModelLookupRegistry = modelRegistry;
-	if (disabledProviders.size > 0) {
-		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
+	if (disabledProviders.size > 0 || options?.allowedProvider !== undefined) {
+		const enabledModels = modelRegistry
+			.getAvailable()
+			.filter(
+				model =>
+					!disabledProviders.has(model.provider) &&
+					(options?.allowedProvider === undefined || model.provider === options.allowedProvider),
+			);
 		lookupRegistry = { getAvailable: () => enabledModels };
 	}
 	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings, options);
+	if (!primary.model && options?.allowedProvider !== undefined && parentActiveModelPattern && !options.exactOnly) {
+		const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
+		if (fallback.model) return { ...fallback, authFallbackUsed: true };
+	}
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}

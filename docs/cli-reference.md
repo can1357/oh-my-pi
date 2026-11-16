@@ -138,7 +138,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 | Flag                       | Description                                                                                                                                                                                          |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--tools <a,b,c>`          | Comma-separated list of tools to enable (default: all).                                                                                                                                              |
+| `--tools <a,b,c>`          | Comma-separated list of tools to enable (default: tools enabled in settings; a tool whose setting is off stays off).                                                                                 |
 | `--no-tools`               | Disable all built-in tools.                                                                                                                                                                          |
 | `--no-lsp`                 | Disable LSP tools, formatting, and diagnostics.                                                                                                                                                      |
 | `--no-pty`                 | Disable PTY-based interactive bash execution.                                                                                                                                                        |
@@ -225,9 +225,10 @@ the session, which cancels background jobs the run started (`bash` or `task`
 calls the model ran asynchronously). With `--wait-async` (or
 `async.printWake: true`) it instead waits for them; each job's result is
 delivered to the same session as it is in the TUI, starting another turn, and a
-turn may start further jobs. The run exits once no owned job or undelivered
-result remains, and text mode prints the answer of the last turn. Bound
-unattended runs with `--max-time`.
+turn may start further jobs (or child agents that message back). The process
+exits once the run ends — nothing streaming and nothing left that could resume
+it — and text mode prints the answer of the last turn. Bound unattended runs
+with `--max-time`.
 
 ```sh
 # Start a long build in the background, then react to its result in the same session

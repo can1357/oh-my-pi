@@ -61,6 +61,10 @@ import { MCPManager } from "../../mcp/manager";
 import { reconnectMcpManagerServer } from "../../mcp/oauth-reauth";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
+import { AgentRegistry } from "../../registry/agent-registry";
+import { registerPersistedSubagents } from "../../registry/persisted-agents";
+import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import { autosaveApprovedPlan } from "../../plan-mode/plan-autosave";
@@ -74,12 +78,13 @@ import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
+import { sumSubagentTreeCost } from "../agent-hub-runtime";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import {
-	blockText,
 	choiceValue,
 	defaultFormData,
 	fieldQuestions,
+	formContext,
 	type HtmlFormData,
 	type HtmlFormValue,
 	isArrayChoice,
@@ -108,6 +113,7 @@ import {
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 import { cfgDisabledExtensions, cfgExtensions } from "../../extensibility/settings";
+import { cfgMcpStartupTimeoutMs } from "../../mcp/settings";
 import { cfgPlanEnabled } from "../../plan-mode/settings";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -117,6 +123,12 @@ const APPROVE_OPTION = "Approve and execute";
 const REFINE_OPTION = "Refine plan";
 /** Title of the free-text property each `askDialog` question gets beside its options. */
 const OTHER_OPTION = "Other (type your own)";
+/**
+ * Suffix of the free-text "Other" property beside a choice property, shared by
+ * `askDialog` and HTML forms; clients such as Orca merge `<key>__other` into
+ * the `<key>` choice instead of rendering it as a separate question.
+ */
+const OTHER_SUFFIX = "__other";
 const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
@@ -648,33 +660,16 @@ async function elicitFromAcpClient(
 }
 
 /**
- * The elicitation message for an HTML form: its section titles and context
- * blocks (paragraphs, lists, preformatted text, tables) as plain text, the
- * fields themselves being schema properties.
- */
-function formElicitationMessage(form: HtmlForm): string {
-	const parts: string[] = [];
-	for (const section of form.sections) {
-		const title = spansText(section.title).trim();
-		if (title) parts.push(title);
-		for (const block of section.blocks) {
-			const text = blockText(block);
-			if (text) parts.push(text);
-		}
-	}
-	return parts.filter(part => part.trim()).join("\n\n") || "Fill in the form";
-}
-
-/**
  * Property holding each "Other" choice field's free-text answer:
- * `<name>_other`, with more underscores while another control already uses it.
+ * `<name>__other` ({@link OTHER_SUFFIX}), with more underscores while another
+ * control already uses it.
  */
 function otherProperties(form: HtmlForm): Map<ChoiceField, string> {
 	const taken = new Set([...form.fields.map(field => field.name), ...form.hidden.map(([name]) => name)]);
 	const properties = new Map<ChoiceField, string>();
 	for (const field of form.fields) {
 		if (field.kind !== "choice" || !field.other || !field.name) continue;
-		let property = `${field.name}_other`;
+		let property = `${field.name}${OTHER_SUFFIX}`;
 		while (taken.has(property)) property += "_";
 		taken.add(property);
 		properties.set(field, property);
@@ -894,7 +889,7 @@ export function createAcpExtensionUiContext(
 						};
 					}
 				}
-				properties[`${key}__other`] = { type: "string", title: OTHER_OPTION };
+				properties[`${key}${OTHER_SUFFIX}`] = { type: "string", title: OTHER_OPTION };
 			}
 
 			let timedOut = false;
@@ -920,7 +915,7 @@ export function createAcpExtensionUiContext(
 				kind: "submit",
 				results: questions.map((question, index) => {
 					const key = `q${index}`;
-					const otherKey = `${key}__other`;
+					const otherKey = `${key}${OTHER_SUFFIX}`;
 					const labels = question.options.map(option => option.label);
 					const otherValue = content[otherKey];
 					const customInput = typeof otherValue === "string" && otherValue.trim() ? otherValue.trim() : undefined;
@@ -953,7 +948,8 @@ export function createAcpExtensionUiContext(
 				connection,
 				getSessionId(),
 				"formDialog",
-				formElicitationMessage(form),
+				// Section titles and captions already title the field properties ({@link formContext}).
+				formContext(form).join("\n\n") || "Fill in the form",
 				properties,
 				required.length > 0 ? required : undefined,
 				{
@@ -1023,6 +1019,10 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	/** ACP has no Agent Hub, so tree costs read each subagent's live session directly. */
+	#subagentObservers = new SessionObserverRegistry();
+	#subagentSessionCosts = new WeakMap<object, AgentCostSnapshot>();
+	#subagentCostHydrations = new Map<string, Promise<void>>();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -2158,7 +2158,10 @@ export class AcpAgent implements Agent {
 			await this.#flushMissedFinalAssistantText(record, event);
 			await this.#flushUnreportedTurnError(record, event);
 			await this.#emitEndOfTurnUpdates(record);
-			await this.#waitForAcpPromptIdle(record);
+			await this.#waitForAcpPromptIdle(record, promptTurn);
+			// A follow-up turn's `agent_end` handler can settle the prompt first; this
+			// handler must not then reset or settle the next prompt's state.
+			if (promptTurn.settled) return;
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
 			this.#finishPrompt(record, {
@@ -2251,9 +2254,10 @@ export class AcpAgent implements Agent {
 		});
 	}
 
-	async #waitForAcpPromptIdle(record: ManagedSessionRecord): Promise<void> {
+	async #waitForAcpPromptIdle(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
 		for (let pass = 0; pass < ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES; pass++) {
 			await record.session.waitForIdle();
+			if (promptTurn.settled) return;
 			const delivered = await record.session.drainAsyncJobDeliveriesForAcp({
 				timeoutMs: ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS,
 			});
@@ -2861,7 +2865,7 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Reload plugin/registry state for an ACP session. Mirrors the interactive
-	 * `/reload-plugins` and `/move` flows: invalidates the plugin-roots cache,
+	 * `/reload-plugins` flow: invalidates the plugin-roots cache,
 	 * refreshes task agents, resets the capability cache, refreshes the
 	 * session's slash-command state, then re-advertises commands so the client
 	 * sees newly installed/disabled plugins.
@@ -2880,14 +2884,14 @@ export class AcpAgent implements Agent {
 
 		const contextUsage = record.session.getContextUsage();
 		if (contextUsage) {
-			const usageStats = record.session.sessionManager.getUsageStatistics();
+			const cost = await this.#sessionTreeCost(record);
 			await this.#connection.sessionUpdate({
 				sessionId,
 				update: {
 					sessionUpdate: "usage_update",
 					size: contextUsage.contextWindow,
 					used: contextUsage.tokens ?? 0,
-					cost: usageStats.cost > 0 ? { amount: usageStats.cost, currency: "USD" } : undefined,
+					cost: cost > 0 ? { amount: cost, currency: "USD" } : undefined,
 				},
 			});
 		}
@@ -2900,6 +2904,42 @@ export class AcpAgent implements Agent {
 				updatedAt: new Date().toISOString(),
 			},
 		});
+	}
+
+	/**
+	 * The session's own spend plus its subagent tree, totalled as the TUI status
+	 * line does. `task` results carry only blocking children's spend, so the tree
+	 * cost adds background children; the task-result sum stays its floor.
+	 */
+	async #sessionTreeCost(record: ManagedSessionRecord): Promise<number> {
+		const sessionManager = record.session.sessionManager;
+		const rootSessionFile = sessionManager.getSessionFile() ?? undefined;
+		await this.#hydratePersistedSubagentCosts(rootSessionFile, sessionManager.isSessionOnDisk());
+		const usage = sessionManager.getUsageStatistics();
+		const treeCost = sumSubagentTreeCost({
+			refs: AgentRegistry.global().list(),
+			observers: this.#subagentObservers,
+			rootSessionFile,
+			sessionCosts: this.#subagentSessionCosts,
+		});
+		return Math.max(0, usage.cost - usage.subagentCost) + Math.max(treeCost, usage.subagentCost);
+	}
+
+	/**
+	 * Register a loaded session's persisted subagent transcripts (with usage
+	 * history) once per root, as the TUI does, so background spend from before a
+	 * restart still counts after `session/load`.
+	 */
+	#hydratePersistedSubagentCosts(rootSessionFile: string | undefined, onDisk: boolean): Promise<void> {
+		if (!rootSessionFile || !onDisk) return Promise.resolve();
+		let hydration = this.#subagentCostHydrations.get(rootSessionFile);
+		if (!hydration) {
+			hydration = registerPersistedSubagents(AgentRegistry.global(), rootSessionFile).catch(error => {
+				logger.warn("Persisted subagent cost hydration failed", { rootSessionFile, error: String(error) });
+			});
+			this.#subagentCostHydrations.set(rootSessionFile, hydration);
+		}
+		return hydration;
 	}
 
 	#cloneUsageStatistics(usage: UsageStatistics): UsageStatistics {
@@ -3416,7 +3456,14 @@ export class AcpAgent implements Agent {
 			};
 		}
 
-		const result = await manager.connectServers(configs, sources);
+		// Honor the user's startup window like the interactive path does
+		// (`sdk.ts`); `OMP_MCP_STARTUP_TIMEOUT_MS` still takes precedence.
+		const result = await manager.connectServers(
+			configs,
+			sources,
+			undefined,
+			cfgMcpStartupTimeoutMs.get(record.session.settings),
+		);
 		// A client-declared server whose initial connect fails (e.g. an expired
 		// client-owned bearer answering 401 inside the startup window) must not
 		// abort session creation: the record keeps the manager with the failed
