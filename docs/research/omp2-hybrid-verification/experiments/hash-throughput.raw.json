@@ -1,0 +1,98 @@
+{
+  "experiment": "Core Hash32 streaming SHA-256 dependency optimization",
+  "date": "2026-11-16",
+  "repository_base": "bf873e3f53b4bf539cf77563fd67b9d52c540381",
+  "core_source_modified_from_base": false,
+  "rustc": "1.99.0-nightly (1a98b1e13 2026-08-07)",
+  "rustc_commit": "1a98b1e135b254f209c67d447b6d8bcd56a859e0",
+  "target": "x86_64-unknown-linux-gnu",
+  "llvm": "23.1.0",
+  "cgroup_cpu_max": "200000 100000",
+  "profile": {
+    "base": "dev",
+    "backend": "LLVM",
+    "opt_level": 0,
+    "debug": 0,
+    "incremental": false,
+    "optimized_variant": "profile.dev.package.sha2.opt-level=3"
+  },
+  "dependency_versions": {
+    "block-buffer": "0.10.4",
+    "crypto-common": "0.1.7",
+    "digest": "0.10.7",
+    "generic-array": "0.14.7",
+    "omp-core": "2.0.0",
+    "sha2": "0.10.9"
+  },
+  "bytes_hashed": 67108864,
+  "buffer_bytes": 16777216,
+  "iterations": 4,
+  "digest": "103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+  "samples": {
+    "baseline": {
+      "16_mib_updates": {
+        "elapsed_seconds": [
+          2.271449276,
+          2.254869297,
+          2.183218319
+        ],
+        "median_seconds": 2.254869297,
+        "median_mib_per_second": 28.383019842945693,
+        "raw_stdout": [
+          "bytes=67108864 chunked=false elapsed_seconds=2.271449276 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=false elapsed_seconds=2.254869297 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=false elapsed_seconds=2.183218319 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5"
+        ]
+      },
+      "64_kib_updates": {
+        "elapsed_seconds": [
+          2.14559552,
+          2.292411251,
+          2.235308787
+        ],
+        "median_seconds": 2.235308787,
+        "median_mib_per_second": 28.631391050850816,
+        "raw_stdout": [
+          "bytes=67108864 chunked=true elapsed_seconds=2.145595520 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=true elapsed_seconds=2.292411251 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=true elapsed_seconds=2.235308787 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5"
+        ]
+      }
+    },
+    "sha2_opt3": {
+      "16_mib_updates": {
+        "elapsed_seconds": [
+          0.038758774,
+          0.041462685,
+          0.03920067
+        ],
+        "median_seconds": 0.03920067,
+        "median_mib_per_second": 1632.6251566618632,
+        "raw_stdout": [
+          "bytes=67108864 chunked=false elapsed_seconds=0.038758774 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=false elapsed_seconds=0.041462685 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=false elapsed_seconds=0.039200670 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5"
+        ]
+      },
+      "64_kib_updates": {
+        "elapsed_seconds": [
+          0.040651777,
+          0.038009534,
+          0.041474278
+        ],
+        "median_seconds": 0.040651777,
+        "median_mib_per_second": 1574.3469221529972,
+        "raw_stdout": [
+          "bytes=67108864 chunked=true elapsed_seconds=0.040651777 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=true elapsed_seconds=0.038009534 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5",
+          "bytes=67108864 chunked=true elapsed_seconds=0.041474278 digest=103f23a15401a701b73587902f16e3b5b3bf38a039d5c94b675a9a8e84dbd5b5"
+        ]
+      }
+    }
+  },
+  "limitations": [
+    "In-memory hashing only; no source inventory, file I/O, process, compiler, test, model, or reranker timing.",
+    "Isolated temporary Cargo project, no repository lockfile/profile replacement.",
+    "One Linux environment; not Apple Silicon or 16 GB Mac evidence."
+  ]
+}

@@ -36,7 +36,7 @@ PING_INTERVAL: Final[Duration] = Duration("15s")
 PYTHON_REV: Final[str] = "3.14t"
 """Python free-threaded ABI revision required by the host."""
 
-SCHEMA_REV: Final[int] = 29
+SCHEMA_REV: Final[int] = 30
 """Wire schema revision shared with ``omp_proto::SCHEMA_REV``.
 
 A Rust test (``frozen_surface.rs``) compares this against the authoritative

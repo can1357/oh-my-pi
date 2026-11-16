@@ -48,7 +48,7 @@ pub mod value_json;
 ///
 /// This is bumped for every wire-visible schema change and is the revision
 /// compared by the `omp.gateway.v1.Hello` handshake.
-pub const SCHEMA_REV: u32 = 29;
+pub const SCHEMA_REV: u32 = 30;
 
 /// Generated packages under the protobuf `omp` namespace.
 pub mod omp {

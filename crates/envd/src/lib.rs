@@ -50,6 +50,8 @@ pub mod exthost;
 pub mod fetch_host;
 #[cfg(any(feature = "cap-forge", feature = "cap-ci"))]
 mod forge_adapter;
+/// Isolated native verification process authority.
+pub mod verification;
 #[cfg(feature = "cap-forge")]
 pub use forge_adapter::CheckoutForge;
 pub mod forge_url;
@@ -1180,10 +1182,23 @@ impl ProjectEnvironment {
 		con: Arc<Ctx>,
 		bridges: RegistryBridges,
 	) -> Result<Self, EnvdError> {
+		Self::isolated_with_eval(root, state_dir, con, bridges, true).await
+	}
+
+	/// Uses the same isolated host composition with an explicit eval capability.
+	/// Native verification disables Python eval rather than locating or starting
+	/// the application child executable for a process-only authority.
+	pub(crate) async fn isolated_with_eval(
+		root: &Path,
+		state_dir: &Path,
+		con: Arc<Ctx>,
+		bridges: RegistryBridges,
+		py_eval: bool,
+	) -> Result<Self, EnvdError> {
 		let command_credentials = bridges.command_credentials.clone();
 		let dynamic_tool_factories = bridges.dynamic_tool_factories.clone();
 		let (worker_config, data_bindings) =
-			worker_config(state_dir, true, &[], &[], host_settings::SV_INTERRUPT_GRACE.get(&con))?;
+			worker_config(state_dir, py_eval, &[], &[], host_settings::SV_INTERRUPT_GRACE.get(&con))?;
 		let convars = Arc::new(exthost::ConvarControlFactory::new(Arc::clone(&con)));
 		let server = Arc::new(
 			EnvServer::open_local(

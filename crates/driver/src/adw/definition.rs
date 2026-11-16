@@ -18,11 +18,13 @@ use omp_core::{FastHashMap, Hash32, Str};
 use omp_ext::workspace_trust::inventory::{WORKFLOW_EXTENSION, WORKFLOWS_DIR};
 use serde::Deserialize;
 
+use crate::verification::{NativeVerificationError, NativeVerificationSpec};
+
 /// How one phase produces its result.
 ///
-/// Parallel to [`PhaseKind`]: agent and review phases carry a prompt, code
-/// phases carry an argv. The variant is resolved at load, so a dispatch never
-/// discovers a phase is missing its instructions.
+/// Agent and review phases carry a prompt; code phases carry an argv or an
+/// explicit native verification inventory. The variant is resolved at load, so
+/// a dispatch never discovers a phase is missing its instructions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PhaseSpec {
 	/// A model turn driven by this prompt.
@@ -42,6 +44,8 @@ pub enum PhaseSpec {
 		/// Working directory relative to the project root.
 		cwd:    Option<Str>,
 	},
+	/// Native deterministic checks whose retained evidence decides acceptance.
+	Verification(NativeVerificationSpec),
 }
 
 /// A validated workflow and the execution detail for each of its phases.
@@ -145,6 +149,22 @@ pub enum DefinitionError {
 		/// The phase carrying the rejected directory.
 		phase: PhaseName,
 	},
+	/// Verification was combined with another provider or declared on a model
+	/// phase.
+	#[error("phase `{phase}` must declare native verification alone on a code phase")]
+	VerificationConflict {
+		/// The phase with incompatible execution declarations.
+		phase: PhaseName,
+	},
+	/// The explicit native verification inventory or budgets are invalid.
+	#[error("phase `{phase}` declares invalid native verification")]
+	Verification {
+		/// The phase with the rejected inventory.
+		phase:  PhaseName,
+		/// Typed native verification validation failure.
+		#[source]
+		source: NativeVerificationError,
+	},
 }
 
 /// Loads `<project>/.omp/workflows/<name>.toml`.
@@ -202,39 +222,55 @@ fn lower(
 	let mut specs = FastHashMap::default();
 	for declared in file.phase {
 		let name = PhaseName::new(declared.name);
-		let spec = match declared.kind {
-			PhaseKind::Agent | PhaseKind::Review => {
-				if declared.prompt.trim().is_empty() {
-					return Err(DefinitionError::MissingPrompt { phase: name });
-				}
-				if declared
-					.executor
-					.as_deref()
-					.is_some_and(|id| id.trim().is_empty())
-				{
-					return Err(DefinitionError::BadExecutor { phase: name });
-				}
-				if declared.executor.is_some() && declared.requires != Requirement::default() {
-					return Err(DefinitionError::ExecutorWithRequirement { phase: name });
-				}
-				PhaseSpec::Prompt { text: declared.prompt, executor: declared.executor }
-			},
-			PhaseKind::Code => {
-				if declared.executor.is_some() {
-					return Err(DefinitionError::BadExecutor { phase: name });
-				}
-				let mut argv = declared.command.into_iter();
-				let Some(binary) = argv.next() else {
-					return Err(DefinitionError::MissingCommand { phase: name });
-				};
-				if binary.bytes().any(|byte| matches!(byte, b'/' | b'\\')) {
-					return Err(DefinitionError::CommandPath { phase: name });
-				}
-				if declared.cwd.as_deref().is_some_and(escapes_project) {
-					return Err(DefinitionError::CommandCwd { phase: name });
-				}
-				PhaseSpec::Command { binary, args: argv.collect(), cwd: declared.cwd }
-			},
+		let spec = if let Some(verification) = declared.verification {
+			if declared.kind != PhaseKind::Code
+				|| declared.command.is_some()
+				|| declared.cwd.is_some()
+				|| declared.executor.is_some()
+				|| declared.prompt.is_some()
+			{
+				return Err(DefinitionError::VerificationConflict { phase: name });
+			}
+			verification
+				.validate()
+				.map_err(|source| DefinitionError::Verification { phase: name.clone(), source })?;
+			PhaseSpec::Verification(verification)
+		} else {
+			match declared.kind {
+				PhaseKind::Agent | PhaseKind::Review => {
+					let prompt = declared.prompt.unwrap_or_default();
+					if prompt.trim().is_empty() {
+						return Err(DefinitionError::MissingPrompt { phase: name });
+					}
+					if declared
+						.executor
+						.as_deref()
+						.is_some_and(|id| id.trim().is_empty())
+					{
+						return Err(DefinitionError::BadExecutor { phase: name });
+					}
+					if declared.executor.is_some() && declared.requires != Requirement::default() {
+						return Err(DefinitionError::ExecutorWithRequirement { phase: name });
+					}
+					PhaseSpec::Prompt { text: prompt, executor: declared.executor }
+				},
+				PhaseKind::Code => {
+					if declared.executor.is_some() {
+						return Err(DefinitionError::BadExecutor { phase: name });
+					}
+					let mut argv = declared.command.unwrap_or_default().into_iter();
+					let Some(binary) = argv.next() else {
+						return Err(DefinitionError::MissingCommand { phase: name });
+					};
+					if binary.bytes().any(|byte| matches!(byte, b'/' | b'\\')) {
+						return Err(DefinitionError::CommandPath { phase: name });
+					}
+					if declared.cwd.as_deref().is_some_and(escapes_project) {
+						return Err(DefinitionError::CommandCwd { phase: name });
+					}
+					PhaseSpec::Command { binary, args: argv.collect(), cwd: declared.cwd }
+				},
+			}
 		};
 
 		let mut phase = Phase::new(name.clone(), declared.kind)
@@ -279,24 +315,26 @@ struct FileWorkflow {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FilePhase {
-	name:       Str,
-	kind:       PhaseKind,
+	name:         Str,
+	kind:         PhaseKind,
 	#[serde(default)]
-	depends_on: Option<Vec<Str>>,
+	depends_on:   Option<Vec<Str>>,
 	#[serde(default)]
-	inputs:     Vec<Str>,
+	inputs:       Vec<Str>,
 	#[serde(default = "retry")]
-	on_reject:  OnReject,
+	on_reject:    OnReject,
 	#[serde(default)]
-	requires:   Requirement,
+	requires:     Requirement,
 	#[serde(default)]
-	prompt:     Str,
+	prompt:       Option<Str>,
 	#[serde(default)]
-	executor:   Option<Str>,
+	executor:     Option<Str>,
 	#[serde(default)]
-	command:    Vec<Str>,
+	command:      Option<Vec<Str>>,
 	#[serde(default)]
-	cwd:        Option<Str>,
+	cwd:          Option<Str>,
+	#[serde(default)]
+	verification: Option<NativeVerificationSpec>,
 }
 
 /// Matches `Phase::new`, whose undeclared rejection route is a retry.
@@ -499,5 +537,120 @@ depends_on = ["a"]
 		let def = load(project.path(), "flow").expect("load");
 		let expected = Hash32::sum(content).to_hex().to_string();
 		assert_eq!(def.digest(), expected);
+	}
+
+	#[test]
+	fn native_verification_is_an_explicit_code_provider_with_bounded_defaults() {
+		let project = tempfile::tempdir().unwrap();
+		write(
+			project.path(),
+			"verify",
+			r#"
+[[phase]]
+name = "implement"
+kind = "agent"
+prompt = "Implement the requested change."
+
+[[phase]]
+name = "verify"
+kind = "code"
+inputs = ["implement"]
+on_reject = "correct"
+verification = { packages = ["omp-core"] }
+"#,
+		);
+		let definition = load(project.path(), "verify").unwrap();
+		let Some(PhaseSpec::Verification(spec)) = definition.spec(PhaseName::from_ref("verify"))
+		else {
+			panic!("explicit verification provider must be retained");
+		};
+		assert_eq!(spec.packages, vec![Str::new_static("omp-core")]);
+		assert_eq!(spec.timeout_seconds, 900);
+		assert_eq!(spec.minimum_tests, 1);
+		assert_eq!(spec.max_output_bytes, 4 * 1024 * 1024);
+		let phase = definition
+			.workflow()
+			.phases()
+			.iter()
+			.find(|phase| phase.name.as_str() == "verify")
+			.unwrap();
+		assert_eq!(phase.kind, PhaseKind::Code);
+		assert_eq!(phase.on_reject, OnReject::Correct);
+		assert_eq!(phase.inputs.as_slice(), &[PhaseName::new_static("implement")]);
+	}
+
+	#[test]
+	fn native_verification_refuses_model_phases_and_ambiguous_execution_fields() {
+		let project = tempfile::tempdir().unwrap();
+		for kind in ["agent", "review"] {
+			write(
+				project.path(),
+				"mixed",
+				&format!(
+					"[[phase]]\nname = \"verify\"\nkind = \"{kind}\"\nverification = {{ packages = \
+					 [\"omp-core\"] }}\n"
+				),
+			);
+			assert!(matches!(
+				load(project.path(), "mixed"),
+				Err(DefinitionError::VerificationConflict { .. })
+			));
+		}
+		for field in [
+			"command = [\"just\", \"check-pkg\", \"omp-core\"]",
+			"command = []",
+			"cwd = \"\"",
+			"executor = \"\"",
+			"prompt = \"\"",
+		] {
+			write(
+				project.path(),
+				"mixed",
+				&format!(
+					"[[phase]]\nname = \"verify\"\nkind = \"code\"\n{field}\nverification = {{ \
+					 packages = [\"omp-core\"] }}\n"
+				),
+			);
+			assert!(
+				matches!(
+					load(project.path(), "mixed"),
+					Err(DefinitionError::VerificationConflict { .. })
+				),
+				"{field}"
+			);
+		}
+	}
+
+	#[test]
+	fn native_verification_refuses_invalid_inventory_budgets_and_unknown_fields() {
+		let project = tempfile::tempdir().unwrap();
+		for fields in [
+			"packages = []",
+			"packages = [\"omp-core\", \"omp-core\"]",
+			"packages = [\"../escape\"]",
+			"packages = [\"omp-core\"], timeout_seconds = 0",
+			"packages = [\"omp-core\"], timeout_seconds = 1801",
+			"packages = [\"omp-core\"], minimum_tests = 0",
+			"packages = [\"omp-core\"], max_output_bytes = 4194305",
+		] {
+			write(
+				project.path(),
+				"invalid",
+				&format!(
+					"[[phase]]\nname = \"verify\"\nkind = \"code\"\nverification = {{ {fields} }}\n"
+				),
+			);
+			assert!(
+				matches!(load(project.path(), "invalid"), Err(DefinitionError::Verification { .. })),
+				"{fields}"
+			);
+		}
+		write(
+			project.path(),
+			"unknown",
+			"[[phase]]\nname = \"verify\"\nkind = \"code\"\nverification = { packages = \
+			 [\"omp-core\"], invented = true }\n",
+		);
+		assert!(matches!(load(project.path(), "unknown"), Err(DefinitionError::Parse { .. })));
 	}
 }

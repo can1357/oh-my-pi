@@ -44,6 +44,7 @@
 
 mod adapter;
 mod backend;
+mod captured_inputs;
 mod cargo_just;
 mod deny;
 mod digest;
@@ -62,6 +63,7 @@ pub use backend::{
 	BackendCapabilities, CachePolicy, CacheSupport, CancelOutcome, CancelSupport, ExecutionBackend,
 	ExecutionPolicy, ExecutionRun, FallbackPolicy, ReattachContext,
 };
+pub use captured_inputs::{CaptureEntry, capture_entries};
 pub use cargo_just::{
 	CARGO_JUST_RECIPES, CARGO_TARGET_CACHE, CargoJust, DEFAULT_TIMEOUT, JUST, RecipeClass,
 	recipe_class,

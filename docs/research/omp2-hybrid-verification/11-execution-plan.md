@@ -1,23 +1,25 @@
 # Implementation execution plan
 
-Status: proposed work queue, not a production implementation.
-Updated: 2026-11-14.
-Revalidated base: `omp2` at `355a324e4c52bb473eca53925807972d6491d265`,
-the actual merge of research PR #618. This branch was created after a
-fast-forward pull. The original research source pin remains unchanged.
+Status: ordered work queue; S1–S3 landed, S4 implementation under validation.
+Updated: 2026-11-15.
+S4 implementation base: `omp2` at
+`868e20edb5e676a9a842835b9f06668e4cb62ef9`.
+The original research source pin remains unchanged. This records implementation
+progress separately from the original source audit and benchmark claims.
 
 Implementation progress: [S1 required inventory and verdict](13-required-inventory-s1.md)
 is merged in PR #626. [S2 native capture/applicability](14-input-snapshots-s2.md)
-is implemented on the pulled `omp2` base
-`0b4a60064dddc9d29b3451422d841f0a80c04b01`; validation is recorded in its slice note.
+landed through PR #646; validation is recorded in its slice note.
 S2 requires host-admitted supplemental input identities and observes matching
 captures; it does not establish automatic dependency closure or an atomic live
-worktree. [S3 evidence storage](15-evidence-storage-s3.md) is implemented on
-the S2 branch at `e960c471555c19a3a67afb98a77e3a7d69035c73` while PR #646
-remains unmerged. It imports and retains the full evidence closure through the
+worktree. [S3 evidence storage](15-evidence-storage-s3.md) landed in the same
+integration through PR #655 into the S2 branch and then PR #646 into `omp2`.
+It imports and retains the full evidence closure through the
 existing session journal/CAS and checks integrity and exact applicability;
-execution/provenance truth remains host-admitted. S4 remains the first joined
-verification milestone.
+execution/provenance truth remains host-admitted. [S4 native checks](16-native-checks-s4.md)
+connects explicit deterministic A1/C1 execution to retained evidence and opt-in
+ADW acceptance. Its compilation and joined-runtime validation are tracked in that
+note; source presence alone is not completion.
 
 ## What the research establishes
 
@@ -65,7 +67,7 @@ are included in the skills/plan PR.
 | S1: required inventory and pure verdict | **New** `crates/driver/src/verification/{mod,policy}.rs`; export from `driver/src/lib.rs`; owning tests in `driver/src/verification/policy.rs` or `driver/tests/verification_policy.rs` | S0 is helpful tooling, not a runtime dependency | Typed required IDs and PASS/FAIL/INCONCLUSIVE; missing/duplicate/stale/cancelled/effects-unknown results cannot PASS; empty inventory is invalid for enabled policy; confirmed required violation is FAIL; no execution or model dependency |
 | S2: snapshot and applicability | **New** `driver/src/verification/snapshot.rs`; reuse VCS and existing execution input capture, `omp_core::Hash32`; shared digest ownership follows `exec/src/digest.rs` | S1 | Byte-exact full input manifest with dependency/feature/toolchain/test/environment/policy identity; stable canonical encoding; dirty/untracked/generated input and source-race tests; unknown inputs prevent durable PASS reuse |
 | S3: evidence adapter | **New** `driver/src/verification/evidence.rs`; existing `journal/src/{blob,kind,runlog,gc}.rs` changed only when required for registered records/retention; session projection through existing Component seam | S1–2 | Blobs finalized before journal publication; full transitive retention roots; replay, interrupted publication, corrupt/missing blob and GC tests; original evidence immutable; current-snapshot applicability receipt required for reuse |
-| S4: first working verification path | **New** native adapter in `driver/src/verification/`; integrate `driver/src/adw/{definition,production}.rs` opt-in, existing `cleanse/checkers.rs` and execution authority; documentation/example under existing `.omp/workflows` only if schema needs it | S1–3 | Run explicit A1 and selected C1 `just` package recipes on captured input; persist raw output, observed check/test inventory and receipt; missing executable, zero selected tests, nonzero exit, cancellation and source change fail or remain inconclusive; real driver/envd integration test |
+| S4: first working verification path | Native adapter in `driver/src/verification/`; opt-in `driver/src/adw/{definition,production}.rs`; EnvD owns captured-input materialization and isolated process execution | S1–3 | Admit known `just` package recipe definitions and execute their fixed, instrumented Cargo/nextest equivalents on captured input; persist raw output, complete observed inventory and receipts; missing executable, zero selected tests, nonzero exit, cancellation and source change fail or remain inconclusive; real driver/envd integration test |
 | S5: conservative impact and focused review | Existing `vcs`, `ast`, `kb`, LSP, child kernel and restriction seams; **new** impact/reviewer/validator modules in driver | Working S4 with tests | Uncertain graph widens scope; mandatory security context retained; claims source-bound and falsified natively where possible; first-word review not used as new evidence-backed acceptance; Standard profile opt-in |
 | S6: measured optimization and autonomy | Existing evidence/ADW/job/approval seams; optional ranking provider and mutation adapters | S5 plus held-out evaluation | Compare original Forge and hybrid, with/without ranking; no stale-cache PASS; quality/latency/cost reported; bounded repairs, Strict perspectives and escalation only after evidence supports rollout |
 
@@ -75,9 +77,11 @@ second demonstrated need; do not expand the ADW state machine just to house
 verification names. Keep host resources out of pure domain code and preserve
 `compose_kernel` as the production construction boundary.
 
-S1–S3 do not imply a working verification engine: S4 is the first joined-path
-milestone. No standalone pure reducer, unused interface or skill collection
-should be reported as completed autonomous verification.
+S1–S3 alone do not imply a working verification engine: S4 is the first joined-path
+milestone, with its executed validation recorded separately. It does not implement
+semantic review, reranking or autonomous verification of arbitrary requirements.
+No standalone pure reducer, unused interface or skill collection should be
+reported as completed autonomous verification.
 
 ## First-slice contract to defend
 

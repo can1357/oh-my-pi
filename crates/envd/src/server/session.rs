@@ -339,6 +339,7 @@ impl EnvServer {
 			workspace.root(),
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
+			blobs.store().clone(),
 		)?;
 		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
 		#[cfg(feature = "cap-browser")]
@@ -648,6 +649,7 @@ impl EnvServer {
 			workspace.root(),
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
+			blobs.store().clone(),
 		)?;
 		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
 		#[cfg(feature = "cap-browser")]
@@ -895,6 +897,7 @@ impl EnvServer {
 			&root,
 			state_dir,
 			&crate::tool_url::local::session_local_root(&state_dir.join("sessions"), &session_id),
+			blobs.store().clone(),
 		)?;
 		let (mut host_settings, shell_settings, sandbox_settings) = execution_settings(con);
 		#[cfg(feature = "cap-browser")]

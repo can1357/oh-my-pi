@@ -22,7 +22,7 @@ use omp_adw::{
 };
 use omp_agent::delegated::{DenyAll, ExecutorId, TurnEnd};
 use omp_contract::posture::{ApprovalMode, effective_approval_mode};
-use omp_core::{Str, StrMut, sf};
+use omp_core::{Hash32, Str, StrMut, sf};
 use omp_env::EnvClient;
 use omp_envd::{
 	admission::probe_sandbox,
@@ -50,6 +50,10 @@ use crate::{
 	delegated_host::{DelegatedHostError, ExecutorRegistry, run_delegated_prompt},
 	exec_composer::{REMOTE_POSTURE, RemoteError},
 	headless::{HeadlessError, KernelOptions, compose_kernel, kernel::LaunchExtensionPolicy},
+	verification::{
+		GateVerdict, NativeVerificationError, NativeVerificationSpec, native_verification_posture,
+		run_native_verification,
+	},
 	workspace_trust::WorkspaceTrustSource,
 };
 
@@ -112,6 +116,15 @@ pub enum ProductionError {
 	/// executor.
 	#[error("a phase with a posture requirement cannot run on a delegated executor")]
 	DelegatedRequirement,
+	/// Native verification posture admission failed.
+	#[error("native verification admission failed")]
+	Verification(#[from] NativeVerificationError),
+	/// A verification session journal could not be created.
+	#[error("native verification journal could not be created")]
+	VerificationJournal(#[source] SessionError),
+	/// The exact phase requirements could not be encoded.
+	#[error("native verification requirements could not be encoded")]
+	VerificationRequirements(#[source] serde_json::Error),
 }
 
 impl From<RemoteError> for ProductionError {
@@ -531,6 +544,9 @@ impl AdwHost for ProductionAdwHost {
 	}
 
 	fn phase_posture(&self, _phase: &Phase, spec: &PhaseSpec) -> Result<Posture, Self::Error> {
+		if matches!(spec, PhaseSpec::Verification(_)) {
+			return Ok(native_verification_posture(&self.root)?);
+		}
 		if let PhaseSpec::Command { binary, args, .. } = spec
 			&& self.exec_policy() == AdwExecPolicy::RemoteOnly
 			&& eligible(binary, args)
@@ -582,7 +598,9 @@ impl AdwHost for ProductionAdwHost {
 	fn admit(&self, phase: &Phase, spec: &PhaseSpec) -> Result<(), Self::Error> {
 		let trusted = self.workspace_trust.trust() == WorkspaceTrust::Trusted;
 		match spec {
-			PhaseSpec::Command { .. } if !trusted => Err(ProductionError::UntrustedWorkspace),
+			PhaseSpec::Command { .. } | PhaseSpec::Verification(_) if !trusted => {
+				Err(ProductionError::UntrustedWorkspace)
+			},
 			PhaseSpec::Prompt { executor: Some(_), .. }
 				if phase.requires != Requirement::default() =>
 			{
@@ -591,7 +609,9 @@ impl AdwHost for ProductionAdwHost {
 			PhaseSpec::Prompt { executor: Some(_), .. } if !trusted => {
 				Err(ProductionError::UntrustedWorkspace)
 			},
-			PhaseSpec::Command { .. } | PhaseSpec::Prompt { .. } => Ok(()),
+			PhaseSpec::Command { .. } | PhaseSpec::Verification(_) | PhaseSpec::Prompt { .. } => {
+				Ok(())
+			},
 		}
 	}
 
@@ -605,6 +625,56 @@ impl AdwHost for ProductionAdwHost {
 		cancel: &CancellationToken,
 	) -> Result<PhaseResult, Self::Error> {
 		match spec {
+			PhaseSpec::Verification(spec) => {
+				if self.workspace_trust.trust() != WorkspaceTrust::Trusted {
+					return Err(ProductionError::UntrustedWorkspace);
+				}
+				let requirements = verification_requirements(phase, spec, inputs)?;
+				let state =
+					omp_env::project_state::directory(&self.data_dir, &self.root)?.join("verification");
+				let journals = state.join("sessions");
+				fs::create_dir_all(&journals)?;
+				let stem: String = phase
+					.name
+					.as_str()
+					.chars()
+					.map(|c| {
+						if c.is_ascii_alphanumeric() || c == '-' {
+							c
+						} else {
+							'_'
+						}
+					})
+					.collect();
+				let path =
+					journals.join(format!("{stem}-{attempt}-{}.oms", omp_core::Ulid::generate()));
+				let mut session = Session::create(&path, ComponentRegistry::standard())
+					.map_err(ProductionError::VerificationJournal)?;
+				match run_native_verification(
+					self.environment().await?,
+					&mut session,
+					&self.root,
+					&state.join("runtime"),
+					spec,
+					requirements,
+					cancel,
+				)
+				.await
+				{
+					Ok(report) => Ok(PhaseResult {
+						accepted: report.verdict == GateVerdict::Pass,
+						feedback: sf!("{}\nVerification journal: {}", report.feedback, path.display()),
+					}),
+					Err(_) => Ok(PhaseResult {
+						accepted: false,
+						feedback: sf!(
+							"INCONCLUSIVE: native verification did not complete; inspect the retained \
+							 session.\nVerification journal: {}",
+							path.display()
+						),
+					}),
+				}
+			},
 			PhaseSpec::Command { binary, args, cwd } => {
 				self
 					.run_command(phase, binary.as_str(), args, cwd.as_deref(), cancel)
@@ -625,6 +695,17 @@ impl AdwHost for ProductionAdwHost {
 			},
 		}
 	}
+}
+
+fn verification_requirements(
+	phase: &Phase,
+	spec: &NativeVerificationSpec,
+	inputs: &[SelectedInput],
+) -> Result<Hash32, ProductionError> {
+	let bytes =
+		serde_json::to_vec(&("omp.native-verification.requirements.v1", phase, spec, inputs))
+			.map_err(ProductionError::VerificationRequirements)?;
+	Ok(Hash32::sum(&bytes))
 }
 
 /// Composes the brief one model phase receives.
@@ -712,6 +793,47 @@ mod tests {
 	use super::{super::definition, *};
 
 	const TRUSTED: TrustDecision = TrustDecision::Trusted { duration: GrantDuration::Persistent };
+
+	fn verification_spec() -> NativeVerificationSpec {
+		serde_json::from_str(r#"{"packages":["omp-core"]}"#).expect("native specification")
+	}
+
+	#[test]
+	fn native_verification_requires_trust_without_changing_prompt_admission() {
+		let project = tempfile::tempdir().expect("project");
+		let phase = Phase::new(PhaseName::new_static("verify"), PhaseKind::Code);
+		let spec = PhaseSpec::Verification(verification_spec());
+		for decision in [TrustDecision::Untrusted, TrustDecision::Denied] {
+			let host = host_under(project.path(), omp_con::Ctx::new(), decision);
+			assert!(matches!(host.admit(&phase, &spec), Err(ProductionError::UntrustedWorkspace)));
+			assert!(
+				host
+					.admit(&phase, &PhaseSpec::Prompt { text: sf!("legacy"), executor: None })
+					.is_ok()
+			);
+		}
+		assert!(
+			host(project.path(), omp_con::Ctx::new())
+				.admit(&phase, &spec)
+				.is_ok()
+		);
+	}
+
+	#[test]
+	fn native_requirements_bind_phase_inventory_and_consumed_versions() {
+		let phase = Phase::new(PhaseName::new_static("verify"), PhaseKind::Code);
+		let spec = verification_spec();
+		let inputs = [SelectedInput { phase: PhaseName::new_static("implement"), version: 1 }];
+		let key = verification_requirements(&phase, &spec, &inputs).unwrap();
+		assert_eq!(key, verification_requirements(&phase, &spec, &inputs).unwrap());
+		let newer = [SelectedInput { phase: PhaseName::new_static("implement"), version: 2 }];
+		assert_ne!(key, verification_requirements(&phase, &spec, &newer).unwrap());
+		let mut changed_spec = spec.clone();
+		changed_spec.minimum_tests += 1;
+		assert_ne!(key, verification_requirements(&phase, &changed_spec, &inputs).unwrap());
+		let renamed = Phase::new(PhaseName::new_static("other"), PhaseKind::Code);
+		assert_ne!(key, verification_requirements(&renamed, &spec, &inputs).unwrap());
+	}
 
 	fn host(project: &Path, ctx: omp_con::Ctx) -> ProductionAdwHost {
 		host_under(project, ctx, TRUSTED)
