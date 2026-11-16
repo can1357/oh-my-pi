@@ -53,8 +53,11 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	getSessionSettingsIdentity: session => session.settings,
 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,
 	goalStatusInFooter: session => cfgGoalStatusInFooter.get(session.settings ?? settings),
-	activeAccount: (session, provider) =>
-		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
+	activeAccount: (session, provider) => {
+		const storage = session.modelRegistry?.authStorage;
+		const credentialId = storage?.sessions?.activeCredentialId(provider, session.sessionId);
+		return credentialId !== undefined ? { credentialId } : storage?.oauth.identity(provider, session.sessionId);
+	},
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
 	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
 	resolveActiveRepo: resolveActiveRepoContextSync,

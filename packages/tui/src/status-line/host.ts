@@ -5,7 +5,10 @@ import type { JobWidgetEntry } from "../tools/job-widget";
 import type { CompactionBoundaries } from "./context-usage";
 import type { StatusLineSettings, StatusResetExpiry } from "./types";
 
+/** Identity used to scope the status-line quota to the account serving requests. */
 export interface StatusAccountIdentity {
+	/** Durable row id for an API-key credential; null means no usable account is known yet. */
+	credentialId?: number | null;
 	accountId?: string;
 	email?: string;
 	projectId?: string;

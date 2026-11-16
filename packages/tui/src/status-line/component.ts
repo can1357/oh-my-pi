@@ -237,6 +237,7 @@ function normalizeUsageScopeValue(value: unknown): string | undefined {
  */
 function reportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
 	if (!identity) return false;
+	if (identity.credentialId !== undefined) return report.metadata?.credentialId === identity.credentialId;
 	const accountId = normalizeUsageScopeValue(identity.accountId);
 	const email = normalizeUsageScopeValue(identity.email);
 	const projectId = normalizeUsageScopeValue(identity.projectId);
@@ -2121,6 +2122,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// showing the previous org's quota for the rest of the cache TTL.
 		return [
 			activeProvider,
+			identity?.credentialId ?? "",
 			identity?.accountId ?? "",
 			identity?.email ?? "",
 			identity?.projectId ?? "",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the status-line usage segment showing another OpenCode Go API-key account's quota when multiple credentials are stored ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)).
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes

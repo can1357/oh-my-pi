@@ -1203,6 +1203,11 @@ export type SessionRestrictionLease = symbol;
 /** Session credential affinity operations. */
 export interface SessionsApi {
 	/**
+	 * Durable API-key row used by this session; `null` when stored keys exist
+	 * but no usable row has been selected, `undefined` without stored keys.
+	 */
+	activeCredentialId(provider: string, sessionId: string | undefined): number | null | undefined;
+	/**
 	 * Pin one stored OAuth account as this session's preferred credential.
 	 *
 	 * The durable credential id keeps the pin stable across credential refreshes,

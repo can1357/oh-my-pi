@@ -1,5 +1,6 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
+import type { StatusAccountIdentity } from "@oh-my-pi/pi-tui/status-line/host";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 /** Codex's orgName is the login-time plan, not a workspace name. */
@@ -105,9 +106,10 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
 export function limitMatchesActiveAccount(
 	report: UsageReport,
 	limit: UsageLimit,
-	identity: OAuthAccountIdentity | undefined,
+	identity: StatusAccountIdentity | undefined,
 ): boolean {
 	if (!identity) return false;
+	if (identity.credentialId !== undefined) return report.metadata?.credentialId === identity.credentialId;
 	const metadata = report.metadata ?? {};
 	const activeAccountId = normalizeIdentityValue(identity.accountId);
 	const activeEmail = normalizeIdentityValue(identity.email);

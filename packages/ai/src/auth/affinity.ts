@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { getEnvApiKey } from "../env-api-key";
+import { providerTypeKey, type CredentialBlocks } from "./blocks";
 import type { AuthCredential, OAuthCredential, SessionRestrictionLease, SessionsApi } from "./types";
 import type { AuthCredentialStore } from "./store";
 import type { CredentialPool } from "./pool";
@@ -60,17 +61,20 @@ export class SessionAffinity implements SessionsApi {
 	#pool: CredentialPool;
 	#overrides: KeyOverrides;
 	#restrictions: SessionRestrictions;
+	#blocks: CredentialBlocks;
 
 	constructor(
 		store: AuthCredentialStore,
 		pool: CredentialPool,
 		overrides: KeyOverrides,
 		restrictions: SessionRestrictions,
+		blocks: CredentialBlocks,
 	) {
 		this.#store = store;
 		this.#pool = pool;
 		this.#overrides = overrides;
 		this.#restrictions = restrictions;
+		this.#blocks = blocks;
 	}
 
 	restrict(provider: string, sessionId: string, identityKeys: readonly string[]): SessionRestrictionLease {
@@ -220,6 +224,21 @@ export class SessionAffinity implements SessionsApi {
 		if (!sessionId) return undefined;
 		const credential = this.#lookup(provider, sessionId);
 		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
+	}
+
+	/** The last usable stored API key for this session, without choosing another account. */
+	activeCredentialId(provider: string, sessionId: string | undefined): number | null | undefined {
+		const storedKeys = this.#pool.entries(provider).some(entry => entry.credential.type === "api_key");
+		if (!storedKeys) return undefined;
+		const active = this.get(provider, sessionId);
+		if (active?.type === "oauth") return undefined;
+		if (
+			active?.type !== "api_key" ||
+			active.credentialId === undefined ||
+			this.#blocks.isBlocked(provider, providerTypeKey(provider, "api_key"), active.index)
+		)
+			return null;
+		return active.credentialId;
 	}
 
 	#lookup(provider: string, sessionId: string): SessionCredential | undefined {

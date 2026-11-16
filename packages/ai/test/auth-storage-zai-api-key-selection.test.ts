@@ -49,7 +49,7 @@ describe("AuthStorage Z.AI API-key usage ranking", () => {
 		tempDir = "";
 	});
 
-	test("skips an exhausted login API key when a Z.AI sibling has request quota", async () => {
+	test("routes around an exhausted login API key and attributes status usage to the serving row", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
 		await authStorage.credentials.set("zai", [
@@ -100,6 +100,19 @@ describe("AuthStorage Z.AI API-key usage ranking", () => {
 		});
 
 		expect(await authStorage.keys.get("zai")).toBe("zai-healthy");
+		expect(authStorage.sessions.activeCredentialId("zai", "session-usage")).toBeNull();
+		expect(await authStorage.keys.get("zai", "session-usage")).toBe("zai-healthy");
+		const healthy = authStorage.credentials
+			.list("zai")
+			.find(row => row.credential.type === "api_key" && row.credential.key === "zai-healthy");
+		expect(authStorage.sessions.activeCredentialId("zai", "session-usage")).toBe(healthy?.id);
+		const reports = await authStorage.usage.reports({ provider: "zai" });
+		expect(
+			reports?.find(report => report.metadata?.credentialId === healthy?.id)?.limits[0]?.amount.usedFraction,
+		).toBe(0.2);
+		expect(
+			reports?.find(report => report.metadata?.credentialId !== healthy?.id)?.limits[0]?.amount.usedFraction,
+		).toBe(1);
 	});
 
 	test("resolves stored API-key references before probing Z.AI usage", async () => {

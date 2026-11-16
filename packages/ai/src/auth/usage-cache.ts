@@ -30,7 +30,12 @@ const USAGE_FORCE_REFRESH_TTL_MS = 5 * 60_000;
 export const DEFAULT_USAGE_REQUEST_TIMEOUT_MS = 10_000;
 
 /** A single usage fetch target; used by usage probes and the cache. */
-export type UsageRequestDescriptor = { provider: Provider; credential: UsageCredential; baseUrl?: string };
+export type UsageRequestDescriptor = {
+	provider: Provider;
+	credential: UsageCredential;
+	baseUrl?: string;
+	credentialId?: number;
+};
 /** Forced-refresh markers active for one reports pass; used by UsageService. */
 export type ForcedUsageRefresh = { all: boolean; providers: Set<Provider> };
 /** Cached value and its logical expiry; used by UsageService. */

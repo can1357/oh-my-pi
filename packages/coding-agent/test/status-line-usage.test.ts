@@ -26,6 +26,7 @@ function makeComponent(
 		provider?: string;
 		modelId?: string;
 		activeIdentity?: { accountId?: string; email?: string; projectId?: string };
+		activeCredentialId?: number | null;
 	} = {},
 ): StatusLineComponent {
 	const component = statusLines.track(
@@ -53,6 +54,9 @@ function makeComponent(
 						oauth: {
 							identity: (provider: string) =>
 								provider === options.provider ? options.activeIdentity : undefined,
+						},
+						sessions: {
+							activeCredentialId: () => options.activeCredentialId,
 						},
 					},
 				},
@@ -590,6 +594,38 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("8%");
 		expect(content).toContain("mo");
 		expect(content).toContain("42%");
+	});
+
+	it("shows the serving API-key account rather than a blocked sibling's quota", async () => {
+		const report = (credentialId: number, weekly: number, monthly: number) => ({
+			provider: "opencode-go",
+			metadata: { credentialId, planType: "OpenCode Go" },
+			limits: [
+				{ scope: { windowId: "7d" }, amount: { usedFraction: weekly } },
+				{ scope: { windowId: "monthly" }, amount: { usedFraction: monthly } },
+			],
+		});
+		const component = makeComponent([report(2, 0, 1), report(4, 0.04, 0.68)], {
+			provider: "opencode-go",
+			activeCredentialId: 4,
+		});
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("7d 4%");
+		expect(content).toContain("mo 68%");
+		expect(content).not.toContain("mo 100%");
+		const pending = makeComponent([report(2, 0, 1), report(4, 0.04, 0.68)], {
+			provider: "opencode-go",
+			activeCredentialId: null,
+		});
+		pending.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const pendingContent = stripVTControlCharacters(pending.getTopBorder(200).content);
+		expect(pendingContent).not.toContain("mo");
+		expect(pendingContent).not.toContain("7d");
 	});
 
 	it("renders an alibaba-token-plan monthly-only quota without a reported span", async () => {

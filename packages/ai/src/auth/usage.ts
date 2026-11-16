@@ -702,6 +702,7 @@ export class UsageService implements UsageApi {
 				} else {
 					request = oauthUsageRequest(provider, credential, baseUrl);
 				}
+				if (credential.type === "api_key") request.credentialId = entry.id;
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
 				requests.push(request);
 			}
@@ -908,7 +909,15 @@ export class UsageService implements UsageApi {
 			}
 
 			const results = await this.#fetchUsageRequests(requests, forcedRefresh.providers);
-			const reports = results.filter((report): report is UsageReport => report !== null);
+			const reports: UsageReport[] = [];
+			for (let index = 0; index < results.length; index++) {
+				const report = results[index];
+				if (!report) continue;
+				const credentialId = requests[index]?.credentialId;
+				reports.push(
+					credentialId === undefined ? report : { ...report, metadata: { ...report.metadata, credentialId } },
+				);
+			}
 			const deduped = dedupeUsageReports(reports, this.logger);
 			// no outer cache write — see comment above.
 			const resolved = deduped;

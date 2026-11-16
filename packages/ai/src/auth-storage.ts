@@ -332,7 +332,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		// override's `cacheVersion` separates its rows from other processes sharing the store.
 		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
-		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
+		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions, blocks);
 		const usage = new UsageService({
 			store,
 			pool,

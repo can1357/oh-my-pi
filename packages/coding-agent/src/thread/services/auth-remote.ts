@@ -459,6 +459,9 @@ class RemoteSessions implements SessionsApi {
 	permits(provider: string, sessionId: string, credentialId: number): boolean {
 		return this.#remote.callSync("sessions.permits", provider, sessionId, credentialId);
 	}
+	activeCredentialId(provider: string, sessionId: string | undefined): number | null | undefined {
+		return this.#remote.callSync("sessions.activeCredentialId", provider, sessionId);
+	}
 	release(provider: string, sessionId: string): boolean {
 		return this.#remote.callSync("sessions.release", provider, sessionId);
 	}
