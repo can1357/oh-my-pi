@@ -6,6 +6,10 @@
 
 - Added `JudgmentResult.cached`, set when every answer came from an answer cache and no provider request was made ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
 
+### Fixed
+
+- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
