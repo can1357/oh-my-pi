@@ -1825,10 +1825,13 @@ function discardChanges(command: ShellCommand, scope: GuardScope, probes: GuardP
 
 // -- kills_harness -----------------------------------------------------------------------------------
 
-/** This process and its ancestors below init. */
+/**
+ * This process and its ancestors below init. The process itself always counts, PID 1 included: omp
+ * is PID 1 when it is a container's entrypoint.
+ */
 function harnessLineage(): number[] {
-	const pids: number[] = [];
-	let pid: number | null = process.pid;
+	const pids = [process.pid];
+	let pid = Process.fromPid(process.pid)?.ppid ?? null;
 	while (pid !== null && pid > 1 && !pids.includes(pid) && pids.length < 32) {
 		pids.push(pid);
 		pid = Process.fromPid(pid)?.ppid ?? null;

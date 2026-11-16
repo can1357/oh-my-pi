@@ -1105,6 +1105,17 @@ describe("guard rule review regressions", () => {
 		}
 	});
 
+	it.skipIf(process.platform !== "linux")("counts omp itself when it runs as PID 1", () => {
+		const pid = process.pid;
+		// A container's entrypoint: omp is PID 1, which `pgrep -P 0` lists.
+		Object.defineProperty(process, "pid", { value: 1, configurable: true, writable: true });
+		try {
+			expect(ruleOf(bashApproval(process.cwd(), "pkill -P 0"))).toBe("kills_harness");
+		} finally {
+			Object.defineProperty(process, "pid", { value: pid, configurable: true, writable: true });
+		}
+	});
+
 	it("names in a compound prompt only the segments the chain before them leaves at risk", async () => {
 		await dirtyRepo(cwd);
 		const tool = new BashTool(
