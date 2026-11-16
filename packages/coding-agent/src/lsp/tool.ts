@@ -519,6 +519,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
+		const recordFileChange = this.session.recordFileChange
+			? (change: WorkspaceFileChange) => this.session.recordFileChange?.({ ...change, tool: "lsp" })
+			: undefined;
+
 		if (action === "rename_file") {
 			if (!file || !new_name) {
 				return {
@@ -855,7 +859,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// Apply the reference edits and move as one unit: a failed move rolls
 			// the reference edits back so the source, destination, and every
 			// reference file are left unchanged.
-			await applyEditsThenRename(referenceEdits, source, dest);
+			await applyEditsThenRename(
+				referenceEdits,
+				source,
+				dest,
+				pairs.map(pair => ({ from: uriToFile(pair.oldUri), to: uriToFile(pair.newUri) })),
+				recordFileChange,
+			);
 			summary.push(`  Renamed ${sourceLabel} → ${destLabel}`);
 
 			for (const [serverName, serverConfig] of servers) {
@@ -1269,9 +1279,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const resolvedCharacter = targetFile ? await resolveSymbolColumn(targetFile, resolvedLine, symbol) : 0;
 			const position = { line: resolvedLine - 1, character: resolvedCharacter };
 
-			const recordFileChange = this.session.recordFileChange
-				? (change: WorkspaceFileChange) => this.session.recordFileChange?.({ ...change, tool: "lsp" })
-				: undefined;
 			let output: string;
 			// Set on bare empty-lookup outcomes (no definition/references/…): the
 			// result carries no information once consumed, so compaction may elide

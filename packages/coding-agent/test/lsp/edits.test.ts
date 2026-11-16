@@ -33,28 +33,64 @@ describe("applyEditsThenRename", () => {
 		await fs.rm(dir, { recursive: true, force: true });
 	});
 
-	it("applies reference edits and moves the source when the move succeeds", async () => {
+	it("applies reference edits, moves the source, and then reports both", async () => {
 		const dest = path.join(dir, "nested", "renamed.ts");
-		await applyEditsThenRename([{ filePath: ref, edits: importEdit }], source, dest);
+		const recorded: WorkspaceFileChange[] = [];
+		const refMtimeMs = (await fs.stat(ref)).mtimeMs;
+		const sourceMtimeMs = (await fs.stat(source)).mtimeMs;
+		await applyEditsThenRename(
+			[{ filePath: ref, edits: importEdit }],
+			source,
+			dest,
+			[{ from: source, to: dest }],
+			change => recorded.push(change),
+		);
 
 		expect(await Bun.file(dest).text()).toBe("export const x = 1;\n");
 		expect(await Bun.file(source).exists()).toBe(false);
 		expect(await Bun.file(ref).text()).toBe('import { x } from "./renamed";\n');
+		const real = await fs.realpath(dir);
+		expect(recorded).toEqual([
+			{
+				path: path.join(real, "ref.ts"),
+				before: refBefore,
+				after: 'import { x } from "./renamed";\n',
+				beforeMtimeMs: refMtimeMs,
+			},
+			{
+				path: path.join(real, "moved.ts"),
+				before: "export const x = 1;\n",
+				after: null,
+				beforeMtimeMs: sourceMtimeMs,
+			},
+			{ path: path.join(real, "nested", "renamed.ts"), before: null, after: "export const x = 1;\n" },
+		]);
 	});
 
-	it("rolls back reference edits when the move fails", async () => {
+	it("restores the reference files' exact bytes and reports nothing when the move fails", async () => {
 		// A regular file stands where a dest-parent directory must be, so the
 		// recursive mkdir throws ENOTDIR before the rename runs.
 		const blocker = path.join(dir, "blocker");
 		await Bun.write(blocker, "not a dir");
 		const dest = path.join(blocker, "sub", "renamed.ts");
+		await Bun.write(ref, `\uFEFF${refBefore}`);
+		const recorded: WorkspaceFileChange[] = [];
 
-		await expect(applyEditsThenRename([{ filePath: ref, edits: importEdit }], source, dest)).rejects.toThrow();
+		await expect(
+			applyEditsThenRename(
+				[{ filePath: ref, edits: importEdit }],
+				source,
+				dest,
+				[{ from: source, to: dest }],
+				change => recorded.push(change),
+			),
+		).rejects.toThrow();
 
 		// Failed move must leave source, destination, and reference files untouched.
-		expect(await Bun.file(ref).text()).toBe(refBefore);
+		expect(await fs.readFile(ref, "utf8")).toBe(`\uFEFF${refBefore}`);
 		expect(await Bun.file(source).exists()).toBe(true);
 		expect(await Bun.file(dest).exists()).toBe(false);
+		expect(recorded).toEqual([]);
 	});
 });
 

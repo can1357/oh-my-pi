@@ -17,7 +17,8 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
-import { readTextFromDisk, uriToFile } from "./utils";
+import { stripBom } from "../edit/normalize";
+import { readDiskSnapshot, uriToFile } from "./utils";
 
 // =============================================================================
 // Text Edit Application
@@ -157,24 +158,30 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 	return out;
 }
 
+/** A file's on-disk text before text edits (a BOM is kept) and the text written. */
+export interface TextEditOutcome {
+	before: string;
+	after: string;
+	beforeMtimeMs: number;
+}
+
 /**
- * Apply text edits to a file.
+ * Apply text edits to a file, reading it once.
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
+ * `onFileChange` receives the change under the file's real path.
  */
 export async function applyTextEdits(
 	filePath: string,
 	edits: TextEdit[],
 	onFileChange?: (change: WorkspaceFileChange) => void,
-): Promise<void> {
-	const content = await readTextFromDisk(filePath);
-	// Journal disk contents, not the BOM-stripped text used for LSP positions.
-	const journalPath = onFileChange ? await fs.realpath(filePath) : undefined;
-	const before = journalPath ? await readSnapshot(journalPath) : undefined;
-	const result = applyTextEditsToString(content, edits);
-	await Bun.write(filePath, result);
-	if (onFileChange && journalPath && before) {
-		onFileChange({ path: journalPath, before: before.text, after: result, beforeMtimeMs: before.mtimeMs });
-	}
+): Promise<TextEditOutcome> {
+	const snapshot = await readDiskSnapshot(filePath);
+	// LSP positions address the text after a BOM; the edited text is written without it.
+	const after = applyTextEditsToString(stripBom(snapshot.text).text, edits);
+	await Bun.write(filePath, after);
+	const outcome = { before: snapshot.text, after, beforeMtimeMs: snapshot.mtimeMs };
+	if (onFileChange) onFileChange({ path: await fs.realpath(filePath), ...outcome });
+	return outcome;
 }
 
 /** A reference file and the text edits a rename computed for it. */
@@ -183,15 +190,29 @@ export interface RenameReferenceEdit {
 	edits: TextEdit[];
 }
 
+/** A file a rename moves, `from` its old path `to` its new one. */
+export interface RenameMove {
+	from: string;
+	to: string;
+}
+
+/** `filePath` with its directory resolved, keeping a symlink itself as the entry. */
+async function entryLocation(filePath: string): Promise<string> {
+	return path.join(await fs.realpath(path.dirname(filePath)), path.basename(filePath));
+}
+
 /**
  * Apply a rename's reference edits and then move `source` → `dest` as one unit.
  *
  * The reference edits (import/usage rewrites in other files) must be written
  * before the move so their positions match the pre-move file contents, but a
- * failed move must not leave those files half-rewritten: each edited file is
- * snapshotted first, and if `mkdir`/`rename` throws, every snapshot is restored
- * before the error propagates. A failed move therefore leaves the source,
- * destination, and every reference file exactly as they were.
+ * failed move must not leave those files half-rewritten: if `mkdir`/`rename`
+ * throws, every edited file gets its original bytes back before the error
+ * propagates. A failed move therefore leaves the source, destination, and every
+ * reference file exactly as they were.
+ *
+ * `onFileChange` receives the reference edits and then each moved regular file
+ * as a deletion at `from` and a creation at `to`, only once the move succeeded.
  *
  * @throws the original `mkdir`/`rename` error, after rolling back the edits.
  */
@@ -199,18 +220,39 @@ export async function applyEditsThenRename(
 	references: RenameReferenceEdit[],
 	source: string,
 	dest: string,
+	moves: readonly RenameMove[],
+	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<void> {
-	const backups: Array<{ filePath: string; original: string }> = [];
+	const edited: Array<{ filePath: string; outcome: TextEditOutcome }> = [];
 	for (const { filePath, edits } of references) {
-		backups.push({ filePath, original: await readTextFromDisk(filePath) });
-		await applyTextEdits(filePath, edits);
+		edited.push({ filePath, outcome: await applyTextEdits(filePath, edits) });
+	}
+	// Journal paths and moved contents must be taken before the move takes them away.
+	const editChanges: WorkspaceFileChange[] = [];
+	const moved: Array<{ from: string; to: string; text: string; mtimeMs?: number }> = [];
+	if (onFileChange) {
+		for (const { filePath, outcome } of edited) {
+			editChanges.push({ path: await fs.realpath(filePath), ...outcome });
+		}
+		for (const { from, to } of moves) {
+			if ((await fs.lstat(from)).isSymbolicLink()) continue;
+			const snapshot = await readSnapshot(from);
+			if (snapshot?.text != null)
+				moved.push({ from: await entryLocation(from), to, text: snapshot.text, mtimeMs: snapshot.mtimeMs });
+		}
 	}
 	try {
 		await fs.mkdir(path.dirname(dest), { recursive: true });
 		await fs.rename(source, dest);
 	} catch (err) {
-		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
+		await Promise.all(edited.map(({ filePath, outcome }) => Bun.write(filePath, outcome.before)));
 		throw err;
+	}
+	if (!onFileChange) return;
+	for (const change of editChanges) onFileChange(change);
+	for (const { from, to, text, mtimeMs } of moved) {
+		onFileChange({ path: from, before: text, after: null, beforeMtimeMs: mtimeMs });
+		onFileChange({ path: await entryLocation(to), before: null, after: text });
 	}
 }
 
