@@ -1,0 +1,3 @@
+upstream = "candidate"
+layer = 60
+reason = "extension_handler_settled event: reports each extension handler's duration and ok/error/timeout outcome, so hook latency is logged and a 30 s handler timeout can start a learner."
