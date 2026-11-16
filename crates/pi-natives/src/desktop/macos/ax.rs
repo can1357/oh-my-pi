@@ -1335,7 +1335,11 @@ fn labelled_props(
 		return Ok(props);
 	}
 	let linked = values.get(TITLE_ELEMENT);
-	let label = if answered(&linked) {
+	// `AppKit` fails some attributes on every read; as `read_identity` counts
+	// that as an answer, a failed link is no link, not an unanswered one.
+	let label = if linked.as_ref().err() == Some(&AXError::Failure) {
+		Ok(None)
+	} else if answered(&linked) {
 		linked_label(linked.ok().flatten().as_deref(), read_label)
 	} else {
 		Err(AXError::CannotComplete)
@@ -3119,6 +3123,10 @@ mod tests {
 		// SAFETY: An AXError-typed AXValue copies the one AXError it points at.
 		let busy =
 			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut busy).cast()) }.unwrap();
+		let mut failure = AXError::Failure;
+		// SAFETY: as for `busy`.
+		let failure =
+			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut failure).cast()) }.unwrap();
 		// SAFETY: kCFNull is a process-lifetime constant.
 		let null: &CFType = unsafe { kCFNull }.unwrap();
 		let link = create_system_wide();
@@ -3181,6 +3189,11 @@ mod tests {
 		let unread = read(null, null, add_date, &busy, Ok(Some("Mode")));
 		assert!(unread.partial);
 		assert!(unread.label_complete);
+		// A link `AppKit` fails on every read is no link: the field keeps its
+		// placeholder name and its identity.
+		let failed = read(null, null, add_date, &failure, Ok(Some("Mode")));
+		assert_eq!((failed.title, failed.description.as_deref()), (None, Some("Add Date")));
+		assert!(!failed.partial);
 	}
 
 	fn linked_field(
