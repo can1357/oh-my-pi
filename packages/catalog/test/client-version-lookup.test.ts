@@ -8,7 +8,7 @@ const RETRY_MS = 10 * 60_000;
 function countingFetch(respond: () => Promise<Response>): { fetcher: FetchImpl; urls: string[] } {
 	const urls: string[] = [];
 	const fetcher = Object.assign(
-		(input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
+		(input: string | URL | Request, _init?: RequestInit) => {
 			urls.push(String(input));
 			return respond();
 		},
