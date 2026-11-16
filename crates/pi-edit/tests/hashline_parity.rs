@@ -1030,9 +1030,9 @@ async fn block_ops_refuse_a_rust_line_that_opens_no_item() {
 	}
 }
 
-#[tokio::test]
-async fn block_op_on_a_later_rust_attribute_points_at_the_first() {
-	let source = "/// Docs.\n#[derive(Debug)]\nstruct S {\n    x: u32,\n}\n";
+/// `CUT 2*` on a later annotation of a Rust item: the refusal, after checking
+/// that the file is unchanged.
+async fn cut_later_rust_annotation(source: &str) -> String {
 	let workspace = Workspace::new(EditMode::Hashline);
 	workspace.write("x.rs", source);
 	let tag = workspace.snapshot("x.rs", source, None);
@@ -1042,11 +1042,39 @@ async fn block_op_on_a_later_rust_attribute_points_at_the_first() {
 			&common::DiskWriter::default(),
 		)
 		.await
-		.expect_err("a later attribute of an item opens no block of its own")
+		.expect_err("a later annotation of an item opens no block of its own")
 		.to_string();
+	assert_eq!(workspace.read("x.rs").as_deref(), Some(source));
+	error
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_rust_attribute_points_at_the_first() {
+	let error =
+		cut_later_rust_annotation("/// Docs.\n#[derive(Debug)]\nstruct S {\n    x: u32,\n}\n").await;
 	assert!(error.contains("resolved a single-line block"), "{error}");
 	assert!(error.contains("begins at line 1 and ends at line 5"), "{error}");
-	assert_eq!(workspace.read("x.rs").as_deref(), Some(source));
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_multi_line_rust_attribute_is_refused() {
+	let error = cut_later_rust_annotation(
+		"#[derive(Debug)]\n#[cfg_attr(\n    feature = \"serde\",\n    derive(Serialize)\n)]\nstruct \
+		 S {\n    x: u32,\n}\n",
+	)
+	.await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 8"), "{error}");
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_multi_line_rust_doc_comment_is_refused() {
+	let error = cut_later_rust_annotation(
+		"#[derive(Debug)]\n/**\n * Docs.\n */\nstruct S {\n    x: u32,\n}\n",
+	)
+	.await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 7"), "{error}");
 }
 
 #[tokio::test]
