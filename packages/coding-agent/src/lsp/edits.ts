@@ -196,25 +196,22 @@ export interface RenameMove {
 	to: string;
 }
 
-/** `filePath` with its directory resolved, keeping a symlink itself as the entry. */
-async function entryLocation(filePath: string): Promise<string> {
-	return path.join(await fs.realpath(path.dirname(filePath)), path.basename(filePath));
-}
-
 /**
  * Apply a rename's reference edits and then move `source` → `dest` as one unit.
  *
  * The reference edits (import/usage rewrites in other files) must be written
  * before the move so their positions match the pre-move file contents, but a
- * failed move must not leave those files half-rewritten: if `mkdir`/`rename`
- * throws, every edited file gets its original bytes back before the error
- * propagates. A failed move therefore leaves the source, destination, and every
- * reference file exactly as they were.
+ * failure must not leave those files half-rewritten: if a later edit, the
+ * journal snapshot, or `mkdir`/`rename` throws, every edited file gets its
+ * original bytes back before the error propagates. A failed rename therefore
+ * leaves the source, destination, and every reference file exactly as they were.
  *
  * `onFileChange` receives the reference edits and then each moved regular file
- * as a deletion at `from` and a creation at `to`, only once the move succeeded.
+ * (symlinks are left out) as a deletion at `from` and a creation at `to`, only
+ * once the move succeeded. Paths keep the moved entry itself, resolving only its
+ * directory.
  *
- * @throws the original `mkdir`/`rename` error, after rolling back the edits.
+ * @throws the original error, after rolling back the edits.
  */
 export async function applyEditsThenRename(
 	references: RenameReferenceEdit[],
@@ -223,25 +220,38 @@ export async function applyEditsThenRename(
 	moves: readonly RenameMove[],
 	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<void> {
+	// One realpath per directory: a directory rename moves up to `MAX_RENAME_PAIRS` siblings.
+	const realDirs = new Map<string, Promise<string>>();
+	const entryLocation = async (filePath: string): Promise<string> => {
+		const dir = path.dirname(filePath);
+		let realDir = realDirs.get(dir);
+		if (!realDir) {
+			realDir = fs.realpath(dir);
+			realDirs.set(dir, realDir);
+		}
+		return path.join(await realDir, path.basename(filePath));
+	};
 	const edited: Array<{ filePath: string; outcome: TextEditOutcome }> = [];
-	for (const { filePath, edits } of references) {
-		edited.push({ filePath, outcome: await applyTextEdits(filePath, edits) });
-	}
-	// Journal paths and moved contents must be taken before the move takes them away.
 	const editChanges: WorkspaceFileChange[] = [];
-	const moved: Array<{ from: string; to: string; text: string; mtimeMs?: number }> = [];
-	if (onFileChange) {
-		for (const { filePath, outcome } of edited) {
-			editChanges.push({ path: await fs.realpath(filePath), ...outcome });
-		}
-		for (const { from, to } of moves) {
-			if ((await fs.lstat(from)).isSymbolicLink()) continue;
-			const snapshot = await readSnapshot(from);
-			if (snapshot?.text != null)
-				moved.push({ from: await entryLocation(from), to, text: snapshot.text, mtimeMs: snapshot.mtimeMs });
-		}
-	}
+	let moved: Array<{ from: string; to: string; text: string; mtimeMs?: number } | undefined> = [];
 	try {
+		for (const { filePath, edits } of references) {
+			edited.push({ filePath, outcome: await applyTextEdits(filePath, edits) });
+		}
+		// Journal paths and moved contents must be taken before the move takes them away.
+		if (onFileChange) {
+			for (const { filePath, outcome } of edited) {
+				editChanges.push({ path: await fs.realpath(filePath), ...outcome });
+			}
+			moved = await Promise.all(
+				moves.map(async ({ from, to }) => {
+					if ((await fs.lstat(from)).isSymbolicLink()) return undefined;
+					const snapshot = await readSnapshot(from);
+					if (snapshot?.text == null) return undefined;
+					return { from: await entryLocation(from), to, text: snapshot.text, mtimeMs: snapshot.mtimeMs };
+				}),
+			);
+		}
 		await fs.mkdir(path.dirname(dest), { recursive: true });
 		await fs.rename(source, dest);
 	} catch (err) {
@@ -250,9 +260,10 @@ export async function applyEditsThenRename(
 	}
 	if (!onFileChange) return;
 	for (const change of editChanges) onFileChange(change);
-	for (const { from, to, text, mtimeMs } of moved) {
-		onFileChange({ path: from, before: text, after: null, beforeMtimeMs: mtimeMs });
-		onFileChange({ path: await entryLocation(to), before: null, after: text });
+	for (const entry of moved) {
+		if (!entry) continue;
+		onFileChange({ path: entry.from, before: entry.text, after: null, beforeMtimeMs: entry.mtimeMs });
+		onFileChange({ path: await entryLocation(entry.to), before: null, after: entry.text });
 	}
 }
 
