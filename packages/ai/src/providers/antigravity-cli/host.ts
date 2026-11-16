@@ -1,8 +1,10 @@
 /**
  * One stateful agy ACP conversation across omp's per-step stream calls.
- * MCP tool calls park between steps. A deadline cancels and drains the ACP
- * prompt before releasing its MCP response; the actual late result is sent
- * only in a subsequent prompt. Failed drains kill the process and reseed.
+ * MCP tool calls park between steps. Past the relay threshold the parked call
+ * returns a notice and `omp_await_result` yields the original result in the
+ * same turn; a result that lands after the turn is sent as a late prompt.
+ * Without relay a deadline cancels and drains the ACP prompt first. Failed
+ * drains kill the process and reseed.
  */
 import * as path from "node:path";
 import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
@@ -37,6 +39,7 @@ import {
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
+import { type RelayClock, RELAY_CONTROL_NAME, RELAY_CONTROL_TOOL, resolveRelayConfig, ToolRelay } from "./relay";
 import type { StepWriter } from "./step-writer";
 
 const AGENT_NAME = "bridge";
@@ -81,6 +84,8 @@ export interface AgyTransportOptions {
 	geminiDir: string;
 	cwd: string;
 	tools: readonly McpToolDefinition[];
+	/** Extra MCP tools advertised to agy but never projected into omp's tool list. */
+	controlTools?: readonly McpToolDefinition[];
 	signal: AbortSignal;
 	onCall: McpCallHandler;
 	onUpdate(notification: SessionNotification): void;
@@ -102,6 +107,8 @@ export interface AgyHostOptions {
 	announcementTimeoutMs?: number;
 	startupTimeoutMs?: number;
 	schedule?: AgyScheduler;
+	/** Relay seam; defaults to `OMP_ACP_TOOL_RELAY_MS`. */
+	relay?: ToolRelay;
 }
 
 interface AgyProcess extends AgyTransport {
@@ -134,9 +141,9 @@ interface ActiveStep {
 
 interface PendingCall {
 	id: string;
-	state: "parked" | "cancelling" | "detached";
+	state: "parked" | "cancelling" | "detached" | "relayed";
 	settle(output: McpToolOutput): void;
-	expiry: AgyTimer;
+	expiry?: AgyTimer;
 	drain?: Promise<void>;
 }
 
@@ -152,6 +159,7 @@ interface Turn {
 export class AgyHost implements ProviderSessionState {
 	readonly #geminiDir: string;
 	readonly #options: Required<AgyHostOptions>;
+	readonly #relay: ToolRelay;
 	readonly #ownedConversations = new Set<string>();
 	readonly #exits = new Set<Promise<number>>();
 	#process: AgyProcess | undefined;
@@ -169,14 +177,17 @@ export class AgyHost implements ProviderSessionState {
 	/** geminiDir is the account-scoped agy configuration and conversation directory. */
 	constructor(geminiDir: string, options: AgyHostOptions = {}) {
 		this.#geminiDir = geminiDir;
+		const schedule = options.schedule ?? scheduleTimer;
 		this.#options = {
 			startTransport: options.startTransport ?? startTransport,
 			holdLimitMs: options.holdLimitMs ?? HOLD_LIMIT_MS,
 			cancelTimeoutMs: options.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS,
 			announcementTimeoutMs: options.announcementTimeoutMs ?? ANNOUNCEMENT_TIMEOUT_MS,
 			startupTimeoutMs: options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS,
-			schedule: options.schedule ?? scheduleTimer,
+			schedule,
+			relay: options.relay ?? new ToolRelay(resolveRelayConfig(), relayClock(schedule)),
 		};
+		this.#relay = this.#options.relay;
 		if (
 			this.#options.holdLimitMs <= 0 ||
 			this.#options.cancelTimeoutMs <= 0 ||
@@ -199,6 +210,7 @@ export class AgyHost implements ProviderSessionState {
 	/** Emit one assistant step, parking at a tool call or finishing at the ACP turn end. */
 	async step(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
 		if (this.#step) throw new Error("Antigravity CLI is already running a request for this session");
+		this.#relay.beginTurn();
 		const step: ActiveStep = {
 			writer,
 			messages: context.messages,
@@ -224,9 +236,11 @@ export class AgyHost implements ProviderSessionState {
 			const system = (context.systemPrompt ?? []).join("\n\n");
 			const systemKey = system;
 			let plan = planTurn(context.messages, this.#ledger);
+			// A pending whose MCP response was already released keeps the live turn across a process restart.
+			const released = this.#pending?.state === "detached" || this.#pending?.state === "relayed";
 			const parkedTurnMoves =
-				this.#pending?.state !== "detached" &&
 				this.#pending !== undefined &&
+				!released &&
 				(this.#process?.toolsKey !== toolsKey ||
 					this.#process.cwd !== cwd ||
 					this.#process.credentialVersion !== options.credentialVersion ||
@@ -295,11 +309,41 @@ export class AgyHost implements ProviderSessionState {
 			if (plan.kind === "resume") {
 				const pending = this.#pending;
 				if (pending?.drain) await this.#setup(pending.drain);
-				if (plan.toolResult && pending?.state === "detached") {
+				if (plan.toolResult && pending?.state === "relayed") {
+					const turn = this.#turn;
+					const awaiting = turn !== undefined && !turn.cancelling && this.#relay.awaiting(pending.id);
+					this.#relay.settle(pending.id, toMcpOutput(plan.toolResult));
+					this.#releasePending();
+					if (awaiting && turn) {
+						if (plan.input.length > 0) {
+							this.#prompt(plan.input.flatMap(inputBlocks));
+							await this.#setup(
+								withTimeout(
+									turn.response.promise,
+									this.#options.cancelTimeoutMs,
+									"Antigravity CLI did not accept steering",
+									this.#options.schedule,
+								),
+							);
+						}
+					} else {
+						// The turn holding the notice is gone or stopped waiting: deliver the result as a new prompt.
+						this.#prompt([...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
+						if (turn && !turn.cancelling)
+							await this.#setup(
+								withTimeout(
+									turn.response.promise,
+									this.#options.cancelTimeoutMs,
+									"Antigravity CLI did not accept the relayed result",
+									this.#options.schedule,
+								),
+							);
+					}
+				} else if (plan.toolResult && pending?.state === "detached") {
 					this.#releasePending();
 					this.#prompt([...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
 				} else {
-					pending?.expiry.cancel();
+					pending?.expiry?.cancel();
 					if (plan.input.length > 0) {
 						const previous = this.#turn;
 						this.#prompt(plan.input.flatMap(inputBlocks));
@@ -378,11 +422,13 @@ export class AgyHost implements ProviderSessionState {
 		step: ActiveStep,
 		credentialVersion: string | undefined,
 	): Promise<void> {
-		const detached = this.#pending?.state === "detached" ? this.#pending : undefined;
+		// A pending whose MCP response was already released must survive a restart to deliver its result.
+		const released =
+			this.#pending?.state === "detached" || this.#pending?.state === "relayed" ? this.#pending : undefined;
 		const ledger = this.#ledger;
-		this.#stopProcess();
-		if (detached) {
-			this.#pending = detached;
+		this.#stopProcess(released);
+		if (released) {
+			this.#pending = released;
 			this.#ledger = ledger;
 		}
 		const token = {};
@@ -390,6 +436,7 @@ export class AgyHost implements ProviderSessionState {
 			geminiDir: this.#geminiDir,
 			cwd,
 			tools,
+			controlTools: this.#relay.enabled ? [RELAY_CONTROL_TOOL] : [],
 			signal: step.controller.signal,
 			onCall: async (name, args, id) => {
 				try {
@@ -450,7 +497,7 @@ export class AgyHost implements ProviderSessionState {
 		);
 	}
 
-	#stopProcess(): void {
+	#stopProcess(preserve?: PendingCall): void {
 		const agy = this.#process;
 		this.#process = undefined;
 		if (this.#turn || this.#pending) this.#ledger = undefined;
@@ -462,7 +509,9 @@ export class AgyHost implements ProviderSessionState {
 			turn.response.reject(error);
 		}
 		this.#turns.clear();
-		this.#releasePending()?.settle(errorOutput("Tool call cancelled: the host stopped this turn."));
+		const pending = this.#releasePending();
+		if (pending !== preserve) pending?.settle(errorOutput("Tool call cancelled: the host stopped this turn."));
+		this.#relay.cancelAll("Tool call cancelled: the host stopped this turn.", preserve?.id);
 		for (const waiter of this.#announcementWaiters) waiter.finish(false);
 		this.#announced.clear();
 		if (this.#conversation) this.#conversation.loaded = false;
@@ -565,7 +614,7 @@ export class AgyHost implements ProviderSessionState {
 	#releasePending(): PendingCall | undefined {
 		const pending = this.#pending;
 		this.#pending = undefined;
-		pending?.expiry.cancel();
+		pending?.expiry?.cancel();
 		return pending;
 	}
 
@@ -612,7 +661,7 @@ export class AgyHost implements ProviderSessionState {
 
 	async #abandonTurn(): Promise<void> {
 		this.#ledger = undefined;
-		this.#pending?.expiry.cancel();
+		this.#pending?.expiry?.cancel();
 		try {
 			if (this.#pending?.drain) await this.#pending.drain;
 			await this.#cancelTurn();
@@ -631,12 +680,15 @@ export class AgyHost implements ProviderSessionState {
 	): Promise<McpToolOutput> {
 		const agy = this.#process;
 		if (!agy || agy.token !== token) return errorOutput("Tool call belongs to a stopped process.");
+		if (name === RELAY_CONTROL_NAME) return this.#onControlCall(args);
 		const tool = agy.tools.get(name);
 		if (!tool || !validateJsonSchemaValue(tool.inputSchema, args).success) {
 			this.#fail(new Error("Antigravity CLI requested an unknown tool or invalid arguments"));
 			return errorOutput("Unknown tool or invalid arguments; no execution occurred.");
 		}
 		const announced = await this.#awaitAnnouncement(name);
+		const duplicate = announced ? this.#relay.duplicateNotice(name, args) : undefined;
+		if (duplicate) return duplicate;
 		const step = this.#step;
 		const conversationId = this.#conversation?.id;
 		if (
@@ -660,7 +712,9 @@ export class AgyHost implements ProviderSessionState {
 			id,
 			state: "parked",
 			settle: result.resolve,
-			expiry: this.#options.schedule(this.#options.holdLimitMs, () => this.#detach(pending)),
+			expiry: this.#relay.enabled
+				? undefined
+				: this.#options.schedule(this.#options.holdLimitMs, () => this.#detach(pending)),
 		};
 		this.#pending = pending;
 		step.writer.toolCall({ type: "toolCall", id, name, arguments: args });
@@ -669,7 +723,21 @@ export class AgyHost implements ProviderSessionState {
 		step.writer.finish("toolUse", { type: "antigravityCli", conversationId, digest });
 		this.#ledger = { count: step.messages.length + 1, digest, pendingToolCallId: id };
 		step.done.resolve();
-		return result.promise;
+		return this.#relay.park({ id, name, arguments: args }, result.promise, () => {
+			if (this.#pending !== pending) return;
+			pending.state = "relayed";
+			pending.expiry?.cancel();
+		});
+	}
+
+	/** Reads a relay record only; the original tool already ran under omp's control. */
+	async #onControlCall(args: Record<string, unknown>): Promise<McpToolOutput> {
+		if (!validateJsonSchemaValue(RELAY_CONTROL_TOOL.inputSchema, args).success) {
+			this.#fail(new Error("Antigravity CLI requested an unknown tool or invalid arguments"));
+			return errorOutput("Unknown tool or invalid arguments; no execution occurred.");
+		}
+		const callId = typeof args.call_id === "string" ? args.call_id : "";
+		return this.#relay.awaitResult(callId);
 	}
 
 	#awaitAnnouncement(name: string): Promise<boolean> {
@@ -709,7 +777,7 @@ export class AgyHost implements ProviderSessionState {
 				return;
 			case "tool_call": {
 				const name = MCP_TOOL_NAME.exec(update.title)?.[1];
-				if (!name) return;
+				if (!name || name === RELAY_CONTROL_NAME) return;
 				const waiter = [...this.#announcementWaiters].find(candidate => candidate.name === name);
 				if (waiter) waiter.finish(true);
 				else this.#announced.set(name, (this.#announced.get(name) ?? 0) + 1);
@@ -722,7 +790,13 @@ export class AgyHost implements ProviderSessionState {
 		if (this.#turn !== turn || turn.cancelling) return;
 		this.#turn = undefined;
 		const step = this.#step;
-		if (!step || step.writer.done || this.#pending) {
+		const pending = this.#pending;
+		if (pending?.state === "relayed") {
+			// The notice already released agy; the original result is delivered by the next step.
+			if (response.stopReason === "cancelled") this.#fail(new Error("Antigravity CLI cancelled the request"));
+			return;
+		}
+		if (!step || step.writer.done || pending) {
 			this.#fail(new Error("Antigravity CLI ended a turn while its tool was still parked"));
 			return;
 		}
@@ -779,7 +853,9 @@ async function startTransport(options: AgyTransportOptions): Promise<AgyTranspor
 	await writeAgentDefinition(options.geminiDir);
 	options.signal.throwIfAborted();
 	let closeProcess: (() => void) | undefined;
-	const bridge = new McpBridge(options.tools, options.onCall, () => closeProcess?.());
+	const bridge = new McpBridge([...options.tools, ...(options.controlTools ?? [])], options.onCall, () =>
+		closeProcess?.(),
+	);
 	try {
 		const child = Bun.spawn(
 			[
@@ -883,6 +959,17 @@ function mapAgyError(error: unknown): Error {
 function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {
 	const timer = setTimeout(callback, delayMs);
 	return { cancel: () => clearTimeout(timer) };
+}
+
+/** One timer source for the host and its relay, so tests can drive both clocks. */
+function relayClock(schedule: AgyScheduler): RelayClock {
+	return {
+		setTimeout: (callback, ms) => schedule(ms, callback),
+		clearTimeout: handle => {
+			const timer = handle as AgyTimer | undefined;
+			timer?.cancel();
+		},
+	};
 }
 
 async function withTimeout<T>(operation: Promise<T>, ms: number, message: string, schedule: AgyScheduler): Promise<T> {

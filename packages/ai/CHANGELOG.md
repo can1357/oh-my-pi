@@ -25,6 +25,7 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+- Added Antigravity CLI tool relay so a tool call that outlives its MCP window returns a notice with a `call_id`, and `omp_await_result` returns the original result in the same turn without running the tool again; results that land after the turn are delivered in the next step. `OMP_ACP_TOOL_RELAY_MS` sets the threshold (default 85000, `0` disables, clamped 5000–165000). ([#PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PLACEHOLDER) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
