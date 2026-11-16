@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The async delivery session-switch tests no longer depend on the developer's `disabledProviders` setting; they failed with "No API key found for anthropic" when it listed `anthropic` ([#19390](https://github.com/can1357/oh-my-pi/pull/19390) by [@Xytronix](https://github.com/Xytronix))
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
