@@ -1,0 +1,3 @@
+reason = "Regression test: jfind grepIndex run through the real native addon with a shell filesystem"
+upstream = "candidate"
+layer = 50
