@@ -1,6 +1,9 @@
 # Hosted-first macOS CI fallback: evaluation and approval plan
 
-Status: proposed plan; awaiting owner approval. Date: 2026-11-16.
+Status: plan approved for S0 detailed design and read-only Mac preflight,
+2026-11-16. [S0 design](design.md) selects hosted Linux controllers with isolated
+macOS workers; [preflight](preflight.md) records live-access blockers. No broader
+Mac-writer trust acceptance or activation is implied by plan approval.
 No workflow, dispatcher, credential, ruleset or Mac service is changed here.
 
 Inspected OMP2: `1a32fad0dfe602da1db6ee53c24577a7941b8e78` on `omp2`.
@@ -223,8 +226,8 @@ five-minute SLA has been measured in this investigation.
 
 ## Approval boundary
 
-The owner requested evaluation and a plan, then approval, then design and
-implementation. Stop here for approval of this plan and its explicit design
-decisions. No CI behavior, Mac installation, token creation, ruleset migration
-or live fallback experiment is authorized by this research artifact alone.
+The owner approved proceeding to S0 detailed design and read-only preflight.
+That approval does not install Mac services, create tokens, accept broader Mac
+writer trust, modify rulesets or enable live fallback. The design/preflight
+records distinguish completed source work from blocked operational checks.
 Unresolved EGM findings remain in [egm-review.md](egm-review.md).
