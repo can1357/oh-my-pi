@@ -1,6 +1,7 @@
 /** `/login` runs agy's own sign-in, then exports its isolated consumer grant. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import * as AIError from "../../error";
 import { agyGeminiDir, resolveAgyBinary } from "../../providers/antigravity-cli/binary";
@@ -92,15 +93,40 @@ async function bounded<T>(work: Promise<T>, signal: AbortSignal, milliseconds: n
 	}
 }
 
+/** Serializes interactive sign-in so a second omp process fails fast instead of racing agy. */
+export async function withAgyLoginLock<T>(root: string, fn: () => Promise<T>): Promise<T> {
+	await fs.mkdir(root, { recursive: true, mode: 0o700 });
+	const lock = tryAcquireFileLock(path.join(root, "login"));
+	if (!lock) {
+		throw new AIError.OAuthError(
+			"Another omp process is already signing in to Antigravity CLI. Finish or cancel that sign-in first.",
+			{ kind: "validation", provider: PROVIDER },
+		);
+	}
+	try {
+		return await fn();
+	} finally {
+		lock.release();
+	}
+}
+
 export async function loginAntigravityCli(ctrl: OAuthController): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt && !ctrl.onManualCodeInput) throw new AIError.OnPromptRequiredError("Antigravity CLI");
 	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError("Antigravity CLI sign-in cancelled");
 	const deadline = AbortSignal.timeout(LOGIN_TIMEOUT_MS);
 	const signal = ctrl.signal ? AbortSignal.any([ctrl.signal, deadline]) : deadline;
 	ctrl.onProgress?.("Preparing the Antigravity CLI...");
-	const binary = await bounded(resolveAgyBinary(ctrl.fetch ?? fetch), signal, START_TIMEOUT_MS);
 	const root = path.join(agyGeminiDir(), "logins");
-	await fs.mkdir(root, { recursive: true, mode: 0o700 });
+	return withAgyLoginLock(root, () => performAgyLogin(ctrl, signal, deadline, root));
+}
+
+async function performAgyLogin(
+	ctrl: OAuthController,
+	signal: AbortSignal,
+	deadline: AbortSignal,
+	root: string,
+): Promise<OAuthCredentials> {
+	const binary = await bounded(resolveAgyBinary(ctrl.fetch ?? fetch), signal, START_TIMEOUT_MS);
 	const directory = await fs.mkdtemp(path.join(root, "login-"));
 	let child: Subprocess<"pipe", "pipe", "pipe"> | undefined;
 	let signedIn = false;

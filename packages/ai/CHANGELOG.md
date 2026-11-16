@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Serialized interactive Antigravity CLI sign-in across omp processes so two login flows cannot race.
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
