@@ -8,6 +8,10 @@
 - Added `procmgr.getChildShellEnv()`, the environment a bash command would start from at the moment of the call, before the bash tool's own additions; reading it doesn't pin the dotenv project ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 - Added `$envAnyCase(name, env)`, which reads an env object's variable whatever its key casing, as Windows does (a copied env keeps `Path`) ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
+### Fixed
+
+- Fixed bare URLs swallowing the following word when Korean, Japanese or Chinese text follows a parenthesized URL without a space, as in `(https://example.com/pull/1)가` ([#19336](https://github.com/can1357/oh-my-pi/pull/19336) by [@nnnnoel](https://github.com/nnnnoel))
+
 ## [18.20.3] - 2026-11-16
 
 ### Fixed
