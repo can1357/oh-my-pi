@@ -208,6 +208,8 @@ describe("Streaming Markdown", () => {
 					const text = doc.slice(0, len);
 					const rendered = renderStreamingMarkdown(text, prefix);
 					expect(`<div class="tr-md">${rendered.html}</div>`).toBe(renderMarkdown(text));
+					// StreamingMarkdown keeps the frozen prefix's DOM and appends only the rest.
+					expect(rendered.html.startsWith(rendered.prefix.html)).toBe(true);
 					prefix = rendered.prefix;
 					if (len === doc.length) break;
 				}

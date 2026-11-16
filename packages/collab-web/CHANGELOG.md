@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Long streaming replies in the collab viewer no longer rebuild the whole message on every token
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed
