@@ -49,6 +49,7 @@ import {
 } from "../keybinding-matchers";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText, type KeyId, matchesKey } from "../keys";
+import { isSvgMedia, loadMedia, type Media, svgMedia } from "../media";
 import { code, col, item, keyed, list, node, row, span, text } from "../native/describe";
 import { nativeImageNode } from "../native/blobs";
 import {
@@ -81,7 +82,6 @@ import {
 	OTHER_LABEL,
 	textValue,
 } from "./data";
-import { type FormMedia, isSvgMedia, loadFormImage, svgMedia } from "./media";
 import { BreakRank, type Page, type PageAtom, pageHeight, paginate } from "./paginate";
 import {
 	type ChoiceField,
@@ -746,7 +746,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		}
 		this.#media.set(block, { state: "loading" });
 		const signal = this.#mediaAbort.signal;
-		loadFormImage(block.src, { cwd: this.#options.cwd ?? process.cwd(), signal }).then(
+		loadMedia(block.src, { cwd: this.#options.cwd ?? process.cwd(), signal }).then(
 			// A picture landing after dispose must not take an image key nobody will release.
 			media => signal.aborted || this.#settleMedia(block, this.#readyMedia(media, block.alt || "image")),
 			(error: unknown) => {
@@ -773,7 +773,7 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * Both go through the TUI's image budget: without an id, a Kitty image is a self-contained
 	 * `a=T` placement that repainting the rows never removes, so it outlives the form.
 	 */
-	#readyMedia(media: FormMedia, alt: string): MediaSlot {
+	#readyMedia(media: Media, alt: string): MediaSlot {
 		const maxRows = this.#pictureRows();
 		const budget = this.#options.tui?.imageBudget;
 		const native = nativeImageNode(media.bytes, media.mime, { alt, max: { h: `${maxRows}lines` } });

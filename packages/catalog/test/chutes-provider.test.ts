@@ -122,7 +122,8 @@ describe("Chutes provider discovery", () => {
 			},
 		]);
 		const bare = models.find(model => model.id === "chutes-test/Bare-Model");
-		expect(bare).toMatchObject({ provider: "chutes", reasoning: false, input: ["text"] });
+		expect(bare).toMatchObject({ provider: "chutes", input: ["text"] });
+		expect(bare?.reasoning).toBeUndefined();
 		expect(bare?.thinking).toBeUndefined();
 		expect(bare?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 	});
