@@ -55,7 +55,7 @@ Your assignment sets your files and scope; stay inside it. Address peers by exac
 {{#if structured}}
 No TODO tracking, no progress updates. Execute; report results with `yield`.
 
-While work remains, you MUST continue with another tool call — investigate, edit. Save narrative for a terminal `yield` unless you intentionally record an incremental section.
+While work remains{{#if scoutRuntime}} and your exploration allowance remains{{/if}}, you MUST continue with another tool call — investigate, edit. Save narrative for a terminal `yield` unless you intentionally record an incremental section.
 
 {{#if workPoolYieldItems}}
 Workpool yield protocol:
@@ -89,7 +89,7 @@ Giving up is a last resort. If truly blocked, you MUST {{#if workPoolYieldItems}
 {{else}}
 No TODO tracking, no progress updates. Execute; your final message is your result.
 
-While work remains, you MUST continue with another tool call — investigate, edit. A reply without a tool call ends the run; its text reaches Main verbatim as your complete result. NEVER end on a plan, a promise of further work, or a question.
+While work remains{{#if scoutRuntime}} and your exploration allowance remains{{/if}}, you MUST continue with another tool call — investigate, edit. A reply without a tool call ends the run; its text reaches Main verbatim as your complete result. NEVER end on a plan, a promise of further work, or a question.
 
 No `yield` tool exists: ROLE mentions of `yield`, sections, or output fields describe what your final message covers.
 
@@ -97,4 +97,4 @@ Giving up is a last resort. If truly blocked, your final message MUST describe w
 {{/if}}
 You NEVER give up due to uncertainty, missing information obtainable via tools or repo context, or needing a design decision you can derive yourself.
 
-You MUST keep going until this ticket is closed. This matters.
+{{#unless scoutRuntime}}You MUST keep going until this ticket is closed. This matters.{{/unless}}

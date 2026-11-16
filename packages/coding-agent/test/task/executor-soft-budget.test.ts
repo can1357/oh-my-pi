@@ -241,14 +241,17 @@ describe("runSubprocess soft request budget", () => {
 		});
 	}
 
-	it("a budget stop drives one forced final yield and finishes as a normal completion", async () => {
-		const id = "BudgetScout";
+	it.each([
+		{ budget: 2, configured: 2 },
+		{ budget: 32, configured: 200 },
+	])("returns partial evidence after a scout budget of $budget", async ({ budget, configured }) => {
+		const id = `BudgetScout${budget}`;
+		const stopThreshold = Math.ceil(budget * 1.5);
 		let abortCallsAtReminder: number | undefined;
 		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
 			if (promptIndex === 1) {
-				// Free-running exploration: budget 2 → stop threshold 3.
-				for (let i = 1; i <= 3; i++) {
-					const message = assistantText(`exploring ${i}`, i === 3 ? "aborted" : "stop");
+				for (let i = 1; i <= stopThreshold; i++) {
+					const message = assistantText(`exploring ${i}`, i === stopThreshold ? "aborted" : "stop");
 					pushMessage(message);
 					emit({ type: "message_end", message } as unknown as AgentSessionEvent);
 				}
@@ -263,7 +266,7 @@ describe("runSubprocess soft request budget", () => {
 						type: "toolCall" as const,
 						id: "tool-forced-yield",
 						name: "yield",
-						arguments: { data: { report: "partial findings" } },
+						arguments: { data: { report: "partial findings", files: ["src/evidence.ts:12-18"] } },
 					},
 				],
 				stopReason: "toolUse" as const,
@@ -276,7 +279,10 @@ describe("runSubprocess soft request budget", () => {
 				toolName: "yield",
 				result: {
 					content: [{ type: "text", text: "Result submitted." }],
-					details: { status: "success", data: { report: "partial findings" } },
+					details: {
+						status: "success",
+						data: { report: "partial findings", files: ["src/evidence.ts:12-18"] },
+					},
 				},
 				isError: false,
 			} as AgentSessionEvent);
@@ -285,7 +291,11 @@ describe("runSubprocess soft request budget", () => {
 		registerRunning(id, handle.session);
 		const parentSessionFile = `${tempDir.path()}/parent.jsonl`;
 
-		const result = await runSubprocess({ ...baseOptions(id), sessionFile: parentSessionFile });
+		const result = await runSubprocess({
+			...baseOptions(id),
+			settings: Settings.isolated({ "task.softRequestBudget": configured }),
+			sessionFile: parentSessionFile,
+		});
 
 		// The budget stop aborted the free-running turn exactly once before the
 		// wrap-up reminder; the second abort (after the terminal yield) is the
@@ -296,7 +306,7 @@ describe("runSubprocess soft request budget", () => {
 		expect(handle.prompts[1]?.options?.synthetic).toBe(true);
 		expect(handle.prompts[1]?.options?.toolChoice).toEqual({ type: "tool", name: "yield" });
 		expect(handle.sentUserMessages).toContainEqual({
-			content: buildBudgetNotice(2, 2),
+			content: buildBudgetNotice(budget, budget),
 			options: { deliverAs: "steer", attribution: "agent" },
 		});
 		const createOptions = createAgentSessionSpy.mock.calls[0]?.[0];
@@ -305,7 +315,8 @@ describe("runSubprocess soft request budget", () => {
 		expect(result.aborted).toBe(false);
 		expect(result.exitCode).toBe(0);
 		expect(result.abortReason).toBeUndefined();
-		expect(JSON.parse(result.output)).toEqual({ report: "partial findings" });
+		expect(JSON.parse(result.output)).toEqual({ report: "partial findings", files: ["src/evidence.ts:12-18"] });
+		expect(result.requests).toBe(stopThreshold + 1);
 		// The agent stays a live, adopted peer.
 		expect(AgentRegistry.global().get(id)?.status).toBe("idle");
 		expect(AgentLifecycleManager.global().has(id)).toBe(true);
@@ -766,7 +777,7 @@ describe("resolveSoftRequestBudget", () => {
 	});
 
 	it("keeps the bundled ceiling when the configured budget is higher", () => {
-		expect(resolveSoftRequestBudget("scout", 200)).toBe(100);
+		expect(resolveSoftRequestBudget("scout", 200)).toBe(32);
 		expect(resolveSoftRequestBudget("sonic", 200)).toBe(100);
 	});
 
@@ -789,7 +800,7 @@ describe("resolveSoftRequestBudget", () => {
 	it("keeps agents without an entry on the configured budget and bundled ceilings", () => {
 		const agentBudgets = { lead: 400 };
 		expect(resolveSoftRequestBudget("task", 200, agentBudgets)).toBe(200);
-		expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
+		expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(32);
 		expect(resolveSoftRequestBudget("sonic", 200, agentBudgets)).toBe(100);
 	});
 
@@ -832,7 +843,7 @@ describe("task.agentSoftRequestBudget", () => {
 		try {
 			const settings = await Settings.loadReadOnly({ agentDir, cwd: tempDir.path(), configFiles: [overlay] });
 			const agentBudgets = cfgTaskAgentSoftRequestBudget.get(settings);
-			expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(100);
+			expect(resolveSoftRequestBudget("scout", 200, agentBudgets)).toBe(32);
 			expect(resolveSoftRequestBudget("lead", 200, agentBudgets)).toBe(400);
 		} finally {
 			if (previousConfigFiles === undefined) delete process.env.PI_CONFIG_FILES;

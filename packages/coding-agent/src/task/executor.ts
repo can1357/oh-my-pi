@@ -134,6 +134,7 @@ import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
+import { refreshScoutRuntimePrompt, withScoutRuntimePrompt } from "./scout-runtime";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import { recordStepsSent, type StepProgress, type StepReportRoute, sendStepReport } from "./steps";
 import type { WorkPoolYieldItem } from "./workpool-yield";
@@ -205,7 +206,7 @@ const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
  * both.
  */
 export const SOFT_REQUEST_BUDGET: Record<string, number> = {
-	scout: 100,
+	scout: 32,
 	sonic: 100,
 	default: 200,
 };
@@ -4251,6 +4252,8 @@ function buildSubagentSessionOptions(
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
 		// A launch prompts its assignment only after setup; a revive's turns are its IRC wakes.
 		awaitingAssignment: launch !== undefined,
+		// The first SDK render precedes session attachment. Scouts refresh once after
+		// creation; later tool rebinds render against the session's candidate tool set.
 		systemPrompt: defaultPrompt => {
 			// A revive shows the roster the parked session's prompt held, and a rebuild that leaves the
 			// rest of the prompt unchanged keeps the roster the prompt it replaces showed: peer rows carry
@@ -4263,6 +4266,7 @@ function buildSubagentSessionOptions(
 					? inputs.ircRoster
 					: (heldIrcRoster(inputs, defaultPrompt) ??
 						collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile));
+			const scoutRuntime = spec.options.agentName === "scout";
 			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 				agent: inputs.agentSystemPrompt,
 				context: inputs.context,
@@ -4281,12 +4285,20 @@ function buildSubagentSessionOptions(
 				ircParkedCount: ircRoster?.parkedCount ?? 0,
 				ircOmittedCount: ircRoster?.omittedCount ?? 0,
 				ircSelfId: inputs.ircEnabled ? inputs.id : "",
+				scoutRuntime,
 			});
 			if (ircRoster) recordIrcRender(inputs, subagentPrompt, ircRoster);
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
 			// `<project-context>` block so spawns of the same agent share the static
 			// prompt prefix as a cache hit.
-			return [...defaultPrompt, subagentPrompt];
+			const blocks = [...defaultPrompt, subagentPrompt];
+			return scoutRuntime
+				? withScoutRuntimePrompt(blocks, {
+						agentId: inputs.id,
+						budget: softRequestBudgetFor("scout", settings).softRequestBudget,
+						reportingGraceRequests: BUDGET_STOP_GRACE_REQUESTS,
+					})
+				: blocks;
 		},
 	};
 }
@@ -4507,6 +4519,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 			if (subagentToolNames.length !== revivedToolNames.length) {
 				await revived.setActiveToolsByName(subagentToolNames);
 			}
+			await refreshScoutRuntimePrompt(revived, capture.agentName);
 			// Re-run the executor's extension wiring on the rebuilt session. Skipping it leaves the
 			// runner pre-init, so a `tool_call` handler touching a runtime action trips the
 			// fail-closed gate and blocks every tool (including `yield`) in the revived agent (issue #8824).
@@ -5286,6 +5299,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
+			await awaitAbortable(refreshScoutRuntimePrompt(session, agent.name));
 			if (options.workPoolYieldItems) {
 				await awaitAbortable(session.setWorkPoolYieldItems(options.workPoolYieldItems));
 			}

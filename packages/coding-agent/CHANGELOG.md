@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Scouts use a 32-request soft budget and report partial findings through the existing forced-yield stop. Their runtime prompt identifies available capabilities and the effective request budget.
+
+### Fixed
+
+- Selective commits refuse unfinished Git operations before modifying HEAD or the shared index, including resolved merges that still need a merge commit.
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes

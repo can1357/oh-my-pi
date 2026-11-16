@@ -113,6 +113,7 @@ interface LastAssistantStop {
 
 function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
+	let enabledToolNames: string[] = [];
 	let lastAssistant:
 		| {
 				role: "assistant";
@@ -127,7 +128,9 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	const session = {
 		...createSessionDefaults(),
 		getMountedXdevToolNames: () => [],
+		getEnabledToolNames: () => [...enabledToolNames],
 		setActiveToolsByName: async (names: string[]) => {
+			enabledToolNames = [...names];
 			activeToolNames.push(names);
 		},
 		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
@@ -609,7 +612,7 @@ describe("persisted subagent revival", () => {
 		if (!reviver) throw new Error("Expected a persisted reviver");
 		await reviver(ref);
 
-		expect(capturedBudget).toBe(100);
+		expect(capturedBudget).toBe(32);
 	});
 
 	it("restores the live account pool for the persisted agent name, so a revived agent stays restricted", async () => {

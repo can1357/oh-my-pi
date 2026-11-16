@@ -38,6 +38,7 @@ import {
 import type { EventBus } from "../utils/event-bus";
 import {
 	attachIrcWakeTurnMonitor,
+	BUDGET_STOP_GRACE_REQUESTS,
 	compactionThresholdSettings,
 	createSubagentSettings,
 	followMCPTools,
@@ -55,6 +56,7 @@ import {
 	type PerCallModelGrants,
 } from "./model-approval";
 import { cfgTaskAgentAccountPools, cfgTaskMaxEffort } from "./settings";
+import { refreshScoutRuntimePrompt, withScoutRuntimePrompt } from "./scout-runtime";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -403,6 +405,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 	const mcpFollower = mcpManager ? followMCPTools(mcpManager, { scope: reopened.getSessionId() }) : undefined;
 	const mcpProxyTools = mcpFollower?.proxyTools() ?? [];
 
+	const agentName = persistedAgentName(ref.displayName, init);
 	let session: AgentSession;
 	try {
 		({ session } = await createAgentSession({
@@ -421,7 +424,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			agentId: ref.id,
 			agentDisplayName: ref.displayName,
 			// `agents` rule scoping keys on the durable definition name (see `persistedAgentName`).
-			agentName: persistedAgentName(ref.displayName, init),
+			agentName,
 			parentTaskPrefix: ref.id,
 			asyncJobManager: spec.asyncJobManager,
 			parentAgentId: ref.parentId,
@@ -449,7 +452,15 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			outputSchemaMode: init.outputSchemaMode,
 			restrictToolNames: restrictToolNames || undefined,
 			requireYieldTool: structured,
-			systemPrompt: () => [...init.systemPrompt],
+			systemPrompt: () =>
+				agentName === "scout"
+					? withScoutRuntimePrompt(init.systemPrompt, {
+							agentId: ref.id,
+							budget: softRequestBudgetFor(agentName, spec.settings).softRequestBudget,
+							reportingGraceRequests: BUDGET_STOP_GRACE_REQUESTS,
+							restored: true,
+						})
+					: [...init.systemPrompt],
 			// Inherit current owner policy, never extension authority from a transcript.
 			extensionRoots: () => spec.root.effectiveExtensionRoots,
 			preloadedPreparedExtensions: spec.preparedExtensions,
@@ -512,6 +523,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 		reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
 		reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
 	});
+	await refreshScoutRuntimePrompt(session, agentName);
 	await replayRevivedAgentStart(session);
 	// Cold revives must drive registry status themselves — createAgentSession
 	// doesn't wire this generically (the live path does it in the executor).
