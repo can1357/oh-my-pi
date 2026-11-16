@@ -463,7 +463,12 @@ import {
 	type SessionAdvisorsHost,
 } from "./session-advisors";
 import type { SessionContext, TranscriptSessionContextOptions } from "./session-context";
-import { buildSessionContext, getRestorableSessionModels, isTranscriptEntry } from "./session-context";
+import {
+	buildSessionContext,
+	getRestorableSessionModels,
+	isTranscriptEntry,
+	sessionBranchHasSavedThinkingEntry,
+} from "./session-context";
 import {
 	type CacheRefreshOutcome,
 	type CacheWarmer,
@@ -14284,6 +14289,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			} else if (didReloadConversationChange) {
 				this.#closeAllProviderSessions("session reload");
 			}
+			// A retry-fallback hop is not a saved selector when nothing was recorded
+			// before it, so the configured default applies. Decide that before an
+			// explicit model is recorded: that write is not a choice to keep the
+			// hop's effort, and reading the branch afterwards treats the effort as
+			// saved while this context still says off.
+			const restoredThinkingFrom = (context: {
+				thinkingLevel?: string;
+				configuredThinkingLevel?: string;
+			}): ConfiguredThinkingLevel | undefined => {
+				const hasThinkingEntry = sessionBranchHasSavedThinkingEntry(this.sessionManager.getBranch());
+				const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
+				const restoredConfigured = context.configuredThinkingLevel;
+				return hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && context.thinkingLevel !== "off")
+					? restoredConfigured === AUTO_THINKING
+						? AUTO_THINKING
+						: (context.thinkingLevel as ThinkingLevel | undefined)
+					: defaultThinkingLevel;
+			};
+			const restoredThinkingLevel = restoredThinkingFrom(sessionContext);
 
 			if (targetModel) {
 				const currentModel = this.model;
@@ -14305,6 +14329,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						: undefined;
 				if (explicitModel && !(savedModel && modelsAreEqual(savedModel, targetModel))) {
 					this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`);
+					// The model entry would be read as keeping the effort then in effect,
+					// including a backup hop's. Record the selector this switch restored
+					// when that reading would differ, so a later open keeps it too.
+					const adopted = restoredThinkingFrom(this.sessionManager.buildSessionContext());
+					if (restoredThinkingLevel !== undefined && adopted !== restoredThinkingLevel) {
+						this.sessionManager.appendThinkingLevelChange(restoredThinkingLevel, restoredThinkingLevel);
+					}
 				}
 			}
 
@@ -14322,30 +14353,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 
-			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
 			const hasServiceTierEntry = this.sessionManager
 				.getBranch()
 				.some(entry => entry.type === "service_tier_change");
-			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
 			const configuredServiceTierByFamily = buildServiceTierByFamily(
 				cfgTierOpenai.get(this.settings),
 				cfgTierAnthropic.get(this.settings),
 				cfgTierGoogle.get(this.settings),
 			);
-			// Restore the thinking selector. Each change persists the configured
-			// selector (`auto` or a concrete level), so prefer it: an `auto` session
-			// resumes in auto mode (reclassifying the next turn) instead of freezing at
-			// the last resolved level. Entries written before the `configured` field
-			// existed fall back to the concrete level (legacy pin-on-resume behavior).
-			// With no thinking entry, fall back to the global default so fresh sessions
-			// still classify their first turn.
-			const restoredConfigured = sessionContext.configuredThinkingLevel;
-			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
-				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-					? restoredConfigured === AUTO_THINKING
-						? AUTO_THINKING
-						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-					: defaultThinkingLevel;
+			// Thinking was decided before the explicit model entry above. Each saved
+			// change persists the configured selector (`auto` or a concrete level), so
+			// an `auto` session resumes in auto mode instead of freezing at the last
+			// resolved level. Entries written before the `configured` field existed
+			// fall back to the concrete level. With no thinking entry, the global
+			// default applies so fresh sessions still classify their first turn.
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
