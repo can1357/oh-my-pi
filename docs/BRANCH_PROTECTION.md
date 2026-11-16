@@ -211,14 +211,26 @@ is:pr is:open label:risk/journal-format pull requests that touch the durable jou
 is:pr is:open label:size/xl             large pull requests worth splitting
 ```
 
-## Deliberately not installed
+## gitStream
 
-**gitStream (and similar review-routing services).** The GitHub App reports a
-`gitStream.cm` check on every pull request as *Skipped* because the repository
-has no `.cm/` configuration. The labels above cover what it would add here.
-Remove the app from this repository under **Settings > GitHub Apps > gitStream >
-Configure > Repository access** (organization or personal installation,
-wherever it was installed).
+Informational review context on pull requests. The free plan automates at most
+250 pull requests a month per owner. Past that quota, and on a merge-queue
+event, the check concludes *Skipped* and does not block merge. It is not a
+required check.
+
+- `.github/workflows/gitstream.yml` is the lite workflow. This repository is a
+  monorepo, so the full-history action times out. The lite action fetches six
+  months of history. The GitHub App dispatches the workflow by filename, and
+  the workflow file has to be on `omp2` before that dispatch exists.
+- `.cm/gitstream.cm` posts one comment: estimated review time, whether the
+  diff deletes files, and whether it touches a durable surface. Those surfaces
+  match the `risk/*` globs in `.github/labeler.yml`, plus
+  `.github/rulesets/`.
+
+The check does not approve, request changes, assign reviewers, require extra
+approvals, or require a ticket. Path and size labels stay in `pr-labels.yml`.
+
+## Deliberately not installed
 
 **CODEOWNERS.** With one maintainer, every review routes to the same person.
 Add `.github/CODEOWNERS` when a second maintainer owns part of the tree, and
