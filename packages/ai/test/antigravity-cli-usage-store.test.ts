@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
@@ -83,14 +83,14 @@ function metadata(usage: FixtureUsage): Uint8Array {
 }
 
 async function tempDir(prefix: string): Promise<string> {
-	const dir = await mkdtemp(path.join(tmpdir(), prefix));
-	cleanup.push(() => rm(dir, { recursive: true, force: true }));
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	cleanup.push(() => fs.rm(dir, { recursive: true, force: true }));
 	return dir;
 }
 
 async function storeFile(dir: string): Promise<string> {
 	const file = path.join(dir, "session.db");
-	await mkdir(path.dirname(file), { recursive: true });
+	await fs.mkdir(path.dirname(file), { recursive: true });
 	const db = new Database(file);
 	db.run("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB)");
 	const insert = db.prepare("INSERT INTO steps (idx, step_type, status, metadata) VALUES (?, ?, ?, ?)");
@@ -157,7 +157,7 @@ describe("agy usage store", () => {
 	it("reads only completed model steps after the cursor", async () => {
 		const dir = await tempDir("agy-usage-store-");
 		const file = await storeFile(dir);
-		expect(peekMaxModelStepIdx(file)).toBe(2);
+		expect(peekMaxModelStepIdx(file)).toBe(4);
 		expect(readModelStepsAfter(file, 0)).toEqual({
 			maxIdx: 2,
 			usage: { inputTokens: 300, outputTokens: 50, cachedWriteTokens: 5, cachedReadTokens: 100, thoughtTokens: 25 },
@@ -167,6 +167,14 @@ describe("agy usage store", () => {
 			usage: { inputTokens: 200, outputTokens: 30, cachedWriteTokens: 0, cachedReadTokens: 60, thoughtTokens: 15 },
 		});
 		expect(readModelStepsAfter(file, 2)).toBeUndefined();
+		const db = new Database(file);
+		db.run("UPDATE steps SET status = 3 WHERE idx = 4");
+		db.close();
+		expect(readModelStepsAfter(file, 3)).toEqual({
+			maxIdx: 4,
+			usage: { inputTokens: 900, outputTokens: 900, cachedWriteTokens: 0, cachedReadTokens: 0, thoughtTokens: 0 },
+		});
+		expect(readModelStepsAfter(file, 4)).toBeUndefined();
 	});
 
 	it("treats an empty store as a cursor and a missing or corrupt store as unavailable", async () => {
@@ -257,9 +265,15 @@ class FakeAgy implements AgyTransport {
 
 const schedule: AgyScheduler = () => ({ cancel: () => undefined });
 
-function seedRow(file: string, idx: number, usage: FixtureUsage): void {
+function seedRow(file: string, idx: number, usage: FixtureUsage, status = 3): void {
 	const db = new Database(file);
-	db.run("INSERT INTO steps (idx, step_type, status, metadata) VALUES (?, 15, 3, ?)", [idx, metadata(usage)]);
+	db.run("INSERT INTO steps (idx, step_type, status, metadata) VALUES (?, 15, ?, ?)", [idx, status, metadata(usage)]);
+	db.close();
+}
+
+function setRowStatus(file: string, idx: number, status: number): void {
+	const db = new Database(file);
+	db.run("UPDATE steps SET status = ? WHERE idx = ?", [status, idx]);
 	db.close();
 }
 
@@ -293,7 +307,7 @@ describe("agy usage fallback", () => {
 		const fake = await started.next();
 		const prompt = await fake.prompts.next();
 		const store = conversationStorePath(dir, fake.currentId);
-		await mkdir(path.dirname(store), { recursive: true });
+		await fs.mkdir(path.dirname(store), { recursive: true });
 		const db = new Database(store);
 		db.run("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB)");
 		db.close();
@@ -329,13 +343,14 @@ describe("agy usage fallback", () => {
 
 		const third = begin(host, [...messages, first.writer.output, user("more"), second.writer.output, user("native")]);
 		const nativePrompt = await fake.prompts.next();
-		seedRow(store, 4, { input: 900, output: 900, cachedWrite: 0, cachedRead: 0, thought: 0 });
+		seedRow(store, 4, { input: 900, output: 900, cachedWrite: 0, cachedRead: 0, thought: 0 }, 2);
 		fake.text("Native answer.");
 		nativePrompt.response.resolve({
 			stopReason: "end_turn",
 			usage: { inputTokens: 11, outputTokens: 5, totalTokens: 16 },
 		});
 		await third.done;
+		setRowStatus(store, 4, 3);
 
 		expect(third.writer.output.usage).toMatchObject({
 			input: 11,
@@ -397,7 +412,7 @@ describe("agy usage fallback", () => {
 		});
 		await first.done;
 
-		await mkdir(path.dirname(store), { recursive: true });
+		await fs.mkdir(path.dirname(store), { recursive: true });
 		const db = new Database(store);
 		db.run("CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB)");
 		db.close();

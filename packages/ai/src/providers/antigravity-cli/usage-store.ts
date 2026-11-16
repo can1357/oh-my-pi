@@ -127,17 +127,15 @@ export function decodeModelUsageStats(metadata: Uint8Array): StepUsage | undefin
 }
 
 /**
- * Highest completed model-step index, or -1 when the store exists without one.
- * A missing or unreadable store reports no cursor at all.
+ * Highest model-step index, including in-progress rows, or -1 when the store
+ * exists without one. A missing or unreadable store reports no cursor at all.
  */
 export function peekMaxModelStepIdx(dbPath: string): number | undefined {
 	let db: Database | undefined;
 	try {
 		db = new Database(dbPath, { readonly: true, create: false });
 		const row = db
-			.query<{ maxIdx: number }, []>(
-				"SELECT coalesce(max(idx), -1) AS maxIdx FROM steps WHERE step_type = 15 AND status = 3",
-			)
+			.query<{ maxIdx: number }, []>("SELECT coalesce(max(idx), -1) AS maxIdx FROM steps WHERE step_type = 15")
 			.get();
 		const raw = row?.maxIdx;
 		return typeof raw === "number" && Number.isFinite(raw) ? raw : undefined;
