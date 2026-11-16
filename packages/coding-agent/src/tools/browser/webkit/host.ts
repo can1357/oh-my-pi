@@ -24,6 +24,15 @@ import { WebKitViewer } from "./viewer";
 const EXIT_GRACE_MS = 2_000;
 /** How long the host's last output may trail its exit (or its exit trail the end of its output). */
 const DRAIN_MS = 250;
+/**
+ * How long a started host may take to answer the greeting. The first launch of
+ * a new engine build on macOS waits while the system scans each of its
+ * ad-hoc-signed binaries and libraries, one at a time, which can take longer
+ * than a socket peer's limit. A host that fails exits, and its exit is reported
+ * at once, so this only limits a host that hangs. The open's deadline still
+ * applies, so a host that hangs past it fails the open rather than falling back.
+ */
+const GREETING_TIMEOUT_MS = 60_000;
 
 /** omp's WebKit host cannot run here: it did not start, or could not open its first tab. An open falls back to Chromium. */
 export class WebKitUnavailableError extends ToolError {}
@@ -33,6 +42,7 @@ class HostProcessTransport implements TernTransport {
 	readonly product = "WebKit";
 	readonly peer: string;
 	readonly waitsForEvents = true;
+	readonly greetingTimeoutMs = GREETING_TIMEOUT_MS;
 	readonly #executable: string;
 	#child: Subprocess<"pipe", "pipe", "pipe"> | undefined;
 	#ended = false;
