@@ -4,9 +4,9 @@
 // An id that 1.67.0 serves without an effort dial has no ladder here on
 // purpose, not by oversight (`modelSupportsReasoningEffort` is false for it in
 // that bundle). The one exception is `claude-sonnet-5-5`: served since
-// 2026-09-29 but not yet in the command-code@1.67.0 registry, so its ladder,
-// image input, and price come from Anthropic's first-party catalog at
-// Anthropic list price.
+// 2026-09-29 but not yet in the command-code@1.67.0 registry, so its ladder
+// and image input come from Anthropic's first-party catalog. Its price follows
+// command-code@1.88.5 (see the rate table).
 provider "commandcode" {
 	default-model "claude-sonnet-5"
 	env "COMMAND_CODE_API_KEY" "COMMANDCODE_API_KEY"
@@ -117,6 +117,8 @@ provider "commandcode" {
 		thinking-efforts "high" "xhigh"
 	}
 	// Image input follows command-code@1.67.0: every served id outside its text-only set.
+	// Gemini 4 Argon follows command-code@1.88.5, which lists it with text and
+	// image input; that release has no Gemini 4 Carbon entry.
 	// residue: the vendor's text-only set cuts across classes (Qwen, DeepSeek, GLM,
 	// MiniMax, and Xiaomi each have ids on both sides), so no class selector
 	// expresses this list.
@@ -126,7 +128,8 @@ provider "commandcode" {
 		"deepseek/deepseek-v4-flash-vision-exp" "deepseek/deepseek-v4.1-flash-fast" \
 		"google/gemini-3.1-flash-lite" \
 		"google/gemini-3.5-flash" "google/gemini-3.5-flash-lite" "google/gemini-3.6-flash" \
-		"google/gemini-3.7-flash" "google/gemini-3.8-flash" "gpt-5.3-codex" "gpt-5.4" \
+		"google/gemini-3.7-flash" "google/gemini-3.8-flash" "google/gemini-4-argon" \
+		"gpt-5.3-codex" "gpt-5.4" \
 		"gpt-5.4-mini" "gpt-5.5" "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-6-astra" \
 		"gpt-6-luna" "gpt-6-sol" "meta/muse-spark-1.1" "meta/muse-spark-1.2" \
 		"meta/muse-spark-1.2-contributor" "meta/muse-spark-1.3" "meta/muse-spark-1.3-contributor" \
@@ -187,20 +190,32 @@ provider "commandcode" {
 	// another provider's rates, so this table is the only pricing source.
 	// Base rates are Command Code's per-1M-token USD display rates. They follow
 	// `getDisplayRates` in command-code@1.67.0, read on 2026-09-29. That table
-	// prices 83 of the 84 ids the live catalog served that day; it has no
-	// `claude-sonnet-5-5`. DeepSeek V4 Flash and its vision-exp variant bill on
-	// the V4.1 Flash gateway slug.
+	// prices 83 of the 84 ids the live catalog served that day. Sonnet 5.5,
+	// absent from 1.67.0, Grok 4.7, repriced since, and every id served after
+	// 2026-09-29 follow the command-code@1.88.5 model list instead, read on
+	// 2026-11-12 (see the section at the end of this table). DeepSeek V4 Flash
+	// and its vision-exp variant bill on the V4.1 Flash gateway slug.
 	// A missing cache-write rate means 0. Standing deals (MiniMax M3 50% off,
 	// MiMo discounts) use their current effective rates.
 	// Free models (`poolside/laguna-s-2.1-free`,
 	// `inclusionai/ling-3.0-flash-sante:free`, `stealth/pixel-canary`,
 	// `stealth/space-bunny-alpha`) keep the zero discovery default.
 	// ---------------------------------------------------------------------------
-	models "claude-sonnet-5" "claude-sonnet-5-5" {
+	models "claude-sonnet-5" {
 		cost-patch {
 			input 2.0
 			output 10.0
 			cache-read 0.2
+			cache-write 2.5
+		}
+	}
+	// command-code@1.88.5 (read 2026-11-12) lists Sonnet 5.5 cache reads at 0.1,
+	// half Sonnet 5's, matching Anthropic's 2026-10-07 cut.
+	models "claude-sonnet-5-5" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
 			cache-write 2.5
 		}
 	}
@@ -771,11 +786,13 @@ provider "commandcode" {
 			cache-write 0.0
 		}
 	}
-	// Grok 4.6 bills a whole-request 2x tier above 200K input. Absolute rates
-	// (not the classes/xai.kdl multiplier form, which is scoped to providers
-	// "xai"/"xai-oauth" and never matches here): discovery specs carry zero
-	// base cost, so a multiplier derives nothing.
-	models "xai/grok-4.6" {
+	// Grok 4.6 and 4.7 bill a whole-request 2x tier above 200K input. Absolute
+	// rates (not the classes/xai.kdl multiplier form, which is scoped to
+	// providers "xai"/"xai-oauth" and never matches here): discovery specs carry
+	// zero base cost, so a multiplier derives nothing. Grok 4.7 was 1.2/3.6/0.3
+	// flat in command-code@1.67.0; command-code@1.88.5 (read 2026-11-12) lists
+	// it at Grok 4.6's card, tier included.
+	models "xai/grok-4.6" "xai/grok-4.7" {
 		cost-patch {
 			input 2.0
 			output 6.0
@@ -790,12 +807,143 @@ provider "commandcode" {
 			cache-write 0.0
 		}
 	}
-	models "xai/grok-4.7" {
+	// ---------------------------------------------------------------------------
+	// Ids served after 2026-09-29 follow the model list in command-code@1.88.5,
+	// read on 2026-11-12, as do the Sonnet 5.5 and Grok 4.7 rows above. A
+	// two-tier `contextTiers` card becomes `long-context-cost` at the first
+	// tier's `maxContext`, except Haiku 5.5, whose 5x tier above 100K comes from
+	// the classes/anthropic.kdl multiplier and matches the 1.88.5 card. Gemini 4
+	// Argon carries no dated card: 1.88.5 announces no change for it at Google's
+	// 2026-12-01 list-price increase. Claude Fable 5.2, Muse Ember and Gemini 4
+	// Carbon are served but absent from 1.88.5, so they keep the zero discovery
+	// default. Rows priced from 1.67.0 stay on that card even where 1.88.5 adds
+	// a long-context tier (GPT-5.6 Luna/Sol/Terra, Qwen 3.6 Plus): a tier would
+	// cap their default context window at 272K or 256K.
+	// ---------------------------------------------------------------------------
+	models "google/gemini-4-argon" {
 		cost-patch {
-			input 1.2
-			output 3.6
-			cache-read 0.3
+			input 2.0
+			output 10.0
+			cache-read 0.1
 			cache-write 0.0
+		}
+	}
+	models "claude-haiku-5-5" {
+		cost-patch {
+			input 0.1
+			output 0.5
+			cache-read 0.01
+			cache-write 0.125
+		}
+	}
+	models "gpt-6.1-sol" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
+			cache-write 2.5
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 4.0
+			output 15.0
+			cache-read 0.2
+			cache-write 5.0
+		}
+	}
+	models "gpt-6.1-terra" {
+		cost-patch {
+			input 1.0
+			output 5.0
+			cache-read 0.05
+			cache-write 1.25
+		}
+		long-context-cost {
+			input-threshold 272000
+			input 2.0
+			output 7.5
+			cache-read 0.1
+			cache-write 2.5
+		}
+	}
+	models "deepseek/deepseek-v4.1-flash-ultrafast" {
+		cost-patch {
+			input 2.4
+			output 9.6
+			cache-read 0.048
+			cache-write 0.0
+		}
+	}
+	models "inclusionai/ling-3.1-flash" "inclusionai/ling-3.1-flash-1019" {
+		cost-patch {
+			input 0.3
+			output 0.9
+			cache-read 0.06
+			cache-write 0.0
+		}
+	}
+	models "meta/muse-spark-open" {
+		cost-patch {
+			input 1.25
+			output 4.25
+			cache-read 0.15
+			cache-write 0.0
+		}
+	}
+	models "meta/muse-wonder-1.0" {
+		cost-patch {
+			input 4.0
+			output 20.0
+			cache-read 0.2
+			cache-write 0.0
+		}
+	}
+	models "minimax/minimax-m3.1-flash" {
+		cost-patch {
+			input 0.15
+			output 0.6
+			cache-read 0.015
+			cache-write 0.0
+		}
+	}
+	models "mistral/mistral-large-4" {
+		cost-patch {
+			input 1.36
+			output 4.18
+			cache-read 0.14
+			cache-write 0.0
+		}
+	}
+	models "moonshotai/Kimi-K3.1-Pro" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.2
+			cache-write 0.0
+		}
+	}
+	models "nvidia/nemotron-3.5-super-vl" {
+		cost-patch {
+			input 0.2
+			output 0.5
+			cache-read 0.04
+			cache-write 0.0
+		}
+	}
+	models "ornith/ornith-1.5-122b" {
+		cost-patch {
+			input 0.16
+			output 0.64
+			cache-read 0.02
+			cache-write 0.0
+		}
+	}
+	models "Qwen/Qwen3.8-Max-Prime" {
+		cost-patch {
+			input 4.0
+			output 12.0
+			cache-read 0.5
+			cache-write 5.0
 		}
 	}
 }

@@ -74,6 +74,7 @@ const OPTION_TIERS = {
 	cwd: "server",
 	providerOptions: "server",
 	providerSessionState: "server",
+	thinkingCapabilityDbPath: "server",
 	providerRetryWait: "server",
 	parentSessionId: "server",
 	minimizeEffort: "server",

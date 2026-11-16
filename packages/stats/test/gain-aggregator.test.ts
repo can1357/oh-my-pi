@@ -5,6 +5,7 @@ import { initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
 import { dedupeProjects, getGainDashboardStats, normalizeProjectPath } from "@oh-my-pi/omp-stats/gain-aggregator";
 import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getStatsDbPath } from "@oh-my-pi/pi-utils";
+import { format } from "@oh-my-pi/pi-utils/dates";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
 installStatsTestIsolation("@pi-stats-gain-");
@@ -111,9 +112,7 @@ describe("getGainDashboardStats", () => {
 		const fooStats = await getGainDashboardStats("24h", "/Users/me/Code/foo");
 		expect(fooStats.overall.savedTokens).toBe(150);
 		expect(fooStats.bySource.snapcompact.hits).toBe(2);
-		expect(fooStats.timeSeries).toEqual([
-			{ date: new Date(now).toISOString().slice(0, 10), snapcompact: 150, total: 150 },
-		]);
+		expect(fooStats.timeSeries).toEqual([{ date: format(now, "yyyy-MM-dd"), snapcompact: 150, total: 150 }]);
 
 		const foobarStats = await getGainDashboardStats("24h", "/Users/me/Code/foobar");
 		expect(foobarStats.overall.savedTokens).toBe(200);

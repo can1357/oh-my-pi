@@ -69,6 +69,20 @@ describe("default web chain", () => {
 		return model;
 	}
 
+	it("offline skips foreign search engines but still tries hosted search on the session provider", async () => {
+		const isolated = Settings.isolated({ "models.offline": true });
+		await runSearchQuery(
+			{ query: "anything" },
+			{
+				authStorage,
+				modelRegistry,
+				sessionModel: sessionModel("anthropic", "claude-sonnet-4-5"),
+				settings: isolated,
+			},
+		);
+		expect(attempted).toEqual(["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-5"]);
+	});
+
 	it.each([
 		["anthropic", "claude-sonnet-4-5", "claude-haiku-4-5"],
 		["openai", "gpt-6.1-sol", "gpt-6-luna"],

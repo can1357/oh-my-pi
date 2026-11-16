@@ -1,0 +1,11 @@
+auth "chutes" {
+	name "Chutes"
+	login "api-key" {
+		auth-url "https://chutes.ai/app/settings/api-keys"
+		instructions "Create or copy your API key from the Chutes dashboard"
+		prompt "Paste your Chutes API key" placeholder="cpk_..."
+		// `/models` is public without a key but rejects an invalid bearer with
+		// 401, so it validates the key without spending inference.
+		validate "models-endpoint" label="Chutes" url="https://llm.chutes.ai/v1/models"
+	}
+}

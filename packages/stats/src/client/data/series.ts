@@ -6,17 +6,42 @@
 import type { ChartSeries } from "../charts/types";
 import { OTHER_COLOR, SERIES_COLORS } from "./colors";
 
-/** Sum `value(point)` into a dense array aligned to `buckets`. Out-of-axis points are dropped. */
+/**
+ * Index of the last bucket starting at or before `timestamp`, or -1 before the
+ * axis. Matching by floor instead of exact key keeps data visible when the
+ * server's day buckets start at a different midnight than the browser's axis
+ * (the two run in different timezones): the day shifts rather than vanishing.
+ */
+export function bucketAt(buckets: readonly number[], timestamp: number): number {
+	let lo = 0;
+	let hi = buckets.length - 1;
+	let found = -1;
+	while (lo <= hi) {
+		const mid = (lo + hi) >> 1;
+		if (buckets[mid] <= timestamp) {
+			found = mid;
+			lo = mid + 1;
+		} else {
+			hi = mid - 1;
+		}
+	}
+	return found;
+}
+
+/**
+ * Sum `value(point)` into a dense array aligned to `buckets`. Points before
+ * the first bucket are dropped; points after the last bucket start land in the
+ * last bucket.
+ */
 export function densify<P extends { timestamp: number }>(
 	points: readonly P[],
 	buckets: readonly number[],
 	value: (point: P) => number,
 ): number[] {
-	const index = bucketIndex(buckets);
 	const out = Array.from({ length: buckets.length }, () => 0);
 	for (const point of points) {
-		const i = index.get(point.timestamp);
-		if (i !== undefined) out[i] += value(point);
+		const i = bucketAt(buckets, point.timestamp);
+		if (i >= 0) out[i] += value(point);
 	}
 	return out;
 }
@@ -36,17 +61,17 @@ export interface PivotOptions<P> {
 
 /**
  * Pivot long rows into one dense series per key, ranked by total (largest
- * first). Series beyond `limit` merge into a trailing "Other" series.
+ * first). Series beyond `limit` merge into a trailing "Other" series. Points
+ * are placed like `densify`: dropped before the axis, last bucket after it.
  */
 export function pivotSeries<P extends { timestamp: number }>(
 	points: readonly P[],
 	opts: PivotOptions<P>,
 ): ChartSeries[] {
-	const index = bucketIndex(opts.buckets);
 	const byKey = new Map<string, number[]>();
 	for (const point of points) {
-		const i = index.get(point.timestamp);
-		if (i === undefined) continue;
+		const i = bucketAt(opts.buckets, point.timestamp);
+		if (i < 0) continue;
 		const key = opts.key(point);
 		let values = byKey.get(key);
 		if (!values) {
@@ -76,10 +101,4 @@ export function pivotSeries<P extends { timestamp: number }>(
 		series.push({ key: "__other__", label: `Other (${tail.length})`, color: OTHER_COLOR, values: other });
 	}
 	return series;
-}
-
-function bucketIndex(buckets: readonly number[]): Map<number, number> {
-	const index = new Map<number, number>();
-	for (let i = 0; i < buckets.length; i++) index.set(buckets[i], i);
-	return index;
 }

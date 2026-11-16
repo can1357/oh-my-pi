@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ConflictHistory } from "@oh-my-pi/pi-coding-agent/tools/conflict-detect";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -757,6 +758,94 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(after).toBe("line 1\noldApi(x)\nnewApi(x)\nline N\n");
 	});
 
+	// A side with no lines (an addition against nothing) must resolve to no
+	// lines: a token that expands to nothing leaves no blank line behind.
+	const EMPTY_THEIRS = ["line 1", "<<<<<<< HEAD", "added(x)", "=======", ">>>>>>> feature/x", "line N", ""].join("\n");
+
+	it("`conflict://1` with a token on an empty side splices no lines", async () => {
+		const filePath = path.join(tempDir, "empty-side.ts");
+		await Bun.write(filePath, EMPTY_THEIRS);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-empty-side", { path: "empty-side.ts" });
+		await write.execute("write-empty-side", { path: "conflict://1", content: "@theirs" });
+
+		expect(await Bun.file(filePath).text()).toBe("line 1\nline N\n");
+	});
+
+	it("`conflict://*` with a token on empty sides splices no lines", async () => {
+		const filePath = path.join(tempDir, "empty-sides.ts");
+		await Bun.write(
+			filePath,
+			[
+				"<<<<<<< A",
+				"a-ours",
+				"=======",
+				">>>>>>> A",
+				"middle",
+				"<<<<<<< B",
+				"b-ours",
+				"=======",
+				">>>>>>> B",
+				"tail",
+				"",
+			].join("\n"),
+		);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-empty-sides", { path: "empty-sides.ts" });
+		const result = await write.execute("write-empty-sides", { path: "conflict://*", content: "@theirs" });
+
+		expect(getText(result)).toContain("Resolved 2 conflicts");
+		expect(await Bun.file(filePath).text()).toBe("middle\ntail\n");
+	});
+
+	// A chosen side is the side's real content, not pasted context: when it
+	// ends with the same statement and blank line that follow the region, all
+	// of it must still land, or the resolved code silently loses a statement.
+	const SIDE_ENDS_LIKE_CONTEXT = [
+		"globalThis.count=0;",
+		"<<<<<<< HEAD",
+		"globalThis.count++;",
+		"globalThis.count++;",
+		"",
+		"=======",
+		"globalThis.count+=2;",
+		">>>>>>> topic",
+		"globalThis.count++;",
+		"",
+		"console.log(globalThis.count);",
+		"",
+	];
+	const RESOLVED_WITH_OURS = [
+		"globalThis.count=0;",
+		"globalThis.count++;",
+		"globalThis.count++;",
+		"",
+		"globalThis.count++;",
+		"",
+		"console.log(globalThis.count);",
+		"",
+	];
+
+	it("`conflict://1` with `@ours` keeps every line of a side that ends like the context below", async () => {
+		const filePath = path.join(tempDir, "side-echo.js");
+		await Bun.write(filePath, SIDE_ENDS_LIKE_CONTEXT.join("\n"));
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-side-echo", { path: "side-echo.js" });
+		const result = await write.execute("write-side-echo", { path: "conflict://1", content: "@ours" });
+
+		expect(getText(result)).not.toContain("dropped");
+		expect(await Bun.file(filePath).text()).toBe(RESOLVED_WITH_OURS.join("\n"));
+	});
+
 	it("rejects `@base` for a 2-way conflict with a clear error", async () => {
 		const filePath = path.join(tempDir, "nobase.ts");
 		await Bun.write(filePath, TWO_WAY);
@@ -836,6 +925,63 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(await Bun.file(filePath).text()).toBe("line 1\nresolved by hand\nline N\n");
 	});
 
+	it.each(["conflict://1", "conflict://*"])(
+		"an edit on the block's lines under the pre-%s tag is rejected as stale",
+		async uri => {
+			await Bun.write(path.join(tempDir, "tagged.ts"), TWO_WAY);
+			const session = createTestSession(tempDir);
+			const read = await getTool(session, "read");
+			const write = await getTool(session, "write");
+
+			const readTag = /\[tagged\.ts#([0-9A-F]{4})\]/.exec(
+				getText(await read.execute("read-tagged", { path: "tagged.ts" })),
+			)![1];
+			await write.execute("write-tagged", { path: uri, content: "@ours" });
+
+			const stale = getText(
+				await new EditTool(session, "hashline").execute("edit-stale", {
+					input: `[tagged.ts#${readTag}]\nPUT 3.=3:\n+oldApi(y)\n`,
+				}),
+			);
+			expect(stale).toContain("file changed between read and edit");
+			expect(await Bun.file(path.join(tempDir, "tagged.ts")).text()).toBe("line 1\noldApi(x)\nline N\n");
+		},
+	);
+
+	it("an edit outside the block under the pre-resolution tag lands at its new position", async () => {
+		const filePath = path.join(tempDir, "notes.txt");
+		await Bun.write(
+			filePath,
+			[
+				"alpha line one",
+				"<<<<<<< HEAD",
+				"ours body",
+				"=======",
+				"theirs body",
+				">>>>>>> feat",
+				"omega line seven",
+				"zeta line eight",
+				"",
+			].join("\n"),
+		);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		const readTag = /\[notes\.txt#([0-9A-F]{4})\]/.exec(
+			getText(await read.execute("read-notes", { path: "notes.txt" })),
+		)![1];
+		await write.execute("write-notes", { path: "conflict://1", content: "@ours" });
+
+		const result = getText(
+			await new EditTool(session, "hashline").execute("edit-notes", {
+				input: `[notes.txt#${readTag}]\nPUT 7.=7:\n+omega line changed\n`,
+			}),
+		);
+		expect(result).toContain("Recovered by remapping stale line anchors");
+		expect(await Bun.file(filePath).text()).toBe("alpha line one\nours body\nomega line changed\nzeta line eight\n");
+	});
+
 	it("strips hashline display prefixes from replacement content when hashline mode is active", async () => {
 		const filePath = path.join(tempDir, "hashed.ts");
 		await Bun.write(filePath, TWO_WAY);
@@ -910,5 +1056,55 @@ describe("write resolves conflicts via conflict://N", () => {
 		expect(getText(result)).toContain("Resolved conflict #1");
 		const after = await Bun.file(filePath).text();
 		expect(after).toBe("// extra line\n// another extra\nline 1\nnewApi(x)\nline N\n");
+	});
+
+	it("keeps a UTF-8 byte-order mark when resolving `conflict://N`", async () => {
+		const filePath = path.join(tempDir, "bom.ts");
+		await Bun.write(filePath, `\uFEFF${TWO_WAY}`);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-bom", { path: "bom.ts" });
+		await write.execute("write-bom", { path: "conflict://1", content: "@theirs" });
+
+		// `Bun.file().text()` hides a BOM; decode verbatim to see it.
+		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFline 1\nnewApi(x)\nline N\n");
+	});
+
+	it("resolves individual conflicts starting on the BOM-prefixed first line without losing later blocks", async () => {
+		const filePath = path.join(tempDir, "bom-first.ts");
+		await Bun.write(filePath, `\uFEFF${TWO_BLOCKS}`);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-bom-first", { path: "bom-first.ts:conflicts" });
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(2);
+		await write.execute("write-bom-first", { path: "conflict://1", content: "@theirs" });
+
+		expect(await fs.readFile(filePath, "utf8")).toBe(
+			"\uFEFFa-theirs\nmiddle\n<<<<<<< B\nb-ours\n=======\nb-theirs\n>>>>>>> B\ntail\n",
+		);
+		expect(session.state?.conflictHistory?.entries().map(entry => entry.id)).toEqual([2]);
+
+		await write.execute("write-bom-second", { path: "conflict://2", content: "@ours" });
+		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFa-theirs\nmiddle\nb-ours\ntail\n");
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(0);
+	});
+
+	it("keeps a UTF-8 byte-order mark when bulk-resolving `conflict://*`", async () => {
+		const filePath = path.join(tempDir, "bom-bulk.ts");
+		await Bun.write(filePath, `\uFEFF${TWO_BLOCKS}`);
+		const session = createTestSession(tempDir);
+		const read = await getTool(session, "read");
+		const write = await getTool(session, "write");
+
+		await read.execute("read-bom-bulk", { path: "bom-bulk.ts:conflicts" });
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(2);
+		await write.execute("write-bom-bulk", { path: "conflict://*", content: "@ours" });
+
+		expect(await fs.readFile(filePath, "utf8")).toBe("\uFEFFa-ours\nmiddle\nb-ours\ntail\n");
+		expect(session.state?.conflictHistory?.entries()).toHaveLength(0);
 	});
 });

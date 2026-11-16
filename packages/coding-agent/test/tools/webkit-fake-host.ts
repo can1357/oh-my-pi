@@ -51,13 +51,26 @@ const send = message => {
 	process.stdout.write(Buffer.concat([head, body]));
 };
 const events = new Map();
+// The events call with wait each block holds, as the host does: { id, after }.
+const waiting = new Map();
 let nextBlock = 1;
+const eventsAfter = (block, after) => {
+	const list = events.get(block) ?? [];
+	return { ok: { events: list.filter(event => event.seq > (after ?? 0)), next: list.length, dropped: 0 } };
+};
+const answerWaiting = block => {
+	const held = waiting.get(block);
+	if (!held) return;
+	waiting.delete(block);
+	send({ id: held.id, browser: eventsAfter(block, held.after) });
+};
 const push = (block, event) => {
 	const list = events.get(block) ?? [];
 	list.push({ seq: list.length + 1, ...event });
 	events.set(block, list);
+	answerWaiting(block);
 };
-function answer(op) {
+function answer(op, id) {
 	switch (op.op) {
 		case "open": {
 			if (mode === "fail-open") return { error: { kind: "failed", message: "no display to create a view on" } };
@@ -66,8 +79,14 @@ function answer(op) {
 			return { ok: { block, url: "about:blank" } };
 		}
 		case "events": {
-			const list = events.get(op.block) ?? [];
-			return { ok: { events: list.filter(event => event.seq > (op.after ?? 0)), next: list.length, dropped: 0 } };
+			// A new call answers the held one with what it has.
+			answerWaiting(op.block);
+			const result = eventsAfter(op.block, op.after);
+			if (op.wait && result.ok.events.length === 0) {
+				waiting.set(op.block, { id, after: op.after });
+				return null;
+			}
+			return result;
 		}
 		case "state":
 			return {
@@ -113,7 +132,7 @@ process.stdin.on("data", chunk => {
 			send({ welcome: { ops: ["browser", "dom", "console", "network"] } });
 		} else if (message.browser) {
 			fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(message.browser) + "\n");
-			const result = answer(message.browser);
+			const result = answer(message.browser, message.id);
 			if (result) send({ id: message.id, browser: result });
 		}
 	}

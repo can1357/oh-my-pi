@@ -387,6 +387,32 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find(providerName, "fallback-model")).toBeDefined();
 	});
 
+	test("retryUnavailableDiscovery recovers models a failed discovery left out", async () => {
+		const providerName = "flaky-runtime-provider";
+		let failing = true;
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [{ ...baseModel, id: "fallback-model" }],
+				fetchDynamicModels: async () => {
+					if (failing) throw new Error("transient discovery failure");
+					return [{ ...baseModel, id: "dynamic-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+		await registry.refreshRuntimeProviders("online");
+		expect(registry.find(providerName, "dynamic-model")).toBeUndefined();
+
+		failing = false;
+		await registry.retryUnavailableDiscovery();
+
+		expect(registry.find(providerName, "dynamic-model")).toBeDefined();
+	});
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(

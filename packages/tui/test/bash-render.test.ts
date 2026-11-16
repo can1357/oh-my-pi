@@ -346,6 +346,36 @@ describe("bashToolRenderer", () => {
 		for (const row of body) expect(indent(row)).toBeGreaterThan(topLevel);
 	});
 
+	it("keeps the interpreted command when a result lands before the run's first trace", () => {
+		// An `async` call returns its background-start result before the trace poll ran once.
+		setThemeInstance(uiTheme);
+		const command = 'cd /elsewhere && for v in a b; do echo "$v" || break; done';
+		const shellPresentation = readShellPresentation(new RunTrace(command), defaultShellVizPreferences());
+		// Rows between the card's top border and the next divider (`Output`, or the bottom border).
+		const commandPane = (rows: readonly string[]) => {
+			const plain = rows.map(row => Bun.stripANSI(row));
+			const end = plain.findIndex((row, index) => index > 0 && /^[├╰]/.test(row));
+			return plain.slice(1, end);
+		};
+		const call = bashToolRenderer.renderCall(
+			{ command },
+			{ expanded: false, isPartial: true, shellPresentation },
+			uiTheme,
+		);
+		const result = bashToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: { async: { state: "running", jobId: "bg_1", type: "bash" }, cwd: "/elsewhere" },
+			},
+			{ expanded: false, isPartial: false, shellPresentation },
+			uiTheme,
+			{ command },
+		);
+		const callPane = commandPane(call.render(90));
+		expect(commandPane(result.render(90))).toEqual(callPane);
+		expect(callPane.join("\n")).not.toContain("echo");
+	});
+
 	it("highlights every line of a multi-line bash command in renderResult", async () => {
 		setThemeInstance(uiTheme!);
 		const command = 'for f in a b; do\n\techo "$f"\ndone';

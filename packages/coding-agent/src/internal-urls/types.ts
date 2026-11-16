@@ -80,7 +80,8 @@ export interface SchemeWritePolicy {
 	 * - `file`: tools (`write`, `edit`, `ast_edit`) write the file {@link ProtocolHandler.locate}
 	 *   returns with `{ create: true }`; the handler has no `write` hook.
 	 * - `handler`: {@link ProtocolHandler.write} performs it (messages, stdin, settings, remote
-	 *   hosts, devices); file-editing tools refuse the URL even when it locates a backing file.
+	 *   hosts, devices) for `write` and for bash redirects, which deliver a handle's bytes as one
+	 *   write on close; file-editing tools refuse the URL even when it locates a backing file.
 	 */
 	via: "file" | "handler";
 	/**
@@ -95,8 +96,6 @@ export interface SchemeWritePolicy {
 	tier(url: InternalUrl, content: string | undefined, session: ToolSession | undefined): ToolApprovalDecision;
 	/** Largest payload in UTF-8 bytes the scheme accepts; the shell refuses writes past it (EFBIG). Default: unbounded. */
 	maxBytes?: number;
-	/** True when `write` may omit `content` for this URL (`proc://<id>/kill`). */
-	contentOptional?(url: InternalUrl): boolean;
 	/**
 	 * True when this URL's write only cancels background work (`proc://<id>/kill`), so it
 	 * passes the plan-mode and device-only gates like a `coordination`-scoped write. Approval
@@ -198,6 +197,13 @@ export interface InternalResource {
 	 */
 	shape?: "document" | "value";
 	/**
+	 * The JSON path named no stored value (`agent://id/missing`). `content` stays
+	 * the read sentinel `"null"`, and readers still see that sentinel. Only the
+	 * search-list split probe treats this as not found, so a `;` list is not
+	 * kept whole on it.
+	 */
+	absent?: boolean;
+	/**
 	 * True when the resolved content cannot be edited by the agent (e.g. sealed
 	 * artifacts, harness docs, machine-generated memory summaries). Hashline
 	 * anchors and similar edit affordances are suppressed for immutable
@@ -277,12 +283,6 @@ export interface ResolveContext {
 	 * as a second exact identity alongside {@link sessionFile}.
 	 */
 	sessionId?: string;
-	/**
-	 * Source artifacts dir of a seance caller (editor completion binding).
-	 * History completions may use this scalar without constructing a tool
-	 * session; tool resolution reads {@link session}.seanceSourceArtifactsDir.
-	 */
-	seanceSourceArtifactsDir?: string;
 	/** Registry that owns the calling session; defaults to the process-wide registry. */
 	agentRegistry?: AgentRegistryApi;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
@@ -355,7 +355,7 @@ export interface WriteContext {
 	 * `proc://` stdin/stop/mode, `xd://` devices) require it and throw when it is absent.
 	 */
 	session?: ToolSession;
-	/** The `write` tool call dispatching this write; device dispatch (`xd://`) forwards it to the wrapped tool. */
+	/** The tool call dispatching this write (`write`, or a bash command redirecting into the URL); device dispatch (`xd://`) forwards it to the wrapped tool. */
 	toolCall?: {
 		id: string;
 		onUpdate?: AgentToolUpdateCallback;

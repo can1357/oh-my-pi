@@ -770,25 +770,33 @@ describe("openai-completions wire-quirk compat detection", () => {
 			).compat.supportsForcedToolChoice,
 		).toBe(true);
 	});
-	it("disables encrypted reasoning replay for Muse Spark on OpenCode gateways (#11928)", () => {
-		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
-		// cannot round-trip encrypted reasoning: the upstream binds
-		// `encrypted_content` to the gateway's caller, so replaying it on a
-		// later tool-call step 400s with "reasoning `encrypted_content` was not
-		// issued to this caller". The deployment contract must stop requesting
-		// it and drop native reasoning items from replay.
-		for (const [provider, id, baseUrl] of [
-			["opencode-zen", "muse-spark-1.3-contributor-free", "https://opencode.ai/zen/v1"],
-			["opencode-go", "muse-spark-1.3-contributor", "https://opencode.ai/zen/go/v1"],
-		] as const) {
-			const compat = resolveModelPolicy(
-				responsesSpec({ id, provider, name: "Muse Spark", baseUrl, reasoning: true }),
+	it("replays encrypted reasoning for tested OpenCode Go Muse Spark revisions without changing Zen policy", () => {
+		for (const id of ["muse-spark-1.2-contributor", "muse-spark-1.3-contributor"]) {
+			const go = resolveModelPolicy(
+				responsesSpec({
+					id,
+					provider: "opencode-go",
+					name: `Muse Spark ${id}`,
+					baseUrl: "https://opencode.ai/inference/go/v1",
+					reasoning: true,
+				}),
 			).compat;
-			expect(compat.includeEncryptedReasoning).toBe(false);
-			expect(compat.filterReasoningHistory).toBe(true);
+			expect(go.includeEncryptedReasoning).toBe(true);
+			expect(go.filterReasoningHistory).toBe(false);
 		}
-		// A non-Muse reasoning model on the same gateway keeps the Responses
-		// default replay behavior, so the carve-out is scoped to the broken lane.
+
+		const zen = resolveModelPolicy(
+			responsesSpec({
+				id: "muse-spark-1.3",
+				provider: "opencode-zen",
+				name: "Muse Spark 1.3",
+				baseUrl: "https://opencode.ai/zen/v1",
+				reasoning: true,
+			}),
+		).compat;
+		expect(zen.includeEncryptedReasoning).toBe(false);
+		expect(zen.filterReasoningHistory).toBe(true);
+
 		const other = resolveModelPolicy(
 			responsesSpec({
 				id: "big-pickle",
@@ -1645,7 +1653,7 @@ describe("model cache materialized round trip", () => {
 		}
 	});
 
-	it("ignores rows materialized under a stale build or rules policy without deleting them", async () => {
+	it("keeps rows materialized under another build or rules policy beside this build's row", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-stale-policy-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const model = buildModel(completionsSpec({ provider: "stale-policy-cache-test" }));
@@ -1656,8 +1664,8 @@ describe("model cache materialized round trip", () => {
 			db.run("UPDATE model_cache SET materialization_policy = ?", ["stale-builder:stale-rules"]);
 			db.close();
 
-			// Another app version's rows read as absent but are not mass-deleted on
-			// open; each provider's next write replaces its own row lazily.
+			// Another app version's rows read as absent and are not mass-deleted on
+			// open; this build's next write adds its own row instead of replacing theirs.
 			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
 			const countRows = () => {
 				const verified = new Database(dbPath, { readonly: true });
@@ -1670,7 +1678,7 @@ describe("model cache materialized round trip", () => {
 			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
 			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)?.models).toHaveLength(1);
 			expect(readModelCache("other-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
-			expect(countRows()).toBe(2);
+			expect(countRows()).toBe(3);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

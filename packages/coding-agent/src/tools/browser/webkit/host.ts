@@ -32,6 +32,7 @@ export class WebKitUnavailableError extends ToolError {}
 class HostProcessTransport implements TernTransport {
 	readonly product = "WebKit";
 	readonly peer: string;
+	readonly waitsForEvents = true;
 	readonly #executable: string;
 	#child: Subprocess<"pipe", "pipe", "pipe"> | undefined;
 	#ended = false;
@@ -306,5 +307,7 @@ export class WebKitHost {
 		if (exited) return;
 		logger.debug("WebKit host did not exit after its input closed; killing it", { pid: child.pid });
 		await gracefulKillTreeOnce(child.pid);
+		// Signal delivery is not exit/reaping; callers may start a replacement immediately.
+		await child.exited;
 	}
 }

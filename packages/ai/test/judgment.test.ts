@@ -8,6 +8,7 @@ import {
 	chatTextBackend,
 	createNativeJudge,
 	nativeJudgmentAcceptsImages,
+	isGatewayCredentialsExhausted,
 	JudgmentApiError,
 	JudgmentParseError,
 	NativeJudge,
@@ -1266,6 +1267,42 @@ describe("NativeJudge", () => {
 
 		expect(result.answers.urgent.noul).toBe(0.92);
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
+	});
+
+	it("sends a gateway's credentials-exhausted 502 once but retries any other 502", async () => {
+		const exhausted = {
+			type: "upstream_credentials_exhausted",
+			is_bifrost_error: false,
+			status_code: 502,
+			error: { type: "upstream_credentials_exhausted", message: "all keys failed" },
+		};
+		let calls = 0;
+		const gateway = new NativeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				calls++;
+				return Response.json(exhausted, { status: 502, headers: { "retry-after-ms": "1" } });
+			},
+		});
+		const error = await gateway.judge(request).catch(e => e);
+		expect(error).toBeInstanceOf(JudgmentApiError);
+		expect(isGatewayCredentialsExhausted(error)).toBe(true);
+		expect(calls).toBe(1);
+
+		const statuses = [502, 502, 200];
+		const flaky = new NativeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				const status = statuses.shift() ?? 200;
+				if (status === 200) return answered();
+				return Response.json(
+					{ error: { type: "bad_gateway", message: "upstream reset" } },
+					{ status, headers: { "retry-after-ms": "1" } },
+				);
+			},
+		});
+		expect((await flaky.judge(request)).answers.urgent.noul).toBe(0.92);
+		expect(statuses).toEqual([]);
 	});
 
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {

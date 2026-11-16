@@ -1,5 +1,6 @@
 auth "google-antigravity" {
 	name "Google Antigravity (Gemini, Claude, GPT-OSS)"
+	disabled "Google Antigravity is paused: Google's terms do not allow third-party sign-in and Google has suspended accounts that used it (see #18341). Use GEMINI_API_KEY (AI Studio) or google-vertex instead."
 	login-warning "Google's Antigravity terms do not allow signing in from third-party tools like omp, and Google has suspended accounts that did (see #18341). If you depend on this Google account, use GEMINI_API_KEY (AI Studio) or google-vertex instead."
 	login "oauth-code" {
 		// Antigravity uses different Google OAuth credentials for its additional models.
