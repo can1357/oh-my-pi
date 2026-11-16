@@ -6,9 +6,19 @@
 
 - Deleting or moving a large directory tree inside a project no longer stalls language-server file watching ([#19490](https://github.com/can1357/oh-my-pi/pull/19490) by [@H4vC](https://github.com/H4vC))
 - Long-running subagents use less CPU and memory per update as their sessions grow ([#19486](https://github.com/can1357/oh-my-pi/pull/19486) by [@H4vC](https://github.com/H4vC))
+### Breaking Changes
+
+- Replaced `ida.enabled`, `ida.maxOpen`, and `ida.idleCloseSec` with `disassembler.backend`, `disassembler.maxOpen`, and `disassembler.idleCloseSec`; shared database APIs now live under `@oh-my-pi/pi-coding-agent/disasm`.
+
 ### Added
 
+- Added Ghidra executable views and `xd://ghidra` scripting with automatic Ghidra, JDK, and PyGhidra setup; Auto prefers an installed IDA Pro, otherwise Ghidra.
+
 - Added a `Force Remove` option to `worktree.onExit` that removes worktrees created during the session on exit without asking, even when they have uncommitted changes; new commits stay on the worktree's branch.
+
+### Changed
+
+- The model switcher (alt+p / `/switch`) can now filter models by provider (Tab / Shift+Tab) and set the thinking level for the switch (alt+←/→); in Tern it opens as a drop-up above the composer with a provider rail, a thinking slider, and a Task / Main toggle in its head instead of an action bar.
 
 
 ## [18.21.0] - 2026-11-16

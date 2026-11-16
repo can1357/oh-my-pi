@@ -3,8 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, acquireFileLock } from "@oh-my-pi/pi-utils";
-import type { IdbLocation } from "../../src/ida/store";
-import { IdaWorker } from "../../src/ida/supervisor";
+import { DISASM_BACKENDS } from "../../src/disasm/backend";
+import type { DatabaseLocation } from "../../src/disasm/store";
+import { DisasmWorker } from "../../src/disasm/supervisor";
 
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 
@@ -70,7 +71,7 @@ interface ExecResult {
 
 describe("IDA worker protocol", () => {
 	let dir: string;
-	let worker: IdaWorker;
+	let worker: DisasmWorker;
 
 	beforeAll(async () => {
 		dir = await fs.mkdtemp(path.join(os.tmpdir(), "ida-worker-"));
@@ -87,17 +88,18 @@ describe("IDA worker protocol", () => {
 		env.PYTHONPATH = stubs;
 		env.PYTHONUNBUFFERED = "1";
 		env.PYTHONIOENCODING = "utf-8";
-		const loc: IdbLocation = {
+		const loc: DatabaseLocation = {
 			id: "stub",
 			dir,
 			sourcePath: path.join(dir, "stub.bin"),
+			stagedPath: path.join(dir, "stub.bin"),
 			kind: "inplace",
 			openPath: path.join(dir, "stub.i64"),
 			isNew: false,
 			lockTarget: path.join(dir, "stub.i64"),
 		};
 		const lock = await acquireFileLock(loc.lockTarget);
-		worker = await IdaWorker.start(loc, { pythonPath, env }, lock, 0);
+		worker = await DisasmWorker.start(DISASM_BACKENDS.ida, loc, { pythonPath, env }, lock, 0);
 	});
 
 	afterAll(async () => {

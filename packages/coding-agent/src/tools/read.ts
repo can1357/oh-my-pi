@@ -33,12 +33,12 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import {
-	cfgIdaAvailable,
+	cfgDisasmBackend,
+	DISASM_BACKENDS,
 	EXECUTABLE_SNIFF_BYTES,
 	isExecutableFile,
 	isExecutableHeader,
-	isIdaDatabasePath,
-} from "../ida";
+} from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
@@ -1257,7 +1257,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	get description(): string {
 		return prompt.render(readDescription, {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
-			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
+			BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 		});
 	}
 	/**
@@ -1266,7 +1266,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 */
 	docTopics(): Record<string, string> {
 		return {
-			sources: prompt.render(readSourcesDoc, { BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings) }),
+			sources: prompt.render(readSourcesDoc, {
+				BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
+			}),
 			urls: InternalUrlRouter.instance()
 				.reference()
 				.map(line => `- ${line}`)
@@ -2342,7 +2344,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 
 			// `bin:main`, `bin:imports`, `bin:main:10-40`: an executable/IDB prefix
-			// routes to an IDA view; `:raw` keeps the byte-verbatim escape hatch.
+			// routes to a disassembler view; `:raw` keeps the byte-verbatim escape hatch.
 			if (question === undefined) {
 				const binaryParsed = parseSel(literalSplit.sel);
 				if (!isRawSelector(binaryParsed)) {
@@ -2655,19 +2657,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				(wholeFileBytes
 					? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
 					: await isProbablyBinary(absolutePath));
-			// Executables and IDBs open in IDA instead of being refused. Speculative
-			// reads (lexicalAbsolutePath set) never launch IDA; they fall back to an
+			// Executables and backend databases open in a disassembler instead of being refused. Speculative
+			// reads (lexicalAbsolutePath set) never launch a disassembler; they fall back to an
 			// ordinary execution that does.
+			const backend = cfgDisasmBackend.get(this.session.settings);
 			if (
 				looksBinary &&
 				lexicalAbsolutePath === undefined &&
-				cfgIdaAvailable.get(this.session.settings) &&
-				(isIdaDatabasePath(absolutePath) ||
+				backend !== undefined &&
+				(DISASM_BACKENDS[backend].isDatabasePath(absolutePath) ||
 					(wholeFileBytes
 						? isExecutableHeader(wholeFileBytes.subarray(0, EXECUTABLE_SNIFF_BYTES))
 						: await isExecutableFile(absolutePath)))
 			) {
-				return readBinary(this.session, { absolutePath, view: "" }, parsed, signal);
+				return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);
 			}
 			if (looksBinary) {
 				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })

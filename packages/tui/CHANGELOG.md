@@ -6,6 +6,9 @@
 
 - Scrolling and typing in an open agent transcript no longer slows down as the transcript grows ([#19489](https://github.com/can1357/oh-my-pi/pull/19489) by [@H4vC](https://github.com/H4vC))
 - Typing and moving the cursor in very long drafts (over 256 lines) no longer slows down ([#19488](https://github.com/can1357/oh-my-pi/pull/19488) by [@H4vC](https://github.com/H4vC))
+### Added
+
+- Added provider scopes and a thinking-level slider to `ModelPickerComponent`: `ModelPickerOptions.thinkingLevelFor` enables the slider, and `onPick` receives the chosen level as `meta.thinkingLevel`. The native picker sheet gained `anchor`, `scopeStyle`, and `level` props, and picker actions gained `head` and `icon` for icon buttons in the sheet head.
 
 ## [18.21.0] - 2026-11-16
 

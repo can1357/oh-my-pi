@@ -13,15 +13,18 @@ import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
-	acquireIdaDatabase,
-	cfgIdaAvailable,
-	findOpenIdaDatabase,
-	type IdaDatabase,
-	listIdaDatabases,
-	locateIdb,
+	acquireDatabase,
+	cfgDisasmBackend,
+	DISASM_BACKENDS,
+	type DisasmBackendId,
+	findOpenDatabase,
+	type DisasmDatabase,
+	listDatabases,
+	locateDatabase,
 	splitSliceRef,
-} from "../ida";
+} from "../disasm";
 import idaDescription from "../prompts/tools/ida.md" with { type: "text" };
+import ghidraDescription from "../prompts/tools/ghidra.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { saveArtifactText } from "./gh-common";
@@ -30,35 +33,37 @@ import { cfgToolsMaxTimeout } from "./settings";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
-/** Timeout for structured edit/save RPCs against the IDA worker. */
-const IDA_EDIT_TIMEOUT_MS = 120_000;
+/** Timeout for structured edit/save RPCs against a disassembler worker. */
+const DISASM_EDIT_TIMEOUT_MS = 120_000;
 
-const idaSchema = type({
+const disasmSchema = type({
 	action: type.enumerated("list", "open", "save", "close", "exec", "rename", "comment", "set_type", "make_function"),
-	"db?": type("string").describe("binary or .i64/.idb path, or open db id; optional when exactly one db is open"),
+	"db?": type("string").describe(
+		"binary path (IDA also .i64/.idb), or open db id; optional when exactly one db is open",
+	),
 	"target?": type("string").describe("symbol name or 0x address"),
 	"name?": type("string").describe("new name (rename)"),
 	"text?": type("string").describe("comment text"),
 	"repeatable?": type("boolean").describe("repeatable comment"),
 	"decl?": type("string").describe("C declaration (set_type)"),
-	"code?": type("string").describe("Python for exec; `db` is the ida_domain Database; namespace persists per db"),
+	"code?": type("string").describe("Python for exec; namespace persists per db"),
 	"save?": type("boolean").describe("close: save first (default true)"),
 	"timeout?": type("number").describe("exec timeout seconds"),
 });
 
-/** Parameters accepted by the `ida` tool. */
-export type IdaParams = typeof idaSchema.infer;
-/** Actions supported by the `ida` tool. */
-export type IdaAction = IdaParams["action"];
+/** Parameters accepted by either disassembler tool. */
+export type DisasmParams = typeof disasmSchema.infer;
+/** Actions supported by either disassembler tool. */
+export type DisasmAction = DisasmParams["action"];
 
-/** Structured details attached to `ida` tool results. */
-export interface IdaToolDetails {
-	action: IdaAction;
+/** Structured details attached to disassembler tool results. */
+export interface DisasmToolDetails {
+	action: DisasmAction;
 	db?: string;
 	meta?: OutputMeta;
 }
 
-interface IdaExecResult {
+interface ExecResult {
 	output: string;
 	value: string | null;
 	error: string | null;
@@ -70,14 +75,14 @@ function stringArg(args: unknown, key: string): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-function requireArg(value: string | undefined, name: string, action: IdaAction): string {
+function requireArg(value: string | undefined, name: string, action: DisasmAction): string {
 	if (value === undefined || value.trim() === "") throw new ToolError(`${name} is required for ${action}`);
 	return value;
 }
 
-/** IDA Pro tool: lifecycle, structured edits, and Python `exec` against process-wide shared IDBs. */
-export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
-	readonly name = "ida";
+/** Lifecycle, edits, and Python scripting for backend databases shared across agents. */
+export class DisasmTool implements AgentTool<typeof disasmSchema, DisasmToolDetails> {
+	readonly name: DisasmBackendId;
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const action = stringArg(args, "action");
 		if (action === "list") return "read";
@@ -94,35 +99,44 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 		if (code) lines.push(`Code: ${truncateForPrompt(code)}`);
 		return lines;
 	};
-	readonly label = "IDA";
-	readonly summary = "Open, edit, and script IDA Pro databases shared across agents";
+	readonly label: string;
+	readonly summary: string;
 	readonly description: string;
-	readonly parameters = idaSchema;
+	readonly parameters = disasmSchema;
 	readonly strict = true;
 	readonly loadMode = "discoverable";
 
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(idaDescription);
+	constructor(
+		private readonly session: ToolSession,
+		backend: DisasmBackendId,
+	) {
+		this.name = backend;
+		this.label = DISASM_BACKENDS[backend].label;
+		this.summary =
+			backend === "ida"
+				? "Open, edit, and script IDA Pro databases shared across agents"
+				: "Open, edit, and script Ghidra programs shared across agents";
+		this.description = prompt.render(backend === "ida" ? idaDescription : ghidraDescription);
 	}
 
-	/** Create the tool when `ida.enabled` is on. */
-	static createIf(session: ToolSession): IdaTool | null {
-		return cfgIdaAvailable.get(session.settings) ? new IdaTool(session) : null;
+	/** Create the tool only when its backend serves this session. */
+	static createIf(session: ToolSession, backend: DisasmBackendId): DisasmTool | null {
+		return cfgDisasmBackend.get(session.settings) === backend ? new DisasmTool(session, backend) : null;
 	}
 
 	async execute(
 		_toolCallId: string,
-		params: IdaParams,
+		params: DisasmParams,
 		signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<IdaToolDetails>,
+		_onUpdate?: AgentToolUpdateCallback<DisasmToolDetails>,
 		_context?: AgentToolContext,
-	): Promise<AgentToolResult<IdaToolDetails>> {
-		const details: IdaToolDetails = { action: params.action };
+	): Promise<AgentToolResult<DisasmToolDetails>> {
+		const details: DisasmToolDetails = { action: params.action };
 		const result = toolResult(details);
 		switch (params.action) {
 			case "list": {
-				const dbs = await listIdaDatabases(this.session);
-				if (dbs.length === 0) return result.text("No IDA databases open.").done();
+				const dbs = await listDatabases(this.session, this.name);
+				if (dbs.length === 0) return result.text(`No ${this.label} databases open.`).done();
 				const lines = dbs.map(db => {
 					const { state, info, current } = db.status;
 					if (state === "opening") return `${db.id}  (opening)  ${shortenPath(db.ref)}`;
@@ -145,7 +159,11 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 			case "save": {
 				const db = await this.#resolveDb(params.db, false, signal);
 				details.db = db.id;
-				const { idb } = await db.request<{ idb: string }>("save", {}, { signal, timeoutMs: IDA_EDIT_TIMEOUT_MS });
+				const { idb } = await db.request<{ idb: string }>(
+					"save",
+					{},
+					{ signal, timeoutMs: DISASM_EDIT_TIMEOUT_MS },
+				);
 				return result.text(`Saved ${shortenPath(idb)}`).done();
 			}
 			case "close": {
@@ -163,7 +181,7 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 				const res = await db.request<{ ea: string; old: string; new: string }>(
 					"rename",
 					{ target, name },
-					{ signal, timeoutMs: IDA_EDIT_TIMEOUT_MS },
+					{ signal, timeoutMs: DISASM_EDIT_TIMEOUT_MS },
 				);
 				return result.text(`Renamed ${res.ea} ${res.old || "(unnamed)"} → ${res.new}`).done();
 			}
@@ -176,7 +194,7 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 				const res = await db.request<{ ea: string }>(
 					"comment",
 					{ target, text, repeatable },
-					{ signal, timeoutMs: IDA_EDIT_TIMEOUT_MS },
+					{ signal, timeoutMs: DISASM_EDIT_TIMEOUT_MS },
 				);
 				return result.text(`Set ${repeatable ? "repeatable " : ""}comment at ${res.ea}`).done();
 			}
@@ -188,7 +206,7 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 				const res = await db.request<{ ea: string; type: string }>(
 					"set_type",
 					{ target, decl },
-					{ signal, timeoutMs: IDA_EDIT_TIMEOUT_MS },
+					{ signal, timeoutMs: DISASM_EDIT_TIMEOUT_MS },
 				);
 				return result.text(`Typed ${res.ea} as ${res.type}`).done();
 			}
@@ -199,7 +217,7 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 				const res = await db.request<{ ea: string; name: string }>(
 					"make_function",
 					{ target },
-					{ signal, timeoutMs: IDA_EDIT_TIMEOUT_MS },
+					{ signal, timeoutMs: DISASM_EDIT_TIMEOUT_MS },
 				);
 				return result.text(`Created function ${res.name} at ${res.ea}`).done();
 			}
@@ -207,14 +225,14 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 				const code = requireArg(params.code, "code", params.action);
 				const db = await this.#resolveDb(params.db, true, signal);
 				details.db = db.id;
-				const timeoutSec = clampTimeout("ida", params.timeout, cfgToolsMaxTimeout.get(this.session.settings));
-				const res = await db.request<IdaExecResult>("exec", { code }, { signal, timeoutMs: timeoutSec * 1000 });
+				const timeoutSec = clampTimeout(this.name, params.timeout, cfgToolsMaxTimeout.get(this.session.settings));
+				const res = await db.request<ExecResult>("exec", { code }, { signal, timeoutMs: timeoutSec * 1000 });
 				const parts: string[] = [];
 				if (res.output) parts.push(res.output.trimEnd());
 				if (res.value !== null) parts.push(`=> ${res.value}`);
 				if (res.error !== null) parts.push(res.error.trimEnd());
 				const text = await enforceInlineByteCap(parts.length > 0 ? parts.join("\n") : "(no output)", {
-					saveArtifact: full => saveArtifactText(this.session, "ida", full).catch(() => undefined),
+					saveArtifact: full => saveArtifactText(this.session, this.name, full).catch(() => undefined),
 				});
 				return result
 					.text(text)
@@ -225,23 +243,23 @@ export class IdaTool implements AgentTool<typeof idaSchema, IdaToolDetails> {
 	}
 
 	/** Resolve `db` (id, path, or omitted) to an open database; `open` opens/creates it when needed. */
-	async #resolveDb(ref: string | undefined, open: boolean, signal?: AbortSignal): Promise<IdaDatabase> {
+	async #resolveDb(ref: string | undefined, open: boolean, signal?: AbortSignal): Promise<DisasmDatabase> {
 		if (!ref) {
-			const dbs = (await listIdaDatabases(this.session)).filter(db => db.status.state === "open");
-			if (dbs.length === 0) throw new ToolError("No IDA database open; pass db=<binary path>");
+			const dbs = (await listDatabases(this.session, this.name)).filter(db => db.status.state === "open");
+			if (dbs.length === 0) throw new ToolError(`No ${this.label} database open; pass db=<binary path>`);
 			if (dbs.length > 1)
-				throw new ToolError(`Multiple IDA databases open (${dbs.map(db => db.id).join(", ")}); pass db`);
+				throw new ToolError(`Multiple ${this.label} databases open (${dbs.map(db => db.id).join(", ")}); pass db`);
 			return dbs[0];
 		}
-		const byId = await findOpenIdaDatabase(this.session, ref);
+		const byId = await findOpenDatabase(this.session, this.name, ref);
 		if (byId) return byId;
 		const { path: sourcePath, arch } = splitSliceRef(ref);
 		const abs = resolveToCwd(sourcePath, this.session.cwd);
 		const stat = await fs.stat(abs).catch(() => null);
 		if (!stat?.isFile()) throw new ToolError(`db not found: ${ref}`);
-		if (open) return acquireIdaDatabase(this.session, abs, { arch, signal });
-		const loc = await locateIdb(abs, { arch });
-		const db = await findOpenIdaDatabase(this.session, loc.id);
+		if (open) return acquireDatabase(this.session, this.name, abs, { arch, signal });
+		const loc = await locateDatabase(DISASM_BACKENDS[this.name], abs, { arch });
+		const db = await findOpenDatabase(this.session, this.name, loc.id);
 		if (!db) throw new ToolError(`${ref} is not open`);
 		return db;
 	}

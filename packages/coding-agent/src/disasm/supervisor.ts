@@ -1,22 +1,21 @@
 /**
- * Supervisor for one IDA Python worker (`worker.py`), run inside the broker-supervised IDA
+ * Supervisor for one disassembler Python worker, run inside its broker-supervised
  * host daemon (`host.ts`).
  *
- * idalib supports one kernel and one open database per process, so each database gets its own
+ * Each backend keeps one analysis database per Python process, so each database gets its own
  * worker. The worker speaks NDJSON over stdin/stdout; requests are serialized, dirty databases
  * autosave when idle, and idle databases save and close themselves.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type FileLockHandle, logger, readLines, untilAborted } from "@oh-my-pi/pi-utils";
+import { type FileLockHandle, logger, readLines, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { Subprocess } from "bun";
 import { hostHasInheritableConsole, shouldHideKernelWindow } from "../eval/py/spawn-options";
 import { stageRunnerScript } from "../eval/runner-cache";
-import type { IdaRuntime } from "./runtime";
-import { type FatSelection, type IdbLocation, idbRef, sanitizeIdbName } from "./store";
+import type { DisasmBackend, WorkerRuntime } from "./backend";
+import { type FatSelection, type DatabaseLocation, databaseRef } from "./store";
 import { errorMessage } from "./protocol";
-import IDA_WORKER from "./worker.py" with { type: "text" };
 
 /** How long a worker gets to answer after SIGINT before it is killed. */
 const INTERRUPT_GRACE_MS = 5_000;
@@ -31,8 +30,8 @@ const STREAM_DRAIN_MS = 1_000;
 const STDERR_TAIL_CHARS = 64 * 1024;
 const STDERR_TAIL_LINES = 20;
 
-/** RPC methods implemented by the IDA worker. */
-export type IdaMethod =
+/** RPC methods shared by disassembler workers. */
+export type WorkerMethod =
 	| "open"
 	| "view"
 	| "exec"
@@ -44,7 +43,7 @@ export type IdaMethod =
 	| "close";
 
 /** Loader facts the worker reports when a database opens. */
-export interface IdaDatabaseInfo {
+export interface DatabaseInfo {
 	module: string;
 	format: string;
 	arch: string;
@@ -52,18 +51,18 @@ export interface IdaDatabaseInfo {
 }
 
 /** Per-request cancellation and deadline; either one interrupts a running request (SIGINT, then SIGKILL). */
-export interface IdaRequestOptions {
+export interface WorkerRequestOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 }
 
-interface IdaOpenResult extends IdaDatabaseInfo {
+interface OpenResult extends DatabaseInfo {
 	idb: string;
 }
 
 /** The request a worker is currently executing. */
-export interface IdaRunningRequest {
-	method: IdaMethod;
+export interface RunningRequest {
+	method: WorkerMethod;
 	startedAt: number;
 }
 
@@ -81,7 +80,7 @@ function delay(ms: number): { promise: Promise<void>; cancel(): void } {
 	return { promise, cancel: () => clearTimeout(timer) };
 }
 
-function parseWorkerResponse(frame: unknown): WorkerResponse | null {
+function parseWorkerResponse(frame: unknown, label: string): WorkerResponse | null {
 	if (typeof frame !== "object" || frame === null) return null;
 	if (!("id" in frame) || typeof frame.id !== "number") return null;
 	if (!("ok" in frame) || typeof frame.ok !== "boolean") return null;
@@ -94,14 +93,15 @@ function parseWorkerResponse(frame: unknown): WorkerResponse | null {
 	const message =
 		typeof error === "object" && error !== null && "message" in error && typeof error.message === "string"
 			? error.message
-			: "IDA worker request failed";
+			: `${label} worker request failed`;
 	return { id: frame.id, ok: false, message };
 }
 
-/** One open IDA database backed by a dedicated Python worker process. */
-export class IdaWorker {
-	/** Registry key from `locateIdb`. */
+/** One open disassembler database backed by a dedicated Python worker process. */
+export class DisasmWorker {
+	/** Registry key from `locateDatabase`. */
 	readonly id: string;
+	readonly #backend: DisasmBackend;
 	/** Absolute path of the binary or `.i64`/`.idb` the database was opened for. */
 	readonly sourcePath: string;
 	/** For universal binaries: the analyzed slice and its siblings. */
@@ -109,7 +109,7 @@ export class IdaWorker {
 	/** Worker process id. */
 	readonly pid: number;
 	#idbPath: string;
-	#info: IdaDatabaseInfo = { module: "", format: "", arch: "", bitness: 0 };
+	#info: DatabaseInfo = { module: "", format: "", arch: "", bitness: 0 };
 	readonly #proc: Subprocess<"pipe", "pipe", "pipe">;
 	readonly #lock: FileLockHandle;
 	readonly #streamsDrained: Promise<unknown>;
@@ -127,19 +127,21 @@ export class IdaWorker {
 	#execSinceSave = false;
 	/** Requests queued or in flight. */
 	#active = 0;
-	#current: IdaRunningRequest | null = null;
+	#current: RunningRequest | null = null;
 	#lastUsed = Date.now();
 	/** Idle time after which the database is saved and closed; 0 disables. */
 	readonly #idleCloseMs: number;
 	#autosaveTimer: Timer | undefined;
 	#idleTimer: Timer | undefined;
 
-	private constructor(
-		loc: IdbLocation,
+	constructor(
+		backend: DisasmBackend,
+		loc: DatabaseLocation,
 		proc: Subprocess<"pipe", "pipe", "pipe">,
 		lock: FileLockHandle,
 		idleCloseMs: number,
 	) {
+		this.#backend = backend;
 		this.id = loc.id;
 		this.sourcePath = loc.sourcePath;
 		this.fat = loc.fat;
@@ -154,34 +156,56 @@ export class IdaWorker {
 
 	/**
 	 * Spawn a worker for `loc` and open its database. The caller holds `lock` and has run
-	 * `prepareStoreDir`; on failure the worker is killed, a half-created store IDB is removed,
-	 * and the lock stays with the caller. The open cannot be cancelled: idalib ignores SIGINT
-	 * while opening, so an interrupt would kill the worker mid-creation.
+	 * `prepareStoreDir`; on failure the worker is killed, a half-created store database is removed,
+	 * and the lock stays with the caller. Opens cannot be cancelled; killing initial analysis
+	 * could leave an incomplete database.
 	 */
 	static async start(
-		loc: IdbLocation,
-		runtime: IdaRuntime,
+		backend: DisasmBackend,
+		loc: DatabaseLocation,
+		runtime: WorkerRuntime,
 		lock: FileLockHandle,
 		idleCloseMs: number,
-	): Promise<IdaWorker> {
-		const script = await stageRunnerScript("omp-ida-worker", "py", IDA_WORKER);
-		const proc = Bun.spawn([runtime.pythonPath, "-u", script], {
-			cwd: loc.dir,
-			env: runtime.env,
-			stdin: "pipe",
-			stdout: "pipe",
-			stderr: "pipe",
-			// Stay in the host's process group: the broker's stop/kill signals the whole group.
-			// worker.py ignores SIGTERM so the host can save and close it first.
-			detached: false,
-			windowsHide: shouldHideKernelWindow({
-				platform: process.platform,
-				hostHasInheritableConsole: hostHasInheritableConsole(),
-			}),
-		});
-		const db = new IdaWorker(loc, proc, lock, idleCloseMs);
+	): Promise<DisasmWorker> {
+		const script = await stageRunnerScript(backend.workerStageDir, "py", backend.workerScript);
+		const alias = backend.projectAlias ? await TempDir.create(`@omp-${backend.id}-project-`) : undefined;
+		const project = alias?.join("project") ?? loc.dir;
+		let proc: Subprocess<"pipe", "pipe", "pipe">;
 		try {
-			const opened = await db.request<IdaOpenResult>("open", { path: loc.openPath, new: loc.isNew });
+			if (alias) {
+				await fs.promises.symlink(loc.dir, project, process.platform === "win32" ? "junction" : "dir");
+			}
+			proc = Bun.spawn([runtime.pythonPath, "-u", script], {
+				cwd: loc.dir,
+				env: runtime.env,
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				// Stay in the host's process group: the broker's stop/kill signals the whole group.
+				// worker.py ignores SIGTERM so the host can save and close it first.
+				detached: false,
+				windowsHide: shouldHideKernelWindow({
+					platform: process.platform,
+					hostHasInheritableConsole: hostHasInheritableConsole(),
+				}),
+			});
+		} catch (error) {
+			await alias?.remove();
+			throw error;
+		}
+		void proc.exited
+			.then(() => alias?.remove())
+			.catch(error => {
+				logger.warn(`${backend.label} project alias cleanup failed`, { id: loc.id, error: errorMessage(error) });
+			});
+		const db = new DisasmWorker(backend, loc, proc, lock, idleCloseMs);
+		try {
+			const opened = await db.request<OpenResult>("open", {
+				path: loc.openPath,
+				new: loc.isNew,
+				binary: loc.stagedPath,
+				project,
+			});
 			if (db.#exitCode !== null) throw db.#exitError();
 			db.#idbPath = opened.idb;
 			db.#info = { module: opened.module, format: opened.format, arch: opened.arch, bitness: opened.bitness };
@@ -190,23 +214,23 @@ export class IdaWorker {
 			return db;
 		} catch (error) {
 			await db.#kill();
-			if (loc.kind === "store" && loc.isNew) await removeCreationLeftovers(loc);
+			if (loc.kind === "store" && loc.isNew) await removeCreationLeftovers(backend, loc);
 			throw error;
 		}
 	}
 
-	/** Reference `read` and `ida db=` resolve back to this database (see {@link idbRef}). */
+	/** Reference `read` and the backend tool resolve back to this database (see {@link databaseRef}). */
 	get ref(): string {
-		return idbRef(this);
+		return databaseRef(this);
 	}
 
-	/** Path of the IDB file as reported by IDA. */
+	/** Database path reported by the backend. */
 	get idbPath(): string {
 		return this.#idbPath;
 	}
 
 	/** Loader facts reported when the database opened. */
-	get info(): IdaDatabaseInfo {
+	get info(): DatabaseInfo {
 		return this.#info;
 	}
 
@@ -231,7 +255,7 @@ export class IdaWorker {
 	}
 
 	/** The request the worker is executing now, if any. */
-	get current(): IdaRunningRequest | null {
+	get current(): RunningRequest | null {
 		return this.#current;
 	}
 
@@ -243,7 +267,7 @@ export class IdaWorker {
 	 * waits {@link INTERRUPT_GRACE_MS} for the answer; a worker that does not answer is killed.
 	 * Worker-side failures surface as {@link ToolError}.
 	 */
-	async request<T>(method: IdaMethod, params: object, options: IdaRequestOptions = {}): Promise<T> {
+	async request<T>(method: WorkerMethod, params: object, options: WorkerRequestOptions = {}): Promise<T> {
 		if (this.#exitCode !== null) throw this.#exitError();
 		const { signal, timeoutMs } = options;
 		const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
@@ -286,8 +310,8 @@ export class IdaWorker {
 		const running = this.#current;
 		throw new ToolError(
 			running
-				? `IDA ${this.id} busy: ${running.method} running for ${Math.round((Date.now() - running.startedAt) / 1000)}s; retry later or raise timeout`
-				: `IDA ${this.id} busy: queued requests did not finish within ${Math.round(timeoutMs / 1000)}s`,
+				? `${this.#backend.label} ${this.id} busy: ${running.method} running for ${Math.round((Date.now() - running.startedAt) / 1000)}s; retry later or raise timeout`
+				: `${this.#backend.label} ${this.id} busy: queued requests did not finish within ${Math.round(timeoutMs / 1000)}s`,
 		);
 	}
 
@@ -299,7 +323,7 @@ export class IdaWorker {
 			this.#autosaveTimer = setTimeout(() => {
 				if (this.#active > 0 || this.#closing) return;
 				this.request("save", {}, { timeoutMs: CLOSE_TIMEOUT_MS }).catch(error => {
-					logger.warn("IDA autosave failed", { id: this.id, error: errorMessage(error) });
+					logger.warn(`${this.#backend.label} autosave failed`, { id: this.id, error: errorMessage(error) });
 				});
 			}, AUTOSAVE_IDLE_MS);
 			this.#autosaveTimer.unref();
@@ -308,7 +332,7 @@ export class IdaWorker {
 			this.#idleTimer = setTimeout(() => {
 				if (this.#active > 0 || this.#closing) return;
 				this.close({ save: true }).catch(error => {
-					logger.warn("IDA idle close failed", { id: this.id, error: errorMessage(error) });
+					logger.warn(`${this.#backend.label} idle close failed`, { id: this.id, error: errorMessage(error) });
 				});
 			}, this.#idleCloseMs);
 			this.#idleTimer.unref();
@@ -349,7 +373,7 @@ export class IdaWorker {
 		await Promise.all([write, this.#proc.stdin.flush()]);
 	}
 
-	async #send(method: IdaMethod, params: object, options: IdaRequestOptions): Promise<unknown> {
+	async #send(method: WorkerMethod, params: object, options: WorkerRequestOptions): Promise<unknown> {
 		if (this.#exitCode !== null) throw this.#exitError();
 		const id = this.#nextId++;
 		const response = Promise.withResolvers<unknown>();
@@ -365,7 +389,9 @@ export class IdaWorker {
 				// A broken stdin pipe is terminal; killing the worker runs the normal exit path and frees the lock.
 				this.#pending.delete(id);
 				await this.#kill();
-				throw new ToolError(`Failed to send ${method} to the IDA worker for ${this.id}: ${errorMessage(error)}`);
+				throw new ToolError(
+					`Failed to send ${method} to the ${this.#backend.label} worker for ${this.id}: ${errorMessage(error)}`,
+				);
 			}
 
 			const { signal, timeoutMs } = options;
@@ -387,7 +413,7 @@ export class IdaWorker {
 			}
 
 			try {
-				if (process.platform === "win32") {
+				if (process.platform === "win32" || this.#backend.interrupt === "frame") {
 					// Windows has no per-process SIGINT (kill terminates); worker.py reads this frame on its stdin thread.
 					await this.#writeFrame(`${JSON.stringify({ interrupt: id })}\n`);
 				} else {
@@ -409,7 +435,7 @@ export class IdaWorker {
 			this.#pending.delete(id);
 			await this.#kill();
 			throw new ToolError(
-				`IDA ${method} did not stop after interrupt; worker killed, changes since the last save are lost`,
+				`${this.#backend.label} ${method} did not stop after interrupt; worker killed, changes since the last save are lost`,
 			);
 		} finally {
 			this.#pending.delete(id);
@@ -427,16 +453,19 @@ export class IdaWorker {
 				try {
 					frame = JSON.parse(line);
 				} catch {
-					logger.warn("IDA worker wrote non-JSON to its protocol stream", {
+					logger.warn(`${this.#backend.label} worker wrote non-JSON to its protocol stream`, {
 						id: this.id,
 						line: line.slice(0, 200),
 					});
 					continue;
 				}
-				const response = parseWorkerResponse(frame);
+				const response = parseWorkerResponse(frame, this.#backend.label);
 				const entry = response ? this.#pending.get(response.id) : undefined;
 				if (!response || !entry) {
-					logger.warn("IDA worker sent an unmatched response", { id: this.id, line: line.slice(0, 200) });
+					logger.warn(`${this.#backend.label} worker sent an unmatched response`, {
+						id: this.id,
+						line: line.slice(0, 200),
+					});
 					continue;
 				}
 				this.#pending.delete(response.id);
@@ -448,7 +477,7 @@ export class IdaWorker {
 				}
 			}
 		} catch (error) {
-			logger.warn("IDA worker stdout reader failed", { id: this.id, error: errorMessage(error) });
+			logger.warn(`${this.#backend.label} worker stdout reader failed`, { id: this.id, error: errorMessage(error) });
 		}
 	}
 
@@ -460,7 +489,10 @@ export class IdaWorker {
 			}
 			this.#appendStderr(decoder.decode());
 		} catch (error) {
-			logger.debug("IDA worker stderr reader failed", { id: this.id, error: errorMessage(error) });
+			logger.debug(`${this.#backend.label} worker stderr reader failed`, {
+				id: this.id,
+				error: errorMessage(error),
+			});
 		}
 	}
 
@@ -488,7 +520,9 @@ export class IdaWorker {
 	#exitError(): ToolError {
 		const tail = this.#stderrTail.trimEnd();
 		const lines = tail ? tail.split("\n").slice(-STDERR_TAIL_LINES).join("\n") : "";
-		return new ToolError(`IDA worker for ${this.id} exited (code ${this.#exitCode})${lines ? `: ${lines}` : ""}`);
+		return new ToolError(
+			`${this.#backend.label} worker for ${this.id} exited (code ${this.#exitCode})${lines ? `: ${lines}` : ""}`,
+		);
 	}
 
 	/** SIGKILL the worker and wait for it to exit. */
@@ -509,8 +543,8 @@ export class IdaWorker {
 }
 
 /** Delete everything a failed creation left in the store dir except the staged input and the lock file. */
-async function removeCreationLeftovers(loc: IdbLocation): Promise<void> {
-	const keep = new Set([sanitizeIdbName(path.basename(loc.sourcePath)), `${path.basename(loc.lockTarget)}.lock`]);
+async function removeCreationLeftovers(backend: DisasmBackend, loc: DatabaseLocation): Promise<void> {
+	const keep = new Set([path.basename(loc.stagedPath), `${path.basename(loc.lockTarget)}.lock`]);
 	try {
 		const entries = await fs.promises.readdir(loc.dir);
 		await Promise.all(
@@ -519,6 +553,9 @@ async function removeCreationLeftovers(loc: IdbLocation): Promise<void> {
 				.map(entry => fs.promises.rm(path.join(loc.dir, entry), { recursive: true, force: true })),
 		);
 	} catch (error) {
-		logger.warn("IDA cleanup after failed database creation failed", { id: loc.id, error: errorMessage(error) });
+		logger.warn(`${backend.label} cleanup after failed database creation failed`, {
+			id: loc.id,
+			error: errorMessage(error),
+		});
 	}
 }

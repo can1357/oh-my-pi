@@ -3,9 +3,9 @@ IDA Pro (idalib) databases: lifecycle, structured edits, and Python `exec` insid
 <instruction>
 - Each open DB runs as an `omp.ida.<id>` daemon in the project's `omp ps`, shared by every agent, subagent, and omp process in the project.
 - DBs survive compaction. `list` shows them.
-- At most `ida.maxOpen` (default 4) stay open:
+- At most `disassembler.maxOpen` databases (default 4, shared with Ghidra) stay open:
   - opening another saves and closes the least recently used idle DB
-  - DBs idle for `ida.idleCloseSec` (default 15 min) are saved and closed
+  - DBs idle for `disassembler.idleCloseSec` (default 15 min) are saved and closed
   - reopening is fast but resets the `exec` namespace
 - `db` accepts a binary or `.i64`/`.idb` path (`<bin>:@<arch>` for a universal Mach-O slice), an open db id, or its daemon name.
 - `db` MAY be omitted when exactly one DB is open.

@@ -1,29 +1,37 @@
 /**
- * Cross-process contract between omp processes and the broker-supervised IDA host daemon.
+ * Cross-process contract between omp processes and the broker-supervised disassembler host daemon.
  *
- * Each open database runs in one daemon named {@link idaDaemonName} under the project's daemon
+ * Each open database runs in one daemon named {@link daemonName} under the project's daemon
  * broker (so it shows up in `omp ps`). The daemon is an omp worker (`host.ts`) that owns the
- * IDB lock and one Python worker, and serves NDJSON requests on {@link idaHostEndpoint}.
+ * database lock and one Python worker, and serves NDJSON requests on {@link hostEndpoint}.
  */
 import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { type } from "@oh-my-pi/omptype";
-export { IDA_HOST_WORKER_ARG } from "../cli/worker-selectors";
+import type { DisasmBackendId } from "./backend";
+export { DISASM_HOST_WORKER_ARG } from "../cli/worker-selectors";
 
-/** Environment key carrying the JSON {@link IdaHostConfig} for the daemon. */
-export const IDA_HOST_CONFIG_ENV = "OMP_IDA_HOST_CONFIG";
+/** Environment key carrying the JSON {@link HostConfig} for the daemon. */
+export const DISASM_HOST_CONFIG_ENV = "OMP_DISASM_HOST_CONFIG";
 
-/** Name prefix of every IDA daemon in a broker scope. */
-export const IDA_DAEMON_PREFIX = "omp.ida.";
+/** Prefix of a backend's broker-supervised database hosts. */
+export function daemonPrefix(backend: DisasmBackendId): string {
+	return `omp.${backend}.`;
+}
+
+/** Prefixes counted together toward the shared open-database limit. */
+export const DISASM_DAEMON_PREFIXES = ["omp.ida.", "omp.ghidra."];
 
 /** Broker daemon names are capped at 48 characters (`broker.ts`). */
 const DAEMON_NAME_MAX = 48;
 
 /** Broker readiness regex matched against the banner the host prints once it listens. */
-export const IDA_HOST_READY_PATTERN = String.raw`omp ida host listening on \S+`;
+export function hostReadyPattern(backend: DisasmBackendId): string {
+	return String.raw`omp ${backend} host listening on \S+`;
+}
 
 /** Banner printed on stdout once the host socket accepts connections. */
-export function idaHostReadyBanner(endpoint: string): string {
-	return `omp ida host listening on ${endpoint}`;
+export function hostReadyBanner(backend: DisasmBackendId, endpoint: string): string {
+	return `omp ${backend} host listening on ${endpoint}`;
 }
 
 /** Message text of any thrown value, for logs and wire errors. */
@@ -35,32 +43,32 @@ function hash16(text: string): string {
 	return Bun.hash.wyhash(text).toString(16).padStart(16, "0");
 }
 
-/** Broker daemon name for the database registered under `id` (a `locateIdb` id). */
-export function idaDaemonName(id: string): string {
+/** Broker daemon name for the database registered under `id` (a `locateDatabase` id). */
+export function daemonName(backend: DisasmBackendId, id: string): string {
 	const safe = id.replace(/[^A-Za-z0-9._-]/g, "_");
-	const name = `${IDA_DAEMON_PREFIX}${safe}`;
+	const name = `${daemonPrefix(backend)}${safe}`;
 	if (name.length <= DAEMON_NAME_MAX) return name;
-	const prefix = `${IDA_DAEMON_PREFIX}${hash16(id)}-`;
+	const prefix = `${daemonPrefix(backend)}${hash16(id)}-`;
 	return `${prefix}${safe.slice(0, DAEMON_NAME_MAX - prefix.length)}`;
 }
 
 /** Unix socket or Windows named pipe the host for `daemonName` listens on. */
-export function idaHostEndpoint(runtimeDir: string, daemonName: string): string {
+export function hostEndpoint(runtimeDir: string, daemonName: string): string {
 	// Hashed to stay under the ~104-byte Unix socket path limit.
-	return ipcEndpoint(runtimeDir, `ida-${hash16(daemonName)}`);
+	return ipcEndpoint(runtimeDir, `disasm-${hash16(daemonName)}`);
 }
 
 /** RPC methods an omp process may forward to the worker through `call`. */
-export const IDA_CALL_METHODS = ["view", "exec", "rename", "comment", "set_type", "make_function", "save"] as const;
+export const HOST_CALL_METHODS = ["view", "exec", "rename", "comment", "set_type", "make_function", "save"] as const;
 
 /** A method forwarded with `call`. */
-export type IdaCallMethod = (typeof IDA_CALL_METHODS)[number];
+export type HostCallMethod = (typeof HOST_CALL_METHODS)[number];
 
 const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' | 'flush'" })
 	.or({
 		id: "number",
 		op: "'call'",
-		method: type.enumerated(...IDA_CALL_METHODS),
+		method: type.enumerated(...HOST_CALL_METHODS),
 		params: "object",
 		"timeoutMs?": "number",
 	})
@@ -70,17 +78,17 @@ const hostRequestSchema = type({ id: "number", op: "'ping' | 'open' | 'status' |
 /**
  * One request frame sent to the host.
  * - `ping`: liveness probe, answered `"pong"` in any state.
- * - `open`: wait until the database is open; answers {@link IdaHostStatus} or the open failure.
- * - `status`: current {@link IdaHostStatus} without waiting.
+ * - `open`: wait until the database is open; answers {@link HostStatus} or the open failure.
+ * - `status`: current {@link HostStatus} without waiting.
  * - `call`: forward one worker request; `timeoutMs` covers the queue wait too.
  * - `cancel`: abort the caller's own pending `call` `target` (no answer).
  * - `flush`: save when there are unsaved changes; answers `{ saved }`.
  * - `close`: save (when `save`) and close; the host exits after answering.
  */
-export type IdaHostRequest = typeof hostRequestSchema.infer;
+export type HostRequest = typeof hostRequestSchema.infer;
 
 /** Decode one request line; throws on a malformed frame. */
-export function parseIdaHostRequest(line: string): IdaHostRequest {
+export function parseHostRequest(line: string): HostRequest {
 	return hostRequestSchema.assert(JSON.parse(line));
 }
 
@@ -91,10 +99,10 @@ const hostResponseSchema = type({ id: "number", ok: "true", "result?": "unknown"
 });
 
 /** One response frame from the host. */
-export type IdaHostResponse = typeof hostResponseSchema.infer;
+export type HostResponse = typeof hostResponseSchema.infer;
 
 /** Decode one response line; throws on a malformed frame. */
-export function parseIdaHostResponse(line: string): IdaHostResponse {
+export function parseHostResponse(line: string): HostResponse {
 	return hostResponseSchema.assert(JSON.parse(line));
 }
 
@@ -118,19 +126,21 @@ const hostStatusSchema = type({
  * A host's database as reported by `open`/`status`. `busy` counts queued and running requests
  * from every omp process; `lastUsed` drives LRU eviction; `dirty` means a close would save.
  */
-export type IdaHostStatus = typeof hostStatusSchema.infer;
+export type HostStatus = typeof hostStatusSchema.infer;
 
 /** Validate a `status`/`open` result. */
-export function parseIdaHostStatus(value: unknown): IdaHostStatus {
+export function parseHostStatus(value: unknown): HostStatus {
 	return hostStatusSchema.assert(value);
 }
 
 const hostConfigSchema = type({
+	backend: "'ida' | 'ghidra'",
 	endpoint: "string",
 	loc: {
 		id: "string",
 		dir: "string",
 		sourcePath: "string",
+		stagedPath: "string",
 		kind: "'store' | 'inplace'",
 		openPath: "string",
 		isNew: "boolean",
@@ -142,9 +152,9 @@ const hostConfigSchema = type({
 });
 
 /** Everything the host needs to open its database; built by the omp process that starts it. */
-export type IdaHostConfig = typeof hostConfigSchema.infer;
+export type HostConfig = typeof hostConfigSchema.infer;
 
-/** Decode the host config from {@link IDA_HOST_CONFIG_ENV}; throws on a malformed value. */
-export function parseIdaHostConfig(json: string): IdaHostConfig {
+/** Decode the host config from {@link DISASM_HOST_CONFIG_ENV}; throws on a malformed value. */
+export function parseHostConfig(json: string): HostConfig {
 	return hostConfigSchema.assert(JSON.parse(json));
 }

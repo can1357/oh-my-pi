@@ -54,13 +54,11 @@ import { type BuiltinToolName, type HiddenToolName, normalizeToolNames } from ".
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ContextNotesTool, NewContextTool } from "./context-notes";
 import { DebugTool } from "./debug";
-import { cfgIdaAvailable } from "../ida/install";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
 import { GithubTool } from "./gh";
 import { GlobTool } from "./glob";
 import { GrepTool } from "./grep";
-import { IdaTool } from "./ida";
 import { isIrcEnabled } from "../irc/messaging";
 import { FindTool, isFindEnabled } from "./jfind";
 import { LearnTool } from "./learn";
@@ -130,7 +128,6 @@ export * from "./computer";
 export * from "./computer/supervisor";
 export * from "./context-notes";
 export * from "./debug";
-export * from "./ida";
 export * from "./essential-tools";
 export * from "./eval";
 export * from "./eval-backends";
@@ -617,7 +614,6 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	ast_edit: s => new AstEditTool(s),
 	ask: AskTool.createIf,
 	debug: DebugTool.createIf,
-	ida: IdaTool.createIf,
 	eval: s => new EvalTool(s),
 	github: GithubTool.createIf,
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
@@ -803,7 +799,6 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 		if (name === "bash") return editDisabled || cfgBashEnabled.get(session.settings);
 		if (name === "eval") return allowEval;
 		if (name === "debug") return cfgDebugEnabled.get(session.settings);
-		if (name === "ida") return cfgIdaAvailable.get(session.settings);
 		if (name === "todo")
 			return (!includeYield || session.prewalkArmed === true) && cfgTodoEnabled.get(session.settings);
 		if (name === "glob") return cfgGlobEnabled.get(session.settings);

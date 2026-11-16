@@ -658,6 +658,24 @@ export interface TspPickerAction {
 	end?: boolean;
 	/** A toggle's state (`Task model ⌥P`): drawn pressed when true. */
 	on?: boolean;
+	/** Drawn in the head as an icon-only button before its esc keycap (`icon`, else the label's initial), its label and keys as tooltip; `on` tints it. */
+	head?: boolean;
+	/** A head action's icon name. */
+	icon?: string;
+	disabled?: string | true;
+}
+
+/** A picker's stepped slider. */
+export interface TspPickerLevel {
+	/** What it sets ("Thinking"). */
+	label: string;
+	/** Its steps, low to high: the terminal heats the track up the ladder (color, then motion). */
+	steps: readonly { id: string; label: string }[];
+	/** The current step's id. */
+	value: string;
+	/** The keys the program binds to step it, shown in its tooltip (`["alt", "left", "right"]`). */
+	keys?: readonly string[];
+	/** Drawn but frozen, the reason as its tooltip. */
 	disabled?: string | true;
 }
 
@@ -683,6 +701,12 @@ export interface TspPickerProps {
 	/** Plural noun for counts and empty copy ("models", "sessions"). */
 	noun?: string;
 	size?: "md" | "lg" | "screen";
+	/**
+	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
+	 * (its `composerPart: "composer"` column), left edges aligned — a drop-up for a picker acting on the draft, such as
+	 * the model switcher. Placed as if absent while no composer is drawn, and on a phone.
+	 */
+	anchor?: "composer";
 	layout?: "rows" | "cards" | "timeline" | "tree";
 	/** The program's search text (keys stay the program's); `null` hides the field. */
 	query?: string | null;
@@ -691,6 +715,8 @@ export interface TspPickerProps {
 	placeholder?: string;
 	scopes?: readonly TspPickerScope[];
 	scope?: string;
+	/** How `scopes` draw: a labeled column (default), or `"rail"`: icons only, label and count as the tooltip, kept on narrow sheets. A `group` change draws a separator. */
+	scopeStyle?: "column" | "rail";
 	tabs?: readonly { id: string; label: TspText; count?: number }[];
 	tab?: string;
 	columns?: readonly TspPickerColumn[];
@@ -717,6 +743,8 @@ export interface TspPickerProps {
 		items: readonly { id: string; label: TspText; on?: boolean; dot?: string }[];
 		selected?: string;
 	} | null;
+	/** A stepped slider docked above the action bar (the model switcher's thinking effort). A press or drag ending on another step sends `action {act:"level", value: <step id>}`. */
+	level?: TspPickerLevel | null;
 	state?: "ready" | "loading" | "error";
 	message?: TspText;
 	empty?: TspText;

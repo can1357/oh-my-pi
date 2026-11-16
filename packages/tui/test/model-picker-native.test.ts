@@ -1,10 +1,12 @@
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { TspPickerGroup, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { ModelHubComponent, type ModelHubRegistry, type ModelHubSource } from "../src/overlays/model-hub";
-import { ModelPickerComponent } from "../src/overlays/model-picker";
+import { providerMark } from "../src/overlays/model-browser";
+import { ModelPickerComponent, type ModelPickerOptions } from "../src/overlays/model-picker";
 import { initTheme } from "../src/theme";
 import type { TUI } from "../src/tui";
 
@@ -343,35 +345,181 @@ test("the Roles view picker names the active preset and ctrl+←/→ switches it
 	expect(switched).toEqual(["slow", "fast"]);
 });
 
-test("the quick picker is an md sheet with the summary below and a task-model toggle", () => {
-	const picked: string[] = [];
-	const picker = new ModelPickerComponent(
+const QUICK_MODELS = [
+	...MODELS,
+	model("demo", "demo-lite", { thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium] } }),
+	model("local", "tiny", { reasoning: false }),
+];
+
+function openQuickPicker(picked: string[], options: ModelPickerOptions = {}): ModelPickerComponent {
+	return new ModelPickerComponent(
 		ui,
 		source({ default: "demo/demo" }, ["demo/demo"]),
-		{ ...registry(MODELS), refreshIfStale: async () => false },
-		MODELS.map(entry => ({ model: entry })),
+		{ ...registry(QUICK_MODELS), refreshIfStale: async () => false },
+		QUICK_MODELS.map(entry => ({ model: entry })),
 		{
-			onPick: (_model, selector) => picked.push(`session:${selector}`),
+			onPick: (_model, selector, meta) =>
+				picked.push(`session:${selector}${meta.thinkingLevel ? `:${meta.thinkingLevel}` : ""}`),
 			onPickTask: (_model, selector) => picked.push(`task:${selector}`),
 			onCancel: () => {},
 		},
-		{ currentSelector: "demo/demo", taskModeKeys: ["alt+p"] },
+		{ currentSelector: "demo/demo", taskModeKeys: ["alt+p"], thinkingLevelFor: () => Effort.High, ...options },
 	);
+}
+
+function quickAct(picker: ModelPickerComponent, act: string, value?: string): void {
+	picker.handleNativeEvent({ type: "action", key: "", act, mods: [], ...(value !== undefined ? { value } : {}) });
+}
+
+/** Item ids the picker lists, group heads dropped. */
+function rowIds(p: TspPickerProps): string[] {
+	return (p.order ?? []).filter((entry): entry is string => typeof entry === "string");
+}
+
+test("the quick picker is a composer drop-up with a provider rail, a thinking slider and a task-model toggle", () => {
+	const picked: string[] = [];
+	const picker = openQuickPicker(picked);
 	expect(picker.describe(withoutPicker).k).not.toBe("picker");
 	let root = picker.describe(withPicker);
 	let p = props(root);
-	expect(p).toMatchObject({ size: "md", preview: "below", title: "Switch model", selected: "demo/demo" });
-	expect(p.scopes).toBeUndefined();
+	expect(p).toMatchObject({
+		size: "md",
+		anchor: "composer",
+		preview: "none",
+		scopeStyle: "rail",
+		scope: "all",
+		placeholder: "Search models, @ for quick roles…",
+		selected: "demo/demo",
+	});
+	expect(p.title).toBeUndefined();
+	expect(p.subtitle).toBeUndefined();
+	expect(root.c ?? []).toEqual([]);
+	expect(p.scopes).toEqual([
+		{ id: "all", label: "All models", icon: "list", count: 7 },
+		{ id: "provider:anthropic", label: "anthropic", mark: providerMark("anthropic"), group: "Providers", count: 2 },
+		{ id: "provider:demo", label: "demo", mark: providerMark("demo"), group: "Providers", count: 2 },
+		{ id: "provider:local", label: "local", mark: providerMark("local"), group: "Providers", count: 1 },
+		{ id: "provider:openai", label: "openai", mark: providerMark("openai"), group: "Providers", count: 2 },
+	]);
 	expect(groups(p)).toEqual(["Recent", "All"]);
-	expect(root.c?.some(child => prop(child, "layout") === "inline")).toBe(true);
+	// No action bar: only the Task / Main toggle, drawn in the head.
+	expect(p.actions).toEqual([
+		{ id: "task", label: "Task / Main", keys: ["alt", "p"], on: false, head: true, icon: "users" },
+	]);
+	expect(p.level).toEqual({
+		label: "Thinking",
+		steps: [
+			{ id: "auto", label: "Auto" },
+			{ id: "off", label: "Off" },
+			{ id: "minimal", label: "Min" },
+			{ id: "low", label: "Low" },
+			{ id: "medium", label: "Med" },
+			{ id: "high", label: "High" },
+			{ id: "xhigh", label: "XHigh" },
+		],
+		value: "high",
+		keys: ["alt", "left", "right"],
+	});
 
-	picker.handleNativeEvent({ type: "action", key: "", act: "task", mods: [] });
+	// A model without reasoning freezes the slider at Off.
+	picker.handleNativeEvent({ type: "select", key: "", item: "local/tiny" });
+	expect(props(picker.describe(withPicker)).level).toMatchObject({
+		steps: ["off", "minimal", "low", "medium", "high"].map(id => expect.objectContaining({ id })),
+		value: "off",
+		disabled: "tiny does not reason",
+	});
+
+	quickAct(picker, "task");
 	root = picker.describe(withPicker);
 	p = props(root);
-	expect(p.title).toBe("Switch task model");
-	expect(p.actions?.find(action => action.id === "task")?.on).toBe(true);
+	expect(p.placeholder).toBe("Search models for Task subagents…");
+	expect(p.actions).toEqual([
+		{ id: "task", label: "Task / Main", keys: ["alt", "p"], on: true, head: true, icon: "users" },
+	]);
 	picker.handleNativeEvent({ type: "activate", key: "", item: "openai/gpt-5.6" });
 	expect(picked).toEqual(["task:openai/gpt-5.6"]);
+});
+
+test("a provider scope lists only its models, Tab cycles scopes, and All restores the list", () => {
+	const picker = openQuickPicker([]);
+	const all = rowIds(props(picker.describe(withPicker)));
+	expect(all).toHaveLength(QUICK_MODELS.length);
+
+	quickAct(picker, "scope", "provider:openai");
+	let p = props(picker.describe(withPicker));
+	expect(p.scope).toBe("provider:openai");
+	expect(rowIds(p).toSorted()).toEqual(["openai/gpt-5.6", "openai/gpt-5.6-mini"]);
+	expect(p.total).toBe(2);
+
+	// Search applies within the scope.
+	for (const char of "mini") picker.handleInput(char);
+	expect(rowIds(props(picker.describe(withPicker)))).toEqual(["openai/gpt-5.6-mini"]);
+	quickAct(picker, "clear");
+
+	quickAct(picker, "scope", "all");
+	p = props(picker.describe(withPicker));
+	expect(p.scope).toBe("all");
+	expect(rowIds(p).toSorted()).toEqual(all.toSorted());
+
+	picker.handleInput("\t");
+	expect(props(picker.describe(withPicker)).scope).toBe("provider:anthropic");
+	picker.handleInput("\x1b[Z");
+	picker.handleInput("\x1b[Z");
+	expect(props(picker.describe(withPicker)).scope).toBe("provider:openai");
+
+	// `@` quick roles drop the scopes and come back to All.
+	picker.handleInput("@");
+	expect(props(picker.describe(withPicker)).scopes).toBeUndefined();
+	picker.handleInput("\x7f");
+	expect(props(picker.describe(withPicker)).scope).toBe("all");
+});
+
+test("alt+←/→ and the slider set the thinking level a pick applies, clamped to the picked model", () => {
+	const picked: string[] = [];
+	const picker = openQuickPicker(picked);
+	const level = () => props(picker.describe(withPicker)).level;
+
+	// Untouched, a pick leaves the level to the host.
+	picker.handleInput("\r");
+	expect(picked).toEqual(["session:demo/demo"]);
+
+	picker.handleInput("\x1b[1;3C"); // alt+→
+	expect(level()?.value).toBe("xhigh");
+	picker.handleInput("\x1b[1;3C"); // stops at the top step
+	expect(level()?.value).toBe("xhigh");
+	picker.handleInput("\x1b[1;3D"); // alt+←
+	picker.handleInput("\x1b[1;3D");
+	expect(level()?.value).toBe("medium");
+	quickAct(picker, "level", "low");
+	expect(level()?.value).toBe("low");
+	quickAct(picker, "level", "bogus");
+	expect(level()?.value).toBe("low");
+	picker.handleInput("\r");
+	expect(picked.at(-1)).toBe("session:demo/demo:low");
+
+	// The pending level clamps to the highlighted model's ladder.
+	quickAct(picker, "level", "xhigh");
+	picker.handleNativeEvent({ type: "select", key: "", item: "demo/demo-lite" });
+	expect(level()?.value).toBe("medium");
+	picker.handleNativeEvent({ type: "activate", key: "", item: "demo/demo-lite" });
+	expect(picked.at(-1)).toBe("session:demo/demo-lite:medium");
+
+	// A model without reasoning gets no level.
+	picker.handleNativeEvent({ type: "activate", key: "", item: "local/tiny" });
+	expect(picked.at(-1)).toBe("session:local/tiny");
+});
+
+test("the thinking slider is session-only: none in task mode or among quick roles", () => {
+	const picker = openQuickPicker([]);
+	expect(props(picker.describe(withPicker)).level).not.toBeNull();
+	quickAct(picker, "task");
+	expect(props(picker.describe(withPicker)).level).toBeNull();
+	quickAct(picker, "task");
+	picker.handleInput("@");
+	const p = props(picker.describe(withPicker));
+	expect(p.level).toBeNull();
+	expect(p.scopes).toBeUndefined();
+	expect(p.actions).toEqual([]);
 });
 
 test("shows a non-default service tier's own speed aggregate", () => {

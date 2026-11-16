@@ -2,27 +2,35 @@ import * as fs from "node:fs/promises";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { acquireIdaDatabase, cfgIdaAvailable, isExecutableFile, isIdaDatabasePath, SLICE_SEPARATOR } from "../ida";
+import {
+	acquireDatabase,
+	cfgDisasmBackend,
+	DISASM_BACKENDS,
+	type DisasmBackendId,
+	isExecutableFile,
+	SLICE_SEPARATOR,
+} from "../disasm";
 import type { ToolSession } from "../sdk";
 import { formatPathRelativeToCwd, resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult } from "./read-format";
 import type { ParsedSelector } from "./read-selector";
 
-/** IDA view rendered by the worker's `view` method. */
-export type IdaViewKind = "overview" | "pseudocode" | "asm" | "imports" | "exports" | "strings" | "xrefs";
+/** disassembler view rendered by the worker's `view` method. */
+export type BinaryViewKind = "overview" | "pseudocode" | "asm" | "imports" | "exports" | "strings" | "xrefs";
 
 /** Parsed `<binary>:<view>` suffix; `target` is a symbol name or `0x` address. */
-export type BinaryView = { kind: IdaViewKind; target?: string };
+export type BinaryView = { kind: BinaryViewKind; target?: string };
 
 /** An executable or IDB on disk plus the unparsed view suffix after it. */
 export interface BinaryViewTarget {
+	backend: DisasmBackendId;
 	absolutePath: string;
 	view: string;
 	/** Universal-binary slice from a leading `@<arch>` view segment; default slice when absent. */
 	arch?: string;
 }
 
-const RESERVED_VIEWS: Record<string, IdaViewKind> = { imports: "imports", exports: "exports", strings: "strings" };
+const RESERVED_VIEWS: Record<string, BinaryViewKind> = { imports: "imports", exports: "exports", strings: "strings" };
 const SLICE_PREFIX = "@";
 const XREFS_PREFIX = "xrefs:";
 const ASM_SUFFIX = ":asm";
@@ -54,19 +62,20 @@ async function isFile(absolutePath: string): Promise<boolean> {
 }
 
 /**
- * Split `readPath` into an executable/IDB file and an IDA view suffix. Returns
- * null when IDA is disabled, the path has no `:`, the whole path is an existing
+ * Split `readPath` into an executable/IDB file and an disassembler view suffix. Returns
+ * null when disassembly is disabled, the path has no `:`, the whole path is an existing
  * file, or no `:`-delimited prefix names an executable or IDB.
  */
 export async function resolveBinaryViewPath(session: ToolSession, readPath: string): Promise<BinaryViewTarget | null> {
-	if (!cfgIdaAvailable.get(session.settings)) return null;
+	const backend = cfgDisasmBackend.get(session.settings);
+	if (backend === undefined) return null;
 	if (!readPath.includes(":")) return null;
 	if (await isFile(resolveReadPath(readPath, session.cwd))) return null;
 	for (let i = readPath.lastIndexOf(":"); i > 0; i = readPath.lastIndexOf(":", i - 1)) {
 		const absolutePath = resolveReadPath(readPath.slice(0, i), session.cwd);
 		if (!(await isFile(absolutePath))) continue;
-		if (isIdaDatabasePath(absolutePath) || (await isExecutableFile(absolutePath))) {
-			return { absolutePath, ...splitSliceView(readPath.slice(i + 1)) };
+		if (DISASM_BACKENDS[backend].isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath))) {
+			return { backend, absolutePath, ...splitSliceView(readPath.slice(i + 1)) };
 		}
 	}
 	return null;
@@ -81,7 +90,7 @@ function splitSliceView(view: string): { view: string; arch?: string } {
 	return { arch, view: end < 0 ? "" : view.slice(end + 1) };
 }
 
-/** Render an IDA view of an executable or IDB, opening (or creating) its database on first use. */
+/** Render an disassembler view of an executable or IDB, opening (or creating) its database on first use. */
 export async function readBinary(
 	session: ToolSession,
 	target: BinaryViewTarget,
@@ -89,7 +98,7 @@ export async function readBinary(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<ReadToolDetails>> {
 	const view = parseBinaryView(target.view);
-	const db = await acquireIdaDatabase(session, target.absolutePath, { arch: target.arch, signal });
+	const db = await acquireDatabase(session, target.backend, target.absolutePath, { arch: target.arch, signal });
 	const { text } = await db.request<{ text: string }>("view", view, { signal, timeoutMs: VIEW_TIMEOUT_MS });
 	let output = text;
 	if (view.kind === "overview") {
