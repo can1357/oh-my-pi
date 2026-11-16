@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.20.3] - 2026-11-16
+
 ### Fixed
 
 - Committing or writing trees now correctly reports unresolved index conflicts instead of silently omitting conflicted files.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.20.3] - 2026-11-16
+
 ### Breaking Changes
 
 - Renamed the browser `tab.clickAt()` option from `clickCount` to `count`, matching `tab.click()`.
