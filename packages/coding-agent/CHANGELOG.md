@@ -75,6 +75,9 @@
 ### Fixed
 
 - Fixed Mnemopi embedding API failures (rejected key, unknown model, missing `input_type`) silently degrading recall to keyword search; they now show a warning with the provider's response, and print mode writes it to stderr ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
+### Added
+
+- Added opt-in periodic stall assessments for the main agent, with todo changes, transcript-backed agent histories and active time that remain available after parked sessions are released, preserved transcript ownership when killed agents are revived, background job completions, non-owning service completion observations, and configurable idle waking (`stallReminders`, default interval: 60 minutes) ([#15078](https://github.com/can1357/oh-my-pi/pull/15078) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.20.2] - 2026-11-14
 

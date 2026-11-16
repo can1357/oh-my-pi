@@ -102,6 +102,7 @@ export interface PrewalkCoordinatorHost {
 	hasBuiltInTool(name: string): boolean;
 	getPlanModeState(): PlanModeState | undefined;
 	setPlanModeState(state: PlanModeState | undefined): void;
+	holdStallReminderDelivery(): Disposable;
 	getPlanReferencePath(): string;
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void;
 	waitForSessionMessagePersistence(message: AgentMessage): Promise<void>;
@@ -515,6 +516,7 @@ export class PrewalkCoordinator {
 	/** Lazily enables plan-yolo's plan phase before the first prompt is built. */
 	async armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
+		using _stallReminderDelivery = this.#host.holdStallReminderDelivery();
 		this.#planYoloArmed = true;
 		const previousEnabledTools = this.#host.getEnabledToolNames();
 		const previousMountedTools = this.#host.getMountedXdevToolNames();
@@ -581,6 +583,7 @@ export class PrewalkCoordinator {
 		if (cfgOffline.get(this.#host.settings) && planYolo.target.provider !== this.#host.model()?.provider) {
 			throw new ToolError("Offline mode restricts plan handoffs to the active provider.");
 		}
+		using _stallReminderDelivery = this.#host.holdStallReminderDelivery();
 		const {
 			planFilePath,
 			planContent,
