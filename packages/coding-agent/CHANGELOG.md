@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed eval `commit` `only(...)` failing with `No changed path matches` when one of its paths or globs matched no changed file; it now keeps what the others match, deselects the rest, and reports the unmatched ones ([#19472](https://github.com/can1357/oh-my-pi/pull/19472) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
