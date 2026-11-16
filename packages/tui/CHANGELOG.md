@@ -2,31 +2,26 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Scrolling and typing in an open agent transcript no longer slows down as the transcript grows ([#19489](https://github.com/can1357/oh-my-pi/pull/19489) by [@H4vC](https://github.com/H4vC))
-- Slow-terminal rendering now resumes from output-drain notifications instead of polling, retaining the latest frame and forced repaint requests. Output failures are detected even while rendering is idle, and stale notifications cannot affect a restarted terminal.
-- Terminal shutdown queues all restoration before retiring its output writer; late writes and emergency cleanup no longer emit output after the shell/editor handoff.
-- Typing and moving the cursor in very long drafts (over 256 lines) no longer slows down ([#19488](https://github.com/can1357/oh-my-pi/pull/19488) by [@H4vC](https://github.com/H4vC))
-### Added
-
-- Added `search` prop to ModelPickerComponent, allowing the search UI to be placed in the list head or list body
-- Added the native plan review document and dock: under a Tern that draws `doc`, `buttons` and `menu`, `PlanReviewOverlay` shows the plan as an editable, commentable `doc` (quote annotations, `onPlanEdited` on in-place edits) above an Approve split button, model chip, Save and Cancel. `NativeUiEvent` gained `docChange`, `comment`, `commentNote` and `uncomment`.
-- Added provider scopes and a thinking-level slider to `ModelPickerComponent`: `ModelPickerOptions.thinkingLevelFor` enables the slider, and `onPick` receives the chosen level as `meta.thinkingLevel`. The native picker sheet gained `anchor`, `scopeStyle`, and `level` props, and picker actions gained `head` and `icon` for icon buttons in the sheet head.
-
 ### Breaking Changes
 
-- Terminals exposing `pendingOutputBytes` must implement `onOutputDrain(callback)`, returning an unsubscribe function. Terminals without output backpressure may omit both.
-- `PlanReviewOverlay` takes `options` as `PlanReviewOverlayChoice` objects (`id`, `label`, `detail`, `meta`, `disabled` reason) and reports choice ids to `onPick` and `selectOption`; `refine` adds Refine while the plan has feedback and `onSave` adds Save, which keeps the overlay open. `disabledIndices` and `externalEditorName` are gone, and `describe` takes the `DescribeContext`.
+- Terminals that support output backpressure must now implement onOutputDrain(callback), which returns an unsubscribe function; terminals without backpressure can omit both pendingOutputBytes and onOutputDrain.
+- Updated PlanReviewOverlay options to use PlanReviewOverlayChoice objects and report choice IDs to onPick and selectOption. Refine and Save actions now reflect plan feedback and saving behavior; removed disabledIndices and externalEditorName, and updated describe to receive DescribeContext.
+
+### Added
+
+- Added configurable model search placement, provider scopes, and an optional thinking-level slider to ModelPickerComponent; selected thinking levels are reported through onPick metadata. The native picker sheet now supports anchoring, scope styling, level display, and icon actions.
+- Added a native plan review document and dock with editable and commentable plans, quote annotations, plan-edit notifications, Approve, Save, and Cancel actions, plus model selection.
 
 ### Changed
 
-- Changed provider scopes to list only their models when no provider is active, and the active provider again restores all models
-- Changed thinking slider key bindings to use plain left/right arrows instead of Alt+left/right
-- Changed scope cycling to include the active provider toggling back to all models
-- Changed slider UI to include a brain icon alongside the label
-- Changed footer hint to omit the "alt+" prefix in the thinking level hint
-- Retitled `PlanSaveOverlay` "Save plan" with a Save button.
+- Provider scopes now show only the selected provider's models when a provider is chosen, with scope cycling able to return to the full model list.
+- Updated thinking-level controls to use left and right arrow keys, and refreshed the slider and footer hint presentation.
+- Retitled the plan-saving overlay to “Save plan” and updated its action label.
+
+### Fixed
+
+- Fixed slow scrolling and typing in long agent transcripts.
+- Fixed slow typing and cursor movement in drafts longer than 256 lines.
 
 ## [18.21.0] - 2026-11-16
 

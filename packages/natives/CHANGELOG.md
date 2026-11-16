@@ -4,16 +4,16 @@
 
 ### Breaking Changes
 
-- `TtyWriter` requires a drain threshold and callback, accepts only independently reopenable TTYs, and reports conservative pending UTF-8 byte bounds.
+- `TtyWriter` now requires a drain threshold and callback and only supports independently reopenable TTYs. Its pending UTF-8 byte bounds are reported conservatively.
 
 ### Changed
 
-- Large terminal repaints now encode off the JavaScript thread and release oversized buffers after draining.
+- Large terminal repaints are handled more efficiently, reducing JavaScript-thread work and releasing oversized buffers after output drains.
 
 ### Fixed
 
-- Stalled terminal writers now stop without leaking descriptors or continuing output after shutdown.
-- Terminal output preserves Unicode across chunk boundaries and replaces malformed surrogates independently in each write.
+- Fixed stalled terminal writers continuing to emit output or leaking file descriptors after shutdown.
+- Fixed terminal output preserving Unicode across chunk boundaries and safely replacing malformed surrogate sequences.
 
 ## [18.21.0] - 2026-11-16
 

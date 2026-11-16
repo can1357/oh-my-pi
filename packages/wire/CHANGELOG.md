@@ -4,9 +4,8 @@
 
 ### Added
 
-- Added optional `icon` field to `TspPickerLevel` for tooltip and accessible name
-- Added optional `search` field to `TspPickerProps` to control placement of the search UI
-- `buttons`, `menu` and `doc` kinds (`TspButtonsProps`, `TspMenuProps` with `TspMenuItem`, `TspDocProps` with `TspDocComment`); `doc` is a text kind. Events: a `doc`'s `change` (`text`), `comment`, `uncomment` and `editing`, and `checked` on a menu row's `action`
+- Added optional picker icons for tooltips and accessible names, plus an option to control the placement of the search interface.
+- Added buttons, menu, and document component kinds, including menu-row action state changes and document text editing, commenting, and uncommenting events.
 
 ## [18.18.6] - 2026-11-09
 
