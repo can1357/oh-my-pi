@@ -169,6 +169,89 @@ function relativeWithin(dir: string, target: string): string | undefined {
 	return rel.replaceAll("\\", "/");
 }
 
+/**
+ * A map keyed by resolved, case-folded paths that can drop a directory and
+ * everything below it in time proportional to what it removes.
+ */
+class PathMap<V> {
+	readonly #values = new Map<string, V>();
+	/** Entries of each directory above a key that are keys or lead to one. */
+	readonly #children = new Map<string, Set<string>>();
+
+	get(key: string): V | undefined {
+		return this.#values.get(key);
+	}
+
+	has(key: string): boolean {
+		return this.#values.has(key);
+	}
+
+	set(key: string, value: V): void {
+		if (!this.#values.has(key)) {
+			// Link `key` up to the first ancestor already linked.
+			for (
+				let child = key, parent = path.dirname(key);
+				parent !== child;
+				child = parent, parent = path.dirname(parent)
+			) {
+				const entries = this.#children.get(parent);
+				if (entries) {
+					entries.add(child);
+					break;
+				}
+				this.#children.set(parent, new Set([child]));
+			}
+		}
+		this.#values.set(key, value);
+	}
+
+	delete(key: string): void {
+		if (this.#values.delete(key) && !this.#children.has(key)) this.#unlink(key);
+	}
+
+	/** Remove `dir` and every key below it, passing each removed value to `removed`. */
+	deleteWithin(dir: string, removed?: (value: V) => void): void {
+		const stack = [dir];
+		for (let key = stack.pop(); key !== undefined; key = stack.pop()) {
+			const value = this.#values.get(key);
+			if (value !== undefined && this.#values.delete(key)) removed?.(value);
+			const entries = this.#children.get(key);
+			if (!entries) continue;
+			this.#children.delete(key);
+			for (const entry of entries) stack.push(entry);
+		}
+		this.#unlink(dir);
+	}
+
+	clear(): void {
+		this.#values.clear();
+		this.#children.clear();
+	}
+
+	values(): MapIterator<V> {
+		return this.#values.values();
+	}
+
+	[Symbol.iterator](): MapIterator<[string, V]> {
+		return this.#values.entries();
+	}
+
+	/** Detach `key`, no longer a key nor above one, from its ancestors, dropping those left empty. */
+	#unlink(key: string): void {
+		for (
+			let child = key, parent = path.dirname(key);
+			parent !== child;
+			child = parent, parent = path.dirname(parent)
+		) {
+			const entries = this.#children.get(parent);
+			if (!entries?.delete(child) || entries.size > 0) return;
+			this.#children.delete(parent);
+			// A key stays linked to its own ancestors.
+			if (this.#values.has(parent)) return;
+		}
+	}
+}
+
 function spec(base: string, pattern: string, kind: number): WatchSpec {
 	const glob = foldCase(pattern.replaceAll("\\", "/"));
 	return { base: path.resolve(base), glob: new Bun.Glob(glob), kind, deep: glob.includes("/") || glob.includes("**") };
@@ -260,8 +343,11 @@ export class WatchedFilesForwarder {
 	#delivery: Promise<void> = Promise.resolve();
 	/** Paths the client reported itself, with their size and mtime then (undefined: absent). */
 	readonly #announced = new Map<string, { at: number; snapshot: Promise<string | undefined> }>();
-	/** Creations and deletions delivered lately, by case-folded path: a repeat of one is redundant. */
-	readonly #reported = new Map<string, { type: FileChangeType; at: number }>();
+	/**
+	 * Creations and deletions delivered lately, by case-folded path, with when the server last heard
+	 * of the path: a repeat of one is redundant, and a created file touched since has changed.
+	 */
+	readonly #reported = new PathMap<{ type: FileChangeType; at: number }>();
 	#reportedPrunedAt = 0;
 	/** How far the file system's clock was last seen behind ours (network drives); rescans look back that much further. */
 	#clockLag = 0;
@@ -546,7 +632,7 @@ export class WatchedFilesForwarder {
 	 * skipped. `armed` settles once the existing tree is watched.
 	 */
 	#openTree(root: string, ended: (error: unknown) => void): { watch: Watch; armed: Promise<void> } {
-		const watchers = new Map<string, fs.FSWatcher>();
+		const watchers = new PathMap<fs.FSWatcher>();
 		let skipped = false;
 		const watch = newWatch(() => {
 			for (const watcher of watchers.values()) watcher.close();
@@ -582,13 +668,7 @@ export class WatchedFilesForwarder {
 		watch.tree = {
 			watch: watchOne,
 			covers: dir => watchers.has(foldCase(path.dirname(dir))),
-			remove: dir => {
-				for (const [key, watcher] of watchers) {
-					if (relativeWithin(dir, key) === undefined) continue;
-					watcher.close();
-					watchers.delete(key);
-				}
-			},
+			remove: dir => watchers.deleteWithin(foldCase(path.resolve(dir)), watcher => watcher.close()),
 		};
 		watchOne(root);
 		return { watch, armed: this.#walk(root, true, watchOne).then(() => {}) };
@@ -661,7 +741,7 @@ export class WatchedFilesForwarder {
 		if (since === 0) {
 			for (const target of files) {
 				if (renamedFrom) this.#record(path.join(renamedFrom, path.relative(dir, target)), true, false);
-				if (this.#wantedKinds(target) !== 0) this.#record(target, false, true);
+				if (this.#wantedKinds(target) !== 0) this.#record(target, false, true, undefined, true);
 			}
 			return;
 		}
@@ -735,7 +815,7 @@ export class WatchedFilesForwarder {
 	/** A directory went away: its files went with it, reported or not. */
 	#directoryVanished(dir: string): void {
 		for (const watch of this.#watches.values()) watch.tree?.remove(dir);
-		for (const key of this.#reported.keys()) if (relativeWithin(dir, key) !== undefined) this.#reported.delete(key);
+		this.#reported.deleteWithin(foldCase(path.resolve(dir)));
 	}
 
 	/** Re-resolve the watched directories when `target` is a spec base or one of its ancestors. */
@@ -818,11 +898,15 @@ export class WatchedFilesForwarder {
 
 	async #deliver(batch: Array<[target: string, change: PendingChange, kinds: number]>): Promise<void> {
 		// The disk answers what the events leave open: whether an `fs.watch`
-		// "rename" left the path present, and whether a changed path is a
-		// directory, which "changes" whenever its entries do (they report themselves).
+		// "rename" left the path present, whether a changed path is a
+		// directory, which "changes" whenever its entries do (they report
+		// themselves), and whether a file reported created was touched since.
 		const stats = await Promise.all(
 			batch.map(([target, { before, after }]) =>
-				after === undefined || (before && after) || this.#announcement(target)
+				after === undefined ||
+				(before && after) ||
+				(after && this.#reported.get(foldCase(path.resolve(target)))?.type === FileChangeType.Created) ||
+				this.#announcement(target)
 					? fs.promises.lstat(target).catch(() => null)
 					: undefined,
 			),
@@ -835,9 +919,18 @@ export class WatchedFilesForwarder {
 		const changes: FileEvent[] = [];
 		for (const [index, [target, change, kinds]] of batch.entries()) {
 			const stat = stats[index];
+			const key = foldCase(path.resolve(target));
+			const reported = this.#reported.get(key);
+			const last = reported && now - reported.at <= REPORTED_TTL_MS ? reported : undefined;
 			const after = change.after ?? !!stat;
+			// The server was told lately that this file was created: touched since, it changed, whatever
+			// the events guess (FSEvents keeps a new file's creation flag on its later events, so macOS
+			// reports writes to it as "rename"; a rescan takes every file it finds for new). Untouched,
+			// the event repeats the creation.
+			const touchedSinceCreated =
+				last?.type === FileChangeType.Created && !!stat && !stat.isDirectory() && stat.ctimeMs > last.at;
 			// A "rename" seen first: present now means it appeared, gone means it went.
-			const before = change.before ?? !after;
+			const before = touchedSinceCreated || (change.before ?? !after);
 			if (after && !before && change.directory === undefined && stat?.isDirectory()) this.#directoryAppeared(target);
 			if (!after && change.directory) this.#directoryVanished(target);
 			if (kinds === 0) continue;
@@ -854,11 +947,11 @@ export class WatchedFilesForwarder {
 			else if (before) type = FileChangeType.Deleted;
 			else continue;
 			// A creation after a creation (a rescan repeating an event, or the reverse) says nothing new.
-			const key = foldCase(path.resolve(target));
 			if (type !== FileChangeType.Changed) {
-				const last = this.#reported.get(key);
+				if (last?.type === type) continue;
 				this.#reported.set(key, { type, at: now });
-				if (last?.type === type && now - last.at <= REPORTED_TTL_MS) continue;
+			} else if (last?.type === FileChangeType.Created) {
+				last.at = now;
 			}
 			if (!(kinds & (1 << (type - 1)))) continue;
 			if (await this.#alreadyAnnounced(target, stat)) continue;

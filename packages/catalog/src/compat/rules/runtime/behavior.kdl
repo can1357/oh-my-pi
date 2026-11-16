@@ -529,7 +529,7 @@ behavior {
 		model "web/public"
 	}
 	role-defaults "speech" {
-		model "local/kokoro"
+		model "local/phonon-31m"
 		model "xai/grok-tts"
 		model "xai-oauth/grok-tts"
 	}

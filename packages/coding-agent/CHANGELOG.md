@@ -2,83 +2,168 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- Moved binary analysis from the standalone `ida` and `ghidra` tools into the backend-neutral `dsm` namespace (`xd://eval/dsm`).
+- Replaced the `ida.enabled`, `ida.maxOpen`, and `ida.idleCloseSec` settings with `disassembler.backend`, `disassembler.maxOpen`, and `disassembler.idleCloseSec`; shared disassembler database APIs are now available under `@oh-my-pi/pi-coding-agent/disasm`.
+
 ### Added
 
-- Subagents now preserve @upstream provider pinning on inherited models
-- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
-- Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
-- Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` fires the rule again on later matching turns, at most once per turn and never on the retry or follow-up turn its own reminder started ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
+- Added Tern plan review editing and comments: double-click plans to edit them, select text to add Google Docs-style comments, and send comments to Refine.
+- Added Ghidra support with automatic setup of Ghidra, JDK, and PyGhidra when analysis is explicitly requested; Auto mode uses an installed IDA Pro when available and otherwise falls back to Ghidra.
+- Added support for sharing live analysis databases with child agents through `db.handle()` and `dsm.open(handle)`.
+- Added a `Force Remove` option to `worktree.onExit` that removes session-created worktrees without prompting, including worktrees with uncommitted changes; new commits remain on the worktree branch.
 
 ### Changed
 
-- `write proc://<id>/kill` now takes `content` like every other write (send `""`; it is ignored)
-- The install script now prints the exact command for your shell (zsh, bash, fish, or sh) to add the install directory to your PATH ([#19099](https://github.com/can1357/oh-my-pi/pull/19099) by [@wescopeland](https://github.com/wescopeland))
-- `grep`, `glob` and `find` below an ovnfs checkout are answered by its daemon through the natives, found from the mount table, so they no longer depend on `ovnfs.path` or on `ovnfs status` finding the daemon, and `find` gains the speed-up `grep` and `glob` had
-- Secret redaction no longer rescans the whole conversation on every request: text already redacted in an earlier request is reused until a new secret changes the outcome, and `secrets.yml` regex rules skip text missing their leading literal, cutting redaction on a large session from 17–55 ms to about 1 ms per request and the first request after loading by 2–4×
-- Trimmed the default system prompt: the tool-choice rules now only point to `read`, `edit` and `find`; the reasoning-format, AST and subagent-limit guidance is gone (`ast_edit`/`ast_grep` state their preference in their own summaries); the workflow, delivery and critical rules are shorter and no longer repeat each other; Spotlight's note on how tool results are shaped is a short list under Tool I/O instead of a paragraph at the end; and xd:// devices are listed by bare name
-- `edit.modelVariants` now picks the longest matching model pattern instead of the first, so a specific key like `openai/gpt-5` wins over `gpt` whatever the config order ([#17835](https://github.com/can1357/oh-my-pi/pull/17835) by [@DeprecatedLuke](https://github.com/DeprecatedLuke))
-- Browser tabs open in omp's own headless WebKit engine instead of managed Chromium when the engine, ABKit, is installed (`~/.o2/lib/abkit/ABHost`, `ABHost.exe` on Windows, the location Tern uses too; or the `browser.webkitPath` setting / `PI_BROWSER_WEBKIT_PATH`): pages see a visible, focused window with no automation flag, and a default tab runs no omp script in the page (console, errors and the request log come from the engine; `route`, geolocation/locale/offline emulation, `vitals` and `reactEnable` add page code only when called; response bodies are unavailable there). Chromium still opens `headed` tabs where the engine ships no viewer and takes over, saying why, when the engine cannot start; `app: "chromium"` picks Chromium for one open and `app: "webkit"` requires WebKit (with `headed: true` its tab opens in a window), and the `browser.webkit` setting or `PI_BROWSER_WEBKIT=0` turns it off. On macOS the engine has WebGL, WebGPU, silent video and audio playback, Web Audio, WebRTC, WebAuthn, gamepads and Web Share, and its TLS handshake, HTTP/2 settings and request headers are the ones Safari sends
-- omp downloads its WebKit engine, ABKit, from build.stencil.so into `~/.o2/lib/abkit` (checked against the build's SHA-256) for `app: "webkit"` when it is missing, and before Chrome for Testing when an open finds no browser installed; a failed download leaves that open on Chromium and says why
-- The `task` tool description now lists only the delivery rules (results auto-deliver, `wait`, unverified `completed`); the `read proc://`, `write proc://<id>/kill`, job-expiry and `write agent://` reference arrives with the session's first spawn result
-- The `ask.timeout` setting, README and RPC schema docs now describe the `ask` tool as an HTML form that submits its current values on timeout, not a question picker that auto-selects an option
-- The `bash` tool description lists the embedded shell's in-process builtins again, straight from the shell, so it follows every `PI_DISABLE_*` switch and the platform
-- `read`'s selectors for SQLite, archives, JSON queries, executables, video and SVG, and the sub-path grammar of `proc://`, `ssh://` and `issue://`/`pr://`, no longer ship with every request: the model reads them on demand at `xd://read/sources` and `xd://read/urls`, and they stay inline when `read` is off
-- `/browser visible` and `/browser headless` now show and hide the windows of omp's WebKit tabs at once instead of waiting for the next open: where the engine ships its viewer (macOS), each tab gets a window of its own that the user can also click, scroll and type in, and `headed: true` or `browser.headless` off keeps a tab on WebKit with a window instead of sending it to Chromium. Chromium tabs still change mode with the next open
-- In a Tern whose engine reads the DOM natively, browser `observe`, selectors, clicks, typing, element reads and waits no longer run script in the page: the engine finds elements (across frames and closed shadow roots) and every action is trusted input at the point it resolved; `type` then types at the caret its click places, and `text/` selectors ignore case
+- Updated Tern plan review with a single Approve control, comment-aware Refine option, model selection, and a Save action that writes the plan while keeping review open and plan mode active.
+- Plain executable reads now display Mach-O, ELF, and PE metadata without opening an analysis database or downloading a backend; request an overview, function details, or `dsm.open()` to begin analysis.
+- Improved the model switcher (`Alt+P` / `/switch`) with provider filtering and per-switch thinking-level selection. In Tern, it now opens above the composer with integrated search, provider and Task/Main filters, and a thinking-level slider.
 
 ### Fixed
 
-- `write` no longer fails with "content is required" on strict-mode providers such as Wafer and Fireworks, where models sent `content: null` for an ordinary file write
-- A seance `task` whose `sourceSession` id belongs to another project now fails with a hint to pass that session's `.jsonl` path, which works from any project, instead of only "was not found" ([#19095](https://github.com/can1357/oh-my-pi/pull/19095) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- On Windows, a `mnemopi.dbPath` of `~/…` now resolves to a native path (`C:\Users\you\mnemopi\custom.db`) instead of mixing `\` and `/` ([#19106](https://github.com/can1357/oh-my-pi/pull/19106) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- Advisors no longer get repeat-read warnings for reads another advisor made; each advisor now keeps its own tool state (snapshots, conflict history, repeat-read counts) ([#18834](https://github.com/can1357/oh-my-pi/issues/18834))
-- `/new` and switching sessions now start tools fresh: `conflict://` ids, already-reported diagnostics and repeat-read counts no longer carry over from the previous conversation, for the main agent and advisors alike
-- `/annotate session` now opens the same fullscreen message picker as `/copy` in classic terminals and Tern ([#19145](https://github.com/can1357/oh-my-pi/pull/19145) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
-- Edit responses now show inserted or replaced runs of up to 41 lines in full instead of collapsing them to `…`, so the next edit can target lines it just wrote without a "never displayed" rejection ([#19091](https://github.com/can1357/oh-my-pi/issues/19091))
-- Edit responses mark skipped lines between separate hunks with `…` instead of a blank line ([#19091](https://github.com/can1357/oh-my-pi/issues/19091))
-- After a file changes outside the edit tool (formatter, build step, another writer), lines an earlier read displayed that kept their number and content can still be edited after a partial re-read, instead of being rejected as never displayed ([#19092](https://github.com/can1357/oh-my-pi/issues/19092))
-- `omp stats` no longer freezes the dashboard for seconds each time an open Spotlight tab rebuilds after a sync ([#19118](https://github.com/can1357/oh-my-pi/pull/19118) by [@will-bogusz](https://github.com/will-bogusz))
-- In Chromium browser tabs, a click on an element inside a frame the page removes while the mouse button is down fails as unconfirmed instead of reporting a click the element never got, and sends no remaining presses of a double-click to the exposed page; a frame that navigates on the press still counts as delivered ([#19094](https://github.com/can1357/oh-my-pi/pull/19094) by [@will-bogusz](https://github.com/will-bogusz))
-- Hashline edits from a truncated `@file` mention can no longer target rows the mention never showed, and a mention whose first line exceeds the size limit no longer offers a partial line as editable ([#19093](https://github.com/can1357/oh-my-pi/pull/19093) by [@apoc](https://github.com/apoc))
-- Long tasks and stage names in the pinned TODO panel now wrap beneath their own text with the tree lines intact, instead of restarting at the panel's left edge ([#19117](https://github.com/can1357/oh-my-pi/pull/19117) by [@chan1103](https://github.com/chan1103))
-- Fixed prompt-history search returning unrelated prompts for punctuated queries such as `a/b` ([#18762](https://github.com/can1357/oh-my-pi/issues/18762)) ([#19111](https://github.com/can1357/oh-my-pi/pull/19111) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
-- `omp zsh` on Windows: `zsh/files` (`mkdir`, `rmdir`, `rm`, `mv`, `ln`) and `zstat` work on real directories instead of failing with "the filename, directory name, or volume label syntax is incorrect" ([#19146](https://github.com/can1357/oh-my-pi/pull/19146) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- `omp zsh` on Windows: after a failed `zsh/system` call, `syserror` prints the POSIX error (`Bad file descriptor`, `Illegal seek`) instead of a Windows message such as "The operation completed successfully." ([#19107](https://github.com/can1357/oh-my-pi/pull/19107) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- On Windows, `find -exec`, `xargs` and `env` no longer fail with `not found` (status 127) when running an external program such as `sh` ([#19108](https://github.com/can1357/oh-my-pi/pull/19108) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- Fixed loading a session another omp process has open (e.g. ACP `session/load` from a second process) and then exiting creating a duplicate "open-elsewhere" copy of the session ([#19103](https://github.com/can1357/oh-my-pi/issues/19103))
-- Approving a plan no longer names an untitled session when automatic titles are off (`--no-title` / `PI_NO_TITLE`) ([#19140](https://github.com/can1357/oh-my-pi/issues/19140))
-- ACP `usage_update` cost now includes what background subagents spend ([#19102](https://github.com/can1357/oh-my-pi/issues/19102)) ([#19113](https://github.com/can1357/oh-my-pi/pull/19113) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
-- Fixed false unknown-model fallback warnings on cold or stale caches for authenticated `openai-codex`, `google-antigravity`, and `google-gemini-cli` providers, stopped disabled cold-cache providers from deferring fallback warnings, and stopped lazy catalog loads from overwriting completed or failed discovery states ([#19017](https://github.com/can1357/oh-my-pi/pull/19017) by [@PGupta-Git](https://github.com/PGupta-Git))
-- ACP clients such as Orca now show an `ask` HTML form's "Other" text box inside its radio/checkbox question instead of as a second, duplicate question ([#19028](https://github.com/can1357/oh-my-pi/issues/19028))
-- Bash tool: a command that times out or is cancelled now behaves like Ctrl+C in a terminal: only what it started is stopped, and the shell keeps its variables, working directory and the `&` jobs earlier commands left running (a server or VM no longer dies with a later command's timeout)
-- MCP tools returning lists or strings no longer repeat their payload in the model's context when the server also sends SDK-wrapped structured content ([#18894](https://github.com/can1357/oh-my-pi/issues/18894), [#18920](https://github.com/can1357/oh-my-pi/pull/18920) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- In Chromium browser tabs, `page.evaluate`, `evaluateHandle`, `$eval`, `$$eval` and `waitForFunction` inside `tab.run` now see the page's own globals and custom elements, as `tab.evaluate` does, instead of `null` or `undefined`; waits support concise methods, poll at page-side intervals, reject invalid polling options, preserve abort reasons and stop polling on cancellation, disposing late results ([#18751](https://github.com/can1357/oh-my-pi/pull/18751) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `omp bench --account`, `omp dry-balance --bench`, and security scans pinned to one OAuth account sending the raw access token to providers whose API key is a structured credential (GitHub Copilot, Gemini CLI, Antigravity, Snowflake); they now send the same key normal requests do ([#19030](https://github.com/can1357/oh-my-pi/pull/19030) by [@Xytronix](https://github.com/Xytronix))
-- A hashline `PUT` whose body repeats the line just outside its range and otherwise leaves the range unchanged now adds that copy, instead of silently doing nothing while reporting an auto-repaired boundary echo ([#18234](https://github.com/can1357/oh-my-pi/pull/18234) by [@eggpeat](https://github.com/eggpeat))
-- `omp --help` lists the tool names `--tools` accepts, grouped into enabled-by-default and optional; browser and computer use are documented as `eval` features ([#19064](https://github.com/can1357/oh-my-pi/pull/19064) by [@nibblebot](https://github.com/nibblebot))
-- Added Liquid AI judges (`liquid/d1.1`, `liquid/d1-ultra`) for the `judge` role; images are resized to fit Liquid's per-request patch budget ([#18076](https://github.com/can1357/oh-my-pi/issues/18076), [#18100](https://github.com/can1357/oh-my-pi/pull/18100) by [@SuperUserA](https://github.com/SuperUserA))
-- Added Nace Drex judges (`nace/drex-max-v1.1`, `nace/drex-max-finance`, `nace/drex-v2.0`) for the `judge` role, including Drex Max image judgments ([#18950](https://github.com/can1357/oh-my-pi/pull/18950) by [@alphastorm](https://github.com/alphastorm))
-- Added the `find.hitThreshold` setting (above 0, up to 1; unset keeps 0.2): the probability a verified passage needs before `find` and `omp find` report its file or list its range, so a judge other than TypeSafe Jev can run at the cutoff that fits its calibration ([#18963](https://github.com/can1357/oh-my-pi/pull/18963) by [@alphastorm](https://github.com/alphastorm))
-- GitHub Actions watches now show per-step progress, states, and durations, with Ctrl+O expansion and native Tern Surface Protocol views ([#18945](https://github.com/can1357/oh-my-pi/pull/18945) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- Computer instructions now describe macOS `StaleRef` refusals for relabelled controls, including the new ref and the weaker role-and-label recovery candidate from a partial window read ([#18892](https://github.com/can1357/oh-my-pi/pull/18892) by [@will-bogusz](https://github.com/will-bogusz))
-- Computer-use guidance tells the agent to reread the window after `UserIntervened` on X11 as well as macOS, without undoing or replaying over the user's input ([#18784](https://github.com/can1357/oh-my-pi/pull/18784) by [@will-bogusz](https://github.com/will-bogusz))
-- Computer raise refusals say that on X11 a covered window's screenshot needs a compositing manager, instead of promising one plain X11 cannot supply ([#18783](https://github.com/can1357/oh-my-pi/pull/18783) by [@will-bogusz](https://github.com/will-bogusz))
-- The `computer` tool's takeover `type` on Windows no longer loses the end of the text in apps that read keys slowly, such as Chrome, while reporting success, and says in its output when the text was sent but the app was not seen reading it ([#19037](https://github.com/can1357/oh-my-pi/pull/19037) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `wait` returning "Nothing to wait for" after a directly messaged agent sent an `agent://all` broadcast before replying, instead of blocking for its direct reply ([#18976](https://github.com/can1357/oh-my-pi/pull/18976) by [@alphastorm](https://github.com/alphastorm))
-- Fixed the TUI marking pending or in-progress todos completed when a subagent with a matching or similar description finishes; matching todos still highlight while the subagent runs and are marked completed only through `todo` or `/todo` ([#18975](https://github.com/can1357/oh-my-pi/pull/18975) by [@alphastorm](https://github.com/alphastorm))
-- Fixed worker-thread subagents logging `Failed to bind extension … <inline-0>` on every spawn and subagents reporting themselves to Warp as separate sessions; an SDK inline extension that worker threads cannot load now logs one warning naming it ([#18980](https://github.com/can1357/oh-my-pi/pull/18980) by [@alphastorm](https://github.com/alphastorm))
-- Fixed the shell's `ls` builtin so non-numeric `-T`/`--tabsize` values (such as `ls -laT dir`, which previously listed the working directory) and overflowing `-w`/`--width` values with trailing non-digits now fail with exit 2 ([#18985](https://github.com/can1357/oh-my-pi/pull/18985) by [@alphastorm](https://github.com/alphastorm))
-- Fixed `read` JSON queries (`archive.tar:member.json?q=.x`) on text archive members failing with `not found inside archive` while preserving literal `?` member names and member or query-output line selectors ([#18970](https://github.com/can1357/oh-my-pi/pull/18970) by [@alphastorm](https://github.com/alphastorm))
-- Fixed `write` LSP diagnostics warning that a `#!` script is not executable (such as Ruff `EXE001`) on calls that mark the file executable (`chmod +x`) ([#18978](https://github.com/can1357/oh-my-pi/pull/18978) by [@alphastorm](https://github.com/alphastorm))
-- Fixed `read xd://<tool>` and `write xd://<tool>` for unambiguous wire aliases of enabled tools (such as `xd://apply_patch` when `edit` uses `apply_patch` mode) so they return tool docs, run with the tool's approval tier, and no longer fail with `No such tool` ([#18977](https://github.com/can1357/oh-my-pi/pull/18977) by [@alphastorm](https://github.com/alphastorm))
-- Fixed `yield` rejecting a JSON-string `data` payload with `expected object, received string` when the decoded value fails the output schema; it now reports the decoded field violations ([#18971](https://github.com/can1357/oh-my-pi/pull/18971) by [@alphastorm](https://github.com/alphastorm))
-- Fixed `github` `run_watch` marking failed-job logs unavailable when they contain ANSI or other terminal escape sequences, returning plain-text logs on both current and older GitHub CLI (`gh`) releases ([#18968](https://github.com/can1357/oh-my-pi/pull/18968) by [@alphastorm](https://github.com/alphastorm))
-- Fixed `web_search` leaving pages open in the shared headless browser when a search was cancelled while its page was still opening or the page failed to close, so the browser's memory no longer grows over a long session ([#19058](https://github.com/can1357/oh-my-pi/pull/19058) by [@tuschla](https://github.com/tuschla))
+- Deleting or moving large directory trees inside a project no longer stalls language-server file watching ([#19490](https://github.com/can1357/oh-my-pi/pull/19490) by [@H4vC](https://github.com/H4vC)).
+- Reduced CPU and memory usage for long-running subagents as their sessions grow ([#19486](https://github.com/can1357/oh-my-pi/pull/19486) by [@H4vC](https://github.com/H4vC)).
+- Fixed `commit.draft()` incorrectly classifying files deleted or renamed through bash or eval as “Not yours”; they now appear under Review.
 
 ### Removed
 
-- Removed `task.file` and the task tool's `taskFile` field; subagent instructions are always inline
-- Todo tasks can no longer be blocked: the `blocked` status and `blocker` note are gone from the `todo` tool, `/todo edit` (`[!]` is now an unknown marker), the HUD, ACP plans, goal continuation (which no longer pauses on a blocked-only list) and the RPC `TodoStatus`/`TodoItem` wire types and SDKs (Go, Python, Rust). A saved todo list that still holds a blocked task reads back with it pending on resume
+- Removed the legacy standalone disassembler tools and their associated prompt instructions.
+- Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet; use selection copying and double-click editing instead.
+
+## [18.21.0] - 2026-11-16
+
+### Breaking Changes
+
+- Updated the `AgentSession` run lifecycle API: `agent_end` is emitted once when a run can no longer resume, and `agent_pause` reports runs that stop while awaiting work. Replaced `hasPendingAsyncWork()`, `settleAsyncWork()`, and `suppressAutoResumeUntilPrompt()` with `isRunActive`, `wakeSources`, and `waitForRunEnd()`. Calling `abort()` now also ends runs paused on background work; RPC, JSON print, collaboration, and extension streams retain their existing per-loop `agent_end` behavior.
+
+### Added
+
+- Added configurable automatic subagent prewalk through `task.agentPrewalkAuto`, allowing per-agent `on`/`off` settings or model patterns while preserving unconditional subagent prewalk.
+- Unknown custom and discovered models now automatically detect reasoning support and remember supported reasoning effort levels for future sessions.
+- Added inline image and web-page replies: supported terminals can display local, data, and HTTP(S) images and embedded pages, while other terminals receive linked fallbacks. Added `tui.renderEmbeds` to disable this rendering.
+- Added interactive embedded pages in Tern replies, including click-to-visit and Escape-to-return navigation; common host, path, and `file:` URL forms are accepted.
+- Bash redirects can now write to all writable internal URLs, including job cancellation endpoints and handler-backed `agent://`, `cfg://`, `ssh://`, and `xd://` URLs.
+- Added image pasting to `ask` form notes and `ui.formDialog` options via `acceptImages`; pasted images are returned with `[Image #N]` markers and described for text-only models. Unsupported prompts now clearly reject image pastes.
+
+### Changed
+
+- Changed the default local text-to-speech model to Phonon 31M for faster synthesis, smaller downloads, and additional voices. Existing Kokoro voice settings migrate automatically; speaking rates now range from 0.8× to 1.3×.
+- Tern `/btw` responses now appear as folded, interactive notes at the point where they were requested, with follow-up, copy, branch, inject, and stop actions; `/btw` without a prompt still opens the history view.
+- Overlapping Bash calls now share shell state, including variables, functions, aliases, options, and traps, and background jobs started by those calls continue running independently.
+- Extensions enabled or reconfigured through `extensions` or `disabledExtensions` now load into the active session without requiring a restart.
+- Rich-text pastes made during approval steering or in dialogs now preserve Markdown formatting and images when inserted into the chat editor.
+- Moving a task or resuming a session in another project now switches its agents, extensions, custom tools, and MCP servers to match the destination project without a restart.
+
+### Fixed
+
+- Fixed status indicators incorrectly showing the agent as idle while subagents or background work could still resume the run.
+- Fixed subagents and security scans completing while child agents were still running or queued peer messages remained.
+- Fixed conflict-region resolution when a selected side is empty or shares edge lines with surrounding code.
+- MCP stdio server failures before a response now report the process exit code or terminating signal instead of only reporting closed stdout.
+- Fixed prewalk handoffs so model and reasoning-effort changes are preserved, and automatic handoffs return to the planning model when automatic prewalk is changed or disabled.
+
+## [18.20.3] - 2026-11-16
+
+### Breaking Changes
+
+- Renamed the browser `tab.clickAt()` option from `clickCount` to `count`, matching `tab.click()`.
+- Browser viewport screenshot coordinates now use the displayed image coordinates when the screenshot is scaled for the model; pass `css: true` (or `{ x, y, css: true }` for drag points) to provide viewport CSS pixels explicitly.
+- Added opt-in `mnemopi.recallRelevance` (`off`, `auto`, or `on`; default `off`) to filter automatic memory recall for task relevance using the `judge` role.
+- Added path-scoped entries for `bash.patterns` and `bashInterceptor.patterns`, resolved per working directory. Project and `--config` overlays now prepend these rules to global rules instead of replacing them.
+- Added `bash.allowedEnvVars` and per-rule `env` lists to permit explicitly named environment-variable prefixes on matching `allow` rules.
+- Subagents now preserve `@upstream` provider pinning on inherited models.
+- Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict auxiliary services to the active model's provider or disable cross-provider services.
+- Added per-rule TTSR `repeatMode` frontmatter (`once`, `after-gap`, or `always`) to override the global repeat policy.
+- Compound bash approval prompts now show each command segment separately, distinguishing allowed segments from those requiring approval.
+- Removed the `seance` agent, `/seance` command, and the task tool's `sourceSession` parameter.
+
+### Added
+
+- Added `mnemopi.embeddingQueryPrefix` and `mnemopi.embeddingInputType` configuration for asymmetric and instruction-tuned embedding models, including providers that require an `input_type`.
+
+### Changed
+
+- Browser screenshots are delivered to the model in CSS pixels up to the supported unscaled size, making viewport screenshot coordinates directly usable with browser actions; scaling guidance remains for scaled full-page and element captures.
+- Browser `waitForUrl`, `waitForResponse`, and `requests({ filter })` now support `*` glob patterns in URL strings, while other strings retain substring matching.
+- The WebKit browser engine now automatically installs and updates to the newest stable ABKit release, with versioned installations that allow updates without waiting for existing browser hosts to exit.
+- Improved browser responsiveness and recovery: unresponsive WebKit pages fail fast with actionable errors, navigation can recover busy pages, and browser operations provide clearer diagnostics for timeouts, closed tabs, unsupported event listeners, invalid routes, cookie data, and viewport changes.
+- Pressing Delete at the end of the Ctrl+R search field removes the selected prompt from history.
+- `/copy` now works while viewing a subagent and copies from that subagent's transcript.
+- `find` now returns unranked literal keyword matches when all judge requests fail.
+- `take()` and `drop()` now reject nonexistent hunk units with a clear error.
+- `edit` rejection messages now suggest the file's current tag, and edits made before conflict resolution carry over to the resolved file.
+- `/marketplace` and marketplace install/uninstall commands now report picker and catalog-load errors without exiting the session.
+- ACP sessions honor `mcp.startupTimeoutMs` for MCP servers declared by the client, and ACP form elicitations no longer repeat field labels unnecessarily.
+- Task progress from every `task.steps` subagent step is now preserved, rather than only the final step's report.
+- Pasting HTML into the composer now preserves spaces from whitespace-only inline elements and indentation inside `<pre>` blocks.
+- Queued follow-ups edited with Alt+Up are restored as queued messages instead of being sent into the active turn.
+
+### Fixed
+
+- Fixed `ida` `exec` output on IDA 9.5+ by suppressing helper deprecation warnings and preserving the updated function metadata API.
+- Expired Perplexity logins and cookies no longer return an error page as a search answer; the provider is reported as expired and the search chain continues.
+- Fixed browser WebMCP discovery and invocation on Chrome and Chromium 157 and later.
+- Private hosts written with a trailing dot are now correctly handled by Ask and `always-ask-cached` before file tools access them.
+- Fixed the TUI freezing when switching sessions from an open tool-approval prompt.
+- Fixed `/commit` and eval `commit` dropping UTF-8 BOMs or mishandling quoted and Unicode filenames during change tracking and selective commits.
+- Fixed misleading Wayland clipboard warnings when pasting an image or when the clipboard is empty.
+- Fixed JavaScript evaluation after an in-place Linux upgrade by keeping session workers tied to the session's build.
+- Deleting a session that cannot be removed no longer deletes its prompt history and statistics.
+- Fixed `read` and `write` handling of line selectors on `xd://` device URLs.
+- Fixed `eval wait()` rejecting or mishandling numeric delays; browser waits now direct users to the appropriate wait helpers.
+- Fixed browser `open` with an existing Arch Chromium profile, Tern navigation, closed external Tern blocks, and docked Tern viewport emulation.
+- Fixed Tern and WebKit browser calls that incorrectly exposed unsupported page event-listener APIs; errors now identify the supported alternatives.
+- Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
+- Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added the `antigravity-cli` provider for Google Antigravity over ACP, with managed binary installation, `/login antigravity-cli` Google sign-in, host tool execution, and retained conversations across tool steps and history changes.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added `/commit` to create commits containing only changes made by the agent or a selected subagent, while preserving other agents’ and the user’s work. The workflow is also available through the eval `commit` namespace, supports targeting repositories outside the session directory, handles binary and non-UTF-8 files, symlinks, file mode changes, and initial commits, and can optionally skip commit hooks with `no_verify`; use `commit.enabled` to disable it.
+- Added `auth.unpausedProviders` (the **Unpaused Providers** setting) to re-enable paused providers such as Google Antigravity at your own risk while preserving their stored login state.
+- Added configurable long-turn todo reminders through `todo.midRunNudges`, including options to disable reminders, limit them to two, or continue with increasing intervals.
+- Pasting styled content into the composer now preserves Markdown formatting and places embedded images at their original positions, while code copied from editors remains plain text.
+- Added the `session_clear` hook and extension event, emitted when `/clear` resets the current session context without changing its session ID.
+- Added path-scoped Bash allow rules, project and configuration overlay precedence, and environment-variable controls through `bash.allowedEnvVars` and per-rule `env` settings.
+- Subagents now preserve `@upstream` provider pinning when inheriting models.
+- Added deletion of individual prompts from Ctrl+R history with the Delete key.
+- Added `--no-judge`, `--no-spotlight`, and `--offline` options to restrict or disable auxiliary services outside the active model’s provider.
+- Added per-rule TTSR `repeatMode` settings (`once`, `after-gap`, or `always`) to control reminder repetition.
+- Bash approval prompts now show compound command segments individually and identify which segments are allowed or require approval.
+- Todo `done`, `drop`, and `rm` operations now accept multiple tasks in a single request, including newline-, semicolon-, comma-, or space-separated input without splitting exact task-name matches.
+- Todo status lines now display task counts when multiple targets are involved.
+
+### Changed
+
+- `/fork` and fork-from-transcript now abort an active response and fork immediately.
+- Reduced default `grep` output by showing only matching lines and limiting matches per file; configure `grep.contextBefore` and `grep.contextAfter` to include surrounding context.
+- Changed the default `spotlight.thinking` level from `low` to `med` for deeper result analysis and improved ranking, at a higher request cost.
+- When Spotlight is enabled, commonly reread source and issue or pull-request content is shown more completely before outlining, including support for additional source file types.
+
+### Fixed
+
+- `/loop` now pauses after a provider error such as a rate limit instead of resubmitting the same prompt and attaching its `@file` mentions again ([#19272](https://github.com/can1357/oh-my-pi/issues/19272)).
+- Resuming a session whose directory was deleted now continues in the current directory with a warning instead of failing.
+- Model mentions and `/switch` completions now recover discovered models after provider discovery fails at startup, retrying discovery when needed.
+- Background job results that arrive after an ACP prompt ends are now carried into the next prompt instead of starting an invisible turn.
+- OpenAI server compaction failures now proceed to the next available compaction method instead of retrying server compaction on another model.
+- Language servers now recognize edits made shortly after a file is created, including on macOS.
+- Bash commands displayed in the Pseudo shell view now remain accurate while streaming through heredocs, substitutions, loops, continuations, arithmetic expressions, and background execution.
+- Resuming a session or reviving a subagent after a retry fallback with a thinking suffix (e.g. `:xhigh`) now restores the primary model's own thinking level instead of keeping the fallback's ([#19273](https://github.com/can1357/oh-my-pi/issues/19273)).
 
 ## [18.20.0] - 2026-11-12
 

@@ -12,6 +12,7 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 - [`packages/coding-agent/src/export/ttsr-settings.ts`](../packages/coding-agent/src/export/ttsr-settings.ts)
 - [`packages/coding-agent/src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
 - [`packages/coding-agent/src/prompts/system/ttsr-interrupt.md`](../packages/coding-agent/src/prompts/system/ttsr-interrupt.md)
+- [`packages/coding-agent/src/prompts/system/ttsr-prose-notice.md`](../packages/coding-agent/src/prompts/system/ttsr-prose-notice.md)
 - [`packages/coding-agent/src/prompts/system/ttsr-warning.md`](../packages/coding-agent/src/prompts/system/ttsr-warning.md)
 - [`packages/coding-agent/src/prompts/system/ttsr-tool-reminder.md`](../packages/coding-agent/src/prompts/system/ttsr-tool-reminder.md)
 - [`packages/coding-agent/src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
@@ -140,7 +141,7 @@ After the 50ms timeout, the scheduled task first verifies that its retry token, 
 1. clears the abort-pending flag and per-tool reminder buckets
 2. reads `ttsrManager.getSettings().contextMode`
 3. if `contextMode === "discard"`, drops the targeted partial assistant output with `agent.replaceMessages(...slice(0, targetAssistantIndex))`
-4. builds injection content from pending rules using `ttsr-interrupt.md`
+4. builds injection content from pending rules using `ttsr-interrupt.md` — this is the abort/retry path, where the rule did interrupt the output, so the interrupting template is the truthful one
 5. appends a hidden runtime custom message and persists a matching `custom_message` entry with `customType: "ttsr-injection"` and `details.rules`
 6. marks/persists those rule names through a `ttsr_injection` entry and schedules a continuation with the session's agent-continue scheduler. If the interrupted run is still busy, the scheduler waits for it to settle and retries; skipped or failed continuations release the resume gate.
 
@@ -177,7 +178,14 @@ Non-interrupting matches split by `matchContext.source`:
 
 - **Bridged AgentTool calls (Cursor exec handlers, eval).** These dispatches bypass the agent loop, so `afterToolCall` never runs for them. Finalized inner calls are checked at the `ExtensionToolWrapper` boundary, which passes the call's tool context to `TtsrCoordinator.afterBridgedToolCall`. When that context carries an `addAdditionalContext` sink, the reminder is delivered through it as passive context (the Cursor exec bridge installs a sink whenever the session supplies a tool context, and delivers after its buffered results on the next provider request) and the bridged result stays untouched. A bridged call with no sink has no trusted channel, so the reminder is prepended to its result as a leading text block instead; eval-bridged calls take this fallback today. Prelude host calls (`browser.*`, `computer.*`, `tab.run`) are not AgentTool dispatches and stay outside this path.
 
-- **`source === "text"` / `"thinking"` (prose-source match).** The rule is queued in the pending injections. After a successful non-error, non-aborted assistant message, `TtsrCoordinator` queues the hidden `ttsr-injection` custom message with `agent.followUp()` and schedules continuation after 1ms. These deferred non-interrupting prose matches do not emit `ttsr_triggered`; that event is emitted for actual interrupt paths and for non-interrupting per-tool reminders.
+- **`source === "text"` / `"thinking"` (prose-source match).** The rule is queued in the pending injections. After a successful non-error, non-aborted assistant message, `TtsrCoordinator` queues the hidden `ttsr-injection` custom message with `agent.followUp()` and schedules continuation after 1ms. These deferred non-interrupting prose matches do not emit `ttsr_triggered`; that event is emitted for actual interrupt paths and for non-interrupting per-tool reminders. The deferred message is rendered with `ttsr-prose-notice.md`: the rule matched output it did not interrupt, so the notice states that the output was not interrupted by the rule. It deliberately claims nothing else about the output — a `length` stop truncates it and a `toolUse` stop continues into tool calls.
+
+  ```xml
+  <system-reminder reason="rule_violation" rule="{{name}}" path="{{path}}">
+  ...
+  {{content}}
+  </system-reminder>
+  ```
 
 Within a matching batch, each rule is attached to exactly one sibling tool call: if multiple sibling calls would satisfy the same rule, the first claimed bucket wins. Multiple distinct rules can still share one tool call's passive context.
 

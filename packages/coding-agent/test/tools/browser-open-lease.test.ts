@@ -161,12 +161,15 @@ describe("browser open — requested timeout bounds the whole acquisition (#6365
 describe("browser open — caller cancellation rolls back the fresh browser (#6365)", () => {
 	it("aborting before tab publication rejects with ToolAbortError and leaves both maps empty", async () => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
-		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
+		const browserClosed = Promise.withResolvers<void>();
+		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => browserClosed.resolve());
 		const openSplitGate = Promise.withResolvers<void>();
+		const openSplitEntered = Promise.withResolvers<void>();
 		const surfaceClosed: string[] = [];
 		spyOn(CmuxSocketClient.prototype, "request").mockImplementation(
 			async (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> => {
 				if (method === "browser.open_split") {
+					openSplitEntered.resolve();
 					await openSplitGate.promise;
 					return { surface_id: "surface-abort", url: "about:blank" };
 				}
@@ -188,7 +191,7 @@ describe("browser open — caller cancellation rolls back the fresh browser (#63
 
 		// Browser acquisition has resolved; tab acquisition is parked in
 		// `open_split`. Cancel here — before any tab is published.
-		await Promise.resolve();
+		await openSplitEntered.promise;
 		controller.abort();
 
 		const outcome = await settled;
@@ -196,15 +199,17 @@ describe("browser open — caller cancellation rolls back the fresh browser (#63
 		if (outcome.ok) throw new Error("unreachable");
 		expect(outcome.err).toBeInstanceOf(ToolAbortError);
 
-		// The open-acquisition lease rollback disposes the fresh browser exactly
-		// once and leaves nothing owned solely by the failed open.
+		expect(getTabsMapForTest().has("fresh")).toBe(false);
+
+		// The tab acquisition holds the browser until its in-flight `open_split`
+		// unwinds; then the late surface is closed and the fresh browser is
+		// disposed exactly once, leaving nothing owned solely by the failed open.
+		openSplitGate.resolve();
+		await browserClosed.promise;
+		expect(surfaceClosed).toEqual(["surface-abort"]);
 		expect(getTabsMapForTest().has("fresh")).toBe(false);
 		expect(registry.getBrowsersMapForTest().size).toBe(0);
 		expect(closeSpy).toHaveBeenCalledTimes(1);
-
-		// Let the orphaned acquisition unwind so it does not leak past the test.
-		openSplitGate.resolve();
-		await Promise.resolve();
 	});
 });
 

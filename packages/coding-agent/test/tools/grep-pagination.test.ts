@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { GrepTool } from "../../src/tools/grep";
+import { GrepTool, MULTI_FILE_PER_FILE_MATCHES, SINGLE_FILE_MATCHES } from "../../src/tools/grep";
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -50,11 +50,13 @@ describe("grep file pagination", () => {
 		const second = await tool.execute("page-2", { pattern: "needle", path: ".", skip: 20 });
 		expect(second.details?.files).toEqual([...names.slice(20), "hot.txt"]);
 		const text = textOf(second);
-		// The hot file keeps its first 20 matches, and the model is told so.
-		expect(text).toContain("needle 19");
-		expect(text).not.toContain("needle 20");
-		expect(text).toContain("More than 20 matches in hot.txt; grep keeps the first 20 per file");
-		expect(text).toContain("Search one file alone for up to 200.");
+		// The hot file keeps its first matches up to the cap, and the model is told so.
+		expect(text).toContain(`needle ${MULTI_FILE_PER_FILE_MATCHES - 1}`);
+		expect(text).not.toContain(`needle ${MULTI_FILE_PER_FILE_MATCHES}`);
+		expect(text).toContain(
+			`More than ${MULTI_FILE_PER_FILE_MATCHES} matches in hot.txt; grep keeps the first ${MULTI_FILE_PER_FILE_MATCHES} per file`,
+		);
+		expect(text).toContain(`Search one file alone for up to ${SINGLE_FILE_MATCHES}.`);
 		expect(text).not.toContain("skip=");
 
 		const alone = textOf(await tool.execute("hot-alone", { pattern: "needle", path: "hot.txt" }));
@@ -81,29 +83,37 @@ describe("grep file pagination", () => {
 		const tool = newTool();
 
 		const text = textOf(await tool.execute("single", { pattern: "needle", path: "big.txt" }));
-		expect(text).toContain("needle 199");
-		expect(text).not.toContain("needle 200");
-		expect(text).toContain("More than 200 matches; grep keeps the first 200 in a file.");
+		expect(text).toContain(`needle ${SINGLE_FILE_MATCHES - 1}`);
+		expect(text).not.toContain(`needle ${SINGLE_FILE_MATCHES}`);
+		expect(text).toContain(
+			`More than ${SINGLE_FILE_MATCHES} matches; grep keeps the first ${SINGLE_FILE_MATCHES} in a file.`,
+		);
 		expect(text).toContain("Add a line range (`path:N-M`)");
 
-		const ranged = textOf(await tool.execute("single-range", { pattern: "needle", path: "big.txt:201-250" }));
+		const ranged = textOf(await tool.execute("single-range", { pattern: "needle", path: "big.txt:231-250" }));
 		expect(ranged).toContain("needle 249");
 		expect(ranged).not.toContain("More than");
 	});
 
+	// Each match is preceded by two wide filler lines shown as context, so a capped page overflows the byte cap and a
+	// file's section ends on its last match line.
+	const wideMatches = (prefix: string, count: number, filler: string) =>
+		Array.from({ length: count }, (_, index) => `${filler}\n${filler}\nneedle ${prefix}${index} ${filler}`).join(
+			"\n",
+		);
+
 	it("keeps the cap notice when the byte cap cuts the matches", async () => {
 		const filler = "x".repeat(500);
-		await Bun.write(
-			path.join(cwd, "wide.txt"),
-			Array.from({ length: 250 }, (_, index) => `needle ${index} ${filler}`).join("\n"),
-		);
-		const tool = newTool({ context: 0 });
+		await Bun.write(path.join(cwd, "wide.txt"), wideMatches("", SINGLE_FILE_MATCHES + 10, filler));
+		const tool = newTool({ contextBefore: 2, contextAfter: 0 });
 
 		const result = await tool.execute("wide", { pattern: "needle", path: "wide.txt" });
 		const text = textOf(result);
 		expect(result.details?.truncation?.truncated).toBe(true);
-		expect(text).not.toContain("needle 199 ");
-		expect(text).toContain("More than 200 matches; grep keeps the first 200 in a file.");
+		expect(text).not.toContain(`needle ${SINGLE_FILE_MATCHES - 1} `);
+		expect(text).toContain(
+			`More than ${SINGLE_FILE_MATCHES} matches; grep keeps the first ${SINGLE_FILE_MATCHES} in a file.`,
+		);
 		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
 	});
 
@@ -113,19 +123,24 @@ describe("grep file pagination", () => {
 		for (const name of names) {
 			await Bun.write(
 				path.join(cwd, `${name}.txt`),
-				Array.from({ length: 21 }, (_, index) => `needle ${name} ${index} ${filler}`).join("\n"),
+				wideMatches(`${name} `, MULTI_FILE_PER_FILE_MATCHES + 1, filler),
 			);
 		}
-		const result = await newTool({ context: 0 }).execute("wide-many", { pattern: "needle", path: "." });
+		const result = await newTool({ contextBefore: 2, contextAfter: 0 }).execute("wide-many", {
+			pattern: "needle",
+			path: ".",
+		});
 		const text = textOf(result);
 		expect(result.details?.truncation?.truncated).toBe(true);
 		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
 		expect(text).toContain("Showing files 1-20 of 25. Use skip=20 for the next page");
-		// The byte cap drops later files whole; only files whose 20th match is still in the text are named.
-		const whole = names.filter(name => text.includes(`needle ${name} 19 `));
+		// The byte cap drops later files whole; only files whose last capped match is still in the text are named.
+		const whole = names.filter(name => text.includes(`needle ${name} ${MULTI_FILE_PER_FILE_MATCHES - 1} `));
 		expect(whole.length).toBeGreaterThan(0);
 		expect(whole.length).toBeLessThan(5);
-		expect(text).toContain(`More than 20 matches in ${whole.map(name => `${name}.txt`).join(", ")};`);
+		expect(text).toContain(
+			`More than ${MULTI_FILE_PER_FILE_MATCHES} matches in ${whole.map(name => `${name}.txt`).join(", ")};`,
+		);
 	});
 
 	it("names only capped files the result renders in full", async () => {
@@ -139,14 +154,19 @@ describe("grep file pagination", () => {
 		expect(limited).not.toContain("More than");
 
 		const both = textOf(await newTool().execute("both", { pattern: "needle", path: "." }));
-		expect(both).toContain("More than 20 matches in a.txt, b.txt;");
+		expect(both).toContain(`More than ${MULTI_FILE_PER_FILE_MATCHES} matches in a.txt, b.txt;`);
 	});
 
 	it("counts capped files past the fifth", async () => {
 		for (let index = 0; index < 6; index++) {
-			await Bun.write(path.join(cwd, `h${index}.txt`), Array.from({ length: 21 }, () => "needle").join("\n"));
+			await Bun.write(
+				path.join(cwd, `h${index}.txt`),
+				Array.from({ length: MULTI_FILE_PER_FILE_MATCHES + 1 }, () => "needle").join("\n"),
+			);
 		}
 		const text = textOf(await newTool().execute("six", { pattern: "needle", path: "." }));
-		expect(text).toContain("More than 20 matches in h0.txt, h1.txt, h2.txt, h3.txt, h4.txt and 1 more file;");
+		expect(text).toContain(
+			`More than ${MULTI_FILE_PER_FILE_MATCHES} matches in h0.txt, h1.txt, h2.txt, h3.txt, h4.txt and 1 more file;`,
+		);
 	});
 });

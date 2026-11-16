@@ -15,6 +15,7 @@ import type {
 	VercelGatewayRouting,
 } from "@oh-my-pi/pi-catalog/types";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { resolveXiaomiRequestBaseUrl } from "../registry/oauth/xiaomi";
 import {
 	COREWEAVE_PROJECT_HEADER,
 	coreWeaveProjectHeaders,
@@ -282,6 +283,7 @@ export function resolveOpenAIRequestSetup(
 			baseUrl = moonshotBaseUrl;
 		}
 	}
+	baseUrl = resolveXiaomiRequestBaseUrl({ provider: model.provider, baseUrl }, rawApiKey);
 	if (model.provider === "sakana") {
 		const sakanaBaseUrl = resolveSakanaRequestBaseUrl();
 		if (sakanaBaseUrl) {
@@ -2065,6 +2067,29 @@ export interface BuildResponsesInputOptions<TApi extends Api> {
 	requiresReasoningReplayForToolCalls?: boolean;
 	/** Naming rule for rebuilt `function_call` names; see {@link ResponsesToolNaming}. */
 	toolNaming?: ResponsesToolNaming;
+	/**
+	 * Replay no earlier turn's encrypted reasoning: the request retrying a
+	 * refused replay ({@link isOpenAIResponsesRefusedEncryptedReasoningError}).
+	 * Without it, only turns before the latest
+	 * {@link OpenAIResponsesHistoryPayload.encryptedReasoningFloor} lose theirs.
+	 */
+	dropEncryptedReasoning?: boolean;
+}
+
+/** A reasoning item carrying an opaque server-issued `encrypted_content` blob. */
+function isEncryptedReasoningItem(item: object | undefined): boolean {
+	return (
+		item !== undefined &&
+		"type" in item &&
+		item.type === "reasoning" &&
+		"encrypted_content" in item &&
+		typeof item.encrypted_content === "string"
+	);
+}
+
+/** Whether a built request replays any encrypted reasoning blob. */
+export function replaysEncryptedReasoning(input: ResponseInput | string | undefined): boolean {
+	return Array.isArray(input) && input.some(isEncryptedReasoningItem);
 }
 
 /**
@@ -2307,8 +2332,24 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		undefined,
 		filteredCompat,
 	);
-	const filterReasoning = <T extends { type?: string }>(items: T[]): T[] =>
-		options.nativeHistory?.filterReasoning ? items.filter(item => item?.type !== "reasoning") : items;
+	const filterReasoning = <T extends { type?: string }>(items: T[], dropEncrypted: boolean): T[] =>
+		options.nativeHistory?.filterReasoning
+			? items.filter(item => item?.type !== "reasoning")
+			: dropEncrypted
+				? items.filter(item => !isEncryptedReasoningItem(item))
+				: items;
+	// Turns before this index replay no encrypted reasoning: the server refused
+	// it once, and the turn that recovered (it carries the floor marker) was
+	// requested without it. Later turns' blobs were issued after the refusal.
+	let encryptedReasoningFloor = options.dropEncryptedReasoning ? transformedMessages.length : 0;
+	for (let index = transformedMessages.length - 1; index > encryptedReasoningFloor; index--) {
+		const candidate = transformedMessages[index];
+		const payload = candidate.role === "assistant" ? candidate.providerPayload : undefined;
+		if (payload?.type === "openaiResponsesHistory" && payload.encryptedReasoningFloor === true) {
+			encryptedReasoningFloor = index;
+			break;
+		}
+	}
 	const includeThinkingSignatures = options.includeThinkingSignatures ?? options.nativeHistory?.replay ?? true;
 	// Harmony-server models (gpt-5.x) reject requests whose input data reproduces
 	// reserved control-token spellings; escape the transport copy of untrusted
@@ -2317,7 +2358,9 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const escapeControlTokens = isHarmonyDialectModel(options.model);
 
 	let msgIndex = 0;
-	for (const msg of transformedMessages) {
+	for (let position = 0; position < transformedMessages.length; position++) {
+		const msg = transformedMessages[position];
+		const dropEncryptedReasoning = position < encryptedReasoningFloor;
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
 			const historyItems = options.nativeHistory
@@ -2332,10 +2375,13 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				}) ??
 					false);
 			if (historyItems && shouldReplayPayloadItems) {
-				const sanitizedItems = sanitizeOpenAIResponsesHistoryItemsForReplay(filterReasoning(historyItems), {
-					supportsImageDetailOriginal,
-					supportsComputerUse: options.model.supportsComputerUse === true,
-				});
+				const sanitizedItems = sanitizeOpenAIResponsesHistoryItemsForReplay(
+					filterReasoning(historyItems, dropEncryptedReasoning),
+					{
+						supportsImageDetailOriginal,
+						supportsComputerUse: options.model.supportsComputerUse === true,
+					},
+				);
 				const replayItems = adaptResponsesReplayItemsForModel(
 					sanitizedItems,
 					supportsCustomToolCalls,
@@ -2385,7 +2431,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
 				const rawSanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
-					filterReasoning(historyItems),
+					filterReasoning(historyItems, dropEncryptedReasoning),
 					{
 						supportsImageDetailOriginal,
 						supportsComputerUse: options.model.supportsComputerUse === true,
@@ -2462,7 +2508,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model,
 				msgIndex,
 				knownCallIds,
-				suppressHiddenEmptyFallback ? false : includeThinkingSignatures,
+				// A thinking signature embeds the turn's reasoning item, blob included.
+				suppressHiddenEmptyFallback || dropEncryptedReasoning ? false : includeThinkingSignatures,
 				customCallIds,
 				options.preserveAssistantMessageIds,
 				supportsCustomToolCalls,
@@ -4565,6 +4612,22 @@ export function isOpenAIResponsesStalePreviousResponseError(error: unknown): boo
 	return (
 		/previous[ _]?response/i.test(error.message) &&
 		/not[ _]?found|invalid|expired|stale|unsupported/i.test(error.message)
+	);
+}
+
+/**
+ * The server refused a replayed `encrypted_content` blob it no longer honors:
+ * issued under another key or credential (Meta: "reasoning `encrypted_content`
+ * was not issued to this caller", also behind gateways that prefix their own
+ * wording), expired, or unverifiable (OpenAI `invalid_encrypted_content`).
+ * Resending the same history fails the same way; one without the blobs does not.
+ */
+export function isOpenAIResponsesRefusedEncryptedReasoningError(error: unknown): boolean {
+	if (!error || typeof error !== "object") return false;
+	if ("code" in error && error.code === "invalid_encrypted_content") return true;
+	if (!("message" in error) || typeof error.message !== "string") return false;
+	return /encrypted[ _]content\b.*?\b(?:was not issued to this caller|has expired|could not be verified)/i.test(
+		error.message,
 	);
 }
 

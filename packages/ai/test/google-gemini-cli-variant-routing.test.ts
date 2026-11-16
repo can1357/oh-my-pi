@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as compatAuth from "@oh-my-pi/pi-catalog/compat/auth";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -130,6 +131,10 @@ async function captureRequest(
 }
 
 describe("google-gemini-cli effort-tier variant routing", () => {
+	// Antigravity is paused in its auth rules; its transport stays for when it is turned back on.
+	beforeEach(() => vi.spyOn(compatAuth, "providerDisabledReason").mockReturnValue(undefined));
+	afterEach(() => vi.restoreAllMocks());
+
 	it("discovers one Claude 5.5 model per family and sends each served tier its advertised level, label and cap", async () => {
 		const tiers = [Effort.Low, Effort.Medium, Effort.High] as const;
 		const families = ["claude-opus-5-5", "claude-sonnet-5-5"];

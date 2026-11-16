@@ -489,6 +489,32 @@ export declare class NativeOAuthCallback {
   dispose(): Promise<undefined>
 }
 
+/** One loaded Phonon checkpoint, English normalization, CPU inference. */
+export declare class PhononTts {
+  /**
+   * Load the checkpoint in `modelDir`: `config.json`, `tokenizer.json`,
+   * `model.q8.gguf`, and voice embeddings under `voices/` (registered by
+   * file stem) plus `default-voice.safetensors` (registered as `default`).
+   *
+   * # Errors
+   * Rejects when a required file is missing or the weights fail to load.
+   */
+  static load(modelDir: string): Promise<PhononTts>
+  /** PCM sample rate of every synthesized buffer, in Hz. */
+  get sampleRate(): number
+  /** Registered voice names, sorted. */
+  get voices(): Array<string>
+  /**
+   * Synthesize `text` as mono `f32` PCM at [`Self::sample_rate`].
+   * Requests run one at a time; a concurrent call waits for the previous one.
+   *
+   * # Errors
+   * Rejects for an unregistered voice, a `durationDelta` the conditioner
+   * rejects, or a generation failure.
+   */
+  synthesize(text: string, options?: PhononSpeechOptions | undefined | null): Promise<Float32Array>
+}
+
 /**
  * The bytes crossing one shell run's pipeline pipes, during and after the run.
  *
@@ -645,9 +671,21 @@ export declare class Shell {
    * session's state (variables, functions, aliases, options, working
    * directory) as of its last command boundary: while a command runs, the
    * state that command started from. What the fork sets stays in the
-   * fork. Never waits for the running command.
+   * fork until `adopt()` carries it back. Never waits for the running
+   * command.
    */
   fork(): Shell
+  /**
+   * Carry what `fork` (a `fork()` of this shell whose `run` settled)
+   * changed, its variables, functions, aliases, options and traps, into
+   * this shell's session: at the end of the command it runs now, or at
+   * once between commands, and into every fork taken from here on. A name
+   * both changed keeps the value of the command that ended last. Returns
+   * `false` when there is nothing to carry from or into: the fork did not
+   * start from a session's state or lost its session, or this shell has
+   * none.
+   */
+  adopt(fork: Shell): boolean
   /**
    * Run a shell command using the provided options.
    *
@@ -737,47 +775,31 @@ export declare class TextPredictor {
 }
 
 /**
- * Dedicated writer thread for one terminal fd.
- *
- * Duplicated (close-on-exec) at construction and closed on drop. The
- * duplicate keeps the pump's fd alive if the original is closed or replaced;
- * file-status flags such as `O_NONBLOCK` are shared and handled by polling for
- * `POLLOUT`. Close-on-exec keeps the terminal out of every child the process
- * spawns without explicit fd handling (`std::process::Command`, gitoxide
- * filter drivers), which could otherwise read the user's keystrokes and
- * terminal replies through it.
+ * Dedicated, cancellable terminal writer. The destination must be a TTY that
+ * can be independently reopened; pipes and files are deliberately rejected.
  */
 export declare class TtyWriter {
   /**
-   * Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
-   * when the descriptor cannot be duplicated.
+   * Start an independently opened terminal writer. onDrain runs when the
+   * pending bound crosses from above drainThreshold to at/below it, and on
+   * fatal writes even below the threshold. It does not retain the event loop.
    */
-  constructor(fd: number)
+  constructor(fd: number, drainThreshold: number, onDrain: () => void)
   /**
-   * Enqueue terminal output; never blocks. Returns the total bytes now
-   * pending (including this chunk).
-   *
-   * Reads the JS string as UTF-16 through the thread's scratch arena and
-   * transcodes it with `xutf` straight into the shared back buffer, so a
-   * warm writer costs no per-call heap allocation.
+   * Copy UTF-16 into pooled storage without UTF-8 sizing or transcoding on
+   * JS's thread. Returns a conservative pending UTF-8 byte upper bound.
    */
   write(data: string): number
-  /** Bytes accepted but not yet written to the terminal. */
+  /** Conservative UTF-8 bytes not yet written (tightened by the worker). */
   pending(): number
-  /** True once a write failed (dead PTY); queued output has been dropped. */
+  /** True after a terminal write failed; all pending output is dropped. */
   get dead(): boolean
-  /**
-   * Block the calling thread until the queue drains, the writer dies, or
-   * `timeout_ms` elapses. Returns true when fully drained. Exit paths only.
-   */
+  /** Wait for queued output until the deadline. False on timeout or failure. */
   flushSync(timeoutMs: number): boolean
   /**
-   * Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
-   *
-   * A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
-   * cannot be joined without freezing the caller: when the bounded flush
-   * times out the thread is detached instead and its dup'd fd is leaked —
-   * closing it under a blocked write would race kernel fd reuse.
+   * Drain until the deadline, then cancel and join. Never detaches a writer
+   * or leaves old output running after return. Already queued JS callbacks
+   * may still run; callers must ignore callbacks from a stopped writer.
    */
   stop(flushTimeoutMs: number): void
 }
@@ -851,8 +873,8 @@ export declare class VcsGitRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** List tree paths. */
-  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List a tree's blobs and symlinks recursively with their modes. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsTreeEntry>>
   /** List submodule paths. */
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
@@ -3263,6 +3285,20 @@ export interface PdfMarkdownResult {
  */
 export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
 
+/** Request options for [`PhononTts::synthesize`]. */
+export interface PhononSpeechOptions {
+  /**
+   * Registered voice name (a `voices/<name>.safetensors` stem); omit for the
+   * checkpoint's default voice.
+   */
+  voice?: string
+  /**
+   * `duration_delta` conditioner: negative speaks faster, positive slower.
+   * Omit for the model's natural rate (0).
+   */
+  durationDelta?: number
+}
+
 /** Retained bytes of a stream, as stream offsets `start..end`. */
 export interface PipeStreamChunk {
   /**
@@ -4013,6 +4049,11 @@ export interface ShellVizOptions {
   speed: number
   selectedNode?: string
   expandedNodes: Array<string>
+  /**
+   * The script is a command still streaming in, not yet run: its
+   * unfinished end is drawn as it will most likely continue.
+   */
+  streaming?: boolean
 }
 
 /**
@@ -4243,6 +4284,12 @@ export interface VcsCommitOptions {
   allowEmpty?: boolean
   amend?: boolean
   files?: Array<string>
+  /** Build the commit from this index file instead of the repository's. */
+  indexPath?: string
+  /** Fail with `HeadMoved` unless HEAD resolves to this revision. */
+  expectedHead?: string
+  /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
+  noVerify?: boolean
 }
 
 /** Detach copied Git metadata. */
@@ -4371,6 +4418,16 @@ export interface VcsStatusSummary {
   staged: number
   unstaged: number
   untracked: number
+}
+
+/** One blob or symlink of a tree listing. */
+export interface VcsTreeEntry {
+  path: string
+  /**
+   * Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
+   * `120000`.
+   */
+  mode: string
 }
 
 /** Validate hunk selections. */

@@ -377,7 +377,7 @@ export class SessionPublisher {
 		this.#publishedSource = current;
 		if (extends_) {
 			const added = current.slice(published.length);
-			this.#published = [...current];
+			for (const message of added) published.push(message);
 			this.#bridge.remote.notify("messages", this.#key, { kind: "append", messages: toWireData(added) });
 			return;
 		}
@@ -398,7 +398,7 @@ export class SessionPublisher {
 	 */
 	#entriesDelta(): SessionEntriesDelta | undefined {
 		const manager = this.session.sessionManager;
-		const current = manager.getEntries();
+		const current = manager.getEntriesView();
 		const revision = manager.bodyRevision;
 		const published = this.#entries;
 		const last = published.length - 1;
@@ -407,11 +407,15 @@ export class SessionPublisher {
 			current.length >= published.length &&
 			(published.length === 0 || (current[0] === published[0] && current[last] === published[last]));
 		if (extends_ && current.length === published.length) return undefined;
-		this.#entries = current;
 		this.#entriesRevision = revision;
 		const obfuscator = this.session.obfuscator;
-		if (extends_) return { kind: "append", entries: displayEntries(current.slice(published.length), obfuscator) };
-		return { kind: "replace", entries: displayEntries(current, obfuscator) };
+		if (extends_) {
+			const added = current.slice(published.length);
+			for (const entry of added) published.push(entry);
+			return { kind: "append", entries: displayEntries(added, obfuscator) };
+		}
+		this.#entries = [...current];
+		return { kind: "replace", entries: displayEntries(this.#entries, obfuscator) };
 	}
 
 	#publishView(): void {
@@ -472,7 +476,6 @@ export class SessionPublisher {
 		return {
 			providerSessionId: session.sessionId,
 			sessionName: manager.getSessionName(),
-			seanceSourceArtifactsDir: manager.getSeanceSourceArtifactsDir(),
 			leafId: manager.getLeafId(),
 			agentEffort: session.agent.state.thinkingLevel,
 			tools,

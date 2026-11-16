@@ -404,9 +404,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return value;
 	};
 
+	const WAIT_NOT_A_SLEEP =
+		"wait() takes agent or completion handles; it is not a sleep. Wait for page state with tab.waitFor*(…), or pause with await Bun.sleep(ms).";
 	const wait = async (handles, opts, ...rest) => {
 		const { timeout, raiseErrors = true } = optionsArg("wait", opts, rest, ["timeout", "raiseErrors"], "{ timeout, raiseErrors }");
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
+		// `Array.from(1800)` is `[]`: a number would otherwise return at once, silently, where a sleep was meant.
+		if (typeof handles === "number") throw new TypeError(WAIT_NOT_A_SLEEP);
 		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
 		const items = await Promise.all(raw);
 		for (const handle of items) {
@@ -594,8 +598,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				item.images = images[key];
 			}
 		}
+		// `op` goes last so a caller-supplied `op` cannot turn create into close/cancel on an existing batch.
 		return judgeBatchFrom(
-			await globalThis.__omp_call_tool__("__judge_batch__", { op: "create", items, questions, ...batchOptions }),
+			await globalThis.__omp_call_tool__("__judge_batch__", {
+				...batchOptions,
+				items,
+				questions,
+				op: "create",
+			}),
 		);
 	};
 
@@ -676,10 +686,11 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			["name", "context", "tools", "model"],
 			"{ name, context, tools, model }",
 		);
+		// `op` goes last so a caller-supplied `op` cannot turn create into close/push on an existing pool.
 		const result = await globalThis.__omp_call_tool__("__workpool__", {
-			op: "create",
 			...(agentName === undefined ? {} : { agent: agentName }),
 			...options,
+			op: "create",
 		});
 		if (!result || typeof result.name !== "string") throw new Error("workpool() did not return a pool");
 		return new WorkPool(result.name, result.agent, result.limit);

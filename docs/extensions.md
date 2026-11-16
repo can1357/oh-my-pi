@@ -515,6 +515,7 @@ Canonical event unions and payload types are in `types.ts`.
 
 - `session_start`
 - `session_before_switch` / `session_switch`
+- `session_clear`
 - `session_before_branch` / `session_branch`
 - `session_before_compact` / `session.compacting` / `session_compact`
 - `session_before_tree` / `session_tree`
@@ -529,6 +530,13 @@ loaded, so its tools, commands, and `input`/`before_agent_start` hooks apply fro
 the first request. Events emitted before it binds are not replayed. Resumed
 sessions, `--tools`, and launches with flags omp does not recognize load every
 extension before the session starts.
+
+`session_clear` receives `{ type: "session_clear" }` after a successful in-place
+context reset (`/clear` or `AgentSession.resetSessionContext()`), including an
+empty clear. Handlers are awaited before the reset returns and can invalidate
+caches of instructions already injected into model context. The session id,
+file, and persisted history are unchanged; this is not `session_switch` and
+cannot cancel the reset. A busy/rejected reset emits no event.
 
 `session.compacting` receives `{ sessionId, messages }` and can return
 `{ context?: string[]; prompt?: string; preserveData?: Record<string, unknown> }`
@@ -647,7 +655,7 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 ### Plan review lifecycle
 
-- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` uses the default file name without opening the path prompt.
+- `plan_review_requested` reports an interactive plan review with its `reviewId`, session, title, plan path and content, plus the choices in display order. Choice ids are stable (`execute`, `compact`, `keep`, `refine`, `save`); labels may change, and `keep` carries the current token count. An extension can answer it with `ctx.resolvePlanReview(...)` while the terminal picker stays live; the first answer wins. `save` writes the plan under the default file name without opening the path prompt and leaves the review open, still answerable (it fires no `plan_review_resolved`). The overlay shows Refine only while the plan has comments; `refine` with `input.feedback` is accepted either way.
 - An approval answered by an extension runs on the tier named by `input.role`, or the one currently selected in the overlay's model slider when `role` is omitted; `plan_review_requested` lists the selectable `tiers` (`role`, `provider`, `model`, and `thinkingLevel` when the role pins one; absent when fewer than two resolve). The approval executes the plan as it is at pick time: in-overlay edits if any, otherwise the plan file re-read from disk. That can differ from the reported `planContent`; an extension may write the plan file before answering to execute its own revision.
 - Tier order follows the configured role cycle, not the selected tier. The slider initially selects `default` when available; a remote `input.role` updates the displayed tier and commits the answer, preventing later terminal input from changing it.
 - `plan_review_resolved` reports how that review closed, with the selected choice id (or `undefined` when dismissed or cancelled by a session switch, a replacement review, or shutdown) and `by: "local" | "extension"`. It fires when the overlay actually closes, after every `plan_review_requested` handler has returned, so `plan_review_requested` handlers should hand off long work (a remote round-trip, a `ctx.ui` dialog) instead of awaiting it.

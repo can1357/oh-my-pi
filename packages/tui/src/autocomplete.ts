@@ -239,11 +239,12 @@ type Awaitable<T> = T | Promise<T>;
 /**
  * `^` model mention completion at the cursor. `unhandled` means no mention token there, or
  * another completion outranks it, so the async {@link AutocompleteProvider.getSuggestions} decides.
+ * `pending` is a model discovery pass that may add candidates (it never rejects); re-query once it settles.
  */
 export type ModelMentionCompletion =
 	| { kind: "unhandled" }
 	| { kind: "no-match" }
-	| { kind: "matched"; suggestions: { items: AutocompleteItem[]; prefix: string } };
+	| { kind: "matched"; suggestions: { items: AutocompleteItem[]; prefix: string }; pending?: Promise<void> };
 
 export interface SlashCommand {
 	name: string;

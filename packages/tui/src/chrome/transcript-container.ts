@@ -366,6 +366,17 @@ export class TranscriptContainer extends Container {
 	#lastFrame: AnimationFrame = { tick: 0, now: 0 };
 	// Start rows from the last full render(), keyed by child component (transcript deep-links).
 	#childStartRows = new Map<Component, number>();
+	// Last full render() while no block is committed (transcript viewers), reused while
+	// every block returns the same rows: a viewer repaints on every key and tick.
+	#fullRender:
+		| {
+				width: number;
+				components: Component[];
+				blocks: (readonly string[])[];
+				compact: boolean[];
+				rows: readonly string[];
+		  }
+		| undefined;
 	// Watchdog for the wedge where an unfinalized frontier block pins pressure
 	// retirement: everything behind it stays live and degrades to one-line
 	// allocations. Logs once per pinned episode after a grace period.
@@ -456,6 +467,7 @@ export class TranscriptContainer extends Container {
 		this.#entries.splice(index, 1);
 		this.#frontier = Math.min(this.#frontier, this.#entries.length);
 		this.#childStartRows.delete(component);
+		this.#fullRender = undefined;
 	}
 
 	override clear(): void {
@@ -464,6 +476,7 @@ export class TranscriptContainer extends Container {
 		this.#frontier = 0;
 		this.#offered = undefined;
 		this.#childStartRows.clear();
+		this.#fullRender = undefined;
 		this.#pinnedFrontier = undefined;
 		this.#replayPending = false;
 		this.#replayRequested = false;
@@ -761,6 +774,11 @@ export class TranscriptContainer extends Container {
 		const blocks: (readonly string[])[] = [];
 		const measuredImages: boolean[] = [];
 		let unrendered = 0;
+		// Rows the collected blocks fill at full height, separators between them included.
+		let filled = 0;
+		let compactBelow: boolean | undefined;
+		let clipDecided = false;
+		let clip = false;
 		for (let cursor = live.length - 1; cursor >= 0; cursor--) {
 			if (shown.length > capacity) {
 				unrendered = cursor + 1;
@@ -772,6 +790,19 @@ export class TranscriptContainer extends Container {
 			shown.push(candidate);
 			blocks.push(block.rows);
 			measuredImages.push(block.images);
+			const compact = isCompact(candidate.entry.component);
+			filled += block.rows.length + (compactBelow === undefined ? 0 : separatorRows(compact, compactBelow));
+			compactBelow = compact;
+			// The newest blocks fill the screen. When pressure retirement will take
+			// everything above them, show them at full height and clip the rest off
+			// the top: that is the layout retirement converges to, so a resumed or
+			// refocused ledger still draining into scrollback over several budgeted
+			// frames paints its final tail at once instead of one-row stubs.
+			if (!clipDecided && filled >= capacity) {
+				clipDecided = true;
+				clip = this.#retiresThrough(live, cursor, filled > capacity);
+				if (clip) break;
+			}
 		}
 		shown.reverse();
 		blocks.reverse();
@@ -780,7 +811,7 @@ export class TranscriptContainer extends Container {
 			this.#lastViewportSpans = [];
 			return EMPTY_ROWS;
 		}
-		if (shown.length > capacity) {
+		if (!clip && shown.length > capacity) {
 			// Blocks the walk never reached are still transcript state: the
 			// emergency layout consults them only where it must.
 			return this.#renderEmergency(shown, live.slice(0, unrendered), width, capacity, frame);
@@ -807,7 +838,7 @@ export class TranscriptContainer extends Container {
 			total += gap + blocks[blockIndex]!.length;
 			above = compact;
 		}
-		if (total <= capacity) {
+		if (clip || total <= capacity) {
 			const output: string[] = [];
 			const owners: (Component | undefined)[] = [];
 			for (let blockIndex = 0; blockIndex < blocks.length; blockIndex++) {
@@ -821,8 +852,18 @@ export class TranscriptContainer extends Container {
 					owners.push(component);
 				}
 			}
-			this.#commitViewportSpans(owners, output.length);
-			return output;
+			const drop = Math.max(0, output.length - capacity);
+			// A terminal that cannot draw part of an image (iTerm2) draws the whole
+			// picture upward from its image row, so a clip through its reserved rows
+			// would paint it over whatever sits above the viewport. Blank that row
+			// until the split retires the image whole into scrollback.
+			const headClipped = drop - gaps[0]!;
+			if (headClipped > 0) {
+				const below = cutBelowWholeImage(blocks[0]!, headClipped);
+				if (below > headClipped) output[gaps[0]! + below - 1] = "";
+			}
+			this.#commitViewportSpans(owners.slice(drop), output.length - drop);
+			return drop > 0 ? output.slice(drop) : output;
 		}
 
 		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
@@ -862,6 +903,26 @@ export class TranscriptContainer extends Container {
 		const drop = Math.max(0, output.length - capacity);
 		this.#commitViewportSpans(owners.slice(drop), output.length - drop);
 		return drop > 0 ? output.slice(drop) : output;
+	}
+
+	/**
+	 * Whether every live block older than `live[cursor]`, and that block itself
+	 * (as a split) when `clipped`, is finalized, so pressure retirement takes it
+	 * into scrollback once it settles. A finalized block still pending (an async
+	 * figure render or image conversion in replayed history) may still swap a
+	 * placeholder for its figure, but it is off screen and not yet in scrollback,
+	 * so it retires with its final rows; a block still streaming or running
+	 * would stay pinned out of view instead.
+	 */
+	#retiresThrough(live: ReadonlyArray<{ entry: TranscriptEntry }>, cursor: number, clipped: boolean): boolean {
+		const end = clipped ? cursor + 1 : cursor;
+		for (let index = 0; index < end; index++) {
+			const { entry } = live[index]!;
+			if (entry.state === "settled") continue;
+			const block = entry.component as Component & FinalizableBlock;
+			if (block.isTranscriptBlockFinalized?.() === false) return false;
+		}
+		return true;
 	}
 
 	/**
@@ -1353,23 +1414,49 @@ export class TranscriptContainer extends Container {
 		return this.#nativeNode;
 	}
 
-	/** Full semantic render used by exports and non-terminal commands. */
+	/**
+	 * Full semantic render used by exports, non-terminal commands, and transcript
+	 * viewers. It writes no scrollback, so the append-only emission ledger is left
+	 * to the frame path.
+	 */
 	override render(width: number): readonly string[] {
 		this.#syncEntries();
+		const components: Component[] = [];
+		const blocks: (readonly string[])[] = [];
+		const compact: boolean[] = [];
+		let committed = false;
+		for (const entry of this.#entries) {
+			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
+			components.push(entry.component);
+			blocks.push(entry.component.render(width));
+			compact.push(isCompact(entry.component));
+			if (entry.state === "committed") {
+				committed = true;
+				this.#releaseRenderCaches(entry);
+			}
+		}
+		const memo = this.#fullRender;
+		if (
+			memo?.width === width &&
+			sameItems(memo.components, components) &&
+			sameItems(memo.blocks, blocks) &&
+			sameItems(memo.compact, compact)
+		) {
+			return memo.rows;
+		}
 		this.#childStartRows.clear();
 		const rows: string[] = [];
 		let above: RowsAbove;
-		for (const entry of this.#entries) {
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			const block = this.#renderEntry(entry, width);
-			if (entry.state === "committed") this.#releaseRenderCaches(entry);
+		for (let index = 0; index < blocks.length; index++) {
+			const block = trimBlankEdges(blocks[index]!);
 			if (block.length === 0) continue;
-			const compact = isCompact(entry.component);
-			if (separatorRows(above, compact) > 0) rows.push("");
-			this.#childStartRows.set(entry.component, rows.length);
-			rows.push(...block);
-			above = compact;
+			if (separatorRows(above, compact[index]!) > 0) rows.push("");
+			this.#childStartRows.set(components[index]!, rows.length);
+			for (const row of block) rows.push(row);
+			above = compact[index]!;
 		}
+		// Committed blocks drop their render caches, so they never return the same rows twice.
+		this.#fullRender = committed ? undefined : { width, components, blocks, compact, rows };
 		return rows;
 	}
 

@@ -129,11 +129,14 @@ class "deepseek" {
 			}
 		}
 	}
-	// DeepSeek's API retired the V4.0 vision preview and serves its legacy id
-	// with the current Flash (api-docs.deepseek.com/guides/vision); hosts that
-	// still run the preview keep their fallback.
+	// DeepSeek's API retired the V4.0 Flash ids and serves both with the
+	// current multimodal Flash (api-docs.deepseek.com/guides/vision; the
+	// response reports `model: deepseek-flash`), so neither may inherit the
+	// V4.0 text-only strip. Hosts that still run V4.0 weights or the preview
+	// keep their fallback.
 	on "deepseek" {
-		models "deepseek-v4-flash-vision-exp" {
+		models "deepseek-v4-flash" "deepseek-v4-flash-vision-exp" {
+			strip-image-input #false
 			image-tokenization {
 				regime "deepseek-patch"
 				verified #true

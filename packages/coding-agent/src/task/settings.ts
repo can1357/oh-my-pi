@@ -130,7 +130,7 @@ export const cfgWorktreeOnExit = register({
 	id: "worktree.onExit",
 	protocolDefault: ["rpc", "acp"],
 	type: "enum",
-	values: ["keep", "ask", "remove"] as const,
+	values: ["keep", "ask", "remove", "force"] as const,
 	default: "keep",
 	ui: {
 		tab: "tasks",
@@ -145,6 +145,12 @@ export const cfgWorktreeOnExit = register({
 				label: "Remove",
 				description:
 					"Remove clean worktrees; ask when they have uncommitted changes or new commits. Gitignored files (e.g. `.env`) are deleted too",
+			},
+			{
+				value: "force",
+				label: "Force Remove",
+				description:
+					"Remove every worktree without asking, even with uncommitted changes. Uncommitted work, gitignored files (e.g. `.env`), and commits only on a detached HEAD are lost; new commits on the branch are kept",
 			},
 		],
 	},
@@ -680,6 +686,13 @@ export const cfgTaskAgentAccountPools = register({
 
 export const cfgTaskAgentPrewalk = register({
 	id: "task.agentPrewalk",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: {} as Record<string, string>,
+});
+
+export const cfgTaskAgentPrewalkAuto = register({
+	id: "task.agentPrewalkAuto",
 	protocolDefault: ["rpc", "acp"],
 	type: "record",
 	default: {} as Record<string, string>,

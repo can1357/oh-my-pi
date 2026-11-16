@@ -2,21 +2,65 @@
 
 ## [Unreleased]
 
-### Added
+## [18.22.0] - 2026-11-16
 
-- `DirectoryWatcher` watches a directory on Windows through `ReadDirectoryChangesW` on its own thread and reports changes in batches with their action (added, removed, modified, renamed) and lost-change signals, without dropping changes during bursts as `fs.watch` does there ([#18964](https://github.com/can1357/oh-my-pi/pull/18964) by [@H4vC](https://github.com/H4vC))
-- `DirectoryWatcher` changes say whether their entry is a directory, and `close()` returns without waiting for the watcher thread to cancel its reads (a network round trip on shares)
-- `grep()` and `glob()` below an ovnfs checkout are answered by the ovnfs daemon serving it, which searches the checkout's overlay in-process instead of paying an NFS round trip per file: the walker finds ovnfs mounts in the host mount table, and falls back to its own walk whenever the daemon cannot answer (no daemon, another protocol version, a daemon serving another mount, an error reply). Named file roots, `onMatches` streaming, `type` filters and link-following globs always walk natively
+### Breaking Changes
+
+- `TtyWriter` now requires a drain threshold and callback and only supports independently reopenable TTYs. Its pending UTF-8 byte bounds are reported conservatively.
+
+### Changed
+
+- Large terminal repaints are handled more efficiently, reducing JavaScript-thread work and releasing oversized buffers after output drains.
 
 ### Fixed
 
-- Fixed `<text>` disappearing from rendered SVGs when a generic font family names a font that is not installed ([#15181](https://github.com/can1357/oh-my-pi/issues/15181)) ([#18538](https://github.com/can1357/oh-my-pi/pull/18538) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
-- Fixed `worktree add` failing, or leaving behind a worktree that could not be removed, when the checkout being cloned contains read-only files or directories ([#14190](https://github.com/can1357/oh-my-pi/issues/14190)) ([#18537](https://github.com/can1357/oh-my-pi/pull/18537) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
-- Fixed `worktree add` deleting a file outside the new worktree when the source checkout had replaced a tracked directory with a symlink ([#18537](https://github.com/can1357/oh-my-pi/pull/18537) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
-- A cancelled or timed-out `Shell.run` no longer ends the `&` jobs earlier runs left running, and the shell keeps its session (variables, working directory, jobs) for the next run; only what the cancelled run started is stopped
-- Fixed shell `find`, `fd`, `rg` and the `grep`/`glob` natives spending minutes on searches of a home directory: walks rooted on a local filesystem list network mounts below them (NFS, SMB, autofs, sshfs, … such as OrbStack's `~/OrbStack`) but no longer descend into them. A search rooted on a network filesystem walks it as before, and ovnfs mounts are always walked
-- Fixed shell `find` walking network filesystems and cold caches one listing at a time: while listings are slow it now reads the next directories ahead on the blocking pool, keeping several round trips in flight (about 1.5× faster on an OrbStack NFS tree); fast local listings stay on the walk
-- Fixed shell `fd` being about twice as slow as `fd` itself: it now walks on the parallel walker, filtering on its workers and printing matches as the walk settles them, in the byte order of their paths (as `sort` orders them). `-j` sets the worker count; `.fdignore` is read by the walker, beats `.gitignore`/`.ignore` (a `!` rule re-includes) and applies from every ancestor; `--no-ignore-parent` also skips ancestors' `.gitignore`/`.ignore`; `-E`, `--prune` and `--ignore-contain` prune at every depth, `--min-depth` included; `--show-errors` lists unreadable directories with their paths after the matches; a file given as a search path is an error, as in `fd`
+- Fixed stalled terminal writers continuing to emit output or leaking file descriptors after shutdown.
+- Fixed terminal output preserving Unicode across chunk boundaries and safely replacing malformed surrogate sequences.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added the `PhononTts` binding for on-device Phonon text-to-speech.
+- Added `Shell.adopt(fork)` to apply variables, functions, aliases, options, and traps from a completed fork back to its parent shell. When both shells set a name, the value from the command that finished last is retained.
+
+### Fixed
+
+- Fixed concurrent `commitCreate()` calls incorrectly overwriting each other’s commit subject and body.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Committing or writing trees now correctly reports unresolved index conflicts instead of silently omitting conflicted files.
+- Fixed shell compatibility with GNU `grep` for end-of-line-anchored patterns, including `-o` and `-z` modes, and corrected `sed` substitutions on multibyte-character lines.
+- Fixed native diff and patch handling for filenames containing spaces and other characters requiring quoting, including binary changes.
+
+## [18.20.1] - 2026-11-14
+
+### Breaking Changes
+
+- Changed lsTree() to return { path, mode } entries instead of bare paths; mode matches git ls-tree output (for example, 100755 or 120000).
+
+### Added
+
+- Added noVerify to commitCreate() options to skip the pre-commit and commit-msg hooks, matching git commit --no-verify.
+- Added optimistic concurrency and alternate-index support to commitCreate(), allowing commits to use a separate index and reject stale commits when HEAD has changed.
+- Improved grep() and glob() performance for ovnfs checkouts by using the serving daemon when available while preserving native fallback behavior and existing streaming, filtering, and link-following options.
+
+### Changed
+
+- Improved shell search across local and network filesystems: local searches avoid unexpectedly traversing network mounts, network-backed searches perform more directory operations concurrently, and fd supports parallel traversal together with ignore, pruning, depth, worker, and error-reporting options.
+
+### Fixed
+
+- Fixed binary patches produced by diffText({ binary: true }) and diffNoIndex(…, true) for non-UTF-8 text, such as Latin-1, so patches preserve the original bytes and apply correctly.
+- Fixed SVG rendering when a generic font family refers to an unavailable font, preventing <text> elements from disappearing.
+- Fixed worktree add for source checkouts containing read-only files or directories, including cases where tracked directories are replaced by symlinks.
+- Fixed cancelled and timed-out Shell.run calls so they terminate only jobs started by that invocation while preserving the shell session for later runs.
+- Reduced memory usage when visualizing long multi-line shell commands.
+- Fixed the shell cp builtin so symlink-following options work correctly with archive and directory-copy modes without disabling recursion or attribute preservation.
+- Replaced built-in shell crashes on very long -a/-o chains in [ ] and test expressions with a clear error for excessively deep expressions.
 
 ## [18.20.0] - 2026-11-12
 
