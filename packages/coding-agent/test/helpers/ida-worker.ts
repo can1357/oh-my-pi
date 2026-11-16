@@ -24,8 +24,22 @@ def module_getattr(name):
 `;
 const STUB_MODULE = "from _omp_ida_stub import _Any, module_getattr as __getattr__\n";
 const STUB_MODULES = [
-	"idapro", "ida_auto", "ida_bytes", "ida_funcs", "ida_hexrays", "ida_idaapi", "ida_idp", "ida_lines",
-	"ida_loader", "ida_nalt", "ida_name", "ida_segment", "ida_typeinf", "ida_ua", "ida_xref", "idautils",
+	"idapro",
+	"ida_auto",
+	"ida_bytes",
+	"ida_funcs",
+	"ida_hexrays",
+	"ida_idaapi",
+	"ida_idp",
+	"ida_lines",
+	"ida_loader",
+	"ida_nalt",
+	"ida_name",
+	"ida_segment",
+	"ida_typeinf",
+	"ida_ua",
+	"ida_xref",
+	"idautils",
 ];
 const STUB_DATABASE = `${STUB_MODULE}
 class Database(_Any):

@@ -88,10 +88,16 @@ export function parseDatabaseHandle(value: string): DatabaseHandle | undefined {
 	const project = url.searchParams.get("project");
 	if (
 		(url.hostname !== "ida" && url.hostname !== "ghidra") ||
-		url.username || url.password || url.port || url.hash ||
-		parts.length !== 3 || !/^[A-Za-z0-9._-]+$/.test(parts[1]) ||
+		url.username ||
+		url.password ||
+		url.port ||
+		url.hash ||
+		parts.length !== 3 ||
+		!/^[A-Za-z0-9._-]+$/.test(parts[1]) ||
 		!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(parts[2]) ||
-		project === null || !path.isAbsolute(project) || url.searchParams.size !== 1
+		project === null ||
+		!path.isAbsolute(project) ||
+		url.searchParams.size !== 1
 	) {
 		throw new ToolError("Invalid dsm handle; pass the string returned by db.handle().");
 	}

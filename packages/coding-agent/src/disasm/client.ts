@@ -264,7 +264,9 @@ export class DisasmDatabase {
 
 	/** Acquire a connection-owned reference; an expected handle rejects stale or foreign incarnations. */
 	async retain(expected = this.handle): Promise<RetainedReference> {
-		const retained = parseRetainedReference(await this.#conn.call({ id: this.#conn.nextId(), op: "retain", handle: expected }));
+		const retained = parseRetainedReference(
+			await this.#conn.call({ id: this.#conn.nextId(), op: "retain", handle: expected }),
+		);
 		this.#status.references = retained.references;
 		return retained;
 	}
@@ -542,7 +544,9 @@ async function findOpenDatabaseAt(
 export async function findDatabaseHandle(handle: DatabaseHandle): Promise<DisasmDatabase> {
 	const db = await findOpenDatabaseAt(handle.project, handle.backend, handle.id);
 	if (!db || db.handle !== formatDatabaseHandle(handle)) {
-		throw new ToolError("dsm handle has expired; the original database is no longer open. Ask its owner for a live handle.");
+		throw new ToolError(
+			"dsm handle has expired; the original database is no longer open. Ask its owner for a live handle.",
+		);
 	}
 	return db;
 }

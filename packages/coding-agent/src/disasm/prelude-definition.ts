@@ -51,14 +51,16 @@ function releaseConversation(owner: DsmReferenceOwner): Promise<void> {
 	// Detach synchronously, but let already-running calls settle before dropping their references.
 	owner.cleanup = owner.cleanup.then(async () => {
 		await Promise.allSettled(pending);
-		await Promise.all(references.map(async entry => {
-			if (!entry.db.connected) return;
-			try {
-				await entry.db.release(entry.reference.lease, { save: true });
-			} catch (error) {
-				logger.warn("dsm reference cleanup failed", { id: entry.db.id, error: String(error) });
-			}
-		}));
+		await Promise.all(
+			references.map(async entry => {
+				if (!entry.db.connected) return;
+				try {
+					await entry.db.release(entry.reference.lease, { save: true });
+				} catch (error) {
+					logger.warn("dsm reference cleanup failed", { id: entry.db.id, error: String(error) });
+				}
+			}),
+		);
 	});
 	return owner.cleanup;
 }
@@ -78,13 +80,26 @@ function referenceOwner(session: ToolSession): DsmReferenceOwner {
 	const existing = session[DSM_REFERENCES];
 	if (existing) return existing;
 	const owner: DsmReferenceOwner = {
-		references: new Map(), pending: new Set(), generation: 0, disposed: false, cleanup: Promise.resolve(), unregister: [],
+		references: new Map(),
+		pending: new Set(),
+		generation: 0,
+		disposed: false,
+		cleanup: Promise.resolve(),
+		unregister: [],
 	};
 	Object.defineProperty(session, DSM_REFERENCES, { value: owner, configurable: true });
-	owner.unregister.push(cfgDisasmBackend.listen(session.settings, () => { void releaseConversation(owner); }));
-	const stopSession = session.registerSessionChangeCallback?.(() => { void releaseConversation(owner); });
+	owner.unregister.push(
+		cfgDisasmBackend.listen(session.settings, () => {
+			void releaseConversation(owner);
+		}),
+	);
+	const stopSession = session.registerSessionChangeCallback?.(() => {
+		void releaseConversation(owner);
+	});
 	if (typeof stopSession === "function") owner.unregister.push(stopSession);
-	const stopDispose = session.registerDisposeCallback?.(() => { void releaseDsmReferences(session); });
+	const stopDispose = session.registerDisposeCallback?.(() => {
+		void releaseDsmReferences(session);
+	});
 	if (typeof stopDispose === "function") owner.unregister.push(stopDispose);
 	return owner;
 }
@@ -93,23 +108,38 @@ function describeCall(parameters: unknown): string | undefined {
 	const params = paramsSchema(parameters);
 	if (params instanceof type.errors) return undefined;
 	switch (params.action) {
-		case "open": return `dsm.open(${JSON.stringify(params.path)})`;
-		case "get": return `dsm.get(${params.ref === undefined ? "" : JSON.stringify(params.ref)})`;
-		case "list": return "dsm.list()";
-		case "view": return `dsm.view(${JSON.stringify(params.view ?? "overview")})`;
-		case "rename": return `dsm.rename(${JSON.stringify(params.target)}, ${JSON.stringify(params.name)})`;
-		case "comment": case "set_type": case "make_function": return `dsm.${params.action}(${JSON.stringify(params.target)})`;
-		default: return `dsm.${params.action}()`;
+		case "open":
+			return `dsm.open(${JSON.stringify(params.path)})`;
+		case "get":
+			return `dsm.get(${params.ref === undefined ? "" : JSON.stringify(params.ref)})`;
+		case "list":
+			return "dsm.list()";
+		case "view":
+			return `dsm.view(${JSON.stringify(params.view ?? "overview")})`;
+		case "rename":
+			return `dsm.rename(${JSON.stringify(params.target)}, ${JSON.stringify(params.name)})`;
+		case "comment":
+		case "set_type":
+		case "make_function":
+			return `dsm.${params.action}(${JSON.stringify(params.target)})`;
+		default:
+			return `dsm.${params.action}()`;
 	}
 }
 
 /** Hidden, backend-neutral disassembly capability with independently retained cross-agent database handles. */
 export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 	const owner = referenceOwner(session);
-	const notOpen = () => new ToolError("Database reference is closed or expired; reopen with dsm.open(path or handle).");
+	const notOpen = () =>
+		new ToolError("Database reference is closed or expired; reopen with dsm.open(path or handle).");
 	const describe = (db: DisasmDatabase, backend: DisasmBackendId) => ({
-		id: db.id, backend, ref: db.ref, path: db.idbPath, info: db.info,
-		handle: db.handle, references: db.status.references,
+		id: db.id,
+		backend,
+		ref: db.ref,
+		path: db.idbPath,
+		info: db.info,
+		handle: db.handle,
+		references: db.status.references,
 	});
 	const invoke = async (params: DsmParams, signal?: AbortSignal): Promise<unknown> => {
 		const generation = owner.generation;
@@ -121,7 +151,8 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 			}
 			const backend = cfgDisasmBackend.get(session.settings);
 			if (backend === undefined) throw new ToolError("dsm is disabled in the current session.");
-			if (expected !== undefined && backend !== expected) throw new ToolError("Disassembler backend changed; reopen with dsm.open(path or handle).");
+			if (expected !== undefined && backend !== expected)
+				throw new ToolError("Disassembler backend changed; reopen with dsm.open(path or handle).");
 			return backend;
 		};
 		const backend = active();
@@ -148,16 +179,25 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 			return [...databases.values()].filter(db => db.status.state === "open");
 		};
 		switch (params.action) {
-			case "list": return (await openDatabases()).map(db => describe(db, backend));
+			case "list":
+				return (await openDatabases()).map(db => describe(db, backend));
 			case "get": {
 				if (params.ref === undefined) {
 					const dbs = await openDatabases();
 					if (dbs.length === 0) throw notOpen();
-					if (dbs.length > 1) throw new ToolError(`Multiple databases open (${dbs.map(db => db.id).join(", ")}); pass dsm.get(ref).`);
+					if (dbs.length > 1)
+						throw new ToolError(
+							`Multiple databases open (${dbs.map(db => db.id).join(", ")}); pass dsm.get(ref).`,
+						);
 					return remember(dbs[0]);
 				}
 				const ref = params.ref;
-				const owned = [...owner.references.values()].find(entry => entry.backend === backend && entry.db.connected && (entry.db.id === ref || entry.db.name === ref || entry.db.ref === ref));
+				const owned = [...owner.references.values()].find(
+					entry =>
+						entry.backend === backend &&
+						entry.db.connected &&
+						(entry.db.id === ref || entry.db.name === ref || entry.db.ref === ref),
+				);
 				if (owned) return remember(owned.db);
 				let db = await findOpenDatabase(session, backend, ref);
 				active(backend);
@@ -183,7 +223,10 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 				const { path, arch } = splitSliceRef(params.path);
 				const absolutePath = resolveToCwd(path, session.cwd);
 				const stat = await fs.stat(absolutePath).catch(() => null);
-				if (!stat?.isFile() || (!DISASM_BACKENDS[backend].isDatabasePath(absolutePath) && !(await isExecutableFile(absolutePath)))) {
+				if (
+					!stat?.isFile() ||
+					(!DISASM_BACKENDS[backend].isDatabasePath(absolutePath) && !(await isExecutableFile(absolutePath)))
+				) {
 					throw new ToolError(`Not an executable or supported database: ${params.path}`);
 				}
 				active(backend);
@@ -195,20 +238,36 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 		if (!entry || entry.backend !== backend || !entry.db.connected) throw notOpen();
 		await entry.db.refresh();
 		active(params.backend);
-		if (owner.references.get(params.lease) !== entry || entry.db.status.state !== "open" || entry.db.handle !== entry.reference.handle) throw notOpen();
+		if (
+			owner.references.get(params.lease) !== entry ||
+			entry.db.status.state !== "open" ||
+			entry.db.handle !== entry.reference.handle
+		)
+			throw notOpen();
 		const db = entry.db;
 		const options = { signal, timeoutMs: REQUEST_TIMEOUT_MS };
 		switch (params.action) {
-			case "view": return (await db.request<{ text: string }>("view", parseBinaryView(params.view ?? "overview"), options)).text;
+			case "view":
+				return (await db.request<{ text: string }>("view", parseBinaryView(params.view ?? "overview"), options))
+					.text;
 			case "exec": {
 				const seconds = clampTimeout("dsm", params.timeout, cfgToolsMaxTimeout.get(session.settings));
 				return db.request<ExecResult>("exec", { code: params.code }, { signal, timeoutMs: seconds * 1000 });
 			}
-			case "rename": return db.request<unknown>("rename", { target: params.target, name: params.name }, options);
-			case "comment": return db.request<unknown>("comment", { target: params.target, text: params.text, repeatable: params.repeatable ?? false }, options);
-			case "set_type": return db.request<unknown>("set_type", { target: params.target, decl: params.decl }, options);
-			case "make_function": return db.request<unknown>("make_function", { target: params.target }, options);
-			case "save": return { path: (await db.request<{ idb: string }>("save", {}, options)).idb };
+			case "rename":
+				return db.request<unknown>("rename", { target: params.target, name: params.name }, options);
+			case "comment":
+				return db.request<unknown>(
+					"comment",
+					{ target: params.target, text: params.text, repeatable: params.repeatable ?? false },
+					options,
+				);
+			case "set_type":
+				return db.request<unknown>("set_type", { target: params.target, decl: params.decl }, options);
+			case "make_function":
+				return db.request<unknown>("make_function", { target: params.target }, options);
+			case "save":
+				return { path: (await db.request<{ idb: string }>("save", {}, options)).idb };
 			case "close":
 				owner.references.delete(params.lease);
 				await db.release(entry.reference.lease, { save: params.save ?? true });
@@ -216,8 +275,12 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 		}
 	};
 	return {
-		name: "dsm", documentation: dsmDocumentation, guidance: dsmGuidance,
-		javascript: dsmJavascript, python: dsmPython, exports: ["dsm"],
+		name: "dsm",
+		documentation: dsmDocumentation,
+		guidance: dsmGuidance,
+		javascript: dsmJavascript,
+		python: dsmPython,
+		exports: ["dsm"],
 		enabled: () => !owner.disposed && !session.isDisposed?.() && cfgDisasmBackend.get(session.settings) !== undefined,
 		approval: parameters => {
 			const parsed = paramsSchema(parameters);
@@ -229,7 +292,14 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 			if (parsed instanceof type.errors) throw new ToolError(`dsm received invalid arguments: ${parsed.summary}`);
 			const pending = invoke(parsed, context.signal);
 			owner.pending.add(pending);
-			void pending.then(() => { owner.pending.delete(pending); }, () => { owner.pending.delete(pending); });
+			void pending.then(
+				() => {
+					owner.pending.delete(pending);
+				},
+				() => {
+					owner.pending.delete(pending);
+				},
+			);
 			return { content: [], details: { value: await untilAborted(context.signal, pending) } };
 		},
 		status: describeCall,

@@ -15,6 +15,7 @@
 
 - Added in-place editing and Google-Docs-style comments to the plan review under Tern: double-click the plan to edit it, select text to comment; comments feed Refine.
 - Added Ghidra analysis with automatic Ghidra, JDK, and PyGhidra setup on explicit analysis; Auto prefers an installed IDA Pro, otherwise Ghidra.
+- Share live analysis databases with child agents through `db.handle()` and `dsm.open(handle)`; each owner closes only its own reference.
 
 - Added a `Force Remove` option to `worktree.onExit` that removes worktrees created during the session on exit without asking, even when they have uncommitted changes; new commits stay on the worktree's branch.
 

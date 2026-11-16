@@ -209,7 +209,10 @@ class DisasmHost {
 				this.#saveOnRelease = true;
 				this.#worker?.setReferenceCount(this.#references.size);
 				void this.#closeUnreferenced()?.catch(error => {
-					logger.warn("Disassembler orphaned-reference close failed", { id: this.#config.loc.id, error: errorMessage(error) });
+					logger.warn("Disassembler orphaned-reference close failed", {
+						id: this.#config.loc.id,
+						error: errorMessage(error),
+					});
 				});
 			}
 		});
@@ -231,8 +234,10 @@ class DisasmHost {
 				return this.#status();
 			case "retain": {
 				const worker = await this.#liveWorker();
-				if (!this.#connections.has(conn)) throw new ToolError("Disassembler connection closed before retain completed");
-				if (request.handle !== this.#reference) throw new ToolError("dsm handle has expired; the original database is no longer open");
+				if (!this.#connections.has(conn))
+					throw new ToolError("Disassembler connection closed before retain completed");
+				if (request.handle !== this.#reference)
+					throw new ToolError("dsm handle has expired; the original database is no longer open");
 				const lease = crypto.randomUUID();
 				leases.add(lease);
 				this.#references.add(lease);
@@ -241,7 +246,8 @@ class DisasmHost {
 			}
 			case "release": {
 				const worker = await this.#liveWorker();
-				if (!leases.delete(request.lease)) throw new ToolError("Database reference is not owned by this connection or was already released");
+				if (!leases.delete(request.lease))
+					throw new ToolError("Database reference is not owned by this connection or was already released");
 				this.#references.delete(request.lease);
 				this.#saveOnRelease ||= request.save;
 				worker.setReferenceCount(this.#references.size);
@@ -270,7 +276,9 @@ class DisasmHost {
 			case "close": {
 				await this.#liveWorker();
 				if (this.#references.size > 0) {
-					throw new ToolError(`Database has ${this.#references.size} active dsm references; each owner must close its own handle`);
+					throw new ToolError(
+						`Database has ${this.#references.size} active dsm references; each owner must close its own handle`,
+					);
 				}
 				this.#saveOnRelease ||= request.save;
 				await this.#closeUnreferenced();

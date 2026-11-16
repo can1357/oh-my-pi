@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { ipcEndpoint } from "@oh-my-pi/pi-natives";
 import { ptree, readLines, untilAborted } from "@oh-my-pi/pi-utils";
 import { DisasmDatabase } from "../../src/disasm/client";
-import { DISASM_HOST_CONFIG_ENV, DISASM_HOST_WORKER_ARG, type HostConfig, hostReadyPattern } from "../../src/disasm/protocol";
+import {
+	DISASM_HOST_CONFIG_ENV,
+	DISASM_HOST_WORKER_ARG,
+	type HostConfig,
+	hostReadyPattern,
+} from "../../src/disasm/protocol";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../../src/subprocess/worker-client";
 import { createIdaWorkerRuntime } from "../helpers/ida-worker";
 
@@ -23,8 +28,14 @@ async function hostFixture() {
 		projectDir: dir,
 		endpoint,
 		loc: {
-			id: "references", dir, sourcePath: path.join(dir, "stub.i64"), stagedPath: path.join(dir, "stub.i64"),
-			kind: "inplace", openPath: path.join(dir, "stub.i64"), isNew: false, lockTarget: path.join(dir, "stub.i64"),
+			id: "references",
+			dir,
+			sourcePath: path.join(dir, "stub.i64"),
+			stagedPath: path.join(dir, "stub.i64"),
+			kind: "inplace",
+			openPath: path.join(dir, "stub.i64"),
+			isNew: false,
+			lockTarget: path.join(dir, "stub.i64"),
 		},
 		runtime: await createIdaWorkerRuntime(dir, { savePath: saved }),
 		idleCloseMs: 1000,
@@ -58,14 +69,20 @@ async function hostFixture() {
 	const connect = async () => {
 		await untilAborted(AbortSignal.timeout(10_000), running.ready);
 		const client = await DisasmDatabase.attach("omp.ida.references", endpoint, "open");
-		if (!client) throw new Error(`Listening disassembler host did not accept a connection: ${running.child.peekStderr()}`);
+		if (!client)
+			throw new Error(`Listening disassembler host did not accept a connection: ${running.child.peekStderr()}`);
 		clients.push(client);
 		return client;
 	};
 	return {
-		connect, saved,
-		async exited() { await untilAborted(AbortSignal.timeout(10_000), running.child.exited); },
-		restart() { running = start(); },
+		connect,
+		saved,
+		async exited() {
+			await untilAborted(AbortSignal.timeout(10_000), running.child.exited);
+		},
+		restart() {
+			running = start();
+		},
 	};
 }
 
