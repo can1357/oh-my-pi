@@ -10,6 +10,7 @@
 
 ### Changed
 
+- Changed the local speech model `kokoro` to `phonon-31m`
 - A provider's authored seed rows now survive that provider's `exclude-models` rules at generation, so a family exclusion such as xai-oauth's `prefix="grok-voice-"` no longer drops a seeded runner row ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Google Antigravity no longer excludes `gemini-3-flash`: the alias answers chat and transcription again, so only the retired `gemini-3.5-flash` stays excluded ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
 
