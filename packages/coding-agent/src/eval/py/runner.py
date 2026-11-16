@@ -2571,14 +2571,15 @@ def _prepare_file_source(
     if display_source and (not lines or not lines[-1].endswith(("\n", "\r"))):
         lines[-1] += "\n"
     linecache.cache[filename] = (len(display_source), None, lines, filename)
-    ns["__file__"] = filename
-    script_dir = os.path.dirname(filename)
-    if script_dir:
-        try:
-            sys.path.remove(script_dir)
-        except ValueError:
-            pass
-        sys.path.insert(0, script_dir)
+    if not (filename.startswith("<") and filename.endswith(">")):
+        ns["__file__"] = filename
+        script_dir = os.path.dirname(filename)
+        if script_dir:
+            try:
+                sys.path.remove(script_dir)
+            except ValueError:
+                pass
+            sys.path.insert(0, script_dir)
 
 
 def _exec_source(source: str, ns: dict) -> None:
@@ -2607,8 +2608,7 @@ async def _exec_source_async(
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
     body_code, expr_code, has_expr = _compile_source(source, filename)
-    if filename != "<cell>":
-        _prepare_file_source(source, ns, filename, linecache_source)
+    _prepare_file_source(source, ns, filename, linecache_source)
     if body_code is None:
         return
     await _run_compiled_async(body_code, ns, want_value=False)
@@ -2916,15 +2916,15 @@ async def _handle_request_async(req: dict) -> None:
         try:
             _apply_request_runtime(req)
             source = req.get("code", "")
-            transformed = transform_cell(source)
             requested_filename = req.get("filename")
             filename = (
                 requested_filename
                 if isinstance(requested_filename, str) and requested_filename
-                else "<cell>"
+                else f"<cell-{execution_count}>"
             )
+            transformed = transform_cell(source)
         except SyntaxError as exc:
-            _emit_error(rid, exc)
+            _emit_error(rid, exc, source_filename=filename)
             _emit(
                 {
                     "type": "done",
@@ -3018,8 +3018,8 @@ async def _handle_request_async(req: dict) -> None:
             _end_exec_sigint()
 
 
-def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
-    if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
+def _emit_error(rid: str, exc: BaseException, source_filename: str | None = None) -> None:
+    if isinstance(exc, SyntaxError) and source_filename is not None and exc.filename == source_filename:
         # Syntax error in the executed source itself: every stack frame is
         # runner machinery, so emit only the caret display, like a REPL.
         tb_lines = traceback.format_exception_only(type(exc), exc)

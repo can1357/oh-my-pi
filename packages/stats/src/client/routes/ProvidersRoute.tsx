@@ -15,7 +15,7 @@ import {
 } from "../data/formatters";
 import { type QueryResult, useQuery } from "../data/query";
 import { bucketAxis, formatBucket, formatTick, rangeMeta } from "../data/range";
-import { densify, pivotSeries } from "../data/series";
+import { bucketAt, densify, pivotSeries } from "../data/series";
 import type {
 	ProviderAggregate,
 	ProviderHourlyPoint,
@@ -939,7 +939,6 @@ function buildUtilization(accounts: UsageWindowSeries[], names: ReadonlyMap<stri
 	const span = last - first;
 	const bucketMs = UTIL_STEPS.find(step => span / step < MAX_UTIL_SLOTS) ?? DAY_MS;
 	const buckets = bucketAxis("all", [first], bucketMs, last);
-	const index = (ts: number) => Math.floor((ts - buckets[0]) / bucketMs);
 	const exhausted = buckets.map((): string[] => []);
 	let max = 0;
 
@@ -950,8 +949,9 @@ function buildUtilization(accounts: UsageWindowSeries[], names: ReadonlyMap<stri
 		const values: (number | null)[] = buckets.map(() => null);
 		const readAt: number[] = buckets.map(() => 0);
 		for (const p of account.points) {
-			const i = index(p.timestamp);
-			if (i < 0 || i >= buckets.length) continue;
+			// Floor search: day buckets start at local midnight, so they are not uniform.
+			const i = bucketAt(buckets, p.timestamp);
+			if (i < 0) continue;
 			if (p.exhausted && !exhausted[i].includes(nameOf(account))) exhausted[i].push(nameOf(account));
 			if (p.usedFraction === null || p.timestamp < readAt[i]) continue;
 			values[i] = p.usedFraction;

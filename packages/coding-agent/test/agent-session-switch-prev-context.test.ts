@@ -1,4 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -184,6 +186,34 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(onCwdChange).toHaveBeenCalledWith(targetDir.path(), sourceDir.path());
 		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+	});
+	it("resumes a target whose recorded directory is gone in the current cwd", async () => {
+		const sourceDir = TempDir.createSync("@pi-switch-gone-source-");
+		const targetDir = TempDir.createSync("@pi-switch-gone-target-");
+		tempDirs.push(sourceDir, targetDir);
+
+		const { session, sessionManager } = buildSession(sourceDir);
+		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
+		await sessionManager.flush();
+		const goneProject = path.join(targetDir.path(), "project");
+		await fs.mkdir(goneProject);
+		const targetManager = SessionManager.create(goneProject, targetDir.path());
+		targetManager.appendMessage({ role: "user", content: "target", timestamp: 2 });
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetSessionFile = targetManager.getSessionFile();
+		await targetManager.close();
+		await fs.rm(goneProject, { recursive: true });
+
+		const onCwdChange = vi.fn(async () => true);
+		const switched = await session.switchSession(targetSessionFile!, { onCwdChange });
+
+		// The manager keeps the current cwd; callers detect the fallback via recorded ≠ runtime cwd.
+		expect(switched).toBe(true);
+		expect(onCwdChange).not.toHaveBeenCalled();
+		expect(sessionManager.getSessionFile()).toBe(targetSessionFile);
+		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+		expect(sessionManager.getRecordedCwd()).toBe(goneProject);
 	});
 	it("rejects callback-free switches across project directories", async () => {
 		const sourceDir = TempDir.createSync("@pi-switch-no-callback-source-");

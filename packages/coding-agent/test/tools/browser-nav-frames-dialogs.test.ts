@@ -353,6 +353,32 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 		});
 	}, 30_000);
 
+	test("returns from a click that opens a confirm, and fails page calls at once until it is answered", async () => {
+		const invoke = createHost();
+		await invoke({ action: "open", name: "confirm-click", url: `${baseUrl}/confirm-click` });
+		const outcome = valueOf(
+			await invoke({
+				action: "run",
+				name: "confirm-click",
+				code: `await tab.evaluate(() => {
+	const button = document.body.appendChild(document.createElement("button"));
+	button.id = "leave";
+	button.textContent = "Sign Out";
+	button.onclick = () => { globalThis.confirmResult = confirm("Leave?"); };
+});
+await tab.click("#leave");
+const started = Date.now();
+const blocked = await tab.text("body").then(() => "read", error => String(error));
+const blockedMs = Date.now() - started;
+await tab.handleDialog({ accept: true });
+return { blocked, fast: blockedMs < 2000, answered: await tab.evaluate(() => globalThis.confirmResult) };`,
+			}),
+		) as { blocked: string; fast: boolean; answered: unknown };
+		// The read names the dialog that stops the page instead of running out its own deadline.
+		expect(outcome.blocked).toContain("Leave?");
+		expect(outcome).toMatchObject({ fast: true, answered: true });
+	}, 30_000);
+
 	test("scopes helpers to iframe documents in run and direct call paths", async () => {
 		const invoke = createHost();
 		await invoke({ action: "open", name: "frames", url: `${baseUrl}/frames` });

@@ -421,6 +421,14 @@ export class SkillDescriptionCatalog {
 		const store = this.#store;
 		const misses = new Map<string, Skill>();
 		const rendered = skills.map(skill => {
+			// Authored descriptions already within the preview budget need no model
+			// compression: use them verbatim so exclusions survive. Only truly
+			// short input qualifies — `previewSkillDescription` truncates longer
+			// text to fit, which must still schedule compression. `keyFor` runs
+			// only for long descriptions that may schedule compression.
+			const collapsed = skill.description.replace(/\s+/g, " ").trim();
+			if (collapsed.length <= MAX_PREVIEW_CHARS)
+				return { ...skill, description: previewSkillDescription(skill.description) };
 			const key = keyFor(skill);
 			let description = this.#snapshot.get(key);
 			if (description === undefined) {

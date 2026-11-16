@@ -7,8 +7,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { buildHarEntry } from "@oh-my-pi/pi-coding-agent/tools/browser/network";
 import { getTab, releaseTab, type WebKitTabSession } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { createFakeHost, type FakeHost } from "./webkit-fake-host";
 
 // Ambient browser env of the developer's shell (and of an omp running the suite) must not pick the backend.
@@ -216,6 +218,79 @@ describe("a tab on a server that observes pages natively", () => {
 		const detail = await tab.ternTab.request(requests[0]!.id);
 		expect(detail.status).toBe(200);
 		expect(detail.body).toBeUndefined();
+	});
+
+	it("tells a frame's document from an XHR answered with HTML, and reports only sizes the engine knows", async () => {
+		const html = { type: "response", status: 200, mime: "text/html", main: false };
+		await emit([
+			// Plain http off this machine: WebKit sends no fetch metadata, and marks a frame's document request
+			// with Upgrade-Insecure-Requests (headers as the engine reports them).
+			{
+				type: "request",
+				id: 10,
+				url: "http://192.168.1.254/frame.html",
+				method: "GET",
+				headers: { Accept: "text/html", "Upgrade-Insecure-Requests": "1" },
+				main: false,
+			},
+			{ ...html, id: 10, url: "http://192.168.1.254/frame.html", headers: { "Content-Length": "0" } },
+			{ type: "requestFinished", id: 10, length: 0 },
+			{
+				type: "request",
+				id: 11,
+				url: "http://192.168.1.254/login_web_app.cgi",
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					Accept: "application/json, text/plain, */*",
+				},
+				main: false,
+			},
+			// Close-delimited, as the router answers: no Content-Length, which the engine reports as length 0.
+			{ ...html, id: 11, status: 299, url: "http://192.168.1.254/login_web_app.cgi", headers: {} },
+			{ type: "requestFinished", id: 11, length: 0 },
+			// A trustworthy origin gets fetch metadata, which names what the request is for.
+			{
+				type: "request",
+				id: 12,
+				url: "https://site.example/frame",
+				method: "GET",
+				headers: { "Sec-Fetch-Dest": "iframe" },
+				main: false,
+			},
+			{ ...html, id: 12, url: "https://site.example/frame", headers: { "Content-Length": "42" } },
+			{ type: "requestFinished", id: 12, length: 42 },
+			{
+				type: "request",
+				id: 13,
+				url: "https://site.example/api",
+				method: "POST",
+				headers: { "Sec-Fetch-Dest": "empty" },
+				main: false,
+			},
+			{ ...html, id: 13, url: "https://site.example/api", headers: {} },
+		]);
+
+		const requests = await tab.ternTab.requests();
+		expect(requests.map(record => [record.url, record.resourceType, record.sizes])).toEqual([
+			["http://192.168.1.254/frame.html", "subdocument", { responseBody: 0 }],
+			["http://192.168.1.254/login_web_app.cgi", "fetch", {}],
+			["https://site.example/frame", "subdocument", { responseBody: 42 }],
+			["https://site.example/api", "fetch", {}],
+		]);
+
+		// A HAR says "unknown" for both sizes of the login POST, not 0.
+		const entry = buildHarEntry(requests[1]!, undefined, "none", "") as {
+			request: { bodySize: number };
+			response: { bodySize: number };
+		};
+		expect([entry.request.bodySize, entry.response.bodySize]).toEqual([-1, -1]);
+	});
+
+	it("refuses a waitForUrl pattern that is neither a string nor a RegExp", async () => {
+		// Eval code is untyped: a predicate reaches the helper as it is.
+		const predicate = ((url: string) => url.endsWith("/overview")) as unknown as RegExp;
+		await expect(tab.ternTab.waitForUrl(predicate, { timeout: 5_000 })).rejects.toBeInstanceOf(ToolError);
 	});
 
 	it("keeps the engine as the logs' source while a capture script is installed", async () => {

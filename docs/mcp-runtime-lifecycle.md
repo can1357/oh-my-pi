@@ -163,12 +163,14 @@ Both preserve MCP content and metadata; `structuredContent` is retained in `deta
 
 ### Interactive reload and live-change paths
 
-`/mcp reload` (`src/modes/controllers/mcp-command-controller.ts`) does:
+`/mcp reload` (`src/modes/controllers/mcp-command-controller.ts`) runs `reconnectMCPServers` (`src/mcp/reload.ts`), which:
 
 1. `mcpManager.disconnectAll()`,
 2. clears stale MCP prompt commands,
 3. calls `mcpManager.discoverAndConnect()` with the same project/Exa/browser filters as startup,
 4. calls `session.refreshMCPTools(mcpManager.getTools())`.
+
+A working-directory change (`/move`, resuming a session from another project) re-scopes the session-owned manager: `session.refreshProjectScope()` calls `mcpManager.setCwd(newCwd)`, which re-points project config discovery and the advertised `roots/list`, and then runs the same reconnect for every server, since roots are advertised without `listChanged`. The reconnect runs in the background, and the next turn waits for it, bounded, as it does for startup discovery. Reloads are serialized, and the first one waits for startup-deferred discovery to finish.
 
 `session.refreshMCPTools()` delegates to `src/session/session-tools.ts`, which serializes registry mutations, reconciles manager and extension-owned MCP tools, re-wraps the latest tools, and reapplies availability/presentation without restarting. Connected manager tools become enabled; extension-owned MCP tools preserve their previous selection. A failed refresh restores the previous MCP registry. The owning SDK session also installs `setOnToolsChanged`, so late initial connections, server `tools/list_changed` notifications, reconnects, and disconnects can trigger the same rebinding. Explicit `/mcp reconnect <name>` performs one final refresh after the manager reconnect completes.
 
