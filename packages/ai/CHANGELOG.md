@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed Claude subscription requests to newly released models failing once with `claude_code_version_too_old`; the current Claude Code version is now looked up from npm ([#19256](https://github.com/can1357/oh-my-pi/pull/19256) by [@Xytronix](https://github.com/Xytronix))
+- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
 
 ## [18.21.0] - 2026-11-16
 
