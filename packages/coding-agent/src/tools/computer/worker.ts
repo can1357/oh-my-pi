@@ -582,8 +582,8 @@ async function appNames(session: NativeDesktopSession, signal: AbortSignal): Pro
 }
 
 /**
- * Says where focus ended after a fallback takeover, from native's
- * WindowServer reading taken when the takeover finished.
+ * Says where focus ended after a fallback takeover, from native's window
+ * server reading taken when the takeover finished (macOS and Windows).
  */
 async function focusReport(
 	session: NativeDesktopSession,

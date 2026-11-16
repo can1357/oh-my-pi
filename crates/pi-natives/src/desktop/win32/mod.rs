@@ -431,12 +431,33 @@ mod tests {
 				.unwrap();
 			// SAFETY: no preconditions.
 			assert_eq!(unsafe { GetForegroundWindow() }, windows.user, "after {input:?}");
+			// Both windows belong to the window host.
+			let pid = Some(windows.host.id());
+			assert_eq!(
+				control::take_focus_return().map(|r| (r.handed_back, r.previous_pid, r.front_pid)),
+				Some((true, pid, pid)),
+				"after {input:?}"
+			);
 		}
 		// Whether focusing an edit selects its text is the control's business;
 		// the keys reached the target and nothing reached the user's window.
 		let typed = Windows::text(windows.target);
 		assert!(typed != TARGET && typed.contains('x'), "target text {typed:?}");
 		assert_eq!(Windows::text(windows.user), USER);
+
+		// With the target already in front nothing is handed back.
+		// SAFETY: a window handle this test created.
+		unsafe { SetForegroundWindow(windows.target) };
+		assert!(window::wait_for_foreground(windows.target, Duration::from_secs(2)).unwrap());
+		let input = ElementInput::Chord(vec![KeyName::End]);
+		backend
+			.element_input(&element, &input, DeliveryMode::ForegroundReturnFocus, &token)
+			.unwrap();
+		let pid = Some(windows.host.id());
+		assert_eq!(
+			control::take_focus_return().map(|r| (r.handed_back, r.previous_pid, r.front_pid)),
+			Some((false, pid, pid))
+		);
 	}
 
 	/// 240 characters, each block numbered so a dropped one shows.
