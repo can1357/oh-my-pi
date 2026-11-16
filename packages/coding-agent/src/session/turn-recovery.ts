@@ -845,9 +845,10 @@ export class TurnRecovery {
 			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
+				const sessionId = this.#host.sessionId();
 				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
 					activeModel.provider,
-					this.#host.sessionId(),
+					sessionId,
 					{
 						retryAfterMs,
 						// Provider-stated timing only when the error text parsed;
@@ -857,6 +858,16 @@ export class TurnRecovery {
 						modelId: activeModel.id,
 					},
 				);
+				logger.debug("Usage limit recorded for session credential", {
+					sessionId,
+					provider: activeModel.provider,
+					modelId: activeModel.id,
+					retryAfterMs,
+					switched: outcome.switched,
+					blockedUntilMs: outcome.blockedUntilMs,
+					siblingRetryAtMs: outcome.retryAtMs,
+					reportResetAtMs: outcome.reportResetAtMs,
+				});
 				return {
 					switchedCredential: outcome.switched,
 					retryAfterMs,
@@ -2811,6 +2822,7 @@ export class TurnRecovery {
 		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
 			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
 			let restored = false;
+			let restoredCredentialIds: number[] | undefined;
 			if (!rotated) {
 				const resetAbortController = new AbortController();
 				this.#retryAbortController?.abort();
@@ -2823,6 +2835,7 @@ export class TurnRecovery {
 						resetAbortController.signal.throwIfAborted();
 						if (result.restored) {
 							restored = true;
+							restoredCredentialIds = result.restoredCredentialIds;
 							break;
 						}
 						if (result.retryAfterMs === undefined || attempt >= maxRetries) break;
@@ -2911,6 +2924,16 @@ export class TurnRecovery {
 					delayMs = usageLimitWaitMs;
 				}
 			}
+			logger.debug("Usage limit retry decision", {
+				sessionId: this.#host.sessionId(),
+				retryAttempt: this.#retryAttempt,
+				retryBudgetExhausted,
+				siblingAvailable: recordedUsageLimitOutcome.switchedCredential,
+				rotated,
+				resetRestored: restored,
+				restoredCredentialIds,
+				delayMs,
+			});
 		}
 
 		const currentModel = this.#host.model();
@@ -3196,6 +3219,15 @@ export class TurnRecovery {
 			return false;
 		}
 
+		if (recordedUsageLimitOutcome) {
+			logger.debug("Usage limit retry scheduled", {
+				sessionId: this.#host.sessionId(),
+				retryAttempt: this.#retryAttempt,
+				switchedCredential,
+				switchedModel,
+				delayMs,
+			});
+		}
 		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
 		// Quota resets elapse while the machine sleeps; capture the deadline before event delivery.
 		const usageResetDeadline = AIError.is(id, AIError.Flag.UsageLimit) ? Date.now() + delayMs : undefined;
