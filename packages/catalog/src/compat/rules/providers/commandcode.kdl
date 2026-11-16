@@ -65,7 +65,8 @@ provider "commandcode" {
 	// First-party OpenAI grants `none` only to the 5.6 generation
 	// (`providers/openai.kdl`); the gateway may forward `reasoning.effort`
 	// unchanged, so the other GPT ids keep the first-party lowest-effort off.
-	models "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" {
+	models "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" \
+		"gpt-6.1-sol" "gpt-6.1-terra" {
 		reasoning-disable-mode "lowest-effort"
 	}
 	models "typesafe/jev" {

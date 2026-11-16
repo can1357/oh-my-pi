@@ -333,6 +333,39 @@ describe("Command Code provider support", () => {
 		for (const { body } of chatBodies) expect(body.reasoning_effort).not.toBe("none");
 	});
 
+	test.each([
+		["discovery", "gpt-6.1-sol"],
+		["discovery", "gpt-6.1-terra"],
+		["bundled", "gpt-6.1-sol"],
+		["bundled", "gpt-6.1-terra"],
+	])("%s %s uses lowest effort for off and preserves explicit effort", async (source, id) => {
+		const models = source === "discovery" ? await discoverModels([id]) : getBundledModels("commandcode");
+		const model = models.find(model => model.id === id);
+		if (!model) throw new Error(`Missing Command Code fixture: ${source}/${id}`);
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = vi.fn(async (input, init) => {
+			expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/responses");
+			bodies.push(JSON.parse(String(init?.body)));
+			return new Response("stop", { status: 400 });
+		});
+		const context = { messages: [{ role: "user" as const, content: "Reply OK", timestamp: 0 }] };
+		await streamSimple(model, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			reasoning: Effort.High,
+			maxHttpAttempts: 1,
+		}).result();
+		expect(bodies.at(-1)?.reasoning).toMatchObject({ effort: "high" });
+		await streamSimple(model, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			disableReasoning: true,
+			maxHttpAttempts: 1,
+		}).result();
+		expect(bodies).toHaveLength(2);
+		expect(bodies[1]?.reasoning).toEqual({ effort: "low" });
+	});
+
 	test("sends each advertised Command Code Qwen effort and preserves off", async () => {
 		const models = await discoverModels(["Qwen/Qwen3.8-Max-Prime", "Qwen/Qwen4-Max"]);
 		const context = { messages: [{ role: "user" as const, content: "Reply OK", timestamp: 0 }] };
