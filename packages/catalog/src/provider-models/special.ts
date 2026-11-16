@@ -115,11 +115,11 @@ function unionCodexModels(
 	return catalogs.length > 0 ? unionAccountCatalogs(catalogs) : null;
 }
 
-/** `/codex/models` never lists local labels, so authoritative discovery must keep the authored seed rows. */
+/** Keep authored local labels in non-empty discovery; empty stays empty so ModelManager uses its short retry. */
 function withAuthoredSeeds(
 	discovered: readonly ModelSpec<"openai-codex-responses">[] | null,
 ): readonly ModelSpec<Api>[] | null {
-	if (!discovered) return null;
+	if (!discovered || discovered.length === 0) return discovered;
 	const known = new Set(discovered.map(model => model.id));
 	const missing = seedModels("openai-codex").filter(seed => !known.has(seed.id));
 	return missing.length === 0 ? discovered : [...discovered, ...missing.map(seed => ({ ...seed }))];

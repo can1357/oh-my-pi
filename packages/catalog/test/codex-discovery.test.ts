@@ -591,6 +591,44 @@ describe("Codex model discovery", () => {
 		}
 	});
 
+	it("keeps an empty upstream roster non-authoritative and retries it after five minutes", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-empty-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		let now = 1_000_000;
+		let fetches = 0;
+		const fetchFn: typeof fetch = Object.assign(
+			async () => {
+				fetches++;
+				return Response.json({ models: [] });
+			},
+			{ preconnect() {} },
+		);
+		const options = {
+			...openaiCodexModelManagerOptions({
+				resolveAccounts: async () => [{ accessToken: "test-token" }],
+				fetch: fetchFn,
+			}),
+			staticModels: [],
+			cacheDbPath,
+			now: () => now,
+		};
+		try {
+			const first = await resolveProviderModels(options, "online");
+			expect(first.models).toEqual([]);
+			expect(fetches).toBe(1);
+
+			now += 4 * 60 * 1000;
+			await resolveProviderModels(options);
+			expect(fetches).toBe(1);
+
+			now += 2 * 60 * 1000;
+			await resolveProviderModels(options);
+			expect(fetches).toBe(2);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps bundled display names over Codex's slug-style display_name", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-names-"));
 		// Codex reports `GPT-6.1-Sol` where every other surface (and the bundled
