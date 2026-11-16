@@ -7,6 +7,7 @@ import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
+	describeToolArguments,
 	type AgyConnection,
 	type AgyHostOptions,
 	type AgyScheduler,
@@ -648,6 +649,23 @@ describe("AgyHost stateful steps", () => {
 		expect(state.host.hasPendingTurn).toBe(true);
 		state.host.close();
 		await expect(run.done).rejects.toThrow("session closed");
+	});
+
+	it("bounds long diagnostic paths without dropping the expected schema", () => {
+		const message = describeToolArguments(
+			{
+				name: "read",
+				description: "Read",
+				inputSchema: {
+					type: "object",
+					properties: {},
+					additionalProperties: false,
+				},
+			},
+			{ ["x".repeat(17_000)]: 1 },
+		);
+		expect(message).toContain("Expected schema:");
+		expect(message.length).toBeLessThanOrEqual(16_387);
 	});
 
 	it("close clears pending calls and deadline timers without a later cancel", async () => {

@@ -106,6 +106,16 @@ describe("McpBridge", () => {
 		expect(reply.error?.message.length).toBeLessThanOrEqual(142);
 	});
 
+	it("rejects a non-string tool name without escaping the handler", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		const reply = await peer.request("tools/call", { name: { toString: null }, arguments: {} });
+		expect(reply.error?.code).toBe(-32602);
+		expect(reply.error?.message).toBe("Unknown tool");
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
+	});
+
 	it("decodes fragmented UTF-8 and parks the MCP response until its actual result arrives", async () => {
 		const arrived = Promise.withResolvers<{ name: string; args: unknown; id: string | undefined }>();
 		const result = Promise.withResolvers<McpToolOutput>();

@@ -156,9 +156,12 @@ function handleLine(
 			reply({ result: { tools } });
 			return;
 		case "tools/call": {
-			const tool = typeof params.name === "string" ? byName.get(params.name) : undefined;
+			const name = typeof params.name === "string" ? params.name : undefined;
+			const tool = name ? byName.get(name) : undefined;
 			if (!tool) {
-				reply({ error: { code: -32602, message: `Unknown tool: ${String(params.name).slice(0, 128)}` } });
+				reply({
+					error: { code: -32602, message: name ? `Unknown tool: ${name.slice(0, 128)}` : "Unknown tool" },
+				});
 				return;
 			}
 			const args = params.arguments === undefined ? {} : params.arguments;

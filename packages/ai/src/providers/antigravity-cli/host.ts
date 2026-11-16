@@ -874,12 +874,13 @@ function errorOutput(text: string): McpToolOutput {
 
 const MAX_DIAGNOSTIC_ISSUES = 8;
 const MAX_DIAGNOSTIC_PATH_SEGMENTS = 8;
+const MAX_DIAGNOSTIC_PATH_SEGMENT = 64;
 const MAX_DIAGNOSTIC_TOOL_NAME = 128;
 const MAX_DIAGNOSTIC_SCHEMA = 8_192;
 const MAX_DIAGNOSTIC_MESSAGE = 16_384;
 
 /** Explains rejected arguments with the failing paths and the tool's expected schema. */
-function describeToolArguments(
+export function describeToolArguments(
 	tool: McpToolDefinition,
 	args: unknown,
 	validation?: JsonSchemaValidationResult,
@@ -899,7 +900,12 @@ function describeToolArguments(
 				.map(issue => {
 					const path = issue.path
 						.slice(0, MAX_DIAGNOSTIC_PATH_SEGMENTS)
-						.map(segment => String(segment))
+						.map(segment => {
+							const text = String(segment);
+							return text.length > MAX_DIAGNOSTIC_PATH_SEGMENT
+								? `${text.slice(0, MAX_DIAGNOSTIC_PATH_SEGMENT)}...`
+								: text;
+						})
 						.join(".");
 					return `${path.length === 0 ? "(root)" : path}: ${issue.message}`;
 				})
