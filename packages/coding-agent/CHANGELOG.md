@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed `read` hanging indefinitely on images and other non-text files when speculative execution is enabled with `beforeToolCall` hooks ([#19359](https://github.com/can1357/oh-my-pi/issues/19359), [#19361](https://github.com/can1357/oh-my-pi/pull/19361) by [@gtoxlili](https://github.com/gtoxlili))
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
 - The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
 - Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))

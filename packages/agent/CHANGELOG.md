@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed speculative tool execution hanging `read` indefinitely on images and other non-text files when host evidence capture declines a candidate after dispatch has claimed it ([#19359](https://github.com/can1357/oh-my-pi/issues/19359)) ([#19361](https://github.com/can1357/oh-my-pi/pull/19361) by [@gtoxlili](https://github.com/gtoxlili))
+- Fixed claimed speculative tool candidates hanging when discarded or aborted before execution completes ([#19359](https://github.com/can1357/oh-my-pi/issues/19359), [#19361](https://github.com/can1357/oh-my-pi/pull/19361) by [@gtoxlili](https://github.com/gtoxlili))
 
 ## [18.20.1] - 2026-11-14
 
