@@ -404,7 +404,7 @@ describe("settings as a native prefs page", () => {
 			send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
 			send(selector, { type: "activate", key: "", item: "tui.linkMap" });
 			selector.handleInput(ENTER);
-			values.set("tui.linkMap", { ...map, "//work": "file:///Overlay:/" });
+			values.set("tui.linkMap", { "//work": "file:///Overlay:/", ...map });
 			shadowed["//work"] = "--config overlay";
 			selector.handleInput(ENTER);
 			expect(screen(selector)).toContain("The --config overlay sets //work");
@@ -415,7 +415,7 @@ describe("settings as a native prefs page", () => {
 			expect(screen(selector)).toContain("The --config overlay sets //work");
 			expect(entryWrites).toEqual([]);
 			expect(changes).toEqual([]);
-			expect(values.get("tui.linkMap")).toEqual({ ...map, "//work": "file:///Overlay:/" });
+			expect(values.get("tui.linkMap")).toEqual({ "//work": "file:///Overlay:/", ...map });
 		});
 
 		it("refuses a nonempty edit to a later normalized duplicate but removes only that entry when cleared", () => {
@@ -477,20 +477,33 @@ describe("settings as a native prefs page", () => {
 			const home = spyOn(os, "homedir").mockReturnValue("/logical/home");
 			const real = spyOn(fs, "realpathSync").mockReturnValue("/physical/home");
 			try {
-				const map = {
-					"/logical/home": "file:///First:/",
-					"~": "file:///Ignored:/",
-					"/physical/home": "file:///Physical:/",
-				};
-				const { selector, values, entryWrites } = harness({ "tui.linkMap": map });
-				send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
-				send(selector, { type: "activate", key: "", item: "tui.linkMap" });
-				expect(screen(selector)).toContain("ignored: same prefix as /logical/home");
-				expect(screen(selector)).not.toContain("ignored: same prefix as ~");
-				openTarget(selector, map, "/physical/home");
-				selector.handleInput(ENTER);
-				expect(entryWrites).toEqual([["tui.linkMap", "/physical/home", "file:///Physical:/"]]);
-				expect(values.get("tui.linkMap")).toEqual(map);
+				for (const ignoredHasLayer of [false, true]) {
+					const shadowed: Record<string, string> = ignoredHasLayer ? { "~": "--config overlay" } : {};
+					const map = { "/logical/home": "file:///First:/", "~": "file:///Ignored:/" };
+					const { selector, values, entryWrites } = harness({ "tui.linkMap": map }, shadowed);
+					send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+					send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+					expect(screen(selector)).toContain("ignored: same prefix as /logical/home");
+					selector.handleInput(DOWN);
+					selector.handleInput(DOWN);
+					selector.handleInput(ENTER);
+					type(selector, "/physical/home");
+					selector.handleInput(ENTER);
+					expect(screen(selector)).toContain("Link target: /physical/home");
+					type(selector, "file:///Physical:/");
+					selector.handleInput(ENTER);
+					const added = { ...map, "/physical/home": "file:///Physical:/" };
+					expect(entryWrites).toEqual([["tui.linkMap", "/physical/home", "file:///Physical:/"]]);
+					expect(values.get("tui.linkMap")).toEqual(added);
+					expect(screen(selector)).not.toContain("ignored: same prefix as ~");
+					openTarget(selector, added, "/physical/home");
+					selector.handleInput(ENTER);
+					expect(entryWrites).toEqual([
+						["tui.linkMap", "/physical/home", "file:///Physical:/"],
+						["tui.linkMap", "/physical/home", "file:///Physical:/"],
+					]);
+					expect(values.get("tui.linkMap")).toEqual(added);
+				}
 			} finally {
 				real.mockRestore();
 				home.mockRestore();

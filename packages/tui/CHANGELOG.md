@@ -14,7 +14,7 @@
 
 ### Fixed
 
-- Link Map target forms keep save refusals visible when a higher config layer takes ownership and reject edits to ignored duplicate entries; clearing the target still removes an ignored global entry ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Link Map target forms keep save refusals visible when a higher config layer takes ownership and reject edits to ignored duplicate entries; clearing the target still removes an ignored global entry. Ignored aliases do not block adding or editing a mapping for an otherwise unclaimed prefix ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.21.0] - 2026-11-16
 
