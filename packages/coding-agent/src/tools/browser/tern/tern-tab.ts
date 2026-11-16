@@ -21,9 +21,10 @@ import * as path from "node:path";
 import { isRecord, logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
-import { formatScreenshot, resizeImage } from "../../../utils/image-resize";
+import { resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
 import { ToolAbortError, throwIfAborted } from "../../tool-errors";
+import { PointerSpace } from "../pointer-space";
 import {
 	type BrowserA11yOptions,
 	type BrowserA11yResult,
@@ -95,6 +96,7 @@ import {
 	createPngDiff,
 	type DiffScreenshotOptions,
 	type DiffScreenshotResult,
+	emitScreenshot,
 	formatScreenshotLegend,
 	type PdfOptions,
 	pngPixelChangeRatio,
@@ -182,7 +184,7 @@ import { listTernBlocks, type TernBlockEntry } from "./blocks";
 import { TernError, type TernSocketClient } from "./wire";
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
-type DragTarget = string | { readonly x: number; readonly y: number };
+type DragTarget = string | { readonly x: number; readonly y: number; readonly css?: boolean };
 type MouseButtonName = "left" | "right" | "middle" | "back" | "forward";
 type World = "page" | "isolated";
 
@@ -541,6 +543,8 @@ export class TernTab implements InProcessRunTab {
 	#cursorOverlay = false;
 	// Input state.
 	#pointer: { x: number; y: number } | undefined;
+	/** What `clickAt`, `mouseMove` and `drag` points mean: CSS pixels, or positions on the last scaled screenshot. */
+	readonly #pointerSpace = new PointerSpace();
 	readonly #buttons = new Set<"left" | "right" | "middle">();
 	readonly #mods: TernModifier[] = [];
 	// Screenshots, snapshots, recording.
@@ -1748,6 +1752,7 @@ export class TernTab implements InProcessRunTab {
 			throw await this.#viewportFailure(error, width, height);
 		}
 		this.#viewport = { ...viewport };
+		this.#pointerSpace.resized({ width, height });
 	}
 
 	/**
@@ -2366,19 +2371,23 @@ export class TernTab implements InProcessRunTab {
 		return { x: viewport.width / 2, y: viewport.height / 2 };
 	}
 
-	/** Move the pointer (interpolated over `steps`); a held button drags. */
-	async mouseMove(x: number, y: number, opts?: { steps?: number }): Promise<void> {
+	/**
+	 * Move the pointer (interpolated over `steps`) to a position on the latest screenshot, or to viewport CSS
+	 * pixels with `css`; a held button drags.
+	 */
+	async mouseMove(x: number, y: number, opts?: { steps?: number; css?: boolean }): Promise<void> {
 		if (!Number.isFinite(x) || !Number.isFinite(y))
 			throw new ToolError("mouseMove coordinates must be finite numbers");
-		const from = this.#pointer ?? { x, y };
+		const to = this.#pointerSpace.toViewport({ x, y, css: opts?.css });
+		const from = this.#pointer ?? to;
 		const steps = Math.max(1, Math.floor(opts?.steps ?? 1));
 		const held = [...this.#buttons][0] ?? "left";
 		const events: TernInputStep[] = [];
 		for (let step = 1; step <= steps; step++) {
-			const point = { x: from.x + ((x - from.x) * step) / steps, y: from.y + ((y - from.y) * step) / steps };
+			const point = { x: from.x + ((to.x - from.x) * step) / steps, y: from.y + ((to.y - from.y) * step) / steps };
 			events.push(this.#mouseStep("move", point, held, 0));
 		}
-		this.#pointer = { x, y };
+		this.#pointer = to;
 		await this.#input(events);
 	}
 
@@ -2398,10 +2407,18 @@ export class TernTab implements InProcessRunTab {
 		await this.#input([this.#mouseStep("up", point, button, opts?.clickCount ?? 1)]);
 	}
 
-	/** Click at viewport coordinates. */
-	async clickAt(x: number, y: number, opts?: { button?: MouseButtonName; count?: number }): Promise<void> {
+	/** Click at a position on the latest screenshot, or at viewport CSS pixels with `css`. */
+	async clickAt(
+		x: number,
+		y: number,
+		opts?: { button?: MouseButtonName; count?: number; css?: boolean },
+	): Promise<void> {
 		if (!Number.isFinite(x) || !Number.isFinite(y)) throw new ToolError("clickAt coordinates must be finite numbers");
-		await this.#clickAt({ x, y }, this.#button(opts?.button), Math.max(1, Math.floor(opts?.count ?? 1)));
+		await this.#clickAt(
+			this.#pointerSpace.toViewport({ x, y, css: opts?.css }),
+			this.#button(opts?.button),
+			Math.max(1, Math.floor(opts?.count ?? 1)),
+		);
 	}
 
 	/** A trusted wheel event at the pointer (the viewport centre before any pointer move). */
@@ -2436,7 +2453,8 @@ export class TernTab implements InProcessRunTab {
 			const box = await this.#target(`tab.drag() ${role} ${JSON.stringify(target)}`, target, "drag", null);
 			return { x: box.x, y: box.y };
 		}
-		if (target && Number.isFinite(target.x) && Number.isFinite(target.y)) return { x: target.x, y: target.y };
+		if (target && Number.isFinite(target.x) && Number.isFinite(target.y))
+			return this.#pointerSpace.toViewport(target);
 		throw new ToolError("Drag target must be a selector string or { x: number, y: number } point");
 	}
 
@@ -3061,47 +3079,24 @@ export class TernTab implements InProcessRunTab {
 			change = { changed, revision, pixelChangeRatio };
 			if (!changed) return change;
 		}
-		const resized = await resizeImage(
-			{ type: "image", data: buffer.toString("base64"), mimeType: mime },
+		const dest = await emitScreenshot(
 			{
-				maxWidth: 1024,
-				maxHeight: 1024,
-				maxBytes: 150 * 1024,
-				jpegQuality: 70,
-				excludeWebP: context.session.excludeWebP,
+				bytes: buffer,
+				mimeType: mime,
+				area: screenshotArea(opts),
+				scale,
+				keepCapture: opts.format !== undefined,
+				silent: opts.silent,
+				notes: opts.annotate ? [formatScreenshotLegend(legend)] : undefined,
 			},
+			{
+				session: context.session,
+				output: context.output,
+				screenshots: context.screenshots,
+				pointer: this.#pointerSpace,
+			},
+			this.#signal,
 		);
-		throwIfAborted(this.#signal);
-		const saveFullRes = !!context.session.browserScreenshotDir || opts.format !== undefined;
-		const savedBuffer = saveFullRes ? buffer : Buffer.from(resized.buffer);
-		const savedMimeType = saveFullRes ? mime : resized.mimeType;
-		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-		const dest = context.session.browserScreenshotDir
-			? path.join(
-					context.session.browserScreenshotDir,
-					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
-		await Bun.write(dest, savedBuffer);
-		throwIfAborted(this.#signal);
-		context.screenshots.push({
-			dest,
-			mimeType: savedMimeType,
-			bytes: savedBuffer.length,
-			width: resized.width,
-			height: resized.height,
-		});
-		if (!opts.silent) {
-			const lines = formatScreenshot({
-				saveFullRes,
-				dest,
-				resized,
-				capture: { area: screenshotArea(opts), scale },
-			});
-			if (opts.annotate) lines.push(formatScreenshotLegend(legend));
-			context.output.push({ type: "text", text: lines.join("\n") });
-			context.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-		}
 		return change ? { ...change, path: dest } : dest;
 	}
 
@@ -4338,11 +4333,12 @@ export class TernPageFacade {
 			down: key => tab.keyDown(key),
 			up: key => tab.keyUp(key),
 		};
+		// Raw page input takes viewport CSS pixels, as Puppeteer's does: no screenshot frame applies.
 		this.mouse = {
-			move: (x, y, options) => tab.mouseMove(x, y, options),
+			move: (x, y, options) => tab.mouseMove(x, y, { steps: options?.steps, css: true }),
 			down: options => tab.mouseDown(options),
 			up: options => tab.mouseUp(options),
-			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, count: options?.count }),
+			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, count: options?.count, css: true }),
 			wheel: delta => tab.wheel(delta.deltaX ?? 0, delta.deltaY ?? 0),
 		};
 	}

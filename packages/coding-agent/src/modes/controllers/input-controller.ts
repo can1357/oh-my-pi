@@ -186,6 +186,7 @@ const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	btw: () => true,
+	copy: () => true,
 	effort: () => true,
 	export: () => true,
 	jobs: args => {
@@ -632,8 +633,9 @@ export class InputController {
 				this.#restoreYieldCompactionOnStop();
 				return;
 			}
-			// The turn is over and only background jobs can resume it; its row
-			// stays mounted, so this is checked before the loader's abort.
+			// The run is paused and only outside work (background jobs, child agents,
+			// peer messages) can resume it; its row stays mounted, so this is checked
+			// before the loader's abort.
 			const awaitingAsyncWork = this.ctx.eventController.isAwaitingAsyncWork();
 			if (this.ctx.loadingAnimation && !awaitingAsyncWork) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
@@ -650,8 +652,8 @@ export class InputController {
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
 			} else if (awaitingAsyncWork) {
-				// End the wait. The jobs keep running; their results land in context
-				// for the next prompt instead of starting a turn.
+				// End the wait: the run ends now. The jobs keep running; their results
+				// land in context for the next prompt instead of starting a turn.
 				void this.ctx.eventController.stopAwaitingAsyncWork();
 			} else if (this.ctx.session.isStreaming) {
 				this.#abortStreamingTurn();
@@ -1654,10 +1656,10 @@ export class InputController {
 			const parsed = parseSlashCommand(text);
 			const name = parsed && lookupBuiltinSlashCommand(parsed.name)?.name;
 			if (parsed && name && FOCUSED_VIEW_COMMANDS[name]?.(parsed.args)) {
-				// Viewer-scoped commands: /btw asks about the focused transcript, /export
-				// writes it (with its own subagents), /jobs lists the focused agent's jobs
-				// without a way to cancel them, /usage reports account-wide limits, and
-				// /model, /switch, /effort change the focused agent's model and thinking.
+				// Viewer-scoped commands: /btw asks about the focused transcript, /copy picks
+				// from it, /export writes it (with its own subagents), /jobs lists the focused
+				// agent's jobs without a way to cancel them, /usage reports account-wide limits,
+				// and /model, /switch, /effort change the focused agent's model and thinking.
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {

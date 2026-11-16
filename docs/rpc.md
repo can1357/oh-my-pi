@@ -950,13 +950,14 @@ Each command replaces the whole filter state: omitting `messageUpdates` resets i
 
 `yielded` is `true` when the agent finished its turn: the end is terminal, or the session resumes only for queued input or background-job results. It is `false` while the agent continues its own work (retry, compaction continuation, stop-time reminders). Frames from older runtimes omit it; treat those as yielded only when terminal.
 
-`isTerminal: false` means a continuation or possible async delivery remains.
-`awaitingAsyncWork: true` identifies a non-terminal end whose only possible
-resume is a background-job result; cancelled or suppressed delivery may mean
-no follow-up run occurs. The optional fields keep older frames terminal-compatible
-when `isTerminal` is absent. Use `yielded` for a prompt's yield and
-`session_settled` for quiescence, rather than assuming every non-terminal end
-guarantees another turn.
+`isTerminal: false` means the run goes on: a continuation, queued input or
+outside work resumes it. `awaitingAsyncWork: true` identifies a non-terminal end
+whose only possible resume is outside work: a background-job result, a message
+from a child agent still running, or a queued peer message. Every run ends with
+exactly one terminal `agent_end`, also when that outside work goes away without
+resuming it (a cancelled job, a child that finishes without writing back). The
+optional fields keep older frames terminal-compatible when `isTerminal` is
+absent. Use `yielded` for a prompt's yield and `session_settled` for quiescence.
 
 ### Progress events
 

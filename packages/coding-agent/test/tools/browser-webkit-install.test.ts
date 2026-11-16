@@ -7,7 +7,7 @@ import {
 	ENGINE_VERSION_FILE,
 	installWebKitEngine,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/webkit/install";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, tryAcquireFileLock } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
 const DOWNLOAD = "https://r2.test/abkit.tar.gz";
@@ -151,6 +151,29 @@ describe.skipIf(process.platform === "win32")("omp's WebKit engine install", () 
 			host.kill();
 			await host.exited;
 		}
+	});
+
+	it("runs an installed engine at once while another omp holds the install lock or the build service is down", async () => {
+		const requests: string[] = [];
+		const fetchImpl = await buildService(await archive({ "abkit/ABHost": "#!/bin/sh\n" }), requests);
+		const busyDir = path.join(temp.path(), "busy", "abkit");
+		await fs.symlink(await versionFolder(busyDir, "0.1.9"), busyDir);
+		// Another omp downloading an update holds this lock for as long as the download takes.
+		const lock = tryAcquireFileLock(`${busyDir}.install`);
+		expect(lock).not.toBeNull();
+		try {
+			expect(await installWebKitEngine(busyDir, { fetchImpl })).toBe(path.join(busyDir, "ABHost"));
+		} finally {
+			lock?.release();
+		}
+		expect(requests).toEqual([]);
+
+		const offlineDir = path.join(temp.path(), "offline", "abkit");
+		await fs.symlink(await versionFolder(offlineDir, "0.1.9"), offlineDir);
+		const offline: Fetch = async () => {
+			throw new TypeError("fetch failed");
+		};
+		expect(await installWebKitEngine(offlineDir, { fetchImpl: offline })).toBe(path.join(offlineDir, "ABHost"));
 	});
 
 	it("does not replace a plain engine folder a process runs from", async () => {

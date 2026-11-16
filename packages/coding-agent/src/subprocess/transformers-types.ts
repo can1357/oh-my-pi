@@ -50,9 +50,3 @@ export interface TextGenerationPipeline {
 	(text: string, options: Record<string, unknown>): Promise<TextGenerationStringOutput>;
 	tokenizer: TextTokenizer;
 }
-
-/** PCM audio and sample rate returned by Kokoro synthesis. */
-export interface RawAudio {
-	audio: Float32Array | Float32Array[];
-	sampling_rate: number;
-}
