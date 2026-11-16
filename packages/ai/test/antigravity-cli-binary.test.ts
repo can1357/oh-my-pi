@@ -1,7 +1,9 @@
 import { afterEach, expect, it, vi } from "bun:test";
+import { expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { ensureAgyInstalled, updateAgyBinary } from "../src/providers/antigravity-cli/binary";
+import { ensureAgyInstalled, resolveAgyBinary, updateAgyBinary } from "../src/providers/antigravity-cli/binary";
 import type { FetchImpl } from "../src/types";
 
 /** Serves a release manifest and archive in memory without running an installer or contacting Google. */
@@ -68,6 +70,14 @@ async function trickle(gapMs: number, silentAfter = Infinity): Promise<{ fetch: 
 afterEach(() => {
 	vi.useRealTimers();
 });
+function managedBinary(directory: string, version = "1.5.9"): string {
+	return path.join(directory, version, process.platform === "win32" ? "agy.exe" : "agy");
+}
+
+async function executable(file: string, script: string): Promise<void> {
+	await Bun.write(file, script);
+	await fs.chmod(file, 0o755);
+}
 
 it("concurrent first-use requests install one verified executable without running the profile installer", async () => {
 	using temp = TempDir.createSync("@omp-agy-download-");
@@ -121,4 +131,137 @@ it("a download that stops sending fails as a stalled download and installs nothi
 	vi.advanceTimersByTime(60_000);
 	await expect(install).rejects.toThrow(/Antigravity CLI download stalled: no data for 60s after .+ of /);
 	expect(await Bun.file(path.join(directory, "install.json")).exists()).toBe(false);
+	});
+it("uses a compatible agy from PATH without downloading the managed release", async () => {
+	using temp = TempDir.createSync("@omp-agy-path-");
+	const requests: string[] = [];
+	const binary = await resolveAgyBinary(
+		async input => {
+			requests.push(String(input));
+			throw new Error("network");
+		},
+		{
+			directory: temp.join("bin"),
+			which: () => "/opt/agy/bin/agy",
+			probe: async () => "1.5.9 (build 42)",
+		},
+	);
+	expect(binary).toBe("/opt/agy/bin/agy");
+	expect(requests).toEqual([]);
+});
+
+it("falls back to the managed release when the PATH agy is too old", async () => {
+	using temp = TempDir.createSync("@omp-agy-old-");
+	const directory = temp.join("bin");
+	const remote = await release("1.5.9", "managed executable");
+	const binary = await resolveAgyBinary(remote.fetch, {
+		directory,
+		which: () => "/opt/agy/bin/agy",
+		probe: async () => "1.5.8",
+	});
+	expect(binary).toBe(managedBinary(directory));
+	expect(await Bun.file(binary).text()).toBe("managed executable");
+});
+
+it("falls back when the PATH agy probe fails or reports no version", async () => {
+	using temp = TempDir.createSync("@omp-agy-probe-");
+	const directory = temp.join("bin");
+	const remote = await release("1.5.9", "managed executable");
+	for (const probe of [
+		async () => {
+			throw new Error("probe failed");
+		},
+		async () => undefined,
+	]) {
+		const binary = await resolveAgyBinary(remote.fetch, { directory, which: () => "/opt/agy/bin/agy", probe });
+		expect(binary).toBe(managedBinary(directory));
+	}
+});
+
+it("keeps PI_AGY_PATH ahead of PATH discovery", async () => {
+	using temp = TempDir.createSync("@omp-agy-override-");
+	const previous = process.env.PI_AGY_PATH;
+	process.env.PI_AGY_PATH = "/override/agy";
+	try {
+		const binary = await resolveAgyBinary(
+			async () => {
+				throw new Error("network");
+			},
+			{
+				directory: temp.join("bin"),
+				which: () => "/opt/agy/bin/agy",
+				probe: async () => "1.5.9",
+			},
+		);
+		expect(binary).toBe("/override/agy");
+	} finally {
+		if (previous === undefined) delete process.env.PI_AGY_PATH;
+		else process.env.PI_AGY_PATH = previous;
+	}
+});
+
+it("installs the managed release when no agy is on PATH", async () => {
+	using temp = TempDir.createSync("@omp-agy-missing-");
+	const directory = temp.join("bin");
+	const remote = await release("1.5.9", "managed executable");
+	const binary = await resolveAgyBinary(remote.fetch, { directory, which: () => null });
+	expect(binary).toBe(managedBinary(directory));
+});
+
+it.skipIf(process.platform === "win32")("reads the installed CLI version through agy acp --version", async () => {
+	using temp = TempDir.createSync("@omp-agy-version-");
+	const cli = temp.join("agy");
+	await executable(cli, "#!/bin/sh\nprintf '1.5.9\\n'\n");
+	const binary = await resolveAgyBinary(
+		async () => {
+			throw new Error("network");
+		},
+		{ directory: temp.join("bin"), which: () => cli },
+	);
+	expect(binary).toBe(cli);
+});
+
+it.skipIf(process.platform === "win32")("rejects an installed CLI below the supported version", async () => {
+	using temp = TempDir.createSync("@omp-agy-version-old-");
+	const cli = temp.join("agy");
+	await executable(cli, "#!/bin/sh\nprintf '1.5.8\\n'\n");
+	const directory = temp.join("bin");
+	const remote = await release("1.5.9", "managed executable");
+	const binary = await resolveAgyBinary(remote.fetch, { directory, which: () => cli });
+	expect(binary).toBe(managedBinary(directory));
+});
+
+it.skipIf(process.platform === "win32")("re-probes a CLI path after its version changes", async () => {
+	using temp = TempDir.createSync("@omp-agy-reprobe-");
+	const cli = temp.join("agy");
+	const directory = temp.join("bin");
+	const remote = await release("1.5.9", "managed executable");
+	const resolve = () => resolveAgyBinary(remote.fetch, { directory, which: () => cli });
+
+	await executable(cli, "#!/bin/sh\nprintf '1.5.8\\n'\n");
+	expect(await resolve()).toBe(managedBinary(directory));
+
+	await executable(cli, "#!/bin/sh\nprintf '1.5.9\\n'\n");
+	expect(await resolve()).toBe(cli);
+
+	await executable(cli, "#!/bin/sh\nprintf '1.5.8\\n'\n");
+	expect(await resolve()).toBe(managedBinary(directory));
+});
+
+it("accepts a newer CLI and rejects prerelease or malformed versions", async () => {
+	using temp = TempDir.createSync("@omp-agy-versions-");
+	const directory = temp.join("bin");
+	const remote = await release("1.5.9", "managed executable");
+	for (const [version, compatible] of [
+		["1.5.10", true],
+		["1.5.9-rc.1", false],
+		["1.5.9junk", false],
+	] as const) {
+		const binary = await resolveAgyBinary(remote.fetch, {
+			directory,
+			which: () => "/opt/agy/bin/agy",
+			probe: async () => version,
+		});
+		expect(binary).toBe(compatible ? "/opt/agy/bin/agy" : managedBinary(directory));
+	}
 });
