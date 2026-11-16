@@ -25,7 +25,6 @@ import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import { loadBundledAgents } from "@oh-my-pi/pi-coding-agent/task/agents";
 import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -391,94 +390,83 @@ describe("task.batch validation", () => {
 	});
 
 	it.each([
-		{ batch: false, structured: true, isolation: false, seance: false, model: "" },
-		{ batch: true, structured: false, isolation: true, seance: true, model: [] },
-	])(
-		"routes empty model placeholders through the agent loop: $batch $structured $isolation $seance",
-		async options => {
-			const configuredAgent = { ...taskAgent, model: ["default/route"] };
-			const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
-			mockDiscovery(options.seance ? [configuredAgent, bundledSeance] : configuredAgent);
-			const seen: Array<{ model: unknown; grants: unknown }> = [];
-			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async spawn => {
-				seen.push({ model: spawn.modelOverride, grants: spawn.perCallModelGrants });
-				return makeResult(spawn.id ?? "?");
-			});
-			const tool = await TaskTool.create(
-				createSession({
-					settings: {
-						"async.enabled": false,
-						"task.batch": options.batch,
-						"task.structured": options.structured,
-						"task.isolation.enabled": options.isolation,
-						"task.perCallModel": "off",
-					},
-				}),
-			);
-			const item = { agent: "task", task: "Do A.", solutionSpace: "bounded", model: options.model };
-			const mock = createMockModel({
-				responses: [
-					{
-						content: [
-							{
-								type: "toolCall",
-								id: "empty-model",
-								name: "task",
-								arguments: options.batch ? { context: "ctx", tasks: [item] } : item,
-							},
-						],
-					},
-					{ content: ["done"] },
-				],
-			});
-			const agent = new Agent({
-				initialState: {
-					model: mock.model,
-					systemPrompt: ["Test"],
-					tools: [tool as unknown as AgentTool],
-					messages: [],
+		{ batch: false, structured: true, isolation: false, model: "" },
+		{ batch: true, structured: false, isolation: true, model: [] },
+	])("routes empty model placeholders through the agent loop: $batch $structured $isolation", async options => {
+		const configuredAgent = { ...taskAgent, model: ["default/route"] };
+		mockDiscovery(configuredAgent);
+		const seen: Array<{ model: unknown; grants: unknown }> = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async spawn => {
+			seen.push({ model: spawn.modelOverride, grants: spawn.perCallModelGrants });
+			return makeResult(spawn.id ?? "?");
+		});
+		const tool = await TaskTool.create(
+			createSession({
+				settings: {
+					"async.enabled": false,
+					"task.batch": options.batch,
+					"task.structured": options.structured,
+					"task.isolation.enabled": options.isolation,
+					"task.perCallModel": "off",
 				},
-				streamFn: mock.stream,
-			});
-			await agent.prompt("go");
-			const result = agent.state.messages.find(message => message.role === "toolResult");
-			expect(result?.role === "toolResult" && result.isError).toBe(false);
-			const omitted = { agent: "task", task: "Do B.", solutionSpace: "bounded" };
-			const baseline = await tool.execute(
-				"omitted-model",
-				options.batch ? { context: "ctx", tasks: [omitted] } : omitted,
-			);
-			expect(baseline.isError).not.toBe(true);
-			expect(seen).toEqual([
-				{ model: ["default/route"], grants: undefined },
-				{ model: ["default/route"], grants: undefined },
-			]);
-		},
-	);
+			}),
+		);
+		const item = { agent: "task", task: "Do A.", solutionSpace: "bounded", model: options.model };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "empty-model",
+							name: "task",
+							arguments: options.batch ? { context: "ctx", tasks: [item] } : item,
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [tool as unknown as AgentTool],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		await agent.prompt("go");
+		const result = agent.state.messages.find(message => message.role === "toolResult");
+		expect(result?.role === "toolResult" && result.isError).toBe(false);
+		const omitted = { agent: "task", task: "Do B.", solutionSpace: "bounded" };
+		const baseline = await tool.execute(
+			"omitted-model",
+			options.batch ? { context: "ctx", tasks: [omitted] } : omitted,
+		);
+		expect(baseline.isError).not.toBe(true);
+		expect(seen).toEqual([
+			{ model: ["default/route"], grants: undefined },
+			{ model: ["default/route"], grants: undefined },
+		]);
+	});
 
 	// The agent loop validates arguments against the wire schema before execute(),
-	// and that schema deletes undeclared keys. With per-call model off, `model` and
-	// `sourceSession` on an ordinary agent must still be refused by every call form
-	// instead of being dropped, leaving the child on its own model while the caller
+	// and that schema deletes undeclared keys. With per-call model off, `model`
+	// must still be refused by every call form instead of being dropped, leaving the child on its own model while the caller
 	// believes it pinned another.
 	// `task.structured` and `task.isolation.enabled` choose between the prebuilt and
 	// generated batch schemas, each with and without `isolated`.
 	it.each([
-		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "model" },
-		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "model" },
-		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "model" },
-		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "model" },
-		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: false, field: "sourceSession" },
-		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: false, field: "sourceSession" },
-		{ form: "batch", seance: "hidden", batch: true, structured: false, isolation: true, field: "sourceSession" },
-		{ form: "batch", seance: "hidden", batch: true, structured: true, isolation: true, field: "sourceSession" },
-		{ form: "batch", seance: "advertised", batch: true, structured: false, isolation: false, field: "model" },
-		{ form: "flat", seance: "hidden", batch: false, structured: false, isolation: false, field: "model" },
+		{ form: "batch", batch: true, structured: false, isolation: false },
+		{ form: "batch", batch: true, structured: true, isolation: false },
+		{ form: "batch", batch: true, structured: false, isolation: true },
+		{ form: "batch", batch: true, structured: true, isolation: true },
+		{ form: "flat", batch: false, structured: false, isolation: false },
 	])(
-		"refuses $field on an ordinary agent in the $form form with seance $seance (structured: $structured, isolation: $isolation)",
-		async ({ seance, batch, structured, isolation, field }) => {
-			const bundledSeance = loadBundledAgents().find(agent => agent.name === "seance")!;
-			mockDiscovery(seance === "advertised" ? [taskAgent, bundledSeance] : taskAgent);
+		"refuses model on an ordinary agent in the $form form (structured: $structured, isolation: $isolation)",
+		async ({ batch, structured, isolation }) => {
+			mockDiscovery(taskAgent);
 			const run = vi
 				.spyOn(executorModule, "runSubprocess")
 				.mockImplementation(async options => makeResult(options.id ?? "?"));
@@ -492,7 +480,7 @@ describe("task.batch validation", () => {
 					},
 				}),
 			);
-			const item = { name: "Alpha", agent: "task", task: "Do A.", solutionSpace: "c", [field]: "stub/model-b" };
+			const item = { name: "Alpha", agent: "task", task: "Do A.", solutionSpace: "c", model: "stub/model-b" };
 			const mock = createMockModel({
 				responses: [
 					{
@@ -521,12 +509,7 @@ describe("task.batch validation", () => {
 
 			const toolResult = agent.state.messages.find(message => message.role === "toolResult");
 			const text = toolResult?.role === "toolResult" ? getFirstText(toolResult) : "";
-			// `model` doubles as the per-call selector, whose disabled gate is reported first.
-			expect(text).toContain(
-				field === "model"
-					? "Per-call model is disabled for task calls (task.perCallModel: off)."
-					: `\`${field}\` is only accepted for the \`seance\` agent.`,
-			);
+			expect(text).toContain("Per-call model is disabled for task calls (task.perCallModel: off).");
 			expect(toolResult?.role === "toolResult" && toolResult.isError).toBe(true);
 			expect(run).not.toHaveBeenCalled();
 		},
