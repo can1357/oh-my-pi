@@ -1046,7 +1046,8 @@ export class MCPManager implements MCPManagerApi {
 					if (allowBackgroundLogging && !reportedErrors.has(name)) {
 						logger.error("MCP tool load failed", { path: `mcp:${name}`, error: message });
 					}
-					if (error instanceof MCPConnectionTimeoutError || isTransientMCPInitialFailure(error)) {
+					const transientInitial = isTransientMCPInitialFailure(error);
+					if (error instanceof MCPConnectionTimeoutError || transientInitial) {
 						notify({ type: "reconnecting", serverName: name });
 						const stopForwarding = onStatus
 							? this.addConnectionStatusListener(event => {

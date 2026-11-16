@@ -2,9 +2,9 @@
 /**
  * Test fixture: a minimal Streamable HTTP MCP server whose availability can be
  * flipped. While "down" it closes its GET SSE streams (the client sees the
- * transport end, like a process restart) and answers every request with 503;
- * back "up" it is a fresh generation with new session ids, like a server that
- * has just been redeployed.
+ * transport end, like a process restart) and answers every request with a
+ * configurable status (503 by default); back "up" it is a fresh generation
+ * with new session ids, like a server that has just been redeployed.
  *
  * Doubles as the manual reproduction for the reconnect schedule. Standalone:
  *
@@ -20,7 +20,7 @@ export interface FlakyHttpMcpServer {
 	readonly url: string;
 	/** Number of `initialize` requests answered, across generations. */
 	readonly initializes: number;
-	/** Number of POST requests (one per connection attempt) refused with 503 while down. */
+	/** Number of POST requests (one per connection attempt) refused while down. */
 	readonly refusals: number;
 	/** Text the `ping` tool answers with for the current generation. */
 	readonly pong: string;
