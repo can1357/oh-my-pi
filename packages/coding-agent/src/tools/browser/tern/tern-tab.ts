@@ -14,15 +14,17 @@
  * and screenshot annotations, `styles`, `uploadFile`, `ariaSnapshot`, frame
  * listing, focusing an element that takes no text, element `evaluate`).
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isRecord, logger, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
-import { formatScreenshot, resizeImage } from "../../../utils/image-resize";
+import { resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
 import { ToolAbortError, throwIfAborted } from "../../tool-errors";
+import { PointerSpace } from "../pointer-space";
 import {
 	type BrowserA11yOptions,
 	type BrowserA11yResult,
@@ -45,7 +47,7 @@ import type { BrowserEmulateOptions, ClipboardActionResult, ClipboardReadResult 
 import type { BrowserFrameInfo } from "../frames";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
 import { loadedKnownDevices, loadPuppeteer } from "../launch";
-import { assertUrlPattern, pushStateInPage, sameAddress } from "../navigation";
+import { parseUrlPattern, pushStateInPage, sameAddress } from "../navigation";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -56,7 +58,7 @@ import type {
 	NetworkRouteDescription,
 	NetworkRouteOptions,
 } from "../network";
-import { normalizeAllowedDomains } from "../network";
+import { normalizeAllowedDomains, urlMatcher } from "../network";
 import { resolveOpTimeouts, resolveWaitTimeout, ZERO_MATCH_FAIL_FAST_MS } from "../op-timeouts";
 import { DEFAULT_STYLE_PROPERTIES } from "../queries";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
@@ -94,6 +96,7 @@ import {
 	createPngDiff,
 	type DiffScreenshotOptions,
 	type DiffScreenshotResult,
+	emitScreenshot,
 	formatScreenshotLegend,
 	type PdfOptions,
 	pngPixelChangeRatio,
@@ -177,11 +180,11 @@ import {
 	type TernTargetFailure,
 } from "./page-kit";
 import { parseTernSelector, type TernSelector } from "./selectors";
-import type { TernBlockEntry } from "./blocks";
+import { listTernBlocks, type TernBlockEntry } from "./blocks";
 import { TernError, type TernSocketClient } from "./wire";
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
-type DragTarget = string | { readonly x: number; readonly y: number };
+type DragTarget = string | { readonly x: number; readonly y: number; readonly css?: boolean };
 type MouseButtonName = "left" | "right" | "middle" | "back" | "forward";
 type World = "page" | "isolated";
 
@@ -284,6 +287,8 @@ type CaptureEntry = BrowserConsoleEntry | BrowserErrorEntry;
 const EVENT_LOG_LIMIT = 4_000;
 const CONSOLE_LIMIT = 500;
 const NAVIGATION_IDLE_MS = 500;
+/** The address a PiP opens at, and the one a stale or substituted load reports. */
+const BLANK_URL = "about:blank";
 const KIT_CALL =
 	"async function (method, args) { const kit = globalThis.__ompTernKit; if (!kit) return { missing: true }; return { value: await kit[method](...args) }; }";
 /** Rendering updates an element's rect must hold still for before a native action aims at it. */
@@ -489,6 +494,11 @@ export class TernTab implements InProcessRunTab {
 	readonly #events: TernEvent[] = [];
 	#pulling: Promise<void> | undefined;
 	#runContext: InProcessRunContext | undefined;
+	readonly #readScope = new AsyncLocalStorage<{ deadline: number; signal: AbortSignal }>();
+	#rendererFailure: ToolError | undefined;
+	#rendererProbe: Promise<void> | undefined;
+	/** Set once the backend no longer has this tab's block ({@link gone}): every later op fails with it. */
+	#gone: { reason: string; error: ToolError } | undefined;
 	#runtime: JsRuntime | undefined;
 	#pageFacade: TernPageFacade | undefined;
 	#browserFacade: TernBrowserFacade | undefined;
@@ -533,6 +543,8 @@ export class TernTab implements InProcessRunTab {
 	#cursorOverlay = false;
 	// Input state.
 	#pointer: { x: number; y: number } | undefined;
+	/** What `clickAt`, `mouseMove` and `drag` points mean: CSS pixels, or positions on the last scaled screenshot. */
+	readonly #pointerSpace = new PointerSpace();
 	readonly #buttons = new Set<"left" | "right" | "middle">();
 	readonly #mods: TernModifier[] = [];
 	// Screenshots, snapshots, recording.
@@ -656,8 +668,23 @@ export class TernTab implements InProcessRunTab {
 		return this.#browserFacade;
 	}
 
+	/** The renderer failure that requires an explicit close/reopen; ordinary timeouts do not quarantine a tab. */
+	get rendererFailure(): ToolError | undefined {
+		return this.#rendererFailure;
+	}
+
+	/**
+	 * Why the tab's block is gone (closed or moved out of the window without
+	 * omp closing it), once an op answered `not_found` for it and the window's
+	 * `blocks` no longer list it; undefined while the block is there.
+	 */
+	get gone(): string | undefined {
+		return this.#gone?.reason;
+	}
+
 	/** The tab's JavaScript runtime for `tab.run`. */
 	ensureRuntime(session: SessionSnapshot): JsRuntime {
+		if (this.#rendererFailure) throw this.#rendererFailure;
 		this.#runtime ??= new JsRuntime({ initialCwd: session.cwd, sessionId: `tern-tab-${this.block}` });
 		return this.#runtime;
 	}
@@ -721,11 +748,92 @@ export class TernTab implements InProcessRunTab {
 	// ─── Protocol plumbing ────────────────────────────────────────────────
 
 	get #signal(): AbortSignal | undefined {
-		return this.#runContext?.signal;
+		return this.#readScope.getStore()?.signal ?? this.#runContext?.signal;
 	}
 
 	get #cellMs(): number {
-		return this.#runContext?.timeoutMs ?? 30_000;
+		return this.#runContext ? Math.max(1, this.#runContext.deadline - Date.now()) : 30_000;
+	}
+
+	/** Give a multi-stage read one deadline, including selector preparation and image processing. */
+	async #quickRead<T>(label: string, read: () => Promise<T>): Promise<T> {
+		if (this.#rendererFailure) throw this.#rendererFailure;
+		if (this.#readScope.getStore()) return await read();
+		const timeoutMs = resolveOpTimeouts(this.#cellMs).quickOpMs;
+		const deadline = Date.now() + timeoutMs;
+		const expired = new TernError("timeout", `${this.product} ${label} timed out after ${timeoutMs}ms`);
+		const controller = new AbortController();
+		const parent = this.#runContext?.signal;
+		const signal = parent ? AbortSignal.any([parent, controller.signal]) : controller.signal;
+		const timer = setTimeout(() => controller.abort(expired), timeoutMs);
+		try {
+			return await this.#readScope.run({ deadline, signal }, () => untilAborted(signal, read));
+		} catch (error) {
+			const timedOut = controller.signal.aborted && !parent?.aborted;
+			if (
+				!parent?.aborted &&
+				(timedOut || (error instanceof TernError && (error.kind === "timeout" || error.kind === "failed")))
+			) {
+				await this.#checkRenderer();
+			}
+			throw this.#rendererFailure ?? (timedOut ? expired : error);
+		} finally {
+			clearTimeout(timer);
+			controller.abort(new ToolAbortError("Browser read ended"));
+		}
+	}
+
+	/** A second, independent renderer request distinguishes a stuck page from a slow individual read. */
+	async #checkRenderer(): Promise<void> {
+		if (
+			this.product !== "WebKit" ||
+			this.#client.supports("responsive") ||
+			this.#dialogState().open ||
+			this.#rendererFailure
+		)
+			return;
+		if (this.#rendererProbe) return await this.#rendererProbe;
+		const signal = this.#runContext?.signal;
+		// The quick read leaves a second for attribution/recovery; do not diagnose a hang on an expired run.
+		if (signal?.aborted || this.#cellMs < 750) return;
+		this.#rendererProbe = (async () => {
+			// A confirm/prompt can stop renderer work without a renderer fault.
+			try {
+				this.#ingestEvents(
+					await this.#client.request(
+						{ op: "events", block: this.block, after: this.#cursor },
+						{ timeoutMs: 250, signal },
+					),
+				);
+			} catch {
+				return;
+			}
+			if (this.#dialogState().open || signal?.aborted || this.#cellMs < 500) return;
+			try {
+				await this.#client.request(
+					{ op: "eval", block: this.block, function: "function () { return true; }", args: [], world: "isolated" },
+					{ timeoutMs: 500, signal },
+				);
+			} catch (error) {
+				if (
+					error instanceof TernError &&
+					error.kind === "timeout" &&
+					!signal?.aborted &&
+					!this.#dialogState().open
+				) {
+					this.#rendererFailure = new ToolError(
+						`WebKit renderer for tab ${JSON.stringify(this.#name)} (block ${this.block}) is unresponsive: ` +
+							`both a page read and an independent renderer probe timed out. ` +
+							`Close and reopen this tab; no browser processes were terminated automatically.`,
+					);
+				}
+			}
+		})();
+		try {
+			await this.#rendererProbe;
+		} finally {
+			this.#rendererProbe = undefined;
+		}
 	}
 
 	/**
@@ -734,11 +842,95 @@ export class TernTab implements InProcessRunTab {
 	 * fails it too, except for input, which ends as done (the dialog is what the click or key press did).
 	 */
 	async #op(op: string, fields: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
+		if (this.#rendererFailure) throw this.#rendererFailure;
+		if (this.#gone) throw this.#gone.error;
+		try {
+			return await this.#blockOp(op, fields, timeoutMs);
+		} catch (error) {
+			throw await this.#blockFailure(await this.#unresponsiveFailure(error));
+		}
+	}
+
+	/**
+	 * `error`, or an `unresponsive` error naming the way out when the page's web process does not answer (a script
+	 * keeps it busy): the host's own `unresponsive` failure, or a timeout while its `state` says the page is
+	 * unresponsive. Only a host that watches responsiveness (`responsive`: omp's WebKit host) tells.
+	 */
+	async #unresponsiveFailure(error: unknown): Promise<unknown> {
+		if (!(error instanceof TernError) || !this.#client.supports("responsive")) return error;
+		let cause = error.message;
+		if (error.kind === "timeout") {
+			try {
+				const state = await this.#client.request(
+					{ op: "state", block: this.block },
+					{ timeoutMs: 1_000, signal: this.#signal },
+				);
+				if (!isRecord(state) || state.responsive !== false) return error;
+			} catch {
+				return error;
+			}
+			cause += ": the page is unresponsive, a script keeps its web process busy";
+		} else if (error.kind !== "unresponsive") {
+			return error;
+		}
+		return new TernError(
+			"unresponsive",
+			`${cause}. In tab ${JSON.stringify(this.#name)}, tab.reload() or tab.goto() ends that web process and loads ` +
+				`the page in a new one; closing the tab ends it too.`,
+		);
+	}
+
+	/**
+	 * `error`, or the tab's gone-block error when it is a `not_found` and the
+	 * window's `blocks` no longer list this block (DOM ops answer `not_found`
+	 * for a stale element ref too: that block is still there).
+	 */
+	async #blockFailure(error: unknown): Promise<unknown> {
+		if (this.#gone) return this.#gone.error;
+		if (!(error instanceof TernError) || error.kind !== "not_found") return error;
+		let listed: boolean;
+		try {
+			const blocks = await listTernBlocks(this.#client, { timeoutMs: 2_000, signal: this.#signal });
+			listed = blocks.some(entry => entry.block === this.block);
+		} catch {
+			return error;
+		}
+		if (listed) return error;
+		const quoted = JSON.stringify(this.#name);
+		const block = `its ${this.product} browser block ${this.block}${this.adopted ? " (the user's)" : ""}`;
+		const reason =
+			this.product === "Tern"
+				? `${block} is no longer in this Tern window (the user closed it, or its tab or window closed; omp did not close it)`
+				: `${block} is no longer in omp's WebKit host`;
+		const reopen =
+			this.product === "Tern"
+				? `Reopen it with browser.open({ name: ${quoted}, app: "tern", url }); browser.targets({ app: "tern" }) lists the live blocks, and passing one's id as target adopts it.`
+				: `Reopen it with browser.open({ name: ${quoted}, app: "own", url }).`;
+		this.#gone = {
+			reason,
+			error: new ToolError(`Tab ${quoted} is gone: ${reason}. omp closed the tab. ${reopen}\n(${error.message})`),
+		};
+		return this.#gone.error;
+	}
+
+	async #blockOp(op: string, fields: Record<string, unknown>, timeoutMs: number | undefined): Promise<unknown> {
 		const signal = this.#signal;
 		throwIfAborted(signal);
-		const options = { timeoutMs: timeoutMs ?? resolveOpTimeouts(this.#cellMs).budgetBound, signal };
+		const scope = this.#readScope.getStore();
+		const remaining = scope ? Math.max(1, scope.deadline - Date.now()) : Infinity;
+		const options = {
+			timeoutMs: Math.min(timeoutMs ?? Infinity, resolveOpTimeouts(this.#cellMs).budgetBound, remaining),
+			signal,
+		};
+		// A quick read fails fast on a page whose web process stopped answering, where the host can tell.
+		const request = {
+			op,
+			block: this.block,
+			...fields,
+			...(scope && this.#client.supports("responsive") ? { failUnresponsive: true } : {}),
+		};
 		const dialogMode = PAGE_OP_DIALOG[op];
-		if (!dialogMode) return await this.#client.request({ op, block: this.block, ...fields }, options);
+		if (!dialogMode) return await this.#client.request(request, options);
 		const label = `${this.product} ${op}`;
 		const held = this.#dialogState();
 		if (held.open) throw dialogBlocksPageError(label, held, "is open");
@@ -746,7 +938,7 @@ export class TernTab implements InProcessRunTab {
 		const opSignal = signal ? AbortSignal.any([signal, done.signal]) : done.signal;
 		try {
 			const answer = await Promise.race([
-				this.#client.request({ op, block: this.block, ...fields }, { ...options, signal: opSignal }),
+				this.#client.request(request, { ...options, signal: opSignal }),
 				this.#whenDialog(opSignal).then(dialog => {
 					if (dialogMode === "blocks") throw dialogBlocksPageError(label, dialog, "opened");
 					return undefined;
@@ -1120,13 +1312,14 @@ export class TernTab implements InProcessRunTab {
 
 	/**
 	 * Poll `check` until it yields a value (not `undefined`), backing off
-	 * 25→100 ms; `pull` also refreshes Tern events before each check.
+	 * 25→100 ms; `pull` also refreshes Tern events before each check, and
+	 * `timeoutNote` says what the poll last saw in its timeout error.
 	 */
 	async #poll<T>(
 		label: string,
 		timeoutMs: number,
 		check: () => T | undefined | Promise<T | undefined>,
-		opts: { pull: boolean } = { pull: false },
+		opts: { pull: boolean; timeoutNote?: () => string } = { pull: false },
 	): Promise<T> {
 		const deadline = Date.now() + timeoutMs;
 		let delay = 25;
@@ -1135,7 +1328,10 @@ export class TernTab implements InProcessRunTab {
 			const value = await check();
 			if (value !== undefined) return value;
 			const left = deadline - Date.now();
-			if (left <= 0) throw new ToolError(`${label} timed out after ${timeoutMs}ms`);
+			if (left <= 0) {
+				const note = opts.timeoutNote ? `: ${opts.timeoutNote()}` : "";
+				throw new ToolError(`${label} timed out after ${timeoutMs}ms${note}`);
+			}
 			await untilAborted(this.#signal, () => Bun.sleep(Math.min(delay, left)));
 			delay = Math.min(100, Math.round(delay * 1.5));
 		}
@@ -1299,23 +1495,35 @@ export class TernTab implements InProcessRunTab {
 	 * every resource load on a server that reports loads itself).
 	 * A load failure or allowlist block throws. When a navigation reports no
 	 * events (same-document, cached), a settled `state` ends the wait.
+	 * With `leavesBlank` (a goto to an address other than about:blank) the
+	 * page's about:blank reports are not this navigation's: a late report of
+	 * the PiP's initial blank load, or a blank reload Tern made instead of the
+	 * load, must not settle the wait at about:blank.
 	 */
 	async #awaitNavigation(
 		label: string,
 		since: number,
 		waitUntil: WaitUntil,
 		timeoutMs: number,
-		opts: { requireChange: boolean; startUrl: string },
+		opts: { requireChange: boolean; startUrl: string; leavesBlank: boolean },
 	): Promise<TernRequestEntry | null> {
 		let iteration = 0;
 		let idleSince: number | undefined;
 		let settledByState = false;
+		let sawBlank = false;
 		await this.#poll(
 			label,
 			timeoutMs,
 			async () => {
 				iteration++;
-				const events = this.#eventsSince(since);
+				const events = this.#eventsSince(since).filter(event => {
+					const blank =
+						opts.leavesBlank &&
+						event.url === BLANK_URL &&
+						(event.type === "committed" || event.type === "loaded" || event.type === "url");
+					if (blank) sawBlank = true;
+					return !blank;
+				});
 				const failed = events.find(event => event.type === "failed");
 				if (failed) throw new ToolError(`${label} failed: ${stringOr(failed.message, "load failed")}`);
 				const blocked = events.find(event => event.type === "blocked");
@@ -1327,7 +1535,17 @@ export class TernTab implements InProcessRunTab {
 				let loaded = events.some(event => event.type === "loaded");
 				if (!loaded && iteration % 4 === 0) {
 					const state = await this.#refreshState();
-					if (state.loading === false && (changed || (!opts.requireChange && this.#url !== opts.startUrl))) {
+					// Tern's `state` names the address a goto asked for before its web view starts the load,
+					// so leaving about:blank (never a same-document navigation) also needs the page's own report.
+					const arrived = !(
+						opts.leavesBlank &&
+						(this.#url === BLANK_URL || (opts.startUrl === BLANK_URL && !changed))
+					);
+					if (
+						state.loading === false &&
+						arrived &&
+						(changed || (!opts.requireChange && this.#url !== opts.startUrl))
+					) {
 						loaded = true;
 						settledByState = true;
 					}
@@ -1362,7 +1580,13 @@ export class TernTab implements InProcessRunTab {
 				idleSince ??= Date.now();
 				return Date.now() - idleSince >= NAVIGATION_IDLE_MS ? true : undefined;
 			},
-			{ pull: true },
+			{
+				pull: true,
+				timeoutNote: () =>
+					sawBlank
+						? `${this.product} reported an about:blank load since the goto, not the requested page`
+						: `the page is at ${this.#url}`,
+			},
 		);
 		const mainResponses = this.#network
 			.settledAfter(0)
@@ -1377,7 +1601,10 @@ export class TernTab implements InProcessRunTab {
 		start: () => Promise<unknown>,
 		waitUntil: WaitUntil | undefined,
 		timeoutMs: number,
+		leavesBlank = false,
 	): Promise<TernRequestEntry | null> {
+		// A host that watches responsiveness ends an unresponsive page's web process on navigation: that recovers the tab.
+		if (this.#client.supports("responsive")) this.#rendererFailure = undefined;
 		await this.#pull();
 		const since = this.#cursor;
 		const responseCursor = this.#network.cursor;
@@ -1386,6 +1613,7 @@ export class TernTab implements InProcessRunTab {
 		const response = await this.#awaitNavigation(label, since, waitUntil ?? "load", timeoutMs, {
 			requireChange: false,
 			startUrl,
+			leavesBlank,
 		});
 		return response && response.seq >= responseCursor ? response : null;
 	}
@@ -1412,6 +1640,7 @@ export class TernTab implements InProcessRunTab {
 					: this.#op("goto", { url }, timeoutMs),
 			opts?.waitUntil,
 			timeoutMs,
+			url !== BLANK_URL,
 		);
 		return entry ? new TernResponse(entry, this) : null;
 	}
@@ -1462,6 +1691,7 @@ export class TernTab implements InProcessRunTab {
 			{
 				requireChange: true,
 				startUrl: this.#url,
+				leavesBlank: false,
 			},
 		);
 		return entry && entry.seq >= responseCursor ? new TernResponse(entry, this) : null;
@@ -1469,7 +1699,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Wait until the URL contains `pattern` (string) or matches it (RegExp). */
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
-		assertUrlPattern(pattern);
+		const matches = urlMatcher(parseUrlPattern(pattern));
 		const timeoutMs = resolveWaitTimeout(this.#cellMs, opts?.timeout);
 		let iteration = 0;
 		return await this.#poll(
@@ -1477,11 +1707,9 @@ export class TernTab implements InProcessRunTab {
 			timeoutMs,
 			async () => {
 				if (++iteration % 4 === 0) await this.#refreshState();
-				if (typeof pattern === "string") return this.#url.includes(pattern) ? this.#url : undefined;
-				pattern.lastIndex = 0;
-				return pattern.test(this.#url) ? this.#url : undefined;
+				return matches(this.#url) ? this.#url : undefined;
 			},
-			{ pull: true },
+			{ pull: true, timeoutNote: () => `the URL is ${this.#url}` },
 		);
 	}
 
@@ -1516,8 +1744,37 @@ export class TernTab implements InProcessRunTab {
 
 	/** Resize the PiP's page (`viewport` op); `deviceScaleFactor` scales captures. */
 	async setViewport(viewport: ViewportOptions): Promise<void> {
-		await this.#op("viewport", { width: Math.round(viewport.width), height: Math.round(viewport.height) });
+		const width = Math.round(viewport.width);
+		const height = Math.round(viewport.height);
+		try {
+			await this.#op("viewport", { width, height });
+		} catch (error) {
+			throw await this.#viewportFailure(error, width, height);
+		}
 		this.#viewport = { ...viewport };
+		this.#pointerSpace.resized({ width, height });
+	}
+
+	/**
+	 * `error`, or what to do instead when Tern refused the size because the
+	 * block is docked (`blocks` lists it with no owner): a docked page takes
+	 * the block's size, and no op floats it again.
+	 */
+	async #viewportFailure(error: unknown, width: number, height: number): Promise<unknown> {
+		if (this.product !== "Tern" || !(error instanceof TernError) || error.kind !== "failed") return error;
+		const entry = await listTernBlocks(this.#client, { timeoutMs: 2_000, signal: this.#signal })
+			.then(blocks => blocks.find(candidate => candidate.block === this.block))
+			.catch(() => undefined);
+		if (entry?.owner !== null) return error;
+		await this.#refreshState().catch(() => undefined);
+		const now = `${Math.round(this.#viewport.width)}x${Math.round(this.#viewport.height)}`;
+		const how = this.adopted
+			? "It is the user's block, docked in their layout"
+			: "omp opened it as a picture-in-picture; it was docked since (by the user, or by Tern when the pane it floated over closed, was parked or moved)";
+		return new ToolError(
+			`${this.product} browser block ${this.block} of tab ${JSON.stringify(this.#name)} is docked, so its page takes the block's size (${now} now) and cannot be set to ${width}x${height}. ${how}. ` +
+				`For a fixed viewport, open a tab with browser.open({ name, app: "own", url, viewport: { width: ${width}, height: ${height} } }), or ask the user to pop the block out as a picture-in-picture, then call emulate({ viewport }) again.`,
+		);
 	}
 
 	// ─── Selectors and targets ────────────────────────────────────────────
@@ -2114,19 +2371,23 @@ export class TernTab implements InProcessRunTab {
 		return { x: viewport.width / 2, y: viewport.height / 2 };
 	}
 
-	/** Move the pointer (interpolated over `steps`); a held button drags. */
-	async mouseMove(x: number, y: number, opts?: { steps?: number }): Promise<void> {
+	/**
+	 * Move the pointer (interpolated over `steps`) to a position on the latest screenshot, or to viewport CSS
+	 * pixels with `css`; a held button drags.
+	 */
+	async mouseMove(x: number, y: number, opts?: { steps?: number; css?: boolean }): Promise<void> {
 		if (!Number.isFinite(x) || !Number.isFinite(y))
 			throw new ToolError("mouseMove coordinates must be finite numbers");
-		const from = this.#pointer ?? { x, y };
+		const to = this.#pointerSpace.toViewport({ x, y, css: opts?.css });
+		const from = this.#pointer ?? to;
 		const steps = Math.max(1, Math.floor(opts?.steps ?? 1));
 		const held = [...this.#buttons][0] ?? "left";
 		const events: TernInputStep[] = [];
 		for (let step = 1; step <= steps; step++) {
-			const point = { x: from.x + ((x - from.x) * step) / steps, y: from.y + ((y - from.y) * step) / steps };
+			const point = { x: from.x + ((to.x - from.x) * step) / steps, y: from.y + ((to.y - from.y) * step) / steps };
 			events.push(this.#mouseStep("move", point, held, 0));
 		}
-		this.#pointer = { x, y };
+		this.#pointer = to;
 		await this.#input(events);
 	}
 
@@ -2146,10 +2407,18 @@ export class TernTab implements InProcessRunTab {
 		await this.#input([this.#mouseStep("up", point, button, opts?.clickCount ?? 1)]);
 	}
 
-	/** Click at viewport coordinates. */
-	async clickAt(x: number, y: number, opts?: { button?: MouseButtonName; clickCount?: number }): Promise<void> {
+	/** Click at a position on the latest screenshot, or at viewport CSS pixels with `css`. */
+	async clickAt(
+		x: number,
+		y: number,
+		opts?: { button?: MouseButtonName; count?: number; css?: boolean },
+	): Promise<void> {
 		if (!Number.isFinite(x) || !Number.isFinite(y)) throw new ToolError("clickAt coordinates must be finite numbers");
-		await this.#clickAt({ x, y }, this.#button(opts?.button), Math.max(1, Math.floor(opts?.clickCount ?? 1)));
+		await this.#clickAt(
+			this.#pointerSpace.toViewport({ x, y, css: opts?.css }),
+			this.#button(opts?.button),
+			Math.max(1, Math.floor(opts?.count ?? 1)),
+		);
 	}
 
 	/** A trusted wheel event at the pointer (the viewport centre before any pointer move). */
@@ -2184,7 +2453,8 @@ export class TernTab implements InProcessRunTab {
 			const box = await this.#target(`tab.drag() ${role} ${JSON.stringify(target)}`, target, "drag", null);
 			return { x: box.x, y: box.y };
 		}
-		if (target && Number.isFinite(target.x) && Number.isFinite(target.y)) return { x: target.x, y: target.y };
+		if (target && Number.isFinite(target.x) && Number.isFinite(target.y))
+			return this.#pointerSpace.toViewport(target);
 		throw new ToolError("Drag target must be a selector string or { x: number, y: number } point");
 	}
 
@@ -2617,18 +2887,20 @@ export class TernTab implements InProcessRunTab {
 		selector?: string;
 		compact?: boolean;
 	}): Promise<Observation> {
-		if (this.#native) return (await this.#observeNative(opts)).observation;
-		const observation = await this.#kit<Observation>("observe", [
-			{
-				includeAll: opts?.includeAll,
-				viewportOnly: opts?.viewportOnly,
-				compact: opts?.compact,
-				...(opts?.selector ? { root: this.#spec(opts.selector) } : {}),
-			},
-		]);
-		this.#url = observation.url;
-		if (observation.title !== undefined) this.#title = observation.title;
-		return observation;
+		return await this.#quickRead("tab.observe()", async () => {
+			if (this.#native) return (await this.#observeNative(opts)).observation;
+			const observation = await this.#kit<Observation>("observe", [
+				{
+					includeAll: opts?.includeAll,
+					viewportOnly: opts?.viewportOnly,
+					compact: opts?.compact,
+					...(opts?.selector ? { root: this.#spec(opts.selector) } : {}),
+				},
+			]);
+			this.#url = observation.url;
+			if (observation.title !== undefined) this.#title = observation.title;
+			return observation;
+		});
 	}
 
 	/** Playwright-format ARIA snapshot (refs resolve through `ref()`/`aria-ref=`). */
@@ -2642,15 +2914,17 @@ export class TernTab implements InProcessRunTab {
 		opts: AriaSnapshotOptions | undefined,
 		frame: FramePath,
 	): Promise<string | AriaSnapshotDiffResult> {
-		const payload = await this.#kit<{ snapshot: string; hrefs: Record<string, string> }>(
-			"ariaSnapshot",
-			[selector ? this.#spec(selector) : null, { depth: opts?.depth, boxes: opts?.boxes }, opts?.urls === true],
-			frame,
-		);
-		const snapshot = postProcessAriaSnapshot(payload.snapshot, opts, payload.hrefs);
-		if (!opts?.diff || frame) return snapshot;
-		await this.#refreshState();
-		return diffAriaSnapshot(this.#ariaBaselines, ariaSnapshotBaselineKey(selector, opts), this.#url, snapshot);
+		return await this.#quickRead("tab.ariaSnapshot()", async () => {
+			const payload = await this.#kit<{ snapshot: string; hrefs: Record<string, string> }>(
+				"ariaSnapshot",
+				[selector ? this.#spec(selector) : null, { depth: opts?.depth, boxes: opts?.boxes }, opts?.urls === true],
+				frame,
+			);
+			const snapshot = postProcessAriaSnapshot(payload.snapshot, opts, payload.hrefs);
+			if (!opts?.diff || frame) return snapshot;
+			await this.#refreshState();
+			return diffAriaSnapshot(this.#ariaBaselines, ariaSnapshotBaselineKey(selector, opts), this.#url, snapshot);
+		});
 	}
 
 	/** axe-core audit of the main document (run in the isolated world). */
@@ -2675,17 +2949,19 @@ export class TernTab implements InProcessRunTab {
 
 	/** Readable text/markdown of the page. */
 	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
-		const html = await this.pageContent();
-		const readable = await extractReadableFromHtml(html, this.#url, format, opts);
-		if (!readable)
-			throw new ToolError(`tab.extract(${JSON.stringify(format)}) found no readable content on ${this.#url}`);
-		const content = format === "markdown" ? readable.markdown : readable.text;
-		if (!content) {
-			throw new ToolError(
-				`tab.extract(${JSON.stringify(format)}) produced empty ${format} content for ${this.#url}`,
-			);
-		}
-		return content;
+		return await this.#quickRead("tab.extract()", async () => {
+			const html = await this.pageContent();
+			const readable = await extractReadableFromHtml(html, this.#url, format, opts);
+			if (!readable)
+				throw new ToolError(`tab.extract(${JSON.stringify(format)}) found no readable content on ${this.#url}`);
+			const content = format === "markdown" ? readable.markdown : readable.text;
+			if (!content) {
+				throw new ToolError(
+					`tab.extract(${JSON.stringify(format)}) produced empty ${format} content for ${this.#url}`,
+				);
+			}
+			return content;
+		});
 	}
 
 	/** The document's outer HTML. */
@@ -2707,29 +2983,33 @@ export class TernTab implements InProcessRunTab {
 		},
 		frame: FramePath = null,
 	): Promise<Buffer> {
-		const scale = opts.scale ?? this.#viewport.deviceScaleFactor ?? 1;
-		const fields: Record<string, unknown> = { scale, format: opts.format };
-		if (opts.format === "jpeg") fields.quality = opts.quality ?? 80;
-		if (opts.selector !== undefined) {
-			// Scrolls the element into view and waits for it to be visible before measuring it.
-			await this.#target(`tab.screenshot(${describe(opts.selector)})`, opts.selector, "point", frame);
-			const rect = await this.box(opts.selector, frame);
-			if (!rect) throw new ToolError("Screenshot selector did not resolve to a visible element");
-			fields.rect = rect;
-		} else if (opts.fullPage) {
-			fields.full = true;
-		}
-		// Let the page paint the state the caller just produced.
-		await this.#eval(
-			"function () { return new Promise(resolve => requestAnimationFrame(() => resolve(true))); }",
-			[],
-			"isolated",
-			null,
-		).catch(() => undefined);
-		const answer = await this.#op("capture", fields, resolveOpTimeouts(this.#cellMs).quickOpMs);
-		if (!isRecord(answer) || typeof answer.data !== "string")
-			throw new ToolError(`${this.product} capture answered without image data`);
-		return Buffer.from(answer.data, "base64");
+		return await this.#quickRead("tab.screenshot()", async () => {
+			const scale = opts.scale ?? this.#viewport.deviceScaleFactor ?? 1;
+			const fields: Record<string, unknown> = { scale, format: opts.format };
+			if (opts.format === "jpeg") fields.quality = opts.quality ?? 80;
+			if (opts.selector !== undefined) {
+				// Scrolls the element into view and waits for it to be visible before measuring it.
+				await this.#target(`tab.screenshot(${describe(opts.selector)})`, opts.selector, "point", frame);
+				const rect = await this.box(opts.selector, frame);
+				if (!rect) throw new ToolError("Screenshot selector did not resolve to a visible element");
+				fields.rect = rect;
+			} else if (opts.fullPage) {
+				fields.full = true;
+			}
+			// ABHost settles paint within its bounded native capture; a renderer-side preflight can itself hang.
+			if (this.product !== "WebKit") {
+				await this.#eval(
+					"function () { return new Promise(resolve => requestAnimationFrame(() => resolve(true))); }",
+					[],
+					"isolated",
+					null,
+				);
+			}
+			const answer = await this.#op("capture", fields);
+			if (!isRecord(answer) || typeof answer.data !== "string")
+				throw new ToolError(`${this.product} capture answered without image data`);
+			return Buffer.from(answer.data, "base64");
+		});
 	}
 
 	/** Screenshot with selector/fullPage/annotate/format/quality and change detection. */
@@ -2739,6 +3019,10 @@ export class TernTab implements InProcessRunTab {
 
 	/** {@link screenshot} inside `frame` (selector captures). */
 	async screenshotIn(opts: ScreenshotOptions, frame: FramePath): Promise<string | ScreenshotChangeResult> {
+		return await this.#quickRead("tab.screenshot()", () => this.#screenshotIn(opts, frame));
+	}
+
+	async #screenshotIn(opts: ScreenshotOptions, frame: FramePath): Promise<string | ScreenshotChangeResult> {
 		const context = this.#requireRunContext("tab.screenshot()");
 		screenshotQuality(opts);
 		const threshold = screenshotThreshold(opts.threshold);
@@ -2795,45 +3079,24 @@ export class TernTab implements InProcessRunTab {
 			change = { changed, revision, pixelChangeRatio };
 			if (!changed) return change;
 		}
-		const resized = await resizeImage(
-			{ type: "image", data: buffer.toString("base64"), mimeType: mime },
+		const dest = await emitScreenshot(
 			{
-				maxWidth: 1024,
-				maxHeight: 1024,
-				maxBytes: 150 * 1024,
-				jpegQuality: 70,
-				excludeWebP: context.session.excludeWebP,
+				bytes: buffer,
+				mimeType: mime,
+				area: screenshotArea(opts),
+				scale,
+				keepCapture: opts.format !== undefined,
+				silent: opts.silent,
+				notes: opts.annotate ? [formatScreenshotLegend(legend)] : undefined,
 			},
+			{
+				session: context.session,
+				output: context.output,
+				screenshots: context.screenshots,
+				pointer: this.#pointerSpace,
+			},
+			this.#signal,
 		);
-		const saveFullRes = !!context.session.browserScreenshotDir || opts.format !== undefined;
-		const savedBuffer = saveFullRes ? buffer : Buffer.from(resized.buffer);
-		const savedMimeType = saveFullRes ? mime : resized.mimeType;
-		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-		const dest = context.session.browserScreenshotDir
-			? path.join(
-					context.session.browserScreenshotDir,
-					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
-		await Bun.write(dest, savedBuffer);
-		context.screenshots.push({
-			dest,
-			mimeType: savedMimeType,
-			bytes: savedBuffer.length,
-			width: resized.width,
-			height: resized.height,
-		});
-		if (!opts.silent) {
-			const lines = formatScreenshot({
-				saveFullRes,
-				dest,
-				resized,
-				capture: { area: screenshotArea(opts), scale },
-			});
-			if (opts.annotate) lines.push(formatScreenshotLegend(legend));
-			context.output.push({ type: "text", text: lines.join("\n") });
-			context.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-		}
 		return change ? { ...change, path: dest } : dest;
 	}
 
@@ -3451,6 +3714,12 @@ export class TernTab implements InProcessRunTab {
 		await this.#pull();
 		// Responses arriving from now on, in arrival order (requests already in flight included).
 		let cursor = this.#network.settleCursor;
+		let test: (response: TernResponse) => boolean | Promise<boolean>;
+		if (typeof pattern === "function") test = pattern;
+		else {
+			const matches = urlMatcher(pattern);
+			test = response => matches(response.url());
+		}
 		return await this.#poll(
 			"tab.waitForResponse()",
 			resolveWaitTimeout(this.#cellMs, opts?.timeout ?? resolveOpTimeouts(this.#cellMs).budgetBound),
@@ -3459,11 +3728,7 @@ export class TernTab implements InProcessRunTab {
 					cursor = record.settledSeq ?? cursor;
 					if (record.status === undefined) continue;
 					const response = new TernResponse(record, this);
-					if (typeof pattern === "function") {
-						if (await pattern(response)) return response;
-					} else if (typeof pattern === "string" ? record.url.includes(pattern) : pattern.test(record.url)) {
-						return response;
-					}
+					if (await test(response)) return response;
 				}
 				return undefined;
 			},
@@ -4068,11 +4333,12 @@ export class TernPageFacade {
 			down: key => tab.keyDown(key),
 			up: key => tab.keyUp(key),
 		};
+		// Raw page input takes viewport CSS pixels, as Puppeteer's does: no screenshot frame applies.
 		this.mouse = {
-			move: (x, y, options) => tab.mouseMove(x, y, options),
+			move: (x, y, options) => tab.mouseMove(x, y, { steps: options?.steps, css: true }),
 			down: options => tab.mouseDown(options),
 			up: options => tab.mouseUp(options),
-			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, clickCount: options?.count }),
+			click: (x, y, options) => tab.clickAt(x, y, { button: options?.button, count: options?.count, css: true }),
 			wheel: delta => tab.wheel(delta.deltaX ?? 0, delta.deltaY ?? 0),
 		};
 	}
@@ -4190,6 +4456,49 @@ export class TernPageFacade {
 
 	async setCookie(...cookies: unknown[]): Promise<void> {
 		await this.#tab.setCookies(...cookies);
+	}
+
+	on(event: unknown, _handler?: unknown): never {
+		throw this.#noEvents("on", event);
+	}
+
+	once(event: unknown, _handler?: unknown): never {
+		throw this.#noEvents("once", event);
+	}
+
+	off(event: unknown, _handler?: unknown): never {
+		throw this.#noEvents("off", event);
+	}
+
+	addListener(event: unknown, _handler?: unknown): never {
+		throw this.#noEvents("addListener", event);
+	}
+
+	removeListener(event: unknown, _handler?: unknown): never {
+		throw this.#noEvents("removeListener", event);
+	}
+
+	prependListener(event: unknown, _handler?: unknown): never {
+		throw this.#noEvents("prependListener", event);
+	}
+
+	prependOnceListener(event: unknown, _handler?: unknown): never {
+		throw this.#noEvents("prependOnceListener", event);
+	}
+
+	removeAllListeners(event?: unknown): never {
+		throw this.#noEvents("removeAllListeners", event);
+	}
+
+	/** Puppeteer's page events have no counterpart here: what to use instead. */
+	#noEvents(method: string, event: unknown): ToolError {
+		const name = typeof event === "string" ? JSON.stringify(event) : "";
+		return new ToolError(
+			`page.${method}(${name}) is not supported on the ${this.#tab.product} browser backend: its page emits no events. ` +
+				"Read traffic with tab.requests() and tab.request(id), or wait for one with tab.waitForResponse(pattern); " +
+				"read console messages and page errors with tab.console(); see a held dialog with tab.dialog(); " +
+				"wait for navigations with tab.waitForNavigation() or tab.waitForUrl(pattern).",
+		);
 	}
 }
 

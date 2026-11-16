@@ -2260,9 +2260,7 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
-	/** Per-call model (exact ids or configured `@role`s, one or an ordered list), gated by `task.perCallModel`; host selection uses a separate trusted channel. */
+	/** The per-call model (exact ids or configured `@role`s, one or an ordered list), gated by `task.perCallModel`. */
 	model?: string | string[];
 	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
@@ -2293,8 +2291,6 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
 	/** See {@link TaskItem.model}. */
 	model?: string | string[];
 	/** The work (flat form). */

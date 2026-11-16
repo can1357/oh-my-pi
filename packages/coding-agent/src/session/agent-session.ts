@@ -314,6 +314,7 @@ import type {
 	AsyncJobTree,
 	CommandMetadataChangedListener,
 	ContextUsageBreakdown,
+	DequeuedMessage,
 	DroppedPrompt,
 	EphemeralTurnOptions,
 	EphemeralTurnResult,
@@ -11413,11 +11414,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Pop the last queued message (steering first, then follow-up).
+	 * Pop the last queued message (steering first, then follow-up), tagged with its queue.
 	 * Used by dequeue keybinding to restore messages to editor one at a time.
 	 * Steps over agent-authored queued messages (advisor cards, hidden/internal steers).
 	 */
-	popLastQueuedMessage(): RestoredQueuedMessage | undefined {
+	popLastQueuedMessage(): DequeuedMessage | undefined {
 		const steering = this.agent.peekSteeringQueue();
 		const followUp = this.agent.peekFollowUpQueue();
 		const lastUserIndex = (queue: readonly AgentMessage[]): number => {
@@ -11431,14 +11432,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const removed = steering[fromSteer];
 			this.agent.replaceQueues(this.#withoutQueuedUserMessage(steering, fromSteer), followUp.slice());
 			this.#reconcileQueuedMessageDrain();
-			return toRestoredQueuedMessage(removed);
+			return { ...toRestoredQueuedMessage(removed), queue: "steering" };
 		}
 		const fromFollowUp = lastUserIndex(followUp);
 		if (fromFollowUp >= 0) {
 			const removed = followUp[fromFollowUp];
 			this.agent.replaceQueues(steering.slice(), this.#withoutQueuedUserMessage(followUp, fromFollowUp));
 			this.#reconcileQueuedMessageDrain();
-			return toRestoredQueuedMessage(removed);
+			return { ...toRestoredQueuedMessage(removed), queue: "followUp" };
 		}
 		return undefined;
 	}
@@ -15203,11 +15204,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Build a standalone context for host tool calls outside a normal agent turn,
-	 * including `/tree` ask re-answer and `/seance`. Mode controllers cannot reach
-	 * the SDK's ToolContextStore, so required fields are backed by live session state.
+	 * Build a standalone `AgentToolContext` for running `AskTool.execute()`
+	 * outside a normal agent turn, for `/tree` `ask` re-answer (issue #5642).
+	 * `SelectorController` has no reachable `ToolContextStore` (that store is
+	 * built inside `sdk.ts` and never threaded through to mode controllers),
+	 * so this mirrors `refreshMCPTools()`'s `getCustomToolContext` factory
+	 * with real session state instead of a `{ ... } as unknown as
+	 * AgentToolContext` cast that could silently compile with an incomplete
+	 * context (roboomp review on #5895) — every `CustomToolContext` field is
+	 * backed by live session state, so a future required field fails to
+	 * compile here instead of surfacing as `undefined` at runtime.
 	 */
-	buildToolContext(uiContext?: ExtensionUIContext): AgentToolContext {
+	buildAskReanswerContext(uiContext: ExtensionUIContext): AgentToolContext {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -15219,7 +15227,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			},
 			settings: this.settings,
 			ui: uiContext,
-			hasUI: uiContext !== undefined,
+			hasUI: true,
 		};
 	}
 

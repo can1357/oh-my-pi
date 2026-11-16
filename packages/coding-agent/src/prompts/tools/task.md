@@ -35,7 +35,7 @@ Run one agent synchronously.
 - `context`: shared (`# Goal`, `# Contract` interfaces); NEVER repeat per task.
 {{/if}}
 {{#if steps}}
-- `steps`: ordered stages for one agent; each is sent only after it finishes the previous one, and the last stage's result is returned.
+- `steps`: ordered stages for one agent; each is sent only after it finishes the previous one. Earlier stages' reports arrive as progress messages; the last stage's result is returned.
   - First step carries `# Target` files/non-goals{{#if batchEnabled}} beyond `context`{{/if}}.
   - Each step: one `# Change` stage.
   - Last step adds `# Acceptance` observable result.
@@ -57,15 +57,14 @@ Run one agent synchronously.
 - `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
 {{/if}}
 {{#if perCallModelEnabled}}
-- `model`: one exact `provider/model-id[@upstream][:level]` or configured `@role[:level]` for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}, or a non-empty ordered array of them.
+- `model`: one exact `provider/model-id[@upstream][:level]` or configured `@role[:level]` for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}, or an ordered array of them.
   - First available candidate with working credentials wins at spawn; no runtime model fallback.
   - `@upstream` pins an aggregator route and is part of the model identity.
   - Only operator-approved models; no globs or partial IDs.
-  - Approved roles:{{#unless perCallModelAdvertisement.roles.length}} none{{/unless}}
+  - Approved:
 {{#each perCallModelAdvertisement.roles}}
     - `@{{role}}` → {{#list patterns join=", "}}`{{this}}`{{/list}}
 {{/each}}
-  - Other approved models:
 {{#unless perCallModelAdvertisement.parentModelWithheld}}
     - your own current model
 {{/unless}}
@@ -73,7 +72,7 @@ Run one agent synchronously.
 {{#if perCallModelAdvertisement.allowlist.length}}
   - Allowlist: {{#list perCallModelAdvertisement.allowlist join=", "}}`{{this}}`{{/list}} (must also be approved; globs only narrow, NEVER send a glob as `model`).
 {{/if}}
-  - Except for bundled seance, an agent's `task.agentModelOverrides` entry or user-chosen effort conflicts with `model`.
+  - An agent's `task.agentModelOverrides` entry or user-chosen effort conflicts with `model`.
   - Omit unless needed.
   - No candidate available with credentials → stop and report; NEVER substitute another.
   - Every request requires an approved model; retry fallback, context promotion and prewalk are off.
@@ -89,7 +88,7 @@ Run one agent synchronously.
 {{/if}}
 {{/if}}
 
-{{#if seanceGuidance}}{{seanceGuidance}}{{/if}}Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
+Shared edits need one integration owner; give each task its files{{#unless batchEnabled}} and interfaces{{/unless}}.
 Every task MUST skip build/lint/tests/formatters mid-flight; run once afterward.
 
 # Available Agents

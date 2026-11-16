@@ -1,6 +1,6 @@
 /**
- * Approval for per-call `model` selectors on task items, eval `agent()` and
- * `workpool()`, and saved-model selections by model-facing seances.
+ * Approval for the per-call `model` selector on task items, eval `agent()` and
+ * `workpool()`.
  *
  * A model-facing selector may only pick a chat model the operator already
  * names: a configured chat role's value, the selected agent's own frontmatter

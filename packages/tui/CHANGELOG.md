@@ -4,8 +4,7 @@
 
 ### Changed
 
-- `TaskItem.model` and `TaskParams.model` now document configured `@role` selectors and ordered candidate lists for per-call selection; their `string | string[]` types are unchanged ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
-- `TaskItem.model` now documents that bundled seance follows the per-call model gate; its `string | string[]` type is unchanged ([#16784](https://github.com/can1357/oh-my-pi/pull/16784) by [@Xytronix](https://github.com/Xytronix))
+- `TaskItem.model` and `TaskParams.model` accept configured `@role` selectors and ordered candidate lists (`string | string[]`) for per-call selection ([#16793](https://github.com/can1357/oh-my-pi/pull/16793) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.20.1] - 2026-11-14
 
