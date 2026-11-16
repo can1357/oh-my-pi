@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Verda Inference as a provider: `/login verda` or `VERDA_INFERENCE_API_KEY`, with Kimi K3.1 Pro and DeepSeek V4.1 Flash 1017 and live discovery of the models enabled in your Verda project.
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
