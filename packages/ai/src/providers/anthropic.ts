@@ -2494,7 +2494,6 @@ const streamAnthropicOnce = (
 				output.content.length = 0;
 				output.model = sourceModel.id;
 				output.responseId = undefined;
-				output.requestId = undefined;
 				output.upstreamModel = undefined;
 				output.errorMessage = undefined;
 				output.stopDetails = undefined;
@@ -2716,6 +2715,8 @@ const streamAnthropicOnce = (
 					let response: Response;
 					let requestId: string | null;
 					let recordsRawSseEvents: boolean;
+					// Cleared here, not per retry rung: an attempt that throws before its response must not keep the last one's id.
+					output.requestId = undefined;
 					try {
 						({
 							events: anthropicStream,

@@ -1820,6 +1820,27 @@ describe("anthropic stream envelope handling", () => {
 		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "recovered" }]);
 	});
 
+	it("does not keep an earlier attempt's request id when the retry fails before its stream opens", async () => {
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			attempt += 1;
+			// The first attempt opens a stream (request id `req_mock`) that dies before any content, so it is retried.
+			if (attempt === 1) return createMockRequest([createTextSuccessEvents("unused")[0]]) as never;
+			return createRejectedMockRequest(createOtherInvalidRequestError()) as never;
+		});
+
+		const stream = streamAnthropic(model, context, {
+			apiKey: "sk-ant-test",
+			providerRetryWait: async () => {},
+		});
+		const result = await stream.result();
+
+		expect(attempt).toBe(2);
+		expect(result.stopReason).toBe("error");
+		// `req_mock` belongs to the request that was retried, not to the one that failed.
+		expect(result.requestId).toBeUndefined();
+	});
+
 	it("fails the turn instead of finalizing a clean stop when the stream dies mid-generation", async () => {
 		// message_start + content_block_start + text_delta, then the wire goes dead:
 		// no content_block_stop, no message_delta stop_reason, no message_stop.
