@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `HtmlFormDialog` option notes take pasted images when the form is opened with `acceptImages`: the open note is a paste target (`attachImage`, `beginPaste`, `pasteText`), a deleted `[Image #N]` marker drops its image, and `OptionNote.images` carries the rest ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
+
 ### Fixed
 
 - Fixed the model hub offering models a role can never use (such as image or speech models for Default) when adding or replacing that role's fallback ([#19371](https://github.com/can1357/oh-my-pi/pull/19371) by [@Xytronix](https://github.com/Xytronix))

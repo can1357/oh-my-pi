@@ -923,6 +923,9 @@ export class ExtensionUiController {
 				onSubmit: (data, notes) => settle({ data, ...(notes.length ? { notes } : {}) }),
 				onCancel: () => settle(undefined),
 				inputGuard: draft?.guard,
+				acceptImages: dialogOptions?.acceptImages === true,
+				onPasteImage: () => this.ctx.handleImagePaste(),
+				onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
 			});
 			const releaseComposerOwner = draft && this.#claimComposerOwner(dialog, draft.owns);
 			this.ctx.closeLinkBrowser();

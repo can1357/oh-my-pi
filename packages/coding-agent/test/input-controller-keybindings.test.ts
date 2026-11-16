@@ -10,7 +10,17 @@ import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ComposerOwner, InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { type Component, type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	getKeybindings,
+	type KeyId,
+	type KeybindingsManager as TuiKeybindingsManager,
+	matchesKey,
+	setKeybindings,
+} from "@oh-my-pi/pi-tui";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
+import { parseHtmlForm } from "@oh-my-pi/pi-tui/html-form/parse";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -1811,5 +1821,129 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 
 		expect(dispatchInput(listeners, "\x0f")).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+});
+
+describe("InputController image paste into an ask form note", () => {
+	const FORM = `<form><fieldset><legend>Database</legend>
+<label><input type="radio" name="db" value="sqlite" checked> SQLite</label><br>
+<label><input type="radio" name="db" value="pg"> Postgres</label></fieldset></form>`;
+
+	let settingsState: SettingsTestState | undefined;
+	let tempDir: TempDir;
+	let previousKeybindings: TuiKeybindingsManager;
+
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	beforeEach(async () => {
+		settingsState = beginSettingsTest();
+		await Settings.init({ inMemory: true });
+		tempDir = await TempDir.create("@omp-form-note-image-");
+		previousKeybindings = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory());
+	});
+
+	afterEach(async () => {
+		setKeybindings(previousKeybindings);
+		restoreSettingsTestState(settingsState);
+		settingsState = undefined;
+		await tempDir.remove();
+	});
+
+	const routes = [
+		{
+			name: "an enhanced (OSC 5522) paste",
+			paste: (_form: HtmlFormDialog, _png: string, listeners: InputListener[]) => {
+				dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+			},
+		},
+		{
+			name: "Ctrl+V",
+			paste: (_form: HtmlFormDialog, _png: string, listeners: InputListener[]) => {
+				dispatchInput(listeners, "\x16");
+			},
+		},
+		{
+			name: "a bracketed image-file path",
+			paste: (form: HtmlFormDialog, png: string) => {
+				form.handleInput(`\x1b[200~${png}\x1b[201~`);
+			},
+		},
+	];
+
+	/** An opted-in form focused in front of the main editor, with the controller's paste listeners installed. */
+	async function mountForm() {
+		const context = await createContext();
+		Object.assign(context.ctx, {
+			sessionManager: {
+				getCwd: () => tempDir.path(),
+				getArtifactsDir: () => tempDir.path(),
+				getSessionId: () => "session",
+			},
+		});
+		const pngPath = tempDir.join("shot.png");
+		await Bun.write(pngPath, Buffer.from(TINY_PNG, "base64"));
+		const controller = new InputController(context.ctx, {
+			readImage: async () => ({
+				data: Buffer.from(TINY_PNG, "base64"),
+				mimeType: "image/png",
+			}),
+			readText: async () => "",
+			readMacFileUrls: async () => [],
+		});
+		const form = new HtmlFormDialog(parseHtmlForm(FORM), {
+			acceptImages: true,
+			onPasteImage: () => controller.handleImagePaste(),
+			onPasteImagePath: path => controller.handleImagePathPaste(path),
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+		});
+		form.focused = true;
+		form.render(100);
+		context.setFocused(form);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		context.spies.addStartListener.mock.calls[0]?.[0]();
+		return { context, form, listeners, pngPath };
+	}
+
+	it.each(routes)("attaches $name to the open note", async ({ paste }) => {
+		const { context, form, listeners, pngPath } = await mountForm();
+
+		form.handleInput("n");
+		form.handleInput("why sqlite");
+		const delivered = Promise.withResolvers<void>();
+		context.spies.requestRender.mockImplementation(() => delivered.resolve());
+		paste(form, pngPath, listeners);
+		form.handleInput("\r");
+		await delivered.promise;
+
+		const [note] = form.optionNotes();
+		expect(note?.images).toHaveLength(1);
+		expect(note?.text).toMatch(/^why sqlite\s*\[Image #1, \d+x\d+\]$/);
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(context.editor.getText()).toBe("");
+		form.dispose();
+	});
+
+	it("refuses an enhanced image paste while no note is open", async () => {
+		const { context, form, listeners } = await mountForm();
+		const showStatus = context.ctx.showStatus as unknown as Mock<(message: string) => void>;
+		// Settle on either outcome, so a paste that lands in the main editor fails the assertions below.
+		const settled = Promise.withResolvers<void>();
+		showStatus.mockImplementation(() => settled.resolve());
+		(context.editor.insertAtom as Mock<(label: string, expansion: string) => void>).mockImplementation(() =>
+			settled.resolve(),
+		);
+
+		dispatchEnhancedImagePaste(listeners, Buffer.from(TINY_PNG, "base64"));
+		await settled.promise;
+
+		expect(showStatus).toHaveBeenCalledWith("Image paste is not supported in this prompt");
+		expect(context.editor.pendingImages).toHaveLength(0);
+		expect(form.optionNotes()).toEqual([]);
+		form.dispose();
 	});
 });
