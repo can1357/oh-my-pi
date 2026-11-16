@@ -5,6 +5,7 @@ import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { detectColorMode, isLightSurface, mixThemeColors, resolveThemeColors, resolveVarRefs } from "./color";
 import darkThemeJson from "./dark.json" with { type: "json" };
+import darkZenburnThemeJson from "./dark-zenburn.json" with { type: "json" };
 import defaultThemes from "./defaults.json" with { type: "json" };
 import lightThemeJson from "./light.json" with { type: "json" };
 import type { ColorMode, ThemeBg, ThemeColor, ThemeJson } from "./schema";
@@ -17,6 +18,7 @@ import { Theme } from "./theme-class";
 
 const BUILTIN_THEMES: Record<string, ThemeJson> = {
 	dark: darkThemeJson as ThemeJson,
+	"dark-zenburn": darkZenburnThemeJson as ThemeJson,
 	light: lightThemeJson as ThemeJson,
 	...(defaultThemes as Record<string, ThemeJson>),
 };

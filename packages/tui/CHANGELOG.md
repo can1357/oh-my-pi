@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `dark-zenburn` built-in theme, a warm low-contrast dark palette ([#19364](https://github.com/can1357/oh-my-pi/pull/19364) by [@mrckndt](https://github.com/mrckndt)).
+
 ## [18.20.1] - 2026-11-14
 
 ### Added
