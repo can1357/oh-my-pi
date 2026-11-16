@@ -6,6 +6,15 @@
 
 - Renamed the browser `tab.clickAt()` option `clickCount` to `count`, matching `tab.click()`
 - After a browser viewport screenshot that had to be scaled for the model, `tab.clickAt()`, `tab.mouseMove()` and `tab.drag()` points are read as positions on that image and mapped to the page; pass `css: true` (`{ x, y, css: true }` for a drag point) for viewport CSS pixels
+- Added opt-in `mnemopi.recallRelevance` (`off`/`auto`/`on`, default `off`) to filter automatic memory recall for task relevance through the `judge` role ([#19132](https://github.com/can1357/oh-my-pi/pull/19132) by [@wolfiesch](https://github.com/wolfiesch))
+- `bash.patterns` and `bashInterceptor.patterns` now support path-scoped `{ path, patterns: [...] }` entries in `config.yml`, resolving per working directory like `enabledModels` ([#18350](https://github.com/can1357/oh-my-pi/pull/18350) by [@asuffield](https://github.com/asuffield))
+- Added `bash.allowedEnvVars` and per-rule `env` lists on `bash.patterns` to allow leading `KEY=VALUE` prefixes for exactly named environment variables on `allow` rules without duplicating rules for each variable combination ([#18351](https://github.com/can1357/oh-my-pi/pull/18351) by [@asuffield](https://github.com/asuffield))
+- Project (`.omp/config.yml`) and `--config` overlay `bash.patterns` and `bashInterceptor.patterns` now prepend ahead of global rules instead of replacing them wholesale ([#18352](https://github.com/can1357/oh-my-pi/pull/18352) by [@asuffield](https://github.com/asuffield))
+- Subagents now preserve @upstream provider pinning on inherited models
+- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
+- Added `--no-judge` and `--no-spotlight` to restrict those services to the active model's provider, and `--offline` to restrict auxiliary services.
+- Added per-rule `repeatMode` frontmatter (`once`, `after-gap`, or `always`) that overrides `ttsr.repeatMode` for one TTSR rule; `always` fires the rule again on later matching turns, at most once per turn and never on the retry or follow-up turn its own reminder started ([#19163](https://github.com/can1357/oh-my-pi/pull/19163) by [@Xytronix](https://github.com/Xytronix))
+- Compound bash approval prompts (`bash.allowCompoundCommands: true`) list each `&&` segment on its own line, marking segments covered by `bash.patterns` allow rules (`✓ … (allowed: <pattern>)`) separately from segments being prompted for (`? … (requires approval | prompt: <pattern> | critical pattern)`) ([#18749](https://github.com/can1357/oh-my-pi/pull/18749) by [@asuffield](https://github.com/asuffield))
 
 ### Changed
 
