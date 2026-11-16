@@ -633,6 +633,26 @@ impl GitRepo {
 			.map_err(|e| Error::backend("git read-tree", e))
 	}
 
+	/// Seed a private index from `treeish`, retaining the shared index's
+	/// sparse-checkout exclusions.
+	///
+	/// Hooks run against the private index; without skip-worktree bits they see
+	/// excluded paths as deletions.
+	pub fn read_tree_keeping_sparse(&self, treeish: &str, index_path: &Path) -> Result<()> {
+		let repo = self.gix()?;
+		let tree = resolve_tree(&repo, treeish)?;
+		let mut index = repo
+			.index_from_tree(&tree)
+			.map_err(|e| Error::backend("git read-tree", e))?;
+		if let Some(shared) = load_index_at(&repo, None)? {
+			mark_skipped_like(&mut index, &shared);
+		}
+		index.set_path(index_path);
+		index
+			.write(INDEX_WRITE)
+			.map_err(|e| Error::backend("git read-tree", e))
+	}
+
 	/// Write an index as a tree object and return its object id.
 	pub fn write_tree(&self, index_path: Option<&Path>) -> Result<String> {
 		let repo = self.gix()?;
@@ -1368,6 +1388,38 @@ fn resolve_tree(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectI
 		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
 }
 
+/// Match skipped files and sparse-directory prefixes from the shared index
+/// against the tree index.
+fn mark_skipped_like(index: &mut gix::index::State, shared: &gix::index::State) {
+	use gix::index::entry::{Flags, Mode};
+
+	let mut files = HashSet::new();
+	let mut dirs = Vec::new();
+	for entry in shared
+		.entries()
+		.iter()
+		.filter(|entry| entry.flags.contains(Flags::SKIP_WORKTREE))
+	{
+		let path = entry.path(shared);
+		if entry.mode == Mode::DIR {
+			// Sparse-directory paths end in `/`, keeping prefix matching on
+			// component boundaries.
+			debug_assert!(path.ends_with(b"/"));
+			dirs.push(path);
+		} else {
+			files.insert(path);
+		}
+	}
+	if files.is_empty() && dirs.is_empty() {
+		return;
+	}
+	for (entry, path) in index.entries_mut_with_paths() {
+		if files.contains(path) || dirs.iter().any(|dir| path.starts_with(dir)) {
+			entry.flags.insert(Flags::EXTENDED | Flags::SKIP_WORKTREE);
+		}
+	}
+}
+
 fn commit_tree(repo: &gix::Repository, id: &gix::hash::ObjectId) -> Result<gix::hash::ObjectId> {
 	let commit = repo
 		.find_commit(*id)
@@ -1646,18 +1698,41 @@ fn write_index_tree(
 		.iter()
 		.filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
 	{
-		let parts: Vec<&[u8]> = entry.path(index).split(|b| *b == b'/').collect();
-		let mut node = &mut root;
-		for part in &parts[..parts.len().saturating_sub(1)] {
-			node = node.dirs.entry(BString::from(*part)).or_default();
-		}
-		if let Some(name) = parts.last() {
-			node
-				.files
-				.push((BString::from(*name), entry.mode, entry.id));
+		let path = entry.path(index);
+		if entry.mode == gix::index::entry::Mode::DIR {
+			// A sparse-directory entry carries the collapsed subtree id and a
+			// path ending in `/`. Writing it verbatim would split into an
+			// empty trailing component and produce a malformed tree entry, so
+			// expand it back into the real files it stands for.
+			let subtree = repo
+				.index_from_tree(&entry.id)
+				.map_err(|e| Error::backend("git write-tree", e))?;
+			for leaf in subtree.entries() {
+				let mut full_path = path.to_owned();
+				full_path.extend_from_slice(leaf.path(&subtree));
+				insert_tree_entry(&mut root, full_path.as_ref(), leaf.mode, leaf.id);
+			}
+		} else {
+			insert_tree_entry(&mut root, path, entry.mode, entry.id);
 		}
 	}
 	write_tree_node(repo, root)
+}
+
+fn insert_tree_entry(
+	root: &mut TreeNode,
+	path: &[u8],
+	mode: gix::index::entry::Mode,
+	id: gix::hash::ObjectId,
+) {
+	let parts: Vec<&[u8]> = path.split(|b| *b == b'/').collect();
+	let mut node = root;
+	for part in &parts[..parts.len().saturating_sub(1)] {
+		node = node.dirs.entry(BString::from(*part)).or_default();
+	}
+	if let Some(name) = parts.last() {
+		node.files.push((BString::from(*name), mode, id));
+	}
 }
 
 fn write_tree_node(repo: &gix::Repository, node: TreeNode) -> Result<gix::hash::ObjectId> {
@@ -3708,5 +3783,59 @@ mod tests {
 		);
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);
+	}
+
+	#[test]
+	fn private_commit_index_keeps_sparse_checkout_paths_out_of_hook_diff() {
+		for sparse_index in [false, true] {
+			let (temp, repo) = fixture();
+			for path in
+				["kept/inside", "away-kept/inside", "awayfile", "away/outside", "away/deep/outside"]
+			{
+				let file = temp.path().join(path);
+				fs::create_dir_all(file.parent().unwrap()).unwrap();
+				fs::write(file, "content\n").unwrap();
+			}
+			git(temp.path(), &["add", "."]);
+			git(temp.path(), &["commit", "-qm", "sparse paths"]);
+			git(temp.path(), &[
+				"sparse-checkout",
+				"init",
+				"--cone",
+				if sparse_index {
+					"--sparse-index"
+				} else {
+					"--no-sparse-index"
+				},
+			]);
+			git(temp.path(), &["sparse-checkout", "set", "kept", "away-kept"]);
+			assert!(!temp.path().join("away").exists());
+
+			let shared = temp.path().join(".git/index");
+			let private = temp.path().join(".git/private.index");
+			repo.read_tree_keeping_sparse("HEAD", &private).unwrap();
+			let git_on = |index: &Path, args: &[&str]| {
+				let output = Command::new("git")
+					.arg("-C")
+					.arg(temp.path())
+					.env("GIT_INDEX_FILE", index)
+					.args(args)
+					.output()
+					.unwrap();
+				assert!(
+					output.status.success(),
+					"git {args:?}: {}",
+					String::from_utf8_lossy(&output.stderr)
+				);
+				String::from_utf8(output.stdout).unwrap()
+			};
+			assert_eq!(git_on(&private, &["diff", "--name-only"]), "", "sparse index: {sparse_index}");
+			assert_eq!(
+				git_on(&private, &["ls-files", "-t"]),
+				git_on(&shared, &["ls-files", "-t"]),
+				"sparse index: {sparse_index}; excluded paths must stay skipped without excluding \
+				 prefix neighbors"
+			);
+		}
 	}
 }
