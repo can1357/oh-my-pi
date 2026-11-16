@@ -10,6 +10,10 @@
 ### Fixed
 
 - Fixed concurrent `commitCreate()` calls committing each other's subject and body ([#19345](https://github.com/can1357/oh-my-pi/pull/19345) by [@eggpeat](https://github.com/eggpeat))
+### Changed
+
+- The glibc Linux addons no longer load `libm.so.6` or `libutil.so.1`; they need only `libc.so.6`, `libpthread.so.0` and `libdl.so.2`
+- The Linux addons export only their N-API entry point, no longer wasmtime's C API
 
 ## [18.20.3] - 2026-11-16
 

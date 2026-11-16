@@ -11,7 +11,12 @@
 ### Changed
 
 - Changed the local speech model `kokoro` to `phonon-31m`
+- Unknown reasoning capabilities now retain an unverified thinking ladder and can load endpoint-scoped probe results from `models.db`.
 - A provider's authored seed rows now survive that provider's `exclude-models` rules at generation, so a family exclusion such as xai-oauth's `prefix="grok-voice-"` no longer drops a seeded runner row ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+### Fixed
+
+- Fixed xAI Grok OAuth `grok-composer-2.5-fast` being listed as non-reasoning; thinking levels from minimal through xhigh are now available.
 
 ## [18.20.3] - 2026-11-16
 
