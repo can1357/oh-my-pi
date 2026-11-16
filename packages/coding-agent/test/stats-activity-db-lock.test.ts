@@ -114,8 +114,10 @@ describe("/usage activity load", () => {
 			legacy.close();
 
 			const events = await load();
-			expect(events.at(-1)).toEqual({ type: "done", id: "load" });
-			expect(requests(events.findLast(event => event.type === "activity"))).toBe(1);
+			// The stored rows paint before the sync migrates the database.
+			expect(events.map(event => event.type)).toEqual(["activity", "activity", "done"]);
+			expect(requests(events[0])).toBe(1);
+			expect(requests(events[1])).toBe(1);
 		} finally {
 			if (previousTz === undefined) delete process.env.TZ;
 			else process.env.TZ = previousTz;

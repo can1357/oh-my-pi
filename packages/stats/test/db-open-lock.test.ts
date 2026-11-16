@@ -46,6 +46,18 @@ async function whileLocked<T>(fn: () => Promise<T> | T): Promise<T> {
 	}
 }
 
+/** Run `fn` in a whole-hour timezone, where daily activity reads the hourly rollup. */
+async function inUtc<T>(fn: () => Promise<T>): Promise<T> {
+	const previousTz = process.env.TZ;
+	process.env.TZ = "UTC";
+	try {
+		return await fn();
+	} finally {
+		if (previousTz === undefined) delete process.env.TZ;
+		else process.env.TZ = previousTz;
+	}
+}
+
 describe("opening the stats database", () => {
 	it("reopens an initialized database without taking the write lock", async () => {
 		await db.initDb();
@@ -70,6 +82,39 @@ describe("opening the stats database", () => {
 		db.closeDb();
 		const points = await whileLocked(() => db.readDailyActivity());
 		expect(points?.reduce((sum, point) => sum + point.requests, 0)).toBe(2);
+	}, 20_000);
+
+	it("reads the raw rows when the stored rollup was built under another version", async () => {
+		await inUtc(async () => {
+			await db.initDb();
+			const timestamp = Date.now() - 60 * 60_000;
+			db.insertMessageStats([request("a", timestamp), request("b", timestamp + 1)]);
+			await refreshRollups();
+			db.closeDb();
+			// Another build's rollup: same columns, other fact definitions. Only a
+			// writable open rebuilds it, which the read-only paint never does.
+			const other = new Database(getStatsDbPath());
+			other.run("UPDATE message_rollup SET requests = requests * 10");
+			other.run("UPDATE meta SET value = 'other' WHERE key = 'rollup_version'");
+			other.close();
+			const points = db.readDailyActivity();
+			expect(points?.reduce((sum, point) => sum + point.requests, 0)).toBe(2);
+		});
+	}, 20_000);
+
+	it("reads the raw rows of a database written before the hourly rollup", async () => {
+		await inUtc(async () => {
+			await db.initDb();
+			db.insertMessageStats([request("a", Date.now() - 60 * 60_000)]);
+			db.closeDb();
+			const legacy = new Database(getStatsDbPath());
+			legacy.run("DROP TABLE message_rollup");
+			legacy.run("DROP TABLE rollup_dirty");
+			legacy.run("DELETE FROM meta WHERE key = 'rollup_version'");
+			legacy.close();
+			const points = db.readDailyActivity();
+			expect(points?.reduce((sum, point) => sum + point.requests, 0)).toBe(1);
+		});
 	}, 20_000);
 
 	it("reads no activity before any database exists", () => {

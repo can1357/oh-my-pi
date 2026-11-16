@@ -910,18 +910,31 @@ export function getProviderHourlyBurn(cutoff: number | null = null): ProviderHou
 }
 
 /**
+ * Whether the stored rollup was built under this build's {@link ROLLUP_VERSION}.
+ * Only {@link ensureRollupSchema} rebuilds an older one, so a connection that
+ * skips it (the read-only `/usage` paint) must not trust the rollup otherwise.
+ */
+function rollupIsCurrent(database: Database): boolean {
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(ROLLUP_VERSION_KEY);
+	return row?.value === ROLLUP_VERSION;
+}
+
+/**
  * Per-local-day request/token/cost totals since `cutoff`, oldest first, read
  * from the hourly rollup. Returns null when the local UTC offset is not a whole
  * hour (now or at `cutoff`), since hourly buckets then straddle local midnight,
- * or while the dirty backlog is too large for exact reads; callers then
- * aggregate the raw rows instead.
+ * when the stored rollup is missing or was built under another version, or
+ * while the dirty backlog is too large for exact reads; callers then aggregate
+ * the raw rows instead.
  */
 export function getDailyActivityFromRollup(
 	cutoff: number,
 	database: Database | null = currentDb(),
 ): DailyActivityPoint[] | null {
 	if (new Date().getTimezoneOffset() % 60 !== 0 || new Date(cutoff).getTimezoneOffset() % 60 !== 0) return null;
-	if (!database || !dirtyIsSmall(database)) return null;
+	if (!database || !rollupIsCurrent(database) || !dirtyIsSmall(database)) return null;
 	return queryMessages<{ day: string; cost: number; requests: number; total_tokens: number | null }>(
 		{ cutoff },
 		`date(f.bucket / 1000, 'unixepoch', 'localtime') AS day, TOTAL(f.cost_total) AS cost,
