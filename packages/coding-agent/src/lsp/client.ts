@@ -8,7 +8,7 @@ import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange, type WorkspaceFileChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { connectSharedLspTransport } from "./mux/daemon";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
@@ -937,11 +937,12 @@ export async function applyWorkspaceEditWithLsp(
 	edit: WorkspaceEdit,
 	cwd: string,
 	signal?: AbortSignal,
+	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<string[]> {
 	const executed: ExecutedWorkspaceChange[] = [];
 	let applied: string[];
 	try {
-		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change)));
+		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change), onFileChange));
 	} catch (err) {
 		// Best-effort: overlays for the mutated prefix must not stay stale, but
 		// reconciliation problems must not mask the original apply failure.

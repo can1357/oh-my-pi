@@ -51,7 +51,7 @@ import {
 	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { FileChangeReport, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -969,7 +969,13 @@ describe("lsp regressions", () => {
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
 			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
 			const targetPath = await openDocument(client, "target.ts");
-			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const before = await Bun.file(targetPath).text();
+			const beforeMtimeMs = (await fsp.stat(targetPath)).mtimeMs;
+			const recorded: FileChangeReport[] = [];
+			const tool = new LspTool({
+				...makeLspSession(tempDir.path()),
+				recordFileChange: change => recorded.push(change),
+			});
 
 			const listed = await tool.execute("list-source-actions", {
 				action: "code_actions",
@@ -980,6 +986,7 @@ describe("lsp regressions", () => {
 				type: "text",
 				text: "3 code action(s):\n  0: [refactor.rewrite] Convert named imports to namespace import\n  1: [refactor.rewrite] Convert named imports to namespace import\n  2: [source.organizeImports] Organize Imports",
 			});
+			expect(recorded).toEqual([]);
 
 			await tool.execute("apply-source-action", {
 				action: "code_actions",
@@ -989,6 +996,7 @@ describe("lsp regressions", () => {
 				apply: true,
 			});
 			expect(await Bun.file(targetPath).text()).toBe("organized\n");
+			expect(recorded).toEqual([{ path: targetPath, tool: "lsp", before, after: "organized\n", beforeMtimeMs }]);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -4196,10 +4204,15 @@ describe("lsp regressions", () => {
 				idleTimeoutMs: undefined,
 			});
 
-			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const recorded: FileChangeReport[] = [];
+			const tool = new LspTool({
+				...makeLspSession(tempDir.path()),
+				recordFileChange: change => recorded.push(change),
+			});
 			expect(
 				textResult(await tool.execute("symbols-before-rename", { action: "symbols", file: filePath })),
 			).toContain("OldName");
+			const beforeMtimeMs = (await fsp.stat(filePath)).mtimeMs;
 			await tool.execute("rename-open-document", {
 				action: "rename",
 				file: filePath,
@@ -4208,6 +4221,15 @@ describe("lsp regressions", () => {
 				new_name: "NewName",
 			});
 			expect(await Bun.file(filePath).text()).toContain("NewName");
+			expect(recorded).toEqual([
+				{
+					path: filePath,
+					tool: "lsp",
+					before: "package main\nfunc OldName() {}\n",
+					after: "package main\nfunc NewName() {}\n",
+					beforeMtimeMs,
+				},
+			]);
 
 			const symbols = await tool.execute("symbols-after-rename", { action: "symbols", file: filePath });
 			expect(textResult(symbols)).toContain("NewName");

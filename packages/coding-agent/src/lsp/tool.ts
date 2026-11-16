@@ -61,6 +61,7 @@ import {
 	type RenameReferenceEdit,
 	rangesOverlap,
 	sortAndValidateTextEdits,
+	type WorkspaceFileChange,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
@@ -1267,6 +1268,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const resolvedCharacter = targetFile ? await resolveSymbolColumn(targetFile, resolvedLine, symbol) : 0;
 			const position = { line: resolvedLine - 1, character: resolvedCharacter };
 
+			const recordFileChange = this.session.recordFileChange
+				? (change: WorkspaceFileChange) => this.session.recordFileChange?.({ ...change, tool: "lsp" })
+				: undefined;
 			let output: string;
 			// Set on bare empty-lookup outcomes (no definition/references/…): the
 			// result carries no information once consumed, so compaction may elide
@@ -1514,7 +1518,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: async edit =>
+								applyWorkspaceEditWithLsp(edit, this.session.cwd, signal, recordFileChange),
 							executeCommand: async commandItem => {
 								await sendRequest(
 									client,
@@ -1610,7 +1615,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
-							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
+							const applied = await applyWorkspaceEditWithLsp(
+								result,
+								this.session.cwd,
+								signal,
+								recordFileChange,
+							);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 						} else {
 							const preview = formatWorkspaceEdit(result, this.session.cwd);

@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { type FileSnapshot, readSnapshot } from "../commit/selective/journal";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
@@ -160,10 +161,18 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
  * Apply text edits to a file.
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
  */
-export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
-	const content = await readTextFromDisk(filePath);
+export async function applyTextEdits(
+	filePath: string,
+	edits: TextEdit[],
+	onFileChange?: (change: WorkspaceFileChange) => void,
+): Promise<void> {
+	const [content, stat] = await Promise.all([
+		readTextFromDisk(filePath),
+		onFileChange ? fs.stat(filePath).catch(() => undefined) : undefined,
+	]);
 	const result = applyTextEditsToString(content, edits);
 	await Bun.write(filePath, result);
+	onFileChange?.({ path: filePath, before: content, after: result, beforeMtimeMs: stat?.mtimeMs });
 }
 
 /** A reference file and the text edits a rename computed for it. */
@@ -206,6 +215,51 @@ export async function applyEditsThenRename(
 // =============================================================================
 // Workspace Edit Application
 // =============================================================================
+
+/** A file mutation reported after it lands, for selective-commit attribution. */
+export interface WorkspaceFileChange {
+	path: string;
+	before: string | null;
+	after: string | null;
+	beforeMtimeMs?: number;
+}
+
+type ResourceSnapshots = Map<string, FileSnapshot | undefined>;
+
+/** Snapshot resource operations without following directory symlinks or reading special files. */
+async function snapshotResource(filePath: string): Promise<ResourceSnapshots> {
+	const snapshots: ResourceSnapshots = new Map();
+	try {
+		const stat = await fs.lstat(filePath);
+		if (stat.isDirectory()) {
+			for (const entry of await fs.readdir(filePath)) {
+				for (const [file, snapshot] of await snapshotResource(path.join(filePath, entry))) {
+					snapshots.set(file, snapshot);
+				}
+			}
+		} else if (stat.isSymbolicLink()) {
+			snapshots.set(filePath, { text: await fs.readlink(filePath), mtimeMs: stat.mtimeMs });
+		} else {
+			snapshots.set(filePath, stat.isFile() ? await readSnapshot(filePath) : undefined);
+		}
+	} catch (error) {
+		snapshots.set(filePath, isEnoent(error) ? { text: null } : undefined);
+	}
+	return snapshots;
+}
+
+function recordResourceChanges(
+	before: ResourceSnapshots,
+	after: ResourceSnapshots,
+	onFileChange: (change: WorkspaceFileChange) => void,
+): void {
+	for (const file of new Set([...before.keys(), ...after.keys()])) {
+		const previous = before.has(file) ? before.get(file) : { text: null };
+		const next = after.has(file) ? after.get(file) : { text: null };
+		if (!previous || !next || previous.text === next.text) continue;
+		onFileChange({ path: file, before: previous.text, after: next.text, beforeMtimeMs: previous.mtimeMs });
+	}
+}
 
 type WorkspaceEditOp =
 	| { kind: "text"; uri: string; edits: TextEdit[] }
@@ -312,11 +366,14 @@ export interface WorkspaceEditResult {
  * the callback has already reported the executed prefix — callers that must
  * reconcile external state (e.g. LSP overlays) rely on this because the
  * returned {@link WorkspaceEditResult} is lost on failure.
+ * `onFileChange` reports the before/after contents of each successful write,
+ * including the executed prefix when a later operation fails.
  */
 export async function applyWorkspaceEdit(
 	edit: WorkspaceEdit,
 	cwd: string,
 	onExecuted?: (change: ExecutedWorkspaceChange) => void,
+	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<WorkspaceEditResult> {
 	const applied: string[] = [];
 	const executed: ExecutedWorkspaceChange[] = [];
@@ -333,11 +390,12 @@ export async function applyWorkspaceEdit(
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
-				await applyTextEdits(filePath, op.edits);
+				await applyTextEdits(filePath, op.edits, onFileChange);
 				applied.push(`Applied ${op.edits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "edit", uri: op.uri });
 			} else if (op.kind === "create") {
 				const filePath = uriToFile(op.uri);
+				const before = onFileChange ? await snapshotResource(filePath) : undefined;
 				await fs.mkdir(path.dirname(filePath), { recursive: true });
 				try {
 					if (op.options?.overwrite) {
@@ -352,11 +410,30 @@ export async function applyWorkspaceEdit(
 					}
 					continue;
 				}
+				if (onFileChange && before) {
+					recordResourceChanges(before, new Map([[filePath, { text: "" }]]), onFileChange);
+				}
 				applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "create", uri: op.uri });
 			} else if (op.kind === "rename") {
 				const oldPath = uriToFile(op.oldUri);
 				const newPath = uriToFile(op.newUri);
+				let before: ResourceSnapshots | undefined;
+				let destination: ResourceSnapshots | undefined;
+				let after: ResourceSnapshots | undefined;
+				if (onFileChange && oldPath !== newPath) {
+					const source = await snapshotResource(oldPath);
+					destination = await snapshotResource(newPath);
+					after = new Map();
+					for (const [file, snapshot] of source) {
+						const moved = path.join(newPath, path.relative(oldPath, file));
+						after.set(moved, snapshot);
+						if (!destination.has(moved)) {
+							destination.set(moved, (await snapshotResource(moved)).get(moved));
+						}
+					}
+					before = new Map([...source, ...destination]);
+				}
 				await fs.mkdir(path.dirname(newPath), { recursive: true });
 				if (oldPath !== newPath) {
 					// Displace an overwritten destination into a kernel-reserved sibling
@@ -398,6 +475,9 @@ export async function applyWorkspaceEdit(
 							} catch {
 								// Restoration failed: the destination really is gone, so
 								// report it to reconciliation as an executed delete.
+								if (onFileChange && destination) {
+									recordResourceChanges(destination, new Map(), onFileChange);
+								}
 								record({ kind: "delete", uri: op.newUri });
 							}
 							await fs.rm(displaced.dir, { recursive: true, force: true }).catch(() => {});
@@ -413,10 +493,12 @@ export async function applyWorkspaceEdit(
 						});
 					}
 				}
+				if (onFileChange && before && after) recordResourceChanges(before, after, onFileChange);
 				applied.push(`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} → ${formatPathRelativeToCwd(newPath, cwd)}`);
 				record({ kind: "rename", oldUri: op.oldUri, newUri: op.newUri });
 			} else {
 				const filePath = uriToFile(op.uri);
+				const before = onFileChange ? await snapshotResource(filePath) : undefined;
 				try {
 					const stat = await fs.lstat(filePath);
 					if (stat.isDirectory() && !stat.isSymbolicLink() && !op.options?.recursive) {
@@ -428,6 +510,7 @@ export async function applyWorkspaceEdit(
 					if (!(op.options?.ignoreIfNotExists && isEnoent(error))) throw error;
 					continue;
 				}
+				if (onFileChange && before) recordResourceChanges(before, new Map(), onFileChange);
 				applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "delete", uri: op.uri });
 			}
@@ -442,7 +525,7 @@ export async function applyWorkspaceEdit(
 			const textEdits = changes[uri];
 			if (textEdits.length === 0) continue;
 			const filePath = uriToFile(uri);
-			await applyTextEdits(filePath, textEdits);
+			await applyTextEdits(filePath, textEdits, onFileChange);
 			applied.push(`Applied ${textEdits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
 			record({ kind: "edit", uri });
 		}

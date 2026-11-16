@@ -2,8 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { applyEditsThenRename } from "@oh-my-pi/pi-coding-agent/lsp/edits";
-import type { TextEdit } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import {
+	applyEditsThenRename,
+	applyWorkspaceEdit,
+	type WorkspaceFileChange,
+} from "@oh-my-pi/pi-coding-agent/lsp/edits";
+import type { TextEdit, WorkspaceEdit } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 
 // Rewrite `./moved` → `./renamed` on line 0 of the reference file below.
 const importEdit: TextEdit[] = [
@@ -50,5 +55,169 @@ describe("applyEditsThenRename", () => {
 		expect(await Bun.file(ref).text()).toBe(refBefore);
 		expect(await Bun.file(source).exists()).toBe(true);
 		expect(await Bun.file(dest).exists()).toBe(false);
+	});
+});
+
+describe("workspace edit recorder", () => {
+	let dir: string;
+
+	beforeEach(async () => {
+		dir = await fs.mkdtemp(path.join(os.tmpdir(), "edits-journal-"));
+	});
+
+	afterEach(async () => {
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	it.each(["changes", "documentChanges"] as const)(
+		"reports each file's disk before/after text once to the recorder for %s",
+		async format => {
+			const first = path.join(dir, "first.ts");
+			const second = path.join(dir, "second.ts");
+			await Bun.write(first, "const oldName = oldName;\n");
+			await Bun.write(second, "oldName();\n");
+			const before = await Promise.all([Bun.file(first).text(), Bun.file(second).text()]);
+			const stats = await Promise.all([fs.stat(first), fs.stat(second)]);
+			const replace = (start: number): TextEdit => ({
+				range: { start: { line: 0, character: start }, end: { line: 0, character: start + 7 } },
+				newText: "newName",
+			});
+			const changes = {
+				[fileToUri(first)]: [replace(6), replace(16)],
+				[fileToUri(second)]: [replace(0)],
+			};
+			const edit: WorkspaceEdit =
+				format === "changes"
+					? { changes }
+					: {
+							documentChanges: Object.entries(changes).map(([uri, edits]) => ({
+								textDocument: { uri, version: null },
+								edits,
+							})),
+						};
+			const recorded: WorkspaceFileChange[] = [];
+
+			await applyWorkspaceEdit(edit, dir, undefined, change => recorded.push(change));
+
+			expect(await Bun.file(first).text()).toBe("const newName = newName;\n");
+			expect(await Bun.file(second).text()).toBe("newName();\n");
+			expect(recorded).toEqual([
+				{ path: first, before: before[0], after: await Bun.file(first).text(), beforeMtimeMs: stats[0].mtimeMs },
+				{ path: second, before: before[1], after: await Bun.file(second).text(), beforeMtimeMs: stats[1].mtimeMs },
+			]);
+		},
+	);
+
+	it("reports creates, overwrites, folder moves and recursive deletes to the recorder", async () => {
+		const created = path.join(dir, "created.ts");
+		const overwritten = path.join(dir, "overwritten.ts");
+		const source = path.join(dir, "source", "child.ts");
+		const destination = path.join(dir, "destination", "child.ts");
+		const displaced = path.join(dir, "destination", "displaced.ts");
+		const deleted = path.join(dir, "deleted", "nested", "child.ts");
+		await Bun.write(overwritten, "overwrite me\n");
+		await Bun.write(source, "move me\n");
+		await Bun.write(destination, "old destination\n");
+		await Bun.write(displaced, "remove me\n");
+		await Bun.write(deleted, "delete me\n");
+		const mtimes = new Map(
+			await Promise.all(
+				[overwritten, source, destination, displaced, deleted].map(
+					async file => [file, (await fs.stat(file)).mtimeMs] as const,
+				),
+			),
+		);
+		const recorded: WorkspaceFileChange[] = [];
+
+		await applyWorkspaceEdit(
+			{
+				documentChanges: [
+					{ kind: "create", uri: fileToUri(created) },
+					{ kind: "create", uri: fileToUri(overwritten), options: { overwrite: true } },
+					{
+						kind: "rename",
+						oldUri: fileToUri(path.dirname(source)),
+						newUri: fileToUri(path.dirname(destination)),
+						options: { overwrite: true },
+					},
+					{ kind: "delete", uri: fileToUri(path.join(dir, "deleted")), options: { recursive: true } },
+				],
+			},
+			dir,
+			undefined,
+			change => recorded.push(change),
+		);
+
+		expect(await Bun.file(created).text()).toBe("");
+		expect(await Bun.file(overwritten).text()).toBe("");
+		expect(await Bun.file(source).exists()).toBe(false);
+		expect(await Bun.file(destination).text()).toBe("move me\n");
+		expect(await Bun.file(displaced).exists()).toBe(false);
+		expect(await Bun.file(deleted).exists()).toBe(false);
+		expect(recorded.toSorted((a, b) => a.path.localeCompare(b.path))).toEqual(
+			[
+				{ path: created, before: null, after: "", beforeMtimeMs: undefined },
+				{ path: overwritten, before: "overwrite me\n", after: "", beforeMtimeMs: mtimes.get(overwritten) },
+				{ path: source, before: "move me\n", after: null, beforeMtimeMs: mtimes.get(source) },
+				{
+					path: destination,
+					before: "old destination\n",
+					after: "move me\n",
+					beforeMtimeMs: mtimes.get(destination),
+				},
+				{ path: displaced, before: "remove me\n", after: null, beforeMtimeMs: mtimes.get(displaced) },
+				{ path: deleted, before: "delete me\n", after: null, beforeMtimeMs: mtimes.get(deleted) },
+			].toSorted((a, b) => a.path.localeCompare(b.path)),
+		);
+	});
+
+	it("keeps the executed prefix in the recorder but omits skipped and failed operations", async () => {
+		const edited = path.join(dir, "nonempty", "source.ts");
+		const target = path.join(dir, "target.ts");
+		const child = path.join(dir, "nonempty", "child.ts");
+		await Bun.write(edited, "oldName\n");
+		await Bun.write(target, "keep target\n");
+		await Bun.write(child, "keep child\n");
+		const beforeMtimeMs = (await fs.stat(edited)).mtimeMs;
+		const recorded: WorkspaceFileChange[] = [];
+
+		await expect(
+			applyWorkspaceEdit(
+				{
+					documentChanges: [
+						{ kind: "create", uri: fileToUri(edited), options: { ignoreIfExists: true } },
+						{
+							kind: "rename",
+							oldUri: fileToUri(edited),
+							newUri: fileToUri(target),
+							options: { ignoreIfExists: true },
+						},
+						{
+							kind: "delete",
+							uri: fileToUri(path.join(dir, "missing.ts")),
+							options: { ignoreIfNotExists: true },
+						},
+						{
+							textDocument: { uri: fileToUri(edited), version: null },
+							edits: [
+								{
+									range: { start: { line: 0, character: 0 }, end: { line: 0, character: 7 } },
+									newText: "newName",
+								},
+							],
+						},
+						{ kind: "delete", uri: fileToUri(path.dirname(child)) },
+					],
+				},
+				dir,
+				undefined,
+				change => recorded.push(change),
+			),
+		).rejects.toThrow();
+
+		expect(await Bun.file(edited).text()).toBe("newName\n");
+		expect(await Bun.file(target).text()).toBe("keep target\n");
+		expect(await Bun.file(child).text()).toBe("keep child\n");
+		expect(recorded).toEqual([{ path: edited, before: "oldName\n", after: "newName\n", beforeMtimeMs }]);
 	});
 });
