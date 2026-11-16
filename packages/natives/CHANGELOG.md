@@ -10,6 +10,7 @@
 ### Fixed
 
 - Fixed concurrent `commitCreate()` calls committing each other's subject and body ([#19345](https://github.com/can1357/oh-my-pi/pull/19345) by [@eggpeat](https://github.com/eggpeat))
+- Fixed `commitCreate()` dropping a rejecting `pre-commit`/`commit-msg` hook's stdout from the error; hook output now arrives interleaved in `stderr` and the message, as under `git commit` ([#19449](https://github.com/can1357/oh-my-pi/issues/19449))
 
 ## [18.20.3] - 2026-11-16
 

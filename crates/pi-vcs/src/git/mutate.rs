@@ -5,7 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
 	ffi::OsStr,
 	fs,
-	io::Write,
+	io::{self, Read, Write},
 	path::{Path, PathBuf},
 	process::{Command, Stdio},
 };
@@ -1090,6 +1090,11 @@ impl Drop for CommitMessageFile {
 
 /// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the
 /// commit is built from an alternate index, as `git commit --only` does.
+///
+/// Like `git commit`, the hook's stdout goes to its stderr: a rejection
+/// carries both streams, interleaved, in the `stderr` of [`Error::Cli`], so
+/// hooks that report on stdout (the `pre-commit` framework) still explain the
+/// failure.
 fn run_commit_hook(
 	repository: &GitRepo,
 	name: &str,
@@ -1098,6 +1103,13 @@ fn run_commit_hook(
 ) -> Result<()> {
 	let Some(hook) = repository.hook_path(name)? else {
 		return Ok(());
+	};
+	let command_name = || format!("git commit ({name} hook)");
+	let io_failed = |err: io::Error| Error::Cli {
+		command:   command_name(),
+		exit_code: 1,
+		stdout:    String::new(),
+		stderr:    err.to_string(),
 	};
 	// Windows CreateProcess cannot execute a shebang script directly. Let Git
 	// invoke the hook through its own shell, as `git commit` does.
@@ -1114,28 +1126,34 @@ fn run_commit_hook(
 	if let Some(index_path) = index_path {
 		command.env("GIT_INDEX_FILE", index_path);
 	}
-	let output = command
+	let (mut reader, writer) = io::pipe().map_err(io_failed)?;
+	let stderr = writer.try_clone().map_err(io_failed)?;
+	let mut child = command
 		.args(args)
 		.current_dir(repository.root())
 		.env("GIT_DIR", &repository.info().git_dir)
 		.env("GIT_WORK_TREE", repository.root())
 		.env("GIT_TERMINAL_PROMPT", "0")
 		.stdin(Stdio::null())
-		.output()
-		.map_err(|err| Error::Cli {
-			command:   format!("git commit ({name} hook)"),
-			exit_code: 1,
-			stdout:    String::new(),
-			stderr:    err.to_string(),
-		})?;
-	if output.status.success() {
+		.stdout(writer)
+		.stderr(stderr)
+		.spawn()
+		.map_err(io_failed)?;
+	// `command` holds the parent's write ends; the read below sees EOF only
+	// once they are closed.
+	drop(command);
+	let mut output = Vec::new();
+	let read = reader.read_to_end(&mut output);
+	let status = child.wait().map_err(io_failed)?;
+	read.map_err(io_failed)?;
+	if status.success() {
 		return Ok(());
 	}
 	Err(Error::Cli {
-		command:   format!("git commit ({name} hook)"),
-		exit_code: output.status.code().unwrap_or(1),
-		stdout:    String::from_utf8_lossy_owned(output.stdout),
-		stderr:    String::from_utf8_lossy_owned(output.stderr),
+		command:   command_name(),
+		exit_code: status.code().unwrap_or(1),
+		stdout:    String::new(),
+		stderr:    String::from_utf8_lossy_owned(output),
 	})
 }
 
@@ -2534,6 +2552,32 @@ mod tests {
 			.commit_create("unverified", &CommitOptions { no_verify: true, ..options })
 			.unwrap();
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), id);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn rejecting_hook_reports_stdout_and_stderr_in_order() {
+		use std::os::unix::fs::PermissionsExt;
+		let (temp, repo) = fixture();
+		let hooks = temp.path().join(".git").join("hooks");
+		fs::create_dir_all(&hooks).unwrap();
+		let hook = hooks.join("pre-commit");
+		fs::write(
+			&hook,
+			"#!/bin/sh\necho start >&2\necho 'some-hook....Failed'\necho 'files were modified' \
+			 >&2\nexit 3\n",
+		)
+		.unwrap();
+		fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+		let err = repo
+			.commit_create("rejected", &CommitOptions { allow_empty: true, ..Default::default() })
+			.unwrap_err();
+		let Error::Cli { exit_code, ref stderr, .. } = err else {
+			panic!("expected a hook failure, got {err:?}");
+		};
+		assert_eq!(exit_code, 3);
+		assert_eq!(stderr, "start\nsome-hook....Failed\nfiles were modified\n");
+		assert_eq!(err.to_string(), "start\nsome-hook....Failed\nfiles were modified");
 	}
 
 	#[cfg(unix)]
