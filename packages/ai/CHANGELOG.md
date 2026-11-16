@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Claude Fable and Mythos usage-limit rejections rotating to a sibling account that still has quota, instead of waiting out the capped account or falling back to another model.
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
