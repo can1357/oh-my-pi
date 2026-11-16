@@ -1,9 +1,10 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { retireWhenIdle } from "@oh-my-pi/pi-ai/providers/antigravity-cli";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
@@ -185,6 +186,7 @@ class FakeAgy implements AgyTransport {
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
+	vi.useRealTimers();
 	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 });
 
@@ -704,5 +706,41 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("implicit host retention", () => {
+	it("closes a host whose tool turn is still parked when its idle deadline passes", async () => {
+		const state = await parked();
+		const sessions = new Map();
+		const entry = { host: state.host, account: "account" };
+		sessions.set("implicit", entry);
+		vi.useFakeTimers();
+		retireWhenIdle("implicit", entry, sessions);
+		vi.advanceTimersByTime(60 * 60_000);
+		expect(state.fake.closed).toBe(true);
+		expect(sessions.has("implicit")).toBe(false);
+		expect((await state.output).isError).toBe(true);
+	});
+
+	it("leaves a host that replaced the retired entry alone", async () => {
+		const staleState = await parked();
+		const sessions = new Map();
+		const stale = { host: staleState.host, account: "account" };
+		sessions.set("implicit", stale);
+		vi.useFakeTimers();
+		retireWhenIdle("implicit", stale, sessions);
+		const nextState = await fixture();
+		const replacement = { host: nextState.host, account: "account" };
+		sessions.set("implicit", replacement);
+		const next = step(nextState.host, [user("hello")]);
+		const fake = await nextState.started.next();
+		const prompt = await fake.prompts.next();
+		vi.advanceTimersByTime(60 * 60_000);
+		expect(fake.closed).toBe(false);
+		expect(sessions.get("implicit")).toBe(replacement);
+		fake.text("Done.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
 	});
 });

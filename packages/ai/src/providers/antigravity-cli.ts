@@ -106,15 +106,22 @@ async function runStep(
 	}
 }
 
-function retireWhenIdle(key: string, entry: RetainedHost): void {
+/**
+ * Close and forget an implicit host once its idle deadline passes, even with a
+ * parked tool: the deadline counts from the last step, so an abandoned turn
+ * cannot renew it. Closing settles the held MCP call; a later result replays
+ * the supplied transcript instead of holding a native process and map entry.
+ * `sessions` is injectable so the deadline runs without a live agy process.
+ */
+export function retireWhenIdle(
+	key: string,
+	entry: RetainedHost,
+	sessions: Map<string, RetainedHost> = implicitSessions,
+): void {
 	entry.idle = setTimeout(() => {
-		if (implicitSessions.get(key) !== entry) return;
-		if (entry.host.hasPendingTurn) {
-			retireWhenIdle(key, entry);
-			return;
-		}
+		if (sessions.get(key) !== entry) return;
 		entry.host.close();
-		implicitSessions.delete(key);
+		sessions.delete(key);
 	}, IDLE_MS);
 	entry.idle.unref();
 }
