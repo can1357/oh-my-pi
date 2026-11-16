@@ -150,6 +150,7 @@ import { type BashResult, drainAbortedShells, releaseShellSessions } from "../ex
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { MCPLoadResult } from "../mcp";
 import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
@@ -1340,6 +1341,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#sideStreamFn: StreamFn;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
+	#reloadOwnedMcpServers: (() => Promise<MCPLoadResult | undefined>) | undefined;
+	#projectScopeRefresher: (() => Promise<void>) | undefined;
+	#projectScopeRefresh: Promise<void> = Promise.resolve();
 
 	readonly #ttsr: TtsrCoordinator;
 	readonly #stats: SessionStatsTracker;
@@ -2697,6 +2701,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			skillsReloadable: config.skillsReloadable,
 		});
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
+		this.#reloadOwnedMcpServers = config.reloadOwnedMcpServers;
 		const ttsrHost: TtsrCoordinatorHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -7899,6 +7904,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#deferredExtensionLoader = load;
 	}
 
+	/** Install the {@link refreshProjectScope} implementation (top-level sessions only). */
+	setProjectScopeRefresher(refresh: () => Promise<void>): void {
+		this.#projectScopeRefresher = refresh;
+	}
+
+	/**
+	 * Re-scope what this session discovered from its working directory after the cwd changed
+	 * (`/move`, resuming a session from another project): task agents, project extensions and
+	 * custom tools, and the owned MCP manager's servers. Serialized; a no-op for sessions without
+	 * a project scope (subagents). MCP servers reconnect in the background and turns wait for
+	 * them, bounded, as they do for startup discovery.
+	 */
+	refreshProjectScope(): Promise<void> {
+		const refresh = this.#projectScopeRefresher;
+		if (!refresh) return Promise.resolve();
+		const next = this.#projectScopeRefresh.catch(() => {}).then(refresh);
+		this.#projectScopeRefresh = next;
+		return next;
+	}
+
+	/**
+	 * Reconnect the owned MCP manager's servers against the current cwd and rebind MCP tools.
+	 * Resolves `undefined` when this session borrows or disables MCP.
+	 */
+	reloadMCPServers(): Promise<MCPLoadResult | undefined> {
+		return this.#reloadOwnedMcpServers?.() ?? Promise.resolve(undefined);
+	}
+
 	/** Whether startup-deferred extensions are still unbound (loading or not yet started). */
 	get hasPendingDeferredExtensions(): boolean {
 		return this.#deferredExtensionLoader !== undefined || this.#deferredExtensionLoad !== undefined;
@@ -12262,8 +12295,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Replace the title-generation system prompt override. Called by
-	 *  {@link InteractiveMode.refreshTitleSystemPrompt} after the session cwd
-	 *  changes (e.g. `/move` relocation) so the next replan refresh resolves
+	 *  `rescopeSessionToCwd` after the session cwd changes (e.g. `/move`
+	 *  relocation) so the next replan refresh resolves
 	 *  against the destination project's override. */
 	setTitleSystemPrompt(prompt: string | undefined): void {
 		this.#titleSystemPrompt = prompt;
