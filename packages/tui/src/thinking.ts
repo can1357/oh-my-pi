@@ -134,10 +134,10 @@ export function resolveThinkingLevelForModel(
 
 /**
  * Level applied to `model` when the user has not picked one for it (carried,
- * global default, auto). Unverified thinking stays unset until the user picks.
+ * global default, auto), including models awaiting capability discovery.
  */
-export function automaticThinkingLevel<T>(model: Model | undefined, fallback: T): T | undefined {
-	return model?.thinking?.unverified ? undefined : fallback;
+export function automaticThinkingLevel<T>(_model: Model | undefined, fallback: T): T {
+	return fallback;
 }
 
 /**
@@ -419,7 +419,7 @@ export function assertModelSupportsEffortCeiling(model: Model, maxEffort: Effort
  * models.
  */
 export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | undefined {
-	if (!model?.reasoning || model.thinking?.unverified) return undefined;
+	if (!model?.reasoning) return undefined;
 	const preferred = model.thinking?.defaultLevel ?? Effort.High;
 	return clampAutoThinkingEffort(model, preferred === Effort.Max ? Effort.XHigh : preferred, Effort.XHigh);
 }

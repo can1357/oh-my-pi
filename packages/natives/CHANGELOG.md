@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added the `PhononTts` binding for on-device Phonon text-to-speech.
+- Added `Shell.adopt(fork)` to apply variables, functions, aliases, options, and traps from a completed fork back to its parent shell. When both shells set a name, the value from the command that finished last is retained.
+
+### Fixed
+
+- Fixed concurrent `commitCreate()` calls incorrectly overwriting each other’s commit subject and body.
+
 ## [18.20.3] - 2026-11-16
 
 ### Fixed
