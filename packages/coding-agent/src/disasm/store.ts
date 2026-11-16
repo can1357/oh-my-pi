@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { getAgentDir, peekFile } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { DisasmBackend } from "./backend";
 
 /** Number of leading bytes needed by {@link isExecutableHeader} (a full 64-byte DOS header for PE). */
 export const EXECUTABLE_SNIFF_BYTES = 64;
@@ -158,12 +159,6 @@ export function splitSliceRef(ref: string): { path: string; arch?: string } {
 	return { path: ref.slice(0, at), arch };
 }
 
-/** True when `p` has an IDA database extension (`.i64`/`.idb`, case-insensitive). */
-export function isIdaDatabasePath(p: string): boolean {
-	const ext = path.extname(p).toLowerCase();
-	return ext === ".i64" || ext === ".idb";
-}
-
 /** Sniff the file header; false on any I/O error. */
 export async function isExecutableFile(absPath: string): Promise<boolean> {
 	try {
@@ -173,11 +168,13 @@ export async function isExecutableFile(absPath: string): Promise<boolean> {
 	}
 }
 
-/** Where an IDB for a given source lives and how to open it. */
-export interface IdbLocation {
+/** Where a backend database lives and which binary it analyzes. */
+export interface DatabaseLocation {
+	/** Absolute staged executable path, or the source path for an in-place database. */
+	stagedPath: string;
 	/** Registry key: `<sha16>-<name>` for store DBs, `<name>-<pathsha8>` for in-place DBs. */
 	id: string;
-	/** Directory holding the IDB (store dir, or the user's directory for in-place). */
+	/** Directory holding the database (managed store, or the user's directory for in-place). */
 	dir: string;
 	/** Absolute path the user asked for (binary or `.i64`/`.idb`). */
 	sourcePath: string;
@@ -189,23 +186,23 @@ export interface IdbLocation {
 	isNew: boolean;
 	/** Path handed to `acquireFileLock` (lock file is `${lockTarget}.lock`). */
 	lockTarget: string;
-	/** Set for universal binaries: the store IDB is built from `fat.slice` alone. */
+	/** Set for universal binaries: the database analyzes `fat.slice` alone. */
 	fat?: FatSelection;
 }
 
-/** Reference `read` and `ida db=` resolve back to a database: the source path plus `:@<arch>` for a universal binary slice. */
-export function idbRef(loc: Pick<IdbLocation, "sourcePath" | "fat">): string {
+/** Reference `read` and the backend tool resolve back to a database: the source path plus `:@<arch>` for a universal binary slice. */
+export function databaseRef(loc: Pick<DatabaseLocation, "sourcePath" | "fat">): string {
 	return loc.fat ? `${loc.sourcePath}${SLICE_SEPARATOR}${loc.fat.slice.arch}` : loc.sourcePath;
 }
 
-/** Options for {@link locateIdb}. */
-export interface LocateIdbOptions {
+/** Options for {@link locateDatabase}. */
+export interface LocateDatabaseOptions {
 	/** Slice of a universal binary to analyze; defaults to the host architecture. Rejected for thin binaries and IDBs. */
 	arch?: string;
 }
 
 /** Replace characters outside `[A-Za-z0-9._-]` with `_` and cap at 64 chars. */
-export function sanitizeIdbName(name: string): string {
+export function sanitizeDatabaseName(name: string): string {
 	return name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, MAX_NAME_LENGTH);
 }
 
@@ -231,24 +228,29 @@ async function hashFileContent(absPath: string): Promise<string> {
 }
 
 /**
- * Compute the IDB location for a binary (content-addressed store, one per slice of a universal binary)
+ * Compute the database location for a binary (content-addressed store, one per slice of a universal binary)
  * or an existing `.i64`/`.idb` (in place).
  * Throws a ToolError when `arch` is given for a thin binary or IDB, or names no slice.
  */
-export async function locateIdb(sourcePath: string, options: LocateIdbOptions = {}): Promise<IdbLocation> {
+export async function locateDatabase(
+	backend: DisasmBackend,
+	sourcePath: string,
+	options: LocateDatabaseOptions = {},
+): Promise<DatabaseLocation> {
 	const absPath = path.resolve(sourcePath);
-	const name = sanitizeIdbName(path.basename(absPath));
-	const slices = isIdaDatabasePath(absPath) ? null : await readFatSlices(absPath);
+	const name = sanitizeDatabaseName(path.basename(absPath));
+	const slices = backend.isDatabasePath(absPath) ? null : await readFatSlices(absPath);
 	if (options.arch !== undefined && !slices) {
 		throw new ToolError(`${shortenPath(absPath)} is not a universal binary; drop ${SLICE_SEPARATOR}${options.arch}`);
 	}
 
-	if (isIdaDatabasePath(absPath)) {
+	if (backend.isDatabasePath(absPath)) {
 		const pathSha = new Bun.CryptoHasher("sha256").update(absPath).digest("hex");
 		return {
 			id: `${name}-${pathSha.slice(0, 8)}`,
 			dir: path.dirname(absPath),
 			sourcePath: absPath,
+			stagedPath: absPath,
 			kind: "inplace",
 			openPath: absPath,
 			isNew: false,
@@ -258,12 +260,13 @@ export async function locateIdb(sourcePath: string, options: LocateIdbOptions = 
 
 	const sha = await hashFileContent(absPath);
 	const fat = slices ? { slice: selectSlice(slices, options.arch), slices } : undefined;
-	const id = `${sha.slice(0, 16)}-${name}${fat ? `.${sanitizeIdbName(fat.slice.arch)}` : ""}`;
-	const dir = path.join(getAgentDir(), "idbs", id);
+	const id = `${sha.slice(0, 16)}-${name}${fat ? `.${sanitizeDatabaseName(fat.slice.arch)}` : ""}`;
+	const dir = path.join(getAgentDir(), backend.storeDir, id);
 	return {
 		id,
 		dir,
 		sourcePath: absPath,
+		stagedPath: path.join(dir, name),
 		kind: "store",
 		openPath: path.join(dir, name),
 		isNew: true,
@@ -276,7 +279,7 @@ export async function locateIdb(sourcePath: string, options: LocateIdbOptions = 
  * Validate an in-place location (refuses when IDA has it unpacked) or stage a store binary and settle `loc.openPath`/`loc.isNew`.
  * Call only while holding the lock on `loc.lockTarget` and only when the DB is not already open in this process.
  */
-export async function prepareStoreDir(loc: IdbLocation): Promise<void> {
+export async function prepareStoreDir(backend: DisasmBackend, loc: DatabaseLocation): Promise<void> {
 	if (loc.kind === "inplace") {
 		const id0Path = path.join(loc.dir, `${path.basename(loc.openPath, path.extname(loc.openPath))}.id0`);
 		if (await Bun.file(id0Path).exists()) {
@@ -288,11 +291,11 @@ export async function prepareStoreDir(loc: IdbLocation): Promise<void> {
 	}
 	await fs.promises.mkdir(loc.dir, { recursive: true });
 
-	const stagedName = sanitizeIdbName(path.basename(loc.sourcePath));
-	const staged = path.join(loc.dir, stagedName);
+	const stagedName = path.basename(loc.stagedPath);
+	const staged = loc.stagedPath;
 	if (!(await Bun.file(staged).exists())) {
 		if (loc.fat) {
-			// IDA's loader would silently take the first slice of a fat file; stage the chosen thin Mach-O instead.
+			// Stage the selected thin Mach-O so every backend analyzes the requested slice.
 			const { arch, offset, size } = loc.fat.slice;
 			const source = Bun.file(loc.sourcePath);
 			if (offset + size > source.size) {
@@ -306,10 +309,10 @@ export async function prepareStoreDir(loc: IdbLocation): Promise<void> {
 	}
 
 	const entries = (await fs.promises.readdir(loc.dir)).sort();
-	const databases = entries.filter(entry => entry.toLowerCase().endsWith(".i64"));
+	const databases = entries.filter(entry => entry.toLowerCase().endsWith(backend.databaseExt));
 	if (databases.length > 0) {
-		// Prefer the DB IDA names after the staged input; unpacked `<stem>.id0`… siblings are left for IDA.
-		const preferred = databases.find(entry => entry === `${stagedName}.i64`) ?? databases[0];
+		// Prefer the backend's canonical database name; leave its project files intact.
+		const preferred = databases.find(entry => entry === backend.databaseName(stagedName)) ?? databases[0];
 		loc.openPath = path.join(loc.dir, preferred);
 		loc.isNew = false;
 		return;
