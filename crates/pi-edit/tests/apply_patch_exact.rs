@@ -10,6 +10,62 @@ fn update(body: &str) -> String {
 }
 
 #[tokio::test]
+async fn diff_header_like_removed_comment_is_matched_and_replaced() {
+	let workspace = common::Workspace::new(EditMode::ApplyPatch);
+	workspace.write("fixture.txt", "SELECT 1;\n-- old comment\nSELECT 2;\n");
+	workspace
+		.apply_raw(
+			&update("@@\n SELECT 1;\n--- old comment\n+-- new comment\n SELECT 2;"),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.unwrap();
+	assert_eq!(
+		workspace.read("fixture.txt").as_deref(),
+		Some("SELECT 1;\n-- new comment\nSELECT 2;\n")
+	);
+}
+
+#[tokio::test]
+async fn diff_header_like_added_increment_is_written() {
+	let workspace = common::Workspace::new(EditMode::ApplyPatch);
+	workspace.write("fixture.txt", "int i;\ni++;\n");
+	workspace
+		.apply_raw(&update("@@\n int i;\n+++ i;\n i++;"), &common::DiskWriter::default())
+		.await
+		.unwrap();
+	assert_eq!(workspace.read("fixture.txt").as_deref(), Some("int i;\n++ i;\ni++;\n"));
+}
+
+#[tokio::test]
+async fn diff_header_like_comment_removal_keeps_neighboring_rows() {
+	let workspace = common::Workspace::new(EditMode::ApplyPatch);
+	workspace.write("fixture.txt", "head\n-- removed\n- \nold\nend\n");
+	workspace
+		.apply_raw(
+			&update("@@\n head\n--- removed\n-- \n-old\n+new\n end"),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.unwrap();
+	assert_eq!(workspace.read("fixture.txt").as_deref(), Some("head\nnew\nend\n"));
+}
+
+#[tokio::test]
+async fn diff_header_like_mixed_removed_and_added_rows_are_content() {
+	let workspace = common::Workspace::new(EditMode::ApplyPatch);
+	workspace.write("fixture.txt", "head\n-- old\n++ old\nend\n");
+	workspace
+		.apply_raw(
+			&update("@@\n head\n--- old\n-++ old\n+-- new\n+++ new\n end"),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.unwrap();
+	assert_eq!(workspace.read("fixture.txt").as_deref(), Some("head\n-- new\n++ new\nend\n"));
+}
+
+#[tokio::test]
 async fn rejects_materially_unmatched_lines_without_writes() {
 	for (before, body) in [
 		(
