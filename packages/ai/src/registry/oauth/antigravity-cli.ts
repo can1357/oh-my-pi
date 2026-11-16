@@ -73,15 +73,18 @@ export function agyAuthorizationCode(input: string): string {
 	return code;
 }
 
-/** Bounds even callbacks that do not implement cancellation themselves. */
-async function bounded<T>(work: Promise<T>, signal: AbortSignal, milliseconds: number): Promise<T> {
+/** Bounds even callbacks that do not implement cancellation themselves; omit `milliseconds` to only honor `signal`. */
+async function bounded<T>(work: Promise<T>, signal: AbortSignal, milliseconds?: number): Promise<T> {
 	const stopped = Promise.withResolvers<never>();
 	const onAbort = () => stopped.reject(new AIError.LoginCancelledError("Antigravity CLI sign-in cancelled"));
-	const timer = setTimeout(() => {
-		stopped.reject(
-			new AIError.OAuthError("Antigravity CLI sign-in timed out", { kind: "timeout", provider: PROVIDER }),
-		);
-	}, milliseconds);
+	const timer =
+		milliseconds === undefined
+			? undefined
+			: setTimeout(() => {
+					stopped.reject(
+						new AIError.OAuthError("Antigravity CLI sign-in timed out", { kind: "timeout", provider: PROVIDER }),
+					);
+				}, milliseconds);
 	signal.addEventListener("abort", onAbort, { once: true });
 	if (signal.aborted) onAbort();
 	try {
@@ -95,10 +98,12 @@ async function bounded<T>(work: Promise<T>, signal: AbortSignal, milliseconds: n
 export async function loginAntigravityCli(ctrl: OAuthController): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt && !ctrl.onManualCodeInput) throw new AIError.OnPromptRequiredError("Antigravity CLI");
 	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError("Antigravity CLI sign-in cancelled");
+	ctrl.onProgress?.("Preparing the Antigravity CLI...");
+	// The managed install has its own stall timeout; a slow download must not consume the sign-in deadline.
+	const install = resolveAgyBinary(ctrl.fetch ?? fetch);
+	const binary = ctrl.signal ? await bounded(install, ctrl.signal) : await install;
 	const deadline = AbortSignal.timeout(LOGIN_TIMEOUT_MS);
 	const signal = ctrl.signal ? AbortSignal.any([ctrl.signal, deadline]) : deadline;
-	ctrl.onProgress?.("Preparing the Antigravity CLI...");
-	const binary = await bounded(resolveAgyBinary(ctrl.fetch ?? fetch), signal, START_TIMEOUT_MS);
 	const root = path.join(agyGeminiDir(), "logins");
 	await fs.mkdir(root, { recursive: true, mode: 0o700 });
 	const directory = await fs.mkdtemp(path.join(root, "login-"));
