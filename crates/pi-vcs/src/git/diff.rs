@@ -876,7 +876,10 @@ fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>
 		},
 		_ => {},
 	}
-	if change.old_id != change.new_id {
+	// Binary patches name both blobs in full even when they are equal (a
+	// mode-only change). `git apply` rejects a binary patch without that line,
+	// and the applier compares it with the blob it is about to replace.
+	if change.old_id != change.new_id || full_ids {
 		let old = display_id(change.old_id, full_ids);
 		let new = display_id(change.new_id, full_ids);
 		out.push_str("index ");

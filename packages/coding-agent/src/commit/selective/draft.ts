@@ -74,8 +74,8 @@ export interface FileState {
 export type SelectedChange =
 	/** HEAD's state (`null`: absent) → the selected state (`null`: deleted). */
 	| { kind: "text"; path: string; before: FileState | null; after: FileState | null }
-	/** Committed as its current worktree state; `added` when HEAD lacks the path. */
-	| { kind: "whole"; path: string; added: boolean };
+	/** Committed as `patch` captured it at draft time; `added` when HEAD lacks the path. */
+	| { kind: "whole"; path: string; added: boolean; patch: string };
 
 /**
  * Why a file has no line attribution and is committed whole: binary, non-UTF-8, or oversized
@@ -101,6 +101,8 @@ interface FileChange {
 	mode: string | null;
 	/** Set exactly when `attribution` is absent: the file selects whole. */
 	whole?: WholeReason;
+	/** Appliable patch from HEAD to the whole-file content, frozen at draft time; set alongside `whole`. */
+	patch?: string;
 	/** Line attribution of the content change. */
 	attribution?: Attribution;
 	classification?: Classification;
@@ -388,11 +390,17 @@ async function loadFile(
 		wholeSelected: false,
 		editors: [...new Set(records.map(record => record.agent))],
 	};
-	const whole = (reason: WholeReason): FileChange => ({
+	// The patch is rendered now, not at commit time: other agents keep editing the
+	// worktree, and the commit must contain exactly what this draft captured.
+	const whole = async (reason: WholeReason): Promise<FileChange> => ({
 		...base,
 		head: null,
 		work: null,
 		whole: reason,
+		patch:
+			head.sha === null || head.mode === null
+				? await repo.diffNoIndex("/dev/null", file, true)
+				: await repo.diffText({ base: head.sha, files: [file], binary: true }),
 		hint: records.length === 0 ? windowCall(mtimeMs) : undefined,
 	});
 	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
@@ -512,7 +520,9 @@ export class Draft {
 		const changes: SelectedChange[] = [];
 		for (const file of this.#files) {
 			if (!file.attribution) {
-				if (file.wholeSelected) changes.push({ kind: "whole", path: file.path, added: file.headMode === null });
+				if (file.wholeSelected && file.patch !== undefined) {
+					changes.push({ kind: "whole", path: file.path, added: file.headMode === null, patch: file.patch });
+				}
 				continue;
 			}
 			if (file.selected.size === 0) continue;
@@ -780,7 +790,7 @@ export class Draft {
 		const parts = this.selection().map(change =>
 			change.kind === "text"
 				? formatTextPatch(change.path, change.before, change.after)
-				: `diff --git a/${change.path} b/${change.path}\n(whole-file change committed as in the worktree)\n`,
+				: `diff --git a/${change.path} b/${change.path}\n(whole-file change; content captured at draft time)\n`,
 		);
 		return parts.join("") || "Nothing selected.";
 	}
