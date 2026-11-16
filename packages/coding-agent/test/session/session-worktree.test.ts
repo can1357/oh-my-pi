@@ -314,7 +314,7 @@ describe("session worktree helpers (real git)", () => {
 			const { warnings } = await finishSessionWorktree(wt, Settings.isolated(), {
 				session: { refreshProjectScope: async () => {} },
 				moved: true,
-				inWorktree: true,
+				inWorktree: () => true,
 				withHookSignal: run => run(signal),
 				rescan: async () => {},
 			});
@@ -473,6 +473,27 @@ describe("session worktree helpers (real git)", () => {
 			const wt = await createAndFinish();
 			expect(Date.now() - started).toBeLessThan(10_000);
 			expect(wt.hookWarning).toBeUndefined();
+		});
+
+		it("does not rescan a session that ended while the hook ran", async () => {
+			const wt = await create();
+			let sessionEnded = false;
+			const refreshProjectScope = vi.fn(async () => {});
+			const rescan = vi.fn(async () => {});
+			await finishSessionWorktree(wt, Settings.isolated(), {
+				session: { refreshProjectScope },
+				moved: true,
+				inWorktree: () => !sessionEnded,
+				// The session is disposed (SIGTERM, an SDK host) while the hook runs.
+				withHookSignal: async run => {
+					const result = await run();
+					sessionEnded = true;
+					return result;
+				},
+				rescan,
+			});
+			expect(refreshProjectScope).not.toHaveBeenCalled();
+			expect(rescan).not.toHaveBeenCalled();
 		});
 
 		it.each([

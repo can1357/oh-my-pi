@@ -1792,8 +1792,9 @@ export class CommandController {
 			const finished = await finishSessionWorktree(worktree, this.ctx.settings, {
 				session: this.ctx.session,
 				moved: relocated,
-				// A failed move whose rollback failed too can leave the session in the worktree, or end it.
-				inWorktree:
+				// A failed move whose rollback failed too can leave the session in the worktree; the session can end
+				// while the hook runs.
+				inWorktree: () =>
 					!this.ctx.session.isDisposed && path.resolve(this.ctx.sessionManager.getCwd()) === worktree.path,
 				withHookSignal: run => this.#withHookLoader(run),
 				rescan: () => this.ctx.session.refreshSkillsAndCommands(),

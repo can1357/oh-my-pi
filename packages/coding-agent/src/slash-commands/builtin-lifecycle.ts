@@ -802,8 +802,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const finished = await finishSessionWorktree(worktree, runtime.settings, {
 				session: runtime.session,
 				moved: !failure,
-				// A failed move whose rollback failed too can leave the session in the worktree, or end it.
-				inWorktree: !runtime.session.isDisposed && path.resolve(runtime.sessionManager.getCwd()) === worktree.path,
+				// A failed move whose rollback failed too can leave the session in the worktree; the session can end
+				// while the hook runs.
+				inWorktree: () =>
+					!runtime.session.isDisposed && path.resolve(runtime.sessionManager.getCwd()) === worktree.path,
 				withHookSignal: run => run(runtime.signal),
 				rescan: async () => {
 					await runtime.session.refreshSkillsAndCommands();

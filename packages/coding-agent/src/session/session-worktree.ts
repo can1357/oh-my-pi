@@ -116,9 +116,10 @@ export async function cleanSourceCheckoutIfConfigured(
 /**
  * Finishes `/wt` after the session's move into `worktree` succeeded or failed (`moved`): cleans the source
  * (`worktree.cleanSource`, only after a move that carried changes), runs the worktree's hook under the signal
- * `withHookSignal` gives it, and rescans a session that lives in the worktree (`inWorktree`: after the move, or
- * after a failed move whose rollback failed too) so it sees what the hook added: the project scope the move loaded
- * before the hook ran (task agents, extensions, custom tools, MCP servers), then skills and commands (`rescan`).
+ * `withHookSignal` gives it, and rescans a session that lives in the worktree once the hook is done (`inWorktree`,
+ * asked then, since the session can end while the hook runs: after the move, or after a failed move whose rollback
+ * failed too) so it sees what the hook added: the project scope the move loaded before the hook ran (task agents,
+ * extensions, custom tools, MCP servers), then skills and commands (`rescan`).
  * The cleanup runs before the hook so a save into the source during the hook survives; the hook's env is taken
  * first because the cleanup can delete an untracked `.env` the dotenv filter reads. Returns warnings in order.
  */
@@ -128,7 +129,7 @@ export async function finishSessionWorktree(
 	options: {
 		session: Pick<AgentSession, "refreshProjectScope">;
 		moved: boolean;
-		inWorktree: boolean;
+		inWorktree: () => boolean;
 		withHookSignal: <T>(run: (signal?: AbortSignal) => Promise<T>) => Promise<T>;
 		rescan: () => Promise<void>;
 	},
@@ -144,7 +145,7 @@ export async function finishSessionWorktree(
 	const warnings: string[] = [];
 	const hookWarning = formatPostCheckoutHookWarning(hook);
 	if (hookWarning) warnings.push(hookWarning);
-	if (options.inWorktree) {
+	if (options.inWorktree()) {
 		try {
 			clearClaudePluginRootsCache();
 			await options.session.refreshProjectScope();
