@@ -963,7 +963,7 @@ fn child_display(dir: &Path, name: &OsStr) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-	use std::{ffi::OsString, fs, path::Path, time::{Duration, SystemTime}};
+	use std::{ffi::OsString, fs, path::Path, time::Duration};
 
 	use chrono::TimeZone as _;
 	use clap::Parser as _;
@@ -1084,8 +1084,13 @@ mod tests {
 		] {
 			let dir = tempfile::tempdir().unwrap();
 			write_pair(dir.path(), "old\n", "new\n");
-			let time = SystemTime::from(chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap())
-				+ Duration::from_nanos(123_456_700);
+			let Some(time) = crate::time_zone::system_time_at(
+				chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap(),
+				123_456_700,
+			) else {
+				eprintln!("year {year}: SystemTime cannot represent it on this platform; skipping");
+				continue;
+			};
 			let mut stored = true;
 			for name in ["a.txt", "b.txt"] {
 				let file = fs::File::options().write(true).open(dir.path().join(name)).unwrap();

@@ -3946,7 +3946,7 @@ pub mod matchers {
 
 	#[cfg(test)]
 	mod time_format_tests {
-		use std::{fs, time::{Duration, SystemTime}};
+		use std::fs;
 
 		use chrono::TimeZone as _;
 		use clap::Parser as _;
@@ -3958,8 +3958,13 @@ pub mod matchers {
 			for (year, year_text) in [(10000, "+10000"), (-10000, "-10000")] {
 				let dir = tempfile::tempdir().unwrap();
 				let file = fs::File::create(dir.path().join("dated")).unwrap();
-				let time = SystemTime::from(chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap())
-					+ Duration::from_nanos(123_456_700);
+				let Some(time) = crate::time_zone::system_time_at(
+					chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap(),
+					123_456_700,
+				) else {
+					eprintln!("year {year}: SystemTime cannot represent it on this platform; skipping");
+					continue;
+				};
 				let stored = match file.set_times(fs::FileTimes::new().set_modified(time)) {
 					Ok(()) if file.metadata().unwrap().modified().unwrap() == time => true,
 					Ok(()) => {
