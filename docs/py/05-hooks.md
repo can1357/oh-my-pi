@@ -953,7 +953,7 @@ this event's bit set — useful to skip building an expensive
 |---|---|---|
 | `omp.limits.REENTRANCY_DEPTH` | 4 | Maximum nested CONTROL round-trips from inside a hook. Exceeding raises `omp.ReentrancyError` |
 | `omp.limits.INTERACTIVE_CAP` | `15m` | Wall-clock ceiling (`omp.Duration`) for a suspended deadline budget across all legal interactive round-trips in one hook invocation. Approval waits are excluded: the ticket is Core's (§2.6) |
-| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per session before the core refuses further continuation. |
+| `omp.limits.SETTLE_CONTINUATION_CAP` | 8 | Maximum consecutive `agent_settled` continuations per session before the core refuses further continuation. The core cap of 8 counts continuations from every source per submission. |
 | `omp.limits.SHUTDOWN_BUDGET` | `2s` | Total budget (`omp.Duration`) for all `session_shutdown` handlers, dispatched concurrently. |
 | `omp.limits.OBSERVE_CAP` | 64 | Maximum `OBSERVE` subscriptions dispatched for one event; beyond it observers are truncated and the truncation journaled. **Gate phases have no truncation cap**: exceeding mandatory gate capacity is an activation-time error, never a runtime truncation (§3.13). A previous revision applied this cap to whole chains, silently dropping policy past the 64th hook — proceeding with "the top 64" of a mandatory policy set is not defensible, and that rule is reversed |
 | `omp.limits.MODIFY_ROUNDS` | 1 | The decision procedure runs exactly once per invocation. There is no re-run after mutation; a transform that needs to see final arguments declares a higher `order` |
@@ -1394,6 +1394,12 @@ reinvented one. A previous revision exported the loop mirror as bare `Phase`, co
 two other "phase" meanings across the set; it is renamed `AgentPhase` (matching the Rust name),
 with `omp.LifecyclePhase` and `omp.InvocationPhase` owned by [`00-overview.md`](00-overview.md)
 and [`03-params.md`](03-params.md), and `omp.HookPhase` in §3.4.
+
+> **Dispatch status:** `agent_settled` hooks are dispatched; a Python `Continue`
+> (object with string `prompt`, optional `label`) appends a user item and runs
+> one more turn, `Settle` (`{}`) settles. `role`, `visible` and `collapse_prior`
+> are **not yet honored**, nor is the `ctx.pending_continuation` veto. The core
+> cap of 8 counts continuations from every source per submission.
 
 **`agent_settled` is the domain-only goal-loop seam.** It fires at exactly the point the loop drains
 `DrainPoint::Idle` and would otherwise publish `AgentPhase::Idle`
