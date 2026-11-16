@@ -15,6 +15,7 @@
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
+- The streaming `write` preview changes height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#18712](https://github.com/can1357/oh-my-pi/pull/18712) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.1] - 2026-11-19
 
@@ -59,6 +60,11 @@
 - Fixed table chart unit display and change-factor calculations for measurements with scaled units.
 - Fixed checkbox groups so pressing Enter with nothing selected first checks the focused box.
 - Ask forms now open each question with its preselected answer, allowing Enter to accept the recommendation without replacing it.
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
+- Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
+- Enter on a checkbox group with nothing checked checks the focused box before moving on
+
 
 ## [18.22.2] - 2026-11-18
 
@@ -226,9 +232,6 @@
 ### Fixed
 
 - Saved-reset messages name the Claude Fable weekly limit as "Claude Fable weekly" instead of its raw id ([#18661](https://github.com/can1357/oh-my-pi/pull/18661) by [@TheAifam5](https://github.com/TheAifam5))
-- The streaming `write` preview changes height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#16099](https://github.com/can1357/oh-my-pi/pull/16099) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- The streaming `write` preview changes height on every line as the content arrives; the collapsed preview now holds a steady height while a write streams, and the first result clears the tail rows it left in the scrollback ([#16033](https://github.com/can1357/oh-my-pi/issues/16033), [#18712](https://github.com/can1357/oh-my-pi/pull/18712) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
 
 ## [18.18.6] - 2026-11-09
 
