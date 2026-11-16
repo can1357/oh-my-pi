@@ -1,0 +1,11 @@
+[
+	{
+		"path": "packages/coding-agent/src/modes/controllers/event-controller.ts",
+		"stages": [
+			{ "mode": "100644", "blob": "315f74ac05988d0f2deefcc8b9789dabd5e2e96b", "stage": 1 },
+			{ "mode": "100644", "blob": "5391c8368e1afcdef81d383836ba250ff56f1f14", "stage": 2 },
+			{ "mode": "100644", "blob": "f61cbbc198a41992360ccb0edf312d5e16eb820e", "stage": 3 }
+		],
+		"use": 3
+	}
+]
