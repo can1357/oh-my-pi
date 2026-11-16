@@ -13,7 +13,7 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
-async function git(cwd: string, args: string[]): Promise<string> {
+async function git(cwd: string, args: readonly string[]): Promise<string> {
 	const env = { ...process.env, HOME: cwd, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
 	const proc = Bun.spawn(["git", "-C", cwd, ...args], { env, stdout: "pipe", stderr: "pipe" });
 	const [out, err, code] = await Promise.all([
@@ -227,6 +227,84 @@ describe("selective commit flow", () => {
 			commitSelection(draft, { subject: "fix: a" }, { journal, agent: { agent: "Main" } }),
 		).rejects.toThrow(/HEAD moved .* changed a\.ts/);
 	});
+
+	it("refuses to commit during a merge in a linked worktree without changing HEAD or the index", async () => {
+		const { root: mainRoot, journal } = await emptyRepo();
+		await Bun.write(path.join(mainRoot, "base.txt"), "base\n");
+		await git(mainRoot, ["add", "."]);
+		await git(mainRoot, ["commit", "-qm", "base"]);
+		await git(mainRoot, ["checkout", "-qb", "side"]);
+		await Bun.write(path.join(mainRoot, "side.txt"), "side\n");
+		await git(mainRoot, ["add", "."]);
+		await git(mainRoot, ["commit", "-qm", "side"]);
+		await git(mainRoot, ["checkout", "-q", "main"]);
+		await Bun.write(path.join(mainRoot, "main.txt"), "main\n");
+		await git(mainRoot, ["add", "."]);
+		await git(mainRoot, ["commit", "-qm", "main"]);
+
+		const root = `${mainRoot}-linked`;
+		tempDirs.push(root);
+		await git(mainRoot, ["worktree", "add", "-q", "-b", "topic", root, "main"]);
+		await git(root, ["merge", "--no-commit", "--no-ff", "side"]);
+		const gitDir = (await git(root, ["rev-parse", "--absolute-git-dir"])).trim();
+		const mergeHead = await Bun.file(path.join(gitDir, "MERGE_HEAD")).text();
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		const staged = await git(root, ["diff", "--cached"]);
+		const file = path.join(root, "agent.txt");
+		await Bun.write(file, "agent\n");
+		journal.recordChange({ agent: "Main", tool: "write", path: file, before: null, after: "agent\n" });
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		await expect(
+			commitSelection(draft, { subject: "fix: agent" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/merge is in progress; finish or abort.*git commit/);
+
+		expect(await git(root, ["rev-list", "--count", "HEAD"])).toBe("2\n");
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await Bun.file(path.join(gitDir, "MERGE_HEAD")).text()).toBe(mergeHead);
+		expect(await git(root, ["diff", "--cached"])).toBe(staged);
+	});
+
+	it.each([
+		{ operation: "cherry-pick", args: ["cherry-pick", "--no-edit", "side"], marker: "CHERRY_PICK_HEAD" },
+		{ operation: "revert", args: ["revert", "--no-edit", "side"], marker: "REVERT_HEAD" },
+		{ operation: "rebase", args: ["rebase", "--merge", "side"], marker: "rebase-merge" },
+		{ operation: "rebase", args: ["rebase", "--apply", "side"], marker: "rebase-apply" },
+	])(
+		"refuses to commit during $operation ($marker) without changing HEAD or operation state",
+		async ({ operation, args, marker }) => {
+			const { root, journal, write } = await emptyRepo();
+			await Bun.write(path.join(root, "conflict.txt"), "base\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-qm", "base"]);
+			await git(root, ["checkout", "-qb", "side"]);
+			await Bun.write(path.join(root, "conflict.txt"), "side\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-qm", "side"]);
+			await git(root, ["checkout", "-q", "main"]);
+			await Bun.write(path.join(root, "conflict.txt"), "main\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-qm", "main"]);
+			await expect(git(root, args)).rejects.toThrow(/failed \(1\)/);
+			const gitDir = (await git(root, ["rev-parse", "--absolute-git-dir"])).trim();
+			const state = await fs.readdir(gitDir);
+			expect(state).toContain(marker);
+			const head = await git(root, ["rev-parse", "HEAD"]);
+			const staged = await git(root, ["diff", "--cached"]);
+			await write("Main", undefined, "agent.txt", "agent\n");
+			await journal.flush();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			await expect(
+				commitSelection(draft, { subject: "fix: agent" }, { journal, agent: { agent: "Main" } }),
+			).rejects.toThrow(new RegExp(`${operation} is in progress; finish or abort.*git commit`));
+
+			expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+			expect(await fs.readdir(gitDir)).toEqual(state);
+			expect(await git(root, ["diff", "--cached"])).toBe(staged);
+		},
+	);
 
 	it("rejects an unknown hunk unit id without changing the selection", async () => {
 		const { root, journal, write } = await emptyRepo();
