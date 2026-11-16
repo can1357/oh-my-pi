@@ -230,6 +230,15 @@ describe("settings as a native prefs page", () => {
 		expect(prefs(selector).props.editing).toEqual({ row: "todo.backend", option: "ext" });
 	});
 
+	it("shows a stored runtime value that no option offers without its control sequences", () => {
+		// An id whose extension was disabled since it was picked, or one typed into the settings file.
+		const { selector } = harness({ "todo.backend": "gone\x1b]0;title\x07\x1b[2J" });
+		const rendered = selector.render(120).join("\n");
+		expect(Bun.stripANSI(rendered)).toContain("gone");
+		expect(rendered).not.toContain("\x1b]0;title");
+		expect(rendered).not.toContain("\x1b[2J");
+	});
+
 	it("puts the status-line preview after its section on Appearance only", () => {
 		const { selector } = harness();
 		const roles = (n: NativeNode) => (n.c ?? []).map(c => ("k" in c && c.p && "role" in c.p ? c.p.role : undefined));

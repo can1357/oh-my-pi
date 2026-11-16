@@ -1510,13 +1510,16 @@ export class SettingsSelectorComponent implements Component {
 
 			case "submenu": {
 				const raw = this.#getSubmenuCurrentValue(def.path, currentValue);
-				const runtimeLabel = this.#context.runtimeOptions?.has(def.path)
-					? this.#submenuOptions(def).find(option => option.value === raw)?.label
-					: undefined;
+				if (!this.#context.runtimeOptions?.has(def.path)) {
+					return { ...item, currentValue: raw, submenu: (cv, done) => this.#createSubmenu(def, cv, done) };
+				}
+				// Runtime values can come from extensions, and a stored one no extension registers now has no
+				// option: show the option's sanitized label, else the sanitized value; the submenu matches raw values.
+				const label = this.#submenuOptions(def).find(option => option.value === raw)?.label;
 				return {
 					...item,
-					currentValue: runtimeLabel ?? raw,
-					submenu: (cv, done) => this.#createSubmenu(def, runtimeLabel === undefined ? cv : raw, done),
+					currentValue: label ?? sanitizeDisplaySingleLine(raw),
+					submenu: (_cv, done) => this.#createSubmenu(def, raw, done),
 				};
 			}
 

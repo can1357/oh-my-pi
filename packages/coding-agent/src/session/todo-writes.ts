@@ -108,8 +108,11 @@ export class TodoWrites {
 		};
 		// Native writes run inline to completion; nothing waits, so there is nothing for a signal to cut short.
 		if (!this.queued) return (async () => write(undefined, assertSameList))();
+		// A disposed session's file is sealed: a queued write that starts after disposal never reaches the backend,
+		// and one whose backend call settles after it does not commit.
 		const assertCurrent = (): void => {
 			signal?.throwIfAborted();
+			if (this.#host.isDisposed()) throw new TodoListChangedError();
 			assertSameList();
 		};
 		const queued = this.#track(

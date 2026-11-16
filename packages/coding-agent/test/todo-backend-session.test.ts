@@ -566,6 +566,26 @@ export default function(pi) {
 		expect(session.getTodoPhases()).toEqual([]);
 	});
 
+	test("disposing the session drops an edit whose replace is pending and keeps queued edits from the backend", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
+		const replaceGate = hold(recorder, "replace");
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		const edit = (content: string) =>
+			settled(session.editTodoPhases(() => [{ name: "Tasks", tasks: [{ content, status: "pending" }] }]));
+
+		const pending = edit("pending at dispose");
+		await replaceGate.started.promise;
+		const queued = edit("queued behind it");
+		session.beginDispose();
+		replaceGate.release.resolve();
+
+		expect((await pending)?.toString()).toContain("The session changed before the todo edit was saved");
+		expect((await queued)?.toString()).toContain("The session changed before the todo edit was saved");
+		expect(recorder.calls.filter(call => call.method === "replace")).toHaveLength(1);
+		expect(userTodoEdits(session)).toHaveLength(0);
+		expect(session.getTodoPhases()).toEqual([]);
+	});
+
 	test("a cross-project switch that rolls back keeps the backend instance, without a notice", async () => {
 		const recorder = createTodoBackendRecorder("tracker");
 		const sessionDir = tempDir.join("sessions");
