@@ -2,20 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native Git recovers an unavailable process working directory to `$HOME` or a stable filesystem root instead of rejecting valid repositories ([#19450](https://github.com/can1357/oh-my-pi/pull/19450) by [@J4ck1e2000](https://github.com/J4ck1e2000))
+
+## [18.21.0] - 2026-11-16
+
 ### Added
 
-- Added `PhononTts` binding for on-device Phonon text-to-speech
-- Added `Shell.adopt(fork)`, which carries the variables, functions, aliases, options and traps a `fork()` set into the shell it was forked from, at the end of that shell's running command; a name both set keeps the value of the command that ended last
+- Added the `PhononTts` binding for on-device Phonon text-to-speech.
+- Added `Shell.adopt(fork)` to apply variables, functions, aliases, options, and traps from a completed fork back to its parent shell. When both shells set a name, the value from the command that finished last is retained.
 
 ### Fixed
 
-- Fixed concurrent `commitCreate()` calls committing each other's subject and body ([#19345](https://github.com/can1357/oh-my-pi/pull/19345) by [@eggpeat](https://github.com/eggpeat))
-- Native Git recovers an unavailable process working directory to `$HOME` or a stable filesystem root instead of rejecting valid repositories ([#19450](https://github.com/can1357/oh-my-pi/pull/19450) by [@J4ck1e2000](https://github.com/J4ck1e2000))
-
-### Changed
-
-- The glibc Linux addons no longer load `libm.so.6` or `libutil.so.1`; they need only `libc.so.6`, `libpthread.so.0` and `libdl.so.2`
-- The Linux addons export only their N-API entry point, no longer wasmtime's C API
+- Fixed concurrent `commitCreate()` calls incorrectly overwriting each other’s commit subject and body.
 
 ## [18.20.3] - 2026-11-16
 
