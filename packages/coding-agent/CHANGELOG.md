@@ -109,6 +109,7 @@
 - Rich-text pastes during approval type-to-steer, or into a dialog opened over a draft that still holds typing, now reach the chat editor as Markdown with their images instead of as plain text ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
 - Fixed prewalk handoffs overriding model or effort choices made mid-switch, and auto handoffs not returning to the planning model after `prewalk.auto` changed or `/prewalk off` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - `^model` references followed by sentence punctuation now register their model agent instead of remaining literal ([#19369](https://github.com/can1357/oh-my-pi/issues/19369))
+- `^model` references followed by sentence punctuation now register their model agent instead of remaining literal ([#19445](https://github.com/can1357/oh-my-pi/pull/19445) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.3] - 2026-11-16
 
