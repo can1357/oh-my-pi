@@ -217,7 +217,7 @@ Choose the setting by the desired outcome:
 6. Named supervised service
    - Requires `launch.enabled` and an active Bash tool; `async: true` and any supplied `timeout` are incompatible.
    - Runs through the launch broker with project-unique `name`, the configured shell environment plus the session identity, PTY defaulting to `true`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
-   - Readiness waits for all supplied log/port conditions, service exit, or timeout. Inspect with `read proc://<name>`.
+   - Readiness waits for all supplied log/port conditions, service exit, or timeout. `ready.log` is a Unicode multiline regex over accumulated output: `^` and `$` match line boundaries, including after earlier startup output, and matches may span output chunks. Inspect with `read proc://<name>`.
 7. Intercepted command
    - No subprocess created.
    - Returns a `ToolError` pointing the model at the dedicated tool or named service mode.
