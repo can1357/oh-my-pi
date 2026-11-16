@@ -708,16 +708,31 @@ const TAR_VALUE_OPTIONS: Record<string, boolean> = {
 };
 /** tar's letter for an exclusion list (`-X list`), whose paths tar leaves out. */
 const TAR_EXCLUDE_LETTER = "X";
+/** tar's one-letter operations whose members name entries of the archive, not files tar reads: extract and list. */
+const TAR_ENTRY_LETTERS = "xt";
+/**
+ * tar's long operations whose members name entries of the archive, not files tar reads, each with
+ * the shortest abbreviation GNU tar takes for it (`--ex` could also be `--exclude`).
+ */
+const TAR_ENTRY_OPTIONS: Record<string, string> = {
+	"--extract": "--ext",
+	"--get": "--ge",
+	"--list": "--list",
+	"--delete": "--dele",
+};
 
 /**
  * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
  * that directory, as tar does; each `-C` is relative to the one before it. Option values stay as
  * written, and exclusions are left out. A member after a directory the guard cannot resolve is
- * left out unless it is absolute.
+ * left out unless it is absolute. An extraction, listing or deletion (`x`, `t`, `--delete`) reads
+ * only the archive and the member lists: its members name entries of the archive, not files.
  */
 function tarReadWords(command: ShellCommand, home: string): string[] {
 	const argv = args(command);
 	const words: string[] = [];
+	const members: string[] = [];
+	let entries = false;
 	let dir: string | undefined = command.cwd;
 	const changeDir = (word: string) => {
 		dir = dir === undefined ? undefined : resolveCommandWordPath(command, word, dir, home);
@@ -727,6 +742,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 	if (argv.length > 0 && !argv[0].startsWith("-")) {
 		const letters = argv[i++];
 		for (const letter of letters) {
+			entries ||= TAR_ENTRY_LETTERS.includes(letter);
 			if (!TAR_VALUE_LETTERS.includes(letter) || i >= argv.length) continue;
 			const value = argv[i++];
 			if (letter === "C") changeDir(value);
@@ -749,10 +765,16 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 			} else if (Object.hasOwn(TAR_VALUE_OPTIONS, flag)) {
 				const target = value ?? argv[++i];
 				if (target !== undefined && TAR_VALUE_OPTIONS[flag]) words.push(target);
+			} else {
+				entries ||= Object.entries(TAR_ENTRY_OPTIONS).some(
+					([full, shortest]) => flag.startsWith(shortest) && full.startsWith(flag),
+				);
 			}
 		} else if (options && arg.startsWith("-") && arg.length > 1) {
 			let k = 1;
-			while (k < arg.length && !TAR_VALUE_LETTERS.includes(arg[k])) k++;
+			for (; k < arg.length && !TAR_VALUE_LETTERS.includes(arg[k]); k++) {
+				entries ||= TAR_ENTRY_LETTERS.includes(arg[k]);
+			}
 			if (k === arg.length) continue;
 			const value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
 			if (value === undefined) continue;
@@ -765,10 +787,10 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 					: path.isAbsolute(arg) || ABSOLUTE_EXPANSION_RE.test(arg)
 						? arg
 						: undefined;
-			if (member !== undefined) words.push(member);
+			if (member !== undefined) members.push(member);
 		}
 	}
-	return words;
+	return entries ? words : [...words, ...members];
 }
 
 /**

