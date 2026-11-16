@@ -720,6 +720,8 @@ later one. Within a phase the execution model is fixed per phase, not per subscr
 | `APPROVAL` | Handlers run after REVIEW; tickets merge | `RequireApproval`, `Allow`, `Deny`, `Defer` | "A human must see this" rules, external-approver routing | Never suspends a coroutine (§2.6). Core merges every `RequireApproval` into one durable ticket per invocation — one unspoofable dialog, survives restarts, headless/external approval is a ticket property ([`06-policy.md`](06-policy.md)) |
 | `OBSERVE` | Asynchronous, off the critical path | `None` | Metrics, journal annotation, side dashboards | Cannot change the decision. Runs after the outcome is fixed; a slow or dead observer delays nothing |
 
+> **Implementation status (Rust, 2026-11):** `HookGate::gate` / envd `HookControlFactory::compose` run **Precheck → Transform → Review → Approval sequentially** per subscription (same per-event deadline path). There is **no separate Review-phase budget** beyond ordinary timeouts (`SESSION_SHUTDOWN_BUDGET` is shutdown-only). Parallel Precheck/Review and “budgeted Review” above remain the **design target**; do not assume concurrency from this table alone. Observe stays off the `gate()` critical path. Source: `crates/contract/src/hooks.rs`, `crates/envd/src/tools/hooks.rs`, `crates/agent` Kernel emit.
+
 **Paid-completion exception.** `omp.agents.completion()` is also legal in a turn-scoped
 `TRANSFORM` hook — today, exactly `turn_start` — so one bounded classifier may select a mutable
 turn field and return `Modify`. This does not generalize to per-call TRANSFORM hooks:
@@ -2126,9 +2128,11 @@ runs:
    raises `omp.HookContractError`. The composed payload is validated against the resolved target's
    schema; invalid composition rejects the operation as malformed and journals which subscription
    produced the invalid state.
-6. **REVIEW**, dispatched concurrently, budgeted. The aggregate policy is explicit: any `Deny`
-   denies (all denials journaled); otherwise `Allow`s are recorded as affirmative votes. Paid
-   inference is allowed here; externally visible effects are not.
+6. **REVIEW**, design target: dispatched concurrently, budgeted. **Rust today:** sequential
+   with the same per-event timeout as other gate phases (see Implementation status under §3.4).
+   The aggregate policy is explicit: any `Deny` denies (all denials journaled); otherwise
+   `Allow`s are recorded as affirmative votes. Paid inference is allowed here; externally
+   visible effects are not.
 7. **APPROVAL.** Handlers run concurrently and return immediately. Any `Deny` denies. Every
    `RequireApproval(ApprovalSpec)` is merged into one durable, Core-owned approval ticket for this
    invocation; the procedure then waits **in Core, not in Python** for the ticket's resolution
