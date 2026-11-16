@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { TernError } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { WebKitHost, WebKitUnavailableError } from "@oh-my-pi/pi-coding-agent/tools/browser/webkit/host";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { createFakeHost, type FakeHost, isProcessAlive } from "./webkit-fake-host";
 
 let fake: FakeHost | undefined;
@@ -94,6 +95,19 @@ describe("WebKitHost", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("stops a host still starting when its open is abandoned", async () => {
+		fake = await createFakeHost("late-welcome");
+		const controller = new AbortController();
+		const launching = WebKitHost.launch(fake.executable, undefined, controller.signal).catch(
+			(error: unknown) => error,
+		);
+		while (!(await fake.pid())) await Bun.sleep(10);
+		const pid = await fake.pid();
+		controller.abort();
+		expect(await launching).toBeInstanceOf(ToolAbortError);
+		expect(isProcessAlive(pid)).toBe(false);
 	});
 
 	it("kills a host that keeps running after its input closed", async () => {

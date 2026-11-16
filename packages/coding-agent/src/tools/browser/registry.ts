@@ -246,7 +246,12 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		return { key: browserKey(kind), kind, tern, refCount: 0 };
 	}
 	if (kind.kind === "webkit") {
-		return { key: browserKey(kind), kind, webkit: await WebKitHost.launch(kind.path, kind.viewer), refCount: 0 };
+		return {
+			key: browserKey(kind),
+			kind,
+			webkit: await WebKitHost.launch(kind.path, kind.viewer, opts.signal),
+			refCount: 0,
+		};
 	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI

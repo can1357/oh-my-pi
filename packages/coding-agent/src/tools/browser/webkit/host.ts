@@ -15,6 +15,7 @@ import * as path from "node:path";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { logger, readLines } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
+import { ToolAbortError } from "../../tool-errors";
 import { gracefulKillTreeOnce } from "../attach";
 import type { TernInputStep } from "../tern/keys";
 import { TernSocketClient, type TernTransport, type TernTransportEvents } from "../tern/wire";
@@ -150,15 +151,21 @@ export class WebKitHost {
 	/**
 	 * Start `executable` and greet it. A host that cannot be started, exits, or
 	 * does not answer the greeting is a {@link WebKitUnavailableError}; what was
-	 * started is stopped again.
+	 * started is stopped again, as it is when `signal` aborts before the greeting.
 	 */
-	static async launch(executable: string, viewerPath?: string): Promise<WebKitHost> {
+	static async launch(executable: string, viewerPath?: string, signal?: AbortSignal): Promise<WebKitHost> {
 		const host = new WebKitHost(executable, viewerPath);
+		const abandon = (): void => host.client.close();
+		signal?.addEventListener("abort", abandon, { once: true });
 		try {
+			if (signal?.aborted) abandon();
 			await host.client.connect();
 		} catch (error) {
 			await host.close();
+			if (signal?.aborted) throw new ToolAbortError("Browser open aborted");
 			throw new WebKitUnavailableError(error instanceof Error ? error.message : String(error));
+		} finally {
+			signal?.removeEventListener("abort", abandon);
 		}
 		logger.debug("WebKit host started", { executable, pid: host.pid });
 		return host;
