@@ -644,9 +644,8 @@ impl GitRepo {
 		let mut index = repo
 			.index_from_tree(&tree)
 			.map_err(|e| Error::backend("git read-tree", e))?;
-		if let Some(shared) = load_index_at(&repo, None)? {
-			mark_skipped_like(&mut index, &shared);
-		}
+		let shared = load_index_or_head(&repo, "git read-tree")?;
+		mark_skipped_like(&mut index, &shared);
 		index.set_path(index_path);
 		index
 			.write(INDEX_WRITE)
@@ -1413,8 +1412,14 @@ fn mark_skipped_like(index: &mut gix::index::State, shared: &gix::index::State) 
 	if files.is_empty() && dirs.is_empty() {
 		return;
 	}
+	// Sparse directories are maximal excluded subtrees, so they are sorted and
+	// never nested: only the last dir <= path can contain `path`.
 	for (entry, path) in index.entries_mut_with_paths() {
-		if files.contains(path) || dirs.iter().any(|dir| path.starts_with(dir)) {
+		let enclosing = dirs
+			.partition_point(|dir| *dir <= path)
+			.checked_sub(1)
+			.map(|i| dirs[i]);
+		if files.contains(path) || enclosing.is_some_and(|dir| path.starts_with(dir)) {
 			entry.flags.insert(Flags::EXTENDED | Flags::SKIP_WORKTREE);
 		}
 	}
@@ -1698,20 +1703,15 @@ fn write_index_tree(
 		.iter()
 		.filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
 	{
-		let path = entry.path(index);
+		let path = entry.path(index).as_bytes();
 		if entry.mode == gix::index::entry::Mode::DIR {
-			// A sparse-directory entry carries the collapsed subtree id and a
-			// path ending in `/`. Writing it verbatim would split into an
-			// empty trailing component and produce a malformed tree entry, so
-			// expand it back into the real files it stands for.
-			let subtree = repo
-				.index_from_tree(&entry.id)
-				.map_err(|e| Error::backend("git write-tree", e))?;
-			for leaf in subtree.entries() {
-				let mut full_path = path.to_owned();
-				full_path.extend_from_slice(leaf.path(&subtree));
-				insert_tree_entry(&mut root, full_path.as_ref(), leaf.mode, leaf.id);
-			}
+			// A sparse-directory entry already carries the collapsed subtree
+			// object for its path (which ends in `/`). Insert that tree id as a
+			// single directory entry instead of expanding every out-of-cone
+			// leaf: expanding re-serializes the whole excluded tree on every
+			// commit and splits the path into an empty trailing filename.
+			let collapsed = path.strip_suffix(b"/").unwrap_or(path);
+			insert_tree_entry(&mut root, collapsed, entry.mode, entry.id);
 		} else {
 			insert_tree_entry(&mut root, path, entry.mode, entry.id);
 		}
