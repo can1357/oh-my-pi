@@ -1055,6 +1055,76 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		expect(fake.promptHistory).toHaveLength(1);
 		expect(run.writer.output.stopReason).toBe("length");
 	});
+
+	it("rejects a stale tool callback that completes after a new step begins", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("first")]);
+		const fake = await state.started.next();
+		const firstPrompt = await fake.prompts.next();
+		fake.text("Working.");
+		// The call is announced late; it keeps waiting while the first step ends.
+		const stale = fake.options.onCall("read", { path: "a.txt" }, fake.currentId);
+		firstPrompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("first"), first.writer.output, user("second")]);
+		const secondPrompt = await fake.prompts.next();
+		state.clock.fire(30);
+		const rejected = await stale;
+		expect(rejected.isError).toBe(true);
+		expect(rejected.content[0]).toEqual({ type: "text", text: expect.stringContaining("no longer active") });
+		expect(fake.closed).toBe(false);
+		expect(second.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		fake.text("Second answer.");
+		secondPrompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.content).toEqual([{ type: "text", text: "Second answer." }]);
+	});
+
+	it("settles a call awaiting its announcement when the request is cancelled", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const pending = fake.options.onCall("read", { path: "a.txt" }, fake.currentId);
+		abort.abort(new Error("user-interrupt"));
+		const settled = await pending;
+		expect(settled.isError).toBe(true);
+		expect(settled.content[0]).toEqual({ type: "text", text: expect.stringContaining("no longer active") });
+		await expect(run.done).rejects.toThrow("aborted");
+		expect(fake.closed).toBe(false);
+		fake.acknowledgeCancel();
+	});
+
+	it("continues a reasoning-only output-limited part before requiring visible output", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("think then answer")]);
+		const fake = await state.started.next();
+		const first = await fake.prompts.next();
+		fake.thinking("pondering");
+		fake.text("   ");
+		first.response.resolve({
+			stopReason: "max_tokens",
+			usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 },
+		});
+		const continuation = await fake.prompts.next();
+		expect(fake.created).toHaveLength(1);
+		expect(run.writer.done).toBe(false);
+		fake.text("Answer.");
+		continuation.response.resolve({
+			stopReason: "end_turn",
+			usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9 },
+		});
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("stop");
+		expect(run.writer.output.content).toEqual([
+			{ type: "thinking", thinking: "pondering" },
+			{ type: "text", text: "   Answer." },
+		]);
+		expect(run.writer.output.usage.input).toBe(12);
+		expect(run.writer.output.usage.output).toBe(5);
+		expect(run.writer.output.usage.totalTokens).toBe(17);
+	});
 });
 
 describe("AgyHost diagnostics", () => {

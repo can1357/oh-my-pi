@@ -753,6 +753,10 @@ export class AgyHost implements ProviderSessionState {
 			step.done.reject(error);
 		}
 		this.#ledger = undefined;
+		// A call still waiting to be announced belongs to the cancelled turn; it
+		// must settle now instead of holding the bridge until its own timeout.
+		for (const waiter of this.#announcementWaiters) waiter.finish(false);
+		this.#announced.clear();
 		this.#releasePending()?.settle(errorOutput("Tool call cancelled: the request was cancelled."));
 		void this.#cancelTurn({ idleMs: this.#options.drainIdleMs, maxMs: this.#options.drainMaxMs }).then(
 			() => undefined,
@@ -784,22 +788,29 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error(`Antigravity CLI requested an unknown tool: ${shownName}`));
 			return errorOutput(`Unknown tool: ${shownName}; no execution occurred.`);
 		}
-		const announced = await this.#awaitAnnouncement(name);
+		// Bind the call to the step and turn that were live when it arrived; a
+		// cancellation or a newer step must never adopt it or fail the process.
 		const step = this.#step;
+		const turn = this.#turn;
 		const conversationId = this.#conversation?.id;
-		if (
-			!announced ||
+		if (!step || !turn || !conversationId)
+			return errorOutput("Tool call cancelled: the request it belonged to is no longer active.");
+		const stale = (): boolean =>
 			this.#process !== agy ||
-			!step ||
+			this.#step !== step ||
 			step.writer.done ||
 			step.aborted ||
-			!conversationId ||
-			(callerId !== undefined && callerId !== conversationId) ||
-			this.#pending ||
-			!this.#turn ||
-			this.#turn.cancelling
-		) {
-			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
+			this.#turn !== turn ||
+			turn.cancelling;
+		if (callerId !== undefined && callerId !== conversationId) {
+			this.#fail(new Error("Antigravity CLI requested a tool for another session"));
+			return errorOutput("Tool call rejected; no execution occurred.");
+		}
+		if (stale()) return errorOutput("Tool call cancelled: the request it belonged to is no longer active.");
+		const announced = await this.#awaitAnnouncement(name);
+		if (stale()) return errorOutput("Tool call cancelled: the request it belonged to is no longer active.");
+		if (!announced || this.#pending) {
+			this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
 			return errorOutput("Tool call rejected; no execution occurred.");
 		}
 		const validation = validateJsonSchemaValue(tool.inputSchema, args);
@@ -890,6 +901,9 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI refused the request"));
 			return;
 		}
+		// A limited part may hold only reasoning or whitespace; continuing it is
+		// what makes the turn usable, so the limit is resolved first.
+		if (this.#continueTurn(turn, response)) return;
 		const writer = step.writer;
 		const truncated = response.stopReason === "max_tokens" || response.stopReason === "max_turn_requests";
 		if (
@@ -901,7 +915,6 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
 			return;
 		}
-		if (this.#continueTurn(turn, response)) return;
 		this.#turn = undefined;
 		this.#turns.delete(turn);
 		writer.usage(this.#contextTokens, turn.usage);
