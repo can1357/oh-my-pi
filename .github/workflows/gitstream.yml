@@ -1,0 +1,58 @@
+# Lite gitStream workflow for this monorepo.
+# Source: linear-b/gitstream docs/downloads/gitstream-lite.yml at
+# 5cd1030bdf52dc2580cae167e38e2d4f24da4de2. The full gitstream.yml action
+# clones complete history and times out on a repository this size. The lite
+# action fetches six months of history. The GitHub App dispatches this file
+# by name; it is not a required check. Rules live in .cm/gitstream.cm.
+# Pinned to the v2-lite tag commit.
+
+name: gitStream workflow automation
+run-name: |
+  /:\ gitStream: PR #${{ fromJSON(fromJSON(github.event.inputs.client_payload)).pullRequestNumber }} from ${{ github.event.inputs.full_repository }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      client_payload:
+        description: The Client payload
+        required: true
+      full_repository:
+        description: the repository name include the owner in `owner/repo_name` format
+        required: true
+      head_ref:
+        description: the head sha
+        required: true
+      base_ref:
+        description: the base ref
+        required: true
+      installation_id:
+        description: the installation id
+        required: false
+      resolver_url:
+        description: the resolver url to pass results to
+        required: true
+      resolver_token:
+        description: Optional resolver token for resolver service
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  gitStream:
+    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    name: gitStream workflow automation
+    steps:
+      - name: Evaluate Rules
+        uses: linear-b/gitstream-github-action@af5d3319e4d8a1a82a5a3a2c247b64ab70030319 # v2-lite
+        id: rules-engine
+        with:
+          full_repository: ${{ github.event.inputs.full_repository }}
+          head_ref: ${{ github.event.inputs.head_ref }}
+          base_ref: ${{ github.event.inputs.base_ref }}
+          client_payload: ${{ github.event.inputs.client_payload }}
+          installation_id: ${{ github.event.inputs.installation_id }}
+          resolver_url: ${{ github.event.inputs.resolver_url }}
+          resolver_token: ${{ github.event.inputs.resolver_token }}
