@@ -5,6 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
 	ffi::OsStr,
 	fs,
+	io::Write,
 	path::{Path, PathBuf},
 	process::{Command, Stdio},
 };
@@ -203,8 +204,27 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
 		let index_path = options.index_path.as_deref();
+		// An alternate index that does not exist is a caller error, never a
+		// silent fallback to the repository's index.
+		let load_index = || match index_path {
+			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
+				Error::backend("git commit", format!("index file not found: {}", path.display()))
+			}),
+			None => load_index_or_head(&repo, "git commit"),
+		};
+		// Refuse unresolved stages before hooks or HEAD updates. Omitting
+		// stages 1-3 while writing the tree deletes those paths from the
+		// commit; `git commit` rejects them in prepare_index and does not
+		// run hooks. A pathspec commit copies only the selected paths, so
+		// conflicts elsewhere in the index must be caught here, not by
+		// `write_index_tree`.
+		let mut index = load_index()?;
+		reject_unmerged_index(&index, "git commit")?;
 		if !options.no_verify {
 			run_commit_hook(self, "pre-commit", &[], index_path)?;
+			// The hook may have edited the index.
+			index = load_index()?;
+			reject_unmerged_index(&index, "git commit")?;
 		}
 		let mut head = repo
 			.head()
@@ -225,14 +245,6 @@ impl GitRepo {
 				});
 			}
 		}
-		let index = match index_path {
-			// An alternate index that does not exist is a caller error, never a
-			// silent fallback to the repository's index.
-			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
-				Error::backend("git commit", format!("index file not found: {}", path.display()))
-			})?,
-			None => load_index_or_head(&repo, "git commit")?,
-		};
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
 		} else {
@@ -290,12 +302,16 @@ impl GitRepo {
 				.ok_or_else(|| Error::backend("git commit", "author identity is not configured"))?
 				.map_err(|err| Error::backend("git commit", err))?
 		};
-		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
-		fs::write(&message_path, message)?;
+		// Not `.git/COMMIT_EDITMSG`: overlapping calls reread whichever message
+		// landed last, including when `no_verify` skips the hook.
+		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
+		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
+		// message, as under `git commit`; only the private copy is read back.
+		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
 		if !options.no_verify {
-			run_commit_hook(self, "commit-msg", &[message_path.as_os_str()], index_path)?;
+			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
 		}
-		let message = fs::read_to_string(&message_path)
+		let message = fs::read_to_string(&message_file.path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let id = if sign {
 			sign_commit(self, &message, tree, &parents, author, committer)?
@@ -1032,6 +1048,46 @@ impl GitRepo {
 	}
 }
 
+/// One call's commit message. Dropped on every exit, including hook, signer,
+/// and ref-update failures.
+///
+/// `commit-msg` edits the path it is given. Sharing `.git/COMMIT_EDITMSG`
+/// lets an overlapping `commit_create` replace that file between the write
+/// and the reread, so both commits record the other call's subject and body.
+#[must_use = "dropping the guard deletes the commit message file"]
+struct CommitMessageFile {
+	path: PathBuf,
+}
+
+impl CommitMessageFile {
+	fn create(git_dir: &Path, message: &str) -> Result<Self> {
+		use std::sync::atomic::{AtomicU64, Ordering};
+		static NEXT: AtomicU64 = AtomicU64::new(0);
+		let n = NEXT.fetch_add(1, Ordering::Relaxed);
+		let tick = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_nanos());
+		let path = git_dir.join(format!(".omp-commit-msg-{}-{tick}-{n}", std::process::id()));
+		// Close before the guard exists so a failed write can unlink the
+		// partial file on Windows, where an open handle blocks removal.
+		let mut file = fs::OpenOptions::new()
+			.write(true)
+			.create_new(true)
+			.open(&path)?;
+		let written = file.write_all(message.as_bytes());
+		drop(file);
+		let message_file = Self { path };
+		written?;
+		Ok(message_file)
+	}
+}
+
+impl Drop for CommitMessageFile {
+	fn drop(&mut self) {
+		let _ = fs::remove_file(&self.path);
+	}
+}
+
 /// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the
 /// commit is built from an alternate index, as `git commit --only` does.
 fn run_commit_hook(
@@ -1556,10 +1612,34 @@ struct TreeNode {
 	dirs:  BTreeMap<BString, Self>,
 }
 
+/// Refuse to serialize `index` while any entry is still at a conflict stage.
+/// A tree can store only stage 0; dropping stages 1-3 deletes that path.
+fn reject_unmerged_index(index: &gix::index::File, context: &'static str) -> Result<()> {
+	let mut paths = BTreeSet::new();
+	for entry in index.entries() {
+		if entry.stage() != gix::index::entry::Stage::Unconflicted {
+			paths.insert(entry.path(index).to_str_lossy().into_owned());
+		}
+	}
+	if paths.is_empty() {
+		return Ok(());
+	}
+	Err(Error::backend(
+		context,
+		format!(
+			"the index has unmerged entries: {}",
+			paths.into_iter().collect::<Vec<_>>().join(", ")
+		),
+	))
+}
+
 fn write_index_tree(
 	repo: &gix::Repository,
 	index: &gix::index::File,
 ) -> Result<gix::hash::ObjectId> {
+	// Filtering to stage 0 would omit a path that exists only as conflict
+	// stages and delete it from the tree. `git write-tree` refuses instead.
+	reject_unmerged_index(index, "git write-tree")?;
 	let mut root = TreeNode::default();
 	for entry in index
 		.entries()

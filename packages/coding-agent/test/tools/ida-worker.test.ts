@@ -77,6 +77,7 @@ describe("IDA worker protocol", () => {
 		const stubs = path.join(dir, "stubs");
 		await Bun.write(path.join(stubs, "_omp_ida_stub.py"), STUB);
 		for (const name of STUB_MODULES) await Bun.write(path.join(stubs, `${name}.py`), STUB_MODULE);
+		await Bun.write(path.join(stubs, "ida_pro.py"), "IDA_SDK_VERSION = 950\n");
 		await Bun.write(path.join(stubs, "ida_domain", "__init__.py"), STUB_DATABASE);
 		await Bun.write(path.join(stubs, "ida_domain", "database.py"), STUB_MODULE);
 		await Bun.write(path.join(stubs, "ida_domain", "xrefs.py"), STUB_MODULE);
