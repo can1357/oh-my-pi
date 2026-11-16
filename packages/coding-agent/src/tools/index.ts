@@ -139,6 +139,7 @@ export * from "./file-write-fallback";
 export * from "./gh";
 export * from "./glob";
 export * from "./grep";
+export * from "./guard-rules";
 export * from "./jfind";
 export type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-tui/tools/wait";
 export * from "./image-gen";
