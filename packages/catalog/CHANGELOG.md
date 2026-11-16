@@ -26,6 +26,10 @@
 
 - Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
 
+### Fixed
+
+- Fixed retry-reset timezone resolution for custom providers pointing at the Zhipu Coding Plan endpoint, including trailing-slash base URLs ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.20.3] - 2026-11-16
 
 ### Added

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed one-shot retries and title generation to pass the model endpoint so custom Zhipu Coding Plan providers honor the Beijing-time quota reset ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

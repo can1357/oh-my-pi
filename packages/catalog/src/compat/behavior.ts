@@ -107,7 +107,13 @@ export function quotaTierFor(provider: string, model: string): string | undefine
 export function retryResetTimezoneOffsetFor(provider: string, baseUrl?: string): string | undefined {
 	const direct = behavior.retryResetTimezones.find(rule => rule.provider === provider);
 	if (direct) return direct.offset;
-	return behavior.retryResetTimezones.find(rule => rule.baseUrl !== undefined && rule.baseUrl === baseUrl)?.offset;
+	if (baseUrl === undefined) return undefined;
+	// Custom providers keep the configured spelling; the completions transport
+	// strips trailing slashes before issuing the request, so match the same way.
+	const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+	return behavior.retryResetTimezones.find(
+		rule => rule.baseUrl !== undefined && rule.baseUrl.replace(/\/+$/, "") === normalizedBaseUrl,
+	)?.offset;
 }
 
 /** Whether a provider has catalog-authored model quota scopes. */
