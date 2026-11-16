@@ -120,9 +120,10 @@ describe("/usage activity load", () => {
 			expect(requests(events[0])).toBe(1);
 			expect(requests(events[1])).toBe(1);
 		} finally {
-			// bun test pins `Date` to UTC with TZ unset; deleting TZ would drop that
-			// pin and run later files in this process in the host's zone.
-			process.env.TZ = previousTz ?? "UTC";
+			// Put back the zone seen before: UTC under bun test's pin, or the host's
+			// zone when an earlier file in this process deleted TZ. Deleting TZ here
+			// would drop the pin and run later files in the host's zone.
+			process.env.TZ = previousTz ?? zone;
 		}
 		expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe(zone);
 	}, 30_000);
