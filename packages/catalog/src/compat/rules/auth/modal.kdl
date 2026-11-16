@@ -1,0 +1,13 @@
+// Registry auth for "modal": how /login collects the proxy token.
+
+auth "modal" {
+	name "Modal"
+	login "api-key" {
+		auth-url "https://modal.com/settings/proxy-auth-tokens"
+		instructions "Create a Proxy Auth Token (modal.com/settings/proxy-auth-tokens or `modal workspace proxy-tokens create`) and paste the combined wk-….ws-… token"
+		prompt "Paste your Modal proxy token" placeholder="wk-….ws-…"
+		// The shared gateway's /models rejects unauthenticated requests, so it
+		// validates the pasted token; MODAL_BASE_URL retargets dedicated endpoints.
+		validate "models-endpoint" label="Modal" url="https://inference.us-west.modal.direct/v1/models" base-url-env="MODAL_BASE_URL" base-url-append="/v1" base-url-path="/models"
+	}
+}

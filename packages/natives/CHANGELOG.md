@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PhononTts` binding for on-device Phonon text-to-speech
+- Added `Shell.adopt(fork)`, which carries the variables, functions, aliases, options and traps a `fork()` set into the shell it was forked from, at the end of that shell's running command; a name both set keeps the value of the command that ended last
+
+### Fixed
+
+- Fixed concurrent `commitCreate()` calls committing each other's subject and body ([#19345](https://github.com/can1357/oh-my-pi/pull/19345) by [@eggpeat](https://github.com/eggpeat))
+### Changed
+
+- The glibc Linux addons no longer load `libm.so.6` or `libutil.so.1`; they need only `libc.so.6`, `libpthread.so.0` and `libdl.so.2`
+- The Linux addons export only their N-API entry point, no longer wasmtime's C API
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Committing or writing trees now correctly reports unresolved index conflicts instead of silently omitting conflicted files.
+- Fixed shell compatibility with GNU `grep` for end-of-line-anchored patterns, including `-o` and `-z` modes, and corrected `sed` substitutions on multibyte-character lines.
+- Fixed native diff and patch handling for filenames containing spaces and other characters requiring quoting, including binary changes.
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes
