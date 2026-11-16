@@ -261,6 +261,10 @@ export class TodoWrites {
 		const runner = this.#host.extensionRunner();
 		if (!runner || this.#host.isDisposed() || !isBackendId(id)) return;
 		const definition = runner.getTodoBackend(id);
+		// The registry may have changed since #observeSetting queued this (an extension disabled or re-enabled
+		// behind a slow call): record what is resolved here, so the next write neither creates it again nor
+		// repeats the notice. A newer setting value has its own resolution queued.
+		if (cfgTodoBackend.get(this.#host.settings) === id) this.#requested = definition ?? id;
 		if (!definition) {
 			this.#host.warn(
 				`Todo backend "${sanitizeTodoBackendText(id)}" is not registered by any enabled extension; using native todos.`,

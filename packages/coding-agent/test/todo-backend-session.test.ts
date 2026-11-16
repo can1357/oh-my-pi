@@ -301,6 +301,40 @@ describe("todo backends in a real session", () => {
 		expect(taskContents(session)).toEqual(["backed", "native while suspended", "backed again"]);
 	});
 
+	test("a suspend undone while a slow apply holds the queue creates the backend once, not again at the next write", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
+		const session = await createSession({ backend: "tracker", extensions: [recorder.extension()] });
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("extension runner is not available");
+		const notices = collectNotices(session);
+		await todo(session, { op: "init", items: ["first"] });
+		expect(recorder.created).toBe(1);
+
+		const applyGate = hold(recorder, "apply");
+		const slow = todo(session, { op: "append", phase: "Tasks", items: ["slow"] });
+		await applyGate.started.promise;
+		// The edit's lookup sees the extension suspended and queues a resolution behind the slow
+		// apply; the extension is back before that resolution runs.
+		runner.setSuspendedExtensions(() => true);
+		const lookup = runner.getTodoBackend.bind(runner);
+		vi.spyOn(runner, "getTodoBackend").mockImplementationOnce(id => {
+			const found = lookup(id);
+			runner.setSuspendedExtensions(() => false);
+			return found;
+		});
+		const edit = session.editTodoPhases(phases => phases);
+		applyGate.release.resolve();
+		await slow;
+		await edit;
+		await flushTodoWrites(session);
+		expect(recorder.created).toBe(2);
+
+		await todo(session, { op: "append", phase: "Tasks", items: ["after"] });
+
+		expect(recorder.created).toBe(2);
+		expect(notices).toEqual([]);
+	});
+
 	test("a dialog opened in create is aborted when the handler budget runs out, and the session falls back to native todos", async () => {
 		const dialogSignals: Array<AbortSignal | undefined> = [];
 		const hanging: ExtensionFactory = pi => {
