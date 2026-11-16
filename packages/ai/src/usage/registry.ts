@@ -1,6 +1,7 @@
 import type { Provider } from "../types";
 import type { CredentialRankingStrategy, UsageProvider } from "../usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./alibaba-token-plan";
+import { antigravityCliRankingStrategy, antigravityCliUsageProvider } from "./antigravity-cli";
 import { charmHyperUsageProvider } from "./charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./claude";
 import { clinePassUsageProvider } from "./cline-pass";
@@ -34,6 +35,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	minimaxCodeUsageProvider,
 	museCodeUsageProvider,
 	antigravityUsageProvider,
+	antigravityCliUsageProvider,
 	googleGeminiCliUsageProvider,
 	ollamaUsageProvider,
 	factoryDroidUsageProvider,
@@ -68,6 +70,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["anthropic", claudeRankingStrategy],
 	["cursor", cursorRankingStrategy],
 	["google-antigravity", antigravityRankingStrategy],
+	["antigravity-cli", antigravityCliRankingStrategy],
 	["factory-droid", factoryDroidRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],

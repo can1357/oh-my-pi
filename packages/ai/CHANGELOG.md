@@ -62,6 +62,7 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+- Added `/usage` quota reporting for the `antigravity-cli` provider through the official `agy /usage` command.
 
 ## [18.20.3] - 2026-11-16
 

@@ -28,6 +28,8 @@
 ### Added
 
 - Added Modal as a hosted inference provider.
+- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+- Added quota-tier metadata for `antigravity-cli` so usage reports scope Gemini, Argon, and Claude/GPT limits to the matching model bucket.
 
 ### Changed
 
