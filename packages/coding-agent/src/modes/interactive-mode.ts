@@ -88,7 +88,6 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AssistantTextRenderer,
 	AutocompleteProviderFactory,
@@ -117,7 +116,7 @@ import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { GoalModeState } from "../goals/state";
-import { rebindMemoryBackendForCwd } from "../hindsight/backend";
+import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
 import { hasNativeJudge } from "../judgment";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -183,7 +182,6 @@ import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
@@ -194,6 +192,7 @@ import {
 	parseConfiguredThinkingLevel,
 	resolveConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
+import { capturePage } from "../tools/browser/page-shot";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
@@ -291,6 +290,7 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { setEmbedHost } from "@oh-my-pi/pi-tui/chat/embed-host";
 import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
@@ -390,6 +390,7 @@ import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
+	ComposerOwner,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
@@ -452,6 +453,7 @@ import {
 	cfgTuiMouse,
 	cfgTuiColorfulMarkdown,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderEmbeds,
 	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiCompleteScrollback,
@@ -529,6 +531,7 @@ const cfgLiveUiSettings = combine({
 	"tui.colorfulMarkdown": cfgTuiColorfulMarkdown,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.renderSvg": cfgTuiRenderSvg,
+	"tui.renderEmbeds": cfgTuiRenderEmbeds,
 	"extensionRenderers.assistantText": cfgExtensionAssistantTextRenderers,
 	"extensionRenderers.transcriptPresenters": cfgExtensionTranscriptPresenters,
 	"tui.autoGraph": cfgTuiAutoGraph,
@@ -1959,6 +1962,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 	approvalOwnsComposer = false;
+	composerOwner?: ComposerOwner;
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
 	}
@@ -2185,6 +2189,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownColorful(cfgTuiColorfulMarkdown.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
 		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
+		this.#applyEmbedSetting();
 		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
@@ -2935,9 +2940,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				// A terminal provider failure is not a loop yield: resubmitting the
 				// captured prompt would append another user turn (and every @file
-				// attachment) without making progress. Non-terminal settles still
-				// belong to retry/maintenance and must not park the loop.
-				if (event.type === "agent_end" && event.isTerminal !== false) {
+				// attachment) without making progress. Pauses still belong to the
+				// run and must not park the loop.
+				if (event.type === "agent_end") {
 					const last = event.messages.findLast(message => message.role === "assistant");
 					if (last?.stopReason === "error" && this.loopModeEnabled && this.loopPrompt) {
 						this.pauseLoop();
@@ -3066,18 +3071,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.syncIdleMaintenanceView();
 		// Publish native send readiness even when no user input triggers another frame.
 		this.ui.requestRender();
-	}
-
-	/** Reload the title-generation system prompt override for the provided working
-	 *  directory and stash it on the session so first-input titling
-	 *  ({@link input-controller}) and replan-driven refresh
-	 *  ({@link AgentSession.#refreshTitleAfterReplan}) share one source
-	 *  ({@link discoverTitleSystemPromptFile}; issue #3734). */
-	async refreshTitleSystemPrompt(cwd?: string): Promise<void> {
-		const basePath = cwd ?? this.sessionManager.getCwd();
-		const titleSystemPromptSource = discoverTitleSystemPromptFile(basePath);
-		const resolved = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
-		this.session.setTitleSystemPrompt(resolved);
 	}
 
 	/**
@@ -3269,48 +3262,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Everything after chdir is a rescope of cwd-derived state. If any of it
 		// fails, undo the chdir so `false` reliably means "nothing committed";
 		// callers roll back their own session/manager state on false.
+		const scopedSettings = isSettingsInitialized() ? settings : undefined;
 		try {
-			// Re-scope project settings (`.claude/settings.yml` etc.) to the new
-			// directory in place so the active session and every settings reader pick
-			// up the destination project's configuration.
-			if (isSettingsInitialized()) {
-				await settings.reloadForCwd(newCwd);
-				// The reload fired the memory scope hooks; complete the rebind
-				// before the move commits so the next prompt cannot recall or
-				// retain against the source project's memory.
-				await rebindMemoryBackendForCwd(this.session);
-			}
-			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
-			// the next prompt sees everything scoped to the new project directory.
-			clearClaudePluginRootsCache();
-			await this.refreshTitleSystemPrompt(newCwd);
-			await this.session.refreshSkillsAndCommands();
+			await rescopeSessionToCwd(this.session, scopedSettings, newCwd);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
-			// cwd-derived caches (provider globals, plugin roots, capabilities,
-			// skills, slash commands) must all return to the source project so a
-			// `false` result reliably means nothing was committed.
+			// cwd-derived state (memory, plugin roots, agents, extensions, custom
+			// tools, MCP servers, skills, slash commands) must all return to the
+			// source project so a `false` result reliably means nothing was committed.
 			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				if (isSettingsInitialized()) {
-					await settings.reloadForCwd(previousCwd);
-					await rebindMemoryBackendForCwd(this.session);
-				}
-				clearClaudePluginRootsCache();
-				await this.refreshTitleSystemPrompt(previousCwd);
-				await this.session.refreshSkillsAndCommands();
+				await rescopeSessionToCwd(this.session, scopedSettings, previousCwd);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
-					if (isSettingsInitialized()) {
-						await settings.reloadForCwd(actual);
-						await rebindMemoryBackendForCwd(this.session);
-					}
-					clearClaudePluginRootsCache();
-					await this.refreshTitleSystemPrompt(actual);
-					await this.session.refreshSkillsAndCommands();
+					await rescopeSessionToCwd(this.session, scopedSettings, actual);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
@@ -4200,8 +4168,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			pendingSubmissionDispose?.();
 			this.#optimisticUserMessageComponents = [];
 			this.#pendingWorkingMessage = undefined;
-			// A run that only waits on background jobs keeps its working row, which
-			// names the wait; the settle watch or the next run tears it down.
+			// A run paused on outside work keeps its working row, which names the
+			// wait; the next loop or the run's `agent_end` tears it down.
 			if (this.loadingAnimation && !this.#eventController.isAwaitingAsyncWork()) {
 				this.#stopLoadingAnimation(true);
 			}
@@ -4261,6 +4229,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			mode === "auto" && !hasNativeJudge(this.settings, this.session.modelRegistry, this.session.model)
 				? undefined
 				: pickTableChart(request, this.session.tableChartJudge()),
+		);
+	}
+
+	/** Lend replies' `<img>` and `<iframe>` tags the session's directory and the headless browser; off, they stay Markdown. */
+	#applyEmbedSetting(): void {
+		setEmbedHost(
+			cfgTuiRenderEmbeds.get(this.settings) ? { cwd: () => this.sessionManager.getCwd(), capturePage } : undefined,
 		);
 	}
 
@@ -4395,6 +4370,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.renderSvg")) {
 			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
+			rebuildChat = true;
+		}
+		if (any("tui.renderEmbeds")) {
+			this.#applyEmbedSetting();
 			rebuildChat = true;
 		}
 		// Components take the extension text renderers when built; the rebuild keeps the streaming
@@ -4929,6 +4908,7 @@ export class InteractiveMode implements InteractiveModeContext {
 						: dictation
 					: undefined,
 			viewing: this.#viewingLineage(),
+			btw: this.#btwController.isFocused(),
 			title: this.sessionManager.getSessionName(),
 		};
 	}
@@ -5081,6 +5061,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.pendingTools.set(id, component);
 		}
 		this.#eventController.reconcileReadGroupAfterRebuild();
+		void this.#btwController.placeNotes();
 		// During the pre-streaming window — after `startPendingSubmission` has
 		// optimistically rendered the user's message but before the user
 		// `message_start` event lands it in `session` entries — any rebuild
@@ -8534,7 +8515,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.hasAdmittedSubmission ||
 			this.session.isStreaming ||
 			this.session.queuedMessageCount > 0 ||
-			this.session.hasPendingAsyncWork()
+			this.session.isRunActive
 		) {
 			return;
 		}
@@ -9146,6 +9127,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyExtensionLinks();
 		this.#applyTranscriptPresenters();
 		await this.#uiHelpers.renderInitialMessages(options);
+		void this.#btwController.placeNotes();
 		this.syncRetryHintRow();
 		// A switch or tree move that replays the transcript strands a `/compact` queued for the old position.
 		this.#inputController.releaseStaleYieldCompaction();
@@ -9740,6 +9722,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwEscape(): boolean {
 		return this.#btwController.handleEscape();
+	}
+
+	get isBtwFocused(): boolean {
+		return this.#btwController.isFocused();
+	}
+
+	submitBtwFollowUp(question: string, images?: ImageContent[]): Promise<boolean> {
+		return this.#btwController.submitFollowUp(question, images);
 	}
 
 	canBranchBtw(): boolean {

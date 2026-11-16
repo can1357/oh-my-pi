@@ -394,6 +394,16 @@ than a byte-for-byte native provider transcript.
   details. `Right` focuses details, `Left` returns to history.
 - Focused details support scrolling, `Page Up`/`Page Down`, and `Home`/`End`.
   Narrow terminals show one pane at a time.
+- In Tern, the answer is a note in the transcript, after what was on screen when it was
+  asked, instead of the inline panel; it is display-only, never a session message. Clicking
+  the note points the composer at it (role `omp.editor.btw`, a `btw` chip, the note ringed):
+  plain drafts go to its topic as follow-ups, which answer in the same note, while `/`
+  commands and `!`/`$` shell drafts run as usual. `Esc`, the chip, or another click on the
+  note points the composer back at the chat without cancelling a running answer. Its `×`
+  folds it to one line, which a click opens again with the composer on it. Right-click (a
+  long press on a phone) offers copy, inject, branch, stop, opening it in history, and
+  fold. After a transcript rebuild or resume, the notes asked on the shown branch come back
+  folded, each before the first message newer than it.
 - New questions and follow-ups are refused while any BTW request is running.
   There is no implicit cancellation or queue.
 - A refused follow-up submission keeps the draft for retry; repeated Enter while

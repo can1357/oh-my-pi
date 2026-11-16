@@ -304,8 +304,7 @@ describe("native security coordinator", () => {
 						throw new Error("review interrupted");
 					},
 					waitForIdle: async () => undefined,
-					hasPendingAsyncWork: () => false,
-					settleAsyncWork: async () => undefined,
+					waitForRunEnd: async () => undefined,
 					abort: async () => {
 						abortCalls++;
 						promptFinished.resolve();
@@ -363,8 +362,7 @@ describe("native security coordinator", () => {
 							return true;
 						},
 						waitForIdle: async () => undefined,
-						hasPendingAsyncWork: () => false,
-						settleAsyncWork: async () => undefined,
+						waitForRunEnd: async () => undefined,
 						abort: async () => undefined,
 						dispose: async () => undefined,
 					};
