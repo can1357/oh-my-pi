@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Scrolling and typing in an open agent transcript no longer slows down as the transcript grows ([#19489](https://github.com/can1357/oh-my-pi/pull/19489) by [@H4vC](https://github.com/H4vC))
 - Typing and moving the cursor in very long drafts (over 256 lines) no longer slows down ([#19488](https://github.com/can1357/oh-my-pi/pull/19488) by [@H4vC](https://github.com/H4vC))
 
 ## [18.21.0] - 2026-11-16
