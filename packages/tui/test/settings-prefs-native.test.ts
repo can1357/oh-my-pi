@@ -316,7 +316,9 @@ describe("settings as a native prefs page", () => {
 		};
 		const screen = (selector: SettingsSelectorComponent) => Bun.stripANSI(selector.render(160).join("\n"));
 		const openTarget = (selector: SettingsSelectorComponent, entries: Record<string, string>, key: string) => {
-			const index = Object.keys(entries).sort((a, b) => a.localeCompare(b)).indexOf(key);
+			const index = Object.keys(entries)
+				.sort((a, b) => a.localeCompare(b))
+				.indexOf(key);
 			for (let i = 0; i < index; i++) selector.handleInput(DOWN);
 			selector.handleInput(ENTER);
 		};
@@ -473,42 +475,45 @@ describe("settings as a native prefs page", () => {
 			});
 		}
 
-		it.skipIf(process.platform === "win32")("a rejected home alias does not reserve its other physical prefix", () => {
-			const home = spyOn(os, "homedir").mockReturnValue("/logical/home");
-			const real = spyOn(fs, "realpathSync").mockReturnValue("/physical/home");
-			try {
-				for (const ignoredHasLayer of [false, true]) {
-					const shadowed: Record<string, string> = ignoredHasLayer ? { "~": "--config overlay" } : {};
-					const map = { "/logical/home": "file:///First:/", "~": "file:///Ignored:/" };
-					const { selector, values, entryWrites } = harness({ "tui.linkMap": map }, shadowed);
-					send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
-					send(selector, { type: "activate", key: "", item: "tui.linkMap" });
-					expect(screen(selector)).toContain("ignored: same prefix as /logical/home");
-					selector.handleInput(DOWN);
-					selector.handleInput(DOWN);
-					selector.handleInput(ENTER);
-					type(selector, "/physical/home");
-					selector.handleInput(ENTER);
-					expect(screen(selector)).toContain("Link target: /physical/home");
-					type(selector, "file:///Physical:/");
-					selector.handleInput(ENTER);
-					const added = { ...map, "/physical/home": "file:///Physical:/" };
-					expect(entryWrites).toEqual([["tui.linkMap", "/physical/home", "file:///Physical:/"]]);
-					expect(values.get("tui.linkMap")).toEqual(added);
-					expect(screen(selector)).not.toContain("ignored: same prefix as ~");
-					openTarget(selector, added, "/physical/home");
-					selector.handleInput(ENTER);
-					expect(entryWrites).toEqual([
-						["tui.linkMap", "/physical/home", "file:///Physical:/"],
-						["tui.linkMap", "/physical/home", "file:///Physical:/"],
-					]);
-					expect(values.get("tui.linkMap")).toEqual(added);
+		it.skipIf(process.platform === "win32")(
+			"a rejected home alias does not reserve its other physical prefix",
+			() => {
+				const home = spyOn(os, "homedir").mockReturnValue("/logical/home");
+				const real = spyOn(fs, "realpathSync").mockReturnValue("/physical/home");
+				try {
+					for (const ignoredHasLayer of [false, true]) {
+						const shadowed: Record<string, string> = ignoredHasLayer ? { "~": "--config overlay" } : {};
+						const map = { "/logical/home": "file:///First:/", "~": "file:///Ignored:/" };
+						const { selector, values, entryWrites } = harness({ "tui.linkMap": map }, shadowed);
+						send(selector, { type: "action", key: "", act: "page", value: "shell", mods: [] });
+						send(selector, { type: "activate", key: "", item: "tui.linkMap" });
+						expect(screen(selector)).toContain("ignored: same prefix as /logical/home");
+						selector.handleInput(DOWN);
+						selector.handleInput(DOWN);
+						selector.handleInput(ENTER);
+						type(selector, "/physical/home");
+						selector.handleInput(ENTER);
+						expect(screen(selector)).toContain("Link target: /physical/home");
+						type(selector, "file:///Physical:/");
+						selector.handleInput(ENTER);
+						const added = { ...map, "/physical/home": "file:///Physical:/" };
+						expect(entryWrites).toEqual([["tui.linkMap", "/physical/home", "file:///Physical:/"]]);
+						expect(values.get("tui.linkMap")).toEqual(added);
+						expect(screen(selector)).not.toContain("ignored: same prefix as ~");
+						openTarget(selector, added, "/physical/home");
+						selector.handleInput(ENTER);
+						expect(entryWrites).toEqual([
+							["tui.linkMap", "/physical/home", "file:///Physical:/"],
+							["tui.linkMap", "/physical/home", "file:///Physical:/"],
+						]);
+						expect(values.get("tui.linkMap")).toEqual(added);
+					}
+				} finally {
+					real.mockRestore();
+					home.mockRestore();
 				}
-			} finally {
-				real.mockRestore();
-				home.mockRestore();
-			}
-		});
+			},
+		);
 
 		it.skipIf(process.platform === "win32")("tests a path against the map links use, and clears every entry", () => {
 			const map = { "/srv/handbook": "https://git.contoso.example/handbook/blob/main" };

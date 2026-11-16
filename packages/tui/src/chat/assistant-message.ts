@@ -1650,7 +1650,8 @@ export class AssistantMessageComponent extends Container {
 			}
 		}
 		const spans = [span(label, "muted")];
-		if (url?.startsWith("file:")) spans.push(span(" "), fileLinkSpan(Bun.fileURLToPath(url), "Visit", "link"));
+		if (url?.startsWith("file:"))
+			spans.push(span(" "), fileLinkSpan({ path: Bun.fileURLToPath(url), kind: "file" }, "Visit", "link"));
 		else if (url) spans.push(span(" "), urlLinkSpan(url, "Visit"));
 		nodes.push(node("text", { spans, truncate: "end" }, undefined, `${slot}.visit`));
 		return nodes;
