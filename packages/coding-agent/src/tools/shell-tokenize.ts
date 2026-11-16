@@ -1069,12 +1069,28 @@ export interface ParsedShellScript {
 	 * not read as heredocs.
 	 */
 	truncated: boolean;
+	/** Where the script leaves the shell; `undefined` for a script with no commands. */
+	end: ShellScriptEnd | undefined;
+}
+
+/**
+ * Where a script leaves the shell for a command joined to it by `&&`: the directories its `cd`s
+ * leave, and what is known to have succeeded when that command starts.
+ */
+export interface ShellScriptEnd {
+	readonly dirs: ShellDirectories;
+	readonly succeeded: SucceededLink | undefined;
 }
 
 /** Where a parsed script runs: its starting directory and the home `~` and `$HOME` expand to. */
 export interface ShellScriptScope {
 	cwd: string;
 	home: string;
+	/**
+	 * Where an earlier script joined to this one by `&&` left the shell (its {@link ParsedShellScript.end}):
+	 * the script starts there, not at `cwd`, after what that one leaves known to have succeeded.
+	 */
+	after?: ShellScriptEnd;
 }
 
 /**
@@ -1329,11 +1345,11 @@ interface CaseReading {
  */
 interface Substitution {
 	/**
-	 * Its pipelines, nested ones after the top level, run from `cwd` with `input` upstream of them
+	 * Its pipelines, nested ones after the top level, run from `from` with `input` upstream of them
 	 * and `succeeded` known to have succeeded before them.
 	 */
 	read: (
-		cwd: string | undefined,
+		from: ShellDirectories,
 		input: ShellUpstream | undefined,
 		succeeded: SucceededLink | undefined,
 	) => ShellCommand[][];
@@ -1350,17 +1366,22 @@ interface ReadScope {
 }
 
 /** Directories `pushd` saved, the one `popd` returns to first; what is below them is unknown. */
-interface DirectoryStack {
+export interface DirectoryStack {
 	readonly dir: string | undefined;
 	readonly below: DirectoryStack | undefined;
 }
 
 /** Where the shell is as a script runs, each `undefined` where the guard cannot tell. */
-interface ShellDirectories {
+export interface ShellDirectories {
 	readonly cwd: string | undefined;
 	/** `OLDPWD`, where `cd -` goes. */
 	readonly previous: string | undefined;
 	readonly stack: DirectoryStack | undefined;
+}
+
+/** The shell in `cwd`, with neither `OLDPWD` nor the `pushd` stack known. */
+function startingIn(cwd: string | undefined): ShellDirectories {
+	return { cwd, previous: undefined, stack: undefined };
 }
 
 /** Builtins that change the shell's directory, run on their own ({@link changeDirectory}). */
@@ -1413,20 +1434,30 @@ function negatesPipeline(words: readonly string[], quoted: readonly boolean[]): 
 }
 
 /**
- * Which commands are known to have succeeded before the next one starts, as a script runs: the
- * last command of each pipeline in the current `&&` chain, until an `||` makes earlier members
- * optional, on top of what had succeeded when the enclosing `( )` group or nested script started.
+ * Which commands are known to have succeeded before the next one starts, as a script runs. The
+ * pipelines of an and-or list run left to right, each after the status of what ran before it: after
+ * `&&` only when that succeeded, after `||` only when it failed. A pipeline after `&&` therefore runs
+ * only once the pipeline before it ran and succeeded, unless that one followed an `||` and may have
+ * been skipped; one after `||` follows a failure, which leaves only what had succeeded before the
+ * list. A pipeline's status is its last stage's, and a negated (`!`) one succeeds when that fails, so
+ * it adds nothing. A `( )` group is one stage: when it ends a pipeline that is not negated and that
+ * pipeline succeeds, its own last and-or list succeeded, and what that list leaves known holds.
  */
 class SucceededCommands {
 	/** Succeeded before the current and-or list started. */
 	#base: SucceededLink | undefined;
-	/** `#base` plus the current list's `&&` members so far. */
+	/** Known to have succeeded when the current pipeline starts. */
 	#chain: SucceededLink | undefined;
-	/** An `||` in the current list: what follows may run without its earlier members. */
-	#optional = false;
-	/** The last pipeline's last command, until the operator after it says whether it counts. */
-	#last: ShellCommand | undefined;
-	readonly #groups: { base: SucceededLink | undefined; chain: SucceededLink | undefined; optional: boolean }[] = [];
+	/** The current pipeline follows an `||`: it may not have run. */
+	#afterOr = false;
+	/** What the pipeline that just ended leaves known if it ran and succeeded, until the operator after it says. */
+	#ended: SucceededLink | undefined;
+	readonly #groups: {
+		base: SucceededLink | undefined;
+		chain: SucceededLink | undefined;
+		afterOr: boolean;
+		negated: boolean;
+	}[] = [];
 
 	constructor(initial: SucceededLink | undefined) {
 		this.#base = initial;
@@ -1434,43 +1465,62 @@ class SucceededCommands {
 	}
 
 	get current(): SucceededLink | undefined {
-		return this.#optional ? this.#base : this.#chain;
+		return this.#chain;
 	}
 
 	/**
-	 * A pipeline ended. Its status is its last command's, so only that one counts; a negated (`!`)
-	 * pipeline succeeds when its commands fail, so it counts as none.
+	 * A pipeline ended, `last` the command of its last stage; a negated one counts as none. A command
+	 * that is only redirections (`) > log`, after a group) adds nothing: what was known stands.
 	 */
-	finish(pipeline: readonly ShellCommand[], negated: boolean): void {
-		this.#last = negated ? undefined : pipeline.at(-1);
+	finish(last: ShellCommand | undefined, negated: boolean): void {
+		if (negated) this.#ended = undefined;
+		else if (last && last.argv.length > 0) this.#ended = { command: last, before: this.#chain };
 	}
 
+	/** What the current pipeline starts after once the and-or list so far has succeeded, as `&&` makes it. */
+	get settled(): SucceededLink | undefined {
+		return !this.#afterOr && this.#ended ? this.#ended : this.#chain;
+	}
+
+	/** A `(` opens a group, a stage of a pipeline that is `negated` or not. */
+	open(negated: boolean): void {
+		this.#groups.push({ base: this.#base, chain: this.#chain, afterOr: this.#afterOr, negated });
+		this.#base = this.#chain;
+		this.#afterOr = false;
+		this.#ended = undefined;
+	}
+
+	/**
+	 * A `)` closes the innermost group, which leaves known what its last and-or list does if it ends
+	 * its pipeline (see {@link pipe}). Returns whether that pipeline is negated: it may go on after
+	 * the group.
+	 */
+	close(): boolean {
+		const group = this.#groups.pop();
+		if (!group) return false;
+		const settled = this.settled;
+		this.#base = group.base;
+		this.#chain = group.chain;
+		this.#afterOr = group.afterOr;
+		this.#ended = group.negated ? undefined : settled;
+		return group.negated;
+	}
+
+	/**
+	 * The operator after a pipeline stage: `|` or `|&` (the pipeline goes on, so a group that ended
+	 * before it does not give its status), `&&`, `||`, or one that ends the and-or list (`;`, a
+	 * newline, `&`, `;;`).
+	 */
 	operator(operator: string): void {
 		if (operator === "&&") {
-			if (!this.#optional && this.#last) this.#chain = { command: this.#last, before: this.#chain };
-			this.#last = undefined;
-		} else if (operator === "||") {
-			this.#optional = true;
-			this.#last = undefined;
-		} else if (operator === "(") {
-			this.#groups.push({ base: this.#base, chain: this.#chain, optional: this.#optional });
-			this.#base = this.current;
+			this.#chain = this.settled;
+			this.#afterOr = false;
+		} else if (!Object.hasOwn(SHELL_PIPES, operator)) {
+			// After `||`, or in a new list, which runs whatever the last one did.
 			this.#chain = this.#base;
-			this.#optional = false;
-			this.#last = undefined;
-		} else if (operator === ")") {
-			const group = this.#groups.pop();
-			if (!group) return;
-			// The group's last pipeline stays in `#last`, judged by the operator after `)`.
-			if (this.#optional) this.#chain = group.chain;
-			this.#optional ||= group.optional;
-			this.#base = group.base;
-		} else {
-			// `;`, a newline, `&`, `;;`: a new and-or list, which runs whatever the last one did.
-			this.#chain = this.#base;
-			this.#optional = false;
-			this.#last = undefined;
+			this.#afterOr = operator === "||";
 		}
+		this.#ended = undefined;
 	}
 }
 
@@ -1853,16 +1903,18 @@ class ShellScriptParser {
 	 * (see {@link untaken}), so a stage nested in many taken ones is not walked again for each.
 	 */
 	readonly #taken = new Map<readonly ShellCommand[], number[]>();
+	/** Where the top-level script leaves the shell, as its first reading has it (see {@link ShellScriptEnd}). */
+	end: ShellScriptEnd | undefined;
 	constructor(readonly home: string) {}
 
 	/**
-	 * The pipelines `source` runs, nested ones after the top level, with `input` upstream of it and
-	 * `succeeded` known to have succeeded before it. When a `'` in a double-quoted `${ }` makes bash
-	 * and POSIX shells read `source` differently, the commands of both readings.
+	 * The pipelines `source` runs from `from`, nested ones after the top level, with `input` upstream
+	 * of it and `succeeded` known to have succeeded before it. When a `'` in a double-quoted `${ }`
+	 * makes bash and POSIX shells read `source` differently, the commands of both readings.
 	 */
 	parse(
 		source: string,
-		cwd: string | undefined,
+		from: ShellDirectories,
 		depth: number,
 		input: ShellUpstream | undefined,
 		succeeded: SucceededLink | undefined,
@@ -1876,10 +1928,10 @@ class ShellScriptParser {
 		const outer = { bashQuotes: this.#bashQuotes, ambiguous: this.#ambiguous };
 		this.#bashQuotes = false;
 		this.#ambiguous = false;
-		const pipelines = this.#read(source, cwd, depth, input, succeeded);
+		const pipelines = this.#read(source, from, depth, input, succeeded);
 		if (this.#ambiguous && this.#budget(source, depth)) {
 			this.#bashQuotes = true;
-			append(pipelines, this.#read(source, cwd, depth, input, succeeded));
+			append(pipelines, this.#read(source, from, depth, input, succeeded));
 		}
 		this.#bashQuotes = outer.bashQuotes;
 		this.#ambiguous = outer.ambiguous;
@@ -1897,43 +1949,44 @@ class ShellScriptParser {
 
 	#read(
 		source: string,
-		cwd: string | undefined,
+		from: ShellDirectories,
 		depth: number,
 		input: ShellUpstream | undefined,
 		succeeded: SucceededLink | undefined,
 	): ShellCommand[][] {
 		const scope: ReadScope = { depth, subs: new Map() };
-		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope, cwd, input, succeeded);
+		return this.#pipelines(this.#tokens(source, 0, scope, true, false).tokens, scope, from, input, succeeded);
 	}
 
 	/**
-	 * The commands `substitution` runs from `cwd` with `input`, after `succeeded`, parsed the first
+	 * The commands `substitution` runs from `from` with `input`, after `succeeded`, parsed the first
 	 * time it is asked for.
 	 */
 	#substitute(
 		substitution: Substitution,
-		cwd: string | undefined,
+		from: ShellDirectories,
 		input: ShellUpstream | undefined,
 		succeeded: SucceededLink | undefined,
 	): ShellCommand[][] {
-		substitution.pipelines ??= substitution.read(cwd, input, succeeded);
+		substitution.pipelines ??= substitution.read(from, input, succeeded);
 		return substitution.pipelines;
 	}
 
 	/**
-	 * The pipelines `tokens`, read in `scope`, run from `start` with `input` upstream of them and
-	 * `succeeded` known to have succeeded before them, nested ones after the top level. Neither
-	 * `OLDPWD` nor the `pushd` stack is known at the start.
+	 * The pipelines `tokens`, read in `scope`, run from `from` with `input` upstream of them and
+	 * `succeeded` known to have succeeded before them, nested ones after the top level. At the top
+	 * level, also records in {@link end} where the script leaves the shell for a command after an
+	 * `&&` that follows it.
 	 */
 	#pipelines(
 		tokens: readonly ShellScriptToken[],
 		scope: ReadScope,
-		start: string | undefined,
+		from: ShellDirectories,
 		input: ShellUpstream | undefined,
 		succeeded: SucceededLink | undefined,
 	): ShellCommand[][] {
 		const { depth, subs } = scope;
-		let dirs: ShellDirectories = { cwd: start, previous: undefined, stack: undefined };
+		let dirs = from;
 		// A `( )` subshell's `cd` ends with the group: the directories are restored at its `)`.
 		const subshellDirs: ShellDirectories[] = [];
 		const pipelines: ShellCommand[][] = [];
@@ -1953,6 +2006,7 @@ class ShellScriptParser {
 			return command;
 		});
 		let pipeline: ShellCommand[] = [];
+		// Whether the pipeline being read is negated; a `( )` group in it keeps that until its `)`.
 		let negated = false;
 		for (const [index, segment] of segments.entries()) {
 			if (pipeline.length === 0 && negatesPipeline(segment.words, segment.quoted)) negated = true;
@@ -1965,24 +2019,36 @@ class ShellScriptParser {
 				stages.add(command);
 			}
 			stages.operator(segment.operator);
-			if (Object.hasOwn(SHELL_PIPES, segment.operator)) continue;
+			if (Object.hasOwn(SHELL_PIPES, segment.operator)) {
+				done.operator(segment.operator);
+				continue;
+			}
 			if (pipeline.length > 0) {
 				pipelines.push(pipeline);
 				const only = pipeline.length === 1 ? pipeline[0] : undefined;
 				if (only && Object.hasOwn(DIRECTORY_CHANGERS, only.argv[0])) dirs = changeDirectory(only, dirs, this.home);
-				done.finish(pipeline, negated);
+				done.finish(pipeline.at(-1), negated);
 				pipeline = [];
+			}
+			if (segment.operator === "(") {
+				done.open(negated);
+				negated = false;
+				subshellDirs.push(dirs);
+			} else if (segment.operator === ")") {
+				negated = done.close();
+				dirs = subshellDirs.pop() ?? dirs;
+			} else {
+				// The text's last segment ends with no operator: what holds there is what an `&&` after it sees.
+				if (depth === 0 && index === segments.length - 1) this.end ??= { dirs, succeeded: done.settled };
+				done.operator(segment.operator);
 				negated = false;
 			}
-			done.operator(segment.operator);
-			if (segment.operator === "(") subshellDirs.push(dirs);
-			else if (segment.operator === ")") dirs = subshellDirs.pop() ?? dirs;
 		}
 		// A substitution no command took (one in a heredoc delimiter) is read from where the script starts.
 		return [
 			...pipelines,
 			...nested,
-			...[...subs.values()].flatMap(sub => this.#substitute(sub, start, input, succeeded)),
+			...[...subs.values()].flatMap(sub => this.#substitute(sub, from, input, succeeded)),
 		];
 	}
 
@@ -2015,7 +2081,7 @@ class ShellScriptParser {
 		sources.push(command);
 		for (const source of sources) {
 			for (const text of this.#passed.get(source) ?? []) {
-				append(nested, this.parse(text, cwd, depth + 1, undefined, succeeded));
+				append(nested, this.parse(text, startingIn(cwd), depth + 1, undefined, succeeded));
 			}
 			this.#passed.delete(source);
 		}
@@ -2411,7 +2477,7 @@ class ShellScriptParser {
 			let end = start + 1;
 			while (end < text.length && text[end] !== "`") end += text[end] === "\\" ? 2 : 1;
 			const body = text.slice(start + 1, end).replace(quoted ? QUOTED_BACKTICK_ESCAPE_RE : BACKTICK_ESCAPE_RE, "$1");
-			scope.subs.set(key, { read: (cwd, input, succeeded) => this.parse(body, cwd, depth, input, succeeded) });
+			scope.subs.set(key, { read: (from, input, succeeded) => this.parse(body, from, depth, input, succeeded) });
 			return { key, after: end + 1 };
 		}
 		if (depth > SHELL_SCRIPT_MAX_DEPTH) {
@@ -2424,8 +2490,8 @@ class ShellScriptParser {
 		// commands either way, but a `<<` in it is never a heredoc.
 		const { tokens, end } = this.#tokens(text, start + 2, inner, !text.startsWith("$((", start), true);
 		this.scripts.push(text.slice(start + 2, end));
-		const read: Substitution["read"] = (cwd, input, succeeded) =>
-			this.#pipelines(tokens, inner, cwd, input, succeeded);
+		const read: Substitution["read"] = (from, input, succeeded) =>
+			this.#pipelines(tokens, inner, from, input, succeeded);
 		scope.subs.set(key, text[start] === ">" ? { read, output: true } : { read });
 		return { key, after: end + 1 };
 	}
@@ -2579,12 +2645,16 @@ class ShellScriptParser {
 				const input = sub.output
 					? (output ??= { commands: [command], from: 0, to: 1, before: upstream })
 					: upstream;
-				for (const pipeline of this.#substitute(sub, cwd, input, succeeded)) append(command.subs, pipeline);
+				for (const pipeline of this.#substitute(sub, startingIn(cwd), input, succeeded)) {
+					append(command.subs, pipeline);
+				}
 			}
 		}
 		if (!runs) return undefined;
 		const script = argv.length > 0 ? inlineShellScript(argv) : undefined;
-		if (script !== undefined) append(nested, this.parse(script, command.cwd, depth + 1, undefined, succeeded));
+		if (script !== undefined) {
+			append(nested, this.parse(script, startingIn(command.cwd), depth + 1, undefined, succeeded));
+		}
 		if (Object.hasOwn(SCRIPT_SHELLS, argv[0]) && shellScriptSource(argv) === "stdin") {
 			this.#feedShell(command, depth, nested);
 		}
@@ -2609,6 +2679,7 @@ class ShellScriptParser {
  */
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);
-	const pipelines = parser.parse(command, scope.cwd, 0, undefined, undefined);
-	return { pipelines, scripts: parser.scripts, truncated: parser.truncated };
+	const { after } = scope;
+	const pipelines = parser.parse(command, after?.dirs ?? startingIn(scope.cwd), 0, undefined, after?.succeeded);
+	return { pipelines, scripts: parser.scripts, truncated: parser.truncated, end: parser.end };
 }

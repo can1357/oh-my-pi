@@ -2,13 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, ToolApprovalDecision, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { clearGuardProbeCache } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
@@ -163,10 +162,7 @@ describe("discard_changes", () => {
 			.cwd(repo)
 			.quiet();
 	});
-	afterEach(() => {
-		clearGuardProbeCache();
-		temp.removeSync();
-	});
+	afterEach(() => temp.removeSync());
 
 	const discarding = [
 		"git reset --hard",
@@ -199,7 +195,6 @@ describe("discard_changes", () => {
 	it("flags git clean only when it would delete untracked files", () => {
 		expect(bashApproval(repo, "git clean -f")).toBe("exec");
 		fs.writeFileSync(path.join(repo, "scratch.txt"), "x\n");
-		clearGuardProbeCache();
 		expect(ruleOf(bashApproval(repo, "git clean -f"))).toBe("discard_changes");
 		// An untracked file survives `reset --hard`, so that stays allowed.
 		expect(bashApproval(repo, "git reset --hard")).toBe("exec");
@@ -217,7 +212,6 @@ describe("discard_changes", () => {
 		expect(ruleOf(bashApproval(repo, "cd docs && git reset --hard"))).toBe("discard_changes");
 		// A staged change stays in the index, which these restore the work tree from.
 		await $`git add a.txt`.cwd(repo).quiet();
-		clearGuardProbeCache();
 		for (const command of ["git checkout .", "git checkout -- .", "git restore ."]) {
 			expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
 		}
@@ -287,7 +281,6 @@ describe("discard_changes", () => {
 			expect(bashApproval(repo, "git reset --hard")).toBe("exec");
 			// Without its filter, a file the filter handles counts as changed when its size changed.
 			fs.writeFileSync(path.join(repo, "a.txt"), "changed\n");
-			clearGuardProbeCache();
 			expect(ruleOf(bashApproval(repo, "git reset --hard"))).toBe("discard_changes");
 			expect(fs.existsSync(marker)).toBe(false);
 		} finally {
@@ -295,20 +288,36 @@ describe("discard_changes", () => {
 		}
 	});
 
-	it("ignores an ambient GIT_DIR that points at another repository", async () => {
-		const other = TempDir.createSync("@omp-guard-other-");
-		const previous = Bun.env.GIT_DIR;
-		try {
-			await $`git init -q`.cwd(other.path()).quiet();
-			fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
-			Bun.env.GIT_DIR = path.join(other.path(), ".git");
-			expect(ruleOf(bashApproval(repo, "git reset --hard"))).toBe("discard_changes");
-		} finally {
-			if (previous === undefined) delete Bun.env.GIT_DIR;
-			else Bun.env.GIT_DIR = previous;
-			other.removeSync();
-		}
-	});
+	it.skipIf(process.platform === "win32")(
+		"ignores the GIT_* variables omp inherits, such as a GIT_DIR naming another repository",
+		async () => {
+			const other = TempDir.createSync("@omp-guard-other-");
+			try {
+				await $`git init -q`.cwd(other.path()).quiet();
+				const marker = path.join(other.path(), "marker");
+				fs.writeFileSync(path.join(repo, ".gitattributes"), "a.txt filter=evil\n");
+				fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+				// A real process environment: `Bun.env` does not reach the variables native code passes on.
+				const script = `import { discardsWorkSync } from "@oh-my-pi/pi-natives/vcs"; console.log(discardsWorkSync(${JSON.stringify(repo)}, {}, 3000));`;
+				const child = Bun.spawnSync([process.execPath, "-e", script], {
+					cwd: import.meta.dir,
+					env: {
+						...Bun.env,
+						GIT_DIR: path.join(other.path(), ".git"),
+						// Outranks the `GIT_CONFIG_COUNT` blanking: only dropping every inherited GIT_* keeps it out.
+						GIT_CONFIG_PARAMETERS: `'filter.evil.clean'='touch ${marker}; cat'`,
+					},
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				// The clean repository GIT_DIR names would answer `false`; the session's is dirty.
+				expect(child.stdout.toString().trim()).toBe("true");
+				expect(fs.existsSync(marker)).toBe(false);
+			} finally {
+				other.removeSync();
+			}
+		},
+	);
 });
 
 describe.skipIf(process.platform === "win32")("kills_harness", () => {
@@ -316,8 +325,6 @@ describe.skipIf(process.platform === "win32")("kills_harness", () => {
 	// probe never lists it there, as the `pkill` would spare it. `killall` probes ask with `-a`.
 	const bsd = process.platform === "darwin" || process.platform === "freebsd";
 	const ownName = path.basename(process.execPath).slice(0, 15);
-	beforeEach(() => clearGuardProbeCache());
-	afterEach(() => clearGuardProbeCache());
 
 	it("flags killall only when pgrep lists this process or an ancestor", () => {
 		const cwd = process.cwd();
@@ -345,21 +352,22 @@ describe.skipIf(process.platform === "win32")("kills_harness", () => {
 		expect(bashApproval(process.cwd(), "killall /nonexistent/omp-guard-no-such-process")).toBe("exec");
 	});
 
-	it("probes once per call across approval paths and skips probes when yolo ignores the result", () => {
+	it("probes once per tool call across its approval paths and skips probes when yolo ignores the result", () => {
 		const cwd = process.cwd();
 		const command = `killall ${ownName}`;
 		const spawn = spyOn(Bun, "spawnSync");
 		try {
 			const tool = new BashTool(createSession(cwd));
-			const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
-			expect(ruleOf(approval({ command }))).toBe("kills_harness");
+			const approval = tool.approval as (args: unknown, ctx?: AgentToolContext) => ToolApprovalDecision;
+			const ctx = {
+				toolCall: { batchId: "b", index: 0, total: 1, toolCalls: [] } as ToolCallContext,
+			} as AgentToolContext;
+			expect(ruleOf(approval({ command }, ctx))).toBe("kills_harness");
 			const probes = spawn.mock.calls.length;
 			expect(probes).toBeGreaterThan(0);
-			approval({ command });
-			tool.formatApprovalDetails({ command });
+			approval({ command }, ctx);
 			expect(spawn.mock.calls.length).toBe(probes);
 
-			clearGuardProbeCache();
 			spawn.mockClear();
 			expect(bashApproval(cwd, command, {}, { "tools.approvalMode": "yolo" })).toBe("exec");
 			expect(spawn).not.toHaveBeenCalled();

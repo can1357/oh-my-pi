@@ -56,16 +56,19 @@ import {
 	extractLiteralAndChainSegments,
 	isShellEnvironmentAssignment,
 	type LiteralShellCommandSegment,
+	type ShellScriptEnd,
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
 import {
 	CRITICAL_BASH_PATTERNS,
 	CRITICAL_PATTERN_REASON,
+	checkShellGuard,
 	findShellGuardHit,
 	type GuardHit,
 	GuardProbeBudget,
 	type GuardScope,
+	type ShellGuardOptions,
 } from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -664,7 +667,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
 		}
-		const guardHit = this.#guardHit(command, input.cwd, probe);
+		const guardHit = this.#guardHit(command, input.cwd, { probe, toolCall: ctx?.toolCall });
 		const criticalCommand = guardHit !== undefined;
 		const criticalDecision: ToolApprovalDecision = {
 			tier: "exec",
@@ -689,9 +692,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * The fixed rule `command` breaks. With `tools.guardRules` off, a critical pattern matched against
 	 * the raw command line; on, every guard rule, through shell nesting.
 	 */
-	#guardHit(command: string, cwd: unknown, probe: boolean, budget?: GuardProbeBudget): GuardHit | undefined {
+	#guardHit(command: string, cwd: unknown, options: ShellGuardOptions): GuardHit | undefined {
 		if (cfgToolsGuardRules.get(this.session.settings)) {
-			return findShellGuardHit(command, this.#guardScope(cwd), { probe, budget });
+			return findShellGuardHit(command, this.#guardScope(cwd), options);
 		}
 		return command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command))
 			? { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON }
@@ -760,15 +763,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		// The segments and the whole chain are checks for one call: their probes share one budget.
 		const budget = new GuardProbeBudget();
+		const guardRules = cfgToolsGuardRules.get(this.session.settings);
+		const scope = this.#guardScope(cwd);
+		// Each segment is checked where the ones before it leave the shell (after their `cd`s, with
+		// their `git stash`es known to have succeeded), as the whole chain checks it.
+		let after: ShellScriptEnd | undefined;
 		const segmentHits = segments.map((segment): GuardHit | undefined => {
+			const check = guardRules ? checkShellGuard(segment.text, scope, { budget, after }) : undefined;
+			after = check?.end;
 			const literalCommand = segment.literal?.argv.join(" ");
 			if (literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
 				return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
 			}
-			return this.#guardHit(segment.text, cwd, true, budget);
+			return check ? check.hit : this.#guardHit(segment.text, cwd, { budget });
 		});
 		const wholeChainOnlyCritical =
-			this.#guardHit(command, cwd, true, budget) !== undefined && !segmentHits.some(hit => hit !== undefined);
+			this.#guardHit(command, cwd, { budget }) !== undefined && !segmentHits.some(hit => hit !== undefined);
 		if (wholeChainOnlyCritical) return null;
 
 		let chainUntainted = true;

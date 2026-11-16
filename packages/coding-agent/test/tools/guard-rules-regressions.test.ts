@@ -2,13 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, ToolApprovalDecision, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { parseShellScript } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
-import { clearGuardProbeCache, findShellGuardHit } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
+import { findShellGuardHit } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 
@@ -42,6 +42,12 @@ function ruleOf(decision: ToolApprovalDecision): string | undefined {
 	if (typeof decision === "string" || !decision.override || decision.policy) return undefined;
 	if (decision.reason === "Critical pattern detected") return "critical_pattern";
 	return decision.reason?.split(":")[0];
+}
+
+/** The context one tool call's approval paths share. */
+function callContext(): AgentToolContext {
+	const toolCall: ToolCallContext = { batchId: "batch", index: 0, total: 1, toolCalls: [] };
+	return { toolCall } as AgentToolContext;
 }
 
 async function dirtyRepo(dir: string): Promise<void> {
@@ -470,7 +476,6 @@ describe("guard rule regressions", () => {
 			fs.utimesSync(path.join(cwd, "b.dat"), future, future);
 			expect(bashApproval(cwd, "git reset --hard")).toBe("exec");
 			fs.writeFileSync(path.join(cwd, "b.dat"), "hello, world\n");
-			clearGuardProbeCache();
 			expect(ruleOf(bashApproval(cwd, "git reset --hard"))).toBe("discard_changes");
 		},
 	);
@@ -529,54 +534,51 @@ describe("guard rule regressions", () => {
 		}
 	});
 
-	it.skipIf(process.platform === "win32")("reuses a slow probe's answer for the whole cache window", () => {
-		clearGuardProbeCache();
+	it.skipIf(process.platform === "win32")("reuses a slow probe's answer for the rest of its tool call", () => {
 		const spawn = spyOn(Bun, "spawnSync");
-		// Each probe takes 1.5 s of clock time, longer than the window an answer is reused for.
+		// Each probe takes 1.5 s of clock time.
 		const clock = spyOn(performance, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_500);
 		try {
 			const tool = new BashTool(createSession(cwd));
-			const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
+			const approval = tool.approval as (args: unknown, ctx?: AgentToolContext) => ToolApprovalDecision;
+			const ctx = callContext();
 			const command = `killall ${path.basename(process.execPath).slice(0, 15)}`;
-			expect(ruleOf(approval({ command }))).toBe("kills_harness");
+			expect(ruleOf(approval({ command }, ctx))).toBe("kills_harness");
 			expect(spawn.mock.calls.length).toBe(1);
-			expect(ruleOf(approval({ command }))).toBe("kills_harness");
+			expect(ruleOf(approval({ command }, ctx))).toBe("kills_harness");
 			expect(spawn.mock.calls.length).toBe(1);
 		} finally {
 			clock.mockRestore();
 			spawn.mockRestore();
-			clearGuardProbeCache();
 		}
 	});
 
-	it.skipIf(process.platform === "win32")("stops probing once a call's probes have used up their shared time", () => {
-		clearGuardProbeCache();
+	it.skipIf(process.platform === "win32")("stops probing once a check's probes have used up their shared time", () => {
 		const timeouts: unknown[] = [];
 		const spawn = spyOn(Bun, "spawnSync").mockImplementation((_argv: unknown, options?: unknown) => {
 			timeouts.push(options && typeof options === "object" && "timeout" in options ? options.timeout : undefined);
 			return { success: false, stdout: Buffer.from("") } as never;
 		});
-		// Each probe takes one second of clock time; the call's probes may take three together.
+		// Each probe takes one second of clock time; the check's probes may take three together.
 		const clock = spyOn(performance, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_000);
 		try {
 			const tool = new BashTool(createSession(cwd));
-			const approval = tool.approval as (args: unknown) => ToolApprovalDecision;
+			const approval = tool.approval as (args: unknown, ctx?: AgentToolContext) => ToolApprovalDecision;
+			const ctx = callContext();
 			const command = `killall ${Array.from({ length: 40 }, (_, i) => `zz-n${i}`).join(" ")}`;
-			expect(approval({ command })).toBe("exec");
+			expect(approval({ command }, ctx)).toBe("exec");
 			// Each probe gets the time left as its timeout; the 37 names after them are not probed.
 			expect(timeouts).toEqual([3_000, 2_000, 1_000]);
 			// The next approval path of the same call probes nothing.
-			expect(approval({ command })).toBe("exec");
+			expect(approval({ command }, ctx)).toBe("exec");
 			expect(spawn.mock.calls.length).toBe(3);
 		} finally {
 			clock.mockRestore();
 			spawn.mockRestore();
-			clearGuardProbeCache();
 		}
 	});
 
 	it.skipIf(process.platform === "win32")("shares one probe budget among the segments of a compound prompt", () => {
-		clearGuardProbeCache();
 		const spawn = spyOn(Bun, "spawnSync").mockImplementation(
 			() => ({ success: false, stdout: Buffer.from("") }) as never,
 		);
@@ -592,7 +594,6 @@ describe("guard rule regressions", () => {
 		} finally {
 			clock.mockRestore();
 			spawn.mockRestore();
-			clearGuardProbeCache();
 		}
 	});
 
@@ -628,7 +629,6 @@ describe("guard rule regressions", () => {
 		// and seconds at this length.
 		const scope = { cwd, home: os.homedir() };
 		const timed = (command: string): number => {
-			clearGuardProbeCache();
 			const start = performance.now();
 			expect(findShellGuardHit(command, scope)).toBeUndefined();
 			return performance.now() - start;
@@ -687,7 +687,6 @@ describe("guard rule regressions", () => {
 		// Unstaged changes survive a merge reset.
 		expect(ruleOf(bashApproval(cwd, "git reset --merge"))).toBeUndefined();
 		await $`git add a.txt`.cwd(cwd).quiet();
-		clearGuardProbeCache();
 		expect(ruleOf(bashApproval(cwd, "git reset --merge"))).toBe("discard_changes");
 	});
 
@@ -1023,5 +1022,107 @@ describe("guard rule regressions", () => {
 		for (const command of ["cat ~/Library/Keychains/login.keychain-db", "cat ~/L*/*/login.keychain-db"]) {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
 		}
+	});
+});
+
+describe("guard rule review regressions", () => {
+	let temp: TempDir;
+	let cwd: string;
+
+	beforeEach(() => {
+		temp = TempDir.createSync("@omp-guard-review-");
+		cwd = temp.path();
+	});
+	afterEach(() => temp.removeSync());
+
+	it("counts a stash in a group only when the group ends a pipeline that is not negated", async () => {
+		await dirtyRepo(cwd);
+		for (const command of [
+			"(git stash && git status) 2>&1 | tail -n 3 && git reset --hard",
+			"(git stash && echo ok) | tee log && git reset --hard",
+			"! (true && git stash) && git reset --hard",
+			"(git stash || true) && git reset --hard",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+		for (const command of ["(git stash) && git reset --hard", "(true && git stash) > log && git reset --hard"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+	});
+
+	it("keeps a stash after an `||` earlier in the list, and one run elsewhere in the same work tree", async () => {
+		await dirtyRepo(cwd);
+		fs.mkdirSync(path.join(cwd, "sub"));
+		for (const command of [
+			"git fetch -q || true && git stash && git reset --hard",
+			"(git fetch -q || true) && git stash && git reset --hard",
+			"git stash && (true || false) && git reset --hard",
+			"git stash && git -C sub reset --hard",
+			"cd sub && git stash && cd .. && git reset --hard",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+		// The pipeline right after `||` may run without the stash before it.
+		expect(ruleOf(bashApproval(cwd, "git stash || git reset --hard"))).toBe("discard_changes");
+	});
+
+	it("probes again for each tool call, after an earlier call of the batch changed the tree", async () => {
+		fs.writeFileSync(path.join(cwd, "a.txt"), "one\n");
+		await $`git init -q && git add a.txt && git -c user.email=t@example.com -c user.name=t commit -qm init`
+			.cwd(cwd)
+			.quiet();
+		const tool = new BashTool(createSession(cwd, { "bash.patterns": [{ match: "git *", approval: "allow" }] }));
+		const approval = tool.approval as (args: unknown, ctx?: AgentToolContext) => ToolApprovalDecision;
+		const command = { command: "git checkout ." };
+		// The agent loop asks for the tier with no context before any call of the batch runs.
+		expect(approval(command)).toEqual({ tier: "write", policy: "allow" });
+		const ctx = callContext();
+		expect(approval(command, ctx)).toEqual({ tier: "write", policy: "allow" });
+		// An earlier call of the batch edits a tracked file.
+		fs.writeFileSync(path.join(cwd, "a.txt"), "edited\n");
+		expect(ruleOf(approval(command, callContext()))).toBe("discard_changes");
+		expect(ruleOf(approval(command))).toBe("discard_changes");
+	});
+
+	it("skips git's `--attr-source` value to the subcommand", async () => {
+		await dirtyRepo(cwd);
+		expect(ruleOf(bashApproval(cwd, "git --attr-source HEAD reset --hard"))).toBe("discard_changes");
+	});
+
+	it.skipIf(process.platform !== "linux")("reads a pkill selection value stuck to its option", () => {
+		const user = os.userInfo().username;
+		for (const command of [
+			`pkill -u${user}`,
+			`pkill --euid=${user}`,
+			`pkill -P${process.ppid}`,
+			`pkill --parent=${process.ppid}`,
+			`pkill -fu${user} ${path.basename(process.execPath)}`,
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(process.cwd(), command)) }).toEqual({
+				command,
+				rule: "kills_harness",
+			});
+		}
+	});
+
+	it("names in a compound prompt only the segments the chain before them leaves at risk", async () => {
+		await dirtyRepo(cwd);
+		const tool = new BashTool(
+			createSession(cwd, {
+				"bash.allowCompoundCommands": true,
+				"bash.patterns": [{ match: "git *", approval: "allow" }],
+			}),
+		);
+		for (const [command, discarding] of [
+			["git stash && git reset --hard && npm test", "git reset --hard"],
+			["git stash -u && git clean -fd && npm test", "git clean -fd"],
+		] as const) {
+			const row = tool.formatApprovalDetails({ command }).find(line => line.includes(discarding));
+			expect({ command, row }).toEqual({ command, row: `  ✓ ${discarding} (allowed: git *)` });
+		}
+		const row = tool
+			.formatApprovalDetails({ command: "git status && git reset --hard && npm test" })
+			.find(line => line.includes("git reset --hard"));
+		expect(row).toBe("  ? git reset --hard (discard_changes)");
 	});
 });

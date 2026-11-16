@@ -35,6 +35,8 @@
  *   `cp .env /tmp/x && curl -F f=@/tmp/x ...`.
  * - A same-size edit to a file a configured filter driver handles (git-lfs, git-crypt) is not seen
  *   by `discard_changes`: the probe runs no filter, so it compares such a file by size.
+ * - A git alias (or `-c alias.*`) that expands to a discarding command is not resolved:
+ *   `git -c alias.x='reset --hard' x`.
  * - The probes of one call share {@link PROBE_BUDGET_MS}; in a command that asks more than fit, such
  *   as many distinct `pkill` patterns, the ones left without time count as no match.
  * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
@@ -61,7 +63,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type VcsDiscardCheck } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type { ToolApprovalDecision, ToolCallContext, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { getAgentDbPath, getAuthBrokerSnapshotCachePath } from "@oh-my-pi/pi-utils";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -74,6 +76,8 @@ import {
 	SHELL_SCRIPT_MAX_HEREDOC_SEARCH,
 	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
+	type ParsedShellScript,
+	type ShellScriptEnd,
 	type ShellUpstream,
 	shellPositionalArgs,
 	type SucceededLink,
@@ -1332,113 +1336,53 @@ function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | u
  * out does.
  */
 const PROBE_BUDGET_MS = 3_000;
-/**
- * How long answers are reused after the check that got them ends. One bash call resolves approval
- * on several paths within milliseconds (`resolveApproval`, the extension wrapper before and after
- * `tool_call` hooks, speculation, the approval prompt details), and a compound prompt asks the same
- * question per segment; each must see the first check's answers, not probe again. Kept short so a
- * later call, after the agent has changed the tree, probes again.
- */
-const PROBE_CACHE_TTL_MS = 1_000;
-const PROBE_CACHE_MAX = 64;
-
-/**
- * Answers kept for {@link PROBE_CACHE_TTL_MS}, the oldest dropped past {@link PROBE_CACHE_MAX}. Ages
- * come from the monotonic clock: a wall clock stepped back must not keep an answer alive.
- */
-class AnswerCache<T> {
-	readonly #entries = new Map<string, { at: number; answer: T }>();
-
-	/** The answer kept for `key`, boxed so that a kept `undefined` counts, or `undefined` when none is fresh. */
-	get(key: string, now: number): { answer: T } | undefined {
-		const entry = this.#entries.get(key);
-		return entry && now - entry.at < PROBE_CACHE_TTL_MS ? entry : undefined;
-	}
-
-	/** Keeps `answer` for `key`, its window starting at `now`. */
-	set(key: string, answer: T, now: number): void {
-		this.#entries.delete(key);
-		this.#entries.set(key, { at: now, answer });
-		for (const [oldest, entry] of this.#entries) {
-			if (this.#entries.size <= PROBE_CACHE_MAX && now - entry.at < PROBE_CACHE_TTL_MS) break;
-			this.#entries.delete(oldest);
-		}
-	}
-
-	clear(): void {
-		this.#entries.clear();
-	}
-}
 
 type ProbeAnswer = string | boolean | undefined;
 
-/** Each probe's answer, by probe. */
-const probeAnswers = new AnswerCache<ProbeAnswer>();
-/** What the probing rules found for a command, by command and scope. */
-const checkResults = new AnswerCache<GuardHit | undefined>();
-
-/** Forgets every memoized probe answer; tests that change a repository between calls use it. */
-export function clearGuardProbeCache(): void {
-	probeAnswers.clear();
-	checkResults.clear();
-}
-
 /**
- * The time the probes of one bash call may take ({@link PROBE_BUDGET_MS}), counted from when it is
- * made. Each check makes its own; a caller that checks several commands for one call, such as the
- * segments of a compound prompt, passes one to all of them.
+ * The probes of the checks a caller makes together, such as the segments of a compound prompt and
+ * the whole chain: together they take at most {@link PROBE_BUDGET_MS} from when the budget is made,
+ * and each probe is asked once among them.
  */
 export class GuardProbeBudget {
-	readonly deadline = performance.now() + PROBE_BUDGET_MS;
-}
+	readonly #deadline = performance.now() + PROBE_BUDGET_MS;
+	readonly #answers: Map<string, ProbeAnswer>;
 
-/** The probes one check asks, each asked once. */
-class ProbeRun {
-	readonly #answers = new Map<string, ProbeAnswer>();
-	readonly #budget: GuardProbeBudget;
-	#asked = false;
-
-	constructor(budget: GuardProbeBudget) {
-		this.#budget = budget;
-	}
-
-	/** Whether the check asked any probe, answered or not. */
-	get asked(): boolean {
-		return this.#asked;
+	/** `answers`: what the earlier checks of the same tool call got, shared with them. */
+	constructor(answers = new Map<string, ProbeAnswer>()) {
+		this.#answers = answers;
 	}
 
 	/**
-	 * The answer to the probe `key`: a fresh kept one, else `run`'s, which gets the budget left as its
-	 * timeout. With no budget left it does not run and answers `undefined`, which is not kept, so a
-	 * later call with time left asks it. A probe that throws answers `undefined`.
+	 * The answer to the probe `key`: a kept one, else `run`'s, which gets the time left as its
+	 * timeout. With no time left it does not run and answers `undefined`, which is not kept, so a
+	 * later check with time of its own asks it. A probe that throws answers `undefined`.
 	 */
 	ask(key: string, run: (timeoutMs: number) => ProbeAnswer): ProbeAnswer {
-		this.#asked = true;
 		if (this.#answers.has(key)) return this.#answers.get(key);
-		const now = performance.now();
-		const kept = probeAnswers.get(key, now);
+		const left = this.#deadline - performance.now();
+		if (left <= 0) return undefined;
 		let answer: ProbeAnswer;
-		if (kept) {
-			answer = kept.answer;
-		} else {
-			const left = this.#budget.deadline - now;
-			if (left <= 0) return undefined;
-			try {
-				answer = run(Math.ceil(left));
-			} catch {
-				answer = undefined;
-			}
+		try {
+			answer = run(Math.ceil(left));
+		} catch {
+			answer = undefined;
 		}
 		this.#answers.set(key, answer);
 		return answer;
 	}
-
-	/** Keeps every answer the check used, from when it ends, for the checks after it. */
-	finish(): void {
-		const now = performance.now();
-		for (const [key, answer] of this.#answers) probeAnswers.set(key, answer, now);
-	}
 }
+
+/**
+ * What the checks for each tool call found: each probe's answer, and what the probing rules found
+ * for a command, by scope and command. The call's approval paths (the ACP permission gate, the
+ * extension wrapper before and after `tool_call` hooks) thus check a command once. Never shared
+ * across calls: an earlier call of the same batch may change the tree before a later call's gate.
+ */
+const callChecks = new WeakMap<
+	ToolCallContext,
+	{ answers: Map<string, ProbeAnswer>; results: Map<string, GuardHit | undefined> }
+>();
 
 // -- discard_changes ---------------------------------------------------------------------------------
 
@@ -1448,6 +1392,7 @@ const GIT_VALUE_OPTIONS: Record<string, true> = {
 	"--namespace": true,
 	"--exec-path": true,
 	"--config-env": true,
+	"--attr-source": true,
 };
 const MASS_PATHSPECS: Record<string, true> = { ".": true, ":/": true, "*": true, ":(top)": true, "./": true };
 
@@ -1760,10 +1705,26 @@ interface StashLink {
 	link: SucceededLink;
 	/** It takes saved work back out (`pop`, `drop`, `clear`, `branch`), so no earlier stash holds anything. */
 	release: boolean;
-	/** Where it runs. */
-	target: GitTarget | undefined;
-	/** What it saves, when it saves every change to tracked files there. */
+	/** The repository and work tree it saves ({@link gitRepository}), when it saves every change to tracked files there. */
+	repository: string | undefined;
+	/** What it saves besides the tracked changes, when it saves every one of them. */
 	saved: Stashed | undefined;
+}
+
+/**
+ * The repository and work tree a git command at `target` works on, as one key, or `undefined` when
+ * it finds none. A `git stash` saves the whole work tree, whichever of its directories it runs in.
+ */
+function gitRepository(target: GitTarget | undefined): string | undefined {
+	if (!target) return undefined;
+	// With a repository named and no work tree, git takes the directory it runs in as the work tree.
+	if (target.gitDir !== undefined) return `${target.gitDir}\0${target.workTree ?? target.where}`;
+	try {
+		const info = vcs.gitInfo(target.where);
+		return info ? `${info.gitDir}\0${target.workTree ?? info.repoRoot}` : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** The `git stash` that is `link`'s command, or `undefined` when the command is no `git stash`. */
@@ -1772,7 +1733,8 @@ function stashAt(link: SucceededLink, scope: GuardScope): StashLink | undefined 
 	const { sub, rest, target } = gitInvocation(link.command, scope.home);
 	if (sub !== "stash") return undefined;
 	const release = rest.length > 0 && Object.hasOwn(STASH_RELEASES, rest[0]);
-	return { link, release, target, saved: release ? undefined : stashSaves(rest) };
+	const saved = release ? undefined : stashSaves(rest);
+	return { link, release, repository: saved && gitRepository(target), saved };
 }
 
 /** The latest `git stash` at or before each chain link looked at, `null` for none. */
@@ -1811,34 +1773,34 @@ const STASH_LOOKBACK = 64;
 
 /**
  * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its `&&`
- * chain) saved where `target` points and still hold, or `undefined` for none: what the stashes there
- * saved after the latest `pop`, `drop`, `clear` or `branch`, wherever that ran. Only stashes are
- * visited, at most {@link STASH_LOOKBACK} of them.
+ * chain) saved in the repository and work tree `target` works on and still hold, or `undefined` for
+ * none: what the stashes there saved after the latest `pop`, `drop`, `clear` or `branch`, wherever
+ * that ran. Only stashes are visited, at most {@link STASH_LOOKBACK} of them.
  */
 function stashedBefore(command: ShellCommand, target: GitTarget, scope: GuardScope): Stashed | undefined {
 	let stashed: Stashed | undefined;
 	let stash = latestStash(command.succeeded, scope);
+	// Looked up at the first stash that saved something.
+	let repository: string | undefined | null = null;
 	for (let seen = 0; stash && !stash.release && seen < STASH_LOOKBACK; seen++) {
 		const { saved } = stash;
-		if (
-			saved &&
-			stash.target?.where === target.where &&
-			stash.target.gitDir === target.gitDir &&
-			stash.target.workTree === target.workTree
-		) {
-			stashed = {
-				untracked: saved.untracked || (stashed?.untracked ?? false),
-				ignored: saved.ignored || (stashed?.ignored ?? false),
-			};
-			// An `-a` stash saved all there is.
-			if (stashed.ignored) break;
+		if (saved && stash.repository !== undefined) {
+			if (repository === null) repository = gitRepository(target);
+			if (stash.repository === repository) {
+				stashed = {
+					untracked: saved.untracked || (stashed?.untracked ?? false),
+					ignored: saved.ignored || (stashed?.ignored ?? false),
+				};
+				// An `-a` stash saved all there is.
+				if (stashed.ignored) break;
+			}
 		}
 		stash = latestStash(stash.link.before, scope);
 	}
 	return stashed;
 }
 
-function discardChanges(command: ShellCommand, scope: GuardScope, probes: ProbeRun): GuardHit | undefined {
+function discardChanges(command: ShellCommand, scope: GuardScope, probes: GuardProbeBudget): GuardHit | undefined {
 	if (command.argv[0] !== "git") return undefined;
 	const { sub, rest, target } = gitInvocation(command, scope.home);
 	const probe = discardProbe(command, scope, sub, rest);
@@ -1922,10 +1884,14 @@ function signalOption(word: string): string | undefined {
 	return SIGNAL_NAMES.has(name) || name === "EXIT" ? value : undefined;
 }
 
+/** procps `pkill` short options that take a value: the rest of their bundle, or the next word. */
+const PKILL_VALUE_LETTERS = "gGPstuUFrOq";
+
 /**
  * The selection a `pkill` gives `pgrep`: its options without the ones `pgrep` lacks or answers
  * differently. `-c` and `--count` (a count, not PIDs), `-e` and `--echo`, and `-H` go; `-q` and
- * `--queue` go with the value they take. Every other option selects what `pkill` does.
+ * `--queue` go with the value they take. Every other option selects what `pkill` does, and one that
+ * takes a value keeps it whole, stuck on (`-ucoolify`, `--parent=1`) or the next word.
  */
 function pgrepSelection(kept: readonly string[]): string[] {
 	const out: string[] = [];
@@ -1942,9 +1908,13 @@ function pgrepSelection(kept: readonly string[]): string[] {
 			let letters = "";
 			for (let k = 1; k < arg.length; k++) {
 				const letter = arg[k];
-				// `-q` takes the rest of its bundle, or the next word, as its value.
-				if (letter === "q") {
-					if (k === arg.length - 1) i++;
+				if (PKILL_VALUE_LETTERS.includes(letter)) {
+					const stuck = arg.slice(k + 1);
+					const value = stuck === "" ? kept[++i] : undefined;
+					if (letter !== "q") letters += letter + stuck;
+					if (letters.length > 0) out.push(`-${letters}`);
+					if (letter !== "q" && value !== undefined) out.push(value);
+					letters = "";
 					break;
 				}
 				if (!"cHe".includes(letter)) letters += letter;
@@ -1981,8 +1951,9 @@ function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] 
 	}
 	if (signal !== undefined && (/^0+$/.test(signal) || /^(SIG)?EXIT$/i.test(signal))) return [];
 	if (name === "pkill") {
+		// `pgrep` refuses a selection with no criterion in it, as `pkill` does.
 		const selection = pgrepSelection(kept);
-		return selection.some(arg => !arg.startsWith("-")) ? pgrepProbe(["pgrep", ...selection]) : [];
+		return selection.length > 0 ? pgrepProbe(["pgrep", ...selection]) : [];
 	}
 	const names: string[] = [];
 	let user: string | undefined;
@@ -2042,14 +2013,14 @@ function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] 
  * runs the system `pkill`, and so does a `pkill` behind a wrapper such as `sudo` or `xargs`, or in a
  * nested `bash -c`.
  */
-function killsHarness(command: ShellCommand, scope: GuardScope, probeRun: ProbeRun): GuardHit | undefined {
+function killsHarness(command: ShellCommand, scope: GuardScope, budget: GuardProbeBudget): GuardHit | undefined {
 	const name = command.argv[0];
 	if (name !== "pkill" && name !== "killall") return undefined;
 	const probes = killMatchProbes(command, scope);
 	if (probes.length === 0) return undefined;
 	const lineage = harnessLineage();
 	for (const probe of probes) {
-		const output = probeRun.ask(probe.key, probe.run);
+		const output = budget.ask(probe.key, probe.run);
 		if (typeof output !== "string") continue;
 		const matched = output
 			.split("\n")
@@ -2067,7 +2038,7 @@ function killsHarness(command: ShellCommand, scope: GuardScope, probeRun: ProbeR
 
 // -- entry points ------------------------------------------------------------------------------------
 
-/** Options for {@link findShellGuardHit}. */
+/** Options for {@link checkShellGuard}. */
 export interface ShellGuardOptions {
 	/**
 	 * Whether `discard_changes` and `kills_harness` may run their probes. Without probes those
@@ -2075,30 +2046,61 @@ export interface ShellGuardOptions {
 	 */
 	probe?: boolean;
 	/**
-	 * The probe time this check may use, shared with the other checks the caller makes for the same
-	 * call. Without one the check has its own {@link PROBE_BUDGET_MS}, and the next check of the same
-	 * command in the same scope within {@link PROBE_CACHE_TTL_MS} reuses what it found.
+	 * The probe time this check may use, shared with the other checks the caller makes together.
+	 * Without one the check has its own {@link PROBE_BUDGET_MS}.
 	 */
 	budget?: GuardProbeBudget;
+	/**
+	 * The tool call being approved. Its other approval paths reuse what this check found, and its
+	 * probe answers; no other call does. Without one, nothing is reused.
+	 */
+	toolCall?: ToolCallContext;
+	/**
+	 * Where an earlier part of the command line joined to this one by `&&` leaves the shell (the
+	 * `end` that checking that part reported), for a segment of a compound prompt: the command starts
+	 * there, after the `cd`s and `git stash`es of the part before it.
+	 */
+	after?: ShellScriptEnd;
 }
 
-/**
- * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
- * against the command and every nested script it runs; the other rules against every simple
- * command it runs. A command nested deeper than the parser follows, with more nested script text
- * than it reads, with more text to search for heredoc delimiters that never come, or with brace
- * lists that expand past {@link MAX_BRACE_TEXT} and break no rule before that, fails closed
- * (`nesting_limit`). Probing rules run only after every other rule has passed, and their probes
- * share one budget: the ones left without time count as no match.
- */
+/** What {@link checkShellGuard} found, and where the command leaves the shell. */
+export interface ShellGuardCheck {
+	hit: GuardHit | undefined;
+	/** For the next segment of a compound prompt, as its {@link ShellGuardOptions.after}. */
+	end: ShellScriptEnd | undefined;
+}
+
+/** The first fixed rule a shell command breaks, or `undefined` (see {@link checkShellGuard}). */
 export function findShellGuardHit(
 	command: string,
 	scope: GuardScope,
 	options: ShellGuardOptions = {},
 ): GuardHit | undefined {
-	if (command.trim() === "") return undefined;
+	return checkShellGuard(command, scope, options).hit;
+}
+
+/**
+ * The first fixed rule a shell command breaks, and where the command leaves the shell. Critical
+ * patterns are matched against the command and every nested script it runs; the other rules against
+ * every simple command it runs. A command nested deeper than the parser follows, with more nested
+ * script text than it reads, with more text to search for heredoc delimiters that never come, or
+ * with brace lists that expand past {@link MAX_BRACE_TEXT} and break no rule before that, fails
+ * closed (`nesting_limit`). Probing rules run only after every other rule has passed, and their
+ * probes share one budget: the ones left without time count as no match.
+ */
+export function checkShellGuard(command: string, scope: GuardScope, options: ShellGuardOptions = {}): ShellGuardCheck {
+	if (command.trim() === "") return { hit: undefined, end: options.after };
+	const parsed = parseShellScript(command, { ...scope, after: options.after });
+	return { hit: firstHit(command, parsed, scope, options), end: parsed.end };
+}
+
+function firstHit(
+	command: string,
+	{ pipelines, scripts, truncated }: ParsedShellScript,
+	scope: GuardScope,
+	options: ShellGuardOptions,
+): GuardHit | undefined {
 	braceTextLeft = MAX_BRACE_TEXT;
-	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
 	// The raw line, each nested script, and each simple command in canonical quoting: the program
 	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
 	// matches like `rm -rf /`, while an argument quoted in the source (`git commit -m "reboot"`)
@@ -2139,27 +2141,24 @@ export function findShellGuardHit(
 		);
 	}
 	if (options.probe === false) return undefined;
+	const { toolCall } = options;
+	let checks = toolCall && callChecks.get(toolCall);
+	if (toolCall && !checks) {
+		checks = { answers: new Map(), results: new Map() };
+		callChecks.set(toolCall, checks);
+	}
 	const key = `${scope.cwd}\0${scope.home}\0${command}`;
-	const known = checkResults.get(key, performance.now());
-	if (known) return known.answer;
-	const probes = new ProbeRun(options.budget ?? new GuardProbeBudget());
-	const found = probedHit(pipelines, scope, probes);
-	probes.finish();
-	// What a check found with a budget it shares may be cut short by the other checks, so only a
-	// check with its own is kept for the approval paths that check the same command after it.
-	if (!options.budget && probes.asked) checkResults.set(key, found, performance.now());
-	return found;
-}
-
-/** The first `discard_changes` or `kills_harness` hit among `pipelines`, its probes asked through `probes`. */
-function probedHit(pipelines: ShellCommand[][], scope: GuardScope, probes: ProbeRun): GuardHit | undefined {
-	for (const pipeline of pipelines) {
+	if (checks?.results.has(key)) return checks.results.get(key);
+	const budget = options.budget ?? new GuardProbeBudget(checks?.answers);
+	let found: GuardHit | undefined;
+	probing: for (const pipeline of pipelines) {
 		for (const simple of pipeline) {
-			const found = discardChanges(simple, scope, probes) ?? killsHarness(simple, scope, probes);
-			if (found) return found;
+			found = discardChanges(simple, scope, budget) ?? killsHarness(simple, scope, budget);
+			if (found) break probing;
 		}
 	}
-	return undefined;
+	checks?.results.set(key, found);
+	return found;
 }
 
 /**
