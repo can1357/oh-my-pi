@@ -22,7 +22,7 @@ import {
 	mnemopiDebugEnabled,
 	resolveEmbeddingProvider,
 } from "./runtime-options";
-import { clipToWindow, DEFAULT_INPUT_CHARS } from "./text-window";
+import { CHARS_PER_TOKEN, clipToTokenWindow, clipToWindow, DEFAULT_INPUT_CHARS, estimateTokens } from "./text-window";
 
 export type { EmbeddingOutput } from "./runtime-options";
 export { cosineSimilarity } from "./vector-math";
@@ -185,8 +185,9 @@ function effectiveMaxInputChars(): number {
 }
 
 /**
- * Clip every input to {@link effectiveMaxInputChars} so a runaway retention
- * transcript can't blow past the embedding model's context window. Uses a
+ * Clip every input to the configured character cap and to the derived token
+ * budget so a runaway retention transcript can't blow past the embedding
+ * model's context window or a llama.cpp server's physical batch. Uses a
  * head/tail split via {@link clipToWindow} so the embedding still sees the
  * tail of the conversation (where the latest topic shifts live) and not just
  * the stale prefix. Returns the original array when no input needs trimming
@@ -197,16 +198,20 @@ function effectiveMaxInputChars(): number {
  * original bug (#3126).
  */
 function capInputs(texts: readonly string[]): readonly string[] {
-	const max = effectiveMaxInputChars();
-	if (max === 0) return texts;
+	const maxChars = effectiveMaxInputChars();
+	if (maxChars === 0) return texts;
+	const maxTokens = Math.max(1, Math.floor(maxChars / CHARS_PER_TOKEN));
 	let trimmed: string[] | null = null;
 	let trimmedCount = 0;
 	let maxOriginalLen = 0;
 	for (let i = 0; i < texts.length; i++) {
 		const text = texts[i] ?? "";
-		if (text.length <= max) continue;
+		let clipped = text;
+		if (clipped.length > maxChars) clipped = clipToWindow(clipped, maxChars);
+		if (estimateTokens(clipped) > maxTokens) clipped = clipToTokenWindow(clipped, maxTokens);
+		if (clipped === text) continue;
 		if (trimmed === null) trimmed = texts.slice() as string[];
-		trimmed[i] = clipToWindow(text, max);
+		trimmed[i] = clipped;
 		trimmedCount++;
 		if (text.length > maxOriginalLen) maxOriginalLen = text.length;
 	}
@@ -215,7 +220,8 @@ function capInputs(texts: readonly string[]): readonly string[] {
 		inputCount: texts.length,
 		trimmedCount,
 		maxOriginalLen,
-		maxInputChars: max,
+		maxInputChars: maxChars,
+		maxInputTokens: maxTokens,
 	});
 	return trimmed;
 }
@@ -421,14 +427,76 @@ function reportRequestFailure(baseUrl: string, status: number | undefined, messa
 	}
 }
 
+/**
+ * Whether a provider rejected the request because the input is longer than the
+ * model/server window. llama.cpp returns 413 for an input above its physical
+ * batch; OpenAI-compatible APIs use 400 with a context-length message.
+ */
+function isContextLengthRejection(status: number, body: string): boolean {
+	if (status === 413) return true;
+	if (status !== 400) return false;
+	return /context length|maximum context|too large to process|input length .*exceed/i.test(body);
+}
+
+const CONTEXT_LIMIT_MAX_RETRIES = 16;
+
+interface EmbeddingRetryBudget {
+	remaining: number;
+}
+
+/**
+ * Outcome of a context-limit retry. `attempted: false` means no smaller request
+ * could be made, so the caller must report the rejection it just received.
+ * `attempted: true` means every request made by the retry already reported its
+ * own failure at the deepest level; the caller returns `matrix` as-is.
+ */
+interface ContextLimitRetry {
+	attempted: boolean;
+	matrix: EmbeddingMatrix | null;
+}
+
+/**
+ * Retry a context-length rejection with smaller inputs: split a batch so only
+ * the offending members are resized, then halve a single input until it fits.
+ * A provider that rejects every request still consumes the shared budget and
+ * returns null instead of recursing without bound.
+ */
+async function retryContextLimit(
+	texts: readonly string[],
+	role: EmbeddingRole,
+	budget: EmbeddingRetryBudget,
+	status: number,
+): Promise<ContextLimitRetry> {
+	if (budget.remaining <= 0) return { attempted: false, matrix: null };
+	budget.remaining -= 1;
+	if (texts.length > 1) {
+		const mid = Math.ceil(texts.length / 2);
+		const left = await embedApiBatch(texts.slice(0, mid), role, budget);
+		if (left === null) return { attempted: true, matrix: null };
+		const right = await embedApiBatch(texts.slice(mid), role, budget);
+		if (right === null) return { attempted: true, matrix: null };
+		return { attempted: true, matrix: [...left, ...right] };
+	}
+	const text = texts[0] ?? "";
+	if (text.length <= 32) return { attempted: false, matrix: null };
+	const smaller = clipToWindow(text, Math.floor(text.length / 2));
+	logger.debug("mnemopi: retrying embedding input below the provider context limit", {
+		status,
+		fromChars: text.length,
+		toChars: smaller.length,
+	});
+	return { attempted: true, matrix: await embedApiBatch([smaller], role, budget) };
+}
+
 async function embedApi(texts: readonly string[], role: EmbeddingRole): Promise<EmbeddingMatrix | null> {
 	const size = embeddingBatchSize();
+	const budget: EmbeddingRetryBudget = { remaining: CONTEXT_LIMIT_MAX_RETRIES };
 	if (texts.length <= size) {
-		return embedApiBatch(texts, role);
+		return embedApiBatch(texts, role, budget);
 	}
 	const matrix: EmbeddingMatrix = [];
 	for (let offset = 0; offset < texts.length; offset += size) {
-		const part = await embedApiBatch(texts.slice(offset, offset + size), role);
+		const part = await embedApiBatch(texts.slice(offset, offset + size), role, budget);
 		if (part === null) {
 			return null;
 		}
@@ -437,7 +505,11 @@ async function embedApi(texts: readonly string[], role: EmbeddingRole): Promise<
 	return matrix;
 }
 
-async function embedApiBatch(texts: readonly string[], role: EmbeddingRole): Promise<EmbeddingMatrix | null> {
+async function embedApiBatch(
+	texts: readonly string[],
+	role: EmbeddingRole,
+	budget: EmbeddingRetryBudget = { remaining: 0 },
+): Promise<EmbeddingMatrix | null> {
 	const baseUrl = embeddingBaseUrl();
 	const allowRemote = activeEmbeddingOptions()?.allowRemote;
 	if (allowRemote?.(baseUrl) === false) return null;
@@ -488,6 +560,10 @@ async function embedApiBatch(texts: readonly string[], role: EmbeddingRole): Pro
 		});
 		if (!response.ok) {
 			const detail = await response.text().catch(() => "");
+			if (isContextLengthRejection(response.status, detail)) {
+				const retry = await retryContextLimit(texts, role, budget, response.status);
+				if (retry.attempted) return retry.matrix;
+			}
 			logEmbeddingRejection(response.status, detail);
 			reportRequestFailure(baseUrl, response.status, detail);
 			return null;

@@ -106,14 +106,19 @@ export function embeddingsDisabled(env: Env = process.env): boolean {
  * embedding model context windows: BGE/E5 defaults are 512 tokens, bge-m3 is
  * 8192, and OpenAI's text-embedding-3-* is 8192. llama.cpp's `/embeddings`
  * server rejects oversized requests with `request (N tokens) exceeds the
- * available context size`; OpenAI silently right-truncates. Capping at the
- * source gives both backends deterministic behavior and prevents the silent
- * recall degradation we saw in issue #3126.
+ * available context size`, and an embedding server whose physical batch is
+ * smaller than the context (Ollama's `-b 2048` default) rejects the whole
+ * request with HTTP 413 as soon as one input passes 2048 tokens. OpenAI
+ * silently right-truncates. Capping at the source gives both backends
+ * deterministic behavior and prevents the silent recall degradation we saw in
+ * issue #3126.
  *
- * Default `8192` chars is intentionally conservative for 8192-token embedding
- * contexts (bge-m3, OpenAI text-embedding-3) and CJK-heavy transcripts. Raise
- * it for larger local contexts (for example Qwen3-Embedding with 32k ctx).
- * `0` disables the cap.
+ * The cap is enforced in characters and, because one character is not one
+ * token, in estimated tokens derived at `CHARS_PER_TOKEN` (4) characters per
+ * token. Default `8192` chars therefore allows ~2048 tokens: inside an
+ * 8k-token context and inside llama.cpp's 2048-token physical batch. Raise it
+ * for larger local contexts (for example Qwen3-Embedding with 32k ctx).
+ * `0` disables both caps.
  */
 export function embeddingMaxInputChars(env: Env = process.env): number {
 	return Math.max(0, envInt("MNEMOPI_EMBEDDING_MAX_INPUT_CHARS", 8192, env));

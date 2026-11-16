@@ -54,7 +54,11 @@ export interface MnemopiEmbeddingRuntimeOptions {
 	apiUrl?: string;
 	apiKey?: ApiKey;
 	provider?: MnemopiEmbeddingProvider | ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>);
-	/** Override `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS`. `0` disables the cap. See `config.embeddingMaxInputChars`. */
+	/**
+	 * Override `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS`. `0` disables the cap. The same
+	 * value derives the per-input token budget (chars / 4), so 8192 chars caps an
+	 * embedding input at ~2048 tokens. See `config.embeddingMaxInputChars`.
+	 */
 	maxInputChars?: number;
 	/** Override `MNEMOPI_EMBEDDING_BATCH_SIZE`: max texts per embedding API request. */
 	batchSize?: number;

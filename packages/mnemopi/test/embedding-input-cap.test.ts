@@ -6,6 +6,7 @@ import {
 	setEmbeddingProviderForTests,
 } from "@oh-my-pi/pi-mnemopi/core/embeddings";
 import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { estimateTokens } from "@oh-my-pi/pi-mnemopi/core/text-window";
 
 /**
  * Regression coverage for issue #3126: `MnemopiSessionState.retainMessages`
@@ -13,8 +14,8 @@ import { withMnemopiRuntimeOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-opt
  * overflow whatever ctx the embedding server was started with — llama.cpp
  * rejects oversized requests with `request (N tokens) exceeds the available
  * context size`, OpenAI silently right-truncates. `embed()` now caps each
- * input to `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS` (default 8192) before the
- * provider sees it.
+ * input to `MNEMOPI_EMBEDDING_MAX_INPUT_CHARS` (default 8192) and to the token
+ * budget derived from it (default ~2048 tokens) before the provider sees it.
  */
 function captureProvider(): {
 	embed: (texts: readonly string[]) => AsyncGenerator<number[][]>;
@@ -28,6 +29,11 @@ function captureProvider(): {
 			yield texts.map(text => [text.length]);
 		},
 	};
+}
+
+function expectWithinTokenBudget(text: string | undefined, maxTokens: number): void {
+	expect(text).toBeDefined();
+	expect(estimateTokens(text ?? "")).toBeLessThanOrEqual(maxTokens);
 }
 
 const ENV_KEY = "MNEMOPI_EMBEDDING_MAX_INPUT_CHARS";
@@ -47,7 +53,7 @@ afterEach(() => {
 });
 
 describe("embed() input cap (#3126)", () => {
-	it("truncates oversized inputs to the default cap before reaching the provider", async () => {
+	it("truncates oversized inputs to the default character and token caps", async () => {
 		const provider = captureProvider();
 		setEmbeddingProviderForTests(provider);
 
@@ -57,19 +63,36 @@ describe("embed() input cap (#3126)", () => {
 		expect(provider.calls).toHaveLength(1);
 		const [seenShort, seenHuge] = provider.calls[0] ?? [];
 		expect(seenShort).toBe("short");
-		expect(seenHuge?.length).toBe(8192);
+		expect(seenHuge?.length).toBeLessThan(8192);
+		expectWithinTokenBudget(seenHuge, 2048);
 	});
 
-	it("honors MNEMOPI_EMBEDDING_MAX_INPUT_CHARS env override", async () => {
+	it("shrinks CJK input by token estimate even when it fits the character cap", async () => {
+		const provider = captureProvider();
+		setEmbeddingProviderForTests(provider);
+
+		// 10k CJK characters are under the 8192-character cap's neighborhood but
+		// tokenize at ~1 token per character, far above the 2048-token budget.
+		const cjk = "中".repeat(10_000);
+		await withEnvValue(undefined, () => embed([cjk]));
+
+		const seen = provider.calls[0]?.[0];
+		expect(seen?.length).toBeLessThan(8192);
+		expectWithinTokenBudget(seen, 2048);
+	});
+
+	it("honors MNEMOPI_EMBEDDING_MAX_INPUT_CHARS env override in both caps", async () => {
 		const provider = captureProvider();
 		setEmbeddingProviderForTests(provider);
 
 		await withEnvValue("1024", () => embed(["y".repeat(5000)]));
 
-		expect(provider.calls[0]?.[0]?.length).toBe(1024);
+		const seen = provider.calls[0]?.[0];
+		expect(seen?.length).toBeLessThanOrEqual(1024);
+		expectWithinTokenBudget(seen, 256);
 	});
 
-	it("disables the cap when the env override is 0", async () => {
+	it("disables both caps when the env override is 0", async () => {
 		const provider = captureProvider();
 		setEmbeddingProviderForTests(provider);
 
@@ -79,7 +102,7 @@ describe("embed() input cap (#3126)", () => {
 		expect(provider.calls[0]?.[0]).toBe(huge);
 	});
 
-	it("respects a constructor-scoped maxInputChars override", async () => {
+	it("respects a constructor-scoped maxInputChars override in both caps", async () => {
 		const provider = captureProvider();
 		setEmbeddingProviderForTests(provider);
 
@@ -87,7 +110,9 @@ describe("embed() input cap (#3126)", () => {
 			withMnemopiRuntimeOptions({ embeddings: { maxInputChars: 256 } }, () => embed(["w".repeat(10_000)])),
 		);
 
-		expect(provider.calls[0]?.[0]?.length).toBe(256);
+		const seen = provider.calls[0]?.[0];
+		expect(seen?.length).toBeLessThanOrEqual(256);
+		expectWithinTokenBudget(seen, 64);
 	});
 
 	it("preserves both ends of a chronological transcript via the head/tail clip", async () => {
@@ -105,7 +130,8 @@ describe("embed() input cap (#3126)", () => {
 		await withEnvValue(undefined, () => embed([transcript]));
 
 		const seen = provider.calls[0]?.[0] ?? "";
-		expect(seen.length).toBe(8192);
+		expect(seen.length).toBeLessThanOrEqual(8192);
+		expectWithinTokenBudget(seen, 2048);
 		expect(seen.startsWith(earliest)).toBe(true);
 		expect(seen.endsWith(latest)).toBe(true);
 		expect(seen).toContain("[...]");
