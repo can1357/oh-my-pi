@@ -19,6 +19,9 @@
 
 - Fixed the macOS `computer` tool failing a click or press on an Activity Monitor process row with `StaleRef` whenever the table refreshed since `ax()` read it: the ref now follows its row when exactly one row still reads as it did in every cell, a click is refused when the app has sorted another row into its place, and the error otherwise shows the row then and now ([#19048](https://github.com/can1357/oh-my-pi/pull/19048) by [@will-bogusz](https://github.com/will-bogusz))
 - Row-ref clicks on macOS check every takeover press and deeply nested row descendants; an off-screen activation primer does not count as a target press when reporting a moved row ([#19048](https://github.com/can1357/oh-my-pi/pull/19048) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Linux `el.type` putting the agent's text into the field the user was typing in, and reporting success, while it took over the keyboard: GTK fields and Qt multi-line text edits now take printable ASCII text through accessibility, with no keys, focus change or takeover; an unfocused GTK single-line field requires an empty or fully selected value so its selection-on-focus setting cannot cause text loss. On Wayland those fields now take text instead of refusing. Other fields keep the key path, including Qt single-line fields where an accessibility write skips validation ([#19035](https://github.com/can1357/oh-my-pi/pull/19035) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 

@@ -12,7 +12,7 @@ use capture::X11Capture;
 use image::RgbaImage;
 use input::X11Input;
 
-use super::ax::{AtSpiAx, ElementFocus};
+use super::ax::{AtSpiAx, ElementFocus, TextRoute};
 use crate::desktop::{
 	ax::AxHandle,
 	backend::{AxBackend, Backend, DeliveryMode, ElementDelivery, ElementInput, PointerEvent},
@@ -188,9 +188,11 @@ impl Backend for X11Backend {
 		self.input.raise_window(window)
 	}
 
-	/// Background keys go to an element only when they reach it through its
-	/// window's keyboard: an AT-SPI focus request makes GTK and Chromium
-	/// present the window, which takes the user's focus.
+	/// Background text goes in through the element's AT-SPI text interface
+	/// first, which needs neither focus nor keys. Background keys go to an
+	/// element only when they reach it through its window's keyboard: an
+	/// AT-SPI focus request makes GTK and Chromium present the window, which
+	/// takes the user's focus.
 	fn element_input(
 		&mut self,
 		element: &AxHandle,
@@ -220,6 +222,9 @@ impl Backend for X11Backend {
 /// The steps of keyboard input addressed to an element, apart so their order
 /// is testable without an X server.
 trait ElementKeys {
+	/// Puts text in through the element's AT-SPI text interface; `Absent`
+	/// for a chord.
+	fn insert_text(&mut self) -> CoreResult<TextRoute>;
 	/// The element's focus state and the toolkit reporting it.
 	fn focus_state(&mut self) -> CoreResult<ElementFocus>;
 	/// Sends the keys to the element's window in the background.
@@ -229,15 +234,22 @@ trait ElementKeys {
 	fn send_takeover(&mut self) -> CoreResult<()>;
 }
 
-/// Background keys go out only to an element that already holds its window's
-/// keyboard focus, read without focusing anything; takeover focuses it.
+/// In the background, text the element takes through its AT-SPI text
+/// interface goes no further; otherwise keys go out only to an element that
+/// already holds its window's keyboard focus, read without focusing anything.
+/// Takeover focuses the element and sends keys.
 fn deliver_element_keys(
 	window: &str,
 	mode: DeliveryMode,
 	route: &mut impl ElementKeys,
 ) -> CoreResult<ElementDelivery> {
 	if mode == DeliveryMode::Background {
-		if let Some(refusal) = background_element_refusal(window, &route.focus_state()?) {
+		let declined = match route.insert_text()? {
+			TextRoute::Inserted => return Ok(ElementDelivery::Delivered),
+			TextRoute::Absent => None,
+			TextRoute::Declined(reason) => Some(reason),
+		};
+		if let Some(refusal) = background_element_refusal(window, &route.focus_state()?, declined) {
 			return Err(refusal);
 		}
 		route.send_background()?;
@@ -257,6 +269,14 @@ struct X11ElementKeys<'a> {
 }
 
 impl ElementKeys for X11ElementKeys<'_> {
+	fn insert_text(&mut self) -> CoreResult<TextRoute> {
+		let ElementInput::Text(text) = self.keys else {
+			return Ok(TextRoute::Absent);
+		};
+		self.token.check()?;
+		self.ax.type_text(self.element, text)
+	}
+
 	fn focus_state(&mut self) -> CoreResult<ElementFocus> {
 		self.ax.element_focus(self.element)
 	}
@@ -290,8 +310,13 @@ impl ElementKeys for X11ElementKeys<'_> {
 /// `focus`. GTK 3 reports `Focused` only for its window's focus widget
 /// (`gtkwidgetaccessible.c`); Chromium reports its page's focused node while
 /// the omnibox or another view holds the window's keyboard. A toolkit the
-/// application does not name is not trusted either.
-fn background_element_refusal(window: &str, focus: &ElementFocus) -> Option<DesktopError> {
+/// application does not name is not trusted either. `declined` says why the
+/// element's accessibility text route went unused, when it did.
+fn background_element_refusal(
+	window: &str,
+	focus: &ElementFocus,
+	declined: Option<&str>,
+) -> Option<DesktopError> {
 	let gtk3 = focus.toolkit.eq_ignore_ascii_case("gtk") && focus.version.starts_with("3.");
 	let reason = if !gtk3 {
 		let toolkit = if focus.toolkit.is_empty() {
@@ -308,8 +333,10 @@ fn background_element_refusal(window: &str, focus: &ElementFocus) -> Option<Desk
 	} else {
 		return None;
 	};
+	let declined = declined
+		.map_or_default(|why| format!("; its accessibility text route was not used, since {why}"));
 	Some(DesktopError::background_unavailable(format!(
-		"{reason}, and focusing it would bring that window to the front; no input was sent"
+		"{reason}, and focusing it would bring that window to the front{declined}; no input was sent"
 	)))
 }
 
@@ -320,6 +347,7 @@ mod tests {
 
 	/// Records which steps of an element input ran, in order.
 	struct Recorder {
+		text:    TextRoute,
 		focused: bool,
 		toolkit: &'static str,
 		version: &'static str,
@@ -327,6 +355,11 @@ mod tests {
 	}
 
 	impl ElementKeys for Recorder {
+		fn insert_text(&mut self) -> CoreResult<TextRoute> {
+			self.steps.push("insert text");
+			Ok(self.text)
+		}
+
 		fn focus_state(&mut self) -> CoreResult<ElementFocus> {
 			self.steps.push("read focus");
 			Ok(ElementFocus {
@@ -347,21 +380,126 @@ mod tests {
 		}
 	}
 
+	fn deliver_text(
+		mode: DeliveryMode,
+		text: TextRoute,
+		focused: bool,
+		toolkit: &'static str,
+		version: &'static str,
+	) -> (CoreResult<ElementDelivery>, Vec<&'static str>) {
+		let mut route = Recorder { text, focused, toolkit, version, steps: Vec::new() };
+		(deliver_element_keys("42", mode, &mut route), route.steps)
+	}
+
 	fn deliver(
 		mode: DeliveryMode,
 		focused: bool,
 		toolkit: &'static str,
 		version: &'static str,
 	) -> (CoreResult<ElementDelivery>, Vec<&'static str>) {
-		let mut route = Recorder { focused, toolkit, version, steps: Vec::new() };
-		(deliver_element_keys("42", mode, &mut route), route.steps)
+		deliver_text(mode, TextRoute::Absent, focused, toolkit, version)
+	}
+
+	#[test]
+	fn background_text_the_element_takes_needs_no_focus_and_no_keys() {
+		// Unfocused, in a toolkit whose focus is not trusted: keys would be
+		// refused, and takeover would follow.
+		let inserted = TextRoute::Inserted;
+		let (delivered, steps) =
+			deliver_text(DeliveryMode::Background, inserted, false, "Qt", "6.10.1");
+		assert!(matches!(delivered, Ok(ElementDelivery::Delivered)));
+		assert_eq!(steps, ["insert text"]);
+
+		// Takeover sends keys, as `takeover: true` asks and as the rerun after a
+		// background refusal needs: that attempt already tried the text route.
+		let (delivered, steps) =
+			deliver_text(DeliveryMode::Foreground, inserted, false, "Qt", "6.10.1");
+		assert!(matches!(delivered, Ok(ElementDelivery::Delivered)));
+		assert_eq!(steps, ["takeover keys"]);
+	}
+
+	#[test]
+	fn a_declined_text_route_is_named_in_the_refusal() {
+		let declined = TextRoute::Declined("the field would skip its validator");
+		let (delivered, steps) =
+			deliver_text(DeliveryMode::Background, declined, false, "Qt", "6.10.1");
+		let Err(error) = delivered else {
+			panic!("a declined element was sent keys")
+		};
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert!(
+			error.message.ends_with(
+				"; its accessibility text route was not used, since the field would skip its \
+				 validator; no input was sent"
+			),
+			"{}",
+			error.message
+		);
+		assert_eq!(steps, ["insert text", "read focus"]);
+	}
+
+	#[test]
+	fn a_declined_unfocused_entry_keeps_the_key_route() {
+		let declined = TextRoute::Declined("the field's selection after focusing is unknown");
+		let (delivered, steps) =
+			deliver_text(DeliveryMode::Background, declined, false, "gtk", "3.24.41");
+		let Err(error) = delivered else {
+			panic!("an unfocused entry was sent background keys")
+		};
+		assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
+		assert_eq!(steps, ["insert text", "read focus"]);
+
+		let (delivered, steps) =
+			deliver_text(DeliveryMode::Foreground, declined, false, "gtk", "3.24.41");
+		assert!(matches!(delivered, Ok(ElementDelivery::Delivered)));
+		assert_eq!(steps, ["takeover keys"]);
+	}
+
+	/// An insert that failed may still have reached the element (a timeout or
+	/// a cancel), so no keys follow it: they could type the text twice.
+	#[test]
+	fn a_failed_text_insert_sends_no_keys() {
+		struct Failing(Vec<&'static str>);
+
+		impl ElementKeys for Failing {
+			fn insert_text(&mut self) -> CoreResult<TextRoute> {
+				self.0.push("insert text");
+				Err(crate::desktop::linux::ax::not_answering())
+			}
+
+			fn focus_state(&mut self) -> CoreResult<ElementFocus> {
+				self.0.push("read focus");
+				Ok(ElementFocus {
+					focused: true,
+					toolkit: "gtk".to_owned(),
+					version: "3.24.41".to_owned(),
+				})
+			}
+
+			fn send_background(&mut self) -> CoreResult<()> {
+				self.0.push("background keys");
+				Ok(())
+			}
+
+			fn send_takeover(&mut self) -> CoreResult<()> {
+				self.0.push("takeover keys");
+				Ok(())
+			}
+		}
+
+		let mut route = Failing(Vec::new());
+		let Err(error) = deliver_element_keys("42", DeliveryMode::Background, &mut route) else {
+			panic!("keys followed a failed insert")
+		};
+		assert_eq!(error.code, ErrorCode::Timeout);
+		assert_eq!(route.0, ["insert text"]);
 	}
 
 	#[test]
 	fn background_element_keys_go_only_to_a_gtk3_window_focus_widget() {
 		let (delivered, steps) = deliver(DeliveryMode::Background, true, "gtk", "3.24.41");
 		assert!(matches!(delivered, Ok(ElementDelivery::Delivered)));
-		assert_eq!(steps, ["read focus", "background keys"]);
+		assert_eq!(steps, ["insert text", "read focus", "background keys"]);
 
 		for (focused, toolkit, version) in
 			[(false, "gtk", "3.24.41"), (true, "Chromium", "1.0"), (true, "", "")]
@@ -372,7 +510,11 @@ mod tests {
 			};
 			assert_eq!(error.code, ErrorCode::BackgroundUnavailable);
 			assert!(error.message.ends_with("; no input was sent"), "{}", error.message);
-			assert_eq!(steps, ["read focus"], "nothing focused or sent after a refusal");
+			assert_eq!(
+				steps,
+				["insert text", "read focus"],
+				"nothing focused or sent after a refusal"
+			);
 		}
 
 		for mode in [DeliveryMode::Foreground, DeliveryMode::ForegroundReturnFocus] {

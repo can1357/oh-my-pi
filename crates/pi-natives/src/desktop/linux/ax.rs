@@ -1175,14 +1175,206 @@ async fn text_contents(
 	name: &UniqueName<'static>,
 	object: &ObjectRefOwned,
 ) -> atspi::zbus::Result<String> {
-	let text = atspi::proxy::text::TextProxy::builder(connection)
+	whole_text(&text_proxy(connection, name, object).await?).await
+}
+
+/// All of the text `text` reads.
+async fn whole_text(text: &atspi::proxy::text::TextProxy<'_>) -> atspi::zbus::Result<String> {
+	let count = text.character_count().await?;
+	text.get_text(0, count).await
+}
+
+/// What the AT-SPI text route did with text typed into an element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextRoute {
+	/// The element took the text, and reads back as typing would leave it.
+	Inserted,
+	/// The element offers no route that leaves it as typing would; nothing
+	/// was written.
+	Absent,
+	/// The element offers the interfaces, but its toolkit applies a write
+	/// differently from typing, for the reason given; nothing was written.
+	Declined(&'static str),
+}
+
+/// Why a Qt single-line field declines the route. Qt's widgets apply an
+/// accessible insert, delete or replace on a line edit as `setText` of the
+/// whole new text (`QAccessibleLineEdit` in `simplewidgets.cpp`, Qt 5.15 and
+/// 6), and spin boxes, date edits and editable combo boxes pass theirs to
+/// their line edit, so the write skips what typing goes through. Qt's
+/// multi-line text edits insert through a `QTextCursor`, as typing does.
+pub(crate) const QT_LINE_EDIT_SETS_TEXT: &str =
+	"Qt applies an accessibility insert to a single-line field by replacing its whole text, which \
+	 skips the field's validator and input mask and does not count as a user edit";
+
+/// Puts `text` into an element as focusing it and typing would, through the
+/// element's AT-SPI `Text` and `EditableText` interfaces: the text replaces
+/// the element's selection, or goes in at its caret. An unfocused GTK entry
+/// takes it only for an empty or fully selected value: then either
+/// selection-on-focus setting leaves the same result.
+/// No keys are sent and no focus moves. `Absent` means the element took
+/// nothing, so keys may follow: its application's `toolkit` is neither GTK
+/// nor Qt (unnamed included), it lacks either interface, is or may be a
+/// password field, is read-only or disabled, its text or caret could not be
+/// read, or it left its text as it was after the write. `Declined` means the
+/// same for a single-line field of a Qt application
+/// ([`QT_LINE_EDIT_SETS_TEXT`]) or a GTK entry whose focus selection is
+/// unknown. Text changed to anything other than what typing would give is an
+/// error, after which nothing more is sent.
+///
+/// GTK applies the insert through the field's own `insert-text` handlers, and
+/// Qt's multi-line edits through a `QTextCursor`, so the field validates and
+/// signals the edit as for typing; a GTK 4 entry records no undo step for it.
+/// Other toolkits keep keys, as their inserts were not shown to act as typing:
+/// Firefox 160 answers `true` and keeps the old text, and Writer
+/// (`LibreOffice`) took the insert in 1 of 10 tries.
+///
+/// Only printable ASCII goes this way, into a field whose text has no
+/// character outside the Basic Multilingual Plane: `InsertText`'s length is
+/// UTF-8 bytes in GTK 3 (`gtk_editable_insert_text`) and UTF-16 units in Qt
+/// (`QString::resize` in its `AtSpiAdaptor`), and Qt's offsets count UTF-16
+/// units where GTK's count characters, so outside those limits the units
+/// disagree. Control characters, such as a newline, are keys that act (Return
+/// submits a form), not text to insert.
+async fn insert_typed_text(
+	connection: &atspi::zbus::Connection,
+	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+	toolkit: &str,
+	text: &str,
+) -> CoreResult<TextRoute> {
+	const ABSENT: CoreResult<TextRoute> = Ok(TextRoute::Absent);
+	let qt = toolkit.eq_ignore_ascii_case("qt");
+	if !qt && !toolkit.eq_ignore_ascii_case("gtk") {
+		return ABSENT;
+	}
+	if text.is_empty() || !text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+		return ABSENT;
+	}
+	let Ok(interfaces) = accessible.get_interfaces().await else {
+		return ABSENT;
+	};
+	if !interfaces.contains(atspi::Interface::EditableText)
+		|| !interfaces.contains(atspi::Interface::Text)
+	{
+		return ABSENT;
+	}
+	// A role that cannot be read counts as a password field's, as for setValue.
+	if accessible
+		.get_role()
+		.await
+		.ok()
+		.is_none_or(|role| role == Role::PasswordText)
+	{
+		return ABSENT;
+	}
+	// Typing changes nothing in a read-only or disabled field, while an insert
+	// would: Qt's line edit takes one either way.
+	let Ok(states) = accessible.get_state().await else {
+		return ABSENT;
+	};
+	if !states.contains(State::Editable)
+		|| states.contains(State::ReadOnly)
+		|| !state_enabled(states)
+	{
+		return ABSENT;
+	}
+	if qt && !states.contains(State::MultiLine) {
+		return Ok(TextRoute::Declined(QT_LINE_EDIT_SETS_TEXT));
+	}
+	let Ok(reader) = text_proxy(connection, name, object).await else {
+		return ABSENT;
+	};
+	let Ok(before) = whole_text(&reader).await else {
+		return ABSENT;
+	};
+	let length = before.chars().count();
+	// A field showing a mask hides its text (a GTK 4 entry with visibility off
+	// is a plain `Text`), so where its caret falls cannot be checked.
+	if crate::desktop::ax::masked(&before) || length != before.encode_utf16().count() {
+		return ABSENT;
+	}
+	let Ok(caret) = reader.caret_offset().await else {
+		return ABSENT;
+	};
+	let (start, end) = match reader.get_n_selections().await {
+		Ok(0) => (caret, caret),
+		Ok(_) => match reader.get_selection(0).await {
+			Ok((from, to)) => (from.min(to), from.max(to)),
+			Err(_) => return ABSENT,
+		},
+		Err(_) => return ABSENT,
+	};
+	// GTK's per-application select-on-focus setting is not exposed by AT-SPI.
+	// Only an empty or already fully selected value gives the same edit with
+	// either setting, so no inferred selection may delete existing text.
+	if !(qt
+		|| states.contains(State::Focused)
+		|| states.contains(State::MultiLine)
+		|| start == 0 && usize::try_from(end).ok() == Some(length))
+	{
+		return Ok(TextRoute::Declined("the field's selection after focusing is unknown"));
+	}
+	let (Ok(first), Ok(last)) = (usize::try_from(start), usize::try_from(end)) else {
+		return ABSENT;
+	};
+	if last > length {
+		return ABSENT;
+	}
+	let expected: String = before
+		.chars()
+		.take(first)
+		.chain(text.chars())
+		.chain(before.chars().skip(last))
+		.collect();
+	let Ok(editable) = atspi::proxy::editable_text::EditableTextProxy::builder(connection)
+		.destination(name.clone())
+		.and_then(|b| b.path(object.path().clone()))
+	else {
+		return ABSENT;
+	};
+	let Ok(editable) = editable.build().await else {
+		return ABSENT;
+	};
+	// ASCII: as many bytes as characters and UTF-16 units.
+	let inserted = i32::try_from(text.len())
+		.map_err(|_| DesktopError::ax_failed("text is too long for an AT-SPI insert"))?;
+	// The app's answers are not proof either way; what the field reads is.
+	if start < end {
+		let _ = editable.delete_text(start, end).await;
+	}
+	let _ = editable.insert_text(start, text, inserted).await;
+	let actual = whole_text(&reader).await.ok();
+	if actual
+		.as_deref()
+		.is_some_and(|actual| actual == expected || masks(actual, &expected))
+	{
+		// A GTK 3 text view does not move its caret on an insert
+		// (`gtktextviewaccessible.c`); typing leaves it after the text.
+		let _ = reader.set_caret_offset(start + inserted).await;
+		return Ok(TextRoute::Inserted);
+	}
+	if actual.as_deref() == Some(before.as_str()) {
+		return ABSENT;
+	}
+	let secure = actual.as_deref().is_some_and(crate::desktop::ax::masked);
+	text_readback(text, &expected, actual.as_deref(), secure).map(|()| TextRoute::Inserted)
+}
+
+/// The element's `Text` interface, read live: its caret and length change
+/// under every write.
+async fn text_proxy(
+	connection: &atspi::zbus::Connection,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+) -> atspi::zbus::Result<atspi::proxy::text::TextProxy<'static>> {
+	atspi::proxy::text::TextProxy::builder(connection)
 		.destination(name.clone())?
 		.path(object.path().clone())?
 		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
 		.build()
-		.await?;
-	let count = text.character_count().await?;
-	text.get_text(0, count).await
+		.await
 }
 
 /// The text of an element with the `Text` interface, up to 16,384 characters.
@@ -1651,27 +1843,50 @@ impl AtSpiAx {
 				.await
 				.map_err(failed)?
 				.contains(State::Focused);
-			let app = proxy.get_application().await.map_err(failed)?;
-			let toolkit = async {
-				let app = atspi::proxy::application::ApplicationProxy::builder(connection)
-					.destination(app.name()?.clone())
-					.ok()?
-					.path(app.path().clone())
-					.ok()?
-					// atk-bridge answers `Get` for these properties, not `GetAll`.
-					.cache_properties(zbus::proxy::CacheProperties::No)
-					.build()
-					.await
-					.ok()?;
-				let toolkit = app.toolkit_name().await.ok()?;
-				let version = app.version().await.unwrap_or_default();
-				Some((toolkit, version))
-			}
-			.await;
-			let (toolkit, version) = toolkit.unwrap_or_default();
+			let (toolkit, version) = app_toolkit(connection, &proxy).await.unwrap_or_default();
 			Ok(ElementFocus { focused, toolkit, version })
 		})
 	}
+
+	/// Puts `text` into the element through its AT-SPI text interfaces, as
+	/// typing it would ([`insert_typed_text`]).
+	pub(crate) fn type_text(&self, h: &AxHandle, text: &str) -> CoreResult<TextRoute> {
+		let object = Self::object(h).clone();
+		let Some(name) = object.name().cloned() else {
+			return Ok(TextRoute::Absent);
+		};
+		self.request(async {
+			let connection = &self.connection;
+			let Ok(accessible) = object.as_accessible_proxy(connection).await else {
+				return Ok(TextRoute::Absent);
+			};
+			let (toolkit, _) = app_toolkit(connection, &accessible)
+				.await
+				.unwrap_or_default();
+			insert_typed_text(connection, &accessible, &name, &object, &toolkit, text).await
+		})
+	}
+}
+
+/// The toolkit name and version the element's application reports, if any.
+async fn app_toolkit(
+	connection: &atspi::zbus::Connection,
+	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
+) -> Option<(String, String)> {
+	let app = accessible.get_application().await.ok()?;
+	let app = atspi::proxy::application::ApplicationProxy::builder(connection)
+		.destination(app.name()?.clone())
+		.ok()?
+		.path(app.path().clone())
+		.ok()?
+		// atk-bridge answers `Get` for these properties, not `GetAll`.
+		.cache_properties(zbus::proxy::CacheProperties::No)
+		.build()
+		.await
+		.ok()?;
+	let toolkit = app.toolkit_name().await.ok()?;
+	let version = app.version().await.unwrap_or_default();
+	Some((toolkit, version))
 }
 
 #[cfg(test)]
@@ -2143,6 +2358,352 @@ mod tests {
 				(None, Ok(())) => {},
 				(Some(text), Err(err)) if err.message.contains(text) => {},
 				(_, result) => panic!("{path}: {result:?}"),
+			}
+		}
+	}
+
+	#[test]
+	fn typed_text_goes_in_where_typing_would_put_it_or_not_at_all() {
+		use std::sync::{Arc, Mutex};
+
+		use atspi::zbus::{connection::Builder as ConnectionBuilder, interface};
+
+		const PEER: &str = ":1.7";
+
+		/// What a field does with an edit: applies it as GTK 3 does (`length`
+		/// in bytes, caret left where it was), answers true and keeps its text
+		/// (Firefox 160), applies a delete but not the insert after it, or puts
+		/// in something else.
+		#[derive(Clone, Copy, PartialEq)]
+		enum Edits {
+			Applied,
+			Ignored,
+			DeleteOnly,
+			Garbled,
+		}
+
+		struct Field {
+			text:      String,
+			caret:     i32,
+			selection: Option<(i32, i32)>,
+			edits:     Edits,
+			/// How many edits (deletes and inserts) it got.
+			writes:    usize,
+			/// One mask character per character, as a hidden GTK 4 entry.
+			hidden:    bool,
+		}
+
+		type Shared = Arc<Mutex<Field>>;
+
+		struct Text(Shared);
+
+		#[interface(name = "org.a11y.atspi.Text")]
+		impl Text {
+			#[zbus(property)]
+			fn character_count(&self) -> i32 {
+				self.0.lock().unwrap().text.chars().count() as i32
+			}
+
+			#[zbus(property)]
+			fn caret_offset(&self) -> i32 {
+				self.0.lock().unwrap().caret
+			}
+
+			fn get_text(&self, start: i32, end: i32) -> String {
+				let field = self.0.lock().unwrap();
+				let text = field
+					.text
+					.chars()
+					.skip(start as usize)
+					.take((end - start) as usize);
+				if field.hidden {
+					text.map(|_| '●').collect()
+				} else {
+					text.collect()
+				}
+			}
+
+			fn get_n_selections(&self) -> i32 {
+				i32::from(self.0.lock().unwrap().selection.is_some())
+			}
+
+			#[zbus(out_args("start_offset", "end_offset"))]
+			fn get_selection(&self, selection_num: i32) -> (i32, i32) {
+				assert_eq!(selection_num, 0, "only the first selection is read");
+				self.0.lock().unwrap().selection.unwrap_or_default()
+			}
+
+			fn set_caret_offset(&self, offset: i32) -> bool {
+				self.0.lock().unwrap().caret = offset;
+				true
+			}
+		}
+
+		struct Editable(Shared);
+
+		#[interface(name = "org.a11y.atspi.EditableText")]
+		impl Editable {
+			fn delete_text(&self, start: i32, end: i32) -> bool {
+				let mut field = self.0.lock().unwrap();
+				field.writes += 1;
+				if field.edits != Edits::Ignored {
+					let kept: String = field.text.chars().take(start as usize).collect();
+					let rest: String = field.text.chars().skip(end as usize).collect();
+					field.text = kept + &rest;
+					field.selection = None;
+				}
+				true
+			}
+
+			fn insert_text(&self, position: i32, text: String, length: i32) -> bool {
+				let mut field = self.0.lock().unwrap();
+				field.writes += 1;
+				let inserted = match field.edits {
+					Edits::Applied => text[..length as usize].to_owned(),
+					Edits::Ignored | Edits::DeleteOnly => return true,
+					Edits::Garbled => format!("{text}?"),
+				};
+				let kept: String = field.text.chars().take(position as usize).collect();
+				let rest: String = field.text.chars().skip(position as usize).collect();
+				field.text = kept + &inserted + &rest;
+				true
+			}
+		}
+
+		struct Accessible {
+			/// `None`: the role cannot be read.
+			role:     Option<Role>,
+			editable: bool,
+			states:   StateSet,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Accessible {
+			fn get_role(&self) -> atspi::zbus::fdo::Result<u32> {
+				self
+					.role
+					.map(|role| role as u32)
+					.ok_or_else(|| atspi::zbus::fdo::Error::Failed("no role".into()))
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				let bits = self.states.bits();
+				vec![bits as u32, (bits >> 32) as u32]
+			}
+
+			fn get_interfaces(&self) -> Vec<String> {
+				let mut names = vec!["org.a11y.atspi.Accessible", "org.a11y.atspi.Text"];
+				if self.editable {
+					names.push("org.a11y.atspi.EditableText");
+				}
+				names.into_iter().map(str::to_owned).collect()
+			}
+		}
+
+		/// The outcome: taken, and the field's text and caret afterward; not
+		/// taken (keys may follow), or declined with a reason; or an error
+		/// naming what the field reads.
+		#[derive(Debug, PartialEq)]
+		enum Outcome {
+			Taken(&'static str, i32),
+			NotTaken,
+			Declined,
+			Reads(&'static str),
+		}
+
+		struct Case {
+			path:      &'static str,
+			text:      &'static str,
+			old:       &'static str,
+			caret:     i32,
+			selection: Option<(i32, i32)>,
+			edits:     Edits,
+			role:      Option<Role>,
+			editable:  bool,
+			states:    StateSet,
+			hidden:    bool,
+			toolkit:   &'static str,
+			outcome:   Outcome,
+			writes:    usize,
+		}
+
+		let field = |path, old, caret, outcome, writes| Case {
+			path,
+			text: "AB",
+			old,
+			caret,
+			selection: None,
+			edits: Edits::Applied,
+			role: Some(Role::Entry),
+			editable: true,
+			// GTK 4 reports `Sensitive` without `Enabled`. Focused, so the
+			// caret and selection count.
+			states: StateSet::new(State::Editable | State::Sensitive | State::Focused),
+			hidden: false,
+			toolkit: "gtk",
+			outcome,
+			writes,
+		};
+		let cases = [
+			field("/caret", "hello", 2, Outcome::Taken("heABllo", 4), 1),
+			// Select-on-focus can be off: do not delete an unfocused entry's
+			// text without evidence that its whole value is selected.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				..field("/unfocused_entry", "hello", 2, Outcome::Declined, 0)
+			},
+			// Both setting values agree for a full selection or an empty value.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				selection: Some((5, 0)),
+				..field("/unfocused_selected", "hello", 0, Outcome::Taken("AB", 2), 2)
+			},
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				..field("/unfocused_empty", "", 0, Outcome::Taken("AB", 2), 1)
+			},
+			// A text view keeps its caret when focused.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive | State::MultiLine),
+				..field("/unfocused_text_view", "hello", 2, Outcome::Taken("heABllo", 4), 1)
+			},
+			// LibreOffice reports `-1` for a paragraph without the caret.
+			field("/no_caret", "hello", -1, Outcome::NotTaken, 0),
+			Case {
+				selection: Some((6, 11)),
+				..field("/selection", "hello world", 3, Outcome::Taken("hello AB", 8), 2)
+			},
+			// A selection made from its end backward.
+			Case {
+				selection: Some((11, 6)),
+				..field("/backward", "hello world", 3, Outcome::Taken("hello AB", 8), 2)
+			},
+			Case { edits: Edits::Ignored, ..field("/gecko", "hello", 5, Outcome::NotTaken, 1) },
+			// The read-back repeats the written text, which an error never quotes.
+			Case {
+				edits: Edits::Garbled,
+				..field(
+					"/garbled",
+					"hello",
+					5,
+					Outcome::Reads(r#"now reads "hello<the written text>?""#),
+					1,
+				)
+			},
+			// The selection went, the text did not: the field changed.
+			Case {
+				selection: Some((6, 11)),
+				edits: Edits::DeleteOnly,
+				..field("/delete_only", "hello world", 3, Outcome::Reads(r#"now reads "hello ""#), 2)
+			},
+			// No edit interface (Chromium): nothing is tried.
+			Case { editable: false, ..field("/chromium", "hello", 5, Outcome::NotTaken, 0) },
+			// Qt's line edit would take an insert typing could not make.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive | State::ReadOnly),
+				..field("/read_only", "hello", 5, Outcome::NotTaken, 0)
+			},
+			Case {
+				states: StateSet::new(State::Editable),
+				..field("/disabled", "hello", 5, Outcome::NotTaken, 0)
+			},
+			Case { role: Some(Role::PasswordText), ..field("/password", "", 0, Outcome::NotTaken, 0) },
+			Case { role: None, ..field("/no_role", "hello", 5, Outcome::NotTaken, 0) },
+			// A hidden field takes the text; its mask shows as many characters.
+			Case { hidden: true, ..field("/hidden", "", 0, Outcome::Taken("●●", 2), 1) },
+			// A hidden field that already holds text hides where its caret is.
+			Case { hidden: true, ..field("/hidden_text", "pw", 2, Outcome::NotTaken, 0) },
+			// Qt counts offsets in UTF-16 units, GTK in characters.
+			field("/astral", "😀x", 2, Outcome::NotTaken, 0),
+			// Lengths are bytes in GTK 3 and UTF-16 units in Qt.
+			Case { text: "é", ..field("/accented", "hello", 5, Outcome::NotTaken, 0) },
+			// Return is a key that acts, not text.
+			Case { text: "a\n", ..field("/newline", "hello", 5, Outcome::NotTaken, 0) },
+			Case { text: "", ..field("/empty", "hello", 5, Outcome::NotTaken, 0) },
+			// A Qt line edit applies the insert as `setText`, past its validator:
+			// a digits-only field would hold "AB" after a reported success.
+			Case { toolkit: "Qt", ..field("/qt_line_edit", "12", 2, Outcome::Declined, 0) },
+			// A toolkit whose insert was never measured, or one the application
+			// does not name, keeps keys: a Qt line edit read as unnamed would
+			// otherwise take `setText` and report success.
+			Case { toolkit: "", ..field("/unnamed_toolkit", "12", 2, Outcome::NotTaken, 0) },
+			Case { toolkit: "VCL", ..field("/other_toolkit", "12", 2, Outcome::NotTaken, 0) },
+			// A Qt multi-line edit inserts through a text cursor, as typing does.
+			Case {
+				toolkit: "Qt",
+				states: StateSet::new(State::Editable | State::Enabled | State::MultiLine),
+				..field("/qt_text_edit", "12", 2, Outcome::Taken("12AB", 4), 1)
+			},
+		];
+		let fields: Vec<Shared> = cases
+			.iter()
+			.map(|case| {
+				Arc::new(Mutex::new(Field {
+					text:      case.old.to_owned(),
+					caret:     case.caret,
+					selection: case.selection,
+					edits:     case.edits,
+					writes:    0,
+					hidden:    case.hidden,
+				}))
+			})
+			.collect();
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let results = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let mut builder = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p();
+			for (case, field) in cases.iter().zip(&fields) {
+				builder = builder
+					.serve_at(case.path, Text(field.clone()))
+					.unwrap()
+					.serve_at(case.path, Editable(field.clone()))
+					.unwrap()
+					.serve_at(case.path, Accessible {
+						role:     case.role,
+						editable: case.editable,
+						states:   case.states,
+					})
+					.unwrap();
+			}
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(builder.build(), client).unwrap();
+			let mut results = Vec::new();
+			for case in &cases {
+				let object = ObjectRefOwned::from_static_str_unchecked(PEER, case.path);
+				let name = object.name().unwrap().clone();
+				let accessible = object.as_accessible_proxy(&client).await.unwrap();
+				results.push(
+					insert_typed_text(&client, &accessible, &name, &object, case.toolkit, case.text)
+						.await,
+				);
+			}
+			drop(server);
+			results
+		});
+		for ((case, result), field) in cases.iter().zip(results).zip(&fields) {
+			let field = field.lock().unwrap();
+			assert_eq!(field.writes, case.writes, "{}: edits", case.path);
+			match (&case.outcome, result) {
+				(Outcome::Taken(text, caret), Ok(TextRoute::Inserted)) => {
+					let shown = if field.hidden {
+						"●".repeat(field.text.chars().count())
+					} else {
+						field.text.clone()
+					};
+					assert_eq!((shown.as_str(), field.caret), (*text, *caret), "{}", case.path);
+				},
+				(Outcome::NotTaken, Ok(TextRoute::Absent)) => {
+					assert_eq!(field.text, case.old, "{}: text changed", case.path);
+				},
+				(Outcome::Declined, Ok(TextRoute::Declined(reason))) => {
+					assert_eq!(field.text, case.old, "{}: text changed", case.path);
+					assert!(!reason.is_empty(), "{}: missing decline reason", case.path);
+				},
+				(Outcome::Reads(text), Err(err)) if err.message.contains(text) => {},
+				(outcome, result) => panic!("{}: expected {outcome:?}, got {result:?}", case.path),
 			}
 		}
 	}
