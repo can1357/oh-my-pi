@@ -21,6 +21,8 @@ import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
+import { matchesUsageLimitText } from "../src/error";
+import { extractProviderRetryHint } from "../src/utils/retry-after";
 
 const model = buildModel({
 	api: "antigravity-acp",
@@ -309,7 +311,13 @@ describe("AgyHost stateful steps", () => {
 			"Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.",
 		);
 		prompt.response.resolve({ stopReason: "end_turn" });
-		await expect(run.done).rejects.toThrow(/quota exceeded.*reset at/);
+		const error = await run.done.catch(reason => reason);
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toMatch(/quota exceeded.*reset at/);
+		expect(extractProviderRetryHint("antigravity-cli", message)).toBeGreaterThan(0);
+		expect(matchesUsageLimitText(message)).toBe(true);
+		expect(run.writer.output.content.some(block => block.type === "text")).toBe(false);
 		expect(fake.closed).toBe(true);
 	});
 	it("rejects a tool call after the official quota notice", async () => {
@@ -323,7 +331,11 @@ describe("AgyHost stateful steps", () => {
 		const output = await fake.call("read", { path: "a" }, fake.currentId);
 		expect(output.isError).toBe(true);
 		expect(textOf(output.content)).toContain("quota exceeded");
-		await expect(run.done).rejects.toThrow(/quota exceeded.*reset at/);
+		const error = await run.done.catch(reason => reason);
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(extractProviderRetryHint("antigravity-cli", message)).toBeGreaterThan(0);
+		expect(run.writer.output.content.some(block => block.type === "text")).toBe(false);
 		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
 		expect(fake.closed).toBe(true);
 	});

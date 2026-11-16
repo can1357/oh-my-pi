@@ -1,4 +1,6 @@
+import type { AssistantMessage } from "../../types";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
 const QUOTA_NOTICE_PREFIX = "Usage Limit Reached\n\nYou have reached your current quota for this period.";
 const QUOTA_NOTICE_RESET = /^ Your limit will reset (.+)\.$/u;
 const QUOTA_RELATIVE_RESET = /^in (\d+ (?:day|hour|minute|second)s?(?:, \d+ (?:day|hour|minute|second)s?)*)$/u;
@@ -51,4 +53,12 @@ export function quotaExhaustion(text: string, now = Date.now()): { resetAt?: str
 		return resetAt ? { resetAt: resetAt.toISOString() } : {};
 	}
 	return {};
+}
+
+/** Build the quota error from a step's visible text, if it contains the official notice. */
+export function quotaError(output: AssistantMessage): Error | undefined {
+	const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+	const quota = quotaExhaustion(text);
+	if (!quota) return undefined;
+	return new Error(`Antigravity quota exceeded${quota.resetAt ? `; reset at ${quota.resetAt}` : ""}`);
 }

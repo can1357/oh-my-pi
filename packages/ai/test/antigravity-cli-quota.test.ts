@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import { quotaExhaustion } from "../src/providers/antigravity-cli/quota";
-import { extractProviderRetryHint } from "../src/utils/retry-after";
 
 const notice = "Usage Limit Reached\n\nYou have reached your current quota for this period.";
 
@@ -30,11 +29,5 @@ describe("quotaExhaustion", () => {
 
 	it("ignores ordinary assistant text", () => {
 		expect(quotaExhaustion("Here is the answer.")).toBeUndefined();
-	});
-
-	it("uses the existing reset-at retry hint format", () => {
-		const resetAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
-		const message = `Antigravity quota exceeded; reset at ${resetAt}`;
-		expect(extractProviderRetryHint("antigravity-cli", message)).toBeGreaterThan(0);
 	});
 });
