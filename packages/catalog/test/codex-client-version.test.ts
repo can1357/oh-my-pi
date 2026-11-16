@@ -22,7 +22,7 @@ interface CapturedRequest {
 function codexFetch(latest: () => Response): { fetcher: FetchImpl; requests: CapturedRequest[] } {
 	const requests: CapturedRequest[] = [];
 	const fetcher = Object.assign(
-		async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+		async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			requests.push({ url, version: new Headers(init?.headers).get("version") });
 			if (url === DIST_TAGS_URL) return latest();
@@ -37,7 +37,7 @@ function codexFetch(latest: () => Response): { fetcher: FetchImpl; requests: Cap
 function backendOnlyFetch(): { fetcher: FetchImpl; requests: CapturedRequest[] } {
 	const requests: CapturedRequest[] = [];
 	const fetcher = Object.assign(
-		async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+		async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (!url.startsWith("https://chatgpt.com/backend-api/")) throw new Error(`blocked: ${url}`);
 			requests.push({ url, version: new Headers(init?.headers).get("version") });

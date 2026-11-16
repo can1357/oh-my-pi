@@ -502,7 +502,7 @@ describe("openai-codex streaming", () => {
 		const registryUrls: string[] = [];
 		vi.spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(
-				async (input: Parameters<typeof fetch>[0]) => {
+				async (input: string | URL | Request) => {
 					registryUrls.push(input instanceof Request ? input.url : input.toString());
 					return new Response(JSON.stringify({ latest: "0.999.1" }));
 				},
