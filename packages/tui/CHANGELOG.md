@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The composer can keep typed text on each terminal's own foreground colour instead of a fixed near-white or black when the theme `text` token is empty, so a session shared across terminals with different backgrounds stays readable (`composer.terminalForeground`, off by default) ([#18493](https://github.com/can1357/oh-my-pi/pull/18493) by [@pperezrubio](https://github.com/pperezrubio))
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

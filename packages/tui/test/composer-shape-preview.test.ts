@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { renderComposerShapePreview } from "../src/overlays/composer-shape-preview";
 import { getComposerShapeOptions, installExtensionComposerShape } from "../src/overlays/composer-shape-registry";
-import { initTheme, setTheme } from "../src/theme/theme";
+import { initTheme, setComposerTerminalForeground, setTheme } from "../src/theme/theme";
 import { type ComposerStyle, visibleWidth } from "../src/index";
 
 beforeAll(async () => {
@@ -17,6 +17,16 @@ describe("composer shape preview", () => {
 		const box = renderComposerShapePreview("box", 80).join("\n");
 		expect(box).not.toContain("\x1b[39mAsk anything");
 		expect(box).toMatch(/\x1b\[38[;0-9]*mAsk anything/);
+	});
+
+	it("keeps transparent composer preview text on the terminal default when opted in", async () => {
+		await setTheme("light");
+		setComposerTerminalForeground(true);
+		try {
+			expect(renderComposerShapePreview("box", 80).join("\n")).toContain("\x1b[39mAsk anything");
+		} finally {
+			setComposerTerminalForeground(false);
+		}
 	});
 
 	it("borrows status rows from the live status source per shape layout", async () => {
