@@ -760,11 +760,9 @@ fn grapheme_width_str(g: &str, tab_width: usize) -> usize {
 	if it.next().is_none() {
 		return char_width_corrected(c0);
 	}
-	// Multi-char grapheme: keep UnicodeWidthStr as the source of truth for
-	// sequence-level width rules (VS16 emoji presentation, keycaps, ZWJ emoji,
-	// CRLF, script ligatures). A per-char sum is not equivalent. Apply only the
-	// same local Compatibility Jamo delta that char_width_corrected applies to
-	// standalone code points; the delta is a no-op when no correction is active.
+	// Kitty's cluster widths handle presentation selectors and spacing marks;
+	// a per-char sum is not equivalent. Apply the local Compatibility Jamo
+	// correction to the cluster width as for standalone code points.
 	let mut width = xutf::width_str(g);
 	for c in g.chars() {
 		width = apply_hangul_compat_jamo_delta(width, c);
@@ -2110,11 +2108,19 @@ mod tests {
 	}
 
 	#[test]
+	fn test_visible_width_kitty_indic_cluster() {
+		// Kitty assigns the cluster the width of its first codepoint rather
+		// than adding the widths of the joined consonants.
+		assert_eq!(visible_width_u16(&to_u16("क्ष"), DEFAULT_TAB_WIDTH), 1);
+	}
+
+	#[test]
 	fn test_visible_width_jamo_correction_inside_combining_cluster() {
-		let jamo_cells = if cfg!(target_os = "macos") { 1 } else { 2 };
-		let filler_cells = usize::from(cfg!(target_os = "macos"));
-		assert_eq!(visible_width_u16(&to_u16("\u{3141}\u{0301}"), DEFAULT_TAB_WIDTH), jamo_cells);
-		assert_eq!(visible_width_u16(&to_u16("\u{3164}\u{0301}"), DEFAULT_TAB_WIDTH), filler_cells);
+		// Kitty's widths make the Hangul filler wide like the visible jamo;
+		// macOS's narrow correction applies to both.
+		let cells = if cfg!(target_os = "macos") { 1 } else { 2 };
+		assert_eq!(visible_width_u16(&to_u16("\u{3141}\u{0301}"), DEFAULT_TAB_WIDTH), cells);
+		assert_eq!(visible_width_u16(&to_u16("\u{3164}\u{0301}"), DEFAULT_TAB_WIDTH), cells);
 	}
 
 	#[test]
