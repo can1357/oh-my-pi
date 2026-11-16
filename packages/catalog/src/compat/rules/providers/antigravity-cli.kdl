@@ -69,6 +69,26 @@ provider "antigravity-cli" {
 		}
 	}
 
+	// Gemini 3.8 Flash keeps its published rate and doubles from 2027-01-01;
+	// both cards are pinned so each request prices at the card in force.
+	models "gemini-3.8-flash" {
+		cost-patch {
+			input 0.75
+			output 3.75
+			cache-read 0.075
+			cache-write 0
+			effective-rates {
+				doubled-rate {
+					effective-from "2027-01-01T00:00:00Z"
+					input 1.5
+					output 7.5
+					cache-read 0.15
+					cache-write 0
+				}
+			}
+		}
+	}
+
 	// Each model's `thought_level` values in `agy acp` 1.5.9; they outrank the
 	// lineage ladders, which add levels this wire cannot select.
 	models "gemini-4-carbon" "gemini-4-argon" "gemini-3.8-flash" "claude-opus-5-5" "claude-sonnet-5-5" {

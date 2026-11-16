@@ -19,6 +19,7 @@ import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-write
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
@@ -670,6 +671,37 @@ describe("AgyHost stateful steps", () => {
 		expect(writer.output.usage.output).toBe(25);
 		expect(writer.output.usage.totalTokens).toBe(408);
 		expect(writer.output.usage.contextTokens).toBe(408);
+	});
+	it("prices a turn from the bundled API-equivalent rate", async () => {
+		const turnCost = async (id: string) => {
+			const state = await fixture();
+			const priced = getBundledModel("antigravity-cli", id);
+			const writer = new StepWriter(priced, new AssistantMessageEventStream());
+			const run = state.host.step(priced, { messages: [user("hello")], tools }, {}, writer);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Done.");
+			prompt.response.resolve({
+				stopReason: "end_turn",
+				usage: { inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000 },
+			});
+			await run;
+			return writer.output.usage.cost;
+		};
+		expect(await turnCost("gemini-4-argon")).toEqual({
+			input: 4,
+			output: 20,
+			cacheRead: 0,
+			cacheWrite: 0,
+			total: 24,
+		});
+		expect(await turnCost("gemini-4-carbon")).toEqual({
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			total: 0,
+		});
 	});
 	it("keeps completed stream output immutable and emits exactly one terminal event", () => {
 		const stream = new AssistantMessageEventStream();

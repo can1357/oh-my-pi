@@ -2,6 +2,7 @@
  * Emits one omp assistant message (a "step") from agy's ACP events: thinking
  * and text deltas, at most one tool call, then a terminal `done` or `error`.
  */
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { PromptResponse } from "@oh-my-pi/pi-utils/acp";
 import type { Api, AntigravityCliPayload, AssistantMessage, Model, ToolCall } from "../../types";
 import type { AssistantMessageEventStream } from "../../utils/event-stream";
@@ -9,12 +10,14 @@ import type { AssistantMessageEventStream } from "../../utils/event-stream";
 export class StepWriter {
 	readonly output: AssistantMessage;
 	#stream: AssistantMessageEventStream;
+	#model: Model<Api>;
 	#textIndex: number | undefined;
 	#thinkingIndex: number | undefined;
 
 	/** Start one assistant stream; subsequent methods are inert after its terminal event. */
 	constructor(model: Model<Api>, stream: AssistantMessageEventStream) {
 		this.#stream = stream;
+		this.#model = model;
 		this.output = {
 			role: "assistant",
 			content: [],
@@ -104,6 +107,7 @@ export class StepWriter {
 			if (turn.thoughtTokens != null) usage.reasoningTokens = turn.thoughtTokens;
 		}
 		usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+		if (turn) calculateCost(this.#model, usage, this.output.timestamp);
 	}
 
 	/** Finish once, retaining the conversation fingerprint needed by the next request. */
