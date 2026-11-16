@@ -7,6 +7,10 @@
 - Added `PhononTts` binding for on-device Phonon text-to-speech
 - Added `Shell.adopt(fork)`, which carries the variables, functions, aliases, options and traps a `fork()` set into the shell it was forked from, at the end of that shell's running command; a name both set keeps the value of the command that ended last
 
+### Fixed
+
+- Fixed concurrent `commitCreate()` calls committing each other's subject and body ([#19345](https://github.com/can1357/oh-my-pi/pull/19345) by [@eggpeat](https://github.com/eggpeat))
+
 ## [18.20.3] - 2026-11-16
 
 ### Fixed
