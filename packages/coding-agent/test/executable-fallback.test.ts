@@ -4,7 +4,7 @@ import * as utils from "@oh-my-pi/pi-utils";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { resolveCliEntryCmd, resolveExecutablePath, resolveWorkerSpawnCmd } from "../src/subprocess/worker-client";
 
-describe("executable fallback on unlinked binary", () => {
+describe("executable selection for restarts and workers", () => {
 	const originalExecPathDesc = Object.getOwnPropertyDescriptor(process, "execPath");
 	const originalArgv0Desc = Object.getOwnPropertyDescriptor(process, "argv0");
 
@@ -37,6 +37,32 @@ describe("executable fallback on unlinked binary", () => {
 			cmd: [process.execPath, "__omp_worker_test"],
 		});
 		expect(whichSpy).not.toHaveBeenCalled();
+	});
+
+	it("restarts through the upgraded launcher while workers stay on the retained old binary", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const oldBinary = "/opt/homebrew/Cellar/omp/18.16.0/bin/omp";
+		const launcher = "/opt/homebrew/bin/omp";
+		setProcessProp("execPath", oldBinary);
+		setProcessProp("argv0", launcher);
+		vi.spyOn(utils, "isExecutable").mockReturnValue(true);
+		vi.spyOn(utils, "$which").mockReturnValue(null);
+
+		expect(resolveCliEntryCmd({ preferLauncher: true })).toEqual([launcher]);
+		expect(resolveWorkerSpawnCmd("__omp_worker_test")).toEqual({ cmd: [oldBinary, "__omp_worker_test"] });
+	});
+
+	it("restarts from the current PATH when argv0 is bare and the old binary still exists", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const oldBinary = "/opt/homebrew/Cellar/omp/18.16.0/bin/omp";
+		const upgraded = "/opt/homebrew/bin/omp";
+		setProcessProp("execPath", oldBinary);
+		setProcessProp("argv0", "omp");
+		vi.spyOn(utils, "isExecutable").mockReturnValue(true);
+		vi.spyOn(utils, "$which").mockReturnValue(upgraded);
+
+		expect(resolveCliEntryCmd({ preferLauncher: true })).toEqual([upgraded]);
+		expect(resolveCliEntryCmd()).toEqual([oldBinary]);
 	});
 
 	it("prefers original absolute launcher path over generic PATH match when executable", () => {

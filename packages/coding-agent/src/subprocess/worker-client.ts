@@ -118,42 +118,39 @@ export interface WorkerSpawnCommand {
 export const SMOKE_TEST_TIMEOUT_MS = 30_000;
 
 /**
- * Resolve the current executable path, falling back to finding the binary on
- * PATH if the original physical path was unlinked on disk (e.g. Homebrew or a
- * package manager pruned the prior version directory during an in-flight
- * upgrade, leaving `process.execPath` pointing at a missing path).
+ * Resolve the current executable path. Workers stay on the running binary
+ * while it exists; `/restart` can prefer the original launcher (or PATH)
+ * to pick up an upgrade that retained the old binary on disk.
+ * If the running binary was unlinked, both paths use the launcher fallback.
  */
-export function resolveExecutablePath(): string {
+export function resolveExecutablePath(options?: { preferLauncher?: boolean }): string {
 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
-	if (isCompiledBinary() && !isExecutable(executable)) {
+	if (isCompiledBinary() && (options?.preferLauncher || !isExecutable(executable))) {
 		const argv0 = stripWindowsExtendedLengthPathPrefix(process.argv0);
 		const isPath = argv0.includes("/") || argv0.includes("\\") || argv0.includes(":");
-		const candidates = [
-			// Prefer the original launcher when invoked with an absolute path
-			isFullyQualifiedPath(argv0) ? argv0 : null,
-			!isPath ? $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }) : null,
-			// Generic fallback to finding "omp" on PATH
-			$which("omp", { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }),
-		];
-		for (const candidate of candidates) {
-			if (candidate && isExecutable(candidate)) {
-				return candidate;
-			}
+		// A qualified argv0 is the original launcher, even if PATH contains another omp.
+		if (isFullyQualifiedPath(argv0) && isExecutable(argv0)) return argv0;
+		if (!isPath) {
+			const launcher = $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass });
+			if (launcher && isExecutable(launcher)) return launcher;
 		}
+		const omp = $which("omp", { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass });
+		if (omp && isExecutable(omp)) return omp;
 	}
 	return executable;
 }
 
 /**
  * Resolve the command that re-enters this CLI's entrypoint: the compiled
- * binary itself, or the runtime plus the declared worker-host entry. Used by
- * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
- * whose no-host fallback deliberately differs (cwd-relative entry pinned to the
- * package root for `bun test` IPC). Outside a CLI host this falls back to the
- * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
+ * binary itself, or the runtime plus the declared worker-host entry. The TUI
+ * `/restart` prefers the launcher to pick up upgrades; other callers keep
+ * the running binary. Workers go through {@link resolveWorkerSpawnCmd},
+ * whose no-host fallback deliberately differs (cwd-relative entry pinned to
+ * the package root for `bun test` IPC). Outside a CLI host this falls back to
+ * the absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
  */
-export function resolveCliEntryCmd(): string[] {
-	const executable = resolveExecutablePath();
+export function resolveCliEntryCmd(options?: { preferLauncher?: boolean }): string[] {
+	const executable = resolveExecutablePath(options);
 	if (isCompiledBinary()) return [executable];
 	const hostEntry = workerHostEntry();
 	if (hostEntry) return [executable, hostEntry];

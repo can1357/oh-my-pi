@@ -8359,7 +8359,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
 		const activeProfile = getActiveProfile();
 		const cmd = [
-			...resolveCliEntryCmd(),
+			...resolveCliEntryCmd({ preferLauncher: true }),
 			...restartArgv(
 				process.argv.slice(2),
 				sessionFile ? path.resolve(sessionFile) : undefined,

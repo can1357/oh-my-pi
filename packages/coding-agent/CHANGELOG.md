@@ -25,6 +25,8 @@
 
 ### Fixed
 
+- `/restart` now follows the upgraded launcher even when the old Homebrew binary is still installed, while running-session workers keep using the original build ([#19454](https://github.com/can1357/oh-my-pi/issues/19454)).
+
 - The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
 - Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
 - `/move` and resuming a session from another project now switch task agents, project extensions, custom tools, and MCP servers to the destination project without a restart ([#19416](https://github.com/can1357/oh-my-pi/pull/19416) by [@yuzu-octopus](https://github.com/yuzu-octopus))
