@@ -5692,9 +5692,11 @@ func (v *AskQuestion) decodeFrom(raw map[string]json.RawMessage) error {
 }
 
 type SelectUiRequest struct {
-	ID            string               `json:"id"`
-	Title         string               `json:"title"`
-	Options       []string             `json:"options"`
+	ID      string   `json:"id"`
+	Title   string   `json:"title"`
+	Options []string `json:"options"`
+	// Opaque fixed-length identity derived from the extension's registry-resolved source; omitted for native/core dialogs.
+	ExtensionID   *string              `json:"extensionId,omitempty"`
 	OptionDetails []SelectOptionDetail `json:"optionDetails,omitempty"`
 	// Index into `options` to focus first.
 	InitialIndex *int64 `json:"initialIndex,omitempty"`
@@ -5719,6 +5721,7 @@ func (v *SelectUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("method", "select")
 	d.required("title", &out.Title)
 	d.required("options", &out.Options)
+	d.optional("extensionId", &out.ExtensionID)
 	d.optional("optionDetails", &out.OptionDetails)
 	d.optional("initialIndex", &out.InitialIndex)
 	d.optional("selectionMarker", &out.SelectionMarker)
@@ -5761,7 +5764,9 @@ type ConfirmUiRequest struct {
 	ID      string `json:"id"`
 	Title   string `json:"title"`
 	Message string `json:"message"`
-	Timeout *int64 `json:"timeout,omitempty"`
+	// Opaque fixed-length identity derived from the extension's registry-resolved source; omitted for native/core dialogs.
+	ExtensionID *string `json:"extensionId,omitempty"`
+	Timeout     *int64  `json:"timeout,omitempty"`
 }
 
 func (v *ConfirmUiRequest) UnmarshalJSON(data []byte) error {
@@ -5776,6 +5781,7 @@ func (v *ConfirmUiRequest) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("method", "confirm")
 	d.required("title", &out.Title)
 	d.required("message", &out.Message)
+	d.optional("extensionId", &out.ExtensionID)
 	d.optional("timeout", &out.Timeout)
 	if d.err != nil {
 		return d.err

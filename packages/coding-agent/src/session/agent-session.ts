@@ -9993,26 +9993,29 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `onRouted` fires once the command is found, before its handler runs.
 	 */
 	async #tryExecuteExtensionCommand(text: string, onRouted?: () => void): Promise<"ran" | "failed" | undefined> {
-		if (!this.#extensionRunner) return undefined;
+		const extensionRunner = this.#extensionRunner;
+		if (!extensionRunner) return undefined;
 
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
-		const command = this.#extensionRunner.getCommand(commandName);
+		const command = extensionRunner.getCommand(commandName);
 		if (!command) return undefined;
 		onRouted?.();
 
 		// Get command context from extension runner (includes session control methods)
-		const ctx = this.#extensionRunner.createCommandContext();
+		const ctx = extensionRunner.createCommandContext();
 
 		try {
-			await this.#extensionRunner.runScoped(() => command.handler(args, ctx));
+			await extensionRunner.runCommandCallback(command, () =>
+				extensionRunner.runScoped(() => command.handler(args, ctx)),
+			);
 			return "ran";
 		} catch (err) {
 			// Emit error via extension runner
-			this.#extensionRunner.emitError({
+			extensionRunner.emitError({
 				extensionPath: `command:${commandName}`,
 				event: "command",
 				error: err instanceof Error ? err.message : String(err),

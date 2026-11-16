@@ -1297,6 +1297,8 @@ export interface SelectUiRequest {
 	method: "select";
 	title: string;
 	options: string[];
+	/** Opaque fixed-length identity derived from the extension's registry-resolved source; omitted for native/core dialogs. */
+	extensionId?: string;
 	optionDetails?: SelectOptionDetail[];
 	/** Index into `options` to focus first. */
 	initialIndex?: number;
@@ -1315,6 +1317,8 @@ export interface ConfirmUiRequest {
 	method: "confirm";
 	title: string;
 	message: string;
+	/** Opaque fixed-length identity derived from the extension's registry-resolved source; omitted for native/core dialogs. */
+	extensionId?: string;
 	timeout?: number;
 }
 

@@ -275,6 +275,244 @@ await runRpcMode(session);
 		expect({ exitCode, signal: child.signalCode }, await stderr).toEqual({ exitCode: 0, signal: null });
 	}, 30_000);
 
+	it("tags concurrent extension confirms by source identity while core dialogs remain untagged", async () => {
+		await using temp = await TempDir.create("@rpc-extension-identity-");
+		const firstExtensionPath = temp.join("first-extension.ts");
+		const secondExtensionPath = temp.join("second-extension.ts");
+		const extensionSource = `
+export default function(pi) {
+  pi.on("session_start", (_event, ctx) => {
+    void Promise.all([
+      ctx.ui.confirm("Same title", "Same message", { extensionId: "spoofed" }),
+      ctx.ui.confirm("Same title", "Same message", { extensionId: "spoofed" }),
+    ]);
+  });
+}
+`;
+		await Bun.write(firstExtensionPath, extensionSource);
+		await Bun.write(secondExtensionPath, extensionSource);
+		const runtimePath = temp.join("runtime.ts");
+		const sourceDir = path.resolve(import.meta.dir, "../src");
+		await Bun.write(
+			runtimePath,
+			`
+import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
+import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  toolNames: [],
+  enableMCP: false,
+  enableLsp: false,
+  disableExtensionDiscovery: true,
+  additionalExtensionPaths: ${JSON.stringify([firstExtensionPath, secondExtensionPath])},
+  settings: Settings.isolated({ "compaction.enabled": false }),
+});
+await runRpcMode(session, {
+  setToolUIContext(ui) {
+    void ui.confirm("Core dialog", "Core dialog");
+  },
+});
+`,
+		);
+		const child = Bun.spawn([process.execPath, runtimePath], {
+			cwd: temp.path(),
+			env: {
+				PATH: Bun.env.PATH,
+				HOME: temp.join("home"),
+				PI_CODING_AGENT_DIR: temp.join("agent"),
+				XDG_CONFIG_HOME: temp.join("config"),
+				XDG_DATA_HOME: temp.join("data"),
+				XDG_CACHE_HOME: temp.join("cache"),
+				CI: "true",
+				PI_NO_TITLE: "1",
+			},
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 20_000,
+		});
+		const stderr = new Response(child.stderr).text();
+		const requests: Record<string, unknown>[] = [];
+		try {
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (!isRecord(frame) || frame.type !== "extension_ui_request" || frame.method !== "confirm") continue;
+				requests.push(JSON.parse(JSON.stringify(frame)));
+				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: frame.id, confirmed: true })}\n`);
+				await child.stdin.flush();
+				if (requests.length === 5) child.stdin.end();
+			}
+		} finally {
+			child.stdin.end();
+			await child.exited;
+		}
+
+		const coreRequest = requests.find(request => request.title === "Core dialog");
+		const extensionRequests = requests.filter(request => request.title === "Same title");
+		const expectedIdentity = (sourcePath: string) =>
+			`ext:v1:sha256:${new Bun.CryptoHasher("sha256").update(sourcePath).digest("hex")}`;
+		const identities = extensionRequests.map(request => request.extensionId).sort();
+		expect(requests, await stderr).toHaveLength(5);
+		expect(coreRequest).toBeDefined();
+		expect(coreRequest).not.toHaveProperty("extensionId");
+		expect(extensionRequests).toHaveLength(4);
+		expect(identities).toEqual(
+			[
+				expectedIdentity(firstExtensionPath),
+				expectedIdentity(firstExtensionPath),
+				expectedIdentity(secondExtensionPath),
+				expectedIdentity(secondExtensionPath),
+			].sort(),
+		);
+		expect(JSON.stringify(requests)).not.toContain(firstExtensionPath);
+		expect(JSON.stringify(requests)).not.toContain(secondExtensionPath);
+	}, 30_000);
+
+	it("attaches registry identity to extension tool approvals, confirmations, and command dialogs", async () => {
+		await using temp = await TempDir.create("@rpc-extension-tool-identity-");
+		const extensionPath = temp.join("identity-tool.ts");
+		await Bun.write(
+			extensionPath,
+			`
+import { createAssistantMessageEventStream } from "@oh-my-pi/pi-ai";
+export default function(pi) {
+  pi.registerTool({
+    name: "identity_tool",
+    label: "Same display",
+    description: "Same display",
+    parameters: pi.zod.object({ extensionId: pi.zod.string() }),
+    approval: "exec",
+    execute: async (_id, args, _signal, _update, ctx) => {
+      await ctx.ui.confirm("Same title", "Same message", { extensionId: args.extensionId });
+      return { content: [{ type: "text", text: "done" }] };
+    },
+  });
+  pi.registerCommand("identity-command", {
+    handler: async (_args, ctx) => {
+      await ctx.ui.confirm("Command title", "Command message", { extensionId: "spoofed" });
+    },
+  });
+  pi.registerProvider("identity-scripted", {
+    baseUrl: "http://127.0.0.1:9/v1",
+    api: "scripted-identity",
+    apiKey: "fixture-key",
+    models: [{
+      id: "identity",
+      name: "Identity fixture",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 512,
+    }],
+    streamSimple: (model, context) => {
+      const stream = createAssistantMessageEventStream();
+      const message = {
+        role: "assistant",
+        api: model.api,
+        provider: model.provider,
+        model: model.id,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        timestamp: Date.now(),
+        content: [{ type: "text", text: "done" }],
+        stopReason: "stop",
+      };
+      stream.push({ type: "start", partial: message });
+      if (!context.messages.some(entry => entry.role === "toolResult")) {
+        const toolCall = { type: "toolCall", id: "identity-call", name: "identity_tool", arguments: { extensionId: "spoofed" } };
+        message.content = [toolCall];
+        message.stopReason = "toolUse";
+        stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+        stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+      }
+      stream.push({ type: "done", reason: message.stopReason, message });
+      return stream;
+    },
+  });
+}
+`,
+		);
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "..", "src", "cli.ts"),
+				"--trusted-extension",
+				extensionPath,
+				"--mode",
+				"rpc",
+				"--approval-mode",
+				"always-ask",
+				"--no-session",
+			],
+			{
+				cwd: temp.path(),
+				env: {
+					PATH: Bun.env.PATH,
+					HOME: temp.join("home"),
+					PI_CODING_AGENT_DIR: temp.join("agent"),
+					XDG_CONFIG_HOME: temp.join("config"),
+					XDG_DATA_HOME: temp.join("data"),
+					XDG_CACHE_HOME: temp.join("cache"),
+					CI: "true",
+					PI_NO_TITLE: "1",
+				},
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				timeout: 30_000,
+			},
+		);
+		const stdout = new Response(child.stdout).body;
+		if (!stdout) throw new Error("RPC extension tool identity fixture did not expose stdout");
+		const stderr = new Response(child.stderr).text();
+		const send = async (frame: object) => {
+			child.stdin.write(`${JSON.stringify(frame)}\n`);
+			await child.stdin.flush();
+		};
+		const approvalRequests: Record<string, unknown>[] = [];
+		const confirmRequests: Record<string, unknown>[] = [];
+		let promptResult: unknown;
+		let commandResponse: unknown;
+		try {
+			await send({ type: "set_model", id: "model", provider: "identity-scripted", modelId: "identity" });
+			for await (const frame of readJsonl<unknown>(stdout)) {
+				if (!isRecord(frame)) continue;
+				if (frame.type === "response" && frame.id === "model") {
+					if (frame.success !== true) throw new Error(`Identity model unavailable: ${JSON.stringify(frame)}`);
+					await send({ type: "prompt", id: "run", message: "invoke the registered extension tool" });
+				} else if (frame.type === "extension_ui_request" && frame.method === "select") {
+					approvalRequests.push(frame);
+					await send({ type: "extension_ui_response", id: frame.id, value: "Approve" });
+				} else if (frame.type === "extension_ui_request" && frame.method === "confirm") {
+					confirmRequests.push(frame);
+					await send({ type: "extension_ui_response", id: frame.id, confirmed: true });
+				} else if (frame.type === "prompt_result" && frame.id === "run") {
+					promptResult = frame;
+					await send({ type: "prompt", id: "command", message: "/identity-command" });
+				} else if (frame.type === "response" && frame.id === "command") {
+					commandResponse = frame;
+					break;
+				}
+			}
+		} finally {
+			child.stdin.end();
+			child.kill();
+			await child.exited;
+		}
+
+		const expectedIdentity = `ext:v1:sha256:${new Bun.CryptoHasher("sha256").update(extensionPath).digest("hex")}`;
+		expect(promptResult, await stderr).toBeDefined();
+		expect(approvalRequests).toHaveLength(1);
+		expect(approvalRequests[0]).toMatchObject({ method: "select", extensionId: expectedIdentity });
+		expect(confirmRequests).toHaveLength(2);
+		expect(confirmRequests).toContainEqual(
+			expect.objectContaining({ method: "confirm", title: "Same title", extensionId: expectedIdentity }),
+		);
+		expect(confirmRequests).toContainEqual(
+			expect.objectContaining({ method: "confirm", title: "Command title", extensionId: expectedIdentity }),
+		);
+		expect(commandResponse).toMatchObject({ type: "response", id: "command", success: true });
+	}, 60_000);
+
 	it("keeps the label-only wire shape for bare options", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

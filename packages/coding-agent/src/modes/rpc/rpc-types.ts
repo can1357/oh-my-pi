@@ -794,6 +794,8 @@ export type RpcExtensionUIRequest =
 			id: string;
 			method: "select";
 			title: string;
+			/** Opaque identity of the registry-owned extension source; omitted for native/core requests. */
+			extensionId?: string;
 			options: string[];
 			optionDetails?: RpcExtensionUISelectOptionDetail[];
 			/** Index into `options` to focus first. */
@@ -806,7 +808,16 @@ export type RpcExtensionUIRequest =
 			markableCount?: number;
 			timeout?: number;
 	  }
-	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "confirm";
+			title: string;
+			message: string;
+			/** Opaque identity of the registry-owned extension source; omitted for native/core requests. */
+			extensionId?: string;
+			timeout?: number;
+	  }
 	| {
 			type: "extension_ui_request";
 			id: string;

@@ -32,6 +32,7 @@ import {
 	getExtensionUISelectOptionLabel,
 	timedOutAskDialogResult,
 } from "../../extensibility/extensions";
+import { currentExtensionRequestIdentity } from "../../extensibility/extensions/request-identity";
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
@@ -1315,7 +1316,16 @@ export function requestRpcDialog<T>(
 		},
 		reject,
 	});
-	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
+	const { extensionId: _untrustedExtensionId, ...safeRequest } = request;
+	void _untrustedExtensionId;
+	const extensionId =
+		request.method === "select" || request.method === "confirm" ? currentExtensionRequestIdentity() : undefined;
+	output({
+		type: "extension_ui_request",
+		id,
+		...safeRequest,
+		...(extensionId === undefined ? {} : { extensionId }),
+	} as RpcExtensionUIRequest);
 	return promise;
 }
 /**

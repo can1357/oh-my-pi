@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- RPC extension select and confirm requests now carry an opaque source identity for client-side grant attribution; native/core dialogs omit it
+
 ## [18.22.1] - 2026-11-17
 
 ### Breaking Changes

@@ -45,6 +45,7 @@ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shar
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
+import { extensionRequestIdentity, runWithExtensionRequestIdentity } from "./request-identity";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import {
@@ -1181,7 +1182,7 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileWriteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							if (await this.#runWithExtensionIdentity(ext, () => handler(req, ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file write fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1200,7 +1201,7 @@ export class ExtensionRunner {
 					const ctx = this.createContext();
 					for (const handler of ext.fileDeleteFallbackHandlers) {
 						try {
-							if (await handler(req, ctx)) return true;
+							if (await this.#runWithExtensionIdentity(ext, () => handler(req, ctx))) return true;
 						} catch (error) {
 							logger.warn("Extension file delete fallback handler threw; trying next handler", {
 								extension: ext.path,
@@ -1708,7 +1709,7 @@ export class ExtensionRunner {
 			ui && ui !== this.#uiContext ? Object.create(base, { ui: { value: ui }, hasUI: { value: true } }) : base;
 		for (const handler of handlers) {
 			try {
-				await this.runScoped(() => handler(event, ctx));
+				await this.#runWithExtensionIdentity(owner, () => this.runScoped(() => handler(event, ctx)));
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				logger.warn("link_activate handler failed", { extensionPath: owner.path, url, error: message });
@@ -1767,6 +1768,23 @@ export class ExtensionRunner {
 	 */
 	runScoped<T>(fn: () => T): T {
 		return withActiveSettings(this.settings, fn);
+	}
+
+	runExtensionCallback<T>(extensionPath: string, action: () => T): T {
+		const extension = this.getLoadedExtensions().find(candidate => candidate.path === extensionPath);
+		return this.#runWithExtensionIdentity(extension, action);
+	}
+
+	runCommandCallback<T>(command: RegisteredCommand, action: () => T): T {
+		const extension = this.getLoadedExtensions().find(candidate => candidate.commands.get(command.name) === command);
+		return this.#runWithExtensionIdentity(extension, action);
+	}
+
+	#runWithExtensionIdentity<T>(extension: Extension | undefined, action: () => T): T {
+		return runWithExtensionRequestIdentity(
+			extension ? extensionRequestIdentity(extension.resolvedPath) : undefined,
+			action,
+		);
 	}
 
 	/**
@@ -1966,8 +1984,8 @@ export class ExtensionRunner {
 								handlerSignal,
 								event.type === "tool_call" || SESSION_BEFORE_EVENTS[event.type] === true ? budget : undefined,
 							);
-							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+							result = await this.#runWithExtensionIdentity(ext, () =>
+								this.#toolRegistrationScope.run(registrationScope, () => handler(event, handlerContext)),
 							);
 						} catch (error) {
 							handlerFailure = { error };

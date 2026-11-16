@@ -4540,6 +4540,9 @@ pub struct SelectUiRequest {
 	pub id: String,
 	pub title: String,
 	pub options: Vec<String>,
+	/// Opaque fixed-length identity derived from the extension's registry-resolved source; omitted for native/core dialogs.
+	#[serde(rename = "extensionId", default, skip_serializing_if = "Option::is_none")]
+	pub extension_id: Option<String>,
 	#[serde(rename = "optionDetails", default, skip_serializing_if = "Option::is_none")]
 	pub option_details: Option<Vec<SelectOptionDetail>>,
 	/// Index into `options` to focus first.
@@ -4563,6 +4566,9 @@ pub struct ConfirmUiRequest {
 	pub id: String,
 	pub title: String,
 	pub message: String,
+	/// Opaque fixed-length identity derived from the extension's registry-resolved source; omitted for native/core dialogs.
+	#[serde(rename = "extensionId", default, skip_serializing_if = "Option::is_none")]
+	pub extension_id: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
 }
