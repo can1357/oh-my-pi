@@ -177,6 +177,7 @@ import {
 	type WorktreeExitPlan,
 } from "../session/session-worktree";
 import type { ShakeMode } from "../session/shake-types";
+import { reloadTuiPluginState } from "../slash-commands/builtin-marketplace";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
@@ -3285,6 +3286,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			clearClaudePluginRootsCache();
 			await this.refreshTitleSystemPrompt(newCwd);
 			await this.session.refreshSkillsAndCommands();
+			// Rescope per-project agents, MCP servers, and the rest of the plugin
+			// runtime to the destination project without requiring a restart.
+			await reloadTuiPluginState(this);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived caches (provider globals, plugin roots, capabilities,

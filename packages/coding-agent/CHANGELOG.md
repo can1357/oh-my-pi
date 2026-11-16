@@ -20,6 +20,7 @@
 
 - The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
 - Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
+- `/move` now reloads the destination project's agents and MCP servers in the TUI immediately, without a restart ([#19385](https://github.com/can1357/oh-my-pi/issues/19385))
 
 ## [18.20.3] - 2026-11-16
 
