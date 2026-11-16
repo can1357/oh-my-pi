@@ -346,7 +346,7 @@ import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { createRatchetPrelude } from "./ratchet/prelude-definition";
 import { createArchivePrelude } from "./archive/prelude-definition";
-import { ToolContextStore } from "./tools/context";
+import { type AgentToolCaller, ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./irc/messaging";
 import { imageGenTool } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
@@ -636,6 +636,8 @@ export interface CreateAgentSessionOptions {
 	model?: Model;
 	/** Role whose alias selected {@link model} (CLI `--model pi/<role>`); retries walk that role's fallback chain. */
 	modelRole?: string;
+	/** Passive semantic role exposed to tools for subagent calls; does not affect model or retry routing. */
+	toolCallerModelRole?: string;
 	/**
 	 * Allow an explicit {@link model} to be rebound to its same-selector registry
 	 * entry after initial background discovery. The CLI enables this for models
@@ -3864,10 +3866,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoApprove: options.autoApprove ?? false,
 			spotlightShape,
 		});
-		const toolContextStore = new ToolContextStore(getSessionContext, trackUserWait, {
-			agentId: resolvedAgentId,
-			modelRole: options.modelRole,
-		});
+		const getToolCaller = (): AgentToolCaller => {
+			const modelRole = isSubagentSession
+				? options.toolCallerModelRole
+				: sessionManager.getLastModelChangeRole({ skipEphemeral: true });
+			return modelRole ? { agentId: resolvedAgentId, modelRole } : { agentId: resolvedAgentId };
+		};
+		const toolContextStore = new ToolContextStore(getSessionContext, trackUserWait, getToolCaller);
 		toolSession.getToolContext = () => toolContextStore.getContext();
 		const setSessionActiveToolNames = (names: Iterable<string>): void => {
 			const snapshot = Array.from(names);

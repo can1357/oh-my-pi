@@ -9,7 +9,7 @@ import {
 	type StreamFn,
 	type ToolCallContext,
 } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Context, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -83,6 +83,7 @@ describe("advisor tool-call loop guard", () => {
 		advice?: string,
 		adviceSeverity: "nit" | "concern" | "blocker" = "nit",
 		advices?: AdviceArgs[] | ((context: Context) => AdviceArgs | undefined),
+		advisorTools: AgentTool[] = [failingReadTool],
 	): { advisor: Agent; contexts: Context[]; reviewStarts: Context[] } {
 		const primaryMock = createMockModel({
 			provider: "anthropic",
@@ -184,7 +185,7 @@ describe("advisor tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry,
-			advisorTools: fixedAdvisorTools(failingReadTool),
+			advisorTools: fixedAdvisorTools(...advisorTools),
 			advisorStreamFn,
 			advisorGetToolContext: toolCall => primaryToolContext(toolCall),
 			advisorConfigs:
@@ -258,6 +259,7 @@ describe("advisor tool-call loop guard", () => {
 		let primaryAborts = 0;
 		primaryToolContext = toolCall =>
 			({
+				caller: { agentId: "Main", modelRole: "task" },
 				toolCall,
 				abort: () => {
 					primaryAborts++;
@@ -267,6 +269,7 @@ describe("advisor tool-call loop guard", () => {
 		const { advisor } = createAdvisor({}, 0);
 		const advisorAborts = spyOn(advisor, "abort");
 		let seenToolNames: string[] | undefined;
+		let seenCaller: AgentToolContext["caller"];
 		const mock = createMockModel({
 			provider: "anthropic",
 			responses: [
@@ -284,6 +287,7 @@ describe("advisor tool-call loop guard", () => {
 				approval: "read",
 				async execute(_id, _args, _signal, _update, context) {
 					seenToolNames = context?.toolNames;
+					seenCaller = context?.caller;
 					context?.abort();
 					return { content: [{ type: "text", text: "cancelled" }] };
 				},
@@ -293,6 +297,97 @@ describe("advisor tool-call loop guard", () => {
 		expect(primaryAborts).toBe(0);
 		expect(advisorAborts).toHaveBeenCalled();
 		expect(seenToolNames).toEqual(["ask"]);
+		expect(seenCaller?.agentId).toMatch(/-advisor$/);
+		expect(seenCaller?.modelRole).toBe("advisor");
+	});
+
+	it("uses advisor-owned provenance for Cursor bridge tool calls", async () => {
+		let seenCaller: AgentToolContext["caller"];
+		primaryToolContext = toolCall =>
+			({ caller: { agentId: "Main", modelRole: "task" }, toolCall }) as AgentToolContext;
+		const readTool: AgentTool = {
+			name: "read",
+			label: "Read",
+			description: "Capture bridge provenance",
+			parameters: type({}),
+			async execute(_id, _args, _signal, _update, context) {
+				seenCaller = context?.caller;
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const { advisor } = createAdvisor(
+			{},
+			0,
+			{ name: "Explicit", model: "anthropic/claude-sonnet-4-5" },
+			0,
+			undefined,
+			"nit",
+			undefined,
+			[readTool],
+		);
+		let handlers: SimpleStreamOptions["cursorExecHandlers"];
+		const mock = createMockModel({ provider: "anthropic", responses: [{ content: ["done"] }] });
+		advisor.streamFn = (model, context, options) => {
+			handlers = options?.cursorExecHandlers;
+			return mock.stream(model, context, options);
+		};
+
+		await advisor.prompt("capture bridge");
+		if (!handlers?.piLs) throw new Error("Expected advisor Cursor bridge");
+		await handlers.piLs({ toolCallId: "advisor-bridge", args: { path: "." } });
+
+		expect(seenCaller?.agentId).toMatch(/-advisor-explicit$/);
+		expect(seenCaller?.modelRole).toBeUndefined();
+	});
+
+	it("rebuilds same-model advisor provenance when selector role changes", async () => {
+		const callers: Array<AgentToolContext["caller"]> = [];
+		const readTool: AgentTool = {
+			name: "read",
+			label: "Read",
+			description: "Capture advisor role changes",
+			parameters: type({}),
+			async execute(_id, _args, _signal, _update, context) {
+				callers.push(context?.caller);
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const config: AdvisorConfig = { name: "Mutable", model: "@slow" };
+		const { advisor } = createAdvisor(
+			{ modelRoles: { slow: "anthropic/claude-sonnet-4-5" } },
+			0,
+			config,
+			0,
+			undefined,
+			"nit",
+			undefined,
+			[readTool],
+		);
+		const first = createMockModel({
+			provider: "anthropic",
+			responses: [
+				{ content: [{ type: "toolCall", id: "first-read", name: "read", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		advisor.streamFn = first.stream;
+		await advisor.prompt("first");
+
+		config.model = "anthropic/claude-sonnet-4-5";
+		expect(session?.setAdvisorEnabled(true)).toBe(true);
+		const rebuilt = session?.getAdvisorAgent();
+		if (!rebuilt) throw new Error("Expected rebuilt advisor");
+		const second = createMockModel({
+			provider: "anthropic",
+			responses: [
+				{ content: [{ type: "toolCall", id: "second-read", name: "read", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		rebuilt.streamFn = second.stream;
+		await rebuilt.prompt("second");
+
+		expect(callers.map(caller => caller?.modelRole)).toEqual(["slow", undefined]);
 	});
 
 	it("redirects the advisor's own repeated tool call and reaches its next request", async () => {

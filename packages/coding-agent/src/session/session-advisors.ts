@@ -82,10 +82,12 @@ import {
 	formatModelStringWithRouting,
 	resolveAdvisorRoleSelection,
 	resolveModelOverride,
+	resolveExplicitModelRole,
 } from "../config/model-resolver";
 import { MODEL_ROLES } from "../config/model-roles";
 import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
+import type { AgentToolCaller } from "../tools/context";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
 import { estimateContextToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
@@ -405,6 +407,7 @@ interface AdvisorRuntimeDescriptor {
 	name: string;
 	slug: string;
 	model: Model;
+	modelRole: string | undefined;
 	thinkingLevel: ThinkingLevel;
 	reviewMode: AdvisorReviewMode | undefined;
 	reviewInterval: number | undefined;
@@ -1188,12 +1191,14 @@ export class SessionAdvisors {
 			// Resolve the advisor's model: an explicit `model` override wins; else the
 			// `advisor` role chain. A model that fails to resolve skips just this advisor.
 			let model: Model | undefined;
+			let modelRole: string | undefined;
 			let thinkingLevel: ThinkingLevel | undefined;
 			// `auto` is a session-level selector with no per-advisor classifier, so
 			// `concreteThinkingLevel` erases it. Remember the choice: the advisor
 			// then tracks whatever the primary turn's classifier resolved to.
 			let autoThinking = false;
 			if (config.model) {
+				modelRole = resolveExplicitModelRole(config.model, this.#host.settings);
 				const resolved = resolveModelOverride([config.model], this.#host.modelRegistry, this.#host.settings);
 				model = resolved.model;
 				autoThinking = resolved.thinkingLevel === AUTO_THINKING;
@@ -1210,6 +1215,7 @@ export class SessionAdvisors {
 					continue;
 				}
 			} else {
+				modelRole = "advisor";
 				const sel = resolveAdvisorRoleSelection(this.#host.settings, this.#host.modelRegistry.getAvailable());
 				if (!sel) {
 					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
@@ -1249,6 +1255,7 @@ export class SessionAdvisors {
 				name: config.name,
 				slug,
 				model,
+				modelRole,
 				thinkingLevel: advisorThinkingLevel,
 				reviewMode,
 				reviewInterval,
@@ -1263,6 +1270,7 @@ export class SessionAdvisors {
 					config,
 					slug,
 					model,
+					modelRole,
 					autoThinking ? AUTO_THINKING : advisorThinkingLevel,
 				),
 			});
@@ -1274,6 +1282,7 @@ export class SessionAdvisors {
 		config: AdvisorConfig,
 		slug: string,
 		model: Model,
+		modelRole: string | undefined,
 		thinkingLevel: ThinkingLevel | typeof AUTO_THINKING,
 	): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
@@ -1287,6 +1296,7 @@ export class SessionAdvisors {
 			config.name,
 			slug,
 			formatModelStringWithRouting(model),
+			modelRole ?? "",
 			thinkingLevel,
 			tools,
 			instructions,
@@ -1360,6 +1370,7 @@ export class SessionAdvisors {
 				config,
 				slug,
 				model: advisorModel,
+				modelRole: advisorModelRole,
 				name: advisorName,
 				thinkingLevel: advisorThinkingLevel,
 				autoThinking: advisorAutoThinking,
@@ -1409,6 +1420,13 @@ export class SessionAdvisors {
 				? `${primaryProviderSessionId}-advisor-${slug}`
 				: `${primaryProviderSessionId}-advisor`;
 			const advisorProviderSessionId = this.#advisorProviderSessionId(slug);
+			const advisorCaller: AgentToolCaller = advisorModelRole
+				? { agentId: advisorSessionLabel, modelRole: advisorModelRole }
+				: { agentId: advisorSessionLabel };
+			const getAdvisorToolContext = (toolCall?: ToolCallContext): AgentToolContext | undefined => {
+				const context = this.#advisorGetToolContext?.(toolCall);
+				return context ? { ...context, caller: advisorCaller } : undefined;
+			};
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -1458,7 +1476,7 @@ export class SessionAdvisors {
 				// Approval mode, per-tool policies and `autoApprove` live only on
 				// this context; without it every bridge tool fails closed to
 				// `always-ask`.
-				getToolContext: this.#advisorGetToolContext,
+				getToolContext: getAdvisorToolContext,
 				allowDirectFileMutation: advisorCanMutateFiles,
 				// Gated on the advisor's own grant: the factory builds a fresh
 				// tool, so handing it over unconditionally would give a roster
@@ -1515,7 +1533,7 @@ export class SessionAdvisors {
 				// (`ask`) stops the advisor, and `bash` judges commands against the
 				// tools the advisor has, not the primary's.
 				getToolContext: toolCall => {
-					const context = this.#advisorGetToolContext?.(toolCall);
+					const context = getAdvisorToolContext(toolCall);
 					if (!context) return undefined;
 					return {
 						...context,

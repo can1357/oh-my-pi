@@ -15,6 +15,7 @@ import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolv
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type { AgentToolCaller } from "@oh-my-pi/pi-coding-agent/tools/context";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
@@ -52,6 +53,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { localSession } from "../helpers/local-session";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
@@ -1898,6 +1900,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		requests: string[][];
 		/** Tool names and descriptions of each provider request, in order. */
 		toolRequests: string[];
+		callers: Array<AgentToolCaller | undefined>;
 	}
 
 	interface ExtensionHooks {
@@ -1918,10 +1921,12 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		responses: MockResponseSource,
 		hooks: ExtensionHooks = {},
 		toolNames: string[] = ["read"],
+		toolCaller?: AgentToolCaller,
 	): RecordingSession {
 		const mock = createMockModel({ responses, handler: { content: ["done"] } });
 		const requests: string[][] = [];
 		const toolRequests: string[] = [];
+		const callers: Array<AgentToolCaller | undefined> = [];
 		const owner: { session?: AgentSession } = {};
 		// Like the real yield tool, its wire definition carries the active work-pool items.
 		const yieldTool: AgentTool = {
@@ -1931,22 +1936,51 @@ describe("cold revival replays the system prompt the last request sent", () => {
 				return `yield tool${items.map(item => ` ${item.id}#${item.index}`).join("")}`;
 			},
 		};
-		const tools = [...toolNames.map(createTool), yieldTool];
+		const tools = [
+			...toolNames.map((name): AgentTool => ({
+				...createTool(name),
+				async execute(_id, _args, _signal, _onUpdate, context) {
+					callers.push(context?.caller);
+					return { content: [{ type: "text", text: "ok" }], details: { status: "success", data: {} } };
+				},
+			})),
+			yieldTool,
+		];
+		const model = buildModel({
+			id: "mock",
+			name: "mock",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 2048,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		const modelRegistry = {
+			getApiKey: async () => "test-key",
+			getAvailable: () => [],
+			find: () => model,
+			hasConfiguredAuth: () => true,
+		} as never;
 		const agent = new Agent({
+			getToolContext: toolCaller
+				? () => ({
+						caller: toolCaller,
+						sessionManager,
+						modelRegistry,
+						model,
+						isIdle: () => true,
+						hasQueuedMessages: () => false,
+						abort: () => {},
+						settings,
+					})
+				: undefined,
 			getApiKey: () => "test-key",
 			initialState: {
-				model: buildModel({
-					id: "mock",
-					name: "mock",
-					api: "openai-responses",
-					provider: "openai",
-					baseUrl: "https://example.invalid",
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow: 8192,
-					maxTokens: 2048,
-				}),
+				model,
 				systemPrompt: buildPrompt(tools.map(tool => tool.name)),
 				tools,
 				messages: [],
@@ -1961,13 +1995,8 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		const session: AgentSession = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false, "todo.enabled": false }),
-			modelRegistry: {
-				getApiKey: async () => "test-key",
-				getAvailable: () => [],
-				find: () => agent.state.model,
-				hasConfiguredAuth: () => true,
-			} as never,
+			settings,
+			modelRegistry,
 			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 			extensionRunner: {
 				initialize: () => {},
@@ -1987,7 +2016,7 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		const { beforeModelCall } = hooks;
 		if (beforeModelCall) agent.addBeforeModelCallHook(() => beforeModelCall(session));
 		sessions.push(session);
-		return { session, requests, toolRequests };
+		return { session, requests, toolRequests, callers };
 	}
 
 	const spawnResponses = (): MockResponse[] => [
@@ -2005,8 +2034,9 @@ describe("cold revival replays the system prompt the last request sent", () => {
 	): Promise<RecordingSession> {
 		let spawned: RecordingSession | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementationOnce(async options => {
+			if (!options?.sessionManager) throw new Error("Expected spawned session manager");
 			spawned = createRecordingSession(
-				options!.sessionManager!,
+				options.sessionManager,
 				names => buildPrompt(names, options),
 				responses,
 				hooks,
@@ -2059,6 +2089,64 @@ describe("cold revival replays the system prompt the last request sent", () => {
 		if (!revived) throw new Error("Expected the revive to create a session");
 		return { system: revived.requests[0]!, tools: revived.toolRequests[0]! };
 	}
+
+	it.each([
+		{ label: "restores semantic tool-caller role through cold and warm revival", modelRole: "task" },
+		{ label: "keeps caller role absent for a legacy transcript", modelRole: undefined },
+	])("$label", async ({ modelRole }) => {
+		const cwd = makeTempDir("@pi-revive-tool-caller-");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		const sessionFile = await createPersistedSession(cwd, true, modelRole);
+		const recorded = await SessionManager.open(sessionFile);
+		recorded.appendModelChange("anthropic/claude-sonnet-4-5", "subagent:persisted-restricted");
+		await recorded.close();
+		const registry = AgentRegistry.global();
+		const ref = registry.register(createRef(sessionFile));
+		const lifecycle = new AgentLifecycleManager(registry);
+		lifecycle.setPersistedSubagentReviverFactory(
+			createFactory(cwd, undefined, { authStorage, modelRegistry, settings: Settings.isolated() }),
+			() => 0,
+		);
+		const callers: Array<AgentToolCaller | undefined> = [];
+		const invokeProbe = async (session: AgentSession, id: string) => {
+			const mock = createMockModel({
+				provider: "anthropic",
+				responses: [{ content: [{ type: "toolCall", id, name: "read", arguments: {} }] }, { content: ["done"] }],
+			});
+			const probe: AgentTool = {
+				name: "read",
+				label: "Read",
+				description: "Capture revived provenance",
+				parameters: type({}),
+				async execute(_id, _args, _signal, _update, context) {
+					callers.push(context?.caller);
+					return { content: [{ type: "text", text: "ok" }] };
+				},
+			};
+			session.agent.setTools([probe]);
+			session.agent.streamFn = mock.stream;
+			await session.prompt("follow-up");
+		};
+		try {
+			const cold = localSession(await lifecycle.ensureLive(ref.id));
+			await invokeProbe(cold, "cold-read");
+			await lifecycle.park(ref.id);
+			const warm = localSession(await lifecycle.ensureLive(ref.id));
+			await invokeProbe(warm, "warm-read");
+
+			const expected = { agentId: ref.id, ...(modelRole ? { modelRole } : undefined) };
+			expect(callers).toEqual([expected, expected]);
+			expect(warm.sessionManager.getLastModelChangeRole({ skipEphemeral: true })).toBe(
+				"subagent:persisted-restricted",
+			);
+		} finally {
+			await lifecycle.dispose();
+			registry.unregister(ref.id);
+			authStorage.close();
+		}
+	});
 
 	it("replays the blocks after a first-turn before_agent_start tool change", async () => {
 		const cwd = makeTempDir("@pi-revive-first-turn-tools-");

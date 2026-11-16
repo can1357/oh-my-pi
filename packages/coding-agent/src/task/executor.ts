@@ -5068,7 +5068,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
-					modelRole: resolvedModelRole,
+					toolCallerModelRole: resolvedModelRole,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
 						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,

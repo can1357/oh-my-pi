@@ -419,6 +419,7 @@ export async function revivePersistedSubagent(spec: PersistedReviveSpec, expecte
 			settings: subagentSettings,
 			sessionManager: reopened,
 			agentId: ref.id,
+			toolCallerModelRole: init.modelRole,
 			agentDisplayName: ref.displayName,
 			// `agents` rule scoping keys on the durable definition name (see `persistedAgentName`).
 			agentName: persistedAgentName(ref.displayName, init),

@@ -1,11 +1,19 @@
-import type { AgentToolCaller, AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { CustomToolContext } from "../extensibility/custom-tools/types";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
 import { trackUserWaits, type UserWaitTracker } from "../extensibility/extensions/user-wait";
 import type { CalledToolShaper } from "../spotlight";
 
+/** Host-owned identity of the coding agent executing a tool call. */
+export interface AgentToolCaller {
+	readonly agentId?: string;
+	readonly modelRole?: string;
+}
+
 declare module "@oh-my-pi/pi-agent-core" {
 	interface AgentToolContext extends CustomToolContext {
+		/** Caller identity for the current tool call. */
+		readonly caller?: AgentToolCaller;
 		ui?: ExtensionUIContext;
 		hasUI?: boolean;
 		toolNames?: string[];
@@ -42,29 +50,18 @@ export class ToolContextStore {
 	#uiContext: ExtensionUIContext | undefined;
 	#hasUI = false;
 	#toolNames: string[] = [];
-	readonly #caller: AgentToolCaller | undefined;
 
 	constructor(
 		private readonly getBaseContext: () => ToolBaseContext,
 		/** Runs each dialog a tool opens (`ask`, eval prelude approvals, computer control) as a wait for the user. */
-		private readonly trackUserWait?: UserWaitTracker,
-		caller?: AgentToolCaller,
-	) {
-		const agentId = typeof caller?.agentId === "string" ? caller.agentId.trim() : undefined;
-		const modelRole = typeof caller?.modelRole === "string" ? caller.modelRole.trim() : undefined;
-		this.#caller =
-			agentId || modelRole
-				? Object.freeze({
-						...(agentId ? { agentId } : undefined),
-						...(modelRole ? { modelRole } : undefined),
-					})
-				: undefined;
-	}
+		private readonly trackUserWait: UserWaitTracker | undefined,
+		private readonly getCaller: () => AgentToolCaller,
+	) {}
 
 	getContext(toolCall?: ToolCallContext): AgentToolContext {
 		return {
 			...this.getBaseContext(),
-			caller: this.#caller,
+			caller: this.getCaller(),
 			ui: this.#uiContext,
 			hasUI: this.#hasUI,
 			toolNames: this.#toolNames,
