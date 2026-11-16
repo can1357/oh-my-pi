@@ -1,3 +1,19 @@
+diff --git a/packages/coding-agent/src/modes/controllers/event-controller.ts b/packages/coding-agent/src/modes/controllers/event-controller.ts
+index 315f74ac05988..5391c8368e1af 100644
+--- a/packages/coding-agent/src/modes/controllers/event-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/event-controller.ts
+@@ -2050,11 +2050,6 @@ export class EventController {
+ 		this.#updateWorkingMessageFromIntent(event.intent);
+ 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
+ 		const renderToolName = toolRenderName(event.toolName, tool);
+-		const blocked = this.#blockingPrompt(renderToolName, event.args);
+-		if (blocked) {
+-			this.#blockingPrompts.set(event.toolCallId, blocked);
+-			setRunStatus(blocked);
+-		}
+ 		if (!this.ctx.pendingTools.has(event.toolCallId) && !this.#toolTimelineComponents.has(event.toolCallId)) {
+ 			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
+ 			if (stale) {
 diff --git a/packages/coding-agent/src/subprocess/worker-client.ts b/packages/coding-agent/src/subprocess/worker-client.ts
 index c65ec639286..e0a4518e0d9 100644
 --- a/packages/coding-agent/src/subprocess/worker-client.ts
