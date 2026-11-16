@@ -17,6 +17,7 @@
 ### Changed
 
 - Changed the default local text-to-speech model to Phonon 31M: faster synthesis, a smaller download, and new voices (Kokoro voice settings migrate automatically); the speaking-rate range is now 0.8–1.3×, and old Kokoro caches are removed after the first Phonon install
+- In Tern, `/btw` answers in a note in the transcript where you asked it instead of opening the BTW history sheet: click the note to send the composer's drafts to it as follow-ups (Esc returns to the chat), right-click it to copy, branch, inject or stop, and fold it to one line with its ×; notes come back folded when the transcript is rebuilt or the session resumed. `/btw` alone still opens the history
 - Bash calls that overlap a running or backgrounded call now carry the variables, functions, aliases, options and traps they set into the session's shell (the call that ends last wins a name both set), instead of discarding them with a "Ran in a copy of the busy session shell" notice on every overlapping call; background jobs they start are no longer killed when that copy is garbage-collected
 - Newly enabled extensions now load into the running session when `extensions` or `disabledExtensions` changes, instead of requiring a restart
 

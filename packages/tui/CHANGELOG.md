@@ -10,6 +10,7 @@
 
 - Fixed the model hub offering models a role can never use (such as image or speech models for Default) when adding or replacing that role's fallback ([#19371](https://github.com/can1357/oh-my-pi/pull/19371) by [@Xytronix](https://github.com/Xytronix))
 - Fixed spelling assistance (macOS typo marks, autocorrect and replacements) and word completion acting on `!` shell and `$` Python drafts ([#12474](https://github.com/can1357/oh-my-pi/pull/12474) by [@aleister1102](https://github.com/aleister1102))
+- Added `BtwNoteComponent`, a `/btw` topic drawn as a transcript note for TSP terminals, and the composer's `btw` state (`ComposerNativeState.btw`: role `omp.editor.btw`, a `btw` chip, its placeholder)
 - Assistant replies draw `<img src>` lines as inline pictures, sized by CSS `width`/`height` (px, %, vw, vh, ch, em), and `<iframe src>` lines as one page screenshot over a `[Visit]` link, through a host-installed `setEmbedHost`
 
 ### Changed
