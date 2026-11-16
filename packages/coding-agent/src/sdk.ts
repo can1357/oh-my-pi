@@ -4952,7 +4952,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return Promise.reject(new Error("Offline mode restricts model calls to the active session provider."));
 			}
 			return withCredentialRedaction(cfgSecretsEnabled.get(settings), () =>
-				settingsBoundStreamFn(streamModel, context, streamOptions),
+				settingsBoundStreamFn(streamModel, context, {
+					...streamOptions,
+					thinkingCapabilityDbPath: modelRegistry.modelsDbPath,
+				}),
 			);
 		};
 		// Primary-agent (and its auto-learn capture twin) provider options read per

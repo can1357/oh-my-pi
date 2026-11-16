@@ -9,6 +9,7 @@
 ### Added
 
 - Added `task.agentPrewalkAuto` (agent name -> `on` / `off` / model pattern): the native judge decides per assignment at spawn whether a subagent arms prewalk, handing off to `prewalk.autoTarget` or the given target; unconditional subagent prewalk still wins ([#18913](https://github.com/can1357/oh-my-pi/pull/18913) by [@1vivy](https://github.com/1vivy))
+- Unknown custom and discovered models automatically probe reasoning support before the first thinking request and remember supported effort levels for future sessions.
 - An `<iframe>` in a reply is a live page in Tern (click to use it, Esc to return to the chat), and embed sources are read leniently: `localhost:3000`, `example.com/docs`, a bare or `~/` path, or a `file:` URL with the wrong slashes all load
 - The agent can show pictures and web pages in its replies: an `<img src>` line (a file, a `data:` URI or an http(s) URL) draws inline on terminals that show graphics, sized by `width`/`height` in px, %, vw, vh, ch or em, and an `<iframe src>` line shows one screenshot of the page with a `[Visit]` link; other terminals get a one-row linked note. `tui.renderEmbeds` turns it off
 - Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result

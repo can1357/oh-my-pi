@@ -1,12 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import {
 	assertModelSupportsEffortCeiling,
+	automaticThinkingLevel,
+	AUTO_THINKING,
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
+	newSessionThinkingLevel,
+	resolveConfiguredThinkingLevel,
+	resolveProvisionalAutoLevel,
 } from "../src/thinking";
 
 function customReasoner(): Model {
@@ -24,6 +30,32 @@ function customReasoner(): Model {
 		maxTokens: 32_000,
 	});
 }
+
+describe("thinking before capability discovery", () => {
+	const model = buildModel({
+		...toModelSpec(customReasoner()),
+		reasoning: undefined,
+		thinking: undefined,
+	});
+
+	it.each([Effort.Low, Effort.Max, AUTO_THINKING, ThinkingLevel.Off, undefined])(
+		"honors the session default %s while capability is unverified",
+		level => {
+			expect(model.thinking?.unverified).toBe(true);
+			expect(model.thinking?.efforts).toEqual(THINKING_EFFORTS);
+			expect(automaticThinkingLevel(model, level)).toBe(level);
+			expect(newSessionThinkingLevel(model, undefined, level)).toBe(level);
+		},
+	);
+
+	it("resolves auto to a concrete provisional effort without enabling known non-reasoners", () => {
+		expect(resolveProvisionalAutoLevel(model)).toBe(Effort.High);
+		expect(resolveConfiguredThinkingLevel(model, AUTO_THINKING)).toBe(Effort.High);
+		const nonreasoner = buildModel({ ...toModelSpec(model), reasoning: false, thinking: undefined });
+		expect(nonreasoner.thinking).toBeUndefined();
+		expect(resolveConfiguredThinkingLevel(nonreasoner, AUTO_THINKING)).toBeUndefined();
+	});
+});
 
 const DEFERRED_LEVELS: Array<ThinkingLevel | undefined> = [undefined, ThinkingLevel.Inherit, ThinkingLevel.Off];
 

@@ -16,6 +16,7 @@
 
 ### Changed
 
+- Models awaiting reasoning-capability discovery now follow the session's thinking default and offer auto alongside off and every effort level.
 - `html-form/media` moved to `media`, with `loadFormImage`, `FormMedia` and `MAX_FORM_IMAGE_BYTES` renamed `loadMedia`, `Media` and `MAX_MEDIA_BYTES`
 
 ## [18.20.1] - 2026-11-14
