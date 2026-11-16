@@ -96,6 +96,7 @@ export async function runPostCheckoutHook(
 			detached: process.platform !== "win32",
 		});
 		if (result.ok) return { status: "ok" };
+		// `git hook run` sends the hook's stdout to stderr, so stderr holds the hook's output in the order it printed.
 		return {
 			status: "failed",
 			exitCode: result.exitCode ?? -1,
