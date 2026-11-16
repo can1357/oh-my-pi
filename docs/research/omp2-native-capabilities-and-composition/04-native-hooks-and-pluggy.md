@@ -14,12 +14,14 @@ Can OMP2’s existing hook architecture already provide the useful composability
 |---|---|
 | `crates/contract/src/hooks.rs` | `HookPhase`, `HookDecision`, `Subscription`, `HookGate`, `LifecycleHooks`, `NativeHookHost` |
 | `crates/contract/src/hook_catalog.rs` | Stable `HOOK_EVENTS` descriptors (ADR 0046) |
+| `crates/contract/src/approvals.rs` | `ApprovalBook` (used from agent dispatch) |
+| `crates/agent` (`Kernel`, `loop.rs`) | Live emit + `gate_tool_call` / `before_agent_start` + `retry_tool_tail` skip (EGM G2) |
 | `crates/envd/src/tools/hooks.rs` | Production composer: delegated gate + Python CONTROL callbacks |
 | `crates/driver/src/plugin_hooks.rs` | Claude-plugin `NativeHookHost` on the same gate |
 | `crates/ai/src/layer/hook.rs` (+ provider hooks) | Inference cold-path / provider domain — not a second catalog |
 | `docs/py/05-hooks.md`, `crates/py/python/omp/hooks.py` | Spec + `@omp.hook` |
 
-Wiring: envd builds a **delegated** `HookGate`; driver `attach_native` for plugins; kernel shares the gate via `with_hook_gate`.
+Wiring: envd builds a **delegated** `HookGate`; driver `attach_native` for plugins; **agent Kernel** emits and evaluates via `with_hook_gate`.
 
 ### Phase legality (enforced)
 
@@ -27,7 +29,7 @@ Wiring: envd builds a **delegated** `HookGate`; driver `attach_native` for plugi
 |---|---|---|
 | Precheck | Deny, Defer | Deny-only checks |
 | Transform | Modify, Defer | `MODIFY_ROUNDS = 1`; Replace/Append/Intersect fields |
-| Review | Allow, Deny, Defer | Budgeted review |
+| Review | Allow, Deny, Defer | Sequential today; “parallel/budgeted” is aspirational docs only (EGM G4) |
 | Approval | Allow, Deny, Defer, RequireApproval | Merges into ApprovalBook |
 | Observe | Defer only | Async/lossy; does not change outcome; cap 64 |
 
@@ -42,7 +44,7 @@ Ordering: native hosts before extensions; transform by `(order, host, id)`; deny
 | Tool admission (`tool_call`) | **IV** | Live delegated compose |
 | Native tool policy + ApprovalBook | **IV** | Parallel to hooks |
 | `before_agent_start` / `agent_start` | **IV** | Live prompt/submission seam |
-| `user_input` / `user_bash` / `user_eval` / `command_invoke` | **PD/A** | Catalogued; no Rust emit found |
+| `user_input` / `user_bash` / `user_eval` / `command_invoke` | **PD/A** | Catalogued in Rust + Python; **no production Rust emit** (EGM G9) |
 | Model observe / provider before_request | **IV** | No separate “model admit” gate |
 | `thread_projection`, `turn_start` | **IV** | Live |
 | Tool lifecycle observes + `tool_result` | **IV** | Mostly observe |

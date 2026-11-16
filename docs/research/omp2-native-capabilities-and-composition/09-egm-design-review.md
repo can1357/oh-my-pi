@@ -1,8 +1,10 @@
 # EGM Goldfish design review
 
 Pin: `a8762fd997ca754b30ea7d3344cbd5c656aa5dff`.  
-Reviewer: [EGM Goldfish design review](bc-8ca267e4-34a7-5eb1-a7df-7cf32cf87d5f) (`egm-zoom-out`, fresh context).  
-Second Goldfish (codebase-details) may still be pending; this file records the first closed review.
+Reviewers (fresh contexts):
+
+- [EGM Goldfish design review](bc-8ca267e4-34a7-5eb1-a7df-7cf32cf87d5f) (`egm-zoom-out`) — F1–F9  
+- [EGM duplication Goldfish](bc-45573391-d23b-5f36-a859-34b475f57c43) (`egm-codebase-details`) — G1–G10
 
 ## Verdict (reviewer)
 
@@ -22,9 +24,24 @@ Do **not** treat the cohesive architecture as owner-ready until authority clarit
 | F8 | Minor | **Confirm** | ADR 0061 = **proposed** packaging direction, not landed capability |
 | F9 | Minor | **Confirm** | Matrix evidence = `source-inventoried` unless commands executed |
 
+## Codebase-details findings (Elephant)
+
+| ID | Severity | Disposition | Design change |
+|---|---|---|---|
+| G1 | Blocker | **Confirm** | Schedules are **II/disarmed** — not a live expert/PR periodic path; keep ci@1 `watch` poll |
+| G2 | Major | **Confirm** | Add `omp-agent` `Kernel` as HookGate emit/admission/retry owner |
+| G3 | Major | **Confirm** | Distinguish jaq CLI-port docs (2.3.0) from locked crates (core 2.2.1 / std 2.1.x) |
+| G4 | Major | **Confirm** | Drop “budgeted Review” as implemented; sequential + ordinary timeouts only |
+| G5 | Major | **Confirm** | Document full plugin frontmatter validators; omp `enabled`/`hide` fail on plugin path |
+| G6 | Major | **Confirm** | No 1024 description cap on any path; managed only sanitizes |
+| G7 | Nit/Major | **Confirm** | Name `envd/src/exec.rs` as live cargo-only minimize owner |
+| G8 | Nit | **Confirm** | Cite `extensions/workflows/`; do not list armed schedules as glue |
+| G9 | Nit | **Confirm** | `user_input` family: Rust+Python catalogued; no Rust emit |
+| G10 | Nit | **Confirm** | Keep `01` synced; matrix as summary only |
+
 ## Unresolved / owner
 
-Q1–Q7 in [16-open-questions.md](16-open-questions.md). F1/F2 corrections are Elephant design revisions; they do **not** substitute for owner Q7 authorization.
+Q1–Q7 in [16-open-questions.md](16-open-questions.md). F/G corrections are Elephant design revisions; they do **not** substitute for owner Q7 authorization.
 
 ## Acceptance scorecard (post-revision intent)
 

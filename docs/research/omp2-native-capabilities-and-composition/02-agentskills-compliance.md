@@ -29,12 +29,12 @@ Can OMP2 keep portable Agent Skills compatibility while expressing richer requir
 | Spec field | General path | Agent-plugins path |
 |---|---|---|
 | `name` | optional; dir fallback; allows `_` `.` case | enforced kebab + dir match + ≤64 |
-| `description` | required; no 1024 cap (except managed) | required; no 1024 cap |
-| `license` / `compatibility` / `metadata` | ignored | validated then discarded |
+| `description` | required; **no 1024 length cap** on any path (EGM G6); managed only sanitizes | required; no 1024 cap |
+| `license` / `compatibility` / `metadata` | ignored | validated then discarded (empty license rejected; `compatibility` ≤500; empty metadata keys rejected) |
 | `allowed-tools` | ignored | empty rejected; else discarded; **not enforced** |
-| Unknown keys | dropped | hard fail |
+| Unknown keys | dropped | hard fail (`deny_unknown_fields`) |
 
-OMP-specific fields already present: `enabled`, `hide`/`hidden`, `disable-model-invocation`, provider/include/ignore convars, managed-skills isolation.
+OMP-specific fields (`enabled`, `hide`/`hidden`, …) exist on the **default** path; on the **plugin** header they are unknown → **hard fail** (EGM G5).
 
 ## Classify
 

@@ -27,12 +27,12 @@ Domain mismatch: OMP2’s hazard is bash/sandbox under ADR 0028; sHEL’s docume
 | Capability | Owner | Decision |
 |---|---|---|
 | In-process Bash | `omp-shell`; envd registers builtins | **REUSE** |
-| Native `jq` (jaq 2.3.0 port) | `crates/shell-builtins/src/jq.rs`; `factory.rs` | **REUSE** |
+| Native `jq` (jaq) | `jq.rs` CLI front-end ported from jaq **2.3.0 docs**; locked crates **jaq-core 2.2.1 / jaq-std 2.1.x / jaq-json 1.1.x** (EGM G3); `factory.rs` | **REUSE** |
 | jq streaming / multi-doc / NDJSON-shaped work | jaq iterators; `-s` slurp | **REUSE**; **DEFER** separate stream engine |
 | Text filters (`sed`/`cut`/`tr`/`sort`/`uniq`/`grep`/`rg`) | shell-builtins | **REUSE** (`awk` absent) |
 | Path policy / host-safe jq overrides | ReadOpener, PathPolicy; env/halt/debug overrides | **REUSE** |
 | Shell tool spill / projection | `bash@2`, envd live capture + `artifact://` spill | **REUSE** |
-| Minimizer jq filter | `minimizer` defs/tests **IV**; live envd path **II** (cargo-only) | **REUSE** crate; **DEFER** live jq minimize |
+| Minimizer jq filter | Defs/tests in `omp-minimizer` **IV**; live owner `envd/src/exec.rs` (`is_single_cargo_command` / `minimize_cargo_output`) — **cargo-only** (EGM G7) | **REUSE** crate; **DEFER** live jq minimize |
 | `omp_core::slopjson` | Tolerant tool-arg JSON (`MAX_DEPTH=128`) | **REUSE** for args; **REJECT** as query language |
 | YAML/TOML/CSV as transform language | **A** (serde_yaml for config/import only) | **DEFER** yq-like unless measured need |
 | Dedicated non-bash structured-ops tool | **A** | **DEFER**; prefer bash+`jq` first |

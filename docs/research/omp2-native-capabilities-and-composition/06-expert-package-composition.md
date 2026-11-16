@@ -48,8 +48,8 @@ Zero matches for `expert package` / `ExpertPackage` at the pin. ADR 0061 already
 | Need | Feasible |
 |---|---|
 | Read/comment known PR | Yes — forge@1 / `pr://` |
-| Wait for CI | Yes — ci@1 `watch` poll |
-| Periodic checks | Yes — schedules + forge search + optional ADW |
+| Wait for CI | Yes — ci@1 `watch` poll (live periodic CI mechanism) |
+| Periodic checks via durable schedules | **No in production** — schedules API exists but delivery is **disarmed** (`ScheduleDeliveryBackend` test-only; EGM G1) |
 | Native `pull_request` webhook subscriber | No — request/response Dyn only |
 | Skills alone as monitors | No |
 

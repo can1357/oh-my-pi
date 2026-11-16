@@ -14,7 +14,7 @@ Evidence column: **SI** = source-inventoried (tests not re-run). Recommendation 
 | Enforce `allowed-tools` | parse-only plugins | Absent | unused | ApprovalBook + roster | Experimental | Skill must not grant | Med | SI A | **REJECT** as cohesive default; **document** parse-only (Q3); ADR required before any intersect-only wire |
 | Second skill registry | — | Absent | — | ActiveSkills | Breaks owner | Split brain | High | SI A | **REJECT** |
 | Model/tool reqs from skill metadata | advisory | Proposed | — | catalog + `omp-ai` + envd | Nonstandard if gated | Skills must not authorize | Med | SI `03` | **REUSE** native enforcement (D); **DEFER** sidecar; no skill-YAML preflight runtime |
-| Five-phase HookGate | `contract/hooks.rs`, envd | Implemented | — | — | N/A | Phase legality | Med | SI B | **REUSE** (tool/session admission) |
+| Five-phase HookGate | contract + **agent Kernel** emit + envd compose | Implemented | — | — | N/A | Phase legality | Med | SI B + G2 | **REUSE** (tool/session admission) |
 | Parallel Pluggy middleware stack | — | Absent | — | HookGate | N/A | Attack surface | High | SI B | **REJECT** (YAGNI; not “parity achieved”) |
 | Emit `user_input` family | catalog only | Partial | No Rust emit | `before_agent_start` | N/A | Prompt gate | Med | SI B | **EXTEND** if product needs |
 | Replay re-admission | `retry_tool_tail` | Partial | Skips gate | Journal fidelity | N/A | Policy vs replay | Med | SI B | **EXTEND** only if policy requires |
@@ -29,7 +29,8 @@ Evidence column: **SI** = source-inventoried (tests not re-run). Recommendation 
 | ExpertPackage runtime | — | Absent | — | skills+ADW+ext+classes | Fork story | Authority | High | SI D | **REJECT** |
 | Soft `omp.workflows` DAG | extension device | Implemented (II) | Second DAG vs ADW | ADW for durable experts | N/A | Resume confusion | Med | SI D | **REUSE** as optional long-tail only; **not** expert packaging |
 | Skill-only extension packs | ADR 0061 | Proposed | O8 open | Extensions | Compatible | Trust native | Med | SI D | **DEFER**/proposed packaging — not landed |
-| PR webhook → expert pipeline | forge/ci | Partial | No push webhook | poll/schedules | N/A | Ingress | Med | SI D | **EXTEND** ingress/recipes only |
+| PR webhook → expert pipeline | forge/ci | Partial | No push webhook; schedules **disarmed** | ci@1 `watch` poll | N/A | Ingress | Med | SI D + G1 | **EXTEND** ingress/recipes; do **not** rely on durable schedules |
+| Durable schedule delivery | envd schedules | Partial / disarmed | No production `bind_schedule_delivery` | ci watch / external cron | N/A | N/A | Med | G1 | **DEFER** as expert glue until armed |
 
 ## Cross-stream dependencies
 

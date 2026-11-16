@@ -13,5 +13,7 @@ Status: **proposed research conclusions** — not ADR Accepted; Q7 open.
 | No sHEL embed | Wrong domain; unmeasured; AGPL blast | F6 |
 | No ExpertPackage type | Composition already covered | Stream D |
 | Research-only until owner Q7 | Authorization gate | F4 |
+| Do not treat durable schedules as live expert glue | Delivery disarmed in production | G1 |
+| Cite agent Kernel as hook emit owner | Live admission/retry live in `omp-agent` | G2 |
 
 See [16-open-questions.md](16-open-questions.md) for owner choices still required.
