@@ -2,14 +2,22 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
 ### Added
 
-- `HtmlFormDialog` option notes take pasted images when the form is opened with `acceptImages`: the open note is a paste target (`attachImage`, `beginPaste`, `pasteText`), a deleted `[Image #N]` marker drops its image, and `OptionNote.images` carries the rest ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
+- Added support for pasting images into `HtmlFormDialog` option notes when opened with `acceptImages`, including image attachment, removal, and access to retained images through `OptionNote.images`.
+- Added live web-page and image rendering in assistant replies for supported terminals, including inline images and embedded page previews. Added the `/btw` transcript note for sharing side topics without interrupting the main conversation.
+
+### Changed
+
+- Improved reasoning-capability discovery so models awaiting discovery follow the session's thinking default and offer automatic thinking in addition to disabled and effort-level settings.
+- Renamed the public `html-form/media` APIs to `media`, including `loadMedia`, `Media`, and `MAX_MEDIA_BYTES`.
 
 ### Fixed
 
-- Fixed the model hub offering models a role can never use (such as image or speech models for Default) when adding or replacing that role's fallback ([#19371](https://github.com/can1357/oh-my-pi/pull/19371) by [@Xytronix](https://github.com/Xytronix))
-- Fixed spelling assistance (macOS typo marks, autocorrect and replacements) and word completion acting on `!` shell and `$` Python drafts ([#12474](https://github.com/can1357/oh-my-pi/pull/12474) by [@aleister1102](https://github.com/aleister1102))
+- Fixed fallback model selection so roles are offered only models they can use, excluding incompatible image and speech models.
+- Fixed macOS spelling assistance, autocorrect, replacements, and word completion for shell (`!`) and Python (`$`) drafts.
 
 ## [18.20.1] - 2026-11-14
 

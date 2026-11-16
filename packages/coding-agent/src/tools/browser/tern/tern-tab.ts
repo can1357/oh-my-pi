@@ -1831,7 +1831,9 @@ export class TernTab implements InProcessRunTab {
 				return { x: last.x + offset.x, y: last.y + offset.y, width: last.width, height: last.height };
 			}
 			const elapsed = Date.now() - started;
-			if (elapsed >= timeoutMs) break;
+			// A round starting at the deadline has no budget left for its reads: under a
+			// binding cell budget they time out and mask the diagnosis below.
+			if (elapsed + delay >= timeoutMs) break;
 			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
 			await untilAborted(this.#signal, () => Bun.sleep(delay));
 			delay = Math.min(250, Math.round(delay * 1.5));
@@ -2024,7 +2026,9 @@ export class TernTab implements InProcessRunTab {
 				}
 			}
 			const elapsed = Date.now() - started;
-			if (elapsed >= timeoutMs) break;
+			// A round starting at the deadline has no budget left for its reads: under a
+			// binding cell budget they time out and mask the diagnosis below.
+			if (elapsed + delay >= timeoutMs) break;
 			if (last.reason === "missing" && explicitTimeout === undefined && elapsed >= ZERO_MATCH_FAIL_FAST_MS) break;
 			await untilAborted(this.#signal, () => Bun.sleep(delay));
 			delay = Math.min(250, Math.round(delay * 1.5));
