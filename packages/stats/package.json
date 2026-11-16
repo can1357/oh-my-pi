@@ -61,7 +61,8 @@
     "src",
     "build.ts",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "test/helpers/temp-agent.ts"
   ],
   "exports": {
     ".": {
