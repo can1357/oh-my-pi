@@ -107,7 +107,7 @@ pub(crate) fn run<'a>(
 				return Ok(INTERRUPTED_EXIT_CODE);
 			}
 
-			let (processes, host) = match select_processes(&mut options) {
+			let (processes, host, peers) = match select_processes(mode, &mut options) {
 				Ok(selected) => selected,
 				Err(message) => {
 					writeln!(context.stderr(), "{command_name}: {message}")?;
@@ -182,6 +182,17 @@ pub(crate) fn run<'a>(
 									context.stderr(),
 									"{command_name}: refusing to signal pid {} (this shell or one of its \
 									 ancestors)",
+									process.pid()
+								)?;
+							}
+							continue;
+						}
+						if peers.blocks(process.pid()) {
+							if !options.quiet {
+								writeln!(
+									context.stderr(),
+									"{command_name}: refusing to signal pid {} (another session of this \
+									 program, or one of its ancestors)",
 									process.pid()
 								)?;
 							}
@@ -856,17 +867,26 @@ fn has_proc_selectors(options: &ProcMatchOptions) -> bool {
 		|| !options.states.is_empty()
 }
 
-/// Selects the processes matching `options`, and resolves the host chain from the
-/// same process-table snapshot.
+/// Selects the processes matching `options`, and resolves the host chain and, for
+/// `pkill`, the peer sessions from the same process-table snapshot.
 ///
-/// Both come from one `ProcInfo::all()`: `pkill` needs the chain to decide what it
-/// may signal, and taking a second snapshot for it would walk the whole table
-/// again.
+/// All come from one `ProcInfo::all()`: `pkill` needs them to decide what it may
+/// signal, and taking a second snapshot would walk the whole table again. Peers
+/// cost a read of every process's executable, so only `pkill` resolves them.
 fn select_processes(
+	mode: ProcMatchMode,
 	options: &mut ProcMatchOptions,
-) -> std::result::Result<(Vec<proc_snapshot::ProcInfo>, proc_snapshot::HostProcesses), String> {
+) -> std::result::Result<
+	(Vec<proc_snapshot::ProcInfo>, proc_snapshot::HostProcesses, proc_snapshot::PeerSessions),
+	String,
+> {
 	let all = proc_snapshot::ProcInfo::all();
 	let host = proc_snapshot::HostProcesses::resolve_in(&all);
+	let peers = if mode == ProcMatchMode::Kill {
+		proc_snapshot::PeerSessions::resolve_in(&all)
+	} else {
+		proc_snapshot::PeerSessions::default()
+	};
 	let host_pid = std::process::id() as i32;
 	let host_group = all
 		.iter()
@@ -982,7 +1002,7 @@ fn select_processes(
 	} else if options.oldest {
 		selected.truncate(1);
 	}
-	Ok((selected, host))
+	Ok((selected, host, peers))
 }
 
 fn parse_states(value: &str, target: &mut HashSet<char>) -> std::result::Result<(), (u8, String)> {

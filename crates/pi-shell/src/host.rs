@@ -798,13 +798,17 @@ impl crate::bash::Host for PiHost {
 	}
 }
 
-/// Refuse a signal that would reach pi itself.
+/// Refuse a signal that would reach pi itself, or another session of it.
 ///
 /// Refused: this process (`pid` equal to ours), its own process group (`0`, or
 /// `-pgid`), every process (`-1`), or one of its ancestors or their process
 /// groups. Everything above pi in the process tree is load-bearing for the
 /// session (the terminal, the harness). The tree is resolved at each call, not
 /// cached: a recycled pid of an ancestor that exited is not protected.
+///
+/// On Linux and macOS a peer session is refused too, with its ancestors and
+/// their groups: another process executing this same file that pi did not
+/// start ([`pi_builtins::PeerSessions`], the rule `pkill` applies).
 ///
 /// # Errors
 ///
@@ -823,7 +827,17 @@ pub fn check_signal_target(pid: i32) -> io::Result<()> {
 	} else {
 		protected.iter().any(|&(_, g)| g == -pid)
 	};
-	if hit { refused() } else { Ok(()) }
+	if hit {
+		return refused();
+	}
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	if pi_builtins::PeerSessions::resolve().blocks(pid) {
+		return Err(io::Error::new(
+			io::ErrorKind::PermissionDenied,
+			"refusing to signal another session of this program",
+		));
+	}
+	Ok(())
 }
 
 /// This process and its ancestors with their process groups, nearest first.
