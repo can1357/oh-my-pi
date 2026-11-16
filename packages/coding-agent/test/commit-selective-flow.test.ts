@@ -271,6 +271,7 @@ describe("selective commit flow", () => {
 		{ operation: "revert", args: ["revert", "--no-edit", "side"], marker: "REVERT_HEAD" },
 		{ operation: "rebase", args: ["rebase", "--merge", "side"], marker: "rebase-merge" },
 		{ operation: "rebase", args: ["rebase", "--apply", "side"], marker: "rebase-apply" },
+		{ operation: "git am", args: ["am", "--3way", ".git/side.patch"], marker: "rebase-apply" },
 	])(
 		"refuses to commit during $operation ($marker) without changing HEAD or operation state",
 		async ({ operation, args, marker }) => {
@@ -282,11 +283,14 @@ describe("selective commit flow", () => {
 			await Bun.write(path.join(root, "conflict.txt"), "side\n");
 			await git(root, ["add", "."]);
 			await git(root, ["commit", "-qm", "side"]);
+			if (operation === "git am") {
+				await Bun.write(path.join(root, ".git/side.patch"), await git(root, ["format-patch", "--stdout", "-1"]));
+			}
 			await git(root, ["checkout", "-q", "main"]);
 			await Bun.write(path.join(root, "conflict.txt"), "main\n");
 			await git(root, ["add", "."]);
 			await git(root, ["commit", "-qm", "main"]);
-			await expect(git(root, args)).rejects.toThrow(/failed \(1\)/);
+			await expect(git(root, args)).rejects.toThrow(operation === "git am" ? /failed \(128\)/ : /failed \(1\)/);
 			const gitDir = (await git(root, ["rev-parse", "--absolute-git-dir"])).trim();
 			const state = await fs.readdir(gitDir);
 			expect(state).toContain(marker);
@@ -305,6 +309,40 @@ describe("selective commit flow", () => {
 			expect(await git(root, ["diff", "--cached"])).toBe(staged);
 		},
 	);
+
+	it("refuses an unmerged index without state files when stash pop conflicts after drafting", async () => {
+		const { root, journal, write } = await emptyRepo();
+		await Bun.write(path.join(root, "conflict.txt"), "base\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "base"]);
+		await Bun.write(path.join(root, "conflict.txt"), "stashed\n");
+		await git(root, ["stash", "push", "-m", "stashed"]);
+		await Bun.write(path.join(root, "conflict.txt"), "main\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-qm", "main"]);
+		await write("Main", undefined, "agent.txt", "agent\n");
+		await journal.flush();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		await expect(git(root, ["stash", "pop"])).rejects.toThrow(/failed \(1\)/);
+		const gitDir = (await git(root, ["rev-parse", "--absolute-git-dir"])).trim();
+		const state = await fs.readdir(gitDir);
+		for (const marker of ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"]) {
+			expect(state).not.toContain(marker);
+		}
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		const index = await git(root, ["ls-files", "--stage"]);
+		expect(await git(root, ["ls-files", "--unmerged"])).toContain("conflict.txt");
+		const conflict = await Bun.file(path.join(root, "conflict.txt")).text();
+
+		await expect(
+			commitSelection(draft, { subject: "fix: agent" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/index has unresolved conflicts; resolve them before using commit/);
+
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await git(root, ["ls-files", "--stage"])).toBe(index);
+		expect(await fs.readdir(gitDir)).toEqual(state);
+		expect(await Bun.file(path.join(root, "conflict.txt")).text()).toBe(conflict);
+	});
 
 	it("rejects an unknown hunk unit id without changing the selection", async () => {
 		const { root, journal, write } = await emptyRepo();

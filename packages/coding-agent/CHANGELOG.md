@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `/commit` and eval `commit` creating a single-parent commit during an in-progress merge (dropping `MERGE_HEAD` and leaving the merge's index entries uncommitted); committing now refuses while a merge, cherry-pick, revert or rebase is in progress and says to finish or abort it first ([#19474](https://github.com/can1357/oh-my-pi/pull/19474) by [@alphastorm](https://github.com/alphastorm))
+- Fixed `/commit` and eval `commit` creating a single-parent commit during a merge; committing now refuses while a merge, cherry-pick, revert, rebase or `git am` is in progress or the index has unresolved conflicts ([#19474](https://github.com/can1357/oh-my-pi/pull/19474) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.21.0] - 2026-11-16
 

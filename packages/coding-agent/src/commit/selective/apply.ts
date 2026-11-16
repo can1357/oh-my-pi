@@ -100,7 +100,8 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
 
 /**
  * Commit the draft's selection on top of the current HEAD.
- * @throws when a merge, cherry-pick, revert, or rebase is in progress; when nothing is selected;
+ * @throws when a merge, cherry-pick, revert, rebase, or git am is in progress, or the index has
+ * unresolved conflicts; when nothing is selected;
  * on `amend` when HEAD is not a selective commit of this session; when HEAD moved onto changes
  * that conflict with the selection; or when a hook fails.
  */
@@ -110,20 +111,16 @@ export async function commitSelection(
 	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
 ): Promise<CommitOutcome> {
 	const repo = vcs.requireGit(draft.root);
-	const gitDir = repo.info().gitDir;
-	const state = await fs.readdir(gitDir);
-	const operation = [
-		["rebase-merge", "rebase"],
-		["rebase-apply", "rebase"],
-		["MERGE_HEAD", "merge"],
-		["CHERRY_PICK_HEAD", "cherry-pick"],
-		["REVERT_HEAD", "revert"],
-	].find(([marker]) => state.includes(marker))?.[1];
+	const operation = await repo.operationKind(context.signal);
+	if (operation === "unmerged-index") {
+		throw new Error("The index has unresolved conflicts; resolve them before using commit().");
+	}
 	if (operation) {
 		throw new Error(
-			`A ${operation} is in progress; finish or abort it before using commit(). Use plain \`git commit\` for commits within that operation.`,
+			`A ${operation === "am" ? "git am" : operation} is in progress; finish or abort it before using commit(). Use plain \`git commit\` for commits within that operation.`,
 		);
 	}
+	const gitDir = repo.info().gitDir;
 	const message = composeMessage(request);
 	const changes = draft.selection();
 	if (changes.length === 0) throw new Error("Nothing selected; use take() first.");

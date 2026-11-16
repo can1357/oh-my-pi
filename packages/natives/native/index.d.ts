@@ -853,6 +853,11 @@ export declare class VcsGitRepo {
    * change.
    */
   isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /**
+   * Operation underway, including unresolved index conflicts without state
+   * files.
+   */
+  operationKind(signal?: unknown | undefined | null): Promise<"merge" | "cherry-pick" | "revert" | "rebase" | "am" | "unmerged-index" | null>
   /** Porcelain status. */
   statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
   /** Status counts. */
