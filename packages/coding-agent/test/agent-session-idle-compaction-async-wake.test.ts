@@ -12,7 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 /**
- * Regression coverage for the `#hasPendingAsyncWake()` gate on the idle
+ * Regression coverage for the wake-source gate on the idle
  * compaction pass. `runIdleCompaction()` is the standalone-turn compaction the
  * idle loop fires when the session goes quiet. But a background async job
  * (bash/task) owned by this agent re-wakes the loop when it completes — its
@@ -207,14 +207,13 @@ describe("AgentSession idle compaction async-job deferral", () => {
 		await session.waitForIdle();
 		expect(compactSpy).not.toHaveBeenCalled();
 
-		// Complete the job and fully settle its delivery generation: waiting for
-		// the owner job, draining the queued result, AND letting the injected
-		// async-result follow-up flush off the yield queue. `settleAsyncWork()` is
-		// the session's own one-generation settle — it clears all three legs of
-		// `#hasPendingAsyncWake()` (running job, pending delivery, queued
-		// follow-up), so nothing is left to re-wake the loop and the deferral lifts.
+		// Complete the job and fully settle its delivery: waiting for the owner job,
+		// draining the queued result, AND letting the run the injected async-result
+		// follow-up starts end. Nothing is left to wake the session, so the deferral lifts.
 		job.resolve();
-		await session.settleAsyncWork();
+		await manager.waitForOwnerJobs("Main");
+		await manager.drainDeliveries({ filter: { ownerId: "Main" } });
+		await session.waitForRunEnd();
 
 		await session.runIdleCompaction();
 		await session.waitForIdle();
