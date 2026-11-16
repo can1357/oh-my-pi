@@ -104,7 +104,7 @@ Only 8 files carry VENDOR-CLI lines [scan]:
 
 - The delegated-run host has no production caller at the pinned HEAD: `ExecutorRegistry` (`crates/driver/src/delegated_host.rs:131-148`) and `run_delegated_turn` are referenced only inside their own file and in documents [scan], UNVERIFIED(U1).
 - `ExecutorKind` is a closed enum whose ACP variant holds an `AcpExecutor` (`crates/driver/src/delegated_host.rs:98-102`). [design] Extension profiles therefore produce `AcpExecutor` values and need no new variant.
-- Registration order is asserted as `[DSH_ID, DEVIN_ID, GROK_ID]` (`crates/driver/src/delegated_acp.rs:209-219`). [design] Extension-sourced executors need a defined order (§2.3).
+- Built-ins register in a deterministic order, dsh, devin, grok. The test asserts the set `{DSH_ID, DEVIN_ID, GROK_ID}`, that no id repeats, and that two calls return the same order, not a fixed vector (`crates/driver/src/delegated_acp.rs:209-224`). [design] Extension-sourced executors need a defined order (§2.3).
 - The Codex program convar defaults to `Str::new_static("codex")` while every ACP convar defaults to empty (`crates/driver/src/delegated_host.rs:74`).
 - `AcpExecutor` has private fields (`crates/envd/src/acp_client/executor.rs:43-49`). [design] A parity test needs a read-only view of program, arguments, environment and profile.
 
@@ -252,7 +252,7 @@ Each row says what the field does, what core maps it to, and whether it reuses e
 | Client capabilities | The handshake sends no client capabilities and no MCP servers, whatever the profile says. | `ClientCapabilities` (`crates/envd/src/acp_client/delegated_session.rs:173`) and `mcp_servers` (`crates/envd/src/acp_client/delegated_session.rs:202`). |
 | Arguments | They come from the manifest only. There is no operator or project argument list. The manifest belongs to any installed client-layer extension, and the only gate is the operator's digest approval (§1.5). | The existing rule is `operator-supplied argument list` (`crates/driver/src/delegated_host.rs:12-14`). **Its rationale is not preserved:** that comment keeps an operator from adding a flag that weakens the agent's own sandbox or approval settings, and here an extension author can ship such a flag; core cannot tell. §1.7 states the reframing and the residual risk, and Q18 asks the owner. |
 | Claims | Capability claims can only narrow. | `capabilities_for` (`crates/envd/src/acp_client/executor.rs:121-135`). |
-| Convars | Archive-only, with no `PROJECT` flag, for dynamic convars too. | `flags: archive` (`crates/driver/src/delegated_acp.rs:3-8`). The test `a_project_cfg_cannot_enable_a_cli_or_change_its_route` must also run against dynamic convars (`crates/driver/src/delegated_acp.rs:222-237`). |
+| Convars | Archive-only, with no `PROJECT` flag, for dynamic convars too. | `flags: archive` (`crates/driver/src/delegated_acp.rs:3-8`). The test `a_project_cfg_cannot_enable_a_cli_or_change_its_route` must also run against dynamic convars (`crates/driver/src/delegated_acp.rs:227-242`). |
 | Credentials | A profile never carries a credential and the executor never reads one. | `It never carries a credential` (`crates/envd/src/acp_client/delegated_session.rs:47-49`). `never reads configuration or credentials` (`crates/envd/src/acp_client/executor.rs:3-11`). |
 
 ### 1.5 Executable discovery, approval and digest pinning
@@ -333,7 +333,7 @@ crates/driver/src/delegated_host.rs     ExecutorRegistry::from_ctx: Codex plus t
 
 1. An approved extension profile with the same id as a built-in shadows it. An unapproved one is ignored and the built-in keeps working, so installing an extension changes nothing until the operator approves it. Each extension PR can then be tested against its own parity test without removing the Rust code.
 2. Static convars win. `register_dynamic_var` returns `Duplicate` for a name that already exists (`crates/con/src/ctx.rs:601-603`), so the loader registers a dynamic convar only when `ctx.find` does not know the name (`ctx.find`, `crates/con/src/builtins.rs:47`).
-3. Built-ins keep their order `[DSH_ID, DEVIN_ID, GROK_ID]` (`crates/driver/src/delegated_acp.rs:209-219`). Extension-sourced executors are ordered by extension id, then profile id. The parity test asserts the set of ids and not their order (Q11).
+3. Built-ins keep their deterministic order dsh, devin, grok, set by `enabled_executors` (`crates/driver/src/delegated_acp.rs:102`). Extension-sourced executors are ordered by extension id, then profile id. The parity test asserts the set of ids and not their order (Q11).
 4. The parity test builds the built-in executor and the manifest-derived executor from the same convar values and compares program, arguments, environment, session mode, config options and login notice field by field.
 
 ### 2.4 None installed
@@ -645,7 +645,7 @@ Every behavior of the three Rust profiles, and where it goes. Nothing needs a Py
 | Grok's sandbox caveats live in the module comment. | `crates/driver/src/delegated_acp.rs:21-32` | `[evidence].caveats` | Yes |
 | All three run under the one ACP policy. | `ACP_POLICY` (`crates/envd/src/acp_client/policy.rs:21`) | `[policy].enforces` | Yes, made explicit |
 | All three advertise the same features. | `capabilities_for` (`crates/envd/src/acp_client/executor.rs:121-135`) | The default of `[capability_claims]` | Yes |
-| Registration order is `[DSH_ID, DEVIN_ID, GROK_ID]`. | `crates/driver/src/delegated_acp.rs:209-219` | Not data: a loader rule | No (Q11) |
+| Registration order is deterministic: dsh, devin, grok. | `enabled_executors` (`crates/driver/src/delegated_acp.rs:102`) | Not data: a loader rule | No (Q11) |
 | An empty program convar means not enabled, and the convars are archive-only with no project flag. | `crates/driver/src/delegated_acp.rs:3-11` | Not data: core rules (§1.4, §2.6) | No, by design |
 
 ### 4.5 What the Rust side must expose
@@ -791,7 +791,7 @@ Eleven files carry more than one class [scan]. The baseline is generated once fr
 ### 6.2 Rules
 
 - [design] Names do not change. Each is `sv_delegated_<id>_program` or `sv_delegated_<id>_<param>`, and the first-party extensions keep the ids `devin`, `dsh` and `grok`, so every name in §6.1 keeps working.
-- Meaning does not change: empty is not enabled, the convar is archive-only with no project flag, and a project cfg cannot set it. The existing test must pass for dynamic convars (`a_project_cfg_cannot_enable_a_cli_or_change_its_route`, `crates/driver/src/delegated_acp.rs:222-237`).
+- Meaning does not change: empty is not enabled, the convar is archive-only with no project flag, and a project cfg cannot set it. The existing test must pass for dynamic convars (`a_project_cfg_cannot_enable_a_cli_or_change_its_route`, `crates/driver/src/delegated_acp.rs:227-242`).
 - Types and defaults do not change: strings with an empty default (`crates/driver/src/delegated_acp.rs:70-86`).
 - The Codex convar is not touched. Its default stays `codex` (`crates/driver/src/delegated_host.rs:74`).
 
@@ -888,7 +888,7 @@ This question is only about a second, operator-side argument list. The larger qu
 
 ### Q11. Registration order of extension-sourced executors
 
-The built-ins register in the fixed order `[DSH_ID, DEVIN_ID, GROK_ID]` (`crates/driver/src/delegated_acp.rs:209-219`).
+The built-ins register in the deterministic order dsh, devin, grok. `each_enabled_cli_registers_once_under_its_own_id_in_a_deterministic_order` asserts the set `{DSH_ID, DEVIN_ID, GROK_ID}`, that no id repeats, and that two calls return the same order (`crates/driver/src/delegated_acp.rs:209-224`).
 
 **Recommended:** order by extension id, then profile id, and replace the fixed-order assertion with a deterministic-order test that asserts the set of ids. Nothing in this code depends on the order beyond that test.
 
@@ -969,7 +969,7 @@ Brief line references are marked CONFIRMED or CORRECTED.
 | `SV_DELEGATED_DSH_PROGRAM` (`crates/driver/src/delegated_acp.rs:47`). `SV_DELEGATED_DSH_ROUTE` (`crates/driver/src/delegated_acp.rs:56`). `SV_DELEGATED_DSH_MODEL` (`crates/driver/src/delegated_acp.rs:64`). `SV_DELEGATED_DEVIN_PROGRAM` (`crates/driver/src/delegated_acp.rs:73`). `SV_DELEGATED_GROK_PROGRAM` (`crates/driver/src/delegated_acp.rs:82`). | The five ACP convars; each is a string, empty by default, archive-only. |
 | `DSH_ID` (`crates/driver/src/delegated_acp.rs:89`). `DEVIN_ID` (`crates/driver/src/delegated_acp.rs:91`). `GROK_ID` (`crates/driver/src/delegated_acp.rs:93`). | The three executor ids. |
 | `DEVIN_STOPPED_METHOD` (`crates/driver/src/delegated_acp.rs:96`). `DEVIN_AUTH_CAUSE` (`crates/driver/src/delegated_acp.rs:98`). | Devin's login notice method and cause. |
-| `nothing_is_enabled_until_the_operator_names_a_program` (`crates/driver/src/delegated_acp.rs:204`). `each_enabled_cli_registers_under_its_own_id_in_a_fixed_order` (`crates/driver/src/delegated_acp.rs:209`). `a_project_cfg_cannot_enable_a_cli_or_change_its_route` (`crates/driver/src/delegated_acp.rs:222`). | Tests that pin enablement, order and project-cfg denial. |
+| `nothing_is_enabled_until_the_operator_names_a_program` (`crates/driver/src/delegated_acp.rs:204`). `each_enabled_cli_registers_once_under_its_own_id_in_a_deterministic_order` (`crates/driver/src/delegated_acp.rs:209`). `a_project_cfg_cannot_enable_a_cli_or_change_its_route` (`crates/driver/src/delegated_acp.rs:227`). | Tests that pin enablement, the registered id set, uniqueness and deterministic order, and project-cfg denial. |
 | `dsh_model_is_sent_as_one_compact_json_pair_only_when_both_halves_are_set` (`crates/driver/src/delegated_acp.rs:240`). `dsh_environment_cannot_be_loosened_by_the_parent` (`crates/driver/src/delegated_acp.rs:255`). `devin_asks_to_decline_tools_and_names_its_login_notice` (`crates/driver/src/delegated_acp.rs:276`). | Tests that pin dsh's model option and environment, and Devin's mode and notice. |
 | `SV_DELEGATED_CODEX_PROGRAM` (`crates/driver/src/delegated_host.rs:73`). `pub struct ExecutorProfile` (`crates/driver/src/delegated_host.rs:81`). `pub fn codex_profile` (`crates/driver/src/delegated_host.rs:88`). | The Codex convar and its profile. |
 | `Codex(CodexExecutor)` (`crates/driver/src/delegated_host.rs:101`). `pub struct ExecutorRegistry` (`crates/driver/src/delegated_host.rs:131`). `pub fn from_ctx` (`crates/driver/src/delegated_host.rs:139`). `pub fn get` (`crates/driver/src/delegated_host.rs:154`). | The closed executor enum, the registry and its lookup. |
