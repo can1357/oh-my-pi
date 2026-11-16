@@ -30,12 +30,14 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgEditMode } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import {
 	type ServingModel,
 	validateRetryFallbackChains,
@@ -50,6 +52,7 @@ import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -587,6 +590,123 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 		// Without the post-swap re-sync the base prompt stays `edit:hashline`.
 		expect(session.agent.state.systemPrompt).toEqual(["edit:replace"]);
+	});
+
+	it("keeps apply_patch callable after a retry fallback changes the edit mode", async () => {
+		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models to exist");
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"edit.modelVariants": { [primaryModel.id]: "apply_patch", [fallbackModel.id]: "hashline" },
+			"tools.xdev": false,
+			"lsp.enabled": false,
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		({ session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings,
+			model: primaryModel,
+			toolNames: ["edit"],
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			cacheWarming: false,
+		}));
+		const target = path.join(tempDir.path(), "retry-fallback-edit.txt");
+		const mock = createMockModel();
+		let primaryRequests = 0;
+		let fallbackRequests = 0;
+		const fallbackToolNames: string[][] = [];
+		session.agent.streamFn = (model, context, options) => {
+			if (model.id === primaryModel.id) {
+				mock.push(
+					primaryRequests++ === 0
+						? {
+								content: [
+									{
+										type: "toolCall",
+										id: "primary-patch",
+										name: "apply_patch",
+										arguments: {
+											input: "*** Begin Patch\n*** Add File: retry-fallback-edit.txt\n+primary\n*** End Patch",
+										},
+									},
+								],
+							}
+						: { throw: "overloaded_error: provider returned error 503" },
+				);
+			} else {
+				fallbackToolNames.push(context.tools?.map(tool => tool.name) ?? []);
+				mock.push(
+					fallbackRequests++ === 0
+						? {
+								content: [
+									{
+										type: "toolCall",
+										id: "fallback-patch",
+										name: "apply_patch",
+										arguments: {
+											input: "*** Begin Patch\n*** Update File: retry-fallback-edit.txt\n@@\n-primary\n+fallback\n*** End Patch",
+										},
+									},
+								],
+							}
+						: { content: ["Edited on the fallback"] },
+				);
+			}
+			return mock.stream(model, context, options);
+		};
+
+		expect(session.getActiveToolNames()).not.toContain("apply_patch");
+		await session.prompt("Edit a file, then continue editing after a provider failure");
+		await session.waitForIdle();
+
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(await Bun.file(target).text()).toBe("fallback\n");
+		expect(session.getActiveToolNames()).toContain("apply_patch");
+		expect(fallbackToolNames.every(names => names.includes("edit") && names.includes("apply_patch"))).toBe(true);
+		const toolResults = session.messages.filter(message => message.role === "toolResult");
+		expect(toolResults).toHaveLength(2);
+		expect(
+			toolResults.some(result =>
+				result.content.some(content => content.type === "text" && content.text.includes("Tool apply_patch not found")),
+			),
+		).toBe(false);
+		expect(toolResults.every(result => !result.isError)).toBe(true);
+
+		await session.reconcileBuiltinTools();
+		expect(session.getActiveToolNames()).toContain("apply_patch");
+		cfgToolsApproval.set(settings, { edit: "deny" });
+		const applyPatchTool = session.getToolByName("apply_patch");
+		if (!applyPatchTool) throw new Error("Expected the retained apply_patch tool");
+		await expect(
+			applyPatchTool.execute("denied-patch", {
+				input: "*** Begin Patch\n*** Delete File: retry-fallback-edit.txt\n*** End Patch",
+			}),
+		).rejects.toThrow();
+		expect(await Bun.file(target).text()).toBe("fallback\n");
+
+		await session.setModel(primaryModel);
+		expect(session.getActiveToolNames()).not.toContain("apply_patch");
+		expect(session.agent.state.tools.filter(tool => tool.customWireName === "apply_patch")).toHaveLength(1);
+		await session.setModel(fallbackModel);
+		expect(session.getActiveToolNames()).toContain("apply_patch");
+		cfgEditMode.set(settings, "none");
+		await session.reconcileBuiltinTools();
+		expect(session.getActiveToolNames()).not.toContain("edit");
+		expect(session.getActiveToolNames()).not.toContain("apply_patch");
 	});
 
 	// Re-rendering the prompt on a fallback hop changes the Model line and every byte after it, so

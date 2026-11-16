@@ -4131,6 +4131,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			return goalRegistration;
 		};
 
+		// Dormant until a model switch retires edit's apply_patch wire name. Keep a
+		// separate pinned parser rather than routing old calls through the new mode.
+		const registerApplyPatchTool = (): void => {
+			const native = wrapToolWithMetaNotice(
+				Object.assign(new EditTool(toolSession, "apply_patch", "apply_patch"), { defaultInactive: true }),
+			);
+			toolRegistry.set(native.name, new ExtensionToolWrapper(native, extensionRunner) as Tool);
+			builtInRegistryToolNames.add(native.name);
+			nativeToolsByName.set(native.name, native);
+		};
+		if (builtInRegistryToolNames.has("edit") && !toolRegistry.has("apply_patch")) {
+			registerApplyPatchTool();
+		}
+
 		// `tools.xdev` flips allocate or release the `xd://` state createTools builds
 		// over the canonical map; the session re-partitions on its next apply. Like
 		// createTools, mounting needs a built-in `write` transport.
@@ -4188,6 +4202,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						name === "rewind"
 					: native.hidden !== true;
 				added.push({ name, builtIn: true, activate });
+			}
+			if (!plan.isAllowed("edit") && isBuiltIn("apply_patch")) {
+				toolRegistry.delete("apply_patch");
+				builtInRegistryToolNames.delete("apply_patch");
+				nativeToolsByName.delete("apply_patch");
+				removed.push("apply_patch");
+			} else if (
+				!toolRegistry.has("apply_patch") &&
+				(isBuiltIn("edit") || added.some(entry => entry.name === "edit" && entry.builtIn))
+			) {
+				registerApplyPatchTool();
+				added.push({ name: "apply_patch", builtIn: true, activate: false });
 			}
 			const custom = await reconcileSettingsGatedCustomTools();
 			removed.push(...custom.removed);

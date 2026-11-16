@@ -416,6 +416,7 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
+	#retainApplyPatchTool = false;
 	#installedVibeToolNames = new Set<string>();
 	/** An MCP refresh landed while vibe narrowed the active set; vibe exit activates its manager tools. */
 	#vibeDeferredMcpRefresh = false;
@@ -1170,6 +1171,19 @@ export class SessionTools {
 	 */
 	async syncAfterModelChange(previousEditMode: EditModeSetting, options?: { retryFallback?: boolean }): Promise<void> {
 		const currentEditMode = this.resolveActiveEditMode();
+		const enabled = this.getEnabledToolNames();
+		if (previousEditMode === "apply_patch" && enabled.includes("edit")) {
+			// Keep the outgoing wire contract available without scanning or pinning history.
+			this.#retainApplyPatchTool = true;
+		}
+		if (
+			this.#retainApplyPatchTool &&
+			this.#builtInToolNames.has("apply_patch") &&
+			enabled.includes("apply_patch") !== (enabled.includes("edit") && currentEditMode !== "apply_patch")
+		) {
+			await this.applyActiveToolsByName(enabled, true);
+			return;
+		}
 		const templateChanged = this.#currentPromptTemplate() !== this.#promptTemplate;
 		if (options?.retryFallback) {
 			const inlineDescriptorsChanged = this.#currentInlineDescriptors() !== this.#promptInlineDescriptors;
@@ -1207,12 +1221,14 @@ export class SessionTools {
 		const bridge = this.#host.clientBridge();
 		// Match the capability+method gating pattern used by read/write/bash.
 		if (!bridge?.capabilities.requestPermission || !bridge.requestPermission) return tool;
-		if (PERMISSION_REQUIRED_TOOLS[tool.name] !== true) return tool;
+		const permissionToolName =
+			tool.name === "apply_patch" && this.#builtInToolNames.has(tool.name) ? "edit" : tool.name;
+		if (PERMISSION_REQUIRED_TOOLS[permissionToolName] !== true) return tool;
 		// Default-config ACP sessions still ask for executable calls even though
 		// the schema defaults to yolo; explicit yolo is an intentional opt-in.
 		if (tool.name !== "bash" && this.#isExplicitAutoApproveMode()) {
 			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.#host.settings);
-			const toolPolicy = userPolicies[tool.name];
+			const toolPolicy = userPolicies[permissionToolName];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
 		}
 		return new Proxy(tool, {
@@ -1252,7 +1268,7 @@ export class SessionTools {
 						// remains per-call, even after the client selects Always allow.
 						cacheable = !resolved.override;
 					}
-					const permissionIntent = getPermissionIntent(target.name, args);
+					const permissionIntent = getPermissionIntent(permissionToolName, args);
 					if (!permissionIntent) {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx as never);
 					}
@@ -1458,6 +1474,12 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
+		if (this.#retainApplyPatchTool && this.#builtInToolNames.has("apply_patch")) {
+			toolNames = toolNames.filter(name => name !== "apply_patch");
+			if (toolNames.includes("edit") && this.resolveActiveEditMode() !== "apply_patch") {
+				toolNames.push("apply_patch");
+			}
+		}
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		const fullWriteSelected =
 			toolNames.includes("write") &&

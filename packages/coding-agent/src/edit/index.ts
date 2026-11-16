@@ -362,7 +362,6 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 export class EditTool implements AgentTool<TInput> {
-	readonly name = "edit";
 	readonly label = "Edit";
 	readonly loadMode = "essential";
 	readonly concurrency = "exclusive";
@@ -376,6 +375,7 @@ export class EditTool implements AgentTool<TInput> {
 	constructor(
 		private readonly session: ToolSession,
 		mode?: EditMode,
+		readonly name: "edit" | "apply_patch" = "edit",
 	) {
 		this.#editMode = mode;
 		this.#deferredDiagnostics = new DeferredDiagnostics(session);
@@ -430,9 +430,15 @@ export class EditTool implements AgentTool<TInput> {
 		const { paths, fileOps } = this.#inspect(args);
 		const targets = [...paths];
 		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
-		if (targets.length === 0) return "write";
 		const router = InternalUrlRouter.instance();
-		return strictestApproval(targets.map(target => router.writeTier(target, undefined, this.session)));
+		const decision =
+			targets.length === 0
+				? "write"
+				: strictestApproval(targets.map(target => router.writeTier(target, undefined, this.session)));
+		if (this.name === "edit") return decision;
+		return typeof decision === "string"
+			? { tier: decision, policyKey: "edit" }
+			: { ...decision, policyKey: "edit" };
 	};
 
 	readonly formatApprovalDetails = (args: unknown): string[] => {
