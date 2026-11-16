@@ -80,16 +80,14 @@ describe("query-side conditioning for asymmetric embedders", () => {
 		expect(server.requests).toEqual([
 			{ model: "nv-embedqa-e5-v5", input: ["query: which package manager"], input_type: "query" },
 			{ model: "nv-embedqa-e5-v5", input: ["the project uses bun"], input_type: "passage" },
-		] as RecordedRequest[]);
+		]);
 	});
 
 	it("omits input_type unless enabled, so OpenAI-style endpoints see the plain request", async () => {
 		server = startServer();
 		const vector = await run(server, {}, () => embedQuery("which package manager"));
 		expect(vector).toBeNull();
-		expect(server.requests).toEqual([
-			{ model: "nv-embedqa-e5-v5", input: ["which package manager"] },
-		] as RecordedRequest[]);
+		expect(server.requests).toEqual([{ model: "nv-embedqa-e5-v5", input: ["which package manager"] }]);
 	});
 
 	it("does not serve a query vector cached before input_type was enabled", async () => {
@@ -140,15 +138,18 @@ describe("onRequestFailed", () => {
 
 	it("keeps returning null when the hook throws", async () => {
 		server = startServer(() => new Response("forbidden", { status: 403 }));
+		let calls = 0;
 		const vectors = await run(
 			server,
 			{
 				onRequestFailed: () => {
+					calls += 1;
 					throw new Error("host hook failed");
 				},
 			},
 			() => embed(["a stored memory"]),
 		);
+		expect(calls).toBe(1);
 		expect(vectors).toBeNull();
 	});
 });

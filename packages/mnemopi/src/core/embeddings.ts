@@ -497,11 +497,7 @@ async function embedApiBatch(texts: readonly string[], role: EmbeddingRole): Pro
 			const { data: rows } = data;
 			// A short or long matrix would stamp vectors onto the wrong memories.
 			if (rows === undefined || rows.length !== texts.length) {
-				reportRequestFailure(
-					baseUrl,
-					undefined,
-					`expected ${texts.length} embeddings in the response, got ${rows?.length ?? "none"}`,
-				);
+				reportRequestFailure(baseUrl, undefined, "the response did not carry one embedding per input");
 				return null;
 			}
 			apiCallCount += 1;
@@ -515,7 +511,8 @@ async function embedApiBatch(texts: readonly string[], role: EmbeddingRole): Pro
 		} else {
 			logEmbeddingRejection(status, message);
 		}
-		reportRequestFailure(baseUrl, status, message);
+		// Offline mode can revoke remote access mid-request; that abort is not a provider failure.
+		if (allowRemote?.(baseUrl) !== false) reportRequestFailure(baseUrl, status, message);
 		return null;
 	}
 }
