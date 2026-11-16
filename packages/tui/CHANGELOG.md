@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Typing and moving the cursor in very long drafts (over 256 lines) no longer slows down
+
 ## [18.21.0] - 2026-11-16
 
 ### Added

@@ -819,8 +819,9 @@ export class Editor implements Component, Focusable {
 	// Line measurement + word-wrap cache shared by #layoutText,
 	// #buildVisualLineMap, and key handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
-	// width-config (Hangul jamo setting) change and size-bounded so stale
-	// lines don't accumulate.
+	// width-config (Hangul jamo setting) change, and bounded relative to the
+	// buffer's line count so every current line stays cached across frames
+	// while stale edited-away lines can't accumulate unboundedly.
 	#wrapCache = new Map<string, WrapEntry>();
 	#wrapCacheWidth = -1;
 	#wrapCacheEpoch = -1;
@@ -1263,15 +1264,41 @@ export class Editor implements Component, Focusable {
 	}
 
 	#isOnFirstVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
-		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
-		return currentVisualLine === 0;
+		const segment = this.#cursorSegmentInLine(this.#caretRowWidth);
+		if (segment.index === -1) return this.#state.lines.length === 1 && segment.count === 1;
+		return this.#state.cursorLine === 0 && segment.index === 0;
 	}
 
 	#isOnLastVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
-		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
-		return currentVisualLine === visualLines.length - 1;
+		const segment = this.#cursorSegmentInLine(this.#caretRowWidth);
+		if (segment.index === -1) return true;
+		return this.#state.cursorLine === this.#state.lines.length - 1 && segment.index === segment.count - 1;
+	}
+
+	/**
+	 * The cursor's wrapped row within its own logical line, using the same segment
+	 * ownership rules as {@link #findCurrentVisualLine}; `index` is -1 when no row owns
+	 * the cursor (that lookup then falls back to the last visual line).
+	 */
+	#cursorSegmentInLine(width: number): { index: number; count: number } {
+		const line = this.#state.lines[this.#state.cursorLine] || "";
+		const cursorCol = this.#state.cursorCol;
+		if (line.length === 0 || this.#lineEntry(line, width).width <= width) {
+			return { index: cursorCol <= line.length ? 0 : -1, count: 1 };
+		}
+		const chunks = this.#wrapLine(line, width);
+		for (let j = 0; j < chunks.length; j++) {
+			const chunk = chunks[j];
+			const colInSegment = cursorCol - chunk.startIndex;
+			const length = chunk.endIndex - chunk.startIndex;
+			if (
+				(colInSegment >= 0 || j === 0) &&
+				(colInSegment < length || (j === chunks.length - 1 && colInSegment <= length))
+			) {
+				return { index: j, count: chunks.length };
+			}
+		}
+		return { index: -1, count: chunks.length };
 	}
 
 	#navigateHistory(direction: 1 | -1): void {
@@ -3144,7 +3171,7 @@ export class Editor implements Component, Focusable {
 		}
 		let entry = this.#wrapCache.get(line);
 		if (entry === undefined) {
-			if (this.#wrapCache.size >= 256) {
+			if (this.#wrapCache.size >= Math.max(256, this.#state.lines.length * 2)) {
 				this.#wrapCache.clear();
 			}
 			entry = { width: visibleWidth(line), chunks: null };
