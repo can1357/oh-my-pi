@@ -324,13 +324,8 @@ fn contract_hook_events_match_their_catalog_revision() {
 	assert_eq!(catalog_revision::<ProviderErrorEvent>(), Some(ProviderErrorEvent::REV));
 }
 
-/// `omp.events` and `docs/py/05-hooks.md` declare `agent_settled` revision 2,
-/// which Python hook declarations carry to envd, while the in-process producer
-/// stamps `AgentSettledEvent::REV`, revision 1, on its `HookGate` dispatch.
-/// No wire value changes here: which side moves is an owner decision
-/// (`docs/adr/TASKS.md`), and this test fails once either side does.
 #[test]
-fn agent_settled_revision_divergence_is_pinned() {
-	assert_eq!(catalog_revision::<AgentSettledEvent>(), Some(2));
-	assert_eq!(AgentSettledEvent::REV, 1);
+fn agent_settled_catalog_and_contract_revisions_agree_at_two() {
+	assert_eq!(AgentSettledEvent::REV, 2);
+	assert_eq!(catalog_revision::<AgentSettledEvent>(), Some(AgentSettledEvent::REV));
 }

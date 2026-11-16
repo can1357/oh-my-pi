@@ -943,12 +943,7 @@ impl HookControlFactory {
 		let policy = self.policies.read().get(&event).cloned().ok_or_else(|| {
 			ControlProtocolError::new("UnknownEvent", format!("unknown hook event {event}"))
 		})?;
-		if event_rev != policy.revision {
-			return Err(ControlProtocolError::new(
-				"HookContractError",
-				format!("hook event revision mismatch: expected {}, got {event_rev}", policy.revision),
-			));
-		}
+		check_hook_event_revision(&event, event_rev, &policy)?;
 		let mut payload = arguments.get("payload").cloned().unwrap_or(JsonValue::Null);
 		let scoped_provider = payload.get("provider").and_then(JsonValue::as_str);
 		let mut rows = self
@@ -1137,6 +1132,28 @@ fn hydrate_tool_call_bash(payload: &mut JsonValue) -> bool {
 	let source = ir.source.clone();
 	object.insert(String::from("bash"), crate::policy::bash_ir_json(&ir, &source));
 	true
+}
+
+/// Admits a hook decision only when the dispatched event revision equals the
+/// revision the event policy was declared with.
+fn check_hook_event_revision(
+	event: &str,
+	event_rev: u16,
+	policy: &HookEventPolicy,
+) -> Result<(), ControlProtocolError> {
+	if event_rev == policy.revision {
+		return Ok(());
+	}
+	tracing::warn!(
+		event = %event,
+		event_rev,
+		policy_rev = policy.revision,
+		"hook decision rejected: event revision mismatch"
+	);
+	Err(ControlProtocolError::new(
+		"HookContractError",
+		format!("hook event revision mismatch: expected {}, got {event_rev}", policy.revision),
+	))
 }
 
 fn gate_decision_from_json(value: JsonValue, mut payload: JsonValue) -> GateDecision {
@@ -2228,6 +2245,8 @@ impl ControlAuthority for BoundHookControl {
 
 #[cfg(test)]
 mod tests {
+	use omp_contract::{AgentSettledEvent, HookEvent as _};
+
 	use super::*;
 
 	#[test]
@@ -2472,6 +2491,44 @@ mod tests {
 			.is_none()
 		);
 	}
+
+	/// Revision `agent_settled` declares in `crates/py/python/omp/events.py`;
+	/// envd builds the extension's event policy from that declaration.
+	const PYTHON_AGENT_SETTLED_REVISION: u16 = 2;
+
+	fn agent_settled_policy() -> HookEventPolicy {
+		HookEventPolicy {
+			revision:    PYTHON_AGENT_SETTLED_REVISION,
+			timeout:     time::Duration::from_secs(1),
+			on_failure:  HookFailurePolicy::Defer,
+			default:     json!({"kind": "defer"}),
+			composition: BTreeMap::new(),
+		}
+	}
+
+	fn agent_settled_event() -> String {
+		hook_event_name(AgentSettledEvent::ID).expect("agent_settled hook event name")
+	}
+
+	#[test]
+	fn agent_settled_policy_admits_hook_gate_revision() {
+		let event = agent_settled_event();
+		assert_eq!(event, "agent_settled");
+		let event_rev =
+			u16::try_from(AgentSettledEvent::REV).expect("agent_settled revision fits the wire field");
+		check_hook_event_revision(&event, event_rev, &agent_settled_policy())
+			.expect("the declared agent_settled policy admits the HookGate revision");
+	}
+
+	#[test]
+	fn agent_settled_policy_rejects_stale_revision_one() {
+		let event = agent_settled_event();
+		let error = check_hook_event_revision(&event, 1, &agent_settled_policy())
+			.expect_err("a revision-1 dispatch must not reach the revision-2 policy");
+		assert_eq!(&*error.code, "HookContractError");
+		assert_eq!(&*error.message, "hook event revision mismatch: expected 2, got 1");
+	}
+
 	#[test]
 	fn mcp_filter_is_anchored_and_queue_drops_oldest() {
 		let servers = [sf!("github")];
