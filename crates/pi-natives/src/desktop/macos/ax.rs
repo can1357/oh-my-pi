@@ -2196,7 +2196,9 @@ fn set_number_value(element: &AXUIElement, text: &str, current: &CFNumber) -> Co
 /// without a live app.
 trait NumberField {
 	fn write(&self, value: &CFNumber) -> AXError;
-	fn value(&self) -> Option<CFRetained<CFNumber>>;
+	/// `AXValue` as a number, `None` when it does not read as one, and an
+	/// error when the element no longer exists.
+	fn value(&self) -> CoreResult<Option<CFRetained<CFNumber>>>;
 	/// `AXMinValue` or `AXMaxValue`.
 	fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>>;
 	fn now(&self) -> Instant;
@@ -2221,8 +2223,9 @@ impl NumberField for LiveNumber<'_> {
 		}
 	}
 
-	fn value(&self) -> Option<CFRetained<CFNumber>> {
-		copy_number(self.element, "AXValue")
+	fn value(&self) -> CoreResult<Option<CFRetained<CFNumber>>> {
+		Ok(copy_held_attribute(self.element, "AXValue")?
+			.and_then(|value| value.downcast::<CFNumber>().ok()))
 	}
 
 	fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>> {
@@ -2263,7 +2266,15 @@ fn write_number<F: NumberField>(field: &mut F, target: NumberTarget) -> CoreResu
 	// the whole budget still leaves the app its interval to apply the value.
 	let deadline = field.now() + NUMBER_SETTLE;
 	loop {
-		let actual = field.value();
+		// An app that removes or rebuilds the control once its value changes
+		// leaves the ref dead: no later read can answer, so this ends now.
+		let Ok(actual) = field.value() else {
+			return Err(DesktopError::stale_ref(format!(
+				"the number {target} was sent, but the control no longer exists after the write: the \
+				 app removed or rebuilt it. Re-run ax()/find() and read the control's value there \
+				 before writing again"
+			)));
+		};
 		if actual
 			.as_deref()
 			.is_some_and(|actual| target.reached(actual))
@@ -4152,14 +4163,16 @@ mod tests {
 	}
 
 	/// A number control that reads back `reads` in turn (the last one from
-	/// then on), on a clock that each wait moves by [`NUMBER_POLL`], the write
-	/// by `write_takes` and a read that does not answer by `unread_takes`.
+	/// then on) and is destroyed from read `gone_from` on, on a clock that
+	/// each wait moves by [`NUMBER_POLL`], the write by `write_takes` and a
+	/// read that does not answer by `unread_takes`.
 	struct FakeNumber {
 		write_error:  AXError,
 		write_takes:  Duration,
 		unread_takes: Duration,
 		written:      RefCell<Vec<String>>,
 		reads:        Vec<Option<CFRetained<CFNumber>>>,
+		gone_from:    Option<usize>,
 		read:         Cell<usize>,
 		bounds_read:  Cell<usize>,
 		clock:        Cell<Instant>,
@@ -4175,6 +4188,7 @@ mod tests {
 				unread_takes: Duration::ZERO,
 				written: RefCell::default(),
 				reads,
+				gone_from: None,
 				read: Cell::new(0),
 				bounds_read: Cell::new(0),
 				clock: Cell::new(Instant::now()),
@@ -4191,14 +4205,17 @@ mod tests {
 			self.write_error
 		}
 
-		fn value(&self) -> Option<CFRetained<CFNumber>> {
+		fn value(&self) -> CoreResult<Option<CFRetained<CFNumber>>> {
 			let at = self.read.get();
 			self.read.set(at + 1);
+			if self.gone_from.is_some_and(|gone| at >= gone) {
+				return Err(DesktopError::stale_ref("the element no longer exists"));
+			}
 			let read = self.reads[at.min(self.reads.len() - 1)].clone();
 			if read.is_none() {
 				self.clock.set(self.clock.get() + self.unread_takes);
 			}
-			read
+			Ok(read)
 		}
 
 		fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>> {
@@ -4314,6 +4331,38 @@ mod tests {
 		let mut missed = FakeNumber::reading(numbers(&[150.0]));
 		write_number(&mut missed, NumberTarget::Real(75.0)).unwrap_err();
 		assert_eq!(missed.bounds_read.get(), 2);
+	}
+
+	#[test]
+	fn a_control_the_app_removed_after_the_write_is_a_stale_ref_at_once() {
+		let gone = |reads, gone_from| {
+			let mut field = FakeNumber::reading(reads);
+			field.gone_from = Some(gone_from);
+			let started = field.now();
+			let error = write_number(&mut field, NumberTarget::Real(75.0)).unwrap_err();
+			assert_eq!(error.code, ErrorCode::StaleRef);
+			assert_eq!(
+				error.message,
+				"the number 75 was sent, but the control no longer exists after the write: the app \
+				 removed or rebuilt it. Re-run ax()/find() and read the control's value there before \
+				 writing again"
+			);
+			// It ends at the read that found the element gone, reading no bound.
+			assert_eq!(
+				(field.read.get(), field.bounds_read.get(), field.confirmed.get()),
+				(gone_from + 1, 0, 0)
+			);
+			field.now() - started
+		};
+		// Gone on the first read-back: no settle time spent.
+		assert_eq!(gone(numbers(&[0.0]), 0), Duration::ZERO);
+		// Gone after one unchanged read: one interval.
+		assert_eq!(gone(numbers(&[0.0]), 1), NUMBER_POLL);
+		// An element that is alive but does not read as a number still polls
+		// out the settle time and fails.
+		let mut unread = FakeNumber::reading(vec![None]);
+		let error = write_number(&mut unread, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!((error.code, unread.read.get()), (ErrorCode::AxFailed, SETTLE_READS));
 	}
 
 	#[test]
