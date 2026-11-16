@@ -32,6 +32,8 @@ export const EditSession = nativeBindings.EditSession ?? missingNativeClass("Edi
 export const EditStore = nativeBindings.EditStore ?? missingNativeClass("EditStore");
 export const FileLock = nativeBindings.FileLock ?? missingNativeClass("FileLock");
 export const HighlightStream = nativeBindings.HighlightStream ?? missingNativeClass("HighlightStream");
+export const ImageBudget = nativeBindings.ImageBudget ?? missingNativeClass("ImageBudget");
+export const InlineImage = nativeBindings.InlineImage ?? missingNativeClass("InlineImage");
 export const IpcConnection = nativeBindings.IpcConnection ?? missingNativeClass("IpcConnection");
 export const IpcServer = nativeBindings.IpcServer ?? missingNativeClass("IpcServer");
 export const LineMatcher = nativeBindings.LineMatcher ?? missingNativeClass("LineMatcher");
@@ -47,8 +49,8 @@ export const PtySession = nativeBindings.PtySession ?? missingNativeClass("PtySe
 export const RunTrace = nativeBindings.RunTrace ?? missingNativeClass("RunTrace");
 export const Shell = nativeBindings.Shell ?? missingNativeClass("Shell");
 export const ShellVisualization = nativeBindings.ShellVisualization ?? missingNativeClass("ShellVisualization");
+export const TerminalEngine = nativeBindings.TerminalEngine ?? missingNativeClass("TerminalEngine");
 export const TextPredictor = nativeBindings.TextPredictor ?? missingNativeClass("TextPredictor");
-export const TtyWriter = nativeBindings.TtyWriter ?? missingNativeClass("TtyWriter");
 export const VcsGitRepo = nativeBindings.VcsGitRepo ?? missingNativeClass("VcsGitRepo");
 export const VcsJjWorkspace = nativeBindings.VcsJjWorkspace ?? missingNativeClass("VcsJjWorkspace");
 export const VcsRepo = nativeBindings.VcsRepo ?? missingNativeClass("VcsRepo");
@@ -65,6 +67,7 @@ export const astEdit = nativeBindings.astEdit ?? missingNativeExport("astEdit");
 export const astGrep = nativeBindings.astGrep ?? missingNativeExport("astGrep");
 export const astMatch = nativeBindings.astMatch ?? missingNativeExport("astMatch");
 export const blockRangeAt = nativeBindings.blockRangeAt ?? missingNativeExport("blockRangeAt");
+export const classifyTerminalMultiplexer = nativeBindings.classifyTerminalMultiplexer ?? missingNativeExport("classifyTerminalMultiplexer");
 export const closeDesktopEventTaps = nativeBindings.closeDesktopEventTaps ?? missingNativeExport("closeDesktopEventTaps");
 export const copyToClipboard = nativeBindings.copyToClipboard ?? missingNativeExport("copyToClipboard");
 export const cosineSimilarityPairs = nativeBindings.cosineSimilarityPairs ?? missingNativeExport("cosineSimilarityPairs");
@@ -73,6 +76,8 @@ export const decodeSixelToPng = nativeBindings.decodeSixelToPng ?? missingNative
 export const decodeSixelToPngAsync = nativeBindings.decodeSixelToPngAsync ?? missingNativeExport("decodeSixelToPngAsync");
 export const desktopEscapeStops = nativeBindings.desktopEscapeStops ?? missingNativeExport("desktopEscapeStops");
 export const detectMacOSAppearance = nativeBindings.detectMacOSAppearance ?? missingNativeExport("detectMacOSAppearance");
+export const detectTerminalProfile = nativeBindings.detectTerminalProfile ?? missingNativeExport("detectTerminalProfile");
+export const detectTrueColor = nativeBindings.detectTrueColor ?? missingNativeExport("detectTrueColor");
 export const deviceCheckGenerateToken = nativeBindings.deviceCheckGenerateToken ?? missingNativeExport("deviceCheckGenerateToken");
 export const diffLineRuns = nativeBindings.diffLineRuns ?? missingNativeExport("diffLineRuns");
 export const diffLines = nativeBindings.diffLines ?? missingNativeExport("diffLines");
@@ -105,11 +110,15 @@ export const hashlineFormatNumberedLines = nativeBindings.hashlineFormatNumbered
 export const hashlineIsReadTruncationNotice = nativeBindings.hashlineIsReadTruncationNotice ?? missingNativeExport("hashlineIsReadTruncationNotice");
 export const hashlineStripPrefixes = nativeBindings.hashlineStripPrefixes ?? missingNativeExport("hashlineStripPrefixes");
 export const hasMatch = nativeBindings.hasMatch ?? missingNativeExport("hasMatch");
+export const hasTerminalMultiplexerSession = nativeBindings.hasTerminalMultiplexerSession ?? missingNativeExport("hasTerminalMultiplexerSession");
 export const heldFileKind = nativeBindings.heldFileKind ?? missingNativeExport("heldFileKind");
 export const highlightCode = nativeBindings.highlightCode ?? missingNativeExport("highlightCode");
 export const htmlToMarkdown = nativeBindings.htmlToMarkdown ?? missingNativeExport("htmlToMarkdown");
+export const imageDimensions = nativeBindings.imageDimensions ?? missingNativeExport("imageDimensions");
 export const installSqliteLockShim = nativeBindings.installSqliteLockShim ?? missingNativeExport("installSqliteLockShim");
 export const ipcEndpoint = nativeBindings.ipcEndpoint ?? missingNativeExport("ipcEndpoint");
+export const isInsideTerminalMultiplexer = nativeBindings.isInsideTerminalMultiplexer ?? missingNativeExport("isInsideTerminalMultiplexer");
+export const isNotificationSuppressed = nativeBindings.isNotificationSuppressed ?? missingNativeExport("isNotificationSuppressed");
 export const isoBackend = nativeBindings.isoBackend ?? missingNativeExport("isoBackend");
 export const isoDiff = nativeBindings.isoDiff ?? missingNativeExport("isoDiff");
 export const isoIsUnavailableError = nativeBindings.isoIsUnavailableError ?? missingNativeExport("isoIsUnavailableError");
@@ -117,6 +126,9 @@ export const isoProbe = nativeBindings.isoProbe ?? missingNativeExport("isoProbe
 export const isoResolve = nativeBindings.isoResolve ?? missingNativeExport("isoResolve");
 export const isoStart = nativeBindings.isoStart ?? missingNativeExport("isoStart");
 export const isoStop = nativeBindings.isoStop ?? missingNativeExport("isoStop");
+export const isSshSession = nativeBindings.isSshSession ?? missingNativeExport("isSshSession");
+export const isTerminalBackgroundQueryTrusted = nativeBindings.isTerminalBackgroundQueryTrusted ?? missingNativeExport("isTerminalBackgroundQueryTrusted");
+export const isTspExpected = nativeBindings.isTspExpected ?? missingNativeExport("isTspExpected");
 export const listWorkspace = nativeBindings.listWorkspace ?? missingNativeExport("listWorkspace");
 export const macOSAutocorrectWord = nativeBindings.macOSAutocorrectWord ?? missingNativeExport("macOSAutocorrectWord");
 export const macOSCheckSpelling = nativeBindings.macOSCheckSpelling ?? missingNativeExport("macOSCheckSpelling");
@@ -141,6 +153,7 @@ export const renderMermaidAscii = nativeBindings.renderMermaidAscii ?? missingNa
 export const renderSnapcompactPng = nativeBindings.renderSnapcompactPng ?? missingNativeExport("renderSnapcompactPng");
 export const runShellMain = nativeBindings.runShellMain ?? missingNativeExport("runShellMain");
 export const search = nativeBindings.search ?? missingNativeExport("search");
+export const sendTerminalNotification = nativeBindings.sendTerminalNotification ?? missingNativeExport("sendTerminalNotification");
 export const setHangulCompatJamoWidthOverride = nativeBindings.setHangulCompatJamoWidthOverride ?? missingNativeExport("setHangulCompatJamoWidthOverride");
 export const shellBuiltins = nativeBindings.shellBuiltins ?? missingNativeExport("shellBuiltins");
 export const sliceWithWidth = nativeBindings.sliceWithWidth ?? missingNativeExport("sliceWithWidth");
@@ -149,6 +162,7 @@ export const structuredPatchHunks = nativeBindings.structuredPatchHunks ?? missi
 export const summarizeCode = nativeBindings.summarizeCode ?? missingNativeExport("summarizeCode");
 export const summarizeCodeAsync = nativeBindings.summarizeCodeAsync ?? missingNativeExport("summarizeCodeAsync");
 export const supportsLanguage = nativeBindings.supportsLanguage ?? missingNativeExport("supportsLanguage");
+export const terminalMultiplexerEnvKeys = nativeBindings.terminalMultiplexerEnvKeys ?? missingNativeExport("terminalMultiplexerEnvKeys");
 export const truncateToWidth = nativeBindings.truncateToWidth ?? missingNativeExport("truncateToWidth");
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir ?? missingNativeExport("vcsDetachGitDir");
 export const vcsDiscover = nativeBindings.vcsDiscover ?? missingNativeExport("vcsDiscover");
@@ -166,6 +180,7 @@ export const warmBlockParse = nativeBindings.warmBlockParse ?? missingNativeExpo
 export const warmHighlighter = nativeBindings.warmHighlighter ?? missingNativeExport("warmHighlighter");
 export const wasmGrammarFor = nativeBindings.wasmGrammarFor ?? missingNativeExport("wasmGrammarFor");
 export const wrapTextWithAnsi = nativeBindings.wrapTextWithAnsi ?? missingNativeExport("wrapTextWithAnsi");
+export const wrapTmuxPassthrough = nativeBindings.wrapTmuxPassthrough ?? missingNativeExport("wrapTmuxPassthrough");
 
 // string/numeric enums (napi-rs string_enum produces TS-only const enum)
 export const AstMatchStrictness = {
@@ -211,6 +226,47 @@ export const Encoding = {
 	KimiK2: "KimiK2",
 	Glm5: "Glm5",
 	Jev: "Jev",
+};
+export const EngineEventKind = {
+	Key: "key",
+	Paste: "paste",
+	Render: "render",
+	HistoryReplay: "historyReplay",
+	FrameText: "frameText",
+	Resize: "resize",
+	Appearance: "appearance",
+	PrivateMode: "privateMode",
+	ImageProtocol: "imageProtocol",
+	ProgramStatus: "programStatus",
+	Glyph: "glyph",
+	Osc99: "osc99",
+	NativeSurface: "nativeSurface",
+	TspFallback: "tspFallback",
+	KeyboardProtocol: "keyboardProtocol",
+	CellSize: "cellSize",
+	InputDrained: "inputDrained",
+	Disconnected: "disconnected",
+};
+export const EngineFrameKind = {
+	None: "none",
+	Plan: "plan",
+	Alt: "alt",
+	Resize: "resize",
+};
+export const EngineImageProtocol = {
+	Kitty: "kitty",
+	Iterm2: "iterm2",
+	Sixel: "sixel",
+};
+export const EngineMouse = {
+	Off: "off",
+	Inline: "inline",
+	Full: "full",
+};
+export const EngineResizeScrollback = {
+	Append: "append",
+	Rebuild: "rebuild",
+	Preserve: "preserve",
 };
 export const FileType = {
 	File: 1,

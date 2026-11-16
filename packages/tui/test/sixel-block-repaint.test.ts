@@ -1,16 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
-import * as natives from "@oh-my-pi/pi-natives";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { Image } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
-import {
-	type CellDimensions,
-	getCellDimensions,
-	ImageProtocol,
-	setCellDimensions,
-	setTerminalImageProtocol,
-	TERMINAL,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { type CellDimensions, getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { forceImageProtocol } from "./helpers/image-protocol";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
 withoutTerminalMultiplexer();
@@ -31,10 +26,24 @@ const SIXEL = /\x1bP[0-9;]*q[\s\S]*?\x1b\\/g;
  * become a sentinel glyph so the engine's own writes and erases clear them;
  * `stale` counts paints that landed on cells still holding an earlier raster.
  */
+/**
+ * Resolves once an image's off-thread SIXEL encode lands: the image asks the
+ * budget for the repaint that shows it.
+ */
+function encodeLanded(budget: ImageBudget): Promise<void> {
+	const landed = Promise.withResolvers<void>();
+	const requestRender = budget.requestRender.bind(budget);
+	spyOn(budget, "requestRender").mockImplementation(() => {
+		requestRender();
+		landed.resolve();
+	});
+	return landed.promise;
+}
+
 function trackSixelRaster(term: VirtualTerminal): { stale: number; paints: number } {
 	const state = { stale: 0, paints: 0 };
-	const realWrite = term.write.bind(term);
-	vi.spyOn(term, "write").mockImplementation((data: string) => {
+	const realWrite = term.receive.bind(term);
+	vi.spyOn(term, "receive").mockImplementation((data: string) => {
 		let offset = 0;
 		for (const match of data.matchAll(SIXEL)) {
 			realWrite(data.slice(offset, match.index));
@@ -68,12 +77,12 @@ function trackSixelRaster(term: VirtualTerminal): { stale: number; paints: numbe
 
 describe("SIXEL block repaint", () => {
 	let originalCellDims: CellDimensions;
-	const originalProtocol = TERMINAL.imageProtocol;
+	let restoreProtocol: () => void;
 
 	beforeEach(() => {
 		originalCellDims = { ...getCellDimensions() };
 		setCellDimensions(CELL);
-		setTerminalImageProtocol(ImageProtocol.Sixel);
+		restoreProtocol = forceImageProtocol(ImageProtocol.Sixel);
 		vi.useFakeTimers();
 		// One full 30fps frame per read: the render throttle never defers a frame.
 		let now = 0;
@@ -84,7 +93,7 @@ describe("SIXEL block repaint", () => {
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		setCellDimensions(originalCellDims);
-		setTerminalImageProtocol(originalProtocol);
+		restoreProtocol();
 	});
 
 	/** Run the `setImmediate` render hop and any throttled frame timer it arms. */
@@ -99,10 +108,10 @@ describe("SIXEL block repaint", () => {
 	}
 
 	it("erases a moved block's previous raster before painting it again", async () => {
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
 		const term = new VirtualTerminal(40, 12);
 		const raster = trackSixelRaster(term);
 		const tui = new TUI(term);
+		const encoded = encodeLanded(tui.imageBudget);
 		const above = new Text("above", 0, 0);
 		tui.addChild(above);
 		tui.addChild(
@@ -118,7 +127,7 @@ describe("SIXEL block repaint", () => {
 		try {
 			tui.start();
 			await settle(term);
-			await encodeSixel.mock.results[0]?.value;
+			await encoded;
 			await settle(term);
 			// Each frame moves the block one row inside the viewport: a diffable
 			// frame in which its reserved rows are byte-identical and skipped.
@@ -139,10 +148,10 @@ describe("SIXEL block repaint", () => {
 
 	for (const clippedRows of [1, 2, 3]) {
 		it(`keeps a real Image within its ${4 - clippedRows} visible rows after top clipping`, async () => {
-			const encodeSixel = spyOn(natives, "encodeSixelAsync");
 			const term = new VirtualTerminal(40, 8);
 			const raster = trackSixelRaster(term);
 			const tui = new TUI(term);
+			const encoded = encodeLanded(tui.imageBudget);
 			const graphic = new Image(
 				BASE64_ONE_PIXEL_PNG,
 				"image/png",
@@ -168,7 +177,7 @@ describe("SIXEL block repaint", () => {
 			try {
 				tui.start();
 				await settle(term);
-				await encodeSixel.mock.results[0]?.value;
+				await encoded;
 				await settle(term);
 				expect(raster.paints).toBeGreaterThan(0);
 				expect(term.getViewport()[4]?.trimEnd()).toBe("following text");
@@ -198,10 +207,10 @@ describe("SIXEL block repaint", () => {
 	}
 
 	it("keeps a top-clipped block's raster out of the history rows written above it", async () => {
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
 		const term = new VirtualTerminal(40, 8);
 		const raster = trackSixelRaster(term);
 		const tui = new TUI(term);
+		const encoded = encodeLanded(tui.imageBudget);
 		const graphic = new Image(
 			BASE64_ONE_PIXEL_PNG,
 			"image/png",
@@ -230,7 +239,7 @@ describe("SIXEL block repaint", () => {
 		try {
 			tui.start();
 			await settle(term);
-			await encodeSixel.mock.results[0]?.value;
+			await encoded;
 			await settle(term);
 			expect(raster.paints).toBeGreaterThan(0);
 

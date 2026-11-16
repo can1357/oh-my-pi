@@ -1,3 +1,4 @@
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import {
@@ -7,7 +8,6 @@ import {
 	FuzzyCorpus,
 	getKeybindings,
 	getSettingItemFilterText,
-	type ImageBudget,
 	Input,
 	matchesKey,
 	routeSelectListMouse,
@@ -407,6 +407,10 @@ class MultiSelectSubmenu extends Container {
 		}
 		this.#selectList.handleInput(data);
 	}
+
+	handlePaste(text: string): void {
+		this.#selectList.handlePaste(text);
+	}
 }
 
 class ProviderLimitsSubmenu extends Container {
@@ -534,6 +538,14 @@ class ProviderLimitsSubmenu extends Container {
 			return;
 		}
 		this.children[0]?.handleInput?.(data);
+	}
+
+	handlePaste(text: string): void {
+		if (this.#listField) {
+			this.#listField.handlePaste(text);
+			return;
+		}
+		this.children[0]?.handlePaste?.(text);
 	}
 }
 
@@ -1981,6 +1993,30 @@ export class SettingsSelectorComponent implements Component {
 		} else if (this.#pluginComponent) {
 			this.#pluginComponent.handleInput(data);
 		}
+	}
+
+	/** Pastes follow typed text: open submenus, the live query, or a new cross-tab search (plugins keep their own). */
+	handlePaste(text: string): void {
+		const activeList = this.#searchList ?? this.#currentList;
+		if (this.#textInputActive || activeList?.hasOpenSubmenu()) {
+			activeList?.handlePaste(text);
+			return;
+		}
+		if (this.#searchList) {
+			this.#searchInput.handlePaste(text);
+			const value = this.#searchInput.getValue();
+			if (value !== this.#searchQuery) this.#setSearchQuery(value);
+			return;
+		}
+		if (this.#currentTabId !== "plugins") {
+			// Sanitize through a scratch field so the query matches what typing would produce.
+			const scratch = new Input();
+			scratch.handlePaste(text);
+			const query = scratch.getValue();
+			if (query.trim().length > 0) this.#startSearch(query);
+			return;
+		}
+		this.#pluginComponent?.handlePaste(text);
 	}
 
 	#handleSearchModeInput(data: string, list: SettingsList): void {

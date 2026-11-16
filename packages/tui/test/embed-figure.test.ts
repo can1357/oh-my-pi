@@ -4,13 +4,8 @@ import { EmbedFigure } from "@oh-my-pi/pi-tui/chat/embed-figure";
 import { setEmbedHost } from "@oh-my-pi/pi-tui/chat/embed-host";
 import { type Embed, splitEmbeds } from "@oh-my-pi/pi-tui/chat/embed-source";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
-import {
-	getCellDimensions,
-	ImageProtocol,
-	setCellDimensions,
-	setTerminalImageProtocol,
-	TERMINAL,
-} from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 

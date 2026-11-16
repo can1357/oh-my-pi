@@ -999,6 +999,11 @@ export class PlanReviewOverlay implements Component {
 		if (choice) this.#commit(choice.id, choice.label);
 	}
 
+	handlePaste(text: string): void {
+		if (this.#committed || this.#annotationChooser || !this.#annotating) return;
+		this.#editor.handlePaste(text);
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#committed) return;
 		if (keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;

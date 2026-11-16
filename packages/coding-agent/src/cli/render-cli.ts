@@ -15,7 +15,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { Terminal, TerminalAppearance, TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
+import { Terminal, type TerminalIo } from "@oh-my-pi/pi-tui/terminal";
 import type { RenderScheduler } from "@oh-my-pi/pi-tui/tui";
 import { formatBytes, getProjectDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
@@ -46,50 +46,26 @@ export interface RenderCommandArgs {
 	quiet?: boolean;
 }
 
-/** Byte-sink terminal: counts emitted output, never touches a real TTY. */
-class SinkTerminal implements Terminal {
+/** Byte-sink IO port: counts the output the terminal engine encodes, never touches a real TTY. */
+class SinkIo implements TerminalIo {
+	readonly interactive = false;
+	readonly backlog = 0;
 	bytes = 0;
 	writes = 0;
-	readonly #columns: number;
-	readonly #rows: number;
 
-	constructor(columns: number, rows: number) {
-		this.#columns = columns;
-		this.#rows = rows;
-	}
+	constructor(
+		readonly columns: number,
+		readonly rows: number,
+	) {}
 
-	start(): void {}
-	stop(): void {}
-	async drainInput(): Promise<void> {}
-	write(data: string): void {
-		this.bytes += Buffer.byteLength(data);
-		this.writes++;
+	open(): void {}
+	write(chunks: readonly Uint8Array[]): void {
+		for (const chunk of chunks) {
+			this.bytes += chunk.byteLength;
+			this.writes++;
+		}
 	}
-	get columns(): number {
-		return this.#columns;
-	}
-	get rows(): number {
-		return this.#rows;
-	}
-	get kittyProtocolActive(): boolean {
-		return false;
-	}
-	get kittyEnableSequence(): string | null {
-		return null;
-	}
-	moveBy(): void {}
-	hideCursor(): void {}
-	showCursor(): void {}
-	clearLine(): void {}
-	clearFromCursor(): void {}
-	clearScreen(): void {}
-	setTitle(): void {}
-	setProgress(): void {}
-	onAppearanceChange(): void {}
-	refreshAppearance(_requestToken?: TerminalAppearanceRequestToken): void {}
-	get appearance(): TerminalAppearance | undefined {
-		return undefined;
-	}
+	close(): void {}
 }
 
 /**
@@ -175,7 +151,8 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 			settings,
 			modelRegistry,
 		});
-		const terminal = new SinkTerminal(width, height);
+		const sink = new SinkIo(width, height);
+		const terminal = new Terminal(sink);
 		const scheduler = new DrainScheduler();
 		const composer = new Composer({
 			terminal,
@@ -195,10 +172,10 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		// First full paint: compose every transcript row and emit it, exactly
 		// what the clear-scrollback repaint after navigation writes to the PTY.
 		const paintStart = performance.now();
-		const bytesBeforePaint = terminal.bytes;
+		const bytesBeforePaint = sink.bytes;
 		scheduler.drain();
 		const paintMs = performance.now() - paintStart;
-		const paintBytes = terminal.bytes - bytesBeforePaint;
+		const paintBytes = sink.bytes - bytesBeforePaint;
 
 		const entries = sessionManager.getEntries();
 		let messageCount = 0;
@@ -207,10 +184,10 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 		const repaints: { ms: number; bytes: number }[] = [];
 		for (let i = 0; i < (args.repaint ?? 0); i++) {
 			const start = performance.now();
-			const before = terminal.bytes;
+			const before = sink.bytes;
 			mode.ui.requestRender(true, { clearScrollback: true });
 			scheduler.drain();
-			repaints.push({ ms: performance.now() - start, bytes: terminal.bytes - before });
+			repaints.push({ ms: performance.now() - start, bytes: sink.bytes - before });
 		}
 
 		if (!args.quiet) {
@@ -227,7 +204,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 				`         ${formatBytes(sourceSize)}, ${entries.length} entries, ${messageCount} messages, ${rows} transcript rows @ ${width}x${height}`,
 				`open     ${formatMs(openMs)}`,
 				`replay   ${formatMs(replayMs)}  (transcript build + component construction)`,
-				`paint    ${formatMs(paintMs)}  (full frame compose + emit: ${formatBytes(paintBytes)}, ${terminal.writes} writes)`,
+				`paint    ${formatMs(paintMs)}  (full frame compose + emit: ${formatBytes(paintBytes)}, ${sink.writes} writes)`,
 			];
 			if (repaints.length > 0) {
 				const times = repaints.map(r => r.ms);

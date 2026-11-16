@@ -1,4 +1,4 @@
-import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { cmuxLaunchProvider } from "./cmux";
 import { herdrLaunchProvider } from "./herdr";
 import { orcaLaunchProvider } from "./orca";

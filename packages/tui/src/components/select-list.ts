@@ -758,6 +758,16 @@ export class SelectList implements Component, MouseRoutable {
 		return policy === "always" || (policy === "overflow" && this.#selection.items.length > this.#maxVisible);
 	}
 
+	/** Pastes into the search field when it is editable, re-filtering the list. */
+	handlePaste(text: string): void {
+		if (!this.#canEditSearch()) return;
+		const before = this.#search.getValue();
+		if (before.length === 0 && text.trim().length === 0) return;
+		this.#search.handlePaste(text);
+		const after = this.#search.getValue();
+		if (after !== before) this.#setFilter(after, true);
+	}
+
 	#handleSearchInput(keyData: string): boolean {
 		if (!this.#canEditSearch()) return false;
 

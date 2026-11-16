@@ -1,16 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { MacAppearanceObserver, MacOSAppearance, rasterizeSvg } from "@oh-my-pi/pi-natives";
+import {
+	isInsideTerminalMultiplexer,
+	isTerminalBackgroundQueryTrusted,
+	MacAppearanceObserver,
+	MacOSAppearance,
+	rasterizeSvg,
+} from "@oh-my-pi/pi-natives";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Image } from "@oh-my-pi/pi-tui/components/image";
 import type { TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { type CellDimensions, getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
 import {
-	type CellDimensions,
-	getCellDimensions,
 	getTerminalBackgroundColor,
 	ImageProtocol,
-	isInsideTerminalMultiplexer,
-	isTerminalBackgroundQueryTrusted,
-	setCellDimensions,
 	setTerminalBackgroundColor,
 	setTerminalImageProtocol,
 	TERMINAL,
@@ -29,7 +31,7 @@ class AppearanceTerminal extends VirtualTerminal {
 	readonly #reports = new Set<(appearance: TerminalAppearance) => void>();
 	readonly writes: string[] = [];
 
-	onAppearanceReport(callback: (appearance: TerminalAppearance) => void): () => void {
+	override onAppearanceReport(callback: (appearance: TerminalAppearance) => void): () => void {
 		this.#reports.add(callback);
 		return () => this.#reports.delete(callback);
 	}
@@ -39,16 +41,16 @@ class AppearanceTerminal extends VirtualTerminal {
 		for (const callback of this.#reports) callback("dark");
 	}
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.writes.push(data);
-		super.write(data);
+		super.receive(data);
 	}
 }
 
 class TspAppearanceTerminal extends TspTestTerminal {
 	readonly #reports = new Set<(appearance: TerminalAppearance) => void>();
 
-	onAppearanceReport(callback: (appearance: TerminalAppearance) => void): () => void {
+	override onAppearanceReport(callback: (appearance: TerminalAppearance) => void): () => void {
 		this.#reports.add(callback);
 		return () => this.#reports.delete(callback);
 	}
@@ -150,9 +152,10 @@ describe("terminal background SIXEL repaint", () => {
 	it("repaints when a new owner reports the previous owner's RGB after resetting it at startup", async () => {
 		const terminal = new AppearanceTerminal(40, 5);
 		const start = terminal.start.bind(terminal);
-		const startSpy = vi.spyOn(terminal, "start").mockImplementation((onInput, onResize) => {
+		// A ProcessTerminal owner resets the shared RGB when it starts.
+		const startSpy = vi.spyOn(terminal, "start").mockImplementation(options => {
 			setTerminalBackgroundColor(undefined);
-			start(onInput, onResize);
+			start(options);
 		});
 		const scheduler = new VirtualRenderScheduler();
 		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });
@@ -209,8 +212,8 @@ describe("terminal background SIXEL repaint", () => {
 	it("repaints multiplexer viewports without clearing their native history", async () => {
 		const previousSty = Bun.env.STY;
 		Bun.env.STY = "fixture";
-		expect(isInsideTerminalMultiplexer()).toBe(true);
-		expect(isTerminalBackgroundQueryTrusted()).toBe(true);
+		expect(isInsideTerminalMultiplexer(Bun.env)).toBe(true);
+		expect(isTerminalBackgroundQueryTrusted(Bun.env)).toBe(true);
 		const terminal = new AppearanceTerminal(40, 5);
 		const scheduler = new VirtualRenderScheduler();
 		const tui = new TUI(terminal, undefined, { renderScheduler: scheduler });

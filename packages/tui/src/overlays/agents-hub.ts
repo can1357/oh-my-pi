@@ -830,6 +830,32 @@ export class AgentsHubComponent implements Component {
 		}
 	}
 
+	/** Pastes follow the typed-text path: strip pattern, create description, model search, or the filter. */
+	handlePaste(text: string): void {
+		this.#nativeVersion++;
+		const strip = this.#strip;
+		if (strip) {
+			if (strip.kind === "pattern") strip.input.handlePaste(text);
+		} else if (this.#createActive) {
+			if (this.#createSpec || this.#createGenerating || !this.#createInput) return;
+			this.#createInput.handlePaste(text);
+			this.#createDescription = this.#createInput.getExpandedText();
+		} else if (this.#assigning) {
+			this.#browser.handlePaste(text);
+		} else {
+			const before = this.#search.getValue();
+			this.#search.handlePaste(text);
+			const value = this.#search.getValue();
+			if (value !== before) {
+				this.#focus = "list";
+				this.#buildRows();
+				this.#rowIndex = 0;
+				this.#listScroll = 0;
+			}
+		}
+		this.#requestRender();
+	}
+
 	#activateRow(rowDef: ListRow | undefined): void {
 		if (!rowDef) return;
 		if (rowDef.kind === "new") {

@@ -73,6 +73,7 @@ export interface ApprovalDialogDraft {
 	/** True while the composer holds a draft — text, attachments, or a paste still landing: keys then edit and send it. */
 	hasDraft(): boolean;
 	handleInput(keyData: string): void;
+	handlePaste(text: string, enter?: string): void;
 }
 
 interface ApprovalDialogOptions {
@@ -306,6 +307,14 @@ export class ApprovalDialogComponent implements Component {
 		const count = this.#choices.length;
 		this.#choice = (this.#choice + delta + count) % count;
 		this.#native = undefined;
+		this.options.tui?.requestRender();
+	}
+
+	/** Pastes always land in the composer, like any typed text. */
+	handlePaste(text: string, enter?: string): void {
+		if (this.#closed || !this.options.draft) return;
+		this.#restartCountdown();
+		this.options.draft.handlePaste(text, enter);
 		this.options.tui?.requestRender();
 	}
 

@@ -1,4 +1,4 @@
-import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import type { terminalLaunchCapabilities } from "./providers";
 
 export interface PlacementCapabilities {

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { terminalMultiplexerEnvKeys } from "@oh-my-pi/pi-natives";
 import {
 	CURSOR_MARKER,
 	type TerminalFramePlan,
@@ -6,7 +7,6 @@ import {
 	TUI,
 	type ViewportSize,
 } from "@oh-my-pi/pi-tui";
-import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { VirtualTerminal } from "./virtual-terminal";
 
 // Regression coverage for the SIGWINCH-side pre-erase archiving the unfinished
@@ -36,21 +36,21 @@ import { VirtualTerminal } from "./virtual-terminal";
 class PreservedClearTerminal extends VirtualTerminal {
 	archivedClears = 0;
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		const erase = /\x1b\[([0-2]?)J/g;
 		let cursor = 0;
 		for (let match = erase.exec(data); match; match = erase.exec(data)) {
-			super.write(data.slice(cursor, match.index));
+			super.receive(data.slice(cursor, match.index));
 			cursor = match.index + match[0].length;
 			const mode = match[1] === "" ? "0" : match[1];
 			const position = this.getCursor();
 			if (mode === "2" || (mode === "0" && position.row === 0 && position.col === 0)) {
 				this.archivedClears++;
-				super.write(`\x1b[${this.rows};1H${"\n".repeat(this.rows)}`);
+				super.receive(`\x1b[${this.rows};1H${"\n".repeat(this.rows)}`);
 			}
-			super.write(match[0]);
+			super.receive(match[0]);
 		}
-		super.write(data.slice(cursor));
+		super.receive(data.slice(cursor));
 	}
 }
 
@@ -97,7 +97,7 @@ class ResizeScheduler {
 // Every signal multiplexer classification reads; the suite itself may run under
 // any recognized multiplexer, and the SIGWINCH-side erase only runs on direct
 // terminals.
-const MUX_SIGNALS = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
+const MUX_SIGNALS = [...terminalMultiplexerEnvKeys(), "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
 
 function startRig(markerRow?: number, columns = 40, rows = 12) {
 	const terminal = new PreservedClearTerminal(columns, rows);

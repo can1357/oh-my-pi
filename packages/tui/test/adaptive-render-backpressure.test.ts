@@ -26,6 +26,7 @@ const MAX_ADAPTIVE_RENDER_MS = 200;
 
 class ScriptedFrameCost implements Component {
 	#nextCostMs: number | null = null;
+	renders = 0;
 	scheduler!: { nowMs: number };
 
 	/** Program the next render() to virtually consume `costMs` on the scheduler clock. */
@@ -36,6 +37,7 @@ class ScriptedFrameCost implements Component {
 	invalidate(): void {}
 
 	render(_width: number): readonly string[] {
+		this.renders++;
 		if (this.#nextCostMs !== null) {
 			this.scheduler.nowMs += this.#nextCostMs;
 			this.#nextCostMs = null;
@@ -68,9 +70,15 @@ class DeferredRenderScheduler {
 	}
 }
 
-/** Drain immediates + fire the next scheduled render timer. Returns its `delayMs`. */
-function stepRender(scheduler: DeferredRenderScheduler): number | null {
+/**
+ * Drain immediates + fire the next scheduled render timer. Returns its `delayMs`.
+ * A frame already due when its request is paced is armed as an immediate, not a
+ * timer: it paints while the immediates drain, which is a delay of 0.
+ */
+function stepRender(scheduler: DeferredRenderScheduler, probe: ScriptedFrameCost): number | null {
+	const renders = probe.renders;
 	while (scheduler.immediates.length > 0) scheduler.immediates.shift()!();
+	if (probe.renders > renders) return 0;
 	const timer = scheduler.timers.shift();
 	if (!timer || timer.canceled) return null;
 	scheduler.nowMs += timer.delayMs;
@@ -90,7 +98,7 @@ describe("TUI adaptive render backpressure (#4145)", () => {
 		try {
 			tui.start();
 			// Drain the initial start-time render.
-			stepRender(scheduler);
+			stepRender(scheduler, probe);
 			scheduler.timers.length = 0;
 
 			// Three cheap (1ms) renders back-to-back: each next delay hugs the
@@ -99,7 +107,7 @@ describe("TUI adaptive render backpressure (#4145)", () => {
 			for (let i = 0; i < 3; i++) {
 				probe.scheduleCost(1);
 				tui.requestRender();
-				const delay = stepRender(scheduler);
+				const delay = stepRender(scheduler, probe);
 				expect(delay).not.toBeNull();
 				// The cadence floor is min-interval; adaptive floor is
 				// max(1ms) which is well below it, so delay ≈ min-interval.
@@ -121,20 +129,20 @@ describe("TUI adaptive render backpressure (#4145)", () => {
 
 		try {
 			tui.start();
-			stepRender(scheduler);
+			stepRender(scheduler, probe);
 			scheduler.timers.length = 0;
 
 			// One slow frame — 100ms, well over the 33ms cadence.
 			const slowFrameCostMs = 100;
 			probe.scheduleCost(slowFrameCostMs);
 			tui.requestRender();
-			stepRender(scheduler);
+			stepRender(scheduler, probe);
 
 			// The next requested render should idle proportional to the last
 			// frame's cost. Pre-fix this delay collapsed to zero and pinned CPU.
 			probe.scheduleCost(1);
 			tui.requestRender();
-			const delay = stepRender(scheduler);
+			const delay = stepRender(scheduler, probe);
 			expect(delay).not.toBeNull();
 			// `elapsed` at scheduling time is 0 (last render just ended), so
 			// the adaptive floor equals the recorded 100ms cost directly.
@@ -154,18 +162,18 @@ describe("TUI adaptive render backpressure (#4145)", () => {
 
 		try {
 			tui.start();
-			stepRender(scheduler);
+			stepRender(scheduler, probe);
 			scheduler.timers.length = 0;
 
 			// A pathological 5-second frame — the adaptive floor must cap so
 			// the follow-up delay doesn't become 5s.
 			probe.scheduleCost(5_000);
 			tui.requestRender();
-			stepRender(scheduler);
+			stepRender(scheduler, probe);
 
 			probe.scheduleCost(1);
 			tui.requestRender();
-			const delay = stepRender(scheduler);
+			const delay = stepRender(scheduler, probe);
 			expect(delay).not.toBeNull();
 			expect(delay!).toBeLessThanOrEqual(MAX_ADAPTIVE_RENDER_MS);
 		} finally {

@@ -341,6 +341,11 @@ export class HistorySearchComponent extends OverlayPanel {
 		this.#scheduleResults();
 	}
 
+	handlePaste(text: string): void {
+		this.#searchInput.handlePaste(text);
+		this.#scheduleResults();
+	}
+
 	/**
 	 * With the `picker` kind: a `size:"md"` sheet of past prompts (first line
 	 * with hits, age, folder) as a keyed child the reconciler hoists into

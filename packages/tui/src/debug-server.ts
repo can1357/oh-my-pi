@@ -353,7 +353,7 @@ export class TuiDebugServer {
 				return { ok: true };
 			case "paste":
 				if (typeof request.text !== "string") throw new Error("text must be a string");
-				this.#tui.injectDebugInput(`\x1b[200~${request.text}\x1b[201~`);
+				this.#tui.injectDebugPaste(request.text);
 				return { ok: true };
 			case "mouse": {
 				if (typeof request.x !== "number" || typeof request.y !== "number")

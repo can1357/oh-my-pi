@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { terminalLaunchCapabilities } from "./providers";
 import { launchError } from "./shared";
 import {

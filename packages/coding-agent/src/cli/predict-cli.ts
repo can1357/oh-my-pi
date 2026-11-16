@@ -172,6 +172,11 @@ class PredictCompareComponent implements Component, Focusable {
 		this.#ui.requestRender();
 	}
 
+	handlePaste(text: string): void {
+		this.#input.handlePaste(text);
+		this.#ui.requestRender();
+	}
+
 	/** Accept the first lane's ghost word (Tab). */
 	#accept(): void {
 		const value = this.#input.getValue();

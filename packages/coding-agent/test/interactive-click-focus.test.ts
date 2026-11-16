@@ -388,10 +388,11 @@ describe("inline click-to-focus geometry", () => {
 		await term.waitForRender();
 
 		const written: string[] = [];
-		const write = term.write.bind(term);
-		vi.spyOn(term, "write").mockImplementation(data => {
+		// Every byte the terminal engine encodes reaches the emulator through `receive`.
+		const receive = term.receive.bind(term);
+		vi.spyOn(term, "receive").mockImplementation(data => {
 			written.push(data);
-			write(data);
+			receive(data);
 		});
 		await showReply("Open [the details](demo:open/7) or read [the docs](https://example.com/docs).", "the details");
 		// The terminal never receives the extension URL, so it has no hyperlink of its own to open.

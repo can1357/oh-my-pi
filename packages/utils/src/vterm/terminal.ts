@@ -27,6 +27,8 @@ export interface Disposable {
 /** Observable terminal modes used by interactive input normalization. */
 export interface TerminalModes {
 	applicationCursorKeysMode: boolean;
+	/** DECSET 2004: the program wants pastes wrapped in `CSI 200 ~` … `CSI 201 ~`. */
+	bracketedPasteMode: boolean;
 }
 
 /** Buffer collection exposed by the virtual terminal. */
@@ -93,7 +95,7 @@ export class Terminal {
 	/** Normal, alternate, and active buffer views. */
 	readonly buffer: TerminalBuffers;
 	/** Currently active input modes. */
-	readonly modes: TerminalModes = { applicationCursorKeysMode: false };
+	readonly modes: TerminalModes = { applicationCursorKeysMode: false, bracketedPasteMode: false };
 
 	#scrollback: number;
 	#normal: BufferState;
@@ -740,6 +742,7 @@ export class Terminal {
 		for (const mode of params) {
 			if (!privateMode && mode === 4) this.#insertMode = enabled;
 			else if (privateMode && mode === 1) this.modes.applicationCursorKeysMode = enabled;
+			else if (privateMode && mode === 2004) this.modes.bracketedPasteMode = enabled;
 			else if (privateMode && mode === 6) {
 				this.#originMode = enabled;
 				this.#setCursor(0, 0);
@@ -804,6 +807,7 @@ export class Terminal {
 		this.#insertMode = false;
 		this.#pendingWrap = false;
 		this.modes.applicationCursorKeysMode = false;
+		this.modes.bracketedPasteMode = false;
 	}
 
 	#reflow(state: BufferState, columns: number, rows: number, retainHistory: boolean): BufferState {

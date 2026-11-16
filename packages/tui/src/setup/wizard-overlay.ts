@@ -188,6 +188,12 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 		this.#activeScene?.handleInput?.(data);
 	}
 
+	/** Pastes go to the active scene only while a scene (not splash/outro) is showing. */
+	handlePaste(text: string): void {
+		if (this.#phase === "splash" || this.#phase === "outro" || this.#phase === "done") return;
+		this.#activeScene?.handlePaste?.(text);
+	}
+
 	/**
 	 * Mouse handling for the fullscreen wizard (SGR tracking is on while the
 	 * overlay holds the alternate screen). The frame paints from screen row 0,

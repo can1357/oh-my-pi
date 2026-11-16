@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { ImageBudget } from "../../../src/components/image";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import { getNativeBlob } from "../../../src/native/blobs";
 import { AttachmentChipsBand } from "../../../src/prompt/attachment-chips";
 import { chipLabel } from "../../../src/prompt/composer-attachments";

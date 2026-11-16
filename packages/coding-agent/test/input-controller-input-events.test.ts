@@ -74,6 +74,7 @@ async function createHarness(factory: ExtensionFactory) {
 		dictationSpaceHold: vi.fn(),
 		ui: {
 			requestRender: vi.fn(),
+			addPasteListener: vi.fn(),
 			addInputListener: vi.fn(),
 			addStartListener: vi.fn(),
 			getFocused: () => editor,

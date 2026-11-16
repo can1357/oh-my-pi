@@ -20,18 +20,10 @@ class RecordingTerminal extends VirtualTerminal {
 	readonly writes: string[] = [];
 	cursorVisible = true;
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.writes.push(data);
 		for (const match of data.matchAll(/\x1b\[\?25([hl])/g)) this.cursorVisible = match[1] === "h";
-		super.write(data);
-	}
-
-	override hideCursor(): void {
-		this.write(HARDWARE_CURSOR_HIDE);
-	}
-
-	override showCursor(): void {
-		this.write(HARDWARE_CURSOR_SHOW);
+		super.receive(data);
 	}
 
 	takeWrites(): string {
@@ -142,7 +134,8 @@ describe("AnnotationOverlay fullscreen hardware cursor", () => {
 			expect(terminal.cursorVisible).toBe(true);
 
 			terminal.sendInput("\x1b");
-			await scheduler.settle(terminal);
+			// A lone ESC is delivered once the stdin parser's 50 ms ESC timeout expires.
+			await scheduler.advance(terminal, 50);
 			expect(tui.hasOverlay()).toBe(false);
 			expect(tui.getFocused()).toBe(input);
 			expect(input.focused).toBe(true);
@@ -232,7 +225,8 @@ describe("AnnotationOverlay fullscreen hardware cursor", () => {
 			expect(terminal.cursorVisible).toBe(true);
 
 			terminal.sendInput("\x1b");
-			await scheduler.settle(terminal);
+			// A lone ESC is delivered once the stdin parser's 50 ms ESC timeout expires.
+			await scheduler.advance(terminal, 50);
 			expect(tui.hasOverlay()).toBe(false);
 			expect(overlay.getDraft()).toMatchObject({ kind: "text", editor: { text: "Q" } });
 			expect(terminal.cursorVisible).toBe(false);

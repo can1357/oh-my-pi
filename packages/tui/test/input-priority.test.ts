@@ -366,6 +366,11 @@ describe("TUI input priority", () => {
 			expect(pasteCount).toBe(0);
 
 			terminal.sendInput("\x1b");
+			// A lone ESC reaches the TUI once the stdin parser's 50 ms ESC timeout rules out a sequence.
+			// The engine's one timer is parked on the frame the keys above requested (a nextTick
+			// here): let it run so the timer re-arms for the ESC deadline, then let that elapse.
+			await drainNextTick();
+			vi.advanceTimersByTime(50);
 			terminal.sendInput("\x16");
 			expect(pasteCount).toBe(1);
 		} finally {

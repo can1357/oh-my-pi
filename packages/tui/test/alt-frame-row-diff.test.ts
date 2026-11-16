@@ -14,9 +14,9 @@ withoutTerminalMultiplexer();
 class RecordingTerminal extends VirtualTerminal {
 	readonly writes: string[] = [];
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.writes.push(data);
-		super.write(data);
+		super.receive(data);
 	}
 
 	takeWrites(): string {
@@ -226,7 +226,9 @@ describe("fullscreen overlay paints", () => {
 			tui.stop();
 			await terminal.flush();
 			expect(terminal.getCursor()).toEqual({ row: 4, col: 0 });
-			terminal.write("shell prompt");
+			// The shell owns the terminal now: its output reaches the emulator directly
+			// (the stopped TUI's terminal writes nothing until it starts again).
+			terminal.receive("shell prompt");
 			await terminal.flush();
 			expect(screen(terminal)).toEqual([...transcript, "shell prompt", "", "", ""]);
 		});

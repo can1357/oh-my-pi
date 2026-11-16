@@ -1,16 +1,8 @@
+import { type ImageBudget, InlineImage, imageDimensions } from "@oh-my-pi/pi-natives";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import {
-	type Component,
-	getImageDimensions,
-	getKittyGraphics,
-	type ImageBudget,
-	ImageProtocol,
-	renderImage,
-	replaceTabs,
-	TERMINAL,
-	truncateToWidth,
-	visibleWidth,
-} from "../index";
+import { type Component, ImageProtocol, replaceTabs, TERMINAL, truncateToWidth, visibleWidth } from "../index";
+import { inlineImagePass } from "../components/image";
+import { inlineImageRequest } from "../inline-image";
 import { fileHyperlink } from "../render/hyperlink";
 import { nativeImageNode } from "../native/blobs";
 import { node, row, span } from "../native/describe";
@@ -36,6 +28,19 @@ const kImagePng = Symbol("omp.imagePng");
 
 interface ImageContentWithPng extends ImageContent {
 	[kImagePng]?: ImageContent | null;
+}
+
+/** Symbol-keyed thumbnail cache on the displayed (PNG) image: its native encoder and the rows
+ *  it last returned. */
+const kThumbnail = Symbol("omp.chipThumbnail");
+
+interface ChipThumbnail {
+	image: InlineImage;
+	rows?: string[];
+}
+
+interface ImageContentWithThumbnail extends ImageContent {
+	[kThumbnail]?: ChipThumbnail;
 }
 
 /**
@@ -171,7 +176,7 @@ export class AttachmentChipsBand implements Component {
 	#imageDims(image: ImageContent): { width: number; height: number } | null {
 		let dims = cachedImageDimensions(image);
 		if (dims === undefined) {
-			const probed = getImageDimensions(image.data, image.mimeType);
+			const probed = imageDimensions(image.data, image.mimeType);
 			dims = probed ? { width: probed.widthPx, height: probed.heightPx } : null;
 			setCachedImageDimensions(image, dims);
 		}
@@ -186,35 +191,35 @@ export class AttachmentChipsBand implements Component {
 		dims: { width: number; height: number } | null,
 		kind: "image" | "video",
 	): string[] {
-		if (dims && TERMINAL.imageProtocol === ImageProtocol.Kitty && getKittyGraphics().unicodePlaceholders) {
+		if (dims && TERMINAL.imageProtocol === ImageProtocol.Kitty && TERMINAL.kittyUnicodePlaceholders) {
 			const display = this.#kittyDisplayImage(image);
 			if (display) {
-				const budget = this.budget;
-				const imageId = budget.acquireId(
-					`chip:${display.mimeType}:${display.data.length}:${display.data.slice(0, 32)}`,
-				);
-				// observe() keeps chip thumbnails inside the shared live-graphics budget so a
-				// paste-heavy session cannot pile up placements the way unbudgeted images would.
-				if (!budget.observe(imageId)) {
-					const result = renderImage(
-						display.data,
-						{ widthPx: dims.width, heightPx: dims.height },
-						{
-							maxWidthCells: INNER_COLS,
-							maxHeightCells: INNER_ROWS,
-							imageId,
-							includeTransmit: budget.shouldTransmit(imageId),
-						},
-					);
-					if (result?.transmit) budget.enqueueTransmit(imageId, result.transmit);
-					if (result?.lines) return this.#centerGrid(result.lines);
-				}
+				const rows = this.#thumbnailRows(display, dims);
+				if (rows) return this.#centerGrid(rows);
 			}
 		}
 		const icon = theme.symbol(kind === "video" ? "chip.video" : "chip.image");
 		const pad = INNER_COLS - visibleWidth(icon);
 		const iconRow = " ".repeat(Math.floor(pad / 2)) + theme.fg("muted", icon) + " ".repeat(Math.ceil(pad / 2));
 		return [" ".repeat(INNER_COLS), iconRow, " ".repeat(INNER_COLS), " ".repeat(INNER_COLS)];
+	}
+
+	/** Placeholder rows of a 12x4 thumbnail, or undefined when the budget demoted it to text. The
+	 *  render observes the chip inside the shared live-graphics budget so a paste-heavy session
+	 *  cannot pile up placements the way unbudgeted images would. */
+	#thumbnailRows(display: ImageContentWithThumbnail, dims: { width: number; height: number }): string[] | undefined {
+		let thumbnail = display[kThumbnail];
+		if (!thumbnail) {
+			const image = new InlineImage(display.data, display.mimeType, { widthPx: dims.width, heightPx: dims.height });
+			image.useBudget(this.budget, `chip:${display.mimeType}:${display.data.length}:${display.data.slice(0, 32)}`);
+			thumbnail = { image };
+			display[kThumbnail] = thumbnail;
+		}
+		const result = thumbnail.image.render(
+			inlineImageRequest(INNER_COLS, INNER_ROWS, inlineImagePass(true, thumbnail.rows !== undefined)),
+		);
+		if (result !== null) thumbnail.rows = typeof result === "number" ? undefined : result;
+		return thumbnail.rows;
 	}
 
 	/** PNG form of `image` for the Kitty transmit; non-PNG sources convert asynchronously.

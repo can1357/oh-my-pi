@@ -43,6 +43,18 @@ class DeferredRenderScheduler {
 	}
 }
 
+/**
+ * Take the frame the engine owes right now. The terminal glue arms an engine
+ * deadline that is already due as a scheduler immediate — never as a paced
+ * `scheduleRender` — so "due immediately" reads as: no paced timer pending,
+ * exactly one immediate queued, and running it paints.
+ */
+function takeDueFrame(scheduler: DeferredRenderScheduler): () => void {
+	expect(scheduler.timers.filter(timer => !timer.canceled)).toEqual([]);
+	expect(scheduler.immediates).toHaveLength(1);
+	return scheduler.immediates.shift()!;
+}
+
 describe("TUI input/render scheduling", () => {
 	it("can commit a priority frame without waiting for queued immediates", () => {
 		const term = new VirtualTerminal(20, 4);
@@ -143,12 +155,10 @@ describe("TUI input/render scheduling", () => {
 			try {
 				scheduler.nowMs = 40;
 				term.sendInput("x");
-				scheduler.immediates.shift()?.();
-				const timer = scheduler.timers.shift();
 				// Already past the input cadence (1000/30 ms): due immediately, not in ~960 ms.
-				expect(timer?.delayMs).toBe(0);
-				timer?.callback();
+				takeDueFrame(scheduler)();
 				expect(events).toEqual(["input", "render"]);
+				expect(scheduler.timers).toEqual([]);
 			} finally {
 				tui.stop();
 			}
@@ -167,9 +177,7 @@ describe("TUI input/render scheduling", () => {
 				scheduler.nowMs = 50;
 				term.sendInput("x");
 				expect(parked?.canceled).toBe(true);
-				const input = scheduler.timers.shift();
-				expect(input?.delayMs).toBe(0);
-				input?.callback();
+				takeDueFrame(scheduler)();
 				expect(events).toEqual(["input", "render"]);
 
 				// The ceiling applies again to the next animation frame after that paint.
@@ -234,21 +242,19 @@ describe("TUI input/render scheduling", () => {
 				term.pendingBytes = 64 * 1024 * 1024;
 				scheduler.nowMs = 40;
 				term.sendInput("x");
-				scheduler.immediates.shift()?.();
-				const due = scheduler.timers.shift();
-				expect(due?.delayMs).toBe(0);
-				due?.callback();
+				takeDueFrame(scheduler)();
 				expect(events).toEqual(["input"]);
 				expect(scheduler.timers).toEqual([]);
+				expect(scheduler.immediates).toEqual([]);
 
 				// Drain resumes the keystroke at its input cadence, then consumes the
 				// latch so the next animation frame is paced by the ceiling.
+				// The drain notification ticks the engine, which finds the frame due and paints it.
 				scheduler.nowMs = 50;
 				term.pendingBytes = 0;
-				const resumed = scheduler.timers.shift();
-				expect(resumed?.delayMs).toBe(0);
-				resumed?.callback();
 				expect(events).toEqual(["input", "render"]);
+				expect(scheduler.timers).toEqual([]);
+				expect(scheduler.immediates).toEqual([]);
 				scheduler.nowMs = 60;
 				tui.requestComponentRender(probe);
 				scheduler.immediates.shift()?.();
@@ -278,9 +284,7 @@ describe("TUI input/render scheduling", () => {
 				scheduler.nowMs = 50;
 				term.sendInput("\x0f");
 				expect(parked?.canceled).toBe(true);
-				const frame = scheduler.timers.shift();
-				expect(frame?.delayMs).toBe(0);
-				frame?.callback();
+				takeDueFrame(scheduler)();
 				expect(events).toEqual(["toggle", "render"]);
 			} finally {
 				unsubscribe();
@@ -307,9 +311,7 @@ describe("TUI input/render scheduling", () => {
 				scheduler.nowMs = 40;
 				term.sendInput("\x1b[<64;5;5M");
 				expect(parked?.canceled).toBe(true);
-				const frame = scheduler.timers.shift();
-				expect(frame?.delayMs).toBe(0);
-				frame?.callback();
+				takeDueFrame(scheduler)();
 				expect(events).toEqual(["wheel", "render"]);
 			} finally {
 				unsubscribe();

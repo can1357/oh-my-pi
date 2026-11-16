@@ -26,8 +26,8 @@ async function settle(term: VirtualTerminal): Promise<void> {
 
 function captureWrites(term: VirtualTerminal): string[] {
 	const writes: string[] = [];
-	const realWrite = term.write.bind(term);
-	vi.spyOn(term, "write").mockImplementation((data: string) => {
+	const realWrite = term.receive.bind(term);
+	vi.spyOn(term, "receive").mockImplementation((data: string) => {
 		writes.push(data);
 		realWrite(data);
 	});

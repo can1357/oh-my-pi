@@ -8,7 +8,7 @@ import { type Agent, AgentBusyError, type AgentMessage, agentPauseGate, Thinking
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { execReplace } from "@oh-my-pi/pi-natives";
+import { execReplace, isInsideTerminalMultiplexer } from "@oh-my-pi/pi-natives";
 import type {
 	AutocompleteProvider,
 	Component,
@@ -59,7 +59,6 @@ import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
 import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode } from "@oh-my-pi/pi-wire";
-import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
 	adjustHsv,
@@ -2705,7 +2704,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Load initial todos
 		await logger.time("InteractiveMode.init:todos", () => this.#loadTodoList());
 
-		if (process.platform === "darwin" && TERMINAL.id === "wezterm" && !isInsideTerminalMultiplexer()) {
+		if (process.platform === "darwin" && TERMINAL.id === "wezterm" && !isInsideTerminalMultiplexer(Bun.env)) {
 			this.#eventBusUnsubscribers.push(startMacOSAppearanceReprobeFallback(this.ui.terminal));
 		}
 
@@ -2735,11 +2734,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// OSC 133;A starts a shell prompt and may drop the current status
 		// record. Confirmed OSC 7501 receivers omit the mark while working or
 		// blocked; only a frame that writes the mark needs a status replacement.
-		this.#eventBusUnsubscribers.push(
-			this.ui.addFrameWriteListener(frame => {
-				if (frame.includes("\x1b]133;A\x07")) resendProgramStatus();
-			}),
-		);
+		this.#eventBusUnsubscribers.push(this.ui.addFrameTextListener("\x1b]133;A\x07", resendProgramStatus));
 		setTerminalSessionSource({
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
@@ -2986,7 +2981,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.statusLine.invalidate();
 				this.ui.invalidate();
 				this.updateEditorBorderColor();
-				if (event.ephemeral || isInsideTerminalMultiplexer()) {
+				if (event.ephemeral || isInsideTerminalMultiplexer(Bun.env)) {
 					// Theme previews and multiplexer panes use a non-destructive viewport
 					// repaint rather than replacing already emitted history.
 					this.ui.requestRender();

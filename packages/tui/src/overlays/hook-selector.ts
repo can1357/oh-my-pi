@@ -673,6 +673,19 @@ export class HookSelectorComponent extends OverlayPanel {
 		}
 	}
 
+	/** Pastes edit the type-to-search field when search is enabled; blank pastes into an empty query are dropped. */
+	handlePaste(text: string): void {
+		if (this.#countdown) {
+			this.#countdown.reset();
+			this.#onTimeoutResetCallback?.();
+		}
+		if (!this.#isSearchEnabled()) return;
+		const before = this.#search.getValue();
+		if (before.length === 0 && text.trim().length === 0) return;
+		this.#search.handlePaste(text);
+		if (this.#search.getValue() !== before) this.#syncSearchQuery();
+	}
+
 	override render(width: number): readonly string[] {
 		const renderWidth = Math.max(1, width - 4);
 		if (this.#lastRenderWidth !== renderWidth) {

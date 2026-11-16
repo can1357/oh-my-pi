@@ -117,6 +117,10 @@ function makeHarness() {
 			if (!focused?.handleInput) throw new Error("Expected a focused input component");
 			focused.handleInput(data);
 		},
+		handlePaste(text: string): void {
+			if (!focused?.handlePaste) throw new Error("Expected a focused paste target");
+			focused.handlePaste(text);
+		},
 		getPrompt(): HookEditorComponent {
 			if (!(focused instanceof HookEditorComponent)) throw new Error("Expected the custom answer editor");
 			return focused;
@@ -853,8 +857,8 @@ describe("ExtensionUiController tool approval", () => {
 		harness.editor.onPasteImage = onPasteImage;
 		harness.editor.onPasteImagePath = onPasteImagePath;
 		void harness.controller.showCollabAwareApproval(prompt);
-		// Image-only clipboard paste: the terminal sends an empty bracketed paste.
-		harness.handleInput("\x1b[200~\x1b[201~");
+		// Image-only clipboard paste: the terminal sends an empty paste.
+		harness.handlePaste("");
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
 		// Typed while the clipboard read is pending: held until the image lands.
 		harness.handleInput("x");
@@ -863,7 +867,7 @@ describe("ExtensionUiController tool approval", () => {
 		await clipboard.promise;
 		await Promise.resolve();
 		expect(harness.editor.getText()).toBe("x");
-		harness.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
+		harness.handlePaste("/tmp/shot.png");
 		await Promise.resolve();
 		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/shot.png");
 	});
@@ -879,7 +883,7 @@ describe("ExtensionUiController tool approval", () => {
 		const onSubmit = vi.fn();
 		harness.editor.onSubmit = onSubmit;
 		void harness.controller.showCollabAwareApproval(prompt);
-		harness.handleInput("\x1b[200~\x1b[201~");
+		harness.handlePaste("");
 		// The composer is still empty, yet this Enter belongs to the paste, not to the empty-composer guard.
 		harness.handleInput("\r");
 		clipboard.resolve();

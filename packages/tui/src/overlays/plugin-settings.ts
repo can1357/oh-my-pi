@@ -465,6 +465,10 @@ export class PluginListComponent extends OverlayPanel {
 	handleInput(data: string): void {
 		this.#selectList.handleInput(data);
 	}
+
+	handlePaste(text: string): void {
+		this.#selectList.handlePaste(text);
+	}
 }
 
 // =============================================================================
@@ -588,6 +592,10 @@ export class PluginDetailComponent extends OverlayPanel {
 	handleInput(data: string): void {
 		if (!this.#settingsList) return;
 		this.#settingsList.handleInput(data);
+	}
+
+	handlePaste(text: string): void {
+		this.#settingsList?.handlePaste(text);
 	}
 
 	/** This plugin's settings as a native page section. */
@@ -727,6 +735,10 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 		this.#settingsList.handleInput(data);
 	}
 
+	handlePaste(text: string): void {
+		this.#settingsList.handlePaste(text);
+	}
+
 	/** This plugin's settings as a native page section, with its install facts as the lead. */
 	prefsPage(): PluginPrefsPage {
 		const entry = this.plugin.entries[0];
@@ -773,6 +785,10 @@ class ConfigFieldPanel extends OverlayPanel {
 
 	handleInput(data: string): void {
 		this.#field.handleInput(data);
+	}
+
+	handlePaste(text: string): void {
+		this.#field.handlePaste(text);
 	}
 
 	pasteText(text: string): void {
@@ -1032,5 +1048,9 @@ export class PluginSettingsComponent extends Container {
 			return;
 		}
 		this.#viewComponent.handleInput(data);
+	}
+
+	handlePaste(text: string): void {
+		this.#viewComponent?.handlePaste?.(text);
 	}
 }

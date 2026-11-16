@@ -1,10 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { detectMacOSAppearance, MacAppearanceObserver } from "@oh-my-pi/pi-natives";
+import { detectMacOSAppearance, isTerminalBackgroundQueryTrusted, MacAppearanceObserver } from "@oh-my-pi/pi-natives";
 import type { Terminal, TerminalAppearance } from "../terminal";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, isLightSurface, resolveThemeColors, resolveVarRefs } from "./color";
 import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
@@ -62,7 +61,7 @@ export function onTerminalBackgroundFallbackChange(callback: () => void): () => 
  * Defaults to dark when none of those signals is available.
  */
 export function detectTerminalBackground(): "dark" | "light" {
-	const backgroundQueryTrusted = isTerminalBackgroundQueryTrusted();
+	const backgroundQueryTrusted = isTerminalBackgroundQueryTrusted(Bun.env, process.platform);
 	// Tier 1: terminal-reported appearance from OSC 11 luminance.
 	if (backgroundQueryTrusted && terminalReportedAppearance) {
 		return terminalReportedAppearance;
@@ -673,7 +672,7 @@ var macObserver: { stop(): void } | undefined;
 
 function startMacAppearanceObserver(): void {
 	stopMacAppearanceObserver();
-	if (isTerminalBackgroundQueryTrusted()) return;
+	if (isTerminalBackgroundQueryTrusted(Bun.env, process.platform)) return;
 	try {
 		macOSReportedAppearance = detectMacOSAppearance() ?? undefined;
 		macObserver = MacAppearanceObserver.start((err, appearance) => {

@@ -107,7 +107,7 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 		await harness.settle();
 
 		expect(harness.probe.widths).toHaveLength(rendersBeforeDisconnect);
-		expect(harness.signals.slice(signalsBeforeDisconnect)).toContainEqual({ pid: process.pid, signal: "SIGHUP" });
+		expect(harness.signals.slice(signalsBeforeDisconnect)).toContain("SIGHUP");
 	});
 
 	it("does not wait for terminal output to drain after input ends on Windows", async () => {
@@ -133,6 +133,6 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 		await harness.settle();
 
 		expect(harness.probe.widths).toHaveLength(rendersBeforeDisconnect);
-		expect(harness.signals.slice(signalsBeforeDisconnect)).toContainEqual({ pid: process.pid, signal: "SIGHUP" });
+		expect(harness.signals.slice(signalsBeforeDisconnect)).toContain("SIGHUP");
 	});
 });

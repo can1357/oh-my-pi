@@ -502,38 +502,6 @@ export function isOsc66Line(line: string): boolean {
 	return line.includes(OSC66_PREFIX);
 }
 
-/**
- * Largest `s=` scale among the OSC 66 spans in a line (1 when none is scaled).
- * A scale-`s` heading occupies `s` terminal rows, so the `s - 1` blank rows
- * beneath it are the glyph's lower half and must never be erased or overdrawn.
- */
-export function osc66MaxScale(line: string): number {
-	if (!line.includes(OSC66_PREFIX)) return 1;
-	let max = 1;
-	OSC66_SPAN_REGEX.lastIndex = 0;
-	for (let m = OSC66_SPAN_REGEX.exec(line); m !== null; m = OSC66_SPAN_REGEX.exec(line)) {
-		for (const part of m[1].split(":")) {
-			if (part.indexOf("=") !== 1 || part[0] !== "s") continue;
-			const value = Number.parseInt(part.slice(2), 10);
-			if (Number.isFinite(value) && value > max && value <= 7) max = value;
-		}
-	}
-	return max;
-}
-
-const THAI_LAO_AM_GLOBAL_REGEX = /[\u0e33\u0eb3]/g;
-
-/**
- * Normalize text for terminal output without changing logical editor content.
- * Some terminals render precomposed Thai/Lao AM vowels inconsistently during
- * differential repaint. Their compatibility decompositions have the same cell
- * width but avoid stale-cell artifacts in terminal renderers.
- */
-export function normalizeTerminalOutput(str: string): string {
-	if (str.indexOf("\u0e33") === -1 && str.indexOf("\u0eb3") === -1) return str;
-	return str.replace(THAI_LAO_AM_GLOBAL_REGEX, char => (char === "\u0e33" ? "\u0e4d\u0e32" : "\u0ecd\u0eb2"));
-}
-
 const makeBoolArray = (chars: string): Uint8Array => {
 	const table = new Uint8Array(128);
 	for (let i = 0; i < chars.length; i++) {

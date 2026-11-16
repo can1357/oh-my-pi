@@ -68,10 +68,8 @@ export function startActiveTerminal(): ActiveTerminalHarness {
 	// conpty: false keeps kitty flags at >5u regardless of ambient WSL env.
 	const terminal = new ProcessTerminal({ conpty: false });
 	try {
-		terminal.start(
-			() => {},
-			() => {},
-		);
+		terminal.bind({ input() {}, paste() {}, render() {}, resize() {} });
+		terminal.start();
 	} catch (err) {
 		// A start() regression must not leave later tests with headless off and a faked TTY.
 		restoreProcess();

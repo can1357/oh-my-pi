@@ -1,4 +1,4 @@
-import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { hasTerminalMultiplexerSession } from "@oh-my-pi/pi-natives";
 import { quotePosixArgv } from "../../utils/shell-quote";
 import { launchError, oneLineId, runStep } from "./shared";
 import type { SupportedMultiplexerCapabilities, TerminalLaunchBackend, TerminalLaunchProvider } from "./types";

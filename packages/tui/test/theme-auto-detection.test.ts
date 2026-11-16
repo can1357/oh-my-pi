@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import * as nativesModule from "@oh-my-pi/pi-natives";
 import { type MacAppearanceObserver, MacOSAppearance } from "@oh-my-pi/pi-natives";
-import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui";
+import type { Terminal, TerminalAppearance, TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui";
 import { getTerminalBackgroundColor, setTerminalBackgroundColor } from "@oh-my-pi/pi-tui/terminal-capabilities";
 
 const originalPlatform = process.platform;
@@ -55,7 +55,9 @@ type PrivateModeReportCallback = (mode: number, supported: boolean, confirmed?: 
 
 class FakeAppearanceTerminal implements AppearanceTerminal {
 	appearance: TerminalAppearance | undefined;
-	readonly refreshAppearance = vi.fn(() => {});
+	readonly refreshAppearance = vi.fn(
+		(_requestToken?: TerminalAppearanceRequestToken): TerminalAppearanceRequestToken | undefined => undefined,
+	);
 	#appearanceChangeCallbacks: AppearanceChangeCallback[] = [];
 	#appearanceReportCallbacks: AppearanceReportCallback[] = [];
 	#privateModeReportCallbacks: PrivateModeReportCallback[] = [];

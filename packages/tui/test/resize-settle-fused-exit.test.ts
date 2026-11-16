@@ -23,9 +23,9 @@ const RESIZE_SETTLE_ADVANCE_MS = 160;
 class RecordingTerminal extends BackloggedTerminal {
 	written: string[] = [];
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.written.push(data);
-		super.write(data);
+		super.receive(data);
 	}
 }
 

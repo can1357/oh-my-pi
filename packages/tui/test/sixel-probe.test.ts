@@ -1,194 +1,181 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { ImageProtocol, resolveImageProtocol, setTerminalImageProtocol, TERMINAL, TUI } from "@oh-my-pi/pi-tui";
-import { VirtualTerminal } from "./virtual-terminal";
+import { type Component, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { withFakeTmux } from "./helpers/fake-tmux";
+import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
-import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
-import { withFakeTmux } from "./helpers/fake-tmux";
-
-type MutableTerminalInfo = {
-	imageProtocol: ImageProtocol | null;
-};
 
 // XTSMGRAPHICS item 2 reply captured from foot 1.27: status 0 (success) plus the
 // terminal's maximum SIXEL geometry in pixels.
 const SIXEL_SUPPORTED_REPLY = "\x1b[?2;0;1692;432S";
+/** XTSMGRAPHICS: read the maximum SIXEL geometry. */
+const GRAPHICS_QUERY = "\x1b[?2;1;0S";
+/** XTWINOPS 16: report the cell size in pixels. */
+const CELL_SIZE_QUERY = "\x1b[16t";
 
-const terminalInfo = TERMINAL as unknown as MutableTerminalInfo;
 const originalProtocol = TERMINAL.imageProtocol;
-const originalWtSession = Bun.env.WT_SESSION;
-const originalWslDistro = Bun.env.WSL_DISTRO_NAME;
-const originalWslInterop = Bun.env.WSL_INTEROP;
-const originalForcedProtocol = Bun.env.PI_FORCE_IMAGE_PROTOCOL;
-const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-
-function restoreIsTty(
-	stream: NodeJS.ReadStream | NodeJS.WriteStream,
-	descriptor: PropertyDescriptor | undefined,
-): void {
-	if (descriptor) {
-		Object.defineProperty(stream, "isTTY", descriptor);
-		return;
-	}
-	delete (stream as unknown as { isTTY?: boolean }).isTTY;
-}
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete Bun.env[name];
 	else Bun.env[name] = value;
 }
 
-function startProbe(terminal: VirtualTerminal, protocol: ImageProtocol | null = null): TUI {
-	setTerminalImageProtocol(protocol);
-	terminalInfo.imageProtocol = protocol;
-	Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-	Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-	const tui = new TUI(terminal);
-	tui.start();
-	return tui;
+/** A row with recognizable text that counts its invalidations. */
+class Row implements Component {
+	invalidations = 0;
+	constructor(readonly text: string) {}
+	invalidate(): void {
+		this.invalidations++;
+	}
+	render(): string[] {
+		return [this.text];
+	}
 }
 
-describe("TUI SIXEL capability probe", () => {
+// Reply parsing (status, zero geometry), the 250 ms answer window, and the
+// cell-size query that follows adoption are the engine's (session and input
+// tests). These cases pin the JS side: which environments send the probe, the
+// TUI adopting SIXEL with a repaint, and the cell size reaching the image
+// geometry.
+/** Variables that name the hosting terminal (and with it a static image protocol). */
+const TERMINAL_IDENTITY_KEYS = [
+	"KITTY_WINDOW_ID",
+	"GHOSTTY_RESOURCES_DIR",
+	"WEZTERM_PANE",
+	"ITERM_SESSION_ID",
+	"VSCODE_PID",
+	"ALACRITTY_WINDOW_ID",
+	"LC_TERMINAL",
+	"PASEO_TERMINAL_ID",
+] as const;
+
+describe("TUI SIXEL adoption from the XTSMGRAPHICS probe", () => {
+	withoutTerminalMultiplexer();
+	// The engine resolves the static image protocol from the environment, so
+	// the runner's own terminal identity must not pick one.
+	const envKeys = [
+		"PI_FORCE_IMAGE_PROTOCOL",
+		"PI_TUI_NATIVE",
+		"PI_NO_GLYPH_PROTOCOL",
+		"WT_SESSION",
+		"WSL_DISTRO_NAME",
+		"WSL_INTEROP",
+		...TERMINAL_IDENTITY_KEYS,
+	] as const;
+	const previousEnv = new Map<string, string | undefined>();
+	const ROW = "sixel-probe-row";
+	let originalCellDimensions = getCellDimensions();
+	let harness: ProcessTerminalRenderHarness | undefined;
+
+	beforeEach(() => {
+		vi.useFakeTimers();
+		for (const key of envKeys) {
+			previousEnv.set(key, Bun.env[key]);
+			delete Bun.env[key];
+		}
+		Bun.env.PI_TUI_NATIVE = "0";
+		Bun.env.PI_NO_GLYPH_PROTOCOL = "1";
+		setTerminalImageProtocol(null);
+		originalCellDimensions = getCellDimensions();
+	});
+
 	afterEach(() => {
+		harness?.dispose();
+		harness = undefined;
+		vi.useRealTimers();
 		setTerminalImageProtocol(originalProtocol);
-		terminalInfo.imageProtocol = originalProtocol;
-		restoreEnv("WT_SESSION", originalWtSession);
-		restoreEnv("WSL_DISTRO_NAME", originalWslDistro);
-		restoreEnv("WSL_INTEROP", originalWslInterop);
-		restoreEnv("PI_FORCE_IMAGE_PROTOCOL", originalForcedProtocol);
-		restoreIsTty(process.stdin, stdinIsTtyDescriptor);
-		restoreIsTty(process.stdout, stdoutIsTtyDescriptor);
+		setCellDimensions(originalCellDimensions);
+		for (const [key, value] of previousEnv) restoreEnv(key, value);
+		previousEnv.clear();
 	});
 
-	it("enables SIXEL only after a positive capability reply", () => {
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
-		expect(TERMINAL.imageProtocol).toBeNull();
+	async function startTui(): Promise<{ harness: ProcessTerminalRenderHarness; row: Row }> {
+		harness = createProcessTerminalRenderHarness(80, 24, { conpty: false });
+		const row = new Row(ROW);
+		harness.tui.addChild(row);
+		await harness.settle();
+		return { harness, row };
+	}
 
-		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
+	// The probe used to be gated on the host: on `isConPTYHosted() && WT_SESSION`,
+	// which left foot (TERM=foot, COLORTERM=truecolor, nothing else) on the text
+	// card, and then on `process.platform === "win32"`, which missed WSL (#6009).
+	it.each([
+		["a terminal that exports no identifying variable (foot)", {}],
+		["WSL + Windows Terminal", { WT_SESSION: "test-wt-session", WSL_DISTRO_NAME: "Ubuntu" }],
+	] as const)("adopts SIXEL from a positive reply on %s and repaints", async (_host, env) => {
+		Object.assign(Bun.env, env);
+		const { harness } = await startTui();
+		expect(harness.writes.join("")).toContain(GRAPHICS_QUERY);
+		expect(TERMINAL.imageProtocol).toBeNull();
+		harness.writes.length = 0;
+
+		await harness.feed(SIXEL_SUPPORTED_REPLY.slice(0, 11), SIXEL_SUPPORTED_REPLY.slice(11));
 
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
-		tui.stop();
+		const out = harness.writes.join("");
+		// The engine learned the protocol from the forced repaint: image rows are
+		// sized by the cell, so it asks for it.
+		expect(out).toContain(CELL_SIZE_QUERY);
+		expect(out).toContain(ROW);
 	});
 
-	it("enables SIXEL on a terminal identified only by COLORTERM (foot)", () => {
-		// Regression: the probe used to require isConPTYHosted() && WT_SESSION, so a
-		// SIXEL-capable terminal that exports no identifying variable (foot sets
-		// TERM=foot and COLORTERM=truecolor only) resolved the `trueColor`
-		// capability row, kept imageProtocol null, and rendered every image as the
-		// `[Image: …]` text card.
-		delete Bun.env.WT_SESSION;
-		delete Bun.env.WSL_DISTRO_NAME;
-		delete Bun.env.WSL_INTEROP;
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
+	it("leaves an unknown tmux client's protocol to the probe", async () => {
+		Object.assign(Bun.env, { TMUX: "/tmp/tmux/default,1,0", TERM: "tmux-256color", TERM_PROGRAM: "tmux" });
+		const { harness } = await startTui();
+		expect(harness.writes.join("")).toContain(GRAPHICS_QUERY);
 
-		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
+		await harness.feed(SIXEL_SUPPORTED_REPLY);
 
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
-		tui.stop();
 	});
 
-	it("selects SIXEL through the probe for an unknown tmux client", () => {
-		const env = { TMUX: "/tmp/tmux/default,1,0", TERM: "tmux-256color", TERM_PROGRAM: "tmux" };
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal, resolveImageProtocol("base", env, true));
+	it("applies the reported cell size to image geometry and invalidates the rows", async () => {
+		const { harness, row } = await startTui();
+		await harness.feed(SIXEL_SUPPORTED_REPLY);
+		expect(harness.writes.join("")).toContain(CELL_SIZE_QUERY);
+		const invalidations = row.invalidations;
 
-		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
+		await harness.feed("\x1b[6;23;11t");
 
-		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
-		tui.stop();
+		expect(getCellDimensions()).toEqual({ widthPx: 11, heightPx: 23 });
+		expect(row.invalidations).toBeGreaterThan(invalidations);
 	});
 
-	it("enables SIXEL when the reply arrives split across chunks", () => {
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
-
-		terminal.sendInput("\x1b[?2;0;1692");
-		expect(TERMINAL.imageProtocol).toBeNull();
-		terminal.sendInput(";432S");
-
-		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
-		tui.stop();
-	});
-
-	it("keeps SIXEL disabled when the terminal reports a zero geometry", () => {
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
-
-		terminal.sendInput("\x1b[?2;0;0S");
-
-		expect(TERMINAL.imageProtocol).toBeNull();
-		tui.stop();
-	});
-
-	it("keeps SIXEL disabled when the terminal reports a failure status", () => {
-		// `CSI ? 2 ; Ps ; Pv S` carries the status in Ps: 0 is success and 1..3 are
-		// error/failure per xterm ctlseqs, so only Ps = 0 may enable SIXEL.
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
-
-		terminal.sendInput("\x1b[?2;3;1692;432S");
-
-		expect(TERMINAL.imageProtocol).toBeNull();
-		tui.stop();
-	});
-
-	it("keeps SIXEL disabled when the terminal never answers", () => {
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
-
-		terminal.sendInput("hello");
-
-		expect(TERMINAL.imageProtocol).toBeNull();
-		tui.stop();
-	});
-
-	it("enables SIXEL under WSL + Windows Terminal (process.platform is linux)", () => {
-		// Regression for #6009: inside WSL, process.platform reports "linux" even
-		// though the host is Windows Terminal, so a probe gated on
-		// process.platform === "win32" never negotiated SIXEL there. The probe no
-		// longer gates on the host at all; WSL is one covered environment of many.
-		if (process.platform !== "linux") return;
-		Bun.env.WT_SESSION = "test-wt-session";
-		Bun.env.WSL_DISTRO_NAME = "Ubuntu";
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
-
-		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
-
-		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
-		tui.stop();
-	});
-
-	it("respects the PI_FORCE_IMAGE_PROTOCOL kill switch", () => {
+	it("respects the PI_FORCE_IMAGE_PROTOCOL kill switch", async () => {
 		// `off` resolves imageProtocol to null on purpose; the probe must not
 		// re-enable images behind the user's back.
 		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "off";
-		const terminal = new VirtualTerminal(80, 24);
-		const tui = startProbe(terminal);
+		const { harness } = await startTui();
+		expect(harness.writes.join("")).not.toContain(GRAPHICS_QUERY);
 
-		terminal.sendInput(SIXEL_SUPPORTED_REPLY);
+		await harness.feed(SIXEL_SUPPORTED_REPLY);
 
 		expect(TERMINAL.imageProtocol).toBeNull();
-		tui.stop();
 	});
 });
 
 describe("ProcessTerminal DA1 SIXEL detection", () => {
 	withoutTerminalMultiplexer();
-	const envKeys = ["PI_FORCE_IMAGE_PROTOCOL", "PI_TUI_NATIVE", "PI_NO_GLYPH_PROTOCOL", "TERM_PROGRAM"] as const;
+	const envKeys = [
+		"PI_FORCE_IMAGE_PROTOCOL",
+		"PI_TUI_NATIVE",
+		"PI_NO_GLYPH_PROTOCOL",
+		"TERM_PROGRAM",
+		...TERMINAL_IDENTITY_KEYS,
+	] as const;
 	const previousEnv = new Map<string, string | undefined>();
 	let harness: ProcessTerminalRenderHarness | undefined;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
-		for (const key of envKeys) previousEnv.set(key, Bun.env[key]);
-		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
-		delete Bun.env.TERM_PROGRAM;
+		for (const key of envKeys) {
+			previousEnv.set(key, Bun.env[key]);
+			delete Bun.env[key];
+		}
 		Bun.env.PI_TUI_NATIVE = "0";
 		Bun.env.PI_NO_GLYPH_PROTOCOL = "1";
 		setTerminalImageProtocol(null);
@@ -210,7 +197,7 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 			received.push(data);
 		});
 
-		process.stdin.emit("data", "\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52cx");
+		harness.type("\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52cx");
 
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
 		expect(received).toEqual(["x"]);
@@ -225,9 +212,9 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 			received.push(data);
 		});
 
-		process.stdin.emit("data", "\x1b[?62;4;22;28c");
+		harness.type("\x1b[?62;4;22;28c");
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
-		process.stdin.emit("data", `${SIXEL_SUPPORTED_REPLY}x`);
+		harness.type(`${SIXEL_SUPPORTED_REPLY}x`);
 
 		expect(received).toEqual(["x"]);
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
@@ -240,11 +227,11 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 			received.push(data);
 		});
 
-		process.stdin.emit("data", "\x1b[?62;4;22;28c");
-		process.stdin.emit("data", "\x1b[?2;0;1692");
+		harness.type("\x1b[?62;4;22;28c");
+		harness.type("\x1b[?2;0;1692");
 		vi.advanceTimersByTime(51);
 		expect(received).toEqual([]);
-		process.stdin.emit("data", ";432Sx");
+		harness.type(";432Sx");
 
 		expect(received).toEqual(["x"]);
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
@@ -257,7 +244,7 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 			received.push(data);
 		});
 
-		process.stdin.emit("data", "\x1b[?62;4;22;28c\x1b[?2;3;0Sx");
+		harness.type("\x1b[?62;4;22;28c\x1b[?2;3;0Sx");
 
 		expect(received).toEqual(["x"]);
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
@@ -292,7 +279,7 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 						received.push(data);
 					});
 
-					process.stdin.emit("data", "\x1b[?1;2;4c\x1b[?2;3;0Sx");
+					harness.type("\x1b[?1;2;4c\x1b[?2;3;0Sx");
 					vi.advanceTimersByTime(251);
 
 					expect(received).toEqual(["x"]);
@@ -313,10 +300,10 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 			received.push(data);
 		});
 
-		process.stdin.emit("data", "\x1b[?61;4;6;7;14");
+		harness.type("\x1b[?61;4;6;7;14");
 		vi.advanceTimersByTime(51);
 		expect(TERMINAL.imageProtocol).toBeNull();
-		process.stdin.emit("data", ";21;22;23;24;28;32;42;52cx");
+		harness.type(";21;22;23;24;28;32;42;52cx");
 
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
 		expect(received).toEqual(["x"]);
@@ -325,21 +312,11 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 	it("accepts a late unowned DA1 advertisement after the graphics timeout", () => {
 		harness = createProcessTerminalRenderHarness(80, 24, { conpty: true, nativeWindowsConsole: false });
 		const sentinelCount = harness.writes.reduce((count, write) => count + (write.match(/\x1b\[c/g)?.length ?? 0), 0);
-		process.stdin.emit("data", "\x1b[?61;6;22c".repeat(sentinelCount));
+		harness.type("\x1b[?61;6;22c".repeat(sentinelCount));
 		vi.advanceTimersByTime(251);
 		expect(TERMINAL.imageProtocol).toBeNull();
 
-		process.stdin.emit("data", "\x1b[?61;4;6;22c");
-
-		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
-	});
-
-	it("does not mistake the conformance level or other attributes for SIXEL", () => {
-		harness = createProcessTerminalRenderHarness(80, 24, { conpty: true, nativeWindowsConsole: false });
-
-		process.stdin.emit("data", "\x1b[?4;14;24;42c");
-		expect(TERMINAL.imageProtocol).toBeNull();
-		process.stdin.emit("data", SIXEL_SUPPORTED_REPLY);
+		harness.type("\x1b[?61;4;6;22c");
 
 		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
 	});
@@ -349,30 +326,25 @@ describe("ProcessTerminal DA1 SIXEL detection", () => {
 			Bun.env.PI_FORCE_IMAGE_PROTOCOL = override;
 			harness = createProcessTerminalRenderHarness(80, 24, { conpty: true, nativeWindowsConsole: false });
 
-			process.stdin.emit("data", "\x1b[?61;4;6;22c");
+			harness.type("\x1b[?61;4;6;22c");
 
 			expect(TERMINAL.imageProtocol).toBeNull();
 		});
 	}
 
-	for (const protocol of [ImageProtocol.Kitty, ImageProtocol.Iterm2]) {
+	for (const [protocol, identity] of [
+		[ImageProtocol.Kitty, "KITTY_WINDOW_ID"],
+		[ImageProtocol.Iterm2, "ITERM_SESSION_ID"],
+	] as const) {
 		it(`does not replace the already selected ${protocol} graphics protocol`, () => {
+			// The engine detects the protocol from the terminal's identity.
+			Bun.env[identity] = "1";
 			setTerminalImageProtocol(protocol);
 			harness = createProcessTerminalRenderHarness(80, 24, { conpty: true, nativeWindowsConsole: false });
 
-			process.stdin.emit("data", "\x1b[?61;4;6;22c");
+			harness.type("\x1b[?61;4;6;22c");
 
 			expect(TERMINAL.imageProtocol).toBe(protocol);
 		});
 	}
-
-	it("replays a DA1 advertisement to a subscriber attached after detection", () => {
-		harness = createProcessTerminalRenderHarness(80, 24, { conpty: true, nativeWindowsConsole: false });
-		process.stdin.emit("data", "\x1b[?61;4;6;22c");
-		const reports: boolean[] = [];
-
-		harness.terminal.onSixelSupport(supported => reports.push(supported));
-
-		expect(reports).toEqual([true]);
-	});
 });

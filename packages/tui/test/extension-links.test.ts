@@ -240,9 +240,9 @@ describe("extension-owned links", () => {
 /** Records every byte the TUI writes. */
 class RecordingTerminal extends VirtualTerminal {
 	written = "";
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.written += data;
-		super.write(data);
+		super.receive(data);
 	}
 }
 

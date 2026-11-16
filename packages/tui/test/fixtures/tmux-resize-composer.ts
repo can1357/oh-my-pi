@@ -5,14 +5,6 @@ import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import { CURSOR_MARKER } from "@oh-my-pi/pi-tui/tui";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
 
-class RecordingTerminal extends ProcessTerminal {
-	resets = 0;
-	override write(data: string): void {
-		this.resets += data.split("\x1b[3J").length - 1;
-		super.write(data);
-	}
-}
-
 class Block {
 	constructor(readonly id: number) {}
 	render(width: number): string[] {
@@ -27,7 +19,9 @@ class Editor {
 }
 
 setTerminalHeadless(false);
-const terminal = new RecordingTerminal();
+const terminal = new ProcessTerminal();
+// Destructive resets (ED3 + repaint from row zero) the engine painted.
+let resets = 0;
 const composer = new Composer({
 	terminal,
 	preferences: { ...COMPOSER_DEFAULTS, quiet: true, resizeScrollback: "rebuild" },
@@ -36,7 +30,8 @@ const transcript = new TranscriptContainer();
 for (let id = 0; id < 1000; id++) transcript.addChild(new Block(id));
 composer.setRuntimeChildren([transcript, new Editor()]);
 composer.ui.addPaintListener(paint => {
-	if (!paint.alt) terminal.setTitle(JSON.stringify({ height: paint.rows, resets: terminal.resets }));
+	if (paint.reset) resets++;
+	if (!paint.alt) terminal.setTitle(JSON.stringify({ height: paint.rows, resets }));
 });
 composer.start({ playWelcomeIntro: false });
 await Bun.sleep(60000);

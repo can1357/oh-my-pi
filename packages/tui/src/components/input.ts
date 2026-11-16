@@ -1,4 +1,3 @@
-import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings } from "../keybindings";
 import { extractPrintableText, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
@@ -32,11 +31,10 @@ const segmenter = getSegmenter();
 
 /**
  * Clean text entering the single-line value from outside the keyboard (pastes, dictation) —
- * decode tmux's re-encoded control bytes (both extended-keys formats, e.g. Ctrl+J → "\n") back to
- * literal bytes so the escape tail does not leak in, remove newlines/carriage returns, expand tabs,
- * NFC-normalize, then strip any remaining control bytes. The decoder can synthesize Ctrl+A..Ctrl+Z
- * (0x01..0x1A) from a paste, and a single-line value must hold none of them — newlines are already
- * gone and tabs are already spaces by the time the C0/DEL strip runs.
+ * remove newlines/carriage returns, expand tabs, NFC-normalize, then strip any remaining control
+ * bytes. A terminal paste may carry Ctrl+A..Ctrl+Z (0x01..0x1A) the engine decoded from tmux's
+ * re-encoded control sequences, and a single-line value must hold none of them — newlines are
+ * already gone and tabs are already spaces by the time the C0/DEL strip runs.
  *
  * NFC normalization rationale: macOS Finder drag-drops file paths in NFD
  * (Conjoining Jamo, U+1100..U+11FF). `Bun.stringWidth` counts each
@@ -49,7 +47,7 @@ const segmenter = getSegmenter();
  * value in the same form everything else in the codebase assumes.
  */
 function toSingleLine(text: string): string {
-	return replaceTabs(decodeReencodedPasteControls(text).replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, ""))
+	return replaceTabs(text.replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, ""))
 		.normalize("NFC")
 		.replace(/[\x00-\x1F\x7F]/g, "");
 }
@@ -81,9 +79,6 @@ export class Input implements Component, Focusable {
 
 	/** Focusable interface - set by TUI when focus changes */
 	focused: boolean = false;
-
-	// Bracketed paste mode buffering
-	#pasteHandler = new BracketedPasteHandler();
 
 	// Kill ring for Emacs-style kill/yank operations
 	#killRing = new KillRing();
@@ -140,24 +135,12 @@ export class Input implements Component, Focusable {
 
 	/**
 	 * Apply one key: the editor's text bindings (motion, deletion, kill ring,
-	 * undo), pastes and printable text. Returns whether the key was the
-	 * field's: false for keys it has no binding for, and for cancel/submit
-	 * without an `onEscape`/`onSubmit`, so a host (a list's search field) can
-	 * route everything else on.
+	 * undo) and printable text. Returns whether the key was the field's: false
+	 * for keys it has no binding for, and for cancel/submit without an
+	 * `onEscape`/`onSubmit`, so a host (a list's search field) can route
+	 * everything else on.
 	 */
 	handleInput(data: string): boolean {
-		// Handle bracketed paste mode
-		const paste = this.#pasteHandler.process(data);
-		if (paste.handled) {
-			if (paste.pasteContent !== undefined) {
-				this.#handlePaste(paste.pasteContent);
-				if (paste.remaining.length > 0) {
-					this.handleInput(paste.remaining);
-				}
-			}
-			return true;
-		}
-
 		// Reserve configured keys before text bindings or submit/delete handlers can consume them.
 		const parsedKey = parseKey(data);
 		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
@@ -286,7 +269,12 @@ export class Input implements Component, Focusable {
 		return true;
 	}
 
-	/** Apply terminal paste semantics to text from non-bracketed paste transports
+	/** A terminal paste: flattened to one line (line breaks dropped, tabs expanded, control characters stripped). */
+	handlePaste(text: string): void {
+		this.#handlePaste(text);
+	}
+
+	/** Apply terminal paste semantics to text from other paste transports
 	 *  (e.g. kitty's OSC 5522 enhanced clipboard read). Mirrors `Editor.pasteText`. */
 	pasteText(text: string): void {
 		this.#handlePaste(text);

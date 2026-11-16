@@ -214,7 +214,7 @@ export class ExtensionUiController {
 				this.ctx.ui.requestRender();
 			},
 			pasteToEditor: text => {
-				this.ctx.editor.handleInput(`\x1b[200~${text}\x1b[201~`);
+				this.ctx.editor.handlePaste(text);
 				this.ctx.ui.requestRender();
 			},
 			getEditorText: () => this.ctx.editor.getText(),
@@ -778,6 +778,7 @@ export class ExtensionUiController {
 								hasDraft: () =>
 									editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight,
 								handleInput: keyData => editor.handleDraftEdit(keyData),
+								handlePaste: (text, enter) => editor.handlePaste(text, enter),
 							},
 						},
 					);
@@ -884,6 +885,7 @@ export class ExtensionUiController {
 		const guard: AskDialogInputGuard = {
 			isBlocked: () => draftEditor.getText().length > 0,
 			handleInput: (keyData: string) => draftEditor.handleDraftEdit(keyData),
+			handlePaste: (text: string, enter?: string) => draftEditor.handlePaste(text, enter),
 			hint: "typing edits your prompt",
 			// Show the draft's insertion cursor while it owns input; drop it
 			// once the dialog controls take over.

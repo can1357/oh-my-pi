@@ -30,9 +30,6 @@ import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/inp
 import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
-
 const ONE_PX_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 	"base64",
@@ -64,7 +61,7 @@ describe("CustomEditor empty bracketed paste (issue #3601)", () => {
 		const onPasteImage = vi.fn(async () => true);
 		editor.onPasteImage = onPasteImage;
 
-		editor.handleInput(`${BRACKETED_PASTE_START}${BRACKETED_PASTE_END}`);
+		editor.handlePaste("");
 
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
 		// And the empty payload MUST NOT also fall through to the underlying editor (would
@@ -83,7 +80,7 @@ describe("CustomEditor empty bracketed paste (issue #3601)", () => {
 		const onPasteImage = vi.fn(async () => true);
 		editor.onPasteImage = onPasteImage;
 
-		editor.handleInput(`${BRACKETED_PASTE_START}   ${BRACKETED_PASTE_END}`);
+		editor.handlePaste("   ");
 
 		expect(onPasteImage).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("   ");
@@ -94,7 +91,7 @@ describe("CustomEditor empty bracketed paste (issue #3601)", () => {
 		const onPasteImage = vi.fn(async () => true);
 		editor.onPasteImage = onPasteImage;
 
-		editor.handleInput(`${BRACKETED_PASTE_START}hello world${BRACKETED_PASTE_END}`);
+		editor.handlePaste("hello world");
 
 		expect(onPasteImage).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("hello world");
@@ -107,7 +104,7 @@ describe("CustomEditor empty bracketed paste (issue #3601)", () => {
 		editor.onPasteImage = onPasteImage;
 		editor.onPasteImagePath = onPasteImagePath;
 
-		editor.handleInput(`${BRACKETED_PASTE_START}/tmp/screenshot.png${BRACKETED_PASTE_END}`);
+		editor.handlePaste("/tmp/screenshot.png");
 
 		// The image-path branch fires; the empty-paste branch must stay out of the way.
 		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/screenshot.png");
@@ -119,62 +116,9 @@ describe("CustomEditor empty bracketed paste (issue #3601)", () => {
 		// editor.onPasteImage left undefined.
 
 		// MUST not throw, MUST not modify the buffer, MUST not change focus.
-		editor.handleInput(`${BRACKETED_PASTE_START}${BRACKETED_PASTE_END}`);
+		editor.handlePaste("");
 
 		expect(editor.getText()).toBe("");
-	});
-
-	it("invokes onPasteImage when the empty bracketed paste is split across stdin chunks (Codex PR #3602 review)", () => {
-		// Some terminals (Windows Terminal under load, certain SSH muxes, …)
-		// fragment a bracketed paste so the start marker, payload, and end
-		// marker land in separate `handleInput` calls. The pre-fix guard saw
-		// each fragment in isolation, matched neither, and let the inherited
-		// handler buffer the run as a zero-length text paste — the same
-		// silent-drop symptom #3601 already documents for the single-chunk
-		// case. The post-fix `CustomEditor` runs its own bracketed-paste
-		// assembler, so the assembled empty payload still routes to the
-		// smart clipboard reader.
-		const { editor } = createCtx();
-		const onPasteImage = vi.fn(async () => true);
-		editor.onPasteImage = onPasteImage;
-
-		editor.handleInput(BRACKETED_PASTE_START);
-		expect(onPasteImage).not.toHaveBeenCalled();
-		editor.handleInput(BRACKETED_PASTE_END);
-
-		expect(onPasteImage).toHaveBeenCalledTimes(1);
-		expect(editor.getText()).toBe("");
-	});
-
-	it("routes an image-file path that arrives split across stdin chunks to onPasteImagePath", () => {
-		// Same chunking hazard as the empty-paste case, but for an explicit
-		// image-file path (#3506). The assembled router re-runs the path
-		// detection over the joined payload so the image still attaches.
-		const { editor } = createCtx();
-		const onPasteImagePath = vi.fn();
-		editor.onPasteImagePath = onPasteImagePath;
-
-		editor.handleInput(`${BRACKETED_PASTE_START}/tmp/sc`);
-		editor.handleInput(`reenshot.png${BRACKETED_PASTE_END}`);
-
-		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/screenshot.png");
-	});
-
-	it("forwards a split text paste to the underlying editor exactly once (no double-insertion)", () => {
-		// Sanity check: when the CustomEditor consumes the bracketed paste
-		// markers ahead of `super.handleInput`, it must hand the assembled
-		// payload off via the public `pasteText` API so the base editor's
-		// undo / autocomplete / `[Paste #N]` machinery still runs — and only
-		// once, with the actual content.
-		const { editor } = createCtx();
-		const pasteText = vi.fn();
-		editor.pasteText = pasteText;
-
-		editor.handleInput(`${BRACKETED_PASTE_START}hello `);
-		editor.handleInput(`world${BRACKETED_PASTE_END}`);
-
-		expect(pasteText).toHaveBeenCalledTimes(1);
-		expect(pasteText).toHaveBeenCalledWith("hello world");
 	});
 
 	it("defers a trailing keystroke after a Cmd+V empty paste until the image attach settles (Codex PR #3602 review)", async () => {
@@ -196,8 +140,10 @@ describe("CustomEditor empty bracketed paste (issue #3601)", () => {
 		const onEnter = vi.fn(() => callOrder.push("enter"));
 		editor.setCustomKeyHandler("enter", onEnter);
 
-		// Single read carrying both the empty bracketed paste AND the trailing CR.
-		editor.handleInput(`${BRACKETED_PASTE_START}${BRACKETED_PASTE_END}\r`);
+		// One read carrying both the empty bracketed paste AND the trailing CR: the
+		// TUI delivers the paste, then the Enter to the same component.
+		editor.handlePaste("", "\r");
+		editor.handleInput("\r");
 
 		// Paste started, Enter MUST NOT have fired yet (it would submit pre-image).
 		expect(callOrder).toEqual(["paste:start"]);
@@ -256,7 +202,7 @@ describe("InputController + empty bracketed paste end-to-end (issue #3601)", () 
 		// Wire the same dispatch the production setup uses.
 		editor.onPasteImage = () => controller.handleImagePaste();
 
-		editor.handleInput(`${BRACKETED_PASTE_START}${BRACKETED_PASTE_END}`);
+		editor.handlePaste("");
 		// Drain all queued microtasks so the editor's `void onPasteImage()` and the
 		// async chain inside `#insertPendingImage` (materializeImageReferenceLinks,
 		// imageDimensions) all finish before assertions run.

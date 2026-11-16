@@ -19,35 +19,23 @@ export function setActiveTerminal(terminal: ProcessTerminal | null): void {
 	activeTerminal = terminal;
 }
 
-const stdoutErrorHandlers = new Set<(err: Error) => void>();
 let stdoutErrorListenerInstalled = false;
 
-function onStdoutError(err: Error): void {
-	for (const handler of stdoutErrorHandlers) handler(err);
-}
-
 /**
- * Install the one shared `process.stdout` `error` listener. Its presence alone
- * keeps a stdout error (EPIPE on a closed pipe, EIO on a revoked PTY) from
- * crashing the process as an unhandled `error` event.
+ * Install one `process.stdout` `error` listener for the direct writes below.
+ * Its presence alone keeps a stdout error (EPIPE on a closed pipe, EIO on a
+ * revoked PTY) from crashing the process as an unhandled `error` event; a
+ * terminal's own output never goes through `process.stdout`.
  */
 function installStdoutErrorListener(): void {
 	if (stdoutErrorListenerInstalled) return;
-	process.stdout.on("error", onStdoutError);
+	process.stdout.on("error", () => {});
 	stdoutErrorListenerInstalled = true;
 }
 
-/** Observe stdout errors through the shared listener. Returns the unregister callback. */
-export function registerStdoutErrorHandler(handler: (err: Error) => void): () => void {
-	stdoutErrorHandlers.add(handler);
-	installStdoutErrorListener();
-	return () => {
-		stdoutErrorHandlers.delete(handler);
-	};
-}
-
 /**
- * Hand `data` to the active terminal's ordered output path. Returns false when
+ * Hand `data` to the active terminal's ordered output path (`ops.text(data)`
+ * plus a flush, behind any ops already buffered). Returns false when
  * no terminal in this thread has started. On the main thread that means the
  * caller owns stdout; a worker thread never sees the main thread's terminal, so
  * there `false` is not permission to write. Prefer {@link writeTerminalSequence}.
@@ -60,13 +48,14 @@ export function writeThroughActiveTerminal(data: string): boolean {
 
 /**
  * Write an out-of-band escape sequence (window title, OSC 52 clipboard,
- * notification). While a TUI owns stdout, its frames go through an off-thread
- * pump in chunks that ignore escape boundaries; a direct `process.stdout.write`
- * can land between two chunks and split a frame's escape sequence, and the host
- * terminal then prints its tail as text. So the sequence takes the active
- * terminal's ordered output path, and goes straight to stdout, best-effort, only
- * when no terminal owns it. A worker thread cannot reach the main thread's
- * terminal and would write around its pump, so it writes nothing.
+ * notification). While a TUI owns stdout, its frames go through the terminal's
+ * native output device, whose off-thread pump writes in chunks that ignore
+ * escape boundaries; a direct `process.stdout.write` can land between two
+ * chunks and split a frame's escape sequence, and the host terminal then prints
+ * its tail as text. So the sequence takes the active terminal's ordered output
+ * path as one text op, and goes straight to stdout, best-effort, only when no
+ * terminal owns it. A worker thread cannot reach the main thread's terminal and
+ * would write around its device, so it writes nothing.
  */
 export function writeTerminalSequence(data: string): void {
 	if (!Bun.isMainThread) return;

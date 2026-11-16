@@ -290,6 +290,7 @@ describe("bash shortcut command", () => {
 		const { ctx, executeBash } = createCwdContext("/tmp");
 		type Listener = (data: string) => { consume?: boolean } | undefined;
 		let listeners = new Set<Listener>();
+		const pasteListeners = new Set<Listener>();
 		let globalExpansions = 0;
 		listeners.add(data => {
 			if (data !== "\x0f") return undefined;
@@ -310,9 +311,14 @@ describe("bash shortcut command", () => {
 					else listeners.add(listener);
 					return () => listeners.delete(listener);
 				},
+				addPasteListener: (listener: Listener) => {
+					pasteListeners.add(listener);
+					return () => pasteListeners.delete(listener);
+				},
 			},
 		});
 		const press = (data: string) => [...listeners].some(listener => listener(data)?.consume === true);
+		const paste = (text: string) => [...pasteListeners].some(listener => listener(text)?.consume === true);
 		const written: string[] = [];
 		const pressed: Record<string, boolean> = {};
 		let onStdin: BashPtyOptions["onStdin"];
@@ -324,10 +330,12 @@ describe("bash shortcut command", () => {
 			pressed.answer = press("y");
 			pressed.nanoWrite = press("\x0f");
 			pressed.enter = press("\r");
+			pressed.paste = paste("pasted");
 			pressed.escape = press("\x1b");
 			pressed.mouse = press("\x1b[<0;10;5M");
 			focused = {}; // a dialog took focus
 			pressed.dialog = press("n");
+			pressed.dialogPaste = paste("p");
 			focused = editor;
 			return {
 				output: "ANSWER=y",
@@ -345,21 +353,25 @@ describe("bash shortcut command", () => {
 		await controller.handleBashCommand("read -k 1 answer");
 		expect(editor.nativeKeyPassthrough).toBe(false);
 
-		expect(written).toEqual(["y", "\x0f", "\r"]);
+		// The command never enabled bracketed paste, so the paste arrives as bare text.
+		expect(written).toEqual(["y", "\x0f", "\r", "pasted"]);
 		expect(globalExpansions).toBe(0);
 		// Esc stays the cancel key; mouse reports and focused dialogs keep their input.
 		expect(pressed).toEqual({
 			answer: true,
 			nanoWrite: true,
 			enter: true,
+			paste: true,
 			escape: false,
 			mouse: false,
 			dialog: false,
+			dialogPaste: false,
 		});
 		// After exit the global Ctrl+O shortcut works again.
 		expect(press("\x0f")).toBe(true);
 		expect(globalExpansions).toBe(1);
 		expect(listeners.size).toBe(1);
+		expect(pasteListeners.size).toBe(0);
 		// A native start notification queued behind command completion must not
 		// reclaim the composer after the PTY has exited.
 		onStdin?.(data => written.push(data));

@@ -663,6 +663,22 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		else this.#handleTableInput(keyData);
 	}
 
+	/** Pastes land in whichever search field is being edited. */
+	handlePaste(text: string): void {
+		if (this.#section === "activity") {
+			if (!this.#activitySearchEditing) return;
+			const before = this.#activitySearch.getValue();
+			this.#activitySearch.handlePaste(text);
+			if (this.#activitySearch.getValue() !== before) this.#refreshActivityRows();
+		} else {
+			if (!this.#agentFilterEditing) return;
+			const before = this.#agentFilter.getValue();
+			this.#agentFilter.handlePaste(text);
+			if (this.#agentFilter.getValue() !== before) this.#refreshRows();
+		}
+		this.#requestRender();
+	}
+
 	/**
 	 * Seed the table's left-left close detector with the current time so a single
 	 * subsequent `←` (within {@link LEFT_TAP_WINDOW_MS}) dismisses the hub.

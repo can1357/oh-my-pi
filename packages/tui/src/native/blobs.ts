@@ -7,10 +7,10 @@
  * cache), else uploads it with verb `b` before the frame that first
  * references it.
  */
+import { imageDimensions } from "@oh-my-pi/pi-natives";
 import type { TspProps } from "@oh-my-pi/pi-wire";
 import { tryFileUri } from "../render/hyperlink";
 import { resolveImageOptions } from "../render/render-utils";
-import { getImageDimensions } from "../terminal-capabilities";
 import { node } from "./describe";
 import { imageLinksEnabled, transcriptImageLink } from "../prompt/image-references";
 import type { NativeChild, NativeNode } from "./node";
@@ -99,7 +99,7 @@ export function base64ImageNode(
 	p?: Omit<TspProps<"image">, "blob" | "builtin" | "w" | "h">,
 	key?: string,
 ): NativeNode {
-	const size = getImageDimensions(data, mimeType);
+	const size = imageDimensions(data, mimeType);
 	return nativeImageNode(
 		Buffer.from(data, "base64"),
 		mimeType,

@@ -26,6 +26,7 @@ function makeHarness() {
 	let toggled = 0;
 	const ctx = {
 		ui: {
+			addPasteListener: () => () => {},
 			addInputListener: (fn: (data: string) => { consume?: boolean; data?: string } | undefined) => {
 				listeners.push(fn);
 			},

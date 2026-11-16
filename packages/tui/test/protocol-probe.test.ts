@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import {
 	buildLargeTextLines,
 	buildSampleImage,
@@ -6,7 +7,8 @@ import {
 	ProtocolProbeComponent,
 } from "@oh-my-pi/pi-tui/apps/debug/protocol-probe";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { getImageDimensions, ImageBudget, ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
+import { imageDimensions } from "@oh-my-pi/pi-natives";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	// buildLargeTextLines styles the OSC 66 span through the global theme singleton.
@@ -30,7 +32,7 @@ describe("encodeRgbPng / buildSampleImage", () => {
 		expect(sample.mimeType).toBe("image/png");
 		expect(sample.dimensions).toEqual({ widthPx: 48, heightPx: 24 });
 
-		const decoded = getImageDimensions(sample.base64, "image/png");
+		const decoded = imageDimensions(sample.base64, "image/png");
 		expect(decoded).toEqual({ widthPx: 48, heightPx: 24 });
 	});
 
@@ -38,14 +40,14 @@ describe("encodeRgbPng / buildSampleImage", () => {
 		const png = encodeRgbPng(3, 2, new Uint8Array(3 * 2 * 3));
 		expect(Array.from(png.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
-		const decoded = getImageDimensions(Buffer.from(png).toString("base64"), "image/png");
+		const decoded = imageDimensions(Buffer.from(png).toString("base64"), "image/png");
 		expect(decoded).toEqual({ widthPx: 3, heightPx: 2 });
 	});
 });
 
 it("uses independent graphics ids for repeated probe panels", () => {
 	terminal.imageProtocol = ImageProtocol.Kitty;
-	const budget = new ImageBudget(8, () => {});
+	const budget = new ImageBudget(8);
 	const image = buildSampleImage(8, 8);
 	const first = new ProtocolProbeComponent({ image, imageBudget: budget, notificationSuppressed: true });
 	const second = new ProtocolProbeComponent({ image, imageBudget: budget, notificationSuppressed: true });

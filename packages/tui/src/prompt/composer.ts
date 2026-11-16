@@ -1,3 +1,4 @@
+import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-natives";
 import { getComposerStyle } from "../components/composer/registry";
 import { Spacer } from "../components/spacer";
 import type { StatusLineComponent } from "../status-line/component";
@@ -5,7 +6,6 @@ import { extensionLinkLabels } from "../render/extension-links";
 import { LinkHints, type ViewportLink, viewportLinkTargets } from "../render/link-hints";
 import type { StatusLineSession } from "../status-line/host";
 import { createStartupStatusLine, type StatusLineStartupData, startupComposerState } from "../status-line/startup";
-import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
 	type Component,
@@ -1068,7 +1068,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	#reflowRetiredHeader(width: number, start: number): string[] {
 		const lines = this.#retiredHeaderRows;
 		if (!lines) return [];
-		if (isInsideTerminalMultiplexer()) return lines.slice(start);
+		if (isInsideTerminalMultiplexer(Bun.env)) return lines.slice(start);
 		const reflowed: string[] = [];
 		for (let index = start; index < lines.length; index++) {
 			reflowed.push(...wrapLiteralLine(lines[index]!, width));

@@ -2,7 +2,7 @@
 import type { AssistantMessage, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { getMarkdownLinkUrls } from "../index";
 import { EMPTY_LINK_TARGETS } from "../render/render-utils";
-import type { ImageBudget } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
 import type { AssistantTextRenderer, AssistantThinkingRenderer } from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
 import { ReplyWriteComponent } from "../chat/reply-write";

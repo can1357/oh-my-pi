@@ -194,12 +194,12 @@ class SignInTerminal extends VirtualTerminal {
 	cursorVisible = false;
 	#writes: string[] = [];
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.#writes.push(data);
 		for (const match of data.matchAll(/\x1b\[\?25([hl])/g)) {
 			this.cursorVisible = match[1] === "h";
 		}
-		super.write(data);
+		super.receive(data);
 	}
 
 	takeWrites(): string {
@@ -256,6 +256,9 @@ describe("fullscreen setup sign-in cursor", () => {
 			try {
 				void wizard.run();
 				terminal.sendInput("\r");
+				// A lone Enter is held for the stdin parser's 10 ms raw-paste window: deliver it
+				// (starting the intro dissolve) before freezing the dissolve clock past its end.
+				await scheduler.advance(terminal, 10);
 				// Reuse the wizard tests' clock-based dissolve skip, not a wall-clock sleep.
 				const afterDissolve = performance.now() + 1000;
 				vi.spyOn(performance, "now").mockReturnValue(afterDissolve);
@@ -298,6 +301,8 @@ describe("fullscreen setup sign-in cursor", () => {
 				}
 
 				terminal.sendInput("\x1b");
+				// A lone ESC is delivered once the stdin parser's 50 ms ESC timeout expires.
+				await scheduler.advance(terminal, 50);
 				await cancelled.promise;
 				await Promise.resolve();
 				await scheduler.settle(terminal);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach } from "bun:test";
-import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { terminalMultiplexerEnvKeys } from "@oh-my-pi/pi-natives";
 
 /**
  * Neutralize every terminal-multiplexer signal for the calling test file.
@@ -11,7 +11,7 @@ import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multipl
  * inside a multiplexer. Restores whatever was set afterwards.
  */
 export function withoutTerminalMultiplexer(): void {
-	const keys = [...TERMINAL_MULTIPLEXER_ENV_KEYS, "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
+	const keys = [...terminalMultiplexerEnvKeys(), "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE"];
 	const previous = new Map<string, string | undefined>();
 
 	beforeEach(() => {

@@ -296,7 +296,7 @@ export default function extension(pi: ExtensionAPI): void {
 
 ## Key implementation files
 
-- `packages/tui/src/tui.ts` — `Component`, `Focusable`, cursor marker, focus, overlay, input dispatch.
+- `packages/tui/src/tui.ts` — `Component`, `Focusable`, cursor marker, focus, overlay, input dispatch, and frame composition for the native terminal engine.
 - `packages/tui/src/utils.ts` — width/truncation/sanitization primitives.
 - `packages/tui/src/keys.ts` / `keybindings.ts` — key parsing and base TUI action mapping; `app-keybindings.ts` adds coding-agent actions and disk loading.
 - `packages/coding-agent/src/modes/controllers/extension-ui-controller.ts` — interactive mounting/unmounting for extension/hook/custom-tool UI.

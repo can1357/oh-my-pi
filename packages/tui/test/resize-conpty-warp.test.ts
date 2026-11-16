@@ -34,17 +34,16 @@ const COMMITTED = ["committed-0", "committed-1", "committed-2"];
  * always) and repaints its viewport into the stream on every resize.
  */
 class ConPtyTerminal extends VirtualTerminal {
-	readonly hostOwnsGridOnResize = true;
 	hostRepaints = 0;
 	cprReplies: string[] = [];
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		const probe = data.indexOf("\x1b[6n");
 		if (probe === -1) {
-			super.write(data);
+			super.receive(data);
 			return;
 		}
-		super.write(data.slice(0, probe) + data.slice(probe + 4));
+		super.receive(data.slice(0, probe) + data.slice(probe + 4));
 		const reply = `\x1b[${this.getCursor().row + 1};1R`;
 		this.cprReplies.push(reply);
 		queueMicrotask(() => this.sendInput(reply));
@@ -54,7 +53,7 @@ class ConPtyTerminal extends VirtualTerminal {
 		const stale = this.getViewport().map(row => row.trimEnd());
 		super.resize(columns, rows);
 		this.hostRepaints++;
-		super.write(`\x1b[?25l\x1b[H${stale.map(row => `${row}\x1b[K`).join("\r\n")}\x1b[H\x1b[?25h`);
+		super.receive(`\x1b[?25l\x1b[H${stale.map(row => `${row}\x1b[K`).join("\r\n")}\x1b[H\x1b[?25h`);
 	}
 }
 
@@ -99,14 +98,15 @@ class ResizeScheduler {
 }
 
 function startRig() {
-	const terminal = new ConPtyTerminal(40, 12);
+	// ConPTY owns the grid the application writes to (see EngineConfig.conpty).
+	const terminal = new ConPtyTerminal(40, 12, undefined, { conpty: true });
 	const provider = new ReplayProvider();
 	provider.history = { id: 1, rows: COMMITTED };
 	const renderScheduler = new ResizeScheduler();
 	const tui = new TUI(terminal, undefined, { renderScheduler });
 	const writes: string[] = [];
-	const originalWrite = terminal.write.bind(terminal);
-	terminal.write = (data: string) => {
+	const originalWrite = terminal.receive.bind(terminal);
+	terminal.receive = (data: string) => {
 		writes.push(data);
 		originalWrite(data);
 	};

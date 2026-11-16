@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import { becomesCollectible } from "../../gc";
-import { Image, ImageBudget } from "../../../src/components/image";
+import { Image } from "../../../src/components/image";
 import { base64ImageNode, getNativeBlob } from "../../../src/native/blobs";
 import { SnapcompactShapePreview } from "../../../src/overlays/snapcompact-shape-preview";
 import { AttachmentChipsBand } from "../../../src/prompt/attachment-chips";

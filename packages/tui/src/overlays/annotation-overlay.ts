@@ -485,6 +485,12 @@ export class AnnotationOverlay implements Focusable {
 		return dropped;
 	}
 
+	handlePaste(text: string): void {
+		if (this.#finished || this.#externalOperation || this.#annotationChooser || !this.#annotating) return;
+		this.#discardArmed = false;
+		this.#editor.handlePaste(text);
+	}
+
 	handleInput(data: string): void {
 		if (this.#finished || this.#externalOperation) return;
 		const discardArmed = this.#discardArmed;

@@ -572,6 +572,16 @@ export class RewindSelectorComponent implements Component {
 		}
 	}
 
+	/** Pastes edit the filter while it is open. */
+	handlePaste(text: string): void {
+		const input = this.#filterInput;
+		if (!input) return;
+		const before = input.getValue();
+		input.handlePaste(text);
+		if (input.getValue() !== before) this.#filterChanged();
+		else this.deps.requestRender();
+	}
+
 	/** Leave the filter, keeping the selected item outlined in the full transcript. */
 	#closeFilter(): void {
 		this.#filterInput = undefined;

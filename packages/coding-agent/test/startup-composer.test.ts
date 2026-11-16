@@ -26,6 +26,8 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
+import type { TerminalStartOptions } from "@oh-my-pi/pi-tui/terminal";
+import { VirtualRenderScheduler } from "../../tui/test/virtual-render-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { cfgTierOpenai } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -53,9 +55,9 @@ import {
 class CountingTerminal extends VirtualTerminal {
 	starts = 0;
 	stops = 0;
-	override start(onInput: (data: string) => void, onResize: () => void): void {
+	override start(options?: TerminalStartOptions): void {
 		this.starts += 1;
-		super.start(onInput, onResize);
+		super.start(options);
 	}
 
 	override stop(): void {
@@ -66,9 +68,9 @@ class CountingTerminal extends VirtualTerminal {
 
 class WriteTrackingTerminal extends CountingTerminal {
 	written = "";
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.written += data;
-		super.write(data);
+		super.receive(data);
 	}
 }
 
@@ -81,19 +83,25 @@ class ThrowingStartTerminal extends CountingTerminal {
 class InputTrackingTerminal extends CountingTerminal {
 	startOptions: { deferInput?: boolean } | undefined;
 	inputEnables = 0;
-	override start(
-		onInput: (data: string) => void,
-		onResize: () => void,
-		_onDisconnect?: () => void,
-		options?: { deferInput?: boolean },
-	): void {
+	override start(options?: TerminalStartOptions): void {
 		this.startOptions = options;
-		super.start(onInput, onResize);
+		super.start();
 	}
 
-	enableInput(): void {
+	override enableInput(): void {
 		this.inputEnables += 1;
 	}
+}
+
+/**
+ * Type one break-bearing key read (Enter, Ctrl+J). The engine's stdin parser
+ * holds an ESC-free read carrying CR/LF for its 10 ms raw-paste classification
+ * window, so the key reaches the focused component only once the window closes:
+ * the TUI's virtual clock is advanced past it.
+ */
+async function sendBreak(terminal: VirtualTerminal, scheduler: VirtualRenderScheduler, data: string): Promise<void> {
+	terminal.sendInput(data);
+	await scheduler.advance(terminal, 10);
 }
 
 let savedInteractiveHost: boolean;
@@ -369,15 +377,16 @@ describe("Composer prepaint", () => {
 		},
 	);
 
-	it("keeps one live editor and terminal across handoff", () => {
+	it("keeps one live editor and terminal across handoff", async () => {
 		const terminal = new CountingTerminal();
-		const composer = new Composer({ preferences: config, terminal });
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({ preferences: config, terminal, tuiOptions: { renderScheduler: scheduler } });
 		const submit = vi.fn();
 		composer.editor.onSubmit = submit;
 
 		composer.start();
 		terminal.sendInput("alpha");
-		terminal.sendInput("\r");
+		await sendBreak(terminal, scheduler, "\r");
 
 		expect(composer.editor.getExpandedText()).toBe("alpha");
 		expect(submit).not.toHaveBeenCalled();
@@ -467,7 +476,8 @@ describe("Composer prepaint", () => {
 
 	it("keeps submit gated during initialization, then dispatches with steer", async () => {
 		const terminal = new CountingTerminal();
-		const composer = new Composer({ preferences: config, terminal });
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({ preferences: config, terminal, tuiOptions: { renderScheduler: scheduler } });
 		composer.start();
 		const lease = new ComposerLease(composer);
 		const testSession = await createTestSession({ inMemory: true });
@@ -494,7 +504,7 @@ describe("Composer prepaint", () => {
 			const initializing = mode.init({ suppressWelcomeIntro: true });
 			await enteredInit.promise;
 			terminal.sendInput("alpha");
-			terminal.sendInput("\r");
+			await sendBreak(terminal, scheduler, "\r");
 
 			expect(prompt).not.toHaveBeenCalled();
 			expect(mode.editor.getExpandedText()).toBe("alpha");
@@ -506,7 +516,7 @@ describe("Composer prepaint", () => {
 			// the input loop's first getUserInput dispatches directly with steer
 			// instead of being silently dropped.
 			expect(mode.editor.disableSubmit).toBe(false);
-			terminal.sendInput("\r");
+			await sendBreak(terminal, scheduler, "\r");
 			for (let i = 0; i < 50 && prompt.mock.calls.length === 0; i++) await Promise.resolve();
 			expect(prompt).toHaveBeenCalledWith("alpha", expect.objectContaining({ streamingBehavior: "steer" }));
 			expect(mode.editor.getExpandedText()).toBe("");
@@ -554,7 +564,8 @@ describe("Composer prepaint", () => {
 
 	it("accepts input while the initial CLI prompt's first turn is still running", async () => {
 		const terminal = new CountingTerminal();
-		const composer = new Composer({ preferences: config, terminal });
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({ preferences: config, terminal, tuiOptions: { renderScheduler: scheduler } });
 		composer.start();
 		const lease = new ComposerLease(composer);
 		const testSession = await createTestSession({ inMemory: true });
@@ -582,7 +593,7 @@ describe("Composer prepaint", () => {
 			const initialTurn = testSession.session.prompt("count to 25", { streamingBehavior: "steer" });
 
 			terminal.sendInput("also add tests");
-			terminal.sendInput("\r");
+			await sendBreak(terminal, scheduler, "\r");
 			for (let i = 0; i < 50 && prompt.mock.calls.length < 2; i++) await Promise.resolve();
 			expect(prompt).toHaveBeenCalledWith("also add tests", expect.objectContaining({ streamingBehavior: "steer" }));
 			expect(mode.editor.getExpandedText()).toBe("");
@@ -629,11 +640,12 @@ describe("Composer prepaint", () => {
 
 	it("bounds a tall startup draft after adoption in a short terminal", async () => {
 		const terminal = new CountingTerminal(80, 8);
-		const composer = new Composer({ preferences: config, terminal });
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({ preferences: config, terminal, tuiOptions: { renderScheduler: scheduler } });
 		composer.start();
 		for (let index = 0; index < 18; index += 1) {
 			terminal.sendInput(`line-${index}`);
-			if (index < 17) terminal.sendInput("\n");
+			if (index < 17) await sendBreak(terminal, scheduler, "\n");
 		}
 		const draft = composer.editor.getExpandedText();
 		const lease = new ComposerLease(composer);
@@ -652,7 +664,7 @@ describe("Composer prepaint", () => {
 
 		try {
 			await mode.init({ suppressWelcomeIntro: true });
-			await terminal.waitForRender();
+			await scheduler.settle(terminal);
 			expect(mode.editor.getExpandedText()).toBe(draft);
 			expect(draft.split("\n")).toHaveLength(18);
 			expect(mode.editor.render(80).length).toBeLessThanOrEqual(4);

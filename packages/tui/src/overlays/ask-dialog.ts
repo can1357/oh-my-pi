@@ -162,6 +162,7 @@ interface AskDialogCallbacks {
 export interface AskDialogInputGuard {
 	isBlocked(): boolean;
 	handleInput(keyData: string): void;
+	handlePaste(text: string, enter?: string): void;
 	/** Shown after the release keys while the guard holds input. */
 	hint: string;
 	/** Mirror the guard's blocked state onto the proxied draft surface each
@@ -754,6 +755,15 @@ export class AskDialogComponent implements Component {
 			return;
 		}
 		this.#handleQuestionInput(keyData);
+	}
+
+	/** Pastes reach the guarded draft only while the guard holds input; answers take no text here. */
+	handlePaste(text: string, enter?: string): void {
+		if (this.#closed || this.#promptActive || !this.#guardBlocks()) return;
+		this.#countdown?.reset();
+		this.#native = undefined;
+		this.options.inputGuard?.handlePaste(text, enter);
+		this.#requestRender();
 	}
 
 	render(width: number): readonly string[] {

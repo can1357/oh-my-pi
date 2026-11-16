@@ -1,12 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-	analyzeBgFillLine,
-	DECSACE_DEFAULT,
-	DECSACE_RECT,
-	detectRectangularSgrSupport,
-	encodeDeccara,
-	planDeccaraFills,
-} from "@oh-my-pi/pi-tui";
+import { analyzeBgFillLine, DECSACE_DEFAULT, DECSACE_RECT, encodeDeccara, planDeccaraFills } from "@oh-my-pi/pi-tui";
 
 // Truecolor background open token used throughout the integration tests.
 const BG_OPEN = "\x1b[48;2;10;20;30m";
@@ -22,36 +15,6 @@ function countOccurrences(haystack: string, needle: string): number {
 		from = at + needle.length;
 	}
 }
-
-describe("detectRectangularSgrSupport", () => {
-	it("enables only kitty, which implements the SGR-background extension", () => {
-		expect(detectRectangularSgrSupport("kitty", {})).toBe(true);
-		// Ghostty leaves CSI $r unimplemented (ghostty-org/ghostty#632) — excluded.
-		expect(detectRectangularSgrSupport("ghostty", {})).toBe(false);
-		expect(detectRectangularSgrSupport("wezterm", {})).toBe(false);
-		expect(detectRectangularSgrSupport("iterm2", {})).toBe(false);
-		expect(detectRectangularSgrSupport("alacritty", {})).toBe(false);
-		expect(detectRectangularSgrSupport("base", {})).toBe(false);
-		expect(detectRectangularSgrSupport("trueColor", {})).toBe(false);
-	});
-
-	it("honors the PI_NO_DECCARA kill switch (truthy values only)", () => {
-		expect(detectRectangularSgrSupport("kitty", { PI_NO_DECCARA: "1" })).toBe(false);
-		expect(detectRectangularSgrSupport("kitty", { PI_NO_DECCARA: "true" })).toBe(false);
-		// A falsey assignment is not a kill: support stays on.
-		expect(detectRectangularSgrSupport("kitty", { PI_NO_DECCARA: "0" })).toBe(true);
-		expect(detectRectangularSgrSupport("kitty", { PI_NO_DECCARA: "false" })).toBe(true);
-	});
-
-	it("disables under tmux/screen/zellij/cmux multiplexers", () => {
-		expect(detectRectangularSgrSupport("kitty", { TMUX: "/tmp/tmux-1000/default,123,0" })).toBe(false);
-		expect(detectRectangularSgrSupport("kitty", { STY: "1234.pts-0" })).toBe(false);
-		expect(detectRectangularSgrSupport("kitty", { ZELLIJ: "0" })).toBe(false);
-		expect(detectRectangularSgrSupport("kitty", { CMUX_SURFACE_ID: "surface" })).toBe(false);
-		expect(detectRectangularSgrSupport("kitty", { TERM: "tmux-256color" })).toBe(false);
-		expect(detectRectangularSgrSupport("kitty", { TERM: "screen.xterm" })).toBe(false);
-	});
-});
 
 describe("encodeDeccara", () => {
 	it("matches kitty's documented background-fill example", () => {

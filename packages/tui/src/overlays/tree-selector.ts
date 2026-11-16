@@ -1421,6 +1421,12 @@ class TreeList implements Component {
 			if (this.searchInput.handleInput(keyData) && this.getSearchQuery() !== before) this.#applyFilter();
 		}
 	}
+
+	handlePaste(text: string): void {
+		const before = this.getSearchQuery();
+		this.searchInput.handlePaste(text);
+		if (this.getSearchQuery() !== before) this.#applyFilter();
+	}
 }
 
 /** Component that displays the current search query */
@@ -1503,6 +1509,10 @@ class LabelInput implements Component {
 		} else {
 			this.#input.handleInput(keyData);
 		}
+	}
+
+	handlePaste(text: string): void {
+		this.#input.handlePaste(text);
 	}
 }
 
@@ -1786,6 +1796,11 @@ export class TreeSelectorComponent extends OverlayPanel {
 		} else {
 			this.#treeList.handleInput(keyData);
 		}
+	}
+
+	handlePaste(text: string): void {
+		if (this.#labelInput) this.#labelInput.handlePaste(text);
+		else this.#treeList.handlePaste(text);
 	}
 
 	getTreeList(): TreeList {

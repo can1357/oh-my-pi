@@ -20,11 +20,12 @@
 
 import type { KeyEventType } from "@oh-my-pi/pi-natives";
 import {
+	isInsideTerminalMultiplexer,
+	isSshSession,
 	matchesKey as matchesKeyNative,
 	parseKey as parseKeyNative,
 	parseKittySequence as parseKittySequenceNative,
 } from "@oh-my-pi/pi-natives";
-import { isInsideTerminalMultiplexer, isSshSession } from "./terminal-capabilities";
 
 // =============================================================================
 // Platform Detection
@@ -32,7 +33,7 @@ import { isInsideTerminalMultiplexer, isSshSession } from "./terminal-capabiliti
 
 /** Whether the local process is running directly under Windows Terminal. */
 export function isWindowsTerminalSession(): boolean {
-	return Boolean(process.env.WT_SESSION) && !isSshSession();
+	return Boolean(process.env.WT_SESSION) && !isSshSession(process.env);
 }
 
 /**
@@ -339,11 +340,6 @@ export function isKeyRelease(data: string): boolean {
 		return false;
 	}
 
-	// Don't treat bracketed paste content as key release
-	if (data.includes("\x1b[200~")) {
-		return false;
-	}
-
 	// Match the full CSI sequence pattern for release events
 	return KITTY_RELEASE_PATTERN.test(data);
 }
@@ -356,11 +352,6 @@ export function isKeyRelease(data: string): boolean {
 export function isKeyRepeat(data: string): boolean {
 	// Only detect repeat events when Kitty protocol is active
 	if (!kittyProtocolActive) {
-		return false;
-	}
-
-	// Don't treat bracketed paste content as key repeat
-	if (data.includes("\x1b[200~")) {
 		return false;
 	}
 

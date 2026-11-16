@@ -508,7 +508,7 @@ interface ImageOptions {
 	maxWidthCells?: number;
 	maxHeightCells?: number;
 	filename?: string;
-	budget?: ImageBudget; // usually tui.imageBudget
+	budget?: ImageBudget; // from @oh-my-pi/pi-natives; usually tui.imageBudget
 	requestRender?: () => void; // repaint once a SIXEL encode lands; defaults to the budget's
 }
 
@@ -633,7 +633,7 @@ interface Terminal {
 
 **Built-in implementations:**
 
-- `ProcessTerminal` - Uses `process.stdin/stdout`
+- `ProcessTerminal` - This process's terminal; the native engine owns stdin (raw mode, a reader thread) and stdout (a writer thread)
 - `VirtualTerminal` - For testing (uses kitty-vt-wasm)
 
 ## Utilities

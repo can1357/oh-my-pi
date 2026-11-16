@@ -150,6 +150,10 @@ export class WizardStep implements Component, MouseRoutable {
 		this.#content.handleInput?.(data);
 	}
 
+	handlePaste(text: string): void {
+		this.#content.handlePaste?.(text);
+	}
+
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
 		const content = this.#content;
 		if (!isMouseRoutable(content)) return;

@@ -505,6 +505,10 @@ export class ModelPickerComponent implements Component {
 		}
 		this.#browser.handleInput(data);
 	}
+
+	handlePaste(text: string): void {
+		this.#browser.handlePaste(text);
+	}
 	/** Flip between session-model and Task-subagent targets, repointing the highlight. */
 	#toggleTaskMode(): void {
 		this.#taskMode = !this.#taskMode;

@@ -15,7 +15,8 @@
  */
 import type { DiffStreamResult, HighlightStream } from "@oh-my-pi/pi-natives";
 import { diffWords, structuredPatchHunks } from "@oh-my-pi/pi-natives";
-import { Image, type ImageBudget } from "../../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
+import { Image } from "../../components/image";
 import { clampScrollOffset, scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
 import { centerLine, sliceWithWidth, truncateToWidth, visibleWidth } from "../../utils";
 import { formatBytes } from "@oh-my-pi/pi-utils";

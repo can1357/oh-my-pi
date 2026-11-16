@@ -1482,6 +1482,11 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		this.#searchInput.handleInput(keyData);
 		this.#filterSessions(this.#searchInput.getValue());
 	}
+
+	handlePaste(text: string): void {
+		this.#searchInput.handlePaste(text);
+		this.#filterSessions(this.#searchInput.getValue());
+	}
 }
 
 export interface SessionSelectorOptions<T extends SessionSelectorEntry = SessionSelectorEntry> {
@@ -2324,6 +2329,18 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			this.#renameField?.handleInput(keyData);
 		} else {
 			this.#sessionList.handleInput(keyData);
+		}
+	}
+
+	handlePaste(text: string): void {
+		if (this.#inputLocked) return;
+		this.#pickerErrorOpen = false;
+		if (this.#confirmationDialog) {
+			this.#confirmationDialog.handlePaste(text);
+		} else if (this.#renameDialog) {
+			this.#renameField?.handlePaste(text);
+		} else {
+			this.#sessionList.handlePaste(text);
 		}
 	}
 

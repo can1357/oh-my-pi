@@ -12,7 +12,8 @@
  */
 import { Editor } from "../../components/editor";
 import { FormField, type FormFieldTheme, TextFormField } from "../../components/form";
-import { Image, type ImageBudget } from "../../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
+import { Image } from "../../components/image";
 import { MenuSelection } from "../../components/menu-selection";
 import { ScrollView } from "../../components/scroll-view";
 import { TreeView } from "../../components/tree-view";
@@ -862,6 +863,18 @@ export class Sidebar {
 	#toggleSection(area: SectionTarget["area"]): void {
 		if (!this.#collapsedSections.delete(area)) this.#collapsedSections.add(area);
 		this.#treeVersion++;
+		this.#requestRender();
+	}
+
+	/** Pastes into the selected commit-form field (AI prompt, summary, description) when focused. */
+	handlePaste(text: string): void {
+		if (!this.focused) return;
+		this.#rebuildTargets();
+		const kind = this.selected?.kind;
+		if (kind === "stage-ai-input") this.aiInput.handlePaste(text);
+		else if (kind === "summary") this.summary.handlePaste(text);
+		else if (kind === "description") this.#descriptionField.handlePaste(text);
+		else return;
 		this.#requestRender();
 	}
 

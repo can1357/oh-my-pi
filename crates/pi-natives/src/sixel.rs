@@ -201,7 +201,7 @@ pub fn encode_sixel_async(
 	})
 }
 
-fn encode_image(
+pub(crate) fn encode_image(
 	bytes: &[u8],
 	target_width_px: u32,
 	target_height_px: u32,

@@ -113,10 +113,10 @@ describe("Editor component", () => {
 			editor.onSubmit = text => {
 				submitted.push(text);
 			};
-			editor.handleInput("\x1b[200~" + first + "\x1b[201~");
+			editor.handlePaste(first);
 			editor.rememberDraft();
 			editor.setText("");
-			editor.handleInput("\x1b[200~" + second + "\x1b[201~");
+			editor.handlePaste(second);
 			editor.rememberDraft();
 			editor.handleInput("\r");
 			expect(submitted).toEqual([second]);
@@ -126,7 +126,7 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[A");
 			expect(editor.getExpandedText()).toBe(first);
 			editor.handleInput("\x05");
-			editor.handleInput("\x1b[200~" + addition + "\x1b[201~");
+			editor.handlePaste(addition);
 			editor.handleInput("\r");
 			expect(submitted).toEqual([second, first + addition]);
 			editor.handleInput("\x1b[A");
@@ -2079,30 +2079,14 @@ describe("Editor component", () => {
 		it("strips control characters from pasted text but keeps newlines", () => {
 			const editor = new Editor(defaultEditorTheme);
 			// BEL (\x07) and NUL (\x00) must be removed; the newline must survive.
-			editor.handleInput("\x1b[200~a\x07b\x00c\ndef\x1b[201~");
+			editor.handlePaste("a\x07b\x00c\ndef");
 			expect(editor.getText()).toBe("abc\ndef");
-		});
-
-		it("decodes tmux xterm-format re-encoded control bytes in bracketed paste (kitty+tmux)", () => {
-			const editor = new Editor(defaultEditorTheme);
-			// tmux extended-keys-format=xterm (the default under kitty) re-encodes the
-			// newline (Ctrl+J) inside the paste as ESC[27;5;106~. It must land as a real
-			// newline, not leak the literal escape tail "[27;5;106~" into the buffer.
-			editor.handleInput("\x1b[200~line1\x1b[27;5;106~line2\x1b[201~");
-			expect(editor.getText()).toBe("line1\nline2");
-		});
-
-		it("decodes tmux csi-u-format re-encoded control bytes in bracketed paste", () => {
-			const editor = new Editor(defaultEditorTheme);
-			// tmux extended-keys-format=csi-u re-encodes the newline (Ctrl+J) as ESC[106;5u.
-			editor.handleInput("\x1b[200~line1\x1b[106;5uline2\x1b[201~");
-			expect(editor.getText()).toBe("line1\nline2");
 		});
 
 		it("undoes the last paste when a transient #undo trigger is executed", () => {
 			const editor = new Editor(defaultEditorTheme);
 
-			editor.handleInput("\x1b[200~pasted text\x1b[201~");
+			editor.handlePaste("pasted text");
 			expect(editor.getText()).toBe("pasted text");
 
 			editor.handleInput("#");
@@ -2343,7 +2327,7 @@ describe("Editor component", () => {
 				"tokens $1 $2 $& $$ $` $' end",
 			].join("\n");
 
-			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			editor.handlePaste(pastedText);
 
 			expect(editor.getText()).toMatch(/\[Paste #\d+, \+\d+ lines\]/);
 			expect(editor.getExpandedText()).toBe(pastedText);
@@ -2369,7 +2353,7 @@ describe("Editor component", () => {
 				submitted = text;
 			};
 
-			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			editor.handlePaste(pastedText);
 			editor.handleInput("\r");
 
 			expect(submitted).toBe(pastedText);
@@ -2379,7 +2363,7 @@ describe("Editor component", () => {
 			const editor = new Editor(defaultEditorTheme);
 			const pastedText = "a".repeat(1500);
 
-			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			editor.handlePaste(pastedText);
 
 			expect(editor.getText()).toMatch(/^\[Paste #\d+, 1500 chars\]$/);
 			expect(editor.getExpandedText()).toBe(pastedText);
@@ -2390,7 +2374,7 @@ describe("Editor component", () => {
 			editor.atomicTokenPattern = /\[(?:Image|Paste) #\d+(?:,[^\]\n]*)?\]/g;
 			const pastedText = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join("\n");
 
-			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			editor.handlePaste(pastedText);
 			expect(editor.getText()).toMatch(/^\[Paste #\d+, \+\d+ lines\]$/);
 
 			// Cursor sits just after the marker; one backspace removes the whole token
@@ -2439,7 +2423,7 @@ describe("Editor component", () => {
 			};
 			const pastedText = Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join("\n");
 
-			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			editor.handlePaste(pastedText);
 
 			// Hook intercepted: nothing inserted, no paste marker, hook saw the full text + line count.
 			expect(editor.getText()).toBe("");
@@ -2453,7 +2437,7 @@ describe("Editor component", () => {
 			editor.onLargePaste = () => false;
 			const pastedText = Array.from({ length: 1200 }, (_, i) => `line ${i + 1}`).join("\n");
 
-			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			editor.handlePaste(pastedText);
 
 			expect(editor.getText()).toMatch(/^\[Paste #\d+, \+1200 lines\]$/);
 			expect(editor.getExpandedText()).toBe(pastedText);
@@ -2467,7 +2451,7 @@ describe("Editor component", () => {
 				return true;
 			};
 
-			editor.handleInput("\x1b[200~just a short paste\x1b[201~");
+			editor.handlePaste("just a short paste");
 
 			expect(calls).toBe(0);
 			expect(editor.getText()).toBe("just a short paste");
@@ -2491,48 +2475,11 @@ describe("Editor component", () => {
 		});
 	});
 
-	describe("Bulk input fast path and paste iteration", () => {
-		it("produces identical state for a chunked paste and a single-sequence paste", () => {
-			const content = "alpha beta\ngamma delta\nepsilon";
-			const single = new Editor(defaultEditorTheme);
-			single.handleInput(`\x1b[200~${content}\x1b[201~`);
-
-			const chunked = new Editor(defaultEditorTheme);
-			chunked.handleInput("\x1b[200~");
-			for (const ch of content) chunked.handleInput(ch);
-			chunked.handleInput("\x1b[201~");
-
-			expect(chunked.getText()).toBe(single.getText());
-			expect(chunked.getCursor()).toEqual(single.getCursor());
-		});
-
-		it("normalizes CRLF identically for single and chunked paste delivery", () => {
-			const single = new Editor(defaultEditorTheme);
-			single.handleInput("\x1b[200~one\r\ntwo\rthree\x1b[201~");
-
-			const chunked = new Editor(defaultEditorTheme);
-			chunked.handleInput("\x1b[200~one\r");
-			chunked.handleInput("\ntwo");
-			chunked.handleInput("\rthree\x1b[201~");
-
-			expect(single.getText()).toBe("one\ntwo\nthree");
-			expect(chunked.getText()).toBe(single.getText());
-			expect(chunked.getCursor()).toEqual(single.getCursor());
-		});
-
-		it("processes paste remainders iteratively, applying every trailing paste and keystroke", () => {
+	describe("Bulk input fast path", () => {
+		it("normalizes CRLF and lone CR in a paste to newlines", () => {
 			const editor = new Editor(defaultEditorTheme);
-			// One read carrying two complete pastes plus trailing typed text: the
-			// remainder after each paste loops back through input handling.
-			editor.handleInput("\x1b[200~ab\x1b[201~\x1b[200~cd\x1b[201~ef");
-			expect(editor.getText()).toBe("abcdef");
-			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
-		});
-
-		it("handles a long train of pastes in one read without recursing per remainder", () => {
-			const editor = new Editor(defaultEditorTheme);
-			editor.handleInput("\x1b[200~x\x1b[201~".repeat(2000));
-			expect(editor.getText()).toBe("x".repeat(2000));
+			editor.handlePaste("one\r\ntwo\rthree");
+			expect(editor.getText()).toBe("one\ntwo\nthree");
 		});
 
 		it("inserts a plain printable run identically to per-scalar delivery", () => {
@@ -2588,7 +2535,7 @@ describe("Editor component", () => {
 			});
 			editor.onAutocompleteUpdate = resolveAutocompleteUpdated;
 
-			editor.handleInput("\x1b[200~see @sr\x1b[201~");
+			editor.handlePaste("see @sr");
 
 			await autocompleteUpdated;
 			expect(editor.isShowingAutocomplete()).toBe(true);
@@ -2612,7 +2559,7 @@ describe("Editor component", () => {
 			expect(nfdPath).not.toBe(nfcPath);
 			expect(nfdPath.length).toBeGreaterThan(nfcPath.length);
 
-			editor.handleInput(`\x1b[200~${nfdPath}\x1b[201~`);
+			editor.handlePaste(nfdPath);
 
 			expect(editor.getText()).toBe(nfcPath);
 		});
@@ -2621,7 +2568,7 @@ describe("Editor component", () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.focused = true;
 			const nfdPath = "/Users/leo/화면 기록.mov".normalize("NFD");
-			editor.handleInput(`\x1b[200~${nfdPath}\x1b[201~`);
+			editor.handlePaste(nfdPath);
 
 			const rendered = editor.render(120).join("\n");
 			// Precomposed syllables (`화`, `면`, `기`, `록`) must appear in the

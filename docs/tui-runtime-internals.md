@@ -31,9 +31,9 @@ The welcome header follows the same ordered retirement model but is composer-own
 
 Input path:
 
-`stdin -> ProcessTerminal -> StdinBuffer -> TUI.#handleInput -> focusedComponent.handleInput`
+`stdin bytes -> Terminal (glue) -> TerminalEngine input parser -> TerminalHost.input -> TUI.#handleInput -> focusedComponent.handleInput`
 
-`StdinBuffer` assembles fragmented CSI/OSC/DCS/APC/SS3 sequences and bracketed paste before dispatch. TUI input listeners may consume or transform input first. Key releases are filtered unless the focused component opts in.
+The native engine's input parser (`crates/pi-natives/src/tui/input`) assembles fragmented CSI/OSC/DCS/APC/SS3 sequences and bracketed paste, and claims terminal reports (probe replies, cursor-position reports, in-band resize) before dispatch, so only keys, pastes, and TSP messages reach JS. TUI input listeners may consume or transform input first. Key releases are filtered unless the focused component opts in.
 
 `setFocus()` updates `Focusable.focused`; focused components emit `CURSOR_MARKER`, which the frame writer strips while recording the physical cursor target.
 
@@ -100,7 +100,7 @@ Viewport-only frames cannot create history. Theme changes leave native history t
 
 During resize, TUI normally borrows the alternate buffer. The frame provider supplies a full semantic viewport tail for that transient buffer; history offers are never acknowledged there. After a quiet window TUI restores the normal buffer and recovers its viewport anchor with a DSR (CSI 6n) round trip. The parked cursor offset and stale viewport rows are remeasured at the new width, including inside multiplexers.
 
-Direct terminals use a bottom-preserving bound: `max(0, min(reported − reflowedParkOffset, height − staleReflowedRows))`. Multiplexer CPR replies instead outrank that bound, because height shrink can discard rows below the cursor rather than pushing rows above it. A missing reply falls back to retained geometry and tracked growth/shrink; multiplexer or growth timeouts retry once before falling back. `packages/tui/src/tui.ts` owns these distinct anchor-recovery paths.
+Direct terminals use a bottom-preserving bound: `max(0, min(reported − reflowedParkOffset, height − staleReflowedRows))`. Multiplexer CPR replies instead outrank that bound, because height shrink can discard rows below the cursor rather than pushing rows above it. A missing reply falls back to retained geometry and tracked growth/shrink; multiplexer or growth timeouts retry once before falling back. The engine's screen (`crates/pi-natives/src/tui/screen/resize.rs`) owns these distinct anchor-recovery paths.
 
 Warp is the exception: it re-reports size on `CSI ?1049h` / `CSI ?1049l`, so borrowing that buffer loops. Warp defaults to in-place repaint outside multiplexers/ConPTY; inside a multiplexer the mux owns the grid and consumes the toggles itself, so an inherited Warp marker keeps the mux-tuned borrow path. `PI_TUI_RESIZE_IN_PLACE=1` forces in-place repaint even inside a multiplexer or ConPTY. `PI_TUI_RESIZE_IN_PLACE=0` forces the borrow even on Warp. The first Warp height-only ±1 SIGWINCH after a toggle write is consumed as that echo: while a borrow owns the alt buffer it is swallowed without probing (a CPR issued now would snapshot the alternate grid); otherwise the in-flight anchor probe is retired and reissued at the echoed size so a predating CPR reply cannot anchor it. A later real one-row resize still restarts the transaction.
 

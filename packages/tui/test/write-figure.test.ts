@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { ImageBudget } from "@oh-my-pi/pi-natives";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";

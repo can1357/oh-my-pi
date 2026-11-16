@@ -1,130 +1,80 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import type { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
+import { ManualScheduler } from "./helpers/manual-scheduler";
+import { type FakeTty, fakeProcessTty, recordingHost } from "./helpers/process-tty";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
 
-const ITERM2_DA1_REPLY = "\x1b[?64;1;2;4;6;17;18;21;22c";
-const TSP_HELLO_REPLY =
-	'\x1b_tsp;r;{"r":"hello","v":1,"term":"tern","kinds":["col","text"],"credits":3,"future":1}\x1b\\';
+// The exit drain reads and drops whatever the terminal still sends (late kitty
+// key releases, a Tern surface's frame acknowledgements) so it never reaches
+// the parent shell. When it ends — on idle, at the cap, or once the DA1
+// sentinel a TSP session needs is answered — is the engine's decision (Rust:
+// `drain_turns_keyboard_enhancements_off_and_ends_on_idle_or_at_the_cap`,
+// `drain_waits_for_a_da1_sentinel_under_a_tsp_session`,
+// `drain_queries_no_sentinel_before_any_da1_reply_proved_the_path`). This
+// guards the glue: the returned promise settles exactly when the engine
+// reports the drain done, and nothing read meanwhile reaches the host.
 
-const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-const stdinSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
-const stdoutColumnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-const stdoutRowsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-
-function restoreProperty(target: object, key: string, descriptor: PropertyDescriptor | undefined): void {
-	if (descriptor) {
-		Object.defineProperty(target, key, descriptor);
-		return;
-	}
-	delete (target as Record<string, unknown>)[key];
+/** Let the continuations of an already-settled promise chain run. */
+async function settleMicrotasks(): Promise<void> {
+	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
-describe("drainInput DA1 sentinel gating", () => {
+describe("Terminal.drainInput", () => {
 	withoutTerminalMultiplexer();
 
+	let tty: FakeTty;
 	let terminal: ProcessTerminal | undefined;
-	let previousHeadless = false;
-	let previousTspProbeEnv: string | undefined;
-	let writes: string[] = [];
-	let spies: Array<{ mockRestore(): void }> = [];
 
 	beforeEach(() => {
-		previousTspProbeEnv = Bun.env.PI_TUI_TSP_PROBE;
+		tty = fakeProcessTty();
 	});
-
-	function setup(env: Record<string, string> = {}): void {
-		previousHeadless = setTerminalHeadless(false);
-		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
-		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-		Object.defineProperty(process.stdin, "setRawMode", { value: vi.fn(), configurable: true });
-		Object.defineProperty(process.stdout, "columns", { value: 100, configurable: true });
-		Object.defineProperty(process.stdout, "rows", { value: 30, configurable: true });
-		writes = [];
-		spies = [
-			vi.spyOn(process.stdin, "resume").mockImplementation(() => process.stdin),
-			vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin),
-			vi.spyOn(process.stdin, "setEncoding").mockImplementation(() => process.stdin),
-			vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
-				writes.push(String(chunk));
-				return true;
-			}),
-			vi.spyOn(process, "kill").mockImplementation(() => true),
-		];
-		for (const [k, v] of Object.entries(env)) {
-			Bun.env[k] = v;
-		}
-		terminal = new ProcessTerminal();
-		terminal.start(
-			() => {},
-			() => {},
-		);
-	}
 
 	afterEach(() => {
 		terminal?.stop();
 		terminal = undefined;
-		for (const spy of spies) spy.mockRestore();
-		spies = [];
-		restoreProperty(process.stdin, "isTTY", stdinIsTtyDescriptor);
-		restoreProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
-		restoreProperty(process.stdin, "setRawMode", stdinSetRawModeDescriptor);
-		restoreProperty(process.stdout, "columns", stdoutColumnsDescriptor);
-		restoreProperty(process.stdout, "rows", stdoutRowsDescriptor);
-		setTerminalHeadless(previousHeadless);
-		if (previousTspProbeEnv === undefined) delete Bun.env.PI_TUI_TSP_PROBE;
-		else Bun.env.PI_TUI_TSP_PROBE = previousTspProbeEnv;
+		tty.dispose();
 	});
 
-	it("does not write a DA1 sentinel on non-TSP terminals even when SIXEL is supported", async () => {
-		setup();
-		// Answer startup capability probes with iTerm2's SIXEL-advertising DA1 report
-		for (let i = 0; i < 16; i++) {
-			process.stdin.emit("data", ITERM2_DA1_REPLY);
-		}
+	it("settles once stdin goes idle and drops what arrives meanwhile", async () => {
+		const scheduler = new ManualScheduler();
+		const host = recordingHost();
+		terminal = tty.terminal({ conpty: false });
+		terminal.bind(host, scheduler);
+		terminal.start();
 
-		writes.length = 0;
-		await terminal!.drainInput(100, 20);
+		let drained = false;
+		const drain = terminal.drainInput(1000, 50).then(() => {
+			drained = true;
+		});
+		scheduler.advance(30);
+		tty.type("late typing");
+		scheduler.advance(30);
+		// Past the first idle deadline, but the read re-armed the idle window.
+		await settleMicrotasks();
+		expect(drained).toBe(false);
 
-		const drainedWrites = writes.join("");
-		expect(drainedWrites).not.toContain("\x1b[c");
+		scheduler.advance(50);
+		await drain;
+		expect(host.inputs).toEqual([]);
 	});
 
-	it("writes a DA1 sentinel and awaits its answer when TSP is active", async () => {
-		setup({ TERM_PROGRAM: "tern", PI_TUI_TSP_PROBE: "1" });
+	it("settles immediately while input was never attached", async () => {
+		terminal = tty.terminal({ conpty: false });
+		terminal.bind(recordingHost(), new ManualScheduler());
+		terminal.start({ deferInput: true });
+		tty.clear();
 
-		// Deliver TSP hello reply and answer startup DA1 sentinels
-		process.stdin.emit("data", TSP_HELLO_REPLY);
-		for (let i = 0; i < 16; i++) {
-			process.stdin.emit("data", ITERM2_DA1_REPLY);
-		}
-
-		writes.length = 0;
-		const drainPromise = terminal!.drainInput(300, 20);
-		expect(writes.join("")).toContain("\x1b[c");
-
-		// Answer the exit drain DA1 sentinel
-		process.stdin.emit("data", ITERM2_DA1_REPLY);
-		await drainPromise;
+		await terminal.drainInput(1000, 50);
+		expect(tty.writes).toEqual([]);
 	});
 
-	it("writes a DA1 sentinel when TSP probe is expected and still pending", async () => {
-		setup({ TERM_PROGRAM: "tern", PI_TUI_TSP_PROBE: "1" });
+	it("settles a pending drain when the terminal stops", async () => {
+		terminal = tty.terminal({ conpty: false });
+		terminal.bind(recordingHost(), new ManualScheduler());
+		terminal.start();
 
-		// Answer the keyboard and OSC 11 sentinels so sixelSupport is established,
-		// but leave the TSP sentinel and hello pending.
-		process.stdin.emit("data", ITERM2_DA1_REPLY);
-		process.stdin.emit("data", ITERM2_DA1_REPLY);
-		expect(terminal!.tspProbePending).toBe(true);
-		expect(terminal!.tspExpected).toBe(true);
-
-		writes.length = 0;
-		const drainPromise = terminal!.drainInput(300, 20);
-		expect(writes.join("")).toContain("\x1b[c");
-
-		// Deliver DA1 reply to settle the drain
-		process.stdin.emit("data", ITERM2_DA1_REPLY);
-		await drainPromise;
+		const drain = terminal.drainInput(1000, 50);
+		terminal.stop();
+		await drain;
 	});
 });

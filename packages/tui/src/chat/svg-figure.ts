@@ -13,11 +13,12 @@
  * cells, and redrawn when the room it is shown in changes, so the terminal
  * places it 1:1: any resampling, even 0.99×, blurs every glyph edge.
  */
-import { rasterizeSvg } from "@oh-my-pi/pi-natives";
+import { imageDimensions, rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
-import { Image, type ImageBudget } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
+import { Image } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
-import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
+import { type CellDimensions, getCellDimensions } from "../inline-image";
 import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
 import type { Component } from "../tui";
 import { type FigureBox, type FigureSize, figureBox, figureRoom, isSized, PX_PER_ROW } from "./figure-size";
@@ -368,7 +369,7 @@ export class SvgFigure implements Component {
 		}
 		if (this.#disposed) return;
 		const data = png?.toBase64();
-		const size = data ? getImageDimensions(data, "image/png") : null;
+		const size = data ? imageDimensions(data, "image/png") : null;
 		if (data && size) {
 			this.#show(attempt, data, size.widthPx, size.heightPx);
 		} else if (attempt.final) {

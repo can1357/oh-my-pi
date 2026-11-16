@@ -90,6 +90,16 @@ export function normalizeInputForPty(data: string, applicationCursorKeysMode: bo
 	}
 	return data;
 }
+
+/**
+ * The bytes a terminal sends a PTY child for a paste: wrapped in bracketed-paste
+ * markers once the child enabled bracketed paste (DECSET 2004), else the bare
+ * text. Shared like {@link normalizeInputForPty}.
+ */
+export function encodePasteForPty(text: string, bracketedPasteMode: boolean): string {
+	return bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text;
+}
+
 /** Interactive terminal overlay driven by an external PTY controller. */
 export class BashInteractiveOverlayComponent implements Component {
 	/** Native sheet: a full-pane glass overlay titled Console. */
@@ -237,6 +247,13 @@ export class BashInteractiveOverlayComponent implements Component {
 			return;
 		}
 		this.#onInput(normalizedInput);
+	}
+
+	/** A paste goes to the running child as a terminal would send it. */
+	handlePaste(text: string): void {
+		if (this.#state !== "running") return;
+		const bytes = encodePasteForPty(text, this.#terminal.modes.bracketedPasteMode);
+		if (bytes) this.#onInput(bytes);
 	}
 
 	/** The Force kill button runs the Esc path. */

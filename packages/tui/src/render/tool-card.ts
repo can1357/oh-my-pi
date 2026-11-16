@@ -375,6 +375,10 @@ export class ToolCard implements Component {
 		for (const child of this.#renderedChildren) child.handleInput?.(data);
 	}
 
+	handlePaste(text: string): void {
+		for (const child of this.#renderedChildren) child.handlePaste?.(text);
+	}
+
 	setIgnoreTight(ignore: boolean): void {
 		this.#options.ignoreTight = ignore;
 		this.#plainText.setIgnoreTight(ignore);

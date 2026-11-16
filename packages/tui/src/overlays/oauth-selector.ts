@@ -346,6 +346,15 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		return true;
 	}
 
+	/** Pastes edit the search field when search is enabled; blank pastes into an empty query are dropped. */
+	handlePaste(text: string): void {
+		if (!this.#isSearchEnabled()) return;
+		const before = this.#search.getValue();
+		if (before.length === 0 && text.trim().length === 0) return;
+		this.#search.handlePaste(text);
+		if (this.#search.getValue() !== before) this.#syncSearchQuery();
+	}
+
 	#updateList(): void {
 		this.#nativeRoot = undefined;
 		this.#pickerRoot = undefined;

@@ -63,6 +63,12 @@ class UpdatesSceneController implements SetupSceneController {
 		else this.#selectList.handleInput(data);
 	}
 
+	handlePaste(text: string): void {
+		if (this.#committing) return;
+		if (this.#step) this.#step.handlePaste(text);
+		else this.#selectList.handlePaste(text);
+	}
+
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
 		if (this.#committing) return;
 		this.#step?.routeMouse(event, line, col);

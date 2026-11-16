@@ -1,7 +1,8 @@
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, Container } from "../tui";
-import { Image, type ImageBudget } from "../components/image";
+import type { ImageBudget } from "@oh-my-pi/pi-natives";
+import { Image } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import {
 	type DefaultTextStyle,

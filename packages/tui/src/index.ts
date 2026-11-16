@@ -43,7 +43,6 @@ export * from "./debug-server";
 // DECCARA rectangular-SGR background-fill optimizer
 export * from "./deccara";
 // Desktop notifications via D-Bus (Linux freedesktop notifications)
-export * from "./desktop-notify";
 // Editor component interface (for custom editors)
 export type * from "./editor-component";
 // Fuzzy matching
@@ -53,9 +52,8 @@ export * from "./keybindings";
 // Kitty keyboard protocol helpers
 export * from "./keys";
 // Glyph Protocol: in-band icon registration (APC 25a1)
-export * from "./glyph-protocol";
-// Kitty graphics: Unicode placeholders
-export * from "./kitty-graphics";
+// Inline images: cell size, fallback text, native render requests
+export * from "./inline-image";
 // LaTeX → Unicode/ANSI math rendering
 export * from "./latex-block";
 export * from "./latex-to-unicode";
@@ -67,9 +65,8 @@ export * from "./native/describe";
 export type * from "./native/node";
 export * from "./native/settle";
 export * from "./native/state";
-// Mermaid diagram support
-// Input buffering for batch splitting
-export * from "./stdin-buffer";
+// Component model, overlays, frame protocol, scheduler
+export * from "./tui";
 export type * from "./symbols";
 // Terminal interface and implementations
 export * from "./terminal";
@@ -79,6 +76,5 @@ export * from "./terminal-capabilities";
 export * from "./theme";
 // TTY ID
 export * from "./ttyid";
-export * from "./tui";
 // Utilities
 export * from "./utils";

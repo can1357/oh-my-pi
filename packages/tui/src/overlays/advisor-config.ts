@@ -1031,6 +1031,10 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#active.handleInput?.(data);
 	}
 
+	handlePaste(text: string): void {
+		this.#active.handlePaste?.(text);
+	}
+
 	/** Forward enhanced-paste transports into a multiline instructions editor. */
 	pasteText(text: string): void {
 		if (this.#active instanceof HookEditorComponent) this.#active.pasteText(text);

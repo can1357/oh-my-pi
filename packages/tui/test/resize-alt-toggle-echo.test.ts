@@ -45,11 +45,11 @@ class LineComponent implements Component {
 class AltToggleEchoTerminal extends VirtualTerminal {
 	altEnters = 0;
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		const enters = countNeedle(data, ALT_ENTER);
 		this.altEnters += enters;
 		const exits = countNeedle(data, ALT_EXIT);
-		super.write(data);
+		super.receive(data);
 		if (enters + exits === 0) return;
 		const delta = enters > 0 ? -1 : 1;
 		queueMicrotask(() => {
@@ -159,8 +159,8 @@ describe("resize on Warp, which SIGWINCHes on alt-buffer toggle", () => {
 		Bun.env.TERM_PROGRAM = "WarpTerminal";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -188,8 +188,8 @@ describe("resize on Warp, which SIGWINCHes on alt-buffer toggle", () => {
 		Bun.env.TERM_PROGRAM = "WarpTerminal";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -217,8 +217,8 @@ describe("resize on Warp, which SIGWINCHes on alt-buffer toggle", () => {
 		Bun.env.TERM_PROGRAM = "WarpTerminal";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -265,8 +265,8 @@ describe("Warp in-place resize with a frame provider in rebuild mode", () => {
 		Bun.env.TERM_PROGRAM = "WarpTerminal";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -311,8 +311,8 @@ describe("Warp in-place resize with a frame provider in rebuild mode", () => {
 		Bun.env.TERM_PROGRAM = "WarpTerminal";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -401,8 +401,8 @@ describe("Warp echo expectation is single-shot", () => {
 		Bun.env.PI_TUI_RESIZE_IN_PLACE = "0";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -443,8 +443,8 @@ describe("Warp echo expectation is single-shot", () => {
 		Bun.env.PI_TUI_RESIZE_IN_PLACE = "0";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -481,8 +481,8 @@ describe("Warp echo expectation is single-shot", () => {
 		Bun.env.PI_TUI_RESIZE_IN_PLACE = "0";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};
@@ -516,8 +516,8 @@ describe("Warp echo expectation is single-shot", () => {
 		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
-		const originalWrite = term.write.bind(term);
-		term.write = (data: string) => {
+		const originalWrite = term.receive.bind(term);
+		term.receive = (data: string) => {
 			writes.push(data);
 			originalWrite(data);
 		};

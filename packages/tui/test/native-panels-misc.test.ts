@@ -347,9 +347,9 @@ describe("BtwHistoryPanel native events", () => {
 			getHeight: () => 30,
 		});
 		history.handleInput("f");
-		history.handleInput("\x1b[200~/tmp/shot.png\x1b[201~");
-		history.handleInput("\x1b[200~\x1b[201~");
-		history.handleInput("\x1b[200~plain words\x1b[201~");
+		history.handlePaste("/tmp/shot.png");
+		history.handlePaste("");
+		history.handlePaste("plain words");
 		expect(onPasteImagePath).toHaveBeenCalledWith("/tmp/shot.png");
 		expect(onPasteImage).toHaveBeenCalledTimes(1);
 		const input = findNode(history.describe(), node => node.key === "composer")?.c?.[0];

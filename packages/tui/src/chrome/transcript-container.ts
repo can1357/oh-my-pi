@@ -8,7 +8,7 @@ import { sameItems } from "../native/memo";
 import { isNativeSettled, settleNative } from "../native/settle";
 import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
-import { directPlacementLift, ImageProtocol, iterm2ImagePayload, TERMINAL } from "../terminal-capabilities";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 
 /** Shared animation time supplied by the constrained transcript root. */
 export interface AnimationFrame {
@@ -249,6 +249,31 @@ function contentOf(rows: readonly string[]): string {
 	let text = "";
 	for (const row of rows) text += Bun.stripANSI(row).replace(/[^\p{L}\p{N}]/gu, "");
 	return text;
+}
+
+/** `ESC 7` + `CUU(n)` lead-in of an image direct-placement row. */
+const DIRECT_PLACEMENT_LIFT = /^\x1b7\x1b\[(\d+)A/;
+
+/**
+ * Rows above its own row that an image direct-placement row paints over: the
+ * `CUU(rows-1)` of its lead-in, or 0 for any other row.
+ */
+function directPlacementLift(row: string): number {
+	const m = DIRECT_PLACEMENT_LIFT.exec(row);
+	return m ? Number(m[1]) : 0;
+}
+
+/**
+ * The encoded image of an iTerm2 inline-image row, without the size
+ * parameters a rewrap changes; undefined for a row without one.
+ */
+function iterm2ImagePayload(row: string): string | undefined {
+	const start = row.indexOf(ImageProtocol.Iterm2);
+	if (start === -1) return undefined;
+	const colon = row.indexOf(":", start + ImageProtocol.Iterm2.length);
+	if (colon === -1) return undefined;
+	const end = row.indexOf("\x07", colon + 1);
+	return row.slice(colon + 1, end === -1 ? undefined : end);
 }
 
 /**

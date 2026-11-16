@@ -241,6 +241,10 @@ export class FormField implements Component, Focusable, MouseRoutable {
 		this.control.pasteText?.(text);
 	}
 
+	handlePaste(text: string): void {
+		this.control.handlePaste?.(text);
+	}
+
 	/** Translate a field-local row to its control-local row, excluding all surrounding chrome. */
 	controlLineAt(line: number): number | undefined {
 		if (line < this.#controlLineOffset || line >= this.#controlLineOffset + this.#controlLineCount) {
@@ -600,6 +604,10 @@ export class Form implements Component, Focusable, MouseRoutable {
 
 	pasteText(text: string): void {
 		this.#fields[this.#activeIndex]?.pasteText(text);
+	}
+
+	handlePaste(text: string): void {
+		this.#fields[this.#activeIndex]?.handlePaste(text);
 	}
 
 	routeMouse(event: SgrMouseEvent, line: number, col: number): void {

@@ -1,60 +1,49 @@
 import { describe, expect, it } from "bun:test";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
-import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
+import { Terminal, type TerminalIo, type TerminalIoSink } from "@oh-my-pi/pi-tui/terminal";
 
-class CaptureTerminal implements Terminal {
-	writes: string[] = [];
-	#columns: number;
-	#rows: number;
+const utf8Decoder = new TextDecoder();
+
+/** Byte-capturing IO port: engine output is recorded, nothing answers on stdin. */
+class CaptureIo implements TerminalIo {
+	readonly interactive = false;
+	readonly backlog = 0;
+	readonly writes: string[] = [];
+	sink: TerminalIoSink | undefined;
+
+	constructor(
+		readonly columns: number,
+		readonly rows: number,
+	) {}
+
+	open(sink: TerminalIoSink): void {
+		this.sink = sink;
+	}
+
+	write(chunks: readonly Uint8Array[]): void {
+		for (const chunk of chunks) this.writes.push(utf8Decoder.decode(chunk, { stream: true }));
+	}
+
+	close(): void {
+		this.sink = undefined;
+	}
+}
+
+class CaptureTerminal extends Terminal {
+	readonly #io: CaptureIo;
 
 	constructor(columns = 80, rows = 4) {
-		this.#columns = columns;
-		this.#rows = rows;
+		const io = new CaptureIo(columns, rows);
+		super(io);
+		this.#io = io;
 	}
 
-	get columns(): number {
-		return this.#columns;
-	}
+	override async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
 
-	get rows(): number {
-		return this.#rows;
+	/** Every chunk the engine wrote so far. */
+	get writes(): readonly string[] {
+		return this.#io.writes;
 	}
-
-	get kittyProtocolActive(): boolean {
-		return false;
-	}
-
-	get kittyEnableSequence(): string | null {
-		return null;
-	}
-
-	get keyboardEnhancementEnterSequence(): string | null {
-		return null;
-	}
-
-	get keyboardEnhancementExitSequence(): string | null {
-		return null;
-	}
-
-	get appearance(): TerminalAppearance | undefined {
-		return undefined;
-	}
-
-	start(): void {}
-	stop(): void {}
-	async drainInput(): Promise<void> {}
-	write(data: string): void {
-		this.writes.push(data);
-	}
-	moveBy(): void {}
-	hideCursor(): void {}
-	showCursor(): void {}
-	clearLine(): void {}
-	clearFromCursor(): void {}
-	clearScreen(): void {}
-	setTitle(): void {}
-	setProgress(): void {}
-	onAppearanceChange(): void {}
 }
 
 class RawLinesComponent implements Component {

@@ -4,8 +4,8 @@ import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type Component, Container, type RenderScheduler, visibleWidth } from "@oh-my-pi/pi-tui";
 import { Image } from "@oh-my-pi/pi-tui/components/image";
-import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
-import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
+import { getCellDimensions, setCellDimensions } from "@oh-my-pi/pi-tui/inline-image";
+import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VirtualRenderScheduler } from "../../tui/test/virtual-render-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { withoutTerminalMultiplexer } from "../../tui/test/helpers/terminal-multiplexer";
@@ -80,9 +80,9 @@ class ToolAllocationBlock implements Component {
 class TrackingTerminal extends VirtualTerminal {
 	readonly writes: string[] = [];
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.writes.push(data);
-		super.write(data);
+		super.receive(data);
 	}
 }
 
@@ -339,11 +339,11 @@ describe("composer welcome native-history resize", () => {
 		const originalProtocol = TERMINAL.imageProtocol;
 		const originalTerminalId = TERMINAL.id;
 		const originalCellDimensions = { ...getCellDimensions() };
-		const originalGraphics = { ...getKittyGraphics() };
+		const originalGraphics = TERMINAL.kittyUnicodePlaceholders;
 		Reflect.set(TERMINAL, "imageProtocol", ImageProtocol.Kitty);
 		Reflect.set(TERMINAL, "id", "xterm");
 		setCellDimensions({ widthPx: 10, heightPx: 10 });
-		setKittyGraphics({ unicodePlaceholders: false });
+		TERMINAL.kittyUnicodePlaceholders = false;
 
 		const terminal = new TrackingTerminal(40, 4);
 		const composer = new Composer({
@@ -378,7 +378,7 @@ describe("composer welcome native-history resize", () => {
 			Reflect.set(TERMINAL, "imageProtocol", originalProtocol);
 			Reflect.set(TERMINAL, "id", originalTerminalId);
 			setCellDimensions(originalCellDimensions);
-			setKittyGraphics(originalGraphics);
+			TERMINAL.kittyUnicodePlaceholders = originalGraphics;
 		}
 	});
 

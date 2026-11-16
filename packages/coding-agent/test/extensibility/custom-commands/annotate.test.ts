@@ -466,7 +466,8 @@ describe("/annotate contracts", () => {
 				h.terminal.send(UP);
 				h.flush();
 				h.terminal.send(ENTER);
-				h.flush();
+				// A lone Enter leaves the stdin parser once its 10 ms raw-paste classification window closes.
+				h.flush(10);
 			}
 			expect(await pending).toMatchObject({ text: "Older answer", kind: "message" });
 			h.flush(100);

@@ -541,4 +541,8 @@ export class LoginDialogComponent extends OverlayPanel {
 		// Pass to input
 		this.#input.handleInput(data);
 	}
+
+	handlePaste(text: string): void {
+		this.#input.handlePaste(text);
+	}
 }

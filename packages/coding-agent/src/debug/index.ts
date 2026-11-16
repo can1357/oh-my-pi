@@ -5,18 +5,8 @@
  */
 import * as fs from "node:fs/promises";
 import * as url from "node:url";
-import { getWorkProfile } from "@oh-my-pi/pi-natives";
-import {
-	isNotificationSuppressed,
-	Loader,
-	type OverlayHandle,
-	type SelectItem,
-	SelectList,
-	Spacer,
-	TERMINAL,
-	type TerminalNotification,
-	Text,
-} from "@oh-my-pi/pi-tui";
+import { getWorkProfile, isNotificationSuppressed, type TerminalNotification } from "@oh-my-pi/pi-natives";
+import { Loader, type OverlayHandle, type SelectItem, SelectList, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
@@ -102,6 +92,10 @@ export class DebugSelectorComponent extends OverlayPanel {
 
 	handleInput(keyData: string): void {
 		this.#selectList.handleInput(keyData);
+	}
+
+	handlePaste(text: string): void {
+		this.#selectList.handlePaste(text);
 	}
 
 	async #handleSelection(value: string): Promise<void> {
@@ -475,7 +469,7 @@ export class DebugSelectorComponent extends OverlayPanel {
 		// Fire the desktop notification as a real side effect, then render a
 		// panel that samples every other special protocol and reports the
 		// notification outcome.
-		const suppressed = isNotificationSuppressed();
+		const suppressed = isNotificationSuppressed(Bun.env);
 		if (!suppressed) {
 			const sessionName = this.ctx.sessionManager.getSessionName();
 			const notification: TerminalNotification = {

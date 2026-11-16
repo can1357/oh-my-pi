@@ -9,9 +9,9 @@ const PROMPT_START = "\x1b]133;A\x07";
 class PromptCountingTerminal extends VirtualTerminal {
 	promptStarts = 0;
 
-	override write(data: string): void {
+	override receive(data: string): void {
 		this.promptStarts += data.split(PROMPT_START).length - 1;
-		super.write(data);
+		super.receive(data);
 	}
 }
 

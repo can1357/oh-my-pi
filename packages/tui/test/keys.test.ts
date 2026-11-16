@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { terminalMultiplexerEnvKeys } from "@oh-my-pi/pi-natives";
 import {
 	extractPrintableText,
 	isWindowsTerminalSession,
@@ -7,7 +8,6 @@ import {
 	parseKey,
 	setKittyProtocolActive,
 } from "@oh-my-pi/pi-tui/keys";
-import { TERMINAL_MULTIPLEXER_ENV_KEYS } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 
 describe("matchesKey", () => {
 	it("matches ctrl+letter sequences", () => {
@@ -203,7 +203,7 @@ describe("Raw 0x08 backspace disambiguation", () => {
 		"SSH_CLIENT",
 		"SSH_TTY",
 		"PI_TUI_RAW_BACKSPACE_IS_CTRL",
-		...TERMINAL_MULTIPLEXER_ENV_KEYS,
+		...terminalMultiplexerEnvKeys(),
 	];
 	function withEnv(overrides: Record<string, string>, run: () => void): void {
 		const saved: Record<string, string | undefined> = {};

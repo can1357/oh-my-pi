@@ -1,4 +1,4 @@
-import { RunTrace } from "@oh-my-pi/pi-natives";
+import { imageDimensions, RunTrace } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace, type ShellVizPreferences, type ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import { defaultShellVizPreferences, readShellPresentation, shellVisualization } from "../tools/shell-viz";
 import { changeShellVizPreferences, shellVizEventAction } from "../tools/shell-trace";
@@ -17,7 +17,8 @@ import {
 import { Image } from "../components/image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { getImageDimensions, ImageProtocol, imageFallback, TERMINAL } from "../terminal-capabilities";
+import { imageFallback } from "../inline-image";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { type Component, Container, type TUI } from "../tui";
 import { truncateToWidth } from "../utils";
 import { getProjectDir, isRecord, logger, sanitizeText, sanitizeTextDeep } from "@oh-my-pi/pi-utils";
@@ -184,6 +185,12 @@ class SafeToolRendererComponent implements Component {
 		const handleInput = this.#component.handleInput;
 		if (handleInput === undefined) return;
 		handleInput.call(this.#component, data);
+	}
+
+	handlePaste(text: string): void {
+		const handlePaste = this.#component.handlePaste;
+		if (handlePaste === undefined) return;
+		handlePaste.call(this.#component, text);
 	}
 
 	invalidate(): void {
@@ -1598,7 +1605,7 @@ export class ToolExecutionComponent extends Container {
 		const indicators = this.#getAllImageBlocks()
 			.map(image => {
 				const mimeType = String(image.mimeType);
-				const dims = image.data ? (getImageDimensions(image.data, mimeType) ?? undefined) : undefined;
+				const dims = image.data ? (imageDimensions(image.data, mimeType) ?? undefined) : undefined;
 				return imageFallback(mimeType, dims);
 			})
 			.join("\n");
@@ -2286,7 +2293,7 @@ export class ToolExecutionComponent extends Container {
 			const imageIndicators = imageBlocks
 				.map(img => {
 					const mimeType = String(img.mimeType);
-					const dims = img.data ? (getImageDimensions(img.data, mimeType) ?? undefined) : undefined;
+					const dims = img.data ? (imageDimensions(img.data, mimeType) ?? undefined) : undefined;
 					const placeholder = imageFallback(mimeType, dims);
 					return img.data
 						? linkedImageText(placeholder, { data: img.data, mimeType }, readMediaPath(this.#rawDetails))
