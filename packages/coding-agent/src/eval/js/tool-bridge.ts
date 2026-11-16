@@ -36,7 +36,7 @@ import {
 } from "../handle-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
-import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
+import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
@@ -224,7 +224,11 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
-export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+	return withEvalBridgeToolCall(() => dispatchSessionTool(name, args, options));
+}
+
+async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;

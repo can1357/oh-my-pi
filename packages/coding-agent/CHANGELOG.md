@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `yield` called from an eval cell (`tool.yield(...)`) reporting `Result submitted.` without finishing the delegated task, which then ended as `Stopped without actionable output`; the eval tool bridge now rejects `yield` like `checkpoint` and `rewind` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
+- Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.21.0] - 2026-11-16
 

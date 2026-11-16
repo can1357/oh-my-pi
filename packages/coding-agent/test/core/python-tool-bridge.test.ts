@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { PYTHON_PRELUDE } from "@oh-my-pi/pi-coding-agent/eval/py/prelude";
 import {
 	disposePyToolBridge,
@@ -8,6 +9,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/eval/py/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { $which, isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
@@ -228,6 +231,51 @@ asyncio.run(check_intent())
 			expect(await res.json()).toMatchObject({
 				ok: false,
 				error: expect.stringContaining("call the direct `yield` tool"),
+			});
+			expect(calls).toEqual([]);
+		} finally {
+			unregister();
+		}
+	});
+
+	it("returns a direct-tool error for yield routed through the write xd device", async () => {
+		const calls: FakeCall[] = [];
+		const tool = makeFakeTool("yield", calls, {
+			content: [{ type: "text", text: "Result submitted." }],
+		});
+		const tools = new Map([["yield", tool]]);
+		const xdev: XdevState = {
+			tools,
+			mountedNames: new Set(["yield"]),
+			builtInNames: new Set(["yield"]),
+			isActive: () => false,
+			resolve: name => resolveXdevTool(xdev, name),
+		};
+		const session: ToolSession = {
+			cwd: "/tmp/test",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: Settings.isolated(),
+			xdev,
+			getToolByName: name => tools.get(name),
+		};
+		tools.set("write", new WriteTool(session) as unknown as AgentTool);
+		const info = await ensurePyToolBridge();
+		const unregister = registerPyToolBridge("xd-yield-session", "run-xd-yield", { toolSession: session });
+		try {
+			const res = await call(info, {
+				session: "xd-yield-session",
+				run: "run-xd-yield",
+				name: "write",
+				args: { path: "xd://yield", content: JSON.stringify({ data: { result: "done" } }) },
+			});
+			expect(await res.json()).toMatchObject({
+				ok: true,
+				value: {
+					hasError: true,
+					text: expect.stringContaining("call the direct `yield` tool"),
+				},
 			});
 			expect(calls).toEqual([]);
 		} finally {
