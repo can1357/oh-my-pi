@@ -289,7 +289,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 - `task` — 并行扇出子智能体，可选工作区隔离。
 - `wait` — 阻塞直到下一个后台结果、同伴消息或引导中断；通过 `agent://` 和 `proc://` 给同伴发消息、控制任务。
 - `todo` — 对会话待办列表进行有序修改，支持阶段跟踪。
-- `ask` — 交互式运行中的结构化追问。
+- `ask` — 交互式运行中的 HTML 表单追问（单选框、复选框、下拉选择、文本）。
 
 **桌面与网络**
 
@@ -343,7 +343,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 直连 API 和网关。可按角色混用不同提供商。
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
 
 ### 编程套餐
 
@@ -505,11 +505,11 @@ Exa 也可以通过 `/login exa` 存储 API 密钥；显式选择无密钥模式
 
 ### 交互式——拿不准时，智能体会问你
 
-TUI 是默认界面。工具调用渲染为卡片，编辑在写入磁盘前可预览，遇到歧义时则通过 `ask` 工具处理——这是一个智能体可以在回合中途调用的结构化选项选择器。其余操作都可以用键盘完成。
+TUI 是默认界面。工具调用渲染为卡片，编辑在写入磁盘前可预览，遇到歧义时则通过 `ask` 工具处理——这是智能体可以在回合中途弹出的表单，并预先选中它推荐的选项。其余操作都可以用键盘完成。
 
-同样的提示卡片也会通过 ACP 呈现，编辑器无需自己实现选择器。
+同样的表单也会以 elicitation 的形式通过 ACP 呈现，编辑器无需自己编写对话框。
 
-![omp TUI 显示来自 ask 工具的多选问题。](assets/ask.webp)
+![omp TUI 显示 ask 表单中的一个多选字段。](assets/ask.webp)
 
 ### SDK——嵌入 Node
 
@@ -636,6 +636,10 @@ bun run gen:nix
 ```sh
 bun dev -- --version
 ```
+
+#### Apple Silicon 上的 Nix 构建
+
+在 Apple Silicon 上，`nix build .#omp` 会使用 nixpkgs 的 Swift 编译器和 `apple-sdk_27` 编译 Apple Foundation Models bridge。构建过程不会使用宿主机的 Xcode 或 Command Line Tools。如果无法编译该 bridge，构建会直接失败，而不是发布一个缺少 bridge 的版本。这两者都只是构建期依赖。要使用这些模型，仍需要 macOS 27+、受支持的设备，并开启 Apple Intelligence。如需在不包含该 bridge 的情况下构建，请使用 `omp.override { withAppleFm = false; }`。
 
 ### 调试命令
 

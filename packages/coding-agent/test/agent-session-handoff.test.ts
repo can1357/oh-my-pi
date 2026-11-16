@@ -1113,12 +1113,12 @@ describe("AgentSession handoff", () => {
 			streamFn: mock.stream,
 		});
 
-		const agentEndWillContinue: Array<boolean | undefined> = [];
+		const extensionAgentEnds: string[] = [];
 		const extensionsResult = await loadExtensions([], tempDir.path());
 		const captureAgentEnd = await loadExtensionFromFactory(
 			pi => {
 				pi.on("agent_end", event => {
-					agentEndWillContinue.push(event.willContinue);
+					extensionAgentEnds.push(event.type);
 				});
 			},
 			tempDir.path(),
@@ -1153,16 +1153,17 @@ describe("AgentSession handoff", () => {
 		const generateHandoffSpy = vi
 			.spyOn(compactionModule, "generateHandoffFromContext")
 			.mockResolvedValue("## Goal\nContinue from here");
-		return { mock, agentEndWillContinue, generateHandoffSpy };
+		return { mock, extensionAgentEnds, generateHandoffSpy };
 	}
 
 	it("completes threshold-triggered auto-handoff while the original prompt is still unwinding", async () => {
-		const { mock, agentEndWillContinue, generateHandoffSpy } = await createThresholdHandoffSession(false);
+		const { mock, extensionAgentEnds, generateHandoffSpy } = await createThresholdHandoffSession(false);
 		await session.prompt("Trigger threshold handoff");
+		await session.waitForRunEnd();
 
 		expect(mock.calls).toHaveLength(1);
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(agentEndWillContinue).toEqual([undefined]);
+		expect(extensionAgentEnds).toEqual(["agent_end"]);
 		const endEvents = events.filter(event => event.type === "auto_compaction_end");
 		expect(endEvents).toHaveLength(1);
 		expect(endEvents[0]).toMatchObject({ type: "auto_compaction_end", action: "handoff", aborted: false });
@@ -1172,18 +1173,18 @@ describe("AgentSession handoff", () => {
 
 	it("yields the run when a threshold auto-handoff after a final answer schedules no continuation", async () => {
 		// Auto-continue is enabled, but a terminal text answer never auto-continues
-		// after compaction. The settle must say so: a non-yielded agent_end here
-		// promises a run that never starts, so RPC hosts wait forever for the
-		// prompt's `prompt_result`.
-		const { mock, agentEndWillContinue, generateHandoffSpy } = await createThresholdHandoffSession(true);
+		// after compaction. The run must end: a pause here promises a loop that never
+		// starts, so RPC hosts wait forever for the prompt's `prompt_result`.
+		const { mock, extensionAgentEnds, generateHandoffSpy } = await createThresholdHandoffSession(true);
 		await session.prompt("Trigger threshold handoff");
+		await session.waitForRunEnd();
 
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(1);
 		expect(mock.calls).toHaveLength(1);
-		expect(agentEndWillContinue).toEqual([undefined]);
-		expect(events.filter(event => event.type === "agent_end")).toEqual([
-			expect.objectContaining({ type: "agent_end", isTerminal: true, yielded: true }),
+		expect(extensionAgentEnds).toEqual(["agent_end"]);
+		expect(events.filter(event => event.type === "agent_end" || event.type === "agent_pause")).toEqual([
+			expect.objectContaining({ type: "agent_end" }),
 		]);
 	});
 	it("resets to the base system prompt before generating a handoff", async () => {
@@ -1436,5 +1437,61 @@ describe("AgentSession handoff", () => {
 
 		const result = await session.handoff(undefined, { autoTriggered: true });
 		expect(result).toBeUndefined();
+	});
+
+	it("rejects a final answer instead of committing it as a manual handoff", async () => {
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(
+			"I've read both files completely. Here are the exact texts.",
+		);
+
+		await expect(session.handoff()).rejects.toThrow("Handoff generation produced an invalid document");
+		expect(sessionManager.getBranch().some(entry => entry.type === "compaction")).toBe(false);
+	});
+
+	it("accepts a handoff document whose Goal section follows a title line", async () => {
+		const handoffText = "# Handoff\n\n## Goal\nContinue from here";
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
+
+		const result = await session.handoff();
+
+		expect(result?.document).toBe(handoffText);
+		const compaction = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
+		expect(compaction.summary).toContain(handoffText);
+	});
+
+	it("falls back from malformed auto-handoff to soft compaction", async () => {
+		cfgCompactionMethodOrder.set(session.settings, ["handoff", "soft"]);
+		cfgCompactionHandoffSaveToDisk.set(session.settings, true);
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(
+			"Let me find where the message was created.",
+		);
+		const lastEntryId = sessionManager.getBranch().at(-1)?.id;
+		if (!lastEntryId) throw new Error("Expected seeded history");
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: "original goal", timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: compactionModule.DEFAULT_COMPACTION_SETTINGS,
+		});
+		vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "## Goal\nFollow the original read-only request",
+			shortSummary: undefined,
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+
+		await session.runIdleCompaction();
+
+		const compaction = sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+		expect(compaction).toMatchObject({ type: "compaction", method: "soft" });
+		if (compaction?.type !== "compaction") throw new Error("Expected soft compaction");
+		expect(compaction.summary).toContain("Follow the original read-only request");
+		expect(compaction.summary).not.toContain("Let me find");
 	});
 });

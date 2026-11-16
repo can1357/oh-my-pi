@@ -97,7 +97,7 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
-import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -135,7 +135,7 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import { recordStepsSent, type StepProgress } from "./steps";
+import { recordStepsSent, type StepProgress, type StepReportRoute, sendStepReport } from "./steps";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
@@ -145,8 +145,6 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "./types";
-import { seanceIsolationOptions } from "./seance-policy";
-import type { PreparedSeanceSession } from "./seance";
 import {
 	type AgentProgress,
 	type SingleResult,
@@ -162,6 +160,7 @@ import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly"
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
+	cfgTaskAgentPrewalkAuto,
 	cfgTaskMaxEffort,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
@@ -179,7 +178,10 @@ import {
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
+	cfgPrewalkAutoTarget,
 } from "../session/settings";
+import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
+import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
@@ -260,9 +262,13 @@ function formatSalvageSnippet(text: string, maxLength = 500): string {
 	return flattened.length > maxLength ? `${flattened.slice(0, maxLength - 1)}…` : flattened;
 }
 
-/** Agent event types to forward for progress tracking. */
-const agentEventTypes = new Set<AgentEvent["type"]>([
+/** Events the run monitor tracks: the core loop events plus the session's `agent_pause`. */
+type MonitoredEvent = AgentEvent | Extract<AgentSessionEvent, { type: "agent_pause" }>;
+
+/** Event types the run monitor tracks for progress and output. */
+const monitoredEventTypes = new Set<MonitoredEvent["type"]>([
 	"agent_start",
+	"agent_pause",
 	"agent_end",
 	"turn_start",
 	"turn_end",
@@ -274,8 +280,8 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 	"tool_execution_end",
 ]);
 
-const isAgentEvent = (event: AgentSessionEvent): event is AgentEvent =>
-	agentEventTypes.has(event.type as AgentEvent["type"]);
+const isMonitoredEvent = (event: AgentSessionEvent): event is MonitoredEvent =>
+	monitoredEventTypes.has(event.type as MonitoredEvent["type"]);
 
 function normalizeModelPatterns(value: string | string[] | undefined): string[] {
 	if (!value) return [];
@@ -459,7 +465,6 @@ export interface ExecutorOptions {
 	 */
 	steps?: string[];
 	assignment?: string;
-	preparedSession?: PreparedSeanceSession;
 	/** Shared background from the task call (`task.batch`), rendered into the subagent's system prompt. */
 	context?: string;
 	/**
@@ -1377,7 +1382,7 @@ interface SubagentRunMonitor {
 	 */
 	yieldInvalidatedByAsync(): boolean;
 	/**
-	 * True once a terminal yield with pending owner async work stopped the
+	 * True once a terminal yield while something could still wake the run stopped the
 	 * free-running turn (recoverable, like a budget stop) instead of
 	 * terminating the run. Cleared when {@link waitForYieldTurnStop} settles.
 	 */
@@ -1386,7 +1391,7 @@ interface SubagentRunMonitor {
 	waitForYieldTurnStop(): Promise<void>;
 	/**
 	 * While held, a successful terminal `yield` stops the free-running turn
-	 * (like a yield with owner async work pending) instead of ending the run,
+	 * (like a yield while something can still wake the run) instead of ending the run,
 	 * so the driver can send the next step. A failed yield still ends it.
 	 */
 	holdForSteps(held: boolean): void;
@@ -1436,6 +1441,35 @@ function isAsyncResultInjection(message: AgentMessage | undefined): boolean {
 	return message?.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE;
 }
 
+/**
+ * Judges one assignment for `task.agentPrewalkAuto`. False on a non-arming or
+ * failed judgment: the spawn then runs without prewalk. An abort still throws.
+ */
+async function judgeSubagentAutoPrewalk(
+	request: string,
+	agentName: string,
+	deps: NativeJudgmentDeps,
+): Promise<boolean> {
+	let decision: AutoPrewalkDecision | undefined;
+	try {
+		decision = await classifyAutoPrewalk({ request, history: [] }, deps);
+	} catch (error) {
+		if (deps.signal?.aborted) throw error;
+		logger.debug("Subagent auto-prewalk judgment failed; skipping prewalk", {
+			agent: agentName,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return false;
+	}
+	if (decision?.arm) return true;
+	logger.debug("Subagent auto-prewalk judgment did not arm; skipping prewalk", {
+		agent: agentName,
+		route: decision?.route,
+		prewalkProbability: decision?.probabilities.prewalk,
+	});
+	return false;
+}
+
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const {
 		index,
@@ -1476,6 +1510,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 	const outputChunks: string[] = [];
 	const finalOutputChunks: string[] = [];
+	/** The last stopped loop reported its messages on `agent_pause` and no loop started since. */
+	let pausedLoopCollected = false;
 	const RECENT_OUTPUT_TAIL_BYTES = 8 * 1024;
 	let recentOutputTail = "";
 	let recentOutputDirty = false;
@@ -1617,14 +1653,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		terminalError ??= message;
 		requestAbort("terminate");
 	};
-	// Yield turn-stop: a terminal yield recorded while owner async work is
-	// still pending is a scheduling pause, not run completion. Stop the
+	// Yield turn-stop: a terminal yield recorded while something can still
+	// wake the run (an owned background job, a live child agent, a queued peer
+	// message) is a scheduling pause, not run completion. Stop the
 	// free-running turn exactly like a budget stop (session abort, monitor
-	// signal untouched) so driveSessionToResult's quiescence barrier can settle
-	// the jobs, fold their results in, and demand a fresh yield. Terminating
-	// here instead would abort the run signal and make the barrier
-	// unreachable, completing the run with a payload that predates the job
-	// outcomes.
+	// signal untouched) so driveSessionToResult's quiescence barrier can wait
+	// for the run to end, fold the delivered results in, and demand a fresh
+	// yield. Terminating here instead would abort the run signal and make the
+	// barrier unreachable, completing the run with a payload that predates the
+	// job outcomes.
 	const requestYieldTurnStop = () => {
 		if (yieldTurnStopRequested || abortSent || resolved) return;
 		yieldTurnStopRequested = true;
@@ -1637,9 +1674,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				})
 			: Promise.resolve();
 	};
-
-	/** Owner async work that can still re-wake the run (quiescence barrier predicate). */
-	const sessionHasPendingAsyncWork = (): boolean => activeSession?.hasPendingAsyncWork?.() ?? false;
 
 	// Handle abort signal
 	if (signal) {
@@ -1932,7 +1966,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			});
 	};
 
-	const processEvent = (event: AgentEvent) => {
+	const processEvent = (event: MonitoredEvent) => {
 		if (resolved) return;
 		const now = Date.now();
 		let flushProgress = false;
@@ -2098,11 +2132,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
 					endsRun = wantsTerminate || forcedFinalYield;
 					if (endsRun) {
-						if (event.toolName === "yield" && (sessionHasPendingAsyncWork() || (stepsHeld && !yieldFailed))) {
-							// Terminal yield with owner jobs still pending, or a step's
-							// yield while later steps remain: park the run behind the
-							// quiescence barrier and the next step instead of completing
-							// it (see requestYieldTurnStop).
+						if (
+							event.toolName === "yield" &&
+							(activeSession?.wakeSources !== undefined || (stepsHeld && !yieldFailed))
+						) {
+							// Terminal yield while something can still wake the run, or
+							// a step's yield while later steps remain: park the run behind
+							// the quiescence barrier and the next step instead of
+							// completing it (see requestYieldTurnStop).
 							requestYieldTurnStop();
 						} else {
 							requestAbort("terminate");
@@ -2265,20 +2302,34 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					// Accumulate tokens for progress display
 					progress.tokens += getUsageTokens(messageUsage);
 					// Track latest per-turn context size so the UI can show
-					// "current context", not just cumulative billing volume.
+					// "current context", not just cumulative billing volume. A
+					// segmented provider response bills every continuation request,
+					// so `totalTokens` overshoots the occupied window; the reported
+					// `contextTokens` (or billable total minus orchestration) is the
+					// same accounting the session's own context estimate uses.
 					if (role === "assistant") {
-						const perTurnTotal = getNumberField(messageUsage, "totalTokens");
-						if (perTurnTotal !== undefined && perTurnTotal > 0) {
-							progress.contextTokens = perTurnTotal;
+						const occupied = usageContextTokens(messageUsage);
+						if (occupied > 0) {
+							progress.contextTokens = occupied;
 						}
 					}
 				}
 				break;
 			}
 
-			case "agent_end":
-				// Extract final content from assistant messages only (not user prompts)
-				if (event.messages && Array.isArray(event.messages)) {
+			case "agent_start":
+				pausedLoopCollected = false;
+				break;
+
+			case "agent_pause":
+			case "agent_end": {
+				// Each stopped loop reports its messages on `agent_pause`, or on the
+				// run's `agent_end` when it was the last. A run whose wake sources
+				// vanished after a pause ends with that paused loop's messages again.
+				const resent = event.type === "agent_end" && pausedLoopCollected;
+				pausedLoopCollected = event.type === "agent_pause";
+				// Extract final content from assistant messages only (not user prompts).
+				if (!resent && Array.isArray(event.messages)) {
 					for (const msg of event.messages) {
 						if ((msg as { role?: string })?.role !== "assistant") continue;
 						const messageContent = getMessageContent(msg);
@@ -2293,6 +2344,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 				flushProgress = true;
 				break;
+			}
 		}
 
 		scheduleProgress(flushProgress);
@@ -2367,7 +2419,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				scheduleProgress(true);
 				return;
 			}
-			if (isAgentEvent(event)) {
+			if (isMonitoredEvent(event)) {
 				// Breadcrumb the synchronous subagent event handling so the loop
 				// watchdog can attribute any block to this in-process subagent.
 				pushLoopPhase(`subagent:${id}`);
@@ -2535,6 +2587,24 @@ function resultDelivered(outcome: DriveOutcome, monitor: SubagentRunMonitor, str
 	return outcome.exitCode === 0 && !outcome.aborted && monitor.lastReportTurnText() !== undefined;
 }
 
+/** Every `yield` the run recorded, in call order. */
+function recordedYields(progress: AgentProgress): YieldItem[] {
+	return (progress.extractedToolData?.yield ?? []) as YieldItem[];
+}
+
+/**
+ * What the child delivered for a step: its yields from `firstYield` on, folded
+ * like a run's result, or without `yield` its final message. Undefined when it
+ * delivered no data.
+ */
+function stepReport(monitor: SubagentRunMonitor, structured: boolean, firstYield: number): string | undefined {
+	const lastTurn = monitor.lastReportTurnText();
+	if (!structured) return lastTurn;
+	const assembled = assembleYieldResult(recordedYields(monitor.progress).slice(firstYield), lastTurn);
+	if (!assembled || assembled.missingData) return undefined;
+	return typeof assembled.data === "string" ? assembled.data : JSON.stringify(assembled.data, null, 2);
+}
+
 const MAX_YIELD_RETRIES = 3;
 const MAX_PROMPT_DISPATCH_ATTEMPTS = 4;
 const PROMPT_DISPATCH_IDLE_TIMEOUT_MS = 5_000;
@@ -2580,9 +2650,11 @@ async function driveSessionToResult(
 		 * them); each later one is sent once the previous one was delivered.
 		 */
 		steps?: StepProgress;
+		/** Where what each prompt before the last delivered goes; unset, the reports go nowhere. */
+		stepReports?: StepReportRoute;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy, restore, steps } = options;
+	const { solutionSpace, onPromptBusy, restore, steps, stepReports } = options;
 	const structured = options.structured !== false;
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2681,6 +2753,8 @@ async function driveSessionToResult(
 		}
 	};
 
+	// Yields before this index belong to earlier steps (or an earlier turn).
+	let stepYieldStart = recordedYields(monitor.progress).length;
 	try {
 		if (steps && !restore) recordStepsSent(session.sessionManager, steps.sent, steps.prompts);
 		monitor.holdForSteps(steps !== undefined && steps.sent < steps.prompts.length);
@@ -2726,9 +2800,10 @@ async function driveSessionToResult(
 				// any chance of producing a yield.
 				const lastBeforeReminder = session.getLastAssistantMessage();
 				if (lastBeforeReminder?.stopReason === "error") break;
-				// A turn waiting on owner work is a scheduling pause. The outer
-				// barrier settles that work before a reminder counts against it.
-				if (!budgetStop && session.hasPendingAsyncWork()) break;
+				// A run still open once its loop stopped is a scheduling pause:
+				// something can wake it. The outer barrier waits for the run to
+				// end before a reminder counts against it.
+				if (!budgetStop && session.isRunActive) break;
 				try {
 					retryCount++;
 					const reminder = prompt.render(submitReminderTemplate, {
@@ -2778,28 +2853,29 @@ async function driveSessionToResult(
 		};
 
 		// Yield ladder + quiescence barrier (structured concurrency), one
-		// loop: a turn without a yield first settles pending owner work, then
+		// loop: a turn without a yield first waits for its run to end, then
 		// spends reminders only after there is nothing left to wait for.
-		// A yield also waits for quiescence; each delivered result supersedes
-		// the previous yield and demands a fresh one.
+		// A yield also waits for the run to end; each delivered result
+		// supersedes the previous yield and demands a fresh one.
 		//
-		// A final yield with owner background jobs still running or
-		// undelivered is a scheduling pause, not run completion — the monitor
-		// parks such a yield with a recoverable turn-stop instead of
-		// terminating the run. Jobs are settled and their results folded into
-		// the run as async-result follow-up turns; each delivered result
-		// supersedes the yield it postdates, so the reminder ladder re-runs
-		// to demand a fresh yield that accounts for it. Only a yield with no
-		// pending owner work left is terminal — the isolation runner captures
-		// and destroys the worktree right after this run resolves, so no
-		// owner job that could still re-wake the session may outlive it.
+		// A final yield while something can still wake the run (an owned
+		// background job, a live child agent, a queued peer message) is a
+		// scheduling pause, not run completion — the monitor parks such a
+		// yield with a recoverable turn-stop instead of terminating the run.
+		// The session delivers job results into the run as async-result
+		// follow-up turns and ends the run once nothing can wake it anymore;
+		// each delivered result supersedes the yield it postdates, so the
+		// reminder ladder re-runs to demand a fresh yield that accounts for it.
+		// Only a yield whose run is over is terminal — the isolation runner
+		// captures and destroys the worktree right after this run resolves, so
+		// no owner job that could still re-wake the session may outlive it.
 		// Suppressed (acknowledged / wait-watched) jobs never re-wake the run
 		// and are reaped at teardown.
 		//
 		// Before blocking on running jobs after a yield, tell the model ONCE
 		// what it is waiting on so it can stand by or cancel the job. A turn
-		// without a yield settles its pending jobs without an extra notice.
-		// Runs that exhaust the ladder with no pending work, or hit a terminal
+		// without a yield waits for its run to end without an extra notice.
+		// Runs that exhaust the ladder once their run ended, or hit a terminal
 		// model error, skip the barrier; teardown reaps their jobs. Each step
 		// settles the same way before the next one is sent.
 		const settle = async (): Promise<void> => {
@@ -2811,19 +2887,19 @@ async function driveSessionToResult(
 						!monitor.yieldCalled() &&
 						(monitor.budgetStopRequested() ||
 							session.getLastAssistantMessage()?.stopReason === "error" ||
-							!session.hasPendingAsyncWork())
+							!session.isRunActive)
 					)
 						break;
 				}
 				// Let the parked yield's turn-stop session abort settle before
 				// prompting again (mirrors waitForBudgetStop).
 				await awaitAbortable(monitor.waitForYieldTurnStop());
-				if (!session.hasPendingAsyncWork()) {
+				if (!session.isRunActive) {
 					if (monitor.yieldCalled()) break;
 					continue;
 				}
 				if (!monitor.yieldCalled()) {
-					await awaitAbortable(session.settleAsyncWork());
+					await awaitAbortable(session.waitForRunEnd());
 					continue;
 				}
 				if (!asyncPendingNoticeSent) {
@@ -2851,9 +2927,9 @@ async function driveSessionToResult(
 						continue;
 					}
 				}
-				await awaitAbortable(session.settleAsyncWork());
-				// Results delivered during the settle invalidated the recorded
-				// yield: the next iteration's ladder demands a fresh one.
+				await awaitAbortable(session.waitForRunEnd());
+				// Results delivered before the run ended invalidated the
+				// recorded yield: the next iteration's ladder demands a fresh one.
 			}
 		};
 		await settle();
@@ -2867,6 +2943,11 @@ async function driveSessionToResult(
 				? monitor.yieldCalled()
 				: session.getLastAssistantMessage()?.stopReason === "stop";
 			if (!delivered || abortSignal.aborted || monitor.budgetStopRequested()) break;
+			if (stepReports) {
+				const report = stepReport(monitor, structured, stepYieldStart);
+				if (report?.trim()) await awaitAbortable(sendStepReport(stepReports, report));
+			}
+			stepYieldStart = recordedYields(monitor.progress).length;
 			monitor.holdForSteps(next + 1 < steps.prompts.length);
 			monitor.beginStep();
 			resetYieldTurnState(session.getToolByName("yield"));
@@ -3015,7 +3096,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// the narration of earlier turns.
 	const structured = args.structured !== false;
 	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
-	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
+	const yieldItems = recordedYields(progress);
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
 	pushLoopPhase(`subagent:${id}`);
@@ -3051,7 +3132,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	) {
 		rawOutput = `[cancelled after ${progress.requests} req, ${progress.tokens} tok — last activity: "${formatSalvageSnippet(salvageText)}"]`;
 	}
-	const lastYield = yieldItems?.[yieldItems.length - 1];
+	const lastYield = yieldItems.at(-1);
 	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
 	const { abortedViaYield, hasYield } = finalized;
 	const { content: truncatedOutput, truncated } = truncateTail(rawOutput, {
@@ -4077,12 +4158,14 @@ async function driveFollowUpTurn(
 	// As in a first run: this turn's monitor would take a wake turn's answer
 	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
 	const releaseIrcWakes = session.holdIrcWakes();
+	const parentId = AgentRegistry.global().get(id)?.parentId;
 	try {
 		try {
 			outcome = await driveSessionToResult(session, monitor, message, {
 				structured,
 				restore: options.restore,
 				steps: options.steps,
+				stepReports: parentId ? { from: id, to: parentId } : undefined,
 				onPromptBusy: async () => {
 					attemptUnsubscribe();
 					logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
@@ -4181,7 +4264,6 @@ interface SubagentSessionSpec {
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
 	>;
-	preparedSession?: Pick<PreparedSeanceSession, "promptSuffix">;
 	prompt: SubagentPromptInputs;
 }
 
@@ -4257,8 +4339,7 @@ function buildSubagentSessionOptions(
 			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
 			// `<project-context>` block so spawns of the same agent share the static
 			// prompt prefix as a cache hit.
-			const seancePrompt = spec.preparedSession?.promptSuffix(inputs.model);
-			return [...defaultPrompt, subagentPrompt, ...(seancePrompt ? [seancePrompt] : [])];
+			return [...defaultPrompt, subagentPrompt];
 		},
 	};
 }
@@ -4429,13 +4510,9 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		capture.spec.prompt.reviving = true;
 		// A session-local switch since spawn (a prewalk handoff) owns the model and effort: the
 		// transcript restores the effort, and the spawn selection only backs the model up when it is
-		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent. A seance
-		// fork's selections belong to its source run, never to the consult.
+		// unavailable. The spawn's prewalk stays configured; the coordinator sees it was spent.
 		// A per-call worker never switches models, so its warm revive never prepends a session-local switch.
-		const sessionLocalModel =
-			capture.spec.preparedSession || capture.perCallModel
-				? undefined
-				: reopened.getSessionLocalModelChange()?.model;
+		const sessionLocalModel = capture.perCallModel ? undefined : reopened.getSessionLocalModelChange()?.model;
 		try {
 			try {
 				const options = buildSubagentSessionOptions(
@@ -4555,7 +4632,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		signal,
 		onProgress,
 	} = options;
-	const preparedSession = options.preparedSession;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const structured = options.structured !== false;
 	const startTime = Date.now();
@@ -4603,12 +4679,10 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	// spawn's owner is its parent subagent) and lands on the child's
 	// `modelRoles.advisor`. The expanded pattern is also what the session
 	// contract persists, so cold revival under root settings reuses it.
-	const advisorSelection = preparedSession
-		? undefined
-		: resolveAgentAdvisorSelection({
-				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-				agentAdvisor: agent.advisor,
-			});
+	const advisorSelection = resolveAgentAdvisorSelection({
+		settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+		agentAdvisor: agent.advisor,
+	});
 	const advisorRolePattern = advisorSelection?.model
 		? resolveAgentAdvisorRolePattern(advisorSelection.model, settings)
 		: undefined;
@@ -4634,7 +4708,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	const { softRequestBudget, softRequestBudgetNotice } = softRequestBudgetFor(agent.name, settings);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
-	const restrictToolNames = options.restrictToolNames === true || preparedSession !== undefined;
+	const restrictToolNames = options.restrictToolNames === true;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 
 	// Add tools if specified. Unstructured runs never get `yield`, even when
@@ -4672,7 +4746,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	}
 	// Inbound steering works without messaging; outbound peer coordination requires write.
 	const ircEnabled =
-		!preparedSession &&
 		options.enableIrc !== false &&
 		isIrcEnabled(subagentSettings, childDepth) &&
 		(toolNames === undefined || toolNames.includes("write"));
@@ -4725,10 +4798,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	let releaseIrcWakes: (() => void) | undefined;
 	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
-	let pendingSessionManager: Promise<SessionManager> | undefined;
-	let openedSessionManager: SessionManager | undefined;
-	let untrackedSession: AgentSession | undefined;
-	let pendingSessionDisposal: Promise<void> | undefined;
 	const wakeOptions: IrcWakeTurnMonitorOptions = {
 		id,
 		index,
@@ -4954,70 +5023,16 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				effortLevel ?? (explicitThinkingLevel ? explicitLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
-			const fork = preparedSession?.fork;
-			if (fork && !subtaskSessionFile) {
-				throw new Error("The prepared session fork requires a persisted child session file.");
-			}
-			const sessionManagerPromise = fork
-				? SessionManager.forkFrom(fork.sourceFile, effectiveCwd, undefined, undefined, {
-						seance: true,
+			const sessionManagerPromise = sessionFile
+				? SessionManager.open(sessionFile, undefined, undefined, {
+						initialCwd: effectiveCwd,
+						parentSession: options.sessionFile ?? undefined,
 						suppressBreadcrumb: true,
-						sessionFile: subtaskSessionFile,
-						resetInheritedCost: true,
-						repairInterruptedTail: true,
 					})
-				: sessionFile
-					? SessionManager.open(sessionFile, undefined, undefined, {
-							initialCwd: effectiveCwd,
-							parentSession: options.sessionFile ?? undefined,
-							suppressBreadcrumb: true,
-						})
-					: Promise.resolve(SessionManager.inMemory(effectiveCwd));
-			if (preparedSession) pendingSessionManager = sessionManagerPromise;
+				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
-			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
-			// `task.agentPrewalk` settings override hands the subagent off to a
-			// fast/cheap target at its first edit/write — the same mechanism as the
-			// session-level --prewalk. The bundled generic `task` agent has no
-			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn. A per-call
-			// worker never switches models, so it never prewalks.
-			const perCallModelGrants = options.perCallModelGrants;
-			let prewalk: Prewalk | undefined;
-			const prewalkPattern =
-				preparedSession || perCallModelGrants
-					? undefined
-					: resolveAgentPrewalkPattern({
-							settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-							agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-						});
-			if (prewalkPattern) {
-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
-					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-						warning: resolvedPrewalk.warning,
-					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
-					// Same model AND same effective thinking level: switching would only
-					// inject the plan/checklist nudges for no gain — skip. An effort-only
-					// delta on the same model still arms (it is a real cheapening hand-off).
-					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-					});
-				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
-				}
-			}
-
-			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
-			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -5041,6 +5056,76 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							conversationId: undefined,
 						}
 					: undefined;
+
+			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
+			// `task.agentPrewalk` settings override hands the subagent off to a
+			// fast/cheap target at its first edit/write — the same mechanism as the
+			// session-level --prewalk. The bundled generic `task` agent has no
+			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
+			// Resolution failures skip prewalk instead of failing the spawn. A per-call
+			// worker never switches models, so it never prewalks.
+			// `task.agentPrewalkAuto` (same "on"/"off"/pattern grammar; "on" targets
+			// `prewalk.autoTarget`) asks the judge per assignment when nothing arms
+			// unconditionally. The judgment runs only after the target is known to be
+			// usable; a non-arming or failed judgment leaves the spawn without prewalk.
+			const perCallModelGrants = options.perCallModelGrants;
+			let prewalk: Prewalk | undefined;
+			const judgmentUsage: JudgmentUsage[] = [];
+			const unconditionalPattern = perCallModelGrants
+				? undefined
+				: resolveAgentPrewalkPattern({
+						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+					});
+			const autoEntry =
+				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
+					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
+					: undefined;
+			const autoPattern = autoEntry
+				? resolveAgentPrewalkPattern({
+						settingsOverride: autoEntry,
+						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+					})
+				: undefined;
+			const prewalkPattern = unconditionalPattern ?? autoPattern;
+			if (prewalkPattern) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
+				const target = resolvedPrewalk.model;
+				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+						warning: resolvedPrewalk.warning,
+					});
+				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
+					// Same model AND same effective thinking level: switching would only
+					// inject the plan/checklist nudges for no gain — skip. An effort-only
+					// delta on the same model still arms (it is a real cheapening hand-off).
+					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+					});
+				} else {
+					const armed =
+						unconditionalPattern !== undefined ||
+						(await awaitAbortable(
+							judgeSubagentAutoPrewalk(assignment?.trim() || task, agent.name, {
+								settings,
+								registry: modelRegistry,
+								sessionModel: model,
+								sessionId: id,
+								signal: abortSignal,
+								onUsage: usage => judgmentUsage.push(usage),
+								telemetry: subagentTelemetry,
+							}),
+						));
+					if (armed) prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+				}
+			}
+
+			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
 			if (options.parentTelemetry && subagentAgentIdentity) {
 				const parentTelemetryHandle = resolveTelemetry(
@@ -5138,10 +5223,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					customTools: options.customTools,
 					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
-					// Seance isolation overrides every inherited field above in one place.
-					...(preparedSession ? seanceIsolationOptions(effectiveCwd) : {}),
 				},
-				preparedSession: preparedSession ? { promptSuffix: preparedSession.promptSuffix } : undefined,
 				prompt: {
 					id,
 					model: progress.resolvedModel,
@@ -5161,16 +5243,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
-			if (preparedSession) openedSessionManager = sessionManager;
-			if (options.parentArtifactManager && !preparedSession) {
+			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
 			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
 
-			// A seance fork inherits the source's model roles; they describe the
-			// source run, not this consult, so the consult still pins its own chain.
-			const hasExistingModelRole = !preparedSession && sessionManager.getLastModelChangeRole() !== undefined;
+			const hasExistingModelRole = sessionManager.getLastModelChangeRole() !== undefined;
 			// Subscribe before the builder mints proxies so a manager change during
 			// session startup is replayed on bind instead of lost.
 			const mcpFollower = mcpManager
@@ -5196,7 +5275,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					}),
 				);
 				({ session } = await awaitAbortable(sessionPromise));
-				if (preparedSession) untrackedSession = session;
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
 				// fallback, model switch) still finds it. Consumption is gated per
@@ -5212,16 +5290,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
 				// a cancelled subagent cannot leak them.
-				if (preparedSession) {
-					pendingSessionDisposal = sessionPromise
-						?.then(created => created.session.dispose())
-						.then(
-							() => {},
-							() => {},
-						);
-				} else {
-					void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
-				}
+				void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
 				throw err;
 			}
 			mcpFollower?.bind(session);
@@ -5237,10 +5306,16 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			) {
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
 			}
+			// Bill the auto-prewalk judgment to the child session it decided for, only now:
+			// an earlier entry would make the SDK treat this fresh session as resumed and
+			// skip persisting its starting model, effort and service tier.
+			const journalJudgment = journalJudgmentUsage(sessionManager);
+			if (journalJudgment) {
+				for (const usage of judgmentUsage) journalJudgment(usage);
+			}
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
-			if (preparedSession) untrackedSession = undefined;
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			const registry = AgentRegistry.global();
@@ -5270,7 +5345,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					spec: sessionSpec,
 					perCallModel: perCallModelGrants !== undefined,
 					settings: captureSubagentSettings(settings, subagentSettings),
-					parentArtifactManager: preparedSession ? undefined : options.parentArtifactManager,
+					parentArtifactManager: options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
 					wake: wakeOptions,
 					agentName: agent.name,
@@ -5409,6 +5484,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				solutionSpace: options.solutionSpace,
 				structured,
 				steps: options.steps?.length ? { prompts: options.steps, sent: 1 } : undefined,
+				stepReports: options.parentAgentId ? { from: id, to: options.parentAgentId } : undefined,
 			});
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
@@ -5498,7 +5574,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			const session = monitor.takeActiveSession();
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false && (!preparedSession || readyAt !== undefined)) {
+				if (options.keepAlive !== false) {
 					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
 				await finalizeSubagentLifecycle({
@@ -5506,7 +5582,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false && (!preparedSession || readyAt !== undefined),
+					keepAlive: options.keepAlive !== false,
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
@@ -5532,62 +5608,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						logger.warn("Subagent async job cleanup exceeded its deadline after session shutdown", {
 							id,
 							pendingJobIds: reap.pendingJobIds,
-						});
-					}
-				}
-			}
-			if (preparedSession && untrackedSession) {
-				const incompleteSession = untrackedSession;
-				untrackedSession = undefined;
-				const disposal = Promise.resolve().then(() => incompleteSession.dispose());
-				pendingSessionDisposal = disposal.then(
-					() => {},
-					() => {},
-				);
-				try {
-					await untilAborted(AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())), () => disposal);
-				} catch (cleanupError) {
-					if (Date.now() >= cleanupDeadlineAt) {
-						deferCleanup(disposal);
-					} else {
-						logger.warn("Incomplete subagent session disposal failed", {
-							id,
-							error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-						});
-					}
-				}
-			}
-			if (preparedSession && readyAt === undefined) {
-				const removeFailedFork = (async () => {
-					await pendingSessionDisposal;
-					if (deferredSessionShutdown) await deferredSessionShutdown;
-					let manager = openedSessionManager;
-					if (!manager && pendingSessionManager) {
-						manager = await pendingSessionManager.catch(() => undefined);
-					}
-					if (manager) {
-						const ownedSessionFile = manager.getSessionFile();
-						if (ownedSessionFile) await manager.dropSession(ownedSessionFile);
-					}
-				})().catch(cleanupError => {
-					logger.warn("Failed to remove incomplete prepared session fork", {
-						id,
-						sessionFile: openedSessionManager?.getSessionFile(),
-						error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-					});
-				});
-				try {
-					await untilAborted(
-						AbortSignal.timeout(Math.max(0, cleanupDeadlineAt - Date.now())),
-						() => removeFailedFork,
-					);
-				} catch (cleanupError) {
-					if (Date.now() >= cleanupDeadlineAt) {
-						deferCleanup(removeFailedFork);
-					} else {
-						logger.warn("Incomplete prepared session fork cleanup failed", {
-							id,
-							error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
 						});
 					}
 				}

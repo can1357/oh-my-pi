@@ -1,94 +1,44 @@
 [
-  {
-    "path": "packages/coding-agent/src/modes/interactive-mode.ts",
-    "stages": [
-      {
-        "mode": "100644",
-        "blob": "0fa02bd845823f2b1219fddfadfa8cc0d3ff2d0c",
-        "stage": 1
-      },
-      {
-        "mode": "100644",
-        "blob": "3e3b2c0aab67ecacbebceebc05088b796fc6b35f",
-        "stage": 2
-      },
-      {
-        "mode": "100644",
-        "blob": "582a2d347f9fcb30f6049ccbda051330615a928b",
-        "stage": 3
-      }
-    ],
-    "use": 2,
-    "patch": "interactive-mode.patch"
-  },
-  {
-    "path": "packages/coding-agent/src/session/binary-hot-reload.ts",
-    "stages": [
-      {
-        "mode": "100644",
-        "blob": "5c03c0609fe9cbf7172dafcc74490b18485625cc",
-        "stage": 1
-      },
-      {
-        "mode": "100644",
-        "blob": "0058811752e8391e95ddd92932ce38ad1ed35e04",
-        "stage": 3
-      }
-    ],
-    "use": 3
-  },
-  {
-    "path": "packages/coding-agent/src/session/omp-remote-target.ts",
-    "stages": [
-      {
-        "mode": "100644",
-        "blob": "4c38a8465bdacac833a2c3d9b726be12f977d645",
-        "stage": 1
-      },
-      {
-        "mode": "100644",
-        "blob": "0509074876e6dd2e2b584bccd7af65506a6e7f54",
-        "stage": 3
-      }
-    ],
-    "use": 3
-  },
-  {
-    "path": "packages/coding-agent/src/session/settings.ts",
-    "stages": [
-      {
-        "mode": "100644",
-        "blob": "9b4f407d976da71833ca1ebdeba18115d828b5e9",
-        "stage": 1
-      },
-      {
-        "mode": "100644",
-        "blob": "ba8c21871b9bc8a5cbba64048a56c33f4fc2f47e",
-        "stage": 2
-      },
-      {
-        "mode": "100644",
-        "blob": "46ee85adadf53c7468895fb6f1cde42d61e636b3",
-        "stage": 3
-      }
-    ],
-    "use": 2,
-    "patch": "settings.patch"
-  },
-  {
-    "path": "packages/coding-agent/test/session/binary-hot-reload.test.ts",
-    "stages": [
-      {
-        "mode": "100644",
-        "blob": "6c0fc08ff1886b5a8da013c99138de46d0d1cc4a",
-        "stage": 1
-      },
-      {
-        "mode": "100644",
-        "blob": "ccdaca0254647a9e2d16c7f7b34c0e1e6b65ce70",
-        "stage": 3
-      }
-    ],
-    "use": 3
-  }
+	{
+		"path": "packages/coding-agent/src/modes/interactive-mode.ts",
+		"stages": [
+			{ "mode": "100644", "blob": "928c3ba5d23dbb9972dea5477e7e88141236aeb8", "stage": 1 },
+			{ "mode": "100644", "blob": "01e11cfe30c2b7fc24f8bac2c44278e284d30060", "stage": 2 },
+			{ "mode": "100644", "blob": "919c7dcab2799d87f1b5a4e0946af6e3d02a8e3c", "stage": 3 }
+		],
+		"use": 3
+	},
+	{
+		"path": "packages/coding-agent/src/session/binary-hot-reload.ts",
+		"stages": [
+			{ "mode": "100644", "blob": "5c03c0609fe9cbf7172dafcc74490b18485625cc", "stage": 1 },
+			{ "mode": "100644", "blob": "0058811752e8391e95ddd92932ce38ad1ed35e04", "stage": 3 }
+		],
+		"use": 3
+	},
+	{
+		"path": "packages/coding-agent/src/session/omp-remote-target.ts",
+		"stages": [
+			{ "mode": "100644", "blob": "4c38a8465bdacac833a2c3d9b726be12f977d645", "stage": 1 },
+			{ "mode": "100644", "blob": "0509074876e6dd2e2b584bccd7af65506a6e7f54", "stage": 3 }
+		],
+		"use": 3
+	},
+	{
+		"path": "packages/coding-agent/src/session/settings.ts",
+		"stages": [
+			{ "mode": "100644", "blob": "9b4f407d976da71833ca1ebdeba18115d828b5e9", "stage": 1 },
+			{ "mode": "100644", "blob": "ba8c21871b9bc8a5cbba64048a56c33f4fc2f47e", "stage": 2 },
+			{ "mode": "100644", "blob": "46ee85adadf53c7468895fb6f1cde42d61e636b3", "stage": 3 }
+		],
+		"use": 3
+	},
+	{
+		"path": "packages/coding-agent/test/session/binary-hot-reload.test.ts",
+		"stages": [
+			{ "mode": "100644", "blob": "6c0fc08ff1886b5a8da013c99138de46d0d1cc4a", "stage": 1 },
+			{ "mode": "100644", "blob": "ccdaca0254647a9e2d16c7f7b34c0e1e6b65ce70", "stage": 3 }
+		],
+		"use": 3
+	}
 ]

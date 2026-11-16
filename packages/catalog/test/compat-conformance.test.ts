@@ -35,6 +35,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// (otariModelManagerOptions discovers it live per key), so no rows are
 	// frozen into the bundled catalog.
 	"otari",
+	// Modal's roster is deployment- and credential-scoped
+	// (modalModelManagerOptions discovers it live per token plus endpoint),
+	// so no rows are frozen into the bundled catalog.
+	"modal",
 	// Clef judges are a `bundle="always"` KDL seed that
 	// cloudflareWorkersAiModelManagerOptions serves at runtime; the bundled
 	// catalog gains the rows at the next regeneration.

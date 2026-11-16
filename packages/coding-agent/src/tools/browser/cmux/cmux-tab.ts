@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { JsRuntime } from "../../../eval/js/shared/runtime";
-import { formatScreenshot, resizeImage } from "../../../utils/image-resize";
+import { readImageHeaderDimensions, resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
 import { throwIfAborted } from "../../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -34,6 +34,7 @@ import {
 	historyBackInPage,
 	historyForwardInPage,
 	locationHrefInPage,
+	parseUrlPattern,
 	pushStateInPage,
 	reloadInPage,
 } from "../navigation";
@@ -47,6 +48,7 @@ import type {
 	NetworkRouteDescription,
 	NetworkRouteOptions,
 } from "../network";
+import { urlMatcher } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import { assertTabPressArgs } from "../tab-arguments";
 import { readFilePayloads } from "../upload-files";
@@ -71,12 +73,14 @@ import {
 	createPngDiff,
 	type DiffScreenshotOptions,
 	type DiffScreenshotResult,
+	emitScreenshot,
 	type PdfOptions,
 	type ScreenshotOptions,
 	screenshotThreshold,
 } from "../screenshot";
 import type { InProcessRunContext, InProcessRunTab } from "../in-process-run";
-import type { Observation, ReadyInfo, ScreenshotResult, SessionSnapshot } from "../tab-protocol";
+import { PointerSpace } from "../pointer-space";
+import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
 import {
 	type CmuxEvalResult,
 	type CmuxGeometry,
@@ -103,7 +107,7 @@ interface ObserveOptions {
 }
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
-type DragTarget = string | { readonly x: number; readonly y: number };
+type DragTarget = string | { readonly x: number; readonly y: number; readonly css?: boolean };
 type SelectorKind =
 	| "css"
 	| "ref"
@@ -472,6 +476,8 @@ export class CmuxTab implements InProcessRunTab {
 	#ariaSnapshotBaselines = new Map<string, AriaSnapshotBaseline>();
 	#lastTitle: string | undefined;
 	#lastViewport: ReadyInfo["viewport"] = DEFAULT_VIEWPORT;
+	/** What `clickAt`, `mouseMove` and `drag` points mean: CSS pixels, or positions on the last scaled screenshot. */
+	readonly #pointerSpace = new PointerSpace();
 	readonly #emulationState: BrowserEmulateOptions = {};
 	#runContext: InProcessRunContext | undefined;
 	#runtime: JsRuntime | undefined;
@@ -911,10 +917,11 @@ export class CmuxTab implements InProcessRunTab {
 		})()`);
 	}
 
-	async mouseMove(x: number, y: number, opts?: { steps?: number }): Promise<void> {
+	async mouseMove(x: number, y: number, opts?: { steps?: number; css?: boolean }): Promise<void> {
 		void opts?.steps;
+		const to = this.#pointerSpace.toViewport({ x, y, css: opts?.css });
 		await this.#evalScript(`(() => {
-			const point = ${JSON.stringify({ x, y })};
+			const point = ${JSON.stringify(to)};
 			globalThis.__ompMousePoint = point;
 			const target = document.elementFromPoint(point.x, point.y) || document.body;
 			target.dispatchEvent(new MouseEvent("mousemove", {
@@ -935,8 +942,9 @@ export class CmuxTab implements InProcessRunTab {
 		await this.#evalScript(this.#mouseTransitionScript("mouseup", opts?.button));
 	}
 
-	async clickAt(x: number, y: number, opts?: { button?: string; clickCount?: number }): Promise<void> {
-		const args = { x, y, button: opts?.button ?? "left", clickCount: opts?.clickCount ?? 1 };
+	async clickAt(x: number, y: number, opts?: { button?: string; count?: number; css?: boolean }): Promise<void> {
+		const point = this.#pointerSpace.toViewport({ x, y, css: opts?.css });
+		const args = { ...point, button: opts?.button ?? "left", clickCount: opts?.count ?? 1 };
 		await this.#evalScript(`(() => {
 			const args = ${JSON.stringify(args)};
 			const target = document.elementFromPoint(args.x, args.y) || document.body;
@@ -1098,52 +1106,25 @@ export class CmuxTab implements InProcessRunTab {
 			cssWidth = typeof answer?.value === "number" && answer.value > 0 ? answer.value : undefined;
 		}
 		const result = await this.#captureScreenshotPng(context.timeoutMs);
-		const buffer = Buffer.from(result.png_base64, "base64");
-		const captureMime = "image/png";
-		const resized = await resizeImage(
-			{ type: "image", data: result.png_base64, mimeType: captureMime },
+		const bytes = Buffer.from(result.png_base64, "base64");
+		const pixelWidth = readImageHeaderDimensions(bytes)?.width;
+		return await emitScreenshot(
 			{
-				maxWidth: 1024,
-				maxHeight: 1024,
-				maxBytes: 150 * 1024,
-				jpegQuality: 70,
-				excludeWebP: context.session.excludeWebP,
+				bytes,
+				mimeType: "image/png",
+				area: "viewport",
+				scale: cssWidth && pixelWidth ? pixelWidth / cssWidth : undefined,
+				silent: opts.silent,
+				notes: captureNotes.length > 0 ? [`[cmux surface: ${captureNotes.join("; ")}]`] : undefined,
 			},
+			{
+				session: context.session,
+				output: context.output,
+				screenshots: context.screenshots,
+				pointer: this.#pointerSpace,
+			},
+			context.signal,
 		);
-		const saveFullRes = !!context.session.browserScreenshotDir;
-		const savedBuffer = saveFullRes ? buffer : Buffer.from(resized.buffer);
-		const savedMimeType = saveFullRes ? captureMime : resized.mimeType;
-		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-		const dest = context.session.browserScreenshotDir
-			? path.join(
-					context.session.browserScreenshotDir,
-					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
-		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-		await Bun.write(dest, savedBuffer);
-		const info: ScreenshotResult = {
-			dest,
-			mimeType: savedMimeType,
-			bytes: savedBuffer.length,
-			width: resized.width,
-			height: resized.height,
-		};
-		context.screenshots.push(info);
-		if (!opts.silent) {
-			const lines = formatScreenshot({
-				saveFullRes,
-				dest,
-				resized,
-				capture: { area: "viewport", scale: cssWidth && resized.originalWidth / cssWidth },
-			});
-			if (captureNotes.length > 0) {
-				lines.push(`[cmux surface: ${captureNotes.join("; ")}]`);
-			}
-			context.output.push({ type: "text", text: lines.join("\n") });
-			context.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-		}
-		return dest;
 	}
 
 	async diffScreenshot(baselinePath: string, opts: DiffScreenshotOptions = {}): Promise<DiffScreenshotResult> {
@@ -1189,10 +1170,11 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string> {
+		const resolved = parseUrlPattern(pattern);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const signal = this.#runContext?.signal;
-		if (typeof pattern === "string") {
-			await this.#request("browser.wait", { url_contains: pattern, timeout_ms: timeoutMs }, timeoutMs, signal);
+		if (typeof resolved === "string") {
+			await this.#request("browser.wait", { url_contains: resolved, timeout_ms: timeoutMs }, timeoutMs, signal);
 			const result = (await this.#request("browser.url.get", {}, timeoutMs, signal)) as CmuxUrlGetResult;
 			if (typeof result.url === "string" && result.url.length > 0) {
 				this.#lastUrl = result.url;
@@ -1209,11 +1191,12 @@ export class CmuxTab implements InProcessRunTab {
 			)) as CmuxUrlGetResult;
 			if (typeof result.url === "string" && result.url.length > 0) {
 				this.#lastUrl = result.url;
-				if (pattern.test(result.url)) return result.url;
+				resolved.lastIndex = 0;
+				if (resolved.test(result.url)) return result.url;
 			}
 			await untilAborted(signal, () => Bun.sleep(200));
 		}
-		throw new ToolError(`tab.waitForUrl() timed out after ${timeoutMs}ms`);
+		throw new ToolError(`tab.waitForUrl() timed out after ${timeoutMs}ms: the URL is ${this.#lastUrl}`);
 	}
 
 	/** Init scripts require CDP document-start registration. */
@@ -1622,16 +1605,18 @@ export class CmuxTab implements InProcessRunTab {
 		const signal = this.#runContext?.signal;
 		await this.#installResponseObserver();
 		const startId = await this.#responseCursor();
+		let test: (response: CmuxResponse) => boolean | Promise<boolean>;
+		if (typeof pattern === "function") test = pattern;
+		else {
+			const matches = urlMatcher(pattern);
+			test = response => matches(response.url());
+		}
 		const deadline = Date.now() + timeoutMs;
 		while (Date.now() <= deadline) {
 			const records = await this.#responseRecordsAfter(startId);
 			for (const record of records) {
 				const response = new CmuxResponse(record);
-				if (typeof pattern === "function") {
-					if (await pattern(response)) return response;
-				} else if (pattern instanceof RegExp ? pattern.test(record.url) : record.url.includes(pattern)) {
-					return response;
-				}
+				if (await test(response)) return response;
 			}
 			await untilAborted(signal, () => Bun.sleep(100));
 		}
@@ -2052,7 +2037,7 @@ export class CmuxTab implements InProcessRunTab {
 			return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 		}
 		if (Number.isFinite(target.x) && Number.isFinite(target.y)) {
-			return { x: target.x, y: target.y };
+			return this.#pointerSpace.toViewport(target);
 		}
 		throw new ToolError("Drag target must be a selector string or { x: number, y: number } point");
 	}
@@ -2386,7 +2371,8 @@ class CmuxPageFacade {
 				return Promise.resolve();
 			},
 			up: async () => {
-				if (dragStart) await this.#tab.drag(dragStart, lastPoint);
+				// Raw page input takes viewport CSS pixels, as Puppeteer's does: no screenshot frame applies.
+				if (dragStart) await this.#tab.drag({ ...dragStart, css: true }, { ...lastPoint, css: true });
 				dragStart = undefined;
 			},
 		};

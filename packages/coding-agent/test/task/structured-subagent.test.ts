@@ -18,7 +18,6 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
@@ -74,7 +73,6 @@ function session(
 		cwd?: string;
 		settings?: Settings;
 		planMode?: boolean;
-		parentSpawns?: string;
 		outputSchema?: unknown;
 		maxDepth?: number;
 		isolationEnabled?: boolean;
@@ -106,7 +104,7 @@ function session(
 					: {}),
 			}),
 		getSessionFile: () => null,
-		getSessionSpawns: () => options.parentSpawns ?? "*",
+		getSessionSpawns: () => "*",
 		getSessionAgents: () => options.sessionAgents ?? [],
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
@@ -227,102 +225,6 @@ describe("structured subagent primitive", () => {
 		inheritedSession.outputSchemaMode = "strict";
 		const inherited = await resolveEffectiveSubagentPolicy(request({ session: inheritedSession }));
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
-	});
-
-	it("uses saved seance models in active-role/default order and honors an explicit available override", async () => {
-		const seanceAgent = getBundledAgent("seance");
-		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
-		mockDiscovery(seanceAgent);
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-seance-policy-"));
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage);
-		const cwd = path.join(tempDir, "project");
-		const sourceFile = path.join(tempDir, "sessions", "source.jsonl");
-		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
-		await Bun.write(
-			sourceFile,
-			`${[
-				{ type: "session", version: 3, id: "saved-source", timestamp: "2026-10-01T00:00:00.000Z", cwd },
-				{
-					type: "model_change",
-					id: "default-model",
-					parentId: null,
-					timestamp: "2026-10-01T00:00:01.000Z",
-					model: "anthropic/claude-sonnet-4-5",
-					role: "default",
-				},
-				{
-					type: "model_change",
-					id: "active-model",
-					parentId: "default-model",
-					timestamp: "2026-10-01T00:00:02.000Z",
-					model: "anthropic/claude-sonnet-4-6",
-					role: "fast",
-				},
-			]
-				.map(entry => JSON.stringify(entry))
-				.join("\n")}\n`,
-		);
-		const caller = Object.assign(session({ cwd }), { modelRegistry });
-		try {
-			const saved = await resolveEffectiveSubagentPolicy(
-				request({ session: caller, agent: "seance", sourceSession: sourceFile }),
-			);
-			expect(saved.preparedSession?.fork.sourceFile).toBe(sourceFile);
-
-			expect(saved.modelOverride).toEqual(["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]);
-			expect(saved.enableLsp).toBe(false);
-			expect(saved.enableIrc).toBe(false);
-
-			const overridden = await resolveEffectiveSubagentPolicy(
-				request({
-					session: caller,
-					agent: "seance",
-					sourceSession: sourceFile,
-					model: "anthropic/claude-sonnet-4-5",
-				}),
-			);
-			expect(overridden.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
-		} finally {
-			authStorage.close();
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
-	});
-
-	it("fails closed when the source has no saved model or an explicit model is unavailable", async () => {
-		const seanceAgent = getBundledAgent("seance");
-		if (!seanceAgent) throw new Error("Expected the bundled seance agent");
-		mockDiscovery(seanceAgent);
-		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-seance-model-fail-"));
-		const authStorage = await AuthStorage.create(":memory:");
-		const modelRegistry = new ModelRegistry(authStorage);
-		const cwd = path.join(tempDir, "project");
-		const sourceFile = path.join(tempDir, "sessions", "no-model.jsonl");
-		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
-		await Bun.write(
-			sourceFile,
-			`${JSON.stringify({ type: "session", version: 3, id: "no-model-source", timestamp: "2026-10-01T00:00:00.000Z", cwd })}\n`,
-		);
-		const caller = Object.assign(session({ cwd }), { modelRegistry });
-		try {
-			await expect(
-				resolveEffectiveSubagentPolicy(request({ session: caller, agent: "seance", sourceSession: sourceFile })),
-			).rejects.toThrow("The source session has no saved model.");
-			await expect(
-				resolveEffectiveSubagentPolicy(
-					request({
-						session: caller,
-						agent: "seance",
-						sourceSession: sourceFile,
-						model: "missing-provider/missing-model",
-					}),
-				),
-			).rejects.toThrow("No available saved model can serve this source.");
-		} finally {
-			authStorage.close();
-			await fs.rm(tempDir, { recursive: true, force: true });
-		}
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
@@ -887,91 +789,6 @@ describe("structured subagent primitive", () => {
 				try {
 					AgentRegistry.global().unregister(agentId);
 					if (artifactsDir) await fs.rm(artifactsDir, { recursive: true, force: true });
-				} finally {
-					unregisterCustomApis(sourceId);
-					authStorage.close();
-					await fs.rm(root, { recursive: true, force: true });
-				}
-			}
-		}
-	});
-
-	it("runs the remaining permitted scout when a plan-mode task omits its agent", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-plan-default-scout-"));
-		const cwd = path.join(root, "project");
-		await fs.mkdir(cwd, { recursive: true });
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorage.keys.setRuntime("mock", "test-key");
-		const sourceId = "plan-default-scout-regression";
-		registerMockApi(sourceId);
-		const agentId = "PlanModeDefaultScout";
-		let artifactDir: string | undefined;
-		try {
-			const report = "The permitted plan-mode scout returned this answer.";
-			const model = createMockModel({
-				id: "plan-default-scout",
-				handler: () => ({ content: [report] }),
-			});
-			const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
-			const find = modelRegistry.find.bind(modelRegistry);
-			modelRegistry.find = (provider, id) => (provider === "mock" && id === model.id ? model : find(provider, id));
-			modelRegistry.getAvailable = () => [model];
-			const seanceAgent = getBundledAgent("seance");
-			const scoutAgent = getBundledAgent("scout");
-			if (!seanceAgent || !scoutAgent) throw new Error("Expected bundled seance and scout agents");
-			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-				agents: [
-					seanceAgent,
-					{
-						...scoutAgent,
-						model: [`mock/${model.id}`],
-						tools: ["read", "yield"],
-					},
-				],
-				projectAgentsDir: null,
-			});
-			const settings = Settings.isolated({
-				"task.maxRecursionDepth": 2,
-				"task.isolation.enabled": false,
-				"task.batch": false,
-				"task.structured": false,
-				"task.enableLsp": false,
-				"task.completionProbe": false,
-				"compaction.enabled": false,
-				"retry.enabled": false,
-				"advisor.enabled": false,
-				"autolearn.enabled": false,
-				"todo.enabled": false,
-			});
-			const parentSession = Object.assign(session({ cwd, settings, planMode: true, parentSpawns: "seance,scout" }), {
-				authStorage,
-				modelRegistry,
-				restrictToolNames: true,
-				enableMCP: false,
-				enableLsp: false,
-				enableIrc: false,
-			});
-			const task = await TaskTool.create(parentSession);
-			const result = await task.execute("plan-default-scout", {
-				name: agentId,
-				task: "Return the plan-mode scout answer.",
-				solutionSpace: "The requested agent choice is a single permitted alternative.",
-			});
-
-			artifactDir = AgentRegistry.global().get(agentId)?.sessionFile
-				? path.dirname(AgentRegistry.global().get(agentId)!.sessionFile!)
-				: undefined;
-			expect(result.details?.results).toHaveLength(1);
-			expect(result.details?.results[0]?.agent).toBe("scout");
-			expect(result.content.map(part => (part.type === "text" ? part.text : "")).join("\n")).toContain(report);
-		} finally {
-			const ref = AgentRegistry.global().get(agentId);
-			try {
-				await ref?.session?.dispose();
-			} finally {
-				try {
-					AgentRegistry.global().unregister(agentId);
-					if (artifactDir) await fs.rm(artifactDir, { recursive: true, force: true });
 				} finally {
 					unregisterCustomApis(sourceId);
 					authStorage.close();
@@ -1757,39 +1574,6 @@ describe("per-call model preflight", () => {
 			request({ session: shadowedSession, agent: "m1", perCallModel: "mock/target:low" }),
 		);
 		expect(policy.modelOverride).toEqual(["mock/target:low"]);
-	});
-
-	describe("an agent shadowing the seance name", () => {
-		const shadow: AgentDefinition = { ...AGENT, name: "seance", source: "project", model: ["mock/agent-own"] };
-
-		it.each([
-			["the per-call gate", "off", "mock/target", "task.perCallModel: off"],
-			["exact-selector validation", "on", ["mock/target"], /invalid `model`/],
-		] as const)("holds its model to %s", async (_name, mode, seanceModel, error) => {
-			mockDiscovery(shadow);
-			await expect(
-				resolveEffectiveSubagentPolicy(
-					request({
-						session: perCallSession({ "task.perCallModel": mode, modelRoles: { review: "mock/target" } }),
-						agent: "seance",
-						seanceModel: typeof seanceModel === "string" ? seanceModel : [...seanceModel],
-					}),
-				),
-			).rejects.toThrow(error);
-		});
-
-		it("routes an approved model as a per-call worker", async () => {
-			mockDiscovery(shadow);
-			const policy = await resolveEffectiveSubagentPolicy(
-				request({
-					session: perCallSession({ "task.perCallModel": "on", modelRoles: { review: "mock/target" } }),
-					agent: "seance",
-					seanceModel: "mock/target",
-				}),
-			);
-			expect(policy.modelOverride).toEqual(["mock/target"]);
-			expect(policy.perCallModelGrants?.agentName).toBe("seance");
-		});
 	});
 });
 
