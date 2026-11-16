@@ -1,0 +1,3 @@
+reason = "Restore omp's built-in wait so job results and waits render as native async results instead of capability wakes, and the stop hooks defer while work is pending; also drops a stray #blockingPrompt call that broke the binary bundle."
+upstream = "no"
+layer = 50
