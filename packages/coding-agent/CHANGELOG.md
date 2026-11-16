@@ -7,6 +7,11 @@
 - Added an opt-in decision layer (`decision.*`, off by default) that asks the judge which skills each task needs and hints or loads them with the request; see [docs/decision-layer.md](https://github.com/can1357/oh-my-pi/blob/main/docs/decision-layer.md) ([#19056](https://github.com/can1357/oh-my-pi/pull/19056) by [@Xytronix](https://github.com/Xytronix))
 - Added decision-layer tool preflight (`decision.tools.mode`, off by default): before the first request of a task, the judge picks which mounted `xd://` tools, including connected MCP server tools, the task needs and names them or delivers their docs with the request; see [docs/decision-layer.md](https://github.com/can1357/oh-my-pi/blob/main/docs/decision-layer.md#tools) ([#19057](https://github.com/can1357/oh-my-pi/pull/19057) by [@Xytronix](https://github.com/Xytronix))
 
+### Fixed
+
+- Deleting or moving a large directory tree inside a project no longer stalls language-server file watching ([#19490](https://github.com/can1357/oh-my-pi/pull/19490) by [@H4vC](https://github.com/H4vC))
+- Long-running subagents use less CPU and memory per update as their sessions grow ([#19486](https://github.com/can1357/oh-my-pi/pull/19486) by [@H4vC](https://github.com/H4vC))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
