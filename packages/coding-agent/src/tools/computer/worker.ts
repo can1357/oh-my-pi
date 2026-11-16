@@ -341,10 +341,28 @@ function validateString(value: unknown, call: string, options?: { nonEmpty?: boo
 	);
 }
 
-/** A value control (a slider) reads its value as a number, so a finite number is written as its decimal text. */
+/**
+ * A value control (a slider) reads its value as a number, so a finite number is written as its decimal text.
+ * A whole number past 2^53 has already lost digits on its way here (a Python int crosses the eval bridge as
+ * a JavaScript number), and a number that prints with an exponent is not text a number control takes: both
+ * are refused before anything is sent.
+ */
 function valueText(value: unknown): string {
 	if (typeof value === "string") return value;
-	if (typeof value === "number" && Number.isFinite(value)) return String(value);
+	if (typeof value === "number" && Number.isFinite(value)) {
+		const text = String(value);
+		if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+			throw new ToolError(
+				`setValue(value) got ${text}, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"`,
+			);
+		}
+		if (text.includes("e")) {
+			throw new ToolError(
+				`setValue(value) got ${text}, a number that prints with an exponent; pass it as text in digits, such as "0.0000001"`,
+			);
+		}
+		return text;
+	}
 	throw new ToolError(
 		`setValue(value) requires a string or a finite number, got ${typeof value === "number" ? String(value) : describeArgument(value)}`,
 	);

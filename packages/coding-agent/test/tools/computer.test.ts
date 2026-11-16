@@ -3798,7 +3798,32 @@ describe("expanded computer APIs", () => {
 			isToolError: true,
 			message: "setValue(value) requires a string or a finite number, got boolean",
 		});
-		expect(native.values).toEqual(["75", "-2.5", " 007 ", "75"]);
+		// A whole number past 2^53 has lost digits already, as a Python int has crossing the eval bridge; a
+		// number that prints with an exponent is not text a number control takes. Nothing is sent for either.
+		for (const [code, message] of [
+			[
+				'await desktop.ref("e1").setValue(9007199254740993)',
+				'setValue(value) got 9007199254740992, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"',
+			],
+			[
+				'await desktop.ref("e1").setValue(-1e21)',
+				'setValue(value) got -1e+21, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"',
+			],
+			[
+				'await (await desktop.ref("e1")).setValue(1e-7)',
+				'setValue(value) got 1e-7, a number that prints with an exponent; pass it as text in digits, such as "0.0000001"',
+			],
+		]) {
+			const result = await runWorker(transport, `value-${code}`, code);
+			expect(result.ok ? undefined : result.error).toMatchObject({ isToolError: true, message });
+		}
+		const edges = await runWorker(
+			transport,
+			"value-edges",
+			'await desktop.ref("e1").setValue(9007199254740991); await desktop.ref("e1").setValue(0.000001)',
+		);
+		expect(edges.ok ? undefined : edges.error).toBeUndefined();
+		expect(native.values).toEqual(["75", "-2.5", " 007 ", "75", "9007199254740991", "0.000001"]);
 	});
 
 	it("leaves a printed observe() tree out of the JavaScript value's echo, but keeps ax readable", async () => {
