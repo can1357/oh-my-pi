@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Native Git recovers a removed process working directory instead of rejecting valid repositories
+- Native Git recovers a removed process working directory instead of rejecting valid repositories ([#19450](https://github.com/can1357/oh-my-pi/pull/19450) by [@J4ck1e2000](https://github.com/J4ck1e2000))
 
 ## [18.20.3] - 2026-11-16
 
