@@ -27,7 +27,7 @@ describe("vLLM provider discovery", () => {
 			reasoning: true,
 			contextWindow: 262144,
 		});
-		// Non-thinking Qwen generations keep the wire-reported default.
-		expect(models?.find(model => model.id === "qwen2.5-coder-7b")?.reasoning).toBe(false);
+		// Older Qwen generations keep the wire's silence: no reasoning evidence either way.
+		expect(models?.find(model => model.id === "qwen2.5-coder-7b")?.reasoning).toBeUndefined();
 	});
 });
