@@ -168,6 +168,7 @@ export class AgyHost implements ProviderSessionState {
 	#contextTokens = 0;
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
+	#loggedGeneration = 0;
 
 	/** geminiDir is the account-scoped agy configuration and conversation directory. */
 	constructor(geminiDir: string, options: AgyHostOptions = {}) {
@@ -359,7 +360,7 @@ export class AgyHost implements ProviderSessionState {
 	close(): void {
 		this.#fail(new Error("Antigravity CLI session closed"));
 		this.#conversation = undefined;
-		this.#logDiagnostics();
+		void this.#logDiagnostics();
 	}
 
 	/** Stop first, await process exit, then remove only conversations this host created (never fork sources). */
@@ -373,6 +374,7 @@ export class AgyHost implements ProviderSessionState {
 		);
 		await Promise.all([...this.#ownedConversations].map(id => deleteConversation(this.#geminiDir, id)));
 		this.#ownedConversations.clear();
+		await this.#logDiagnostics();
 	}
 
 	async #setup<T>(operation: Promise<T>): Promise<T> {
@@ -573,14 +575,10 @@ export class AgyHost implements ProviderSessionState {
 				},
 			)
 			.catch(error => this.#fail(error));
-		try {
-			const dispatched = this.#requireProcess().connection.prompt({ sessionId: conversation.id, prompt: blocks });
-			void this.#options.diagnostics
-				.measure("prompt", () => dispatched)
-				.then(turn.response.resolve, turn.response.reject);
-		} catch (error) {
-			turn.response.reject(error);
-		}
+		const dispatched = this.#options.diagnostics.measure("prompt", () =>
+			this.#requireProcess().connection.prompt({ sessionId: conversation.id, prompt: blocks }),
+		);
+		void dispatched.then(turn.response.resolve, turn.response.reject);
 	}
 
 	#releasePending(): PendingCall | undefined {
@@ -797,9 +795,13 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	/** Debug-only rollup: stage names and durations only, never prompts, output, accounts, or session IDs. */
-	#logDiagnostics(): void {
-		const summary = this.#options.diagnostics.summary();
-		if (!summary.enabled || summary.samples === 0) return;
+	async #logDiagnostics(): Promise<void> {
+		const diagnostics = this.#options.diagnostics;
+		if (!diagnostics.enabled) return;
+		await diagnostics.settled();
+		const summary = diagnostics.summary();
+		if (summary.samples === 0 || diagnostics.generation === this.#loggedGeneration) return;
+		this.#loggedGeneration = diagnostics.generation;
 		logger.debug("Antigravity CLI diagnostics", summary);
 	}
 }

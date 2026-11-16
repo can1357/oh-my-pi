@@ -97,6 +97,7 @@ class FakeAgy implements AgyTransport {
 	cancelMode: "ack" | "hold" | "reject" = "ack";
 	autoSteer = true;
 	failLoad = false;
+	failPrompt = false;
 	configureGate: Promise<void> | undefined;
 	currentId = "";
 	#pending = new Set<FakePrompt>();
@@ -137,6 +138,7 @@ class FakeAgy implements AgyTransport {
 				return { configOptions };
 			},
 			prompt: request => {
+				if (this.failPrompt) throw new Error("prompt dispatch failed");
 				if (this.autoSteer) for (const old of this.#pending) old.response.resolve({ stopReason: "end_turn" });
 				const prompt = { request, response: Promise.withResolvers<PromptResponse>() };
 				this.#pending.add(prompt);
@@ -977,6 +979,60 @@ describe("AgyHost diagnostics", () => {
 			debug.mockRestore();
 			if (previous === undefined) delete Bun.env.OMP_ACP_DIAGNOSTICS;
 			else Bun.env.OMP_ACP_DIAGNOSTICS = previous;
+		}
+	});
+
+	it("retains a prompt sample when dispatch throws synchronously", async () => {
+		const diagnostics = new Diagnostics(true);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		fake.failPrompt = true;
+		await expect(run.done).rejects.toThrow("prompt dispatch failed");
+		const { stages } = diagnostics.summary();
+		expect(stages.prompt?.count).toBe(1);
+		expect(stages["step.total"]?.count).toBe(1);
+	});
+
+	it("includes in-flight prompt and step samples in the rollup after closing mid-turn", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			await fake.prompts.next();
+			state.host.close();
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+			const summary = diagnostics.summary();
+			expect(summary.stages.prompt?.count).toBe(1);
+			expect(summary.stages["step.total"]?.count).toBe(1);
+			expect(rollups[0][1]).toEqual(summary);
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it("logs exactly one rollup across close and repeated dispose", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			state.host.close();
+			await state.host.dispose();
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+		} finally {
+			debug.mockRestore();
 		}
 	});
 });

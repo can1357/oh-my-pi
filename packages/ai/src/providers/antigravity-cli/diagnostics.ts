@@ -35,6 +35,9 @@ export class Diagnostics {
 	readonly #enabled: boolean;
 	readonly #now: () => number;
 	readonly #samples: { stage: DiagnosticsStage; ms: number }[] = [];
+	#active = 0;
+	#idle: PromiseWithResolvers<void> | undefined;
+	#generation = 0;
 
 	constructor(enabled: boolean = diagnosticsEnabled(), now: () => number = () => performance.now()) {
 		this.#enabled = enabled;
@@ -45,11 +48,17 @@ export class Diagnostics {
 		return this.#enabled;
 	}
 
+	/** Counts accepted samples, so a rollup can tell whether anything new arrived since the last one. */
+	get generation(): number {
+		return this.#generation;
+	}
+
 	/** Keep the newest samples; invalid durations are dropped rather than skewing the median. */
 	record(stage: DiagnosticsStage, ms: number): void {
 		if (!this.#enabled || !Number.isFinite(ms) || ms < 0) return;
 		this.#samples.push({ stage, ms });
 		if (this.#samples.length > DIAGNOSTICS_CAPACITY) this.#samples.shift();
+		this.#generation++;
 	}
 
 	sync<T>(stage: DiagnosticsStage, work: () => T): T {
@@ -62,19 +71,28 @@ export class Diagnostics {
 		}
 	}
 
-	measure<T>(stage: DiagnosticsStage, work: () => Promise<T>): Promise<T> {
+	/** Resolves once every measured stage has settled, so a close-time rollup can be complete. */
+	settled(): Promise<void> {
+		if (this.#active === 0) return Promise.resolve();
+		this.#idle ??= Promise.withResolvers<void>();
+		return this.#idle.promise;
+	}
+
+	async measure<T>(stage: DiagnosticsStage, work: () => Promise<T>): Promise<T> {
 		if (!this.#enabled) return work();
 		const startedAt = this.#now();
-		return work().then(
-			value => {
-				this.record(stage, this.#now() - startedAt);
-				return value;
-			},
-			(error: unknown) => {
-				this.record(stage, this.#now() - startedAt);
-				throw error;
-			},
-		);
+		this.#active++;
+		try {
+			return await work();
+		} finally {
+			this.record(stage, this.#now() - startedAt);
+			this.#active--;
+			if (this.#active === 0 && this.#idle) {
+				const idle = this.#idle;
+				this.#idle = undefined;
+				idle.resolve();
+			}
+		}
 	}
 
 	summary(): DiagnosticsSummary {
@@ -89,7 +107,7 @@ export class Diagnostics {
 			values.sort((a, b) => a - b);
 			stages[stage] = {
 				count: values.length,
-				medianMs: roundMs(values[Math.floor(values.length / 2)]),
+				medianMs: roundMs(values[Math.floor((values.length - 1) / 2)]),
 				maxMs: roundMs(values[values.length - 1]),
 			};
 		}

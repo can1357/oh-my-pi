@@ -26,6 +26,7 @@ describe("Diagnostics sampler", () => {
 		diagnostics.record("prompt", 12.5);
 		diagnostics.record("prompt", 4);
 		expect(diagnostics.summary().samples).toBe(3);
+		expect(diagnostics.generation).toBe(3);
 		expect(diagnostics.summary().stages.prompt).toEqual({ count: 3, medianMs: 4, maxMs: 12.5 });
 	});
 
@@ -36,7 +37,8 @@ describe("Diagnostics sampler", () => {
 		expect(DIAGNOSTICS_CAPACITY).toBe(128);
 		expect(summary.samples).toBe(DIAGNOSTICS_CAPACITY);
 		expect(summary.capacity).toBe(DIAGNOSTICS_CAPACITY);
-		expect(summary.stages["process.start"]).toEqual({ count: 128, medianMs: 136, maxMs: 199 });
+		expect(summary.stages["process.start"]).toEqual({ count: 128, medianMs: 135, maxMs: 199 });
+		expect(diagnostics.generation).toBe(200);
 	});
 
 	it("reports count, median and max per stage and rounds to microseconds", () => {
@@ -49,6 +51,13 @@ describe("Diagnostics sampler", () => {
 		expect(stages["session.load"]).toEqual({ count: 3, medianMs: 20, maxMs: 30 });
 		expect(stages["session.new"]).toEqual({ count: 1, medianMs: 1.235, maxMs: 1.235 });
 		expect(Object.keys(stages).sort()).toEqual(["session.load", "session.new"]);
+	});
+
+	it("reports the lower middle sample for an even count", () => {
+		const diagnostics = new Diagnostics(true);
+		diagnostics.record("session.new", 20);
+		diagnostics.record("session.new", 10);
+		expect(diagnostics.summary().stages["session.new"]).toEqual({ count: 2, medianMs: 10, maxMs: 20 });
 	});
 
 	it("records nothing and never reads the clock when disabled", async () => {
@@ -98,7 +107,19 @@ describe("Diagnostics sampler", () => {
 				throw new Error("async boom");
 			}),
 		).rejects.toThrow("async boom");
-		expect(diagnostics.summary().stages["step.total"]).toEqual({ count: 2, medianMs: 4, maxMs: 4 });
+		expect(diagnostics.summary().stages["step.total"]).toEqual({ count: 2, medianMs: 3, maxMs: 4 });
+	});
+
+	it("records one sample when the callback throws before returning a promise", async () => {
+		const fake = clock();
+		const diagnostics = new Diagnostics(true, fake.now);
+		await expect(
+			diagnostics.measure("session.new", () => {
+				fake.advance(2);
+				throw new Error("sync dispatch boom");
+			}),
+		).rejects.toThrow("sync dispatch boom");
+		expect(diagnostics.summary().stages["session.new"]).toEqual({ count: 1, medianMs: 2, maxMs: 2 });
 	});
 
 	it("clears retained samples on reset", () => {
