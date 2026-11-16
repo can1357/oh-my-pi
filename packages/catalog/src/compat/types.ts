@@ -400,6 +400,8 @@ export type CompiledAuthValidation =
 			url: string;
 			/** Env var holding an alternate base URL; `baseUrlPath` is appended to it. */
 			baseUrlEnv?: string;
+			/** Path segment ensured on the `baseUrlEnv` value (appended when absent) before `baseUrlPath` is applied — e.g. `/v1` for bases that may be bare origins. */
+			baseUrlAppend?: string;
 			/** Path appended to the `baseUrlEnv` value (default `/models`), for bases that exclude the API version. */
 			baseUrlPath?: string;
 			/** Hook returning extra request headers (may throw a configuration error). */

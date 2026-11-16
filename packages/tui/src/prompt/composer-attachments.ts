@@ -1,3 +1,4 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
 import { SYMBOL_PRESETS } from "../theme/symbols";
@@ -297,6 +298,16 @@ export function compactImageMarkers(
 		},
 	);
 	return { text: rewritten, keep: keep.map(n => n - 1) };
+}
+
+/** Drops images whose markers were deleted and renumbers the rest by appearance (path pastes attach out of order). */
+export function compactImageAttachments(
+	text: string,
+	images: ImageContent[],
+): { text: string; images: ImageContent[] } {
+	const compacted = compactImageMarkers(text, images.length, { byAppearance: true });
+	if (!compacted) return { text, images };
+	return { text: compacted.text, images: compacted.keep.map(index => images[index]!) };
 }
 
 /** Attachment kinds understood by placeholder renderers. */

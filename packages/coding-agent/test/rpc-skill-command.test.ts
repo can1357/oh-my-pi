@@ -210,7 +210,7 @@ async function settleUntil(condition: () => boolean, timeoutMs = 5000): Promise<
 /** Prompt-result plumbing for an idle session; frames land in `frames`. */
 function promptResultsFor(id: string, frames: object[] = []) {
 	const results = new RpcPromptResults(
-		{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+		{ isRunActive: false, isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0 },
 		frame => frames.push(frame),
 	);
 	return { ticket: results.begin(id), results };

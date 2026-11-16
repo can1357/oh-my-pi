@@ -84,7 +84,6 @@ function createMockSession(
 			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
-		hasPendingAsyncWork: () => false,
 	};
 
 	return session as unknown as AgentSession;
@@ -635,6 +634,30 @@ describe("runSubprocess yield reminders", () => {
 
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toBe(report);
+	});
+
+	it("collects each stopped loop's output once across pauses and the run end", async () => {
+		const session = createMockSession(({ promptIndex, emit, state }) => {
+			if (promptIndex > 1) return;
+			const first = createAssistantStopMessage("First.");
+			const second = createAssistantStopMessage("Second.");
+			emit({ type: "agent_start" } as AgentSessionEvent);
+			state.messages.push(first);
+			emit({ type: "message_end", message: first });
+			emit({ type: "agent_pause", messages: [first], yielded: false, awaiting: false });
+			emit({ type: "agent_start" } as AgentSessionEvent);
+			state.messages.push(second);
+			emit({ type: "message_end", message: second });
+			emit({ type: "agent_pause", messages: [second], yielded: true, awaiting: true });
+			// Nothing woke the paused run: it ends with the paused loop's messages again.
+			emit({ type: "agent_end", messages: [second] });
+		});
+		mockCreateAgentSession(session);
+
+		const result = await runSubprocess({ ...baseOptions, id: "subagent-pause-output" });
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toBe("First.Second.");
 	});
 
 	it("rejects prose after a locally runnable tool call in a stop turn", async () => {
