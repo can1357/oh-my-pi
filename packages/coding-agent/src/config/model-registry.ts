@@ -47,6 +47,7 @@ import {
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { withThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
 import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
@@ -473,9 +474,18 @@ export class ModelRegistry {
 		if (fresh.length > 0) this.#catalogMetricRows = [...this.#catalogMetricRows, ...fresh];
 	}
 
-	/** Final pass over every published model list: catalog metrics, then implicit local providers last. */
+	/** Final pass: learned thinking capabilities, catalog metrics, then implicit local providers last. */
 	#finalizeModels(models: Model<Api>[]): Model<Api>[] {
-		return this.#orderImplicitProvidersLast(applyCatalogMetrics(models, this.#catalogMetrics));
+		let learned = models;
+		for (let index = 0; index < models.length; index++) {
+			const model = models[index];
+			if (!model.thinking?.unverified) continue;
+			const projected = withThinkingCapability(model, this.#cacheDbPath);
+			if (projected === model) continue;
+			if (learned === models) learned = models.slice();
+			learned[index] = projected;
+		}
+		return this.#orderImplicitProvidersLast(applyCatalogMetrics(learned, this.#catalogMetrics));
 	}
 
 	/**
@@ -664,6 +674,11 @@ export class ModelRegistry {
 	 */
 	mirrorInputs(): ModelRegistryMirrorInputs {
 		return this.#mirrorInputs;
+	}
+
+	/** Database shared by model discovery and request-time thinking capability probes. */
+	get modelsDbPath(): string | undefined {
+		return this.#cacheDbPath;
 	}
 
 	/**
@@ -4490,7 +4505,8 @@ export interface ProviderConfigInput {
 		api?: Api;
 		kind?: ModelKind;
 		baseUrl?: string;
-		reasoning: boolean;
+		/** Reviewed capability; omitted when request-time discovery should determine support. */
+		reasoning?: boolean;
 		thinking?: ThinkingConfig;
 		input: ("text" | "image")[];
 		supportsTools?: boolean;
