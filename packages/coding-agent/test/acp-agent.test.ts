@@ -36,7 +36,6 @@ import { TASK_SUBAGENT_EVENT_CHANNEL, TASK_SUBAGENT_LIFECYCLE_CHANNEL, TaskTool 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -1591,6 +1590,50 @@ describe("ACP agent", () => {
 				)?.jetbrains?.air?.subagentSessionId === "worker-7",
 		);
 		expect(childChunks).toHaveLength(1);
+		await harness.agent.dispose();
+	});
+
+	it("tags nested task updates with the grandchild owner, not the child", async () => {
+		const airCapabilities = {
+			_meta: { jetbrains: { air: { version: 1, capabilities: ["nativeSubagentSessions"] } } },
+		};
+		const harness = await createHarness({ clientCapabilities: airCapabilities, subagentEventBus: true });
+		await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const flushBusDelivery = async () => {
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+		};
+		for (const frame of [
+			{ id: "worker-a", parentToolCallId: "tc-root" },
+			{ id: "worker-b", parentToolCallId: "tc-a-task" },
+		] as const) {
+			harness.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: frame.id,
+				agent: "task",
+				agentSource: "bundled",
+				status: "started",
+				index: 0,
+				parentToolCallId: frame.parentToolCallId,
+			});
+		}
+		await flushBusDelivery();
+		// worker-a's own `task` call spawning worker-b: the progress belongs
+		// to the grandchild, mirroring the root's `#tagSubagentUpdate`.
+		harness.subagentEventBus?.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+			id: "worker-a",
+			event: { type: "tool_execution_start", toolCallId: "tc-a-task", toolName: "task", args: { task: "Drill" } },
+		});
+		await flushBusDelivery();
+		const routedTo = (sessionId: string) =>
+			harness.updates.filter(update => {
+				const meta = (update.update as { _meta?: unknown })._meta as
+					| { jetbrains?: { air?: { subagentSessionId?: unknown } } }
+					| undefined;
+				return meta?.jetbrains?.air?.subagentSessionId === sessionId;
+			});
+		expect(routedTo("worker-b").length).toBeGreaterThan(0);
+		for (const update of routedTo("worker-b")) {
+			expect(update.sessionId).not.toBe("worker-b");
+		}
 		await harness.agent.dispose();
 	});
 

@@ -73,7 +73,6 @@ import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import type { UsageStatistics } from "../../session/session-entries";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
-import { AgentRegistry } from "../../registry/agent-registry";
 import type { SessionInfo as StoredSessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -2140,6 +2139,19 @@ export class AcpAgent implements Agent {
 	async #forwardAirChildEvent(record: ManagedSessionRecord, payload: SubagentEventPayload): Promise<void> {
 		const tracker = record.subagentTracker;
 		if (!tracker || !tracker.children.has(payload.id)) return;
+		// Nested spawns: when this child runs `task` to spawn a grandchild,
+		// the recorded owner of that task call gets the frames — tagging them
+		// with this child's id would route the grandchild's transcript into
+		// the child's. Falls back to this child when the call is unowned
+		// (shared batched calls stay ambiguous by design) or isn't a `task`
+		// call at all.
+		const routingId =
+			(payload.event.type === "tool_execution_start" ||
+				payload.event.type === "tool_execution_update" ||
+				payload.event.type === "tool_execution_end") &&
+			this.#isTaskToolCall(record, payload.event)
+				? (tracker.childForToolCall(payload.event.toolCallId) ?? payload.id)
+				: payload.id;
 		this.#prepareChildMessage(record, payload.id, payload.event);
 		if (payload.event.type !== "tool_execution_end") this.#trackChildToolArgs(record, payload.id, payload.event);
 		for (const notification of mapAgentSessionEventToAcpSessionUpdates(payload.event, record.protocolSessionId, {
@@ -2154,7 +2166,7 @@ export class AcpAgent implements Agent {
 		})) {
 			const tagged = {
 				...notification,
-				update: withSubagentMeta(notification.update, payload.id),
+				update: withSubagentMeta(notification.update, routingId),
 			};
 			await this.#connection.sessionUpdate(tagged);
 		}
