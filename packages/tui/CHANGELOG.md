@@ -15,6 +15,7 @@
 - Fixed the `status` status-line segment repainting extension `ctx.ui.setStatus` text in the accent colour: statuses that set their own foreground colour or text style keep it, and uncoloured ones still take the accent ([#19727](https://github.com/can1357/oh-my-pi/pull/19727) by [@robfeldmann](https://github.com/robfeldmann))
 - Scrolling no longer drops the background from truncated rows, so tinted lines keep their color to the end of the viewport ([#19632](https://github.com/can1357/oh-my-pi/pull/19632) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Fixed WebP and JPEG images drawing as a blank gap on Kitty-graphics terminals (Ghostty, Kitty, herdr) when shown through a bare `Image`, such as an extension's pasted-image preview ([#19829](https://github.com/can1357/oh-my-pi/pull/19829) by [@jaredlyon](https://github.com/jaredlyon))
+- The plain status line layouts (standalone bottom bar, claude top-rule chip) honor an explicitly configured `statusLine.separator` instead of always joining segments with `·`; with no separator configured the `·` dot stays ([#19220](https://github.com/can1357/oh-my-pi/pull/19220) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [19.0.1] - 2026-11-19
 
@@ -152,14 +153,6 @@
 - Improved working-row animation while waiting for tools or models on terminals without synchronized output, including tmux 3.6.
 - Fixed expanded IRC tool cards to show complete soft-wrapped output and added an expand hint to collapsed cards containing hidden text.
 - Fixed premature scrolling in the `/resume` session picker when navigating near the middle of the list.
-- Fixed asynchronous Bash commands switching to the raw command line instead of remaining visible in the interpreted shell view.
-- Improved rendering when switching to a subagent, resuming a session, or rebuilding a long transcript so the newest messages appear immediately without transient placeholder blocks.
-- Fixed Markdown task lists so completed and open items display distinct checkboxes in transcripts.
-- Fixed DEC 2048 in-band resize reports inserting terminal resize data into the composer on iTerm2.
-- Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
-- Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
-- Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
-- The plain status line layouts (standalone bottom bar, claude top-rule chip) honor an explicitly configured `statusLine.separator` instead of always joining segments with `·`; with no separator configured the `·` dot stays ([#19220](https://github.com/can1357/oh-my-pi/pull/19220) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.0] - 2026-11-12
 
