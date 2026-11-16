@@ -259,7 +259,7 @@ async fn supported_host_runs_exact_tests_retains_receipts_and_rejects_bad_inputs
 	let fixture = Fixture::new().await;
 	if !omp_envd::verification::strict_sandbox_available(&fixture.root).expect("sandbox probe") {
 		eprintln!(
-			"SKIPPED supported-host execution proof: strict source protection and network isolation \
+			"SKIPPED supported-host execution proof: verified Bubblewrap closed-input profile \
 			 unavailable"
 		);
 		return;
@@ -351,8 +351,7 @@ async fn supported_host_refuses_current_source_drift_after_frozen_test_started()
 	let fixture = Fixture::new().await;
 	if !omp_envd::verification::strict_sandbox_available(&fixture.root).expect("sandbox probe") {
 		eprintln!(
-			"SKIPPED current-source drift proof: strict source protection and network isolation \
-			 unavailable"
+			"SKIPPED current-source drift proof: verified Bubblewrap closed-input profile unavailable"
 		);
 		return;
 	}

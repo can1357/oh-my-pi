@@ -187,6 +187,8 @@ pub enum ProtocolFault {
 	UnsupportedDoctestEvent,
 	/// Doctest terminal evidence is missing.
 	MissingDoctestSummary,
+	/// Rustdoc's optional timing report is malformed or out of order.
+	InvalidDoctestReport,
 	/// Just declares global values or modules.
 	JustGlobalDefinitions,
 	/// Just changes exported environment.
@@ -422,9 +424,28 @@ pub(crate) fn parse_doctest_results(bytes: &[u8]) -> Result<TestCoverage, Invent
 	let mut state = SuiteState::default();
 	let mut total = TestCoverage { complete: true, ..TestCoverage::default() };
 	let mut suites = 0;
+	let mut reported = false;
 	for value in lines(bytes)? {
 		if value.get("nextest").is_some() {
 			return Err(InventoryError::Protocol(ProtocolFault::UnexpectedNextestDescriptor));
+		}
+		if reported {
+			return Err(InventoryError::Protocol(ProtocolFault::InvalidDoctestReport));
+		}
+		if string(&value, "type")? == "report" {
+			if suites == 0
+				|| !state.finished
+				|| object(&value)?.len() != 3
+				|| !["total_time", "compilation_time"].iter().all(|key| {
+					value
+						.get(key)
+						.and_then(Value::as_f64)
+						.is_some_and(|time| time.is_finite() && time >= 0.0)
+				}) {
+				return Err(InventoryError::Protocol(ProtocolFault::InvalidDoctestReport));
+			}
+			reported = true;
+			continue;
 		}
 		match (string(&value, "type")?, string(&value, "event")?) {
 			("suite", "started") if !state.started || state.finished => {
@@ -624,5 +645,41 @@ mod tests {
 		assert_eq!(parse_doctest_results(zero).unwrap().selected, 0);
 		assert!(parse_doctest_results(b"").is_err());
 		assert!(parse_doctest_results(b"test result: ok. 100 passed").is_err());
+	}
+
+	#[test]
+	fn rustdoc_timing_report_is_optional_final_metadata_only() {
+		let suite = r#"{"type":"suite","event":"started","test_count":1}
+{"type":"test","event":"started","name":"doc"}
+{"type":"test","event":"ok","name":"doc"}
+{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":0,"measured":0,"filtered_out":0}
+"#;
+		let report = "{\"type\":\"report\",\"total_time\":0.1326,\"compilation_time\":0.1294}\n";
+		let expected = parse_doctest_results(suite.as_bytes()).expect("complete suite");
+		let actual =
+			parse_doctest_results(format!("{suite}{report}").as_bytes()).expect("final timing report");
+		assert_eq!(
+			(actual.selected, actual.passed, actual.failed),
+			(expected.selected, expected.passed, expected.failed)
+		);
+		for invalid in [
+			format!("{report}{suite}"),
+			format!("{suite}{report}{report}"),
+			format!("{suite}{report}{suite}"),
+			format!("{suite}{}", report.replace("0.1326", "-0.1")),
+			format!("{suite}{}", report.replace("0.1294", "\"unknown\"")),
+			format!("{suite}{}", report.replace("0.1326", "1e999")),
+		] {
+			assert!(parse_doctest_results(invalid.as_bytes()).is_err());
+		}
+		let zero = "{\"type\":\"suite\",\"event\":\"started\",\"test_count\":0}\n{\"type\":\"suite\"\
+		            ,\"event\":\"ok\",\"passed\":0,\"failed\":0,\"ignored\":0,\"measured\":0,\"\
+		            filtered_out\":0}\n";
+		assert_eq!(
+			parse_doctest_results(format!("{zero}{report}").as_bytes())
+				.expect("explicit zero suite")
+				.selected,
+			0
+		);
 	}
 }

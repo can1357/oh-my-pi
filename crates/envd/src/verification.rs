@@ -27,6 +27,7 @@ use omp_proto::env::v1::{
 	CloseSessionRequest, ExecOutcome, ExecRequest, ExecStatusMsg, OpenSessionRequest, OutputChannel,
 	OutputRequest, Script,
 };
+use omp_sandbox::{Backend, Runner};
 use tokio::{
 	task::{JoinError, spawn_blocking},
 	time::{Instant, sleep_until, timeout, timeout_at},
@@ -238,6 +239,9 @@ impl VerificationRuntime {
 		options: VerificationRuntimeOptions,
 		cancel: &CancellationToken,
 	) -> Result<Self, VerificationRuntimeError> {
+		if !closed_input_backend_available() {
+			return Err(VerificationRuntimeError::ConfinementUnavailable);
+		}
 		if options.timeout.is_zero()
 			|| options.timeout > Duration::from_secs(1800)
 			|| options.max_output_bytes == 0
@@ -341,9 +345,11 @@ impl VerificationRuntime {
 		let mut readable = BTreeSet::from([registry.clone()]);
 		// Debian-style compiler/linker entry points resolve through this
 		// system-managed indirection directory, outside /usr itself.
-		let alternatives = Path::new("/etc/alternatives");
-		if alternatives.is_dir() {
-			readable.insert(alternatives.to_owned());
+		for runtime in ["/etc/alternatives", "/usr/libexec"] {
+			let runtime = Path::new(runtime);
+			if runtime.is_dir() {
+				readable.insert(runtime.to_owned());
+			}
 		}
 		let mut dependency_roots = vec![registry];
 		let mut paths = BTreeSet::new();
@@ -699,6 +705,9 @@ async fn open_environment(
 /// deny, and full readable roots. This synthetic capability probe has no state
 /// directory and therefore does not request a future-path read denial.
 pub fn strict_sandbox_available(root: &Path) -> Result<bool, VerificationRuntimeError> {
+	if !closed_input_backend_available() {
+		return Ok(false);
+	}
 	let root = canonical(root)?;
 	let ctx = strict_context(
 		&root,
@@ -716,6 +725,13 @@ pub fn strict_sandbox_available(root: &Path) -> Result<bool, VerificationRuntime
 	ctx.set("sv_sandbox_writable_roots", Value::List(Vec::new()), Origin::Host)?;
 	ctx.set("sv_sandbox_write_deny", path_list([root.as_path()])?, Origin::Host)?;
 	Ok(matches!(probe_sandbox(&ctx, &root), SandboxState::Active))
+}
+
+fn closed_input_backend_available() -> bool {
+	// Sparse, sealed mount visibility must constrain executable lookup as
+	// well as reads. Seatbelt permits execution outside scoped read roots;
+	// defer it until that closed-input contract has a native proof.
+	Runner::native_command().is_ok_and(|runner| runner.backend() == Backend::Bubblewrap)
 }
 
 fn strict_context(
@@ -1119,18 +1135,10 @@ fn inventory_sync(
 			}
 		} else if metadata.file_type().is_symlink() {
 			let target = fs::read_link(&path).map_err(|source| io_at(&path, source))?;
-			let resolved = canonical(&path)?;
-			// OS runtime bytes are the already-declared trusted host baseline,
-			// not content-fenced dependencies. Record this symlink's spelling
-			// without claiming to hash its trusted system target. Other targets
-			// must remain inside the admitted, inventoried roots.
-			if !trusted_os_runtime(&resolved)
-				&& !roots
-					.iter()
-					.any(|root| root.is_dir() && resolved.starts_with(root))
-			{
-				return Err(VerificationRuntimeError::UnsupportedDependency { path });
-			}
+			// Hash the link without following or granting its target. This is
+			// sound only for the admitted sparse Bubblewrap profile: outside
+			// targets are absent, targets in other admitted roots are fenced
+			// there, and the OS baseline remains explicitly host-trusted.
 			let target = path_str(&target)?;
 			hash
 				.update(b"symlink")
@@ -1179,28 +1187,34 @@ mod tests {
 			&CancellationToken::new(),
 		)
 		.await;
-		assert!(matches!(result, Err(VerificationRuntimeError::UntrustedPath { .. })));
+		assert!(matches!(
+			result,
+			Err(
+				VerificationRuntimeError::UntrustedPath { .. }
+					| VerificationRuntimeError::ConfinementUnavailable
+			)
+		));
 		assert_eq!(fs::read(&sentinel).expect("preserved receipt"), b"keep");
 		assert_eq!(fs::read_dir(state.path()).expect("caller state").count(), 1);
 	}
 
 	#[cfg(unix)]
 	#[test]
-	fn dependency_symlink_can_target_trusted_system_runtime_only() {
+	fn dependency_symlink_hashes_spelling_without_following_external_target() {
 		let inputs = tempfile::tempdir().expect("inputs");
 		let external = tempfile::tempdir().expect("external user files");
-		let system = canonical(Path::new("/usr/bin/env")).expect("system runtime helper");
-		symlink(&system, inputs.path().join("helper")).expect("system symlink");
 		let roots = [inputs.path().to_owned()];
 		let cancel = CancellationToken::new();
-		assert!(inventory_sync(&roots, &cancel).is_ok());
 		let external_file = external.path().join("helper");
 		fs::write(&external_file, b"unadmitted").expect("external input");
-		symlink(&external_file, inputs.path().join("outside")).expect("user symlink");
-		assert!(matches!(
-			inventory_sync(&roots, &cancel),
-			Err(VerificationRuntimeError::UnsupportedDependency { .. })
-		));
+		let link = inputs.path().join("outside");
+		symlink(&external_file, &link).expect("opaque user symlink");
+		let first = inventory_sync(&roots, &cancel).expect("link inventory");
+		fs::write(&external_file, b"changed external bytes").expect("external change");
+		assert_eq!(first, inventory_sync(&roots, &cancel).expect("unchanged link"));
+		fs::remove_file(&link).expect("replace link");
+		symlink(external.path().join("missing-target"), &link).expect("opaque dangling link");
+		assert_ne!(first, inventory_sync(&roots, &cancel).expect("changed link"));
 		assert!(!trusted_os_runtime(Path::new("/usr-other/bin/helper")));
 	}
 	#[test]
