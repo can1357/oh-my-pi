@@ -40,6 +40,7 @@
 
 ### Fixed
 
+- Switching projects with `/move` now replaces project agents and MCP servers without restarting ([#19385](https://github.com/can1357/oh-my-pi/issues/19385)).
 - Fixed `ida` `exec` output on IDA 9.5+ by suppressing helper deprecation warnings and preserving the updated function metadata API.
 - Expired Perplexity logins and cookies no longer return an error page as a search answer; the provider is reported as expired and the search chain continues.
 - Fixed browser WebMCP discovery and invocation on Chrome and Chromium 157 and later.

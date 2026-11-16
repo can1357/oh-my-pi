@@ -88,7 +88,7 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { reloadTuiPluginState } from "../slash-commands/builtin-marketplace";
 import type {
 	AssistantTextRenderer,
 	AutocompleteProviderFactory,
@@ -3280,11 +3280,10 @@ export class InteractiveMode implements InteractiveModeContext {
 				// retain against the source project's memory.
 				await rebindMemoryBackendForCwd(this.session);
 			}
-			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
-			// the next prompt sees everything scoped to the new project directory.
-			clearClaudePluginRootsCache();
+			// Re-scope plugin roots, agents, skills, commands, and MCP connections
+			// together so existing tools no longer advertise the source project.
 			await this.refreshTitleSystemPrompt(newCwd);
-			await this.session.refreshSkillsAndCommands();
+			await reloadTuiPluginState(this);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
 			// cwd-derived caches (provider globals, plugin roots, capabilities,
@@ -3297,9 +3296,8 @@ export class InteractiveMode implements InteractiveModeContext {
 					await settings.reloadForCwd(previousCwd);
 					await rebindMemoryBackendForCwd(this.session);
 				}
-				clearClaudePluginRootsCache();
 				await this.refreshTitleSystemPrompt(previousCwd);
-				await this.session.refreshSkillsAndCommands();
+				await reloadTuiPluginState(this);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
@@ -3308,9 +3306,8 @@ export class InteractiveMode implements InteractiveModeContext {
 						await settings.reloadForCwd(actual);
 						await rebindMemoryBackendForCwd(this.session);
 					}
-					clearClaudePluginRootsCache();
 					await this.refreshTitleSystemPrompt(actual);
-					await this.session.refreshSkillsAndCommands();
+					await reloadTuiPluginState(this);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
