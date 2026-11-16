@@ -16,6 +16,33 @@ import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
 
+/** Attempts at a shared-index write while another git process holds `index.lock`. */
+const INDEX_WRITE_ATTEMPTS = 5;
+/** Pause before the first retry of a shared-index write, doubled per attempt. */
+const INDEX_WRITE_BACKOFF_MS = 40;
+
+/**
+ * Apply `patch` to the shared index, retrying while it cannot be written; the last failure's
+ * message, or `undefined` once applied. A patch whose preimage the index no longer holds fails
+ * every attempt, which the caller tells apart with `canApplyPatch`.
+ */
+async function applyToSharedIndex(repo: VcsGitRepo, patch: string, signal?: AbortSignal): Promise<string | undefined> {
+	let failure = "";
+	for (let attempt = 0; attempt < INDEX_WRITE_ATTEMPTS; attempt++) {
+		if (attempt > 0) {
+			if (!(await repo.canApplyPatch(patch, { cached: true }).catch(() => true))) return failure;
+			await Bun.sleep(INDEX_WRITE_BACKOFF_MS << (attempt - 1));
+		}
+		try {
+			await repo.applyPatch(patch, { cached: true }, signal);
+			return undefined;
+		} catch (error) {
+			failure = error instanceof Error ? error.message : String(error);
+		}
+	}
+	return failure;
+}
+
 /** Attempts when HEAD moves between building the private index and committing it. */
 const HEAD_RACE_ATTEMPTS = 3;
 
@@ -152,16 +179,21 @@ export async function commitSelection(
 	// application reads HEAD in its place, so seed it with the root commit's tree instead.
 	const seedIndex = parent === null && !(await Bun.file(path.join(repo.info().gitDir, "index")).exists());
 	if (seedIndex) await repo.readTree(sha, undefined, context.signal);
-	for (const entry of seedIndex ? [] : patches) {
-		try {
-			await repo.applyPatch(entry.patch, { cached: true }, context.signal);
-		} catch {
-			if (await repo.canApplyPatch(entry.patch, { cached: true, reverse: true }).catch(() => false)) continue;
-			indexNotes.push(
-				`${entry.path}: its shared-index entry holds someone else's staged changes and was left as is; ` +
-					"`git diff --cached` there shows this commit reverted until they restage.",
-			);
-		}
+	// One write for every path: each write takes `index.lock`, which a concurrent git (a prompt's
+	// or an editor's `git status`) may hold. Per-path writes only when a path's entry differs.
+	const synced = seedIndex || (await applyToSharedIndex(repo, joined, context.signal)) === undefined;
+	for (const entry of synced ? [] : patches) {
+		const failure = await applyToSharedIndex(repo, entry.patch, context.signal);
+		if (failure === undefined) continue;
+		if (await repo.canApplyPatch(entry.patch, { cached: true, reverse: true }).catch(() => false)) continue;
+		const staged = await repo.canApplyPatch(entry.patch, { cached: true }).catch(() => undefined);
+		indexNotes.push(
+			staged === false
+				? `${entry.path}: its shared-index entry holds someone else's staged changes and was left as is; ` +
+						"`git diff --cached` there shows this commit reverted until they restage."
+				: `${entry.path}: the shared index could not be written (${failure}); ` +
+						`\`git diff --cached\` there shows this commit reverted until \`git reset -q -- ${entry.path}\`.`,
+		);
 	}
 	const paths = patches.map(entry => entry.path);
 	await context.journal?.recordCommit({ agent: context.agent.agent, parent: context.agent.parent, sha, paths });
