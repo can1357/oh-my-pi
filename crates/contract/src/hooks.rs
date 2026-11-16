@@ -325,7 +325,7 @@ impl HookEvent for ProviderErrorEvent {
 /// the yield stand.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentSettledEvent {
-	/// Revision-1 JSON `AgentSettledEvent` payload.
+	/// Revision-2 JSON `AgentSettledEvent` payload.
 	pub payload: Bytes,
 }
 
@@ -333,7 +333,7 @@ impl HookEvent for AgentSettledEvent {
 	type Return = AgentSettled;
 
 	const ID: HookEventId = HookEventId::HookEventAgentSettled;
-	const REV: u32 = 1;
+	const REV: u32 = 2;
 
 	fn encode_into(&self, out: &mut BytesMut) {
 		out.extend_from_slice(&self.payload);

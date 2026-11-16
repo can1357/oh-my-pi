@@ -944,6 +944,12 @@ impl HookControlFactory {
 			ControlProtocolError::new("UnknownEvent", format!("unknown hook event {event}"))
 		})?;
 		if event_rev != policy.revision {
+			tracing::warn!(
+				event = %event,
+				event_rev,
+				policy_rev = policy.revision,
+				"hook decision rejected: event revision mismatch"
+			);
 			return Err(ControlProtocolError::new(
 				"HookContractError",
 				format!("hook event revision mismatch: expected {}, got {event_rev}", policy.revision),
