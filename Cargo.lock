@@ -6568,6 +6568,9 @@ dependencies = [
 [[package]]
 name = "pi-diff"
 version = "18.21.0"
+dependencies = [
+ "xutf",
+]
 
 [[package]]
 name = "pi-edit"
@@ -6598,6 +6601,7 @@ dependencies = [
  "pi-diff",
  "tokio",
  "windows-sys 0.61.2",
+ "xutf",
 ]
 
 [[package]]
@@ -6711,6 +6715,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "xutf",
  "zstd",
 ]
 
@@ -6749,6 +6754,7 @@ dependencies = [
  "toml",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
+ "xutf",
  "xxhash-rust",
 ]
 
@@ -6766,6 +6772,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "xutf",
 ]
 
 [[package]]
@@ -6817,6 +6824,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "windows-sys 0.61.2",
+ "xutf",
 ]
 
 [[package]]
@@ -10851,9 +10859,9 @@ dependencies = [
 
 [[package]]
 name = "xutf"
-version = "1.5.0"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "990cc0159ef1d38b900524ac2308778ce60de2d32af70f40a71517c6b299fe8a"
+checksum = "704bc7ae7d98d2d4bbb024f35cf8e706021bdc13a3a7257d741cb64ca71e8cfe"
 
 [[package]]
 name = "xxhash-rust"
