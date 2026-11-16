@@ -38,6 +38,9 @@
 ### Fixed
 
 - Fixed X11 takeover and desktop typing arriving in the wrong case or layout while Caps Lock, a StickyKeys modifier or a second keyboard layout was active ([#19080](https://github.com/can1357/oh-my-pi/pull/19080) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed X11 takeover keys for a window going to another application that held the keyboard, such as its open menu or a screen locker's password prompt, while the call reported them typed into the window; they now wait up to half a second for such a grab to end and otherwise fail with nothing sent. A menu of the window's own application, or the window itself grabbing the keyboard (a VM viewer, a game), still gets the keys unless another application's popup is above it ([#19066](https://github.com/can1357/oh-my-pi/pull/19066) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
