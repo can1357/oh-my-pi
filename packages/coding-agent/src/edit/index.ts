@@ -436,9 +436,7 @@ export class EditTool implements AgentTool<TInput> {
 				? "write"
 				: strictestApproval(targets.map(target => router.writeTier(target, undefined, this.session)));
 		if (this.name === "edit") return decision;
-		return typeof decision === "string"
-			? { tier: decision, policyKey: "edit" }
-			: { ...decision, policyKey: "edit" };
+		return typeof decision === "string" ? { tier: decision, policyKey: "edit" } : { ...decision, policyKey: "edit" };
 	};
 
 	readonly formatApprovalDetails = (args: unknown): string[] => {

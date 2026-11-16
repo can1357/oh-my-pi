@@ -681,7 +681,9 @@ describe("AgentSession retry fallback", () => {
 		expect(toolResults).toHaveLength(2);
 		expect(
 			toolResults.some(result =>
-				result.content.some(content => content.type === "text" && content.text.includes("Tool apply_patch not found")),
+				result.content.some(
+					content => content.type === "text" && content.text.includes("Tool apply_patch not found"),
+				),
 			),
 		).toBe(false);
 		expect(toolResults.every(result => !result.isError)).toBe(true);
