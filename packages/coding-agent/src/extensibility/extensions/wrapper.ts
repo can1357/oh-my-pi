@@ -31,7 +31,7 @@ import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-in
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
-import { extensionRequestIdentity, runWithExtensionRequestIdentity } from "./request-identity";
+import { runWithExtensionRequestIdentity } from "./request-identity";
 
 const registeredToolIdentities = new WeakMap<object, string>();
 
@@ -94,7 +94,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 		const owner = runner
 			.getLoadedExtensions()
 			.find(extension => extension.tools.get(registeredTool.definition.name) === registeredTool);
-		if (owner) registeredToolIdentities.set(this, extensionRequestIdentity(owner.resolvedPath));
+		if (owner?.requestIdentity) registeredToolIdentities.set(this, owner.requestIdentity);
 
 		// Only define render methods when the underlying definition provides them.
 		// If these exist unconditionally on the prototype, ToolExecutionComponent
@@ -534,7 +534,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// a runner exists.
 			result = await this.runner.runScoped(() =>
 				withFileMutationSession(this.runner.sessionId, () =>
-					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+					runWithExtensionRequestIdentity(this.#extensionRequestIdentity, () =>
+						this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+					),
 				),
 			);
 		} catch (err) {

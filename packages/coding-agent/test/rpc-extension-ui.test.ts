@@ -225,6 +225,45 @@ await runRpcMode(session);
 		});
 	}
 
+	async function spawnRpcRuntimeWithExtensions(temp: TempDir, extensionPaths: string[]) {
+		const fixturePath = temp.join("runtime.ts");
+		const sourceDir = path.resolve(import.meta.dir, "../src");
+		await Bun.write(
+			fixturePath,
+			`
+import { createAgentSession, Settings } from ${JSON.stringify(path.join(sourceDir, "sdk.ts"))};
+import { runRpcMode } from ${JSON.stringify(path.join(sourceDir, "modes/rpc/rpc-mode.ts"))};
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  toolNames: [],
+  enableMCP: false,
+  enableLsp: false,
+  disableExtensionDiscovery: true,
+  additionalExtensionPaths: ${JSON.stringify(extensionPaths)},
+  settings: Settings.isolated({ "compaction.enabled": false }),
+});
+await runRpcMode(session);
+`,
+		);
+		return Bun.spawn([process.execPath, fixturePath], {
+			cwd: temp.path(),
+			env: {
+				PATH: Bun.env.PATH,
+				HOME: temp.join("home"),
+				PI_CODING_AGENT_DIR: temp.join("agent"),
+				XDG_CONFIG_HOME: temp.join("config"),
+				XDG_DATA_HOME: temp.join("data"),
+				XDG_CACHE_HOME: temp.join("cache"),
+				CI: "true",
+				PI_NO_TITLE: "1",
+			},
+			stdin: "pipe",
+			stdout: "pipe",
+			stderr: "pipe",
+			timeout: 30_000,
+		});
+	}
+
 	it("answers a dialog session_start awaits, running commands sent meanwhile only after startup, in order", async () => {
 		await using temp = await TempDir.create("@rpc-startup-dialog-");
 		const child = await spawnStartupDialogRuntime(temp);
@@ -234,6 +273,7 @@ await runRpcMode(session);
 		for await (const frame of readJsonl<unknown>(child.stdout)) {
 			if (!isRecord(frame)) continue;
 			if (frame.type === "extension_ui_request" && frame.method === "confirm") {
+				expect(frame).not.toHaveProperty("extensionId");
 				confirmId = frame.id;
 				// Held until startup finishes (had one run at once, its response would precede the confirm's
 				// notify) and then run in arrival order. set_ask_dialog is served during startup and takes effect.
@@ -336,7 +376,7 @@ await runRpcMode(session, {
 		try {
 			for await (const frame of readJsonl<unknown>(child.stdout)) {
 				if (!isRecord(frame) || frame.type !== "extension_ui_request" || frame.method !== "confirm") continue;
-				requests.push(JSON.parse(JSON.stringify(frame)));
+				requests.push(frame);
 				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: frame.id, confirmed: true })}\n`);
 				await child.stdin.flush();
 				if (requests.length === 5) child.stdin.end();
@@ -365,6 +405,143 @@ await runRpcMode(session, {
 		);
 		expect(JSON.stringify(requests)).not.toContain(firstExtensionPath);
 		expect(JSON.stringify(requests)).not.toContain(secondExtensionPath);
+	}, 30_000);
+
+	it("keeps each event-bus listener's registry identity across emitter awaits", async () => {
+		await using temp = await TempDir.create("@rpc-event-bus-identity-");
+		const extensionPath = (owner: "A" | "B") => temp.join(`${owner}.ts`);
+		const extensionSource = (owner: "A" | "B") => `
+export default function(pi) {
+  const gate = Promise.withResolvers();
+  pi.on("session_start", (_event, ctx) => {
+    pi.events.on("${owner}:open", async () => {
+      await gate.promise;
+      await Promise.resolve();
+      await ctx.ui.confirm("Cross-extension event", "${owner}", { extensionId: "spoofed" });
+    });
+    pi.events.on("${owner}:release", () => gate.resolve());
+  });
+  ${
+		owner === "A"
+			? `
+  pi.on("session_start", async () => {
+    await Promise.resolve();
+    pi.events.emit("A:open", undefined);
+    pi.events.emit("B:open", undefined);
+    await Promise.resolve();
+    pi.events.emit("A:release", undefined);
+    pi.events.emit("B:release", undefined);
+  });
+  `
+			: ""
+  }
+}
+`;
+		const extensionAPath = extensionPath("A");
+		const extensionBPath = extensionPath("B");
+		await Bun.write(extensionAPath, extensionSource("A"));
+		await Bun.write(extensionBPath, extensionSource("B"));
+		const child = await spawnRpcRuntimeWithExtensions(temp, [extensionBPath, extensionAPath]);
+		const stderr = new Response(child.stderr).text();
+		const requests: Record<string, unknown>[] = [];
+		try {
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (
+					!isRecord(frame) ||
+					frame.type !== "extension_ui_request" ||
+					frame.method !== "confirm" ||
+					frame.title !== "Cross-extension event"
+				) {
+					continue;
+				}
+				requests.push(frame);
+				child.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: frame.id, confirmed: true })}\n`);
+				await child.stdin.flush();
+				if (requests.length === 2) child.stdin.end();
+			}
+		} finally {
+			child.stdin.end();
+			await child.exited;
+		}
+
+		const identity = (sourcePath: string) =>
+			`ext:v1:sha256:${new Bun.CryptoHasher("sha256").update(sourcePath).digest("hex")}`;
+		expect(requests, await stderr).toHaveLength(2);
+		expect(Object.fromEntries(requests.map(request => [request.message, request.extensionId]))).toEqual({
+			A: identity(extensionAPath),
+			B: identity(extensionBPath),
+		});
+	}, 30_000);
+
+	it("restores the originating identity in RPC timeout response continuations", async () => {
+		await using temp = await TempDir.create("@rpc-ui-timeout-identity-");
+		const extensionPath = temp.join("timeout-identity.ts");
+		await Bun.write(
+			extensionPath,
+			`
+export default function(pi) {
+  pi.on("session_start", async (_event, ctx) => {
+    await ctx.ui.confirm("Host timeout", "answer as timed out", {
+      onTimeout: () => {
+        void ctx.ui.confirm("Host timeout follow-up", "nested", { extensionId: "spoofed" });
+      },
+    });
+    await ctx.ui.confirm("Local timeout", "let omp's timer expire", {
+      timeout: 20,
+      onTimeout: () => {
+        void ctx.ui.confirm("Local timeout follow-up", "nested", { extensionId: "spoofed" });
+      },
+    });
+  });
+}
+`,
+		);
+		const child = await spawnRpcRuntimeWithExtensions(temp, [extensionPath]);
+		const stderr = new Response(child.stderr).text();
+		const requests: Record<string, unknown>[] = [];
+		try {
+			for await (const frame of readJsonl<unknown>(child.stdout)) {
+				if (!isRecord(frame) || frame.type !== "extension_ui_request") continue;
+				if (frame.method === "confirm") {
+					requests.push(frame);
+					if (frame.title === "Host timeout") {
+						child.stdin.write(
+							`${JSON.stringify({
+								type: "extension_ui_response",
+								id: frame.id,
+								cancelled: true,
+								timedOut: true,
+							})}\n`,
+						);
+						await child.stdin.flush();
+					} else if (frame.title !== "Local timeout") {
+						child.stdin.write(
+							`${JSON.stringify({ type: "extension_ui_response", id: frame.id, confirmed: true })}\n`,
+						);
+						await child.stdin.flush();
+					}
+					if (requests.length === 4) child.stdin.end();
+				}
+			}
+		} finally {
+			child.stdin.end();
+			await child.exited;
+		}
+
+		const expectedIdentity = `ext:v1:sha256:${new Bun.CryptoHasher("sha256").update(extensionPath).digest("hex")}`;
+		expect(requests, await stderr).toHaveLength(4);
+		expect(requests.map(request => request.title)).toEqual([
+			"Host timeout",
+			"Host timeout follow-up",
+			"Local timeout",
+			"Local timeout follow-up",
+		]);
+		expect(requests.map(request => request.extensionId)).toEqual([
+			expectedIdentity,
+			expectedIdentity,
+			expectedIdentity,
+			expectedIdentity,
+		]);
 	}, 30_000);
 
 	it("attaches registry identity to extension tool approvals, confirmations, and command dialogs", async () => {

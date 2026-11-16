@@ -32,7 +32,10 @@ import {
 	getExtensionUISelectOptionLabel,
 	timedOutAskDialogResult,
 } from "../../extensibility/extensions";
-import { currentExtensionRequestIdentity } from "../../extensibility/extensions/request-identity";
+import {
+	currentExtensionRequestIdentity,
+	runWithExtensionRequestIdentity,
+} from "../../extensibility/extensions/request-identity";
 import {
 	type BuiltSkillPromptMessage,
 	loadSkillPrompt,
@@ -1205,6 +1208,7 @@ export function requestRpcEditor(
 	editorOptions?: { promptStyle?: boolean },
 ): Promise<string | undefined> {
 	if (dialogOptions?.signal?.aborted) return Promise.resolve(undefined);
+	const requestIdentity = currentExtensionRequestIdentity();
 
 	const id = Snowflake.next() as string;
 	const { promise, resolve, reject } = Promise.withResolvers<string | undefined>();
@@ -1214,18 +1218,20 @@ export function requestRpcEditor(
 		dialogOptions?.signal?.removeEventListener("abort", onAbort);
 		pendingRequests.delete(id);
 	};
-	const finish = (value: string | undefined) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		resolve(value);
-	};
-	const fail = (error: Error) => {
-		if (settled) return;
-		settled = true;
-		cleanup();
-		reject(error);
-	};
+	const finish = (value: string | undefined) =>
+		runWithExtensionRequestIdentity(requestIdentity, () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			resolve(value);
+		});
+	const fail = (error: Error) =>
+		runWithExtensionRequestIdentity(requestIdentity, () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(error);
+		});
 	const onAbort = () => {
 		output({
 			type: "extension_ui_request",
@@ -1270,6 +1276,7 @@ export function requestRpcDialog<T>(
 	parseResponse: (response: RpcExtensionUIResponse) => T,
 ): Promise<T> {
 	if (opts?.signal?.aborted) return Promise.resolve(defaultValue);
+	const requestIdentity = currentExtensionRequestIdentity();
 
 	const id = Snowflake.next() as string;
 	const { promise, resolve, reject } = Promise.withResolvers<T>();
@@ -1289,37 +1296,42 @@ export function requestRpcDialog<T>(
 			method: "cancel",
 			targetId: id,
 		} as RpcExtensionUIRequest);
-	const onAbort = () => {
-		cancelHostDialog();
-		cleanup();
-		resolve(defaultValue);
-	};
-	opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-	if (opts?.timeout !== undefined) {
-		timeoutId = setTimeout(() => {
-			opts.onTimeout?.();
+	const onAbort = () =>
+		runWithExtensionRequestIdentity(requestIdentity, () => {
 			cancelHostDialog();
 			cleanup();
 			resolve(defaultValue);
-		}, opts.timeout);
+		});
+	opts?.signal?.addEventListener("abort", onAbort, { once: true });
+
+	if (opts?.timeout !== undefined) {
+		timeoutId = setTimeout(
+			() =>
+				runWithExtensionRequestIdentity(requestIdentity, () => {
+					opts.onTimeout?.();
+					cancelHostDialog();
+					cleanup();
+					resolve(defaultValue);
+				}),
+			opts.timeout,
+		);
 	}
 
 	pendingRequests.set(id, {
-		resolve: response => {
-			cleanup();
-			try {
-				resolve(parseResponse(response));
-			} catch (err) {
-				reject(err);
-			}
-		},
-		reject,
+		resolve: response =>
+			runWithExtensionRequestIdentity(requestIdentity, () => {
+				cleanup();
+				try {
+					resolve(parseResponse(response));
+				} catch (err) {
+					reject(err);
+				}
+			}),
+		reject: error => runWithExtensionRequestIdentity(requestIdentity, () => reject(error)),
 	});
 	const { extensionId: _untrustedExtensionId, ...safeRequest } = request;
 	void _untrustedExtensionId;
-	const extensionId =
-		request.method === "select" || request.method === "confirm" ? currentExtensionRequestIdentity() : undefined;
+	const extensionId = request.method === "select" || request.method === "confirm" ? requestIdentity : undefined;
 	output({
 		type: "extension_ui_request",
 		id,

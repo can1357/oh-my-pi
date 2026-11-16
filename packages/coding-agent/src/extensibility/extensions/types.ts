@@ -2506,6 +2506,8 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 export interface Extension {
 	path: string;
 	resolvedPath: string;
+	/** Opaque ID for a canonical filesystem source; absent for session-local factories. */
+	requestIdentity?: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
 	tools: Map<string, RegisteredTool<any, any>>;

@@ -38,6 +38,7 @@ import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/leg
 import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
+import { extensionRequestIdentity, runWithExtensionRequestIdentity } from "./request-identity";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
 import type {
@@ -448,10 +449,11 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 /**
  * Create an Extension object with empty collections.
  */
-function createExtension(extensionPath: string, resolvedPath: string): Extension {
+function createExtension(extensionPath: string, resolvedPath: string, requestIdentity?: string): Extension {
 	return {
 		path: extensionPath,
 		resolvedPath,
+		requestIdentity,
 		handlers: new Map(),
 		tools: new Map(),
 		toolRegistrationListeners: new Set(),
@@ -493,9 +495,18 @@ async function runExtensionFactory(
 	}
 }
 
+async function canonicalizeExtensionPath(resolvedPath: string): Promise<string> {
+	if (!isFilesystemSourcePath(resolvedPath)) return resolvedPath;
+	try {
+		return await fs.realpath(resolvedPath);
+	} catch {
+		return path.resolve(resolvedPath);
+	}
+}
+
 /** Import one extension module and resolve its factory without binding it to a session. */
 export async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
-	const resolvedPath = resolvePath(extensionPath, cwd);
+	const resolvedPath = await canonicalizeExtensionPath(resolvePath(extensionPath, cwd));
 	try {
 		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
@@ -528,9 +539,14 @@ async function bindExtension(
 		return { extension: null, error: imported.error };
 	}
 	try {
-		const extension = createExtension(extensionPath, imported.resolvedPath);
+		const requestIdentity = isFilesystemSourcePath(imported.resolvedPath)
+			? extensionRequestIdentity(imported.resolvedPath)
+			: undefined;
+		const extension = createExtension(extensionPath, imported.resolvedPath, requestIdentity);
 		const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		await runWithExtensionRequestIdentity(requestIdentity, () =>
+			withHostGuard(() => runExtensionFactory(factory, api, runtime)),
+		);
 
 		return { extension, error: null };
 	} catch (err) {
@@ -551,7 +567,7 @@ export async function loadExtensionFromFactory(
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
 	const api = new ConcreteExtensionAPI(extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
+	await runWithExtensionRequestIdentity(undefined, () => runExtensionFactory(factory, api, runtime));
 	return extension;
 }
 

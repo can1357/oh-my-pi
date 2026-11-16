@@ -45,7 +45,7 @@ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shar
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import { trackUserWaits, type UserWaitTracker } from "./user-wait";
-import { extensionRequestIdentity, runWithExtensionRequestIdentity } from "./request-identity";
+import { runWithExtensionRequestIdentity } from "./request-identity";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { extensionLinkClicksAvailable } from "@oh-my-pi/pi-tui/render/extension-links";
 import {
@@ -843,13 +843,17 @@ export class ExtensionRunner {
 			throw new Error(`invokeTool: delegation depth exceeded 8 (recursive invokeTool for "${name}"?)`);
 		}
 		const toolCallId = `invoke-${name}-${Date.now().toString(36)}-${depth}`;
-		return (await resolved.tool.execute(
-			toolCallId,
-			params as never,
-			options?.signal,
-			options?.onUpdate as never,
-			options?.callerContext ?? resolved.makeContext(),
-		)) as AgentToolResult<TDetails>;
+		return runWithExtensionRequestIdentity(
+			undefined,
+			async () =>
+				(await resolved.tool.execute(
+					toolCallId,
+					params as never,
+					options?.signal,
+					options?.onUpdate as never,
+					options?.callerContext ?? resolved.makeContext(),
+				)) as AgentToolResult<TDetails>,
+		);
 	}
 
 	constructor(
@@ -1781,10 +1785,7 @@ export class ExtensionRunner {
 	}
 
 	#runWithExtensionIdentity<T>(extension: Extension | undefined, action: () => T): T {
-		return runWithExtensionRequestIdentity(
-			extension ? extensionRequestIdentity(extension.resolvedPath) : undefined,
-			action,
-		);
+		return runWithExtensionRequestIdentity(extension?.requestIdentity, action);
 	}
 
 	/**

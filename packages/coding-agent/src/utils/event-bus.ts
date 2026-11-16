@@ -1,4 +1,8 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import {
+	currentExtensionRequestIdentity,
+	runWithExtensionRequestIdentity,
+} from "../extensibility/extensions/request-identity";
 
 /**
  * Methods are bound arrow fields: upstream Pi's `createEventBus()` returns
@@ -36,13 +40,15 @@ export class EventBus {
 			handlers = new Set();
 			this.#listeners.set(channel, handlers);
 		}
-		const safeHandler = async (data: unknown) => {
-			try {
-				await handler(data);
-			} catch (err) {
-				logger.error("Event handler error", { channel, error: String(err) });
-			}
-		};
+		const requestIdentity = currentExtensionRequestIdentity();
+		const safeHandler = (data: unknown) =>
+			runWithExtensionRequestIdentity(requestIdentity, async () => {
+				try {
+					await handler(data);
+				} catch (err) {
+					logger.error("Event handler error", { channel, error: String(err) });
+				}
+			});
 		handlers.add(safeHandler);
 		if (handlers.size === 1) this.#notifyPresence(channel, true);
 		return () => {
@@ -67,10 +73,12 @@ export class EventBus {
 			watchers = new Set();
 			this.#presenceWatchers.set(channel, watchers);
 		}
-		watchers.add(onChange);
+		const requestIdentity = currentExtensionRequestIdentity();
+		const watcher = (present: boolean) => runWithExtensionRequestIdentity(requestIdentity, () => onChange(present));
+		watchers.add(watcher);
 		return () => {
 			const current = this.#presenceWatchers.get(channel);
-			current?.delete(onChange);
+			current?.delete(watcher);
 			if (current?.size === 0) this.#presenceWatchers.delete(channel);
 		};
 	};
