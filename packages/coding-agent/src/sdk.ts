@@ -387,6 +387,7 @@ import { cfgToolsFormat } from "./session/context-settings";
 import { cfgAutolearnEnabled } from "./autolearn/settings";
 import { cfgBrowserEnabled } from "./tools/browser/settings";
 import {
+	anthropicAdvisorOption,
 	cfgDefaultThinkingLevel,
 	cfgEncourageEdits,
 	cfgExternalThinking,
@@ -673,6 +674,12 @@ export interface CreateAgentSessionOptions {
 	disableModelFallback?: boolean;
 	/** Never opt requests into a provider's optional server-side model fallback. Per-call `model` subagents set it. */
 	disableServerSideFallback?: boolean;
+	/**
+	 * Never attach the Anthropic advisor tool (`providers.anthropic.advisor`).
+	 * Internal utility agents (agentic commit, compression) set it; the main
+	 * loop and task subagents inherit the setting.
+	 */
+	disableAnthropicAdvisor?: boolean;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
@@ -4901,14 +4908,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			);
 		};
 		// Primary-agent (and its auto-learn capture twin) provider options read per
-		// request, so `/settings` changes to budgets, Kimi format, or the Codex
-		// websocket policy reach the next call without a session recreate.
+		// request, so `/settings` changes to budgets, Kimi format, the Codex
+		// websocket policy, or the Anthropic advisor tool reach the next call
+		// without a session recreate. The advisor rides only here: side-channel,
+		// advisor-role and maintenance requests use other wrappers, while the cache
+		// warmer replays through this one so its prefix keeps the advisor tool.
 		const primaryStreamFn: StreamFn = (streamModel, context, streamOptions) => {
 			const kimiApiFormat = cfgProvidersKimiApiFormat.get(settings);
 			return settingsAwareStreamFn(streamModel, context, {
 				...streamOptions,
 				thinkingBudgets: streamOptions?.thinkingBudgets ?? cfgThinkingBudgets.get(settings),
 				kimiApiFormat: streamOptions?.kimiApiFormat ?? (kimiApiFormat === "auto" ? undefined : kimiApiFormat),
+				advisor:
+					streamOptions?.advisor ??
+					(options.disableAnthropicAdvisor ? undefined : anthropicAdvisorOption(settings)),
 			});
 		};
 		// Prompt-cache warmer for the main agent loop only: replays the last

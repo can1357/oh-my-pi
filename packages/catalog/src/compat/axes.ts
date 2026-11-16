@@ -642,6 +642,11 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * on any other model cannot redeem the credit.
 	 */
 	"fallback-credit-targets": { key: "fallbackCreditTargets", set: "catalog", shape: "array" },
+	/**
+	 * Anthropic model ids the API accepts as the `advisor_20260301` tool's
+	 * advisor for this executor, strongest first. Any other pairing is a 400.
+	 */
+	"advisor-models": { key: "advisorModels", set: "catalog", shape: "array" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },

@@ -12,6 +12,9 @@
 
 - Fixed rate-limit handling for Mistral and other OpenAI-compatible providers so requests with no available allowance fail immediately with an actionable error suggesting a model or plan change.
 - Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
+### Added
+
+- Added the Anthropic advisor tool: set `advisor: { model }` (`fable`, `opus`, `sonnet`, … or a model id) and Claude consults that model server-side mid-turn. Advisor calls and results replay across turns, paused turns resume, and advisor tokens are priced at the advisor model's rates.
 
 ## [18.20.2] - 2026-11-14
 

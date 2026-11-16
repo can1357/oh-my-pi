@@ -24,6 +24,28 @@ import type { SlashCommandSpec } from "./types";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "../tools/browser/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../commands/settings";
+import { cfgProvidersAnthropicAdvisor } from "../session/settings";
+import type { AgentSession } from "../session/agent-session";
+import { resolveAdvisorModel } from "@oh-my-pi/pi-catalog/compat/advisor";
+
+const ADVISOR_USAGE = "Usage: /advisor [on|off|status|dump [raw]|configure|tool [model|off]]";
+
+/**
+ * `/advisor tool [model|off]`: show or set the Anthropic advisor tool
+ * (`providers.anthropic.advisor`), reporting what the current model pairs with.
+ */
+function advisorToolCommand(session: AgentSession, arg: string): string {
+	const value = arg.trim();
+	if (value) cfgProvidersAnthropicAdvisor.set(session.settings, value.toLowerCase() === "off" ? "off" : value);
+	const configured = cfgProvidersAnthropicAdvisor.get(session.settings).trim();
+	if (!configured || configured === "off") return "Advisor tool off.";
+	const model = session.model;
+	if (!model) return `Advisor tool: ${configured}.`;
+	const resolved = resolveAdvisorModel(model, configured);
+	return resolved
+		? `Advisor tool: ${configured} → ${resolved} for ${model.provider}/${model.id}.`
+		: `Advisor tool: ${configured}. ${model.provider}/${model.id} has no accepted pairing; its turns run without it.`;
+}
 
 /** Join hint printed by /collab: compact terminal link + clickable browser deep link. */
 function collabLinkHint(host: CollabHost, heading: string, view = false): string {
@@ -64,13 +86,18 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		icon: "advisor",
 		description: "Toggle the advisor (a second model that reviews each turn and injects notes)",
 		acpDescription: "Toggle advisor",
-		acpInputHint: "[on|off|status|dump [raw]|configure]",
+		acpInputHint: "[on|off|status|dump [raw]|configure|tool [model|off]]",
 		subcommands: [
 			{ name: "on", description: "Enable the advisor" },
 			{ name: "off", description: "Disable the advisor" },
 			{ name: "status", description: "Show advisor status" },
 			{ name: "dump", description: "Copy the advisor's transcript to clipboard", usage: "[raw]" },
 			{ name: "configure", description: "Open the advisor configuration editor (TUI)" },
+			{
+				name: "tool",
+				description: "Show or set the Anthropic advisor tool (fable, opus, sonnet, a model id, or off)",
+				usage: "[model|off]",
+			},
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
@@ -122,7 +149,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				);
 				return commandConsumed();
 			}
-			return usage("Usage: /advisor [on|off|status|dump [raw]|configure]", runtime);
+			if (verb === "tool") {
+				await runtime.output(advisorToolCommand(runtime.session, rest));
+				return commandConsumed();
+			}
+			return usage(ADVISOR_USAGE, runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
@@ -172,7 +203,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				clearSubmittedText(runtime);
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /advisor [on|off|status|dump [raw]|configure]");
+			if (verb === "tool") {
+				runtime.ctx.showStatus(advisorToolCommand(runtime.ctx.session, rest));
+				clearSubmittedText(runtime);
+				return;
+			}
+			runtime.ctx.showStatus(ADVISOR_USAGE);
 			clearSubmittedText(runtime);
 		},
 	},

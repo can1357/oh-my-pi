@@ -16,6 +16,7 @@
 
 - Fixed image inputs being dropped for DeepSeek V4 Flash, restoring consistent multimodal image support.
 - Restricted reasoning-effort options for Mistral GLM 5.3, GLM 5.3 Flash, and Mistral Large 4 to the levels supported by those models.
+- Added the advisor models the Anthropic API accepts for each Claude executor, with `resolveAdvisorModel` resolving a family alias to the strongest accepted advisor.
 
 ## [18.20.2] - 2026-11-14
 

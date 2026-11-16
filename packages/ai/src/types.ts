@@ -890,6 +890,22 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	fallbacks?: FallbackParam[];
 	/** Factory Droid only: omit refusal fallbacks and reject responses served by another model. */
 	disableServerSideFallback?: boolean;
+	/**
+	 * Anthropic advisor tool (`advisor-tool-2026-03-01`). The executor model
+	 * may consult the advisor mid-generation; Anthropic runs it server-side.
+	 * Attached only when the catalog accepts the pairing for the request's
+	 * model. Non-Anthropic providers ignore the field.
+	 */
+	advisor?: AnthropicAdvisorOptions;
+}
+
+/** Advisor tool configuration for Anthropic Messages requests. */
+export interface AnthropicAdvisorOptions {
+	/**
+	 * Advisor model: a family alias (`fable`, `mythos`, `opus`, `sonnet`,
+	 * `haiku`) resolving to the strongest accepted member, or a full model id.
+	 */
+	model: string;
 }
 
 // Generic StreamFunction with typed options
@@ -957,8 +973,8 @@ export interface AnthropicFallbackContent {
 }
 
 /**
- * Verbatim Anthropic web-search or tool-search call/result retained for
- * same-provider history replay. Other providers discard it in
+ * Verbatim Anthropic web-search, tool-search, or advisor call/result retained
+ * for same-provider history replay. Other providers discard it in
  * `transformMessages`.
  */
 export interface AnthropicServerToolContent {
@@ -967,12 +983,12 @@ export interface AnthropicServerToolContent {
 		| {
 				type: "server_tool_use";
 				id: string;
-				name: "web_search" | "tool_search_tool_regex" | "tool_search_tool_bm25";
+				name: "web_search" | "tool_search_tool_regex" | "tool_search_tool_bm25" | "advisor";
 				input?: Record<string, unknown> | null;
 				[key: string]: unknown;
 		  }
 		| {
-				type: "web_search_tool_result" | "tool_search_tool_result";
+				type: "web_search_tool_result" | "tool_search_tool_result" | "advisor_tool_result";
 				tool_use_id: string;
 				content: unknown;
 				[key: string]: unknown;

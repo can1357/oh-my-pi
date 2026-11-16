@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added transcript lines for Anthropic advisor-tool consultations (consulting, reviewed, plaintext advice, or unavailable).
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

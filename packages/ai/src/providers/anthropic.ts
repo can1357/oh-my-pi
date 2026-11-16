@@ -29,6 +29,7 @@ import { getEnvApiKey } from "../env-api-key";
 import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
 import type {
+	AnthropicAdvisorOptions,
 	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,
 	AnthropicCompactionRequest,
@@ -162,6 +163,14 @@ import {
 	supportsAnthropicCompactionOnClient,
 } from "./anthropic-compaction";
 import {
+	anthropicAdvisorPrompt,
+	contextHasAdvisorHistory,
+	endsWithPendingAdvisorCall,
+	hasAdvisorIteration,
+	pendingAdvisorCallIds,
+	resolveAnthropicAdvisorTool,
+} from "./anthropic-advisor";
+import {
 	applyClaudeToolPrefix,
 	deriveClaudeDeviceId,
 	extractClaudeMetadataSessionId,
@@ -192,6 +201,7 @@ import {
 	taskBudgetBeta,
 	effortBeta,
 	serverSideFallbackBeta,
+	advisorToolBeta,
 	buildClaudeCodeBetas,
 	buildAnthropicHeaders,
 	resolveAnthropicCustomHeadersForBaseUrl,
@@ -533,7 +543,7 @@ function getAnthropicProviderSessionState(
 }
 
 function hasStrictAnthropicTools(params: MessageCreateParamsStreaming): boolean {
-	return params.tools?.some(tool => tool.strict === true) ?? false;
+	return params.tools?.some(tool => "strict" in tool && tool.strict === true) ?? false;
 }
 
 function dropAnthropicFastMode(params: MessageCreateParamsStreaming): void {
@@ -543,7 +553,7 @@ function dropAnthropicFastMode(params: MessageCreateParamsStreaming): void {
 function dropAnthropicStrictTools(params: MessageCreateParamsStreaming): void {
 	if (!params.tools) return;
 	for (const tool of params.tools) {
-		delete tool.strict;
+		if ("strict" in tool) delete tool.strict;
 	}
 }
 
@@ -870,6 +880,13 @@ export interface AnthropicOptions extends StreamOptions {
 	 * response (a gateway opted in) is still persisted as a replay boundary.
 	 */
 	fallbacks?: FallbackParam[];
+	/**
+	 * Advisor tool (`advisor-tool-2026-03-01`). When the catalog accepts the
+	 * pairing for `model`, the tool and its executor guidance ride on the
+	 * request; the beta header also rides whenever the history carries
+	 * advisor blocks, which replay verbatim.
+	 */
+	advisor?: AnthropicAdvisorOptions;
 }
 
 export type AnthropicClientOptionsArgs = {
@@ -2152,6 +2169,16 @@ const streamAnthropicOnce = (
 						extraBetas.push(LEGACY_COMPACTION_BETA);
 					}
 				}
+				// The advisor beta gates both the tool (attached in buildParams
+				// whenever the pairing resolves) and the replay of its history
+				// blocks, which the API rejects without it.
+				if (
+					!extraBetas.includes(advisorToolBeta) &&
+					(contextHasAdvisorHistory(context.messages) ||
+						resolveAnthropicAdvisorTool(model, options?.advisor) !== undefined)
+				) {
+					extraBetas.push(advisorToolBeta);
+				}
 				// `ttl: "1h"` requires the extended-cache-ttl beta on API-key
 				// requests. OAuth requests never add it here: Anthropic honors
 				// `ttl: "1h"` on the OAuth path without it (verified against live
@@ -2853,7 +2880,7 @@ const streamAnthropicOnce = (
 									if (served) output.model = served;
 								}
 								if (
-									!(serverSideFallback || compacted) ||
+									!(serverSideFallback || compacted || hasAdvisorIteration(startUsage.iterations)) ||
 									!calculateIterationTurnCost(sourceModel, output.usage, startUsage, output.timestamp)
 								) {
 									calculateCost(sourceModel, output.usage, output.timestamp);
@@ -3221,7 +3248,7 @@ const streamAnthropicOnce = (
 									if (served) output.model = served;
 								}
 								if (
-									!(serverSideFallback || compacted) ||
+									!(serverSideFallback || compacted || hasAdvisorIteration(deltaUsage.iterations)) ||
 									!calculateIterationTurnCost(sourceModel, output.usage, deltaUsage, output.timestamp)
 								) {
 									calculateCost(sourceModel, output.usage, output.timestamp);
@@ -4367,7 +4394,7 @@ function countHeadBreakpoints(params: MessageCreateParamsStreaming): number {
 	}
 	if (Array.isArray(params.tools)) {
 		for (const tool of params.tools) {
-			if (tool?.cache_control != null) count++;
+			if ("cache_control" in tool && tool.cache_control != null) count++;
 		}
 	}
 	return count;
@@ -5201,6 +5228,11 @@ function buildParams(
 	const cacheControl =
 		dropCacheControlOptions && resolvedCacheControl ? { type: resolvedCacheControl.type } : resolvedCacheControl;
 
+	// The advisor tool rides on every request of an advised conversation,
+	// on-demand compaction included: removing it is a `tools` edit, which
+	// invalidates replayed thinking. Its guidance leads the system prompt.
+	const advisorTool = resolveAnthropicAdvisorTool(model, options?.advisor);
+
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
 	const shouldInjectClaudeCodeInstruction = isOAuthToken && model.compat.injectClaudeCodeInstruction !== false;
 	const firstUserMessageText = shouldInjectClaudeCodeInstruction
@@ -5208,6 +5240,7 @@ function buildParams(
 		: "";
 	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
+		extraInstructions: advisorTool ? [anthropicAdvisorPrompt(model)] : undefined,
 		firstUserMessageText,
 		cacheControl,
 		dropCacheControl,
@@ -5434,6 +5467,7 @@ function buildParams(
 		droppedThinkingBlocks,
 		credentialId: options?.credentialId,
 		compactionRequest,
+		droppedAdvisorCalls: advisorTool ? undefined : pendingAdvisorCallIds(context.messages),
 	};
 	const wireMessages = convertAnthropicMessages(
 		insertAnthropicControlMarkers(context.messages, [...toolPlan.inserts, ...effortPlan.inserts]),
@@ -5445,6 +5479,10 @@ function buildParams(
 	// Anchor the stable tools+system head so it stays cached across turns; the
 	// moving message tail is anchored separately in applyPromptCaching below.
 	applyHeadCaching(systemBlocks, tools, cacheControl);
+	// After head caching: the advisor definition takes no `cache_control`
+	// (its own `caching` field governs the advisor's read), and the system
+	// breakpoint after it still covers it.
+	const wireTools = advisorTool ? [...(tools ?? []), advisorTool] : tools;
 	const requestControls: AnthropicRequestControls | undefined =
 		toolPlan.record || effortPlan.record
 			? {
@@ -5498,7 +5536,7 @@ function buildParams(
 		model: options?.requestModelId ?? model.requestModelId ?? model.id,
 		messages: wireMessages,
 		...(systemBlocks && { system: systemBlocks }),
-		...(tools !== undefined && { tools }),
+		...(wireTools !== undefined && { tools: wireTools }),
 		...(metadata && { metadata }),
 		max_tokens: Math.min(maxOutputTokens, options?.maxTokens ?? maxOutputTokens),
 		...(thinking && { thinking }),
@@ -5777,6 +5815,11 @@ type AnthropicConversionOptions = {
 	credentialId?: number;
 	/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
 	compactionRequest?: AnthropicCompactionRequest;
+	/**
+	 * Advisor calls without a result to drop: the request carries no advisor
+	 * tool to run them, and the API rejects a pending call without it.
+	 */
+	droppedAdvisorCalls?: ReadonlySet<string>;
 };
 
 /**
@@ -6088,6 +6131,13 @@ export function convertAnthropicMessages(
 						data: block.data,
 					});
 				} else if (block.type === "anthropicServerTool") {
+					if (
+						block.block.type === "server_tool_use" &&
+						block.block.name === "advisor" &&
+						opts?.droppedAdvisorCalls?.has(block.block.id)
+					) {
+						continue;
+					}
 					blocks.push(block.block);
 				} else if (block.type === "fallback") {
 					// Present only when this request can carry it (see `content`).
@@ -6341,7 +6391,9 @@ export function convertAnthropicMessages(
 	}
 	if (opts?.compactionRequest) return params;
 	const last = skipControls(params.length, -1);
-	if (params[last]?.role === "assistant") {
+	// A turn paused on a pending advisor call resumes by replaying it as the
+	// last message, unchanged; the API runs the call and continues the turn.
+	if (params[last]?.role === "assistant" && !endsWithPendingAdvisorCall(params[last])) {
 		params.splice(last + 1, 0, { role: "user", content: "Continue." });
 	}
 

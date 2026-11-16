@@ -45,6 +45,7 @@ export async function createCompressSession(options: {
 		authStorage,
 		modelRegistry,
 		cacheWarming: false,
+		disableAnthropicAdvisor: true,
 		...(resolved?.model ? { model: resolved.model } : {}),
 		customTools: [options.protocol.rewriteTool(), options.protocol.approveTool()],
 		toolNames: ["rewrite", "approve"],
