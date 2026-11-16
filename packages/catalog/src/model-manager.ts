@@ -717,7 +717,15 @@ function mergeDynamicModel<TApi extends Api>(
 	// Providers with authoritative reasoning metadata must not regain a
 	// stale bundled dial after explicitly reporting no reasoning. Others
 	// retain the additive fallback for discovery that omits capabilities.
-	const reasoning = authority.reasoning ? dynamicModel.reasoning : existingModel.reasoning || dynamicModel.reasoning;
+	// A provisional ladder's derived `reasoning: true` is missing evidence,
+	// not capability, so it neither overrides nor joins the other side.
+	const liveReasoning = dynamicModel.thinking?.unverified ? undefined : dynamicModel.reasoning;
+	const fallbackReasoning = existingModel.thinking?.unverified ? undefined : existingModel.reasoning;
+	const reasoning = authority.reasoning
+		? (liveReasoning ?? fallbackReasoning)
+		: liveReasoning === true || fallbackReasoning === true
+			? true
+			: (liveReasoning ?? fallbackReasoning);
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
@@ -746,6 +754,7 @@ function mergeDynamicModel<TApi extends Api>(
 		liveCompat !== undefined &&
 		"trustExplicitThinkingOnly" in liveCompat &&
 		liveCompat.trustExplicitThinkingOnly === true;
+	const thinking = trustsOwnThinking || "thinking" in dynamicModel ? dynamicModel.thinking : existingModel.thinking;
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
@@ -753,7 +762,9 @@ function mergeDynamicModel<TApi extends Api>(
 			authority.staticNames?.get(dynamicModel.id) ??
 			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
-		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
+		// `buildModel` re-derives a provisional ladder from the merged evidence;
+		// carried over, it would erase that evidence (see `resolveModelPolicy`).
+		thinking: thinking?.unverified ? undefined : thinking,
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
