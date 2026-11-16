@@ -5,11 +5,21 @@
 ### Added
 
 - Added the `opencode-client-identity` compat axis and the `wire/opencode` client identity (pinned User-Agent with `PI_AI_OPENCODE_VERSION` overrides, `ses_` session-token derivation), set on free OpenCode Zen models by `opencode-zen.kdl` ([#19112](https://github.com/can1357/oh-my-pi/pull/19112) by [@Xytronix](https://github.com/Xytronix))
-- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added Modal as a hosted inference provider.
 
 ### Changed
 
-- Changed the local speech model `kokoro` to `phonon-31m`
+- Changed the local speech model from Kokoro to Phonon 31M.
+- Improved reasoning capability detection by preserving unverified thinking-level support and using endpoint-specific probe results when available.
+
+### Fixed
+
+- Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
 
 ## [18.20.3] - 2026-11-16
 
