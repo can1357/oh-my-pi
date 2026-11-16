@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor turns over HTTP/1 stalling for minutes on long conversations ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Fixed one proxy gateway error ending a Cursor turn over HTTP/1 ([#17983](https://github.com/can1357/oh-my-pi/pull/17983) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
@@ -16,6 +21,7 @@
 
 ### Fixed
 
+- Fixed Gemini 4 (Argon, Carbon and Hydrogen) answers longer than one 65,536-token output segment failing with finish reason `CONTINUATION`: Google, Vertex AI, Gemini CLI and Antigravity requests now resume the generation, retrying transient failures, and stream it as one reply ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
 - Fixed rate-limit handling for Mistral and other OpenAI-compatible providers so requests with no available allowance fail immediately with an actionable error suggesting a model or plan change.
 - Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
 

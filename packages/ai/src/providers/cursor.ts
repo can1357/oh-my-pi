@@ -229,7 +229,8 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { waitForRetry } from "../utils/retry-wait";
+import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
+import { type RetryWaitHook, waitForRetry } from "../utils/retry-wait";
 import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
 import { formatConnectEndStreamError, hasRetryableCursorErrorDetail } from "./connect-error-detail";
 import { CONNECT_END_STREAM_FLAG, ConnectFrameDecoder, frameConnectMessage } from "./connect-frame";
@@ -850,6 +851,8 @@ interface CursorHttp1RunTransportOptions {
 	headers: Record<string, string>;
 	requestId: string;
 	signal?: AbortSignal;
+	retryWait?: RetryWaitHook;
+	maxRetryDelayMs?: number;
 }
 
 interface CursorPendingAppend {
@@ -857,9 +860,14 @@ interface CursorPendingAppend {
 	data: Uint8Array;
 }
 
-const CURSOR_HTTP1_APPEND_CONCURRENCY = 16;
+// Parallel appends can arrive out of order, and the server then stalls the turn.
+const CURSOR_HTTP1_APPEND_CONCURRENCY = 1;
 const CURSOR_HTTP1_APPEND_BASE_TIMEOUT_MS = 60_000;
 const CURSOR_HTTP1_APPEND_BYTES_PER_SECOND = 128 * 1024;
+const CURSOR_HTTP1_APPEND_RETRY_STATUSES = new Set([502, 503, 504]);
+const CURSOR_HTTP1_APPEND_RETRY_BACKOFF_MS = [250, 1_000];
+// A longer retry-after fails the append rather than being shortened.
+const CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS = 5_000;
 
 function readConnectFrameMessage(frame: Uint8Array): Uint8Array {
 	if (frame.length < 5) {
@@ -880,6 +888,11 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	const abortController = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, abortController.signal]) : abortController.signal;
 	const fetchImpl = wrapFetchForProxy(globalThis.fetch, "cursor");
+	const maxRetryDelayMs = options.maxRetryDelayMs ?? 60_000;
+	const retryAfterCeilingMs =
+		maxRetryDelayMs > 0
+			? Math.min(CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS, maxRetryDelayMs)
+			: CURSOR_HTTP1_APPEND_RETRY_AFTER_MAX_MS;
 	const requestId = create(BidiRequestIdSchema, { requestId: options.requestId });
 	const pendingAppends: CursorPendingAppend[] = [];
 	let appendSeqno = 0n;
@@ -890,11 +903,18 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 	let dataListener: (chunk: Buffer) => void = () => {};
 	let endListener: () => void = () => {};
 	let errorListener: (error: unknown) => void = () => {};
+	const appendsController = new AbortController();
+	const appendSignal = AbortSignal.any([signal, appendsController.signal]);
+	const runOver = (): boolean => closed || ended;
+	const stopAppends = (): void => {
+		pendingAppends.length = 0;
+		appendsController.abort();
+	};
 
 	const fail = (error: unknown): void => {
 		if (closed) return;
 		closed = true;
-		pendingAppends.length = 0;
+		stopAppends();
 		abortController.abort(error);
 		errorListener(error);
 	};
@@ -908,32 +928,53 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			appendSeqno: append.seqno,
 			dataBinary: append.data,
 		});
+		const payload = toBinary(BidiAppendRequestSchema, body);
 		const timeoutMs =
 			CURSOR_HTTP1_APPEND_BASE_TIMEOUT_MS +
 			Math.ceil(append.data.byteLength / CURSOR_HTTP1_APPEND_BYTES_PER_SECOND) * 1_000;
-		const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
-			method: "POST",
-			headers: { ...options.headers, "content-type": "application/proto" },
-			body: toBinary(BidiAppendRequestSchema, body),
-			signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-		});
-		if (response.ok) {
-			await response.body?.cancel();
-			return;
+		// The same request id and seqno make the server apply a resent append once.
+		for (let attempt = 0; ; attempt++) {
+			if (runOver()) return;
+			const response = await fetchImpl(new URL(CURSOR_BIDI_APPEND_PATH, options.baseUrl), {
+				method: "POST",
+				headers: { ...options.headers, "content-type": "application/proto" },
+				body: payload,
+				signal: AbortSignal.any([appendSignal, AbortSignal.timeout(timeoutMs)]),
+			});
+			if (response.ok) {
+				await response.body?.cancel();
+				return;
+			}
+			const backoffMs = CURSOR_HTTP1_APPEND_RETRY_BACKOFF_MS[attempt];
+			const retryAfterMs = getRetryAfterMsFromHeaders(response.headers);
+			const hintMs = retryAfterMs !== undefined && retryAfterMs > 0 ? retryAfterMs : undefined;
+			if (
+				backoffMs !== undefined &&
+				CURSOR_HTTP1_APPEND_RETRY_STATUSES.has(response.status) &&
+				(hintMs === undefined || hintMs <= retryAfterCeilingMs)
+			) {
+				await response.body?.cancel();
+				await waitForRetry(options.retryWait, hintMs ?? backoffMs, appendSignal);
+				continue;
+			}
+			const error = await response.json().catch(() => undefined);
+			throw isRecord(error)
+				? classifyConnectError(error)
+				: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status, {
+						headers: response.headers,
+					});
 		}
-		const error = await response.json().catch(() => undefined);
-		throw isRecord(error)
-			? classifyConnectError(error)
-			: new AIError.ProviderHttpError(`Cursor BidiAppend failed with HTTP ${response.status}`, response.status);
 	};
 
 	const pumpAppends = (): void => {
-		while (!closed && activeAppends < CURSOR_HTTP1_APPEND_CONCURRENCY) {
+		while (!runOver() && activeAppends < CURSOR_HTTP1_APPEND_CONCURRENCY) {
 			const append = pendingAppends.shift();
 			if (!append) return;
 			activeAppends++;
 			void sendAppend(append)
-				.catch(fail)
+				.catch(error => {
+					if (!runOver()) fail(error);
+				})
 				.finally(() => {
 					activeAppends--;
 					pumpAppends();
@@ -968,6 +1009,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			}
 			if (closed) return;
 			closed = true;
+			stopAppends();
 			endListener();
 		} catch (error) {
 			if (!closed) fail(error);
@@ -979,7 +1021,7 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			return closed;
 		},
 		write(frame) {
-			if (closed || ended) return;
+			if (runOver()) return;
 			pendingAppends.push({
 				seqno: appendSeqno++,
 				data: readConnectFrameMessage(frame),
@@ -993,15 +1035,14 @@ function createHttp1RunTransport(options: CursorHttp1RunTransportOptions): Curso
 			// its turn would wait forever). `closed` makes it fire exactly once.
 			if (closed) return;
 			closed = true;
-			pendingAppends.length = 0;
+			stopAppends();
 			abortController.abort();
 			endListener();
 		},
 		end() {
-			// RunSSE's request body is already complete; appends are separate
-			// unary calls, so ending just stops new ones.
+			// RunSSE's request body is already complete; appends are separate unary calls.
 			ended = true;
-			pendingAppends.length = 0;
+			stopAppends();
 		},
 		onResponse(listener) {
 			responseListener = listener;
@@ -1535,6 +1576,8 @@ function streamCursorWithWireMode(
 					headers: requestHeaders,
 					requestId,
 					signal: options?.signal,
+					retryWait: options?.providerRetryWait,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
 				});
 			}
 
