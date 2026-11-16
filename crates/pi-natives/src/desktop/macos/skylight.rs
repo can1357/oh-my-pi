@@ -4962,4 +4962,43 @@ mod tests {
 		let decision = guard.observe(TARGET, None, pressed(Some(false)), t0 + ms(1040));
 		assert_eq!(decision, FocusDecision::Restore);
 	}
+
+	#[test]
+	fn a_swallowed_press_given_up_with_the_target_in_front_leaves_it_sent_back() {
+		// The user's press at 10 ms, which `WindowServer` counts and a remapping
+		// tool swallows, while the target comes forward on its own. The reading
+		// that gives up on the press at 70 ms places it in the user's app.
+		let t0 = Instant::now();
+		let idle = SwitchSignals::of(
+			Reading { buttons: [0; 6], placed: Some(true), skipped: None },
+			t0.checked_sub(ms(5000)),
+			NO_MODIFIERS,
+			None,
+		);
+		let pressed = |placed| {
+			SwitchSignals::of(
+				Reading { buttons: [1, 0, 0, 0, 0, 0], placed, skipped: None },
+				Some(t0 + ms(10)),
+				NO_MODIFIERS,
+				None,
+			)
+		};
+		let target_at = |placed, at| {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
+			let decision = guard.observe(PREVIOUS, Some(42), pressed(None), t0 + ms(20));
+			assert_eq!(decision, FocusDecision::Observe);
+			(guard.observe(TARGET, None, pressed(placed), t0 + at), guard)
+		};
+		// The target in front on that reading is sent back, and the guard
+		// stays armed for the rest of the action.
+		let (decision, guard) = target_at(Some(true), ms(70));
+		assert_eq!(decision, FocusDecision::Restore);
+		assert!(!guard.disarmed && !guard.visited);
+		// The limit: while the press is undelivered it may be the user's click
+		// on the target, so the target coming forward then is left in front.
+		let (decision, guard) = target_at(None, ms(60));
+		assert_eq!(decision, FocusDecision::Disarm);
+		assert!(guard.disarmed && guard.visited);
+	}
 }

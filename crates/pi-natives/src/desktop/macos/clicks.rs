@@ -323,11 +323,11 @@ impl Journal {
 	/// Whether the latest click the HID counters `hid` count went to the
 	/// user's app; `None` while the tap trails `WindowServer`. Once no
 	/// button event has come for [`DELIVERY`] (`idle`), an event the tap
-	/// still has not delivered is lost: the record starts again. What it
-	/// missed counts as in the user's app, since a tool that swallows a
-	/// button before the session's tap, as remappers do, delivers it to no
-	/// app; after macOS disabled the tap it is unknown, as those events
-	/// reached apps.
+	/// still has not delivered is lost: the record starts again, and that
+	/// reading already places it. What it missed counts as in the user's
+	/// app, since a tool that swallows a button before the session's tap, as
+	/// remappers do, delivers it to no app; after macOS disabled the tap it
+	/// is unknown, as those events reached apps.
 	///
 	/// A press routed to the target goes to it; one routed to the user's
 	/// app, or while `apps.helpers` to a process that is no app of its
@@ -347,6 +347,7 @@ impl Journal {
 				if lost {
 					self.before = None;
 				}
+				return self.before;
 			}
 			return None;
 		}
@@ -534,7 +535,7 @@ mod tests {
 		let mut session = Session::started();
 		session.counted(OTHER_DOWN);
 		assert_eq!(session.place(false), None);
-		assert_eq!(session.place(true), None);
+		assert_eq!(session.place(true), Some(true), "the reading that gives it up places it");
 		assert_eq!(session.place(false), Some(true), "what the tap missed picked nothing");
 		session.click(TARGET, (3, 3), None);
 		assert_eq!(session.place(false), Some(false));
@@ -595,7 +596,7 @@ mod tests {
 		// through the tap only after a reading gave up waiting for it.
 		let mut session = Session::started();
 		session.counted(LEFT_DOWN);
-		assert_eq!(session.reading(true).placed, None);
+		assert_eq!(session.reading(true).placed, Some(true));
 		session.delivered(LEFT_DOWN, USER, 3, None);
 		let late = session.reading(false);
 		assert_eq!(late.buttons, [6, 5, 0, 0, 0, 0], "one press, read once");
