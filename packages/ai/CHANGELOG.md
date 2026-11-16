@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
 - Fixed Codex requests reporting a stale client version that hid newly released models; the current `@openai/codex` version is now looked up from npm ([#19257](https://github.com/can1357/oh-my-pi/pull/19257) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.21.0] - 2026-11-16

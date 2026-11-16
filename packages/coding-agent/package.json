@@ -280,6 +280,22 @@
 			"types": "./src/extensibility/plugins/marketplace/*.ts",
 			"import": "./src/extensibility/plugins/marketplace/*.ts"
 		},
+		"./disasm": {
+			"types": "./src/disasm/index.ts",
+			"import": "./src/disasm/index.ts"
+		},
+		"./disasm/*": {
+			"types": "./src/disasm/*.ts",
+			"import": "./src/disasm/*.ts"
+		},
+		"./ghidra": {
+			"types": "./src/ghidra/index.ts",
+			"import": "./src/ghidra/index.ts"
+		},
+		"./ghidra/*": {
+			"types": "./src/ghidra/*.ts",
+			"import": "./src/ghidra/*.ts"
+		},
 		"./ida": {
 			"types": "./src/ida/index.ts",
 			"import": "./src/ida/index.ts"
