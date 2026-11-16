@@ -21,7 +21,9 @@ Recommendation classes: **REUSE** · **EXTEND** · **IMPLEMENT** · **DEFER** ·
 | Parallel Precheck/Review | docs claim | Partial | Sequential impl | Sequential compose | N/A | Perf only | Med | Stream B | **DEFER** |
 | `agent_settled` rev mismatch | catalog vs payload | Partial | rev 2 vs 1 | TASKS.md open | N/A | Schema drift | Low | Stream B | **EXTEND** before schema work |
 | In-process `jq` (jaq) | `shell-builtins/jq.rs` | Implemented | — | — | N/A | PathPolicy | Low | Stream C | **REUSE** |
-| Embed sHEL / second interpreter | — | Absent | Marketing only | bash+jq+spill | N/A | New trust surface | High | Stream C | **REJECT** without measurement |
+| Embed sHEL / second interpreter | — | Absent | Wrong domain (cmd.exe workstation; AGPL) | bash+jq+spill | N/A | New trust + license surface | High | Stream C (×2) | **REJECT** |
+| Nested-eval tool hook emission | envd/kernel | Partial | Nested path skips tool hooks | Documented gap | N/A | Policy blind spot | Med | Stream B | **EXTEND** if policy requires |
+| Bub firstresult prompt/model replace | — | Absent | — | Core-owned prompt/inference | N/A | Would invert authority | High | Stream B | **REJECT** (Locked Deviation) |
 | Live jq minimizer in envd | minimizer crate | Partial | cargo-only live | Spill/projection | N/A | Token vs fidelity | Low | Stream C | **DEFER** |
 | yq-like YAML/CSV transform | — | Absent | No builtin | serde for config only | N/A | Path/injection | Med | Stream C | **DEFER** |
 | ExpertPackage runtime | — | Absent | Composition desire | skills+ADW+ext+classes | Would fork standards story | Authority confusion | High | Stream D | **REJECT** |

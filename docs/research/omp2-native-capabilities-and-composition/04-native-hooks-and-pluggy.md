@@ -1,7 +1,7 @@
 # Stream B — Native hooks vs Bub/Pluggy-style middleware
 
 Pin: `a8762fd997ca754b30ea7d3344cbd5c656aa5dff` (2026-11-16 UTC).  
-Auditor: [Audit native hook phases](bc-b23abcf8-04e3-5e16-81ab-9f251fa0c60e).  
+Auditors: [Audit native hook phases](bc-b23abcf8-04e3-5e16-81ab-9f251fa0c60e), [Audit native hooks](bc-2df90917-dffa-5e0e-9003-4b900c271727).  
 Tests cited were inventoried from source; they were **not** re-run in this audit.
 
 ## Study
@@ -58,8 +58,11 @@ Genuine gaps relative to that *shape* (not missing frameworks):
 1. No single linear middleware list — phased multi-channel by design.  
 2. Prompt family gates catalog-only (`user_input` et al.).  
 3. Replay skips tool_call re-admission (intentional).  
-4. Documented parallel Precheck/Review not implemented.  
-5. Observe deliberately decoupled from outcome.
+4. Documented parallel Precheck/Review not implemented (sequential composers).  
+5. Observe deliberately decoupled from outcome.  
+6. Nested-eval tool path does not fire tool hooks (`docs/py/05-hooks.md`).  
+7. No first-class verification-objective gate event (Review ≠ ADW/evidence authority).  
+8. Bub-style first-result replaceable `build_prompt` / `run_model` — **absent by Locked Deviation**, not a defect.
 
 ## Recommendations
 
@@ -70,9 +73,11 @@ Genuine gaps relative to that *shape* (not missing frameworks):
 | **REUSE** | AI Tower hook as cold-path seam — do not fork the catalog |
 | **EXTEND** | Emit `user_input` family **only** if product needs that seam vs `before_agent_start` |
 | **EXTEND** | Optional re-admission on `retry_tool_tail` **only** if policy must re-gate recovered effects |
-| **EXTEND** | Parallel Precheck/Review only with measured need (optional optimization) |
+| **EXTEND** | Nested-eval tool hook emission **only** if policy must see nested calls |
+| **EXTEND** | Parallel Precheck/Review only with measured need — or retarget docs to sequential |
 | **EXTEND** | Resolve `agent_settled` catalog rev 2 vs payload rev 1 before schema work |
-| **REJECT** | Parallel Pluggy-style linear middleware stack / second decision orchestrator |
+| **DEFER** | Per-hook CPU/token budgets beyond existing deadlines |
+| **REJECT** | Parallel Pluggy-style stack, Bub firstresult turn pipeline, or second decision orchestrator |
 
 ## Non-goals
 

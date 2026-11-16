@@ -1,17 +1,26 @@
 # Stream C — Structured operations vs sHEL
 
 Pin: `a8762fd997ca754b30ea7d3344cbd5c656aa5dff` (2026-11-16 UTC).  
-Auditor: [Audit shell structured ops](bc-a0b48f6f-eff1-5b14-ad30-a5585b30003a).  
-Public site skim: [shel.sh](https://shel.sh/) (2026-11-16) — marketing claims only; **not** executed here.  
+Auditors: [Audit shell structured ops](bc-a0b48f6f-eff1-5b14-ad30-a5585b30003a), [Audit structured ops sHEL](bc-335a8f37-37e9-5811-b7d0-9a20d4ab5005).  
+Public materials: [shel.sh](https://shel.sh/) + docs skim (2026-11-16). **sHEL was not installed or executed** here.  
 Tests cited were inventoried from source; they were **not** re-run. Benchmarks: **NOT MEASURED**.
 
 ## Study
 
 Does sHEL provide useful capabilities that OMP2’s in-process shell, builtins, and typed tool results do not already provide?
 
-## sHEL characterization (external, unverified)
+## sHEL characterization (external)
 
-Public materials describe a “literal-safe” volatile data substrate with installers (`install.sh` / `install-ai.sh`), composable pipelines, and jq/awk interoperability. Maturity signals on the page (stars/downloads/latency) are marketing. **No sHEL source, crate, or import exists at the pin** (`sHEL`/`SHEL` string hits: zero in tracked production source).
+Marketing ([shel.sh](https://shel.sh/)): “literal-safe”, volatile, automation-friendly, pipe to jq/awk, cross-platform latency claims.
+
+**Verified from public docs/repos (second auditor; still not a runtime proof):**
+
+- Technical core targets **Windows `cmd.exe` literal-safety** (Base64, delayed expansion, `FOR /F`, `findstr`, clipboard encodings) — not Unix JSON/NDJSON pipelines.  
+- Install surface is a **multi-repo AGPL workstation** (F# ORC, PowerShell tools, preview GUI); Linux dry-run wants .NET/PowerShell/Ruby — not a drop-in `shel` JSON CLI.  
+- `shel` absent on PATH in this environment; install dry-run only; **no sHEL transform engine exercised**.  
+- **No sHEL source, crate, or import at the pin** (zero `sHEL`/`SHEL` hits in production source).
+
+Domain mismatch: OMP2’s hazard is bash/sandbox under ADR 0028; sHEL’s documented problem is cmd special-character syntax. That is not an OMP2 structured-ops gap.
 
 ## Native inventory (IV unless noted)
 
