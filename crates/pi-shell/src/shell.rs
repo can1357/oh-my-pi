@@ -1382,6 +1382,7 @@ async fn run_shell_command_segmented_chain(
 			// would still have run. An `exit` on the last input that would
 			// run ends the command exactly where it would have ended anyway.
 			ended_by_exit = command_run.outcome.exited
+				&& command_run.outcome.exit_cause == Some(crate::bash::ExitCause::Exit)
 				&& !scope.cancel.is_cancelled()
 				&& (command_run.outcome.cut_short
 					|| segments

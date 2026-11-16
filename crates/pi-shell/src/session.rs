@@ -204,18 +204,21 @@ pub struct RunStdio {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunOutcome {
 	/// Exit status, bash semantics (127 not found, 128 + n for a signal).
-	pub status:    i32,
+	pub status:     i32,
 	/// The run was stopped by its cancellation token.
-	pub cancelled: bool,
+	pub cancelled:  bool,
 	/// `exit` or `set -e` ended the command (rather than its end): a caller
 	/// running one command as several runs stops here, as bash would have.
-	pub exited:    bool,
+	pub exited:     bool,
+	/// In-process attribution; never serialized into a shell image or native
+	/// result.
+	pub exit_cause: Option<crate::bash::ExitCause>,
 	/// Of such an abort, whether commands were still left to run: a trailing
 	/// `exit` at the end of the input ends the command exactly where its end
 	/// would have, and is not reported as cutting it short.
-	pub cut_short: bool,
+	pub cut_short:  bool,
 	/// The shell's working directory after the command.
-	pub cwd:       BString,
+	pub cwd:        BString,
 }
 
 /// Failure of a [`Session`] call.
@@ -748,6 +751,7 @@ impl Driver {
 			}
 		}
 		let exited = self.shell.ended_by_exit(run);
+		let exit_cause = self.shell.exit_cause(run);
 		let cut_short = self.shell.ended_by_exit_cut_short(run);
 		self.settle().await;
 		self.children.set_active(false);
@@ -760,7 +764,14 @@ impl Driver {
 		self.image.publish(&self.store);
 		let cwd = store_cwd(&self.store);
 		// The caller may have stopped waiting (dropped future).
-		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cut_short, cwd });
+		let _ = reply.send(RunOutcome {
+			status,
+			cancelled: applied > 0,
+			exited,
+			exit_cause,
+			cut_short,
+			cwd,
+		});
 	}
 
 	/// Let the background work a command started reach its first wait (an

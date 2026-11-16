@@ -13,6 +13,7 @@ mod callstack;
 mod command;
 mod control;
 mod exec;
+pub use exec::ExitCause;
 mod expand;
 mod fdprobe;
 mod frames;
@@ -523,12 +524,9 @@ pub struct Kernel {
 	/// its input, which ended it exactly where it would have ended anyway;
 	/// meaningful only together with [`Kernel::exited`]. Not imaged.
 	pub exited_cut_short:   bool,
-	/// Set while an `exec` replacement (or a POSIX-fatal error, which ends
-	/// the shell the same way) is what ends the shell: the run really
-	/// stops, but not through the `exit`/`set -e` abort
-	/// [`Shell::ended_by_exit_cut_short`] reports, so the cut-short scan
-	/// must not claim one. Consumed by `exit_shell`. Not imaged.
-	pub exit_fatal:         bool,
+	/// First attribution captured for a root run, before cleanup unwinds
+	/// its frames. Not imaged, like `exited_cut_short`; never drives execution.
+	pub exit_report:        Option<(RunId, exec::ExitCause)>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
 	pub exec_signals:       HashMap<RunId, i32>,
@@ -657,7 +655,7 @@ impl Kernel {
 			prior_jobs: Vec::new(),
 			exited: None,
 			exited_cut_short: false,
-			exit_fatal: false,
+			exit_report: None,
 			exec_signals: HashMap::new(),
 			reported_signal: None,
 			bangs: Vec::new(),
@@ -2588,6 +2586,15 @@ impl Shell {
 	/// ask right after its [`Step::Done`].
 	pub fn ended_by_exit_cut_short(&self, run: RunId) -> bool {
 		self.k.exited == Some(run) && self.k.exited_cut_short
+	}
+
+	/// The first termination cause of `run`, excluding cleanup re-entries.
+	pub fn exit_cause(&self, run: RunId) -> Option<exec::ExitCause> {
+		self
+			.k
+			.exit_report
+			.filter(|(id, _)| *id == run)
+			.map(|(_, cause)| cause)
 	}
 
 	/// The signal that killed an external replacing `run`, if any. Ask

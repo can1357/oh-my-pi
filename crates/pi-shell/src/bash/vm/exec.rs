@@ -36,6 +36,16 @@ use crate::bash::{
 	zshopt::ZshOpt,
 };
 
+/// Why the shell terminated a run. Transient attribution, not image or wire
+/// state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitCause {
+	Exit,
+	ExecReplace,
+	PosixFatal,
+	FatalSignal,
+}
+
 /// Result of one op.
 pub enum Flow {
 	Next,
@@ -56,7 +66,10 @@ pub enum Flow {
 		cont: bool,
 	},
 	/// `exit n` (also a fatal expansion error).
-	Exit(i32),
+	Exit {
+		status: i32,
+		cause:  ExitCause,
+	},
 	/// An expansion or arithmetic error: abandon the current top-level command.
 	Discard(i32),
 }
@@ -415,7 +428,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
 					{
 						let unrun = top_frame(vp).pc + 1;
-						exit_shell(k, vp, cx, status, unrun);
+						exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
 					}
 				} else {
 					let line = line_of(vp, op.node);
@@ -430,10 +443,14 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 				zsh_break(k, vp, cx, n, cont);
 			},
 			Flow::Break { n, cont } => break_loops(k, vp, cx, n, cont, op),
-			Flow::Exit(status) if unit.mode.dialect() == Dialect::Zsh => zsh_exit(k, vp, cx, status),
-			Flow::Exit(status) => {
+			Flow::Exit { status, cause } if unit.mode.dialect() == Dialect::Zsh => {
 				let unrun = top_frame(vp).pc + 1;
-				exit_shell(k, vp, cx, status, unrun);
+				capture_exit_report(k, vp, status, unrun, cause);
+				zsh_exit(k, vp, cx, status);
+			},
+			Flow::Exit { status, cause } => {
+				let unrun = top_frame(vp).pc + 1;
+				exit_shell(k, vp, cx, status, unrun, cause);
 			},
 			Flow::Discard(status) if unit.mode.dialect() == Dialect::Zsh => {
 				zsh_discard(k, vp, cx, status);
@@ -479,7 +496,7 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			// `pc` advanced past the failed op already: its continuation is here.
 			{
 				let unrun = top_frame(vp).pc;
-				exit_shell(k, vp, cx, status, unrun);
+				exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
 			}
 		} else if errreturn_failed && unit.mode.dialect() == Dialect::Zsh && zsh_errreturn(k, cx, vp)
 		{
@@ -522,7 +539,7 @@ fn zsh_return_flow(
 		} else {
 			{
 				let unrun = top_frame(vp).pc + 1;
-				exit_shell(k, vp, cx, status, unrun);
+				exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
 			}
 		}
 	} else if run_always(k, vp, cx, target.unwrap_or(0), TryEnd::Return(status)) {
@@ -557,7 +574,7 @@ fn zsh_return_flow(
 		// a non-interactive shell (`zexit`).
 		{
 			let unrun = top_frame(vp).pc + 1;
-			exit_shell(k, vp, cx, status, unrun);
+			exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
 		}
 	}
 }
@@ -638,11 +655,13 @@ fn script_has_command(src: &[u8], from: usize) -> bool {
 /// is reachable from op `from` without running another op first: follows
 /// jump targets instead of trusting the linear op order, so an `else` arm
 /// the taken branch jumps around does not count as unrun input.
-fn reachable_runs_input(unit: &Unit, from: usize) -> bool {
+fn reachable_runs_input(unit: &Unit, from: usize, status: i32) -> bool {
 	let ops = &unit.ops;
 	let mut visited = vec![false; ops.len()];
-	let mut stack = vec![from as u32];
-	while let Some(index) = stack.pop() {
+	// The status a successor branch will test: a `!` pipeline between the
+	// exit and the branch inverts it, once per negation along the path.
+	let mut stack = vec![(from as u32, status)];
+	while let Some((index, status)) = stack.pop() {
 		let i = index as usize;
 		if i >= ops.len() || visited[i] {
 			continue;
@@ -654,6 +673,11 @@ fn reachable_runs_input(unit: &Unit, from: usize) -> bool {
 		if starts_command(unit, op) || op.code == Opcode::FuncDef || op.code == Opcode::CallAnon {
 			return true;
 		}
+		let status = if op.code == Opcode::Not {
+			i32::from(status == 0)
+		} else {
+			status
+		};
 		// (jump target when the op can leave the linear flow, whether the
 		// next op also runs). Unconditional jumps lose the fall-through;
 		// terminators have neither.
@@ -663,21 +687,23 @@ fn reachable_runs_input(unit: &Unit, from: usize) -> bool {
 			// next iteration's head would have run, not been skipped, and
 			// the loop's exit landing follows it in program order.
 			Opcode::LoopBack => (None, true),
-			Opcode::BrOk | Opcode::BrFail | Opcode::ForNext => (Some(op.a), true),
+			Opcode::BrOk => ((status == 0).then_some(op.a), status != 0),
+			Opcode::BrFail => ((status != 0).then_some(op.a), status == 0),
+			Opcode::ForNext => (Some(op.a), true),
 			Opcode::CaseArm | Opcode::Redir => (Some(op.b), true),
 			Opcode::TryEnter => (Some(op.b), true),
 			Opcode::End | Opcode::SubExit | Opcode::Abort => (None, false),
 			_ => (None, true),
 		};
 		if let Some(target) = target {
-			stack.push(target);
+			stack.push((target, status));
 		}
 		if op.code == Opcode::TryEnter {
 			// An early end of the try-list runs the always-list first.
-			stack.push(op.a);
+			stack.push((op.a, status));
 		}
 		if falls_through {
-			stack.push(index + 1);
+			stack.push((index + 1, status));
 		}
 	}
 	false
@@ -696,7 +722,7 @@ fn reachable_runs_input(unit: &Unit, from: usize) -> bool {
 /// exactly where the script's end would have; loops stay in their frame,
 /// so a loop whose body holds the `exit` reports unrun input only when a
 /// command follows the loop (the loop-back jump is not a command start).
-fn exit_cut_short(vp: &Vproc, top_from: u32) -> bool {
+fn exit_cut_short(vp: &Vproc, top_from: u32, status: i32) -> bool {
 	vp.frames.iter().rev().enumerate().any(|(i, frame)| {
 		frame.unit.as_ref().is_some_and(|unit| {
 			let from = if i == 0 {
@@ -704,7 +730,7 @@ fn exit_cut_short(vp: &Vproc, top_from: u32) -> bool {
 			} else {
 				frame.pc as usize + 1
 			};
-			reachable_runs_input(unit, from)
+			reachable_runs_input(unit, from, status)
 		}) || matches!(&frame.kind, FrameKind::Script { src, pos, .. }
 				if script_has_command(src.as_ref(), pos.0 as usize))
 	})
@@ -730,20 +756,35 @@ fn errexit_on(k: &mut Kernel, cx: &mut Cx<'_>, vp: &Vproc) -> bool {
 	}
 }
 
-/// Leave the shell with `status` (`exit`, `set -e`): unwind every frame;
-/// a subshell runs its EXIT trap here, the root at the run boundary. An
-/// `exit` inside a function runs the root's trap first, above the
-/// function's frames: bash's trap sees its `FUNCNAME` and locals.
-/// `top_unrun` is the top frame's first op that the exit makes unrun:
-/// `pc + 1` while `pc` still sits on the op that triggered it, `pc` where
-/// the dispatch loop already advanced (the errexit check); it feeds
-/// [`exit_cut_short`].
-fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32, top_unrun: u32) {
-	// An `exec` replacement or a POSIX-fatal error ends the shell without
-	// the `exit`/errexit abort this reports. Taken up front so that every
-	// exit path — the zsh hook return below included — consumes it: one
-	// left set would suppress the next exit's own report.
-	let exit_fatal = std::mem::take(&mut k.exit_fatal);
+/// Capture attribution only: actual termination remains `exit_shell`'s job.
+/// Deferred zsh cleanup retains its existing serialized control carriers.
+pub(super) fn capture_exit_report(
+	k: &mut Kernel,
+	vp: &Vproc,
+	status: i32,
+	top_unrun: u32,
+	cause: ExitCause,
+) {
+	if vp.parent.is_none()
+		&& let Some(run) = vp.runs.front()
+		&& k.exit_report.is_none_or(|(id, _)| id != run.id)
+	{
+		k.exit_report = Some((run.id, cause));
+		k.exited_cut_short = cause == ExitCause::Exit && exit_cut_short(vp, top_unrun, status);
+	}
+}
+
+/// Leave the shell with `status`: unwind frames and run existing EXIT cleanup.
+/// `top_unrun` is `pc + 1` at a terminating op, or `pc` after dispatch
+/// advances.
+fn exit_shell(
+	k: &mut Kernel,
+	vp: &mut Vproc,
+	cx: &mut Cx<'_>,
+	status: i32,
+	top_unrun: u32,
+	cause: ExitCause,
+) {
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
 	// new one.
 	if vp.zsh.is_some()
@@ -760,21 +801,8 @@ fn exit_shell(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32, top_
 	if vp.parent.is_none()
 		&& let Some(run) = vp.runs.front()
 	{
-		let prior = k.exited;
 		k.exited = Some(run.id);
-		if exit_fatal {
-			k.exited_cut_short = false;
-		} else if !run.exit_trap_started || prior != Some(run.id) {
-			// A re-entry whose EXIT trap already started (the trap's end, or
-			// an `exit` inside it) sees a `pc` that still points at the
-			// already-executed `exit` — the trap started without advancing
-			// the interrupted frame — so rescanning would count that op
-			// itself. The first computation stands — but only for the run
-			// that made it: a later run's first exit (the `exit` of the
-			// EXIT trap its natural end started) must not inherit an
-			// earlier run's value.
-			k.exited_cut_short = exit_cut_short(vp, top_unrun);
-		}
+		capture_exit_report(k, vp, status, top_unrun, cause);
 	}
 	if !in_exit_trap
 		&& vp
@@ -866,7 +894,7 @@ fn run_boundary(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> bool {
 	run.started = true;
 	// The fatal flag describes one run's own end; one left set never
 	// applies to the next run (its fatal scope ended without `exit_shell`).
-	k.exit_fatal = false;
+	k.exit_report = None;
 	if run.explicit_mode {
 		run.restore_mode = Some(vp.mode);
 		let mode = run.mode;
@@ -1277,7 +1305,7 @@ fn next_command(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>) -> Option<WaitK
 		{
 			// The trap frame that ran `exit` is popped; the interrupted
 			// frame's `pc` is its first unrun op.
-			exit_shell(k, vp, cx, status, vp.frames.last().map_or(0, |f| f.pc));
+			exit_shell(k, vp, cx, status, vp.frames.last().map_or(0, |f| f.pc), ExitCause::Exit);
 		} else if func_trap && trap_status != 0 && vp.mode.dialect() == Dialect::Zsh {
 			// zsh `dotrapargs`: a function trap returning non-zero forces
 			// a return from the interrupted code, with the error flag set.
@@ -2316,7 +2344,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 				&& let Some(status) = exit_trap_status(vp)
 				&& !errexit_on(k, cx, vp)
 			{
-				return Flow::Exit(status);
+				return Flow::Exit { status, cause: ExitCause::PosixFatal };
 			}
 			// bash exits 127 from a `-c` string (`run_one_command`), 1 from a
 			// script and from a subshell (`execute_in_subshell` keeps the
@@ -2328,7 +2356,7 @@ pub fn stop_flow(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, line: u32, sto
 					state::record(cx.store, vp, Key::Misc(MiscKey::RunOrigin)),
 					Ok(Some(Record::Misc(origin))) if origin.as_slice() == b"c"
 				);
-			Flow::Exit(if command { 127 } else { 1 })
+			Flow::Exit { status: if command { 127 } else { 1 }, cause: ExitCause::PosixFatal }
 		},
 		Stop::Store(err) => {
 			k.fail(err);
@@ -3160,11 +3188,6 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 		},
 		Opcode::Spawn => spawn(k, vp, cx, unit, op),
 		Opcode::SubExit => {
-			// The scope ending here — a subshell, pipeline stage or job —
-			// contains any `exec` replacement or POSIX-fatal error that made
-			// it exit: the flag says how its own shell's run ends, so it must
-			// not survive into an unrelated later one.
-			k.exit_fatal = false;
 			if matches!(top_frame(vp).kind, FrameKind::NoFork | FrameKind::Stage) {
 				pop_frame(&mut k.root, cx.store, vp);
 			} else {
@@ -3269,8 +3292,7 @@ fn dispatch(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, unit: &Arc<Unit>, o
 				// POSIX interpretation 383: fatal in a non-interactive shell.
 				let msg = format!("`{}': is a special builtin", f.name).into();
 				k.diag(cx, vp, line, Diag::Usage { msg });
-				k.exit_fatal = true;
-				return Flow::Exit(2);
+				return Flow::Exit { status: 2, cause: ExitCause::PosixFatal };
 			}
 			// zsh: defining `TRAPNAL` sets the trap (`localtraps` saves the
 			// old one).
@@ -3812,8 +3834,7 @@ fn for_in(
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
 			// Fatal to a posix shell.
 			clear_scratch(&mut k.root, cx.store, vp);
-			k.exit_fatal = true;
-			return Flow::Exit(1);
+			return Flow::Exit { status: 1, cause: ExitCause::PosixFatal };
 		}
 		items.clear();
 		1
@@ -3887,8 +3908,7 @@ fn for_next(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, line: u32) 
 		k.diag(cx, vp, line, d);
 		// An assignment error ends a posix shell.
 		if state::option(&mut k.root, cx.store, vp, OptId::Posix).unwrap_or(false) {
-			k.exit_fatal = true;
-			return Flow::Exit(1);
+			return Flow::Exit { status: 1, cause: ExitCause::PosixFatal };
 		}
 		if let Some(rec) = top_frame(vp).loops.last_mut() {
 			rec.status = 1;
@@ -5285,7 +5305,7 @@ fn always_end(vp: &mut Vproc) -> Flow {
 		Some(TryEnd::Error) => Flow::Discard(if rec.status == 0 { 1 } else { rec.status }),
 		Some(TryEnd::Return(n)) => Flow::Return(n),
 		Some(TryEnd::Break { n, cont }) => Flow::Break { n, cont },
-		Some(TryEnd::Exit(n)) => Flow::Exit(n),
+		Some(TryEnd::Exit(n)) => Flow::Exit { status: n, cause: ExitCause::Exit },
 	}
 }
 
@@ -5351,7 +5371,7 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 	} else {
 		{
 			let unrun = top_frame(vp).pc + 1;
-			exit_shell(k, vp, cx, status, unrun);
+			exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
 		}
 	}
 }
@@ -5526,7 +5546,7 @@ fn zsh_exit(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 		}
 		{
 			let unrun = top_frame(vp).pc + 1;
-			exit_shell(k, vp, cx, status, unrun);
+			exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
 		}
 		return;
 	}
@@ -5620,7 +5640,7 @@ fn zsh_discard(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) {
 	} else {
 		unwind(&mut k.root, cx.store, vp, 0);
 		// Every frame is gone: nothing is left to scan.
-		exit_shell(k, vp, cx, status, 0);
+		exit_shell(k, vp, cx, status, 0, ExitCause::PosixFatal);
 	}
 }
 

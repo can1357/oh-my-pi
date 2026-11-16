@@ -2455,16 +2455,18 @@ async fn execute_shell_streams_separates_stdout_and_stderr() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_shell_streams_trailing_exit_is_not_cut_short() {
-	let (stdout_tx, stdout_rx) = flume::unbounded::<Bytes>();
-	let options = ShellExecuteOptions { command: "exit 3".to_string(), ..Default::default() };
-	let streams = StreamSinks { stdout: Some(stdout_tx), stderr: None };
-	let result = execute_shell_streams(options, streams, CancelToken::default())
-		.await
-		.expect("execute should succeed");
-	assert_eq!(result.exit_code, Some(3));
-	assert!(!result.cancelled);
-	assert!(!result.ended_by_exit, "a trailing exit ends nothing early on the streams path");
-	drop(stdout_rx);
+	for (command, expected) in [("exit 3", false), ("exit 3; echo never", true)] {
+		let (stdout_tx, stdout_rx) = flume::unbounded::<Bytes>();
+		let options = ShellExecuteOptions { command: command.to_string(), ..Default::default() };
+		let streams = StreamSinks { stdout: Some(stdout_tx), stderr: None };
+		let result = execute_shell_streams(options, streams, CancelToken::default())
+			.await
+			.expect("execute should succeed");
+		assert_eq!(result.exit_code, Some(3));
+		assert!(!result.cancelled);
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+		assert!(stdout_rx.try_iter().next().is_none(), "the suffix must not execute");
+	}
 }
 
 #[cfg(unix)]

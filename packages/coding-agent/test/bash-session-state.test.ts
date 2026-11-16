@@ -13,7 +13,7 @@ import * as path from "node:path";
 import { AsyncJobManager } from "../src/async";
 import { Settings } from "../src/config/settings";
 import { executeBash, releaseShellSessions, __test } from "../src/exec/bash-executor";
-import type { ShellRunResult } from "@oh-my-pi/pi-natives";
+import { Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import type { ToolSession } from "../src/tools";
 import { BashTool } from "../src/tools/bash";
 
@@ -261,11 +261,18 @@ it("classifies a session-left owner shell as ephemeral", async () => {
 	}
 });
 
-it.skipIf(process.platform === "win32")(
+// Probe the raw native result shape on a natural end, not the behavior being tested.
+const hasNativeExitFlag = Object.hasOwn(await new Shell().run({ command: "true" }), "endedByExit");
+
+it.skipIf(!Bun.env.OMP_REQUIRE_EXIT_FLAG)("source-built addon exposes exit attribution", () => {
+	expect(hasNativeExitFlag).toBe(true);
+});
+
+it.skipIf(process.platform === "win32" || !hasNativeExitFlag)(
 	"reports a cut-short exit end-to-end when the loaded addon carries the flag",
 	async () => {
 		const probe = await executeBash("exit 3; echo never", { minimize: false });
-		if (probe.endedByExit !== true) return; // addon predates the flag
+		expect(probe.endedByExit).toBe(true);
 
 		const tool = bashTool();
 		await run(tool, "set -e; PI_ERREXIT_ARMED=1");
