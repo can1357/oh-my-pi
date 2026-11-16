@@ -20,7 +20,7 @@
  *
  * In both modes the synthesis session (worker, player) opens lazily on the
  * first speakable segment, and an idle timer speaks buffered text when
- * generation stalls (tool call, thinking block). The session is local Kokoro
+ * generation stalls (tool call, thinking block). The session is local Phonon
  * streaming unless the speech role chain starts with an explicitly configured
  * cloud model, which then synthesizes each segment as WAV
  * ({@link createCloudSpeechStream}). One

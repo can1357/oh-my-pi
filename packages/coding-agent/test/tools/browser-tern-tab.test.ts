@@ -7,6 +7,7 @@ import { TernElementHandle, TernTab, userSourceFunction } from "@oh-my-pi/pi-cod
 import { parseTernSelector } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/selectors";
 import { TernError, TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
+import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
 interface FakePage {
@@ -631,7 +632,7 @@ describe("TernTab on an unresponsive page", () => {
 });
 
 describe("TernTab screenshots", () => {
-	it("states the coordinate scale the capture was taken at, not one set while it ran", async () => {
+	it("sizes the screenshot by the scale the capture was taken at, not one set while it ran", async () => {
 		const captureAsked = Promise.withResolvers<number>();
 		daemon = await startFakeDaemon((op, id) => {
 			if (op.op !== "capture") return { ok: {} };
@@ -665,7 +666,48 @@ describe("TernTab screenshots", () => {
 			.flatMap(block => (block.type === "text" ? [block.text] : []))
 			.join("\n");
 		expect(daemon.requests.find(request => request.op.op === "capture")?.op.scale).toBe(1);
-		expect(text).toContain("by 1.17 to get viewport CSS pixels for tab.clickAt");
+		// At scale 1 the 1200x700 capture is the viewport in CSS pixels; read at the later 2 it would shrink to 600x350.
+		expect(text).toBe("Screenshot 1200x700.");
+		for (const saved of screenshots) await fs.rm(saved.dest);
+	});
+
+	it("reads clickAt positions on a scaled screenshot, and page.mouse positions as CSS pixels", async () => {
+		// A 4000x400 viewport reaches the model at half size, 2000x200.
+		const png = encodeRawPng(new Uint8Array(4000 * 400 * 3), 4000, 400, 3).toBase64();
+		daemon = await startFakeDaemon(op => (op.op === "capture" ? { ok: { data: png } } : { ok: {} }));
+		client = new TernSocketClient({ socketPath: daemon.socketPath });
+		const tab = new TernTab({
+			client,
+			block: 7,
+			name: "main",
+			viewport: { width: 4000, height: 400, deviceScaleFactor: 1 },
+		});
+		const screenshots: ScreenshotResult[] = [];
+		tab.setRunContext({
+			timeoutMs: 5_000,
+			deadline: Date.now() + 5_000,
+			signal: new AbortController().signal,
+			session: { cwd: os.tmpdir() },
+			output: new RunOutput(),
+			screenshots,
+		});
+		await tab.screenshot();
+		await tab.clickAt(1000, 100);
+		await tab.page.mouse.click(1000, 100);
+
+		// Where each click's pointer first moved: the image's centre is the viewport's, raw page input is not mapped.
+		const moves = daemon.requests.flatMap(request => {
+			const first: unknown = Array.isArray(request.op.events) ? request.op.events[0] : undefined;
+			return isRecord(first) ? [[first.x, first.y]] : [];
+		});
+		expect(moves).toEqual([
+			[2000, 200],
+			[1000, 100],
+		]);
+
+		// The picture is of another viewport once it is resized.
+		await tab.setViewport({ width: 1000, height: 600 });
+		await expect(tab.clickAt(1000, 100)).rejects.toThrow(/new screenshot/);
 		for (const saved of screenshots) await fs.rm(saved.dest);
 	});
 });

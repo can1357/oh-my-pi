@@ -186,6 +186,7 @@ const OMP_STATUS_LINE_RE = /^\s*in:\s+\d+\s+out:\s+\d+(?:\s+cache\s+\S+)?\s+t:\s
  */
 const FOCUSED_VIEW_COMMANDS: Record<string, (args: string) => boolean> = {
 	btw: () => true,
+	copy: () => true,
 	effort: () => true,
 	export: () => true,
 	jobs: args => {
@@ -632,8 +633,9 @@ export class InputController {
 				this.#restoreYieldCompactionOnStop();
 				return;
 			}
-			// The turn is over and only background jobs can resume it; its row
-			// stays mounted, so this is checked before the loader's abort.
+			// The run is paused and only outside work (background jobs, child agents,
+			// peer messages) can resume it; its row stays mounted, so this is checked
+			// before the loader's abort.
 			const awaitingAsyncWork = this.ctx.eventController.isAwaitingAsyncWork();
 			if (this.ctx.loadingAnimation && !awaitingAsyncWork) {
 				this.restoreQueuedMessagesToEditor({ abort: true });
@@ -650,8 +652,8 @@ export class InputController {
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
 			} else if (awaitingAsyncWork) {
-				// End the wait. The jobs keep running; their results land in context
-				// for the next prompt instead of starting a turn.
+				// End the wait: the run ends now. The jobs keep running; their results
+				// land in context for the next prompt instead of starting a turn.
 				void this.ctx.eventController.stopAwaitingAsyncWork();
 			} else if (this.ctx.session.isStreaming) {
 				this.#abortStreamingTurn();
@@ -1031,7 +1033,7 @@ export class InputController {
 			// Styled text goes where images do: the composer, or a prompt that takes them.
 			acceptsHtml: () => {
 				const focused = this.ctx.ui.getFocused();
-				return !focused || focused === this.ctx.editor || (hasPasteText(focused) && focused.acceptsImages === true);
+				return this.#composerTakesPaste(focused) || (hasPasteText(focused) && focused.acceptsImages === true);
 			},
 			pasteHtml: html => this.#pasteHtml(html),
 			showStatus: message => this.ctx.showStatus(message),
@@ -1654,10 +1656,10 @@ export class InputController {
 			const parsed = parseSlashCommand(text);
 			const name = parsed && lookupBuiltinSlashCommand(parsed.name)?.name;
 			if (parsed && name && FOCUSED_VIEW_COMMANDS[name]?.(parsed.args)) {
-				// Viewer-scoped commands: /btw asks about the focused transcript, /export
-				// writes it (with its own subagents), /jobs lists the focused agent's jobs
-				// without a way to cancel them, /usage reports account-wide limits, and
-				// /model, /switch, /effort change the focused agent's model and thinking.
+				// Viewer-scoped commands: /btw asks about the focused transcript, /copy picks
+				// from it, /export writes it (with its own subagents), /jobs lists the focused
+				// agent's jobs without a way to cancel them, /usage reports account-wide limits,
+				// and /model, /switch, /effort change the focused agent's model and thinking.
 				this.#recordSlashCommandUsage(text);
 				const input = images ? { images, imageLinks } : undefined;
 				if ((await executeBuiltinSlashCommand(text, { ctx: this.ctx, input })) === true) {
@@ -2644,17 +2646,21 @@ export class InputController {
 		});
 	}
 
-	/**
-	 * Route an image paste to the focused destination. A focused prompt that did not opt into
-	 * images refuses, so the image never lands in the hidden main editor (#6057).
-	 */
+	/** Whether a paste goes to the main composer: nothing or the editor is focused, or the focused dialog is the composer owner and currently owns input. */
+	#composerTakesPaste(focused: Component | null): boolean {
+		if (!focused || focused === this.ctx.editor) return true;
+		const owner = this.ctx.composerOwner;
+		return owner?.component === focused && owner.owns();
+	}
+
+	/** Route an image paste to the focused destination; a dialog that can't take the image refuses it (#6057). */
 	async #pasteImageIntoFocus(paste: (sink: ImagePasteSink) => Promise<unknown>): Promise<void> {
 		const focused = this.ctx.ui.getFocused();
-		if (!focused || focused === this.ctx.editor || !hasPasteText(focused)) {
+		if (this.#composerTakesPaste(focused)) {
 			await paste(this.#editorImageSink);
 			return;
 		}
-		if (!focused.acceptsImages) {
+		if (!hasPasteText(focused) || !focused.acceptsImages) {
 			this.ctx.showStatus("Image paste is not supported in this prompt");
 			return;
 		}
@@ -2799,18 +2805,19 @@ export class InputController {
 		let finishPaste: ((text: string | undefined) => boolean) | undefined;
 		let promptPaste: PromptImagePaste | undefined;
 		try {
-			// When a modal paste-capable prompt (login/API-key Input) owns focus,
-			// only clipboard text may land there. Image payloads must not mutate
+			// When a modal paste-capable prompt (login/API-key Input) or a dialog without
+			// `pasteText` owns focus, only clipboard text may land there. Image payloads must not mutate
 			// the hidden main editor — mirror the enhanced-paste `pasteImage`
 			// behavior and surface the unsupported-status instead (#6057).
 			// A prompt that opted into images gets the main editor's full image flow
 			// instead, delivered through one reservation.
 			const focusedNow = this.ctx.ui.getFocused();
-			const promptTarget =
-				focusedNow && focusedNow !== this.ctx.editor && hasPasteText(focusedNow) ? focusedNow : null;
+			const modalFocus = this.#composerTakesPaste(focusedNow) ? null : focusedNow;
+			const promptTarget = modalFocus && hasPasteText(modalFocus) ? modalFocus : null;
+			const bareDialog = modalFocus && !promptTarget ? modalFocus : null;
 			if (promptTarget?.acceptsImages) promptPaste = this.#beginPromptImagePaste(promptTarget);
 			else finishPaste = promptTarget?.beginPaste?.();
-			const textOnlyPrompt = promptTarget !== null && promptPaste === undefined;
+			const textOnlyFocus = modalFocus !== null && promptPaste === undefined;
 			const sink = promptPaste?.sink ?? this.#editorImageSink;
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
@@ -2832,7 +2839,7 @@ export class InputController {
 			// `readMacFileUrls` returns an empty list off Darwin, so on every
 			// other platform this is a no-op and the bitmap read below still
 			// runs first.
-			const fileUrls = textOnlyPrompt ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
+			const fileUrls = textOnlyFocus ? [] : ((await this.clipboard.readMacFileUrls?.()) ?? []);
 			let attachedFromFileUrls = false;
 			for (const url of fileUrls) {
 				const candidate = extractImagePathFromText(url);
@@ -2857,7 +2864,7 @@ export class InputController {
 			);
 			const image = await this.clipboard.readImage();
 			if (image) {
-				if (textOnlyPrompt) {
+				if (textOnlyFocus) {
 					this.ctx.showStatus("Image paste is not supported in this prompt");
 					return false;
 				}
@@ -2886,13 +2893,17 @@ export class InputController {
 			// text. Covers terminals that paste the Finder file path as
 			// plain text rather than as a `public.file-url` (most macOS
 			// terminals do this for image clipboards).
-			const imagePath = textOnlyPrompt ? null : extractImagePathFromText(text);
+			const imagePath = textOnlyFocus ? null : extractImagePathFromText(text);
 			if (imagePath) {
 				await this.#pasteImagePath(imagePath, sink);
 				return true;
 			}
 			// Keep the initiating prompt as the only possible modal destination.
-			if (promptTarget && this.ctx.ui.getFocused() !== promptTarget) return false;
+			if (modalFocus && this.ctx.ui.getFocused() !== modalFocus) return false;
+			if (bareDialog) {
+				this.#pasteTextIntoFocus(text);
+				return true;
+			}
 			if (finishPaste) {
 				const accepted = finishPaste(text);
 				finishPaste = undefined;
@@ -3066,7 +3077,6 @@ export class InputController {
 					cwd: manager.getCwd(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager.getSessionFile(),
-					seanceSourceArtifactsDir: manager.getSeanceSourceArtifactsDir() ?? undefined,
 				};
 			},
 			keybindings: this.ctx.keybindings,

@@ -27,7 +27,7 @@ export interface CloudSpeechStreamOptions {
 	/** Vocalizer chain in attempt order: cloud speech models, optionally followed by local ones. */
 	chain: readonly Model<Api>[];
 	resolveApiKey(model: Model<Api>): ApiKeyResolver;
-	/** Kokoro voice/speed for a local candidate reached by fail-over. */
+	/** Local voice/speed for a local candidate reached by fail-over. */
 	localVoice: string;
 	localSpeed: number;
 	/** `provider/id` of models that failed permanently earlier in the session; this stream adds to it. */
