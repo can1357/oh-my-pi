@@ -9,7 +9,7 @@
 ### Changed
 
 - Changed the local speech model `kokoro` to `phonon-31m`
-- Changed Antigravity CLI usage from zero cost to an API-equivalent estimate using each model's API list rate ([#PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PLACEHOLDER) by [@SenCha930511](https://github.com/SenCha930511))
+- Changed Antigravity CLI usage from zero cost to an API-equivalent estimate using each model's API list rate ([#19425](https://github.com/can1357/oh-my-pi/pull/19425) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
