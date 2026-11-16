@@ -14636,7 +14636,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });
 			}
-			this.#todoWrites.reload();
+			// The todo backend follows after the cwd rollback below: until then the registry holds the
+			// target project's extensions, so resolving it now could drop or create the wrong backend.
+			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
@@ -14666,6 +14668,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					throw new Error(`${original} (${rollbackFailure}; the process may remain in ${cwdChangeTarget})`);
 				}
 			}
+			this.#todoWrites.reload();
 			this.#bash.finishSessionTransition(bashTransition, false);
 			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
 			throw error;

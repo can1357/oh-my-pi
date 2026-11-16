@@ -566,6 +566,48 @@ export default function(pi) {
 		expect(session.getTodoPhases()).toEqual([]);
 	});
 
+	test("a cross-project switch that rolls back keeps the backend instance, without a notice", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
+		const sessionDir = tempDir.join("sessions");
+		const otherProject = tempDir.join("other-project");
+		await Bun.write(`${otherProject}/.keep`, "");
+		const target = SessionManager.create(otherProject, sessionDir);
+		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		target.appendMessage(createAssistantMessage("target answer"));
+		await target.flush();
+		const targetFile = target.getSessionFile();
+		if (!targetFile) throw new Error("target session has no file");
+		const session = await createSession({
+			backend: "tracker",
+			extensions: [recorder.extension()],
+			sessionManager: SessionManager.create(tempDir.path(), sessionDir),
+		});
+		const runner = session.extensionRunner;
+		if (!runner) throw new Error("extension runner is not available");
+		const notices = collectNotices(session);
+		await todo(session, { op: "init", items: ["kept"] });
+		expect(recorder.created).toBe(1);
+
+		// Entering the target project suspends this project's extensions, as a rescope does, then a later
+		// step fails; the rollback resumes them.
+		let entering = true;
+		const switching = session.switchSession(targetFile, {
+			onCwdChange: async () => {
+				runner.setSuspendedExtensions(() => entering);
+				if (!entering) return true;
+				entering = false;
+				throw new Error("destination settings broke");
+			},
+		});
+		await expect(switching).rejects.toThrow("destination settings broke");
+		await flushTodoWrites(session);
+		await todo(session, { op: "append", phase: "Tasks", items: ["after rollback"] });
+
+		expect(notices).toEqual([]);
+		expect(recorder.created).toBe(1);
+		expect(recorder.calls.filter(call => call.method === "apply")).toHaveLength(2);
+	});
+
 	test("switching a fresh session before any prompt does not create the backend", async () => {
 		// ACP loads and forks a stored session this way, before it initializes the extension runner.
 		const recorder = createTodoBackendRecorder("tracker");
