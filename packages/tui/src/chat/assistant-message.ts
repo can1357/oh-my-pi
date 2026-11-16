@@ -775,6 +775,18 @@ export class AssistantMessageComponent extends Container {
 		this.#nativeViewVersion++;
 	}
 
+	/**
+	 * Fold or expand every thinking section at once for the display-detail
+	 * gesture. Unlike {@link setExpandThinkingBlocks}, sections folded or unfolded
+	 * by hand follow it too: the gesture promises one presentation for the whole
+	 * transcript, and a surviving per-section choice would leave it half applied.
+	 */
+	setAllThinkingSectionsExpanded(expand: boolean): void {
+		this.#thinkingCollapsed.clear();
+		this.#expandThinkingBlocks = expand;
+		this.#nativeViewVersion++;
+	}
+
 	override dispose(): void {
 		this.#stopThinkingAnimation();
 		super.dispose();

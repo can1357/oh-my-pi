@@ -51,6 +51,7 @@ describe("createAssistantMessageComponent", () => {
 		const host: AssistantMessageHost = {
 			viewSession: { extensionRunner: { getAssistantThinkingRenderers: () => [] } },
 			effectiveHideThinkingBlock: false,
+			hideToolOutputDetails: false,
 			proseOnlyThinking: false,
 			expandThinkingBlocks: false,
 			assistantImagesVisible: true,

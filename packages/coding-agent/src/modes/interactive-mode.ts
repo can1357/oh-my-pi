@@ -416,6 +416,7 @@ import {
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
 	cfgDisplayHideToolActivity,
+	cfgDisplayHideToolOutputDetails,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShellVisualization,
 	cfgDisplayShowTokenUsage,
@@ -518,6 +519,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
 	"display.shellVisualization": cfgDisplayShellVisualization,
+	"display.hideToolOutputDetails": cfgDisplayHideToolOutputDetails,
 	"terminal.showImages": cfgTerminalShowImages,
 	"terminal.programStatus": cfgTerminalProgramStatus,
 	hideThinkingBlock: cfgHideThinkingBlock,
@@ -1428,6 +1430,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	isBashMode = false;
 	toolOutputExpanded = false;
 	hideToolActivity = false;
+	hideToolOutputDetails = false;
 	todoExpanded = false;
 	planModeEnabled = false;
 	planModePaused = false;
@@ -2344,6 +2347,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.hideToolActivity = cfgDisplayHideToolActivity.get(settings);
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
+		this.hideToolOutputDetails = cfgDisplayHideToolOutputDetails.get(settings);
+		this.chatContainer.setToolOutputDetailsHidden(this.hideToolOutputDetails);
 		this.hideThinkingBlock = cfgHideThinkingBlock.get(settings);
 		this.proseOnlyThinking = cfgProseOnlyThinking.get(settings);
 		this.expandThinkingBlocks = cfgExpandThinkingBlocks.get(settings);
@@ -4289,6 +4294,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		// Field comparisons skip effects the keybinding toggles already applied.
+		const hideToolOutputDetails = cfgDisplayHideToolOutputDetails.get(this.settings);
+		if (any("display.hideToolOutputDetails")) {
+			// Same reset as the Ctrl+H keybinding: rows already in scrollback keep the
+			// presentation they were emitted with until the ledger is forgotten. The
+			// helper no-ops when the keybinding already moved the field.
+			this.#uiHelpers.applyToolOutputDetailsHidden(hideToolOutputDetails);
+		}
 		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
 		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {
 			this.hideToolActivity = hideToolActivity;
@@ -4299,11 +4311,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					(child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent)
 				) {
 					child.setExpanded(false);
-				} else if (child instanceof AssistantMessageComponent) {
-					child.setToolResultImagesVisible(!hideToolActivity);
 				}
 			}
 			this.chatContainer.setToolActivityVisible(!hideToolActivity);
+			// Read-result images follow both axes, so revealing tool activity must not
+			// uncover the images folded tool output details still hide.
+			this.#uiHelpers.syncToolResultImages();
 			if (hideToolActivity) this.ui.clearInlineImages();
 			// Visibility changes must rebuild retired terminal history.
 			resetDisplay = true;
@@ -9850,6 +9863,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	toggleThinkingBlockVisibility(): void {
 		this.#inputController.toggleThinkingBlockVisibility();
+	}
+
+	toggleToolOutputDetailsVisibility(): void {
+		this.#inputController.toggleToolOutputDetailsVisibility();
+	}
+
+	toggleDetailVisibility(): void {
+		this.#inputController.toggleDetailVisibility();
 	}
 
 	toggleTodoExpansion(): void {

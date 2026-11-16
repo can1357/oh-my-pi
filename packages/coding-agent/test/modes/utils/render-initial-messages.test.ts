@@ -17,6 +17,7 @@ import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, RenderSessionContextOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -148,10 +149,21 @@ function hasImageComponent(component: Component): boolean {
 	return countImageComponents(component) > 0;
 }
 
+function findToolCard(component: Component): ToolExecutionComponent | undefined {
+	if (component instanceof ToolExecutionComponent) return component;
+	if (!("children" in component) || !Array.isArray(component.children)) return undefined;
+	for (const child of component.children) {
+		const found = findToolCard(child);
+		if (found) return found;
+	}
+	return undefined;
+}
+
 function makeRenderCtx(
 	transcript: SessionContext,
 	showImages = true,
 	hideToolActivity = false,
+	hideToolOutputDetails = false,
 ): { ctx: InteractiveModeContext; chatContainer: TranscriptContainer } {
 	const chatContainer = new TranscriptContainer();
 	chatContainer.setToolActivityVisible(!hideToolActivity);
@@ -169,7 +181,7 @@ function makeRenderCtx(
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), imageBudget: undefined },
+		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), resetDisplay: vi.fn(), imageBudget: undefined },
 		resetTranscript: () => {
 			ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			ctx.chatContainer.disposeChildren();
@@ -183,10 +195,12 @@ function makeRenderCtx(
 		settings: Settings.isolated({
 			"terminal.showImages": showImages,
 			"display.hideToolActivity": hideToolActivity,
+			"display.hideToolOutputDetails": hideToolOutputDetails,
 			"composer.recallClearedDrafts": false,
 		}),
 		toolOutputExpanded: false,
 		hideToolActivity,
+		hideToolOutputDetails,
 		hideThinkingBlock: false,
 		assistantImagesVisible: showImages,
 		tableChartsVisible: true,
@@ -533,6 +547,103 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		expect(hasImageComponent(chatContainer)).toBe(true);
 	});
 
+	it("lays a replayed tool card out under the current fold setting", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": false } });
+		const transcript = transcriptWith([
+			assistantToolCall("bash-folded", "bash", { command: "ls -la" }),
+			{
+				role: "toolResult",
+				toolCallId: "bash-folded",
+				toolName: "bash",
+				content: [{ type: "text", text: "file-a" }],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+		// The visible container never learned the setting, which is the state a replay
+		// leaves behind when the toggle lands while it is yielding between entries.
+		const { ctx, chatContainer } = makeRenderCtx(transcript, false, false, true);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		const card = findToolCard(chatContainer);
+		expect(card).toBeDefined();
+		expect(card?.render(120)).toHaveLength(1);
+	});
+
+	it("applies the fold to the restored transcript when a staged replay fails", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": false } });
+		const transcript = transcriptWith([assistantToolCall("bash-broken", "bash", { command: "ls -la" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, false, false, true);
+		// A block already on screen: the failed replay hands this container back to
+		// the context, and it has to carry the presentation the settings describe.
+		const card = new ToolExecutionComponent("bash", { command: "ls -la" }, {}, undefined, {
+			requestRender: vi.fn(),
+			requestComponentRender: vi.fn(),
+			resetDisplay: vi.fn(),
+		});
+		card.updateResult({ content: [{ type: "text", text: "file-a" }] }, false);
+		chatContainer.addChild(card);
+		ctx.pendingMessagesContainer = {
+			disposeChildren() {
+				throw new Error("replay failed");
+			},
+		} as unknown as Container;
+
+		await expect(new UiHelpers(ctx).renderInitialMessages()).rejects.toThrow("replay failed");
+
+		expect(chatContainer.children).toContain(card);
+		expect(card.render(120)).toHaveLength(1);
+		card.stopAnimation();
+	});
+
+	it("reapplies the fold to restored read images when a staged replay fails", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-restored", "read", { path: "restored.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, true);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-restored", "read", { path: "restored.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-restored", [pngImage]);
+		assistant.setToolResultImagesVisible(true);
+		chatContainer.addChild(assistant);
+		expect(hasImageComponent(chatContainer)).toBe(true);
+		ctx.pendingMessagesContainer = {
+			disposeChildren() {
+				throw new Error("replay failed");
+			},
+		} as unknown as Container;
+
+		await expect(new UiHelpers(ctx).renderInitialMessages()).rejects.toThrow("replay failed");
+
+		expect(hasImageComponent(chatContainer)).toBe(false);
+	});
+
+	it("hides read-result images while tool output details are folded", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([
+			assistantToolCall("read-tool-folded", "read", { path: "folded.png" }),
+			{
+				role: "toolResult",
+				toolCallId: "read-tool-folded",
+				toolName: "read",
+				content: [{ type: "text", text: "Read image: folded.png" }, pngImage],
+				isError: false,
+				timestamp: 2,
+			},
+		]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, true);
+
+		await new UiHelpers(ctx).renderInitialMessages();
+
+		expect(hasImageComponent(chatContainer)).toBe(false);
+	});
+
 	it("replays reopened session image blocks through the cold-start rebuild path", async () => {
 		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
 		setTerminalImageProtocol(ImageProtocol.Sixel);
@@ -572,6 +683,93 @@ describe("UiHelpers.renderInitialMessages — image replay", () => {
 		expect(countImageComponents(chatContainer)).toBe(2);
 		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("Read reopened.png");
 		expect(ctx.ui.requestRender).toHaveBeenCalledWith(true, { clearScrollback: true });
+	});
+});
+
+describe("UiHelpers.applyToolOutputDetailsHidden — live setting", () => {
+	it("repaints retired rows and resyncs read-result images", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-live", "read", { path: "live.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, false);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-live", "read", { path: "live.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-live", [pngImage]);
+		assistant.setToolResultImagesVisible(true);
+		chatContainer.addChild(assistant);
+		const resetStableEmission = vi.spyOn(chatContainer, "resetStableEmission");
+		expect(hasImageComponent(chatContainer)).toBe(true);
+
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(true);
+
+		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
+		expect(ctx.ui.resetDisplay).toHaveBeenCalledTimes(1);
+		expect(hasImageComponent(chatContainer)).toBe(false);
+
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(false);
+
+		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(resetStableEmission).toHaveBeenCalledTimes(2);
+		expect(hasImageComponent(chatContainer)).toBe(true);
+
+		// A change the Ctrl+H keybinding already applied arrives with the field
+		// equal: nothing to repaint, so no second destructive reset.
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(false);
+
+		expect(resetStableEmission).toHaveBeenCalledTimes(2);
+		expect(ctx.ui.resetDisplay).toHaveBeenCalledTimes(2);
+	});
+
+	it("keeps read-result images hidden while details stay folded as activity returns", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-both", "read", { path: "both.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, false, true);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-both", "read", { path: "both.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-both", [pngImage]);
+		assistant.setToolResultImagesVisible(true);
+		chatContainer.addChild(assistant);
+		const helpers = new UiHelpers(ctx);
+
+		// Revealing tool activity alone leaves the fold in place, so the image stays hidden.
+		helpers.syncToolResultImages();
+
+		expect(hasImageComponent(chatContainer)).toBe(false);
+
+		ctx.hideToolOutputDetails = false;
+		helpers.syncToolResultImages();
+
+		expect(hasImageComponent(chatContainer)).toBe(true);
+	});
+
+	it("keeps read-result images hidden while tool activity is off", async () => {
+		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		const transcript = transcriptWith([assistantToolCall("read-off", "read", { path: "off.png" })]);
+		const { ctx, chatContainer } = makeRenderCtx(transcript, true, true, true);
+		const assistant = new AssistantMessageComponent(
+			assistantToolCall("read-off", "read", { path: "off.png" }),
+			false,
+			() => {},
+		);
+		assistant.setImagesVisible(true);
+		assistant.setToolResultImages("read-off", [pngImage]);
+		chatContainer.addChild(assistant);
+
+		new UiHelpers(ctx).applyToolOutputDetailsHidden(false);
+
+		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(hasImageComponent(chatContainer)).toBe(false);
 	});
 });
 

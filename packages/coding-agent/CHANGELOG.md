@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- `display.hideToolOutputDetails` renders each read or tool call as its own one-line summary — folding a call's multiple targets onto that row too — and hides its output body, on the assembled transcript and on Tern's native surface alike; `app.display.toggleDetail` (Ctrl+H) folds or opens that together with the thinking blocks from a single key ([#11840](https://github.com/can1357/oh-my-pi/pull/11840) by [@iacore](https://github.com/iacore))
+
+### Fixed
+
+- Ctrl+H no longer removes thinking blocks from the transcript: it folds them to their "Thought for 12s" head and opens them again on the next press, even a block folded by hand, while showing or hiding them outright stays on Ctrl+T ([#11840](https://github.com/can1357/oh-my-pi/pull/11840) by [@iacore](https://github.com/iacore))
+- `display.hideToolOutputDetails` no longer swallows a click on a folded call: the collapsed one-row summary reopens its output when the terminal toggles it, while Ctrl+H still folds a call the user had opened ([#11840](https://github.com/can1357/oh-my-pi/pull/11840) by [@iacore](https://github.com/iacore))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
