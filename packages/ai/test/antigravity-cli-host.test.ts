@@ -324,7 +324,8 @@ describe("AgyHost stateful steps", () => {
 		expect(fake.closed).toBe(true);
 	});
 	it("finishes a max_turn_requests stop as length and continues the same conversation", async () => {
-		const state = await fixture();
+		// Automatic continuations are covered below; this keeps the length mapping alone.
+		const state = await fixture({ maxContinuations: 0 });
 		const run = step(state.host, [user("count to one hundred")]);
 		const fake = await state.started.next();
 		const prompt = await fake.prompts.next();
@@ -901,6 +902,158 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("AgyHost cancellation and output-limit continuations", () => {
+	it("sends session/cancel at once for an explicit cancellation and keeps the warm process", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		abort.abort(new Error("user-interrupt"));
+		await expect(run.done).rejects.toThrow("aborted");
+		// The notification is on the wire before the turn acknowledges it.
+		await fake.cancellations.next();
+		expect(fake.closed).toBe(false);
+		fake.acknowledgeCancel();
+		const next = step(state.host, [user("hello"), user("again")]);
+		const prompt = await fake.prompts.next();
+		expect(textOf(prompt.request.prompt)).toContain("again");
+		expect(state.instances).toHaveLength(1);
+		expect(fake.created).toHaveLength(2);
+		fake.text("Second answer.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+	});
+
+	it("stops a cancelled turn that never confirms the drain", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(new Error("user-interrupt"));
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		expect(fake.closed).toBe(false);
+		state.clock.fire(100);
+		await fake.exited;
+		expect(fake.closed).toBe(true);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("extends the drain while the cancelled turn keeps producing updates", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(new Error("user-interrupt"));
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		const tokens = (ms: number) =>
+			[...state.clock.timers.entries()].filter(([, timer]) => timer.ms === ms).map(([token]) => token);
+		const idleBefore = tokens(100);
+		const capBefore = tokens(1_000);
+		expect(idleBefore).toHaveLength(1);
+		expect(capBefore).toHaveLength(1);
+		fake.text("Still working.");
+		expect(tokens(100)).toHaveLength(1);
+		expect(tokens(100)[0]).not.toBe(idleBefore[0]);
+		expect(tokens(1_000)).toEqual(capBefore);
+		expect(fake.closed).toBe(false);
+		state.clock.fire(1_000);
+		await fake.exited;
+		expect(fake.closed).toBe(true);
+	});
+
+	it("continues a max_tokens stop on the same session and merges text and usage", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const first = await fake.prompts.next();
+		fake.text("1 2 3");
+		first.response.resolve({
+			stopReason: "max_tokens",
+			usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
+		});
+		const continuation = await fake.prompts.next();
+		expect(textOf(continuation.request.prompt)).toBe(
+			"Continue exactly where your previous output stopped. Do not repeat any earlier text.",
+		);
+		expect(fake.created).toHaveLength(1);
+		expect(run.writer.done).toBe(false);
+		fake.text(" 4 5 6");
+		continuation.response.resolve({
+			stopReason: "end_turn",
+			usage: { inputTokens: 20, outputTokens: 6, cachedReadTokens: 2, totalTokens: 26 },
+		});
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "1 2 3 4 5 6" }]);
+		expect(run.writer.output.stopReason).toBe("stop");
+		expect(run.writer.output.usage.input).toBe(30);
+		expect(run.writer.output.usage.output).toBe(10);
+		expect(run.writer.output.usage.cacheRead).toBe(2);
+		expect(run.writer.output.usage.totalTokens).toBe(42);
+	});
+
+	it("stops continuing an output-limited turn at the configured limit", async () => {
+		const state = await fixture({ maxContinuations: 2 });
+		const run = step(state.host, [user("keep going")]);
+		const fake = await state.started.next();
+		for (let round = 0; round < 3; round++) {
+			const prompt = await fake.prompts.next();
+			fake.text(`part${round}`);
+			prompt.response.resolve({
+				stopReason: "max_turn_requests",
+				usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+			});
+		}
+		await run.done;
+		expect(fake.promptHistory).toHaveLength(3);
+		expect(fake.created).toHaveLength(1);
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.usage.totalTokens).toBe(6);
+	});
+
+	it("disables continuations with OMP_ACP_MAX_CONTINUATIONS=0", async () => {
+		const previous = Bun.env.OMP_ACP_MAX_CONTINUATIONS;
+		try {
+			Bun.env.OMP_ACP_MAX_CONTINUATIONS = "0";
+			const state = await fixture();
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("1 2 3");
+			prompt.response.resolve({ stopReason: "max_turn_requests" });
+			await run.done;
+			expect(fake.promptHistory).toHaveLength(1);
+			expect(run.writer.output.stopReason).toBe("length");
+		} finally {
+			if (previous === undefined) delete Bun.env.OMP_ACP_MAX_CONTINUATIONS;
+			else Bun.env.OMP_ACP_MAX_CONTINUATIONS = previous;
+		}
+	});
+
+	it("does not add a continuation when agy already resumed the output limit", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text(
+			"1 2 3\n⚠ Your previous response was cut off because it exceeded the output token limit. Please continue from where you left off, keeping your response shorter.",
+		);
+		prompt.response.resolve({ stopReason: "max_tokens" });
+		await run.done;
+		expect(fake.promptHistory).toHaveLength(1);
+		expect(run.writer.output.stopReason).toBe("length");
 	});
 });
 

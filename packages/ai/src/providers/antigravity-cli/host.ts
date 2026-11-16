@@ -2,7 +2,8 @@
  * One stateful agy ACP conversation across omp's per-step stream calls.
  * MCP tool calls park between steps. A deadline cancels and drains the ACP
  * prompt before releasing its MCP response; the actual late result is sent
- * only in a subsequent prompt. Failed drains kill the process and reseed.
+ * only in a subsequent prompt. An output-limited turn continues on the same
+ * session; an explicit user cancellation drains it under a bounded grace.
  */
 import * as path from "node:path";
 import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
@@ -15,6 +16,7 @@ import {
 	type SessionConfigOption,
 	type SessionNotification,
 } from "@oh-my-pi/pi-utils/acp";
+import * as AIError from "../../error";
 import type {
 	AntigravityCliCheckpoint,
 	Context,
@@ -46,6 +48,16 @@ const ANNOUNCEMENT_TIMEOUT_MS = 2_000;
 // Leave enough time to force-stop a process that never acknowledges cancellation.
 const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
+// Keep the process alive for a cancellation that still terminates on its own.
+const DRAIN_IDLE_MS = 10_000;
+const DRAIN_MAX_MS = 60_000;
+const CONTINUATIONS_ENV = "OMP_ACP_MAX_CONTINUATIONS";
+const DEFAULT_MAX_CONTINUATIONS = 3;
+const MAX_CONTINUATIONS = 10;
+const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped. Do not repeat any earlier text.";
+// agy reports its own output-cap continuation as assistant text; a second
+// automatic continuation would duplicate the text it already resumed.
+const OUTPUT_LIMIT_NOTICE = "your previous response was cut off because it exceeded the output token limit";
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
 
 /** Per-step request settings. */
@@ -105,6 +117,12 @@ export interface AgyHostOptions {
 	schedule?: AgyScheduler;
 	/** Opt-in stage timings; tests inject their own instance and clock. */
 	diagnostics?: Diagnostics;
+	/** Silence tolerated while a cancelled turn drains; any update restarts it. */
+	drainIdleMs?: number;
+	/** Absolute cap on a cancelled turn's drain, regardless of activity. */
+	drainMaxMs?: number;
+	/** Automatic output-limit continuations per step; 0 disables them. */
+	maxContinuations?: number;
 }
 
 interface AgyProcess extends AgyTransport {
@@ -149,6 +167,27 @@ interface Turn {
 	stopped: PromiseWithResolvers<never>;
 	cancelling: boolean;
 	cancellation?: Promise<void>;
+	/** Automatic continuations already requested for this turn. */
+	continuations: number;
+	/** Usage summed over the turn's completed prompts, including continuations. */
+	usage?: PromptResponse["usage"];
+	/** Armed only while an explicit cancellation drains the turn. */
+	drain?: { touch(): void };
+}
+
+/** Grace window for an explicitly cancelled turn. */
+interface DrainWindow {
+	/** Silence tolerated before giving up; any update restarts it. */
+	idleMs: number;
+	/** Absolute cap on the whole drain. */
+	maxMs: number;
+}
+
+/** Armed give-up clock shared by the drain and its caller. */
+interface Drain {
+	promise: Promise<never>;
+	touch(): void;
+	dispose(): void;
 }
 
 /** Owns one ACP process and its live ledger; callers must retain it between tool steps. */
@@ -175,6 +214,9 @@ export class AgyHost implements ProviderSessionState {
 		this.#geminiDir = geminiDir;
 		this.#options = {
 			startTransport: options.startTransport ?? startTransport,
+			drainIdleMs: options.drainIdleMs ?? DRAIN_IDLE_MS,
+			drainMaxMs: options.drainMaxMs ?? DRAIN_MAX_MS,
+			maxContinuations: options.maxContinuations ?? maxContinuationsFromEnv(),
 			holdLimitMs: options.holdLimitMs ?? HOLD_LIMIT_MS,
 			cancelTimeoutMs: options.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS,
 			announcementTimeoutMs: options.announcementTimeoutMs ?? ANNOUNCEMENT_TIMEOUT_MS,
@@ -188,6 +230,16 @@ export class AgyHost implements ProviderSessionState {
 			this.#options.holdLimitMs + this.#options.cancelTimeoutMs >= 180_000
 		) {
 			throw new Error("Antigravity CLI cancellation must finish before its 180s MCP deadline");
+		}
+		if (
+			this.#options.drainIdleMs <= 0 ||
+			this.#options.drainMaxMs < this.#options.drainIdleMs ||
+			this.#options.drainMaxMs + this.#options.cancelTimeoutMs >= 180_000
+		) {
+			throw new Error("Antigravity CLI cancellation drain must finish before its 180s MCP deadline");
+		}
+		if (!Number.isSafeInteger(this.#options.maxContinuations) || this.#options.maxContinuations < 0) {
+			throw new Error(`${CONTINUATIONS_ENV} must be a non-negative integer`);
 		}
 	}
 
@@ -220,8 +272,14 @@ export class AgyHost implements ProviderSessionState {
 		step.interrupted.promise.catch(() => undefined);
 		this.#step = step;
 		const onAbort = () => {
+			if (step.aborted) return;
 			step.aborted = true;
-			this.#fail(new Error("Request was aborted"));
+			// A caller-labelled abort is an explicit cancellation: acknowledge the
+			// step now and drain the ACP turn instead of killing the process. A bare
+			// abort is queue steering, which keeps its immediate stop.
+			const reason = AIError.callerAbortReason(options.signal);
+			if (reason === undefined) this.#fail(new Error("Request was aborted"));
+			else this.#cancel(new Error(reason));
 		};
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
@@ -348,7 +406,8 @@ export class AgyHost implements ProviderSessionState {
 			}
 			await step.done.promise;
 		} catch (error) {
-			this.#fail(error);
+			// The abort handler already settled the step and owns the drain.
+			if (!step.aborted) this.#fail(error);
 			throw step.aborted ? new Error("Request was aborted") : mapAgyError(error);
 		} finally {
 			options.signal?.removeEventListener("abort", onAbort);
@@ -551,24 +610,26 @@ export class AgyHost implements ProviderSessionState {
 		conversation.requestedEffort = effort;
 	}
 
-	#prompt(blocks: ContentBlock[]): void {
+	#prompt(blocks: ContentBlock[], continuing?: Turn): void {
 		const conversation = this.#conversation;
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
-		const turn: Turn = {
+		const turn: Turn = continuing ?? {
 			conversationId: conversation.id,
 			response: Promise.withResolvers<PromptResponse>(),
 			stopped: Promise.withResolvers<never>(),
 			cancelling: false,
+			continuations: 0,
 		};
-		turn.stopped.promise.catch(() => undefined);
-		this.#turn = turn;
-		this.#turns.add(turn);
-		void turn.response.promise
+		if (continuing) turn.response = Promise.withResolvers<PromptResponse>();
+		else {
+			turn.stopped.promise.catch(() => undefined);
+			this.#turn = turn;
+			this.#turns.add(turn);
+		}
+		const response = turn.response;
+		void response.promise
 			.then(
-				response => {
-					this.#turns.delete(turn);
-					this.#turnEnded(turn, response);
-				},
+				value => this.#turnEnded(turn, value),
 				error => {
 					this.#turns.delete(turn);
 					if (this.#turn === turn && !turn.cancelling) this.#fail(error);
@@ -578,7 +639,7 @@ export class AgyHost implements ProviderSessionState {
 		const dispatched = this.#options.diagnostics.measure("prompt", () =>
 			this.#requireProcess().connection.prompt({ sessionId: conversation.id, prompt: blocks }),
 		);
-		void dispatched.then(turn.response.resolve, turn.response.reject);
+		void dispatched.then(response.resolve, response.reject);
 	}
 
 	#releasePending(): PendingCall | undefined {
@@ -604,29 +665,101 @@ export class AgyHost implements ProviderSessionState {
 		void pending.drain.catch(error => this.#fail(error));
 	}
 
-	/** cancel() writes a notification; only the outstanding prompt's cancelled response acknowledges it. */
-	#cancelTurn(): Promise<void> {
+	/**
+	 * cancel() writes a notification; only the outstanding prompt's cancelled
+	 * response acknowledges it. A drain window keeps the process while the turn
+	 * still produces updates, and gives up on silence or at its absolute cap.
+	 */
+	#cancelTurn(window?: DrainWindow): Promise<void> {
 		const turn = this.#turn;
 		if (!turn) return Promise.resolve();
 		if (turn.cancellation) return turn.cancellation;
 		turn.cancelling = true;
 		turn.cancellation = (async () => {
 			const connection = this.#requireProcess().connection;
-			const [, response] = await withTimeout(
-				Promise.race([
+			const drain = window ? this.#armDrainWindow(window) : undefined;
+			if (drain) turn.drain = drain;
+			try {
+				const acknowledged: Promise<[void, PromptResponse]> = Promise.race([
 					Promise.all([connection.cancel({ sessionId: turn.conversationId }), turn.response.promise]),
 					turn.stopped.promise,
-				]),
-				this.#options.cancelTimeoutMs,
-				"Antigravity CLI did not confirm cancellation",
-				this.#options.schedule,
-			);
-			if (response.stopReason !== "cancelled" || this.#turn !== turn)
-				throw new Error("Antigravity CLI cancellation was not acknowledged");
-			this.#turn = undefined;
-			this.#announced.clear();
+					...(drain ? [drain.promise] : []),
+				]);
+				const [, response] = window
+					? await acknowledged
+					: await withTimeout(
+							acknowledged,
+							this.#options.cancelTimeoutMs,
+							"Antigravity CLI did not confirm cancellation",
+							this.#options.schedule,
+						);
+				if (response.stopReason !== "cancelled" || this.#turn !== turn)
+					throw new Error("Antigravity CLI cancellation was not acknowledged");
+				this.#turn = undefined;
+				this.#turns.delete(turn);
+				this.#announced.clear();
+			} finally {
+				drain?.dispose();
+				if (turn.drain === drain) turn.drain = undefined;
+			}
 		})();
 		return turn.cancellation;
+	}
+
+	/** Activity-aware give-up clock: an update restarts the silence window, the cap never moves. */
+	#armDrainWindow(window: DrainWindow): Drain {
+		const giveup = Promise.withResolvers<never>();
+		giveup.promise.catch(() => undefined);
+		let settled = false;
+		let idle: AgyTimer | undefined;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			idle?.cancel();
+			giveup.reject(new Error("Antigravity CLI did not confirm cancellation"));
+		};
+		const cap = this.#options.schedule(window.maxMs, finish);
+		const touch = () => {
+			if (settled) return;
+			idle?.cancel();
+			idle = this.#options.schedule(window.idleMs, finish);
+		};
+		touch();
+		return {
+			promise: giveup.promise,
+			touch,
+			dispose: () => {
+				settled = true;
+				idle?.cancel();
+				cap.cancel();
+			},
+		};
+	}
+
+	/**
+	 * Explicit cancellation: release the step and its parked tool at once, then
+	 * drain the ACP turn. A turn that outlives the grace stops the process.
+	 */
+	#cancel(error: Error): void {
+		const turn = this.#turn;
+		if (!turn) {
+			this.#fail(error);
+			return;
+		}
+		const step = this.#step;
+		if (step) {
+			step.controller.abort(error);
+			step.interrupted.reject(error);
+			step.done.reject(error);
+		}
+		this.#ledger = undefined;
+		this.#releasePending()?.settle(errorOutput("Tool call cancelled: the request was cancelled."));
+		void this.#cancelTurn({ idleMs: this.#options.drainIdleMs, maxMs: this.#options.drainMaxMs }).then(
+			() => undefined,
+			() => {
+				if (this.#turn === turn) this.#stopProcess();
+			},
+		);
 	}
 
 	async #abandonTurn(): Promise<void> {
@@ -711,8 +844,11 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	#onUpdate(notification: SessionNotification): void {
-		if (this.#loading || !this.#turn || notification.sessionId !== this.#conversation?.id || this.#turn.cancelling)
-			return;
+		const turn = this.#turn;
+		// Updates from the draining turn prove it is still alive, so they extend
+		// its grace; they never reach the writer once cancellation began.
+		if (turn?.drain && notification.sessionId === turn.conversationId) turn.drain.touch();
+		if (this.#loading || !turn || notification.sessionId !== this.#conversation?.id || turn.cancelling) return;
 		const update = notification.update;
 		const writer = this.#step?.aborted ? undefined : this.#step?.writer;
 		switch (update.sessionUpdate) {
@@ -737,8 +873,10 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	#turnEnded(turn: Turn, response: PromptResponse): void {
-		if (this.#turn !== turn || turn.cancelling) return;
-		this.#turn = undefined;
+		if (this.#turn !== turn || turn.cancelling) {
+			this.#turns.delete(turn);
+			return;
+		}
 		const step = this.#step;
 		if (!step || step.writer.done || this.#pending) {
 			this.#fail(new Error("Antigravity CLI ended a turn while its tool was still parked"));
@@ -763,7 +901,10 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
 			return;
 		}
-		writer.usage(this.#contextTokens, response.usage);
+		if (this.#continueTurn(turn, response)) return;
+		this.#turn = undefined;
+		this.#turns.delete(turn);
+		writer.usage(this.#contextTokens, turn.usage);
 		const digest = transcriptDigest([...step.messages, writer.output]);
 		let checkpoint: AntigravityCliCheckpoint | undefined;
 		if (response.stopReason === "end_turn") {
@@ -781,6 +922,25 @@ export class AgyHost implements ProviderSessionState {
 		});
 		this.#ledger = { count: step.messages.length + 1, digest };
 		step.done.resolve();
+	}
+
+	/** One automatic continuation for an output-limited turn; false when it must finish. */
+	#continueTurn(turn: Turn, response: PromptResponse): boolean {
+		turn.usage = mergeUsage(turn.usage, response.usage);
+		if (response.stopReason !== "max_tokens" && response.stopReason !== "max_turn_requests") return false;
+		if (turn.continuations >= this.#options.maxContinuations) return false;
+		const step = this.#step;
+		if (!step || step.aborted || step.writer.done) return false;
+		// agy resumed this turn itself; a second continuation would repeat its text.
+		if (
+			step.writer.output.content.some(
+				block => block.type === "text" && block.text.toLowerCase().includes(OUTPUT_LIMIT_NOTICE),
+			)
+		)
+			return false;
+		turn.continuations++;
+		this.#prompt([{ type: "text", text: CONTINUATION_PROMPT }], turn);
+		return true;
 	}
 
 	#fail(error: unknown): void {
@@ -966,6 +1126,35 @@ function mapAgyError(error: unknown): Error {
 		return new Error("Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.");
 	}
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+/** An automatic continuation is another prompt, so its counters add to the first part. */
+function mergeUsage(first: PromptResponse["usage"], next: PromptResponse["usage"]): PromptResponse["usage"] {
+	if (!first) return next;
+	if (!next) return first;
+	const optional = (left: number | null | undefined, right: number | null | undefined): number | undefined =>
+		left === undefined || left === null ? (right ?? undefined) : (left ?? 0) + (right ?? 0);
+	const thoughtTokens = optional(first.thoughtTokens, next.thoughtTokens);
+	const cachedReadTokens = optional(first.cachedReadTokens, next.cachedReadTokens);
+	const cachedWriteTokens = optional(first.cachedWriteTokens, next.cachedWriteTokens);
+	return {
+		inputTokens: first.inputTokens + next.inputTokens,
+		outputTokens: first.outputTokens + next.outputTokens,
+		totalTokens: first.totalTokens + next.totalTokens,
+		...(thoughtTokens !== undefined ? { thoughtTokens } : {}),
+		...(cachedReadTokens !== undefined ? { cachedReadTokens } : {}),
+		...(cachedWriteTokens !== undefined ? { cachedWriteTokens } : {}),
+	};
+}
+
+/** Bounded automatic continuations; an unset or empty variable keeps the default. */
+function maxContinuationsFromEnv(env: Record<string, string | undefined> = Bun.env): number {
+	const raw = env[CONTINUATIONS_ENV];
+	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_CONTINUATIONS;
+	const value = Number(raw);
+	if (!Number.isSafeInteger(value) || value < 0 || value > MAX_CONTINUATIONS)
+		throw new Error(`${CONTINUATIONS_ENV} must be an integer between 0 and ${MAX_CONTINUATIONS}`);
+	return value;
 }
 
 function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {
