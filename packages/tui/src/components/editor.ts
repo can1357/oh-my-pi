@@ -3188,6 +3188,8 @@ export class Editor implements Component, Focusable {
 
 	#layoutText(contentWidth: number): LayoutLine[] {
 		const layoutLines: LayoutLine[] = [];
+		// A shrunk buffer (submit, clear, deletion) must not keep the old draft's lines cached.
+		if (this.#wrapCache.size > Math.max(256, this.#state.lines.length * 2)) this.#wrapCache.clear();
 
 		if (this.#state.lines.length === 0 || (this.#state.lines.length === 1 && this.#state.lines[0] === "")) {
 			// Empty editor
