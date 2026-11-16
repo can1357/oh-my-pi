@@ -1,22 +1,19 @@
 # P0 / P1 / P2 roadmap
 
 Pin: `a8762fd997ca754b30ea7d3344cbd5c656aa5dff`.  
-**No production slice authorized** until owner Q7 (and ADR where required).
+**P0 authorized** (owner: plan + implementation). Slice table: [17-slice-plan.md](17-slice-plan.md).
 
-## P0 — Standards and native foundation (docs / tests / no semantics change preferred)
+## P0 — S1–S3 (in progress)
 
-1. Publish omp vs Agent Skills field matrix (current behavior) — document dual parsers (Q2).  
-2. Document `allowed-tools` parse-only / unused (Q3 Elephant default).  
-3. Document HookGate phase legality + sequential Review (fix docs if needed).  
-4. Document structured-ops path: bash + jaq `jq` + spill; sHEL non-goal.  
-5. Document ADW vs `omp.workflows` expert rule.  
-6. Optional: conformance fixtures that **assert current** discovery behavior (SI → executed).
+1. **S1** — omp vs Agent Skills field matrix + discovery conformance tests (Q2 document divergence; Q3 document parse-only).  
+2. **S2** — HookGate phase doc aligned with sequential Rust Review.  
+3. **S3** — Structured-ops + ADW vs `omp.workflows` notes; schedules disarmed.
 
-## P1 — Confirmed gaps (only after ADR/owner)
+## P1 — Confirmed gaps (still need Q1/Q5/Q6 or ADR)
 
-- Optional field **retention** on `Skill` (Q1) without gates.  
-- Emit `user_input` family **or** nest-eval tool hooks **if** product needs.  
-- `agent_settled` rev alignment.  
+- **S4** Optional field **retention** on `Skill` (Q1) without gates.  
+- **S5** Emit `user_input` family **or** nest-eval tool hooks (Q5); optional re-admit (Q6).  
+- `agent_settled` rev alignment (existing TASKS open).  
 - Intersect-only `allowed-tools` **only** with ADR proving no authority expansion.
 
 ## P2 — Conditional / deferred

@@ -11,6 +11,6 @@ EGM agreement does **not** answer these.
 | Q4 | Prefer namespaced string `metadata` vs sidecar vs native-only for requirements? | Retain metadata for portability / Sidecar / **Native-only enforcement (Elephant default post-F2)** | `03` design |
 | Q5 | Emit catalog `user_input` family gates, or keep `before_agent_start` as the prompt seam? | Emit / Keep | Stream B EXTEND |
 | Q6 | Should `retry_tool_tail` re-enter `tool_call` admission? | Re-admit / Keep skip (replay fidelity) | Policy vs journal |
-| Q7 | Authorize any P0 production slice now, or research-only until ADR amendment? | Authorize listed P0 / Research-only | Implementation |
+| Q7 | Authorize any P0 production slice now, or research-only until ADR amendment? | **Authorize P0 (S1–S3)** — owner asked for plan + implementation 2026-11-16 | Implementation |
 
-Default Elephant recommendation pending Goldfish: **Q7 = research-only** for governed behavior; P0 may include **documentation + conformance tests that assert current behavior** without changing semantics, if owner agrees.
+**Q7 resolved for P0:** documentation + conformance tests that lock current behavior (no semantics change). Q1/Q5/Q6 still block P1 S4/S5.
