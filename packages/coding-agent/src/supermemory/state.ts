@@ -343,12 +343,12 @@ export class SupermemorySessionState implements SupermemorySessionStateApi {
 				this.#appendCursor(this.lastRetainedTurn, this.#retainedMessages, this.#windowStart);
 			}
 			if (event.type !== "agent_end") return;
-			// A non-terminal settle is followed by the agent's own continuation; closing the window now
-			// would leave that continuation's answer out of every window.
-			if (this.#config.autoRetain && event.isTerminal !== false) {
+			// agent_end fires once per run, after every continuation it could resume has finished
+			// (mid-run stops emit agent_pause), so the window never closes before the run's answer.
+			if (this.#config.autoRetain) {
 				// Snapshot the settled history now: a job queued behind a slow upload must not read a
 				// turn that started afterwards and close its window before the answer exists.
-				// Every terminal settle: a manual continuation can extend the last window without a user turn.
+				// Every run end: a manual continuation can extend the last window without a user turn.
 				const settled = this.#settledHistory();
 				void this.#enqueueRetention(() => this.#retainDue(settled));
 			}

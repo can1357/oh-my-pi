@@ -6,8 +6,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { isEnoent, logger, sanitizeText, truncate, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, sanitizeText, tryAcquireFileLock, withFileLock } from "@oh-my-pi/pi-utils";
 import { writeFileAtomically } from "../utils/atomic-file";
+import { memoryNoticeErrorText } from "./messages";
 import { redactMemorySecrets } from "./redact";
 
 const QUARANTINE_DIR = "quarantine";
@@ -84,11 +85,6 @@ export function cleanOutboxText(text: string, secret: string | null | undefined)
 export function sendFailure(error: unknown, status: number | undefined): OutboxSendOutcome {
 	if (REJECTED_PAYLOAD_STATUSES.has(status ?? 0)) return "rejected";
 	return { error: error instanceof Error ? error.message : String(error) };
-}
-
-/** Error text for a failure notice: it can carry server response text, so strip terminal controls and bound it. */
-export function noticeErrorText(errorText: string): string {
-	return truncate(sanitizeText(errorText).replace(/\s+/g, " ").trim(), 200);
 }
 
 /**
@@ -418,7 +414,7 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
 			logger.warn(`${label} outbox drain failed`, { destination, error: errorText });
-			notice(`${label} outbox unavailable: ${noticeErrorText(errorText)}. Undelivered memories stay on disk.`);
+			notice(`${label} outbox unavailable: ${memoryNoticeErrorText(errorText)}. Undelivered memories stay on disk.`);
 			this.#schedule(FLUSH_INTERVAL_MS);
 			return;
 		}
@@ -438,7 +434,7 @@ export class MemoryOutboxQueue<E extends MemoryOutboxEvent, I> {
 		// One notice per outage, not per retry.
 		if (++this.#failures === 1) {
 			notice(
-				`Memory retention failed; ${result.kept} ${result.kept === 1 ? "memory" : "memories"} kept in the ${label} outbox for retry: ${noticeErrorText(result.error)}`,
+				`Memory retention failed; ${result.kept} ${result.kept === 1 ? "memory" : "memories"} kept in the ${label} outbox for retry: ${memoryNoticeErrorText(result.error)}`,
 			);
 		}
 		// Exponential backoff from the debounce interval; ±20% jitter spreads processes sharing an outage.

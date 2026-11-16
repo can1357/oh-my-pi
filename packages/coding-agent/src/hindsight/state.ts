@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
-import { MemoryOutboxQueue, noticeErrorText } from "../memory-backend/outbox";
+import { memoryNoticeErrorText } from "../memory-backend/messages";
+import { MemoryOutboxQueue } from "../memory-backend/outbox";
 import { findPersistedRecall, persistRecall } from "../memory-backend/recall-entry";
 import type { MemoryPromptPreparation } from "../memory-backend/types";
 import type { AgentSession } from "../session/agent-session";
@@ -26,6 +27,7 @@ import { createHindsightOutbox, hindsightRetainEvents, type OutboxEvent, type Re
 
 /** `notice` source of Hindsight recall/retain failures; print mode writes these to stderr. */
 export const HINDSIGHT_NOTICE_SOURCE = "Hindsight";
+
 const RETAIN_FLUSH_BATCH_SIZE = 16;
 const MENTAL_MODEL_LOAD_TIMED_OUT = Symbol("mental-model-load-timed-out");
 
@@ -76,6 +78,7 @@ export interface HindsightSessionStateOptions {
 }
 
 /**
+
  * Rolling hash of messages[0, to) for retention-cache validation (see #lastRetainedPrefixKey),
  * continued from `key` = the rolling hash of messages[0, from).
  */
@@ -250,7 +253,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 			if (this.#recallGeneration === generation) {
 				this.session.emitNotice(
 					"warning",
-					`Memory recall failed: ${noticeErrorText(errorText)}`,
+					`Memory recall failed: ${memoryNoticeErrorText(errorText)}`,
 					HINDSIGHT_NOTICE_SOURCE,
 				);
 			}

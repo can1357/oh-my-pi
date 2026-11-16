@@ -112,13 +112,16 @@ interface FileChange {
 	hint?: CallRecord;
 }
 
-/** Content of `bytes` as text, or `undefined` when it must be handled as an opaque whole file. */
+/**
+ * Content of `bytes` as text, or `undefined` when it must be handled as an opaque whole file.
+ * A leading UTF-8 BOM is kept: the text is rendered back into the committed blob.
+ */
 function decodeText(bytes: Uint8Array): string | undefined {
 	if (bytes.byteLength > MAX_TEXT_BYTES || isProbablyBinaryHeader(bytes.subarray(0, BINARY_SNIFF_BYTES))) {
 		return undefined;
 	}
 	try {
-		return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
 	} catch {
 		return undefined;
 	}
@@ -555,9 +558,10 @@ export class Draft {
 		if (target.units?.length && target.path === undefined) throw new Error("Units need a path.");
 		const files = target.path === undefined ? this.#files : this.#match(target.path);
 		const pattern = target.grep === undefined ? undefined : new RegExp(target.grep);
+		// Plan every file before changing any: a unit missing from one file rejects the whole request.
+		const plans = files.map(file => ({ file, ops: this.#targetOps(file, target.units, pattern) }));
 		let touched = 0;
-		for (const file of files) {
-			const ops = this.#targetOps(file, target.units, pattern);
+		for (const { file, ops } of plans) {
 			if (ops === "whole") {
 				if (file.wholeSelected !== take) touched++;
 				file.wholeSelected = take;
@@ -570,7 +574,7 @@ export class Draft {
 				touched++;
 			}
 		}
-		if (pattern && touched === 0 && !files.some(file => this.#targetOps(file, target.units, pattern) !== "whole")) {
+		if (pattern && touched === 0 && !plans.some(plan => plan.ops !== "whole")) {
 			throw new Error(`No change line matches /${target.grep}/.`);
 		}
 		return `${take ? "Selected" : "Deselected"} ${touched} change line(s).`;
@@ -591,10 +595,13 @@ export class Draft {
 		const { hunks } = file.attribution;
 		const ops: ChangeOp[] = [];
 		const wanted = units?.length ? units : undefined;
+		const known = new Set<string>();
 		hunks.forEach((hunk, hunkIndex) => {
+			known.add(String(hunkIndex + 1));
 			const units = [...hunkUnits(hunk).values()];
 			units.forEach((unitOps, unitIndex) => {
 				const id = `${hunkIndex + 1}${unitLetter(unitIndex)}`;
+				known.add(id);
 				if (wanted && !wanted.includes(String(hunkIndex + 1)) && !wanted.includes(id)) return;
 				if (pattern && !unitOps.some(op => pattern.test(op.text))) return;
 				ops.push(...unitOps);
@@ -602,9 +609,7 @@ export class Draft {
 		});
 		if (wanted) {
 			for (const unit of wanted) {
-				const match = /^(\d+)([a-z]*)$/.exec(unit);
-				const hunk = match ? hunks[Number(match[1]) - 1] : undefined;
-				if (!hunk || (match?.[2] && !hunkUnits(hunk).size)) {
+				if (!known.has(unit)) {
 					throw new Error(`${file.path} has no unit "${unit}" (hunks 1-${hunks.length}).`);
 				}
 			}

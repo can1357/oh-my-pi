@@ -78,9 +78,9 @@ function makeSession(options: { settings?: Record<string, unknown>; cwd?: string
 			} as never);
 		},
 		/** Dispatches `agent_end` without waiting for the retention it starts. */
-		emitEnd(isTerminal?: boolean) {
+		emitEnd() {
 			// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
-			for (const listener of [...listeners]) listener({ type: "agent_end", messages: [], isTerminal } as never);
+			for (const listener of [...listeners]) listener({ type: "agent_end", messages: [] } as never);
 		},
 		async endTurn() {
 			session.emitEnd();
@@ -1066,29 +1066,6 @@ describe("supermemoryBackend", () => {
 		} finally {
 			vi.useRealTimers();
 		}
-	});
-
-	it("keeps a window open across a non-terminal settle so the continuation's answer is retained", async () => {
-		const create = vi
-			.spyOn(SupermemoryClient.prototype, "addDocument")
-			.mockResolvedValue({ id: "d", status: "queued" });
-		const session = makeSession({ settings: { "supermemory.retainEveryNTurns": 1 } });
-		await start(session);
-		session.addTurn("one");
-		session.emitEnd(false);
-		await session.getSupermemorySessionState()?.flush();
-		expect(create).not.toHaveBeenCalled();
-		// The continuation adds its answer, then the terminal settle closes the window.
-		session.sessionManager.getEntries().push({
-			type: "message",
-			id: "cont",
-			parentId: null,
-			timestamp: new Date(0).toISOString(),
-			message: { role: "assistant", content: [{ type: "text", text: "continuation answer" }], timestamp: 0 },
-		} as never);
-		await session.endTurn();
-		expect(create).toHaveBeenCalledTimes(1);
-		expect(create.mock.calls[0]?.[1]?.content).toContain("continuation answer");
 	});
 
 	it("a job queued behind a slow upload retains only turns settled when it was queued", async () => {

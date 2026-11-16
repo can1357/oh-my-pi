@@ -6,7 +6,7 @@ import { sessionMemoryToolRefs } from "../memory-backend/tool-names";
 import type { ToolSession } from ".";
 
 import { formatMemories } from "../hindsight/content";
-import { noticeErrorText } from "../memory-backend/outbox";
+import { memoryNoticeErrorText } from "../memory-backend/messages";
 import { cfgMemoryBackend } from "../memory-backend/settings";
 import type { SupermemoryForgetResult } from "../supermemory/client";
 import { isSupermemoryConfigured, loadSupermemoryConfig } from "../supermemory/config";
@@ -24,7 +24,9 @@ function forgetOutcome(
 	const error = result.errors.find(item => item.id === id)?.error ?? "";
 	if (/already forgotten/i.test(error)) return { already: true };
 	if (/not found/i.test(error)) return { failure: `Memory ${id} was not found ${location}.` };
-	return { failure: `Memory ${id} was not forgotten ${location}: ${noticeErrorText(error) || "no reason given"}.` };
+	return {
+		failure: `Memory ${id} was not forgotten ${location}: ${memoryNoticeErrorText(error) || "no reason given"}.`,
+	};
 }
 
 const memoryEditSchema = type({

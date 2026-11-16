@@ -246,7 +246,7 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 	test("an already-dispatched release can click after timeout, but no later click in the sequence is sent", async () => {
 		await withGestureTab("cut-release", async run => {
 			await run("await tab.evaluate(() => { window.blockUpMs = 9000; });");
-			expect(await run(attempt("tab.clickAt(80, 40, { clickCount: 2 })"))).toMatch(
+			expect(await run(attempt("tab.clickAt(80, 40, { count: 2 })"))).toMatch(
 				/^tab\.clickAt\(\) timed out after \d+ms/,
 			);
 			// Chrome already owns the first release; cancellation cannot recall it, but prevents the second press.
@@ -302,7 +302,7 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("a click count below one is refused before anything is sent", async () => {
 		await withGestureTab("zero-clicks", async run => {
-			expect(await run(attempt("tab.clickAt(80, 40, { clickCount: 0 })"))).toContain("positive number of times");
+			expect(await run(attempt("tab.clickAt(80, 40, { count: 0 })"))).toContain("positive number of times");
 			expect(await run(readLog)).toEqual([]);
 		});
 	}, 40_000);
@@ -1805,7 +1805,7 @@ button.addEventListener("${removeOn}", () => frameElement.remove());`;
 			const frame = await page.waitForFrame(candidate => candidate.name() === "inner");
 			const handle = await frame.waitForSelector("button");
 			if (!handle) throw new Error("Expected the frame's button");
-			const outcome = await clickElement(handle, "click bump", undefined, { clickCount }).then(
+			const outcome = await clickElement(handle, "click bump", undefined, { count: clickCount }).then(
 				() => "clicked",
 				error => (String(error).includes("could not confirm the click") ? "unconfirmed" : String(error)),
 			);

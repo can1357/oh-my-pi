@@ -1070,8 +1070,8 @@ function repeatReadNotice(
 
 /**
  * Whether `path` takes a trailing `:A-B` line selector: filesystem paths, web
- * URLs and `lines` schemes do; selector-free devices (`xd://`), opaque MCP
- * resources and unregistered schemes would read the tail as part of the URL.
+ * URLs and `lines` schemes do; selector-free schemes (`out://`, `attachment://`),
+ * opaque MCP resources and unregistered schemes would read the tail as part of the URL.
  */
 function acceptsLineSelector(path: string): boolean {
 	const router = InternalUrlRouter.instance();

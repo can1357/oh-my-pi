@@ -381,7 +381,7 @@ export class LiveSessionController {
 			if (event.message.stopReason === "toolUse") this.#appendProgress(event.message);
 			return;
 		}
-		if (event.type !== "agent_end" || event.isTerminal === false) return;
+		if (event.type !== "agent_end") return;
 		this.#appendFinalResponse(event.messages);
 	}
 
