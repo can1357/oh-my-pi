@@ -35,6 +35,7 @@ import type {
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionBranchEvent,
+	SessionClearEvent,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionCompactingResult,
@@ -267,6 +268,7 @@ export type {
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
 	SessionBranchReason,
+	SessionClearEvent,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
@@ -472,6 +474,7 @@ export interface HookAPI {
 	on(event: "session_start", handler: HookHandler<SessionStartEvent>): void;
 	on(event: "session_before_switch", handler: HookHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>): void;
 	on(event: "session_switch", handler: HookHandler<SessionSwitchEvent>): void;
+	on(event: "session_clear", handler: HookHandler<SessionClearEvent>): void;
 	on(event: "session_before_branch", handler: HookHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>): void;
 	on(event: "session_branch", handler: HookHandler<SessionBranchEvent>): void;
 	on(

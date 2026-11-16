@@ -425,8 +425,8 @@ export class KeyCascade implements KeysApi {
 		}
 		if (oauthResolved) {
 			if (onCredentialId && oauthResolved.credentialId !== undefined) {
-				const { orgId, region, inferenceRegion } = oauthResolved.credential;
-				const identity = { orgId, region, inferenceRegion };
+				const { accountId, orgId, region, inferenceRegion } = oauthResolved.credential;
+				const identity = { accountId, orgId, region, inferenceRegion };
 				onCredentialId(oauthResolved.credentialId, identity, oauthResolved.credential.access);
 			}
 			return oauthResolved.apiKey;

@@ -1,3 +1,6 @@
+#[cfg(unix)]
+use tokio::task::JoinHandle;
+
 use super::*;
 
 /// Brace expansion must not turn a large sequence into one literal word or
@@ -753,6 +756,49 @@ async fn live_background_job_count_tracks_external_background_jobs() {
 	shell.abort().await;
 }
 
+/// A command that times out ends what it started, but a server or VM an
+/// earlier command left running with `&` lives on, and so does the session
+/// that owns it (its variables included).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn timeout_spares_background_jobs_of_earlier_commands() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	shell
+		.run(
+			ShellRunOptions { command: "sh -c 'sleep 30' & early=$!".into(), ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("start the earlier job");
+
+	let timed_out = shell
+		.run(
+			ShellRunOptions { command: "sh -c 'sleep 30' & sleep 30".into(), ..Default::default() },
+			None,
+			CancelToken::new(Some(300)),
+		)
+		.await
+		.expect("run that times out");
+	assert!(timed_out.timed_out);
+	assert_eq!(
+		shell.live_background_job_count().await,
+		1,
+		"the timed-out command's own job must end, the earlier one must not"
+	);
+
+	let probe = shell
+		.run(
+			ShellRunOptions { command: "kill -0 \"$early\"".into(), ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("probe the earlier job");
+	assert_eq!(probe.exit_code, Some(0), "the earlier job died with the timed-out command");
+}
+
 /// An exited `&` child must be waited on while the persistent shell is
 /// idle, not only when the host submits another command. Keep its status
 /// for a later explicit `wait` after the OS process has disappeared.
@@ -1014,33 +1060,68 @@ async fn pids_reports_in_flight_children_until_run_returns() {
 	assert!(shell.pids().is_empty(), "pids cleared once the run returns");
 }
 
+/// Run `command` on `shell`, which must succeed; its output.
+#[cfg(unix)]
+async fn run_ok(shell: &Shell, command: &str) -> String {
+	let (tx, rx) = flume::unbounded();
+	let result = shell
+		.run(
+			ShellRunOptions { command: command.into(), ..Default::default() },
+			Some(tx),
+			CancelToken::default(),
+		)
+		.await
+		.expect("run");
+	assert_eq!(result.exit_code, Some(0), "{command}");
+	rx.drain().collect()
+}
+
+/// Start `command` on `shell`, then hold the run until `gate` exists;
+/// returns once it is held.
+#[cfg(unix)]
+async fn run_held(shell: &Arc<Shell>, command: &str, gate: &Path) -> JoinHandle<String> {
+	let started = gate.with_extension("started");
+	let owner = tokio::spawn({
+		let shell = shell.clone();
+		let command = format!(
+			"{command}; : > {}; while [ ! -e {} ]; do sleep 0.01; done",
+			quote_arg(&started.to_string_lossy()),
+			quote_arg(&gate.to_string_lossy())
+		);
+		async move { run_ok(&shell, &command).await }
+	});
+	time::timeout(Duration::from_secs(5), async {
+		while !started.exists() {
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("held command never started");
+	owner
+}
+
+/// Open `gate` and wait for the run [`run_held`] holds on it to end.
+#[cfg(unix)]
+async fn release_held(owner: JoinHandle<String>, gate: &Path) {
+	fs::write(gate, "").expect("open gate");
+	time::timeout(Duration::from_secs(5), owner)
+		.await
+		.expect("held command finishes")
+		.expect("held command task");
+}
+
 /// A fork taken while a command runs starts from the state that command
 /// started from (variables, functions, cwd), without waiting for it; what the
 /// fork sets stays in the fork; sibling forks draw different `$RANDOM`s.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn fork_starts_from_the_state_before_the_running_command() {
-	async fn run(shell: &Shell, command: &str) -> String {
-		let (tx, rx) = flume::unbounded();
-		let result = shell
-			.run(
-				ShellRunOptions { command: command.into(), ..Default::default() },
-				Some(tx),
-				CancelToken::default(),
-			)
-			.await
-			.expect("run");
-		assert_eq!(result.exit_code, Some(0), "{command}");
-		rx.drain().collect()
-	}
-
 	let _guard = shell_test_lock().lock().await;
 	let dir = tempfile::tempdir().expect("scratch directory");
 	let dir_path = dir.path().canonicalize().expect("canonical dir");
-	let started = dir_path.join("started");
 	let gate = dir_path.join("gate");
 	let shell = Arc::new(Shell::new(None));
-	run(
+	run_ok(
 		&shell,
 		&format!(
 			"PI_FORK_VAR=before; pi_fork_fn() {{ printf 'fn:%s' \"$1\"; }}; cd {}; RANDOM=7",
@@ -1049,27 +1130,11 @@ async fn fork_starts_from_the_state_before_the_running_command() {
 	)
 	.await;
 
-	let owner = tokio::spawn({
-		let shell = shell.clone();
-		let command = format!(
-			"PI_FORK_VAR=during; : > {}; while [ ! -e {} ]; do sleep 0.01; done",
-			quote_arg(&started.to_string_lossy()),
-			quote_arg(&gate.to_string_lossy())
-		);
-		async move { run(&shell, &command).await }
-	});
-	time::timeout(Duration::from_secs(5), async {
-		while !started.exists() {
-			time::sleep(Duration::from_millis(10)).await;
-		}
-	})
-	.await
-	.expect("owner command never started");
-
+	let owner = run_held(&shell, "PI_FORK_VAR=during", &gate).await;
 	let fork = shell.fork();
 	let seen = time::timeout(
 		Duration::from_secs(5),
-		run(
+		run_ok(
 			&fork,
 			"printf '%s|%s|%s' \"$PI_FORK_VAR\" \"$(pi_fork_fn x)\" \"$PWD\"; PI_FORK_VAR=fork",
 		),
@@ -1078,14 +1143,43 @@ async fn fork_starts_from_the_state_before_the_running_command() {
 	.expect("fork waited for the running command");
 	assert_eq!(seen, format!("before|fn:x|{}", dir_path.display()));
 	let random = "echo $RANDOM $RANDOM $RANDOM";
-	assert_ne!(run(&shell.fork(), random).await, run(&shell.fork(), random).await);
+	assert_ne!(run_ok(&shell.fork(), random).await, run_ok(&shell.fork(), random).await);
 
-	fs::write(&gate, "").expect("open gate");
-	time::timeout(Duration::from_secs(5), owner)
-		.await
-		.expect("owner finishes")
-		.expect("owner task");
-	assert_eq!(run(&shell, "printf %s \"$PI_FORK_VAR\"").await, "during");
+	release_held(owner, &gate).await;
+	assert_eq!(run_ok(&shell, "printf %s \"$PI_FORK_VAR\"").await, "during");
+}
+
+/// `adopt` carries what a fork of a busy shell set back into it: forks taken
+/// afterwards see it at once, the shell takes it when its command ends, a
+/// name both changed keeps the value of the command that ended last, and the
+/// working directory stays the shell's.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn adopt_carries_a_fork_back_and_the_last_command_to_end_wins() {
+	let _guard = shell_test_lock().lock().await;
+	let dir = tempfile::tempdir().expect("scratch directory");
+	let dir_path = dir.path().canonicalize().expect("canonical dir");
+	fs::create_dir(dir_path.join("sub")).expect("subdirectory");
+	let gate = dir_path.join("gate");
+	let shell = Arc::new(Shell::new(None));
+	let setup = format!("cd {}; PI_A=base; PI_B=base", quote_arg(&dir_path.to_string_lossy()));
+	run_ok(&shell, &setup).await;
+
+	let owner = run_held(&shell, "PI_B=owner", &gate).await;
+	let fork = shell.fork();
+	run_ok(&fork, "PI_A=fork; PI_B=fork; pi_fn() { printf fn; }; cd sub").await;
+	assert!(shell.adopt(&fork));
+	let read = "printf '%s|%s|%s|%s' \"$PI_A\" \"$PI_B\" \"$(pi_fn)\" \"$PWD\"";
+	let cwd = dir_path.display();
+	assert_eq!(run_ok(&shell.fork(), read).await, format!("fork|fork|fn|{cwd}"));
+
+	release_held(owner, &gate).await;
+	assert_eq!(run_ok(&shell, read).await, format!("fork|owner|fn|{cwd}"));
+
+	let fork = shell.fork();
+	run_ok(&fork, "PI_B=late").await;
+	assert!(shell.adopt(&fork));
+	assert_eq!(run_ok(&shell, "printf %s \"$PI_B\"").await, "late");
 }
 
 #[cfg(unix)]

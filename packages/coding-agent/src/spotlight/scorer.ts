@@ -113,7 +113,14 @@ export class RecordingScorer implements Scorer {
 						error: error.message,
 					});
 					// After a timeout or transport failure, wake the endpoint for the next call.
-					if (error.status === 0 && error.code !== "no_credential" && !signal?.aborted) this.#client.warm();
+					if (
+						error.status === 0 &&
+						error.code !== "no_credential" &&
+						error.code !== "policy" &&
+						!signal?.aborted
+					) {
+						this.#client.warm();
+					}
 					return null;
 				}
 			}),

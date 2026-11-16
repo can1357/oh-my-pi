@@ -5,6 +5,7 @@ import {
 	type TodoPhase,
 	type TodoCompletionTransition,
 	type TodoToolDetails,
+	todoTaskTargets,
 } from "@oh-my-pi/pi-tui/tools/todo";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -59,7 +60,7 @@ const InitListEntry = type({
 const todoSchema = type({
 	op: TodoOp,
 	"list?": InitListEntry.array().describe("phases for init"),
-	"task?": type("string").describe("verbatim task content"),
+	"task?": type("string | string[]").describe("verbatim task content; array targets several (not start)"),
 	"phase?": type("string"),
 	// No `atLeastLength(1)` here: `items` is only meaningful for `init`/`append`,
 	// and both enforce non-empty with op-specific errors. A stray `items: []` on
@@ -284,6 +285,20 @@ function resolveTaskOrError(
 	return hit;
 }
 
+/** Resolve every targeted task, recording one error per missing content. */
+function resolveTasksOrError(
+	phases: TodoPhase[],
+	contents: string[],
+	errors: string[],
+): { task: TodoItem; phase: TodoPhase }[] {
+	const hits: { task: TodoItem; phase: TodoPhase }[] = [];
+	for (const content of contents) {
+		const hit = resolveTaskOrError(phases, content, errors);
+		if (hit) hits.push(hit);
+	}
+	return hits;
+}
+
 function resolvePhaseOrError(phases: TodoPhase[], name: string | undefined, errors: string[]): TodoPhase | undefined {
 	if (!name) {
 		errors.push("Missing phase name");
@@ -295,10 +310,8 @@ function resolvePhaseOrError(phases: TodoPhase[], name: string | undefined, erro
 }
 
 function getTaskTargets(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoItem[] {
-	if (entry.task) {
-		const hit = resolveTaskOrError(phases, entry.task, errors);
-		return hit ? [hit.task] : [];
-	}
+	const contents = todoTaskTargets(phases, entry.task);
+	if (contents.length > 0) return resolveTasksOrError(phases, contents, errors).map(hit => hit.task);
 	if (entry.phase) {
 		const phase = resolvePhaseOrError(phases, entry.phase, errors);
 		return phase ? [...phase.tasks] : [];
@@ -387,10 +400,11 @@ function appendItems(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 }
 
 function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
-	if (entry.task) {
-		const hit = resolveTaskOrError(phases, entry.task, errors);
-		if (!hit) return phases;
-		hit.phase.tasks = hit.phase.tasks.filter(candidate => candidate !== hit.task);
+	const contents = todoTaskTargets(phases, entry.task);
+	if (contents.length > 0) {
+		for (const hit of resolveTasksOrError(phases, contents, errors)) {
+			hit.phase.tasks = hit.phase.tasks.filter(candidate => candidate !== hit.task);
+		}
 		return phases;
 	}
 	if (entry.phase) {
@@ -410,7 +424,12 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 		case "init":
 			return initPhases(entry, errors);
 		case "start": {
-			const hit = resolveTaskOrError(phases, entry.task, errors);
+			const contents = todoTaskTargets(phases, entry.task);
+			if (contents.length > 1) {
+				errors.push("start takes a single task: only one task can be in progress");
+				return phases;
+			}
+			const hit = resolveTaskOrError(phases, contents[0], errors);
 			if (!hit) return phases;
 			for (const phase of phases) {
 				for (const candidate of phase.tasks) {

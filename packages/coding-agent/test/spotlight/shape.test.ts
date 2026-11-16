@@ -111,12 +111,13 @@ function traceOf(out: ShapeOutcome, printed: readonly string[]): ShapedLines & {
 
 describe("spotlight shaping", () => {
 	it("outlines a long source read: a body the conversation names stays open, the rest fold to exact file lines", async () => {
-		// Ten top-level functions of 20 body lines each, read from file line 41 on.
+		// Ten top-level functions of 20 body lines each, read from file line 41 on: over 12k characters.
 		const names = ["alphaHandler", "betaHandler", "computeRetryDelay", "deltaHandler", "epsilonHandler"];
 		const lines: string[] = [];
 		for (let k = 0; k < 10; k++) {
 			lines.push(`function ${names[k % 5]}${k}(a) {`);
-			for (let j = 0; j < 19; j++) lines.push(`  const v${j} = a * ${j} + ${k};`);
+			for (let j = 0; j < 19; j++)
+				lines.push(`  const v${j} = a * ${j} + ${k}; // backoff step ${j} of handler ${k}, jittered`);
 			lines.push("  return a;", "}", "");
 		}
 		const first = 41;
@@ -139,7 +140,7 @@ describe("spotlight shaping", () => {
 		const text = out.text.split("\n");
 		// The named function (k = 2, file lines 87-109) is shown whole, prefixes kept.
 		expect(text).toContain("87|function computeRetryDelay2(a) {");
-		expect(text).toContain("106|  const v18 = a * 18 + 2;");
+		expect(text).toContain("106|  const v18 = a * 18 + 2; // backoff step 18 of handler 2, jittered");
 		// Every other body folds to its exact file lines: function k's body is lines 42 + 23k … 61 + 23k.
 		for (const k of [0, 1, 3, 9]) expect(text).toContain(`  … [lines ${42 + 23 * k}-${61 + 23 * k}]`);
 		expect(text[0]).toBe("[src/retry.ts#ab12]");
@@ -359,6 +360,40 @@ describe("spotlight shaping", () => {
 		expect(trace.pairs).toEqual(hiddenRuns(trace.kept));
 	});
 
+	it("shows a source read of at most 12k characters whole, however many lines, and outlines a longer one", async () => {
+		// Twelve functions of 20 body lines each: 276 lines, under 12k characters until the body lines are padded.
+		const source = (pad: string) => {
+			const lines: string[] = [];
+			for (let k = 0; k < 12; k++) {
+				lines.push(`function handler${k}(a) {`);
+				for (let j = 0; j < 19; j++) lines.push(`  const v${j} = a * ${j} + ${k};${pad}`);
+				lines.push("  return a;", "}", "");
+			}
+			const shown = lines.map((l, i) => `${i + 1}|${l}`);
+			const input: ShapeInput = {
+				tool: "read",
+				text: shown.join("\n"),
+				read: { path: "src/handlers.ts", lines, shown, firstLine: 1, selected: false },
+				cwd: "/nonexistent",
+			};
+			return input;
+		};
+		const rank = scorer(() => 0.3);
+		const short = source("");
+		expect(short.text.length).toBeLessThan(12_000);
+		const whole = await shapeResult(short, context(), rank, newShapeState(), sink());
+		expect(whole.text).toBe(short.text);
+		expect(whole.steps).toEqual(["none"]);
+		// Nothing was ranked: a read shown whole costs no Spotlight request.
+		expect(rank.calls).toBe(0);
+
+		const long = source(" // retry backoff, jittered per attempt");
+		expect(long.text.length).toBeGreaterThan(12_000);
+		const outlined = await shapeResult(long, context(), rank, newShapeState(), sink());
+		expect(outlined.steps).toEqual(["outline"]);
+		expect(outlined.text.length).toBeLessThan(long.text.length / 2);
+	});
+
 	it("traces an outline: signatures stay, a named body opens, a hot body opens on rank, the rest fold", async () => {
 		// Twelve functions of 20 body lines each, read from file line 41 on: function k's body is window lines
 		// 2 + 23k … 21 + 23k. The keep budget (15% of 276 lines) fits the named body and one ranked body.
@@ -366,7 +401,7 @@ describe("spotlight shaping", () => {
 		const lines: string[] = [];
 		for (let k = 0; k < 12; k++) {
 			lines.push(`function ${names[k % 5]}${k}(a) {`);
-			for (let j = 0; j < 19; j++) lines.push(`  const v${j} = a * ${j} + ${k};`);
+			for (let j = 0; j < 19; j++) lines.push(`  const v${j} = a * ${j} + ${k}; // backoff step ${j}, jittered`);
 			lines.push("  return a;", "}", "");
 		}
 		const shown = lines.map((l, i) => `${41 + i}|${l}`);
@@ -413,13 +448,15 @@ describe("spotlight shaping", () => {
 		const lines = Array.from({ length: 10 }, (_, i) => `// header ${i}`);
 		lines.push("class Engine {", "public:");
 		for (let p = 0; p < 8; p++) {
-			for (let j = 0; j < 8; j++) lines.push(`\t/// member ${p} doc ${j}`);
+			for (let j = 0; j < 8; j++)
+				lines.push(`\t/// member ${p} doc ${j}: what the engine guarantees to its callers here`);
 			lines.push(`\tvirtual void member${p}() = 0;`, "");
 		}
 		lines.push("};", "");
 		for (let k = 0; k < 12; k++) {
 			lines.push(`void cold${k}() {`);
-			for (let j = 0; j < 9; j++) lines.push(`  int v${j} = ${k};`);
+			for (let j = 0; j < 9; j++)
+				lines.push(`  int v${j} = ${k}; // scratch value ${j} of the cold path, never read back`);
 			lines.push("}", "");
 		}
 		const shown = lines.map((l, i) => `${i + 1}|${l}`);
@@ -746,6 +783,34 @@ describe("spotlight shaping", () => {
 		expect((await shape(bash(agentRun, report(200)))).text).not.toBe(report(200));
 	});
 
+	it("shows a pull request or issue thread whole up to 12k characters, but cuts a listing and a longer thread", async () => {
+		const thread = (n: number) =>
+			Array.from(
+				{ length: n },
+				(_, i) =>
+					`- Review comment ${i + 1}: the retry at line ${i * 7} drops Retry-After; keep the header's delay.`,
+			).join("\n");
+		const shape = (path: string, text: string) =>
+			shapeResult(
+				{ tool: "read", path, text, cwd: "/nonexistent" },
+				context(),
+				scorer(() => 0.2),
+				newShapeState(),
+				sink(),
+			);
+
+		expect(thread(80).length).toBeGreaterThan(3_900);
+		for (const path of ["pr://7", "issue://owner/repo/7?comments=1"]) {
+			expect((await shape(path, thread(80))).text).toBe(thread(80));
+		}
+		// A listing of pull requests and one file of a PR's diff are not threads.
+		for (const path of ["pr://owner/repo", "pr://7/diff/2"]) {
+			expect((await shape(path, thread(80))).steps).toContain("window");
+		}
+		expect(thread(200).length).toBeGreaterThan(12_000);
+		expect((await shape("pr://7", thread(200))).steps).toContain("window");
+	});
+
 	it("keeps a diff whole up to 12k characters and cuts it past it, while a search that size is cut", async () => {
 		const matches = (n: number) =>
 			Array.from(
@@ -952,6 +1017,12 @@ describe("spotlight shaping", () => {
 		const whole = await shapeResult(read, context(), rank, newShapeState(), sink());
 		expect(whole.text).toBe(read.text);
 		expect(whole.steps).toEqual(["none"]);
+		// A kernel source is code too: cut by rank, half of such reads were read back at once.
+		const kernel: ShapeInput = {
+			...read,
+			read: { path: "csrc/attention.cu", lines: code, shown, firstLine: 1, selected: false },
+		};
+		expect((await shapeResult(kernel, context(), rank, newShapeState(), sink())).text).toBe(read.text);
 
 		const grid = Array.from({ length: 60 }, (_, r) =>
 			Array.from({ length: 80 }, (_, c) => ((r * 7 + c * 3) % 11 < 4 ? "#" : ".")).join(""),
@@ -1056,5 +1127,57 @@ describe("spotlight shaping", () => {
 		expect(out.text).toMatch(/1 line differs \(line \d+\), shown\]/);
 		const shown = out.text.split("\n");
 		for (const gap of gaps) for (const row of saved.slice(gap.from - 1, gap.to)) expect(shown).not.toContain(row);
+	});
+
+	it("keeps exact number literals (64-bit integers, float spellings) in compacted JSON views", async () => {
+		const raw = `[\n${Array.from(
+			{ length: 60 },
+			(_, i) => `  {\n    "id": 9007199254740993,\n    "weight": 1.0,\n    "name": "item-${i + 1}"\n  }`,
+		).join(",\n")}\n]`;
+		const lines = raw.split("\n");
+		const shown = lines.map((l, i) => `${i + 1}|${l}`);
+
+		const readOut = await shapeResult(
+			{
+				tool: "read",
+				text: `[example.json#ab12]\n${shown.join("\n")}`,
+				read: { path: "example.json", lines, shown, firstLine: 1, selected: false },
+				cwd: "/nonexistent",
+			},
+			context(),
+			scorer(null),
+			newShapeState(),
+			sink(),
+		);
+		expect(readOut.steps).toEqual(["dump"]);
+		expect(readOut.text).toContain("(60 rows) id|weight|name");
+		expect(readOut.text).toContain("9007199254740993|1.0|item-1");
+		expect(readOut.text).not.toContain("9007199254740992");
+
+		const bashOut = await shapeResult(
+			bash("cat example.json", raw),
+			context(),
+			scorer(null),
+			newShapeState(),
+			sink(),
+		);
+		expect(bashOut.steps).toEqual(["dump"]);
+		expect(bashOut.text).toContain("9007199254740993|1.0|item-60");
+		expect(bashOut.text).not.toContain("9007199254740992");
+
+		const pyDump = Array.from(
+			{ length: 60 },
+			(_, i) => `{'id': 9007199254740993, 'weight': 1.0, 'name': 'item-${i + 1}'}`,
+		).join("\n");
+		const pyOut = await shapeResult(
+			bash("python3 dump.py", pyDump),
+			context(),
+			scorer(null),
+			newShapeState(),
+			sink(),
+		);
+		expect(pyOut.steps).toEqual(["dump"]);
+		expect(pyOut.text).toContain("9007199254740993|1.0|item-60");
+		expect(pyOut.text).not.toContain("9007199254740992");
 	});
 });

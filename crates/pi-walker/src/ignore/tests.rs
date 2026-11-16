@@ -202,9 +202,17 @@ fn parse_excludes_file_matches_ignore_crate_regex() {
 	assert_eq!(parse_excludes_file(b"excludesfile=~/g", None).as_deref(), Some(Path::new("~/g")));
 }
 
+/// Version-control sources, as a gitignore walk reads them.
+const VCS: Sources = Sources { vcs: true, custom: None, parents: true };
+
+/// Walks `root` on `fs` with [`VCS`] sources; see [`walk_with`].
+async fn walk(fs: &Fs, root: &str) -> Vec<String> {
+	walk_with(fs, root, VCS).await
+}
+
 /// Walks `root` on `fs` the way the walker drives the chain and returns the
 /// non-ignored files, sorted; `.git` directories are not descended.
-async fn walk(fs: &Fs, root: &str) -> Vec<String> {
+async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 	fn visit<'a>(
 		s: &'a mut Session,
 		ig: &'a Ignorer,
@@ -215,11 +223,12 @@ async fn walk(fs: &Fs, root: &str) -> Vec<String> {
 	) -> BoxFuture<'a, ()> {
 		Box::pin(async move {
 			let listing = s.list(dir, Detail::Minimal, 0).await.unwrap().clone();
+			let sources = ig.sources();
 			let mut names = Names::default();
 			for r in listing.records() {
-				names.record(listing.name(r), r.file_type);
+				names.record(listing.name(r), r.file_type, sources.custom);
 			}
-			let frame = DirIgnores::load(s, dir, names, false)
+			let frame = DirIgnores::load(s, dir, names, sources, false)
 				.await
 				.frame(parent, names, rel);
 			let mut scratch = Vec::new();
@@ -247,7 +256,7 @@ async fn walk(fs: &Fs, root: &str) -> Vec<String> {
 		})
 	}
 	let mut s = fs.session();
-	let (ig, frame) = Ignorer::new(&mut s, fs, Path::new(root)).await;
+	let (ig, frame) = Ignorer::new(&mut s, fs, Path::new(root), sources).await;
 	let dir = s.open_dir(Path::new(root)).await.unwrap();
 	let mut out = Vec::new();
 	visit(&mut s, &ig, &dir, b"", frame.as_ref(), &mut out).await;
@@ -393,15 +402,20 @@ async fn ancestor_anchored_rules_use_root_offset() {
 #[test]
 fn global_rules_apply_only_inside_repo_and_last() {
 	let global = Rules::parse(b"*.g\nsub/*.h\n");
-	let ig = Ignorer { global: Some(global), cwd: b"/w".to_vec(), root: b"/w/repo".to_vec() };
+	let ig = Ignorer {
+		sources: VCS,
+		global:  Some(global),
+		cwd:     b"/w".to_vec(),
+		root:    b"/w/repo".to_vec(),
+	};
 	let repo = Frame::new(
 		None,
-		[None, Some(Arc::new(Rules::parse(b"!keep.g\n"))), None],
+		[None, None, Some(Arc::new(Rules::parse(b"!keep.g\n"))), None],
 		true,
 		Box::default(),
 		Box::default(),
 	);
-	let plain = Frame::new(None, [None, None, None], false, Box::default(), Box::default());
+	let plain = Frame::new(None, Default::default(), false, Box::default(), Box::default());
 	let mut scratch = Vec::new();
 	assert!(ig.ignored(Some(&repo), b"x.g", false, &mut scratch));
 	assert!(!ig.ignored(Some(&repo), b"keep.g", false, &mut scratch));
@@ -415,17 +429,76 @@ fn global_rules_apply_only_inside_repo_and_last() {
 
 #[test]
 fn names_record_only_relevant_entries() {
+	let custom = Some(".fdignore");
 	let mut names = Names::default();
-	names.record(b".gitignore", FileType::Dir);
-	names.record(b".ignorex", FileType::File);
+	names.record(b".gitignore", FileType::Dir, custom);
+	names.record(b".ignorex", FileType::File, custom);
+	names.record(b".fdignore", FileType::Dir, custom);
 	assert!(names.is_empty());
-	names.record(b".jj", FileType::Dir);
+	names.record(b".jj", FileType::Dir, custom);
 	assert!(!names.is_empty());
-	assert_eq!(DirIgnores::source_names(names).count(), 0);
-	names.record(b".git", FileType::File);
-	names.record(b".ignore", FileType::Symlink);
-	assert_eq!(DirIgnores::source_names(names).collect::<Vec<_>>(), [
-		(0, ".ignore"),
-		(2, ".git/info/exclude")
+	assert_eq!(DirIgnores::source_names(names, VCS).count(), 0);
+	names.record(b".git", FileType::File, custom);
+	names.record(b".ignore", FileType::Symlink, custom);
+	names.record(b".fdignore", FileType::File, custom);
+	assert_eq!(DirIgnores::source_names(names, VCS).collect::<Vec<_>>(), [
+		(1, ".ignore"),
+		(3, ".git/info/exclude")
+	]);
+	let all = Sources { custom, ..VCS };
+	assert_eq!(DirIgnores::source_names(names, all).collect::<Vec<_>>(), [
+		(0, ".fdignore"),
+		(1, ".ignore"),
+		(3, ".git/info/exclude")
+	]);
+	let custom_only = Sources { vcs: false, ..all };
+	assert_eq!(DirIgnores::source_names(names, custom_only).collect::<Vec<_>>(), [(0, ".fdignore")]);
+}
+
+/// The custom file beats `.gitignore` (a `!` rule re-includes), applies
+/// without the version-control sources, and is read from ancestors above
+/// the repository unless parents are skipped.
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_ignore_file_precedence_scope_and_parents() {
+	let fs = tree(
+		&[
+			("mem://t/.fdignore", "*.top\n"),
+			("mem://t/repo/.gitignore", "*.log\n*.tmp\n"),
+			("mem://t/repo/.fdignore", "!keep.log\n*.fd\n"),
+			("mem://t/repo/a.log", ""),
+			("mem://t/repo/keep.log", ""),
+			("mem://t/repo/x.fd", ""),
+			("mem://t/repo/y.tmp", ""),
+			("mem://t/repo/z.top", ""),
+			("mem://t/repo/z.rs", ""),
+		],
+		&["mem://t/repo/.git"],
+	);
+	let custom = Some(".fdignore");
+	let both = Sources { custom, ..VCS };
+	assert_eq!(walk_with(&fs, "mem://t/repo", both).await, [
+		".fdignore",
+		".gitignore",
+		"keep.log",
+		"z.rs"
+	]);
+	let custom_only = Sources { vcs: false, ..both };
+	assert_eq!(walk_with(&fs, "mem://t/repo", custom_only).await, [
+		".fdignore",
+		".gitignore",
+		"a.log",
+		"keep.log",
+		"y.tmp",
+		"z.rs"
+	]);
+	let local_only = Sources { parents: false, ..custom_only };
+	assert_eq!(walk_with(&fs, "mem://t/repo", local_only).await, [
+		".fdignore",
+		".gitignore",
+		"a.log",
+		"keep.log",
+		"y.tmp",
+		"z.rs",
+		"z.top"
 	]);
 }

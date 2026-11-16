@@ -56,6 +56,7 @@ function createHost(
 		lastModelChangeRole?: string;
 		modelRoles?: Record<string, string>;
 		shakeSucceeds?: boolean;
+		contextFits?: boolean;
 	} = {},
 ): TurnRecoveryHost {
 	const settings = Settings.isolated({
@@ -87,7 +88,7 @@ function createHost(
 		modelRegistry,
 		configWarnings: [],
 		model: () => model,
-		contextFitsModel: () => true,
+		contextFitsModel: () => options.contextFits !== false,
 		textOutputCommitted: () => options.textOutputCommitted !== false,
 		thinkingLevel: () => undefined,
 		configuredThinkingLevel: () => undefined,
@@ -658,9 +659,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
 	});
 
-	it("keeps pure token-context overflows barred from the configured chain", () => {
+	it("keeps token-context overflows the live context exhibits barred from the configured chain", () => {
 		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
-		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains, contextFits: false }));
 		const message = {
 			...makeMessage([], model),
 			errorMessage: "prompt is too long: 250000 tokens > 200000 maximum",
@@ -668,6 +669,36 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		message.errorId = AIError.classifyMessage(message);
 		expect(AIError.isContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
 		expect(AIError.isPayloadRejection(message)).toBe(false);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+	});
+
+	it("walks the configured chain when overflow wording contradicts a context that fits", () => {
+		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
+		// oMLX memory-guard rejection of a ~10k-token prompt: the wording matches overflow text.
+		const message = {
+			...makeMessage([], model),
+			errorMessage:
+				"oMLX prefill memory guard rejected this prompt: Prefill context too large for available memory (pre-chunk guard at 0 tokens, kv_len=10620): predicted peak would exceed prefill safety cap 105.1GB. Free system memory, or reduce context length.",
+		} as AssistantMessage;
+		message.errorId = AIError.classifyMessage(message);
+		expect(AIError.isContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
+		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
+		const unknownWindow = { ...model, contextWindow: 0 };
+		const unknownWindowRecovery = new TurnRecovery(createHost(unknownWindow, modelRegistry, { fallbackChains }));
+		expect(unknownWindowRecovery.isHardErrorFallbackEligible({ ...message, model: unknownWindow.id })).toBe(false);
+	});
+
+	it("keeps a provider-flagged overflow without overflow wording on compaction", () => {
+		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
+		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
+		// The provider attached the flag itself (Devin's large-history invalid_argument), so fit does not waive it.
+		const message = {
+			...makeMessage([], model),
+			errorMessage: "invalid_argument: request rejected",
+			errorId: AIError.create(AIError.Flag.ContextOverflow),
+		} as AssistantMessage;
+		expect(AIError.isContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
 		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
 	});
 

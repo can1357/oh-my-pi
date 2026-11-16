@@ -99,7 +99,9 @@ export function currentDb(): Database | null {
 const BACKFILL_COMPLETE = "complete";
 const BACKFILL_PENDING = "pending";
 const USER_MESSAGES_BACKFILL_KEY = "user_messages_v10";
-const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
+// v2: replies are linked past the non-message entries (system-prompt digest,
+// extension notices, side-model usage) the agent writes before them.
+const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v2";
 // v2: the parser also records the served service tier per message, so a full
 // re-parse fills `service_tier` and re-derives ultrafast premium counts that the
 // v1 pass (priority only) left at zero.
@@ -1543,23 +1545,24 @@ function backfillForkDuplicates(database: Database): void {
 }
 
 /**
- * One-shot wipe of `file_offsets` to force `parseSessionFile` to re-parse
- * every session from byte zero. We don't touch `user_messages`; the parser
- * now emits a `UserMessageLink` for every assistant->parent pair, and the
- * guarded `updateUserMessageLinks` UPDATE fixes any row whose `model` was
- * left NULL by the old in-pass-only linking logic. Idempotent: gated by a
- * sentinel row in `meta`.
+ * Re-parse, once, every session holding a user message without a responding
+ * model, by dropping its cursor; the next sync re-reads it from byte zero and
+ * the guarded `updateUserMessageLinks` UPDATE fills each row whose reply is now
+ * found. Every other cursor stays, so this never re-parses the whole history.
  */
 function repairUserMessageLinks(database: Database): void {
-	const row = database.query("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGE_LINKS_REPAIR_KEY) as
-		| { value: string }
-		| undefined;
-	if (!shouldResetBackfill(row?.value)) return;
-
-	database.run("DELETE FROM file_offsets");
-	database
-		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-		.run(USER_MESSAGE_LINKS_REPAIR_KEY, BACKFILL_PENDING);
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(USER_MESSAGE_LINKS_REPAIR_KEY);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	database.transaction(() => {
+		database.run(
+			"DELETE FROM file_offsets WHERE session_file IN (SELECT session_file FROM user_messages WHERE model IS NULL)",
+		);
+		database
+			.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(USER_MESSAGE_LINKS_REPAIR_KEY, BACKFILL_COMPLETE);
+	})();
 }
 
 /**
@@ -1594,7 +1597,6 @@ export function markSessionBackfillsComplete(): void {
 		for (const key of [
 			USER_MESSAGES_BACKFILL_KEY,
 			TOOL_CALLS_BACKFILL_KEY,
-			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
 			COST_UNPRICED_BACKFILL_KEY,

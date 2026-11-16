@@ -101,19 +101,19 @@ interface WedgeOptions {
 /** Handle for a shared Chromium whose CDP endpoint answers nothing: every call hangs. */
 function makeWedgeHandle(scope: SharedTargetScope, options: WedgeOptions = {}): BrowserHandle {
 	const { shared = true, close = "hang", gate, entered } = options;
-	const session = {
+	const connection = {
 		send: async (): Promise<never> => {
-			if (close === "fail") throw new Error("CDP target session unavailable");
+			if (close === "fail") throw new Error("Protocol error (Target.closeTarget): root connection send failed");
 			if (close === "gate") {
 				entered?.();
 				await gate;
-				throw new Error("CDP target session unavailable");
+				throw new Error("Protocol error (Target.closeTarget): root connection send failed");
 			}
 			return await new Promise<never>(() => {});
 		},
 		on: (): void => undefined,
 		off: (): void => undefined,
-		detach: async (): Promise<void> => undefined,
+		createSession: async (): Promise<never> => await new Promise<never>(() => {}),
 	};
 	const handle: Record<string, unknown> = {
 		key: "headless:1::",
@@ -125,7 +125,7 @@ function makeWedgeHandle(scope: SharedTargetScope, options: WedgeOptions = {}): 
 		browser: {
 			connected: true,
 			targets: () => [],
-			target: () => ({ createCDPSession: async () => session }),
+			_connection: connection,
 			disconnect: () => undefined,
 		},
 	};
@@ -511,7 +511,7 @@ describe("browser cleanup — timed-out target close in a shared browser", () =>
 		expect(healthCheck).not.toHaveBeenCalled();
 	});
 
-	it("treats an unconfirmed close (CDP session failure) as unclosed too", async () => {
+	it("treats an unconfirmed close (failed root-connection send) as unclosed too", async () => {
 		const scope = trackedScope();
 		const healthCheck = spyOn(sharedDaemon, "stopSharedBrowserIfUnreachable").mockResolvedValue(false);
 		await recordSharedTarget(scope, TARGET_ID);

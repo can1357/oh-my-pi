@@ -1,10 +1,15 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import { closeDb, initDb } from "@oh-my-pi/omp-stats/db";
+import { handleApi, startServer } from "@oh-my-pi/omp-stats/server";
 import type { SpotlightAgentScope, SpotlightDashboardStats } from "@oh-my-pi/omp-stats/shared-types";
-import { buildSpotlightDashboard, getSpotlightSessionContext } from "@oh-my-pi/omp-stats/spotlight-aggregator";
+import {
+	buildSpotlightDashboard,
+	getSpotlightDashboardStats,
+	getSpotlightSessionContext,
+} from "@oh-my-pi/omp-stats/spotlight-aggregator";
 import { argumentTokens } from "@oh-my-pi/omp-stats/spotlight-ingest";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { SpotlightSessionBuilder } from "./helpers/spotlight-session";
@@ -810,6 +815,95 @@ describe("Spotlight session scope", () => {
 		const all = await dashboard("all");
 		expect(all.sessions).toBe(2);
 		expect([toolTokens(all, "shaped"), toolTokens(all, "outside")]).toEqual([300, 800]);
+	});
+
+	it("builds the dashboard route off the server thread, with the on-thread payload", async () => {
+		for (const rel of ["main.jsonl", "main/Worker.jsonl"]) {
+			const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+			b.user("go");
+			shortenedRead(b);
+			await write(rel, b);
+		}
+		await syncAllSessions({ workers: 1 });
+
+		// The server's own connection stays untouched: the route builds on a worker's.
+		const database = await initDb();
+		const reads = [vi.spyOn(database, "query"), vi.spyOn(database, "prepare")];
+		const response = await handleApi(new Request("http://stats.test/api/stats/spotlight?range=all&agent=subagent"));
+		for (const read of reads) {
+			expect(read).not.toHaveBeenCalled();
+			read.mockRestore();
+		}
+
+		const json = await response.text();
+		expect(json).toBe(JSON.stringify(await getSpotlightDashboardStats("all", "subagent")));
+		expect((JSON.parse(json) as SpotlightDashboardStats).sessions).toBe(1);
+	});
+
+	it("ends a running dashboard build only when the process's last dashboard stops", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		await write("main.jsonl", b);
+		await syncAllSessions({ workers: 1 });
+
+		const RealWorker = globalThis.Worker;
+		let spawned = Promise.withResolvers<Worker>();
+		const workers = vi.spyOn(globalThis, "Worker").mockImplementation((...args) => {
+			const worker = new RealWorker(...args);
+			spawned.resolve(worker);
+			return worker;
+		});
+		const first = await startServer(0);
+		const second = await startServer(0);
+		try {
+			const kept = handleApi(new Request("http://stats.test/api/stats/spotlight?range=30d&agent=main"));
+			await spawned.promise;
+			first.stop();
+			expect((await kept).status).toBe(200);
+
+			spawned = Promise.withResolvers<Worker>();
+			const ended = handleApi(new Request("http://stats.test/api/stats/spotlight?range=90d&agent=main"));
+			const worker = await spawned.promise;
+			const exited = Promise.withResolvers<void>();
+			worker.addEventListener("close", () => exited.resolve());
+			second.stop();
+			expect(await ended.catch((error: Error) => error.message)).toBe("Stats dashboard stopped");
+			await exited.promise;
+		} finally {
+			first.stop();
+			second.stop();
+			workers.mockRestore();
+		}
+	});
+
+	it("builds one dashboard view at a time", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		shortenedRead(b);
+		await write("main.jsonl", b);
+		await syncAllSessions({ workers: 1 });
+
+		const RealWorker = globalThis.Worker;
+		let building = 0;
+		let most = 0;
+		const workers = vi.spyOn(globalThis, "Worker").mockImplementation((...args) => {
+			const worker = new RealWorker(...args);
+			most = Math.max(most, ++building);
+			worker.addEventListener("message", () => building--);
+			return worker;
+		});
+		try {
+			const responses = await Promise.all(
+				["24h", "7d"].map(range =>
+					handleApi(new Request(`http://stats.test/api/stats/spotlight?range=${range}&agent=main`)),
+				),
+			);
+			expect(responses.map(response => response.status)).toEqual([200, 200]);
+			expect(most).toBe(1);
+		} finally {
+			workers.mockRestore();
+		}
 	});
 });
 

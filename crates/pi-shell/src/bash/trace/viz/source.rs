@@ -56,15 +56,22 @@ impl SourceMap {
 			.unwrap_or_default()
 	}
 }
-/// Map for `len` script bytes from `at`, parsed on their own.
-pub fn script_map(source: &impl VizSource, at: usize, len: usize) -> SourceMap {
+/// Map for `len` script bytes from `at`, parsed on their own, followed by
+/// `extra` bytes that are not in the script (the closers a streaming repair
+/// appends): those all map to the end, so nothing drawn from them alone has
+/// a source range of its own.
+pub fn script_map(source: &impl VizSource, at: usize, len: usize, extra: usize) -> SourceMap {
+	let utf16 = super::printer::script_utf16(source);
 	SourceMap {
-		offset: 0,
+		offset:     0,
 		projection: 0,
-		len,
-		outer: super::printer::script_utf16(source)
-			.get(at..=at + len)
-			.map(Into::into),
+		len:        len + extra,
+		outer:      utf16.get(at..=at + len).map(|map| {
+			map.iter()
+				.copied()
+				.chain(std::iter::repeat_n(map[len], extra))
+				.collect()
+		}),
 	}
 }
 pub fn unit_map(source: &impl VizSource, unit: &SourceUnit<'_>) -> SourceMap {

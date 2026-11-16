@@ -43,6 +43,7 @@ import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { AgentSessionEvent } from "../../session/agent-session";
+import type { WakeSources } from "../../session/agent-session-events";
 import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
@@ -59,7 +60,6 @@ import { SpeechEnhancer } from "../../tts/speech-enhancer";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
-import { setTerminalTitleState } from "../../utils/title-generator";
 import {
 	assistantMessageLinkTargets,
 	createAssistantMessageComponent,
@@ -176,16 +176,29 @@ function normalizeIntent(intent: unknown): string | undefined {
 	);
 }
 
-/** Job ids the async-wait working row lists before collapsing the rest to `+N`. */
-const ASYNC_WAIT_LISTED_JOBS = 3;
+/** Ids per kind the awaiting working row lists before collapsing the rest to `+N`. */
+const ASYNC_WAIT_LISTED_IDS = 3;
 
-/** Working-row text while the run only waits on background jobs; short enough for a narrow terminal. */
-function formatAsyncWaitLabel(jobIds: readonly string[]): string {
-	if (jobIds.length === 0) return "Waiting for background work";
-	if (jobIds.length === 1) return `Waiting for background job ${jobIds[0]}`;
-	const listed = jobIds.slice(0, ASYNC_WAIT_LISTED_JOBS).join(", ");
-	const more = jobIds.length > ASYNC_WAIT_LISTED_JOBS ? ` +${jobIds.length - ASYNC_WAIT_LISTED_JOBS}` : "";
-	return `Waiting for ${jobIds.length} background jobs: ${listed}${more}`;
+function describeWaitedIds(ids: readonly string[], noun: string): string | undefined {
+	if (ids.length === 0) return undefined;
+	if (ids.length === 1) return `${noun} ${ids[0]}`;
+	const listed = ids.slice(0, ASYNC_WAIT_LISTED_IDS).join(", ");
+	const more = ids.length > ASYNC_WAIT_LISTED_IDS ? ` +${ids.length - ASYNC_WAIT_LISTED_IDS}` : "";
+	return `${ids.length} ${noun}s: ${listed}${more}`;
+}
+
+/**
+ * Working-row text while a paused run waits only on outside sources (background
+ * jobs, child agents, queued results or peer messages); short enough for a
+ * narrow terminal.
+ */
+function formatAsyncWaitLabel(sources: WakeSources | undefined): string {
+	const parts = [
+		describeWaitedIds(sources?.jobs ?? [], "background job"),
+		describeWaitedIds(sources?.agents ?? [], "agent"),
+	].filter(part => part !== undefined);
+	if (parts.length > 0) return `Waiting for ${parts.join("; ")}`;
+	return sources?.queued ? "Delivering queued results" : "Waiting for background work";
 }
 
 /** Render args for a live card: the harness strips `i` from executed args, but the stored block keeps it. */
@@ -316,16 +329,17 @@ export class EventController {
 	 * reads progress as busy state) never sees the agent stop mid-run.
 	 */
 	#compactionOwnsProgress = false;
-	/** Bumped at every `agent_start`; a settle watch stands down once a new run begins. */
-	#runEpoch = 0;
-	/** Epoch of the in-flight {@link #finishWhenRunSettles} watch, if any. */
-	#settleWatchEpoch: number | undefined = undefined;
 	/**
-	 * The settle that handed control back to background work only
-	 * (`awaitingAsyncWork`), until a new run starts or the run is torn down.
-	 * While set, the working row names the jobs instead of the last intent.
+	 * The working row names what a paused run awaits instead of the last intent,
+	 * until the next loop starts or the run ends.
 	 */
-	#asyncWaitEnd: Extract<AgentSessionEvent, { type: "agent_end" }> | undefined = undefined;
+	#showingAsyncWait = false;
+	/**
+	 * The user ended a wait on outside work ({@link stopAwaitingAsyncWork}): the
+	 * run's next `agent_end` is a user interrupt, though its messages are the
+	 * last loop's normal yield.
+	 */
+	#stoppedWaiting = false;
 	// Composer activity: a host run or idle maintenance (auto-compaction) owns
 	// turn-scoped chrome, so the post-run chrome floor must not settle on it.
 	#runActive = false;
@@ -364,6 +378,15 @@ export class EventController {
 		this.#detachToolApprovalPreviewWaiter = session?.extensionRunner?.setToolApprovalPreviewWaiter(toolCallId =>
 			this.#waitForToolApprovalPreview(toolCallId),
 		);
+		vocalizer.setModelSource(
+			session?.modelRegistry && session.settings
+				? {
+						settings: session.settings,
+						registry: session.modelRegistry,
+						getSessionProvider: () => session.model?.provider,
+					}
+				: null,
+		);
 		vocalizer.setEnhancer(
 			session?.modelRegistry && session.agent && session.settings
 				? new SpeechEnhancer({
@@ -371,6 +394,7 @@ export class EventController {
 						registry: session.modelRegistry,
 						sessionId: session.sessionId,
 						metadataResolver: provider => session.agent.metadataForProvider(provider),
+						getSessionProvider: () => session.model?.provider,
 					})
 				: null,
 		);
@@ -393,6 +417,7 @@ export class EventController {
 		this.composerPrediction = new ComposerPredictionController(ctx);
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
+			agent_pause: e => this.#handleAgentPause(e),
 			agent_end: e => this.#handleAgentEnd(e),
 			turn_start: async () => {},
 			turn_end: async e => this.#handleTurnEnd(e),
@@ -434,6 +459,7 @@ export class EventController {
 			irc_message: e => this.#handleIrcMessage(e),
 			notice: e => this.#handleNotice(e),
 			model_changed: async () => {
+				vocalizer.enforceProviderPolicy();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
 			},
@@ -1199,7 +1225,9 @@ export class EventController {
 	}
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
-		this.#runEpoch += 1;
+		// A loop started before the interrupt landed; that abort ends this loop
+		// as a plain user interrupt.
+		this.#stoppedWaiting = false;
 		// A run with no user prompt in it (synthetic-only: `/goal` kickoff,
 		// approved-plan execution) must not measure prompt→yield from an unrelated
 		// earlier prompt. Normal user turns reseed via message_start before
@@ -1228,10 +1256,10 @@ export class EventController {
 		this.#postToolAssistantComponents.clear();
 		this.#toolReplyBlocks.clear();
 		this.#lastIntent = undefined;
-		// A background result woke the run: the row stops naming the wait and
-		// follows this run's intents again.
-		if (this.#asyncWaitEnd) {
-			this.#asyncWaitEnd = undefined;
+		// Something outside woke the run: the row stops naming the wait and
+		// follows this loop's intents again.
+		if (this.#showingAsyncWait) {
+			this.#showingAsyncWait = false;
 			this.ctx.setWorkingMessage();
 		}
 		this.#readToolCallArgs.clear();
@@ -2155,8 +2183,8 @@ export class EventController {
 			// While the call is still executing — a mixed blocking+async task
 			// call whose jobs settle before its blocking subset — treat it as a
 			// partial frame: `tool_execution_end` still owns the terminal result.
-			const isTerminal = isFinalAsyncState && this.#backgroundCallIds.has(event.toolCallId);
-			if (isTerminal) {
+			const isParkedFinal = isFinalAsyncState && this.#backgroundCallIds.has(event.toolCallId);
+			if (isParkedFinal) {
 				settleWithJobFrame(component, event.partialResult, event.toolCallId);
 				this.ctx.pendingTools.delete(event.toolCallId);
 				this.#backgroundCallIds.delete(event.toolCallId);
@@ -2399,175 +2427,94 @@ export class EventController {
 			}
 		}
 	}
+	/**
+	 * A model loop stopped and the run goes on. Nothing is torn down and the
+	 * program status stays `working`: the session's own continuation follows
+	 * (`yielded: false`), or queued input, a peer message, a background job or a
+	 * child agent resumes it (`yielded: true`), or the run's `agent_end` closes it.
+	 */
+	async #handleAgentPause(event: Extract<AgentSessionEvent, { type: "agent_pause" }>): Promise<void> {
+		if (event.yielded) this.showAsyncWait();
+		// The plan-mode reconciler queues a model switch to apply once the current
+		// stream ends; the continuation must not run on the old model.
+		await this.ctx.flushPendingModelSwitch();
+		// Nothing streams now, so a command issued from here mounts immediately;
+		// earlier queued panels would otherwise render out of order much later.
+		this.ctx.flushPendingCommandOutput();
+	}
+
 	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
-		// A superseded agent_end: the agent is already streaming a fresh turn, so
-		// this event belongs to a turn that has already been replaced. The session
-		// dispatches to listeners fire-and-forget across an async extension-emit hop
-		// (#emitSessionEvent), so an interrupted turn's agent_end can land AFTER the
-		// resumed turn's agent_start (e.g. any post-turn agent.continue()). Running
-		// the turn-end teardown now would stop the loader the live turn just created,
-		// leaving "Working…" gone while the agent keeps running. The live turn owns
-		// the loader and finalizes it at its own agent_end (isStreaming === false by
-		// then). Mirrors the collab guest's !isStreaming loader reconciler.
-		if (this.ctx.session.isStreaming) {
-			// A focused worker can end while the main session streams; its run is
-			// over even though main's is not. Tear down only what the viewed worker
-			// owns (its loader); main-owned work waits for main's own settle.
-			const view = this.ctx.viewSession;
-			if (view !== this.ctx.session && !view.isStreaming && this.ctx.loadingAnimation) {
+		const stoppedWaiting = this.#stoppedWaiting;
+		this.#stoppedWaiting = false;
+		// A focused worker's run ended while main's run goes on: tear down only
+		// what the viewed worker owns (its loader); main's status stays `working`
+		// until main's own `agent_end`.
+		const view = this.ctx.viewSession;
+		if (view !== this.ctx.session && this.ctx.session.isRunActive) {
+			if (this.ctx.loadingAnimation) {
 				this.ctx.loadingAnimation.stop();
 				this.ctx.loadingAnimation = undefined;
 				this.ctx.statusContainer.disposeChildren();
 			}
-			this.#runActive = view.isStreaming;
+			this.#runActive = false;
 			this.#syncComposerActivity();
 			return;
 		}
-		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
-		// end of the run: the agent's own continuation (reminder, retry, queued
-		// steer/follow-up, IRC wake) follows, or background work may re-wake it.
-		// Skip the idle title/loader teardown; the continuation's terminal
-		// `agent_end` performs it, or the settle watch does when that continuation
-		// never starts (an abort cancels it, background work ends without a wake).
-		// Still flush a deferred model switch — the plan-mode reconciler queues it
-		// to apply once the current stream ends, and `#finishAgentEnd` is otherwise
-		// its only flush site, so the automatic continuation would otherwise run
-		// on the old model/thinking level until the terminal settle.
-		if (event.isTerminal === false) {
-			// `awaitingAsyncWork`: the model handed control back and only a
-			// background-job result can resume it. The title tracks the model, so it
-			// goes idle now — before any await, so a wake landing mid-flush keeps the
-			// `working` its `agent_start` sets. The OSC 7501 record stays `working`:
-			// the run is not over, it resumes or settles without the user.
-			if (event.awaitingAsyncWork === true) {
-				setTerminalTitleState("idle");
-				this.#showAsyncWait(event);
+		if (stoppedWaiting) {
+			setRunStatus({ state: "idle" });
+			await this.#finishAgentEnd(event, { interrupted: true });
+			const running = this.ctx.session.getAsyncJobSnapshot()?.running.length ?? 0;
+			if (running > 0) {
+				this.ctx.showStatus(
+					`Stopped waiting · ${running} background ${running === 1 ? "job" : "jobs"} still running (/jobs)`,
+				);
 			}
-			void this.#finishWhenRunSettles(event);
-			await this.ctx.flushPendingModelSwitch();
-			// Reaching here means the first guard passed, so `isStreaming` is already
-			// false: a command issued from now on mounts immediately. Leaving earlier
-			// panels queued would render them out of order, minutes later, after the
-			// user was told they were only waiting for the turn. The transcript is
-			// quiescent at a settle, which is the condition #4806 wanted.
-			this.ctx.flushPendingCommandOutput();
-			return;
+		} else {
+			setRunStatus(this.#settledRunStatus(event));
+			await this.#finishAgentEnd(event);
 		}
-		setRunStatus(this.#settledRunStatus(event));
-
-		await this.#finishAgentEnd(event);
-		// This settle may belong to an extension-started turn while the main
-		// input loop remains asleep. Do not await session-idle from its own event.
+		// This run may be extension-started while the main input loop remains
+		// asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
 	}
 
 	/**
-	 * Terminal teardown for a non-terminal settle whose continuation never
-	 * starts. Its terminal `agent_end` is not guaranteed: an abort cancels a
-	 * scheduled retry or compaction continuation before its `agent_start`, and a
-	 * cancelled background job enqueues no wake (acknowledged/watched ones are
-	 * suppressed). Mirrors `RpcSessionSettleWatcher`: wait out retries, scheduled
-	 * continuations, and owner-scoped background work, then — if no new run
-	 * started and the session is quiet — run the same teardown a terminal
-	 * `agent_end` would. A continuation that does start bumps the epoch and its
-	 * own `agent_end` finalizes the run instead; {@link stopAwaitingAsyncWork}
-	 * retires the watch and tears down itself.
+	 * When the main session's run is paused waiting only on outside sources, the
+	 * working row says so and names the jobs and child agents, instead of
+	 * repeating the last tool call's intent. The label is live, so a job
+	 * cancelled without a wake (`/jobs kill`) leaves the row at once. A user
+	 * prompt's own completion may have torn its loader down, so mount one for
+	 * the wait; the next loop or the run's `agent_end` takes it over.
 	 */
-	async #finishWhenRunSettles(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
-		const epoch = this.#runEpoch;
-		if (this.#settleWatchEpoch === epoch) return;
-		this.#settleWatchEpoch = epoch;
+	showAsyncWait(): void {
 		const session = this.ctx.session;
-		// No `hasAdmittedSubmission` gate: this very settle is emitted while the
-		// prompt that produced it is still admitted, and a new submission starts a
-		// run whose `agent_start` bumps the epoch anyway.
-		const superseded = () =>
-			this.#runEpoch !== epoch ||
-			this.#settleWatchEpoch !== epoch ||
-			this.ctx.session !== session ||
-			session.isStreaming;
-		try {
-			while (!superseded()) {
-				await session.waitForIdle();
-				if (superseded() || !session.hasPendingAsyncWork()) break;
-				await session.settleAsyncWork();
-			}
-			await this.#runSerialized(async () => {
-				if (
-					superseded() ||
-					session.hasPendingAsyncWork() ||
-					session.hasPostPromptWork ||
-					session.queuedMessageCount > 0
-				) {
-					return;
-				}
-				setRunStatus(this.#settledRunStatus(event));
-				await this.#finishAgentEnd(event);
-				if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
-			});
-		} catch (error) {
-			logger.warn("Non-terminal settle teardown failed", { error: String(error) });
-		} finally {
-			if (this.#settleWatchEpoch === epoch) this.#settleWatchEpoch = undefined;
-		}
-	}
-
-	/**
-	 * The run handed control back and only background work can resume it: the
-	 * working row says so and names the jobs, instead of repeating the last tool
-	 * call's intent. The label is live, so a job cancelled without a wake
-	 * (`/jobs kill`) leaves the row at once. A user prompt's own completion
-	 * tears its loader down, so mount one for the wait; the settle watch or the
-	 * next run takes it over.
-	 */
-	#showAsyncWait(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
-		const session = this.ctx.session;
-		if (this.ctx.viewSession !== session || !session.hasPendingAsyncWork()) return;
-		this.#asyncWaitEnd = event;
+		if (this.ctx.viewSession !== session || !this.isAwaitingAsyncWork()) return;
+		this.#showingAsyncWait = true;
 		this.ctx.ensureLoadingAnimation();
-		this.ctx.setWorkingMessage(() =>
-			formatAsyncWaitLabel(session.getAsyncJobSnapshot()?.running.map(job => job.id) ?? []),
-		);
+		this.ctx.setWorkingMessage(() => formatAsyncWaitLabel(session.wakeSources));
 		this.ctx.ui.requestRender();
 	}
 
-	/** The run only waits on background work, and the interrupt key would end that wait. */
+	/** The main run is paused waiting only on outside sources, and the interrupt key would end that wait. */
 	isAwaitingAsyncWork(): boolean {
 		const session = this.ctx.session;
-		return this.#asyncWaitEnd !== undefined && !session.isStreaming && session.hasPendingAsyncWork();
+		return session.isRunActive && !session.isStreaming && session.wakeSources !== undefined;
 	}
 
 	/**
-	 * End a wait on background work (Esc while {@link isAwaitingAsyncWork}). A
-	 * user interrupt keeps a later job result from starting a turn — it lands in
-	 * context for the next prompt — and the jobs keep running. Nothing the
-	 * settle watch waits for can resume this run any more, so tear it down now
-	 * instead of when the last job finishes, and say what is still running.
+	 * End a wait on outside work (Esc while {@link isAwaitingAsyncWork}). The
+	 * user interrupt ends the paused run with `agent_end` right away; background
+	 * results then land in context for the next prompt and the jobs keep running.
+	 * That `agent_end` is torn down as user-interrupted and says what still runs.
 	 */
 	async stopAwaitingAsyncWork(): Promise<void> {
-		const event = this.#asyncWaitEnd;
-		if (!event) return;
-		this.#asyncWaitEnd = undefined;
-		this.#settleWatchEpoch = undefined;
-		const session = this.ctx.session;
+		if (!this.isAwaitingAsyncWork()) return;
+		this.#stoppedWaiting = true;
 		try {
-			// Ending this wait means "stay quiet until I prompt"; latch before awaiting the
-			// abort so a job finishing in between cannot start a turn.
-			session.suppressAutoResumeUntilPrompt();
-			await session.abort({ reason: USER_INTERRUPT_LABEL });
-			await this.#runSerialized(async () => {
-				if (this.ctx.session !== session || session.isStreaming) return;
-				setRunStatus({ state: "idle" });
-				await this.#finishAgentEnd(event, { interrupted: true });
-				const running = session.getAsyncJobSnapshot()?.running.length ?? 0;
-				if (running > 0) {
-					this.ctx.showStatus(
-						`Stopped waiting · ${running} background ${running === 1 ? "job" : "jobs"} still running (/jobs)`,
-					);
-				}
-			});
+			await this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 		} catch (error) {
-			logger.warn("Ending the background-job wait failed", { error: String(error) });
+			this.#stoppedWaiting = false;
+			logger.warn("Ending the background-work wait failed", { error: String(error) });
 		}
 	}
 
@@ -2590,7 +2537,7 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
 		options?: { interrupted?: boolean },
 	): Promise<void> {
-		this.#asyncWaitEnd = undefined;
+		this.#showingAsyncWait = false;
 		this.#setTerminalProgress(false);
 		this.ctx.statusLine.markActivityEnd();
 		this.#lastAgentEndAt = Date.now();
@@ -2601,9 +2548,7 @@ export class EventController {
 			this.ctx.loadingAnimation = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
-		// A stale end landing after the viewed session started a new turn must
-		// not mark that live turn idle.
-		this.#runActive = this.ctx.viewSession.isStreaming;
+		this.#runActive = false;
 		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
@@ -2990,12 +2935,6 @@ export class EventController {
 	}
 
 	sendErrorNotification(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
-		// A running async job or queued delivery will wake the session again, so
-		// its current agent_end is a scheduling pause rather than a user-visible
-		// terminal failure. AgentSession marks that stable outcome before
-		// dispatching the deferred event; do not infer it from mutable job state.
-		if (event.isTerminal === false) return;
-
 		// `AgentSession` defers and coalesces the wire-level `agent_end` while a
 		// prompt is still in flight (see `#emitSessionEvent` in agent-session.ts):
 		// every mid-retry attempt's own settle is superseded, so this method often
