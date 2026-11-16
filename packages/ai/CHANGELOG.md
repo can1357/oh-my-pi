@@ -10,6 +10,12 @@
 
 - Fixed Google Antigravity sending a 429 that names no quota through every pooled account: it now stays on the receiving account and pauses the provider ([#19269](https://github.com/can1357/oh-my-pi/pull/19269) by [@Xytronix](https://github.com/Xytronix))
 
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
