@@ -52,6 +52,7 @@ export const TSP_KINDS = [
 	"math",
 	"image",
 	"media",
+	"web",
 	"kv",
 	"table",
 	"tree",
@@ -366,6 +367,21 @@ export interface TspMediaProps {
 	link?: string;
 	/** Size cap; the node otherwise fills its container. */
 	max?: { w?: TspExtent; h?: TspExtent };
+}
+/**
+ * A live web page shown inline (an `<iframe>` of a reply): passive until clicked, focused by a
+ * click, left with Escape, and replaced by a still of itself once idle. Programs check
+ * `cx.supports("web")` first.
+ */
+export interface TspWebProps {
+	/** The page: an `http(s)` or `file://` URL. */
+	url: string;
+	/** What the page is, until it reports its own title. */
+	title?: string;
+	/** Width as a CSS length (`"50%"`, `"400px"`, `"60vw"`, `"80ch"`, `"30em"`); default: the column's. */
+	w?: string;
+	/** Height as a CSS length; default: a 16:10 box of the width. */
+	h?: string;
 }
 export interface TspKvProps {
 	items: readonly { k: TspText; v: TspText }[];
@@ -1010,6 +1026,7 @@ export interface TspPropsByKind {
 	math: TspMathProps;
 	image: TspImageProps;
 	media: TspMediaProps;
+	web: TspWebProps;
 	kv: TspKvProps;
 	table: TspTableProps;
 	tree: TspTreeProps;

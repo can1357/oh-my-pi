@@ -49,13 +49,7 @@ import {
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
 import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type {
-	AgentHubOpenOptions,
-	InteractiveModeContext,
-	ResumeSessionOptions,
-	SelectOnlyModelSelectorOptions,
-	SessionPickHandler,
-} from "../../modes/types";
+import type { AgentHubOpenOptions, InteractiveModeContext, ResumeSessionOptions } from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
@@ -95,7 +89,6 @@ import type { ToolSession } from "../../tools";
 import { AskTool } from "../../tools/ask";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { ToolAbortError } from "../../tools/tool-errors";
 import { captureBrowserSession } from "../../utils/browser-session";
 import { copyToClipboard } from "../../utils/clipboard";
@@ -172,14 +165,7 @@ async function loadProviderAuthUi() {
 }
 
 /** Menus that open at most once: a repeat request focuses the open one. */
-type MenuKind =
-	| "settings"
-	| "model-picker"
-	| "model-picker-select"
-	| "model-hub"
-	| "agents-dashboard"
-	| "agent-hub"
-	| "usage-dashboard";
+type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
 interface OpenMenu {
@@ -724,11 +710,7 @@ export class SelectorController {
 	 * picker: the hub assigns persistent roles, which configure the main session
 	 * and future spawns rather than the agent being viewed.
 	 */
-	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void {
-		if (options?.selectOnly) {
-			this.#showModelPicker({ selectOnly: options.selectOnly });
-			return;
-		}
+	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		if (options?.temporaryOnly || this.ctx.focusedAgentId) {
 			this.#showModelPicker();
 			return;
@@ -806,32 +788,15 @@ export class SelectorController {
 	 * bottom-anchored overlay over the transcript. The current model is
 	 * highlighted and preselected; a leading `@` searches ctrl+p quick roles.
 	 */
-	#showModelPicker(options?: { selectOnly?: SelectOnlyModelSelectorOptions }): void {
-		const selectOnly = options?.selectOnly;
-		const menuKind = selectOnly ? "model-picker-select" : "model-picker";
-		const closeOpenMenu = (kind: MenuKind) => {
-			const open = this.#openMenus.get(kind);
-			if (!open) return;
-			open.handle?.hide();
-			this.#releaseMenu(kind, open);
-		};
-		if (selectOnly) {
-			closeOpenMenu("model-picker");
-			closeOpenMenu("model-picker-select");
-		} else {
-			closeOpenMenu("model-picker-select");
-			if (this.#focusOpenMenu("model-picker")) return;
-		}
+	#showModelPicker(): void {
+		const menuKind = "model-picker";
+		if (this.#focusOpenMenu(menuKind)) return;
 		const viewed = this.ctx.viewSession;
 		const currentContextTokens = viewed.getContextUsage()?.tokens ?? 0;
 		const current = viewed.model;
 		const quickRoleOrder = cfgCycleOrder.get(this.ctx.settings);
 		const quickRoleCycle = viewed.getRoleModelCycle(quickRoleOrder);
-		const currentSelector = selectOnly
-			? selectOnly.currentSelector
-			: current
-				? `${current.provider}/${current.id}`
-				: undefined;
+		const currentSelector = current ? `${current.provider}/${current.id}` : undefined;
 		// Preselect the effective Task model in task mode: the configured override,
 		// else the session model (the bundled task agent inherits it by default).
 		const taskOverride = cfgTaskAgentModelOverrides.get(this.ctx.settings).task;
@@ -853,15 +818,6 @@ export class SelectorController {
 			{
 				onPick: async (model, selector, { overContext }) => {
 					if (!isCurrent()) return;
-					if (selectOnly) {
-						done();
-						try {
-							await selectOnly.onSelect(selector);
-						} catch (error) {
-							this.ctx.showError(sanitizeErrorLine(error));
-						}
-						return;
-					}
 					try {
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
@@ -873,7 +829,7 @@ export class SelectorController {
 					}
 				},
 				onPickRole: async entry => {
-					if (!isCurrent() || selectOnly) return;
+					if (!isCurrent()) return;
 					try {
 						await this.ctx.viewSession.applyRoleModel(entry);
 						this.ctx.statusLine.invalidate();
@@ -888,7 +844,7 @@ export class SelectorController {
 					}
 				},
 				onPickTask: (_model, selector) => {
-					if (!isCurrent() || selectOnly) return;
+					if (!isCurrent()) return;
 					// Session-only: layer the Task override onto the runtime settings
 					// layer so it is never persisted, mirroring the session-model pick.
 					cfgTaskAgentModelOverrides.override(this.ctx.settings, {
@@ -908,7 +864,6 @@ export class SelectorController {
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
-				selectOnly: selectOnly !== undefined,
 			},
 		);
 		this.#mountMenu(menu, picker, () => {
@@ -1558,7 +1513,9 @@ export class SelectorController {
 	}
 
 	showCopySelector(): void {
-		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
+		// The session on screen: a focused subagent's transcript, else the main one.
+		const session = this.ctx.viewSession;
+		const entries = session.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
 			this.ctx.showStatus("Nothing to copy yet.");
 			return;
@@ -1572,10 +1529,10 @@ export class SelectorController {
 		};
 		const selector = new CopySelectorComponent(entries, {
 			ui: this.ctx.ui,
-			getTool: name => this.ctx.session.getToolByName(name),
-			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
-			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
-			cwd: this.ctx.sessionManager.getCwd(),
+			getTool: name => session.getToolByName(name),
+			isBuiltInTool: name => session.hasBuiltInTool(name),
+			getMessageRenderer: type => session.extensionRunner?.getMessageRenderer(type),
+			cwd: session.sessionManager.getCwd(),
 			hideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			expandThinkingBlocks: () => this.ctx.expandThinkingBlocks,
@@ -1861,7 +1818,7 @@ export class SelectorController {
 		}
 	}
 
-	async showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): Promise<void> {
+	async showSessionSelector(source?: ForeignSessionSource): Promise<void> {
 		let sessions: SessionInfo[];
 		let onSelectSession: (session: SessionInfo) => Promise<boolean>;
 		let selectorOptions: SessionSelectorOptions<SessionInfo>;
@@ -1926,67 +1883,56 @@ export class SelectorController {
 				: undefined;
 			onSelectSession = session => this.handleResumeSession(session.path, { followContinuation: true });
 			selectorOptions = {
-				...(!onSelect
-					? {
-							onDelete: async (session: SessionInfo) => {
-								if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
-									return false;
-								}
-								const storage = new FileSessionStorage();
-								try {
-									await storage.deleteSessionWithArtifacts(session.path);
-									return true;
-								} catch (error) {
-									throw new Error(
-										`Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
-										{ cause: error },
-									);
-								}
-							},
-							onRename: async (session: SessionInfo, title: string): Promise<string | null> => {
-								if (this.ctx.sessionManager.getSessionFile() === session.path) {
-									// A session that has only been read does not hold
-									// its ownership lease, so another omp process can
-									// claim it; the live rename would then fork onto
-									// a sibling and still report success, leaving the
-									// row here pointing at the old path. Claim the
-									// lease up front and refuse while it is held by
-									// someone else.
-									const claim = new FileSessionStorage().claimSession(session.id, session.path);
-									if (!claim) {
-										throw new Error(
-											"Failed to rename session: it is currently in use by another omp process",
-										);
-									}
-									try {
-										const renamed = await this.ctx.sessionManager.setSessionName(title, "user");
-										return renamed ? (this.ctx.sessionManager.getSessionName() ?? null) : null;
-									} finally {
-										claim();
-									}
-								}
-								const renamed = await SessionManager.renameSessionTitle(session.path, title, {
-									cwd: session.cwd,
-								});
-								// The picker renders the failure itself; throwing
-								// hands it the reason so it can show one message
-								// instead of two.
-								if (!renamed) {
-									throw new Error("Failed to rename session: it is currently in use or no longer available");
-								}
-								return renamed;
-							},
-							onSetPinned: async (session: SessionInfo, pinned: boolean) => {
-								await setSessionPinned(session.id, pinned);
-								this.ctx.applySessionPin(session.id, pinned);
-							},
+				onDelete: async (session: SessionInfo) => {
+					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
+						return false;
+					}
+					const storage = new FileSessionStorage();
+					try {
+						await storage.deleteSessionWithArtifacts(session.path);
+						return true;
+					} catch (error) {
+						throw new Error(
+							`Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
+							{ cause: error },
+						);
+					}
+				},
+				onRename: async (session: SessionInfo, title: string): Promise<string | null> => {
+					if (this.ctx.sessionManager.getSessionFile() === session.path) {
+						// A session that has only been read does not hold
+						// its ownership lease, so another omp process can
+						// claim it; the live rename would then fork onto
+						// a sibling and still report success, leaving the
+						// row here pointing at the old path. Claim the
+						// lease up front and refuse while it is held by
+						// someone else.
+						const claim = new FileSessionStorage().claimSession(session.id, session.path);
+						if (!claim) {
+							throw new Error("Failed to rename session: it is currently in use by another omp process");
 						}
-					: {
-							title: "Select a Session to Consult",
-							actionLabel: "Select",
-							scopeLabel: false,
-							showCwd: true,
-						}),
+						try {
+							const renamed = await this.ctx.sessionManager.setSessionName(title, "user");
+							return renamed ? (this.ctx.sessionManager.getSessionName() ?? null) : null;
+						} finally {
+							claim();
+						}
+					}
+					const renamed = await SessionManager.renameSessionTitle(session.path, title, {
+						cwd: session.cwd,
+					});
+					// The picker renders the failure itself; throwing
+					// hands it the reason so it can show one message
+					// instead of two.
+					if (!renamed) {
+						throw new Error("Failed to rename session: it is currently in use or no longer available");
+					}
+					return renamed;
+				},
+				onSetPinned: async (session: SessionInfo, pinned: boolean) => {
+					await setSessionPinned(session.id, pinned);
+					this.ctx.applySessionPin(session.id, pinned);
+				},
 				historyMatcher,
 				completeSessions: listing.complete,
 				loadAllSessions: () => SessionManager.listAllForPicker(),
@@ -2008,17 +1954,6 @@ export class SelectorController {
 			sessions,
 			async (session: SessionInfo) => {
 				selector.lockInput();
-				if (onSelect) {
-					// Selection-only callers may open a follow-up picker; remove this
-					// fullscreen overlay before invoking them.
-					done();
-					try {
-						await onSelect(session);
-					} catch (error) {
-						this.ctx.showError(sanitizeErrorLine(error));
-					}
-					return;
-				}
 				let keepOpen = false;
 				try {
 					const success = await onSelectSession(session);

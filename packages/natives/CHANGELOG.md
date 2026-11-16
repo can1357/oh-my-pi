@@ -2,12 +2,24 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added the `PhononTts` binding for on-device Phonon text-to-speech.
+- Added `Shell.adopt(fork)` to apply variables, functions, aliases, options, and traps from a completed fork back to its parent shell. When both shells set a name, the value from the command that finished last is retained.
+
 ### Fixed
 
-- Committing or writing a tree now fails when the index still has unresolved conflicts, instead of publishing a commit that drops those files ([#19309](https://github.com/can1357/oh-my-pi/pull/19309) by [@eggpeat](https://github.com/eggpeat))
-- Fixed shell `sed` failing with `internal error` on a global or numbered substitution whose regex matches empty text on a line with multibyte characters (`s/ */_/g` on `café au lait`) ([#19261](https://github.com/can1357/oh-my-pi/pull/19261) by [@tuschla](https://github.com/tuschla))
-- Fixed shell `grep -o` printing nothing for a pattern anchored at the end of a line, such as `echo abc | grep -o 'c$'`, and `grep -z` missing records that match such a pattern: matches are now found in the line without its terminator, as in GNU grep ([#19262](https://github.com/can1357/oh-my-pi/pull/19262) by [@tuschla](https://github.com/tuschla))
-- Fixed native diff and patch round-trips for filenames containing spaces: binary changes no longer fail to apply or land under a truncated path, and paths that cannot be written verbatim are C-quoted like git does ([#19274](https://github.com/can1357/oh-my-pi/pull/19274) by [@eggpeat](https://github.com/eggpeat))
+- Fixed concurrent `commitCreate()` calls incorrectly overwriting each other’s commit subject and body.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Committing or writing trees now correctly reports unresolved index conflicts instead of silently omitting conflicted files.
+- Fixed shell compatibility with GNU `grep` for end-of-line-anchored patterns, including `-o` and `-z` modes, and corrected `sed` substitutions on multibyte-character lines.
+- Fixed native diff and patch handling for filenames containing spaces and other characters requiring quoting, including binary changes.
 
 ## [18.20.1] - 2026-11-14
 

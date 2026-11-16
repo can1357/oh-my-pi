@@ -2,10 +2,31 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added Modal as a hosted inference provider.
+
+### Changed
+
+- Changed the local speech model from Kokoro to Phonon 31M.
+- Improved reasoning capability detection by preserving unverified thinking-level support and using endpoint-specific probe results when available.
+
 ### Fixed
 
-- Fixed `deepseek/deepseek-v4-flash` dropping attached images: DeepSeek serves the retired id with the multimodal V4.1 Flash, so it now keeps image input like `deepseek-flash` ([#19288](https://github.com/can1357/oh-my-pi/issues/19288))
-- Mistral GLM 5.3, GLM 5.3 Flash and Mistral Large 4 now offer only the reasoning efforts Mistral documents ([#19265](https://github.com/can1357/oh-my-pi/issues/19265)) ([#19287](https://github.com/can1357/oh-my-pi/pull/19287) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added publicly available image-sizing helpers for determining model-delivered image dimensions and fitting images to a specified long edge before coordinate mapping.
+
+### Fixed
+
+- Fixed image inputs being dropped for DeepSeek V4 Flash, restoring consistent multimodal image support.
+- Restricted reasoning-effort options for Mistral GLM 5.3, GLM 5.3 Flash, and Mistral Large 4 to the levels supported by those models.
 
 ## [18.20.2] - 2026-11-14
 
