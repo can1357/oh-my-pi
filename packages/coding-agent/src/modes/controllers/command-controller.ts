@@ -1790,6 +1790,7 @@ export class CommandController {
 			}
 			const relocated = await this.#relocateSession(worktree.path);
 			const finished = await finishSessionWorktree(worktree, this.ctx.settings, {
+				session: this.ctx.session,
 				moved: relocated,
 				// A failed move whose rollback failed too can leave the session in the worktree, or end it.
 				inWorktree:

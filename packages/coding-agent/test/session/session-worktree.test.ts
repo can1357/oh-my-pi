@@ -312,6 +312,7 @@ describe("session worktree helpers (real git)", () => {
 		const createAndFinish = async (signal?: AbortSignal) => {
 			const wt = await create();
 			const { warnings } = await finishSessionWorktree(wt, Settings.isolated(), {
+				session: { refreshProjectScope: async () => {} },
 				moved: true,
 				inWorktree: true,
 				withHookSignal: run => run(signal),

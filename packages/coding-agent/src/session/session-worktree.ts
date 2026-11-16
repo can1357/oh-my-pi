@@ -19,6 +19,7 @@ import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
 import { formatPostCheckoutHookWarning, runPostCheckoutHook } from "../utils/worktree-hook";
+import type { AgentSession } from "./agent-session";
 
 import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
 
@@ -115,8 +116,9 @@ export async function cleanSourceCheckoutIfConfigured(
 /**
  * Finishes `/wt` after the session's move into `worktree` succeeded or failed (`moved`): cleans the source
  * (`worktree.cleanSource`, only after a move that carried changes), runs the worktree's hook under the signal
- * `withHookSignal` gives it, and `rescan`s a session that lives in the worktree (`inWorktree`: after the move, or
- * after a failed move whose rollback failed too) so it sees the skills and commands the hook added.
+ * `withHookSignal` gives it, and rescans a session that lives in the worktree (`inWorktree`: after the move, or
+ * after a failed move whose rollback failed too) so it sees what the hook added: the project scope the move loaded
+ * before the hook ran (task agents, extensions, custom tools, MCP servers), then skills and commands (`rescan`).
  * The cleanup runs before the hook so a save into the source during the hook survives; the hook's env is taken
  * first because the cleanup can delete an untracked `.env` the dotenv filter reads. Returns warnings in order.
  */
@@ -124,6 +126,7 @@ export async function finishSessionWorktree(
 	worktree: SessionWorktree,
 	settings: Settings,
 	options: {
+		session: Pick<AgentSession, "refreshProjectScope">;
 		moved: boolean;
 		inWorktree: boolean;
 		withHookSignal: <T>(run: (signal?: AbortSignal) => Promise<T>) => Promise<T>;
@@ -144,12 +147,13 @@ export async function finishSessionWorktree(
 	if (options.inWorktree) {
 		try {
 			clearClaudePluginRootsCache();
+			await options.session.refreshProjectScope();
 			await options.rescan();
 		} catch (err) {
 			// A loader error can quote a whole source line: strip controls, shorten home, bound the warning.
 			warnings.push(
 				...sanitizeDisplayWarnings([
-					`Worktree created, but skill and command rescan failed: ${err instanceof Error ? err.message : String(err)}`,
+					`Worktree created, but rescanning it after the hook failed: ${err instanceof Error ? err.message : String(err)}`,
 				]),
 			);
 		}

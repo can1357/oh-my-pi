@@ -43,7 +43,12 @@ function createMoveContext(sourceDir: string, settingsFlush?: () => Promise<void
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
 	const ctx = {
-		session: { isStreaming: false, moveSession, refreshSkillsAndCommands: vi.fn(async () => {}) },
+		session: {
+			isStreaming: false,
+			moveSession,
+			refreshProjectScope: vi.fn(async () => {}),
+			refreshSkillsAndCommands: vi.fn(async () => {}),
+		},
 		sessionManager: {
 			getCwd: () => state.cwd,
 			captureState,
@@ -212,7 +217,7 @@ describe("CommandController /move", () => {
 		expect(created).toBeDefined();
 		// Cleaned, and cut at 100 columns as a whole.
 		expect(ctx.showWarning).toHaveBeenCalledWith(
-			`Worktree created, but skill and command rescan failed: bad skill file ${"x".repeat(29)}…`,
+			`Worktree created, but rescanning it after the hook failed: bad skill file ${"x".repeat(25)}…`,
 		);
 		expect(ctx.showWarning).toHaveBeenCalledWith(
 			"Worktree created, but cleaning source checkout failed: index.lock exists",

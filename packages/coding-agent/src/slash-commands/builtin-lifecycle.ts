@@ -800,6 +800,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			}
 			const failure = await relocateHeadlessSession(runtime, worktree.path);
 			const finished = await finishSessionWorktree(worktree, runtime.settings, {
+				session: runtime.session,
 				moved: !failure,
 				// A failed move whose rollback failed too can leave the session in the worktree, or end it.
 				inWorktree: !runtime.session.isDisposed && path.resolve(runtime.sessionManager.getCwd()) === worktree.path,

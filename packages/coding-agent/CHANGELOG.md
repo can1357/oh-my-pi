@@ -10,7 +10,7 @@
 
 - Added `task.agentPrewalkAuto` (agent name -> `on` / `off` / model pattern): the native judge decides per assignment at spawn whether a subagent arms prewalk, handing off to `prewalk.autoTarget` or the given target; unconditional subagent prewalk still wins ([#18913](https://github.com/can1357/oh-my-pi/pull/18913) by [@1vivy](https://github.com/1vivy))
 - Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result
-- `/wt` (in the TUI, over ACP and RPC, and from `worktree.onStart`) runs the new worktree's `post-checkout` hook like `git worktree add` and picks up the skills and slash commands it adds; Esc on its loader, cancelling the prompt or quitting omp stops it, and a failing hook keeps the worktree and shows a warning ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
+- `/wt` (in the TUI, over ACP and RPC, and from `worktree.onStart`) runs the new worktree's `post-checkout` hook like `git worktree add` and then picks up the task agents, extensions, custom tools, MCP servers, skills and slash commands it adds; Esc on its loader, cancelling the prompt or quitting omp stops it, and a failing hook keeps the worktree and shows a warning ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Changed
 

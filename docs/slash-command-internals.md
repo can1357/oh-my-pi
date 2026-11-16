@@ -431,9 +431,10 @@ start from at that moment: without the pinned project's `.env` values or reposit
 variables such as `GIT_DIR`, and without the bash tool's own additions such as `CI=true`), runs `worktree.cleanSource`, then
 runs the new worktree's hook as `git worktree add` does (`git hook run --ignore-missing
 post-checkout` with git's new-worktree arguments, in the worktree). After the hook,
-a session that lives in the worktree rescans its skills and slash commands (also when a
-failed move's rollback failed and left it there), so it sees the
-ones the hook added; settings files it writes reach the TUI through its live settings
+a session that lives in the worktree rescans its task agents, extensions, custom tools,
+MCP servers, skills and slash commands (also when a failed move's rollback failed and left
+it there), so it sees what the hook added; MCP servers the worktree configures therefore
+connect a second time. Settings files it writes reach the TUI through its live settings
 reload, while ACP doesn't reload settings files. A checkout the session could
 not move into still gets its hook, unless omp shuts down because it can't re-align the
 TUI workspace. In the TUI, a loader appears once the hook has run for 200 ms if the

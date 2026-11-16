@@ -1400,20 +1400,26 @@ describe("wave 3 commands", () => {
 			}
 		});
 
-		it("rescans skills and commands after the hook, so the session sees what the hook added to the worktree", async () => {
+		it("rescans the project scope, skills and commands after the hook, so the session sees what the hook added to the worktree", async () => {
 			const { runtime, fakeSessionManager } = createRuntime();
-			// The hook runs in the new worktree, as a dispatcher copying gitignored skills into it would.
+			// The hook runs in the new worktree, as a dispatcher copying gitignored skills, agents or MCP config into it would.
 			await installHook(": > made-by-hook");
-			const sawHookFile: boolean[] = [];
+			const scopeSawHookFile: boolean[] = [];
+			const skillsSawHookFile: boolean[] = [];
+			spyOn(runtime.session, "refreshProjectScope").mockImplementation(async () => {
+				scopeSawHookFile.push(await Bun.file(path.join(getProjectDir(), "made-by-hook")).exists());
+			});
 			spyOn(runtime.session, "refreshSkillsAndCommands").mockImplementation(async () => {
-				sawHookFile.push(await Bun.file(path.join(getProjectDir(), "made-by-hook")).exists());
+				skillsSawHookFile.push(await Bun.file(path.join(getProjectDir(), "made-by-hook")).exists());
 			});
 			fakeSessionManager._cwd = repoDir;
 
 			await executeAcpBuiltinSlashCommand("/wt feature/reload", runtime);
 
 			expect(fakeSessionManager._movedTo).toBeDefined();
-			expect(sawHookFile.at(-1)).toBe(true);
+			// The move rescopes before the hook runs; the rescan after it is the one that sees the hook's output.
+			expect(scopeSawHookFile).toEqual([false, true]);
+			expect(skillsSawHookFile.at(-1)).toBe(true);
 		});
 
 		it("still runs the hook and reports its warning when relocating the session fails", async () => {
