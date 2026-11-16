@@ -908,6 +908,34 @@ function patternReaderWords(command: ShellCommand): string[] {
  */
 const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
 /**
+ * Options of readers whose value is a key, certificate, netrc file or key folder the program
+ * authenticates, verifies or keeps its keys with (`curl --key`, `wget --private-key`,
+ * `gpg --homedir`): it neither prints nor copies the value, as `scp -i` does not, so the value is
+ * not read. A one-letter option (`curl -E`) counts only for {@link WRITING_READERS}, whose option
+ * bundles are read letter by letter.
+ */
+const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
+	curl: [
+		"-E",
+		"--cacert",
+		"--capath",
+		"--cert",
+		"--crlfile",
+		"--key",
+		"--netrc-file",
+		"--pinnedpubkey",
+		"--proxy-cacert",
+		"--proxy-capath",
+		"--proxy-cert",
+		"--proxy-crlfile",
+		"--proxy-key",
+		"--proxy-pinnedpubkey",
+		"--pubkey",
+	],
+	wget: ["--ca-certificate", "--ca-directory", "--certificate", "--crl-file", "--pinnedpubkey", "--private-key"],
+	gpg: ["--homedir"],
+};
+/**
  * Readers that also write files: their one-letter options that take a value (in a bundle, the
  * first of them takes the rest of the word, or the next word when it ends the bundle), the options
  * whose value they write to rather than read, and, for a copy, whether a last operand without
@@ -949,9 +977,13 @@ const WRITING_READERS: Record<string, { letters: string; writes: readonly string
 	mv: { letters: "St", writes: ["-t", "--target-directory"], destination: true },
 };
 
-/** The words a {@link WRITING_READERS} command reads: its arguments, without what it writes to. */
+/**
+ * The words a {@link WRITING_READERS} command reads: its arguments, without what it writes to and
+ * the values of its {@link KEY_VALUE_OPTIONS}.
+ */
 function writingReaderWords(command: ShellCommand): string[] {
 	const { letters, writes, destination } = WRITING_READERS[command.argv[0]];
+	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, command.argv[0]) ? KEY_VALUE_OPTIONS[command.argv[0]] : [];
 	const argv = args(command);
 	const words: string[] = [];
 	const operands: string[] = [];
@@ -964,8 +996,11 @@ function writingReaderWords(command: ShellCommand): string[] {
 		}
 		if (arg.startsWith("--")) {
 			const eq = arg.indexOf("=");
-			if (writes.includes(eq > 0 ? arg.slice(0, eq) : arg)) {
+			const option = eq > 0 ? arg.slice(0, eq) : arg;
+			if (writes.includes(option)) {
 				targeted = true;
+				if (eq < 0) i++;
+			} else if (keys.includes(option)) {
 				if (eq < 0) i++;
 			} else {
 				words.push(arg);
@@ -973,8 +1008,11 @@ function writingReaderWords(command: ShellCommand): string[] {
 		} else if (arg.startsWith("-") && arg.length > 1) {
 			let k = 1;
 			while (k < arg.length && !letters.includes(arg[k])) k++;
-			if (k < arg.length && writes.includes(`-${arg[k]}`)) {
+			const option = `-${arg[k]}`;
+			if (k < arg.length && writes.includes(option)) {
 				targeted = true;
+				if (k === arg.length - 1) i++;
+			} else if (k < arg.length && keys.includes(option)) {
 				if (k === arg.length - 1) i++;
 			} else {
 				words.push(arg);
@@ -987,9 +1025,32 @@ function writingReaderWords(command: ShellCommand): string[] {
 	return [...words, ...operands];
 }
 
+/** A plain reader's arguments, without its {@link KEY_VALUE_OPTIONS} (long options only) and their values. */
+function readerArgs(command: ShellCommand): string[] {
+	const argv = args(command);
+	if (!Object.hasOwn(KEY_VALUE_OPTIONS, command.argv[0])) return argv;
+	const keys = KEY_VALUE_OPTIONS[command.argv[0]];
+	const words: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") {
+			words.push(...argv.slice(i + 1));
+			break;
+		}
+		const eq = arg.indexOf("=");
+		if (arg.startsWith("--") && keys.includes(eq > 0 ? arg.slice(0, eq) : arg)) {
+			if (eq < 0) i++;
+			continue;
+		}
+		words.push(arg);
+	}
+	return words;
+}
+
 /**
  * The words a reading command reads files from: a copy's local sources, a search's operands after
- * its pattern, a download's arguments other than where it saves, any other reader's arguments.
+ * its pattern, a download's arguments other than where it saves, any other reader's arguments; the
+ * value of an option that names a key it authenticates with is not read ({@link KEY_VALUE_OPTIONS}).
  */
 function readWords(command: ShellCommand, home: string): string[] {
 	const name = command.argv[0];
@@ -1001,7 +1062,7 @@ function readWords(command: ShellCommand, home: string): string[] {
 	}
 	if (Object.hasOwn(PATTERN_READERS, name)) return patternReaderWords(command);
 	if (Object.hasOwn(WRITING_READERS, name)) return writingReaderWords(command);
-	return Object.hasOwn(READERS, name) ? args(command) : [];
+	return Object.hasOwn(READERS, name) ? readerArgs(command) : [];
 }
 
 // -- credential_read ---------------------------------------------------------------------------------
