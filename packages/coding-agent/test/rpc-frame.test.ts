@@ -20,7 +20,10 @@ function oversizedMessageHistory(prefix: string) {
 }
 
 describe("RPC frame encoding", () => {
-	it("preserves both bash exit flags through response encoding and decoding", () => {
+	// Generic frame transport only: arbitrary response data fields survive
+	// encoding and decoding untouched (the bash exit flags as the example).
+	// It is not an end-to-end typed-BashResult claim.
+	it("preserves arbitrary response data fields (bash exit flags) through frame encoding and decoding", () => {
 		for (const endedByExit of [false, true]) {
 			for (const ephemeralShell of [false, true]) {
 				const frame = {
