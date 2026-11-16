@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { UsageFetchContext, UsageFetchParams, UsageReport } from "../src/usage";
@@ -83,9 +82,18 @@ describe("antigravityCliUsageProvider", () => {
 			fetchedAt: 0,
 			limits: [
 				{
+					id: "antigravity-cli:gemini:5h",
+					label: "Gemini Models",
+					scope: { provider: "antigravity-cli" },
+					window: { id: "5h", label: "5 Hour", durationMs: 5 * 60 * 60 * 1000 },
+					amount: { unit: "percent", remainingFraction: 0.5 },
+					status: "ok",
+				},
+				{
 					id: "antigravity-cli:gemini:weekly",
 					label: "Gemini Models",
 					scope: { provider: "antigravity-cli" },
+					window: { id: "weekly", label: "Weekly", durationMs: 7 * 24 * 60 * 60 * 1000 },
 					amount: { unit: "percent", remainingFraction: 0.8 },
 					status: "ok",
 				},
@@ -93,6 +101,7 @@ describe("antigravityCliUsageProvider", () => {
 					id: "antigravity-cli:gemini-argon:weekly",
 					label: "Gemini 4 Argon",
 					scope: { provider: "antigravity-cli" },
+					window: { id: "weekly", label: "Weekly", durationMs: 7 * 24 * 60 * 60 * 1000 },
 					amount: { unit: "percent", remainingFraction: 0 },
 					status: "exhausted",
 				},
@@ -100,6 +109,7 @@ describe("antigravityCliUsageProvider", () => {
 					id: "antigravity-cli:claude-gpt:weekly",
 					label: "Claude and GPT models",
 					scope: { provider: "antigravity-cli" },
+					window: { id: "weekly", label: "Weekly", durationMs: 7 * 24 * 60 * 60 * 1000 },
 					amount: { unit: "percent", remainingFraction: 1 },
 					status: "ok",
 				},
@@ -108,9 +118,12 @@ describe("antigravityCliUsageProvider", () => {
 		const strategy = defaultRankingStrategy("antigravity-cli");
 		expect(strategy).toBeDefined();
 		const scoped = (modelId: string) => strategy!.scopeLimits!(report, { modelId }).map(limit => limit.id);
-		expect(scoped("gemini-4-carbon")).toEqual(["antigravity-cli:gemini:weekly"]);
+		expect(scoped("gemini-4-carbon")).toEqual(["antigravity-cli:gemini:5h", "antigravity-cli:gemini:weekly"]);
 		expect(scoped("gemini-4-argon")).toEqual(["antigravity-cli:gemini-argon:weekly"]);
 		expect(scoped("claude-sonnet-5-5")).toEqual(["antigravity-cli:claude-gpt:weekly"]);
+		const windows = strategy!.findWindowLimits(report, { modelId: "gemini-4-carbon" });
+		expect(windows.primary?.window?.id).toBe("5h");
+		expect(windows.secondary?.window?.id).toBe("weekly");
 	});
 
 	it.skipIf(process.platform === "win32")(
@@ -132,8 +145,9 @@ for arg in "$@"; do
 done
 printf 'SSH_TTY=%s\\n' "$SSH_TTY" > "$CAPTURE"
 printf 'AUTO_UPDATE=%s\\n' "$AGY_CLI_DISABLE_AUTO_UPDATE" >> "$CAPTURE"
-if [ -f "$app_data/antigravity-oauth-token" ]; then printf 'TOKEN=yes\\n' >> "$CAPTURE"; else printf 'TOKEN=no\\n' >> "$CAPTURE"; fi
+printf 'GEMINI_HOME=%s\\n' "$GEMINI_HOME" >> "$CAPTURE"
 printf 'APP_DATA=%s\\n' "$app_data" >> "$CAPTURE"
+if [ -f "$GEMINI_HOME/$app_data/antigravity-oauth-token" ]; then printf 'TOKEN=yes\\n' >> "$CAPTURE"; else printf 'TOKEN=no\\n' >> "$CAPTURE"; fi
 cat "$QUOTA_OUTPUT"
 `,
 			);
@@ -173,9 +187,10 @@ cat "$QUOTA_OUTPUT"
 				expect(lines).toContain("SSH_TTY=omp-agy-file-auth");
 				expect(lines).toContain("AUTO_UPDATE=1");
 				expect(lines).toContain("TOKEN=yes");
-				const appData = lines.find(line => line.startsWith("APP_DATA="))?.slice("APP_DATA=".length);
-				expect(appData).toContain("omp-agy-usage-");
-				await expect(fs.access(path.dirname(appData!))).rejects.toThrow();
+				expect(lines).toContain("APP_DATA=antigravity-cli");
+				const geminiHome = lines.find(line => line.startsWith("GEMINI_HOME="))?.slice("GEMINI_HOME=".length);
+				expect(geminiHome).toContain("omp-agy-usage-");
+				await expect(fs.access(geminiHome!)).rejects.toThrow();
 			} finally {
 				for (const [key, value] of Object.entries(previous)) {
 					if (value === undefined) delete process.env[key];

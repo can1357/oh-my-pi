@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $env, $which, getAntigravityCliDir, isRecord, ptree, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import { $env, getAntigravityCliDir, isRecord, ptree } from "@oh-my-pi/pi-utils";
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { agyCredentialEnv, stageAgyCredentials } from "../providers/antigravity-cli/credentials";
 import type {
@@ -130,7 +130,10 @@ export const antigravityCliRankingStrategy: CredentialRankingStrategy = {
 	findWindowLimits(report, context) {
 		const key = modelCounterKey(context);
 		const limits = key ? counterLimits(report, key) : report.limits;
-		return { primary: limits[0] };
+		return {
+			primary: limits.find(limit => limit.window?.id === "5h"),
+			secondary: limits.find(limit => limit.window?.id === "weekly"),
+		};
 	},
 	scopeLimits(report, context) {
 		const key = modelCounterKey(context);
@@ -151,8 +154,6 @@ export const antigravityCliRankingStrategy: CredentialRankingStrategy = {
 async function existingAgyBinary(): Promise<string | undefined> {
 	const override = $env.PI_AGY_PATH;
 	if (override) return override;
-	const cli = $which("agy", { cache: WhichCachePolicy.Bypass, requireAbsolutePaths: true });
-	if (cli) return cli;
 	const directory = path.join(getAntigravityCliDir(), "bin");
 	try {
 		const record: unknown = await Bun.file(path.join(directory, "install.json")).json();
@@ -189,17 +190,19 @@ export async function fetchAgyUsage(params: UsageFetchParams, ctx: UsageFetchCon
 		directory = await fs.mkdtemp(path.join(os.tmpdir(), CAPTURE_PREFIX));
 		await fs.chmod(directory, 0o700);
 		await stageAgyCredentials(apiKey, directory);
-		const result = await ptree.exec(
-			[binary, `--app_data_dir=${path.join(directory, "antigravity-cli")}`, "-p", "/usage"],
-			{
-				cwd: directory,
-				env: { ...Bun.env, ...agyCredentialEnv(), AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
-				timeout: COMMAND_TIMEOUT_MS,
-				allowNonZero: true,
-				allowAbort: true,
-				...(params.signal ? { signal: params.signal } : {}),
+		const result = await ptree.exec([binary, "--app_data_dir=antigravity-cli", "-p", "/usage"], {
+			cwd: directory,
+			env: {
+				...Bun.env,
+				...agyCredentialEnv(),
+				AGY_CLI_DISABLE_AUTO_UPDATE: "1",
+				GEMINI_HOME: directory,
 			},
-		);
+			timeout: COMMAND_TIMEOUT_MS,
+			allowNonZero: true,
+			allowAbort: true,
+			...(params.signal ? { signal: params.signal } : {}),
+		});
 		if (!result.ok || result.exitError?.aborted) {
 			ctx.logger?.warn("Antigravity CLI usage probe failed", { exitCode: result.exitCode });
 			return null;
