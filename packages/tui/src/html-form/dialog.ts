@@ -79,13 +79,13 @@ import {
 	type HtmlFormData,
 	type HtmlFormValue,
 	type OptionNote,
+	optionText,
 	OTHER_LABEL,
 	textValue,
 } from "./data";
 import { BreakRank, type Page, type PageAtom, pageHeight, paginate } from "./paginate";
 import {
 	type ChoiceField,
-	type ChoiceOption,
 	type FormBlock,
 	type FormField,
 	type FormSpan,
@@ -226,10 +226,6 @@ function sanitize(text: string): string {
 /** A single select draws as a one-row dropdown; multi-selects keep option rows. */
 function isDropdown(field: ChoiceField): boolean {
 	return field.select && !field.multi;
-}
-
-function optionText(option: ChoiceOption): string {
-	return sanitize(spansText(option.label)).replace(/\s+/g, " ").trim();
 }
 
 /** Split spans at hard breaks into display lines. */
@@ -957,6 +953,20 @@ export class HtmlFormDialog implements Component, Focusable {
 	}
 
 	// ── Countdown ────────────────────────────────────────────────────────────
+
+	/** When the running inactivity countdown fires (epoch ms), or undefined without one. */
+	get deadline(): number | undefined {
+		return this.#tick === undefined ? undefined : this.#deadline;
+	}
+
+	/** Restart the inactivity countdown as input does; false when none is running. */
+	resetTimeout(): boolean {
+		if (this.#tick === undefined) return false;
+		this.#resetCountdown();
+		this.#changed();
+		this.#options.tui?.requestRender();
+		return true;
+	}
 
 	#startCountdown(): void {
 		const timeout = this.#options.timeout;

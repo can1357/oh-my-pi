@@ -15,12 +15,16 @@ import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
+	AskRequestedEvent,
+	AskResolvedEvent,
 	Extension,
 	ExtensionContext,
 	ExtensionEvent,
 	PlanReviewRequestedEvent,
 	PlanReviewResolvedEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
+import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -93,13 +97,13 @@ function observeExtensionEvents(session: AgentSession, onEvent?: (event: Extensi
 function planReviewExtension(
 	name: string,
 	onEvent: (event: ExtensionEvent, ctx: ExtensionContext) => void | Promise<void>,
+	events: ExtensionEvent["type"][] = ["plan_review_requested", "plan_review_resolved"],
 ): Extension {
 	const handle = async (...args: unknown[]): Promise<void> => {
 		await onEvent(args[0] as ExtensionEvent, args[1] as ExtensionContext);
 	};
 	const handlers: Extension["handlers"] = new Map();
-	handlers.set("plan_review_requested", [handle]);
-	handlers.set("plan_review_resolved", [handle]);
+	for (const event of events) handlers.set(event, [handle]);
 	const extensionPath = `/test/${name}.ts`;
 	return {
 		path: extensionPath,
@@ -198,6 +202,7 @@ describe("InteractiveMode plan review rendering", () => {
 	});
 
 	afterEach(async () => {
+		vi.useRealTimers();
 		vi.restoreAllMocks();
 		const currentMode = mode;
 		const currentSession = session;
@@ -227,6 +232,237 @@ describe("InteractiveMode plan review rendering", () => {
 		await mode.initHooksAndCustomTools();
 		return runner;
 	}
+
+	async function loadAskRecorder(
+		onEvent?: (event: AskRequestedEvent | AskResolvedEvent, ctx: ExtensionContext) => void | Promise<void>,
+	) {
+		const events: Array<AskRequestedEvent | AskResolvedEvent> = [];
+		const resolved = Promise.withResolvers<AskResolvedEvent>();
+		const runner = await loadExtensions(
+			planReviewExtension(
+				"ask",
+				async (event, ctx) => {
+					if (event.type !== "ask_requested" && event.type !== "ask_resolved") return;
+					events.push(event);
+					await onEvent?.(event, ctx);
+					if (event.type === "ask_resolved") resolved.resolve(event);
+				},
+				["ask_requested", "ask_resolved"],
+			),
+		);
+		return { runner, ctx: runner.createContext(), events, resolved: resolved.promise };
+	}
+
+	function mountedForm(): HtmlFormDialog {
+		const form = mode.editorContainer.children.find(child => child instanceof HtmlFormDialog);
+		if (!(form instanceof HtmlFormDialog)) throw new Error("Expected a mounted form");
+		return form;
+	}
+
+	it("lets an extension find and answer an ask tool call with canonical data and notes", async () => {
+		const { ctx, resolved } = await loadAskRecorder();
+		const html = `<form><fieldset><legend>Store</legend>
+			<label><input type="radio" name="store" value="sqlite" checked>SQLite</label>
+			<label><input type="radio" name="store" value="redis">Redis</label></fieldset>
+			<input name="ttl" type="number" min="1" value="2"><input type="hidden" name="kind" value="deploy"></form>`;
+		const tool = new AskTool({
+			cwd: tempDir.path(),
+			hasUI: true,
+			canPromptUser: true,
+			settings: Settings.isolated({ "ask.timeout": 30, "ask.notify": "off" }),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		});
+		const outcome = tool.execute("ask-tool", { html }, undefined, undefined, {
+			...ctx,
+			hasQueuedMessages: () => session.queuedMessageCount > 0,
+		});
+		const pending = ctx.getPendingAsks();
+		expect(pending).toEqual([
+			{
+				toolCallId: "ask-tool",
+				html,
+				sessionId: session.sessionManager.getSessionId(),
+				timeoutMs: 30_000,
+				deadline: mountedForm().deadline,
+			},
+		]);
+		pending[0]!.html = "mutated";
+		expect(ctx.getPendingAsks()[0]!.html).toBe(html);
+		const data = { kind: "deploy", store: "redis", ttl: 7 };
+		const notes = [{ name: "store", value: "redis", question: "Store", option: "Redis", text: "shared cache" }];
+		expect(ctx.resolveAsk("ask-tool", { data, notes })).toEqual({ ok: true });
+		expect(ctx.resolveAsk("ask-tool", { data })).toEqual({ ok: false, reason: "not_pending" });
+		const result = await outcome;
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: `User answers:\n${JSON.stringify(data, null, 2)}\nOption notes:\n- Store: Redis [store="redis"] — shared cache`,
+		});
+		expect(result.details?.notes).toEqual(notes);
+		expect(await resolved).toEqual({
+			type: "ask_resolved",
+			toolCallId: "ask-tool",
+			sessionId: session.sessionManager.getSessionId(),
+			data,
+			notes,
+			by: "extension",
+		});
+		expect(ctx.getPendingAsks()).toEqual([]);
+	});
+
+	it("refuses invalid and stale ask answers without closing the form or resetting its deadline", async () => {
+		const { ctx, resolved } = await loadAskRecorder();
+		const html = '<form><input name="title" required><input name="n" type="number" min="2"></form>';
+		const outcome = ctx.ui.formDialog!(html, { toolCallId: "invalid", timeout: 30_000 });
+		const deadline = ctx.getPendingAsks()[0]!.deadline;
+		expect(ctx.resolveAsk("wrong", { data: {} })).toEqual({ ok: false, reason: "not_pending" });
+		expect(ctx.resolveAsk("invalid", { data: { n: 1 } })).toEqual({
+			ok: false,
+			reason: "invalid",
+			errors: [
+				{ name: "title", message: "Required" },
+				{ name: "n", message: "Must be at least 2" },
+			],
+		});
+		expect(ctx.getPendingAsks()[0]!.deadline).toBe(deadline);
+		expect(mountedForm()).toBeInstanceOf(HtmlFormDialog);
+		expect(ctx.resolveAsk("invalid", { data: { title: "ready", n: "2" } })).toEqual({ ok: true });
+		expect(await outcome).toEqual({ data: { title: "ready", n: 2 } });
+		await resolved;
+	});
+
+	it("keeps queued ask forms pending and resolves only the addressed form", async () => {
+		const { ctx, events, resolved } = await loadAskRecorder();
+		const first = ctx.ui.formDialog!('<form><input name="first"></form>', { toolCallId: "first", timeout: 30_000 });
+		const second = ctx.ui.formDialog!('<form><input name="second"></form>', {
+			toolCallId: "second",
+			timeout: 30_000,
+		});
+		expect(ctx.getPendingAsks().map(ask => ask.toolCallId)).toEqual(["first", "second"]);
+		expect(ctx.getPendingAsks()[1]!.deadline).toBeUndefined();
+		expect(ctx.resetAskTimeout("second")).toBe(false);
+		const mounted = mountedForm();
+		expect(ctx.resolveAsk("second", { data: { second: "two" } })).toEqual({ ok: true });
+		expect(await second).toEqual({ data: { second: "two" } });
+		expect(mountedForm()).toBe(mounted);
+		expect(ctx.getPendingAsks().map(ask => ask.toolCallId)).toEqual(["first"]);
+		expect(ctx.resolveAsk("first", { data: { first: "one" } })).toEqual({ ok: true });
+		expect(await first).toEqual({ data: { first: "one" } });
+		await resolved;
+		await Bun.sleep(0);
+		expect(
+			events
+				.filter(event => event.type === "ask_resolved")
+				.map(event => event.toolCallId)
+				.sort(),
+		).toEqual(["first", "second"]);
+	});
+
+	it.each(["submit", "cancel", "abort"] as const)(
+		"reports a local ask %s once and refuses later answers",
+		async action => {
+			const { ctx, events, resolved } = await loadAskRecorder();
+			const abort = new AbortController();
+			const outcome = ctx.ui.formDialog!('<form><input name="answer" value="native"></form>', {
+				toolCallId: action,
+				signal: abort.signal,
+			});
+			const form = mountedForm();
+			if (action === "submit") {
+				form.handleInput("\t");
+				form.handleInput("\r");
+			} else if (action === "cancel") form.handleInput("\x1b");
+			else abort.abort();
+			expect(ctx.resolveAsk(action, { data: { answer: "late" } })).toEqual({ ok: false, reason: "not_pending" });
+			expect(await outcome).toEqual(action === "submit" ? { data: { answer: "native" } } : undefined);
+			expect(await resolved).toEqual({
+				type: "ask_resolved",
+				toolCallId: action,
+				sessionId: session.sessionManager.getSessionId(),
+				...(action === "submit" ? { data: { answer: "native" } } : {}),
+				by: "local",
+			});
+			expect(events.filter(event => event.type === "ask_resolved")).toHaveLength(1);
+		},
+	);
+
+	it("resets a mounted ask deadline and reports the eventual timeout as a local answer", async () => {
+		const { ctx, resolved } = await loadAskRecorder();
+		vi.useFakeTimers();
+		const outcome = ctx.ui.formDialog!('<form><input name="answer" value="default"></form>', {
+			toolCallId: "timeout",
+			timeout: 1000,
+		});
+		const deadline = ctx.getPendingAsks()[0]!.deadline!;
+		vi.advanceTimersByTime(500);
+		expect(ctx.resetAskTimeout("timeout")).toBe(true);
+		expect(ctx.getPendingAsks()[0]!.deadline).toBe(deadline + 500);
+		vi.advanceTimersByTime(1600);
+		expect(ctx.resolveAsk("timeout", { data: { answer: "late" } })).toEqual({ ok: false, reason: "not_pending" });
+		expect(ctx.resetAskTimeout("timeout")).toBe(false);
+		expect(await outcome).toEqual({ data: { answer: "default" }, timedOut: true });
+		expect(await resolved).toEqual({
+			type: "ask_resolved",
+			toolCallId: "timeout",
+			sessionId: session.sessionManager.getSessionId(),
+			data: { answer: "default" },
+			timedOut: true,
+			by: "local",
+		});
+	});
+
+	it("does not expose extension-owned forms without a tool call id", async () => {
+		const { ctx, events } = await loadAskRecorder();
+		const outcome = ctx.ui.formDialog!('<form><input name="answer"></form>');
+		expect(ctx.getPendingAsks()).toEqual([]);
+		expect(ctx.resetAskTimeout("unknown")).toBe(false);
+		mountedForm().handleInput("\x1b");
+		expect(await outcome).toBeUndefined();
+		expect(events).toEqual([]);
+	});
+
+	it("delivers ask_resolved only after every ask_requested handler returned", async () => {
+		const released = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const order: string[] = [];
+		const first = planReviewExtension(
+			"first",
+			(event, ctx) => {
+				if (event.type === "ask_requested") {
+					order.push("first requested");
+					expect(ctx.resolveAsk(event.toolCallId, { data: { answer: "first" } })).toEqual({ ok: true });
+				} else if (event.type === "ask_resolved") order.push("first resolved");
+			},
+			["ask_requested", "ask_resolved"],
+		);
+		const second = planReviewExtension(
+			"second",
+			async event => {
+				if (event.type === "ask_requested") {
+					order.push("second requested");
+					entered.resolve();
+					await released.promise;
+					order.push("second returned");
+				} else if (event.type === "ask_resolved") order.push("second resolved");
+			},
+			["ask_requested", "ask_resolved"],
+		);
+		const runner = await loadExtensions(first, second);
+		const ctx = runner.createContext();
+		const outcome = ctx.ui.formDialog!('<form><input name="answer"></form>', { toolCallId: "barrier" });
+		await entered.promise;
+		expect(await outcome).toEqual({ data: { answer: "first" } });
+		expect(order).toEqual(["first requested", "second requested"]);
+		released.resolve();
+		await Bun.sleep(0);
+		expect(order).toEqual([
+			"first requested",
+			"second requested",
+			"second returned",
+			"first resolved",
+			"second resolved",
+		]);
+	});
 
 	it("exits empty plan mode without confirmation", async () => {
 		const planFilePath = "local://PLAN.md";
