@@ -8395,6 +8395,22 @@ export function scalewayModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// Verda
+// ---------------------------------------------------------------------------
+
+export function verdaModelManagerOptions(config?: SimpleProviderConfig): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "verda",
+		defaultBaseUrl: "https://inference.verda.com/v1",
+		config,
+		dynamicModelsAuthoritative: true,
+		requireApiKey: true,
+		mapModel: mapWithBundledReference,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // Otari
 // ---------------------------------------------------------------------------
 

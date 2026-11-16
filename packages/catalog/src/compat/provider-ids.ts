@@ -86,6 +86,7 @@ export type KnownProvider =
 	| "umans"
 	| "venice"
 	| "vercel-ai-gateway"
+	| "verda"
 	| "vllm"
 	| "wafer-serverless"
 	| "web"

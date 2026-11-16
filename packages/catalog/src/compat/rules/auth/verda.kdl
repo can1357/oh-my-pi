@@ -1,0 +1,10 @@
+auth "verda" {
+	name "Verda"
+	login "api-key" {
+		auth-url "https://console.verda.com/"
+		instructions "Create an inference API key in the Verda Console (Credentials → Inference API Keys) and paste it here"
+		prompt "Paste your Verda inference API key" placeholder="..."
+		// `/v1/models` rejects a wrong key with 401, so validation spends no tokens.
+		validate "models-endpoint" label="Verda" url="https://inference.verda.com/v1/models"
+	}
+}
