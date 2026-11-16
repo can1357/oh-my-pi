@@ -1,4 +1,3 @@
-[docs/adr/0048-schema-and-serialization-boundaries.md (verbatim, 234 lines total)]
 # 0048. Schema and serialization boundaries: keep the formats, check wire compatibility, harden durable decode
 
 Status: accepted 2026-10-28; implementation gate open
