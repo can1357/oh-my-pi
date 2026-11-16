@@ -27,7 +27,7 @@
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
 ### Fixed
 
-- Abandoned Antigravity CLI login directories without a credential are removed after 24 hours, so cancelled or crashed sign-ins do not accumulate.
+- Abandoned Antigravity CLI login directories without a credential are removed after 24 hours, so cancelled or crashed sign-ins do not accumulate. ([#19420](https://github.com/can1357/oh-my-pi/pull/19420) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
