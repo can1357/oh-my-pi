@@ -472,6 +472,24 @@ mod unix {
 		}
 	}
 
+	fn redrive_pty_open(mut open: impl FnMut() -> io::Result<()>) -> io::Result<()> {
+		#[cfg(target_os = "macos")]
+		{
+			// XNU bsd/sys/errno.h defines EREDRIVEOPEN as -6. In tty_ptmx.c
+			// concurrent ptmx clones can select the same minor; tty_dev.c asks
+			// the kernel to redrive the open, but the sentinel can leak to
+			// userspace. Redrive only that condition, with a finite bound.
+			const EREDRIVEOPEN: i32 = -6;
+			for _ in 0..7 {
+				match open() {
+					Err(e) if e.raw_os_error() == Some(EREDRIVEOPEN) => {},
+					result => return result,
+				}
+			}
+		}
+		open()
+	}
+
 	/// A new pty pair, close-on-exec, with window size `size` if given:
 	/// `(master, slave, slave name)`.
 	pub fn open_pty(size: Option<TtyInfo>) -> io::Result<(OwnedFd, OwnedFd, BString)> {
@@ -485,11 +503,14 @@ mod unix {
 		let wsp = ws
 			.as_ref()
 			.map_or(ptr::null_mut(), |w| ptr::from_ref(w).cast_mut());
-		// SAFETY: both out pointers are valid; a null name and termios are
-		// allowed; `wsp` is null or points at a live winsize.
-		check(unsafe {
-			libc::openpty(&raw mut m, &raw mut s, ptr::null_mut(), ptr::null_mut(), wsp.cast())
-		})?;
+		let open = || {
+			// SAFETY: both out pointers are valid; a null name and termios are
+			// allowed; `wsp` is null or points at a live winsize.
+			check(unsafe {
+				libc::openpty(&raw mut m, &raw mut s, ptr::null_mut(), ptr::null_mut(), wsp.cast())
+			})
+		};
+		redrive_pty_open(open)?;
 		// SAFETY: openpty created both descriptors; nothing else owns them.
 		let (m, s) = unsafe { (OwnedFd::from_raw_fd(m), OwnedFd::from_raw_fd(s)) };
 		for fd in [m.as_raw_fd(), s.as_raw_fd()] {
@@ -589,6 +610,49 @@ mod unix {
 		use std::os::fd::AsFd;
 
 		use super::*;
+
+		#[cfg(target_os = "macos")]
+		#[test]
+		fn pty_open_redrives_only_the_kernel_clone_race() {
+			let mut attempts = 0;
+			redrive_pty_open(|| {
+				attempts += 1;
+				if attempts < 3 { Err(io::Error::from_raw_os_error(-6)) } else { Ok(()) }
+			})
+			.unwrap();
+			assert_eq!(attempts, 3);
+
+			let mut attempts = 0;
+			let err = redrive_pty_open(|| {
+				attempts += 1;
+				Err(io::Error::from_raw_os_error(-6))
+			})
+			.unwrap_err();
+			assert_eq!(attempts, 8);
+			assert_eq!(err.raw_os_error(), Some(-6));
+
+			let mut attempts = 0;
+			let err = redrive_pty_open(|| {
+				attempts += 1;
+				Err(io::Error::from_raw_os_error(libc::ENOENT))
+			})
+			.unwrap_err();
+			assert_eq!(attempts, 1);
+			assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+		}
+
+		#[cfg(not(target_os = "macos"))]
+		#[test]
+		fn pty_open_does_not_redrive_errors_on_other_platforms() {
+			let mut attempts = 0;
+			let err = redrive_pty_open(|| {
+				attempts += 1;
+				Err(io::Error::from_raw_os_error(-6))
+			})
+			.unwrap_err();
+			assert_eq!(attempts, 1);
+			assert_eq!(err.raw_os_error(), Some(-6));
+		}
 
 		#[test]
 		fn termios_round_trips_through_a_pty() {

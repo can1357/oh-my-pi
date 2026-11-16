@@ -13,11 +13,11 @@ mod pty_support;
 
 use std::{io, time::Duration};
 
-use pty_support::{Pty, Spawn, TIMEOUT, differential, have_real_zsh};
+use pty_support::{Pty, Spawn, TIMEOUT, ZLE_SYNC_SCRIPT, differential, have_real_zsh};
 
 /// The pause between keys.
 const KEY: Duration = Duration::from_millis(60);
-/// How long output must stay quiet before the screen is read.
+/// Named-command minibuffers can consume ZLE fd-handler output as input.
 const QUIET: Duration = Duration::from_millis(300);
 
 /// Bindings for the widgets emacs mode leaves unbound.
@@ -44,14 +44,18 @@ fn spawn(real: bool, rc: &str) -> Spawn {
 		.env("RPS1", "[%?]")
 		.env_remove("EDITOR")
 		.env_remove("VISUAL")
-		.rc_file(".zshrc", format!("{BINDS}{rc}"))
+		.rc_file(
+			".zshrc",
+			format!("{BINDS}{rc}\n. ~/{ZLE_SYNC_SCRIPT}\nprint -r -- RCDONE\n"),
+		)
+		.zle_sync()
 		.size(24, 80)
 }
 
 /// Type `text` key by key.
 fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 	pty.type_keys(text, KEY)?;
-	pty.settle(QUIET, TIMEOUT)
+	pty.zle_sync(TIMEOUT)
 }
 
 /// Run `drive` against both shells after sourcing the rc file; the final
@@ -61,8 +65,12 @@ fn screens(
 	drive: impl Fn(&mut Pty) -> io::Result<()>,
 ) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
-		pty.settle(QUIET, TIMEOUT)?;
-		keys(pty, ". ~/.zshrc\r")?;
+		// Do not send input until the line editor, rather than the kernel's
+		// canonical/echoing line discipline, owns the terminal.
+		pty.wait_raw(TIMEOUT)?;
+		pty.type_keys(". ~/.zshrc\r", KEY)?;
+		pty.read_until("RCDONE", TIMEOUT)?;
+		pty.zle_sync(TIMEOUT)?;
 		// A clean screen for the case itself.
 		keys(pty, "\x0c")?;
 		drive(pty)
@@ -78,9 +86,24 @@ fn screens(
 
 /// Assert both screens are the same after typing each of `lines`.
 fn same(rc: &str, lines: &[&str]) {
+	same_with(rc, lines, false);
+}
+
+/// Named-command minibuffers and their listing questions are recursive
+/// reads, so they must not receive a ZLE fd-handler request between keys.
+fn same_minibuffer(rc: &str, lines: &[&str]) {
+	same_with(rc, lines, true);
+}
+
+fn same_with(rc: &str, lines: &[&str], minibuffer: bool) {
 	let drive = |pty: &mut Pty| -> io::Result<()> {
 		for l in lines {
-			keys(pty, l)?;
+			if minibuffer {
+				pty.type_keys(l, KEY)?;
+				pty.settle(QUIET, TIMEOUT)?;
+			} else {
+				keys(pty, l)?;
+			}
 		}
 		Ok(())
 	};
@@ -239,7 +262,7 @@ fn undo_redo_and_split_undo() {
 
 #[test]
 fn execute_named_cmd() {
-	same("", &[
+	same_minibuffer("", &[
 		// A unique prefix completes on accept.
 		"echo aa bb\x01\x1bxforward-wo\r,\x1bz,\r",
 		// Space completes as far as it is unique; ^D lists the matches.
@@ -261,7 +284,7 @@ fn execute_named_cmd() {
 fn execute_named_cmd_listing_options() {
 	// The name list laid out packed, rows first, and without
 	// ALWAYS_LAST_PROMPT; AUTO_LIST off lists only on request.
-	same("setopt listpacked\n", &[
+	same_minibuffer("setopt listpacked\n", &[
 		"\x1bxvi-\x04",
 		"\x07setopt listrowsfirst\r",
 		"\x1bxhistory-\x04",
@@ -276,7 +299,12 @@ fn execute_named_cmd_listing_options() {
 fn execute_named_cmd_from_vi_command_mode() {
 	// `:` in vicmd reads the name in `main` (viins), where `vi-cmd-mode`
 	// accepts it; the keymap goes back to vicmd afterwards.
-	same("bindkey -v\n", &["echo abc\x1b:backward-ch\x1bx", "i,\r", "\x1b:nosuch\x1b\x07", "i,\r"]);
+	same_minibuffer("bindkey -v\n", &[
+		"echo abc\x1b:backward-ch\x1bx",
+		"i,\r",
+		"\x1b:nosuch\x1b\x07",
+		"i,\r",
+	]);
 }
 
 #[test]
@@ -379,5 +407,5 @@ fn pound_insert_and_unmeta() {
 #[test]
 fn read_command_from_a_widget() {
 	let rc = "rcw() { zle read-command; BUFFER+=\"<$REPLY>\" }\nzle -N rcw\nbindkey '^Xq' rcw\n";
-	same(rc, &["echo \x18q\x01\x18q\x1bx\r"]);
+	same_minibuffer(rc, &["echo \x18q\x01\x18q\x1bx\r"]);
 }
