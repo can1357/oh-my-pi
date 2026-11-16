@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `apply_patch` hunks dropping rows whose content made them look like diff headers: removing a `-- ` comment line (SQL, Lua, Haskell) failed with `Failed to find expected lines`, and adding a line starting with `++ ` reported success without writing it; inside a hunk every row is now content after its single prefix ([#19479](https://github.com/can1357/oh-my-pi/pull/19479) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
