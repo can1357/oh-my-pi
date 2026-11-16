@@ -260,6 +260,36 @@ describe("WatchedFilesForwarder", () => {
 		expect(sent.filter(change => change.uri === fileToUri(skipped))).toEqual([]);
 	});
 
+	// A recursive `fs.watch` on Linux adds an inotify watch per directory; package trees must not use up the user's limit.
+	it.skipIf(process.platform !== "linux")("puts no inotify watches on package contents or object stores", async () => {
+		const { root, sent, forwarder } = setup();
+		const packages = 300;
+		for (let i = 0; i < packages; i++)
+			await fs.mkdir(path.join(root, "node_modules", `pkg${i}`, "lib"), { recursive: true });
+		for (let i = 0; i < 16; i++)
+			await fs.mkdir(path.join(root, ".git", "objects", i.toString(16)), { recursive: true });
+		await fs.mkdir(path.join(root, "src"));
+		const inotifyWatches = () =>
+			fsSync
+				.readdirSync("/proc/self/fdinfo")
+				.map(fd => {
+					try {
+						return fsSync.readFileSync(`/proc/self/fdinfo/${fd}`, "utf8");
+					} catch {
+						return "";
+					}
+				})
+				.reduce((count, info) => count + info.split("\n").filter(line => line.startsWith("inotify wd")).length, 0);
+		const before = inotifyWatches();
+		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		// root, src, node_modules and .git: package and object store directories stay unwatched.
+		expect(inotifyWatches() - before).toBeLessThanOrEqual(4);
+
+		const source = path.join(root, "src", "index.ts");
+		fsSync.writeFileSync(source, "export {};\n");
+		await waitForEvent(sent, { uri: fileToUri(source), type: FileChangeType.Created });
+	});
+
 	it("does not report a file created and removed within one batch as existing", async () => {
 		const { root, sent, forwarder } = setup();
 		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
