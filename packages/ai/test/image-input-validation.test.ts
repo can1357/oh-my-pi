@@ -309,7 +309,7 @@ it("sends the Antigravity image transport the same client identity as the stream
 	const headers = new Headers(call.init?.headers);
 	// The shipped client names the same client in the body and on the wire.
 	expect(body.userAgent).toBe(getAntigravityUserAgent());
-	expect(headers.get("user-agent")).toBe(body.userAgent);
+	expect(headers.get("user-agent")).toBe(getAntigravityUserAgent());
 	// Per-request identity headers; `Headers` lowercases the names.
 	expect(headers.get("x-cloudaicompanion-trace-id")).toMatch(/^[0-9a-f]{32}$/);
 	expect(headers.get("x-aicode-request-id")).toBe(String(body.requestId));
