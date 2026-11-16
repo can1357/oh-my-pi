@@ -14,14 +14,9 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
-async function git(cwd: string, args: string[], input?: Uint8Array): Promise<string> {
+async function git(cwd: string, args: string[]): Promise<string> {
 	const env = { ...process.env, HOME: cwd, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
-	const proc = Bun.spawn(["git", "-C", cwd, ...args], {
-		env,
-		...(input === undefined ? {} : { stdin: input }),
-		stdout: "pipe",
-		stderr: "pipe",
-	});
+	const proc = Bun.spawn(["git", "-C", cwd, ...args], { env, stdout: "pipe", stderr: "pipe" });
 	const [out, err, code] = await Promise.all([
 		new Response(proc.stdout).text(),
 		new Response(proc.stderr).text(),
@@ -386,18 +381,35 @@ describe("selective commit flow", () => {
 
 		const outcome = await commitSelection(draft, { subject: "chore: assets" }, { journal, agent: { agent: "Main" } });
 
-		const stored = async (file: string) => (await git(root, ["rev-parse", `HEAD:${file}`])).trim();
-		const filtered = async (file: string, bytes: Buffer) =>
-			(await git(root, ["hash-object", `--path=${file}`, "--stdin"], bytes)).trim();
-		const raw = async (bytes: Buffer) => (await git(root, ["hash-object", "--stdin"], bytes)).trim();
-		const filteredLogo = await filtered("logo.bin", draftedLogo);
-		const filteredWide = await filtered("wide.dat", draftedWide);
-		expect(filteredLogo).not.toBe(await raw(draftedLogo));
-		expect(filteredWide).not.toBe(await raw(draftedWide));
-		expect(await filtered("logo.bin", laterLogo)).not.toBe(filteredLogo);
-		expect(await filtered("wide.dat", laterWide)).not.toBe(filteredWide);
 		expect(outcome.paths).toEqual(["logo.bin", "wide.dat"]);
-		expect([await stored("logo.bin"), await stored("wide.dat")]).toEqual([filteredLogo, filteredWide]);
+		expect(await gitBlob(root, "HEAD:logo.bin")).toEqual(Buffer.concat([Buffer.from("pointer:"), draftedLogo]));
+		expect(await gitBlob(root, "HEAD:wide.dat")).toEqual(Buffer.concat([Buffer.from("c\nd\n"), Buffer.from([0xff])]));
+	});
+
+	it("commits other edits when an unchanged oversized file has a staged intermediate version", async () => {
+		const { root, journal, write } = await emptyRepo();
+		const original = `${"a".repeat(4 * 1024 * 1024)}\n`;
+		const staged = `${"b".repeat(4 * 1024 * 1024)}\n`;
+		await Bun.write(path.join(root, "big.txt"), original);
+		await Bun.write(path.join(root, "notes.txt"), "before\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+
+		// The index differs from HEAD, but the worktree content is back to HEAD's bytes.
+		await Bun.write(path.join(root, "big.txt"), staged);
+		await git(root, ["add", "big.txt"]);
+		await Bun.write(path.join(root, "big.txt"), original);
+		await write("Main", undefined, "notes.txt", "after\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "**" });
+		const outcome = await commitSelection(draft, { subject: "fix: notes" }, { journal, agent: { agent: "Main" } });
+
+		expect(outcome.paths).toEqual(["notes.txt"]);
+		expect(await git(root, ["show", "HEAD:notes.txt"])).toBe("after\n");
+		expect((await gitBlob(root, "HEAD:big.txt")).toString()).toBe(original);
+		expect((await gitBlob(root, ":big.txt")).toString()).toBe(staged);
 	});
 
 	it("refuses a whole-file commit when a newer commit changed that file", async () => {

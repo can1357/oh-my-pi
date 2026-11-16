@@ -154,6 +154,9 @@ impl GitRepo {
 			similarity:   None,
 			worktree_new: false,
 		};
+		if change.old_id == change.new_id && change.old_mode == change.new_mode {
+			return Ok(String::new());
+		}
 		render_blob_change(&repo, &change, binary)
 	}
 
