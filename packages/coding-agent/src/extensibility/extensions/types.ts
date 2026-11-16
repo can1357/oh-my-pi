@@ -265,7 +265,7 @@ export interface ExtensionUIDialogOptions {
 	 *  trailing options (e.g. "Other"/"Done" actions) keep the plain cursor.
 	 *  Defaults to all options when `selectionMarker` is set. */
 	markableCount?: number;
-	/** Allow image pastes in rich ask-dialog custom-answer and note prompts. */
+	/** Allow image pastes in rich ask-dialog custom-answer and note prompts, and in `formDialog` option notes. */
 	acceptImages?: boolean;
 }
 

@@ -274,7 +274,7 @@ describe("ModelRegistry", () => {
 			expect(registry.getAll("all")).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({ provider: "local", id: "falcon-h1-90m", kind: "tiny" }),
-					expect.objectContaining({ provider: "local", id: "kokoro", kind: "tts" }),
+					expect.objectContaining({ provider: "local", id: "phonon-31m", kind: "tts" }),
 					expect.objectContaining({ provider: "local", id: "whisper-base", kind: "stt" }),
 					expect.objectContaining({ provider: "web", id: "duckduckgo", kind: "search" }),
 					expect.objectContaining({ provider: "typesafe", id: "jev-latest", kind: "judge" }),
@@ -284,7 +284,7 @@ describe("ModelRegistry", () => {
 				expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
 			);
 			expect(registry.getAvailable("tts")).toContainEqual(
-				expect.objectContaining({ provider: "local", id: "kokoro" }),
+				expect.objectContaining({ provider: "local", id: "phonon-31m" }),
 			);
 			expect(registry.getAvailable("stt")).toContainEqual(
 				expect.objectContaining({ provider: "local", id: "whisper-base" }),
