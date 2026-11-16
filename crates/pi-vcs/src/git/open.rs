@@ -18,6 +18,11 @@ impl GitRepo {
 	/// Thread-local gitoxide repository for this checkout, opening the shared
 	/// thread-safe handle on first use.
 	///
+	/// An unavailable process cwd is recovered to an accessible absolute
+	/// `$HOME`, or the filesystem root (the executable's volume root on
+	/// Windows). This is a process-wide side effect, not scoped to this
+	/// repository. An accessible cwd is never changed.
+	///
 	/// Errors on reftable repositories: they are unreadable in-process and
 	/// every operation on them must use the CLI fallback instead.
 	pub(crate) fn gix(&self) -> Result<gix::Repository> {
@@ -41,6 +46,10 @@ impl GitRepo {
 	/// The cached handle snapshots config and refs at first open; callers that
 	/// must observe out-of-band mutations (config writes, remote edits) pay
 	/// for a fresh open instead.
+	///
+	/// Like [`Self::gix`], opening with an unavailable cwd may move the host
+	/// process cwd to `$HOME` or the filesystem root. This is a process-wide
+	/// side effect; an accessible cwd is never changed.
 	pub(crate) fn gix_fresh(&self) -> Result<gix::Repository> {
 		if self.info().is_reftable {
 			return Err(Error::backend(
@@ -61,8 +70,8 @@ impl GitRepo {
 /// tree from it, which the resolved `git_dir` alone cannot for separate git
 /// dirs.
 ///
-/// If the process cwd was removed, recover it once before retrying gitoxide.
-/// Never relocate a live cwd when opening another repository.
+/// If the process cwd is unavailable, recover it to a stable directory before
+/// retrying gitoxide once. Never relocate a live cwd.
 fn open_discovered(repo: &GitRepo) -> Result<gix::ThreadSafeRepository> {
 	let entry = &repo.info().git_entry_path;
 	let mut opened = open_options().open(entry);
@@ -79,11 +88,42 @@ fn open_discovered(repo: &GitRepo) -> Result<gix::ThreadSafeRepository> {
 			.lock()
 			.map_err(|err| Error::backend("git cwd recovery", err))?;
 		if std::env::current_dir().is_err() {
-			std::env::set_current_dir(repo.root())?;
+			recover_process_cwd()?;
 		}
 		opened = open_options().open(entry);
 	}
 	opened.map_err(|err| Error::backend("git open", err))
+}
+
+/// Prefer an accessible absolute HOME; otherwise use a repository-independent
+/// filesystem root. The caller holds the recovery lock and has rechecked cwd.
+fn recover_process_cwd() -> std::io::Result<()> {
+	if let Some(home) = std::env::var_os("HOME") {
+		let home = std::path::Path::new(&home);
+		if home.is_absolute() && std::env::set_current_dir(home).is_ok() {
+			return Ok(());
+		}
+	}
+
+	#[cfg(windows)]
+	{
+		// A bare `/` depends on the ambient drive. The host executable's
+		// volume root is absolute and independent of the repository.
+		let executable = std::env::current_exe()?;
+		let root = executable
+			.ancestors()
+			.last()
+			.filter(|root| root.is_absolute())
+			.ok_or_else(|| {
+				std::io::Error::new(
+					std::io::ErrorKind::NotFound,
+					"host executable has no absolute filesystem root",
+				)
+			})?;
+		std::env::set_current_dir(root)
+	}
+	#[cfg(not(windows))]
+	std::env::set_current_dir("/")
 }
 
 /// Load the persisted worktree index straight from disk, reconstructing it from
