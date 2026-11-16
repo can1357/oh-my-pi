@@ -7,6 +7,7 @@ import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
+	alignContextTokens,
 	describeToolArguments,
 	type AgyConnection,
 	type AgyHostOptions,
@@ -163,6 +164,9 @@ class FakeAgy implements AgyTransport {
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
 		});
 	}
+	usage(used: number, size: number): void {
+		this.options.onUpdate({ sessionId: this.currentId, update: { sessionUpdate: "usage_update", used, size } });
+	}
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
 		this.options.onUpdate({
 			sessionId: id,
@@ -256,6 +260,36 @@ async function parked(options: AgyHostOptions = {}) {
 function textOf(blocks: ContentBlock[]): string {
 	return blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 }
+
+describe("alignContextTokens", () => {
+	it("scales the ACP occupancy into omp's context window", () => {
+		expect(alignContextTokens(500_000, 1_000_000, 200_000)).toBe(100_000);
+		expect(alignContextTokens(1_000, 4_000, 1_000)).toBe(250);
+		expect(alignContextTokens(3, 2, 10)).toBe(15);
+		expect(alignContextTokens(2, 3, 100)).toBe(67);
+	});
+
+	it("keeps the raw count when the server window is missing or unusable", () => {
+		expect(alignContextTokens(408, 0, 200_000)).toBe(408);
+		expect(alignContextTokens(408, -1_000, 200_000)).toBe(408);
+		expect(alignContextTokens(408, 1.5, 200_000)).toBe(408);
+		expect(alignContextTokens(408, Number.NaN, 200_000)).toBe(408);
+	});
+
+	it("keeps the raw count when the model window is missing or unusable", () => {
+		expect(alignContextTokens(408, 1_000)).toBe(408);
+		expect(alignContextTokens(408, 1_000, 0)).toBe(408);
+		expect(alignContextTokens(408, 1_000, -200_000)).toBe(408);
+		expect(alignContextTokens(408, 1_000, 1.25)).toBe(408);
+	});
+
+	it("keeps non-integer or negative occupancy untouched", () => {
+		expect(alignContextTokens(-1, 1_000, 200_000)).toBe(-1);
+		expect(alignContextTokens(1.5, 1_000, 200_000)).toBe(1.5);
+		expect(alignContextTokens(Number.NaN, 1_000, 200_000)).toBeNaN();
+		expect(alignContextTokens(0, 1_000, 200_000)).toBe(0);
+	});
+});
 
 describe("AgyHost stateful steps", () => {
 	it("rejects an ACP end that contains no usable model response", async () => {
@@ -792,6 +826,68 @@ describe("AgyHost stateful steps", () => {
 		expect(writer.output.usage.output).toBe(25);
 		expect(writer.output.usage.totalTokens).toBe(408);
 		expect(writer.output.usage.contextTokens).toBe(408);
+	});
+	it("writes the ACP occupancy scaled into the model window for parked and finished steps", async () => {
+		const state = await fixture();
+		const messages = [user("read a.txt")];
+		const first = step(state.host, messages);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		fake.usage(500_000, 1_000_000);
+		const held = fake.call();
+		await first.done;
+		expect(first.writer.output.usage.contextTokens).toBe(100_000);
+		const second = step(state.host, [...messages, first.writer.output, result(first.writer.output)]);
+		await held;
+		fake.text("Finished.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(100_000);
+	});
+
+	it("resets occupancy when a fresh session replaces the edited conversation", async () => {
+		const state = await parked();
+		state.fake.usage(900_000, 1_000_000);
+		const edited = {
+			...state.first.writer.output,
+			content: state.first.writer.output.content.map(block =>
+				block.type === "text" ? { ...block, text: "Edited text" } : block,
+			),
+		};
+		const next = step(state.host, [state.messages[0]!, edited, result(edited)]);
+		await state.fake.cancellations.next();
+		const prompt = await state.fake.prompts.next();
+		expect((await state.output).isError).toBe(true);
+		state.fake.text("Edited history received.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.usage.contextTokens).toBe(0);
+	});
+
+	it("resets occupancy when a loaded session starts the next turn", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.usage(900_000, 1_000_000);
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		expect(first.writer.output.usage.contextTokens).toBe(180_000);
+		const conversationId = state.host.conversationId;
+		if (!conversationId) throw new Error("Completed turn lost its conversation");
+		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], {}, undefined, {
+			cwd: path.join(state.dir, "moved"),
+		});
+		const restarted = await state.started.next();
+		const continuation = await restarted.prompts.next();
+		expect(restarted.loads).toEqual([conversationId]);
+		restarted.text("Continued.");
+		void restarted.call("read", { path: "b.txt" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(0);
+		continuation.response.resolve({ stopReason: "end_turn" });
 	});
 	it("keeps completed stream output immutable and emits exactly one terminal event", () => {
 		const stream = new AssistantMessageEventStream();

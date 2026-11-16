@@ -47,6 +47,19 @@ const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
 
+/**
+ * omp compacts against its own model.contextWindow, while ACP reports the
+ * server's window in usage_update.size; normalize the occupancy before omp's
+ * threshold decision and fall back to the raw count when either is unusable.
+ */
+export function alignContextTokens(used: number, size: number, ompContextWindow?: number): number {
+	if (!Number.isSafeInteger(used) || used < 0) return used;
+	if (!Number.isSafeInteger(size) || size <= 0) return used;
+	if (ompContextWindow === undefined || !Number.isSafeInteger(ompContextWindow) || ompContextWindow <= 0) return used;
+	const scaled = Math.round((used / size) * ompContextWindow);
+	return Number.isSafeInteger(scaled) && scaled >= 0 ? scaled : used;
+}
+
 /** Per-step request settings. */
 export interface AgyStepOptions {
 	cwd?: string;
@@ -163,6 +176,8 @@ export class AgyHost implements ProviderSessionState {
 	readonly #turns = new Set<Turn>();
 	#loading: object | undefined;
 	#contextTokens = 0;
+	#contextSize: number | undefined;
+	#contextWindow: number | undefined;
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
 
@@ -199,6 +214,7 @@ export class AgyHost implements ProviderSessionState {
 	/** Emit one assistant step, parking at a tool call or finishing at the ACP turn end. */
 	async step(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
 		if (this.#step) throw new Error("Antigravity CLI is already running a request for this session");
+		this.#contextWindow = model.contextWindow ?? undefined;
 		const step: ActiveStep = {
 			writer,
 			messages: context.messages,
@@ -289,6 +305,7 @@ export class AgyHost implements ProviderSessionState {
 					defaultEffort: thoughtLevel(created.configOptions),
 				};
 				this.#contextTokens = 0;
+				this.#contextSize = undefined;
 			}
 			await this.#setup(this.#configure(model.id, options.reasoning));
 			step.controller.signal.throwIfAborted();
@@ -369,6 +386,12 @@ export class AgyHost implements ProviderSessionState {
 	#requireProcess(): AgyProcess {
 		if (!this.#process) throw new Error("Antigravity CLI process is unavailable");
 		return this.#process;
+	}
+
+	/** Occupancy measured in the active model's window, or the raw ACP count when its size is unknown. */
+	#occupancy(): number {
+		if (this.#contextSize === undefined) return this.#contextTokens;
+		return alignContextTokens(this.#contextTokens, this.#contextSize, this.#contextWindow);
 	}
 
 	async #startProcess(
@@ -498,6 +521,7 @@ export class AgyHost implements ProviderSessionState {
 				throw new Error("Antigravity CLI load was interrupted");
 			this.#conversation = { id, systemKey, loaded: true, defaultEffort: thoughtLevel(loaded.configOptions) };
 			this.#contextTokens = 0;
+			this.#contextSize = undefined;
 		} finally {
 			if (this.#loading === loading) this.#loading = undefined;
 		}
@@ -663,7 +687,7 @@ export class AgyHost implements ProviderSessionState {
 		};
 		this.#pending = pending;
 		step.writer.toolCall({ type: "toolCall", id, name, arguments: args });
-		step.writer.usage(this.#contextTokens);
+		step.writer.usage(this.#occupancy());
 		const digest = transcriptDigest([...step.messages, step.writer.output]);
 		step.writer.finish("toolUse", { type: "antigravityCli", conversationId, digest });
 		this.#ledger = { count: step.messages.length + 1, digest, pendingToolCallId: id };
@@ -705,6 +729,7 @@ export class AgyHost implements ProviderSessionState {
 				return;
 			case "usage_update":
 				this.#contextTokens = update.used;
+				this.#contextSize = update.size;
 				return;
 			case "tool_call": {
 				const name = MCP_TOOL_NAME.exec(update.title)?.[1];
@@ -738,7 +763,7 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
 			return;
 		}
-		writer.usage(this.#contextTokens, response.usage);
+		writer.usage(this.#occupancy(), response.usage);
 		const digest = transcriptDigest([...step.messages, writer.output]);
 		let checkpoint: AntigravityCliCheckpoint | undefined;
 		if (response.stopReason === "end_turn") {
