@@ -631,6 +631,50 @@ describe("AgyHost stateful steps", () => {
 		expect((await corrected).isError).toBe(true);
 	});
 
+	it("normalizes an unambiguous alias before validating tool arguments", async () => {
+		const fileTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: type({ file_path: "string" }),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = fake.call("read", { path: "a.txt" }, fake.currentId);
+		await run.done;
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
+		expect(call.arguments).toEqual({ file_path: "a.txt" });
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await output).isError).toBe(true);
+	});
+
+	it("keeps the actionable diagnostic when an alias cannot be normalized", async () => {
+		const fileTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: type({ file_path: "string" }),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: 2 }, fake.currentId);
+		const text = textOf(output.content);
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(text).toContain("file_path: is required");
+		expect(text).toContain("Expected schema: ");
+		expect(text).toContain(JSON.stringify(advertised));
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
 	it("bounds a large invalid-arguments diagnostic and keeps the turn active", async () => {
 		const keys = Array.from({ length: 200 }, (_, index) => `key${index}`);
 		const wide: Tool = {

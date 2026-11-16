@@ -38,6 +38,7 @@ import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
 import type { StepWriter } from "./step-writer";
+import { normalizeToolArguments } from "./tool-arguments";
 
 const AGENT_NAME = "bridge";
 const STARTUP_TIMEOUT_MS = 60_000;
@@ -650,9 +651,10 @@ export class AgyHost implements ProviderSessionState {
 			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
 			return errorOutput("Tool call rejected; no execution occurred.");
 		}
-		if (!isRecord(args)) return errorOutput(describeToolArguments(tool, args));
-		const validation = validateJsonSchemaValue(tool.inputSchema, args);
-		if (!validation.success) return errorOutput(describeToolArguments(tool, args, validation));
+		const normalized = normalizeToolArguments(tool.inputSchema, args).arguments;
+		if (!isRecord(normalized)) return errorOutput(describeToolArguments(tool, normalized));
+		const validation = validateJsonSchemaValue(tool.inputSchema, normalized);
+		if (!validation.success) return errorOutput(describeToolArguments(tool, normalized, validation));
 		const id = `agy_${crypto.randomUUID().replaceAll("-", "")}`;
 		const result = Promise.withResolvers<McpToolOutput>();
 		const pending: PendingCall = {
@@ -662,7 +664,7 @@ export class AgyHost implements ProviderSessionState {
 			expiry: this.#options.schedule(this.#options.holdLimitMs, () => this.#detach(pending)),
 		};
 		this.#pending = pending;
-		step.writer.toolCall({ type: "toolCall", id, name, arguments: args });
+		step.writer.toolCall({ type: "toolCall", id, name, arguments: normalized });
 		step.writer.usage(this.#contextTokens);
 		const digest = transcriptDigest([...step.messages, step.writer.output]);
 		step.writer.finish("toolUse", { type: "antigravityCli", conversationId, digest });
