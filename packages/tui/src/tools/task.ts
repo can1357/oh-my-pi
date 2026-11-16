@@ -2260,10 +2260,8 @@ export interface TaskItem {
 	name?: string;
 	/** Agent type to run this item (e.g. "scout"). Defaults to the spawn policy's default agent. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
-	/** Bundled seance: override for the source session's saved model. Any other agent: one exact per-call model, gated by `task.perCallModel`. */
-	model?: string | string[];
+	/** One exact per-call model, gated by `task.perCallModel`. */
+	model?: string;
 	/** Inline instructions; exactly one of task or steps is required. */
 	task?: string;
 	/** Ordered stages sent instead of `task` (`task.steps`), each once the child delivered the previous (several share a prompt past four). */
@@ -2293,10 +2291,8 @@ export interface TaskParams {
 	name?: string;
 	/** Agent type to spawn (flat form); omitted values resolve from the session spawn policy. */
 	agent?: string;
-	/** Historical source session selected by the bundled consult agent. */
-	sourceSession?: string;
 	/** See {@link TaskItem.model}. */
-	model?: string | string[];
+	model?: string;
 	/** The work (flat form). */
 	task?: string;
 	/** Ordered stages (flat form); see {@link TaskItem.steps}. */

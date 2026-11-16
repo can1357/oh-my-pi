@@ -5,7 +5,9 @@
  * selected change lines), so it renders a patch from HEAD content to that content instead of
  * editing hunks of a worktree diff: no offsets to recount, no context drift.
  */
+import { encodeGitDiffPath } from "../../utils/git-diff-paths";
 import { changedRegions } from "./attribution";
+import type { FileState } from "./draft";
 
 /** Context lines around each change, as `git diff` emits by default. */
 const CONTEXT = 3;
@@ -33,25 +35,23 @@ function hunkRange(start: number, count: number): string {
 
 /**
  * Unified git patch turning `before` into `after` at repo-relative `path`; `null` = file absent.
- * Returns `""` when the contents are equal.
- * @param newFileMode Mode for a created file (`100644` / `100755`).
+ * Returns `""` when content and mode are equal.
  */
-export function formatTextPatch(
-	path: string,
-	before: string | null,
-	after: string | null,
-	newFileMode = "100644",
-): string {
-	if (before === after) return "";
-	const oldLines = patchLines(before);
-	const newLines = patchLines(after);
-	let out = `diff --git a/${path} b/${path}\n`;
-	if (before === null) out += `new file mode ${newFileMode}\n`;
-	if (after === null) out += "deleted file mode 100644\n";
+export function formatTextPatch(path: string, before: FileState | null, after: FileState | null): string {
+	if (before?.text === after?.text && before?.mode === after?.mode) return "";
+	const oldLines = patchLines(before?.text ?? null);
+	const newLines = patchLines(after?.text ?? null);
+	// Git C-quotes names holding quotes, backslashes, or control bytes (a newline included).
+	const oldPath = encodeGitDiffPath(`a/${path}`);
+	const newPath = encodeGitDiffPath(`b/${path}`);
+	let out = `diff --git ${oldPath} ${newPath}\n`;
+	if (!before && after) out += `new file mode ${after.mode}\n`;
+	else if (before && !after) out += `deleted file mode ${before.mode}\n`;
+	else if (before && after && before.mode !== after.mode) out += `old mode ${before.mode}\nnew mode ${after.mode}\n`;
 	const regions = changedRegions(oldLines, newLines);
 	if (regions.length === 0) return out;
-	out += `--- ${before === null ? "/dev/null" : `a/${path}`}\n`;
-	out += `+++ ${after === null ? "/dev/null" : `b/${path}`}\n`;
+	out += `--- ${before === null ? "/dev/null" : oldPath}\n`;
+	out += `+++ ${after === null ? "/dev/null" : newPath}\n`;
 	let first = 0;
 	while (first < regions.length) {
 		let last = first;
