@@ -144,9 +144,11 @@ fn current_tag_advice(actual_file_hash: &str, offer_resend: bool) -> String {
 	}
 }
 
-/// Diagnostic for input whose only content is a section header: no ops to
-/// apply, so it names the file's current tag to put them under. No rows are
-/// shown, so ops on rows the model has not seen still hit the seen-line guard.
+/// Diagnostic for input whose only content is a section header.
+///
+/// With no ops to apply, it names the file's current tag to put them under. No
+/// rows are shown, so ops on rows the model has not seen still hit the
+/// seen-line guard.
 pub fn format_header_only_message(path: &str, actual_file_hash: &str) -> String {
 	format!(
 		"Edit rejected for {path}: no ops follow the header; put them under this file's current \

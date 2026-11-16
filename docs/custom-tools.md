@@ -26,6 +26,7 @@ There are two active integration styles:
    - Unrestricted session bootstrap discovers and loads config/provider/plugin tool modules, then registers them through a generated extension.
    - These functions and the combined `discoverAndLoadCustomTools` helper are also library APIs in `packages/coding-agent/src/extensibility/custom-tools/loader.ts`.
    - Subagents can reuse `preloadedCustomToolPaths` to skip discovery, but factories are rebound to each session's own API.
+   - Discovered tools load per working directory. After `/move` (or resuming a session from another project) the top-level session discovers the destination's tools, binds them to the destination cwd, and suspends the previous directory's; moving back resumes them. Subagents spawned afterwards inherit the destination's paths.
 
 ```text
 Model tool call flow
