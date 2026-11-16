@@ -1,11 +1,11 @@
 /**
- * Pictures an HTML form shows: `<img src>` loaded from a URL, a `data:` URI or
- * a local file, and inline `<svg>` drawings, as bytes plus a MIME type —
- * a raster (`image/png`, `image/jpeg`, `image/gif`, `image/webp`) or
- * `image/svg+xml`.
+ * Pictures shown in the terminal — an `<img src>` of an HTML form or an
+ * assistant reply, loaded from a URL, a `data:` URI or a local file, and
+ * inline `<svg>` drawings — as bytes plus a MIME type: a raster
+ * (`image/png`, `image/jpeg`, `image/gif`, `image/webp`) or `image/svg+xml`.
  *
  * @example
- * const media = await loadFormImage("docs/arch.png", { cwd, signal });
+ * const media = await loadMedia("docs/arch.png", { cwd, signal });
  * media.mime; // "image/png"
  */
 import * as os from "node:os";
@@ -13,19 +13,19 @@ import * as path from "node:path";
 import { parseImageMetadata } from "@oh-my-pi/pi-utils";
 
 /** An image's bytes and MIME type. */
-export interface FormMedia {
+export interface Media {
 	bytes: Uint8Array;
 	mime: string;
 }
 
 /** Where relative paths resolve, and the abort for in-flight loads. */
-export interface FormMediaOptions {
+export interface MediaOptions {
 	cwd: string;
 	signal?: AbortSignal;
 }
 
-/** Largest picture a form loads. */
-export const MAX_FORM_IMAGE_BYTES = 10 * 1024 * 1024;
+/** Largest picture loaded. */
+export const MAX_MEDIA_BYTES = 10 * 1024 * 1024;
 /** Longest a remote picture may take to arrive. */
 const FETCH_TIMEOUT_MS = 10_000;
 const SVG_MIME = "image/svg+xml";
@@ -35,12 +35,12 @@ const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
  * Load an `<img src>`: an `http(s):` URL, a `data:` URI (base64 or URL-encoded),
  * a `file:` URL, or a path (`~/`-relative, absolute, or relative to `cwd`).
  *
- * @throws {Error} the source cannot be read, exceeds {@link MAX_FORM_IMAGE_BYTES},
+ * @throws {Error} the source cannot be read, exceeds {@link MAX_MEDIA_BYTES},
  * times out, or is not a PNG, JPEG, GIF, WebP or SVG image.
  */
-export async function loadFormImage(src: string, options: FormMediaOptions): Promise<FormMedia> {
+export async function loadMedia(src: string, options: MediaOptions): Promise<Media> {
 	const bytes = await readSource(src, options);
-	if (bytes.byteLength > MAX_FORM_IMAGE_BYTES) throw new Error(`larger than ${MAX_FORM_IMAGE_BYTES >> 20} MiB`);
+	if (bytes.byteLength > MAX_MEDIA_BYTES) throw new Error(`larger than ${MAX_MEDIA_BYTES >> 20} MiB`);
 	const raster = parseImageMetadata(bytes.subarray(0, 64));
 	if (raster) return { bytes, mime: raster.mimeType };
 	const text = new TextDecoder().decode(bytes.subarray(0, 4096));
@@ -53,7 +53,7 @@ export async function loadFormImage(src: string, options: FormMediaOptions): Pro
  * drawing sized only by its `viewBox` given that size as `width`/`height`, since
  * renderers drop a drawing without one.
  */
-export function svgMedia(markup: string): FormMedia {
+export function svgMedia(markup: string): Media {
 	const open = /<svg\b[^>]*>/i.exec(markup)?.[0];
 	if (!open) return { bytes: new TextEncoder().encode(markup), mime: SVG_MIME };
 	const added: string[] = [];
@@ -67,11 +67,11 @@ export function svgMedia(markup: string): FormMedia {
 }
 
 /** Whether `media` is an SVG drawing rather than a raster. */
-export function isSvgMedia(media: FormMedia): boolean {
+export function isSvgMedia(media: Media): boolean {
 	return media.mime === SVG_MIME;
 }
 
-async function readSource(src: string, options: FormMediaOptions): Promise<Uint8Array> {
+async function readSource(src: string, options: MediaOptions): Promise<Uint8Array> {
 	if (/^data:/i.test(src)) return decodeDataUri(src);
 	if (/^https?:\/\//i.test(src)) {
 		const signal = options.signal
@@ -80,16 +80,17 @@ async function readSource(src: string, options: FormMediaOptions): Promise<Uint8
 		const response = await fetch(src, { signal });
 		if (!response.ok) throw new Error(`HTTP ${response.status}`);
 		const declared = Number(response.headers.get("content-length") ?? 0);
-		if (declared > MAX_FORM_IMAGE_BYTES) throw new Error(`larger than ${MAX_FORM_IMAGE_BYTES >> 20} MiB`);
+		if (declared > MAX_MEDIA_BYTES) throw new Error(`larger than ${MAX_MEDIA_BYTES >> 20} MiB`);
 		return new Uint8Array(await response.arrayBuffer());
 	}
-	const file = /^file:/i.test(src) ? Bun.fileURLToPath(src) : resolvePath(src, options.cwd);
-	const handle = Bun.file(file);
-	if (handle.size > MAX_FORM_IMAGE_BYTES) throw new Error(`larger than ${MAX_FORM_IMAGE_BYTES >> 20} MiB`);
+	const handle = Bun.file(mediaPath(src, options.cwd));
+	if (handle.size > MAX_MEDIA_BYTES) throw new Error(`larger than ${MAX_MEDIA_BYTES >> 20} MiB`);
 	return new Uint8Array(await handle.arrayBuffer());
 }
 
-function resolvePath(src: string, cwd: string): string {
+/** The local file `src` names: a `file:` URL, or a path (`~/`-relative, absolute, or relative to `cwd`). */
+export function mediaPath(src: string, cwd: string): string {
+	if (/^file:/i.test(src)) return Bun.fileURLToPath(src);
 	if (src === "~" || src.startsWith("~/")) return path.join(os.homedir(), src.slice(1));
 	return path.resolve(cwd, src);
 }

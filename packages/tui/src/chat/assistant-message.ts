@@ -36,10 +36,14 @@ import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking }
 import { resolveAssistantErrorPresentation } from "./transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
 import { formatErrorBlock } from "../chrome/error-block";
+import { sanitizeStatusText } from "../chrome/shared";
+import { fileLinkSpan, urlLinkSpan } from "../render/hyperlink";
 import { type ServedModelMismatch, ServedModelMarkerComponent } from "./served-model-marker";
 import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome/transcript-container";
 import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
+import { embedHost, embedPageUrl, loadEmbed } from "./embed-host";
+import { type Embed, type EmbedSegment, hasEmbed, splitEmbeds } from "./embed-source";
 import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
@@ -65,7 +69,7 @@ function thoughtLabel(clock: { start: number; end?: number } | undefined): strin
 }
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
-/** Renders one text or thinking block: Markdown, or {@link FigureMarkdown} for text holding a ```svg fence. */
+/** Renders one text or thinking block: Markdown, or {@link FigureMarkdown} for text holding a ```svg fence, an embed or a chartable table. */
 type ProseBlock = Markdown | FigureMarkdown;
 /** A streamed block the fast path updates in place. */
 interface FastPathItem {
@@ -430,6 +434,9 @@ export class AssistantMessageComponent extends Container {
 	readonly #nativeImages = new NativeImageCache();
 	/** Smart table chart picks a TSP describe is waiting on. */
 	readonly #chartPicks = new Set<Promise<void>>();
+	/** Page screenshots of `<iframe>`s for a TSP describe, by `src`: base64 PNG, null when it cannot be captured, absent while on its way. */
+	readonly #pageShots = new Map<string, string | null>();
+	readonly #pageShotsAwaited = new Set<string>();
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
@@ -1006,22 +1013,39 @@ export class AssistantMessageComponent extends Container {
 						this.#nativeLinkSources.set(text, resolved);
 						return resolved;
 					};
-					if (!this.#showImages || !this.#showTableCharts || !hasChartTable(source)) {
-						children.push(markdown(`t${index}`, `t${index}`, linked(source, streaming), streaming));
-						continue;
-					}
-					// A chart follows its table as an ```svg figure the terminal colors; the prose splits around it.
-					const segments = splitTableCharts(source, streaming);
-					segments.forEach((segment, part) => {
-						const slot = part === 0 ? `t${index}` : `t${index}.${part}`;
-						if (segment.kind === "markdown") {
-							const live = streaming && part === segments.length - 1;
-							children.push(markdown(slot, slot, linked(segment.text.trim(), live), live));
+					// The terminal draws an `<img>` itself but shows an `<iframe>` as source: the
+					// prose splits around each one, which becomes its page's screenshot and a link.
+					const runs: EmbedSegment[] =
+						embedHost() && hasEmbed(source, { iframesOnly: true })
+							? splitEmbeds(source, { streaming, iframesOnly: true })
+							: [{ kind: "markdown", text: source }];
+					let parts = 0;
+					const nextSlot = (): string => (parts++ === 0 ? `t${index}` : `t${index}.${parts - 1}`);
+					runs.forEach((run, at) => {
+						if (run.kind === "embed") {
+							children.push(...this.#describePage(run.embed, nextSlot()));
 							return;
 						}
-						const chart = lookupTableChart(segment.table);
-						if (chart instanceof Promise) this.#awaitChart(chart);
-						else if (chart) children.push(markdown(slot, slot, chartFence(chart), false));
+						const text = run.text.trim();
+						const tail = streaming && at === runs.length - 1;
+						if (!this.#showImages || !this.#showTableCharts || !hasChartTable(text)) {
+							const slot = nextSlot();
+							children.push(markdown(slot, slot, linked(text, tail), tail));
+							return;
+						}
+						// A chart follows its table as an ```svg figure the terminal colors; the prose splits around it.
+						const segments = splitTableCharts(text, tail);
+						segments.forEach((segment, part) => {
+							const slot = nextSlot();
+							if (segment.kind === "markdown") {
+								const live = tail && part === segments.length - 1;
+								children.push(markdown(slot, slot, linked(segment.text.trim(), live), live));
+								return;
+							}
+							const chart = lookupTableChart(segment.table);
+							if (chart instanceof Promise) this.#awaitChart(chart);
+							else if (chart) children.push(markdown(slot, slot, chartFence(chart), false));
+						});
 					});
 				} else if (content.type === "thinking") {
 					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
@@ -1544,19 +1568,61 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Whether `text` holds a ```svg fence this terminal draws as a figure, or a
-	 * table it draws a chart under. Native (TSP) terminals receive the fence
-	 * verbatim in the `md` node and draw it themselves, and get charts as image
-	 * nodes from {@link describe}; image-less terminals keep fences as code and
-	 * tables as tables.
+	 * Whether `text` holds a ```svg fence this terminal draws as a figure, a
+	 * table it draws a chart under, or an `<img>`/`<iframe>` line. Native (TSP)
+	 * terminals receive fences and `<img>` tags verbatim in the `md` node and
+	 * draw them themselves, and get charts and page screenshots as image nodes
+	 * from {@link describe}; image-less terminals keep fences as code and
+	 * tables as tables, and show an embed as a one-row note.
 	 */
 	#liftsFigures(text: string): boolean {
+		if (isNativeRendering()) return false;
+		if (embedHost() && hasEmbed(text)) return true;
 		return (
 			this.#showImages &&
 			TERMINAL.imageProtocol !== null &&
-			!isNativeRendering() &&
 			((svgFigureRendering() && hasSvgFence(text)) || (this.#showTableCharts && hasChartTable(text)))
 		);
+	}
+
+	/**
+	 * An `<iframe>` for a native terminal: its page's screenshot, once captured,
+	 * over a row naming the page and linking to it.
+	 */
+	#describePage(embed: Embed, slot: string): NativeNode[] {
+		const nodes: NativeNode[] = [];
+		let label = `▣ ${sanitizeStatusText(embed.label || embed.src)}`;
+		if (this.#showImages) {
+			const shot = this.#pageShots.get(embed.src);
+			if (shot) nodes.push(this.#nativeImages.get(slot, shot, "image/png"));
+			else if (shot === undefined) {
+				label += " — capturing…";
+				this.#awaitPageShot(embed);
+			}
+		}
+		const url = embedPageUrl(embed.src, embedHost()?.cwd() ?? process.cwd());
+		const spans = [span(label, "muted")];
+		if (url?.startsWith("file:")) spans.push(span(" "), fileLinkSpan(Bun.fileURLToPath(url), "Visit", "link"));
+		else if (url) spans.push(span(" "), urlLinkSpan(url, "Visit"));
+		nodes.push(node("text", { spans, truncate: "end" }, undefined, `${slot}.visit`));
+		return nodes;
+	}
+
+	/** Re-describe once the screenshot of `embed`'s page lands, or cannot. */
+	#awaitPageShot(embed: Embed): void {
+		if (this.#pageShotsAwaited.has(embed.src)) return;
+		this.#pageShotsAwaited.add(embed.src);
+		void loadEmbed(embed)
+			.then(
+				media => media.bytes.toBase64(),
+				() => null,
+			)
+			.then(shot => {
+				this.#pageShotsAwaited.delete(embed.src);
+				this.#pageShots.set(embed.src, shot);
+				this.#blockVersion++;
+				this.#onImageUpdate?.();
+			});
 	}
 
 	/** Re-describe once a smart table chart pick lands. */
@@ -1585,6 +1651,7 @@ export class AssistantMessageComponent extends Container {
 				markdown: value => this.#createMarkdown("text", value),
 				tableLocks: this.#lockScope(index),
 				charts: this.#showTableCharts,
+				showImages: this.#showImages,
 				budget: this.#imageBudget,
 				onChange: () => {
 					this.#blockVersion++;
@@ -1741,6 +1808,7 @@ export class AssistantMessageComponent extends Container {
 	setImagesVisible(visible: boolean): void {
 		if (this.#showImages === visible) return;
 		this.#showImages = visible;
+		this.#rebuildFigureBlocks();
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
@@ -1750,12 +1818,16 @@ export class AssistantMessageComponent extends Container {
 	setTableChartsVisible(visible: boolean): void {
 		if (this.#showTableCharts === visible) return;
 		this.#showTableCharts = visible;
-		// Figure blocks bake the switch in; rebuild them rather than reuse.
-		for (const block of this.#figureBlocks.values()) block.dispose();
-		this.#figureBlocks.clear();
+		this.#rebuildFigureBlocks();
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
+	}
+
+	/** Figure blocks bake the image and chart switches in: drop them, so the next update builds them anew. */
+	#rebuildFigureBlocks(): void {
+		for (const block of this.#figureBlocks.values()) block.dispose();
+		this.#figureBlocks.clear();
 	}
 
 	/** Toggle only images produced by tool results; assistant-native images remain governed by setImagesVisible. */
