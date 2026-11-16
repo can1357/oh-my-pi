@@ -278,14 +278,14 @@ interface SavedThinkingLevel {
  *
  * A retry-fallback hop is ephemeral: the level it applied (a chain entry's
  * `:level`, written on the following entry) must not outlive the hop. When the
- * path still ends on a hop, the level in effect before the first hop is
- * restored. A non-fallback model switch supersedes that snapshot: it keeps the
- * effort then in effect and writes no thinking entry when the effort does not
- * change, so that effort is what a later hop restores. When no thinking entry
- * existed before the first hop and no later switch adopted one, hop entries are
- * ignored and the configured default is used. A level chosen after a hop stays
- * while it is the newest entry; a further hop restores it only when nothing
- * preceded the first hop.
+ * path still ends on a hop, restore the level in effect before the first hop.
+ * An explicit choice recorded during that fallback (`retryFallback: false`)
+ * replaces the snapshot, so a later hop restores the choice. A non-fallback
+ * model switch supersedes the snapshot: it keeps the effort then in effect and
+ * writes no thinking entry when the effort does not change, so that effort is
+ * what a later hop restores. When no thinking entry existed before the first hop
+ * and no later switch or explicit choice adopted one, hop entries are ignored
+ * and the configured default is used.
  */
 export function resolveSessionThinking(path: readonly SessionEntry[]): {
 	thinkingLevel: string | undefined;
@@ -305,7 +305,12 @@ export function resolveSessionThinking(path: readonly SessionEntry[]): {
 			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
 			thinkingFromFallbackHop =
 				entry.retryFallback ?? (previous?.type === "model_change" && previous.resolvedModelIsFallback === true);
-			if (!thinkingFromFallbackHop) saved = { thinkingLevel, configured: configuredThinkingLevel };
+			if (!thinkingFromFallbackHop) {
+				saved = { thinkingLevel, configured: configuredThinkingLevel };
+				// An explicit choice during a fallback replaces what a later hop restores.
+				// Legacy entries omit the flag and keep the snapshot from the first hop.
+				if (preFallbackThinking && entry.retryFallback === false) preFallbackThinking = saved;
+			}
 		} else if (entry.type === "model_change") {
 			if (entry.resolvedModelIsFallback === true) {
 				if (!preFallbackThinking && saved) preFallbackThinking = saved;

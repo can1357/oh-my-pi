@@ -582,4 +582,60 @@ describe("fallback-only thinking entries", () => {
 			await session.dispose();
 		}
 	});
+
+	test("keeps an explicit pick on a fallback when a later hop follows a saved level", async () => {
+		freshDir();
+		const sessionManager = SessionManager.inMemory(tempDir);
+		sessionManager.appendModelChange(PRIMARY);
+		sessionManager.appendThinkingLevelChange(Effort.Low, Effort.Low);
+		sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		sessionManager.appendThinkingLevelChange(Effort.High, Effort.High, { retryFallback: true });
+		// High is already in effect, but the receipt marks it as a saved choice.
+		sessionManager.appendThinkingLevelChange(Effort.High, Effort.High, { retryFallback: false });
+		sessionManager.appendModelChange("openai/gpt-4o-mini", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		sessionManager.appendThinkingLevelChange(Effort.XHigh, Effort.XHigh, { retryFallback: true });
+		sessionManager.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		const context = sessionManager.buildSessionContext();
+		expect(context.thinkingLevel).toBe(Effort.High);
+		expect(context.configuredThinkingLevel).toBe(Effort.High);
+
+		const { session } = await createAgentSession(sessionOptions(sessionManager));
+		try {
+			expect(session.configuredThinkingLevel()).toBe(Effort.High);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("switching sessions uses the allowed default model's effort when an earlier role model is turned off", async () => {
+		freshDir();
+		const allowedModel = "anthropic/claude-sonnet-4-6";
+		const roleSettings = () =>
+			Settings.isolated({
+				defaultThinkingLevel: Effort.Medium,
+				modelRoles: { default: `${PRIMARY}:high,${allowedModel}:low` },
+				enabledModels: [allowedModel],
+			});
+		const target = await writeTranscript(fallbackOnlyTranscript());
+		const openedManager = await SessionManager.open(target, path.join(tempDir, "open-allowed-role"));
+		const { session: opened } = await createAgentSession(sessionOptions(openedManager, roleSettings()));
+		try {
+			expect(opened.model?.id).toBe("claude-sonnet-4-5");
+			expect(opened.configuredThinkingLevel()).toBe(Effort.Low);
+		} finally {
+			await opened.dispose();
+		}
+
+		const { session } = await createAgentSession(
+			sessionOptions(SessionManager.create(tempDir, path.join(tempDir, "active-allowed-role")), roleSettings()),
+		);
+		try {
+			session.setThinkingLevel(Effort.Medium);
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
 });

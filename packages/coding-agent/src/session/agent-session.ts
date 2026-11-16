@@ -1010,7 +1010,11 @@ function isEvalActivity(message: AgentMessage): boolean {
 	);
 }
 
-/** Explicit thinking suffix on `modelRoles.default`, if that role value carries one. */
+/**
+ * Explicit thinking suffix on `modelRoles.default`, if that role value carries one.
+ * `availableModels` is the candidate set. Callers pass the session's allowed models
+ * so an `enabledModels` filter hides the same earlier entries startup skips.
+ */
 function explicitDefaultRoleThinking(
 	settings: Settings,
 	availableModels: Model[],
@@ -14331,9 +14335,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					: thinkingLevelWithoutSavedChoice(
 							targetModel ?? this.model,
 							explicitModel ? undefined : restoredSelectorLevel,
-							explicitModel
-								? undefined
-								: explicitDefaultRoleThinking(this.settings, this.#modelRegistry.getAvailable()),
+							explicitModel ? undefined : explicitDefaultRoleThinking(this.settings, this.getAvailableModels()),
 							defaultThinkingLevel,
 						);
 			let persistRestoredThinking = false;
