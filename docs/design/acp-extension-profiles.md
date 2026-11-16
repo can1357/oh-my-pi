@@ -820,6 +820,9 @@ After P8, an archive line such as `sv_delegated_devin_program /opt/devin` (`crat
 
 Each question carries a recommended answer. They go to the council.
 
+
+**Ratification status (2026-11-16):** the council's unanimous answers on Q1, Q3, Q4, Q6–Q9, Q13 and Q18, plus cross-cutting VO and RO2, remain council recommendations only; the owner ratification checkbox was not selected. They are not owner decisions.
+
 ### Q1. Vehicle for the launch-profile manifest
 
 Options: a static content kind beside `agents`, `lsp-servers` and `dap-adapters`; an executable declaration kind with a Python module; or a new top-level table in `omp.toml` (§1.1).
@@ -831,6 +834,9 @@ Options: a static content kind beside `agents`, `lsp-servers` and `dap-adapters`
 ADR 0043 names `envd/src/codex_app_server/*` (`docs/adr/0043-native-cli-integration.md:163`). The vendor-name prohibition names `omp-driver` (`docs/adr/0047-agent-build-execution-model.md:131`). The driver holds the Codex convar, its default program and the executor wiring in `crates/driver/src/delegated_host.rs`, 15 lines [scan].
 
 **Recommended:** yes, as an expiring `exception` entry tied to the same exit conditions (`docs/adr/0043-native-cli-integration.md:166-168`). When either exit is evaluated, move the glue behind a neutral registration function inside the exception module so the driver carries no vendor name.
+
+
+**Owner decision (2026-11-16, as corrected):** the exception record must state the convar default, the unconditional `ExecutorRegistry::from_ctx` Codex registration, and that removing the exception requires a code change to the unconditional registry initialization. Tie expiry to the existing ADR 0043 exit conditions; reaching an exit alone does not remove always-on code.
 
 ### Q3. Vehicle for the conformance check
 
@@ -849,6 +855,9 @@ Claude plugin and hook readers, session import and the OpenCode MCP config reade
 Criteria are in §3.6. A related question is where shims live: Python shims can ship inside an extension wheel, while Node and `.par` bridges are never installed by OMP (`docs/adr/0043-native-cli-integration.md:139-140`).
 
 **Recommended:** shims first, with the three criteria of §3.6 deciding any native executor. Python shims may ship in the wheel. Node and `.par` bridges stay operator-installed, and a missing one is reported as unavailable.
+
+
+**Owner decision (2026-11-16, as corrected):** keep shims first. Before any native MCP or A2A executor is selected for §3.6 criterion 2, define a measurable benchmark threshold and harness; “measurably costs” without either is not an acceptance criterion.
 
 ### Q6. Approval key: reuse the plugin-command domain or add one?
 
@@ -870,11 +879,12 @@ This question is only about a second, operator-side argument list. The larger qu
 
 **Recommended:** no. The ledger in §4.4 shows every behavior of the three profiles fits data or is a core rule. Add a hook only when a real profile fails that ledger.
 
-**Recommended:** no. The explicit convar stays the only enable switch (`crates/driver/src/delegated_acp.rs:10-11`). `[executable].names` only feeds doctor and enable hints.
-
-**Owner decision (2026-11-16):** resolve bare program name once at approval; hash that file and always start exactly it; re-hash before each start. Existing setups work after one re-approval.
+### Q10. May a profile enable itself by searching `$PATH`?
 
 **Recommended:** no. The explicit convar stays the only enable switch (`crates/driver/src/delegated_acp.rs:10-11`). `[executable].names` only feeds doctor and enable hints.
+
+
+**Owner decision (2026-11-16):** resolve a bare program name once at approval; hash that file and always start exactly it; re-hash before each start. Existing setups work after one re-approval.
 
 ### Q11. Registration order of extension-sourced executors
 
@@ -882,47 +892,55 @@ The built-ins register in the fixed order `[DSH_ID, DEVIN_ID, GROK_ID]` (`crates
 
 **Recommended:** order by extension id, then profile id, and replace the fixed-order assertion with a deterministic-order test that asserts the set of ids. Nothing in this code depends on the order beyond that test.
 
+
+**Owner decision (2026-11-16, as corrected):** use set-plus-uniqueness assertions, not a fixed vector. The display-caller audit found only a test reading executors in order; preserve deterministic registration and require callers to sort when display order matters.
+
 ### Q12. Who wires the registry into production, and does P8 wait?
 
 No production code builds the registry at the pinned HEAD, UNVERIFIED(U1).
 
 **Recommended:** track the wiring as a separate ADR 0043 task. P1 to P7 do not depend on it. **P8 waits for it** and for Q16: P8 makes the approval mandatory (§1.5), and with no production caller of the registry and no approval command nothing could be enabled. P9's messages also need the host, so P9 waits too.
 
+
+**Owner decision (2026-11-16, as corrected):** U1 is false: `ExecutorRegistry::from_ctx` already exists and is called by `crates/driver/src/adw/production.rs:274`. P1–P7 preserve behavior for this caller. Track the changed registration behavior separately; P8 still waits on approval (Q16) and the Q18 gate.
+
 ### Q13. Add an operator-only user file for profiles?
 
-**Recommended:** no `omp_api` bump if the host's kind vocabulary is not versioned by API level; if it is, bump it in P1 and say so in the manifest docs. Let a content-only extension omit `[requires].python` when its `entry` is never imported.
-
-The kind is also a new core manifest kind, so it extends the T1 surface of ADR 0049 (§1.1). **Recommended:** record it as an amendment of ADR 0049 (a vendor-neutral contract, `delegated-agents`, in T1) alongside this design's ADR 0043 amendment, and let the owner confirm that it meets the T1 admission test.
-
-**Owner decision (2026-11-16):** delegated-agents is host manifest vocabulary in crates/ext; vendor profile rows stay in T2 extensions; bump omp_api.
+**Recommended:** not in v1. If operators later need private profiles without packaging an extension, reuse the same schema and the same approval gate, as the research note suggests for per-tool definitions (`docs/research/format-registry-options.md:439`).
 
 ### Q14. Does a new content kind need an `omp_api` change, do content-only extensions need Python, and is the kind an ADR 0049 T1 amendment?
 
-**Recommended:** hash the canonical path at approval, re-hash immediately before spawn, and spawn by that same path. Accept the narrowed window for v1: it needs an attacker who can replace the program file in between, UNVERIFIED(U9).
-
-**Owner decision (2026-11-16):** resolve bare program name once at approval; hash that file and always start exactly it; re-hash before each start. Existing setups work after one re-approval.
+Content rows have no `api` field (`docs/py/14-deploy.md:719-721`), UNVERIFIED(U5), and every existing manifest requires Python 3.14 (`extensions/forge/omp.toml:30-31`), UNVERIFIED(U12).
 
 **Recommended:** no `omp_api` bump if the host's kind vocabulary is not versioned by API level; if it is, bump it in P1 and say so in the manifest docs. Let a content-only extension omit `[requires].python` when its `entry` is never imported.
 
 The kind is also a new core manifest kind, so it extends the T1 surface of ADR 0049 (§1.1). **Recommended:** record it as an amendment of ADR 0049 (a vendor-neutral contract, `delegated-agents`, in T1) alongside this design's ADR 0043 amendment, and let the owner confirm that it meets the T1 admission test.
 
-See §6.4.
 
-**Recommended:** keep unknown `sv_delegated_*` lines aside and re-apply them after profiles register, warning once for lines that still have no profile, UNVERIFIED(U6).
+**Owner decision (2026-11-16):** `delegated-agents` is host manifest vocabulary in `crates/ext`; vendor profile rows stay in T2 extensions; bump `omp_api`.
 
-**Owner decision (2026-11-16):** hold skipped `sv_delegated_*` lines, re-apply after profiles register, start program only if approval digest matches. The behaviour change is "skipped, then re-applied", not "hard error to warning".
+### Q15. The gap between hashing the program and spawning it
 
 **Recommended:** hash the canonical path at approval, re-hash immediately before spawn, and spawn by that same path. Accept the narrowed window for v1: it needs an attacker who can replace the program file in between, UNVERIFIED(U9).
+
+
+**Owner decision (2026-11-16):** resolve a bare program name once at approval; hash that file and always start exactly it; re-hash before each start. Existing setups work after one re-approval.
 
 ### Q16. Which command prompts for the approval?
 
 **Recommended:** a subcommand of the existing extension CLI that prints every input of the digest and asks once, with no network access. The surface is not designed here, UNVERIFIED(U11). **P8 is gated on this question** (§5.2): P4's `approval_requires_operator_origin` test uses a test-only writer, and no production writer exists until this is answered.
+
+
+**Owner decision (2026-11-16, as corrected):** the approval command is a subcommand of the existing `omp ext` CLI (not a separate `omp-ext` command). It prints and approves the complete digest input once, with no network access, and must not add or edit profile data or otherwise grant capabilities.
 
 ### Q17. How do archive configs survive the migration?
 
 See §6.4.
 
 **Recommended:** keep unknown `sv_delegated_*` lines aside and re-apply them after profiles register, warning once for lines that still have no profile, UNVERIFIED(U6).
+
+
+**Owner decision (2026-11-16):** hold skipped `sv_delegated_*` lines, re-apply them after profiles register, and start a program only if its approval digest still matches. The behavior change is "skipped, then re-applied", not "hard error to warning".
 
 ### Q18. OPEN OWNER QUESTION: may operator-approved extension data replace the operator-controlled table for arguments?
 
