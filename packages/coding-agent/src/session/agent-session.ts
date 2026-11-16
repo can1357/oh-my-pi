@@ -2347,6 +2347,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
+				// An explicit selection, including same-model reselection, takes ownership when it publishes. The reset
+				// publishes before its first await, so releasing first lets an in-flight prewalk switch see the newer
+				// selection without a window where the new model is live but the handoff still owns the session.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
 				await this.#setModelWithProviderSessionReset(model);
 			},
@@ -12692,8 +12695,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		this.#prewalk.releaseHandoff();
-		return this.#models.cycleThinkingLevel();
+		// Ownership transfers only when a level is selected; the level is applied synchronously, before any
+		// in-flight prewalk switch can resume and read the epoch.
+		const level = this.#models.cycleThinkingLevel();
+		if (level !== undefined) this.#prewalk.releaseHandoff();
+		return level;
 	}
 
 	/** Lists all selectable effort selectors for the active model. */

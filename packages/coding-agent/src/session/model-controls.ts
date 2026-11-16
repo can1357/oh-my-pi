@@ -373,17 +373,16 @@ export class ModelControls {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
-		// Compare against the same fitted snapshot the agent adopts, without losing routing identity.
-		const targetModel = this.#host.modelRegistry.fitContextWindow(
-			await this.#host.modelRegistry.refreshSelectedModelMetadata(model),
-			this.#host.settings,
-		);
+		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 		if (isCurrent?.() === false) return false;
 
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
-		if (this.#model === targetModel) {
+		// Identity, not object equality: the agent's resolver and metadata rebinds swap in refitted rows of the
+		// same model. Only a different model means another selection replaced this one during reconciliation.
+		const landed = modelsAreEqual(this.#model, targetModel);
+		if (landed) {
 			this.#host.sessionManager.appendModelChange(
 				`${targetModel.provider}/${targetModel.id}`,
 				options?.prewalk
@@ -396,7 +395,7 @@ export class ModelControls {
 		}
 
 		// A user selection during the switch owns effort, even on the same model.
-		if (isCurrent?.() === false || this.#model !== targetModel) {
+		if (isCurrent?.() === false || !landed) {
 			this.#reapplyThinkingLevel();
 		} else if (thinkingLevel !== undefined) {
 			this.setThinkingLevel(thinkingLevel);
@@ -404,7 +403,7 @@ export class ModelControls {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
-		return isCurrent?.() !== false && this.#model === targetModel;
+		return isCurrent?.() !== false && landed;
 	}
 
 	/**

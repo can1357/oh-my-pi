@@ -534,6 +534,7 @@ describe("AgentSession auto-prewalk", () => {
 			expect(f.session.getPrewalkState()).toBeUndefined();
 			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
 			expect(f.notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+			expect(f.notices.filter(message => message.startsWith("Prewalk: cancelled the switch"))).toHaveLength(1);
 			expect(f.session.sessionManager.getSessionLocalModelChange()?.role).not.toBe("prewalk");
 			await f.session.prompt("task two");
 			expect(f.requested.at(-1)).toBe(manual.id);
@@ -590,8 +591,10 @@ describe("AgentSession auto-prewalk", () => {
 			await f.session.prompt(TASK);
 
 			expect(f.session.configuredThinkingLevel()).toBe(Effort.Medium);
-			expect(f.nudges.flat()).not.toContain("prewalk-checklist");
-			expect(f.notices.some(message => message.startsWith("Prewalk: switched"))).toBe(false);
+			// The target landed, so the agent gets the checklist, but the notice must not claim a cancellation.
+			expect(f.nudges.flat()).toContain("prewalk-checklist");
+			expect(f.notices.some(message => message.startsWith("Prewalk: cancelled"))).toBe(false);
+			expect(f.notices.filter(message => message.startsWith("Prewalk: switched"))).toHaveLength(1);
 			await f.session.prompt("task two");
 			expect(f.requested.at(-1)).toBe(f.target.id);
 			expect(f.efforts.at(-1)).toBe(Effort.Medium);

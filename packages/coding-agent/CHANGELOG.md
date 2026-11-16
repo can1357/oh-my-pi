@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed prewalk handoffs overriding explicit model or effort choices and failing to restore the planning model after auto-prewalk is turned off ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed prewalk handoffs overriding model or effort choices made mid-switch, and auto handoffs not returning to the planning model after `prewalk.auto` changed or `/prewalk off` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 
 ## [18.20.1] - 2026-11-14
 
