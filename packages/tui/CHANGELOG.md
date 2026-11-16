@@ -6,6 +6,11 @@
 
 - `SettingsRuntimeContext.runtimeOptions` supplies runtime submenu choices for settings without built-in ones; those rows show the chosen option's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
+### Fixed
+
+- Fixed the model hub offering models a role can never use (such as image or speech models for Default) when adding or replacing that role's fallback ([#19371](https://github.com/can1357/oh-my-pi/pull/19371) by [@Xytronix](https://github.com/Xytronix))
+- Fixed spelling assistance (macOS typo marks, autocorrect and replacements) and word completion acting on `!` shell and `$` Python drafts ([#12474](https://github.com/can1357/oh-my-pi/pull/12474) by [@aleister1102](https://github.com/aleister1102))
+
 ## [18.20.1] - 2026-11-14
 
 ### Added

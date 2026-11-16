@@ -160,6 +160,7 @@ import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly"
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
+	cfgTaskAgentPrewalkAuto,
 	cfgTaskMaxEffort,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
@@ -177,7 +178,10 @@ import {
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
+	cfgPrewalkAutoTarget,
 } from "../session/settings";
+import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
+import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
@@ -1435,6 +1439,35 @@ interface SubagentRunMonitor {
  */
 function isAsyncResultInjection(message: AgentMessage | undefined): boolean {
 	return message?.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE;
+}
+
+/**
+ * Judges one assignment for `task.agentPrewalkAuto`. False on a non-arming or
+ * failed judgment: the spawn then runs without prewalk. An abort still throws.
+ */
+async function judgeSubagentAutoPrewalk(
+	request: string,
+	agentName: string,
+	deps: NativeJudgmentDeps,
+): Promise<boolean> {
+	let decision: AutoPrewalkDecision | undefined;
+	try {
+		decision = await classifyAutoPrewalk({ request, history: [] }, deps);
+	} catch (error) {
+		if (deps.signal?.aborted) throw error;
+		logger.debug("Subagent auto-prewalk judgment failed; skipping prewalk", {
+			agent: agentName,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return false;
+	}
+	if (decision?.arm) return true;
+	logger.debug("Subagent auto-prewalk judgment did not arm; skipping prewalk", {
+		agent: agentName,
+		route: decision?.route,
+		prewalkProbability: decision?.probabilities.prewalk,
+	});
+	return false;
 }
 
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
@@ -5000,46 +5033,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
-			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
-			// `task.agentPrewalk` settings override hands the subagent off to a
-			// fast/cheap target at its first edit/write — the same mechanism as the
-			// session-level --prewalk. The bundled generic `task` agent has no
-			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn. A per-call
-			// worker never switches models, so it never prewalks.
-			const perCallModelGrants = options.perCallModelGrants;
-			let prewalk: Prewalk | undefined;
-			const prewalkPattern = perCallModelGrants
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
-			if (prewalkPattern) {
-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
-					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-						warning: resolvedPrewalk.warning,
-					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
-					// Same model AND same effective thinking level: switching would only
-					// inject the plan/checklist nudges for no gain — skip. An effort-only
-					// delta on the same model still arms (it is a real cheapening hand-off).
-					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-					});
-				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
-				}
-			}
-
-			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
-			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -5063,6 +5056,76 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							conversationId: undefined,
 						}
 					: undefined;
+
+			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
+			// `task.agentPrewalk` settings override hands the subagent off to a
+			// fast/cheap target at its first edit/write — the same mechanism as the
+			// session-level --prewalk. The bundled generic `task` agent has no
+			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
+			// Resolution failures skip prewalk instead of failing the spawn. A per-call
+			// worker never switches models, so it never prewalks.
+			// `task.agentPrewalkAuto` (same "on"/"off"/pattern grammar; "on" targets
+			// `prewalk.autoTarget`) asks the judge per assignment when nothing arms
+			// unconditionally. The judgment runs only after the target is known to be
+			// usable; a non-arming or failed judgment leaves the spawn without prewalk.
+			const perCallModelGrants = options.perCallModelGrants;
+			let prewalk: Prewalk | undefined;
+			const judgmentUsage: JudgmentUsage[] = [];
+			const unconditionalPattern = perCallModelGrants
+				? undefined
+				: resolveAgentPrewalkPattern({
+						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+					});
+			const autoEntry =
+				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
+					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
+					: undefined;
+			const autoPattern = autoEntry
+				? resolveAgentPrewalkPattern({
+						settingsOverride: autoEntry,
+						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+					})
+				: undefined;
+			const prewalkPattern = unconditionalPattern ?? autoPattern;
+			if (prewalkPattern) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
+				const target = resolvedPrewalk.model;
+				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+						warning: resolvedPrewalk.warning,
+					});
+				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
+					// Same model AND same effective thinking level: switching would only
+					// inject the plan/checklist nudges for no gain — skip. An effort-only
+					// delta on the same model still arms (it is a real cheapening hand-off).
+					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+					});
+				} else {
+					const armed =
+						unconditionalPattern !== undefined ||
+						(await awaitAbortable(
+							judgeSubagentAutoPrewalk(assignment?.trim() || task, agent.name, {
+								settings,
+								registry: modelRegistry,
+								sessionModel: model,
+								sessionId: id,
+								signal: abortSignal,
+								onUsage: usage => judgmentUsage.push(usage),
+								telemetry: subagentTelemetry,
+							}),
+						));
+					if (armed) prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+				}
+			}
+
+			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
 			if (options.parentTelemetry && subagentAgentIdentity) {
 				const parentTelemetryHandle = resolveTelemetry(
@@ -5242,6 +5305,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(model)
 			) {
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
+			}
+			// Bill the auto-prewalk judgment to the child session it decided for, only now:
+			// an earlier entry would make the SDK treat this fresh session as resumed and
+			// skip persisting its starting model, effort and service tier.
+			const journalJudgment = journalJudgmentUsage(sessionManager);
+			if (journalJudgment) {
+				for (const usage of judgmentUsage) journalJudgment(usage);
 			}
 			sessionCreatedAt = performance.now();
 
