@@ -461,7 +461,7 @@ export async function dispatchXdevTool(
 			};
 		}
 
-		if (isEvalBridgeToolCall() && !isEvalBridgeToolCallable(canonical)) {
+		if (isEvalBridgeToolCall(state) && !isEvalBridgeToolCallable(canonical)) {
 			throw new ToolError(
 				`\`${canonical.name}\` cannot run through the eval bridge; call the direct \`${canonical.name}\` tool.`,
 			);

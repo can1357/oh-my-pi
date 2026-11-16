@@ -1025,6 +1025,18 @@ describe("callSessionTool", () => {
 		expect(execute).toHaveBeenCalledTimes(1);
 	});
 
+	it("lets a session started inside an eval dispatch run its own direct-event devices", async () => {
+		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "Result submitted." }] });
+		const child = createXdevSession([createTool("yield", execute)]);
+		const args = { path: "xd://yield", content: JSON.stringify({ data: { result: "done" } }) };
+		// Stands in for `tool.task`: an in-process subagent whose model writes its own device.
+		const task = createTool("task", async () => await child.write.execute("subagent-device-write", args));
+		const { session } = createXdevSession([task]);
+
+		expect(await callSessionTool("task", {}, { session })).toMatchObject({ text: "Result submitted." });
+		expect(execute).toHaveBeenCalledTimes(1);
+	});
+
 	it("rejects a registry tool excluded from the eval bridge", async () => {
 		const rawExecute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "raw" }] });
 		const session = {

@@ -1,15 +1,20 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 
-const evalBridgeCall = new AsyncLocalStorage<boolean>();
+/** Xdev state of the session whose eval bridge started the current async chain. */
+const evalBridgeCall = new AsyncLocalStorage<object>();
 
-/** Carry the bridge origin through nested dispatch without marking concurrent direct calls. */
-export function withEvalBridgeToolCall<T>(run: () => T): T {
-	return evalBridgeCall.run(true, run);
+/**
+ * Carry the bridge origin through nested dispatch without marking concurrent direct calls.
+ * Keyed by the bridging session's xdev state so sessions started inside the call (in-process
+ * subagents) keep their own device writes.
+ */
+export function withEvalBridgeToolCall<T>(origin: object | undefined, run: () => T): T {
+	return origin ? evalBridgeCall.run(origin, run) : run();
 }
 
-export function isEvalBridgeToolCall(): boolean {
-	return evalBridgeCall.getStore() === true;
+export function isEvalBridgeToolCall(origin: object): boolean {
+	return evalBridgeCall.getStore() === origin;
 }
 
 /**

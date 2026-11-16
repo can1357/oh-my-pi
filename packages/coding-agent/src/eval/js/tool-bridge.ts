@@ -225,7 +225,7 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 }
 
 export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
-	return withEvalBridgeToolCall(() => dispatchSessionTool(name, args, options));
+	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
 }
 
 async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
