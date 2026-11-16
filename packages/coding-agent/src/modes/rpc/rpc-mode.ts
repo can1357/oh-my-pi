@@ -718,7 +718,7 @@ export class RpcShutdownCoordinator {
 	}
 }
 
-/** UTF-8 JSON size of `value`, as compared against `RpcFrameEncoder.maxResponseBytes`. */
+/** UTF-8 JSON size of `value`, as compared against `RpcFrameEncoder.maxIntactFrameBytes`. */
 function encodedBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value));
 }
@@ -1297,6 +1297,7 @@ export async function requestRpcFormDialog(
 ): Promise<ExtensionFormDialogResult | undefined> {
 	// Protocol v1 shrinks an oversized frame and cuts the HTML, so the host could not answer the controls past the cut.
 	const request = { method: "form", html, timeout: dialogOptions?.timeout };
+	// A throwaway id measures the frame: Snowflake ids are always 16 characters, so it encodes to the real id's length.
 	const bytes = encodedBytes({ type: "extension_ui_request", id: Snowflake.next(), ...request });
 	if (bytes > maxFrameBytes) {
 		throw new Error(
@@ -1660,7 +1661,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 		get formDialog(): ExtensionUIContext["formDialog"] {
 			return (html, dialogOptions) =>
-				requestRpcFormDialog(this.pendingRequests, this.output, frameEncoder.maxResponseBytes, html, dialogOptions);
+				requestRpcFormDialog(
+					this.pendingRequests,
+					this.output,
+					frameEncoder.maxIntactFrameBytes,
+					html,
+					dialogOptions,
+				);
 		}
 
 		select(
@@ -2203,7 +2210,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				return fitRemoveQueuedMessageResponse(
 					id,
 					session.takeQueuedMessage(command.message, command.queue),
-					frameEncoder.maxResponseBytes,
+					frameEncoder.maxIntactFrameBytes,
 				);
 			}
 
@@ -2229,7 +2236,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				goalController.stopForHostAbort();
 				abortBuiltinCommands("RPC command aborted by host");
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
-				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxResponseBytes);
+				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxIntactFrameBytes);
 			}
 
 			case "abort_and_prompt": {

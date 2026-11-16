@@ -627,7 +627,7 @@ const DEPLOY_FORM = `<form>
   <input type="hidden" name="release" value="r7">
 </form>`;
 
-/** The protocol v1 limit `RpcFrameEncoder.maxResponseBytes` reports. */
+/** The protocol v1 limit `RpcFrameEncoder.maxIntactFrameBytes` reports. */
 const FRAME_LIMIT = MAX_RPC_FRAME_BYTES - 1;
 
 describe("RPC form dialog", () => {

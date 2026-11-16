@@ -1331,7 +1331,7 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.
-   - `form` requires no opt-in. It carries the HTML `<form>` of one `ask` tool call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer.
+   - `form` requires no opt-in. It carries the HTML `<form>` of one `ask` tool call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer. Hosts must answer every `form` request with submitted `data` or `{ cancelled: true }`; a host without a form renderer must cancel. An unanswered `form` can block the `ask` call indefinitely, because plan mode disables the ask timeout.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
@@ -1391,6 +1391,8 @@ Unknown names, disabled options, wrong types, and answers that break `required`,
 (omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults. A form whose frame
 exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
 call without being sent, instead of reaching the host truncated.
+
+An invalid `data` reply fails the whole `ask` call, with no round for correcting a field, so hosts must enforce the form's constraints before sending: `required` (a whitespace-only text answer counts as empty), `min`/`max`, `minlength`/`maxlength`, `email`, `url`, and `pattern` (anchored to the whole value; an invalid pattern is ignored).
 
 ```json
 {

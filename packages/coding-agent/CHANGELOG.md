@@ -2,12 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- RPC hosts must handle the `ask` tool's whole HTML form as a `form` UI request and answer with submitted `data` or cancellation; field-by-field prompts are no longer used for the tool ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
 
-- RPC hosts must handle the `ask` tool's whole HTML form as a `form` UI request and answer with submitted `data` or cancellation; field-by-field prompts are no longer used for the tool ([#18646](https://github.com/can1357/oh-my-pi/pull/18646) by [@pasquale95](https://github.com/pasquale95))
-- SDK: `AgentSession` emits `agent_end` once per run (when nothing can resume it) and the new `agent_pause` event for a loop that stops mid-run; `hasPendingAsyncWork()`, `settleAsyncWork()` and `suppressAutoResumeUntilPrompt()` are replaced by `isRunActive`, `wakeSources` and `waitForRunEnd()`, and a user-interrupt `abort()` also ends a run paused on background work. The RPC and JSON print streams, the collab wire and extension `agent_end` keep their per-loop flagged shape
 - Updated the `AgentSession` run lifecycle API: `agent_end` is emitted once when a run can no longer resume, and `agent_pause` reports runs that stop while awaiting work. Replaced `hasPendingAsyncWork()`, `settleAsyncWork()`, and `suppressAutoResumeUntilPrompt()` with `isRunActive`, `wakeSources`, and `waitForRunEnd()`. Calling `abort()` now also ends runs paused on background work; RPC, JSON print, collaboration, and extension streams retain their existing per-loop `agent_end` behavior.
 
 ### Added
