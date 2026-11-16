@@ -5,6 +5,8 @@
 ### Fixed
 
 - Scrolling and typing in an open agent transcript no longer slows down as the transcript grows ([#19489](https://github.com/can1357/oh-my-pi/pull/19489) by [@H4vC](https://github.com/H4vC))
+- Slow-terminal rendering now resumes from output-drain notifications instead of polling, retaining the latest frame and forced repaint requests. Output failures are detected even while rendering is idle, and stale notifications cannot affect a restarted terminal.
+- Terminal shutdown queues all restoration before retiring its output writer; late writes and emergency cleanup no longer emit output after the shell/editor handoff.
 - Typing and moving the cursor in very long drafts (over 256 lines) no longer slows down ([#19488](https://github.com/can1357/oh-my-pi/pull/19488) by [@H4vC](https://github.com/H4vC))
 ### Added
 
@@ -14,6 +16,7 @@
 
 ### Breaking Changes
 
+- Terminals exposing `pendingOutputBytes` must implement `onOutputDrain(callback)`, returning an unsubscribe function. Terminals without output backpressure may omit both.
 - `PlanReviewOverlay` takes `options` as `PlanReviewOverlayChoice` objects (`id`, `label`, `detail`, `meta`, `disabled` reason) and reports choice ids to `onPick` and `selectOption`; `refine` adds Refine while the plan has feedback and `onSave` adds Save, which keeps the overlay open. `disabledIndices` and `externalEditorName` are gone, and `describe` takes the `DescribeContext`.
 
 ### Changed
