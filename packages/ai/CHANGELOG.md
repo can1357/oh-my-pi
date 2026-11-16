@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `baseten-systemone` judgment API for Baseten's elephant-1, mammoth-1 and joey-1 decision models, sending images as `state.messages` parts and splitting judgments that would exceed Baseten's 512-option request limit
+- Added the `baseten-systemone` judgment API for Baseten's elephant-1, mammoth-1 and joey-1 decision models, sending images as `state.messages` parts and splitting judgments that would exceed Baseten's 512-option request limit ([#19457](https://github.com/can1357/oh-my-pi/pull/19457) by [@dsingal0](https://github.com/dsingal0))
 
 ## [18.20.3] - 2026-11-16
 

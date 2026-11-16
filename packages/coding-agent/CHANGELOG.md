@@ -8,7 +8,7 @@
 
 ### Added
 
-- Added Baseten's elephant-1, mammoth-1 and joey-1 decision models (`baseten/decision-models/...`) as `judge` role models, using the existing Baseten key or login
+- Added Baseten's elephant-1, mammoth-1 and joey-1 decision models (`baseten/decision-models/...`) as `judge` role models, using the existing Baseten key or login ([#19457](https://github.com/can1357/oh-my-pi/pull/19457) by [@dsingal0](https://github.com/dsingal0))
 - Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result
 
 ### Changed
