@@ -2,7 +2,7 @@ import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import { extractProviderRetryHint } from "../utils/retry-after";
-import type { CredentialRankingContext, CredentialRankingStrategy } from "../usage";
+import type { CredentialRankingContext, CredentialRankingStrategy, UsageReport } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
 import { raceSignal } from "./abort";
 import {
@@ -319,11 +319,29 @@ export class RateLimits implements LimitsApi {
 		// authoritative window still counts as provider timing.
 		let reportResetAtMs: number | undefined;
 		if (target && routing.strategy) {
-			const report = await raceSignal(
-				this.#deps.usage.report(provider, target.credential, options),
-				options?.signal,
-				"usage fetch aborted",
-			);
+			const reportSignal =
+				options?.reportTimeoutMs === undefined
+					? options?.signal
+					: options.signal
+						? AbortSignal.any([options.signal, AbortSignal.timeout(options.reportTimeoutMs)])
+						: AbortSignal.timeout(options.reportTimeoutMs);
+			let report: UsageReport | null;
+			try {
+				report = await raceSignal(
+					this.#deps.usage.report(provider, target.credential, { ...options, signal: reportSignal }),
+					reportSignal,
+					"usage fetch aborted",
+				);
+			} catch (error) {
+				if (
+					!reportSignal?.aborted ||
+					options?.signal?.aborted ||
+					!(reportSignal.reason instanceof Error && reportSignal.reason.name === "TimeoutError")
+				) {
+					throw error;
+				}
+				report = null;
+			}
 			if (report) {
 				const scopedLimits = scopedUsageLimits(routing.strategy, report, routing.rankingContext);
 				if (isUsageLimitReached(scopedLimits)) {

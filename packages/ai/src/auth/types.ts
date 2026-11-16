@@ -789,6 +789,8 @@ export type MarkUsageLimitOptions = {
 	modelId?: string;
 	apiKey?: string;
 	credentialId?: number;
+	/** Cap the best-effort usage report before blocking from the retry-after hint. */
+	reportTimeoutMs?: number;
 	signal?: AbortSignal;
 };
 

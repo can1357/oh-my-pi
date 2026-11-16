@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Quota-limit credential marking can now use a bounded usage report and retain the provider's retry-after block when that report stalls ([#19411](https://github.com/can1357/oh-my-pi/issues/19411)).
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes

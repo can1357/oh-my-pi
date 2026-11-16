@@ -18,6 +18,7 @@ import type {
 	AnthropicFallbackCreditHandle,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, isBillingCapUsageLimit, parseRateLimitReason } from "@oh-my-pi/pi-ai";
+import { raceSignal } from "@oh-my-pi/pi-ai/auth/abort";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
@@ -109,6 +110,8 @@ const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const GENERIC_ABORT_MAX_RETRIES = 2;
+const USAGE_LIMIT_REPORT_TIMEOUT_MS = 2_000;
+const USAGE_LIMIT_MARK_TIMEOUT_MS = 3_000;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -845,27 +848,53 @@ export class TurnRecovery {
 			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
-				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
-					activeModel.provider,
-					this.#host.sessionId(),
-					{
+				const signal = AbortSignal.timeout(USAGE_LIMIT_MARK_TIMEOUT_MS);
+				try {
+					const outcome = await raceSignal(
+						this.#host.modelRegistry.authStorage.limits.markReached(
+							activeModel.provider,
+							this.#host.sessionId(),
+							{
+								retryAfterMs,
+								// Provider-stated timing only when the error text parsed;
+								// the 30-minute fallback is a guess.
+								providerTimed: parsedRetryAfterMs !== undefined,
+								baseUrl: activeModel.baseUrl,
+								modelId: activeModel.id,
+								reportTimeoutMs: USAGE_LIMIT_REPORT_TIMEOUT_MS,
+								signal,
+							},
+						),
+						signal,
+						"usage limit marking timed out",
+					);
+					return {
+						switchedCredential: outcome.switched,
 						retryAfterMs,
-						// Provider-stated timing only when the error text parsed;
-						// the 30-minute fallback is a guess.
-						providerTimed: parsedRetryAfterMs !== undefined,
-						baseUrl: activeModel.baseUrl,
-						modelId: activeModel.id,
-					},
-				);
-				return {
-					switchedCredential: outcome.switched,
-					retryAfterMs,
-					retryAtMs: outcome.retryAtMs,
-					blockedUntilMs: outcome.blockedUntilMs,
-					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
-					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
-					reportResetAtMs: outcome.reportResetAtMs,
-				};
+						retryAtMs: outcome.retryAtMs,
+						blockedUntilMs: outcome.blockedUntilMs,
+						priorBlockedUntilMs: outcome.priorBlockedUntilMs,
+						priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
+						reportResetAtMs: outcome.reportResetAtMs,
+					};
+				} catch (error) {
+					if (!(signal.aborted && signal.reason instanceof Error && signal.reason.name === "TimeoutError")) {
+						throw error;
+					}
+					logger.warn("Usage-limit marking timed out; using provider retry hint", {
+						provider: activeModel.provider,
+						model: activeModel.id,
+					});
+					return {
+						switchedCredential: false,
+						retryAfterMs,
+						retryAtMs: undefined,
+						blockedUntilMs: undefined,
+						priorBlockedUntilMs: undefined,
+						priorBlockedUntilTimed: undefined,
+						reportResetAtMs: undefined,
+					};
+				}
 			})();
 			this.#usageLimitOutcomes.set(message, recorded);
 		}

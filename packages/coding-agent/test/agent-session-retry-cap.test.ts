@@ -116,6 +116,7 @@ describe("AgentSession retry delay cap", () => {
 			session = undefined;
 		}
 		unregisterCustomApis(RETRY_CAP_MOCK_API_SOURCE);
+		authStorage.usage.removeProvider("anthropic");
 		vi.restoreAllMocks();
 	});
 
@@ -195,6 +196,99 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toContain("rate_limit_error");
 		expect(session.isRetrying).toBe(false);
+	});
+
+	it("finishes a quota-limited run when the OAuth usage report stalls", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		authStorage.keys.removeRuntime("anthropic");
+		await authStorage.credentials.set("anthropic", [
+			{ type: "oauth", access: "quota-access", refresh: "quota-refresh", expires: Date.now() + 3_600_000 },
+		]);
+		const report = Promise.withResolvers<null>();
+		const fetchUsage = vi.fn(() => report.promise);
+		const mock = createMockModel({
+			handler: () => ({ throw: "429 usage_limit_reached retry-after=29000" }),
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				authStorage.usage.setProvider("anthropic", { id: "anthropic", fetchUsage });
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.maxDelayMs": 100 });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const events: string[] = [];
+		session.subscribe(event => events.push(event.type));
+
+		try {
+			const prompt = session.prompt("Trigger quota with a stuck usage report");
+			// AbortSignal.timeout uses the runtime clock; a watchdog keeps a broken terminal event from hanging CI.
+			await Promise.race([
+				prompt,
+				Bun.sleep(8_000).then(() => {
+					throw new Error(`RPC run stalled after ${events.join(", ")}`);
+				}),
+			]);
+			await session.waitForIdle();
+			expect(events).toContain("agent_end");
+			expect(events.indexOf("turn_end")).toBeLessThan(events.indexOf("agent_end"));
+			expect(lastAssistant(session).errorMessage).toContain("usage_limit_reached");
+			expect(fetchUsage).toHaveBeenCalled();
+			const row = authStorage.credentials.list("anthropic")[0];
+			if (!row) throw new Error("Expected stored OAuth credential");
+			expect(authStorage.blocks.list([row.id])[0]?.blockedUntilMs).toBeGreaterThan(Date.now() + 28_000_000);
+		} finally {
+			report.resolve(null);
+		}
+	});
+
+	it("ends a quota-limited run when credential marking itself stalls", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const marking = Promise.withResolvers<{ switched: boolean }>();
+		vi.spyOn(authStorage.limits, "markReached").mockImplementation(() => marking.promise);
+		const mock = createMockModel({ handler: () => ({ throw: "429 usage_limit_reached retry-after=29000" }) });
+		const agent = new Agent({
+			getApiKey: () => "anthropic-test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.maxDelayMs": 100 });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const events: string[] = [];
+		session.subscribe(event => events.push(event.type));
+
+		try {
+			const prompt = session.prompt("Trigger quota with stalled credential marking");
+			// The real AbortSignal timeout needs a watchdog if the outer await regresses.
+			await Promise.race([
+				prompt,
+				Bun.sleep(8_000).then(() => {
+					throw new Error(`RPC run stalled after ${events.join(", ")}`);
+				}),
+			]);
+			await session.waitForIdle();
+			expect(events.indexOf("turn_end")).toBeLessThan(events.indexOf("agent_end"));
+			expect(events).toContain("agent_end");
+			expect(lastAssistant(session).errorMessage).toContain("usage_limit_reached");
+		} finally {
+			marking.resolve({ switched: false });
+		}
 	});
 
 	it("waits past retry.maxDelayMs for a usage-limit reset when retry.waitForUsageReset is set", async () => {
