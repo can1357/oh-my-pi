@@ -1,6 +1,15 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { directoryExists, getProjectDir, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
+import { type } from "@oh-my-pi/omptype";
+import {
+	directoryExists,
+	getAgentDir,
+	getProjectDir,
+	isRecord,
+	normalizePathForComparison,
+	setProjectDir,
+} from "@oh-my-pi/pi-utils";
+import { ConfigFile } from "../config/config-file";
 import type { Args } from "./args";
 
 async function maybeAutoChdir(parsed: Args): Promise<void> {
@@ -19,6 +28,14 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 	const normalizedHome = normalizePath(home);
 	if (cwd !== normalizedHome) {
 		return;
+	}
+
+	// Project settings cannot be resolved until the startup directory is chosen.
+	const config = new ConfigFile<unknown>("config", type("unknown"), path.join(getAgentDir(), "config.yml")).tryLoad();
+	if (config.status === "ok" && isRecord(config.value)) {
+		const startup = config.value.startup;
+		const allowHome = config.value["startup.allowHome"] ?? (isRecord(startup) ? startup.allowHome : undefined);
+		if (allowHome === true) return;
 	}
 
 	const candidates =
