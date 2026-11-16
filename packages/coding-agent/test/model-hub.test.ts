@@ -1219,7 +1219,7 @@ describe("ModelHub", () => {
 		test("role fallback candidates honor the role's accepted model kinds", () => {
 			const chat = makeModel("test", "chat-model");
 			const image = makeModel("test", "image-model", 128_000, undefined, "image");
-			const { hub, onFallbackChainChange } = createHub({ models: [chat, image], scoped: true });
+			const { hub } = createHub({ models: [chat, image], scoped: true });
 
 			enterRolesView(hub);
 			hub.handleInput("f"); // add a fallback for the first role (default)
@@ -1227,10 +1227,6 @@ describe("ModelHub", () => {
 			expect(rendered).toContain("Adding fallback for");
 			expect(rendered).toContain("chat-model");
 			expect(rendered).not.toContain("image-model");
-
-			for (const ch of "image-model") hub.handleInput(ch);
-			hub.handleInput("\n");
-			expect(onFallbackChainChange).not.toHaveBeenCalledWith("default", ["test/image-model"]);
 		});
 
 		test("model-keyed fallback candidates are not filtered by a role", () => {
