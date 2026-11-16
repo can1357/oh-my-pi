@@ -7,6 +7,8 @@ mod bridges;
 mod hooks;
 mod registry;
 mod roster_host;
+#[allow(dead_code, reason = "consumed by the settled dispatch wiring")]
+mod settled;
 
 pub use bridges::{
 	ActiveContentInputs, CommandCredentialExecutorFactory, ContentResolver, DynamicTool,
