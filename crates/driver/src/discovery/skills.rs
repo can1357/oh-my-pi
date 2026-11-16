@@ -62,22 +62,30 @@ pub struct SkillSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Skill {
 	/// Unique name (frontmatter `name`, else the directory name).
-	pub name:        Str,
+	pub name:          Str,
 	/// Frontmatter description shown in the system prompt.
-	pub description: Str,
+	pub description:   Str,
+	/// Optional Agent Skills `license` (retained; never grants authority).
+	pub license:       Option<Str>,
+	/// Optional Agent Skills `compatibility` prose (retained; not a preflight
+	/// gate).
+	pub compatibility: Option<Str>,
+	/// Optional Agent Skills string `metadata` map (retained; not a requirements
+	/// runtime).
+	pub metadata:      BTreeMap<Str, Str>,
 	/// Canonical `SKILL.md` path.
-	pub path:        PathBuf,
+	pub path:          PathBuf,
 	/// Canonical directory `skill://<name>/<path>` resolves under.
-	pub base_dir:    PathBuf,
+	pub base_dir:      PathBuf,
 	/// Provider identity of the winning source.
-	pub provider:    Str,
+	pub provider:      Str,
 	/// Precedence level of the winning source.
-	pub level:       SkillLevel,
+	pub level:         SkillLevel,
 	/// Loaded and readable but omitted from the `<skills>` listing
 	/// (frontmatter `hide` / `disable-model-invocation`).
-	pub hidden:      bool,
+	pub hidden:        bool,
 	/// Skill instructions after frontmatter, retained for `/skill:<name>`.
-	pub body:        Str,
+	pub body:          Str,
 }
 
 /// Non-fatal discovery diagnostic.
@@ -846,6 +854,12 @@ struct SkillHeader {
 	name:                     Option<String>,
 	description:              Option<String>,
 	#[serde(default)]
+	license:                  Option<String>,
+	#[serde(default)]
+	compatibility:            Option<String>,
+	#[serde(default)]
+	metadata:                 BTreeMap<String, String>,
+	#[serde(default)]
 	enabled:                  Option<bool>,
 	#[serde(default, alias = "hidden")]
 	hide:                     bool,
@@ -936,6 +950,9 @@ fn load_skill(
 				SkillHeader {
 					name: Some(header.name),
 					description: Some(header.description),
+					license: header.license,
+					compatibility: header.compatibility,
+					metadata: header.metadata,
 					..SkillHeader::default()
 				}
 			},
@@ -1019,9 +1036,30 @@ fn load_skill(
 		.map(Path::to_path_buf)
 		.unwrap_or_else(|| source.root.clone());
 	let body = super::rules::split_frontmatter(&text).1.trim();
+	let license = header
+		.license
+		.as_deref()
+		.map(str::trim)
+		.filter(|value| !value.is_empty())
+		.map(Str::new);
+	let compatibility = header
+		.compatibility
+		.as_deref()
+		.map(str::trim)
+		.filter(|value| !value.is_empty())
+		.map(Str::new);
+	let metadata = header
+		.metadata
+		.into_iter()
+		.filter(|(key, _)| !key.is_empty())
+		.map(|(key, value)| (Str::new(key), Str::new(value)))
+		.collect();
 	Some(Skill {
 		name: Str::new(name),
 		description,
+		license,
+		compatibility,
+		metadata,
 		path: canonical,
 		base_dir,
 		provider: source.provider.clone(),
@@ -1898,7 +1936,7 @@ mod tests {
 	}
 
 	#[test]
-	fn default_skill_frontmatter_drops_agentskills_optional_fields() {
+	fn default_skill_frontmatter_retains_agentskills_optional_fields() {
 		let tree = tempfile::tempdir().unwrap();
 		let root = tree.path().join("skills");
 		write_skill(
@@ -1924,10 +1962,23 @@ mod tests {
 		assert_eq!(skill.description.as_str(), "keeps loading");
 		assert_eq!(skill.body.as_str(), "body");
 		assert!(!skill.hidden);
+		assert_eq!(skill.license.as_deref(), Some("MIT"));
+		assert_eq!(skill.compatibility.as_deref(), Some("linux"));
+		assert_eq!(
+			skill
+				.metadata
+				.get(&Str::new_static("omp/models"))
+				.map(Str::as_str),
+			Some("unused")
+		);
+		// Progressive disclosure: prompt facts stay name+description only.
+		assert_eq!(active.prompt_facts(), vec![
+			serde_json::json!({"name": "portable", "description": "keeps loading"})
+		]);
 	}
 
 	#[test]
-	fn agent_plugin_skill_discards_optional_fields_after_validation() {
+	fn agent_plugin_skill_retains_optional_fields_after_validation() {
 		let tree = tempfile::tempdir().unwrap();
 		let root = tree.path().join("skills");
 		write_skill(
@@ -1948,10 +1999,13 @@ mod tests {
 			discover(&[source(&root, "agent-plugins", SkillLevel::Project)], &SkillPolicy::default());
 		let skill = active
 			.get("portable")
-			.expect("validated optional fields are discarded, not fatal");
+			.expect("validated optional fields are retained, not fatal");
 		assert_eq!(skill.description.as_str(), "plugin portable");
 		assert_eq!(skill.body.as_str(), "plugin body");
 		assert_eq!(skill.provider.as_str(), "agent-plugins");
+		assert_eq!(skill.license.as_deref(), Some("MIT"));
+		assert_eq!(skill.compatibility.as_deref(), Some("os"));
+		assert_eq!(skill.metadata.get(&Str::new_static("key")).map(Str::as_str), Some("value"));
 	}
 
 	#[test]
