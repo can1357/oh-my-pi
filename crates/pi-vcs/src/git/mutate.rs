@@ -305,6 +305,9 @@ impl GitRepo {
 		// Not `.git/COMMIT_EDITMSG`: overlapping calls reread whichever message
 		// landed last, including when `no_verify` skips the hook.
 		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
+		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
+		// message, as under `git commit`; only the private copy is read back.
+		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
 		if !options.no_verify {
 			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
 		}

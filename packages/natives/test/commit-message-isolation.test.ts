@@ -83,11 +83,9 @@ describe("commitCreate message isolation", () => {
 		expect(await Bun.file(shared).text()).toBe("stolen subject\n\nstolen body\n");
 	});
 
-	test("does not publish a noVerify message through COMMIT_EDITMSG", async () => {
+	test("leaves no message file behind when noVerify skips the hook", async () => {
 		const root = await repository();
 		const gitDir = path.join(root, ".git");
-		const shared = path.join(gitDir, "COMMIT_EDITMSG");
-		await Bun.write(shared, "preexisting\n");
 		const before = new Set(await fs.readdir(gitDir));
 		const repo = vcsGitDiscover(root)!;
 
@@ -95,7 +93,6 @@ describe("commitCreate message isolation", () => {
 
 		expect(sha).toBe(await git(root, "rev-parse", "HEAD"));
 		expect(await git(root, "log", "-1", "--format=%B")).toBe("private message");
-		expect(await Bun.file(shared).text()).toBe("preexisting\n");
 		const added = (await fs.readdir(gitDir)).filter(name => !before.has(name));
 		expect(added).toEqual([]);
 	});
@@ -114,6 +111,7 @@ describe("commitCreate message isolation", () => {
 		const seen = (await Bun.file(path.join(root, ".git", "seen-msg-path")).text()).trim();
 		expect(path.basename(seen)).not.toBe("COMMIT_EDITMSG");
 		expect(await Bun.file(seen).exists()).toBe(false);
-		expect(await Bun.file(shared).text()).toBe("preexisting\n");
+		// Hooks that ignore `$1` and read COMMIT_EDITMSG see this call's message.
+		expect(await Bun.file(shared).text()).toBe("will not land\n");
 	});
 });
