@@ -2321,8 +2321,8 @@ export interface ProviderModelConfig {
 	 * Must be a kind the api serves, as in `models.yml`.
 	 */
 	kind?: Model["kind"];
-	/** Whether the model supports extended thinking at all. */
-	reasoning: boolean;
+	/** Reviewed thinking capability; omitted when request-time discovery should determine support. */
+	reasoning?: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */
 	thinking?: Model["thinking"];
 	/** Supported input types. */
