@@ -821,10 +821,13 @@ fn is_patch_wrapper_line(line: &str) -> bool {
 
 /// Strip wrapper/metadata lines and trailing blank rows from a diff body.
 pub fn normalize_diff(diff: &str) -> String {
-	normalize_diff_body(diff, true)
+	normalize_diff_body(diff, false)
 }
 
-fn normalize_diff_body(diff: &str, strip_hunk_metadata: bool) -> String {
+/// `signed_rows_are_content`: Codex apply_patch bodies have no unified-diff
+/// file headers, so every row starting with ` `, `+`, or `-` is hunk content,
+/// even one reading `--- x` or `+++ x`.
+fn normalize_diff_body(diff: &str, signed_rows_are_content: bool) -> String {
 	let mut lines = diff.split('\n').collect::<Vec<_>>();
 	while lines
 		.pop_if(|line| line.is_empty() || (line.trim().is_empty() && !is_diff_content_line(line)))
@@ -837,12 +840,9 @@ fn normalize_diff_body(diff: &str, strip_hunk_metadata: bool) -> String {
 		lines.remove(0);
 	}
 	lines.pop_if(|line| is_patch_wrapper_line(line.trim()));
-	let mut in_hunk = false;
 	lines.retain(|line| {
-		// Inside an apply_patch hunk, even ---/+++ rows are file content.
-		in_hunk = in_hunk || (!strip_hunk_metadata && line.starts_with("@@"));
-		in_hunk
-			|| is_diff_content_line(line)
+		is_diff_content_line(line)
+			|| (signed_rows_are_content && matches!(line.as_bytes().first(), Some(b'+' | b'-')))
 			|| !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
 	});
 	lines.join("\n")
@@ -1212,7 +1212,7 @@ fn parse_hunks(diff: &str, recover_line_numbers: bool) -> Result<Vec<DiffHunk>, 
 			 multi-file markers."
 		)));
 	}
-	let normalized_diff = normalize_diff_body(diff, recover_line_numbers);
+	let normalized_diff = normalize_diff_body(diff, !recover_line_numbers);
 	let lines = normalized_diff.split('\n').collect::<Vec<_>>();
 	let mut hunks = Vec::new();
 	let mut index = 0_usize;
@@ -1224,10 +1224,7 @@ fn parse_hunks(diff: &str, recover_line_numbers: bool) -> Result<Vec<DiffHunk>, 
 			continue;
 		}
 		let is_diff_content = matches!(line.as_bytes().first(), Some(b' ' | b'+' | b'-'));
-		if (recover_line_numbers || hunks.is_empty())
-			&& !is_diff_content
-			&& is_unified_diff_metadata_line(trimmed)
-		{
+		if !is_diff_content && is_unified_diff_metadata_line(trimmed) {
 			index += 1;
 			continue;
 		}

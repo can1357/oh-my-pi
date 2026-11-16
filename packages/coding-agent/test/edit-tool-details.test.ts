@@ -48,26 +48,6 @@ describe("EditTool details", () => {
 		expect(await Bun.file(target).text()).toBe("79 named states\n");
 	});
 
-	test("apply_patch keeps diff-header-like removed SQL comments", async () => {
-		const target = path.join(tempDir, "q.sql");
-		await Bun.write(target, "SELECT 1;\n-- old comment\nSELECT 2;\n");
-		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("diff-comment", {
-			input: "*** Begin Patch\n*** Update File: q.sql\n@@\n SELECT 1;\n--- old comment\n+-- new comment\n SELECT 2;\n*** End Patch",
-		});
-		expect(result.isError).not.toBe(true);
-		expect(await Bun.file(target).text()).toBe("SELECT 1;\n-- new comment\nSELECT 2;\n");
-	});
-
-	test("apply_patch writes diff-header-like added increments", async () => {
-		const target = path.join(tempDir, "a.c");
-		await Bun.write(target, "int i;\ni++;\n");
-		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("diff-increment", {
-			input: "*** Begin Patch\n*** Update File: a.c\n@@\n int i;\n+++ i;\n i++;\n*** End Patch",
-		});
-		expect(result.isError).not.toBe(true);
-		expect(await Bun.file(target).text()).toBe("int i;\n++ i;\ni++;\n");
-	});
-
 	test("apply_patch moves a file before recreating its old path", async () => {
 		await Bun.write(path.join(tempDir, "a.txt"), "old\n");
 		const result = await new EditTool(makeSession(tempDir), "apply_patch").execute("move-add", {
