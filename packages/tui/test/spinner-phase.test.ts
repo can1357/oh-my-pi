@@ -140,6 +140,40 @@ describe("spinner owners share one clock", () => {
 		expect(countPaintsPerFourSeconds(DEFAULT_SPINNER_INTERVAL_MS)).toBe(50);
 	});
 
+	it("refreshes fixed-glyph styling at the throttled cadence without synchronized output", () => {
+		vi.useFakeTimers({ now: 0 });
+		const previous = Bun.env.PI_TUI_SYNC_OUTPUT;
+		Bun.env.PI_TUI_SYNC_OUTPUT = "0";
+		const term = new VirtualTerminal(30, 4);
+		const tui = new TUI(term, false, { renderScheduler: scheduler });
+		let underlined = false;
+		const color = Object.assign((s: string) => (underlined ? `\x1b[4m${s}\x1b[0m` : s), {
+			animated: true as const,
+		});
+		const loader = new Loader(tui, s => s, color, "Checking", ["*"]);
+		tui.addChild(loader);
+		tui.start();
+		try {
+			vi.advanceTimersByTime(1);
+			const initial = term.getViewport();
+			expect(initial[1]).toContain("* Checking");
+			underlined = true;
+			vi.advanceTimersByTime(40);
+			expect(term.getViewportRowUnderlineColumns(1)).toEqual([]);
+			vi.advanceTimersByTime(70);
+			expect(term.getViewport()).toEqual(initial);
+			const start = initial[1].indexOf("Checking");
+			expect(term.getViewportRowUnderlineColumns(1)).toEqual(
+				Array.from({ length: "Checking".length }, (_, i) => start + i),
+			);
+		} finally {
+			loader.stop();
+			tui.stop();
+			if (previous === undefined) delete Bun.env.PI_TUI_SYNC_OUTPUT;
+			else Bun.env.PI_TUI_SYNC_OUTPUT = previous;
+		}
+	});
+
 	it("spinnerTickDelay lands every owner on the same boundary and never fires early", () => {
 		expect(spinnerTickDelay(250, 0)).toBe(250);
 		expect(spinnerTickDelay(250, 120)).toBe(130);

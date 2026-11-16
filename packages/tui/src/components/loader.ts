@@ -380,15 +380,16 @@ export class Loader extends Text {
 				return;
 			}
 			const startedAt = performance.now();
-			// One repaint per period of the shared clock. The period decides, not the glyph: a
-			// one-glyph spinner beside an animated message (the working row) never changes glyph,
-			// yet its message moves every period.
+			// Fixed glyphs and skipped whole cycles still refresh live labels each period.
 			const now = Date.now();
 			const tick = sharedSpinnerTick(now);
-			const advanced = tick !== this.#spinnerTick;
+			const frame = sharedSpinnerFrame(this.#frames.length, now);
+			const advanced =
+				frame !== this.#currentFrame ||
+				(tick !== this.#spinnerTick &&
+					(this.messageColorFn.animated === true || typeof this.message === "function"));
 			this.#spinnerTick = tick;
-			// The glyph is the shared clock's, so every spinner on screen shows the same frame.
-			this.#currentFrame = sharedSpinnerFrame(this.#frames.length, now);
+			this.#currentFrame = frame;
 			// A static spinner still re-reads a dynamic message (countdown, elapsed) on its 1 s tick.
 			const animated = spinnerAnimated();
 			if (advanced || !animated) this.#syncText();

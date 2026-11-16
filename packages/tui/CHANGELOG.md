@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed working-row shimmer freezing without synchronized output and live background-job labels staying stale when the loader uses a fixed interrupt glyph ([#19041](https://github.com/can1357/oh-my-pi/pull/19041) by [@cpu23](https://github.com/cpu23)).
+
 ## [18.20.1] - 2026-11-14
 
 ### Added
