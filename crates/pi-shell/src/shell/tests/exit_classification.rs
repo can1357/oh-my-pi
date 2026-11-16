@@ -177,3 +177,200 @@ async fn exit_classification_zsh_always_cleanup_is_not_cut_input() {
 		assert_eq!(result.ended_by_exit, expected, "{command}");
 	}
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_for_loop_keeps_body_status() {
+	let _guard = shell_test_lock().lock().await;
+	// A for loop's exit status is its last body status, so the || successor
+	// would run and was cut short; the && successor would not.
+	for (command, expected) in [
+		("for x in a; do exit 1; done || printf never", true),
+		("for x in a; do exit 1; done && printf never", false),
+	] {
+		let result = run_exit_case(&Shell::new(None), command).await;
+		assert_eq!(result.exit_code, Some(1), "{command}");
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_return_trap_winding_down_is_not_unrun_input() {
+	let _guard = shell_test_lock().lock().await;
+	// The RETURN trap runs while the function is already leaving: its
+	// return command has executed, and nothing ordinary remains.
+	let result =
+		run_exit_case(&Shell::new(None), "f() { trap 'exit 0' RETURN; return 0; }; f").await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, false);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_nested_always_stays_cleanup_to_the_outermost_end() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	run_exit_case(&shell, "emulate zsh").await;
+	for (command, expected) in [
+		// The inner always block ends while the outer one still runs: the
+		// printf belongs to the outer mandatory cleanup and executes.
+		("f() { { exit 0; } always { { :; } always { :; }; printf cleanup; }; }; f", false),
+		(
+			"f() { { exit 0; } always { { :; } always { :; }; printf cleanup; }; }; f; printf never",
+			true,
+		),
+	] {
+		let result = run_exit_case(&shell, command).await;
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_always_discards_cleanup_status() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	run_exit_case(&shell, "emulate zsh").await;
+	for (command, expected) in [
+		// always_end restores the try-list's status (zero here): the && successor
+		// would run and was cut short; the || successor would not.
+		("f() { { exit 0; } always { ! :; }; }; f && printf never", true),
+		("f() { { exit 0; } always { ! :; }; }; f || printf never", false),
+	] {
+		let result = run_exit_case(&shell, command).await;
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_subshell_in_cleanup_does_not_end_the_walk() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	run_exit_case(&shell, "emulate zsh").await;
+	let result =
+		run_exit_case(&shell, "f() { { exit 0; } always { ( : ); }; printf never; }; f").await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, true);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_exit_trap_child_run_keeps_root_report() {
+	let _guard = shell_test_lock().lock().await;
+	// A child run the EXIT trap starts (the timeout tool) must not clear
+	// the root run's first exit report: the trailing exit at the function's
+	// end still classifies as unremarkable.
+	let result =
+		run_exit_case(&Shell::new(None), "trap 'timeout 1 true' EXIT; f() { exit 0; }; f").await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, false);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_loop_matrix_operator_pairs() {
+	let _guard = shell_test_lock().lock().await;
+	// (command, exit status, &&-successor cut short, ||-successor cut short)
+	for (command, code, and_cut, or_cut) in [
+		// while/until ended by its condition complete with status 0.
+		("while exit 1; do :; done", 1, true, false),
+		("until exit 0; do :; done", 0, true, false),
+		("while exit 2; do :; done", 2, true, false),
+		// for/repeat/select exit with the last body status.
+		("for x in a; do exit 1; done", 1, false, true),
+		("for ((i = 0; i < 1; i++)); do exit 1; done", 1, false, true),
+		// An exit inside the loop head's own command leaves the loop's
+		// exit status as the condition/command itself left it.
+		("while exit 1; do :; break; done", 1, true, false),
+	] {
+		for (op, expected) in [("&&", and_cut), ("||", or_cut)] {
+			let src = format!("{command} {op} printf never");
+			let result = run_exit_case(&Shell::new(None), &src).await;
+			assert_eq!(result.exit_code, Some(code), "{}", src);
+			assert_eq!(result.ended_by_exit, expected, "{}", src);
+		}
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_case_and_else_branches_carry_their_status() {
+	let _guard = shell_test_lock().lock().await;
+	for (command, code, and_cut, or_cut) in [
+		// The matched arm's status is the case's status.
+		("case a in a) exit 1;; esac", 1, false, true),
+		// The else arm's status is the if's status.
+		("if false; then :; else exit 1; fi", 1, false, true),
+	] {
+		for (op, expected) in [("&&", and_cut), ("||", or_cut)] {
+			let src = format!("{command} {op} printf never");
+			let result = run_exit_case(&Shell::new(None), &src).await;
+			assert_eq!(result.exit_code, Some(code), "{}", src);
+			assert_eq!(result.ended_by_exit, expected, "{}", src);
+		}
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_subshells_do_not_end_the_shell() {
+	let _guard = shell_test_lock().lock().await;
+	for (command, code) in [
+		// An exit in a subshell ends the subshell, not the shell: the
+		// suffix runs, no exit notice.
+		("(exit 0); printf never", 0),
+		// The || successor runs (subshell failed) and the run ends with the
+		// suffix's own status.
+		("(exit 1) || printf never", 0),
+		// Command substitution is a subshell too.
+		("echo $(exit 1); printf never", 0),
+	] {
+		let result = run_exit_case(&Shell::new(None), command).await;
+		assert_eq!(result.exit_code, Some(code), "{command}");
+		assert_eq!(result.ended_by_exit, false, "{command}");
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_pipeline_and_anonymous_and_eval_frames() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	// exit in a pipeline element ends that element's subshell only: the
+	// shell itself keeps running (cat and the suffix both run).
+	let result = run_exit_case(&shell, "exit 1 | cat; printf never").await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, false);
+	// A zsh anonymous function: the exit is not at the input's end when a
+	// suffix follows (it never runs); alone at the end it is trailing.
+	run_exit_case(&shell, "emulate zsh").await;
+	let result = run_exit_case(&shell, "() { exit 0; }; printf never").await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, true);
+	let result = run_exit_case(&shell, "() { exit 0; }").await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, false);
+	// eval frames unwind to the caller's suffix like function frames.
+	let result = run_exit_case(&shell, "eval 'exit 1'; printf never").await;
+	assert_eq!(result.exit_code, Some(1));
+	assert_eq!(result.ended_by_exit, true);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_negation_composes_with_composites() {
+	let _guard = shell_test_lock().lock().await;
+	for (command, expected) in [
+		// `!` applies to the whole if: success flips to failure, so the
+		// && successor would not run.
+		("! if exit 1; then :; fi && printf never", false),
+		("! if exit 1; then :; fi || printf never", true),
+	] {
+		let result = run_exit_case(&Shell::new(None), command).await;
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+}
