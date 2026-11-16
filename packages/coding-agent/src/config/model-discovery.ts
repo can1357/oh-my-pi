@@ -221,7 +221,7 @@ export interface DiscoveryContext {
 }
 
 type OllamaDiscoveredModelMetadata = {
-	reasoning: boolean;
+	reasoning?: boolean;
 	input: ("text" | "image")[];
 	contextWindow?: number;
 };
@@ -487,7 +487,7 @@ async function discoverAppleFoundationModels(providerConfig: DiscoveryProviderCo
 			api: providerConfig.api,
 			provider: providerConfig.provider,
 			baseUrl: providerConfig.baseUrl ?? "local://apple-foundation-models",
-			reasoning: availability.reasoningCapable ?? false,
+			reasoning: availability.reasoningCapable,
 			input: availability.vision ? ["text", "image"] : ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
@@ -536,14 +536,13 @@ async function discoverOllamaModelMetadata(
 		}
 		if (!isRecord(capabilities)) {
 			return {
-				reasoning: false,
 				input: ["text"],
 				contextWindow,
 			};
 		}
 		const supportsVision = capabilities.vision === true || capabilities.image === true;
 		return {
-			reasoning: capabilities.thinking === true,
+			reasoning: typeof capabilities.thinking === "boolean" ? capabilities.thinking : undefined,
 			input: supportsVision ? ["text", "image"] : ["text"],
 			contextWindow,
 		};
@@ -593,7 +592,7 @@ export async function discoverOllamaModels(
 			api: providerConfig.api,
 			provider: providerConfig.provider,
 			baseUrl: `${endpoint}/v1`,
-			reasoning: metadata?.reasoning ?? false,
+			reasoning: metadata?.reasoning,
 			input: metadata?.input ?? ["text"],
 			imageInputDecoder: "stb",
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -711,7 +710,6 @@ async function discoverLlamaCppModelsAt(
 					api: providerConfig.api,
 					provider: providerConfig.provider,
 					baseUrl: ensureLlamaCppV1BaseUrl(baseUrl),
-					reasoning: false,
 					input: item.input ?? serverMetadata?.input ?? ["text"],
 					imageInputDecoder: "stb",
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -959,6 +957,8 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
+	/** The row confirms reasoning without advertising a controllable ladder. */
+	| { kind: "native" }
 	/** The row advertises an effort ladder, whether it accepts `none`, its aliases, and whether thinking can be off. */
 	| {
 			kind: "ladder";
@@ -999,7 +999,9 @@ function extractAdvertisedReasoning(item: {
 	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
 	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
 	const efforts = extractReasoningLevels(raw);
-	if (efforts === undefined) return undefined;
+	if (efforts === undefined) {
+		return (metadata?.reasoning ?? item.reasoning) === true ? { kind: "native" } : undefined;
+	}
 	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
@@ -1066,6 +1068,7 @@ function withAdvertisedEfforts(
 ): ModelSpec<Api> {
 	if (advertised === undefined) return spec;
 	if (advertised.kind === "none") return withoutReasoning(spec, isAnthropic);
+	if (advertised.kind === "native") return { ...spec, reasoning: true };
 	// `defaultLevel` is not decoration: `pickInitialThinkingLevel` (sdk.ts) and
 	// the model switcher read it ahead of the user's `defaultThinkingLevel`
 	// setting, so pinning it to the ladder's first tier would start every gateway
@@ -1322,7 +1325,7 @@ export async function discoverOpenAIModelsList(
 			kind: runnerApiKind(api),
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning === true,
+			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
@@ -1343,7 +1346,9 @@ export async function discoverOpenAIModelsList(
 			compat: {
 				supportsStore: false,
 				supportsDeveloperRole: false,
-				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? false,
+				...(referenceCompat?.supportsReasoningEffort !== undefined
+					? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
+					: {}),
 				...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
 				...(referenceCompat?.omitReasoningEffort !== undefined
 					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
@@ -1515,6 +1520,10 @@ export async function discoverProxyModels(
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+		const referenceEffortSupport =
+			reference?.compat && "supportsReasoningEffort" in reference.compat
+				? reference.compat.supportsReasoningEffort
+				: undefined;
 		// A proxy that dispatches with its own catalog advertises the ladder it
 		// accepts for each row. That ladder is authoritative over the reference
 		// guess: cross-provider references carry no thinking at all, so rows whose
@@ -1533,7 +1542,7 @@ export async function discoverProxyModels(
 			api,
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning ?? false,
+			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input: reference?.input ?? ["text"],
 			// Proxy pricing is provider-specific and usually does not match
@@ -1558,7 +1567,7 @@ export async function discoverProxyModels(
 				: {
 						supportsStore: false,
 						supportsDeveloperRole: false,
-						supportsReasoningEffort: false,
+						...(referenceEffortSupport !== undefined ? { supportsReasoningEffort: referenceEffortSupport } : {}),
 					},
 		} as ModelSpec<Api>;
 		const model = skipAmbiguousModel(providerConfig.provider, id, () =>

@@ -858,7 +858,7 @@ const ModelSpecShape = type({
 	provider: "string > 0",
 	// Providers such as Azure resolve the deployment endpoint at request time.
 	baseUrl: "string",
-	reasoning: "boolean",
+	"reasoning?": "boolean | undefined",
 	input: "('text' | 'image')[] > 0",
 	cost: FiniteTokenCost.and({
 		"timeBased?": TimeBasedCostShape.or("undefined"),
