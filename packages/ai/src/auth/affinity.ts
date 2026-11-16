@@ -222,6 +222,15 @@ export class SessionAffinity implements SessionsApi {
 		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
 	}
 
+	/**
+	 * `SessionsApi.sticky`: read-only display/attribution view of {@link get} —
+	 * the stored credential row that most recently served the session,
+	 * including API-key rows (which have no OAuth identity to attribute by).
+	 */
+	sticky(provider: string, sessionId: string | undefined): SessionCredential | undefined {
+		return this.get(provider, sessionId);
+	}
+
 	#lookup(provider: string, sessionId: string): SessionCredential | undefined {
 		const live = this.#sessionLastCredential.get(provider)?.get(sessionId);
 		if (live) {

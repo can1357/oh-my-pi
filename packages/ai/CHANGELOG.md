@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `metadata.credentialId` to usage reports probed from stored credential rows (API-key and OAuth), and a read-only `AuthStorage.sessions.sticky` lookup of the credential a session is currently served from ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)).
+
 ## [18.21.0] - 2026-11-16
 
 ### Added

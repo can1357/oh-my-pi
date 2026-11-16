@@ -114,6 +114,20 @@ type UsageReportsOptions = {
 	signal?: AbortSignal;
 };
 
+/**
+ * Copy of `report` carrying the durable row id of the stored credential the
+ * probe ran as (`metadata.credentialId`). API-key accounts have no OAuth
+ * identity, so the row id is the only attribute that ties a report to the
+ * account the session router actually serves from; consumers that don't read
+ * it are unaffected. Returns cached objects untouched for unattributed
+ * requests (env/runtime keys, broker aggregates).
+ */
+function tagReportCredentialId(report: UsageReport | null, request: UsageRequestDescriptor): UsageReport | null {
+	if (!report || request.credentialId === undefined) return report;
+	if (report.metadata?.credentialId === request.credentialId) return report;
+	return { ...report, metadata: { ...report.metadata, credentialId: request.credentialId } };
+}
+
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
@@ -703,6 +717,7 @@ export class UsageService implements UsageApi {
 					request = oauthUsageRequest(provider, credential, baseUrl);
 				}
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
+				request.credentialId = entry.id;
 				requests.push(request);
 			}
 		}
@@ -821,7 +836,7 @@ export class UsageService implements UsageApi {
 				);
 				return current;
 			}),
-		);
+		).then(reports => reports.map((report, index) => tagReportCredentialId(report, requests[index])));
 	}
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */

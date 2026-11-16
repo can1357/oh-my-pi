@@ -284,3 +284,39 @@ describe("toLogoutAccounts org scoping", () => {
 		]);
 	});
 });
+
+describe("limitMatchesActiveAccount: credential-scoped identity (API-key accounts)", () => {
+	test("matches only the report probed from the pinned credential row", () => {
+		const identity = { credentialId: 4 };
+		expect(limitMatchesActiveAccount(makeReport({ metadata: { credentialId: 4 } }), makeLimit(), identity)).toBe(
+			true,
+		);
+		expect(limitMatchesActiveAccount(makeReport({ metadata: { credentialId: 2 } }), makeLimit(), identity)).toBe(
+			false,
+		);
+	});
+
+	test("an untagged report never matches a pinned row", () => {
+		// Env-key probes and broker aggregates carry no row id; letting them
+		// match would merge sibling API-key accounts into one quota pool.
+		const identity = { credentialId: 4 };
+		expect(limitMatchesActiveAccount(makeReport(), makeLimit(), identity)).toBe(false);
+		expect(
+			limitMatchesActiveAccount(
+				makeReport({ metadata: { email: "a@b.c", accountId: "acc-1" } }),
+				makeLimit(),
+				identity,
+			),
+		).toBe(false);
+	});
+
+	test("reportMatchesActiveAccount reflects the same rule across limits", () => {
+		const identity = { credentialId: 4 };
+		const report = makeReport({
+			metadata: { credentialId: 4 },
+			limits: [makeLimit({ windowId: "7d" }), makeLimit({ windowId: "monthly" })],
+		});
+		expect(reportMatchesActiveAccount(report, identity)).toBe(true);
+		expect(reportMatchesActiveAccount(makeReport({ metadata: { credentialId: 2 } }), identity)).toBe(false);
+	});
+});

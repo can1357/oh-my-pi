@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `StatusAccountIdentity` now carries an optional `credentialId` so hosts can attribute the usage segment to a credential-scoped (API-key) account, and cached usage invalidates when it changes ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)).
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
