@@ -293,6 +293,10 @@ describe("TTSR tool inspection cache", () => {
 		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1"}');
 		args.extra = null;
 		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1","extra":null}');
-		expect(digests).toBe(3);
+		// A renamed key keeps the value and the snapshot's length.
+		delete args.extra;
+		args.other = null;
+		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1","other":null}');
+		expect(digests).toBe(4);
 	});
 });
