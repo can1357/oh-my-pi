@@ -1230,7 +1230,7 @@ impl AxBackend for MacAx {
 			control::intervention::check_press()?;
 			set_string_value(element, "AXValue", value)?;
 			verify_text_value(element, value, value)?;
-			confirm_read_as(|| read_as(element))
+			confirm_read_as("the text", || read_as(element))
 		})
 	}
 
@@ -2177,51 +2177,156 @@ const NUMBER_SETTLE: Duration = Duration::from_millis(500);
 /// Number-valued controls (sliders, steppers, level indicators) publish
 /// `AXValue` as a `CFNumber` and refuse the same value written as a
 /// `CFString` (`IllegalArgument`), so the text is parsed and written as a
-/// `CFNumber`, then read back: the app clamps the value to its range or
-/// rounds it to its steps while answering the write, so the call reports
-/// what the control holds.
+/// `CFNumber` of the kind the control holds, then read back: the app clamps
+/// the value to its range or rounds it to its steps while answering the
+/// write, so the call reports what the control holds.
 fn set_number_value(element: &AXUIElement, text: &str, current: &CFNumber) -> CoreResult<()> {
 	let target = parse_number(text, current)?;
-	let value = CFNumber::new_f64(target);
-	let attribute = CFString::from_str("AXValue");
 	// The probes before can block; a run cancelled meanwhile, or an app the
 	// user used meanwhile, gets nothing written.
 	control::check()?;
 	control::intervention::check_press()?;
-	// SAFETY: The element, attribute and number remain retained for the setter.
-	let error = unsafe { element.set_attribute_value(&attribute, &value) };
-	ax_result(error, "setting AXValue to a number failed; inspect the target before writing again")?;
-	let deadline = Instant::now() + NUMBER_SETTLE;
-	loop {
-		let actual = copy_number(element, "AXValue");
-		if actual
-			.as_deref()
-			.is_some_and(|actual| number_reached(target, actual))
-		{
-			return Ok(());
+	write_number(&mut LiveNumber { element, deadline: Instant::now() + NUMBER_SETTLE }, target)
+}
+
+/// The AX steps of a number write, kept apart so its read-back can be tested
+/// without a live app.
+trait NumberField {
+	fn write(&self, value: &CFNumber) -> AXError;
+	fn value(&self) -> Option<CFRetained<CFNumber>>;
+	/// `AXMinValue` or `AXMaxValue`.
+	fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>>;
+	/// Waits one read-back interval; `false` once the settle time is over.
+	fn wait(&mut self) -> bool;
+	/// Whether the element still reads as the control the ref names.
+	fn confirm(&self) -> CoreResult<()>;
+}
+
+struct LiveNumber<'a> {
+	element:  &'a AXUIElement,
+	deadline: Instant,
+}
+
+impl NumberField for LiveNumber<'_> {
+	fn write(&self, value: &CFNumber) -> AXError {
+		// SAFETY: The element, attribute and number remain retained for the
+		// setter.
+		unsafe {
+			self
+				.element
+				.set_attribute_value(&CFString::from_str("AXValue"), value)
 		}
-		if Instant::now() >= deadline {
-			return Err(number_readback_error(
-				target,
-				actual.as_deref(),
-				copy_number(element, "AXMinValue").as_deref(),
-				copy_number(element, "AXMaxValue").as_deref(),
-			));
+	}
+
+	fn value(&self) -> Option<CFRetained<CFNumber>> {
+		copy_number(self.element, "AXValue")
+	}
+
+	fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>> {
+		copy_number(self.element, attribute)
+	}
+
+	fn wait(&mut self) -> bool {
+		if Instant::now() >= self.deadline {
+			return false;
 		}
 		control::settle(Duration::from_millis(25));
+		true
+	}
+
+	fn confirm(&self) -> CoreResult<()> {
+		confirm_read_as("the number", || read_as(self.element))
 	}
 }
 
-/// The number `text` names, or the refusal naming what the control reads.
-fn parse_number(text: &str, current: &CFNumber) -> CoreResult<f64> {
+/// Writes `target` and reads the value back until it arrives or the settle
+/// time is over. A value that arrived is confirmed as the text paths confirm
+/// theirs: an element the app handed to another control meanwhile may have
+/// taken it in that control's place.
+fn write_number<F: NumberField>(field: &mut F, target: NumberTarget) -> CoreResult<()> {
+	ax_result(
+		field.write(&target.number()),
+		"setting AXValue to a number failed; inspect the target before writing again",
+	)?;
+	loop {
+		let actual = field.value();
+		if actual
+			.as_deref()
+			.is_some_and(|actual| target.reached(actual))
+		{
+			return field.confirm();
+		}
+		if !field.wait() {
+			return Err(number_readback_error(
+				target,
+				actual.as_deref(),
+				field.bound("AXMinValue").as_deref(),
+				field.bound("AXMaxValue").as_deref(),
+			));
+		}
+	}
+}
+
+/// The number a value write asks for, of the kind the control holds: whole
+/// text to an integer-valued control stays an exact `i64`, which an `f64`
+/// would round past 2^53; anything else is an `f64`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NumberTarget {
+	Whole(i64),
+	Real(f64),
+}
+
+impl NumberTarget {
+	const fn as_f64(self) -> f64 {
+		match self {
+			Self::Whole(value) => value as f64,
+			Self::Real(value) => value,
+		}
+	}
+
+	fn number(self) -> CFRetained<CFNumber> {
+		match self {
+			Self::Whole(value) => CFNumber::new_i64(value),
+			Self::Real(value) => CFNumber::new_f64(value),
+		}
+	}
+
+	/// A whole target read back as an integer must be exactly it; otherwise
+	/// [`number_reached`].
+	fn reached(self, actual: &CFNumber) -> bool {
+		match self {
+			Self::Whole(value) if !actual.is_float_type() => actual.as_i64() == Some(value),
+			_ => number_reached(self.as_f64(), actual),
+		}
+	}
+}
+
+impl std::fmt::Display for NumberTarget {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Whole(value) => value.fmt(f),
+			Self::Real(value) => value.fmt(f),
+		}
+	}
+}
+
+/// The number `text` names, as [`NumberTarget`] by the kind `current` is, or
+/// the refusal naming what the control reads.
+fn parse_number(text: &str, current: &CFNumber) -> CoreResult<NumberTarget> {
+	if !current.is_float_type()
+		&& let Ok(value) = text.parse::<i64>()
+	{
+		return Ok(NumberTarget::Whole(value));
+	}
 	text
 		.parse::<f64>()
 		.ok()
 		.filter(|value| value.is_finite())
+		.map(NumberTarget::Real)
 		.ok_or_else(|| {
 			DesktopError::ax_failed(format!(
-				"AXValue is a number and {text:?} is not one: write digits such as \"75\" or \"0.5\"; \
-				 it reads {} now; nothing was written",
+				"AXValue is a number and the text given is not one: write digits such as \"75\" or \
+				 \"0.5\"; it reads {} now; nothing was written",
 				stringify_number(current),
 			))
 		})
@@ -2231,20 +2336,26 @@ fn parse_number(text: &str, current: &CFNumber) -> CoreResult<f64> {
 /// absolute floor, so an unchanged 0 never passes for 5e-8; or, for a
 /// floating-point number, exactly `target` rounded to `f32`, which is what a
 /// control keeping its value in a `Float` reads back (0.3 as
-/// 0.30000001192092896) whether it publishes a `float` or a `double`. An
-/// integer-valued control is held to the first rule.
+/// 0.30000001192092896) whether it publishes a `float` or a `double`. That
+/// rounding counts only where `f32` can hold the target: not past its range,
+/// and not a nonzero target that underflows to 0. An integer-valued control is
+/// held to the first rule.
 fn number_reached(target: f64, actual: &CFNumber) -> bool {
 	let Some(read) = actual.as_f64() else {
 		return false;
 	};
+	let rounded = target as f32;
 	(read - target).abs() <= target.abs() * 4.0 * f64::EPSILON
-		|| (actual.is_float_type() && read == f64::from(target as f32))
+		|| (actual.is_float_type()
+			&& rounded.is_finite()
+			&& (rounded != 0.0 || target == 0.0)
+			&& read == f64::from(rounded))
 }
 
 /// A read-back that is not the written number: the value the control reached,
 /// and its range bound where that explains it.
 fn number_readback_error(
-	target: f64,
+	target: NumberTarget,
 	actual: Option<&CFNumber>,
 	min: Option<&CFNumber>,
 	max: Option<&CFNumber>,
@@ -2255,9 +2366,10 @@ fn number_readback_error(
 			 target before writing again"
 		));
 	};
+	let wanted = target.as_f64();
 	let bound = |bound: Option<&CFNumber>, past: fn(f64, f64) -> bool, name: &str| {
 		bound
-			.filter(|bound| bound.as_f64().is_some_and(|bound| past(target, bound)))
+			.filter(|bound| bound.as_f64().is_some_and(|bound| past(wanted, bound)))
 			.map(|bound| format!(" (its {name} is {})", stringify_number(bound)))
 	};
 	let range = bound(min, |target, min| target < min, "minimum")
@@ -2377,7 +2489,7 @@ fn insert_selected_text(
 		control::intervention::check_press()?;
 		set_string_value(element, "AXSelectedText", text)?;
 		verify_text_value(element, text, &expected)?;
-		confirm_read_as(|| read_as(element))
+		confirm_read_as("the text", || read_as(element))
 	})?;
 	Ok(true)
 }
@@ -2567,7 +2679,7 @@ impl TextField for LiveField<'_> {
 	fn insert(&self, text: &str) -> CoreResult<()> {
 		set_string_value(self.element, "AXSelectedText", text)?;
 		verify_text_value(self.element, text, text)?;
-		confirm_read_as(|| read_as(self.element))
+		confirm_read_as("the text", || read_as(self.element))
 	}
 }
 
@@ -3096,15 +3208,15 @@ mod tests {
 
 	use super::{
 		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
-		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
-		ValueKind, WindowContent, ax_result, content_owner, create_system_wide,
-		element_action_result, focused_window, is_outside_windows, may_borrow_focus, menu_window,
-		not_settable, number_reached, number_readback_error, parse_number, perform_choosing,
+		KeyDestination, KeyFocus, NodeRead, NodeValues, NumberField, NumberTarget, ROLE, TITLE,
+		TextField, TextSurface, VALUE, ValueKind, WindowContent, ax_result, content_owner,
+		create_system_wide, element_action_result, focused_window, is_outside_windows,
+		may_borrow_focus, menu_window, not_settable, number_reached, parse_number, perform_choosing,
 		replace_utf16_selection, replace_whole_value, required_string, secure_subrole,
-		select_attached, standard_window_subrole, stringify_value, takes_inserted_text,
-		target_window, value_kind, window_records_of,
+		select_attached, standard_window_subrole, stringify_number, stringify_value,
+		takes_inserted_text, target_window, value_kind, window_records_of, write_number,
 	};
-	use crate::desktop::error::{CoreResult, ErrorCode};
+	use crate::desktop::error::{CoreResult, DesktopError, ErrorCode};
 
 	#[test]
 	fn an_unreadable_window_subrole_is_unknown_not_a_dialog() {
@@ -3705,16 +3817,30 @@ mod tests {
 	}
 
 	#[test]
-	fn number_text_parses_or_names_what_the_control_reads() {
-		let current = CFNumber::new_f64(12.5);
-		assert_eq!(parse_number("75", &current).unwrap(), 75.0);
-		assert_eq!(parse_number("-2.5", &current).unwrap(), -2.5);
-		assert_eq!(parse_number("1e2", &current).unwrap(), 100.0);
-		for text in ["seventy-five", "", "75%", "NaN", "inf"] {
-			let error = parse_number(text, &current).unwrap_err();
-			assert!(error.message.contains(&format!("{text:?} is not one")), "{}", error.message);
-			assert!(error.message.contains("it reads 12.5 now"), "{}", error.message);
-			assert!(error.message.contains("nothing was written"), "{}", error.message);
+	fn number_text_parses_by_the_kind_the_control_holds_or_names_what_it_reads() {
+		let real = CFNumber::new_f64(12.5);
+		assert_eq!(parse_number("75", &real).unwrap(), NumberTarget::Real(75.0));
+		assert_eq!(parse_number("-2.5", &real).unwrap(), NumberTarget::Real(-2.5));
+		assert_eq!(parse_number("1e2", &real).unwrap(), NumberTarget::Real(100.0));
+		// A float control holds the nearest double; an integer one the integer.
+		assert_eq!(
+			parse_number("9007199254740993", &real).unwrap(),
+			NumberTarget::Real(9_007_199_254_740_992.0)
+		);
+		let whole = CFNumber::new_i64(3);
+		assert_eq!(
+			parse_number("9007199254740993", &whole).unwrap(),
+			NumberTarget::Whole(9_007_199_254_740_993)
+		);
+		assert_eq!(parse_number("-7", &whole).unwrap(), NumberTarget::Whole(-7));
+		assert_eq!(parse_number("42.5", &whole).unwrap(), NumberTarget::Real(42.5));
+		for text in ["seventy-five", "", "75%", "NaN", "inf", "hunter2 secret"] {
+			let error = parse_number(text, &real).unwrap_err();
+			assert_eq!(
+				error.message,
+				"AXValue is a number and the text given is not one: write digits such as \"75\" or \
+				 \"0.5\"; it reads 12.5 now; nothing was written"
+			);
 		}
 	}
 
@@ -3738,6 +3864,15 @@ mod tests {
 		assert!(!number_reached(1e9, &CFNumber::new_f64(1e9 + 100.0)));
 		assert!(number_reached(0.0, &CFNumber::new_i64(0)));
 		assert!(!number_reached(0.0, &CFNumber::new_f64(1e-300)));
+		// f32 rounding counts only where f32 can hold the target: a float
+		// control left at 0 for 1e-50 missed, and 1e39 rounds to infinity.
+		assert!(!number_reached(1e-50, &CFNumber::new_f64(0.0)));
+		assert!(!number_reached(1e-50, &CFNumber::new_f32(0.0)));
+		for read in [f64::INFINITY, f64::from(f32::MAX), 0.0] {
+			assert!(!number_reached(1e39, &CFNumber::new_f64(read)));
+		}
+		assert!(!number_reached(1e39, &CFNumber::new_f32(f32::INFINITY)));
+		assert!(!number_reached(1e39, &CFNumber::new_f32(f32::MAX)));
 	}
 
 	#[test]
@@ -3753,29 +3888,153 @@ mod tests {
 		assert!(matches!(value_kind(None), ValueKind::Text));
 	}
 
+	/// A number control that reads back `reads` in turn (the last one from
+	/// then on) and waits at most `waits` intervals.
+	struct FakeNumber {
+		write_error: AXError,
+		written:     RefCell<Vec<String>>,
+		reads:       Vec<Option<CFRetained<CFNumber>>>,
+		read:        Cell<usize>,
+		waits:       usize,
+		confirm:     Option<&'static str>,
+		confirmed:   Cell<usize>,
+	}
+
+	impl FakeNumber {
+		fn reading(reads: Vec<Option<CFRetained<CFNumber>>>) -> Self {
+			Self {
+				write_error: AXError::Success,
+				written: RefCell::default(),
+				reads,
+				read: Cell::new(0),
+				waits: 20,
+				confirm: None,
+				confirmed: Cell::new(0),
+			}
+		}
+	}
+
+	impl NumberField for FakeNumber {
+		fn write(&self, value: &CFNumber) -> AXError {
+			self.written.borrow_mut().push(stringify_number(value));
+			self.write_error
+		}
+
+		fn value(&self) -> Option<CFRetained<CFNumber>> {
+			let at = self.read.get();
+			self.read.set(at + 1);
+			self.reads[at.min(self.reads.len() - 1)].clone()
+		}
+
+		fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>> {
+			Some(CFNumber::new_f64(if attribute == "AXMinValue" {
+				0.0
+			} else {
+				100.0
+			}))
+		}
+
+		fn wait(&mut self) -> bool {
+			let left = self.waits > 0;
+			self.waits = self.waits.saturating_sub(1);
+			left
+		}
+
+		fn confirm(&self) -> CoreResult<()> {
+			self.confirmed.set(self.confirmed.get() + 1);
+			self
+				.confirm
+				.map_or(Ok(()), |message| Err(DesktopError::new(ErrorCode::AxUnconfirmed, message)))
+		}
+	}
+
+	/// Read-backs of these values, in turn.
+	fn numbers(values: &[f64]) -> Vec<Option<CFRetained<CFNumber>>> {
+		values
+			.iter()
+			.map(|value| Some(CFNumber::new_f64(*value)))
+			.collect()
+	}
+
 	#[test]
-	fn a_number_read_back_names_the_value_reached_and_the_bound_that_explains_it() {
-		let (min, max) = (CFNumber::new_f64(0.0), CFNumber::new_f64(100.0));
-		let clamped =
-			number_readback_error(150.0, Some(&CFNumber::new_f64(100.0)), Some(&min), Some(&max));
+	fn a_number_write_reads_back_until_the_value_arrives_then_confirms_the_ref() {
+		let mut field = FakeNumber::reading(numbers(&[0.0, 0.0, 75.0]));
+		write_number(&mut field, NumberTarget::Real(75.0)).unwrap();
+		assert_eq!(*field.written.borrow(), ["75"]);
+		assert_eq!((field.read.get(), field.confirmed.get()), (3, 1));
+		// An element that reads as another control after the write is
+		// unconfirmed.
+		let mut moved = FakeNumber::reading(numbers(&[75.0]));
+		moved.confirm = Some("the number was written, but e7 now reads as slider \"Pan\"");
+		let error = write_number(&mut moved, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		// A refused write reads nothing back.
+		let mut refused = FakeNumber::reading(numbers(&[0.0]));
+		refused.write_error = AXError::IllegalArgument;
+		let error = write_number(&mut refused, NumberTarget::Real(75.0)).unwrap_err();
+		assert!(
+			error
+				.message
+				.starts_with("setting AXValue to a number failed"),
+			"{}",
+			error.message
+		);
+		assert_eq!(refused.read.get(), 0);
+	}
+
+	#[test]
+	fn a_number_write_the_control_did_not_keep_names_the_value_reached_and_the_bound() {
+		let missed = |target, reads| {
+			let mut field = FakeNumber::reading(reads);
+			field.waits = 3;
+			let error = write_number(&mut field, target).unwrap_err();
+			// It read on until the settle time was over, and confirmed nothing.
+			assert_eq!((field.read.get(), field.confirmed.get()), (4, 0));
+			error.message
+		};
 		assert_eq!(
-			clamped.message,
+			missed(NumberTarget::Real(150.0), numbers(&[100.0])),
 			"wrote 150; the control now reads 100 (its maximum is 100). The app may have clamped, \
 			 rounded or not taken it: inspect the target before writing again"
 		);
-		let low = number_readback_error(-5.0, Some(&CFNumber::new_f64(0.0)), Some(&min), Some(&max));
-		assert!(low.message.contains("now reads 0 (its minimum is 0)."), "{}", low.message);
-		let rounded =
-			number_readback_error(42.5, Some(&CFNumber::new_f64(40.0)), Some(&min), Some(&max));
+		let low = missed(NumberTarget::Real(-5.0), numbers(&[0.0]));
+		assert!(low.contains("now reads 0 (its minimum is 0)."), "{low}");
+		let rounded = missed(NumberTarget::Real(42.5), numbers(&[40.0]));
+		assert!(rounded.starts_with("wrote 42.5; the control now reads 40."), "{rounded}");
+		let ignored = missed(NumberTarget::Real(75.0), numbers(&[0.0]));
+		assert!(ignored.starts_with("wrote 75; the control now reads 0."), "{ignored}");
+		let unread = missed(NumberTarget::Real(75.0), vec![None]);
+		assert!(unread.contains("could not be read back"), "{unread}");
+	}
+
+	#[test]
+	fn a_whole_number_goes_to_an_integer_control_exactly() {
+		let whole = |value: i64| Some(CFNumber::new_i64(value));
+		let target = NumberTarget::Whole(9_007_199_254_740_993);
+		let mut field = FakeNumber::reading(vec![whole(9_007_199_254_740_993)]);
+		write_number(&mut field, target).unwrap();
+		assert_eq!(*field.written.borrow(), ["9007199254740993"]);
+		let mut rounded = FakeNumber::reading(vec![whole(9_007_199_254_740_992)]);
+		rounded.waits = 0;
+		let error = write_number(&mut rounded, target).unwrap_err();
 		assert!(
-			rounded
+			error
 				.message
-				.starts_with("wrote 42.5; the control now reads 40."),
+				.starts_with("wrote 9007199254740993; the control now reads 9007199254740992 "),
 			"{}",
-			rounded.message
+			error.message
 		);
-		let unread = number_readback_error(75.0, None, None, None);
-		assert!(unread.message.contains("could not be read back"), "{}", unread.message);
+		// Fractional text to an integer control is reported as what it reads.
+		let mut fraction = FakeNumber::reading(vec![whole(42)]);
+		fraction.waits = 0;
+		let error = write_number(&mut fraction, NumberTarget::Real(42.5)).unwrap_err();
+		assert!(
+			error
+				.message
+				.starts_with("wrote 42.5; the control now reads 42."),
+			"{}",
+			error.message
+		);
 	}
 
 	#[test]

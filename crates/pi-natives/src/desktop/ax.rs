@@ -599,9 +599,10 @@ pub(crate) fn require_read_as(
 /// element: a write it confirmed while it reads as another control may have
 /// gone to that one, so it is unconfirmed. A read that fails after the write,
 /// as when the app rebuilt the element, cannot tell: the write's own
-/// read-back stands.
+/// read-back stands. `written` names what was written ("the text").
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn confirm_read_as(
+	written: &str,
 	props: impl FnOnce() -> CoreResult<Option<AxReadAs>>,
 ) -> CoreResult<()> {
 	if read_as_state() != Some(true) {
@@ -612,7 +613,7 @@ pub(crate) fn confirm_read_as(
 		Some(message) => Err(DesktopError::new(
 			ErrorCode::AxUnconfirmed,
 			format!(
-				"the text was written, but {message} after the write, so it may have gone to that \
+				"{written} was written, but {message} after the write, so it may have gone to that \
 				 control: read the window before retrying"
 			),
 		)),

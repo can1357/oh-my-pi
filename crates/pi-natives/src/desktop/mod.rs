@@ -3279,7 +3279,7 @@ mod capture_tests {
 					after_write(&mut tree, id);
 				}
 			}
-			ax::confirm_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))
+			ax::confirm_read_as("the text", || self.read_as(h).map(ax::AxReadAs::from_props))
 		}
 
 		fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
