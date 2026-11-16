@@ -1,0 +1,3 @@
+reason = "System prompt and find description send known names and literals to grep/glob first; find only when there is nothing to search for"
+upstream = "candidate"
+layer = 50
