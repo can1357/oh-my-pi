@@ -4,12 +4,25 @@
 
 ### Added
 
+- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added `anthropic/claude-voice-stream` (`kind "stt"`, `anthropic-voice-stream` runner API): Claude subscription speech-to-text over Claude Code's `/voice` socket, OAuth only ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
+- Changed the local speech model `kokoro` to `phonon-31m`
 - A provider's authored seed rows now survive that provider's `exclude-models` rules at generation, so a family exclusion such as xai-oauth's `prefix="grok-voice-"` no longer drops a seeded runner row ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added publicly available image-sizing helpers for determining model-delivered image dimensions and fitting images to a specified long edge before coordinate mapping.
+
+### Fixed
+
+- Fixed image inputs being dropped for DeepSeek V4 Flash, restoring consistent multimodal image support.
+- Restricted reasoning-effort options for Mistral GLM 5.3, GLM 5.3 Flash, and Mistral Large 4 to the levels supported by those models.
 
 ## [18.20.2] - 2026-11-14
 

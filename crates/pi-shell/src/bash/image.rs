@@ -306,6 +306,33 @@ impl ImageDiff {
 	pub fn records(&self) -> impl Iterator<Item = &Record> {
 		self.records.iter().filter_map(|(_, r)| r.as_ref())
 	}
+
+	/// Every change: its key and the new record (`None`: removed).
+	pub fn changes(&self) -> impl Iterator<Item = (Key<'_>, Option<&Record>)> {
+		let vars = self
+			.vars
+			.iter()
+			.map(|(name, r)| (Key::Var(BStr::new(name)), r.as_ref()));
+		vars.chain(
+			self
+				.records
+				.iter()
+				.map(|(key, r)| (key.as_key(), r.as_ref())),
+		)
+	}
+
+	/// Keep only the changes whose key `keep` accepts.
+	pub fn retain(&mut self, mut keep: impl FnMut(Key<'_>) -> bool) {
+		self
+			.vars
+			.retain(|(name, _)| keep(Key::Var(BStr::new(name))));
+		self.records.retain(|(key, _)| keep(key.as_key()));
+	}
+
+	/// Whether the diff changes nothing.
+	pub const fn is_empty(&self) -> bool {
+		self.vars.is_empty() && self.records.is_empty()
+	}
 }
 
 #[cfg(test)]

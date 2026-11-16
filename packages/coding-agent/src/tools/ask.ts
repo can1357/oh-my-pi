@@ -11,6 +11,7 @@
 
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { editorKey, editorKeys } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
@@ -33,18 +34,22 @@ import {
 	spansText,
 	type TextField,
 } from "@oh-my-pi/pi-tui/html-form/parse";
+import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { disambiguateDisplayLabels } from "@oh-my-pi/pi-tui/render/render-utils";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ExtensionUIContext, ExtensionUIDialogOptions, ExtensionUISelectItem } from "../extensibility/extensions";
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { askTimeoutMs, cfgAskNotify } from "../modes/settings";
 import askDescription from "../prompts/tools/ask.md" with { type: "text" };
 import askHeadlessForkMessage from "../prompts/tools/ask-headless-fork.md" with { type: "text" };
 import askResultTemplate from "../prompts/tools/ask-result.md" with { type: "text" };
+import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
 import { cfgSpeechEnabled } from "../tts/settings";
 import { vocalizer } from "../tts/vocalizer";
+import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 import type { ToolSession } from ".";
 import { ToolAbortError } from "./tool-errors";
 
@@ -387,6 +392,47 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		});
 	}
 
+	async #answerImageBlocks(
+		images: ImageContent[],
+		signal: AbortSignal | undefined,
+	): Promise<Array<TextContent | ImageContent>> {
+		if (images.length === 0) return [];
+		let descriptions: TextContent[] | undefined;
+		const model = this.session.getActiveModel?.();
+		const modelRegistry = this.session.modelRegistry;
+		if (modelRegistry && shouldDescribeImagesForTextModel(model, this.session.settings)) {
+			try {
+				descriptions = await describeAttachedImagesForTextModel(
+					images,
+					{
+						activeModel: model,
+						modelRegistry,
+						settings: this.session.settings,
+						localProtocolOptions: sessionLocalProtocolOptions(this.session),
+						activeModelString: this.session.getActiveModelString?.(),
+						telemetryConfig: this.session.getTelemetry?.(),
+						sessionId: this.session.getSessionId?.() ?? undefined,
+						costGate: this.session.costGate,
+					},
+					signal,
+				);
+			} catch (error) {
+				logger.warn("ask answer image description failed; image left undescribed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const blocks: Array<TextContent | ImageContent> = [];
+		for (const [index, image] of images.entries()) {
+			const notice = renderAttachmentSourceNotice(image, index + 1, { askAnswer: true });
+			if (notice) blocks.push({ type: "text", text: notice.content });
+			blocks.push({ type: "image", data: image.data, mimeType: image.mimeType });
+			const description = descriptions?.[index];
+			if (description) blocks.push(description);
+		}
+		return blocks;
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: AskParams,
@@ -450,7 +496,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
 				answered = await untilAborted(dialogSignal, () =>
-					formDialog(params.html, { timeout, signal: dialogSignal }),
+					formDialog(params.html, { timeout, signal: dialogSignal, acceptImages: true }),
 				);
 			} else {
 				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
@@ -462,16 +508,24 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		if (!answered) return cancelAsk();
 
 		const notes = answered.notes?.length ? answered.notes : undefined;
+		// Each note numbers its markers from 1; shift them so `[Image #N]` indexes all result images.
+		const answerImages: ImageContent[] = [];
+		const resultNotes: OptionNote[] = [];
+		for (const { images, ...note } of notes ?? []) {
+			resultNotes.push({ ...note, text: shiftImageMarkers(note.text, answerImages.length, images?.length ?? 0) });
+			if (images) answerImages.push(...images);
+		}
 		const details: AskToolDetails = {
 			answers: formAnswers(form, answered.data),
-			...(notes ? { notes } : {}),
+			...(notes ? { notes: resultNotes } : {}),
 			...(answered.timedOut ? { timedOut: true } : {}),
 		};
 		const text = prompt.render(askResultTemplate, {
 			timedOut: answered.timedOut,
 			json: JSON.stringify(answered.data, null, 2),
-			notes: notes?.map(note => ({ ...note, text: note.text.replace(/\s+/g, " ").trim() })),
+			notes: notes && resultNotes.map(note => ({ ...note, text: note.text.replace(/\s+/g, " ").trim() })),
 		});
-		return { content: [{ type: "text", text }], details };
+		const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
+		return { content: [{ type: "text", text }, ...imageBlocks], details };
 	}
 }
