@@ -5,7 +5,7 @@
 ### Added
 
 - `getUpstreamPin()` and `routedModelsAreEqual()` in `@oh-my-pi/pi-catalog/models` tell apart an aggregator model pinned to different upstream providers ([#19664](https://github.com/can1357/oh-my-pi/pull/19664) by [@taibenvenuti](https://github.com/taibenvenuti))
-- Added Baseten's elephant-1, mammoth-1 and joey-1 decision models as `judge` models on the `baseten` provider, discovered from its model list and answering at `/v1/systemone`
+- Added Baseten's elephant-1, mammoth-1 and joey-1 decision models as `judge` models on the `baseten` provider, discovered from its model list and answering at `/v1/systemone` ([#19457](https://github.com/can1357/oh-my-pi/pull/19457) by [@dsingal0](https://github.com/dsingal0))
 
 ### Fixed
 
