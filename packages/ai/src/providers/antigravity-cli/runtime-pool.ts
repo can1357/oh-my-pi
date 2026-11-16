@@ -5,9 +5,13 @@
  * once torn down, so retention needs one lifecycle instead of one policy per
  * caller: an idle runtime is released without destroying what it persisted, a
  * runtime that still owns work is retried until it is finished, and an explicit
- * disposal is terminal. Entries live in a caller-owned store, which stays the
- * single source of truth — a store cleared elsewhere can never hand back a
- * runtime this pool already retired.
+ * disposal is terminal.
+ *
+ * The caller's store is the lookup the pool hands entries out from, but the
+ * pool also tracks every entry it owns on its own: a caller that deletes or
+ * replaces an entry would otherwise strand a live process and its timer, so the
+ * detached entry is retired once its last lease releases and its replacement is
+ * left untouched.
  */
 
 /** Why a runtime left the pool. Idle retirement must preserve persisted state. */
@@ -40,6 +44,8 @@ export class SessionRuntimePool<T> {
 	readonly #dispose: (entry: T, key: string, reason: SessionRuntimeRetirement) => Promise<void>;
 	readonly #idle: SessionRuntimeIdle<T>;
 	readonly #store: SessionRuntimeStore<T>;
+	readonly #managed = new Map<string, T>();
+	readonly #detached = new Map<T, string>();
 	readonly #leases = new Map<T, number>();
 	readonly #timers = new Map<T, NodeJS.Timeout>();
 	readonly #disposing = new Set<Promise<void>>();
@@ -82,6 +88,11 @@ export class SessionRuntimePool<T> {
 				const count = (this.#leases.get(value) ?? 1) - 1;
 				if (count > 0) this.#leases.set(value, count);
 				else this.#leases.delete(value);
+				const detachedKey = this.#detached.get(value);
+				if (detachedKey !== undefined) {
+					if (count === 0) void this.#retireDetached(value, detachedKey).catch(() => undefined);
+					return;
+				}
 				if (this.#store.get(key) === value) this.#schedule(key, value);
 			},
 		};
@@ -93,6 +104,7 @@ export class SessionRuntimePool<T> {
 
 	/** Retire one idle entry, keeping whatever it persisted. */
 	async closeIdle(key: string): Promise<boolean> {
+		this.#reconcile(key);
 		const entry = this.#store.get(key);
 		if (!entry || this.#leases.has(entry) || this.#idle.canDispose?.(entry) === false) return false;
 		await this.#retire(key, "idle");
@@ -105,23 +117,70 @@ export class SessionRuntimePool<T> {
 	}
 
 	async closeAll(): Promise<void> {
-		const entries = [...this.#store.entries()];
-		for (const [key] of entries) this.#store.delete(key);
-		for (const [, entry] of entries) {
+		const entries = [...this.#managed];
+		const detached = [...this.#detached];
+		this.#managed.clear();
+		this.#detached.clear();
+		for (const [key, entry] of entries) {
+			if (this.#store.get(key) === entry) this.#store.delete(key);
 			this.#clearTimer(entry);
 			this.#leases.delete(entry);
 		}
-		await Promise.allSettled(entries.map(([key, entry]) => this.#disposeEntry(entry, key, "dispose")));
+		for (const [entry] of detached) {
+			this.#clearTimer(entry);
+			this.#leases.delete(entry);
+		}
+		await Promise.allSettled([
+			...entries.map(([key, entry]) => this.#disposeEntry(entry, key, "dispose")),
+			...detached.map(([entry, key]) => this.#disposeEntry(entry, key, "dispose")),
+		]);
 		await Promise.allSettled(this.#disposing);
 	}
 
 	#touch(key: string): T {
-		let entry = this.#store.get(key);
-		if (!entry) {
-			entry = this.#create(key);
-			this.#store.set(key, entry);
+		const stored = this.#store.get(key);
+		const owned = this.#managed.get(key);
+		if (stored !== undefined && stored === owned) return stored;
+		if (owned !== undefined) {
+			// The caller removed or replaced our entry: nothing can reach it again,
+			// so it leaves the pool instead of outliving its replacement.
+			this.#managed.delete(key);
+			this.#detach(owned, key);
 		}
+		if (stored !== undefined) {
+			this.#managed.set(key, stored);
+			return stored;
+		}
+		const entry = this.#create(key);
+		this.#store.set(key, entry);
+		this.#managed.set(key, entry);
 		return entry;
+	}
+
+	/** Notice an entry the caller dropped from its store, without instantiating anything. */
+	#reconcile(key: string): void {
+		const entry = this.#managed.get(key);
+		if (entry === undefined || this.#store.get(key) === entry) return;
+		this.#managed.delete(key);
+		this.#detach(entry, key);
+	}
+
+	/** Retire an entry the store no longer associates with `key`, after its last lease. */
+	#detach(entry: T, key: string): void {
+		this.#clearTimer(entry);
+		if (this.#leases.has(entry)) {
+			this.#detached.set(entry, key);
+			return;
+		}
+		void this.#retireDetached(entry, key).catch(() => undefined);
+	}
+
+	async #retireDetached(entry: T, key: string): Promise<void> {
+		this.#detached.delete(entry);
+		this.#leases.delete(entry);
+		// A caller that dropped the entry never asked for terminal disposal, so
+		// the transport is released and whatever it persisted stays.
+		await this.#disposeEntry(entry, key, "idle");
 	}
 
 	#clearTimer(entry: T): void {
@@ -131,10 +190,11 @@ export class SessionRuntimePool<T> {
 
 	#schedule(key: string, entry: T): void {
 		this.#clearTimer(entry);
-		if (!this.#idle.timeoutMs || this.#leases.has(entry)) return;
+		if (this.#detached.has(entry) || !this.#idle.timeoutMs || this.#leases.has(entry)) return;
 		const timer = setTimeout(() => {
 			this.#timers.delete(entry);
-			if (this.#store.get(key) !== entry || this.#leases.has(entry)) return;
+			this.#reconcile(key);
+			if (this.#detached.has(entry) || this.#store.get(key) !== entry || this.#leases.has(entry)) return;
 			// A parked tool call can outlive its step; retry instead of releasing
 			// a runtime that is still waiting for its result.
 			if (this.#idle.canDispose?.(entry) === false) {
@@ -148,11 +208,13 @@ export class SessionRuntimePool<T> {
 	}
 
 	async #retire(key: string, reason: SessionRuntimeRetirement): Promise<void> {
-		const entry = this.#store.get(key);
+		const entry = this.#managed.get(key) ?? this.#store.get(key);
 		// Detach before awaiting teardown so a later request cannot reuse a
-		// runtime that is already gone.
-		this.#store.delete(key);
-		if (!entry) return;
+		// runtime that is already gone, and never delete a replacement the caller
+		// installed under this key.
+		if (entry !== undefined && this.#store.get(key) === entry) this.#store.delete(key);
+		if (this.#managed.get(key) === entry) this.#managed.delete(key);
+		if (entry === undefined) return;
 		this.#clearTimer(entry);
 		this.#leases.delete(entry);
 		await this.#disposeEntry(entry, key, reason);

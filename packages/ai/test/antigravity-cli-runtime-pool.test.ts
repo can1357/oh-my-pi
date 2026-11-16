@@ -18,6 +18,14 @@ interface Retirement {
 	reason: SessionRuntimeRetirement;
 }
 
+/** A caller-owned map view that only exposes fake runtimes, like the provider's. */
+function ownedStore(states: Map<string, unknown>): SessionRuntimeStore<FakeRuntime> {
+	return sessionRuntimeStore(
+		states,
+		(value): value is FakeRuntime => typeof value === "object" && value !== null && "pending" in value,
+	);
+}
+
 function harness(options: { timeoutMs?: number; store?: SessionRuntimeStore<FakeRuntime> } = {}) {
 	const created: FakeRuntime[] = [];
 	const retirements: Retirement[] = [];
@@ -156,11 +164,7 @@ describe("SessionRuntimePool", () => {
 		const states = new Map<string, unknown>();
 		const foreign = { close: () => undefined };
 		states.set("other-provider:session", foreign);
-		const store = sessionRuntimeStore(
-			states,
-			(value): value is FakeRuntime => typeof value === "object" && value !== null && "pending" in value,
-		);
-		const { pool, created, retirements } = harness({ store });
+		const { pool, created, retirements } = harness({ store: ownedStore(states) });
 
 		const runtime = pool.get("antigravity-acp:acct:default");
 		expect(states.get("antigravity-acp:acct:default")).toBe(runtime);
@@ -170,10 +174,74 @@ describe("SessionRuntimePool", () => {
 		expect(pool.peek("antigravity-acp:acct:default")).toBeUndefined();
 		expect(pool.get("antigravity-acp:acct:default")).not.toBe(runtime);
 		expect(created).toHaveLength(2);
+		expect(runtime.closed).toBe(1);
 
 		await pool.closeAll();
 		expect(states.get("other-provider:session")).toBe(foreign);
 		expect(states.has("antigravity-acp:acct:default")).toBe(false);
-		expect(retirements.every(entry => entry.reason === "dispose")).toBe(true);
+		expect(retirements).toEqual([
+			{ key: "antigravity-acp:acct:default", reason: "idle" },
+			{ key: "antigravity-acp:acct:default", reason: "dispose" },
+		]);
+	});
+
+	it("retires an entry the caller deleted when its idle timer comes due", () => {
+		vi.useFakeTimers();
+		const states = new Map<string, unknown>();
+		const { pool, retirements } = harness({ timeoutMs: 1_000, store: ownedStore(states) });
+		const runtime = pool.get("k");
+		expect(vi.getTimerCount()).toBe(1);
+
+		states.delete("k");
+		vi.advanceTimersByTime(1_000);
+		expect(retirements).toEqual([{ key: "k", reason: "idle" }]);
+		expect(runtime.closed).toBe(1);
+		expect(runtime.disposed).toBe(0);
+		expect(vi.getTimerCount()).toBe(0);
+		expect(pool.values()).toEqual([]);
+	});
+
+	it("retires a replaced entry after its last lease and leaves the replacement in place", () => {
+		vi.useFakeTimers();
+		const states = new Map<string, unknown>();
+		const { pool, created, retirements } = harness({ timeoutMs: 1_000, store: ownedStore(states) });
+		const lease = pool.acquire("k");
+		const original = lease.value;
+		const replacement: FakeRuntime = { id: 99, pending: false, closed: 0, disposed: 0 };
+		states.set("k", replacement);
+
+		// Adopting the replacement drops the original's idle timer immediately and
+		// leaves it leased; the replacement gets the timer instead.
+		expect(pool.get("k")).toBe(replacement);
+		expect(vi.getTimerCount()).toBe(1);
+		expect(retirements).toEqual([]);
+
+		lease.release();
+		expect(retirements).toEqual([{ key: "k", reason: "idle" }]);
+		expect(original.closed).toBe(1);
+		expect(states.get("k")).toBe(replacement);
+		expect(pool.peek("k")).toBe(replacement);
+		expect(pool.get("k")).toBe(replacement);
+		expect(created).toEqual([original]);
+
+		vi.advanceTimersByTime(1_000);
+		expect(retirements).toEqual([
+			{ key: "k", reason: "idle" },
+			{ key: "k", reason: "idle" },
+		]);
+	});
+
+	it("drains a detached entry and its timer in closeAll", async () => {
+		vi.useFakeTimers();
+		const states = new Map<string, unknown>();
+		const { pool, retirements } = harness({ timeoutMs: 1_000, store: ownedStore(states) });
+		const lease = pool.acquire("k");
+		states.delete("k");
+		expect(await pool.closeIdle("k")).toBe(false);
+
+		await pool.closeAll();
+		expect(retirements).toEqual([{ key: "k", reason: "dispose" }]);
+		expect(lease.value.disposed).toBe(1);
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });

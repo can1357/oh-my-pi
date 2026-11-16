@@ -10,7 +10,7 @@ import type { Context, Model, ProviderSessionState, StreamFunction, StreamOption
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { agyGeminiDir } from "./antigravity-cli/binary";
 import { agyCredentialKey, agyCredentialVersion, stageAgyCredentials } from "./antigravity-cli/credentials";
-import { AgyHost } from "./antigravity-cli/host";
+import { AgyHost, type AgyHostOptions } from "./antigravity-cli/host";
 import {
 	type SessionRuntimeIdle,
 	SessionRuntimePool,
@@ -35,6 +35,21 @@ export const antigravityHostIdle: SessionRuntimeIdle<AgyHost> = {
 	canDispose: host => !host.hasPendingTurn,
 };
 
+/** Test-only overrides for retained host construction; production runs with neither field set. */
+export interface AntigravityHostOverrides {
+	/** Account-scoped directory holding staged credentials and conversations. */
+	directory?: (account: string) => string;
+	/** Options every retained host is constructed with. */
+	options?: AgyHostOptions;
+}
+
+let hostOverrides: AntigravityHostOverrides = {};
+
+/** @internal Exported for tests: drive retained hosts through a fake transport and a temporary directory. */
+export function setAntigravityHostOverrides(overrides?: AntigravityHostOverrides): void {
+	hostOverrides = overrides ?? {};
+}
+
 /** Account segment of a retained host key; a credential key is a hex digest, so no separator can hide inside it. */
 function accountOf(key: string): string {
 	const rest = key.slice(KEY_PREFIX.length);
@@ -42,8 +57,12 @@ function accountOf(key: string): string {
 	return end < 0 ? rest : rest.slice(0, end);
 }
 
+function hostDirectory(account: string): string {
+	return hostOverrides.directory?.(account) ?? path.join(agyGeminiDir(), account);
+}
+
 function createHost(key: string): AgyHost {
-	return new AgyHost(path.join(agyGeminiDir(), accountOf(key)));
+	return new AgyHost(hostDirectory(accountOf(key)), hostOverrides.options);
 }
 
 /** @internal Exported for tests. */
@@ -77,6 +96,11 @@ function callerPool(states: Map<string, ProviderSessionState>): SessionRuntimePo
 	return pool;
 }
 
+/** @internal Exported for tests: drain retained hosts for one caller-owned map, or every implicit host. */
+export async function closeAntigravityHosts(states?: Map<string, ProviderSessionState>): Promise<void> {
+	await (states ? callerPool(states) : implicitPool).closeAll();
+}
+
 /** Streams one assistant step while retaining agy's unfinished turn across tool results. */
 export const streamAntigravityCli: StreamFunction<"antigravity-acp"> = (
 	model: Model<"antigravity-acp">,
@@ -103,7 +127,7 @@ async function runStep(
 	options.signal?.throwIfAborted();
 	if (!options.apiKey) throw new Error("Antigravity CLI requires sign-in. Run /login antigravity-cli.");
 	const account = agyCredentialKey(options.apiKey);
-	await stageAgyCredentials(options.apiKey, path.join(agyGeminiDir(), account));
+	await stageAgyCredentials(options.apiKey, hostDirectory(account));
 	const stepOptions = {
 		cwd: options.cwd,
 		reasoning: options.reasoning,
