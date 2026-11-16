@@ -4,9 +4,8 @@
 
 ### Added
 
-- Added `embeddings.queryPrefix` / `MNEMOPI_EMBEDDING_QUERY_PREFIX` to prepend an instruction to recall queries for instruction-tuned embedders such as Qwen3-Embedding and E5 ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
-- Added `embeddings.inputType` / `MNEMOPI_EMBEDDING_INPUT_TYPE` to send `input_type` (`query` or `passage`) with embedding API requests, which NVIDIA NIM asymmetric embedders require ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
-- Added `embeddings.onRequestFailed` so hosts can surface rejected or failed embedding API requests instead of losing them to a debug log ([#19322](https://github.com/can1357/oh-my-pi/pull/19322) by [@yibaimeng](https://github.com/yibaimeng))
+- Added configurable embedding query prefixes and input types for instruction-tuned and asymmetric embedding models, including Qwen3-Embedding, E5, and NVIDIA NIM.
+- Added the `embeddings.onRequestFailed` callback, allowing hosts to handle and surface failed embedding API requests.
 
 ## [18.20.0] - 2026-11-12
 
