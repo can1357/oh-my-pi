@@ -418,7 +418,7 @@ describe("eval js output() options (issue #17455)", () => {
 				id,
 				displayName: id,
 				kind: "sub",
-				session: { isStreaming: true } as AgentSession,
+				session: { isStreaming: true, runStartedAt: Date.now() } as AgentSession,
 				status: "running",
 			});
 		}
