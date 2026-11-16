@@ -83,6 +83,7 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 		errorMessage: msg.errorMessage,
 		errorStatus: msg.errorStatus,
 		errorId: msg.errorId,
+		requestId: msg.requestId,
 	});
 }
 

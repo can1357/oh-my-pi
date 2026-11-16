@@ -1984,6 +1984,8 @@ describe("anthropic stream envelope handling", () => {
 		expect(result.stopDetails).toEqual({ type: "refusal" });
 		expect(result.errorMessage).toContain("Refusal (no details provided)");
 		expect(result.errorMessage).not.toContain("An unknown error occurred");
+		// Support asks for the request id of a refused request, so it must survive on the error turn.
+		expect(result.requestId).toBe("req_mock");
 		expect(countEvents(events, "error")).toBe(1);
 		expect(countEvents(events, "done")).toBe(0);
 	});

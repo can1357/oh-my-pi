@@ -2494,6 +2494,7 @@ const streamAnthropicOnce = (
 				output.content.length = 0;
 				output.model = sourceModel.id;
 				output.responseId = undefined;
+				output.requestId = undefined;
 				output.upstreamModel = undefined;
 				output.errorMessage = undefined;
 				output.stopDetails = undefined;
@@ -2730,6 +2731,7 @@ const streamAnthropicOnce = (
 					} finally {
 						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
 					}
+					output.requestId = requestId ?? undefined;
 					await notifyProviderResponse(options, response, sourceModel, requestId);
 					if (slowMode) {
 						const slowSignal = parseAnthropicSlowModeHeaders(response.headers);
