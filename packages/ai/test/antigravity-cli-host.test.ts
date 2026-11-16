@@ -35,6 +35,18 @@ const model = buildModel({
 	contextWindow: 200_000,
 	reasoning: true,
 });
+const wideModel = buildModel({
+	api: "antigravity-acp",
+	provider: "antigravity-cli",
+	id: "gemini-4-argon",
+	name: "Wide test model",
+	baseUrl: "",
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 8_192,
+	contextWindow: 500_000,
+	reasoning: true,
+});
 const tools: Tool[] = [{ name: "read", description: "Read a file", parameters: type({ path: "string" }) }];
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
 
@@ -96,6 +108,7 @@ class FakeAgy implements AgyTransport {
 	cancelMode: "ack" | "hold" | "reject" = "ack";
 	autoSteer = true;
 	failLoad = false;
+	configureUsage: { used: number; size: number } | undefined;
 	configureGate: Promise<void> | undefined;
 	currentId = "";
 	#pending = new Set<FakePrompt>();
@@ -133,6 +146,8 @@ class FakeAgy implements AgyTransport {
 			setSessionConfigOption: async params => {
 				await this.configureGate;
 				this.configurations.push(`${params.configId}:${params.value}`);
+				if (params.configId === "model" && this.configureUsage)
+					this.usage(this.configureUsage.used, this.configureUsage.size);
 				return { configOptions };
 			},
 			prompt: request => {
@@ -224,10 +239,11 @@ function step(
 	extra: Partial<Context> = {},
 	signal?: AbortSignal,
 	options: Omit<AgyStepOptions, "signal"> = {},
+	activeModel = model,
 ) {
 	const stream = new AssistantMessageEventStream();
-	const writer = new StepWriter(model, stream);
-	const done = host.step(model, { messages, tools, ...extra }, { ...options, signal }, writer);
+	const writer = new StepWriter(activeModel, stream);
+	const done = host.step(activeModel, { messages, tools, ...extra }, { ...options, signal }, writer);
 	done.catch(() => undefined);
 	return { writer, done, stream };
 }
@@ -888,6 +904,55 @@ describe("AgyHost stateful steps", () => {
 		await second.done;
 		expect(second.writer.output.usage.contextTokens).toBe(0);
 		continuation.response.resolve({ stopReason: "end_turn" });
+	});
+	it("records the configuration-time usage_update of a switched model instead of reusing the old window", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.usage(900_000, 1_000_000);
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		expect(first.writer.output.usage.contextTokens).toBe(180_000);
+		fake.configureUsage = { used: 400_000, size: 2_000_000 };
+		const second = step(
+			state.host,
+			[user("hello"), first.writer.output, user("continue")],
+			{},
+			undefined,
+			{},
+			wideModel,
+		);
+		const continuation = await fake.prompts.next();
+		fake.text("Continued.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(100_000);
+	});
+
+	it("falls back to the raw occupancy when a model switch sends no replacement window", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.usage(900_000, 1_000_000);
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(
+			state.host,
+			[user("hello"), first.writer.output, user("continue")],
+			{},
+			undefined,
+			{},
+			wideModel,
+		);
+		const continuation = await fake.prompts.next();
+		fake.text("Continued.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(900_000);
 	});
 	it("keeps completed stream output immutable and emits exactly one terminal event", () => {
 		const stream = new AssistantMessageEventStream();

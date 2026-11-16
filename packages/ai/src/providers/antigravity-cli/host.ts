@@ -532,6 +532,8 @@ export class AgyHost implements ProviderSessionState {
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
 		const connection = this.#requireProcess().connection;
 		if (conversation.model !== modelId) {
+			// A switched model reports its own window; keep the previous size only if configuration resends one.
+			this.#contextSize = undefined;
 			const response = await connection.setSessionConfigOption({
 				sessionId: conversation.id,
 				configId: "model",
@@ -716,9 +718,14 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	#onUpdate(notification: SessionNotification): void {
-		if (this.#loading || !this.#turn || notification.sessionId !== this.#conversation?.id || this.#turn.cancelling)
-			return;
+		if (this.#loading || notification.sessionId !== this.#conversation?.id || this.#turn?.cancelling) return;
 		const update = notification.update;
+		if (update.sessionUpdate === "usage_update") {
+			this.#contextTokens = update.used;
+			this.#contextSize = update.size;
+			return;
+		}
+		if (!this.#turn) return;
 		const writer = this.#step?.aborted ? undefined : this.#step?.writer;
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
@@ -726,10 +733,6 @@ export class AgyHost implements ProviderSessionState {
 				return;
 			case "agent_thought_chunk":
 				if (update.content.type === "text") writer?.thinking(update.content.text);
-				return;
-			case "usage_update":
-				this.#contextTokens = update.used;
-				this.#contextSize = update.size;
 				return;
 			case "tool_call": {
 				const name = MCP_TOOL_NAME.exec(update.title)?.[1];
