@@ -11,7 +11,10 @@ use omp_tools::read::{
 	selector::ParsedSelector,
 };
 
-use crate::vault::{ObsidianOperation, VaultEntry, VaultError, VaultSearch, VaultService};
+use crate::{
+	vault::{ObsidianOperation, VaultEntry, VaultError, VaultSearch, VaultService},
+	vault_graph::{GraphLimits, VaultNativeQuery, vault_query},
+};
 
 const INLINE_LIMIT: usize = 8 * 1024 * 1024;
 const DIRECTORY_ENTRY_LIMIT: usize = 1_000;
@@ -62,6 +65,54 @@ impl VaultResolver {
 			body.push_str("\n[Listing truncated at the configured entry bound.]\n");
 		}
 		Ok(CowBytes::from(body.into_bytes()))
+	}
+
+	async fn native_query<'a>(
+		&'a self,
+		parsed: &ParsedVaultResource,
+		query: VaultNativeQuery,
+		params: &BTreeMap<String, String>,
+		selector: &'a ParsedSelector,
+	) -> Result<CowBytes<'static>, Fault> {
+		use super::select_bytes;
+
+		let heading = params
+			.get("heading")
+			.map(String::as_str)
+			.filter(|value| !value.is_empty());
+		let tag = params
+			.get("tag")
+			.map(String::as_str)
+			.filter(|value| !value.is_empty());
+		if query == VaultNativeQuery::Section && heading.is_none() {
+			return Err(Fault::Invalid {
+				message: Str::new_static(
+					"vault://?op=section requires a non-empty 'heading' parameter",
+				),
+			});
+		}
+		if query == VaultNativeQuery::Tag && tag.is_none() {
+			return Err(Fault::Invalid {
+				message: Str::new_static("vault://?op=tag requires a non-empty 'tag' parameter"),
+			});
+		}
+		let bytes = vault_query(
+			&self.service,
+			&parsed.vault,
+			&parsed.path,
+			query,
+			heading,
+			tag,
+			GraphLimits::production(),
+		)
+		.await
+		.map_err(vault_fault)?;
+		let resource = if parsed.path.is_empty() {
+			parsed.vault.as_str()
+		} else {
+			parsed.path.as_str()
+		};
+		select_bytes(&LineOffsetCache::default(), resource, bytes, selector)
 	}
 }
 
@@ -124,12 +175,16 @@ impl Resolve for VaultResolver {
 		};
 		let parsed = parse_resource(resource).map_err(vault_url_fault)?;
 		let params = parse_query(query);
-		let operation = params
+		let operation_name = params
 			.get("op")
 			.filter(|operation| !operation.is_empty())
 			.ok_or_else(|| Fault::Invalid {
 				message: Str::new_static("vault:// query operations require an 'op' parameter"),
-			})?
+			})?;
+		if let Ok(query) = operation_name.parse::<VaultNativeQuery>() {
+			return self.native_query(&parsed, query, &params, selector).await;
+		}
+		let operation = operation_name
 			.parse::<ObsidianOperation>()
 			.map_err(|_| Fault::Invalid {
 				message: Str::new_static("unsupported vault:// query operation"),
@@ -432,6 +487,18 @@ pub(crate) fn vault_fault(error: VaultError) -> Fault {
 		VaultError::Limit { limit, actual } => Fault::Source {
 			message: sf!("Vault resource is {actual} bytes; narrow it below the {limit}-byte bound"),
 		},
+		VaultError::GraphPath { query } => Fault::Invalid {
+			message: sf!("vault://?op={query} requires a note path"),
+		},
+		VaultError::GraphUtf8 { path } => {
+			Fault::Source { message: sf!("Vault note {path} is not UTF-8") }
+		},
+		VaultError::HeadingMissing { path, heading } => Fault::Invalid {
+			message: sf!("Vault note {path} has no heading {heading}"),
+		},
+		VaultError::GraphEncode { .. } => Fault::Source {
+			message: Str::new_static("Cannot encode the vault graph result"),
+		},
 		VaultError::Escape { path } => Fault::Source {
 			message: sf!("Vault path '{}' escapes its configured root", path.display()),
 		},
@@ -646,6 +713,25 @@ mod tests {
 			std::str::from_utf8(&root)
 				.unwrap()
 				.contains("vault://My%20Notes/")
+		);
+	}
+
+	#[tokio::test]
+	async fn native_graph_query_does_not_spawn_obsidian() {
+		let (_temp, service) = service();
+		let resolver = VaultResolver::new(service);
+		let info = resolver
+			.read_query("My%20Notes/folder/a%3Ab.md", Some("op=info"), &ParsedSelector::None)
+			.await
+			.expect("native info");
+		let info = serde_json::from_slice::<serde_json::Value>(info.as_ref()).expect("info json");
+		assert_eq!(info["op"], "info");
+		assert_eq!(info["path"], "folder/a:b.md");
+		assert!(
+			resolver
+				.read_query("My%20Notes/folder/a%3Ab.md", Some("op=section"), &ParsedSelector::None)
+				.await
+				.is_err()
 		);
 	}
 }

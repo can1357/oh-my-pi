@@ -116,6 +116,7 @@ pub use tool_url::scheme_generation::{
 };
 mod tools;
 mod vault;
+mod vault_graph;
 pub mod vcs;
 #[cfg(windows)]
 pub mod windows;

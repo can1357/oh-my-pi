@@ -1383,6 +1383,33 @@ pub enum VaultError {
 		/// Observed byte length.
 		actual: usize,
 	},
+	/// A graph query addressed a vault root or a directory.
+	#[error("vault query {query} requires a note path")]
+	GraphPath {
+		/// Query name that required a note.
+		query: &'static str,
+	},
+	/// A note addressed by a graph query was not UTF-8.
+	#[error("vault note {path} is not UTF-8")]
+	GraphUtf8 {
+		/// Vault-relative note path.
+		path: Str,
+	},
+	/// A section query named a heading the note does not contain.
+	#[error("vault note {path} has no heading {heading}")]
+	HeadingMissing {
+		/// Vault-relative note path.
+		path:    Str,
+		/// Heading text that was requested.
+		heading: Str,
+	},
+	/// A graph result could not be encoded.
+	#[error("cannot encode vault graph result")]
+	GraphEncode {
+		/// Typed JSON encoder cause.
+		#[source]
+		source: serde_json::Error,
+	},
 	/// No Obsidian CLI executable was discoverable.
 	#[error("Obsidian CLI binary not found; checked PATH and the platform application location")]
 	ObsidianUnavailable,
