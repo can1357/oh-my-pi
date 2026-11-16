@@ -70,6 +70,7 @@
 - Fixed resolving a `conflict://` region to an empty side (`@ours`, `@theirs` or `@both` with no lines) leaving a stray blank line, and a chosen side whose edge lines repeat the surrounding code losing those lines ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
 - Fixed MCP stdio servers that exit or are killed before responding being reported only as "closed stdout"; the error now names the exit code or signal ([#16482](https://github.com/can1357/oh-my-pi/pull/16482) by [@adi-IL](https://github.com/adi-IL))
 - After an Anthropic refusal, later turns no longer resend the refusal text with the tool calls it stopped: those calls now replay as "not executed" only, so one `reasoning_extraction` refusal stops making every following turn of the session likely to be refused too
+- After an Anthropic refusal, later turns no longer resend the refusal text with the tool calls it stopped: those calls now replay as "not executed" only, so one `reasoning_extraction` refusal stops making every following turn of the session likely to be refused too ([#19419](https://github.com/can1357/oh-my-pi/pull/19419) by [@flosrn](https://github.com/flosrn))
 
 ## [18.20.3] - 2026-11-16
 
