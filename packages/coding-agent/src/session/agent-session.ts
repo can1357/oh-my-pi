@@ -12527,6 +12527,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.agent.reset();
 				this.#prunedTerminalFailure = undefined;
 				this.tokenRate.reset();
+				// A queued todo write settling during the awaits below must land neither in a file `/delete`
+				// just removed (an append would recreate it) nor in the new one.
+				this.#todoWrites.invalidate();
 				if (options?.drop && previousSessionFile) {
 					try {
 						await this.sessionManager.dropSession(previousSessionFile);
@@ -12536,8 +12539,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					await this.sessionManager.flush();
 				}
-				// A queued todo write settling during the awaits below must not land in the new file.
-				this.#todoWrites.invalidate();
 				await this.sessionManager.newSession({
 					...options,
 					additionalDirectories: cfgWorkspaceAdditionalDirectories.get(this.settings),

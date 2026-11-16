@@ -586,6 +586,38 @@ export default function(pi) {
 		expect(session.getTodoPhases()).toEqual([]);
 	});
 
+	test("an edit whose replace settles while /delete removes the session file does not recreate it", async () => {
+		const recorder = createTodoBackendRecorder("tracker");
+		const replaceGate = hold(recorder, "replace");
+		const session = await createSession({
+			backend: "tracker",
+			extensions: [recorder.extension()],
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.join("sessions")),
+		});
+		session.sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
+		session.sessionManager.appendMessage(createAssistantMessage("hi"));
+		await session.sessionManager.flush();
+		const deletedFile = session.sessionFile;
+		if (!deletedFile) throw new Error("session has no file");
+
+		const editSettled = settled(
+			session.editTodoPhases(() => [{ name: "Tasks", tasks: [{ content: "late", status: "pending" }] }]),
+		);
+		await replaceGate.started.promise;
+		// Release the held replace once the file is gone, while /delete still awaits its cleanup.
+		const originalDrop = session.sessionManager.dropSession.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "dropSession").mockImplementation(async (sessionPath: string) => {
+			await originalDrop(sessionPath);
+			replaceGate.release.resolve();
+			await editSettled;
+		});
+		expect(await session.newSession({ drop: true })).toBe(true);
+
+		expect((await editSettled)?.toString()).toContain("The session changed before the todo edit was saved");
+		await session.sessionManager.flush();
+		expect(await Bun.file(deletedFile).exists()).toBe(false);
+	});
+
 	test("a cross-project switch that rolls back keeps the backend instance, without a notice", async () => {
 		const recorder = createTodoBackendRecorder("tracker");
 		const sessionDir = tempDir.join("sessions");
