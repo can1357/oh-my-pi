@@ -160,8 +160,8 @@ describe("compaction queued for the next yield", () => {
 			},
 			hasAdmittedSubmission: false,
 			queuedMessageCount: 0,
-			hasPendingAsyncWork: () => false,
-			settleAsyncWork: vi.fn(async () => {}),
+			isRunActive: false,
+			waitForRunEnd: vi.fn(async () => {}),
 			waitForIdle: vi.fn(async () => onWaitForIdle(state)),
 			waitForAdmittedSubmissions: vi.fn(async () => {}),
 			get isSessionTransitioning() {

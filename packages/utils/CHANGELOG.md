@@ -2,10 +2,17 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
 ### Fixed
 
-- Fixed HTML-to-Markdown conversion (web fetch, pasted HTML) dropping the spaces of whitespace-only inline elements (`Hello<span> </span>world` → `Helloworld`) and code indentation inside `<pre>` (Sphinx/Pygments blocks) ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla)).
-- Fixed HTML-to-Markdown conversion leaving a lone-space line between block elements ([#19263](https://github.com/can1357/oh-my-pi/pull/19263) by [@tuschla](https://github.com/tuschla)).
+- Fixed bare URLs swallowing the following word when Korean, Japanese, or Chinese text follows a parenthesized URL without a space.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Fixed HTML-to-Markdown conversion for fetched and pasted HTML to preserve whitespace in inline elements, maintain code indentation in preformatted blocks, and avoid inserting stray blank lines between block elements.
 
 ## [18.20.2] - 2026-11-14
 

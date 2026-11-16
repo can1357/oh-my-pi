@@ -489,6 +489,32 @@ export declare class NativeOAuthCallback {
   dispose(): Promise<undefined>
 }
 
+/** One loaded Phonon checkpoint, English normalization, CPU inference. */
+export declare class PhononTts {
+  /**
+   * Load the checkpoint in `modelDir`: `config.json`, `tokenizer.json`,
+   * `model.q8.gguf`, and voice embeddings under `voices/` (registered by
+   * file stem) plus `default-voice.safetensors` (registered as `default`).
+   *
+   * # Errors
+   * Rejects when a required file is missing or the weights fail to load.
+   */
+  static load(modelDir: string): Promise<PhononTts>
+  /** PCM sample rate of every synthesized buffer, in Hz. */
+  get sampleRate(): number
+  /** Registered voice names, sorted. */
+  get voices(): Array<string>
+  /**
+   * Synthesize `text` as mono `f32` PCM at [`Self::sample_rate`].
+   * Requests run one at a time; a concurrent call waits for the previous one.
+   *
+   * # Errors
+   * Rejects for an unregistered voice, a `durationDelta` the conditioner
+   * rejects, or a generation failure.
+   */
+  synthesize(text: string, options?: PhononSpeechOptions | undefined | null): Promise<Float32Array>
+}
+
 /**
  * The bytes crossing one shell run's pipeline pipes, during and after the run.
  *
@@ -645,9 +671,21 @@ export declare class Shell {
    * session's state (variables, functions, aliases, options, working
    * directory) as of its last command boundary: while a command runs, the
    * state that command started from. What the fork sets stays in the
-   * fork. Never waits for the running command.
+   * fork until `adopt()` carries it back. Never waits for the running
+   * command.
    */
   fork(): Shell
+  /**
+   * Carry what `fork` (a `fork()` of this shell whose `run` settled)
+   * changed, its variables, functions, aliases, options and traps, into
+   * this shell's session: at the end of the command it runs now, or at
+   * once between commands, and into every fork taken from here on. A name
+   * both changed keeps the value of the command that ended last. Returns
+   * `false` when there is nothing to carry from or into: the fork did not
+   * start from a session's state or lost its session, or this shell has
+   * none.
+   */
+  adopt(fork: Shell): boolean
   /**
    * Run a shell command using the provided options.
    *
@@ -3262,6 +3300,20 @@ export interface PdfMarkdownResult {
  * be parsed or converted.
  */
 export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
+
+/** Request options for [`PhononTts::synthesize`]. */
+export interface PhononSpeechOptions {
+  /**
+   * Registered voice name (a `voices/<name>.safetensors` stem); omit for the
+   * checkpoint's default voice.
+   */
+  voice?: string
+  /**
+   * `duration_delta` conditioner: negative speaks faster, positive slower.
+   * Omit for the model's natural rate (0).
+   */
+  durationDelta?: number
+}
 
 /** Retained bytes of a stream, as stream offsets `start..end`. */
 export interface PipeStreamChunk {

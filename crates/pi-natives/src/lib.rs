@@ -27,6 +27,8 @@ pub mod applefm;
 pub mod ast;
 pub mod audio;
 pub mod block;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod bundled_libc;
 pub mod clipboard;
 pub mod crash_handler;
 pub mod desktop;
@@ -78,6 +80,7 @@ pub mod task;
 pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
+pub mod tts;
 pub mod tty_writer;
 pub(crate) mod utils;
 pub mod vectors;

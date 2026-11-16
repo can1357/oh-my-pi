@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
-import { loadFormImage } from "@oh-my-pi/pi-tui/html-form/media";
+import { loadMedia } from "@oh-my-pi/pi-tui/media";
 import { getNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
 import { BreakRank, type PageAtom, paginate } from "@oh-my-pi/pi-tui/html-form/paginate";
@@ -407,6 +407,181 @@ describe("html form", () => {
 		});
 	});
 
+	describe("option note images", () => {
+		const IMAGE = { type: "image" as const, data: "AAAA", mimeType: "image/png" };
+		const DIMS = { width: 1, height: 1 };
+		const NOTE_KEY = "\x1bn";
+		const HOME = "\x1b[H";
+		const DELETE = "\x1b[3~";
+		const paste = (text: string) => `\x1b[200~${text}\x1b[201~`;
+
+		function addImage(form: HtmlFormDialog): string {
+			const settle = form.beginPaste();
+			const marker = form.attachImage(IMAGE, DIMS);
+			if (marker === undefined) throw new Error("note does not accept images");
+			settle(marker);
+			return marker;
+		}
+
+		function imageDialog(overrides: Partial<ConstructorParameters<typeof HtmlFormDialog>[1]> = {}) {
+			return dialog(DB_FORM, { acceptImages: true, ...overrides });
+		}
+
+		it("drops the image of a deleted marker and renumbers the rest", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(" ");
+			const second = { ...IMAGE, data: "BBBB" };
+			form.beginPaste()(form.attachImage(second, DIMS));
+			form.handleInput(HOME);
+			form.handleInput(DELETE);
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "[Image #1, 1x1]", images: [second] }]);
+
+			form.handleInput(NOTE_KEY);
+			expect(form.attachImage(IMAGE, DIMS)).toBe("[Image #2, 1x1]");
+		});
+
+		it("discards images added since the note opened when Esc closes it", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("kept");
+			form.handleInput(ENTER);
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(ESC);
+			expect(form.optionNotes()).toMatchObject([{ text: "kept" }]);
+			expect(form.optionNotes()[0]?.images).toBeUndefined();
+			form.handleInput(NOTE_KEY);
+			expect(form.attachImage(IMAGE, DIMS)).toBe("[Image #1, 1x1]");
+		});
+
+		it("restores a saved note's images on reopening and numbers a new paste after them", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			addImage(form);
+			form.handleInput(ENTER);
+			form.handleInput(NOTE_KEY);
+			const second = { ...IMAGE, data: "BBBB" };
+			expect(form.attachImage(second, DIMS)).toBe("[Image #2, 1x1]");
+			form.beginPaste()("[Image #2, 1x1]");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([
+				{ text: "[Image #1, 1x1][Image #2, 1x1]", images: [IMAGE, second] },
+			]);
+		});
+
+		it("accepts images only when opted in, a note is open and the form is shown", () => {
+			const plain = dialog(DB_FORM).form;
+			plain.handleInput(NOTE_KEY);
+			expect(plain.acceptsImages).toBe(false);
+			expect(plain.pasteText).toBeUndefined();
+			expect(plain.attachImage(IMAGE)).toBeUndefined();
+
+			const { form } = imageDialog();
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+			form.handleInput(NOTE_KEY);
+			expect(form.acceptsImages).toBe(true);
+			expect(form.pasteText).toBeDefined();
+			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+			form.handleNativeEvent({ type: "action", key: "", act: "show", mods: [] });
+			expect(form.acceptsImages).toBe(true);
+			expect(form.pasteText).toBeDefined();
+			form.dispose();
+			expect(form.acceptsImages).toBe(false);
+			expect(form.pasteText).toBeUndefined();
+		});
+
+		it.each([
+			{ name: "saves once the paste settles with its marker", settleWith: "[Image #1, 1x1]", delivered: true },
+			{ name: "keeps the note open when the paste fails", settleWith: undefined, delivered: false },
+		])("Enter during a pending paste: $name", ({ settleWith, delivered }) => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("text ");
+			form.attachImage(IMAGE, DIMS);
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			expect(form.debugState().noteEdit).toBe("db=sqlite");
+			expect(form.optionNotes()).toEqual([]);
+
+			expect(settle(settleWith)).toBe(delivered);
+			if (delivered) {
+				expect(form.debugState().noteEdit).toBeUndefined();
+				expect(form.optionNotes()).toMatchObject([{ text: "text [Image #1, 1x1]", images: [IMAGE] }]);
+			} else {
+				expect(form.debugState().noteEdit).toBe("db=sqlite");
+				form.handleInput(ENTER);
+				expect(form.optionNotes()).toMatchObject([{ text: "text" }]);
+			}
+		});
+
+		it("sends an empty bracketed paste to onPasteImage and image-path pastes to onPasteImagePath", () => {
+			const onPasteImage = vi.fn();
+			const onPasteImagePath = vi.fn();
+			const { form } = imageDialog({ onPasteImage, onPasteImagePath });
+			form.handleInput(NOTE_KEY);
+			form.handleInput(paste(""));
+			expect(onPasteImage).toHaveBeenCalledTimes(1);
+			form.handleInput(paste("/tmp/a.png /tmp/b.png"));
+			expect(onPasteImagePath.mock.calls).toEqual([["/tmp/a.png"], ["/tmp/b.png"]]);
+			form.handleInput(paste("plain words"));
+			form.handleInput(ENTER);
+			expect(onPasteImage).toHaveBeenCalledTimes(1);
+			expect(onPasteImagePath).toHaveBeenCalledTimes(2);
+			expect(form.optionNotes()).toMatchObject([{ text: "plain words" }]);
+		});
+
+		it("leaves bracketed pastes alone without acceptImages", () => {
+			const onPasteImage = vi.fn();
+			const { form } = dialog(DB_FORM, { onPasteImage });
+			form.handleInput(NOTE_KEY);
+			form.handleInput(paste(""));
+			form.handleInput(paste("/tmp/a.png"));
+			form.handleInput(ENTER);
+			expect(onPasteImage).not.toHaveBeenCalled();
+			expect(form.optionNotes()).toMatchObject([{ text: "/tmp/a.png" }]);
+		});
+
+		it("lands a paste reserved before hiding, and the Enter held behind it still saves", () => {
+			const { form } = imageDialog();
+			form.handleInput(NOTE_KEY);
+			form.handleInput("kept ");
+			const settle = form.beginPaste();
+			form.handleInput(ENTER);
+			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
+			expect(form.beginPaste()("refused")).toBe(false);
+			const marker = form.attachImage(IMAGE, DIMS);
+			expect(settle(marker)).toBe(true);
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(form.optionNotes()).toMatchObject([{ text: "kept [Image #1, 1x1]", images: [IMAGE] }]);
+		});
+
+		it("opening a note hands the keys over, so a draft that refills afterwards does not own input", () => {
+			let draft = "";
+			const presented: boolean[] = [];
+			const { form } = imageDialog({
+				inputGuard: {
+					isBlocked: () => draft.length > 0,
+					handleInput: vi.fn(),
+					hint: "typing edits your prompt",
+					syncPresentation: (blocked: boolean) => presented.push(blocked),
+				},
+			});
+			form.handleInput(NOTE_KEY);
+			draft = "late composer paste";
+			form.describe(CX);
+			expect(presented.at(-1)).toBe(false);
+			form.handleInput("x");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "x" }]);
+		});
+	});
+
 	describe("parsing", () => {
 		it("joins radios split across a decision table into one field labeled by column headers", () => {
 			const form = parseHtmlForm(`<form><table>
@@ -503,17 +678,17 @@ describe("html form", () => {
 			try {
 				await Bun.write(path.join(dir, "dot.png"), Uint8Array.fromBase64(PNG_1PX));
 				await Bun.write(path.join(dir, "notes.txt"), "not a picture");
-				expect((await loadFormImage("dot.png", { cwd: dir })).mime).toBe("image/png");
-				expect((await loadFormImage(`data:image/png;base64,${PNG_1PX}`, { cwd: dir })).mime).toBe("image/png");
-				const svg = await loadFormImage("data:image/svg+xml;utf8,%3Csvg viewBox='0 0 4 2'%3E%3C/svg%3E", {
+				expect((await loadMedia("dot.png", { cwd: dir })).mime).toBe("image/png");
+				expect((await loadMedia(`data:image/png;base64,${PNG_1PX}`, { cwd: dir })).mime).toBe("image/png");
+				const svg = await loadMedia("data:image/svg+xml;utf8,%3Csvg viewBox='0 0 4 2'%3E%3C/svg%3E", {
 					cwd: dir,
 				});
 				// An svg sized only by its viewBox gets the size and namespace a standalone drawing needs.
 				expect(new TextDecoder().decode(svg.bytes)).toStartWith(
 					`<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"`,
 				);
-				await expect(loadFormImage("notes.txt", { cwd: dir })).rejects.toThrow("not a PNG");
-				await expect(loadFormImage("missing.png", { cwd: dir })).rejects.toThrow();
+				await expect(loadMedia("notes.txt", { cwd: dir })).rejects.toThrow("not a PNG");
+				await expect(loadMedia("missing.png", { cwd: dir })).rejects.toThrow();
 			} finally {
 				await fs.rm(dir, { recursive: true, force: true });
 			}
