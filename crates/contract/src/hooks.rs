@@ -1709,9 +1709,8 @@ mod tests {
 
 	use super::{
 		AgentSettled, DomainReturn, GateDecision, GateError, GateEvent, GateOutcome, HookDecision,
-		HookEvent, HookGate, HookPatch, HookPhase, LifecycleHookError, LifecycleHooks,
-		MODIFY_ROUNDS, OBSERVE_HANDLER_CAP, OnFailure, ProviderFailover, SourceRef, Subscription,
-		When,
+		HookEvent, HookGate, HookPatch, HookPhase, LifecycleHookError, LifecycleHooks, MODIFY_ROUNDS,
+		OBSERVE_HANDLER_CAP, OnFailure, ProviderFailover, SourceRef, Subscription, When,
 	};
 
 	#[test]
