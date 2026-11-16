@@ -5,11 +5,22 @@
 ### Added
 
 - Added Bifrost (`bifrost`), a self-hosted OpenAI-compatible AI gateway: its `/models` roster is discovered live per virtual key from `BIFROST_BASE_URL` (default `http://localhost:8080/v1`), chat models run over Chat Completions, known decision models become `openai-decisions` judges on the gateway's `/decisions` route, and `/login bifrost` stores the virtual key (`BIFROST_API_KEY`) ([#19053](https://github.com/can1357/oh-my-pi/pull/19053) by [@Xytronix](https://github.com/Xytronix))
+- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+
+### Changed
+
+- Changed the local speech model `kokoro` to `phonon-31m`
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added publicly available image-sizing helpers for determining model-delivered image dimensions and fitting images to a specified long edge before coordinate mapping.
 
 ### Fixed
 
-- Fixed `deepseek/deepseek-v4-flash` dropping attached images: DeepSeek serves the retired id with the multimodal V4.1 Flash, so it now keeps image input like `deepseek-flash` ([#19288](https://github.com/can1357/oh-my-pi/issues/19288))
-- Mistral GLM 5.3, GLM 5.3 Flash and Mistral Large 4 now offer only the reasoning efforts Mistral documents ([#19265](https://github.com/can1357/oh-my-pi/issues/19265)) ([#19287](https://github.com/can1357/oh-my-pi/pull/19287) by [@Alex-Wengg](https://github.com/Alex-Wengg)).
+- Fixed image inputs being dropped for DeepSeek V4 Flash, restoring consistent multimodal image support.
+- Restricted reasoning-effort options for Mistral GLM 5.3, GLM 5.3 Flash, and Mistral Large 4 to the levels supported by those models.
 
 ## [18.20.2] - 2026-11-14
 
