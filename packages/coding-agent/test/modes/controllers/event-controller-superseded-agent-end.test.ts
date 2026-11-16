@@ -13,21 +13,27 @@ import { createInteractiveModeContext } from "../../helpers/interactive-mode-con
  * main session's run state and the viewed session's streaming state are
  * mutable flags the tests drive directly.
  */
-function createContext() {
+function createContext(options: { viewSessionIsMain?: boolean } = {}) {
 	const streamState = { mainRunActive: false, viewIsStreaming: false };
+	const viewed = {
+		isCompacting: false,
+		getLastAssistantMessage: () => undefined,
+		get isStreaming() {
+			return streamState.viewIsStreaming;
+		},
+	};
 	const ctx = createInteractiveModeContext({
 		session: {
 			get isRunActive() {
 				return streamState.mainRunActive;
 			},
-		},
-		viewSession: {
-			isCompacting: false,
-			getLastAssistantMessage: () => undefined,
 			get isStreaming() {
 				return streamState.viewIsStreaming;
 			},
 		},
+		// No override: the helper's `viewSession` getter returns `this.session`,
+		// the normal case where the main session is the one on screen.
+		viewSession: options.viewSessionIsMain ? undefined : viewed,
 	});
 	const loader = new Loader(
 		ctx.ui,
@@ -43,6 +49,18 @@ function createContext() {
 
 const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
 const AGENT_END = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
+const DONE_END = {
+	type: "agent_end",
+	messages: [
+		{
+			role: "assistant",
+			content: [{ type: "text", text: "result" }],
+			stopReason: "stop",
+			usage: { inputTokens: 0, outputTokens: 0 },
+			timestamp: Date.now(),
+		},
+	],
+} as unknown as AgentSessionEvent;
 
 describe("EventController agent_end teardown", () => {
 	beforeAll(async () => {
@@ -96,6 +114,38 @@ describe("EventController agent_end teardown", () => {
 		// Main's run is not over: program status stays `working`.
 		expect(report).not.toHaveBeenCalled();
 		expect(TERMINAL.sendNotification).not.toHaveBeenCalled();
+	});
+
+	it("does not report done when a superseded agent_end lands after the next run opened on the viewed main session", async () => {
+		const { ctx, streamState, loader } = createContext({ viewSessionIsMain: true });
+		// The main session is on screen here, so the focused-worker teardown
+		// branch cannot be what protects the status: the helper's getter makes
+		// `viewSession === session` when no viewSession override is supplied.
+		const controller = new EventController(ctx);
+
+		streamState.mainRunActive = true;
+		streamState.viewIsStreaming = true;
+		await controller.handleEvent(AGENT_START);
+		expect(ctx.loadingAnimation).toBeDefined();
+
+		// This end belongs to the run that just ended, but the serialized
+		// dispatch chain delivers it only after another run opened. Rex would
+		// play a success sound on the resulting `state=done` mid-run (#17307).
+		const report = vi.spyOn(runStatus, "setRunStatus").mockImplementation(() => {});
+		await controller.handleEvent(DONE_END);
+
+		expect(report).not.toHaveBeenCalled();
+		expect(ctx.composer.setRunActive).toHaveBeenLastCalledWith(true);
+		expect(ctx.loadingAnimation).toBeDefined();
+		expect(loader.stop).not.toHaveBeenCalled();
+		expect(TERMINAL.sendNotification).not.toHaveBeenCalled();
+
+		// The live run's own terminal end still reports done normally.
+		streamState.mainRunActive = false;
+		streamState.viewIsStreaming = false;
+		report.mockClear();
+		await controller.handleEvent(DONE_END);
+		expect(report).toHaveBeenCalledWith({ state: "done" });
 	});
 
 	it("keeps the composer busy for idle auto-compaction and releases it at the end", async () => {

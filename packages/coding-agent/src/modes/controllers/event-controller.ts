@@ -2446,18 +2446,25 @@ export class EventController {
 	async #handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		const stoppedWaiting = this.#stoppedWaiting;
 		this.#stoppedWaiting = false;
-		// A focused worker's run ended while main's run goes on: tear down only
-		// what the viewed worker owns (its loader); main's status stays `working`
-		// until main's own `agent_end`.
 		const view = this.ctx.viewSession;
-		if (view !== this.ctx.session && this.ctx.session.isRunActive) {
-			if (this.ctx.loadingAnimation) {
-				this.ctx.loadingAnimation.stop();
-				this.ctx.loadingAnimation = undefined;
-				this.ctx.statusContainer.disposeChildren();
+		// A run is open again by the time this event reaches the serialized
+		// dispatch chain: a superseded end, or a subscriber that started the next
+		// run while this one waited. Its own agent_end must own the status and
+		// teardown — reporting `done` now tells OSC 7501 receivers such as Rex
+		// that the agent finished while it is still working (#17307).
+		if (this.ctx.session.isRunActive) {
+			// A focused worker's run ended while main's run goes on: tear down
+			// only what the viewed worker owns (its loader); main's status stays
+			// `working` until main's own `agent_end`.
+			if (view !== this.ctx.session) {
+				if (this.ctx.loadingAnimation) {
+					this.ctx.loadingAnimation.stop();
+					this.ctx.loadingAnimation = undefined;
+					this.ctx.statusContainer.disposeChildren();
+				}
+				this.#runActive = false;
+				this.#syncComposerActivity();
 			}
-			this.#runActive = false;
-			this.#syncComposerActivity();
 			return;
 		}
 		if (stoppedWaiting) {
