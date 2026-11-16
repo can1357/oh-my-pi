@@ -667,16 +667,20 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 		return (await this.#recallBlock(query, signal))?.text || undefined;
 	}
 
-	/** Recalls `query` into a prompt block plus the memories it holds; undefined when aborted or when a required relevance check failed. */
+	/**
+	 * Recalls `query` into a prompt block plus the memories it holds; undefined when aborted or when a
+	 * required relevance check failed. With `budget`, the relevance judge reads only what that budget
+	 * would show; without it (compaction), every recalled memory is judged and kept uncut.
+	 */
 	async #recallBlock(
 		query: string,
 		signal?: AbortSignal,
-		budget: (block: string) => string = block => this.budgetRecallBlock(block),
+		budget?: (block: string) => string,
 	): Promise<RecallBlock | undefined> {
 		const recalled = await this.collectScopedRecallResults(query);
 		if (signal?.aborted) return undefined;
 		const results: RecallCandidate[] | undefined = this.#relevanceFilterActive()
-			? await this.#filterAutomaticRecall(query, visibleCandidates(recalled, budget), signal)
+			? await this.#filterAutomaticRecall(query, budget ? visibleCandidates(recalled, budget) : recalled, signal)
 			: recalled;
 		if (!results) return undefined;
 		if (results.length === 0) return { text: "", memories: [] };
@@ -737,9 +741,9 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 
 	/** `off`, and `auto` without a native judge, recall exactly as before relevance filtering existed. */
 	#relevanceFilterActive(): boolean {
-		const { settings, modelRegistry } = this.session;
+		const { settings, modelRegistry, model } = this.session;
 		const mode = cfgMnemopiRecallRelevance.get(settings);
-		return mode === "on" || (mode === "auto" && hasNativeJudge(settings, modelRegistry));
+		return mode === "on" || (mode === "auto" && hasNativeJudge(settings, modelRegistry, model));
 	}
 
 	/**
@@ -1013,8 +1017,9 @@ export class MnemopiSessionState implements MnemopiSessionStateApi {
 				return truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
 			});
 			try {
-				const recall = await this.#recallBlock(truncated);
-				record = recall && this.#deliveredRecall(recall, block => this.budgetRecallBlock(block));
+				const budget = (block: string) => this.budgetRecallBlock(block);
+				const recall = await this.#recallBlock(truncated, undefined, budget);
+				record = recall && this.#deliveredRecall(recall, budget);
 				context = recall?.text;
 			} catch (error) {
 				logger.warn("Mnemopi: auto-recall failed", {
