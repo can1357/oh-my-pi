@@ -333,7 +333,7 @@ crates/driver/src/delegated_host.rs     ExecutorRegistry::from_ctx: Codex plus t
 
 1. An approved extension profile with the same id as a built-in shadows it. An unapproved one is ignored and the built-in keeps working, so installing an extension changes nothing until the operator approves it. Each extension PR can then be tested against its own parity test without removing the Rust code.
 2. Static convars win. `register_dynamic_var` returns `Duplicate` for a name that already exists (`crates/con/src/ctx.rs:601-603`), so the loader registers a dynamic convar only when `ctx.find` does not know the name (`ctx.find`, `crates/con/src/builtins.rs:47`).
-3. Built-ins keep their deterministic order dsh, devin, grok (`crates/driver/src/delegated_acp.rs:209-224`). Extension-sourced executors are ordered by extension id, then profile id. The parity test asserts the set of ids and not their order (Q11).
+3. Built-ins keep their deterministic order dsh, devin, grok, set by `enabled_executors` (`crates/driver/src/delegated_acp.rs:102`). Extension-sourced executors are ordered by extension id, then profile id. The parity test asserts the set of ids and not their order (Q11).
 4. The parity test builds the built-in executor and the manifest-derived executor from the same convar values and compares program, arguments, environment, session mode, config options and login notice field by field.
 
 ### 2.4 None installed
@@ -645,7 +645,7 @@ Every behavior of the three Rust profiles, and where it goes. Nothing needs a Py
 | Grok's sandbox caveats live in the module comment. | `crates/driver/src/delegated_acp.rs:21-32` | `[evidence].caveats` | Yes |
 | All three run under the one ACP policy. | `ACP_POLICY` (`crates/envd/src/acp_client/policy.rs:21`) | `[policy].enforces` | Yes, made explicit |
 | All three advertise the same features. | `capabilities_for` (`crates/envd/src/acp_client/executor.rs:121-135`) | The default of `[capability_claims]` | Yes |
-| Registration order is deterministic: dsh, devin, grok. | `crates/driver/src/delegated_acp.rs:209-224` | Not data: a loader rule | No (Q11) |
+| Registration order is deterministic: dsh, devin, grok. | `enabled_executors` (`crates/driver/src/delegated_acp.rs:102`) | Not data: a loader rule | No (Q11) |
 | An empty program convar means not enabled, and the convars are archive-only with no project flag. | `crates/driver/src/delegated_acp.rs:3-11` | Not data: core rules (§1.4, §2.6) | No, by design |
 
 ### 4.5 What the Rust side must expose
