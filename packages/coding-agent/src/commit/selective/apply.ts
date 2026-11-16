@@ -165,5 +165,6 @@ export async function commitSelection(
 	}
 	const paths = patches.map(entry => entry.path);
 	await context.journal?.recordCommit({ agent: context.agent.agent, parent: context.agent.parent, sha, paths });
-	return { sha, subject: message.split("\n", 1)[0], paths, parent, indexNotes };
+	const subject = (await repo.commitDetails(sha)).message.split("\n", 1)[0];
+	return { sha, subject, paths, parent, indexNotes };
 }
