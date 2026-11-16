@@ -5,6 +5,13 @@
 ### Fixed
 
 - Fixed restore, checkout, and patch application so a symlink is replaced instead of followed, including when a parent directory is a symlink, and discarding or merging a link no longer overwrites the file it points at ([#19315](https://github.com/can1357/oh-my-pi/pull/19315) by [@eggpeat](https://github.com/eggpeat)).
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Committing or writing trees now correctly reports unresolved index conflicts instead of silently omitting conflicted files.
+- Fixed shell compatibility with GNU `grep` for end-of-line-anchored patterns, including `-o` and `-z` modes, and corrected `sed` substitutions on multibyte-character lines.
+- Fixed native diff and patch handling for filenames containing spaces and other characters requiring quoting, including binary changes.
 
 ## [18.20.1] - 2026-11-14
 
