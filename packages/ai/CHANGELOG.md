@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `JudgmentResult.cached`, set when every answer came from an answer cache and no provider request was made ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
+
 ### Fixed
 
 - Fixed Mistral (and other OpenAI-compatible) 429s reporting a zero `x-ratelimit-limit-*` allowance being retried for minutes; they now fail on the first request with an error naming the header and suggesting a model or plan switch ([#19300](https://github.com/can1357/oh-my-pi/issues/19300))
