@@ -576,7 +576,7 @@ verification = { packages = ["omp-core"] }
 			.unwrap();
 		assert_eq!(phase.kind, PhaseKind::Code);
 		assert_eq!(phase.on_reject, OnReject::Correct);
-		assert_eq!(phase.inputs.as_slice(), &[PhaseName::new_static("implement")]);
+		assert_eq!(&phase.inputs[..], &[PhaseName::new_static("implement")]);
 	}
 
 	#[test]

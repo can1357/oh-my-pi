@@ -200,6 +200,22 @@ fn assert_not_pass(result: Result<NativeVerificationReport, NativeVerificationEr
 	}
 }
 
+async fn frozen_test_marker(state: &Path) -> PathBuf {
+	loop {
+		let leases = fs::read_dir(state.join("environment/materializations"))
+			.expect("native materialization directory");
+		if let Some(lease) = leases.filter_map(Result::ok).find(|lease| {
+			lease
+				.path()
+				.join("out/target/verification-started")
+				.is_file()
+		}) {
+			return lease.path();
+		}
+		sleep(Duration::from_millis(20)).await;
+	}
+}
+
 #[test]
 fn explicit_inventory_and_finite_budgets_are_required() {
 	assert!(spec().validate().is_ok());
@@ -371,21 +387,7 @@ fn holds_verification_window() {
 	let cancel = CancellationToken::new();
 	let run = fixture.run(&mut session, &cancel);
 	tokio::pin!(run);
-	let marker = async {
-		loop {
-			let leases = fs::read_dir(fixture.state.join("environment/materializations"))
-				.expect("native materialization directory");
-			if leases.filter_map(Result::ok).any(|lease| {
-				lease
-					.path()
-					.join("out/target/verification-started")
-					.is_file()
-			}) {
-				break;
-			}
-			sleep(Duration::from_millis(20)).await;
-		}
-	};
+	let marker = frozen_test_marker(&fixture.state);
 	tokio::select! {
 		result = &mut run => panic!("verification ended before the frozen test marker: {result:?}"),
 		result = timeout(Duration::from_secs(180), marker) => {
@@ -399,5 +401,58 @@ fn holds_verification_window() {
 	let changed = format!("{source}\n// host edit after the frozen test started\n");
 	fs::write(fixture.root.join("src/lib.rs"), &changed).unwrap();
 	assert_not_pass(run.await);
-	assert_eq!(std::fs::read_to_string(fixture.root.join("src/lib.rs")).unwrap(), changed);
+	assert_eq!(fs::read_to_string(fixture.root.join("src/lib.rs")).unwrap(), changed);
+}
+
+#[tokio::test]
+async fn supported_host_cancels_running_test_and_releases_its_frozen_lease() {
+	let fixture = Fixture::new().await;
+	if !omp_envd::verification::strict_sandbox_available(&fixture.root).expect("sandbox probe") {
+		eprintln!(
+			"SKIPPED mid-command cancellation proof: verified Bubblewrap closed-input profile \
+			 unavailable"
+		);
+		return;
+	}
+	let source = r#"
+#[test]
+fn holds_cancellation_window() {
+    let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").unwrap());
+    std::fs::write(target.join("verification-started"), b"started").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(30));
+}
+"#;
+	fs::write(fixture.root.join("src/lib.rs"), source).unwrap();
+	let (_, mut session) = fixture.session();
+	let cancel = CancellationToken::new();
+	let lease = {
+		let run = fixture.run(&mut session, &cancel);
+		tokio::pin!(run);
+		let lease = tokio::select! {
+			result = &mut run => panic!("verification ended before the frozen test marker: {result:?}"),
+			result = timeout(Duration::from_secs(180), frozen_test_marker(&fixture.state)) => {
+				match result {
+					Ok(lease) => lease,
+					Err(_) => {
+						cancel.cancel();
+						let _ = timeout(Duration::from_secs(10), &mut run).await;
+						panic!("frozen test did not start within bounded admission and compilation window");
+					}
+				}
+			}
+		};
+		cancel.cancel();
+		let result = timeout(Duration::from_secs(15), &mut run)
+			.await
+			.expect("mid-command cancellation settles before the checked test's natural completion");
+		assert_not_pass(result);
+		lease
+	};
+	assert!(!lease.exists(), "settled cancellation releases the frozen source and output lease");
+	for publication in evidence_publications(&session).expect("valid durable metadata") {
+		let record = load_evidence(&session, publication).expect("receipt closure verifies");
+		if record.check.starts_with("c1:") || record.check == "inputs-current" {
+			assert_ne!(record.outcome, omp_driver::verification::CheckOutcome::Passed);
+		}
+	}
 }

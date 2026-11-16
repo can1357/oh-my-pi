@@ -86,6 +86,7 @@ impl NativeVerificationSpec {
 			|| self.max_output_bytes > MAX_OUTPUT
 			|| self.packages.iter().any(|p| {
 				p.is_empty()
+					|| p.starts_with('-')
 					|| p.len() > 128
 					|| !p
 						.bytes()
