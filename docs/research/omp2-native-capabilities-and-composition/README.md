@@ -62,10 +62,10 @@ Claude plugin `omitClaudeMd`.
 
 ## Streams
 
-1. **A** — Agent Skills compliance and requirement metadata  
-2. **B** — Native hook phases vs Bub/Pluggy-style middleware  
-3. **C** — Structured ops vs sHEL (no integration without measurement)  
-4. **D** — Expert packages vs skills + ADW + extensions  
+1. **A** — Agent Skills compliance and requirement metadata — **recorded** (`02`, `03`)  
+2. **B** — Native hook phases vs Bub/Pluggy-style middleware — **auditor running**  
+3. **C** — Structured ops vs sHEL (no integration without measurement) — **auditor running**  
+4. **D** — Expert packages vs skills + ADW + extensions — **recorded** (`06`, REJECT ExpertPackage)  
 
 ## Authorization gate
 
