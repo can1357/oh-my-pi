@@ -561,7 +561,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 		if (!cfgToolsGuardRules.get(this.session.settings)) return searchPathTier(args);
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
 		const roots = toPathList(a?.path ?? a?.paths).flatMap(root => approvalRootCandidates(root));
-		return fileToolApproval(searchPathTier(args), roots, this.session.cwd);
+		// With no path, execution searches the session cwd.
+		return fileToolApproval(searchPathTier(args), roots.length > 0 ? roots : ["."], this.session.cwd);
 	};
 	/**
 	 * `always-ask-cached` keys: every file and folder this grep searches, so a

@@ -807,14 +807,23 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
  * per such option, whether its value is the pattern itself or a file read for it. `valued` lists
  * the other options that take the next word as their value, only those that take one in every
  * common implementation, so that no file is mistaken for an option value. `suffixed` lists the
- * one-letter options whose optional value is only the rest of their word (`sed -i.bak`).
+ * one-letter options whose optional value is only the rest of their word (`sed -i.bak`). `walks`
+ * says when a search given no file reads the directory it runs in: `"always"` (`rg`, unless its
+ * input is piped or redirected, which it reads instead), or after one of `flags` (`grep -r`) or
+ * one of `recurse` with the value `recurse` (`grep -d recurse`).
  */
 const PATTERN_READERS: Record<
 	string,
-	{ supplies: Record<string, "pattern" | "file">; valued: readonly string[]; suffixed?: readonly string[] }
+	{
+		supplies: Record<string, "pattern" | "file">;
+		valued: readonly string[];
+		suffixed?: readonly string[];
+		walks?: "always" | { flags: readonly string[]; recurse: readonly string[] };
+	}
 > = {
 	grep: {
 		supplies: { "-e": "pattern", "--regexp": "pattern", "-f": "file", "--file": "file" },
+		walks: { flags: ["-r", "-R", "--recursive", "--dereference-recursive"], recurse: ["-d", "--directories"] },
 		valued: [
 			"-A",
 			"-B",
@@ -836,6 +845,7 @@ const PATTERN_READERS: Record<
 	},
 	rg: {
 		supplies: { "-e": "pattern", "--regexp": "pattern", "-f": "file", "--file": "file" },
+		walks: "always",
 		valued: [
 			"-A",
 			"-B",
@@ -887,20 +897,29 @@ const PATTERN_READERS: Record<
 /**
  * The words a {@link PATTERN_READERS} command reads files from: its operands, without the first
  * when no option supplied the pattern, and a pattern file. A long option that abbreviates one
- * that supplies the pattern (`--reg=x`, `--fil x`) counts as that option.
+ * that supplies the pattern (`--reg=x`, `--fil x`), or one that makes the search recurse
+ * (`--rec`), counts as that option. A search with a pattern and no file operand that reads the
+ * directory it runs in ({@link PATTERN_READERS} `walks`) reads `.`; one with no pattern
+ * (`rg --files`, `rg --version`) searches nothing.
  */
 function patternReaderWords(command: ShellCommand): string[] {
-	const { supplies, valued, suffixed = [] } = PATTERN_READERS[command.argv[0]];
+	const { supplies, valued, suffixed = [], walks } = PATTERN_READERS[command.argv[0]];
 	const supplier = (option: string) => (Object.hasOwn(supplies, option) ? supplies[option] : undefined);
+	const flags = walks === undefined || walks === "always" ? [] : walks.flags;
 	const argv = args(command);
 	const words: string[] = [];
 	const operands: string[] = [];
 	let supplied = false;
+	let recursive = false;
 	// The value of an option that takes one: a pattern file is read, a pattern is not.
 	const take = (option: string, value: string | undefined) => {
 		const kind = supplier(option);
 		supplied ||= kind !== undefined;
 		if (kind === "file" && value !== undefined) words.push(value);
+		// GNU grep takes an abbreviated value (`-d rec`) once it names one choice alone.
+		if (walks !== undefined && walks !== "always" && walks.recurse.includes(option) && value !== undefined) {
+			recursive ||= value.length >= 3 && "recurse".startsWith(value);
+		}
 	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -916,6 +935,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 				if (expanded.length === 1) name = expanded[0];
 			}
 			if (supplier(name) !== undefined || valued.includes(name)) take(name, eq > 0 ? arg.slice(eq + 1) : argv[++i]);
+			else recursive ||= name.length > 2 && flags.some(flag => flag.startsWith(name));
 		} else if (arg.startsWith("-") && arg.length > 1) {
 			// In a bundle (`-rne x`, `-A3`), the first letter that takes a value takes the rest of
 			// the word, or the next word when it ends the bundle; a suffix option (`sed -i.bak`) takes
@@ -923,6 +943,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 			for (let k = 1; k < arg.length; k++) {
 				const option = `-${arg[k]}`;
 				if (suffixed.includes(option)) break;
+				recursive ||= flags.includes(option);
 				if (supplier(option) === undefined && !valued.includes(option)) continue;
 				take(option, k + 1 < arg.length ? arg.slice(k + 1) : argv[++i]);
 				break;
@@ -931,7 +952,10 @@ function patternReaderWords(command: ShellCommand): string[] {
 			operands.push(...shellBraces(command, arg));
 		}
 	}
-	return [...words, ...operands.slice(supplied ? 0 : 1)];
+	const files = operands.slice(supplied ? 0 : 1);
+	const walksCwd = walks === "always" ? command.upstream === undefined && command.reads.length === 0 : recursive;
+	if (files.length === 0 && (supplied || operands.length > 0) && walksCwd) files.push(".");
+	return [...words, ...files];
 }
 
 /**
