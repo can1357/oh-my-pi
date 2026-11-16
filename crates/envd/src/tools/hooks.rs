@@ -2696,7 +2696,7 @@ mod tests {
 		/// Extension names whose callback fails with a protocol error.
 		failing: BTreeSet<&'static str>,
 		/// Callback arguments of every dispatch, in call order.
-		seen:    std::sync::Mutex<Vec<serde_json::Map<String, JsonValue>>>,
+		seen:    parking_lot::Mutex<Vec<serde_json::Map<String, JsonValue>>>,
 	}
 
 	#[async_trait::async_trait]
@@ -2707,7 +2707,7 @@ mod tests {
 			dispatch: ControlDispatch,
 		) -> Result<JsonValue, ControlProtocolError> {
 			self.calls.fetch_add(1, Ordering::SeqCst);
-			self.seen.lock().unwrap().push(dispatch.arguments);
+			self.seen.lock().push(dispatch.arguments);
 			if self.failing.contains(target.extension.as_str()) {
 				return Err(ControlProtocolError::new("CallbackFailed", "scripted failure"));
 			}
@@ -2718,7 +2718,7 @@ mod tests {
 	fn settled_factory(reply: JsonValue) -> (Arc<HookControlFactory>, Arc<SettledDispatcher>) {
 		let dispatcher = Arc::new(SettledDispatcher {
 			calls: AtomicU64::new(0),
-			seen: std::sync::Mutex::new(Vec::new()),
+			seen: parking_lot::Mutex::new(Vec::new()),
 			reply,
 			failing: BTreeSet::from(["a-fail"]),
 		});
@@ -2854,7 +2854,7 @@ mod tests {
 		install(&hooks, settled_row(current_revision()));
 		let payload = json!({"reason": "idle", "nested": {"n": [1, 2]}});
 		hooks.dispatch_agent_settled(&sf!("s1"), 1, &payload).await;
-		let seen = dispatcher.seen.lock().unwrap();
+		let seen = dispatcher.seen.lock();
 		assert_eq!(seen.len(), 1);
 		assert_eq!(seen[0]["payload"], payload);
 		assert_eq!(seen[0]["phase"], "domain");
