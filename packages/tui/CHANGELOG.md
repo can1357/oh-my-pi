@@ -4,6 +4,7 @@
 
 ### Added
 
+- `HtmlFormDialog` option notes take pasted images when the form is opened with `acceptImages`: the open note is a paste target (`attachImage`, `beginPaste`, `pasteText`), a deleted `[Image #N]` marker drops its image, and `OptionNote.images` carries the rest ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
 - `SettingsRuntimeContext.runtimeOptions` supplies runtime submenu choices for settings without built-in ones; those rows show the chosen option's label ([#17990](https://github.com/can1357/oh-my-pi/pull/17990) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
