@@ -1,58 +1,32 @@
-diff --git a/packages/coding-agent/src/modes/controllers/event-controller.ts b/packages/coding-agent/src/modes/controllers/event-controller.ts
-index a2eccdca2b112..31976e312a534 100644
---- a/packages/coding-agent/src/modes/controllers/event-controller.ts
-+++ b/packages/coding-agent/src/modes/controllers/event-controller.ts
-@@ -2022,11 +2022,6 @@ export class EventController {
- 		this.#updateWorkingMessageFromIntent(event.intent);
- 		const tool = this.ctx.viewSession.getToolByName(event.toolName);
- 		const renderToolName = toolRenderName(event.toolName, tool);
--		const blocked = this.#blockingPrompt(renderToolName, event.args);
--		if (blocked) {
--			this.#blockingPrompts.set(event.toolCallId, blocked);
--			setRunStatus(blocked);
--		}
- 		if (!this.ctx.pendingTools.has(event.toolCallId) && !this.#toolTimelineComponents.has(event.toolCallId)) {
- 			const stale = this.#priorTurnToolComponents.get(event.toolCallId);
- 			if (stale) {
-diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
-index dc99750..bb92f4d 100644
---- a/packages/coding-agent/src/modes/interactive-mode.ts
-+++ b/packages/coding-agent/src/modes/interactive-mode.ts
-@@ -8398,15 +8398,19 @@ export class InteractiveMode implements InteractiveModeContext {
- 		const sessionFile = this.sessionManager.isSessionOnDisk() ? this.sessionManager.getSessionFile() : undefined;
- 		// Pass the profile explicitly: native exec does not inherit Bun's process.env updates.
- 		const activeProfile = getActiveProfile();
--		const cmd = [
--			...resolveCliEntryCmd(),
--			...restartArgv(
--				process.argv.slice(2),
--				sessionFile ? path.resolve(sessionFile) : undefined,
--				activeProfile ? { "--profile": true } : undefined,
--			),
--		];
--		if (activeProfile) cmd.push("--profile", activeProfile);
-+		const ompArgs = restartArgv(
-+			process.argv.slice(2),
-+			sessionFile ? path.resolve(sessionFile) : undefined,
-+			activeProfile ? { "--profile": true } : undefined,
-+		);
-+		if (activeProfile) ompArgs.push("--profile", activeProfile);
-+		const remote = resolveOmpRemoteTarget();
-+		// A named remote host must not re-exec the Mac shim: that would see the
-+		// same newer install and hop forever. ssh runs the far-side binary with
-+		// OMP_REMOTE_ACTIVE=1 so the new process stays there.
-+		const cmd = remote
-+			? remoteRestartArgv(remote.host, ompArgs)
-+			: [...resolveRestartEntryCmd(restartLiveExecutable()), ...ompArgs];
- 		await postmortem.cleanup();
- 		await postmortem.drainStdout();
- 		if (process.platform !== "win32") {
 diff --git a/packages/coding-agent/src/subprocess/worker-client.ts b/packages/coding-agent/src/subprocess/worker-client.ts
-index a99f06d..ff87990 100644
+index c65ec639286..e0a4518e0d9 100644
 --- a/packages/coding-agent/src/subprocess/worker-client.ts
 +++ b/packages/coding-agent/src/subprocess/worker-client.ts
-@@ -160,6 +160,22 @@ export function resolveCliEntryCmd(): string[] {
- 	return [executable, path.resolve(import.meta.dir, "..", "cli.ts")];
+@@ -122,6 +122,10 @@ export const SMOKE_TEST_TIMEOUT_MS = 30_000;
+  * PATH if the original physical path was unlinked on disk (e.g. Homebrew or a
+  * package manager pruned the prior version directory during an in-flight
+  * upgrade, leaving `process.execPath` pointing at a missing path).
++ *
++ * A new install that leaves the old file in place does not come through here:
++ * workers must keep spawning the binary this process is already running.
++ * `/restart` uses {@link resolveRestartEntryCmd} so it can exec the live shim.
+  */
+ export function resolveExecutablePath(): string {
+ 	const executable = stripWindowsExtendedLengthPathPrefix(process.execPath);
+@@ -146,8 +150,9 @@ export function resolveExecutablePath(): string {
+
+ /**
+  * Resolve the command that re-enters this CLI's entrypoint: the compiled
+- * binary itself, or the runtime plus the declared worker-host entry. Used by
+- * the TUI `/restart` relaunch; workers go through {@link resolveWorkerSpawnCmd},
++ * binary itself, or the runtime plus the declared worker-host entry. Fork,
++ * gc, and worktree rewrites use this; `/restart` uses
++ * {@link resolveRestartEntryCmd}. Workers go through {@link resolveWorkerSpawnCmd},
+  * whose no-host fallback deliberately differs (cwd-relative entry pinned to the
+  * package root for `bun test` IPC). Outside a CLI host this falls back to the
+  * absolute path of `src/cli.ts` so the relaunch keeps the caller's cwd.
+@@ -171,6 +176,22 @@ function runningImageReplaced(): boolean {
+ 	}
  }
 
 +/**
