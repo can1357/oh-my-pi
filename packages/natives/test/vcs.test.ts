@@ -160,6 +160,13 @@ describe("in-process VCS bindings", () => {
 
 		await expect(pending).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
 	});
+
+	test("rejects quoted path escapes git would not apply", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		const patch = ['diff --git "a/\\777.txt" "b/\\777.txt"', "old mode 100644", "new mode 100755", ""].join("\n");
+		await expect(repo.applyPatch(patch, {})).rejects.toThrow(/invalid octal escape/);
+	});
 });
 
 describe("VcsRepo", () => {
