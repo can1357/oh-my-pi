@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Deleting or moving a large directory tree inside a project no longer stalls language-server file watching
+- Deleting or moving a large directory tree inside a project no longer stalls language-server file watching ([#19490](https://github.com/can1357/oh-my-pi/pull/19490) by [@H4vC](https://github.com/H4vC))
 
 ## [18.21.0] - 2026-11-16
 
