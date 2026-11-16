@@ -58,12 +58,12 @@ function usage(input = 1_000_000, output = 1_000_000) {
 describe("antigravity-cli API-equivalent pricing", () => {
 	it("bundles the API list rate for every priced model", () => {
 		for (const [id, rate] of Object.entries(API_EQUIVALENT_RATES)) {
-			expect(legs(getBundledModel("antigravity-cli", id).cost), id).toEqual(rate);
+			expect(legs(getBundledModel("antigravity-cli", id).cost, BEFORE_DOUBLING), id).toEqual(rate);
 		}
 	});
 
 	it("keeps gemini-4-carbon unpriced", () => {
-		expect(legs(getBundledModel("antigravity-cli", "gemini-4-carbon").cost)).toEqual(UNPRICED);
+		expect(legs(getBundledModel("antigravity-cli", "gemini-4-carbon").cost, BEFORE_DOUBLING)).toEqual(UNPRICED);
 	});
 
 	it("prices every bundled model except the default", () => {
@@ -74,8 +74,12 @@ describe("antigravity-cli API-equivalent pricing", () => {
 	});
 
 	it("estimates usage at the list rate", () => {
-		expect(calculateCost(getBundledModel("antigravity-cli", "gemini-4-argon"), usage()).total).toBe(24);
-		expect(calculateCost(getBundledModel("antigravity-cli", "gemini-4-carbon"), usage()).total).toBe(0);
+		expect(calculateCost(getBundledModel("antigravity-cli", "gemini-4-argon"), usage(), BEFORE_DOUBLING).total).toBe(
+			24,
+		);
+		expect(calculateCost(getBundledModel("antigravity-cli", "gemini-4-carbon"), usage(), BEFORE_DOUBLING).total).toBe(
+			0,
+		);
 	});
 
 	it("authors the same rates in the provider seed", () => {
