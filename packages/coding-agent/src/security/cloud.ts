@@ -1,6 +1,6 @@
-import { nonEmptyString } from "@oh-my-pi/pi-utils";
 import { decodeJwt } from "@oh-my-pi/pi-ai/registry/oauth/openai-codex";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { nonEmptyString } from "@oh-my-pi/pi-utils";
 import type { AuthStorage } from "../session/auth-storage";
 import { resolveExactSecurityOAuthAccess } from "./auth";
 import {
