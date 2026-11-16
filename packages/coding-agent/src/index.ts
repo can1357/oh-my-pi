@@ -25,6 +25,8 @@ export * from "./extensibility/extensions";
 // Hook system types (legacy re-export)
 // Skills
 export * from "./extensibility/skills";
+// Internal URL handler types and router, for `registerUrlScheme`
+export * from "./internal-urls";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
 export type * from "./lsp";

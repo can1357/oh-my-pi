@@ -875,6 +875,11 @@ Every built-in scheme (`local://`, `skill://`, `artifact://`, `security://`,
 `mcp://`, …) is reserved: RPC hosts cannot register or shadow one, and the
 request fails with `Host URI scheme is reserved by OMP: <scheme>://`.
 
+A scheme an extension registered with `pi.registerUrlScheme` is likewise
+unavailable while the extension holds it (suspended included): the request
+fails with `Host URI scheme is registered by extension <source>: <scheme>://`
+and changes none of the host's schemes.
+
 ## Event Stream Schema
 
 RPC mode forwards `AgentSessionEvent` objects from `AgentSession.subscribe(...)`.

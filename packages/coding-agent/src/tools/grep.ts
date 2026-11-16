@@ -1323,7 +1323,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const header = URL_HEADER_RE.exec(line);
 					if (!header) continue;
 					const target = header[1]!.trimEnd().replace(HEADER_SUFFIX_RE, "");
-					const resolved = router.locateSync(target);
+					// The context the search resolved with: the right session's handler, and its cwd/session file.
+					const resolved = router.locateSync(target, resolveContext);
 					if (resolved) (displayTargets ??= {})[target] = resolved;
 				}
 				const truncated = Boolean(

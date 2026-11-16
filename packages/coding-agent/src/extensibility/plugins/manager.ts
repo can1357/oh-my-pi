@@ -469,6 +469,9 @@ export class PluginManager {
 
 		if (loadable.length > 0) {
 			const result = await loadExtensions(loadable, this.#cwd);
+			// These loads only prove the entries import and bind; no runner ever adopts them, so release
+			// what they registered outside their session state (process-wide) right away.
+			for (const extension of result.extensions) extension.registrations?.release();
 			for (const failure of result.errors) {
 				errors.push(`${failure.path}: ${failure.error}`);
 			}

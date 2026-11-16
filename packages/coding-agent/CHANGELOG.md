@@ -56,6 +56,11 @@
 - Fixed browser timeout and busy-page errors to include the current URL, affected tab, and actionable recovery guidance.
 - Fixed Mnemopi embedding failures being silently downgraded to keyword search; provider errors now produce a warning, including in print mode on stderr.
 
+### Added
+
+- Added `pi.registerUrlScheme` so extensions can serve their own `<scheme>://` URLs to `read`, `write` and composer completion; the root session and each subagent keep their own handler, a suspended extension's scheme pauses until it resumes, and it is released with the extension ([#18059](https://github.com/can1357/oh-my-pi/pull/18059) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `pi.onSuspensionChange(listener)` so an extension can pause work it drives itself (a socket, a timer) while a live `disabledExtensions` edit suspends it, and resume it after ([#18059](https://github.com/can1357/oh-my-pi/pull/18059) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

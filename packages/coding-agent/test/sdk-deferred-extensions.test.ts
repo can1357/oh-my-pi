@@ -14,6 +14,7 @@ import {
 	partitionStartupExtensions,
 	recordStartupVerdicts,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/startup-deferral";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -21,6 +22,20 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+
+/** Registers `urlprobe://`, completion included, and logs each bind to `logPath`. */
+const URL_SCHEME_EXTENSION = (logPath: string) => `
+	import * as fs from "node:fs";
+	export default function(pi) {
+		pi.registerUrlScheme({
+			scheme: "urlprobe",
+			spec: { backing: "remote", selectors: "none", immutable: true },
+			resolve: async url => ({ url: url.href, content: "probe", contentType: "text/plain" }),
+			complete: async () => [{ value: "probe" }],
+		});
+		fs.appendFileSync(${JSON.stringify(logPath)}, "bound\\n");
+	}
+`;
 
 const DEFERRED_TOOL_EXTENSION = (logPath: string) => `
 	import * as fs from "node:fs";
@@ -50,6 +65,7 @@ describe("startup-deferred extensions", () => {
 		AgentStorage.close();
 		authStorage.close();
 		tempDir.removeSync();
+		InternalUrlRouter.resetForTests();
 	});
 
 	it("defers only sources whose recorded verdict matches their current file", async () => {
@@ -93,6 +109,55 @@ describe("startup-deferred extensions", () => {
 			eager: [toolOnly, withShortcut, ...drawingPaths, neverLoaded],
 			deferred: [],
 		});
+	});
+
+	it("keeps an extension that registers a URL scheme eager", async () => {
+		const storage = await AgentStorage.open(path.join(tempDir.path(), "agent.db"));
+		const urlOnly = path.join(tempDir.path(), "url-only.ts");
+		fs.writeFileSync(urlOnly, URL_SCHEME_EXTENSION(path.join(tempDir.path(), "unused.log")));
+
+		const loaded = await loadExtensions([urlOnly], tempDir.path());
+		await recordStartupVerdicts(storage, loaded.extensions);
+
+		// Its promptDoc and composer completion must exist before the first prompt.
+		expect(await partitionStartupExtensions(storage, [urlOnly], tempDir.path())).toEqual({
+			eager: [urlOnly],
+			deferred: [],
+		});
+	});
+
+	it("releases a URL scheme a deferred bind registers after its session was disposed", async () => {
+		const logPath = path.join(tempDir.path(), "bind.log");
+		const deferredPath = path.join(tempDir.path(), "deferred-url.ts");
+		fs.writeFileSync(deferredPath, URL_SCHEME_EXTENSION(logPath));
+
+		const eventBus = new EventBus();
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+			settings: Settings.isolated(),
+			eventBus,
+			preloadedExtensions: await loadExtensions([], tempDir.path(), eventBus),
+			deferredExtensionPaths: [deferredPath],
+			enableLsp: false,
+			enableMCP: false,
+			skipPythonPreflight: true,
+			skills: [],
+			rules: [],
+			preloadedCustomToolPaths: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			toolNames: ["read"],
+		});
+		await session.dispose();
+
+		await session.loadDeferredExtensions();
+
+		expect(fs.readFileSync(logPath, "utf8")).toBe("bound\n");
+		expect(InternalUrlRouter.instance().canHandle("urlprobe://x")).toBe(false);
 	});
 
 	it("binds a deferred extension into the live session and replays session_start to it alone", async () => {
