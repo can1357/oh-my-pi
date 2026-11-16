@@ -71,6 +71,8 @@ export interface ComposerNativeState {
 	readonly dictation?: "idle" | "starting" | "recording" | "transcribing";
 	/** The viewed subagent's lineage, outermost first and the viewed agent last; undefined on the main session. */
 	readonly viewing?: readonly string[];
+	/** Drafts go to the `/btw` note the user clicked, as its follow-ups: role `omp.editor.btw`, a `btw` chip. */
+	readonly btw?: boolean;
 	/** The session's title, quoted in italics as the TSP placeholder; undefined until it has one. */
 	readonly title?: string;
 }
@@ -1115,9 +1117,13 @@ export class CustomEditor extends Editor {
 	}
 	/** The quoted-title placeholder, kept while the title stands so the editor node stays reused. */
 	#titlePlaceholder: { title: string; text: TspText } | undefined;
-	/** Viewing a subagent, the draft goes to it: the placeholder names it; else the session's title, quoted in italics. */
+	/**
+	 * Talking to a `/btw` note, the placeholder asks about it; viewing a subagent, the draft goes to
+	 * it: the placeholder names it; else the session's title, quoted in italics.
+	 */
 	override describePlaceholder = (): TspText => {
-		const { viewing, title } = this.composerState();
+		const { viewing, title, btw } = this.composerState();
+		if (btw) return "Ask about this…";
 		const agent = viewing?.at(-1);
 		if (agent !== undefined) return `Message ${agent}`;
 		if (!title) return NATIVE_COMPOSER_PLACEHOLDER;
@@ -1148,10 +1154,10 @@ export class CustomEditor extends Editor {
 		| undefined;
 
 	/**
-	 * The TSP composer: role `omp.editor[.bash|.python]` (tone `pending` while
+	 * The TSP composer: role `omp.editor[.bash|.python|.btw]` (tone `pending` while
 	 * a turn runs) over the context hairline, the viewing header while a
 	 * subagent is focused, the attachment chips, a `line` row of the
-	 * shell-mode chip and the input, and the `bar`: model chip, effort chip
+	 * shell-mode (or `btw`) chip and the input, and the `bar`: model chip, effort chip
 	 * (or the effort glyph as the model chip's icon), the generation rate,
 	 * the other status facts, usage, dictation, then send (Stop while a turn runs).
 	 * Clicks come back as `status.model`, `thinking.cycle`, `dictation.toggle`,
@@ -1176,6 +1182,7 @@ export class CustomEditor extends Editor {
 			modelKey,
 			interruptKey,
 			state.viewing?.join("\u0001"),
+			state.btw,
 			effortGlyph,
 			state.thinkingInModel,
 		].join("\0");
@@ -1227,7 +1234,7 @@ export class CustomEditor extends Editor {
 			"line",
 		);
 		const layout: NativeEditorLayout = {
-			role: shell ? `omp.editor.${shell.kind}` : "omp.editor",
+			role: shell ? `omp.editor.${shell.kind}` : state.btw ? "omp.editor.btw" : "omp.editor",
 			tone: state.running ? "pending" : undefined,
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
 			caret: "line/input",
@@ -1291,6 +1298,23 @@ export class CustomEditor extends Editor {
 				},
 			),
 			"focus",
+		);
+	}
+
+	/**
+	 * The `btw` chip before the input while drafts go to a `/btw` note; a click goes back to the
+	 * chat as the interrupt key does (the note owns it first).
+	 */
+	#describeBtwChip(interruptKey: KeyId): NativeNode {
+		return keyed(
+			row([node("text", { spans: [span("btw", "accent")], wrap: "none" }, undefined, "label")], {
+				role: "omp.composer.mode",
+				gap: "xs",
+				align: "center",
+				title: `Asking the side question · back to the chat  ${formatTooltipKey(interruptKey)}`,
+				actions: { click: "interrupt" },
+			}),
+			"mode",
 		);
 	}
 
@@ -1424,7 +1448,10 @@ export class CustomEditor extends Editor {
 					undefined,
 					"send",
 				);
-		if (!shell) return { focus, mode: undefined, model, effort, dictation, submit };
+		if (!shell) {
+			const mode = state.btw ? this.#describeBtwChip(interruptKey) : undefined;
+			return { focus, mode, model, effort, dictation, submit };
+		}
 		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
 		const mode = keyed(
 			row(
