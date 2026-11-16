@@ -12,6 +12,9 @@
 ### Fixed
 
 - Fixed every Windows takeover saying "focus was not confirmed afterwards": it now says where focus went, such as "focus returned to Windows Explorer", as on macOS ([#18298](https://github.com/can1357/oh-my-pi/issues/18298)) ([#19062](https://github.com/can1357/oh-my-pi/pull/19062) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed Windows computer keys and shortcuts typing the wrong characters when the receiving control, including an embedded editor on another UI thread, uses a different keyboard layout from omp ([#19025](https://github.com/can1357/oh-my-pi/pull/19025) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
