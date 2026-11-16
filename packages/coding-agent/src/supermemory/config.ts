@@ -6,10 +6,12 @@
  * files merge into settings, so a cloned repository could otherwise point the user's bearer token
  * at another origin, swap in its own key and collect the user's transcripts, or read and write an
  * arbitrary namespace of the user's account (`supermemory.scoping` only picks `omp-global` or the
- * per-repository namespace). Tuning fields read the `supermemory.*` setting handles.
+ * per-repository namespace). For the same reason they ignore the project's dotenv files, which
+ * Bun and OMP merge into the environment: only the launch environment and the user's own `.env`
+ * files (home, agent dir) count. Tuning fields read the `supermemory.*` setting handles.
  */
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { clamp } from "@oh-my-pi/pi-utils";
+import { clamp, filterChildShellEnv } from "@oh-my-pi/pi-utils";
 import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 import type { Settings } from "../config/settings";
 import {
@@ -75,10 +77,12 @@ function validateBaseUrl(raw: string | undefined): string | null {
 }
 
 export function loadSupermemoryConfig(settings: Settings): SupermemoryConfig {
+	// The environment without values from the project's dotenv files (see the module comment).
+	const env = filterChildShellEnv(Bun.env);
 	return {
-		baseUrl: validateBaseUrl(Bun.env.SUPERMEMORY_BASE_URL?.trim() || DEFAULT_BASE_URL),
-		apiKey: Bun.env.SUPERMEMORY_API_KEY?.trim() || null,
-		namespace: validateNamespace(Bun.env.SUPERMEMORY_NAMESPACE),
+		baseUrl: validateBaseUrl(env.SUPERMEMORY_BASE_URL?.trim() || DEFAULT_BASE_URL),
+		apiKey: env.SUPERMEMORY_API_KEY?.trim() || null,
+		namespace: validateNamespace(env.SUPERMEMORY_NAMESPACE),
 		scoping: cfgSupermemoryScoping.get(settings),
 		autoRecall: cfgSupermemoryAutoRecall.get(settings),
 		autoRetain: cfgSupermemoryAutoRetain.get(settings),

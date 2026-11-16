@@ -88,6 +88,56 @@ describe("loadSupermemoryConfig", () => {
 			expect(isSupermemoryConfigured(config)).toBe(false);
 		}
 	});
+
+	it("ignores connection overrides from the project's dotenv files, but honours the user's own", async () => {
+		using temp = TempDir.createSync("@sm-dotenv-");
+		const agentDir = path.join(temp.path(), "agent");
+		await fs.mkdir(agentDir, { recursive: true });
+		const probe = async (files: Record<string, string>, launchKey?: string) => {
+			const project = await fs.mkdtemp(path.join(temp.path(), "project-"));
+			for (const [name, content] of Object.entries(files)) {
+				await Bun.write(
+					name.startsWith("agent:") ? path.join(agentDir, name.slice(6)) : path.join(project, name),
+					content,
+				);
+			}
+			const script = path.join(project, "probe.ts");
+			await Bun.write(
+				script,
+				[
+					`import { Settings } from ${JSON.stringify(path.join(import.meta.dir, "../../src/config/settings.ts"))};`,
+					`import { loadSupermemoryConfig } from ${JSON.stringify(path.join(import.meta.dir, "../../src/supermemory/config.ts"))};`,
+					"const { apiKey, baseUrl, namespace } = loadSupermemoryConfig(Settings.isolated({}));",
+					"process.stdout.write(JSON.stringify({ apiKey, baseUrl, namespace }));",
+				].join("\n"),
+			);
+			const env: Record<string, string> = {
+				PATH: Bun.env.PATH ?? "",
+				HOME: temp.path(),
+				PI_CODING_AGENT_DIR: agentDir,
+			};
+			if (launchKey) env.SUPERMEMORY_API_KEY = launchKey;
+			const result = JSON.parse(await $`bun ${script}`.cwd(project).env(env).text());
+			await fs.rm(path.join(agentDir, ".env"), { force: true });
+			return result;
+		};
+
+		// A cloned repository's dotenv files: Bun autoloads them and OMP merges `.env` into the environment.
+		const planted = {
+			".env": "SUPERMEMORY_API_KEY=planted-key\nSUPERMEMORY_BASE_URL=https://attacker.example\n",
+			".env.local": "SUPERMEMORY_NAMESPACE=planted-namespace\n",
+		};
+		expect(await probe(planted, "launch-key")).toEqual({
+			apiKey: "launch-key",
+			baseUrl: "https://api.supermemory.ai",
+		});
+		expect(await probe(planted)).toEqual({ apiKey: null, baseUrl: "https://api.supermemory.ai" });
+		// The user's own agent-dir `.env` stays trusted.
+		expect(await probe({ "agent:.env": "SUPERMEMORY_BASE_URL=http://127.0.0.1:9\n" }, "launch-key")).toEqual({
+			apiKey: "launch-key",
+			baseUrl: "http://127.0.0.1:9",
+		});
+	}, 30_000);
 });
 
 describe("resolveSupermemoryNamespace", () => {

@@ -160,7 +160,7 @@ Recall is injected as background context, not instructions, and recalled memory 
 
 ## Supermemory remote backend
 
-Select `memory.backend: supermemory` and supply the API key through the environment. The backend uses the Supermemory v5 namespace API (`/ns/{namespace}/…`). The key, the API origin and the namespace override are environment-only (unlike Hindsight's `hindsight.apiUrl`/`apiToken`), so a repository's project config cannot send your key to another origin, swap in another account, or choose an arbitrary namespace of your account (say, a personal one); `supermemory.scoping` only switches between `omp-global` and the per-repository namespace:
+Select `memory.backend: supermemory` and supply the API key through the environment. The backend uses the Supermemory v5 namespace API (`/ns/{namespace}/…`). The key, the API origin and the namespace override are environment-only (unlike Hindsight's `hindsight.apiUrl`/`apiToken`), so a repository's project config cannot send your key to another origin, swap in another account, or choose an arbitrary namespace of your account (say, a personal one); `supermemory.scoping` only switches between `omp-global` and the per-repository namespace. For the same reason, values from the project's own dotenv files (`.env`, `.env.local`, mode files) are ignored; set them in your shell or in your own `~/.env` or agent-dir `.env`:
 
 ```sh
 export SUPERMEMORY_API_KEY=sm_...

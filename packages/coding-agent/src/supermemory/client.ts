@@ -3,7 +3,7 @@
  * the bearer token never follows one. Error messages carry only the endpoint outcome (HTTP status,
  * timeout, cancellation) — never the API key, request body, or response body.
  */
-import { asRecord } from "@oh-my-pi/pi-utils";
+import { asRecord, nonEmptyString } from "@oh-my-pi/pi-utils";
 import type { SupermemorySearchMode } from "./config";
 
 export interface SupermemoryDocument {
@@ -116,16 +116,12 @@ function profileMemories(value: unknown): SupermemoryProfileFact[] {
 	});
 }
 
-function optionalString(value: unknown): string | undefined {
-	return typeof value === "string" && value ? value : undefined;
-}
-
 function relatedMemories(value: unknown): SupermemoryRelatedMemory[] {
 	if (!Array.isArray(value)) return [];
 	return value.flatMap(raw => {
 		const item = asRecord(raw);
 		if (!item || typeof item.id !== "string" || typeof item.memory !== "string") return [];
-		return [{ id: item.id, memory: item.memory, relation: optionalString(item.relation) }];
+		return [{ id: item.id, memory: item.memory, relation: nonEmptyString(item.relation) }];
 	});
 }
 
@@ -247,14 +243,14 @@ export class SupermemoryClient {
 			isLatest: object.isLatest === true,
 			isForgotten: object.isForgotten === true,
 			version: typeof object.version === "number" ? object.version : undefined,
-			createdAt: optionalString(system?.createdAt),
-			updatedAt: optionalString(system?.updatedAt),
+			createdAt: nonEmptyString(system?.createdAt),
+			updatedAt: nonEmptyString(system?.updatedAt),
 			parents: relatedMemories(related?.parents),
 			children: relatedMemories(related?.children),
 			siblings: relatedMemories(related?.siblings),
 			document:
 				document && typeof document.id === "string"
-					? { id: document.id, title: optionalString(document.title), summary: optionalString(document.summary) }
+					? { id: document.id, title: nonEmptyString(document.title), summary: nonEmptyString(document.summary) }
 					: undefined,
 		};
 	}

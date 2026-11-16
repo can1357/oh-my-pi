@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getSafeProjectCwd } from "@oh-my-pi/pi-utils";
+import { getSafeProjectCwd, nonEmptyString } from "@oh-my-pi/pi-utils";
 import { writeRemoteFile } from "../ssh/file-transfer";
 import type { BlobDestinationId } from "./destinations";
 import type { BlobUploader, BlobUploadRequest, RemoteDeleteAction } from "./publication";
@@ -36,10 +36,6 @@ interface PlikUpload {
 interface PlikFile {
 	id: string;
 	name?: string;
-}
-
-function nonEmptyString(value: unknown): string | undefined {
-	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function identifier(value: unknown): string | undefined {

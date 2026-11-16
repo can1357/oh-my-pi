@@ -12,6 +12,11 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
 	return isRecord(value) ? value : null;
 }
 
+/** `value` when it is a non-empty string, else `undefined`. */
+export function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 export function toError(value: unknown): Error {
 	return value instanceof Error ? value : new Error(String(value));
 }
