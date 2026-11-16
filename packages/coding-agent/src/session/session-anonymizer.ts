@@ -398,7 +398,6 @@ const FIELD_RULES: Record<string, Rule> = {
 		"hash",
 		"preserveData",
 		"outputSchema",
-		"retryFallback",
 		"workPoolYieldItems",
 		"providerPromptCacheKey",
 		"taskPromptCacheKey",

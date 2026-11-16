@@ -386,7 +386,9 @@ export class ModelControls {
 		// Apply explicit thinking level if given; otherwise prefer the model's
 		// configured defaultLevel; otherwise re-clamp the current level (or auto).
 		if (thinkingLevel !== undefined) {
-			this.setThinkingLevel(thinkingLevel);
+			// An explicit selector is a saved choice even when the new model resolves it
+			// to the effort already in effect (notably while adopting a fallback's effort).
+			this.setThinkingLevel(thinkingLevel, false, { recordUnchanged: selection === "explicit" });
 		} else {
 			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
 		}
@@ -568,7 +570,7 @@ export class ModelControls {
 	setThinkingLevel(
 		level: ConfiguredThinkingLevel | undefined,
 		persist: boolean = false,
-		options?: { retryFallback?: boolean },
+		options?: { retryFallback?: boolean; recordUnchanged?: boolean },
 	): void {
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
@@ -589,10 +591,12 @@ export class ModelControls {
 				cfgDefaultThinkingLevel.set(this.#host.settings, AUTO_THINKING);
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
-			if (isChanging) {
+			if (isChanging || options?.recordUnchanged === true) {
 				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, {
 					retryFallback: options?.retryFallback ?? false,
 				});
+			}
+			if (isChanging) {
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
 			return;
@@ -615,9 +619,13 @@ export class ModelControls {
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
+		}
+		if (isChanging || options?.recordUnchanged === true) {
 			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, {
 				retryFallback: options?.retryFallback ?? false,
 			});
+		}
+		if (isChanging) {
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				cfgDefaultThinkingLevel.set(this.#host.settings, effectiveLevel);
 			}

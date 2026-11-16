@@ -2,13 +2,17 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -220,6 +224,89 @@ describe("fallback-only thinking entries", () => {
 		}
 	});
 
+	test("persists an unchanged effort explicitly retained after a live fallback", async () => {
+		freshDir();
+		const sessionManager = SessionManager.inMemory(tempDir);
+		const settings = Settings.isolated({
+			defaultThinkingLevel: Effort.Low,
+			modelRoles: { default: PRIMARY },
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+		});
+		const options = sessionOptions(sessionManager, settings);
+		const primary = options.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		const fallback = options.modelRegistry.find("openai-codex", "gpt-5.6-sol");
+		const other = options.modelRegistry.find("anthropic", "claude-sonnet-4-6");
+		if (!primary || !fallback || !other) throw new Error("Expected bundled fallback test models");
+		options.authStorage.keys.setRuntime("openai-codex", "test-key");
+		settings.setModelRole("default", PRIMARY);
+		cfgRetryFallbackChains.set(settings, { default: [`${fallback.provider}/${fallback.id}:high`] });
+
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			streamFn: (model, context, streamOptions) => {
+				if (model.provider === primary.provider && model.id === primary.id && primaryAttempts === 0) {
+					primaryAttempts += 1;
+					mock.push({ throw: "rate limit exceeded retry-after-ms=60000" });
+				} else {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				}
+				return mock.stream(model, context, streamOptions);
+			},
+		});
+		const live = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry: options.modelRegistry,
+			thinkingLevel: Effort.Medium,
+		});
+		let target: string;
+		try {
+			await live.prompt("Trigger the high-effort fallback");
+			await live.waitForIdle();
+			expect(live.model?.id).toBe(fallback.id);
+			expect(live.configuredThinkingLevel()).toBe(Effort.High);
+
+			// High is already effective, but explicitly retaining it on this model switch
+			// must still turn the ephemeral fallback effort into a saved session choice.
+			await live.setModelTemporary(other, Effort.High);
+			const context = sessionManager.buildSessionContext();
+			expect(context.thinkingLevel).toBe(Effort.High);
+			expect(context.configuredThinkingLevel).toBe(Effort.High);
+			const retained = sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "thinking_level_change")
+				.at(-1);
+			expect(retained?.retryFallback).toBe(false);
+			target = await writeTranscript(sessionManager);
+		} finally {
+			await live.dispose();
+		}
+
+		const reopenedManager = await SessionManager.open(target, path.join(tempDir, "reopen-live-switch"));
+		expect(reopenedManager.buildSessionContext().configuredThinkingLevel).toBe(Effort.High);
+		const reopenedSettings = Settings.isolated({
+			defaultThinkingLevel: Effort.Low,
+			modelRoles: { default: PRIMARY },
+		});
+		const { session: reopened } = await createAgentSession(sessionOptions(reopenedManager, reopenedSettings));
+		try {
+			expect(reopened.configuredThinkingLevel()).toBe(Effort.High);
+		} finally {
+			await reopened.dispose();
+		}
+	});
+
 	test("does not promote a fallback effort retained by a later model switch", async () => {
 		freshDir();
 		const settings = Settings.isolated({
@@ -235,8 +322,9 @@ describe("fallback-only thinking entries", () => {
 			await session.setModelTemporary(other, Effort.Low);
 			expect(session.configuredThinkingLevel()).toBe(Effort.Low);
 			const context = sessionManager.buildSessionContext();
-			expect(context.thinkingLevel).toBe("off");
-			expect(context.configuredThinkingLevel).toBeUndefined();
+			// The explicit low choice is saved; the fallback's xhigh effort is not promoted.
+			expect(context.thinkingLevel).toBe(Effort.Low);
+			expect(context.configuredThinkingLevel).toBe(Effort.Low);
 		} finally {
 			await session.dispose();
 		}
