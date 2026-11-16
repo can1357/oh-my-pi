@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
