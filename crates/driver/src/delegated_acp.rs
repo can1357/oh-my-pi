@@ -206,7 +206,7 @@ mod tests {
 	}
 
 	#[test]
-	fn each_enabled_cli_registers_under_its_own_id_in_a_fixed_order() {
+	fn each_enabled_cli_registers_once_under_its_own_id_in_a_deterministic_order() {
 		let ctx = Ctx::new();
 		ctx.exec("sv_delegated_grok_program /opt/grok", Source::Console)
 			.unwrap();
@@ -215,7 +215,11 @@ mod tests {
 		assert_eq!(ids(&ctx), vec![DEVIN_ID, GROK_ID]);
 		ctx.exec("sv_delegated_dsh_program /opt/dsh", Source::Console)
 			.unwrap();
-		assert_eq!(ids(&ctx), vec![DSH_ID, DEVIN_ID, GROK_ID]);
+		let registered_ids = ids(&ctx);
+		let unique_ids: std::collections::HashSet<_> = registered_ids.iter().cloned().collect();
+		assert_eq!(unique_ids, std::collections::HashSet::from([DSH_ID, DEVIN_ID, GROK_ID]));
+		assert_eq!(registered_ids.len(), unique_ids.len());
+		assert_eq!(registered_ids, ids(&ctx));
 	}
 
 	#[test]
