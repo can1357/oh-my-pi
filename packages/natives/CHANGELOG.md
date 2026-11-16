@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PhononTts` binding for on-device Phonon text-to-speech
+- Added `Shell.adopt(fork)`, which carries the variables, functions, aliases, options and traps a `fork()` set into the shell it was forked from, at the end of that shell's running command; a name both set keeps the value of the command that ended last
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Committing or writing trees now correctly reports unresolved index conflicts instead of silently omitting conflicted files.
+- Fixed shell compatibility with GNU `grep` for end-of-line-anchored patterns, including `-o` and `-z` modes, and corrected `sed` substitutions on multibyte-character lines.
+- Fixed native diff and patch handling for filenames containing spaces and other characters requiring quoting, including binary changes.
+
 ## [18.20.1] - 2026-11-14
 
 ### Breaking Changes

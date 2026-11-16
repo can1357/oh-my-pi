@@ -23,7 +23,12 @@ import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
-import { InternalUrlFilesystem, UrlFsError } from "../internal-urls/url-filesystem";
+import {
+	InternalUrlFilesystem,
+	type InternalUrlFilesystemOptions,
+	type UrlWriteReport,
+	UrlFsError,
+} from "../internal-urls/url-filesystem";
 import { PipeTextSources, TextTap } from "../job-widgets";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type {
@@ -545,7 +550,7 @@ interface ManagedBashJobHandle {
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	getLatestTrace: () => ShellTrace | undefined;
-	/** Notices for this call's results, including one added once the run starts (temporary shell). */
+	/** Notices for this call's results, including the ones the run adds (URL writes). */
 	notices: readonly string[];
 	/** Hand the call's card to the job: later frames carry `details.async` and the last one settles it. */
 	background: () => void;
@@ -562,8 +567,14 @@ interface BashProgressDetails extends BashToolDetails {
 /** Pid probe of a background job with no command in flight. */
 const NO_PIDS = (): readonly number[] => [];
 
-/** Shown when a call overlapped another one (parallel or backgrounded) and ran in a fork of the session's shell. */
-const SESSION_SHELL_BUSY_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
+/**
+ * Shown when a call ran in a fork of the session's busy shell (it overlapped a parallel or backgrounded call)
+ * and what it set could not be carried back into the session's shell.
+ */
+const FORK_STATE_LOST_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
+/** Shown when such a call left background jobs running: they stay in the copy. */
+const FORK_JOBS_NOTICE =
+	"Background jobs started here run in a copy of the busy session shell; later calls' jobs, wait and %N won't see them.";
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
@@ -613,6 +624,17 @@ function formatTimeoutClampNotice(
 		? `global tools.maxTimeout ceiling ${maxTimeout}s`
 		: `allowed range ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}s`;
 	return `Timeout clamped to ${effectiveTimeoutSec}s (requested ${requestedTimeoutSec}s; ${limit}).`;
+}
+
+/**
+ * Records handler answers to a command's URL writes (`> proc://<id>/kill`, `> xd://<tool>`) as
+ * result notices: the shell itself shows only an errno for a refused write.
+ */
+function noticeUrlWrites(notices: string[]): (report: UrlWriteReport) => void {
+	return ({ url, text, failed }) => {
+		if (failed) notices.push(`Write to ${url} failed: ${text}`);
+		else if (text) notices.push(`${url}: ${text}`);
+	};
 }
 
 /** Explicit tool `cwd` keeps the workspace-root alias; a hoisted shell `cd` does not. */
@@ -862,14 +884,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	/**
 	 * URL filesystem for one embedded-shell run: this session's context, cancelled by the run's own
-	 * signal. `onReply` receives what the run writes to `out://`; without it such writes are refused.
+	 * signal. Without `onReply`/`onWrite` the run's writes to `out://` and other handler-written URLs
+	 * are refused.
 	 */
 	#urlFilesystem(
 		signal: AbortSignal | undefined,
-		tier: ToolTier,
-		onReply?: (text: string) => void,
+		options: Omit<InternalUrlFilesystemOptions, "context">,
 	): InternalUrlFilesystem {
-		return new InternalUrlFilesystem({ context: sessionResolveContext(this.session, { signal }), tier, onReply });
+		return new InternalUrlFilesystem({ ...options, context: sessionResolveContext(this.session, { signal }) });
 	}
 
 	/**
@@ -971,6 +993,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (notice) notices.push(notice);
 			}
 		}
+		const fork = "fork" in result ? result.fork : undefined;
+		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
+		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
 		if (notices.length > 0) outputLines.push("", ...notices);
 		// Shaped output already leads with its exit status.
 		if (failedExit && !shaped?.text?.startsWith("[exit code ")) outputLines.push("", formatExitCodeNotice(exitCode));
@@ -1245,7 +1270,12 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						gitGuard: cfgBashGitGuard.get(this.session.settings),
 						ovnfs: ovnfsCommand(this.session.settings),
 						// Bound to the job's own signal: the job outlives the call that started it.
-						filesystem: this.#urlFilesystem(runSignal, options.approvalTier, onReply).shellFilesystem(),
+						filesystem: this.#urlFilesystem(runSignal, {
+							tier: options.approvalTier,
+							onReply,
+							onWrite: noticeUrlWrites(notices),
+							toolCallId: options.toolCallId,
+						}).shellFilesystem(),
 						artifactPath,
 						artifactId,
 						onChunk: chunk => outputTap.append(chunk),
@@ -1266,7 +1296,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onStart: probe => {
 							pids = probe;
 						},
-						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
 					}).finally(() => {
 						pids = NO_PIDS;
 						liveTrace = undefined;
@@ -1474,7 +1503,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					`Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
 				);
 			}
-			const cwdStat = await this.#urlFilesystem(signal, approvalTier)
+			const cwdStat = await this.#urlFilesystem(signal, { tier: approvalTier })
 				.stat(virtualCwd)
 				.catch((err: unknown) => {
 					if (err instanceof UrlFsError && err.code === "ENOENT") {
@@ -1666,7 +1695,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			autoBgManager.backgroundJob(job.jobId);
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
-			// `job.notices` also carries the temporary-shell notice once the run started.
+			// `job.notices` also carries the notices the run added so far.
 			const notices =
 				waitResult.kind === "steer"
 					? [...job.notices, "Backgrounded early to handle an incoming message; the command keeps running."]
@@ -2031,9 +2060,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					signal,
 					gitGuard: cfgBashGitGuard.get(this.session.settings),
 					ovnfs: ovnfsCommand(this.session.settings),
-					filesystem: this.#urlFilesystem(signal, approvalTier, text => {
-						replies.push(text);
-						emitFrame?.();
+					filesystem: this.#urlFilesystem(signal, {
+						tier: approvalTier,
+						onReply: text => {
+							replies.push(text);
+							emitFrame?.();
+						},
+						onWrite: noticeUrlWrites(pendingNotices),
+						toolCallId,
 					}).shellFilesystem(),
 					artifactPath,
 					artifactId,
@@ -2052,7 +2086,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								}
 							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {

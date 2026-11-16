@@ -1,4 +1,3 @@
-import { SEANCE_SLASH_COMMAND } from "./seance";
 import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -420,7 +419,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			await runtime.ctx.handleHandoffCommand(customInstructions);
 		},
 	},
-	SEANCE_SLASH_COMMAND,
 	{
 		name: "resume",
 		icon: "history",

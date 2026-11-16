@@ -8,6 +8,12 @@
 - Added `procmgr.getChildShellEnv()`, the environment a bash command would start from at the moment of the call, before the bash tool's own additions; reading it doesn't pin the dotenv project ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 - Added `$envAnyCase(name, env)`, which reads an env object's variable whatever its key casing, as Windows does (a copied env keeps `Path`) ([#17130](https://github.com/can1357/oh-my-pi/pull/17130) by [@Dangerboi](https://github.com/Dangerboi))
 
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Fixed HTML-to-Markdown conversion for fetched and pasted HTML to preserve whitespace in inline elements, maintain code indentation in preformatted blocks, and avoid inserting stray blank lines between block elements.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

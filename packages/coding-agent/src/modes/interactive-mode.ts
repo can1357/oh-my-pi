@@ -396,9 +396,7 @@ import type {
 	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ResumeSessionOptions,
-	SessionPickHandler,
 	ShowStatusOptions,
-	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
 	YieldCompaction,
 } from "./types";
@@ -2937,9 +2935,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				}
 				// A terminal provider failure is not a loop yield: resubmitting the
 				// captured prompt would append another user turn (and every @file
-				// attachment) without making progress. Non-terminal settles still
-				// belong to retry/maintenance and must not park the loop.
-				if (event.type === "agent_end" && event.isTerminal !== false) {
+				// attachment) without making progress. Pauses still belong to the
+				// run and must not park the loop.
+				if (event.type === "agent_end") {
 					const last = event.messages.findLast(message => message.role === "assistant");
 					if (last?.stopReason === "error" && this.loopModeEnabled && this.loopPrompt) {
 						this.pauseLoop();
@@ -4202,8 +4200,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			pendingSubmissionDispose?.();
 			this.#optimisticUserMessageComponents = [];
 			this.#pendingWorkingMessage = undefined;
-			// A run that only waits on background jobs keeps its working row, which
-			// names the wait; the settle watch or the next run tears it down.
+			// A run paused on outside work keeps its working row, which names the
+			// wait; the next loop or the run's `agent_end` tears it down.
 			if (this.loadingAnimation && !this.#eventController.isAwaitingAsyncWork()) {
 				this.#stopLoadingAnimation(true);
 			}
@@ -8536,7 +8534,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.hasAdmittedSubmission ||
 			this.session.isStreaming ||
 			this.session.queuedMessageCount > 0 ||
-			this.session.hasPendingAsyncWork()
+			this.session.isRunActive
 		) {
 			return;
 		}
@@ -9609,7 +9607,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showGitTui(revision);
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void {
+	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
 	}
 
@@ -9617,8 +9615,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.switchSessionModel(model, thinkingLevel);
 	}
 
-	showPluginSelector(mode?: "install" | "uninstall"): void {
-		void this.#selectorController.showPluginSelector(mode);
+	showPluginSelector(mode?: "install" | "uninstall"): Promise<void> {
+		return this.#selectorController.showPluginSelector(mode);
 	}
 
 	showUserMessageSelector(startAt?: string): void {
@@ -9637,8 +9635,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThinkingSelector();
 	}
 
-	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void {
-		void this.#selectorController.showSessionSelector(source, onSelect);
+	showSessionSelector(source?: ForeignSessionSource): void {
+		void this.#selectorController.showSessionSelector(source);
 	}
 
 	async handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void> {
