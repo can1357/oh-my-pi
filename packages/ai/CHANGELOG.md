@@ -12,7 +12,7 @@
 
 - Fixed rate-limit handling for Mistral and other OpenAI-compatible providers so requests with no available allowance fail immediately with an actionable error suggesting a model or plan change.
 - Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
-- Fixed abandoned Antigravity CLI tool turns keeping a background process, its tool listener and a session entry alive indefinitely; an idle host now shuts down and a later tool result replays the conversation ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
+- Fixed abandoned Antigravity CLI tool turns keeping a background process, its tool listener and a session entry alive indefinitely; an idle host now shuts down and a later tool result replays the conversation ([#19391](https://github.com/can1357/oh-my-pi/pull/19391) by [@eggpeat](https://github.com/eggpeat))
 - Fixed Mistral (and other OpenAI-compatible) 429s reporting a zero `x-ratelimit-limit-*` allowance being retried for minutes; they now fail on the first request with an error naming the header and suggesting a model or plan switch ([#19300](https://github.com/can1357/oh-my-pi/issues/19300))
 - Fixed pooled Claude accounts presenting one device: an Anthropic OAuth request now reports the device and account id of the credential serving it, including after a rotation inside one call, when caller metadata named the previous account ([#19277](https://github.com/can1357/oh-my-pi/pull/19277) by [@Xytronix](https://github.com/Xytronix))
 
