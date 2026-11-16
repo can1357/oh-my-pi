@@ -791,14 +791,14 @@ impl HookControlFactory {
 		payload: &JsonValue,
 	) -> omp_contract::NativeReply {
 		const EVENT: &str = "agent_settled";
-		let all = self
-			.subscriptions
-			.read()
-			.values()
-			.flat_map(|rows| rows.iter())
-			.cloned()
-			.collect::<Vec<_>>();
-		let rows = super::settled::settled_rows(&all, session.as_str(), session_generation);
+		let rows = {
+			let subscriptions = self.subscriptions.read();
+			super::settled::settled_rows(
+				subscriptions.values().flatten(),
+				session.as_str(),
+				session_generation,
+			)
+		};
 		super::settled::first_continue(&rows, |row| {
 			let row = row.clone();
 			async move {
@@ -2695,6 +2695,8 @@ mod tests {
 		reply:   JsonValue,
 		/// Extension names whose callback fails with a protocol error.
 		failing: BTreeSet<&'static str>,
+		/// Callback arguments of every dispatch, in call order.
+		seen:    std::sync::Mutex<Vec<serde_json::Map<String, JsonValue>>>,
 	}
 
 	#[async_trait::async_trait]
@@ -2702,9 +2704,10 @@ mod tests {
 		async fn dispatch(
 			&self,
 			target: Arc<ControlConnectionIdentity>,
-			_dispatch: ControlDispatch,
+			dispatch: ControlDispatch,
 		) -> Result<JsonValue, ControlProtocolError> {
 			self.calls.fetch_add(1, Ordering::SeqCst);
+			self.seen.lock().unwrap().push(dispatch.arguments);
 			if self.failing.contains(target.extension.as_str()) {
 				return Err(ControlProtocolError::new("CallbackFailed", "scripted failure"));
 			}
@@ -2715,6 +2718,7 @@ mod tests {
 	fn settled_factory(reply: JsonValue) -> (Arc<HookControlFactory>, Arc<SettledDispatcher>) {
 		let dispatcher = Arc::new(SettledDispatcher {
 			calls: AtomicU64::new(0),
+			seen: std::sync::Mutex::new(Vec::new()),
 			reply,
 			failing: BTreeSet::from(["a-fail"]),
 		});
@@ -2842,5 +2846,19 @@ mod tests {
 			.await;
 		assert_eq!(reply, omp_contract::NativeReply::default());
 		assert_eq!(dispatcher.calls.load(Ordering::SeqCst), 1);
+	}
+
+	#[tokio::test]
+	async fn payload_reaches_the_callback_unchanged() {
+		let (hooks, dispatcher) = settled_factory(json!({}));
+		install(&hooks, settled_row(current_revision()));
+		let payload = json!({"reason": "idle", "nested": {"n": [1, 2]}});
+		hooks.dispatch_agent_settled(&sf!("s1"), 1, &payload).await;
+		let seen = dispatcher.seen.lock().unwrap();
+		assert_eq!(seen.len(), 1);
+		assert_eq!(seen[0]["payload"], payload);
+		assert_eq!(seen[0]["phase"], "domain");
+		assert_eq!(seen[0]["name"], "ext/0");
+		assert_eq!(seen[0]["event"], "agent_settled");
 	}
 }

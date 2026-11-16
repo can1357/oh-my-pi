@@ -38,13 +38,13 @@ pub(crate) fn decode_settled_reply(reply: &JsonValue) -> Option<SettledContinue>
 
 /// Selects the domain `agent_settled` rows of one session generation, in call
 /// order.
-pub(crate) fn settled_rows(
-	rows: &[HookSubscription],
+pub(crate) fn settled_rows<'a>(
+	rows: impl IntoIterator<Item = &'a HookSubscription>,
 	session: &str,
 	session_generation: u64,
 ) -> Vec<HookSubscription> {
 	let mut selected: Vec<HookSubscription> = rows
-		.iter()
+		.into_iter()
 		.filter(|row| {
 			row.event == "agent_settled"
 				&& row.phase == "domain"
@@ -223,13 +223,13 @@ mod tests {
 			row("a-ext", 0, "agent_settled", "domain", "s2", 1),
 			settled("a-ext", 0),
 		];
-		assert_eq!(names(&settled_rows(&rows, "s1", 1)), ["a-ext/0", "a-ext/1", "b-ext/0"]);
+		assert_eq!(names(&settled_rows(rows.iter(), "s1", 1)), ["a-ext/0", "a-ext/1", "b-ext/0"]);
 	}
 
 	#[test]
 	fn rows_of_another_generation_are_skipped() {
 		let rows = vec![row("a-ext", 0, "agent_settled", "domain", "s1", 2), settled("b-ext", 0)];
-		assert_eq!(names(&settled_rows(&rows, "s1", 1)), ["b-ext/0"]);
+		assert_eq!(names(&settled_rows(rows.iter(), "s1", 1)), ["b-ext/0"]);
 	}
 
 	#[tokio::test]
