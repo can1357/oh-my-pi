@@ -333,6 +333,45 @@ describe("Command Code provider support", () => {
 		for (const { body } of chatBodies) expect(body.reasoning_effort).not.toBe("none");
 	});
 
+	test("sends each advertised Command Code Qwen effort and preserves off", async () => {
+		const models = await discoverModels(["Qwen/Qwen3.8-Max-Prime", "Qwen/Qwen4-Max"]);
+		const context = { messages: [{ role: "user" as const, content: "Reply OK", timestamp: 0 }] };
+		for (const model of models) {
+			if (!model.thinking) throw new Error(`Missing effort controls for ${model.id}`);
+			const bodies: Record<string, unknown>[] = [];
+			const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return new Response("stop", { status: 400 });
+			});
+			for (const effort of model.thinking.efforts) {
+				await streamSimple(model, context, {
+					apiKey: "user_test",
+					fetch: fetchMock,
+					reasoning: effort,
+					maxHttpAttempts: 1,
+				}).result();
+				const body = bodies.at(-1)!;
+				expect(body.enable_thinking, model.id).toBe(true);
+				expect(body.reasoning_effort, model.id).toBe(effort);
+				expect(body.chat_template_kwargs, model.id).toMatchObject({ reasoning_effort: effort });
+			}
+			await streamSimple(model, context, {
+				apiKey: "user_test",
+				fetch: fetchMock,
+				disableReasoning: true,
+				maxHttpAttempts: 1,
+			}).result();
+			const off = bodies.at(-1)!;
+			expect(off.enable_thinking, model.id).toBe(false);
+			expect(off.reasoning_effort, model.id).toBeUndefined();
+			expect(
+				(off.chat_template_kwargs as Record<string, unknown> | undefined)?.reasoning_effort,
+				model.id,
+			).toBeUndefined();
+			expect(bodies).toHaveLength(model.thinking.efforts.length + 1);
+		}
+	});
+
 	test("routes effort-ladder ids to Responses with the right off switch", async () => {
 		// supported_endpoints on 2026-10-01: these ladder ids lack /responses.
 		// Qwen3.8 stays on chat because `enable_thinking: false` already disables it there.

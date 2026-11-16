@@ -991,12 +991,17 @@ provider "commandcode" {
 		supports-reasoning-effort #true
 		thinking-efforts "low" "medium" "high" "xhigh"
 	}
+	// Preserve the existing off-switch policy while forwarding template effort.
 	models "Qwen/Qwen3.8-Max-Prime" {
 		supports-reasoning-effort #true
+		template-reasoning-effort #true
+		thinking-requires-effort #false
 		thinking-efforts "low" "medium" "xhigh"
 	}
 	models "Qwen/Qwen4-Max" {
 		supports-reasoning-effort #true
+		template-reasoning-effort #true
+		thinking-requires-effort #false
 		thinking-efforts "low" "high" "xhigh"
 	}
 	models "thinkingmachines/inkling-2-small:free" {
