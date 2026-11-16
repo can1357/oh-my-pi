@@ -12,9 +12,16 @@
 //! non-interactive env (`GIT_TERMINAL_PROMPT=0`, askpass rejection, `LC_ALL`
 //! handling), `--no-optional-locks` for reads, fsmonitor/untracked-cache
 //! disabled for writes, ambient `GIT_DIR`-family vars stripped, bounded output
-//! capture, and deadline + SIGTERM→SIGKILL termination via tokio.
+//! capture, bounded post-exit pipe draining, and deadline + SIGTERM→SIGKILL
+//! termination via tokio.
 
-use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
+use std::{
+	ffi::OsStr,
+	path::Path,
+	process::Stdio,
+	sync::{Arc, Mutex},
+	time::Duration,
+};
 
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
@@ -37,7 +44,41 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 pub const OUTPUT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 const TERMINATE_GRACE: Duration = Duration::from_secs(5);
+/// Descendants can retain the pipes after git exits; do not wait for their EOF.
+const DRAIN_GRACE: Duration = Duration::from_secs(1);
 const TRUNCATION_MARKER: &str = "\n[git subprocess output truncated at the capture limit]\n";
+
+/// Publish each chunk so a bounded drain can return the bytes already captured.
+#[derive(Default)]
+struct OutputCapture {
+	retained:  Vec<u8>,
+	truncated: bool,
+	closed:    bool,
+}
+
+impl OutputCapture {
+	/// Stop a reader once its caller has collected the output.
+	fn append(&mut self, bytes: &[u8], limit: usize) -> bool {
+		if self.closed {
+			return false;
+		}
+		if !self.truncated {
+			let keep = bytes.len().min(limit - self.retained.len());
+			self.retained.extend_from_slice(&bytes[..keep]);
+			self.truncated = keep < bytes.len();
+		}
+		true
+	}
+
+	fn take(&mut self) -> String {
+		self.closed = true;
+		let mut text = String::from_utf8_lossy_owned(std::mem::take(&mut self.retained));
+		if self.truncated {
+			text.push_str(TRUNCATION_MARKER);
+		}
+		text
+	}
+}
 
 /// Captured result of a completed git invocation.
 #[derive(Debug, Clone)]
@@ -234,8 +275,10 @@ pub(crate) async fn run(cwd: &Path, args: &[String], options: &RunOptions) -> Re
 
 	let stdout = child.stdout.take().expect("stdout piped");
 	let stderr = child.stderr.take().expect("stderr piped");
-	let stdout_task = tokio::spawn(read_capped(stdout));
-	let stderr_task = tokio::spawn(read_capped(stderr));
+	let stdout_capture = Arc::new(Mutex::new(OutputCapture::default()));
+	let stderr_capture = Arc::new(Mutex::new(OutputCapture::default()));
+	let mut stdout_task = tokio::spawn(read_capped(stdout, Arc::clone(&stdout_capture)));
+	let mut stderr_task = tokio::spawn(read_capped(stderr, Arc::clone(&stderr_capture)));
 
 	let timeout = options.timeout.unwrap_or(COMMAND_TIMEOUT);
 	let cancel = options.cancel.clone().unwrap_or_default();
@@ -257,12 +300,25 @@ pub(crate) async fn run(cwd: &Path, args: &[String], options: &RunOptions) -> Re
 		},
 	};
 
-	let stdout = stdout_task
-		.await
-		.map_err(|err| Error::backend("git run", err))??;
-	let stderr = stderr_task
-		.await
-		.map_err(|err| Error::backend("git run", err))??;
+	// Both readers run concurrently and share one post-exit deadline, even if
+	// descendants retain both pipes. A drain timeout keeps the captured bytes.
+	let drained = tokio::time::timeout(DRAIN_GRACE, async {
+		(&mut stdout_task)
+			.await
+			.map_err(|err| Error::backend("git run", err))??;
+		(&mut stderr_task)
+			.await
+			.map_err(|err| Error::backend("git run", err))??;
+		Ok::<_, Error>(())
+	})
+	.await;
+	stdout_task.abort();
+	stderr_task.abort();
+	if let Ok(result) = drained {
+		result?;
+	}
+	let stdout = stdout_capture.lock().unwrap().take();
+	let stderr = stderr_capture.lock().unwrap().take();
 	Ok(CliOutput { exit_code: exit.code().unwrap_or(-1), stdout, stderr })
 }
 
@@ -417,8 +473,8 @@ fn run_sync_impl(
 fn wait_sync(
 	argv: &[String],
 	mut child: std::process::Child,
-	stdout: Option<std::thread::JoinHandle<String>>,
-	stderr: Option<std::thread::JoinHandle<String>>,
+	stdout: Option<SyncReader>,
+	stderr: Option<SyncReader>,
 	timeout: Duration,
 ) -> Result<CliOutput> {
 	let deadline = std::time::Instant::now() + timeout;
@@ -433,14 +489,36 @@ fn wait_sync(
 			None => std::thread::sleep(Duration::from_millis(10)),
 		}
 	};
-	// The child has exited (or been killed), so the pipes reach EOF and the
-	// readers terminate; join can only block briefly on the final drain.
-	let stdout = stdout.map_or_default(|h| h.join().unwrap_or_default());
-	let stderr = stderr.map_or_default(|h| h.join().unwrap_or_default());
+	// Git exiting does not imply EOF: descendants can retain either pipe. Give
+	// both readers one bounded grace period, then collect their current buffers
+	// without joining a thread still blocked on an inherited pipe.
+	let readers = [stdout, stderr];
+	let drain_deadline = std::time::Instant::now() + DRAIN_GRACE;
+	while readers
+		.iter()
+		.flatten()
+		.any(|reader| !reader.thread.is_finished())
+		&& std::time::Instant::now() < drain_deadline
+	{
+		std::thread::sleep(Duration::from_millis(10));
+	}
+	let [stdout, stderr] = readers.map(|reader| {
+		reader.map_or_default(|reader| {
+			if reader.thread.is_finished() {
+				let _ = reader.thread.join();
+			}
+			reader.output.lock().unwrap().take()
+		})
+	});
 	let Some(status) = status else {
 		return Err(Error::CliTimeout { command: format!("git {}", argv.join(" ")) });
 	};
 	Ok(CliOutput { exit_code: status.code().unwrap_or(-1), stdout, stderr })
+}
+
+struct SyncReader {
+	thread: std::thread::JoinHandle<()>,
+	output: Arc<Mutex<OutputCapture>>,
 }
 
 /// Drain a child stream on a helper thread, mirroring [`read_capped`].
@@ -453,41 +531,30 @@ fn spawn_sync_reader(
 	name: &'static str,
 	stream: Option<impl std::io::Read + Send + 'static>,
 	limit: usize,
-) -> Option<std::thread::JoinHandle<String>> {
+) -> Option<SyncReader> {
 	let stream = stream?;
-	std::thread::Builder::new()
+	let output = Arc::new(Mutex::new(OutputCapture::default()));
+	let capture = Arc::clone(&output);
+	let thread = std::thread::Builder::new()
 		.name(name.into())
-		.spawn(move || read_capped_sync(stream, limit))
-		.ok()
+		.spawn(move || read_capped_sync(stream, limit, &capture))
+		.ok()?;
+	Some(SyncReader { thread, output })
 }
 
 /// Synchronous mirror of [`read_capped`]: cap retention at `limit` while
 /// draining to EOF so the child never blocks.
-fn read_capped_sync(mut stream: impl std::io::Read, limit: usize) -> String {
-	let mut retained: Vec<u8> = Vec::new();
+fn read_capped_sync(mut stream: impl std::io::Read, limit: usize, output: &Mutex<OutputCapture>) {
 	let mut buf = [0u8; 8 * 1024];
-	let mut truncated = false;
 	loop {
 		let n = match stream.read(&mut buf) {
 			Ok(0) | Err(_) => break,
 			Ok(n) => n,
 		};
-		if truncated {
-			continue;
-		}
-		let remaining = limit - retained.len();
-		if n <= remaining {
-			retained.extend_from_slice(&buf[..n]);
-		} else {
-			retained.extend_from_slice(&buf[..remaining]);
-			truncated = true;
+		if !output.lock().unwrap().append(&buf[..n], limit) {
+			break;
 		}
 	}
-	let mut text = String::from_utf8_lossy_owned(retained);
-	if truncated {
-		text.push_str(TRUNCATION_MARKER);
-	}
-	text
 }
 
 fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
@@ -506,31 +573,21 @@ fn spawn_error(cwd: &Path, err: std::io::Error) -> Error {
 
 /// Read a stream to completion, capping retention at [`OUTPUT_LIMIT_BYTES`]
 /// while continuing to drain so the child never blocks on a full pipe.
-async fn read_capped(mut stream: impl tokio::io::AsyncRead + Unpin) -> Result<String> {
-	let mut retained: Vec<u8> = Vec::new();
+async fn read_capped(
+	mut stream: impl tokio::io::AsyncRead + Unpin,
+	output: Arc<Mutex<OutputCapture>>,
+) -> Result<()> {
 	let mut buf = [0u8; 8 * 1024];
-	let mut truncated = false;
 	loop {
 		let n = stream.read(&mut buf).await.map_err(Error::Io)?;
 		if n == 0 {
 			break;
 		}
-		if truncated {
-			continue;
-		}
-		let remaining = OUTPUT_LIMIT_BYTES - retained.len();
-		if n <= remaining {
-			retained.extend_from_slice(&buf[..n]);
-		} else {
-			retained.extend_from_slice(&buf[..remaining]);
-			truncated = true;
+		if !output.lock().unwrap().append(&buf[..n], OUTPUT_LIMIT_BYTES) {
+			break;
 		}
 	}
-	let mut text = String::from_utf8_lossy_owned(retained);
-	if truncated {
-		text.push_str(TRUNCATION_MARKER);
-	}
-	Ok(text)
+	Ok(())
 }
 
 /// SIGTERM, grace period, then SIGKILL.
@@ -671,6 +728,70 @@ pub async fn clone(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(unix)]
+	struct PipeHolder(tempfile::TempDir);
+
+	#[cfg(unix)]
+	impl PipeHolder {
+		fn new() -> Self {
+			Self(tempfile::tempdir().expect("tempdir"))
+		}
+
+		fn args() -> [String; 3] {
+			[
+				"-c".to_owned(),
+				r#"alias.leak=!sh -c 'printf "out\n"; printf "err\n" >&2; sleep 20 & echo $! > sleep.pid'"#
+					.to_owned(),
+				"leak".to_owned(),
+			]
+		}
+	}
+
+	#[cfg(unix)]
+	impl Drop for PipeHolder {
+		fn drop(&mut self) {
+			if let Ok(pid) = std::fs::read_to_string(self.0.path().join("sleep.pid"))
+				&& let Ok(pid) = pid.trim().parse::<libc::pid_t>()
+				&& pid > 0
+			{
+				// SAFETY: the pid belongs to the fixture's background sleep.
+				unsafe {
+					libc::kill(pid, libc::SIGKILL);
+				}
+			}
+		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn sync_runner_bounds_drain_when_a_descendant_holds_pipes() {
+		let fixture = PipeHolder::new();
+		let started = std::time::Instant::now();
+		let out = run_sync(fixture.0.path(), &PipeHolder::args(), SYNC_TIMEOUT).expect("run alias");
+		assert!(started.elapsed() < Duration::from_secs(10), "drain outlived git");
+		assert_eq!(out.exit_code, 0, "alias failed: {out:?}");
+		assert_eq!(out.stdout, "out\n");
+		assert_eq!(out.stderr, "err\n");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn async_runner_bounds_drain_when_a_descendant_holds_pipes() {
+		let fixture = PipeHolder::new();
+		let started = std::time::Instant::now();
+		let out = run(fixture.0.path(), &PipeHolder::args(), &RunOptions {
+			read_only: true,
+			timeout: Some(SYNC_TIMEOUT),
+			..RunOptions::default()
+		})
+		.await
+		.expect("run alias");
+		assert!(started.elapsed() < Duration::from_secs(10), "drain outlived git");
+		assert_eq!(out.exit_code, 0, "alias failed: {out:?}");
+		assert_eq!(out.stdout, "out\n");
+		assert_eq!(out.stderr, "err\n");
+	}
 
 	/// Set on the re-executed child; carries the fixture repository it should
 	/// probe. Its presence is what tells the test body which side it is on.
