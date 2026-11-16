@@ -69,19 +69,22 @@ class MockSocket implements VoiceStreamWebSocketLike {
 	readonly frames: Uint8Array[] = [];
 	readonly controls: string[] = [];
 	closedByClient = false;
+	readonly #onControl: (socket: MockSocket, type: string) => void;
 
 	constructor(
 		readonly url: string,
 		readonly headers: Record<string, string>,
-		private readonly onControl: (socket: MockSocket, type: string) => void,
-	) {}
+		onControl: (socket: MockSocket, type: string) => void,
+	) {
+		this.#onControl = onControl;
+	}
 
 	send(data: string | Uint8Array): void {
 		if (typeof data === "string") {
 			const control: { type: string } = JSON.parse(data);
 			const type = control.type;
 			this.controls.push(type);
-			this.onControl(this, type);
+			this.#onControl(this, type);
 		} else this.frames.push(data.slice());
 	}
 
