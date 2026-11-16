@@ -193,10 +193,10 @@ describe("AgentSession per-turn prune persistence", () => {
 			.mockRejectedValueOnce(new Error("injected rewrite failure"));
 		const runStates: string[] = [];
 		const unsubscribeRunState = session.subscribeRunState(state => runStates.push(state));
-		const settles: boolean[] = [];
+		const settles: string[] = [];
 		const notices: string[] = [];
 		const unsubscribe = session.subscribe(event => {
-			if (event.type === "agent_end") settles.push(event.isTerminal !== false);
+			if (event.type === "agent_end" || event.type === "agent_pause") settles.push(event.type);
 			if (event.type === "notice") notices.push(event.message);
 		});
 		try {
@@ -221,11 +221,11 @@ describe("AgentSession per-turn prune persistence", () => {
 			session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
 			await session.waitForIdle();
 
-			// The run reports idle and publishes one terminal settle, so the UI
-			// stops its working indicator instead of spinning forever.
+			// The loop end opens the run it ends: the run reports idle and publishes one
+			// agent_end, so the UI stops its working indicator instead of spinning forever.
 			expect(rewriteEntries).toHaveBeenCalledTimes(1);
-			expect(runStates).toEqual(["idle"]);
-			expect(settles).toEqual([true]);
+			expect(runStates).toEqual(["running", "idle"]);
+			expect(settles).toEqual(["agent_end"]);
 			expect(notices.some(message => message.includes("injected rewrite failure"))).toBe(true);
 			// The blanked result was restored: live context matches durable history.
 			expect(liveResultText()).toBe("match line\n".repeat(20000));

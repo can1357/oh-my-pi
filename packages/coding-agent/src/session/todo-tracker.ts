@@ -92,7 +92,8 @@ export interface TodoTrackerHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
-	hasPendingAsyncWake(): boolean;
+	/** Something outside the model (a background job, child agent or queued peer message) will resume the run. */
+	hasWakeSources(): boolean;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
@@ -297,8 +298,8 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		if (this.#host.hasPendingAsyncWake()) {
-			logger.debug("Todo completion: async jobs in flight will re-wake the loop; skipping reminder", {
+		if (this.#host.hasWakeSources()) {
+			logger.debug("Todo completion: background work or child agents will resume the run; skipping reminder", {
 				incomplete: incomplete.length,
 			});
 			return false;

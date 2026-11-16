@@ -24,7 +24,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { executeShell } from "@oh-my-pi/pi-natives";
-import { compareVersions, getWebKitHostPath, isEnoent, logger, parseFlag, withFileLock } from "@oh-my-pi/pi-utils";
+import {
+	compareVersions,
+	getWebKitHostPath,
+	isEnoent,
+	logger,
+	parseFlag,
+	tryAcquireFileLock,
+	withFileLock,
+} from "@oh-my-pi/pi-utils";
 import { extractArchive } from "@oh-my-pi/pi-utils/ar";
 import { BROWSER_ARCHIVE_LIMITS } from "@oh-my-pi/pi-utils/browsers";
 import {
@@ -159,15 +167,17 @@ const current = new Set<string>();
  * it; keep a current or newer one (another omp's update), a local build, or
  * an engine another app manages. Each directory is checked once per process;
  * concurrent calls share the check. The check of an installed engine waits
- * {@link UPDATE_CHECK_TIMEOUT_MS} for the build service.
+ * {@link UPDATE_CHECK_TIMEOUT_MS} for the build service and keeps the engine
+ * when it does not answer, and is skipped while another process installs or
+ * updates it: an open never waits on another omp's download.
  *
- * Throws when the build service does not answer or publishes no ABKit build
- * for this host (the message names the target), an outdated plain engine
- * folder (installed before omp kept versions) is in use (its hosts find their
- * helpers through that very path: it is replaced by a process that finds it
- * idle), the download fails or does not match the answer, or the archive
- * holds no `abkit/` host executable. Nothing is left beside `engineDir` then,
- * and the engine already there stays.
+ * Throws when no engine is installed and the build service does not answer or
+ * publishes no ABKit build for this host (the message names the target), an
+ * outdated plain engine folder (installed before omp kept versions) is in use
+ * (its hosts find their helpers through that very path: it is replaced by a
+ * process that finds it idle), the download fails or does not match the
+ * answer, or the archive holds no `abkit/` host executable. Nothing is left
+ * beside `engineDir` then, and the engine already there stays.
  */
 export function installWebKitEngine(engineDir: string, options: InstallWebKitEngineOptions = {}): Promise<string> {
 	if (current.has(engineDir)) {
@@ -189,56 +199,80 @@ export function installWebKitEngine(engineDir: string, options: InstallWebKitEng
 }
 
 async function install(engineDir: string, options: InstallWebKitEngineOptions): Promise<string> {
-	const parent = path.dirname(engineDir);
-	const versionsDir = `${engineDir}-versions`;
-	await fs.mkdir(parent, { recursive: true });
-	return withFileLock(
-		`${engineDir}.install`,
-		async () => {
-			// An app may have taken it over while this one waited for the lock: that app updates it.
-			const installed = hostExecutableAt(engineDir, process.platform);
-			if (installed !== null && (await managedInstallName(engineDir)) !== undefined) return installed;
-			const version = installed === null ? undefined : await engineVersion(engineDir);
-			if (installed !== null && isLocalBuild(version)) return installed;
+	await fs.mkdir(path.dirname(engineDir), { recursive: true });
+	const lockPath = `${engineDir}.install`;
+	const installed = hostExecutableAt(engineDir, process.platform);
+	if (installed === null) {
+		return withFileLock(lockPath, () => installLocked(engineDir, options), {
+			retries: Math.ceil(BUILD_DOWNLOAD_TIMEOUT_MS / 100) + 1,
+			retryDelayMs: 100,
+		});
+	}
+	// Another omp is installing or updating it, which can take a whole download: the engine there runs now.
+	const lock = tryAcquireFileLock(lockPath);
+	if (lock === null) return installed;
+	try {
+		return await installLocked(engineDir, options);
+	} finally {
+		lock.release();
+	}
+}
 
-			const build = await fetchBuild(
-				{ channel: ABKIT_CHANNEL },
-				{
-					product: ABKIT_BUILD,
-					host: await currentBuildHost(),
-					fetchImpl: options.fetchImpl,
-					timeoutMs: installed === null ? undefined : UPDATE_CHECK_TIMEOUT_MS,
-				},
-			);
-			const linkedTo = await linkTarget(engineDir);
-			if (installed !== null) {
-				// Current, or newer: another omp may have updated it while this one waited for the lock.
-				if (version !== undefined && compareVersions(version, build.version) >= 0) {
-					if (linkedTo !== undefined) await sweepVersions(versionsDir, linkedTo);
-					return installed;
-				}
-				if (linkedTo === undefined) {
-					const running = await processesRunningFrom(engineDir);
-					if (running.length > 0) {
-						throw new Error(`${engineDir} is in use (process ${running.join(", ")}); it is updated once idle`);
-					}
-				}
+/** {@link install}'s work, under the install lock. */
+async function installLocked(engineDir: string, options: InstallWebKitEngineOptions): Promise<string> {
+	const versionsDir = `${engineDir}-versions`;
+	// An app may have taken it over while this one waited for the lock: that app updates it.
+	const installed = hostExecutableAt(engineDir, process.platform);
+	if (installed !== null && (await managedInstallName(engineDir)) !== undefined) return installed;
+	const version = installed === null ? undefined : await engineVersion(engineDir);
+	if (installed !== null && isLocalBuild(version)) return installed;
+
+	let build: BuildAnswer;
+	try {
+		build = await fetchBuild(
+			{ channel: ABKIT_CHANNEL },
+			{
+				product: ABKIT_BUILD,
+				host: await currentBuildHost(),
+				fetchImpl: options.fetchImpl,
+				timeoutMs: installed === null ? undefined : UPDATE_CHECK_TIMEOUT_MS,
+			},
+		);
+	} catch (error) {
+		if (installed === null) throw error;
+		// Offline, most likely: no newer build is known, so the installed one is current enough.
+		logger.debug("Could not check for a newer WebKit engine; running the installed one", {
+			engineDir,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return installed;
+	}
+	const linkedTo = await linkTarget(engineDir);
+	if (installed !== null) {
+		// Current, or newer: another omp may have updated it while this one waited for the lock.
+		if (version !== undefined && compareVersions(version, build.version) >= 0) {
+			if (linkedTo !== undefined) await sweepVersions(versionsDir, linkedTo);
+			return installed;
+		}
+		if (linkedTo === undefined) {
+			const running = await processesRunningFrom(engineDir);
+			if (running.length > 0) {
+				throw new Error(`${engineDir} is in use (process ${running.join(", ")}); it is updated once idle`);
 			}
-			const target = path.join(versionsDir, build.version);
-			if (hostExecutableAt(target, process.platform) === null) {
-				logger.warn(installed === null ? "Downloading omp's WebKit engine" : "Updating omp's WebKit engine", {
-					version: build.version,
-					file: build.file.name,
-					engineDir,
-				});
-				await download(build, target, options);
-			}
-			await pointLink(engineDir, target);
-			await sweepVersions(versionsDir, target);
-			return path.join(engineDir, hostExecutableName(process.platform));
-		},
-		{ retries: Math.ceil(BUILD_DOWNLOAD_TIMEOUT_MS / 100) + 1, retryDelayMs: 100 },
-	);
+		}
+	}
+	const target = path.join(versionsDir, build.version);
+	if (hostExecutableAt(target, process.platform) === null) {
+		logger.warn(installed === null ? "Downloading omp's WebKit engine" : "Updating omp's WebKit engine", {
+			version: build.version,
+			file: build.file.name,
+			engineDir,
+		});
+		await download(build, target, options);
+	}
+	await pointLink(engineDir, target);
+	await sweepVersions(versionsDir, target);
+	return path.join(engineDir, hostExecutableName(process.platform));
 }
 
 /**
@@ -304,7 +338,8 @@ async function linkTarget(engineDir: string): Promise<string | undefined> {
  * Point the link `engineDir` at the version folder `target`: a new link made
  * beside it and renamed over the old one, so a reader finds one engine or the
  * other. A junction cannot be renamed over another (Windows): the old one is
- * removed first. A plain folder there (an engine installed before omp kept
+ * removed first, and put back when the new one cannot be renamed in. A plain
+ * folder there (an engine installed before omp kept
  * versions, idle, or a partial copy) is moved aside and deleted once the link
  * is in; it is put back when the link cannot be.
  */
@@ -317,13 +352,18 @@ async function pointLink(engineDir: string, target: string): Promise<void> {
 	const windows = process.platform === "win32";
 	await fs.symlink(target, staged, windows ? "junction" : "dir");
 	let moved = false;
+	let removedJunction: string | undefined;
 	try {
 		const existing = await fs.lstat(engineDir).catch((error: unknown) => {
 			if (isEnoent(error)) return undefined;
 			throw error;
 		});
 		if (existing?.isSymbolicLink()) {
-			if (windows) await fs.rmdir(engineDir);
+			if (windows) {
+				const old = await fs.readlink(engineDir);
+				await fs.rmdir(engineDir);
+				removedJunction = old;
+			}
 		} else if (existing !== undefined) {
 			await fs.rename(engineDir, retired);
 			moved = true;
@@ -332,6 +372,7 @@ async function pointLink(engineDir: string, target: string): Promise<void> {
 	} catch (error) {
 		await fs.rm(staged, { force: true }).catch(() => {});
 		if (moved) await fs.rename(retired, engineDir).catch(() => {});
+		if (removedJunction !== undefined) await fs.symlink(removedJunction, engineDir, "junction").catch(() => {});
 		throw error;
 	}
 	if (moved) await fs.rm(retired, { recursive: true, force: true }).catch(() => {});

@@ -243,7 +243,7 @@ describe("AgentSession aside delivery", () => {
 			} finally {
 				job.resolve("JOB_RESULT_AFTER_ASIDE");
 				await run;
-				await session.settleAsyncWork();
+				await session.waitForRunEnd();
 			}
 			expect(
 				session.agent.state.messages.filter(
