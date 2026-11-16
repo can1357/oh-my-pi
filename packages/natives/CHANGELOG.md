@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native Git recovers an unavailable process working directory to `$HOME` or a stable filesystem root instead of rejecting valid repositories ([#19450](https://github.com/can1357/oh-my-pi/pull/19450) by [@J4ck1e2000](https://github.com/J4ck1e2000))
+
 ## [18.21.0] - 2026-11-16
 
 ### Added

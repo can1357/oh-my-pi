@@ -563,4 +563,123 @@ mod tests {
 			}
 		}
 	}
+
+	#[test]
+	fn gix_preserves_process_cwd_during_concurrent_cached_and_fresh_opens() {
+		let original_cwd = std::env::current_dir().unwrap();
+		let _repositories = assert_concurrent_cached_and_fresh_opens();
+		assert_eq!(
+			std::env::current_dir().unwrap(),
+			original_cwd,
+			"opening must preserve a live cwd"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn gix_opens_repository_after_process_cwd_is_removed() {
+		const MARKER: &str = "PI_VCS_TEST_OPEN_DELETED_CWD";
+		if std::env::var_os(MARKER).is_none() {
+			// Only children remove cwd or change HOME; the parallel test suite
+			// keeps its own process state.
+			let temp = tempfile::tempdir().unwrap();
+			let home = temp.path().join("home");
+			fs::create_dir(&home).unwrap();
+			let unavailable = temp.path().join("missing");
+			let thread = std::thread::current();
+			for (case, home) in [
+				("home", Some(home.as_path())),
+				("missing", None),
+				("unavailable", Some(unavailable.as_path())),
+				("relative", Some(Path::new(".."))),
+			] {
+				let mut command = Command::new(std::env::current_exe().unwrap());
+				command
+					.args(["--exact", thread.name().unwrap(), "--nocapture", "--test-threads=1"])
+					.env(MARKER, case);
+				if let Some(home) = home {
+					command.env("HOME", home);
+				} else {
+					command.env_remove("HOME");
+				}
+				let child = command.output().unwrap();
+				let stdout = String::from_utf8_lossy(&child.stdout);
+				assert!(
+					child.status.success() && stdout.contains("1 passed"),
+					"deleted-cwd child did not run the expected test ({case}):\n{}{}",
+					stdout,
+					String::from_utf8_lossy(&child.stderr)
+				);
+			}
+			return;
+		}
+
+		let expected_cwd = if std::env::var(MARKER).unwrap() == "home" {
+			fs::canonicalize(std::env::var_os("HOME").unwrap()).unwrap()
+		} else {
+			PathBuf::from("/")
+		};
+
+		let cwd = tempfile::tempdir().unwrap();
+		std::env::set_current_dir(cwd.path()).unwrap();
+		cwd.close().unwrap();
+		assert!(std::env::current_dir().is_err(), "child cwd must be unavailable");
+
+		let _repositories = assert_concurrent_cached_and_fresh_opens();
+		assert_eq!(
+			std::env::current_dir().unwrap(),
+			expected_cwd,
+			"recovery must use the stable directory, not a repository root"
+		);
+	}
+
+	fn assert_concurrent_cached_and_fresh_opens() -> tempfile::TempDir {
+		let temp = tempfile::tempdir().unwrap();
+		let main = temp.path().join("main");
+		fs::create_dir_all(&main).unwrap();
+		run_git(&main, &["init", "-q", "-b", "main"]);
+		run_git(&main, &["config", "user.name", "VCS Test"]);
+		run_git(&main, &["config", "user.email", "vcs@example.com"]);
+		run_git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+		let linked = temp.path().join("linked");
+		run_git(&main, &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "wt"]);
+		let separate = temp.path().join("separate");
+		let metadata = temp.path().join("separate-metadata");
+		run_git(temp.path(), &[
+			"clone",
+			"-q",
+			"--separate-git-dir",
+			metadata.to_str().unwrap(),
+			main.to_str().unwrap(),
+			separate.to_str().unwrap(),
+		]);
+
+		let repositories = [
+			(&main, main.join(".git")),
+			(&linked, main.join(".git/worktrees/linked")),
+			(&separate, metadata),
+		];
+		let barrier = std::sync::Barrier::new(repositories.len());
+		std::thread::scope(|scope| {
+			for (root, git_dir) in repositories {
+				let barrier = &barrier;
+				scope.spawn(move || {
+					barrier.wait();
+					let repo = GitRepo::discover(root).unwrap().expect("checkout");
+					for opened in [repo.gix().unwrap(), repo.gix_fresh().unwrap()] {
+						assert_eq!(
+							fs::canonicalize(opened.git_dir()).unwrap(),
+							fs::canonicalize(&git_dir).unwrap()
+						);
+						assert_eq!(
+							fs::canonicalize(opened.workdir().expect("non-bare checkout")).unwrap(),
+							fs::canonicalize(root).unwrap()
+						);
+						opened.head_id().expect("HEAD resolves");
+					}
+				});
+			}
+		});
+		temp
+	}
 }
