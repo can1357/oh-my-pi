@@ -231,6 +231,54 @@ describe("SessionRuntimePool", () => {
 		]);
 	});
 
+	it("retires a deleted entry on its last release without a later pool operation", async () => {
+		vi.useFakeTimers();
+		const states = new Map<string, unknown>();
+		const { pool, retirements } = harness({ timeoutMs: 1_000, store: ownedStore(states) });
+		const lease = pool.acquire("k");
+		states.delete("k");
+		expect(vi.getTimerCount()).toBe(0);
+
+		lease.release();
+		expect(retirements).toEqual([{ key: "k", reason: "idle" }]);
+		expect(lease.value.closed).toBe(1);
+		expect(lease.value.disposed).toBe(0);
+		expect(vi.getTimerCount()).toBe(0);
+		expect(pool.peek("k")).toBeUndefined();
+
+		// The released entry is already gone, so draining cannot retire it twice.
+		await pool.closeAll();
+		expect(retirements).toEqual([{ key: "k", reason: "idle" }]);
+		expect(lease.value.disposed).toBe(0);
+	});
+
+	it("retires a replaced entry on its last release and preserves the replacement", async () => {
+		vi.useFakeTimers();
+		const states = new Map<string, unknown>();
+		const { pool, created, retirements } = harness({ timeoutMs: 1_000, store: ownedStore(states) });
+		const lease = pool.acquire("k");
+		const original = lease.value;
+		const replacement: FakeRuntime = { id: 99, pending: false, closed: 0, disposed: 0 };
+		states.set("k", replacement);
+
+		lease.release();
+		expect(retirements).toEqual([{ key: "k", reason: "idle" }]);
+		expect(original.closed).toBe(1);
+		expect(states.get("k")).toBe(replacement);
+		expect(pool.peek("k")).toBe(replacement);
+		expect(created).toEqual([original]);
+
+		// Draining retires nothing further: the original is already gone and the
+		// replacement was never a runtime this pool created or adopted.
+		await pool.closeAll();
+		expect(retirements).toEqual([{ key: "k", reason: "idle" }]);
+		expect(original.closed).toBe(1);
+		expect(original.disposed).toBe(0);
+		expect(replacement.disposed).toBe(0);
+		expect(states.get("k")).toBe(replacement);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("drains a detached entry and its timer in closeAll", async () => {
 		vi.useFakeTimers();
 		const states = new Map<string, unknown>();

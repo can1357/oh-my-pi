@@ -88,6 +88,10 @@ export class SessionRuntimePool<T> {
 				const count = (this.#leases.get(value) ?? 1) - 1;
 				if (count > 0) this.#leases.set(value, count);
 				else this.#leases.delete(value);
+				// A caller may have dropped this entry while it was leased, with no
+				// pool operation in between to notice: releasing the last claim is
+				// where that entry has to leave instead of idling forever.
+				this.#reconcile(key);
 				const detachedKey = this.#detached.get(value);
 				if (detachedKey !== undefined) {
 					if (count === 0) void this.#retireDetached(value, detachedKey).catch(() => undefined);
