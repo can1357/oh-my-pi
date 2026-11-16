@@ -729,6 +729,10 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI cancelled the request"));
 			return;
 		}
+		if (response.stopReason === "refusal") {
+			this.#fail(new Error("Antigravity CLI refused the request"));
+			return;
+		}
 		const writer = step.writer;
 		if (
 			!writer.output.content.some(
@@ -748,7 +752,8 @@ export class AgyHost implements ProviderSessionState {
 				logger.debug("Antigravity CLI has no durable turn checkpoint; live continuation remains available");
 			}
 		}
-		writer.finish(response.stopReason === "max_tokens" ? "length" : "stop", {
+		const truncated = response.stopReason === "max_tokens" || response.stopReason === "max_turn_requests";
+		writer.finish(truncated ? "length" : "stop", {
 			type: "antigravityCli",
 			conversationId: turn.conversationId,
 			digest,
