@@ -568,16 +568,22 @@ impl Wm<'_> {
 			&& py < top + i32::from(geometry.height)
 	}
 
-	/// Allows core keys through an existing grab only when the topmost
-	/// viewable, non-passive override-redirect root child belongs to `pid`.
-	/// A foreign popup above the target's own popup must keep keys refused.
-	pub(super) fn topmost_grab_popup_of(&self, pid: u32) -> Option<Window> {
-		self
+	/// Whether an active keyboard grab can be taken for `pid`'s own, as X
+	/// does not name a grab's owner: the topmost viewable, non-passive
+	/// override-redirect root child belongs to `pid`, or, with no such popup
+	/// on screen, the focus window `focus` does (a VM viewer or a game that
+	/// grabs on its own window). A foreign popup above the target's own popup
+	/// keeps keys refused.
+	pub(super) fn keyboard_grab_is_owned_by(&self, pid: u32, focus: Window) -> bool {
+		match self
 			.children(self.root)
 			.into_iter()
 			.rev()
 			.find(|&child| self.is_grab_popup(child))
-			.filter(|&child| self.root_child_pid(child) == Some(pid))
+		{
+			Some(popup) => self.root_child_pid(popup) == Some(pid),
+			None => self.owning_pid(focus) == Some(pid),
+		}
 	}
 
 	fn is_grab_popup(&self, window: Window) -> bool {

@@ -867,8 +867,9 @@ impl X11Input {
 	/// [`KEYBOARD_GRAB_WAIT`] for a short grab to end. Probes with a grab of
 	/// its own on the focus window, released in the same flush: a grab where
 	/// the focus already is sends no focus events. X does not name a grab's
-	/// owner, so only the topmost viewable, non-passive override-redirect
-	/// root child belonging to `target`'s process stands for its own grab.
+	/// owner, so it counts as `target`'s own when `target`'s process owns the
+	/// topmost grabbing popup, or, with none on screen, the focus window
+	/// ([`Wm::keyboard_grab_is_owned_by`]).
 	fn check_keyboard_grab(&self, target: Window) -> CoreResult<()> {
 		let deadline = Instant::now() + KEYBOARD_GRAB_WAIT;
 		loop {
@@ -894,15 +895,15 @@ impl X11Input {
 				Ok(GrabStatus::ALREADY_GRABBED | GrabStatus::FROZEN) => {
 					if wm
 						.owning_pid(target)
-						.and_then(|pid| wm.topmost_grab_popup_of(pid))
-						.is_some()
+						.is_some_and(|pid| wm.keyboard_grab_is_owned_by(pid, window))
 					{
 						return Ok(());
 					}
 					if Instant::now() >= deadline {
 						return Err(DesktopError::input_failed(
-							"a keyboard grab is active (an open menu or a screen locker of another \
-							 application), so the keys would not reach the target; no input was sent",
+							"a keyboard grab that is not the target's own is active (an open menu or a \
+							 screen locker of another application), so the keys would not reach the \
+							 target; no input was sent",
 						));
 					}
 				},
@@ -2047,7 +2048,7 @@ mod tests {
 		let error = input
 			.type_text(&takeover, "x", DeliveryMode::Foreground)
 			.expect_err("takeover keys under another application's grab");
-		assert!(error.message.contains("keyboard grab is active"), "{}", error.message);
+		assert!(error.message.contains("not the target's own is active"), "{}", error.message);
 		assert_eq!(presses(&menu), 0, "the other application's menu got keys");
 		assert_eq!(presses(&target), 0, "neither the target nor its lower popup got keys");
 
