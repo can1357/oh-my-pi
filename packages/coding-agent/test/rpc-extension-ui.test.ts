@@ -700,6 +700,20 @@ describe("RPC form dialog", () => {
 		expect(await result).toEqual({ data: { enabled: "off" } });
 	});
 
+	it("keeps a selection that matches both a same-name hidden value and an enabled option", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <input type="hidden" name="tier" value="basic">
+  <label>Tier <select name="tier" required><option value="">Pick one</option><option value="basic">Basic</option><option value="pro">Pro</option></select></label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { tier: "basic" } });
+
+		expect(await result).toEqual({ data: { tier: "basic" } });
+	});
+
 	it("fails a form too large for one frame without sending a truncated copy", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

@@ -1331,7 +1331,7 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
      `questions: Array<{ id: string, question: string, header?: string, options: Array<{ label: string, description?: string, preview?: string }>, multi?: boolean, recommended?: number }>`
      plus `timeout?: number`. `options` never include an "Other" entry; hosts
      always offer free text.
-   - `form` requires no opt-in. It carries the HTML `<form>` of one `ask` tool call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer. Hosts must answer every `form` request with submitted `data` or `{ cancelled: true }`; a host without a form renderer must cancel. An unanswered `form` can block the `ask` call indefinitely, because plan mode disables the ask timeout.
+   - `form` requires no opt-in. It carries the HTML `<form>` of one `ask` tool call as `html: string`, plus `timeout?: number`. Hosts render the form whole; radio and checkbox groups of two or more options offer a free-text "Other" answer, unless the group already has an option labelled `Other`. Hosts must answer every `form` request with submitted `data` or `{ cancelled: true }`; a host without a form renderer must cancel. An unanswered `form` can block the `ask` call indefinitely, because plan mode disables the ask timeout.
 - `notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`
 - `open_url` (emitted by RPC login flows): includes `url`, optional `launchUrl`, and optional `instructions`. When present, `launchUrl` is a short loopback redirect and is the recommended copy target so terminal truncation cannot corrupt OAuth query parameters.
 
@@ -1384,8 +1384,9 @@ is trimmed and ignored when empty. Any other shape fails the `ask` tool call ins
 `<select>` or a lone checkbox gives one option `value` (omitted when nothing is chosen); a checkbox group or a
 multi-select of two or more options gives an array of option values without duplicates (empty when omitted), while one with a single
 option gives that one value like a lone checkbox; a text field gives its text, or a number for a
-`number`/`range` input (an absent text field counts as empty). A radio or checkbox group of two or more options
-takes one extra string that is not an option value as its "Other" answer. Hidden inputs keep the form's own values.
+`number`/`range` input (an absent text field counts as empty). A radio or checkbox group of two or more options,
+unless it already has an option labelled `Other`, takes one extra string that is not an option value as its "Other"
+answer. Hidden inputs keep the form's own values.
 Unknown names, disabled options, wrong types, and answers that break `required`, `min`/`max`,
 `minlength`/`maxlength`, `email`/`url` or `pattern` fail the `ask` tool call instead of guessing. A `form` timeout
 (omp's timer or a host `cancelled: true, timedOut: true` reply) submits the form's defaults. A form whose frame

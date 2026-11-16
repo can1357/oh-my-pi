@@ -1277,8 +1277,16 @@ function parseFormDialogResponse(
 	const hidden = new Map(form.hidden);
 	for (const field of named) {
 		let entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
-		// An echoed same-name hidden input is the unchecked fallback (`off` beside a checkbox), not a selection.
-		if (field.kind === "choice" && entry !== undefined && entry === hidden.get(field.name)) entry = undefined;
+		// An echoed same-name hidden input that no enabled option offers is the unchecked fallback (`off` beside a
+		// checkbox), not a selection.
+		if (
+			field.kind === "choice" &&
+			entry !== undefined &&
+			entry === hidden.get(field.name) &&
+			!field.options.some(option => !option.disabled && option.value === entry)
+		) {
+			entry = undefined;
+		}
 		const value = field.kind === "choice" ? parseFormChoice(field, entry) : parseFormText(field, entry);
 		const problem = fieldError(field, value);
 		if (problem) throw new Error(`Form field ${JSON.stringify(field.name)}: ${problem}`);
