@@ -7,6 +7,10 @@
 //! line that opens an `if` / `function` / `struct` resolves to that construct's
 //! full span; pointing at a continuation line or a lone closing delimiter
 //! resolves to nothing.
+//!
+//! The first outer attribute of a Rust item, `#[...]` or a `///` / `/** */`
+//! doc comment, resolves through the item, as the first decorator line does
+//! in grammars that nest decorators inside the declaration.
 
 use std::collections::BTreeSet;
 
@@ -122,10 +126,72 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 	if node.has_error() {
 		return Ok(None);
 	}
+	let Some(last) = block_end_node(node) else {
+		return Ok(None);
+	};
 	Ok(Some(BlockRange {
 		start_line: node_start_line(node),
-		end_line:   node_content_end_line(node),
+		end_line:   node_content_end_line(last),
 	}))
+}
+
+/// The node whose end closes the block that `node` opens: `node` itself, or
+/// the annotated item when `node` is the first outer attribute of a Rust
+/// item.
+///
+/// tree-sitter-rust keeps an outer attribute (`#[...]`) as an `attribute_item`
+/// beside the item it annotates, and an outer doc comment (`///`, `/** */`),
+/// which Rust reads as a `#[doc]` attribute, as a comment beside it. The
+/// Python, TypeScript and Java grammars instead nest decorators and
+/// annotations inside the declaration, which therefore begins on the first
+/// decorator line. Skipping further attributes and comments reaches the
+/// annotated item, so the first outer attribute opens the same construct the
+/// first decorator does. A later outer attribute of the same item keeps its
+/// own span, as a later decorator does, and so does an outer attribute
+/// followed only by attributes and comments, which annotates nothing. Plain
+/// comments, inner doc comments and inner attributes (`inner_attribute_item`)
+/// never extend. Returns `None` when a skipped attribute or the item carries
+/// a syntax error, for the same reason the caller refuses an error inside
+/// `node`.
+fn block_end_node(node: Node<'_>) -> Option<Node<'_>> {
+	if !is_outer_attribute(node) || !is_first_outer_attribute(node) {
+		return Some(node);
+	}
+	let mut next = node.next_named_sibling();
+	while let Some(sibling) = next {
+		if sibling.has_error() {
+			return None;
+		}
+		if !sibling.is_extra() && sibling.kind() != "attribute_item" {
+			return Some(sibling);
+		}
+		next = sibling.next_named_sibling();
+	}
+	Some(node)
+}
+
+/// Is `node` an outer attribute of the Rust item after it: an
+/// `attribute_item`, or a comment with an outer doc marker (`///`, `/** */`)?
+fn is_outer_attribute(node: Node<'_>) -> bool {
+	node.kind() == "attribute_item"
+		|| (node.is_extra() && node.child_by_field_name("outer").is_some())
+}
+
+/// Is no outer attribute of the same item above `node`? Plain comments
+/// between outer attributes do not end the group, and anything else above
+/// (an earlier item, an inner attribute, the container's opening line) does.
+fn is_first_outer_attribute(node: Node<'_>) -> bool {
+	let mut prev = node.prev_named_sibling();
+	while let Some(sibling) = prev {
+		if is_outer_attribute(sibling) {
+			return false;
+		}
+		if !sibling.is_extra() {
+			return true;
+		}
+		prev = sibling.prev_named_sibling();
+	}
+	true
 }
 
 /// Is `parent` a statement-sequence container that `node` merely opens? These
@@ -691,6 +757,100 @@ mod tests {
 	fn resolves_rust_struct_block() {
 		let code = "struct A;\nstruct B {\n    x: u32,\n}\n";
 		assert_eq!(resolve(code, "r.rs", 2), Some(BlockRange { start_line: 2, end_line: 4 }));
+	}
+
+	/// tree-sitter-rust keeps an outer attribute beside the item it
+	/// annotates, so the attribute line alone is a one-line node. A block
+	/// anchored on the first attribute of an item must run through the item,
+	/// as it does from the first Python decorator or Java annotation, and stop
+	/// before the next item.
+	#[test]
+	fn rust_outer_attribute_resolves_through_the_annotated_item() {
+		assert_eq!(
+			resolve(RUST_ANNOTATED, "x.rs", 3),
+			Some(BlockRange { start_line: 3, end_line: 6 })
+		);
+		// Stacked attributes with a doc comment between them: the first one
+		// opens the whole run.
+		let stacked = "#[derive(Debug)]\n/// Docs.\n#[serde(default)]\nstruct S {\n    x: \
+		               u32,\n}\n\nfn next() {}\n";
+		assert_eq!(resolve(stacked, "x.rs", 1), Some(BlockRange { start_line: 1, end_line: 6 }));
+		// An attribute that spans several lines runs on through the item too,
+		// rather than ending at its own closing line.
+		let multi_line = "#[cfg(all(\n    unix,\n    feature = \"x\"\n))]\nfn f() {}\n";
+		assert_eq!(resolve(multi_line, "x.rs", 1), Some(BlockRange { start_line: 1, end_line: 5 }));
+		// An earlier item and a plain comment above do not make an attribute a
+		// later one: only attributes and doc comments of the same item do.
+		let after_item = "fn g() {}\n// note\n#[test]\nfn f() {\n}\n";
+		assert_eq!(resolve(after_item, "x.rs", 3), Some(BlockRange { start_line: 3, end_line: 5 }));
+	}
+
+	/// Rust reads an outer doc comment as a `#[doc]` attribute, and
+	/// tree-sitter-rust keeps it beside the item as a comment. The first one of
+	/// an item opens the item like the first attribute does, past any
+	/// attributes below it.
+	#[test]
+	fn rust_outer_doc_comment_resolves_through_the_documented_item() {
+		let documented = "/// Docs.\n#[derive(Debug)]\n#[serde(default)]\nstruct S {\n    x: \
+		                  u32,\n}\n\nfn next() {}\n";
+		assert_eq!(resolve(documented, "x.rs", 1), Some(BlockRange { start_line: 1, end_line: 6 }));
+		let block_doc = "/**\n * Docs.\n */\nfn f() {\n    work();\n}\n";
+		assert_eq!(resolve(block_doc, "x.rs", 1), Some(BlockRange { start_line: 1, end_line: 6 }));
+	}
+
+	/// A line that annotates no following item stays a one-line node, which
+	/// the edit layer refuses as a block: an outer attribute or doc comment
+	/// with nothing after it, an inner attribute or inner doc comment (they
+	/// belong to the enclosing module), and a plain comment.
+	#[test]
+	fn rust_line_that_annotates_no_item_stays_one_line() {
+		let cases = [
+			("impl S {\n    fn f() {}\n    #[allow(dead_code)]\n    // note\n}\n", 3),
+			("impl S {\n    fn f() {}\n    /// Dangling docs.\n}\n", 3),
+			("#![allow(dead_code)]\nfn f() {\n    work();\n}\n", 1),
+			("//! Crate docs.\nfn f() {\n    work();\n}\n", 1),
+			("// Note.\nfn f() {\n    work();\n}\n", 1),
+		];
+		for (code, line) in cases {
+			assert_eq!(
+				resolve(code, "x.rs", line),
+				Some(BlockRange { start_line: line, end_line: line }),
+				"{code:?}"
+			);
+		}
+	}
+
+	/// Only the first outer attribute or doc comment of an item opens it, as
+	/// only the first decorator does in Python, TypeScript and Java. A later
+	/// one of the same item, also across a plain comment, keeps its own
+	/// one-line span, which the edit layer refuses as a block.
+	#[test]
+	fn rust_later_attribute_or_doc_comment_of_an_item_stays_one_line() {
+		let cases = [
+			("#[derive(Debug)]\n#[serde(default)]\nstruct S {\n    x: u32,\n}\n", 2),
+			("/// Docs.\n#[test]\nfn f() {\n}\n", 2),
+			("#[test]\n// note\n#[ignore]\nfn f() {\n}\n", 3),
+			("/// First line.\n/// Second line.\nfn f() {\n}\n", 2),
+		];
+		for (code, line) in cases {
+			assert_eq!(
+				resolve(code, "x.rs", line),
+				Some(BlockRange { start_line: line, end_line: line }),
+				"{code:?}"
+			);
+		}
+	}
+
+	/// A syntax error in the annotated item, or in a stacked attribute before
+	/// it, makes the attribute's block an error-recovery span. It resolves to
+	/// nothing, like an error inside any other block, instead of covering the
+	/// broken item or stopping at the attribute alone.
+	#[test]
+	fn rust_attribute_before_a_syntax_error_resolves_to_nothing() {
+		let broken_item = "#[test]\nfn broken( {\n    x();\n}\n\nfn ok() {}\n";
+		assert_eq!(resolve(broken_item, "x.rs", 1), None);
+		let broken_stack = "#[a]\n#[b = ]\nfn f() {\n}\n";
+		assert_eq!(resolve(broken_stack, "x.rs", 1), None);
 	}
 
 	#[test]

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Block edits (`PUT N*`, `CUT N*`) anchored on the first `#[...]` attribute or `///` doc comment of a Rust item now cover the item, instead of failing as a single-line block.
+
 ## [18.21.0] - 2026-11-16
 
 ### Added

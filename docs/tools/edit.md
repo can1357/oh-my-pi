@@ -69,7 +69,7 @@ Only body-bearing `PUT ...:` headers take body rows. Every body row is `+TEXT`; 
 
 Block forms resolve from the opening line through the tree-sitter node's end. Anchor the construct opener, never a closing delimiter, last visible line, blank line, or inner statement. A single-line node is rejected with guidance to use the corresponding explicit-line operation. `PUT >N*:` lowers to ordinary `PUT >N:` with a warning when no block resolves; replace/cut block forms fail instead of guessing.
 
-Leading decorators, attributes, and doc-comments may be separate syntax nodes. Anchor the first decorator when the parser groups it with the declaration; otherwise use an explicit range. Standalone line comments are not swept automatically. In Markdown, a heading's block includes its body and deeper subsections through the next heading of equal or higher level.
+Leading decorators, attributes, and doc-comments may be separate syntax nodes. Anchor the first decorator when the parser groups it with the declaration. In Rust, the first outer attribute (`#[...]`) or outer doc comment (`///`, `/** */`) of an item also resolves through the item, past any further attributes and comments. A later attribute or doc comment of the same item stays a single line. Otherwise use an explicit range. Standalone line comments are not swept automatically. In Markdown, a heading's block includes its body and deeper subsections through the next heading of equal or higher level.
 
 Use tight ranges and separate non-adjacent changes. Do not use `edit` merely to reformat or restyle code; run the project's formatter after the substantive edit.
 
