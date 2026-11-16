@@ -182,6 +182,20 @@ export const stateDefs = {
 			JSON_OBJECT,
 			"The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.",
 		),
+		"fork?": doc(
+			"ShellForkOutcome",
+			"Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.",
+		),
+	},
+	ShellForkOutcome: {
+		carried: doc(
+			"boolean",
+			"What the command set carried back into the session's shell; `false`: it stayed in the fork.",
+		),
+		jobs: doc(
+			"boolean",
+			"It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them.",
+		),
 	},
 	LineRange: { first: "number.integer", last: "number.integer" },
 	FastModeResult: { enabled: "boolean", active: "boolean" },

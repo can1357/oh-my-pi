@@ -2855,6 +2855,10 @@
 					"properties": {},
 					"additionalProperties": {},
 					"description": "The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."
+				},
+				"fork": {
+					"$ref": "#/$defs/ShellForkOutcome",
+					"description": "Set when the command overlapped another one on the session's persistent shell and ran in a fork of it."
 				}
 			},
 			"required": [
@@ -2865,6 +2869,23 @@
 				"totalBytes",
 				"outputLines",
 				"outputBytes"
+			]
+		},
+		"ShellForkOutcome": {
+			"type": "object",
+			"properties": {
+				"carried": {
+					"type": "boolean",
+					"description": "What the command set carried back into the session's shell; `false`: it stayed in the fork."
+				},
+				"jobs": {
+					"type": "boolean",
+					"description": "It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them."
+				}
+			},
+			"required": [
+				"carried",
+				"jobs"
 			]
 		},
 		"LineRange": {

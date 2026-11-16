@@ -3208,6 +3208,17 @@ pub struct BashResult {
 	/// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub trace: Option<Map<String, Value>>,
+	/// Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fork: Option<ShellForkOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShellForkOutcome {
+	/// What the command set carried back into the session's shell; `false`: it stayed in the fork.
+	pub carried: bool,
+	/// It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them.
+	pub jobs: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

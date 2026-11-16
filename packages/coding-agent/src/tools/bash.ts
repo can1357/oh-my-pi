@@ -550,7 +550,7 @@ interface ManagedBashJobHandle {
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	getLatestTrace: () => ShellTrace | undefined;
-	/** Notices for this call's results, including one added once the run starts (temporary shell). */
+	/** Notices for this call's results, including the ones the run adds (URL writes). */
 	notices: readonly string[];
 	/** Hand the call's card to the job: later frames carry `details.async` and the last one settles it. */
 	background: () => void;
@@ -567,8 +567,14 @@ interface BashProgressDetails extends BashToolDetails {
 /** Pid probe of a background job with no command in flight. */
 const NO_PIDS = (): readonly number[] => [];
 
-/** Shown when a call overlapped another one (parallel or backgrounded) and ran in a fork of the session's shell. */
-const SESSION_SHELL_BUSY_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
+/**
+ * Shown when a call ran in a fork of the session's busy shell (it overlapped a parallel or backgrounded call)
+ * and what it set could not be carried back into the session's shell.
+ */
+const FORK_STATE_LOST_NOTICE = "Ran in a copy of the busy session shell; changes here won't persist.";
+/** Shown when such a call left background jobs running: they stay in the copy. */
+const FORK_JOBS_NOTICE =
+	"Background jobs started here run in a copy of the busy session shell; later calls' jobs, wait and %N won't see them.";
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
@@ -987,6 +993,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (notice) notices.push(notice);
 			}
 		}
+		const fork = "fork" in result ? result.fork : undefined;
+		if (fork && !fork.carried) notices.push(FORK_STATE_LOST_NOTICE);
+		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
 		if (notices.length > 0) outputLines.push("", ...notices);
 		// Shaped output already leads with its exit status.
 		if (failedExit && !shaped?.text?.startsWith("[exit code ")) outputLines.push("", formatExitCodeNotice(exitCode));
@@ -1287,7 +1296,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onStart: probe => {
 							pids = probe;
 						},
-						onSessionShellBusy: () => notices.push(SESSION_SHELL_BUSY_NOTICE),
 					}).finally(() => {
 						pids = NO_PIDS;
 						liveTrace = undefined;
@@ -1687,7 +1695,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			autoBgManager.backgroundJob(job.jobId);
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
-			// `job.notices` also carries the temporary-shell notice once the run started.
+			// `job.notices` also carries the notices the run added so far.
 			const notices =
 				waitResult.kind === "steer"
 					? [...job.notices, "Backgrounded early to handle an incoming message; the command keeps running."]
@@ -2078,7 +2086,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 								}
 							: undefined,
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-					onSessionShellBusy: () => pendingNotices.push(SESSION_SHELL_BUSY_NOTICE),
 				});
 		const wallTimeMs = performance.now() - wallTimeStart;
 		if (result.cancelled) {

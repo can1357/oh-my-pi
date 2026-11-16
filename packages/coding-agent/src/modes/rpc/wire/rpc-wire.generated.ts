@@ -557,6 +557,15 @@ export interface BashResult {
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */
 	trace?: Record<string, unknown>;
+	/** Set when the command overlapped another one on the session's persistent shell and ran in a fork of it. */
+	fork?: ShellForkOutcome;
+}
+
+export interface ShellForkOutcome {
+	/** What the command set carried back into the session's shell; `false`: it stayed in the fork. */
+	carried: boolean;
+	/** It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them. */
+	jobs: boolean;
 }
 
 export interface LineRange {

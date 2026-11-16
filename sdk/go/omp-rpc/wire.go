@@ -2642,6 +2642,8 @@ type BashResult struct {
 	Images        []ImageContent             `json:"images,omitempty"`
 	// The embedded shell's final `ShellTrace` of the run; only when the caller asked for one.
 	Trace map[string]json.RawMessage `json:"trace,omitempty"`
+	// Set when the command overlapped another one on the session's persistent shell and ran in a fork of it.
+	Fork *ShellForkOutcome `json:"fork,omitempty"`
 }
 
 func (v *BashResult) UnmarshalJSON(data []byte) error {
@@ -2673,6 +2675,30 @@ func (v *BashResult) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("workingDir", &out.WorkingDir)
 	d.optional("images", &out.Images)
 	d.optional("trace", &out.Trace)
+	d.optional("fork", &out.Fork)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type ShellForkOutcome struct {
+	// What the command set carried back into the session's shell; `false`: it stayed in the fork.
+	Carried bool `json:"carried"`
+	// It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them.
+	Jobs bool `json:"jobs"`
+}
+
+func (v *ShellForkOutcome) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "ShellForkOutcome", v.decodeFrom)
+}
+
+func (v *ShellForkOutcome) decodeFrom(raw map[string]json.RawMessage) error {
+	var out ShellForkOutcome
+	d := fieldDecoder{raw: raw, owner: "ShellForkOutcome"}
+	d.required("carried", &out.Carried)
+	d.required("jobs", &out.Jobs)
 	if d.err != nil {
 		return d.err
 	}
