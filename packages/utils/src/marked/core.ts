@@ -606,7 +606,18 @@ function matchEmphasis(rest: string, output: Token[], closers: InlineClosers): N
 }
 
 function trimBareUrl(candidate: string): string {
+	// A URL runs to the next space, so in text without spaces between words (Korean, Japanese, Chinese) an unbalanced
+	// ")" closing the parentheses around the URL is followed by the next word: the URL ends at that ")".
+	let depth = 0;
 	let end = candidate.length;
+	for (let i = 0; i < end; i++) {
+		const char = candidate[i]!;
+		if (char === "(") depth++;
+		else if (char === ")" && depth > 0) depth--;
+		else if (char === ")" && i + 1 < end && candidate.charCodeAt(i + 1) > 0x7f) end = i;
+	}
+	candidate = candidate.slice(0, end);
+	end = candidate.length;
 	while (end > 0 && ".,:;!?".includes(candidate[end - 1]!)) end--;
 	let out = candidate.slice(0, end);
 	let opens = 0;

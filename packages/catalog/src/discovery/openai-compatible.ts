@@ -204,13 +204,20 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 
 	const deduped = new Map<string, ModelSpec<TApi>>();
 	for (const entry of entries) {
+		const reasoning: unknown = Reflect.get(entry, "reasoning");
+		const supportsReasoning: unknown = Reflect.get(entry, "supports_reasoning");
 		const defaults: ModelSpec<TApi> = {
 			id: entry.id,
 			name: typeof entry.name === "string" && entry.name.length > 0 ? entry.name : entry.id,
 			api: options.api,
 			provider: options.provider,
 			baseUrl,
-			reasoning: false,
+			reasoning:
+				typeof reasoning === "boolean"
+					? reasoning
+					: typeof supportsReasoning === "boolean"
+						? supportsReasoning
+						: undefined,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: null,

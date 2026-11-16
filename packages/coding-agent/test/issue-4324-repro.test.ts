@@ -1,7 +1,7 @@
 /**
  * Regression for https://github.com/can1357/oh-my-pi/issues/4324
  *
- * The Kokoro TTS worker crash-loops with `exit code 7`, but every worker
+ * The TTS worker crash-loops with `exit code 7`, but every worker
  * subprocess was spawned with `stderr: "ignore"` — so the native crash message
  * (ONNX Runtime traceback, glibc assertion, segfault details) was discarded
  * and the parent only ever logged `tts subprocess exited with code 7`, with no
