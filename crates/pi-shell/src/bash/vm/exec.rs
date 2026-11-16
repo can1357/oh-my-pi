@@ -651,12 +651,11 @@ fn script_has_command(src: &[u8], from: usize) -> bool {
 	false
 }
 
-/// Whether a command-starting op (or a function definition, which also runs)
 /// Tri-state continuation status for the unrun-input walk. Branches test
 /// whether it is zero; `!` flips it; `SetStatus` re-derives it; `LoopExit`
-/// completes a condition-ended loop with POSIX status 0. `Unknown` marks a
-/// value the static walk cannot pin down, so both branch directions of a
-/// conditional jump stay reachable.
+/// restores the loop record's saved status. `Unknown` marks a value the
+/// static walk cannot pin down, so both branch directions of a conditional
+/// jump stay reachable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WalkStatus {
 	Zero,
@@ -684,8 +683,8 @@ impl WalkStatus {
 
 /// What the continuation of one frame does when the exit had not happened:
 /// either it runs another command (unrun input), or it falls off the unit's
-/// end, leaving the frame's outgoing status behind (`None` = the paths out
-/// disagree, or a value the walk cannot pin down).
+/// end, leaving the frame's outgoing status behind (`Unknown` when the
+/// paths out disagree or pin no single value).
 #[derive(Debug)]
 enum FrameExit {
 	RunsInput,
@@ -701,28 +700,45 @@ enum FrameExit {
 /// input and its status is discarded — runtime `always_end` restores the
 /// try-list's status), so nested cleanup, cleanup status changes and
 /// subshells inside it cannot distort the walk.
-fn frame_continuation(unit: &Unit, from: usize, status: WalkStatus) -> FrameExit {
+fn frame_continuation(
+	unit: &Unit,
+	from: usize,
+	status: WalkStatus,
+	runtime_loops: &[LoopRec],
+) -> FrameExit {
 	let ops = &unit.ops;
-	// (index, status, loop_saved) — revisit an op for each distinct
-	// status/saved-loop-status combination: a merge point reachable with
+	// (index, status, top-saved) — revisit an op for each distinct
+	// status/top-of-loop-record combination: a merge point reachable with
 	// two statuses must keep exploring both.
-	let mut visited = vec![0u8; ops.len()];
-	let mut stack = vec![(from as u32, status, None)];
+	let mut visited = vec![0u16; ops.len()];
+	// The frame's live loop and try records at exit time, seeded from the
+	// runtime (their saved statuses are fact, not reconstruction); records
+	// the walk itself opens for constructs the continuation would enter.
+	// Paths carry their own copy: branches part ways around pops and
+	// pushes.
+	let seed: Vec<(WalkStatus, bool)> = runtime_loops
+		.iter()
+		.map(|rec| (WalkStatus::of(rec.status), true))
+		.collect();
+	let mut stack = vec![(from as u32, status, seed)];
 	let mut outcomes: Vec<WalkStatus> = Vec::new();
-	while let Some((index, status, loop_saved)) = stack.pop() {
+	while let Some((index, status, mut loops)) = stack.pop() {
 		let i = index as usize;
 		if i >= ops.len() {
 			outcomes.push(status);
 			continue;
 		}
-		let bit = match (status, loop_saved.is_some()) {
-			(WalkStatus::Zero, false) => 0,
-			(WalkStatus::NonZero, false) => 1,
-			(WalkStatus::Unknown, false) => 2,
-			(WalkStatus::Zero, true) => 3,
-			(WalkStatus::NonZero, true) => 4,
-			(WalkStatus::Unknown, true) => 5,
-		};
+		let bit = match status {
+			WalkStatus::Zero => 0,
+			WalkStatus::NonZero => 1,
+			WalkStatus::Unknown => 2,
+		} + 3
+			* match &loops.last() {
+				None => 0,
+				Some((WalkStatus::Zero, _)) => 1,
+				Some((WalkStatus::NonZero, _)) => 2,
+				Some((WalkStatus::Unknown, _)) => 3,
+			};
 		if visited[i] & (1 << bit) != 0 {
 			continue;
 		}
@@ -735,55 +751,73 @@ fn frame_continuation(unit: &Unit, from: usize, status: WalkStatus) -> FrameExit
 			outcomes.push(status);
 			continue;
 		}
-		// The always-list runs however the try-list ended. Skip the whole
-		// region: none of it is ordinary unrun input, and the status it
-		// leaves is discarded in favor of the try-list's.
+		// Entering an always-list snapshots the try-list's outgoing status
+		// into the try record (runtime `always_enter`), and the region's
+		// end restores it (runtime `always_end`). When the record is one
+		// the exit already interrupted — the try was in progress — the
+		// whole region has actually run (mandatory cleanup fires on the
+		// exit path), so none of it is unrun input and the walk skips
+		// ahead. A record the walk itself opened stands for a construct
+		// the continuation would enter: its commands are ordinary unrun
+		// input, walked normally.
 		if op.code == Opcode::AlwaysEnter {
-			let mut depth = 1u32;
-			let mut j = i + 1;
-			while j < ops.len() {
-				match ops[j].code {
-					Opcode::AlwaysEnter => depth += 1,
-					Opcode::AlwaysEnd => depth -= 1,
-					_ => {},
-				}
-				if depth == 0 {
-					break;
-				}
-				j += 1;
+			let interrupted = loops.last().is_some_and(|(_, runtime)| *runtime);
+			if let Some(top) = loops.last_mut() {
+				top.0 = status;
 			}
-			stack.push((j as u32 + 1, status, loop_saved));
-			continue;
+			if interrupted {
+				let mut depth = 1u32;
+				let mut j = i + 1;
+				while j < ops.len() {
+					match ops[j].code {
+						Opcode::AlwaysEnter => depth += 1,
+						Opcode::AlwaysEnd => depth -= 1,
+						_ => {},
+					}
+					if depth == 0 {
+						break;
+					}
+					j += 1;
+				}
+				stack.push((j as u32 + 1, status, loops));
+				continue;
+			}
 		}
 		// A zsh anonymous-function call runs like a command; so does a
 		// function definition.
 		if starts_command(unit, op) || op.code == Opcode::FuncDef || op.code == Opcode::CallAnon {
 			return FrameExit::RunsInput;
 		}
-		let status = match op.code {
+		let mut status = match op.code {
 			Opcode::Not => status.negate(),
 			Opcode::SetStatus => WalkStatus::of(op.a as i32),
 			// An arithmetic or `[[ ]]` evaluation leaves a runtime value the
 			// walk cannot know: both branch directions stay reachable.
 			Opcode::Arith | Opcode::CondTest => WalkStatus::Unknown,
-			// A loop exit restores the loop record's saved status — exactly
-			// what the runtime does (`loop_enter` starts it at zero,
+			// A loop exit restores the innermost record's saved status —
+			// exactly what the runtime does (`loop_enter` seeds zero,
 			// `loop_note` re-records the body's outgoing status at each
-			// `LoopNote`/`LoopBack`). Whatever the loop's test machinery
-			// changed in between is discarded; a path that never reached a
-			// note (a zero-iteration loop) restores the initial zero.
-			Opcode::LoopExit => loop_saved.unwrap_or(WalkStatus::Zero),
+			// `LoopNote`/`LoopBack`, and the frame's live records seed the
+			// walk). Whatever the loop's test machinery changed in between
+			// is discarded; a record-less path restores zero.
+			Opcode::LoopExit => loops.pop().map_or(WalkStatus::Zero, |r| r.0),
+			// Leaving an always-list restores the try-list's snapshot.
+			Opcode::AlwaysEnd => loops.pop().map_or(status, |r| r.0),
 			_ => status,
 		};
 		// The note takes its snapshot of the status the loop record keeps,
 		// before any of the loop's test machinery runs again.
-		let loop_saved = match op.code {
-			Opcode::LoopNote | Opcode::LoopBack => Some(status),
-			// Leaving the loop discards its record (a nested outer loop's
-			// next note re-records).
-			Opcode::LoopExit => None,
-			_ => loop_saved,
-		};
+		if matches!(op.code, Opcode::LoopNote | Opcode::LoopBack)
+			&& let Some(top) = loops.last_mut()
+		{
+			top.0 = status;
+		}
+		// A try the continuation enters opens its own record (seeded like
+		// the runtime's `try_enter`) — but it is the continuation's, not
+		// one the exit interrupted.
+		if op.code == Opcode::TryEnter {
+			loops.push((WalkStatus::Zero, false));
+		}
 		let branch_zero = match status {
 			WalkStatus::Zero => Some(true),
 			WalkStatus::NonZero => Some(false),
@@ -802,6 +836,22 @@ fn frame_continuation(unit: &Unit, from: usize, status: WalkStatus) -> FrameExit
 				.is_some_and(|t| t.code == Opcode::LoopExit)
 		};
 		let (target, falls_through) = match op.code {
+			// A backward unconditional jump is a loop's iteration edge.
+			// Back to the loop's test expression it stays walkable (the
+			// test's branch leads out); straight back into the body
+			// (an omitted arithmetic condition) the loop cannot leave
+			// through this edge and nothing beyond it becomes newly
+			// unrun — drop the path.
+			Opcode::Jmp if op.a < index => {
+				let test_head = ops
+					.get(op.a as usize)
+					.is_some_and(|head| matches!(head.code, Opcode::Arith | Opcode::CondTest));
+				(test_head.then_some(op.a), false)
+			},
+			// Spawned code (a subshell, pipeline stages, a background or
+			// coprocess job) is descriptor bytecode: the parent resumes at
+			// the descriptor's end.
+			Opcode::Spawn => (unit.spawns.get(op.a as usize).map(|s| s.end), false),
 			Opcode::Jmp => (Some(op.a), false),
 			// The loop-back is iteration machinery, not unrun input: the
 			// next iteration's head would have run, not been skipped, and
@@ -825,14 +875,10 @@ fn frame_continuation(unit: &Unit, from: usize, status: WalkStatus) -> FrameExit
 			_ => (None, true),
 		};
 		if let Some(target) = target {
-			stack.push((target, status, loop_saved));
-		}
-		if op.code == Opcode::TryEnter {
-			// An early end of the try-list runs the always-list first.
-			stack.push((op.a, status, loop_saved));
+			stack.push((target, status, loops.clone()));
 		}
 		if falls_through {
-			stack.push((index + 1, status, loop_saved));
+			stack.push((index + 1, status, loops));
 		}
 	}
 	let all_zero = outcomes.iter().all(|s| *s == WalkStatus::Zero);
@@ -866,14 +912,16 @@ fn exit_cut_short(vp: &Vproc, top_from: u32, status: i32) -> bool {
 	// after the call sees.
 	let mut status = WalkStatus::of(status);
 	// Only a DEBUG (before each command) or ERR (after a failing command)
-	// trap preempts a victim mid-stream: when its frame ends, the frame
-	// below resumes at the very pc it was preempted on. Other trap kinds
-	// unwind (`RETURN`/`EXIT` run while the frame is already leaving, its
-	// last command executed), and every non-trap frame (a function call, an
-	// eval/source) resumes after the call op that led here.
+	// trap preempts a victim mid-stream — as does a signal trap, delivered
+	// after the current command completes, before the next runs —: when
+	// its frame ends, the frame below resumes at the very pc it was
+	// preempted on. Other trap kinds unwind (`RETURN`/`EXIT` run while the
+	// frame is already leaving, its last command executed), and every
+	// non-trap frame (a function call, an eval/source) resumes after the
+	// call op that led here.
 	let resumes_in_place = |kind: &FrameKind| {
 		matches!(kind, FrameKind::Script {
-			what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err, .. },
+			what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_), .. },
 			..
 		})
 	};
@@ -896,9 +944,15 @@ fn exit_cut_short(vp: &Vproc, top_from: u32, status: i32) -> bool {
 			frame.pc as usize + 1
 		};
 		resume_at_pc = resumes_in_place(&frame.kind);
-		match frame_continuation(unit, from, status) {
+		match frame_continuation(unit, from, status, &frame.loops) {
 			FrameExit::RunsInput => return true,
 			FrameExit::Exits(out) => status = out,
+		}
+		// A trap restores the interrupted status when it finishes (its
+		// record kept it): the frame above the trap continues from that
+		// status, not from whatever the trap's own commands left behind.
+		if let FrameKind::Script { what: ScriptKind::Trap { status: kept, .. }, .. } = &frame.kind {
+			status = WalkStatus::of(*kept);
 		}
 	}
 	false

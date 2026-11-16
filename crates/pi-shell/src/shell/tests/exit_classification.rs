@@ -374,3 +374,91 @@ async fn exit_classification_negation_composes_with_composites() {
 		assert_eq!(result.ended_by_exit, expected, "{command}");
 	}
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_runtime_loop_records_seed_the_walk() {
+	let _guard = shell_test_lock().lock().await;
+	// The loop already holds the first body's status when the exit fires in
+	// the second condition test: the restored status selects the successor.
+	for (command, expected) in [
+		("i=0; while ((i++ == 0)) || exit 1; do false; done || printf never", true),
+		("i=0; while ((i++ == 0)) || exit 1; do false; done && printf never", false),
+	] {
+		let result = run_exit_case(&Shell::new(None), command).await;
+		assert_eq!(result.exit_code, Some(1), "{command}");
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_omitted_arithmetic_condition_loops_forever() {
+	let _guard = shell_test_lock().lock().await;
+	// Without a condition the loop cannot leave through its test: nothing
+	// after it would ever run, not even were the exit not to happen.
+	for (command, expected) in
+		[("for ((;;)); do exit 1; done", false), ("for ((;;)); do exit 1; done; printf never", false)]
+	{
+		let result = run_exit_case(&Shell::new(None), command).await;
+		assert_eq!(result.exit_code, Some(1), "{command}");
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_spawn_parent_continuation_is_followed() {
+	let _guard = shell_test_lock().lock().await;
+	// A spawned subshell after the exit is descriptor bytecode: the walk
+	// resumes at its end and still finds the parent's suffix.
+	let result =
+		run_exit_case(&Shell::new(None), "{ exit 0; (for ((;0;)); do :; done); printf never; }")
+			.await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, true);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_unentered_try_always_is_ordinary_input() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(None);
+	run_exit_case(&shell, "emulate zsh").await;
+	// The try block was never entered before the exit: its always-list is
+	// unrun input, not already-required cleanup.
+	for (command, expected) in [
+		("f() { exit 0; { } always { printf never; }; }; f", true),
+		// Inside cleanup the try-list's snapshot is restored at the end:
+		// the || successor runs (and was cut short); the && would not.
+		("f() { { false; } always { exit 0; }; }; f || printf never", true),
+		("f() { { false; } always { exit 0; }; }; f && printf never", false),
+	] {
+		let result = run_exit_case(&shell, command).await;
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_trap_restores_interrupted_status() {
+	let _guard = shell_test_lock().lock().await;
+	// A RETURN trap keeps the interrupted status: return 1 leaves the
+	// caller's continuation testing failure, so the || successor would
+	// have run.
+	for (command, expected) in [
+		("f() { trap 'exit 0' RETURN; return 1; }; f || printf never", true),
+		("f() { trap 'exit 0' RETURN; return 1; }; f && printf never", false),
+	] {
+		let result = run_exit_case(&Shell::new(None), command).await;
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		assert_eq!(result.ended_by_exit, expected, "{command}");
+	}
+	// A signal trap interrupts between commands: the sole remaining
+	// command stays unrun input.
+	let result =
+		run_exit_case(&Shell::new(None), "trap 'exit 0' USR1; kill -USR1 $$; printf never").await;
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(result.ended_by_exit, true);
+}
