@@ -143,6 +143,40 @@ describe("native transcript redesign", () => {
 		expect(harness.errors).toEqual([]);
 	});
 
+	it("opens and folds every thought on the detail gesture, hand-folded ones included", async () => {
+		const message: AssistantMessage = {
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content: [{ type: "thinking", thinking: "Weighing it carefully" }],
+		};
+		const component = new AssistantMessageComponent(message);
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		const thought = () => harness!.find(node => node.k === "section" && node.p?.role === "omp.thinking");
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: true });
+
+		component.setAllThinkingSectionsExpanded(true);
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: false });
+
+		component.handleNativeEvent({ type: "toggle", key: "k0", collapsed: true });
+		component.updateContent(message);
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: true });
+
+		// The gesture outranks the section's own choice in both directions.
+		component.setAllThinkingSectionsExpanded(true);
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: false });
+
+		component.setAllThinkingSectionsExpanded(false);
+		await harness.render();
+		expect(thought()?.p).toMatchObject({ collapsed: true });
+		expect(harness.errors).toEqual([]);
+	});
+
 	it("shows hidden thinking only while it streams, and nothing once it settles", async () => {
 		const component = new AssistantMessageComponent(undefined, true);
 		harness = await TspHarness.start();

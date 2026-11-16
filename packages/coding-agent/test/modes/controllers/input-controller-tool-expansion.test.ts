@@ -3,8 +3,8 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { cfgDisplayHideToolActivity, cfgDisplayHideToolOutputDetails } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDisplayHideToolActivity } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgExpandThinkingBlocks, cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("InputController tool output expansion", () => {
 	it("expands children and forces a full repaint so every live block re-renders", () => {
@@ -124,10 +124,12 @@ describe("InputController assistant detail toggle", () => {
 		const showStatus = vi.fn();
 		const assistant = new AssistantMessageComponent();
 		const setHideThinkingBlock = vi.spyOn(assistant, "setHideThinkingBlock");
+		const setAllThinkingSectionsExpanded = vi.spyOn(assistant, "setAllThinkingSectionsExpanded");
 		const ctx = {
 			hideToolActivity: false,
 			hideThinkingBlock: false,
 			hideToolOutputDetails: false,
+			expandThinkingBlocks: false,
 			hasDisplayableThinkingContent: false,
 			toolOutputExpanded: false,
 			settings,
@@ -148,10 +150,11 @@ describe("InputController assistant detail toggle", () => {
 			resetDisplay,
 			showStatus,
 			setHideThinkingBlock,
+			setAllThinkingSectionsExpanded,
 		};
 	}
 
-	it("folds thinking and tool output on one gesture, then restores both", () => {
+	it("opens thinking and tool output on one gesture, then folds both", () => {
 		const {
 			ctx,
 			settings,
@@ -159,18 +162,20 @@ describe("InputController assistant detail toggle", () => {
 			setToolOutputDetailsHidden,
 			resetDisplay,
 			showStatus,
-			setHideThinkingBlock,
+			setAllThinkingSectionsExpanded,
 		} = createContext();
 		const controller = new InputController(ctx);
 
 		controller.toggleDetailVisibility();
 
-		expect(ctx.hideThinkingBlock).toBe(true);
-		expect(ctx.hideToolOutputDetails).toBe(true);
-		expect(cfgHideThinkingBlock.get(settings)).toBe(true);
-		expect(cfgDisplayHideToolOutputDetails.get(settings)).toBe(true);
-		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
-		expect(setToolOutputDetailsHidden).toHaveBeenCalledWith(true);
+		expect(ctx.expandThinkingBlocks).toBe(true);
+		expect(cfgExpandThinkingBlocks.get(settings)).toBe(true);
+		expect(setAllThinkingSectionsExpanded).toHaveBeenCalledWith(true);
+		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(setToolOutputDetailsHidden).toHaveBeenLastCalledWith(false);
+		// Thinking stays on screen: the detail gesture folds it, it never hides it.
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(cfgHideThinkingBlock.get(settings)).toBe(false);
 		// One replay per gesture, not one per axis.
 		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
@@ -180,10 +185,31 @@ describe("InputController assistant detail toggle", () => {
 
 		controller.toggleDetailVisibility();
 
+		expect(ctx.expandThinkingBlocks).toBe(false);
+		expect(cfgExpandThinkingBlocks.get(settings)).toBe(false);
+		expect(setAllThinkingSectionsExpanded).toHaveBeenLastCalledWith(false);
+		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(setToolOutputDetailsHidden).toHaveBeenLastCalledWith(true);
+		// Folding is not hiding: a folded block keeps its "Thought for 12s" head.
 		expect(ctx.hideThinkingBlock).toBe(false);
-		expect(ctx.hideToolOutputDetails).toBe(false);
 		expect(resetDisplay).toHaveBeenCalledTimes(2);
 		expect(showStatus).not.toHaveBeenCalled();
+	});
+
+	it("reveals thinking hidden by its own toggle before opening it", () => {
+		const { ctx, settings, setHideThinkingBlock, setAllThinkingSectionsExpanded } = createContext({
+			hideThinkingBlock: true,
+		});
+
+		new InputController(ctx).toggleDetailVisibility();
+
+		// Asking for the full text cannot leave the text off screen.
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(cfgHideThinkingBlock.get(settings)).toBe(false);
+		expect(setHideThinkingBlock).toHaveBeenCalledWith(false);
+		expect(ctx.expandThinkingBlocks).toBe(true);
+		expect(setAllThinkingSectionsExpanded).toHaveBeenCalledWith(true);
+		expect(ctx.hideToolOutputDetails).toBe(false);
 	});
 
 	it("still folds tool output when thinking cannot be toggled", () => {
@@ -195,40 +221,44 @@ describe("InputController assistant detail toggle", () => {
 
 		expect(ctx.hideThinkingBlock).toBe(false);
 		expect(cfgHideThinkingBlock.get(settings)).toBe(false);
+		expect(ctx.expandThinkingBlocks).toBe(false);
+		expect(cfgExpandThinkingBlocks.get(settings)).toBe(false);
 		expect(ctx.hideToolOutputDetails).toBe(true);
 		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(showStatus).not.toHaveBeenCalled();
 	});
 
-	it("folds both axes from a half-folded transcript, then restores both", () => {
-		const { ctx, resetDisplay } = createContext({ hideThinkingBlock: true });
+	it("opens both axes from a half-folded transcript, then folds both", () => {
+		const { ctx, settings } = createContext({ hideThinkingBlock: true });
 		const controller = new InputController(ctx);
 
 		controller.toggleDetailVisibility();
 
-		expect(ctx.hideThinkingBlock).toBe(true);
-		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(ctx.expandThinkingBlocks).toBe(true);
+		expect(ctx.hideToolOutputDetails).toBe(false);
 
 		controller.toggleDetailVisibility();
 
 		expect(ctx.hideThinkingBlock).toBe(false);
-		expect(ctx.hideToolOutputDetails).toBe(false);
-		expect(resetDisplay).toHaveBeenCalledTimes(2);
+		expect(ctx.expandThinkingBlocks).toBe(false);
+		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(cfgHideThinkingBlock.get(settings)).toBe(false);
 	});
 
-	it("folds thinking when tool output is the half that was already folded", () => {
+	it("opens thinking when tool output is the half that was already folded", () => {
 		const { ctx } = createContext({ hideToolOutputDetails: true });
 		const controller = new InputController(ctx);
 
 		controller.toggleDetailVisibility();
 
-		expect(ctx.hideThinkingBlock).toBe(true);
-		expect(ctx.hideToolOutputDetails).toBe(true);
+		expect(ctx.expandThinkingBlocks).toBe(true);
+		expect(ctx.hideToolOutputDetails).toBe(false);
 
 		controller.toggleDetailVisibility();
 
-		expect(ctx.hideThinkingBlock).toBe(false);
-		expect(ctx.hideToolOutputDetails).toBe(false);
+		expect(ctx.expandThinkingBlocks).toBe(false);
+		expect(ctx.hideToolOutputDetails).toBe(true);
 	});
 
 	it("restores tool output when thinking is auto-hidden and tool output was folded", () => {
@@ -242,6 +272,7 @@ describe("InputController assistant detail toggle", () => {
 		// Auto-hidden thinking counts as folded, so the gesture reveals tool output
 		// on the first press instead of leaving it stuck behind the other axis.
 		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(ctx.expandThinkingBlocks).toBe(false);
 		expect(ctx.hideToolOutputDetails).toBe(false);
 	});
 

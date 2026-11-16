@@ -95,7 +95,7 @@ import {
 	cfgPasteLargeMenuThreshold,
 	cfgTuiMouse,
 } from "../settings";
-import { cfgHideThinkingBlock } from "../../session/settings";
+import { cfgExpandThinkingBlocks, cfgHideThinkingBlock } from "../../session/settings";
 
 /** Bare words that quit (as `/<word>`) when typed alone into a session with no messages. */
 const BARE_EXIT_WORDS: Record<string, true> = { exit: true, quit: true, q: true };
@@ -3265,20 +3265,27 @@ export class InputController {
 	/**
 	 * Gesture behind `app.display.toggleDetail`: one keystroke folds both halves
 	 * of the assistant's working detail — reasoning blocks and tool output — into
-	 * their collapsed presentation. Single-axis toggles stay on their own keys, so
-	 * this is the only entry point that moves both at once.
+	 * their collapsed presentation, and back to their full text. Thinking stays
+	 * on screen either way: folded, a finished block keeps its "Thought for 12s"
+	 * head and its text opens with the next press. Removing it outright stays on
+	 * its own key (`app.thinking.toggle`). Single-axis toggles stay on their own
+	 * keys, so this is the only entry point that moves both at once.
 	 *
 	 * Deliberately silent: the replay shows the new presentation, so a status line
 	 * would only leave a transcript row that can never be dismissed.
 	 */
 	toggleDetailVisibility(): void {
 		const thinkingToggleable = !this.#thinkingBlocksUntoggleable();
-		// One target state for both axes: a half-folded transcript (thinking hidden
-		// by its own toggle, tool details still visible, or the reverse) folds fully
-		// on the next press instead of swapping which half is visible.
-		const hidden = !(this.ctx.hideToolOutputDetails && (!thinkingToggleable || this.ctx.hideThinkingBlock));
-		if (thinkingToggleable) this.#applyThinkingBlockVisibility(hidden);
-		this.#applyToolOutputDetailsHidden(hidden);
+		// One target state for both axes: a half-folded transcript (thinking folded
+		// by its own toggle, tool details still expanded, or the reverse) expands
+		// fully on the next press instead of swapping which half is folded.
+		const expand = !(
+			!this.ctx.hideToolOutputDetails &&
+			!this.ctx.hideThinkingBlock &&
+			(!thinkingToggleable || this.ctx.expandThinkingBlocks)
+		);
+		if (thinkingToggleable) this.#applyThinkingBlocksExpanded(expand);
+		this.#applyToolOutputDetailsHidden(!expand);
 		this.#resetTranscriptRendering();
 	}
 
@@ -3309,6 +3316,27 @@ export class InputController {
 			this.ctx.streamingComponent.setHideThinkingBlock(hidden);
 			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
 		}
+	}
+
+	/**
+	 * Fold or expand every thinking section on screen. Hand-folded sections follow
+	 * this gesture: the key is the one entry point that moves all detail at once,
+	 * so a section folded on its own head must not survive the next press.
+	 *
+	 * Expanding also reveals blocks hidden by `app.thinking.toggle`, since a
+	 * gesture that asks for the full text cannot leave the text off screen; the
+	 * fold direction leaves the visibility preference alone (folding is not
+	 * hiding).
+	 */
+	#applyThinkingBlocksExpanded(expand: boolean): void {
+		if (expand && this.ctx.hideThinkingBlock) this.#applyThinkingBlockVisibility(false);
+		this.ctx.expandThinkingBlocks = expand;
+		cfgExpandThinkingBlocks.set(this.ctx.settings, expand);
+
+		for (const child of this.ctx.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) child.setAllThinkingSectionsExpanded(expand);
+		}
+		if (this.ctx.streamingComponent) this.ctx.streamingComponent.setAllThinkingSectionsExpanded(expand);
 	}
 
 	#applyToolOutputDetailsHidden(hidden: boolean): void {

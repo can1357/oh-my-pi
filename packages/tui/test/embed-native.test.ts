@@ -49,6 +49,7 @@ const HOST: AssistantMessageHost = {
 	assistantImagesVisible: true,
 	tableChartsVisible: true,
 	hideToolActivity: false,
+	hideToolOutputDetails: false,
 	toolOutputExpanded: false,
 	ui: { requestRender: () => {}, imageBudget: new ImageBudget(8, () => {}) },
 	resolveAssistantMessageLinkHrefs: async () => new Map(),
