@@ -675,6 +675,57 @@ describe("AgyHost stateful steps", () => {
 		await expect(run.done).rejects.toThrow("session closed");
 	});
 
+	it("parks the original arguments when normalization would reject a previously valid call", async () => {
+		const enumTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { file_path: { type: "string", enum: ["/tmp/a"] } },
+			},
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read /tmp")], { tools: [enumTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = fake.call("read", { path: "/tmp" }, fake.currentId);
+		await run.done;
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
+		expect(call.arguments).toEqual({ path: "/tmp" });
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await output).isError).toBe(true);
+	});
+
+	it("reports the original issues when a normalized call is still invalid", async () => {
+		const pairTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { file_path: { type: "string" }, cwd: { type: "string" } },
+				required: ["file_path", "cwd"],
+			},
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [pairTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: "a.txt" }, fake.currentId);
+		const text = textOf(output.content);
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(text).toContain("file_path: is required");
+		expect(text).toContain("cwd: is required");
+		expect(text).toContain(JSON.stringify(advertised));
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
 	it("bounds a large invalid-arguments diagnostic and keeps the turn active", async () => {
 		const keys = Array.from({ length: 200 }, (_, index) => `key${index}`);
 		const wide: Tool = {

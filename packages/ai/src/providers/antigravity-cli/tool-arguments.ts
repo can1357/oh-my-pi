@@ -1,10 +1,11 @@
 /**
  * Habitual argument aliases for the Antigravity CLI host path. Schema
  * validation stays the authority: a rename happens only when one schema
- * property and one input key identify the same parameter, so a call that still
- * violates the schema reaches the existing diagnostic path unchanged.
+ * declaration and one input key identify the same parameter, so a call that
+ * still violates the schema reaches the existing diagnostic path unchanged.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { schemaDefinesProperty } from "../../utils/schema/json-schema-validator";
 
 const ALIAS_GROUPS: readonly (readonly string[])[] = [
 	["file_path", "path", "absolute_path", "AbsolutePath", "target_file", "TargetFile"],
@@ -32,10 +33,13 @@ function schemaProperties(schema: unknown): Record<string, unknown> {
 }
 
 /**
- * Renames unambiguous alias arguments to the schema's declared name. Every
- * other shape — a missing or non-object schema, non-object arguments, an
- * already-present target, two candidates on either side, or a non-string
- * target or value — returns the original arguments untouched.
+ * Renames unambiguous alias arguments to the schema's declared name. A group is
+ * ambiguous when the schema declares more than one member anywhere — in
+ * `properties`, `required`, a combiner, or a property pattern — so only the
+ * fully determined case renames. Every other shape — a missing or non-object
+ * schema, non-object arguments, an already-present target, two candidates on
+ * either side, or a non-string target or value — returns the original
+ * arguments untouched.
  */
 export function normalizeToolArguments(schema: unknown, args: unknown): NormalizedToolArguments {
 	if (!isRecord(args)) return { arguments: args, renamed: [] };
@@ -43,7 +47,7 @@ export function normalizeToolArguments(schema: unknown, args: unknown): Normaliz
 	const output: Record<string, unknown> = { ...args };
 	const renamed: RenamedArgument[] = [];
 	for (const group of ALIAS_GROUPS) {
-		const targets = group.filter(key => Object.hasOwn(properties, key));
+		const targets = group.filter(key => schemaDefinesProperty(schema, key));
 		if (targets.length !== 1) continue;
 		const target = targets[0];
 		if (Object.hasOwn(output, target)) continue;

@@ -61,6 +61,24 @@ describe("normalizeToolArguments", () => {
 		expect(args).toEqual({ absolute_path: "/a" });
 	});
 
+	it("counts a group member declared only in required as ambiguity", () => {
+		const schema = {
+			type: "object",
+			properties: { file_path: { type: "string" } },
+			required: ["file_path", "path"],
+		};
+		const { arguments: args, renamed } = normalizeToolArguments(schema, { path: "/a" });
+		expect(renamed).toEqual([]);
+		expect(args).toEqual({ path: "/a" });
+	});
+
+	it("does not rename to a target declared only in required", () => {
+		const schema = { type: "object", properties: {}, required: ["file_path"] };
+		const { arguments: args, renamed } = normalizeToolArguments(schema, { path: "/a" });
+		expect(renamed).toEqual([]);
+		expect(args).toEqual({ path: "/a" });
+	});
+
 	it("keeps the original arguments when the input carries two group members", () => {
 		const { arguments: args, renamed } = normalizeToolArguments(fileSchema, { path: "/a", absolute_path: "/b" });
 		expect(renamed).toEqual([]);

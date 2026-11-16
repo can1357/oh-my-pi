@@ -651,10 +651,15 @@ export class AgyHost implements ProviderSessionState {
 			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
 			return errorOutput("Tool call rejected; no execution occurred.");
 		}
-		const normalized = normalizeToolArguments(tool.inputSchema, args).arguments;
-		if (!isRecord(normalized)) return errorOutput(describeToolArguments(tool, normalized));
-		const validation = validateJsonSchemaValue(tool.inputSchema, normalized);
-		if (!validation.success) return errorOutput(describeToolArguments(tool, normalized, validation));
+		let accepted = normalizeToolArguments(tool.inputSchema, args).arguments;
+		let validation = validateJsonSchemaValue(tool.inputSchema, accepted);
+		if (!validation.success) {
+			// Normalization must never reject arguments the schema already accepted.
+			accepted = args;
+			validation = validateJsonSchemaValue(tool.inputSchema, accepted);
+		}
+		if (!validation.success) return errorOutput(describeToolArguments(tool, accepted, validation));
+		if (!isRecord(accepted)) return errorOutput(describeToolArguments(tool, accepted));
 		const id = `agy_${crypto.randomUUID().replaceAll("-", "")}`;
 		const result = Promise.withResolvers<McpToolOutput>();
 		const pending: PendingCall = {
@@ -664,7 +669,7 @@ export class AgyHost implements ProviderSessionState {
 			expiry: this.#options.schedule(this.#options.holdLimitMs, () => this.#detach(pending)),
 		};
 		this.#pending = pending;
-		step.writer.toolCall({ type: "toolCall", id, name, arguments: normalized });
+		step.writer.toolCall({ type: "toolCall", id, name, arguments: accepted });
 		step.writer.usage(this.#contextTokens);
 		const digest = transcriptDigest([...step.messages, step.writer.output]);
 		step.writer.finish("toolUse", { type: "antigravityCli", conversationId, digest });
