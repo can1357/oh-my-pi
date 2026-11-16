@@ -59,6 +59,8 @@ const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped
 // automatic continuation would duplicate the text it already resumed.
 const OUTPUT_LIMIT_NOTICE = "your previous response was cut off because it exceeded the output token limit";
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
+// Enough history for a late bridge call from any recently abandoned session.
+const ABANDONED_CONVERSATION_LIMIT = 8;
 
 /** Per-step request settings. */
 export interface AgyStepOptions {
@@ -205,6 +207,8 @@ export class AgyHost implements ProviderSessionState {
 	readonly #turns = new Set<Turn>();
 	#loading: object | undefined;
 	#contextTokens = 0;
+	/** Sessions this host replaced or forked away from; a late call from one is stale, not foreign. */
+	readonly #abandonedConversations = new Set<string>();
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
 	#loggedGeneration = 0;
@@ -360,12 +364,12 @@ export class AgyHost implements ProviderSessionState {
 				);
 				conversationStorePath(this.#geminiDir, created.sessionId);
 				this.#ownedConversations.add(created.sessionId);
-				this.#conversation = {
+				this.#adoptConversation({
 					id: created.sessionId,
 					systemKey,
 					loaded: true,
 					defaultEffort: thoughtLevel(created.configOptions),
-				};
+				});
 				this.#contextTokens = 0;
 			}
 			await this.#setup(this.#configure(model.id, options.reasoning));
@@ -561,6 +565,17 @@ export class AgyHost implements ProviderSessionState {
 		}
 	}
 
+	/** Adopt a new session and retire the one it replaces, keeping its id for late bridge calls. */
+	#adoptConversation(conversation: Conversation): void {
+		const previous = this.#conversation?.id;
+		this.#conversation = conversation;
+		if (previous === undefined || previous === conversation.id) return;
+		this.#abandonedConversations.add(previous);
+		if (this.#abandonedConversations.size <= ABANDONED_CONVERSATION_LIMIT) return;
+		const oldest = this.#abandonedConversations.values().next().value;
+		if (oldest !== undefined) this.#abandonedConversations.delete(oldest);
+	}
+
 	async #loadConversation(id: string, system: string, systemKey: string, cwd: string): Promise<void> {
 		conversationStorePath(this.#geminiDir, id);
 		const agy = this.#requireProcess();
@@ -577,7 +592,7 @@ export class AgyHost implements ProviderSessionState {
 			});
 			if (this.#process !== agy || step !== this.#step || step?.controller.signal.aborted)
 				throw new Error("Antigravity CLI load was interrupted");
-			this.#conversation = { id, systemKey, loaded: true, defaultEffort: thoughtLevel(loaded.configOptions) };
+			this.#adoptConversation({ id, systemKey, loaded: true, defaultEffort: thoughtLevel(loaded.configOptions) });
 			this.#contextTokens = 0;
 		} finally {
 			if (this.#loading === loading) this.#loading = undefined;
@@ -782,6 +797,10 @@ export class AgyHost implements ProviderSessionState {
 	async #onToolCall(token: object, name: string, args: unknown, callerId: string | undefined): Promise<McpToolOutput> {
 		const agy = this.#process;
 		if (!agy || agy.token !== token) return errorOutput("Tool call belongs to a stopped process.");
+		// A call that arrives only after its session was replaced belongs to the
+		// retired turn; it must not be read as a foreign caller and fail the live one.
+		if (callerId !== undefined && this.#abandonedConversations.has(callerId))
+			return errorOutput("Tool call cancelled: the request it belonged to is no longer active.");
 		const tool = agy.tools.get(name);
 		if (!tool) {
 			const shownName = name.slice(0, MAX_DIAGNOSTIC_TOOL_NAME);

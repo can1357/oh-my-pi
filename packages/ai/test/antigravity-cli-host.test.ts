@@ -1096,6 +1096,32 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		fake.acknowledgeCancel();
 	});
 
+	it("rejects a late call for the cancelled session without failing the replacement step", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const cancelledId = fake.currentId;
+		abort.abort(new Error("user-interrupt"));
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		fake.acknowledgeCancel();
+		const second = step(state.host, [user("hello"), user("again")]);
+		const prompt = await fake.prompts.next();
+		expect(fake.currentId).not.toBe(cancelledId);
+		// The bridge call is seen for the first time only after the new prompt started.
+		const late = fake.options.onCall("read", { path: "a.txt" }, cancelledId);
+		const rejected = await late;
+		expect(rejected.isError).toBe(true);
+		expect(rejected.content[0]).toEqual({ type: "text", text: expect.stringContaining("no longer active") });
+		expect(fake.closed).toBe(false);
+		fake.text("Second answer.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.content).toEqual([{ type: "text", text: "Second answer." }]);
+	});
+
 	it("continues a reasoning-only output-limited part before requiring visible output", async () => {
 		const state = await fixture();
 		const run = step(state.host, [user("think then answer")]);
