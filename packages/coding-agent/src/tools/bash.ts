@@ -680,14 +680,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	}
 	/**
 	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
-	 * resolves it) or the session cwd.
+	 * resolves it) or the session cwd. A `cwd` execution cannot resolve (`@local://notes`) is left
+	 * for execution to report, and the rules see the session cwd.
 	 */
 	#guardScope(cwd: unknown): GuardScope {
 		const sessionCwd = this.session.cwd ?? process.cwd();
-		const commandCwd =
-			typeof cwd === "string" && cwd !== "" && !InternalUrlRouter.instance().canHandle(cwd)
-				? resolveToCwd(cwd, sessionCwd)
-				: sessionCwd;
+		let commandCwd = sessionCwd;
+		if (typeof cwd === "string" && cwd !== "" && !InternalUrlRouter.instance().canHandle(cwd)) {
+			try {
+				commandCwd = resolveToCwd(cwd, sessionCwd);
+			} catch {
+				commandCwd = sessionCwd;
+			}
+		}
 		return { cwd: commandCwd, home: os.homedir() };
 	}
 	/**
