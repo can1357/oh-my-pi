@@ -30,7 +30,7 @@ use super::{
 	super::{
 		ax::{
 			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
-			require_read_as, text_readback, truncate_chars,
+			performable_names, require_read_as, text_readback, truncate_chars,
 		},
 		backend::{AxBackend, KeyboardFocus, is_raise_action, native_action_name},
 		control,
@@ -1638,18 +1638,30 @@ fn choose_action(
 }
 
 /// The refusal of `native`, an action the element does not list among
-/// `actions`; nothing was sent. A control without a press action still takes
-/// a click, `menu` path included.
+/// `actions`; nothing was sent. The actions it does list are named as
+/// `perform()` takes them, app-defined custom ones left out. A control
+/// without a press action still takes its own click, `menu` path included,
+/// and the refusal names that call: the element's `bounds()` are desktop
+/// coordinates, which a window click, taking screenshot pixels, refuses
+/// before any screenshot and misses after one.
 fn unsupported_action(native: &str, actions: &[String]) -> DesktopError {
+	let offered = performable_names(actions);
+	let offered = if offered.is_empty() {
+		"none".to_owned()
+	} else {
+		offered.join(", ")
+	};
 	let instead = if native == "AXPress" {
-		"; nothing was sent: if this is the control you meant, click() it instead, passing the same \
-		 menu option if you gave one"
+		". Nothing was sent. If this is the control you meant, call click() on this element itself \
+		 (`await el.click()` on the handle you pressed, with the same `menu` option if you gave \
+		 one): it aims at the element and needs no screenshot. Its bounds() are desktop coordinates, \
+		 not pixels for a window click"
 	} else {
 		""
 	};
 	DesktopError::ax_failed(format!(
-		"AX action '{native}' is not supported by this element; available actions: {}{instead}",
-		actions.join(", "),
+		"AX action '{native}' is not supported by this element; available actions: \
+		 {offered}{instead}",
 	))
 }
 
@@ -3247,10 +3259,26 @@ mod tests {
 		let press = perform_choosing(&element, "press", None).unwrap_err();
 		assert_eq!(press.code, ErrorCode::AxFailed);
 		assert!(press.message.contains("'AXPress' is not supported"), "{}", press.message);
-		assert!(press.message.contains("click()"), "{}", press.message);
+		assert!(press.message.contains("available actions: none"), "{}", press.message);
+		// The element's own click, not a window click fed its bounds.
+		assert!(press.message.contains("`await el.click()`"), "{}", press.message);
+		assert!(press.message.contains("bounds() are desktop coordinates"), "{}", press.message);
 		let other = perform_choosing(&element, "AXIncrement", None).unwrap_err();
 		assert!(other.message.contains("'AXIncrement' is not supported"), "{}", other.message);
 		assert!(!other.message.contains("click()"), "{}", other.message);
+		// Contacts and Reminders rows add custom actions perform() cannot take,
+		// whose names run over several lines; they stay out, and each name is
+		// listed once, as perform() takes it.
+		let actions = [
+			"AXShowMenu",
+			"Name:Customize info and appearance\nTarget:0x0\nSelector:(null)",
+			"AXScrollToVisible",
+			"AXShowMenu",
+		]
+		.map(String::from);
+		let listed = super::unsupported_action("AXPress", &actions).message;
+		assert!(listed.contains("available actions: showmenu, scrolltovisible"), "{listed}");
+		assert!(!listed.contains('\n') && !listed.contains("Customize"), "{listed}");
 	}
 
 	#[test]

@@ -899,15 +899,40 @@ const MAX_SHOWN_ACTION: usize = 32;
 /// enough that no app can make a line arbitrarily long.
 const MAX_SHOWN_ACTIONS: usize = 16;
 
+/// The name `perform()` takes for `action`, one macOS action an element
+/// lists: lowercased past its `AX` prefix in any case. `None` for an
+/// app-defined custom action, which cannot be performed by name, and for a
+/// name that is not one ASCII word of at most [`MAX_SHOWN_ACTION`] characters,
+/// which an app could otherwise use to write its own lines into the tool's
+/// output.
+fn performable_name(action: &str) -> Option<String> {
+	let name = action
+		.get(..2)?
+		.eq_ignore_ascii_case("AX")
+		.then(|| &action[2..])?;
+	(!name.is_empty()
+		&& name.len() <= MAX_SHOWN_ACTION
+		&& name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+	.then(|| name.to_ascii_lowercase())
+}
+
+/// The names `perform()` takes, each once in the element's order.
+pub(crate) fn performable_names(actions: &[String]) -> Vec<String> {
+	let mut names = Vec::new();
+	for name in actions.iter().filter_map(|action| performable_name(action)) {
+		if !names.contains(&name) {
+			names.push(name);
+		}
+	}
+	names
+}
+
 /// What a line lists after `actions=`: the macOS actions an element offers
 /// beyond what its role implies. A control's press, a text field's confirm
 /// and cancel, and the actions nearly every element has (scroll into view,
 /// context menu, raise, page scrolls, hover variants) go unlisted, except on a
-/// control without press, which lists all it has. App-defined custom actions
-/// cannot be performed by name and stay unlisted, as does any other
-/// platform's vocabulary, and so does a name that is not one ASCII word of at
-/// most [`MAX_SHOWN_ACTION`] characters, which an app could otherwise use to
-/// write its own lines into the tree. Each name is listed once, and past
+/// control without press, which lists all it has. Only names
+/// [`performable_name`] keeps are listed. Each name is listed once, and past
 /// [`MAX_SHOWN_ACTIONS`] the list ends with how many it left out and the call
 /// that lists them all, so no app can make one line arbitrarily long.
 fn shown_actions(props: &AxProps, reference: &str) -> Option<String> {
@@ -917,23 +942,7 @@ fn shown_actions(props: &AxProps, reference: &str) -> Option<String> {
 		return None;
 	}
 	let role = props.role.as_str();
-	let mut seen = HashSet::new();
-	// Lowercased past an `AX` prefix in any case, as `perform()` takes it.
-	let mut names: Vec<String> = props
-		.actions
-		.iter()
-		.filter_map(|action| {
-			let name = action
-				.get(..2)?
-				.eq_ignore_ascii_case("AX")
-				.then(|| &action[2..])?;
-			(!name.is_empty()
-				&& name.len() <= MAX_SHOWN_ACTION
-				&& name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
-			.then(|| name.to_ascii_lowercase())
-		})
-		.filter(|name| seen.insert(name.clone()))
-		.collect();
+	let mut names = performable_names(&props.actions);
 	if !pressable(role) || names.iter().any(|name| name == "press") {
 		names.retain(|name| {
 			let implied = match name.as_str() {
