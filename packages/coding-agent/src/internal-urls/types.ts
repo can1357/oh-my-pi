@@ -80,7 +80,8 @@ export interface SchemeWritePolicy {
 	 * - `file`: tools (`write`, `edit`, `ast_edit`) write the file {@link ProtocolHandler.locate}
 	 *   returns with `{ create: true }`; the handler has no `write` hook.
 	 * - `handler`: {@link ProtocolHandler.write} performs it (messages, stdin, settings, remote
-	 *   hosts, devices); file-editing tools refuse the URL even when it locates a backing file.
+	 *   hosts, devices) for `write` and for bash redirects, which deliver a handle's bytes as one
+	 *   write on close; file-editing tools refuse the URL even when it locates a backing file.
 	 */
 	via: "file" | "handler";
 	/**
@@ -354,7 +355,7 @@ export interface WriteContext {
 	 * `proc://` stdin/stop/mode, `xd://` devices) require it and throw when it is absent.
 	 */
 	session?: ToolSession;
-	/** The `write` tool call dispatching this write; device dispatch (`xd://`) forwards it to the wrapped tool. */
+	/** The tool call dispatching this write (`write`, or a bash command redirecting into the URL); device dispatch (`xd://`) forwards it to the wrapped tool. */
 	toolCall?: {
 		id: string;
 		onUpdate?: AgentToolUpdateCallback;
