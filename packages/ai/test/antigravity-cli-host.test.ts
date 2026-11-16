@@ -4,8 +4,10 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { retireWhenIdle } from "@oh-my-pi/pi-ai/providers/antigravity-cli";
+import { streamAntigravityCli } from "@oh-my-pi/pi-ai/providers/antigravity-cli";
+import * as agyCredentials from "@oh-my-pi/pi-ai/providers/antigravity-cli/credentials";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import * as agyHostModule from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
 import {
 	AgyHost,
 	type AgyConnection,
@@ -187,6 +189,7 @@ class FakeAgy implements AgyTransport {
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
 	vi.useRealTimers();
+	vi.restoreAllMocks();
 	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 });
 
@@ -256,6 +259,30 @@ async function parked(options: AgyHostOptions = {}) {
 
 function textOf(blocks: ContentBlock[]): string {
 	return blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+}
+
+function mockImplicitHosts(...hosts: AgyHost[]): void {
+	vi.spyOn(agyCredentials, "agyCredentialKey").mockReturnValue("implicit-account");
+	vi.spyOn(agyCredentials, "agyCredentialVersion").mockReturnValue("credential-version");
+	vi.spyOn(agyCredentials, "stageAgyCredentials").mockResolvedValue(undefined);
+	let next = 0;
+	vi.spyOn(agyHostModule, "AgyHost").mockImplementation((() => {
+		const host = hosts[next++];
+		if (!host) throw new Error("Unexpected implicit host construction");
+		return host;
+	}) as never);
+}
+
+function implicitStep(messages: Message[], sessionId: string): AssistantMessageEventStream {
+	return streamAntigravityCli(model, { messages, tools }, { apiKey: "test", sessionId });
+}
+
+async function drainMicrotasksUntil(predicate: () => boolean, errorMessage: string): Promise<void> {
+	for (let i = 0; i < 1000; i++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	throw new Error(errorMessage);
 }
 
 describe("AgyHost stateful steps", () => {
@@ -710,37 +737,74 @@ describe("AgyHost stateful steps", () => {
 });
 
 describe("implicit host retention", () => {
-	it("closes a host whose tool turn is still parked when its idle deadline passes", async () => {
-		const state = await parked();
-		const sessions = new Map();
-		const entry = { host: state.host, account: "account" };
-		sessions.set("implicit", entry);
+	it("disposes a parked host and replays its late tool result through a replacement host", async () => {
+		const parkedState = await fixture();
+		const replayState = await fixture();
+		let disposal: Promise<void> | undefined;
+		const dispose = parkedState.host.dispose.bind(parkedState.host);
+		vi.spyOn(parkedState.host, "dispose").mockImplementation(() => {
+			disposal = dispose();
+			return disposal;
+		});
+		mockImplicitHosts(parkedState.host, replayState.host);
 		vi.useFakeTimers();
-		retireWhenIdle("implicit", entry, sessions);
+		const sessionId = crypto.randomUUID();
+		const first = implicitStep([user("read a.txt")], sessionId);
+		const fake = await parkedState.started.next();
+		await fake.prompts.next();
+		fake.text("Reading now.");
+		const heldCall = fake.call();
+		const assistant = await first.result();
+		expect(assistant.stopReason).toBe("toolUse");
+
+		const store = conversationStorePath(parkedState.dir, fake.currentId);
+		const artifacts = [
+			store,
+			`${store}.checkpoints`,
+			path.join(parkedState.dir, "antigravity-cli", "brain", fake.currentId, "artifact"),
+			path.join(parkedState.dir, "antigravity-cli", "annotations", `${fake.currentId}.pbtxt`),
+		];
+		for (const artifact of artifacts) await Bun.write(artifact, "owned conversation artifact");
+		await drainMicrotasksUntil(() => vi.getTimerCount() === 1, "Implicit host idle timer was not armed");
 		vi.advanceTimersByTime(60 * 60_000);
-		expect(state.fake.closed).toBe(true);
-		expect(sessions.has("implicit")).toBe(false);
-		expect((await state.output).isError).toBe(true);
+		expect(fake.closed).toBe(true);
+		expect((await heldCall).isError).toBe(true);
+		if (!disposal) throw new Error("Idle retirement did not start host disposal");
+		await disposal;
+		for (const artifact of artifacts) expect(await Bun.file(artifact).exists()).toBe(false);
+
+		const replay = implicitStep([user("read a.txt"), assistant, result(assistant)], sessionId);
+		const replacement = await replayState.started.next();
+		const prompt = await replacement.prompts.next();
+		expect(textOf(prompt.request.prompt)).toContain("actual file body");
+		replacement.text("Replayed result received.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		expect((await replay.result()).content).toEqual([{ type: "text", text: "Replayed result received." }]);
+		await drainMicrotasksUntil(() => vi.getTimerCount() === 1, "Replacement host idle timer was not armed");
+		vi.advanceTimersByTime(60 * 60_000);
+		await replacement.exited;
 	});
 
-	it("leaves a host that replaced the retired entry alone", async () => {
-		const staleState = await parked();
-		const sessions = new Map();
-		const stale = { host: staleState.host, account: "account" };
-		sessions.set("implicit", stale);
+	it("does not let a rejected overlapping request retire the active request", async () => {
+		const state = await fixture();
+		mockImplicitHosts(state.host);
 		vi.useFakeTimers();
-		retireWhenIdle("implicit", stale, sessions);
-		const nextState = await fixture();
-		const replacement = { host: nextState.host, account: "account" };
-		sessions.set("implicit", replacement);
-		const next = step(nextState.host, [user("hello")]);
-		const fake = await nextState.started.next();
+		const sessionId = crypto.randomUUID();
+		const first = implicitStep([user("first")], sessionId);
+		const fake = await state.started.next();
 		const prompt = await fake.prompts.next();
+		const overlapping = implicitStep([user("second")], sessionId);
+		const rejected = await overlapping.result();
+		expect(rejected.stopReason).toBe("error");
+		expect(rejected.errorMessage).toContain("already running");
+
 		vi.advanceTimersByTime(60 * 60_000);
 		expect(fake.closed).toBe(false);
-		expect(sessions.get("implicit")).toBe(replacement);
-		fake.text("Done.");
+		fake.text("First request finished.");
 		prompt.response.resolve({ stopReason: "end_turn" });
-		await next.done;
+		expect((await first.result()).stopReason).toBe("stop");
+		await drainMicrotasksUntil(() => vi.getTimerCount() === 1, "Completed host idle timer was not armed");
+		vi.advanceTimersByTime(60 * 60_000);
+		await fake.exited;
 	});
 });
