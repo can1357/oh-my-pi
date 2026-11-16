@@ -799,6 +799,8 @@ export interface TspPickerProps {
 	 * (count and esc gone), head actions atop a `rail`. Ignored on a phone.
 	 */
 	search?: "head" | "list";
+	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
+	density?: "regular" | "snug";
 	layout?: "rows" | "cards" | "timeline" | "tree";
 	/** The program's search text (keys stay the program's); `null` hides the field. */
 	query?: string | null;

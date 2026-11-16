@@ -621,6 +621,7 @@ export class ModelPickerComponent implements Component {
 			size: "md",
 			anchor: "composer",
 			search: "list",
+			density: "snug",
 			layout: "rows",
 			preview: "none",
 			placeholder: mode === "task" ? "Search models for Task subagents…" : "Search models, @ for quick roles…",

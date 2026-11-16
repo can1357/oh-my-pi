@@ -386,6 +386,7 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 		size: "md",
 		anchor: "composer",
 		search: "list",
+		density: "snug",
 		preview: "none",
 		scopeStyle: "rail",
 		scope: "all",
