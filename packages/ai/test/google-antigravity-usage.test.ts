@@ -7,6 +7,7 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams, UsageLimit } from "@oh-my-pi/pi-ai/usage";
+import { defaultUsageProvider } from "@oh-my-pi/pi-ai/usage/registry";
 import {
 	antigravityCliUsageProvider,
 	antigravityRankingStrategy,
@@ -683,6 +684,9 @@ const quotaSummaryFixture = {
 
 describe("antigravity-cli usage", () => {
 	it("registers a provider for the ACP provider id", () => {
+		// Goes through the registry so a missing DEFAULT_USAGE_PROVIDERS entry fails here.
+		expect(defaultUsageProvider("antigravity-cli")).toBe(antigravityCliUsageProvider);
+		expect(defaultUsageProvider("google-antigravity")).toBe(antigravityUsageProvider);
 		expect(antigravityCliUsageProvider.id).toBe("antigravity-cli");
 		expect(antigravityCliUsageProvider.supports?.({ provider: "antigravity-cli" } as UsageFetchParams)).toBe(true);
 		expect(antigravityCliUsageProvider.supports?.({ provider: "google-antigravity" } as UsageFetchParams)).toBe(false);
@@ -736,6 +740,35 @@ describe("antigravity-cli usage", () => {
 
 		expect(calls.map(call => call.path)).toEqual(["/v1internal:loadCodeAssist"]);
 		expect(report).toBeNull();
+	});
+
+	it("keeps the discovered project on the fetchAvailableModels fallback", async () => {
+		const { calls, fetchImpl } = routedFetch({
+			":loadCodeAssist": { cloudaicompanionProject: "resolved-project" },
+			":fetchAvailableModels": {
+				models: {
+					"gemini-4-hydrogen": {
+						displayName: "Gemini 4 Hydrogen",
+						quotaInfo: { remainingFraction: 0.4, windowId: "weekly" },
+					},
+				},
+			},
+		});
+
+		const report = await antigravityCliUsageProvider.fetchUsage(
+			{ provider: "antigravity-cli", credential: antigravityCliCredential() },
+			makeCtx(fetchImpl),
+		);
+
+		// retrieveUserQuotaSummary is unavailable here, so the legacy catalog is used.
+		expect(calls.map(call => call.path)).toEqual([
+			"/v1internal:loadCodeAssist",
+			"/v1internal:retrieveUserQuotaSummary",
+			"/v1internal:fetchAvailableModels",
+		]);
+		expect(report?.metadata?.projectId).toBe("resolved-project");
+		expect(report?.limits.length).toBeGreaterThan(0);
+		for (const limit of report?.limits ?? []) expect(limit.scope?.projectId).toBe("resolved-project");
 	});
 
 	it("keeps the legacy provider on its stored project", async () => {

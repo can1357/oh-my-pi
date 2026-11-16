@@ -1,6 +1,7 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getAntigravityHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import * as AIError from "../error";
+import { ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA } from "../registry/oauth/google-antigravity";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -88,9 +89,6 @@ const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 const RETRIEVE_USER_QUOTA_SUMMARY_PATH = "/v1internal:retrieveUserQuotaSummary";
 const LOAD_CODE_ASSIST_PATH = "/v1internal:loadCodeAssist";
-// Mirrors ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA in registry/oauth/google-antigravity.ts.
-// Kept local so the usage layer does not depend on the OAuth registry module.
-const LOAD_CODE_ASSIST_BODY = { metadata: { ideType: "ANTIGRAVITY" } } as const;
 /** `UsageReport.metadata.quotaSource` of reports built from `retrieveUserQuotaSummary`. */
 const QUOTA_SUMMARY_SOURCE = "quota-summary";
 
@@ -491,10 +489,16 @@ async function resolveAntigravityProjectId(
 	ctx: UsageFetchContext,
 ): Promise<string | undefined> {
 	const result = await fetchAntigravityEndpoint(
-		{ ...request, path: LOAD_CODE_ASSIST_PATH, body: LOAD_CODE_ASSIST_BODY },
+		{ ...request, path: LOAD_CODE_ASSIST_PATH, body: { metadata: ANTIGRAVITY_LOAD_CODE_ASSIST_METADATA } },
 		ctx,
 	);
-	if (!result.response?.ok) return undefined;
+	if (!result.response?.ok) {
+		ctx.logger?.warn("Antigravity project discovery failed", {
+			status: result.response?.status ?? 0,
+			statusText: result.response?.statusText ?? "unknown",
+		});
+		return undefined;
+	}
 	try {
 		const payload = (await result.response.json()) as { cloudaicompanionProject?: unknown };
 		const projectId = payload.cloudaicompanionProject;
@@ -662,8 +666,8 @@ async function fetchAntigravityUsage(input: UsageFetchParams, ctx: UsageFetchCon
 			label,
 			scope: {
 				provider: params.provider,
-				accountId: credential.accountId,
-				projectId: credential.projectId,
+				accountId: params.credential.accountId,
+				projectId: params.credential.projectId,
 				tier: entry.tier,
 				windowId: entry.windowId,
 			},
@@ -681,10 +685,10 @@ async function fetchAntigravityUsage(input: UsageFetchParams, ctx: UsageFetchCon
 
 	const metadata: UsageReport["metadata"] = {
 		endpoint: successfulEndpoint,
-		projectId: credential.projectId,
+		projectId: params.credential.projectId,
 	};
-	if (credential.email) metadata.email = credential.email;
-	if (credential.accountId) metadata.accountId = credential.accountId;
+	if (params.credential.email) metadata.email = params.credential.email;
+	if (params.credential.accountId) metadata.accountId = params.credential.accountId;
 
 	const report: UsageReport = {
 		provider: params.provider,

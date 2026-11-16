@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/usage` reporting for the `antigravity-cli` provider: quota now resolves the Cloud Code project when the credential carries none, so the ACP route no longer reports "no usage data" (#19397).
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
