@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Scrolling and typing in an open agent transcript no longer slows down as the transcript grows
+
 ## [18.21.0] - 2026-11-16
 
 ### Added

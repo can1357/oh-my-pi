@@ -104,6 +104,8 @@ export class TranscriptBrowser implements Component {
 	#followBottom: boolean;
 	#layout: BrowserLayout | undefined;
 	#cachedLines: readonly string[] | undefined;
+	/** Body rows last handed to the scroll view; rows are immutable per reference. */
+	#bodyLines: readonly string[] | undefined;
 
 	constructor(options: TranscriptBrowserOptions) {
 		this.#options = options;
@@ -245,7 +247,10 @@ export class TranscriptBrowser implements Component {
 		const bodyHeight = Math.max(minimumBodyRows, height - chromeRows);
 		this.#layout = { bodyTop: frame.header.length + (frameWidth > 0 ? 2 : 0), bodyHeight };
 
-		this.#scrollView.setLines(frame.body.lines);
+		if (frame.body.lines !== this.#bodyLines) {
+			this.#bodyLines = frame.body.lines;
+			this.#scrollView.setLines(frame.body.lines);
+		}
 		this.#scrollView.setHeight(bodyHeight);
 		if (frame.body.anchor && this.#scrollView.revealRange(frame.body.anchor, context.contentWidth)) {
 			this.#followBottom = false;
