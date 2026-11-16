@@ -204,13 +204,10 @@ export interface AgentStartEvent {
 
 export type PendingAnswerContinuation = "related" | "unrelated-background" | "unknown" | null;
 
-/** Durable selected-answer provenance at an agent-loop settle. */
 export interface SelectedAnswerSettle {
-	/** Persisted session entry for the selected assistant answer. */
 	entryId: string;
-	/** Process-local identity shared with this answer's message lifecycle events. */
 	messageId: string;
-	/** True only when no related or unknown continuation is pending. */
+	/** False for related or unknown continuation provenance. */
 	isFinal: boolean;
 	/** Why the session may resume after this settle; unknown never establishes finality. */
 	pendingContinuation: PendingAnswerContinuation;
@@ -226,7 +223,6 @@ export interface AgentEndEvent {
 	 * treat this as a user-visible terminal settle.
 	 */
 	willContinue?: boolean;
-	/** Present only when the selected assistant answer has a durable persisted identity. */
 	settle?: SelectedAnswerSettle;
 }
 

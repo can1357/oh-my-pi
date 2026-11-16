@@ -126,12 +126,10 @@ describe("AgentSession session_stop willContinue", () => {
 		expect(sessionStopCalls).toBe(2);
 		expect(agentEnds).toHaveLength(2);
 		expect(mock.calls).toHaveLength(2);
-		// First settle scheduled a continuation related to the selected answer.
 		expect(agentEnds[0]?.willContinue).toBe(true);
 		expect(agentEnds[0]?.settle).toMatchObject({ isFinal: false, pendingContinuation: "related" });
 		expect(agentEnds[0]?.settle?.entryId).toBeTruthy();
 		expect(agentEnds[0]?.settle?.messageId).toBe(assistantEnds[0]?.messageId);
-		// The continuation produced a distinct durable answer and settled terminally.
 		expect(agentEnds[1]?.willContinue).toBeFalsy();
 		expect(agentEnds[1]?.settle).toMatchObject({ isFinal: true, pendingContinuation: null });
 		expect(agentEnds[1]?.settle?.entryId).toBeTruthy();
