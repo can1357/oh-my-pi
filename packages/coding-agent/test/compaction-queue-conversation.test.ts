@@ -320,10 +320,12 @@ describe("compaction queue conversation ownership", () => {
 		h.helpers.queueCompactionMessage("older queued", "followUp");
 		h.helpers.queueCompactionMessage("newer queued", "followUp");
 		h.input.handleDequeue();
-		expect(h.editor.getExpandedText()).toBe("newer queued");
+		expect(h.editor.getExpandedText()).toBe("=> newer queued");
 		h.editor.setText("newer queued with my suffix");
 		h.input.handleDequeue();
 		expect(h.ctx.compactionQueuedMessages).toEqual([]);
+		// The edited draft is no longer shorthand, so the older entry returns
+		// through the plain prepend instead of the `=>` requeue form.
 		expect(h.editor.getExpandedText()).toBe("older queued\n\nnewer queued with my suffix");
 	});
 
@@ -332,9 +334,11 @@ describe("compaction queue conversation ownership", () => {
 		h.helpers.queueCompactionMessage("older queued", "followUp");
 		h.helpers.queueCompactionMessage("newer queued", "followUp");
 		h.input.handleDequeue();
-		expect(h.editor.getExpandedText()).toBe("newer queued");
+		expect(h.editor.getExpandedText()).toBe("=> newer queued");
 		h.editor.setText("X rewritten");
 		h.input.handleDequeue();
+		// The rewritten draft is not shorthand, so the entry returns through the
+		// plain prepend: the replacement is kept, nothing dropped.
 		expect(h.editor.getExpandedText()).toBe("older queued\n\nX rewritten");
 	});
 

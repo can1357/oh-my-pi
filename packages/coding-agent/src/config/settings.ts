@@ -440,6 +440,45 @@ function pathMatchesPrefix(cwd: string, prefix: string): boolean {
 	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+/**
+ * Phonon voice replacing each retired Kokoro voice family, keyed by Kokoro's
+ * accent/gender prefix (`af_heart` → American female → `harper`).
+ */
+const PHONON_VOICE_FOR_KOKORO_PREFIX: Record<string, string> = {
+	af_: "harper",
+	am_: "easton",
+	bf_: "maeve",
+	bm_: "edwin",
+};
+
+/**
+ * Local TTS moved from Kokoro-82M to Phonon 31M: rewrite configured Kokoro
+ * voice ids (`tts.localVoice`, `speech.voice`) to the Phonon voice of the same
+ * accent and gender, and a `local/kokoro` speech role to `local/phonon-31m`.
+ * Handles nested and quoted-dotted sources.
+ */
+function migrateKokoroSpeechSettings(raw: RawSettings): void {
+	const phononVoice = (value: unknown): string | undefined =>
+		typeof value === "string" ? PHONON_VOICE_FOR_KOKORO_PREFIX[value.slice(0, 3)] : undefined;
+	const phononRole = (value: unknown): unknown =>
+		value === "local/kokoro"
+			? "local/phonon-31m"
+			: Array.isArray(value)
+				? value.map(entry => (entry === "local/kokoro" ? "local/phonon-31m" : entry))
+				: value;
+	const leaves: Array<[root: string, leaf: string, migrate: (value: unknown) => unknown]> = [
+		["tts", "localVoice", value => phononVoice(value) ?? value],
+		["speech", "voice", value => phononVoice(value) ?? value],
+		["modelRoles", "speech", phononRole],
+	];
+	for (const [root, leaf, migrate] of leaves) {
+		const rootObj = raw[root];
+		if (isRecord(rootObj) && leaf in rootObj) rootObj[leaf] = migrate(rootObj[leaf]);
+		const dotted = `${root}.${leaf}`;
+		if (dotted in raw) raw[dotted] = migrate(raw[dotted]);
+	}
+}
+
 function stringArrayFromUnknown(value: unknown): string[] {
 	if (typeof value === "string") return [value];
 	if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
@@ -803,7 +842,12 @@ export class Settings {
 	/** Observers of own-layer and scope changes ({@link onLayersChange}). */
 	#layerListeners = new Set<() => void>();
 
-	private constructor(options: SettingsOptions = {}) {
+	/**
+	 * `projection`: a derived read-only view of another instance ({@link grantAuthority}), not a
+	 * session's settings; it stays out of the registry so legacy {@link findScopedSettings}
+	 * lookups never resolve to it.
+	 */
+	private constructor(options: SettingsOptions = {}, { projection = false }: { projection?: boolean } = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
@@ -811,7 +855,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
-		liveSettingsInstances.add(new WeakRef(this));
+		if (!projection) liveSettingsInstances.add(new WeakRef(this));
 		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
 	}
 
@@ -911,7 +955,7 @@ export class Settings {
 		if (this.#derived && this.#parent) return this.#parent.grantAuthority();
 		const revision = this.revision;
 		if (this.#grantView?.revision === revision) return this.#grantView.view;
-		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir });
+		const view = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir }, { projection: true });
 		view.#storage = this.#storage;
 		view.#global = this.#operatorLayers();
 		inheritWarnings(view, this);
@@ -3617,13 +3661,13 @@ export class Settings {
 			delete raw["task.completionProbeMs"];
 		}
 
-		// Early per-agent toggles were persisted as booleans even though the
-		// runtime record contract is "on"/"off"/model pattern. Normalize each
-		// layer before merging so project-level false still overrides global true.
+		// Per-agent records accept booleans from early persisted toggles and
+		// hand-written YAML, though the runtime contract is "on"/"off"/model pattern.
+		// Normalize each layer before merging so project-level false still overrides global true.
 		{
 			const taskObj = isRecord(raw.task) ? raw.task : undefined;
 			if (taskObj) {
-				for (const key of ["agentPrewalk", "agentAdvisor"]) {
+				for (const key of ["agentPrewalk", "agentAdvisor", "agentPrewalkAuto"]) {
 					const overrides = isRecord(taskObj[key]) ? taskObj[key] : undefined;
 					if (!overrides) continue;
 					for (const agentName in overrides) {
@@ -3653,6 +3697,8 @@ export class Settings {
 			"remindersMax",
 			value => typeof value === "number" && Number.isFinite(value),
 		);
+
+		migrateKokoroSpeechSettings(raw);
 
 		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
 		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
@@ -4443,9 +4489,10 @@ export class Settings {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Weak registry of every constructed instance so `resetSettingsForTest` can
- * disarm stray background saves on isolated instances too. WeakRefs never
- * retain instances; the set is cleared on every test reset.
+ * Weak registry of every constructed instance except in-memory projections, so
+ * `resetSettingsForTest` can disarm stray background saves on isolated
+ * instances too and {@link findScopedSettings} can resolve a session by scope.
+ * WeakRefs never retain instances; the set is cleared on every test reset.
  */
 const liveSettingsInstances = new Set<WeakRef<Settings>>();
 

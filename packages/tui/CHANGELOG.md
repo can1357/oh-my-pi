@@ -17,22 +17,33 @@
 
 ### Added
 
-- Todo tool status line now shows count for multiple task targets
-- Composer image tokens now preserve pasted image blobs when copying drafts in Tern.
-- Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
-- Markdown links handled by registered extension schemes now use a distinct `mdExtensionLink` theme color, with a muted fallback for themes that do not define it.
-- Approval dialogs now distinguish allowed and prompted segments in compound Bash commands, using clear colors and opening at the first segment requiring approval.
-- Added an optional Branch action to chat and a `b` shortcut in the BTW history sheet.
+- `HtmlFormDialog` option notes take pasted images when the form is opened with `acceptImages`: the open note is a paste target (`attachImage`, `beginPaste`, `pasteText`), a deleted `[Image #N]` marker drops its image, and `OptionNote.images` carries the rest ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
 
 ### Fixed
 
-- Fixed asynchronous Bash commands switching to the raw command line instead of remaining visible in the interpreted shell view.
-- Improved rendering when switching to a subagent, resuming a session, or rebuilding a long transcript so the newest messages appear immediately without transient placeholder blocks.
-- Fixed Markdown task lists so completed and open items display distinct checkboxes in transcripts.
-- Fixed DEC 2048 in-band resize reports inserting terminal resize data into the composer on iTerm2.
-- Fixed the working-row animation slowing dramatically while waiting for a tool or model on terminals without synchronized output, including tmux 3.6.
-- Expanded tool output in IRC cards now displays the complete soft-wrapped message, and collapsed cards with hidden text show the `Ctrl+O: Expand` hint.
-- Fixed premature scrolling in the `/resume` session picker when navigating near the vertical midpoint.
+- Fixed the model hub offering models a role can never use (such as image or speech models for Default) when adding or replacing that role's fallback ([#19371](https://github.com/can1357/oh-my-pi/pull/19371) by [@Xytronix](https://github.com/Xytronix))
+- Fixed spelling assistance (macOS typo marks, autocorrect and replacements) and word completion acting on `!` shell and `$` Python drafts ([#12474](https://github.com/can1357/oh-my-pi/pull/12474) by [@aleister1102](https://github.com/aleister1102))
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added task counts to the Todo status line when work is assigned to multiple targets.
+- Preserved pasted images when copying Composer drafts in Tern.
+- Added the ability to delete the selected prompt from history by pressing Delete at the end of the Ctrl+R search field.
+- Added distinct theming for Markdown links using registered extension schemes, with a muted fallback for themes that do not define the new color.
+- Improved compound Bash command approval dialogs by distinguishing allowed and approval-required segments and opening at the first segment requiring approval.
+- Added an optional Branch action to chat, including the `b` shortcut in the BTW history sheet.
+
+### Fixed
+
+- Fixed asynchronous Bash commands switching from the interpreted shell view to the raw command line.
+- Improved transcript rendering when switching to a subagent, resuming a session, or rebuilding a long transcript so the newest messages appear immediately.
+- Fixed Markdown task lists displaying the wrong checkbox state for completed and open items.
+- Fixed iTerm2 inserting terminal resize data into the composer when reporting in-band resizes.
+- Improved working-row animation while waiting for tools or models on terminals without synchronized output, including tmux 3.6.
+- Fixed expanded IRC tool cards to show complete soft-wrapped output and added an expand hint to collapsed cards containing hidden text.
+- Fixed premature scrolling in the `/resume` session picker when navigating near the middle of the list.
 
 ## [18.20.0] - 2026-11-12
 

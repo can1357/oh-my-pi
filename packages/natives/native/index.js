@@ -39,6 +39,7 @@ export const LiveWebRtcPeer = nativeBindings.LiveWebRtcPeer ?? missingNativeClas
 export const MacAppearanceObserver = nativeBindings.MacAppearanceObserver ?? missingNativeClass("MacAppearanceObserver");
 export const MacOSFrontApp = nativeBindings.MacOSFrontApp ?? missingNativeClass("MacOSFrontApp");
 export const NativeOAuthCallback = nativeBindings.NativeOAuthCallback ?? missingNativeClass("NativeOAuthCallback");
+export const PhononTts = nativeBindings.PhononTts ?? missingNativeClass("PhononTts");
 export const PipeStreams = nativeBindings.PipeStreams ?? missingNativeClass("PipeStreams");
 export const PowerAssertion = nativeBindings.PowerAssertion ?? missingNativeClass("PowerAssertion");
 export const Process = nativeBindings.Process ?? missingNativeClass("Process");

@@ -89,7 +89,6 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
 	AssistantTextRenderer,
 	AutocompleteProviderFactory,
@@ -118,7 +117,7 @@ import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import type { GoalModeState } from "../goals/state";
-import { rebindMemoryBackendForCwd } from "../hindsight/backend";
+import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
 import { hasNativeJudge } from "../judgment";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -184,7 +183,6 @@ import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { type DictationTarget, MicCursor, type SttCallbacks, STTController, type SttState } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
@@ -392,15 +390,14 @@ import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
+	ComposerOwner,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderInitialMessagesOptions,
 	RenderSessionContextOptions,
 	ResumeSessionOptions,
-	SessionPickHandler,
 	ShowStatusOptions,
-	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
 	YieldCompaction,
 } from "./types";
@@ -1964,6 +1961,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 	approvalOwnsComposer = false;
+	composerOwner?: ComposerOwner;
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
 	}
@@ -2938,9 +2936,18 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (event.type === "config_warnings_changed") {
 					this.#syncHeaderExtras();
 				}
-				// A turn the TUI did not submit (an extension message, a background job) leaves
-				// getUserInput pending, so arm the loop's next iteration here instead.
-				if (event.type === "agent_end" && this.onInputCallback) this.#scheduleLoopAutoSubmit();
+				// A terminal provider failure is not a loop yield: resubmitting the
+				// captured prompt would append another user turn (and every @file
+				// attachment) without making progress. Pauses still belong to the
+				// run and must not park the loop.
+				if (event.type === "agent_end") {
+					const last = event.messages.findLast(message => message.role === "assistant");
+					if (last?.stopReason === "error" && this.loopModeEnabled && this.loopPrompt) {
+						this.pauseLoop();
+					} else if (this.onInputCallback) {
+						this.#scheduleLoopAutoSubmit();
+					}
+				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
@@ -3062,18 +3069,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.syncIdleMaintenanceView();
 		// Publish native send readiness even when no user input triggers another frame.
 		this.ui.requestRender();
-	}
-
-	/** Reload the title-generation system prompt override for the provided working
-	 *  directory and stash it on the session so first-input titling
-	 *  ({@link input-controller}) and replan-driven refresh
-	 *  ({@link AgentSession.#refreshTitleAfterReplan}) share one source
-	 *  ({@link discoverTitleSystemPromptFile}; issue #3734). */
-	async refreshTitleSystemPrompt(cwd?: string): Promise<void> {
-		const basePath = cwd ?? this.sessionManager.getCwd();
-		const titleSystemPromptSource = discoverTitleSystemPromptFile(basePath);
-		const resolved = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
-		this.session.setTitleSystemPrompt(resolved);
 	}
 
 	/**
@@ -3265,48 +3260,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Everything after chdir is a rescope of cwd-derived state. If any of it
 		// fails, undo the chdir so `false` reliably means "nothing committed";
 		// callers roll back their own session/manager state on false.
+		const scopedSettings = isSettingsInitialized() ? settings : undefined;
 		try {
-			// Re-scope project settings (`.claude/settings.yml` etc.) to the new
-			// directory in place so the active session and every settings reader pick
-			// up the destination project's configuration.
-			if (isSettingsInitialized()) {
-				await settings.reloadForCwd(newCwd);
-				// The reload fired the memory scope hooks; complete the rebind
-				// before the move commits so the next prompt cannot recall or
-				// retain against the source project's memory.
-				await rebindMemoryBackendForCwd(this.session);
-			}
-			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
-			// the next prompt sees everything scoped to the new project directory.
-			clearClaudePluginRootsCache();
-			await this.refreshTitleSystemPrompt(newCwd);
-			await this.session.refreshSkillsAndCommands();
+			await rescopeSessionToCwd(this.session, scopedSettings, newCwd);
 		} catch (error) {
 			// Undo the whole transition: the process cwd, Settings scope, and
-			// cwd-derived caches (provider globals, plugin roots, capabilities,
-			// skills, slash commands) must all return to the source project so a
-			// `false` result reliably means nothing was committed.
+			// cwd-derived state (memory, plugin roots, agents, extensions, custom
+			// tools, MCP servers, skills, slash commands) must all return to the
+			// source project so a `false` result reliably means nothing was committed.
 			this.sessionManager.setCwdWithoutRelocation(previousCwd);
 			try {
 				setProjectDir(previousCwd);
-				if (isSettingsInitialized()) {
-					await settings.reloadForCwd(previousCwd);
-					await rebindMemoryBackendForCwd(this.session);
-				}
-				clearClaudePluginRootsCache();
-				await this.refreshTitleSystemPrompt(previousCwd);
-				await this.session.refreshSkillsAndCommands();
+				await rescopeSessionToCwd(this.session, scopedSettings, previousCwd);
 			} catch (restoreError) {
 				const actual = this.sessionManager.getCwd();
 				try {
 					setProjectDir(actual);
-					if (isSettingsInitialized()) {
-						await settings.reloadForCwd(actual);
-						await rebindMemoryBackendForCwd(this.session);
-					}
-					clearClaudePluginRootsCache();
-					await this.refreshTitleSystemPrompt(actual);
-					await this.session.refreshSkillsAndCommands();
+					await rescopeSessionToCwd(this.session, scopedSettings, actual);
 				} catch {}
 				this.showError(
 					`Failed to switch to ${newCwd} (${error instanceof Error ? error.message : String(error)}), and restoring the previous workspace failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}`,
@@ -4196,8 +4166,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			pendingSubmissionDispose?.();
 			this.#optimisticUserMessageComponents = [];
 			this.#pendingWorkingMessage = undefined;
-			// A run that only waits on background jobs keeps its working row, which
-			// names the wait; the settle watch or the next run tears it down.
+			// A run paused on outside work keeps its working row, which names the
+			// wait; the next loop or the run's `agent_end` tears it down.
 			if (this.loadingAnimation && !this.#eventController.isAwaitingAsyncWork()) {
 				this.#stopLoadingAnimation(true);
 			}
@@ -8530,7 +8500,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.hasAdmittedSubmission ||
 			this.session.isStreaming ||
 			this.session.queuedMessageCount > 0 ||
-			this.session.hasPendingAsyncWork()
+			this.session.isRunActive
 		) {
 			return;
 		}
@@ -9621,7 +9591,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		void this.#selectorController.showGitTui(revision);
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean; selectOnly?: SelectOnlyModelSelectorOptions }): void {
+	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
 	}
 
@@ -9629,8 +9599,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.switchSessionModel(model, thinkingLevel);
 	}
 
-	showPluginSelector(mode?: "install" | "uninstall"): void {
-		void this.#selectorController.showPluginSelector(mode);
+	showPluginSelector(mode?: "install" | "uninstall"): Promise<void> {
+		return this.#selectorController.showPluginSelector(mode);
 	}
 
 	showUserMessageSelector(startAt?: string): void {
@@ -9649,8 +9619,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThinkingSelector();
 	}
 
-	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void {
-		void this.#selectorController.showSessionSelector(source, onSelect);
+	showSessionSelector(source?: ForeignSessionSource): void {
+		void this.#selectorController.showSessionSelector(source);
 	}
 
 	async handleResumeSession(sessionPath: string, options?: ResumeSessionOptions): Promise<void> {

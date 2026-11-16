@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { formatQueueShorthand, parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/prompt/queue-input";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { ParsedSlashCommand, TuiSlashCommandRuntime } from "../types";
 
@@ -120,6 +121,7 @@ export function restoreQueuedDraft(
 	editor: CustomEditor,
 	entries: readonly RestoredQueuedMessage[],
 	currentText?: string,
+	options?: { queuedShorthand?: boolean },
 ): number {
 	if (entries.length === 0) return 0;
 	// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
@@ -134,7 +136,13 @@ export function restoreQueuedDraft(
 	// keep their original positions.
 	const queuedText = queuedDraftText(editor, entries);
 	const current = currentText ?? editor.getText();
-	const combinedText = [queuedText, current].filter(text => text.trim()).join("\n\n");
+	// A queued requeue returns as `=>` shorthand only when the draft already holds
+	// that form (or is empty); any other draft keeps the plain prepend.
+	const queuedDraft = options?.queuedShorthand ? (current.trim() ? parseQueueShorthand(current) : "") : undefined;
+	const combinedText =
+		queuedDraft === undefined
+			? [queuedText, current].filter(text => text.trim()).join("\n\n")
+			: formatQueueShorthand([queuedText, ...splitQueuedMessages(queuedDraft)]);
 	// Hand queued images back to the pending-image buffer first (links are
 	// re-materialized lazily), then set the text: setCollapsedText folds the
 	// renumbered `[Image #N, WxH]` references back into chip tokens, and the
