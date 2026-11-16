@@ -227,6 +227,11 @@ describe("replayPrompt", () => {
 			type: "text",
 			text: '<tool_result id="call-2" name="read" error="true">',
 		});
+		const quoted = { ...mixed, toolCallId: 'call-"quoted"\\path', toolName: 'read "image"\nfile' };
+		expect(toolResultImagesPrompt(quoted)[0]).toEqual({
+			type: "text",
+			text: `<tool_result id=${JSON.stringify(quoted.toolCallId)} name=${JSON.stringify(quoted.toolName)}>`,
+		});
 	});
 	it("sends trailing user input as-is and labels earlier transcript messages", () => {
 		const blocks = replayPrompt([
