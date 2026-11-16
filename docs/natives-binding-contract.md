@@ -24,7 +24,7 @@ There is no `NativeBindings` declaration-merging lifecycle or `packages/natives/
 Two additional public subpaths are lazy:
 
 - `@oh-my-pi/pi-natives/path`: `expandWindowsLongPath(path)` and `getWindowsShortPath(path)`; native loading occurs only on Windows, while other platforms return the input unchanged.
-- `@oh-my-pi/pi-natives/vcs`: repository discovery/requirements (`git`, `repo`, `repoForDisplay`, `require`, `requireGit`, `gitInfo`, `jj`, `isPureJj`), clone/detach/patch helpers, VCS error predicates, and `watch`. Native-backed calls load and memoize the addon. `repoForDisplay` prefers Jujutsu on equal-root ties; `repo` retains Git-safe discovery precedence.
+- `@oh-my-pi/pi-natives/vcs`: repository discovery/requirements (`git`, `repo`, `repoForDisplay`, `require`, `requireGit`, `gitInfo`, `jj`, `isPureJj`), the synchronous discard check `discardsWorkSync`, clone/detach/patch helpers, VCS error predicates, and `watch`. Native-backed calls load and memoize the addon. `repoForDisplay` prefers Jujutsu on equal-root ties; `repo` retains Git-safe discovery precedence.
 
 Do not import unexported `native/*` implementation paths from package consumers.
 
