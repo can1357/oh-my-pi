@@ -2803,6 +2803,89 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("records a command's server-applied edit for its caller only while it is the sole command in flight", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-command-edit-");
+		const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+		try {
+			const filePath = path.join(tempDir.path(), "a.ts");
+			await Bun.write(filePath, "const oldName = 1;\n");
+			const uri = fileToUri(filePath);
+			const held = Promise.withResolvers<void>();
+			let nextEditId = 1_000;
+			const fakeServer = installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { executeCommandProvider: { commands: ["rename", "hold"] } } },
+					});
+				} else if (message.method === "workspace/executeCommand") {
+					const { command, arguments: args } = message.params as { command: string; arguments: string[] };
+					if (command === "hold") {
+						void held.promise.then(() => server.send({ jsonrpc: "2.0", id: message.id, result: null }));
+						return;
+					}
+					// Like a real server: apply the edit, wait for the client's answer, then answer the command.
+					const [from, to] = args;
+					const editId = nextEditId++;
+					const edit = {
+						changes: {
+							[uri]: [
+								{
+									range: { start: { line: 0, character: 6 }, end: { line: 0, character: 6 + from.length } },
+									newText: to,
+								},
+							],
+						},
+					};
+					server.send({ jsonrpc: "2.0", id: editId, method: "workspace/applyEdit", params: { edit } });
+					void server
+						.waitFor(reply => reply.id === editId && reply.method === undefined)
+						.then(() => server.send({ jsonrpc: "2.0", id: message.id, result: null }));
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const client = await lspClient.getOrCreateClient(config, tempDir.path());
+			const recorded: FileChangeReport[] = [];
+			const record = (change: Omit<FileChangeReport, "tool">) => recorded.push({ ...change, tool: "lsp" });
+
+			await lspClient.executeCommandWithLsp(
+				client,
+				{ command: "rename", arguments: ["oldName", "newName"] },
+				undefined,
+				record,
+			);
+			// A second command in flight makes the owner of the next edit ambiguous.
+			const hold = lspClient.executeCommandWithLsp(client, { command: "hold" });
+			await fakeServer.waitFor(message => (message.params as { command?: string } | undefined)?.command === "hold");
+			await lspClient.executeCommandWithLsp(
+				client,
+				{ command: "rename", arguments: ["newName", "lastName"] },
+				undefined,
+				record,
+			);
+			held.resolve();
+			await hold;
+
+			expect(await Bun.file(filePath).text()).toBe("const lastName = 1;\n");
+			expect(recorded).toEqual([
+				{
+					path: await fsp.realpath(filePath),
+					tool: "lsp",
+					before: "const oldName = 1;\n",
+					after: "const newName = 1;\n",
+					beforeMtimeMs: expect.any(Number),
+				},
+			]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("does not reuse stale file diagnostics after another URI publishes", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-stale-diags-");
 		try {

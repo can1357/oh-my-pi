@@ -136,7 +136,7 @@ describe("workspace edit recorder", () => {
 
 			expect(await fs.readFile(target, "utf8")).toBe("const newName = 1;\n");
 			expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
-			expect(await fs.readlink(link)).toBe("../target.ts");
+			expect(path.resolve(workspace, await fs.readlink(link))).toBe(target);
 			expect(recorded).toEqual([{ path: target, before, after: "const newName = 1;\n", beforeMtimeMs }]);
 		},
 	);

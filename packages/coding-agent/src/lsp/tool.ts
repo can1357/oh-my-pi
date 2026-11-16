@@ -21,6 +21,7 @@ import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
 	ensureWorkspaceFolders,
+	executeCommandWithLsp,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
@@ -1521,15 +1522,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 							applyWorkspaceEdit: async edit =>
 								applyWorkspaceEditWithLsp(edit, this.session.cwd, signal, recordFileChange),
 							executeCommand: async commandItem => {
-								await sendRequest(
-									client,
-									"workspace/executeCommand",
-									{
-										command: commandItem.command,
-										arguments: commandItem.arguments ?? [],
-									},
-									signal,
-								);
+								await executeCommandWithLsp(client, commandItem, signal, recordFileChange);
 							},
 						});
 
