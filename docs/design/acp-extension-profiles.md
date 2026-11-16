@@ -870,7 +870,9 @@ This question is only about a second, operator-side argument list. The larger qu
 
 **Recommended:** no. The ledger in §4.4 shows every behavior of the three profiles fits data or is a core rule. Add a hook only when a real profile fails that ledger.
 
-### Q10. May a profile enable itself by searching `$PATH`?
+**Recommended:** no. The explicit convar stays the only enable switch (`crates/driver/src/delegated_acp.rs:10-11`). `[executable].names` only feeds doctor and enable hints.
+
+**Owner decision (2026-11-16):** resolve bare program name once at approval; hash that file and always start exactly it; re-hash before each start. Existing setups work after one re-approval.
 
 **Recommended:** no. The explicit convar stays the only enable switch (`crates/driver/src/delegated_acp.rs:10-11`). `[executable].names` only feeds doctor and enable hints.
 
@@ -888,17 +890,27 @@ No production code builds the registry at the pinned HEAD, UNVERIFIED(U1).
 
 ### Q13. Add an operator-only user file for profiles?
 
-**Recommended:** not in v1. If operators later need private profiles without packaging an extension, reuse the same schema and the same approval gate, as the research note suggests for per-tool definitions (`docs/research/format-registry-options.md:439`).
+**Recommended:** no `omp_api` bump if the host's kind vocabulary is not versioned by API level; if it is, bump it in P1 and say so in the manifest docs. Let a content-only extension omit `[requires].python` when its `entry` is never imported.
+
+The kind is also a new core manifest kind, so it extends the T1 surface of ADR 0049 (§1.1). **Recommended:** record it as an amendment of ADR 0049 (a vendor-neutral contract, `delegated-agents`, in T1) alongside this design's ADR 0043 amendment, and let the owner confirm that it meets the T1 admission test.
+
+**Owner decision (2026-11-16):** delegated-agents is host manifest vocabulary in crates/ext; vendor profile rows stay in T2 extensions; bump omp_api.
 
 ### Q14. Does a new content kind need an `omp_api` change, do content-only extensions need Python, and is the kind an ADR 0049 T1 amendment?
 
-Content rows have no `api` field (`docs/py/14-deploy.md:719-721`), UNVERIFIED(U5), and every existing manifest requires Python 3.14 (`extensions/forge/omp.toml:30-31`), UNVERIFIED(U12).
+**Recommended:** hash the canonical path at approval, re-hash immediately before spawn, and spawn by that same path. Accept the narrowed window for v1: it needs an attacker who can replace the program file in between, UNVERIFIED(U9).
+
+**Owner decision (2026-11-16):** resolve bare program name once at approval; hash that file and always start exactly it; re-hash before each start. Existing setups work after one re-approval.
 
 **Recommended:** no `omp_api` bump if the host's kind vocabulary is not versioned by API level; if it is, bump it in P1 and say so in the manifest docs. Let a content-only extension omit `[requires].python` when its `entry` is never imported.
 
 The kind is also a new core manifest kind, so it extends the T1 surface of ADR 0049 (§1.1). **Recommended:** record it as an amendment of ADR 0049 (a vendor-neutral contract, `delegated-agents`, in T1) alongside this design's ADR 0043 amendment, and let the owner confirm that it meets the T1 admission test.
 
-### Q15. The gap between hashing the program and spawning it
+See §6.4.
+
+**Recommended:** keep unknown `sv_delegated_*` lines aside and re-apply them after profiles register, warning once for lines that still have no profile, UNVERIFIED(U6).
+
+**Owner decision (2026-11-16):** hold skipped `sv_delegated_*` lines, re-apply after profiles register, start program only if approval digest matches. The behaviour change is "skipped, then re-applied", not "hard error to warning".
 
 **Recommended:** hash the canonical path at approval, re-hash immediately before spawn, and spawn by that same path. Accept the narrowed window for v1: it needs an attacker who can replace the program file in between, UNVERIFIED(U9).
 
