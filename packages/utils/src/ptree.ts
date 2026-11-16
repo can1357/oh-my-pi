@@ -308,6 +308,10 @@ export class ChildProcess<In extends InMask = InMask> {
 	get killed() {
 		return this.proc.killed;
 	}
+	/** The root has exited, by code or by signal (Bun reports a signalled root with a null `exitCode`). */
+	get #rootExited(): boolean {
+		return this.proc.exitCode !== null || this.proc.signalCode !== null;
+	}
 	get stdin(): Bun.SpawnOptions.WritableToIO<In> {
 		return this.proc.stdin;
 	}
@@ -345,7 +349,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			this.#exitReasonPending = reason;
 			// The normalized exit promise may already have resolved from a dead
 			// group leader; wait() still needs to report the later deadline.
-			if (this.proc.exitCode !== null) this.#exitReason = reason;
+			if (this.#rootExited) this.#exitReason = reason;
 		}
 		// A command under the Linux subreaper is stopped without ever signalling
 		// the subreaper politely: SIGTERM would end it, its orphaned descendants
@@ -375,12 +379,7 @@ export class ChildProcess<In extends InMask = InMask> {
 				return;
 			}
 		}
-		if (
-			this.proc.exitCode !== null &&
-			this.#terminateGroup &&
-			this.#openPipeReaders > 0 &&
-			process.platform !== "win32"
-		) {
+		if (this.#rootExited && this.#terminateGroup && this.#openPipeReaders > 0 && process.platform !== "win32") {
 			// Bun detached children are POSIX session/process-group leaders. If
 			// the leader has exited, the native Process handle cannot rediscover
 			// its PGID, but a pipe-holding descendant keeps that exact group alive.
@@ -747,7 +746,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	[Symbol.dispose](): void {
-		if (this.proc.exitCode !== null) return;
+		if (this.#rootExited) return;
 		this.kill(new AbortError("process disposed", this.#stderrTail));
 	}
 }

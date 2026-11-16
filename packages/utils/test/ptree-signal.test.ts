@@ -245,15 +245,19 @@ describe("ptree signal abort handling", () => {
 	);
 
 	// Real processes: the abort has to reach a background process that outlived its parent.
-	it.skipIf(process.platform === "win32")(
-		"kills a detached group still holding the pipes when the signal aborts during the exit grace",
-		async () => {
+	it.skipIf(process.platform === "win32").each([
+		{ leader: "exits", tail: "" },
+		// Bun reports a signalled leader with a null exit code and `killed` set.
+		{ leader: "is killed by a signal", tail: "; kill -TERM $$" },
+	])(
+		"kills a detached group still holding the pipes when the signal aborts during the exit grace (leader $leader)",
+		async ({ tail }) => {
 			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ptree-exit-grace-"));
 			const pidFile = path.join(dir, "bg.pid");
 			const controller = new AbortController();
 			let pid = Number.NaN;
 			try {
-				using child = spawn(["sh", "-c", `sleep 30 & echo $! > "${pidFile}"`], {
+				using child = spawn(["sh", "-c", `sleep 30 & echo $! > "${pidFile}"${tail}`], {
 					detached: true,
 					signal: controller.signal,
 					exitGraceMs: 5_000,
