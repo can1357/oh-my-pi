@@ -917,13 +917,20 @@ describe("callSessionTool", () => {
 
 	it("rejects checkpoint and rewind before reaching the registry", async () => {
 		const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "ok" }] });
-		const session = createSession([createTool("checkpoint", execute), createTool("rewind", execute)]);
+		const session = createSession([
+			createTool("checkpoint", execute),
+			createTool("rewind", execute),
+			createTool("yield", execute),
+		]);
 
 		await expect(callSessionTool("checkpoint", { goal: "g" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
 		);
 		await expect(callSessionTool("rewind", { report: "r" }, { session })).rejects.toThrow(
 			"cannot run through the eval bridge",
+		);
+		await expect(callSessionTool("yield", { data: { result: "done" } }, { session })).rejects.toThrow(
+			"call the direct `yield` tool",
 		);
 		expect(execute).not.toHaveBeenCalled();
 	});
@@ -932,6 +939,7 @@ describe("callSessionTool", () => {
 		for (const [name, alias] of [
 			["checkpoint", "savepoint"],
 			["rewind", "restorepoint"],
+			["yield", "submit"],
 		]) {
 			const execute = vi.fn().mockResolvedValue({ content: [{ type: "text", text: "not committed" }] });
 			const tool = { ...createTool(name, execute), customWireName: alias };

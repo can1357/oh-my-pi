@@ -210,6 +210,31 @@ asyncio.run(check_intent())
 		}
 	});
 
+	it("rejects yield with a direct-tool error without executing it", async () => {
+		const calls: FakeCall[] = [];
+		const tool = makeFakeTool("yield", calls, {
+			content: [{ type: "text", text: "Result submitted." }],
+		});
+		const session = makeSession(new Map([["yield", tool]]));
+		const info = await ensurePyToolBridge();
+		const unregister = registerPyToolBridge("yield-session", "run-yield", { toolSession: session });
+		try {
+			const res = await call(info, {
+				session: "yield-session",
+				run: "run-yield",
+				name: "yield",
+				args: { data: { result: "done" } },
+			});
+			expect(await res.json()).toMatchObject({
+				ok: false,
+				error: expect.stringContaining("call the direct `yield` tool"),
+			});
+			expect(calls).toEqual([]);
+		} finally {
+			unregister();
+		}
+	});
+
 	it("rejects requests with a bad bearer token", async () => {
 		const info = await ensurePyToolBridge();
 		const res = await call(
