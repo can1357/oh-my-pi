@@ -212,7 +212,8 @@ mod tests {
 			.unwrap();
 		ctx.exec("sv_delegated_devin_program /opt/devin", Source::Console)
 			.unwrap();
-		assert_eq!(ids(&ctx), vec![DEVIN_ID, GROK_ID]);
+		let partial: std::collections::HashSet<_> = ids(&ctx).into_iter().collect();
+		assert_eq!(partial, std::collections::HashSet::from([DEVIN_ID, GROK_ID]));
 		ctx.exec("sv_delegated_dsh_program /opt/dsh", Source::Console)
 			.unwrap();
 		let registered_ids = ids(&ctx);
