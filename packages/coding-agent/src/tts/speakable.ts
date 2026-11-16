@@ -35,13 +35,13 @@ const MIN_SEGMENT = 24;
 /**
  * Mid-stream soft cut: once this much unpunctuated text is buffered, split at
  * a clause boundary instead of waiting for the sentence to end. Long sentences
- * synthesize as clause-sized pieces, keeping the playback pipeline fed (a
- * 280-char segment costs ~6s of synthesis — enough to drain the player dry).
+ * synthesize as clause-sized pieces, so audio starts before the sentence is
+ * complete and the playback pipeline stays fed.
  */
 const SOFT_CLAUSE_LEN = 160;
 /**
- * Hard cap per segment. Kokoro's `generate()` truncates past ~510 phoneme
- * tokens rather than splitting, so every emission path must stay well under it.
+ * Hard cap per segment: bounds one synthesis call and stays well inside the
+ * model's per-chunk text budget, so every emission path is spoken whole.
  */
 const MAX_SEGMENT = 280;
 
@@ -340,8 +340,8 @@ export class SpeakableStream {
 		for (;;) {
 			const buf = this.#buf;
 			const min = this.#spoke ? MIN_SEGMENT : FIRST_SEGMENT_MIN;
-			// Bounded: a sentence past MAX_SEGMENT risks Kokoro's ~510-phoneme
-			// truncation — fall through to clause/word cuts instead.
+			// Bounded: a sentence past MAX_SEGMENT falls through to clause/word
+			// cuts instead.
 			const sentence = findSentenceCut(buf, min);
 			if (sentence !== -1 && sentence <= MAX_SEGMENT) {
 				this.#cut(sentence, out);
