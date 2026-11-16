@@ -1024,6 +1024,8 @@ export class HtmlFormDialog implements Component, Focusable {
 		const option =
 			target ?? (stop.kind === "option" ? stop.option : (this.#open?.highlight ?? this.#current(stop.field)));
 		if (option === undefined || stop.field.options[option]?.disabled !== false) return;
+		// Opening a note hands the keys over, as up/down does, so a draft that refills later can't claim pastes.
+		this.#releaseGuard();
 		const editor = (this.#savedNoteEditor ??= new Editor(getEditorTheme()));
 		editor.setBorderVisible(false);
 		editor.setMaxHeight(4);
@@ -1133,7 +1135,7 @@ export class HtmlFormDialog implements Component, Focusable {
 
 	// ── Pasted images ────────────────────────────────────────────────────────
 
-	/** Whether {@link attachImage} would take an image now. */
+	/** Whether the form takes a new image paste now: a note is open and the form is shown. */
 	get acceptsImages(): boolean {
 		return !!this.#options.acceptImages && this.#noteEditor !== undefined && !this.#hidden;
 	}
@@ -1146,9 +1148,12 @@ export class HtmlFormDialog implements Component, Focusable {
 		return this.acceptsImages ? text => this.#pasteText(text) : undefined;
 	}
 
-	/** Adds an image to the open note; returns its `[Image #N, WxH]` marker for the caller to deliver. */
+	/**
+	 * Adds an image to the open note; returns its `[Image #N, WxH]` marker for the caller to deliver.
+	 * Takes it while the form is hidden too: a paste reserved before Alt+H still lands in its note.
+	 */
 	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
-		const note = this.acceptsImages ? this.#noteEditor : undefined;
+		const note = this.#options.acceptImages ? this.#noteEditor : undefined;
 		if (!note) return undefined;
 		note.images.push(image);
 		return formatVisionMarker("image", note.images.length, dims);
@@ -1391,8 +1396,8 @@ export class HtmlFormDialog implements Component, Focusable {
 	#setHidden(hidden: boolean): void {
 		if (this.#hidden === hidden) return;
 		this.#hidden = hidden;
-		// A hidden form takes no paste: reserved slots and a held save die with the view.
-		if (hidden) this.#noteEditor?.pastes.clear();
+		// A hidden form takes no new paste (see acceptsImages), but one already reserved still lands
+		// in its note, and an Enter held behind it still saves.
 		this.#open = undefined;
 		this.#syncControlFocus();
 	}

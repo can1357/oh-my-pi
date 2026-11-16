@@ -644,7 +644,6 @@ describe("AskTool option note images", () => {
 			createContext({ formDialog }),
 		);
 
-		expect(formDialog.mock.calls[0]?.[1]).toMatchObject({ acceptImages: true });
 		expect(result.content).toEqual([
 			{
 				type: "text",

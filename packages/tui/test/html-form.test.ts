@@ -547,16 +547,38 @@ describe("html form", () => {
 			expect(form.optionNotes()).toMatchObject([{ text: "/tmp/a.png" }]);
 		});
 
-		it("delivers nothing into the note when a paste reserved before hiding completes", () => {
+		it("lands a paste reserved before hiding, and the Enter held behind it still saves", () => {
 			const { form } = imageDialog();
 			form.handleInput(NOTE_KEY);
-			form.handleInput("kept");
+			form.handleInput("kept ");
 			const settle = form.beginPaste();
-			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
-			expect(settle("secret")).toBe(false);
-			form.handleNativeEvent({ type: "action", key: "", act: "show", mods: [] });
 			form.handleInput(ENTER);
-			expect(form.optionNotes()).toMatchObject([{ text: "kept" }]);
+			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
+			expect(form.beginPaste()("refused")).toBe(false);
+			const marker = form.attachImage(IMAGE, DIMS);
+			expect(settle(marker)).toBe(true);
+			expect(form.debugState().noteEdit).toBeUndefined();
+			expect(form.optionNotes()).toMatchObject([{ text: "kept [Image #1, 1x1]", images: [IMAGE] }]);
+		});
+
+		it("opening a note hands the keys over, so a draft that refills afterwards does not own input", () => {
+			let draft = "";
+			const presented: boolean[] = [];
+			const { form } = imageDialog({
+				inputGuard: {
+					isBlocked: () => draft.length > 0,
+					handleInput: vi.fn(),
+					hint: "typing edits your prompt",
+					syncPresentation: (blocked: boolean) => presented.push(blocked),
+				},
+			});
+			form.handleInput(NOTE_KEY);
+			draft = "late composer paste";
+			form.describe(CX);
+			expect(presented.at(-1)).toBe(false);
+			form.handleInput("x");
+			form.handleInput(ENTER);
+			expect(form.optionNotes()).toMatchObject([{ text: "x" }]);
 		});
 	});
 
