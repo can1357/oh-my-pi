@@ -83,7 +83,13 @@ export async function commitSelection(
 ): Promise<CommitOutcome> {
 	const message = composeMessage(request);
 	const changes = draft.selection();
-	if (changes.length === 0) throw new Error("Nothing selected; use take() first.");
+	if (changes.length === 0) {
+		throw new Error(
+			draft.paths.length === 0
+				? `Nothing to commit: ${draft.root} has no changes against HEAD.`
+				: "Nothing selected; use take() first.",
+		);
+	}
 	const repo = vcs.requireGit(draft.root);
 	const patches: Array<{ path: string; patch: string }> = [];
 	for (const change of changes) {

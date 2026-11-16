@@ -28,6 +28,7 @@
 - Fixed MCP stdio servers that exit or are killed before responding being reported only as "closed stdout"; the error now names the exit code or signal ([#16482](https://github.com/can1357/oh-my-pi/pull/16482) by [@adi-IL](https://github.com/adi-IL))
 - Pasting an image while a dialog that can't hold one has focus (the `ask` form, agents hub, `/annotate`, selectors) now shows "Image paste is not supported in this prompt" instead of attaching it to the chat editor hidden behind it ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
 - Rich-text pastes during approval type-to-steer, or into a dialog opened over a draft that still holds typing, now reach the chat editor as Markdown with their images instead of as plain text ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
+- Fixed the JavaScript `commit` eval prelude silently ignoring unknown options (e.g. `commit.draft({ cwd })` drafted the session's own checkout); it now throws naming the expected options, and committing a draft of an unchanged repository says so instead of suggesting `take()` ([#19440](https://github.com/can1357/oh-my-pi/issues/19440))
 
 ## [18.20.3] - 2026-11-16
 
