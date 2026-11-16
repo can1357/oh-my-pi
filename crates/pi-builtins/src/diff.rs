@@ -15,9 +15,13 @@ use std::{
 };
 
 use clap::{ArgAction, Parser};
+use jiff::{Timestamp, tz::TimeZone};
 use pi_diff::{Run, diff_line_tokens};
 
-use crate::host::{Host, Utility, forward_slash_display, strip_errno};
+use crate::{
+	host::{Host, Utility, forward_slash_display, strip_errno},
+	time_zone::shell_time_zone,
+};
 
 /// Parsed `diff` invocation.
 #[derive(Parser)]
@@ -133,6 +137,7 @@ struct Options<'a> {
 	strip_trailing_cr:   bool,
 	labels:              &'a [OsString],
 	excludes:            &'a [glob::Pattern],
+	time_zone:           &'a TimeZone,
 }
 
 /// A classified operand and its resolved filesystem path.
@@ -200,6 +205,7 @@ impl Utility for Diff {
 		} else {
 			Format::Normal
 		};
+		let time_zone = shell_time_zone(host);
 		let opts = Options {
 			format,
 			brief: self.brief,
@@ -213,6 +219,7 @@ impl Utility for Diff {
 			strip_trailing_cr: self.strip_trailing_cr,
 			labels: &self.labels,
 			excludes: &excludes,
+			time_zone: &time_zone,
 		};
 		match diff_main(&self.files, opts, host) {
 			Ok(code) => code,
@@ -529,13 +536,13 @@ fn diff_pair(
 	match opts.format {
 		Format::Normal => write_normal(out, &ops, &suppressed, &old, &new)?,
 		Format::Unified(context) => {
-			wline(out, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(out, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			wline(out, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a, opts.time_zone)?))?;
+			wline(out, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b, opts.time_zone)?))?;
 			write_unified(out, &ops, &suppressed, &old, &new, context)?;
 		},
 		Format::Context(context) => {
-			wline(out, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(out, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			wline(out, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a, opts.time_zone)?))?;
+			wline(out, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b, opts.time_zone)?))?;
 			write_context_format(out, &ops, &suppressed, &old, &new, context)?;
 		},
 	}
@@ -548,20 +555,19 @@ fn display_label(label: Option<&OsString>, name: &Path) -> String {
 
 /// Unified/context header field: the label verbatim when given, otherwise
 /// `NAME<TAB>TIMESTAMP` with the GNU timestamp format.
-fn header(label: Option<&OsString>, name: &Path, mtime: Option<SystemTime>) -> String {
+fn header(label: Option<&OsString>, name: &Path, mtime: Option<SystemTime>, time_zone: &TimeZone) -> Result<String, String> {
 	match label {
-		Some(label) => label.to_string_lossy().into_owned(),
-		None => format!("{}\t{}", name.display(), timestamp(mtime)),
+		Some(label) => Ok(label.to_string_lossy().into_owned()),
+		None => Ok(format!("{}\t{}", name.display(), timestamp(mtime, time_zone)?)),
 	}
 }
 
-/// GNU header timestamp: `%Y-%m-%d %H:%M:%S.%N %z` in local time. Stdin has
-/// no mtime and uses the current time, like GNU.
-fn timestamp(mtime: Option<SystemTime>) -> String {
+/// GNU header timestamp: `%Y-%m-%d %H:%M:%S.%N %z` in the shell's time zone.
+/// Stdin has no mtime and uses the current time, like GNU.
+fn timestamp(mtime: Option<SystemTime>, time_zone: &TimeZone) -> Result<String, String> {
 	let time = mtime.unwrap_or_else(SystemTime::now);
-	chrono::DateTime::<chrono::Local>::from(time)
-		.format("%Y-%m-%d %H:%M:%S%.9f %z")
-		.to_string()
+	let timestamp = Timestamp::try_from(time).map_err(|err| err.to_string())?;
+	Ok(timestamp.to_zoned(time_zone.clone()).strftime("%Y-%m-%d %H:%M:%S.%N %z").to_string())
 }
 
 /// Writes `range` lines of `file` prefixed with `marker`, emitting the GNU
@@ -952,10 +958,12 @@ fn child_display(dir: &Path, name: &OsStr) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::Path};
+	use std::{ffi::OsString, fs, path::Path, time::Duration};
+
+	use clap::Parser as _;
 
 	use super::Diff;
-	use crate::host::run_util;
+	use crate::host::{Host, Utility, run_caught, run_util};
 
 	fn run_in(cwd: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
 		let (code, capture) = run_util::<Diff>(args, stdin, cwd);
@@ -1026,6 +1034,41 @@ mod tests {
 		assert_eq!((stamp.as_bytes()[4], stamp.as_bytes()[7]), (b'-', b'-'), "got: {stamp}");
 		assert!(stamp.contains('.') && (stamp.contains(" +") || stamp.contains(" -")));
 		assert!(stdout.contains("@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"), "got: {stdout}");
+	}
+
+	fn assert_headers_use_the_shell_time_zone(flag: &str, markers: [&str; 2]) {
+		let dir = tempfile::tempdir().unwrap();
+		write_pair(dir.path(), "old\n", "new\n");
+		let time = std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700);
+		for name in ["a.txt", "b.txt"] {
+			fs::File::options()
+				.write(true)
+				.open(dir.path().join(name))
+				.unwrap()
+				.set_times(fs::FileTimes::new().set_modified(time))
+				.unwrap();
+		}
+		let (mut host, capture) = Host::for_test("diff", "", dir.path());
+		host.set_test_var("TZ", "Asia/Tokyo");
+		let argv: Vec<OsString> = ["diff", flag, "a.txt", "b.txt"].into_iter().map(OsString::from).collect();
+		let parsed = Diff::try_parse_from(Diff::rewrite_argv(argv).unwrap()).unwrap();
+		assert_eq!(run_caught::<Diff>(parsed, &mut host), 1, "{}", capture.err());
+		assert_eq!(capture.err(), "");
+		let stdout = capture.out();
+		let mut lines = stdout.lines();
+		for (marker, name) in markers.into_iter().zip(["a.txt", "b.txt"]) {
+			assert_eq!(lines.next().unwrap(), format!("{marker} {name}\t2023-11-15 07:13:20.123456700 +0900"));
+		}
+	}
+
+	#[test]
+	fn unified_headers_use_the_shell_time_zone() {
+		assert_headers_use_the_shell_time_zone("-u", ["---", "+++"]);
+	}
+
+	#[test]
+	fn context_headers_use_the_shell_time_zone() {
+		assert_headers_use_the_shell_time_zone("-c", ["***", "---"]);
 	}
 
 	// Defends: -L/--label (twice) replaces name *and* timestamp in headers.
