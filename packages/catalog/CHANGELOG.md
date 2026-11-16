@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the Modal login instructions to reference the rendered auth link and the `modal workspace proxy-tokens` CLI, and tagged the auth URL with UTM params ([#19500](https://github.com/can1357/oh-my-pi/pull/19500) by [@andrewhinh](https://github.com/andrewhinh))
+
 ### Added
 
 - Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
