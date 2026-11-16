@@ -31,6 +31,18 @@ async fn diff_header_like_rows_are_hunk_content() {
 			"@@\n head\n--- old\n-++ old\n+-- new\n+++ new\n end",
 			"head\n-- new\n++ new\nend\n",
 		),
+		// A header-less first hunk before a bare or context `@@` is content, not
+		// a file header.
+		(
+			"-- drop me\nSELECT 1;\nx\nSELECT 2;\n",
+			"--- drop me\n@@\n SELECT 1;\n-x\n+y\n SELECT 2;",
+			"SELECT 1;\ny\nSELECT 2;\n",
+		),
+		(
+			"-- drop me\nSELECT 1;\nx\nSELECT 2;\n",
+			"--- drop me\n+++ added\n@@ SELECT 1;\n-x\n+y\n SELECT 2;",
+			"++ added\nSELECT 1;\ny\nSELECT 2;\n",
+		),
 	] {
 		let workspace = common::Workspace::new(EditMode::ApplyPatch);
 		workspace.write("fixture.txt", before);

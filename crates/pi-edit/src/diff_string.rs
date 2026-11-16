@@ -832,8 +832,8 @@ enum HunkDialect {
 	Json,
 	/// Codex `apply_patch` update body: a row starting with `-` or `+` is hunk
 	/// content even when it reads `--- x` or `+++ x`, except a unified-diff file
-	/// header opening the body right before an `@@` row. Numeric prefixes stay
-	/// literal.
+	/// header opening the body right before a unified range header
+	/// (`@@ -l,s +l,s @@`). Numeric prefixes stay literal.
 	ApplyPatch,
 }
 
@@ -843,8 +843,9 @@ const fn is_signed_row(line: &str) -> bool {
 
 /// Range of a unified-diff file header (`--- a`, `+++ b`, either or both)
 /// opening an `apply_patch` body after any unsigned metadata rows. Only a
-/// header directly followed by an `@@` row counts: elsewhere such rows are
-/// content.
+/// header directly followed by a unified range header (`@@ -l,s +l,s @@`)
+/// counts: Codex hunk headers never take that form, so before a bare or
+/// context `@@` the rows are a header-less first hunk's content.
 fn leading_file_header(lines: &[&str]) -> Option<std::ops::Range<usize>> {
 	let start = lines.iter().position(|line| {
 		is_signed_row(line) || !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
@@ -856,7 +857,11 @@ fn leading_file_header(lines: &[&str]) -> Option<std::ops::Range<usize>> {
 	if lines.get(end).is_some_and(|line| line.starts_with("+++ ")) {
 		end += 1;
 	}
-	(end > start && lines.get(end).is_some_and(|line| line.starts_with("@@"))).then_some(start..end)
+	(end > start
+		&& lines
+			.get(end)
+			.is_some_and(|line| parse_unified_hunk_header(line.trim_end()).is_some()))
+	.then_some(start..end)
 }
 
 fn normalize_diff_body(diff: &str, dialect: HunkDialect) -> String {
