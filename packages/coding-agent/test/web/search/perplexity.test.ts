@@ -442,6 +442,18 @@ describe("Perplexity OAuth request shape", () => {
 		expect(response.sources).toHaveLength(1);
 	});
 
+	it("fails a source-less signed-out answer so the chain advances past a stale session", async () => {
+		// A session cookie the service no longer honors degrades to the signed-out
+		// signup wall: HTTP 200, a wall answer, no web_results.
+		const fetchMock = mockOAuth(() => {}, {
+			blocks: [{ intended_usage: "ask_text", markdown_block: { answer: "Sign up and repeat your request." } }],
+		});
+
+		await expect(
+			searchPerplexity({ query: '"CVE-2026-109618"', authStorage: oauthAuthStorage, fetch: fetchMock }),
+		).rejects.toThrow(/stored session is signed out/);
+	});
+
 	it("maps directives onto ask-endpoint native filters and rewrites query_str", async () => {
 		let body: Record<string, unknown> | undefined;
 		const fetchMock = mockOAuth(b => (body = b));
@@ -502,7 +514,13 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 			final: true,
 			display_model: "pplx_pro",
 			uuid: "req-oauth",
-			blocks: [{ intended_usage: "ask_text", markdown_block: { answer: "OAuth answer" } }],
+			blocks: [
+				{ intended_usage: "ask_text", markdown_block: { answer: "OAuth answer" } },
+				{
+					intended_usage: "web_results",
+					web_result_block: { web_results: [{ name: "OpenAI", url: "https://openai.com" }] },
+				},
+			],
 		};
 		const askBody = `data: ${JSON.stringify(event)}\n\n`;
 		const fetchMock: FetchImpl = async input => {

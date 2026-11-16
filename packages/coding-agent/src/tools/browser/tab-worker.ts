@@ -25,7 +25,7 @@ import type {
 } from "puppeteer-core";
 import { stringifyFunction } from "puppeteer-core/internal/util/Function.js";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
-import { formatScreenshot, resizeImage } from "../../utils/image-resize";
+import { resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
 import {
 	bindRunFacade,
@@ -134,6 +134,7 @@ import {
 	type NetworkRequestsOptions,
 	type NetworkRouteDescription,
 	type NetworkRouteOptions,
+	urlMatcher,
 } from "./network";
 import {
 	type BrowserCaptureResult,
@@ -208,6 +209,7 @@ import {
 	createPngDiff,
 	type DiffScreenshotOptions,
 	type DiffScreenshotResult,
+	emitScreenshot,
 	formatScreenshotLegend,
 	installScreenshotAnnotations,
 	type PdfOptions,
@@ -216,12 +218,14 @@ import {
 	type ScreenshotChangeResult,
 	type ScreenshotHistory,
 	type ScreenshotOptions,
+	type ScreenshotRun,
 	screenshotArea,
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
 	whileDrawing,
 } from "./screenshot";
+import { PointerSpace } from "./pointer-space";
 import { type DialogPolicy, type DialogState, dialogBlocksPageError, RuntimeDialogController } from "./dialogs";
 import {
 	type BrowserFrameApi,
@@ -233,10 +237,10 @@ import {
 	resolveFrame,
 } from "./frames";
 import {
-	assertUrlPattern,
 	isNavigatedContextError,
 	type NavigationWaitUntil,
 	navigateMainFrame,
+	parseUrlPattern,
 	pushState,
 	reloadPage,
 	traverseHistory,
@@ -342,7 +346,7 @@ const SELECTOR_HANDLER_PREFIXES = [
 	"p-",
 ] as const;
 
-type DragTarget = string | { readonly x: number; readonly y: number };
+type DragTarget = string | { readonly x: number; readonly y: number; readonly css?: boolean };
 
 /** Maximum wait for a renderer acknowledgement after a wheel event is queued. */
 const SCROLL_ACK_TIMEOUT_MS = 2_000;
@@ -372,6 +376,8 @@ interface OpOptions {
 	 * once the dialog is answered); `"answers"` ends it as done (an input the page answered with the dialog).
 	 */
 	dialog?: "blocks" | "answers";
+	/** What the call saw when its deadline fired (e.g. the current URL), appended to the timeout error. */
+	timeoutNote?: () => string;
 }
 
 /** Queue a wheel event without treating a delayed renderer acknowledgement as dispatch failure. */
@@ -500,7 +506,7 @@ interface TabApi {
 	uncheck(selector: string): Promise<void>;
 	keyDown(key: KeyInput): Promise<void>;
 	keyUp(key: KeyInput): Promise<void>;
-	mouseMove(x: number, y: number, opts?: { steps?: number }): Promise<void>;
+	mouseMove(x: number, y: number, opts?: { steps?: number; css?: boolean }): Promise<void>;
 	mouseDown(opts?: { button?: "left" | "right" | "middle" | "back" | "forward" }): Promise<void>;
 	mouseUp(opts?: { button?: "left" | "right" | "middle" | "back" | "forward" }): Promise<void>;
 	clickAt(
@@ -508,7 +514,8 @@ interface TabApi {
 		y: number,
 		opts?: {
 			button?: "left" | "right" | "middle" | "back" | "forward";
-			clickCount?: number;
+			count?: number;
+			css?: boolean;
 		},
 	): Promise<void>;
 	wheel(deltaX: number, deltaY: number): Promise<void>;
@@ -1060,9 +1067,9 @@ export function toActionableHandle(
 		enriched.click = options =>
 			clickElement(enriched, "handle.click()", undefined, {
 				button: options?.button,
-				clickCount: options?.count,
+				count: options?.count,
 			});
-		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { clickCount: 2 });
+		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { count: 2 });
 		enriched.check = () => setElementChecked(enriched, true, "handle.check()");
 		enriched.uncheck = () => setElementChecked(enriched, false, "handle.uncheck()");
 		enriched.select = (...values) => selectElementOptions(enriched, values, "handle.select()");
@@ -1146,7 +1153,7 @@ export function toActionableHandle(
 					() =>
 						clickElement(enriched, "handle.click()", signal, {
 							button: options?.button,
-							clickCount: options?.count,
+							count: options?.count,
 						}),
 					invalidate,
 				),
@@ -1161,7 +1168,7 @@ export function toActionableHandle(
 					originals,
 					"handle.dblclick()",
 					signal,
-					() => clickElement(enriched, "handle.dblclick()", signal, { clickCount: 2 }),
+					() => clickElement(enriched, "handle.dblclick()", signal, { count: 2 }),
 					invalidate,
 				),
 			"answers",
@@ -1844,6 +1851,7 @@ export class WorkerCore {
 	#ariaSnapshotBaselines = new Map<string, AriaSnapshotBaseline>();
 	#emulation?: BrowserEmulationController;
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
+	readonly #pointerSpace = new PointerSpace();
 	#webmcp?: WebMcpController;
 	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
@@ -2660,6 +2668,7 @@ export class WorkerCore {
 					hint = `; the element never became clickable (last check: ${refusal}${countNote ? `; ${countNote}` : ""})`;
 				else if (probe && "count" in probe) hint = formatSelectorMatchHint(probe.count);
 				else if (countNote) hint = `; ${countNote}`;
+				if (opts?.timeoutNote) hint += `; ${opts.timeoutNote()}`;
 				throw markBrowserRunRejection(
 					new ToolError(`${label} timed out after ${perOpTimeoutMs}ms${hint}`),
 					active.rejectionOwner,
@@ -2773,6 +2782,7 @@ export class WorkerCore {
 		const { budgetBound, quickOpMs, actionOpMs } = resolveOpTimeouts(timeoutMs);
 		const waitMs = (explicit?: number): number => resolveWaitTimeout(timeoutMs, explicit);
 		const INF = Number.POSITIVE_INFINITY;
+		const shots: ScreenshotRun = { session, output, screenshots, pointer: this.#pointerSpace };
 		const op = <T>(
 			label: string,
 			perOpMs: number,
@@ -2877,9 +2887,7 @@ export class WorkerCore {
 					},
 				),
 			screenshot: opts =>
-				read(describeScreenshot(opts), quickOpMs, sig =>
-					this.#captureScreenshot(session, output, screenshots, sig, opts),
-				),
+				read(describeScreenshot(opts), quickOpMs, sig => this.#captureScreenshot(shots, sig, opts)),
 			extract: (format = "markdown", opts) =>
 				read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
 					const html = (await untilAborted(sig, () => page.content())) as string;
@@ -2903,7 +2911,7 @@ export class WorkerCore {
 					actionOpMs,
 					async sig => {
 						const label = `tab.click(${JSON.stringify(selector)})`;
-						const click = { button: opts?.button, clickCount: opts?.count };
+						const click = { button: opts?.button, count: opts?.count };
 						const resolved = normalizeSelector(selector);
 						if (resolved.startsWith("text/") && parseAriaRefSelector(selector) === null) {
 							await clickQueryHandlerText(page, resolved, label, actionOpMs, sig, click);
@@ -3104,9 +3112,11 @@ export class WorkerCore {
 				);
 			},
 			waitForUrl: (pattern, opts) => {
-				assertUrlPattern(pattern);
+				const resolved = parseUrlPattern(pattern);
 				const w = waitMs(opts?.timeout);
-				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(pattern, w, sig));
+				return act("tab.waitForUrl()", w, sig => this.#waitForUrl(resolved, w, sig), {
+					timeoutNote: () => `the URL is ${page.url()}`,
+				});
 			},
 			waitForResponse: (pattern, opts) => {
 				const w = waitMs(opts?.timeout);
@@ -3203,15 +3213,7 @@ export class WorkerCore {
 						waitMs,
 						op,
 						captureScreenshot: (target, selector, screenshotSignal) =>
-							captureFrameScreenshot(
-								target,
-								selector,
-								screenshotSignal,
-								normalizeSelector,
-								session,
-								output,
-								screenshots,
-							),
+							captureFrameScreenshot(target, selector, screenshotSignal, normalizeSelector, shots),
 					});
 				}),
 			dialog: () =>
@@ -3374,7 +3376,7 @@ export class WorkerCore {
 					actionOpMs,
 					async sig => {
 						await this.#clickSelector(selector, actionOpMs, sig, handle =>
-							clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { clickCount: 2 }),
+							clickElement(handle, `tab.dblclick(${JSON.stringify(selector)})`, sig, { count: 2 }),
 						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS, dialog: "answers" },
@@ -3440,7 +3442,11 @@ export class WorkerCore {
 					this.#heldKeys.delete(key);
 					return keyUp(page, key, sig);
 				}),
-			mouseMove: (x, y, opts) => op("tab.mouseMove()", actionOpMs, sig => mouseMove(page, x, y, opts, sig)),
+			mouseMove: (x, y, opts) =>
+				op("tab.mouseMove()", actionOpMs, async sig => {
+					const point = this.#pointerSpace.toViewport({ x, y, css: opts?.css }, page.viewport() ?? undefined);
+					await mouseMove(page, point.x, point.y, { steps: opts?.steps }, sig);
+				}),
 			mouseDown: opts =>
 				op("tab.mouseDown()", actionOpMs, async sig => {
 					await mouseDown(page, opts, sig);
@@ -3453,7 +3459,11 @@ export class WorkerCore {
 				}),
 			// Raw pointer input runs at once, as on main: sent the moment a new document had parsed, a click did not
 			// reach it.
-			clickAt: (x, y, opts) => op("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
+			clickAt: (x, y, opts) =>
+				op("tab.clickAt()", actionOpMs, async sig => {
+					const point = this.#pointerSpace.toViewport({ x, y, css: opts?.css }, page.viewport() ?? undefined);
+					await clickAt(page, point.x, point.y, opts, sig);
+				}),
 			wheel: (deltaX, deltaY) => op("tab.wheel()", actionOpMs, sig => wheel(page, deltaX, deltaY, sig)),
 			highlight: (selector, opts) =>
 				act(
@@ -3571,9 +3581,7 @@ export class WorkerCore {
 	}
 
 	async #captureScreenshot(
-		session: SessionSnapshot,
-		output: RunOutput,
-		screenshots: ScreenshotResult[],
+		run: ScreenshotRun,
 		signal: AbortSignal | undefined,
 		opts: ScreenshotOptions = {},
 	): Promise<string | ScreenshotChangeResult> {
@@ -3634,41 +3642,19 @@ export class WorkerCore {
 			changeResult = { changed, revision, pixelChangeRatio };
 			if (!changed) return changeResult;
 		}
-		const resized = await resizeImage(
-			{ type: "image", data: buffer.toBase64(), mimeType: captureMime },
-			{ maxWidth: 1024, maxHeight: 1024, maxBytes: 150 * 1024, jpegQuality: 70, excludeWebP: session.excludeWebP },
+		const dest = await emitScreenshot(
+			{
+				bytes: buffer,
+				mimeType: captureMime,
+				area: screenshotArea(opts),
+				scale: captureScale,
+				keepCapture: opts.format !== undefined,
+				silent: opts.silent,
+				notes: opts.annotate ? [formatScreenshotLegend(annotationTargets)] : undefined,
+			},
+			run,
+			signal,
 		);
-		const preserveFormat = opts.format !== undefined;
-		const saveFullRes = !!session.browserScreenshotDir || preserveFormat;
-		const savedBuffer = saveFullRes ? buffer : resized.buffer;
-		const savedMimeType = saveFullRes ? captureMime : resized.mimeType;
-		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-		const dest = session.browserScreenshotDir
-			? path.join(
-					session.browserScreenshotDir,
-					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
-		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-		await Bun.write(dest, savedBuffer);
-		screenshots.push({
-			dest,
-			mimeType: savedMimeType,
-			bytes: savedBuffer.length,
-			width: resized.width,
-			height: resized.height,
-		});
-		if (!opts.silent) {
-			const lines = formatScreenshot({
-				saveFullRes,
-				dest,
-				resized,
-				capture: { area: screenshotArea(opts), scale: captureScale },
-			});
-			if (opts.annotate) lines.push(formatScreenshotLegend(annotationTargets));
-			output.push({ type: "text", text: lines.join("\n") });
-			output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-		}
 		if (changeResult) return { ...changeResult, path: dest };
 		return dest;
 	}
@@ -3763,7 +3749,8 @@ export class WorkerCore {
 				typeof (target as { x: unknown }).x === "number" &&
 				typeof (target as { y: unknown }).y === "number"
 			) {
-				return { x: (target as { x: number }).x, y: (target as { y: number }).y };
+				// A point is a position on the latest screenshot unless it says it is CSS pixels.
+				return this.#pointerSpace.toViewport(target, page.viewport() ?? undefined);
 			}
 			throw new ToolError(
 				`Drag ${role} must be a selector string or { x: number, y: number } point. Got: ${typeof target}`,
@@ -3860,12 +3847,12 @@ export class WorkerCore {
 		signal: AbortSignal,
 	): Promise<HTTPResponse> {
 		const page = this.#requirePage();
-		const predicate: (response: HTTPResponse) => boolean | Promise<boolean> =
-			typeof pattern === "function"
-				? pattern
-				: pattern instanceof RegExp
-					? response => pattern.test(response.url())
-					: response => response.url().includes(pattern);
+		let predicate: (response: HTTPResponse) => boolean | Promise<boolean>;
+		if (typeof pattern === "function") predicate = pattern;
+		else {
+			const matches = urlMatcher(pattern);
+			predicate = response => matches(response.url());
+		}
 		return (await untilAborted(signal, () => page.waitForResponse(predicate, { timeout, signal }))) as HTTPResponse;
 	}
 
