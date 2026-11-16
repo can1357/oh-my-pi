@@ -13,15 +13,22 @@
 
 ### Added
 
+- Added in-place editing and Google-Docs-style comments to the plan review under Tern: double-click the plan to edit it, select text to comment; comments feed Refine.
 - Added Ghidra analysis with automatic Ghidra, JDK, and PyGhidra setup on explicit analysis; Auto prefers an installed IDA Pro, otherwise Ghidra.
 
 - Added a `Force Remove` option to `worktree.onExit` that removes worktrees created during the session on exit without asking, even when they have uncommitted changes; new commits stay on the worktree's branch.
 
 ### Changed
 
+- Changed the plan review: one Approve button (Refine while the plan has comments) whose menu holds the approval choices, a model chip, and **Save** in place of **Save and quit**: Save writes the plan and keeps the review open, without leaving plan mode or clearing the session (also for an extension's `save` answer).
+- Changed the plan review to offer **Refine plan** only while the plan has comments or other feedback, as the first, preselected option.
 - Plain executable reads now show Mach-O/ELF/PE metadata without opening databases or downloading a backend; request `:overview`, a function selector, or `dsm.open()` to start analysis.
 
 - The model switcher (alt+p / `/switch`) can now filter models by provider (Tab / Shift+Tab) and set the thinking level for the switch (alt+←/→); in Tern it opens as a drop-up above the composer with a provider rail, a thinking slider, and a Task / Main toggle in its head instead of an action bar.
+
+### Removed
+
+- Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet (copy a selection, double-click to edit).
 
 
 ## [18.21.0] - 2026-11-16

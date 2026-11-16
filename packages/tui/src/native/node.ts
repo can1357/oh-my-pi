@@ -134,6 +134,20 @@ export type NativeUiEvent =
 			readonly item: string;
 			readonly value: boolean | number | string | readonly string[] | null;
 	  }
+	/** The user edited a `doc` node in place: `text` is its full new source. */
+	| { readonly type: "docChange"; readonly key: string; readonly text: string }
+	/** A new comment on a `doc` node's `quote` (`at`: its UTF-16 offset in the source the user saw). */
+	| {
+			readonly type: "comment";
+			readonly key: string;
+			readonly quote: string;
+			readonly at: number;
+			readonly note: string;
+	  }
+	/** The edited note of comment `comment` on a `doc` node. */
+	| { readonly type: "commentNote"; readonly key: string; readonly comment: string; readonly note: string }
+	/** Comment `comment` on a `doc` node deleted. */
+	| { readonly type: "uncomment"; readonly key: string; readonly comment: string }
 	/** An edit over the terminal's own selection in an `editor`/`input` node (see {@link NativeTextEdit}). */
 	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit)
 	/** Undo the last change to an `editor`/`input` node's text (the terminal's ⌃Z); a no-op with no history. */

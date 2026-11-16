@@ -8,7 +8,16 @@
 - Typing and moving the cursor in very long drafts (over 256 lines) no longer slows down ([#19488](https://github.com/can1357/oh-my-pi/pull/19488) by [@H4vC](https://github.com/H4vC))
 ### Added
 
+- Added the native plan review document and dock: under a Tern that draws `doc`, `buttons` and `menu`, `PlanReviewOverlay` shows the plan as an editable, commentable `doc` (quote annotations, `onPlanEdited` on in-place edits) above an Approve split button, model chip, Save and Cancel. `NativeUiEvent` gained `docChange`, `comment`, `commentNote` and `uncomment`.
 - Added provider scopes and a thinking-level slider to `ModelPickerComponent`: `ModelPickerOptions.thinkingLevelFor` enables the slider, and `onPick` receives the chosen level as `meta.thinkingLevel`. The native picker sheet gained `anchor`, `scopeStyle`, and `level` props, and picker actions gained `head` and `icon` for icon buttons in the sheet head.
+
+### Breaking Changes
+
+- `PlanReviewOverlay` takes `options` as `PlanReviewOverlayChoice` objects (`id`, `label`, `detail`, `meta`, `disabled` reason) and reports choice ids to `onPick` and `selectOption`; `refine` adds Refine while the plan has feedback and `onSave` adds Save, which keeps the overlay open. `disabledIndices` and `externalEditorName` are gone, and `describe` takes the `DescribeContext`.
+
+### Changed
+
+- Retitled `PlanSaveOverlay` "Save plan" with a Save button.
 
 ## [18.21.0] - 2026-11-16
 
