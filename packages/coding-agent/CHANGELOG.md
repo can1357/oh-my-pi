@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
+
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes
