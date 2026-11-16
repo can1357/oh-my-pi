@@ -319,4 +319,55 @@ describe("Baseten provider discovery", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	test("routes decision-models rows to System One as judge models and leaves chat rows on chat completions", async () => {
+		const roster = {
+			data: [
+				{
+					id: "decision-models/baseten-elephant-9b-latest",
+					object: "model",
+					name: "elephant-1",
+					context_length: 16384,
+					supported_features: [],
+					input_modalities: ["text", "image"],
+					pricing: { prompt: "0.000000035", completion: "0.00", input_cache_read: "0.00" },
+				},
+				{
+					id: "moonshotai/Kimi-K2.7-Code",
+					object: "model",
+					name: "Kimi K2.7 Code",
+					supported_features: ["tools", "reasoning"],
+					input_modalities: ["text"],
+				},
+			],
+		};
+		const fetchRoster: FetchImpl = async () => Response.json(roster);
+
+		const defaults = await basetenModelManagerOptions({ apiKey: "k", fetch: fetchRoster }).fetchDynamicModels?.();
+		const gateway = await basetenModelManagerOptions({
+			apiKey: "k",
+			baseUrl: "https://gateway.example/v1/",
+			fetch: fetchRoster,
+		}).fetchDynamicModels?.();
+
+		const elephant = defaults?.find(model => model.id === "decision-models/baseten-elephant-9b-latest");
+		expect(elephant).toMatchObject({
+			api: "baseten-systemone",
+			baseUrl: "https://inference.baseten.co",
+			kind: "judge",
+			reasoning: false,
+			supportsTools: false,
+			input: ["text", "image"],
+			contextWindow: 16384,
+			cost: { input: 0.035, output: 0 },
+		});
+		expect(defaults?.find(model => model.id === "moonshotai/Kimi-K2.7-Code")).toMatchObject({
+			api: "openai-completions",
+			baseUrl: "https://inference.baseten.co/v1",
+		});
+		// A gateway base URL keeps the System One root beside its chat root.
+		expect(gateway?.find(model => model.id === "decision-models/baseten-elephant-9b-latest")?.baseUrl).toBe(
+			"https://gateway.example",
+		);
+	});
 });

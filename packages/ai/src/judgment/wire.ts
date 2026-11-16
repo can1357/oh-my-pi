@@ -5,7 +5,7 @@
  */
 import type { ImageContent, Usage } from "../types";
 import type { JudgmentImageInput } from "@oh-my-pi/pi-catalog/compat/judgment-images";
-import type { JudgmentRequest } from "./types";
+import type { JudgmentRequest, Question } from "./types";
 
 /** Where one attempt posts and which token it sends. */
 export interface JudgmentTarget {
@@ -29,6 +29,14 @@ export interface DecodedJudgment {
 /** Image assets kept separately from judgment state for asset-aware native wires. */
 export type JudgmentImageAssets = Readonly<Record<string, ImageContent>>;
 
+/** A server-side ceiling on the answer options one request may carry, summed over its questions. */
+export interface JudgmentOptionBudget {
+	/** Most options one request may carry; a request over it is rejected whole. */
+	limit: number;
+	/** Options `question` adds to a request. */
+	cost(question: Question): number;
+}
+
 /** How one judgment API addresses, encodes, and decodes a request. */
 export interface JudgmentWire {
 	/**
@@ -50,6 +58,8 @@ export interface JudgmentWire {
 	ignoresImageDetail?: boolean;
 	/** Whether this dialect forwards `box` questions; others reject them before sending. */
 	boxes?: boolean;
+	/** Option ceiling the API enforces per request; larger judgments are split so each request fits. */
+	optionBudget?: JudgmentOptionBudget;
 	/** The response's answers and usage for `request`; `undefined` when the payload is not this API's response shape. */
 	decode(payload: unknown, request: JudgmentRequest): DecodedJudgment | undefined;
 }

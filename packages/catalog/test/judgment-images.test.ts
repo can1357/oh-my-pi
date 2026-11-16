@@ -41,4 +41,40 @@ describe("judgment-image-input", () => {
 			resolveJudgmentImageInput(judge("typesafe/jev-unverified", "openrouter-decisions", "openrouter")),
 		).toBeUndefined();
 	});
+
+	test("bounds Baseten decision models to the image sizes the API answers", () => {
+		const decision = (id: string) =>
+			buildModel({
+				...base,
+				id,
+				name: id,
+				api: "baseten-systemone",
+				provider: "baseten",
+				baseUrl: "https://inference.baseten.co",
+			});
+
+		for (const id of [
+			"decision-models/baseten-elephant-9b-latest",
+			"decision-models/baseten-mammoth-27b-latest",
+			"decision-models/baseten-joey-2b-latest",
+		]) {
+			expect(resolveJudgmentImageInput(decision(id))).toEqual({
+				mimeTypes: ["image/png", "image/jpeg", "image/webp"],
+				maxPixels: 4_000_000,
+				maxTotalPatches: 8000,
+			});
+		}
+		expect(
+			resolveJudgmentImageInput(
+				buildModel({
+					...base,
+					id: "moonshotai/Kimi-K2.7-Code",
+					name: "Kimi",
+					api: "openai-completions",
+					provider: "baseten",
+					baseUrl: "https://inference.baseten.co/v1",
+				}),
+			),
+		).toBeUndefined();
+	});
 });

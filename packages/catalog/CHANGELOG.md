@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Baseten's elephant-1, mammoth-1 and joey-1 decision models as `judge` models on the `baseten` provider, discovered from its model list and answering at `/v1/systemone`
 - Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
 
 ### Changed

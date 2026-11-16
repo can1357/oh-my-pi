@@ -41,6 +41,7 @@ import { getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { googleDecisionsWire } from "./google-decisions";
 import { openaiDecisionsWire } from "./openai-decisions";
 import {
+	basetenWire,
 	liquidWire,
 	naceWire,
 	openrouterDecisionsWire,
@@ -58,7 +59,7 @@ import {
 	type Questions,
 	tokenUsage,
 } from "./types";
-import type { JudgmentImageAssets, JudgmentWire } from "./wire";
+import type { JudgmentImageAssets, JudgmentOptionBudget, JudgmentWire } from "./wire";
 export type { JudgmentImageAssets } from "./wire";
 
 export const TYPESAFE_PROVIDER = "typesafe";
@@ -72,6 +73,7 @@ const JUDGMENT_WIRES = {
 	"google-decisions": googleDecisionsWire,
 	"liquid-systemone": liquidWire,
 	"nace-systemone": naceWire,
+	"baseten-systemone": basetenWire,
 } as const satisfies Partial<Record<Api, JudgmentWire>>;
 
 /** APIs {@link NativeJudge} can serve. */
@@ -266,6 +268,37 @@ function backoffMs(attempt: number, headers: Headers | undefined): number {
 	return Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
 }
 
+/**
+ * Question ids grouped into requests, in order: no group holds more than `cap` questions or, when
+ * the wire enforces an option budget, more options than it allows. A question over the budget on
+ * its own still gets a request of its own, so the server reports it rather than this client.
+ */
+function chunkQuestionIds(
+	ids: readonly string[],
+	questions: Questions,
+	cap: number | undefined,
+	budget: JudgmentOptionBudget | undefined,
+): string[][] {
+	const chunks: string[][] = [];
+	let current: string[] = [];
+	let used = 0;
+	for (const id of ids) {
+		const cost = budget?.cost(questions[id]) ?? 0;
+		const full =
+			current.length > 0 &&
+			((cap !== undefined && current.length >= cap) || (budget !== undefined && used + cost > budget.limit));
+		if (full) {
+			chunks.push(current);
+			current = [];
+			used = 0;
+		}
+		current.push(id);
+		used += cost;
+	}
+	if (current.length > 0) chunks.push(current);
+	return chunks;
+}
+
 /** Whether `value` is a wire answer of `type`. Answers are trusted past their discriminant, as forwarded verbatim. */
 function isAnswerOf(value: unknown, type: Answer["type"]): value is Answer {
 	return isRecord(value) && value.type === type;
@@ -425,9 +458,13 @@ export class NativeJudge implements Judge {
 				throw new AIError.ValidationError(`Native judgment backend ${this.label} does not answer box questions`);
 			}
 		}
-		const ids = Object.keys(request.questions);
-		const cap = this.#maxQuestions;
-		if (cap !== undefined && ids.length > cap) return this.#judgeChunked(request, ids, cap, options);
+		const chunks = chunkQuestionIds(
+			Object.keys(request.questions),
+			request.questions,
+			this.#maxQuestions,
+			this.#wire.optionBudget,
+		);
+		if (chunks.length > 1) return this.#judgeChunked(request, chunks, options);
 		return this.#judgeOnce(request, options);
 	}
 
@@ -437,23 +474,21 @@ export class NativeJudge implements Judge {
 	}
 
 	/**
-	 * Answer `request` in requests of at most `cap` questions each, {@link CHUNK_PARALLEL} at a time;
+	 * Answer `request` as one request per entry of `chunkIds`, {@link CHUNK_PARALLEL} at a time;
 	 * answers merge and usage sums. The first failing chunk aborts its in-flight siblings and stops
 	 * dispatch, so a doomed judgment stops spending; once every chunk settles, the usage of those that
 	 * succeeded goes to `onPartialUsage` before the judgment rejects.
 	 */
 	async #judgeChunked<Q extends Questions>(
 		request: JudgmentRequest<Q>,
-		ids: string[],
-		cap: number,
+		chunkIds: readonly (readonly string[])[],
 		options: NativeJudgeCallOptions | undefined,
 	): Promise<JudgmentResult<Q>> {
-		const chunks: Questions[] = [];
-		for (let start = 0; start < ids.length; start += cap) {
+		const chunks: Questions[] = chunkIds.map(ids => {
 			const questions: Questions = {};
-			for (const id of ids.slice(start, start + cap)) questions[id] = request.questions[id];
-			chunks.push(questions);
-		}
+			for (const id of ids) questions[id] = request.questions[id];
+			return questions;
+		});
 		const failed = new AbortController();
 		const signal = options?.signal ? AbortSignal.any([options.signal, failed.signal]) : failed.signal;
 		const imageAssets = options?.imageAssets;
