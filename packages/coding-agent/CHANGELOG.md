@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the shell's `rg` builtin ignoring `-g`/`--glob`/`--iglob` patterns that contain a slash (such as `--glob '!docs/evidence/**'` or `-g 'src/*.txt'`) when searching `.` or no path, so anchored exclusions still listed the excluded files and anchored inclusions found nothing; they now match relative to the working directory as in ripgrep ([#19476](https://github.com/can1357/oh-my-pi/pull/19476) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes
