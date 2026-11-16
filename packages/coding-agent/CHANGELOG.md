@@ -4,35 +4,33 @@
 
 ### Breaking Changes
 
-- SDK: `AgentSession` emits `agent_end` once per run (when nothing can resume it) and the new `agent_pause` event for a loop that stops mid-run; `hasPendingAsyncWork()`, `settleAsyncWork()` and `suppressAutoResumeUntilPrompt()` are replaced by `isRunActive`, `wakeSources` and `waitForRunEnd()`, and a user-interrupt `abort()` also ends a run paused on background work. The RPC and JSON print streams, the collab wire and extension `agent_end` keep their per-loop flagged shape
+- Updated the `AgentSession` run lifecycle API: `agent_end` is emitted once when a run can no longer resume, and `agent_pause` reports runs that stop while awaiting work. Replaced `hasPendingAsyncWork()`, `settleAsyncWork()`, and `suppressAutoResumeUntilPrompt()` with `isRunActive`, `wakeSources`, and `waitForRunEnd()`. Calling `abort()` now also ends runs paused on background work; RPC, JSON print, collaboration, and extension streams retain their existing per-loop `agent_end` behavior.
 
 ### Added
 
-- Added `task.agentPrewalkAuto` (agent name -> `on` / `off` / model pattern): the native judge decides per assignment at spawn whether a subagent arms prewalk, handing off to `prewalk.autoTarget` or the given target; unconditional subagent prewalk still wins ([#18913](https://github.com/can1357/oh-my-pi/pull/18913) by [@1vivy](https://github.com/1vivy))
-- Unknown custom and discovered models automatically probe reasoning support before the first thinking request and remember supported effort levels for future sessions.
-- An `<iframe>` in a reply is a live page in Tern (click to use it, Esc to return to the chat), and embed sources are read leniently: `localhost:3000`, `example.com/docs`, a bare or `~/` path, or a `file:` URL with the wrong slashes all load
-- The agent can show pictures and web pages in its replies: an `<img src>` line (a file, a `data:` URI or an http(s) URL) draws inline on terminals that show graphics, sized by `width`/`height` in px, %, vw, vh, ch or em, and an `<iframe src>` line shows one screenshot of the page with a `[Visit]` link; other terminals get a one-row linked note. `tui.renderEmbeds` turns it off
-- Bash redirects now write every writable internal URL, not just `local://` and `out://`: `: > proc://<id>/kill` cancels a job, and `agent://`, `cfg://`, `ssh://`, `xd://`, and other handler-written URLs take redirected text like the `write` tool, with the handler's answer shown in the result
-- `ask` form notes take pasted screenshots again: with a note open, `Ctrl+V` (`Alt+V` on Windows) or the terminal's own paste attaches the image, and it reaches the model after the answers as `[Image #N]`, described for text-only models ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
-- `ui.formDialog` accepts `acceptImages`: option notes then take pasted images, returned in `OptionNote.images` with their `[Image #N]` markers ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
+- Added configurable automatic subagent prewalk through `task.agentPrewalkAuto`, allowing per-agent `on`/`off` settings or model patterns while preserving unconditional subagent prewalk.
+- Unknown custom and discovered models now automatically detect reasoning support and remember supported reasoning effort levels for future sessions.
+- Added inline image and web-page replies: supported terminals can display local, data, and HTTP(S) images and embedded pages, while other terminals receive linked fallbacks. Added `tui.renderEmbeds` to disable this rendering.
+- Added interactive embedded pages in Tern replies, including click-to-visit and Escape-to-return navigation; common host, path, and `file:` URL forms are accepted.
+- Bash redirects can now write to all writable internal URLs, including job cancellation endpoints and handler-backed `agent://`, `cfg://`, `ssh://`, and `xd://` URLs.
+- Added image pasting to `ask` form notes and `ui.formDialog` options via `acceptImages`; pasted images are returned with `[Image #N]` markers and described for text-only models. Unsupported prompts now clearly reject image pastes.
 
 ### Changed
 
-- Changed the default local text-to-speech model to Phonon 31M: faster synthesis, a smaller download, and new voices (Kokoro voice settings migrate automatically); the speaking-rate range is now 0.8–1.3×, and old Kokoro caches are removed after the first Phonon install
-- In Tern, `/btw` answers in a note in the transcript where you asked it instead of opening the BTW history sheet: click the note to send the composer's drafts to it as follow-ups (Esc returns to the chat), right-click it to copy, branch, inject or stop, and fold it to one line with its ×; notes come back folded when the transcript is rebuilt or the session resumed. `/btw` alone still opens the history
-- Bash calls that overlap a running or backgrounded call now carry the variables, functions, aliases, options and traps they set into the session's shell (the call that ends last wins a name both set), instead of discarding them with a "Ran in a copy of the busy session shell" notice on every overlapping call; background jobs they start are no longer killed when that copy is garbage-collected
-- Newly enabled extensions now load into the running session when `extensions` or `disabledExtensions` changes, instead of requiring a restart
+- Changed the default local text-to-speech model to Phonon 31M for faster synthesis, smaller downloads, and additional voices. Existing Kokoro voice settings migrate automatically; speaking rates now range from 0.8× to 1.3×.
+- Tern `/btw` responses now appear as folded, interactive notes at the point where they were requested, with follow-up, copy, branch, inject, and stop actions; `/btw` without a prompt still opens the history view.
+- Overlapping Bash calls now share shell state, including variables, functions, aliases, options, and traps, and background jobs started by those calls continue running independently.
+- Extensions enabled or reconfigured through `extensions` or `disabledExtensions` now load into the active session without requiring a restart.
+- Rich-text pastes made during approval steering or in dialogs now preserve Markdown formatting and images when inserted into the chat editor.
+- Moving a task or resuming a session in another project now switches its agents, extensions, custom tools, and MCP servers to match the destination project without a restart.
 
 ### Fixed
 
-- The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
-- Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
-- `/move` and resuming a session from another project now switch task agents, project extensions, custom tools, and MCP servers to the destination project without a restart ([#19416](https://github.com/can1357/oh-my-pi/pull/19416) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed resolving a `conflict://` region to an empty side (`@ours`, `@theirs` or `@both` with no lines) leaving a stray blank line, and a chosen side whose edge lines repeat the surrounding code losing those lines ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
-- Fixed MCP stdio servers that exit or are killed before responding being reported only as "closed stdout"; the error now names the exit code or signal ([#16482](https://github.com/can1357/oh-my-pi/pull/16482) by [@adi-IL](https://github.com/adi-IL))
-- Pasting an image while a dialog that can't hold one has focus (the `ask` form, agents hub, `/annotate`, selectors) now shows "Image paste is not supported in this prompt" instead of attaching it to the chat editor hidden behind it ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
-- Rich-text pastes during approval type-to-steer, or into a dialog opened over a draft that still holds typing, now reach the chat editor as Markdown with their images instead of as plain text ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
-- Fixed prewalk handoffs overriding model or effort choices made mid-switch, and auto handoffs not returning to the planning model after `prewalk.auto` changed or `/prewalk off` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- Fixed status indicators incorrectly showing the agent as idle while subagents or background work could still resume the run.
+- Fixed subagents and security scans completing while child agents were still running or queued peer messages remained.
+- Fixed conflict-region resolution when a selected side is empty or shares edge lines with surrounding code.
+- MCP stdio server failures before a response now report the process exit code or terminating signal instead of only reporting closed stdout.
+- Fixed prewalk handoffs so model and reasoning-effort changes are preserved, and automatic handoffs return to the planning model when automatic prewalk is changed or disabled.
 
 ## [18.20.3] - 2026-11-16
 

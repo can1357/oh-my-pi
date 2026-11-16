@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added parallel, persistent thinking-capability probes for unknown models, including alternate effort and token-budget request formats.
+- Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
 
 ## [18.20.3] - 2026-11-16
 
