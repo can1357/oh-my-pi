@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed service `ready.log` and wait patterns treating `^` and `$` as the start and end of all output so far, so a readiness line printed after any earlier output (such as `^READY$` after a startup banner) never matched and the service timed out as not ready ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
+- Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
 
 ## [18.21.0] - 2026-11-16
 
