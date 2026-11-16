@@ -1,0 +1,53 @@
+# -*- mode: yaml -*-
+# Review context for omp pull requests. Informational only: no approve,
+# request-changes, reviewer assignment, or extra required approvals.
+# Path and size labels stay in .github/workflows/pr-labels.yml.
+
+manifest:
+  version: 1.0
+
+triggers:
+  exclude:
+    branch:
+      - r/(Dependabot|dependabot|renovate|Renovate)/
+
+automations:
+  review_context:
+    on:
+      - pr_created
+      - pr_ready_for_review
+      - commit
+    if:
+      - {{ not is.bot }}
+    run:
+      - action: add-comment@v1
+        args:
+          comment: |
+            ### gitStream review context
+
+            Estimated review time: {{ calc.etr }} minutes.
+            Deletes files: {{ has.deleted_files }}.
+            Touches a durable surface: {{ files | match(list=sensitive) | some }}.
+
+            Durable surfaces are the journal, protobuf contracts, the pinned toolchain, root `Cargo.toml`, embedded Python linkage, and branch-protection rulesets. `pr-labels.yml` still applies `area/*`, `kind/*`, `risk/*`, and `size/*`. This check does not approve the pull request.
+
+is:
+  bot: {{ pr.author | match(list=['github-actions','_bot_','[bot]','dependabot','renovate','gitstream-cm','prvalidation','aida-bot']) | some }}
+
+calc:
+  etr: {{ branch | estimatedReviewTime }}
+
+has:
+  deleted_files: {{ source.diff.files | map(attr='new_file') | match(term='/dev/null') | some }}
+
+# Same surfaces as the risk/* globs in .github/labeler.yml, plus rulesets.
+sensitive:
+  - crates/journal/
+  - crates/proto/proto/
+  - rust-toolchain.toml
+  - .cargo/
+  - Cargo.toml
+  - crates/py/build.rs
+  - crates/py/scripts/
+  - crates/py-link/
+  - .github/rulesets/

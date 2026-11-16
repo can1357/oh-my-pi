@@ -1,0 +1,19 @@
+id = "omp.vault"
+name = "Vault graph"
+version = "0.1.0"
+omp_api = 1
+description = "Query configured note vaults for metadata, sections, backlinks, and tags."
+entry = "omp_vault"
+capabilities = ["env.doc.read"]
+
+[[declarations]]
+id = "vault_query"
+kind = "soft"
+module = "omp_vault.device"
+key = "vault_query@.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[requires]
+python = ">=3.14"
