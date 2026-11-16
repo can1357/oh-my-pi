@@ -12,6 +12,7 @@ import {
 	type ServiceTierByFamily,
 } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { type ConfiguredThinkingLevel, newSessionThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	createBranchSummaryMessage,
@@ -327,6 +328,23 @@ export function resolveSessionThinking(path: readonly SessionEntry[]): {
 	}
 
 	return { thinkingLevel, configuredThinkingLevel, hasSavedThinkingEntry: saved !== undefined };
+}
+
+/**
+ * Thinking selector for a resumed session that recorded no saved choice.
+ * A suffix on the restored model selector wins; otherwise a new session's
+ * policy applies (explicit role suffix, then the model's default level, then
+ * the configured default). Callers pass an undefined selector and role when
+ * an explicit model override is in effect, matching startup.
+ */
+export function thinkingLevelWithoutSavedChoice(
+	model: Model | undefined,
+	restoredSelectorLevel: ConfiguredThinkingLevel | undefined,
+	roleLevel: ConfiguredThinkingLevel | undefined,
+	configuredDefault: ConfiguredThinkingLevel | undefined,
+): ConfiguredThinkingLevel | undefined {
+	if (restoredSelectorLevel !== undefined) return restoredSelectorLevel;
+	return newSessionThinkingLevel(model, roleLevel, configuredDefault);
 }
 
 export function buildSessionContext(

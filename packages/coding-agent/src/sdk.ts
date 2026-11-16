@@ -248,6 +248,7 @@ import {
 	getReadableCompactionEntry,
 	getRestorableSessionModels,
 	resolveSessionThinking,
+	thinkingLevelWithoutSavedChoice,
 } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { cfgOffline } from "./config/auxiliary-model-policy";
@@ -294,7 +295,6 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
-	newSessionThinkingLevel,
 	parseConfiguredThinkingLevel,
 	parseThinkingLevel,
 	resolveConfiguredThinkingLevel,
@@ -2366,16 +2366,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
 				parseThinkingLevel(existingSession.thinkingLevel);
 		}
-		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
-			level = restoredSessionThinkingLevel;
-		}
 		if (level !== undefined) return level;
 		const roleLevel =
 			!hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel
 				? defaultRoleSpec.thinkingLevel
 				: undefined;
-		return newSessionThinkingLevel(
+		return thinkingLevelWithoutSavedChoice(
 			selectedModel,
+			!hasExplicitModel && !hasThinkingEntry ? restoredSessionThinkingLevel : undefined,
 			roleLevel,
 			parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(settings)),
 		);

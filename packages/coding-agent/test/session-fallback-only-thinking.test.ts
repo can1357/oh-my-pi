@@ -519,4 +519,67 @@ describe("fallback-only thinking entries", () => {
 			await session.dispose();
 		}
 	});
+
+	test("switching sessions uses the default role's effort when only a fallback wrote a thinking level", async () => {
+		freshDir();
+		const roleSettings = () =>
+			Settings.isolated({
+				defaultThinkingLevel: Effort.Low,
+				modelRoles: { default: `${PRIMARY}:high` },
+			});
+		const target = await writeTranscript(fallbackOnlyTranscript());
+		const openedManager = await SessionManager.open(target, path.join(tempDir, "open-role"));
+		const { session: opened } = await createAgentSession(sessionOptions(openedManager, roleSettings()));
+		try {
+			expect(opened.model?.id).toBe("claude-sonnet-4-5");
+			expect(opened.configuredThinkingLevel()).toBe(Effort.High);
+		} finally {
+			await opened.dispose();
+		}
+
+		const { session } = await createAgentSession(
+			sessionOptions(SessionManager.create(tempDir, path.join(tempDir, "active-role")), roleSettings()),
+		);
+		try {
+			session.setThinkingLevel(Effort.Medium);
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			expect(session.configuredThinkingLevel()).toBe(Effort.High);
+			expect(session.sessionManager.buildSessionContext().configuredThinkingLevel).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("switching sessions keeps a saved model thinking suffix ahead of the role and the global default", async () => {
+		freshDir();
+		const sessionManager = SessionManager.inMemory(tempDir);
+		sessionManager.appendModelChange(`${PRIMARY}:low`);
+		sessionManager.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		const target = await writeTranscript(sessionManager);
+		const suffixSettings = () =>
+			Settings.isolated({
+				defaultThinkingLevel: Effort.Medium,
+				modelRoles: { default: `${PRIMARY}:high` },
+			});
+		const openedManager = await SessionManager.open(target, path.join(tempDir, "open-suffix"));
+		const { session: opened } = await createAgentSession(sessionOptions(openedManager, suffixSettings()));
+		try {
+			expect(opened.model?.id).toBe("claude-sonnet-4-5");
+			expect(opened.configuredThinkingLevel()).toBe(Effort.Low);
+		} finally {
+			await opened.dispose();
+		}
+
+		const { session } = await createAgentSession(
+			sessionOptions(SessionManager.create(tempDir, path.join(tempDir, "active-suffix")), suffixSettings()),
+		);
+		try {
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			expect(session.configuredThinkingLevel()).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
 });

@@ -132,6 +132,7 @@ import {
 	getModelMatchPreferences,
 	type ResolvedModelRoleValue,
 	resolveCliModel,
+	resolveModelRoleValue,
 	resolveSessionModelSelector,
 	sessionModelDiscoveryProviders,
 } from "../config/model-resolver";
@@ -468,6 +469,7 @@ import {
 	getRestorableSessionModels,
 	isTranscriptEntry,
 	resolveSessionThinking,
+	thinkingLevelWithoutSavedChoice,
 } from "./session-context";
 import {
 	type CacheRefreshOutcome,
@@ -1006,6 +1008,18 @@ function isEvalActivity(message: AgentMessage): boolean {
 	return (
 		message.role === "assistant" && message.content.some(block => block.type === "toolCall" && block.name === "eval")
 	);
+}
+
+/** Explicit thinking suffix on `modelRoles.default`, if that role value carries one. */
+function explicitDefaultRoleThinking(
+	settings: Settings,
+	availableModels: Model[],
+): ConfiguredThinkingLevel | undefined {
+	const role = resolveModelRoleValue(settings.getModelRole("default"), availableModels, {
+		settings,
+		matchPreferences: getModelMatchPreferences(settings),
+	});
+	return role.explicitThinkingLevel ? role.thinkingLevel : undefined;
 }
 
 export class AgentSession implements SettingsScope, AgentViewSession {
@@ -14237,9 +14251,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.sessionManager.getLastModelChangeRole(),
 			);
 			let targetModel = explicitModel;
+			let restoredSelectorLevel: ConfiguredThinkingLevel | undefined;
 			let modelFallbackWarning: string | undefined;
 			if (!targetModel && !options?.keepModel && targetModelStrings.length > 0) {
-				targetModel = await this.#resolveSessionModel(targetModelStrings);
+				const restoredSessionModel = await this.#resolveSessionModel(targetModelStrings);
+				targetModel = restoredSessionModel?.model;
+				restoredSelectorLevel = restoredSessionModel?.thinkingLevel;
 				if (!targetModel && switchingToDifferentSession) {
 					// Like startup resume: never hand the transcript to a model the
 					// session did not choose unless a UI can say so.
@@ -14300,13 +14317,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const resolvedThinking = resolveSessionThinking(this.sessionManager.getBranch());
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(cfgDefaultThinkingLevel.get(this.settings));
 			const restoredConfigured = sessionContext.configuredThinkingLevel;
-			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
+			const hasSavedThinking =
 				resolvedThinking.hasSavedThinkingEntry ||
-				(defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-					? restoredConfigured === AUTO_THINKING
-						? AUTO_THINKING
-						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-					: defaultThinkingLevel;
+				(defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off");
+			// A kept model is the host's, not this transcript's. Collab mirrors the host
+			// effort afterwards, so the role suffix and selector must not take over.
+			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined = hasSavedThinking
+				? restoredConfigured === AUTO_THINKING
+					? AUTO_THINKING
+					: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
+				: options?.keepModel
+					? defaultThinkingLevel
+					: thinkingLevelWithoutSavedChoice(
+							targetModel ?? this.model,
+							explicitModel ? undefined : restoredSelectorLevel,
+							explicitModel
+								? undefined
+								: explicitDefaultRoleThinking(this.settings, this.#modelRegistry.getAvailable()),
+							defaultThinkingLevel,
+						);
 			let persistRestoredThinking = false;
 
 			if (targetModel) {
@@ -14365,8 +14394,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// change persists the configured selector (`auto` or a concrete level), so
 			// an `auto` session resumes in auto mode instead of freezing at the last
 			// resolved level. Entries written before the `configured` field existed
-			// fall back to the concrete level. With no thinking entry, the global
-			// default applies so fresh sessions still classify their first turn.
+			// fall back to the concrete level. With no saved choice, startup's policy
+			// applies: the restored selector's suffix, then the default role's explicit
+			// suffix, then the model's default level, then the global default.
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			if (persistRestoredThinking) {
 				// Keep the raw level concrete for transcript readers; `configured` alone
@@ -14529,11 +14559,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * none is in the catalog, refresh the discovery-backed providers among them
 	 * once and retry.
 	 */
-	async #resolveSessionModel(selectors: readonly string[]): Promise<Model | undefined> {
-		const resolve = (): Model | undefined => {
+	async #resolveSessionModel(
+		selectors: readonly string[],
+	): Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> {
+		const resolve = () => {
 			for (const selector of selectors) {
 				const restored = resolveSessionModelSelector(this.#modelRegistry, selector);
-				if (restored) return restored.model;
+				if (restored) return restored;
 			}
 			return undefined;
 		};

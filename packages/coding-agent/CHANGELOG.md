@@ -6,6 +6,7 @@
 
 - Resuming or switching to a session whose only saved thinking level came from a retry fallback now uses the configured default instead of keeping the fallback's effort ([#19394](https://github.com/can1357/oh-my-pi/pull/19394) by [@eggpeat](https://github.com/eggpeat))
 - Model switches and effort picks now remember an explicitly retained fallback effort after reopening, and anonymized sessions preserve whether each thinking change came from a retry fallback ([#19394](https://github.com/can1357/oh-my-pi/pull/19394) by [@eggpeat](https://github.com/eggpeat))
+- Switching to a session with no saved thinking choice now uses the same effort as opening it, including the default model's configured effort, instead of only the global thinking setting ([#N](https://github.com/can1357/oh-my-pi/pull/N) by [@eggpeat](https://github.com/eggpeat))
 
 ## [18.20.3] - 2026-11-16
 
