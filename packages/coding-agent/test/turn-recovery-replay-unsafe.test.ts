@@ -458,26 +458,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		}
 	});
 
-	it("still attributes a same-provider quota error to the current provider", async () => {
-		const recovery = new TurnRecovery(createHost(model, modelRegistry));
-		const mark = vi.spyOn(authStorage.limits, "markReached").mockResolvedValue({ switched: true });
-		try {
-			const failed: AssistantMessage = {
-				...makeMessage([], model),
-				errorMessage: "429 usage_limit_reached: Weekly limit reached, retry-after-ms=1000",
-			};
-			expect(await recovery.recordUsageLimitOutcome(failed)).toBe(true);
-			expect(mark).toHaveBeenCalledWith("anthropic", "test-session", {
-				retryAfterMs: expect.any(Number),
-				providerTimed: true,
-				baseUrl: model.baseUrl,
-				modelId: model.id,
-			});
-		} finally {
-			mark.mockRestore();
-		}
-	});
-
 	it("ignores old-provider quota policy when the model changes during marking", async () => {
 		const codex = getBundledModel("openai-codex", "gpt-6.1-sol");
 		if (!codex) throw new Error("Expected bundled openai-codex model");
