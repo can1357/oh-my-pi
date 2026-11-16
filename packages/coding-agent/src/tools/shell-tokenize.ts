@@ -1024,6 +1024,12 @@ export interface ShellCommand {
 	 * `\~/x`), so the shell does not expand it; a word the command also has with a bare `~` is not here.
 	 */
 	literalTildes: ReadonlySet<string>;
+	/**
+	 * Arguments and redirection targets with a `{`, every one of which was quoted or escaped
+	 * (`'{"a":1,"b":2}'`, `\{a,b}`), so the shell brace-expands nothing in them; a word the command
+	 * also has with an unquoted `{` is not here.
+	 */
+	literalBraces: ReadonlySet<string>;
 }
 
 /**
@@ -1250,6 +1256,8 @@ interface ShellScriptToken {
 	heredoc?: ShellHeredoc;
 	/** Set on a word whose leading `~` was quoted or escaped (`"~/x"`, `\~/x`), so the shell does not expand it. */
 	literalTilde?: true;
+	/** Set on a word with a `{`, none of them unquoted (`'{"a":1}'`, `\{a,b}`), so the shell brace-expands nothing in it. */
+	literalBraces?: true;
 	/** Set on a `case` pattern: no command word, though its substitutions run. */
 	pattern?: true;
 }
@@ -1267,6 +1275,8 @@ interface ShellScriptSegment {
 	other: string[];
 	/** Words and redirection targets whose leading `~` the shell keeps, as in {@link ShellCommand.literalTildes}. */
 	literalTildes: Set<string>;
+	/** Words and redirection targets the shell brace-expands nothing in, as in {@link ShellCommand.literalBraces}. */
+	literalBraces: Set<string>;
 	operator: string;
 }
 
@@ -1385,6 +1395,20 @@ const QUOTE_SENSITIVE_RE = /[[\]}"\\$`]/;
 /** Appends `items` to `target`; unlike `push(...items)`, any number of them. */
 function append<T>(target: T[], items: Iterable<T>): void {
 	for (const item of items) target.push(item);
+}
+
+/**
+ * Records one occurrence of `word` in a segment: kept in `literal` while every occurrence so far
+ * was `quoted` (the shell expands nothing in it), and moved to `bare` for good at the first that
+ * was not, since the guard sees one word for both.
+ */
+function markLiteral(literal: Set<string>, bare: Set<string>, word: string, quoted: boolean): void {
+	if (quoted && !bare.has(word)) {
+		literal.add(word);
+	} else {
+		bare.add(word);
+		literal.delete(word);
+	}
 }
 
 /**
@@ -1914,6 +1938,8 @@ class ShellScriptParser {
 		let quoted = false;
 		// Whether the word starts with an unquoted `~`, which the shell expands.
 		let bareTilde = false;
+		// Whether the word has an unquoted `{`, which can start a brace list the shell expands.
+		let bareBrace = false;
 		// Set after `<<`/`<<-`: the next word is a heredoc delimiter.
 		let delimiter: { stripTabs: boolean } | undefined;
 		const pending: PendingHeredoc[] = [];
@@ -1951,6 +1977,7 @@ class ShellScriptParser {
 			if (started) {
 				const token: ShellScriptToken = { text: word, operator: false, quoted };
 				if (word.startsWith("~") && !bareTilde) token.literalTilde = true;
+				if (!bareBrace && word.includes("{")) token.literalBraces = true;
 				if (delimiter) {
 					token.heredoc = { body: "", expands: !quoted, subs: [] };
 					pending.push({ delimiter: word, stripTabs: delimiter.stripTabs, doc: token.heredoc });
@@ -1967,6 +1994,7 @@ class ShellScriptParser {
 			started = false;
 			quoted = false;
 			bareTilde = false;
+			bareBrace = false;
 		};
 		let i = start;
 		while (i < text.length) {
@@ -2026,6 +2054,7 @@ class ShellScriptParser {
 				const operator = SHELL_OPERATORS.find(op => text.startsWith(op, i));
 				if (operator === undefined) {
 					bareTilde ||= !started && ch === "~";
+					bareBrace ||= ch === "{";
 					word += ch;
 					started = true;
 					i++;
@@ -2317,11 +2346,13 @@ class ShellScriptParser {
 			heredocs: [],
 			other: [],
 			literalTildes: new Set(),
+			literalBraces: new Set(),
 			operator: ";",
 		});
 		let current = empty();
-		// Words of the current segment written with a bare `~`, which the shell expands.
+		// Words of the current segment written with a bare `~`, or an unquoted `{`, which the shell expands.
 		let bareTildes = new Set<string>();
+		let bareBraces = new Set<string>();
 		let redirect: string | undefined;
 		let continued = false;
 		for (const token of tokens) {
@@ -2331,12 +2362,10 @@ class ShellScriptParser {
 			}
 			if (continued && token.operator && token.text === "\n") continue;
 			if (!token.operator && token.text.startsWith("~")) {
-				if (token.literalTilde && !bareTildes.has(token.text)) {
-					current.literalTildes.add(token.text);
-				} else {
-					bareTildes.add(token.text);
-					current.literalTildes.delete(token.text);
-				}
+				markLiteral(current.literalTildes, bareTildes, token.text, token.literalTilde === true);
+			}
+			if (!token.operator && token.text.includes("{")) {
+				markLiteral(current.literalBraces, bareBraces, token.text, token.literalBraces === true);
 			}
 			continued = token.operator && Object.hasOwn(SHELL_CONTINUATIONS, token.text);
 			if (redirect !== undefined && !token.operator) {
@@ -2365,6 +2394,7 @@ class ShellScriptParser {
 				segments.push(current);
 				current = empty();
 				bareTildes = new Set();
+				bareBraces = new Set();
 				redirect = undefined;
 			}
 		}
@@ -2416,6 +2446,7 @@ class ShellScriptParser {
 			shellCwd: cwd,
 			upstream,
 			literalTildes: segment.literalTildes,
+			literalBraces: segment.literalBraces,
 		};
 		// A command that is only redirections still opens its files (`$(< file)`, `done < file`) and
 		// passes its heredocs on.

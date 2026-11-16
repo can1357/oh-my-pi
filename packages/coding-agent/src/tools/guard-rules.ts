@@ -374,10 +374,10 @@ const BRACE_SEQUENCE_RE = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?
 /**
  * The words brace expansion makes of `word`: `a{b,c}` gives `ab` and `ac`, `{1..3}` and `{a..c}`
  * give sequences, and nested lists expand too; a brace with neither a top-level `,` nor a sequence,
- * or one after `$`, stays as written. Quotes are not known here, so a quoted brace expands too. A
- * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, and at most {@link MAX_BRACE_WORDS}
- * words are made. Once the words made for the command line pass {@link MAX_BRACE_TEXT}, a word
- * stays whole.
+ * or one after `$`, stays as written. Quotes are not known here: {@link shellBraces} leaves whole a
+ * word whose braces the source quoted. A word longer than {@link MAX_BRACE_WORD_LENGTH} stays
+ * whole, and at most {@link MAX_BRACE_WORDS} words are made. Once the words made for the command
+ * line pass {@link MAX_BRACE_TEXT}, a word stays whole.
  */
 function expandBraces(word: string): string[] {
 	if (word.length > MAX_BRACE_WORD_LENGTH || !word.includes("{")) return [word];
@@ -441,6 +441,15 @@ function expandBraces(word: string): string[] {
 }
 
 /**
+ * The words the shell makes of a word of `command` by brace expansion ({@link expandBraces}); a
+ * word whose every `{` the source quoted or escaped (`'{"a":1,"b":2}'`) stays whole, as the shell
+ * expands no brace in it.
+ */
+function shellBraces(command: ShellCommand, word: string): string[] {
+	return command.literalBraces.has(word) ? [word] : expandBraces(word);
+}
+
+/**
  * The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}, or `undefined` once they, or
  * the alternatives of one brace, come to more than `maxText` characters.
  */
@@ -480,13 +489,13 @@ function braceWords(parts: readonly BracePart[], maxText: number): string[] | un
 
 /**
  * The absolute paths a word of `command` names, one per word its braces expand to
- * ({@link expandBraces}), each resolved from `cwd` as {@link resolveCommandWordPath} resolves it;
+ * ({@link shellBraces}), each resolved from `cwd` as {@link resolveCommandWordPath} resolves it;
  * those that cannot be resolved, relative ones from an unknown `cwd` included, are left out.
  */
 function wordPaths(command: ShellCommand, word: string, cwd: string | undefined, home: string): string[] {
 	const literalTilde = command.literalTildes.has(word);
 	const paths: string[] = [];
-	for (const expanded of expandBraces(word)) {
+	for (const expanded of shellBraces(command, word)) {
 		const target = resolveShellWordPath(literalTilde ? `./${expanded}` : expanded, cwd, home);
 		if (target !== undefined) paths.push(target);
 	}
@@ -673,7 +682,7 @@ function copyOperands(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
+			operands.push(...argv.slice(i + 1).flatMap(word => shellBraces(command, word)));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -685,7 +694,7 @@ function copyOperands(command: ShellCommand): string[] {
 			while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
 			if (k === arg.length - 1) i++;
 		} else {
-			operands.push(...expandBraces(arg));
+			operands.push(...shellBraces(command, arg));
 		}
 	}
 	return operands;
@@ -896,7 +905,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
+			operands.push(...argv.slice(i + 1).flatMap(word => shellBraces(command, word)));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -919,7 +928,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 				break;
 			}
 		} else {
-			operands.push(...expandBraces(arg));
+			operands.push(...shellBraces(command, arg));
 		}
 	}
 	return [...words, ...operands.slice(supplied ? 0 : 1)];
@@ -1017,7 +1026,7 @@ function writingReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
+			operands.push(...argv.slice(i + 1).flatMap(word => shellBraces(command, word)));
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -1044,7 +1053,7 @@ function writingReaderWords(command: ShellCommand): string[] {
 				words.push(arg);
 			}
 		} else {
-			operands.push(...expandBraces(arg));
+			operands.push(...shellBraces(command, arg));
 		}
 	}
 	if (destination && !targeted) operands.pop();
@@ -1235,9 +1244,9 @@ function sentFiles(command: ShellCommand): string[] {
 			}
 			if (value === undefined) continue;
 			if (option === "-T" || option === "--upload-file") {
-				// `-T "{a,b}"` uploads each file of the list, as braces expand ({@link sentSecret}), and
-				// curl reads a set of one, `-T "{.env}"`, as its file.
-				files.push(value.replace(/\{([^{},]*)\}/g, "$1"));
+				// curl globs the value itself, quoted or not: `-T "{a,b}"` uploads each file of the list,
+				// and curl reads a set of one, `-T "{.env}"`, as its file.
+				files.push(...expandBraces(value.replace(/\{([^{},]*)\}/g, "$1")));
 			} else if (option === "-F" || option === "--form") {
 				files.push(...formFiles(value));
 			} else if (option === "--data-urlencode") {
