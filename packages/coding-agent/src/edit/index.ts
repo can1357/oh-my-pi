@@ -381,6 +381,11 @@ export class EditTool implements AgentTool<TInput> {
 		this.#deferredDiagnostics = new DeferredDiagnostics(session);
 	}
 
+	/** Builds the retired patch contract over this tool's conversation and policy state. */
+	createApplyPatchTool(): EditTool {
+		return new EditTool(this.session, "apply_patch", "apply_patch");
+	}
+
 	get mode(): EditMode {
 		if (this.#editMode) return this.#editMode;
 		const mode = resolveEditMode(this.session);

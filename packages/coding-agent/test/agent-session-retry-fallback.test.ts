@@ -751,6 +751,8 @@ describe("AgentSession retry fallback", () => {
 		await session.setModel(primaryModel);
 		expect(session.getActiveToolNames()).not.toContain("apply_patch");
 		expect(session.agent.state.tools.filter(tool => tool.customWireName === "apply_patch")).toHaveLength(1);
+		expect(session.getEvalBridgeToolNames()).toContain("apply_patch");
+		expect(session.getToolForEvalBridge("xd://apply_patch")).toBe(session.getToolByName("edit"));
 		await session.setModel(fallbackModel);
 		expect(session.getActiveToolNames()).toContain("apply_patch");
 		cfgEditMode.set(settings, "none");

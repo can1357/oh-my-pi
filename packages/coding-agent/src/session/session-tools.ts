@@ -60,6 +60,7 @@ import {
 	xdevDocsFor,
 	xdevEntries,
 } from "../tools/xdev";
+import type { EditTool } from "../edit";
 import type { EditModeSetting } from "../edit/settings";
 import { resolveEditMode } from "../utils/edit-mode";
 import {
@@ -1176,10 +1177,15 @@ export class SessionTools {
 			// Keep the outgoing wire contract available without scanning or pinning history.
 			this.#retainApplyPatchTool = true;
 		}
+		const retainApplyPatch =
+			enabled.includes("edit") &&
+			this.#builtInToolNames.has("edit") &&
+			currentEditMode !== "apply_patch" &&
+			currentEditMode !== "none";
 		if (
 			this.#retainApplyPatchTool &&
-			this.#builtInToolNames.has("apply_patch") &&
-			enabled.includes("apply_patch") !== (enabled.includes("edit") && currentEditMode !== "apply_patch")
+			(this.#builtInToolNames.has("apply_patch") || !this.#toolRegistry.has("apply_patch")) &&
+			enabled.includes("apply_patch") !== retainApplyPatch
 		) {
 			await this.applyActiveToolsByName(enabled, true);
 			return;
@@ -1474,11 +1480,24 @@ export class SessionTools {
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
-		if (this.#retainApplyPatchTool && this.#builtInToolNames.has("apply_patch")) {
-			toolNames = toolNames.filter(name => name !== "apply_patch");
-			if (toolNames.includes("edit") && this.resolveActiveEditMode() !== "apply_patch") {
+		const retainedEdit =
+			this.#retainApplyPatchTool && toolNames.includes("edit") && this.#builtInToolNames.has("edit")
+				? (this.#toolRegistry.get("edit") as EditTool | undefined)
+				: undefined;
+		const editMode = retainedEdit ? this.resolveActiveEditMode() : undefined;
+		if (retainedEdit && editMode !== "apply_patch" && editMode !== "none") {
+			if (!this.#toolRegistry.has("apply_patch")) {
+				const tool = this.#wrapRuntimeTool(retainedEdit.createApplyPatchTool());
+				this.#toolRegistry.set(tool.name, tool);
+				this.#builtInToolNames.add(tool.name);
+			}
+			if (this.#builtInToolNames.has("apply_patch") && !toolNames.includes("apply_patch")) {
 				toolNames.push("apply_patch");
 			}
+		} else if (this.#builtInToolNames.has("apply_patch")) {
+			this.#toolRegistry.delete("apply_patch");
+			this.#builtInToolNames.delete("apply_patch");
+			toolNames = toolNames.filter(name => name !== "apply_patch");
 		}
 		let builtInWriteAvailable = this.#builtInToolNames.has("write");
 		const fullWriteSelected =
