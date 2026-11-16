@@ -40,7 +40,7 @@ const HEADER_RESTORE_VERSION = 1;
  * computed lazily on first cache access and memoized, so processes that never
  * touch the model cache skip the stringify entirely.
  */
-const MODEL_MATERIALIZATION_VERSION = 1;
+const MODEL_MATERIALIZATION_VERSION = 2;
 let cachedMaterializationPolicy: string | undefined;
 function materializationPolicy(): string {
 	if (cachedMaterializationPolicy === undefined) {
@@ -289,6 +289,16 @@ function initializeDb(db: Database): void {
 			PRIMARY KEY (provider_id, materialization_policy)
 		)
 	`);
+	db.run(`
+		CREATE TABLE IF NOT EXISTS thinking_capability (
+			provider_id TEXT NOT NULL,
+			api TEXT NOT NULL,
+			endpoint TEXT NOT NULL,
+			wire_model_id TEXT NOT NULL,
+			capability TEXT NOT NULL,
+			PRIMARY KEY (provider_id, api, endpoint, wire_model_id)
+		)
+	`);
 	migrateCacheSchema(db);
 	// `models_hash` is the only payload-change detector for the read memo and the
 	// unchanged-write skip. Writers here replace whole rows; this keeps an
@@ -401,11 +411,52 @@ function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) =
 	return runModelCacheDb(resolvedPath, shared, useDb);
 }
 
+/** Secret-free identity of one probed model endpoint and request API. */
+export interface ThinkingCapabilityCacheKey {
+	provider: string;
+	api: string;
+	endpoint: string;
+	wireModelId: string;
+}
+
+/** Read raw thinking-capability metadata through the shared, corruption-recovering cache connection. */
+export function readCachedThinkingCapability(key: ThinkingCapabilityCacheKey, dbPath?: string): string | undefined {
+	try {
+		return withModelCacheDb(
+			dbPath,
+			db =>
+				db
+					.query<{ capability: string }, [string, string, string, string]>(
+						"SELECT capability FROM thinking_capability WHERE provider_id = ? AND api = ? AND endpoint = ? AND wire_model_id = ?",
+					)
+					.get(key.provider, key.api, key.endpoint, key.wireModelId)?.capability,
+		);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Persist validated thinking-capability JSON; storage failures never interrupt a request. */
+export function writeCachedThinkingCapability(
+	key: ThinkingCapabilityCacheKey,
+	capability: string,
+	dbPath?: string,
+): void {
+	try {
+		withModelCacheDb(dbPath, db => {
+			db.run(
+				"INSERT OR REPLACE INTO thinking_capability (provider_id, api, endpoint, wire_model_id, capability) VALUES (?, ?, ?, ?, ?)",
+				[key.provider, key.api, key.endpoint, key.wireModelId, capability],
+			);
+		});
+	} catch {
+		// Capability persistence is best-effort, like model-cache persistence.
+	}
+}
+
 /**
- * An explicit path naming the default `models.db` (e.g. the SDK passing
- * `getModelDbPath(agentDir)` for the default agent dir) shares the long-lived
- * handle, so it gets the `data_version` fast path instead of opening,
- * initializing and re-reading the row on every call.
+ * An explicit default database path shares the long-lived connection rather
+ * than opening and initializing the same database on every call.
  */
 function resolveCacheDb(dbPath: string | undefined): { resolvedPath: string; shared: boolean } {
 	const defaultPath = getModelDbPath();
