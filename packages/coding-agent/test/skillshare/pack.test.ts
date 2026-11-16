@@ -82,6 +82,8 @@ describe("packSkill", () => {
 		expect(entries.map(entry => entry.path)).toEqual(pack.files.map(file => file.path));
 		expect(new TextDecoder().decode(entries[0].content)).toBe(SKILL_MD);
 		expect(pack.integrity).toBe(`sha512-${new Bun.CryptoHasher("sha512").update(pack.tgz).digest("base64")}`);
+		// Host-independent gzip header: the OS byte would otherwise differ between macOS and Linux.
+		expect(pack.tgz[9]).toBe(255);
 
 		const again = await packSkill(tempDir.path());
 		expect(again.integrity).toBe(pack.integrity);

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp skill publish` producing different package integrities for the same files on macOS and Linux ([#19402](https://github.com/can1357/oh-my-pi/issues/19402))
+
 ## [18.20.3] - 2026-11-16
 
 ### Breaking Changes
