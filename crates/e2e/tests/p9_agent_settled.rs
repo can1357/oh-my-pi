@@ -1,3 +1,6 @@
+//! Python `agent_settled` hooks answer through the environment authority's hook
+//! gate.
+
 #![cfg(unix)]
 
 use omp_agent::{AgentSettled, LifecycleHooks};
