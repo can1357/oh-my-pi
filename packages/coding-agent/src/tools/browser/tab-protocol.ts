@@ -46,6 +46,11 @@ export interface ScreenshotLimits {
 	tokenization?: ImageTokenization;
 	/** Longest edge the host passes to the model; unset when it keeps the image's size. */
 	maxEdge?: number;
+	/**
+	 * Set where the model's wire sends a screenshot's `detail: "original"` tag as it is. Elsewhere the wire
+	 * drops it and the provider's default level sizes the image.
+	 */
+	detail?: "original";
 }
 
 export interface SessionSnapshot {

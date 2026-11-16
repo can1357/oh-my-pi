@@ -672,15 +672,15 @@ describe("TernTab screenshots", () => {
 	});
 
 	it("reads clickAt positions on a scaled screenshot, and page.mouse positions as CSS pixels", async () => {
-		// A 3136x400 viewport reaches the model at half size, 1568x200.
-		const png = encodeRawPng(new Uint8Array(3136 * 400 * 3), 3136, 400, 3).toBase64();
+		// A 4000x400 viewport reaches the model at half size, 2000x200.
+		const png = encodeRawPng(new Uint8Array(4000 * 400 * 3), 4000, 400, 3).toBase64();
 		daemon = await startFakeDaemon(op => (op.op === "capture" ? { ok: { data: png } } : { ok: {} }));
 		client = new TernSocketClient({ socketPath: daemon.socketPath });
 		const tab = new TernTab({
 			client,
 			block: 7,
 			name: "main",
-			viewport: { width: 3136, height: 400, deviceScaleFactor: 1 },
+			viewport: { width: 4000, height: 400, deviceScaleFactor: 1 },
 		});
 		const screenshots: ScreenshotResult[] = [];
 		tab.setRunContext({
@@ -692,8 +692,8 @@ describe("TernTab screenshots", () => {
 			screenshots,
 		});
 		await tab.screenshot();
-		await tab.clickAt(784, 100);
-		await tab.page.mouse.click(784, 100);
+		await tab.clickAt(1000, 100);
+		await tab.page.mouse.click(1000, 100);
 
 		// Where each click's pointer first moved: the image's centre is the viewport's, raw page input is not mapped.
 		const moves = daemon.requests.flatMap(request => {
@@ -701,13 +701,13 @@ describe("TernTab screenshots", () => {
 			return isRecord(first) ? [[first.x, first.y]] : [];
 		});
 		expect(moves).toEqual([
-			[1568, 200],
-			[784, 100],
+			[2000, 200],
+			[1000, 100],
 		]);
 
 		// The picture is of another viewport once it is resized.
 		await tab.setViewport({ width: 1000, height: 600 });
-		await expect(tab.clickAt(784, 100)).rejects.toThrow(/new screenshot/);
+		await expect(tab.clickAt(1000, 100)).rejects.toThrow(/new screenshot/);
 		for (const saved of screenshots) await fs.rm(saved.dest);
 	});
 });

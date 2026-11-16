@@ -8,6 +8,7 @@ import {
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { resolveImageMaxEdge, resolveImageTokenization } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import type { CDPSession, Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
@@ -50,6 +51,7 @@ import {
 	type ReadyInfo,
 	type RunErrorPayload,
 	type RunResultOk,
+	type ScreenshotLimits,
 	type SessionSnapshot,
 	type Transferable,
 	type Transport,
@@ -1083,10 +1085,7 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 			cwd: opts.session.cwd,
 			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
 			excludeWebP: webpExclusionForModel(model),
-			screenshotLimits: model && {
-				tokenization: resolveImageTokenization(model),
-				maxEdge: resolveImageMaxEdge(model),
-			},
+			screenshotLimits: model && screenshotLimits(model),
 		},
 	).catch(error => {
 		// A worker's run reports this through its payload; an in-process (cmux, Tern) run throws the original.
@@ -2594,6 +2593,19 @@ async function waitForClosed(tab: WorkerTabSession): Promise<void> {
 	} finally {
 		unsubscribe();
 	}
+}
+
+/** What rescales an image on its way to `model`, for sizing screenshots that reach it untouched. */
+function screenshotLimits(model: Model): ScreenshotLimits {
+	const compat = model.compat;
+	return {
+		tokenization: resolveImageTokenization(model),
+		maxEdge: resolveImageMaxEdge(model),
+		detail:
+			compat && "supportsImageDetailOriginal" in compat && compat.supportsImageDetailOriginal
+				? "original"
+				: undefined,
+	};
 }
 
 function expandBrowserScreenshotDir(session: ToolSession): string | undefined {

@@ -551,21 +551,21 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 	});
 
 	it.each([
-		// The 2000x20 capture is drawn 1568x16 inside a 1568x200 image (the vision limits pad it), so a click at
-		// the image's centre is the centre of the 1000x10 viewport.
+		// The 2000x20 capture is drawn inside a 2000x200 image (the vision limits pad it), so a click at the
+		// image's centre is the centre of the 1000x10 viewport.
 		{ name: "measured", width: { value: 1000 }, note: "1000x10 viewport", clicked: '"x":500,"y":5' },
 		// With no scale to map by, the click takes the position as CSS pixels.
 		{
 			name: "missing",
 			width: { value: "" },
 			note: "scale to CSS pixels could not be read",
-			clicked: '"x":784,"y":100',
+			clicked: '"x":1000,"y":100',
 		},
 		{
 			name: "failed",
 			width: new Error("eval failed"),
 			note: "scale to CSS pixels could not be read",
-			clicked: '"x":784,"y":100',
+			clicked: '"x":1000,"y":100',
 		},
 	])("screenshot and clickAt with $name viewport width", async ({ width, note, clicked }) => {
 		spyOn(CmuxSocketClient.prototype, "connect").mockResolvedValue(undefined);
@@ -602,7 +602,7 @@ describe("browser tab-supervisor — cmux tab close mid-run (#4499)", () => {
 		});
 
 		const result = await runInTab("screenshot-scale", {
-			code: "const shot = await tab.screenshot(); await tab.clickAt(784, 100); return shot;",
+			code: "const shot = await tab.screenshot(); await tab.clickAt(1000, 100); return shot;",
 			timeoutMs: 5_000,
 			session: makeSession("/tmp"),
 		});

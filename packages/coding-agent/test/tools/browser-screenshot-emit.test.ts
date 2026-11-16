@@ -13,6 +13,15 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 /** Claude's standard tier: images past 1,568 28px patches are shrunk by the API. */
 const STANDARD: ImageTokenization = { regime: "anthropic-patch", maxEdge: 1568, maxTokens: 1568 };
 const HIRES: ImageTokenization = { regime: "anthropic-patch", maxEdge: 2576, maxTokens: 4784 };
+/** A GPT line whose default level (`auto` = `high`) keeps fewer patches than `original` does. */
+const GPT_AUTO_HIGH: ImageTokenization = {
+	regime: "openai-patch",
+	multiplier: 1.2,
+	auto: "high",
+	low: { maxEdge: 512 },
+	high: { maxEdge: 2048, patchBudget: 2500 },
+	original: { maxEdge: 6000, patchBudget: 10_000 },
+};
 
 const stored: string[] = [];
 
@@ -83,15 +92,30 @@ describe("emitScreenshot", () => {
 
 	it("scales a viewport past the size cap and reads pointer positions on that image", async () => {
 		const pointer = new PointerSpace();
-		const shot = await emit(1920, 1080, {}, { pointer });
+		const shot = await emit(2500, 1250, {}, { pointer });
 
-		expect(shot.stored).toEqual({ width: 1568, height: 882 });
-		expect(shot.text).toContain("Screenshot 1568x882.");
-		expect(shot.text).toContain("1920x1080 viewport");
+		expect(shot.stored).toEqual({ width: 2000, height: 1000 });
+		expect(shot.text).toContain("Screenshot 2000x1000.");
+		expect(shot.text).toContain("2500x1250 viewport");
 		expect(shot.text).toContain("{css: true}");
 		// The image's centre is the viewport's centre; a page-measured position passes through.
-		expect(pointer.toViewport({ x: 784, y: 441 })).toEqual({ x: 960, y: 540 });
-		expect(pointer.toViewport({ x: 960, y: 540, css: true })).toEqual({ x: 960, y: 540 });
+		expect(pointer.toViewport({ x: 1000, y: 500 })).toEqual({ x: 1250, y: 625 });
+		expect(pointer.toViewport({ x: 1250, y: 625, css: true })).toEqual({ x: 1250, y: 625 });
+	});
+
+	it("sizes a viewport for the detail level the model's wire sends", async () => {
+		// 2000x1500 is 63x47 patches of 32px: more than the 2,500 the default level keeps, which leaves 57x43.
+		const dropped = await emit(2000, 1500, {}, { session: { screenshotLimits: { tokenization: GPT_AUTO_HIGH } } });
+		const sent = await emit(
+			2000,
+			1500,
+			{},
+			{ session: { screenshotLimits: { tokenization: GPT_AUTO_HIGH, detail: "original" } } },
+		);
+
+		expect(Math.ceil(dropped.stored.width / 32)).toBe(57);
+		expect(Math.ceil(dropped.stored.height / 32)).toBe(43);
+		expect(sent.stored).toEqual({ width: 2000, height: 1500 });
 	});
 
 	it.each([
@@ -110,22 +134,22 @@ describe("emitScreenshot", () => {
 
 	it("returns the pointer helpers to CSS pixels once a screenshot is in them again", async () => {
 		const pointer = new PointerSpace();
-		await emit(1920, 1080, {}, { pointer });
+		await emit(2500, 1250, {}, { pointer });
 		await emit(1280, 720, {}, { pointer });
 
-		expect(pointer.toViewport({ x: 784, y: 441 })).toEqual({ x: 784, y: 441 });
+		expect(pointer.toViewport({ x: 1000, y: 500 })).toEqual({ x: 1000, y: 500 });
 	});
 
 	it("keeps an explicit factor for a full-page capture and leaves the pointer helpers on the viewport", async () => {
 		const pointer = new PointerSpace();
-		await emit(1920, 1080, {}, { pointer });
+		await emit(2500, 1250, {}, { pointer });
 		const page = await emit(1365, 5000, { area: "page" }, { pointer });
 
-		expect(page.stored).toEqual({ width: 428, height: 1568 });
+		expect(page.stored).toEqual({ width: 546, height: 2000 });
 		expect(page.text).toContain(
-			"Multiply image coordinates by 3.19 to get CSS pixels from the page's top-left corner",
+			"Multiply image coordinates by 2.50 to get CSS pixels from the page's top-left corner",
 		);
-		expect(pointer.toViewport({ x: 784, y: 441 })).toEqual({ x: 960, y: 540 });
+		expect(pointer.toViewport({ x: 1000, y: 500 })).toEqual({ x: 1250, y: 625 });
 	});
 
 	it("enlarges an element crop under the vision floor and says how it maps", async () => {
@@ -138,22 +162,22 @@ describe("emitScreenshot", () => {
 
 	it("says the mapping is unknown instead of guessing one, and stops reading positions on images", async () => {
 		const pointer = new PointerSpace();
-		await emit(1920, 1080, {}, { pointer });
+		await emit(2500, 1250, {}, { pointer });
 		const shot = await emit(2000, 1000, { scale: undefined }, { pointer });
 
 		expect(shot.text).toContain("scale to CSS pixels could not be read");
-		expect(pointer.toViewport({ x: 784, y: 441 })).toEqual({ x: 784, y: 441 });
+		expect(pointer.toViewport({ x: 1000, y: 500 })).toEqual({ x: 1000, y: 500 });
 	});
 
 	it("stores a silent capture without showing it or moving the pointer helpers", async () => {
 		const pointer = new PointerSpace();
-		await emit(1920, 1080, {}, { pointer });
+		await emit(2500, 1250, {}, { pointer });
 		const shot = await emit(1280, 720, { silent: true }, { pointer });
 
 		expect(shot.text).toBe("");
 		expect(shot.imageCount).toBe(0);
 		expect(shot.screenshots).toHaveLength(1);
-		expect(pointer.toViewport({ x: 784, y: 441 })).toEqual({ x: 960, y: 540 });
+		expect(pointer.toViewport({ x: 1000, y: 500 })).toEqual({ x: 1250, y: 625 });
 	});
 
 	it("keeps the capture itself under a screenshot directory and names it", async () => {

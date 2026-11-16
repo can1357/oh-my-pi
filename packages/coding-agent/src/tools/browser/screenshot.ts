@@ -175,14 +175,11 @@ export function screenshotQuality(opts: ScreenshotOptions): number | undefined {
 }
 
 /**
- * Longest edge of a model-visible screenshot. A larger image is rescaled on its way to the model without the
- * tool hearing of it, which moves every position read off it: Eval's display pass caps images at 1568px, and
- * an Anthropic request carrying more than 20 images caps each at 2000px.
+ * Longest edge of a model-visible screenshot: the most an Anthropic request carrying more than 20 images
+ * allows per image. The provider boundary shrinks a larger one to it without the tool hearing of it, which
+ * would move every position read off the image.
  */
-const SCREENSHOT_MAX_EDGE = 1568;
-
-/** Encoded size cap of a model-visible screenshot; encoding quality gives way before its size does. */
-const SCREENSHOT_MAX_BYTES = 150 * 1024;
+const SCREENSHOT_MAX_EDGE = 2000;
 
 /** The CSS space positions on a full-page or element capture map to. */
 const SCREENSHOT_AREA_TARGET = {
@@ -201,7 +198,7 @@ function modelVisibleEdge(size: ImageSize | undefined, limits: ScreenshotLimits 
 	if (!size || Math.min(size.width, size.height) < DEFAULT_MIN_DIMENSION) return cap;
 	const capped = fitLongEdge(size, cap);
 	const edge = Math.max(capped.width, capped.height);
-	const delivered = limits?.tokenization && deliveredImageSize(limits.tokenization, capped);
+	const delivered = limits?.tokenization && deliveredImageSize(limits.tokenization, capped, limits.detail);
 	// A vendor that enlarges small images names a larger size; only a smaller one binds.
 	return delivered ? Math.min(edge, Math.max(delivered.width, delivered.height)) : edge;
 }
@@ -281,15 +278,10 @@ export async function emitScreenshot(
 		header && { width: Math.round(header.width / density), height: Math.round(header.height / density) },
 		session.screenshotLimits,
 	);
+	// Within the byte budget every tool image gets: encoding quality gives way before the image's size does.
 	const resized = await resizeImage(
 		{ bytes: capture.bytes, mimeType: capture.mimeType },
-		{
-			maxWidth: edge,
-			maxHeight: edge,
-			maxBytes: SCREENSHOT_MAX_BYTES,
-			jpegQuality: 70,
-			excludeWebP: session.excludeWebP,
-		},
+		{ maxWidth: edge, maxHeight: edge, jpegQuality: 70, excludeWebP: session.excludeWebP },
 	);
 	throwIfAborted(signal);
 	const kept = capture.keepCapture === true || !!session.browserScreenshotDir;
@@ -315,7 +307,8 @@ export async function emitScreenshot(
 	const note = coordinateNote(capture.area, scale, resized, frame);
 	if (note) line += ` ${note}`;
 	run.output.push({ type: "text", text: [line, ...(capture.notes ?? [])].join("\n") });
-	run.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
+	// `original`: the image is already sized for the model, and resizing it again would move its positions.
+	run.output.push({ type: "image", data: resized.data, mimeType: resized.mimeType, detail: "original" });
 	// The pointer helpers now read positions on this image, or CSS pixels when it is in them.
 	if (capture.area === "viewport") run.pointer.use(frame);
 	return dest;

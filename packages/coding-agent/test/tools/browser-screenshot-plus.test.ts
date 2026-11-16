@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
@@ -305,6 +306,46 @@ body { margin: 0; }
 		});
 	}, 30_000);
 
+	test("a 1920x1080 screenshot passes through an Eval cell at full size, with no second resize", async () => {
+		await withoutBackendOverrides(async () => {
+			const session: ToolSession = {
+				cwd: process.cwd(),
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				settings: Settings.isolated({
+					"browser.webkit": false,
+					"browser.enabled": true,
+					"browser.headless": true,
+					"browser.cmux": false,
+					"browser.tern": false,
+					"async.enabled": false,
+				}),
+				getEvalSessionId: () => "browser-screenshot-eval",
+				getEvalPreludes: () => [prelude],
+			};
+			const prelude = createBrowserPrelude(session);
+			const name = `screenshot-eval-${crypto.randomUUID()}`;
+			// Eval shrinks any other cell image past 1568px and says so in a note of its own.
+			const result = await new EvalTool(session).execute("browser-screenshot-eval", {
+				language: "js",
+				timeout: 30,
+				code: `const tab = await browser.open({ name: ${JSON.stringify(name)}, url: ${JSON.stringify(targetPage(700, 500))}, viewport: { width: 1920, height: 1080, scale: 1 } });
+await tab.screenshot();
+await tab.close();`,
+			});
+			const images = result.content.filter(block => block.type === "image");
+			expect(images).toHaveLength(1);
+			const [image] = images;
+			if (image?.type !== "image") throw new Error("The cell showed no screenshot");
+			const shown = await new Bun.Image(Buffer.from(image.data, "base64")).metadata();
+			expect([shown.width, shown.height]).toEqual([1920, 1080]);
+			const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+			expect(text).toContain("Screenshot 1920x1080.");
+			expect(text).not.toContain("displayed at");
+		});
+	}, 30_000);
+
 	test("a viewport past the size cap arrives scaled, and positions on that image still click there", async () => {
 		await withoutBackendOverrides(async () => {
 			const invoke = createHost();
@@ -315,25 +356,25 @@ body { margin: 0; }
 				await invoke({
 					action: "open",
 					name,
-					url: targetPage(1400, 900),
-					viewport: { width: 2000, height: 1200, scale: 1 },
+					url: targetPage(1700, 1100),
+					viewport: { width: 2500, height: 1500, scale: 1 },
 				});
 				const shot = await invoke({ action: "call", name, chain: [{ method: "screenshot", args: [] }] });
-				expect(shownSize(shot)).toEqual([1568, 941]);
+				expect(shownSize(shot)).toEqual([2000, 1200]);
 				const text = shot.content
 					.filter(block => block.type === "text")
 					.map(block => block.text)
 					.join("\n");
-				expect(text).toContain("2000x1200 viewport");
+				expect(text).toContain("2500x1500 viewport");
 
-				// The button's centre (1420, 920 CSS px) as it appears on the image.
-				const onImage = [Math.round((1420 * 1568) / 2000), Math.round((920 * 941) / 1200)];
+				// The button's centre (1720, 1120 CSS px) as it appears on the image, at 0.8 of the viewport.
+				const onImage = [1376, 896];
 				await invoke({ action: "call", name, chain: [{ method: "clickAt", args: onImage }] });
 				expect(await title()).toBe("hit");
 
 				// The same position measured on the page says so.
 				await invoke({ action: "call", name, chain: [{ method: "evaluate", args: ["document.title = ''"] }] });
-				await invoke({ action: "call", name, chain: [{ method: "clickAt", args: [1420, 920, { css: true }] }] });
+				await invoke({ action: "call", name, chain: [{ method: "clickAt", args: [1720, 1120, { css: true }] }] });
 				expect(await title()).toBe("hit");
 
 				// A resized viewport is not the one pictured: image positions fail instead of landing elsewhere.
