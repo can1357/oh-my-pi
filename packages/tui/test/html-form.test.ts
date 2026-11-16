@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
-import { loadFormImage } from "@oh-my-pi/pi-tui/html-form/media";
+import { loadMedia } from "@oh-my-pi/pi-tui/media";
 import { getNativeBlob } from "@oh-my-pi/pi-tui/native/blobs";
 import { HtmlFormDialog } from "@oh-my-pi/pi-tui/html-form/dialog";
 import { BreakRank, type PageAtom, paginate } from "@oh-my-pi/pi-tui/html-form/paginate";
@@ -678,17 +678,17 @@ describe("html form", () => {
 			try {
 				await Bun.write(path.join(dir, "dot.png"), Uint8Array.fromBase64(PNG_1PX));
 				await Bun.write(path.join(dir, "notes.txt"), "not a picture");
-				expect((await loadFormImage("dot.png", { cwd: dir })).mime).toBe("image/png");
-				expect((await loadFormImage(`data:image/png;base64,${PNG_1PX}`, { cwd: dir })).mime).toBe("image/png");
-				const svg = await loadFormImage("data:image/svg+xml;utf8,%3Csvg viewBox='0 0 4 2'%3E%3C/svg%3E", {
+				expect((await loadMedia("dot.png", { cwd: dir })).mime).toBe("image/png");
+				expect((await loadMedia(`data:image/png;base64,${PNG_1PX}`, { cwd: dir })).mime).toBe("image/png");
+				const svg = await loadMedia("data:image/svg+xml;utf8,%3Csvg viewBox='0 0 4 2'%3E%3C/svg%3E", {
 					cwd: dir,
 				});
 				// An svg sized only by its viewBox gets the size and namespace a standalone drawing needs.
 				expect(new TextDecoder().decode(svg.bytes)).toStartWith(
 					`<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"`,
 				);
-				await expect(loadFormImage("notes.txt", { cwd: dir })).rejects.toThrow("not a PNG");
-				await expect(loadFormImage("missing.png", { cwd: dir })).rejects.toThrow();
+				await expect(loadMedia("notes.txt", { cwd: dir })).rejects.toThrow("not a PNG");
+				await expect(loadMedia("missing.png", { cwd: dir })).rejects.toThrow();
 			} finally {
 				await fs.rm(dir, { recursive: true, force: true });
 			}
