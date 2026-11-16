@@ -9,11 +9,6 @@ provider "modal" {
 	// deployments or regions may carry different limits.
 	skip-cross-provider-reference-fills #true
 	dynamic-models-authoritative #true
-	// Constructs the manager for tokenless users so a dedicated endpoint in
-	// MODAL_BASE_URL can be discovered keyless; `modalModelManagerOptions` still
-	// gates live discovery on a token or configured endpoint, so the shared
-	// gateway never sees an unauthenticated request.
-	allow-unauthenticated #true
 	discovery label="Modal"
 
 	thinking-mode "effort"

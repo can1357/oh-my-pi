@@ -47,7 +47,6 @@ import {
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
-import { normalizeModalBaseUrl } from "../wire/modal";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
@@ -60,6 +59,7 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import { normalizeModalBaseUrl } from "../wire/modal";
 import {
 	SINGULARITYAPI_DEV_API_BASE_URL,
 	SINGULARITYAPI_TECH_API_BASE_URL,
@@ -8508,18 +8508,18 @@ function modalThinkingConfig(entry: OpenAICompatibleModelRecord): ThinkingConfig
  * carry `context_length`, `max_output_length`, `input_modalities`,
  * `supported_features` (`tools`, `reasoning`, …) and the effort ladder in
  * `reasoning_options`; the gateway prices nothing, so costs stay unknown.
- * Discovery runs only with a proxy token or a dedicated endpoint
- * (`MODAL_BASE_URL`): the shared gateway rejects unauthenticated requests.
+ * Discovery runs only with a proxy token: the shared gateway rejects
+ * unauthenticated requests, and requests to a dedicated endpoint
+ * (`MODAL_BASE_URL`) carry the same token.
  */
 export function modalModelManagerOptions(config?: ModalModelManagerConfig): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const configuredBaseUrl = config?.baseUrl ?? Bun.env.MODAL_BASE_URL;
-	const baseUrl = normalizeModalBaseUrl(configuredBaseUrl);
+	const baseUrl = normalizeModalBaseUrl(config?.baseUrl ?? Bun.env.MODAL_BASE_URL);
 	return {
 		providerId: "modal",
 		cacheProviderId: resolveModelCacheProviderId("modal", { apiKey, baseUrl }),
 		dynamicModelsAuthoritative: true,
-		...((apiKey || configuredBaseUrl) && {
+		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels({
 					api: "openai-completions",

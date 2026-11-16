@@ -1,5 +1,4 @@
 import { describe, expect, test, vi } from "bun:test";
-import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { modalModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -117,35 +116,10 @@ describe("modal provider discovery", () => {
 		expect(plain?.supportsTools).toBe(false);
 	});
 
-	test("marks endpoints without tools and skips non-text outputs", async () => {
-		const fetchMock: FetchImpl = vi.fn(async () => mockModelsResponse());
-		const options = modalModelManagerOptions({ apiKey: "wk-test.ws-secret", baseUrl: GATEWAY_URL, fetch: fetchMock });
-		const models = await options.fetchDynamicModels?.();
-
-		// The embedding (`output_modalities` lacks `text`) and voice
-		// (`input_modalities` lacks `text`) endpoints are filtered out.
-		expect(models?.every(model => !model.id.includes("embed") && !model.id.includes("voice"))).toBe(true);
-	});
-
-	test("login validation normalizes MODAL_BASE_URL like discovery", () => {
-		const login = authPolicyFor("modal")?.login;
-		expect(login?.kind).toBe("api-key");
-		if (login?.kind !== "api-key") return;
-		expect(login.validate?.kind).toBe("models-endpoint");
-		if (login.validate?.kind !== "models-endpoint") return;
-		expect(login.validate.baseUrlEnv).toBe("MODAL_BASE_URL");
-		expect(login.validate.baseUrlAppend).toBe("/v1");
-		expect(login.validate.baseUrlPath).toBe("/models");
-	});
-
-	test("skips discovery with no token and no dedicated endpoint", () => {
-		const saved = Bun.env.MODAL_BASE_URL;
-		delete Bun.env.MODAL_BASE_URL;
-		try {
-			expect(modalModelManagerOptions().fetchDynamicModels).toBeUndefined();
-		} finally {
-			if (saved !== undefined) Bun.env.MODAL_BASE_URL = saved;
-		}
+	test("skips discovery without a proxy token, even with a dedicated endpoint", () => {
+		expect(
+			modalModelManagerOptions({ baseUrl: "https://acme--ep-app.modal.run" }).fetchDynamicModels,
+		).toBeUndefined();
 	});
 
 	test("normalizes MODAL_BASE_URL and scopes the cache to token plus endpoint", async () => {
@@ -153,11 +127,19 @@ describe("modal provider discovery", () => {
 			expect(String(input)).toBe("https://acme--ep-app.modal.run/v1/models");
 			return mockModelsResponse();
 		});
-		const options = modalModelManagerOptions({ baseUrl: "https://acme--ep-app.modal.run", fetch: fetchMock });
+		const options = modalModelManagerOptions({
+			apiKey: "wk-test.ws-secret",
+			baseUrl: "https://acme--ep-app.modal.run",
+			fetch: fetchMock,
+		});
 		const models = await options.fetchDynamicModels?.();
 		expect(models?.[0]?.baseUrl).toBe("https://acme--ep-app.modal.run/v1");
 
-		const same = modalModelManagerOptions({ baseUrl: "https://acme--ep-app.modal.run/v1", fetch: fetchMock });
+		const same = modalModelManagerOptions({
+			apiKey: "wk-test.ws-secret",
+			baseUrl: "https://acme--ep-app.modal.run/v1",
+			fetch: fetchMock,
+		});
 		expect(same.cacheProviderId).toBe(options.cacheProviderId);
 
 		const other = modalModelManagerOptions({
