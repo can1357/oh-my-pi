@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "bun:test";
 import type { DesktopRosterWindow } from "@oh-my-pi/pi-natives";
-import { NativeWindowWatch, readTabFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
+import { FrontTab, NativeWindowWatch, readTabFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
 import * as nativeWindows from "@oh-my-pi/pi-coding-agent/tools/browser/native-windows";
 import { WorkerCore } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { WorkerInbound, WorkerOutbound } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
@@ -10,7 +10,8 @@ import {
 	launchHeadlessBrowser,
 	removeUserDataDir,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
-import { browserShowsWindows } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { frontTabSource } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -38,14 +39,19 @@ function win(id: number, over: Partial<DesktopRosterWindow> = {}): DesktopRoster
 /** The tab's window, as the page reports its own frame. */
 const TAB_WINDOW = win(10, { title: "AGENT TAB" });
 const USER_WINDOW = win(20, { pid: USER_APP, app: "TextEdit", x: 1210, width: 700 });
-const FRAME = { x: TAB_WINDOW.x, y: TAB_WINDOW.y, width: TAB_WINDOW.width, height: TAB_WINDOW.height, visible: true };
-const HIDDEN = { ...FRAME, visible: false };
+const FRAME = { x: TAB_WINDOW.x, y: TAB_WINDOW.y, width: TAB_WINDOW.width, height: TAB_WINDOW.height };
 
-/** A watch reading `rosters` in turn; the last supplied frame stays current. */
-function watchWith(rosters: DesktopRosterWindow[][], frames: (typeof FRAME)[] = []): NativeWindowWatch {
+/** A watch reading `rosters` in turn; the last supplied frame and front-tab answer stay current, from in front. */
+function watchWith(
+	rosters: DesktopRosterWindow[][],
+	frames: (typeof FRAME)[] = [],
+	fronts: (boolean | undefined)[] = [],
+): NativeWindowWatch {
 	let frame = FRAME;
+	let front: boolean | undefined = true;
 	return new NativeWindowWatch(
 		async () => (frame = frames.shift() ?? frame),
+		async () => (front = fronts.length > 0 ? fronts.shift() : front),
 		() => rosters.shift(),
 	);
 }
@@ -77,20 +83,23 @@ describe("native-window frame timeout cleanup", () => {
 	});
 });
 
-describe("browsers that show windows", () => {
-	test("leaves headless and unidentified CDP browsers out, including recycled tabs", () => {
-		expect(browserShowsWindows({ kind: "headless", headless: true })).toBe(false);
-		expect(browserShowsWindows({ kind: "headless", headless: false })).toBe(true);
-		expect(browserShowsWindows({ kind: "connected", cdpUrl: "http://127.0.0.1:9222" })).toBe(false);
-		expect(browserShowsWindows({ kind: "connected", cdpUrl: "https://remote.example" })).toBe(false);
-		expect(browserShowsWindows({ kind: "relay", cdpUrl: "http://127.0.0.1:9224" })).toBe(true);
-		expect(browserShowsWindows({ kind: "relay", cdpUrl: "https://remote.example" })).toBe(false);
-		expect(browserShowsWindows({ kind: "spawned", path: "/Applications/App.app" })).toBe(true);
+describe("front-tab sources", () => {
+	test("reads omp's own visible Chromium and the loopback relay, and leaves every other browser out", () => {
+		expect(frontTabSource({ kind: "headless", headless: true })).toBeUndefined();
+		expect(frontTabSource({ kind: "headless", headless: false })).toBe("chrome");
+		expect(
+			frontTabSource({ kind: "spawned", path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" }),
+		).toBe("chrome");
+		expect(frontTabSource({ kind: "spawned", path: "/Applications/App.app/Contents/MacOS/App" })).toBeUndefined();
+		expect(frontTabSource({ kind: "connected", cdpUrl: "http://127.0.0.1:9222" })).toBeUndefined();
+		expect(frontTabSource({ kind: "connected", cdpUrl: "https://remote.example" })).toBeUndefined();
+		expect(frontTabSource({ kind: "relay", cdpUrl: "http://127.0.0.1:9224" })).toBe("relay");
+		expect(frontTabSource({ kind: "relay", cdpUrl: "https://remote.example" })).toBeUndefined();
 	});
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("native-window frame isolation", () => {
-	test("ignores page overrides of window geometry and visibility", async () => {
+	test("ignores page overrides of window geometry", async () => {
 		const { browser, userDataDir } = await launchHeadlessBrowser({ headless: true });
 		try {
 			const page = await browser.newPage();
@@ -103,7 +112,6 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("native-window frame isolation", () => {
 					for (const name of ["screenX", "screenY", "outerWidth", "outerHeight"]) {
 						Object.defineProperty(globalThis, name, { value: 9000 });
 					}
-					Object.defineProperty(document, "visibilityState", { value: "hidden" });
 				});
 			expect(await readTabFrame(page)).toEqual(frame);
 		} finally {
@@ -136,7 +144,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("page-backed native-window candidates", () 
 			});
 			const rosters = [[parent], [candidate, parent]];
 			const watch = new NativeWindowWatch(
-				async () => ({ ...parent, visible: true }),
+				async () => parent,
+				async () => true,
 				() => rosters.shift(),
 				BROWSER,
 				() => nativeWindows.readBrowserPageFrames(browser),
@@ -191,7 +200,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE || process.platform !== "darwin")("native no
 						browserWSEndpoint: wsEndpoint,
 						safeDir: getPuppeteerDir(),
 						uploadDir: `${userDataDir}/uploads`,
-						showsWindows: true,
+						frontTab: "chrome",
 					},
 				});
 				expect((await ready.promise).type).toBe("ready");
@@ -300,6 +309,7 @@ describe("browser native-window report", () => {
 		const rosters = [[twin], [sheet, twin]];
 		const watch = new NativeWindowWatch(
 			async () => FRAME,
+			async () => true,
 			() => rosters.shift(),
 			BROWSER,
 		);
@@ -343,32 +353,28 @@ describe("browser native-window report", () => {
 		).toEqual([]);
 	});
 
-	test("rechecks visibility after the call instead of attributing the newly selected tab's picker", async () => {
+	test("rechecks the tab list after the call instead of attributing the newly selected tab's picker", async () => {
 		const picker = win(31, { layer: 101, x: 100, y: 300, width: 240, height: 180 });
-		let frame = FRAME;
-		const rosters = [[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [picker, TAB_WINDOW]];
-		const watch = new NativeWindowWatch(
-			async () => frame,
-			() => rosters.shift(),
+		// The second call's start samples the previous tail, so the third answer is the call end's own.
+		const watch = watchWith(
+			[[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [picker, TAB_WINDOW]],
+			[],
+			[true, true, false],
 		);
 		await call(watch);
-		watch.beginCall(false);
-		frame = HIDDEN;
-		expect(await watch.endCall()).toEqual([]);
+		expect(await call(watch)).toEqual([]);
 	});
 
-	test("rechecks visibility when a delayed picker is sampled", async () => {
+	test("rechecks the tab list when a delayed picker is sampled", async () => {
 		vi.useFakeTimers();
 		try {
 			const picker = win(31, { layer: 101, x: 100, y: 300, width: 240, height: 180 });
-			let frame = FRAME;
-			const rosters = [[TAB_WINDOW], [TAB_WINDOW], [picker, TAB_WINDOW], [picker, TAB_WINDOW], [picker, TAB_WINDOW]];
-			const watch = new NativeWindowWatch(
-				async () => frame,
-				() => rosters.shift(),
+			const watch = watchWith(
+				[[TAB_WINDOW], [TAB_WINDOW], [picker, TAB_WINDOW], [picker, TAB_WINDOW], [picker, TAB_WINDOW]],
+				[],
+				[true, false],
 			);
 			await call(watch);
-			frame = HIDDEN;
 			vi.advanceTimersByTime(2_000);
 			expect(await call(watch)).toEqual([]);
 		} finally {
@@ -449,21 +455,27 @@ describe("browser native-window report", () => {
 	});
 
 	test("names nothing for a background tab, whose window shows another tab's menus", async () => {
-		// The tab in front of it (the user's, or another session's) opens a <select> menu during this tab's call.
+		// The tab in front of it (the user's, or another session's) opens a <select> menu during this tab's call. The
+		// page still reports the frame it last showed at, and focus emulation keeps it reporting itself visible.
 		const menu = win(42, { x: 40, y: 120, width: 180, height: 90, layer: 101 });
-		const watch = watchWith([[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [menu, TAB_WINDOW]], [FRAME, HIDDEN]);
+		const watch = watchWith([[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [menu, TAB_WINDOW]], [], [true, true, false]);
 		expect(await call(watch)).toEqual([]);
 		expect(await call(watch)).toEqual([]);
 	});
 
-	test("does not take another app's window at the tab's frame while the page is hidden", async () => {
-		// The browser's window is on another Space; a maximised window of the user's app has the same frame.
+	test("does not take another app's window at the tab's frame while another tab is in front", async () => {
+		// A maximised window of the user's app has the frame the background page last showed at.
 		const other = win(43, { pid: USER_APP, app: "TextEdit" });
 		const sheet = win(44, { pid: USER_APP, app: "TextEdit", x: 300, y: 120, width: 600, height: 420 });
-		const watch = watchWith([[other], [other], [other, TAB_WINDOW], [other, TAB_WINDOW, sheet]], [HIDDEN, FRAME]);
+		const watch = watchWith([[other], [other], [other, TAB_WINDOW], [other, TAB_WINDOW, sheet]], [], [false, true]);
 		expect(await call(watch)).toEqual([]);
-		// Back on screen, the browser's window and the other app's share the frame: neither is taken as the tab's.
+		// In front again, the browser's window and the other app's share the frame: neither is taken as the tab's.
 		expect(await call(watch)).toEqual([]);
+	});
+
+	test("names nothing when the browser's tab list cannot say which tab is in front", async () => {
+		const picker = win(31, { layer: 101, x: 100, y: 300, width: 240, height: 180 });
+		expect(await call(watchWith([[TAB_WINDOW], [picker, TAB_WINDOW]], [], [undefined]))).toEqual([]);
 	});
 
 	test("places a window over the tab it found earlier when a dialog keeps the page from answering", async () => {
@@ -473,6 +485,46 @@ describe("browser native-window report", () => {
 		watch.beginCall(true);
 		const [line] = await watch.endCall(true);
 		expect(line).toContain("a floating panel during this call");
+	});
+
+	test("asks the tab list while a dialog keeps the page from answering", async () => {
+		// The call ends with the page's confirm() open; the user selects another tab of the window, whose menu opens.
+		const menu = win(42, { x: 40, y: 120, width: 180, height: 90, layer: 101 });
+		const watch = watchWith([[TAB_WINDOW], [TAB_WINDOW], [TAB_WINDOW], [menu, TAB_WINDOW]], [], [true, true, false]);
+		await call(watch);
+		watch.beginCall(true);
+		expect(await watch.endCall(true)).toEqual([]);
+	});
+
+	test("asks the tab list at the tail while a dialog keeps the page from answering", async () => {
+		vi.useFakeTimers();
+		try {
+			const menu = win(42, { x: 40, y: 120, width: 180, height: 90, layer: 101 });
+			const watch = watchWith(
+				[
+					[TAB_WINDOW],
+					[TAB_WINDOW],
+					[TAB_WINDOW],
+					[TAB_WINDOW],
+					[TAB_WINDOW],
+					[menu, TAB_WINDOW],
+					[menu, TAB_WINDOW],
+					[menu, TAB_WINDOW],
+				],
+				[],
+				[true, true, true, false],
+			);
+			await call(watch);
+			vi.advanceTimersByTime(2_000);
+			// The call leaves the page's confirm() open; the user then selects another tab, whose menu opens.
+			watch.beginCall(false);
+			expect(await watch.endCall(true)).toEqual([]);
+			vi.advanceTimersByTime(2_000);
+			watch.beginCall(true);
+			expect(await watch.endCall(true)).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("leaves out the page's own JavaScript dialog, which Chrome draws over the tab", async () => {
@@ -491,5 +543,234 @@ describe("browser native-window report", () => {
 		expect(await watch.endCall(true)).toEqual([]);
 		watch.beginCall(true);
 		expect(await watch.endCall(true)).toEqual([]);
+	});
+});
+
+describe("front tab by the browser's tab list", () => {
+	/** `/json/list` page entries, most recently shown first. */
+	function list(...ids: string[]): Array<Record<string, string>> {
+		return ids.map(id => ({ id, type: "page", title: id, url: `https://example.test/${id}` }));
+	}
+
+	/** Answers `Browser.getWindowForTarget` from `placement`; an id it lacks has no browser window. */
+	function windows(placement: Record<string, number>): (targetId: string) => Promise<number> {
+		return async targetId => {
+			const window = placement[targetId];
+			if (window === undefined) throw new Error(`Browser window not found for ${targetId}`);
+			return window;
+		};
+	}
+
+	/** One tab's reader over Chrome's list, with `placement` for its window lookups. */
+	function chrome(targetId: string, placement: Record<string, number>, openedInFront = false): FrontTab {
+		const endpoint = "ws://127.0.0.1:1/devtools/browser/unused";
+		return new FrontTab("chrome", endpoint, targetId, windows(placement), openedInFront);
+	}
+
+	test("takes a tab alone in its window as in front", async () => {
+		// The other window's tab was shown later, so Chrome lists it first.
+		expect(await chrome("agent", { other: 2, agent: 1 }).inFront(list("other", "agent"))).toBe(true);
+	});
+
+	test("takes a tab as behind when a page of its window is listed before it", async () => {
+		expect(await chrome("agent", { user: 1, agent: 1 }).inFront(list("user", "agent"))).toBe(false);
+	});
+
+	test("takes a tab omp opened in front for in front while no page of its window is listed before it", async () => {
+		const agent = chrome("agent", { agent: 1, blank: 1, user: 1 }, true);
+		expect(await agent.inFront(list("agent", "blank"))).toBe(true);
+		expect(await agent.inFront(list("user", "agent", "blank"))).toBe(false);
+		expect(await agent.inFront(list("agent", "user", "blank"))).toBe(true);
+	});
+
+	test("does not take a tab listed first for in front until it passes a page once listed before it", async () => {
+		// Chrome ranks a tab opened in the background by its creation, so first alone cannot say it was shown.
+		const agent = chrome("agent", { user: 1, agent: 1, older: 1 });
+		expect(await agent.inFront(list("agent", "user"))).toBe(false);
+		// The user's tab is shown, then the agent's: it could only pass the user's by being shown.
+		expect(await agent.inFront(list("user", "agent"))).toBe(false);
+		expect(await agent.inFront(list("agent", "user"))).toBe(true);
+		// Once shown it stays known shown: a page it never passed, listed after it, changes nothing.
+		expect(await agent.inFront(list("agent", "older", "user"))).toBe(true);
+	});
+
+	test("does not take a tab opened in the background for in front after the tabs listed before it close", async () => {
+		// The agent opens tab A2, then A3, in the background of the window whose front tab is the user's, then closes A3.
+		const second = chrome("a2", { a2: 1, a3: 1, user: 1 });
+		expect(await second.inFront(list("a2", "user"))).toBe(false);
+		expect(await second.inFront(list("a3", "a2", "user"))).toBe(false);
+		expect(await second.inFront(list("a2", "user"))).toBe(false);
+	});
+
+	test("takes the tab in front as behind while a tab opened in the background of its window ranks first", async () => {
+		const agent = chrome("agent", { opened: 1, agent: 1, user: 1 }, true);
+		expect(await agent.inFront(list("agent", "user"))).toBe(true);
+		expect(await agent.inFront(list("opened", "agent", "user"))).toBe(false);
+	});
+
+	test("tells each tab's place across two windows", async () => {
+		// The user's tab is in front of the agent's in one window; another window shows its own tab.
+		const placement = { other: 2, user: 1, agent: 1 };
+		const entries = list("other", "user", "agent");
+		expect(await chrome("other", placement).inFront(entries)).toBe(true);
+		expect(await chrome("user", placement, true).inFront(entries)).toBe(true);
+		expect(await chrome("agent", placement, true).inFront(entries)).toBe(false);
+	});
+
+	test("asks for the windows of the pages after the tab only while it is listed first and not known shown", async () => {
+		// The devtools entry has no browser window to report.
+		const windowOf = vi.fn(windows({ agent: 1, user: 1 }));
+		const endpoint = "ws://127.0.0.1:1/devtools/browser/unused";
+		const asked = () => windowOf.mock.calls.map(([id]) => id);
+		expect(
+			await new FrontTab("chrome", endpoint, "agent", windowOf, true).inFront(list("agent", "user", "devtools")),
+		).toBe(true);
+		expect(asked()).toEqual(["agent"]);
+		windowOf.mockClear();
+		const unshown = new FrontTab("chrome", endpoint, "agent", windowOf, false);
+		expect(await unshown.inFront(list("user", "agent", "devtools"))).toBe(false);
+		expect(asked()).toEqual(["user", "agent"]);
+		expect(await unshown.inFront(list("agent", "user", "devtools"))).toBeUndefined();
+	});
+
+	test("names nothing over a tab opened in the background, whose page matches a window at the screen origin", async () => {
+		// Chrome lists the never-shown tab first, by its creation, and its page reports the screen origin: the frame of
+		// a window there (full screen, or a hidden menu bar) whose front tab, the user's, opens a menu.
+		const atOrigin = win(10, { x: 0, y: 0, width: 1240, height: 860 });
+		const menu = win(42, { x: 40, y: 120, width: 180, height: 90, layer: 101 });
+		const rosters = [[atOrigin], [atOrigin], [atOrigin], [menu, atOrigin]];
+		const agent = chrome("agent", { agent: 1, user: 1 });
+		const watch = new NativeWindowWatch(
+			async () => ({ x: 0, y: 0, width: 1240, height: 860 }),
+			shown => agent.inFront(list("agent", "user"), shown),
+			() => rosters.shift(),
+			BROWSER,
+		);
+		expect(await call(watch)).toEqual([]);
+		expect(await call(watch)).toEqual([]);
+	});
+
+	test("takes a page frame off the screen origin at one browser window as proof the tab was shown", async () => {
+		// The user shows the agent's tab, opened in the background, once: Chrome still lists it first, and its page now
+		// reports the frame of its window, over which the agent's own click opens a menu.
+		const menu = win(42, { x: 40, y: 120, width: 180, height: 90, layer: 101 });
+		const rosters = [[TAB_WINDOW], [menu, TAB_WINDOW]];
+		const agent = chrome("agent", { agent: 1, user: 1 });
+		const watch = new NativeWindowWatch(
+			async () => FRAME,
+			shown => agent.inFront(list("agent", "user"), shown),
+			() => rosters.shift(),
+			BROWSER,
+		);
+		const [line] = await call(watch);
+		expect(line).toContain("computer.window(42)");
+	});
+
+	test("takes no proof from the screen origin, an ambiguous match or a window of another or unknown process", async () => {
+		const atOrigin = win(10, { x: 0, y: 0, width: 1240, height: 860 });
+		const twin = win(11);
+		const other = win(21, { pid: USER_APP, app: "TextEdit" });
+		const proofs: boolean[] = [];
+		const watchAt = (frame: typeof FRAME, roster: DesktopRosterWindow[], browserPid: number | undefined) =>
+			new NativeWindowWatch(
+				async () => frame,
+				async shown => {
+					proofs.push(shown);
+					return false;
+				},
+				() => roster,
+				browserPid,
+			);
+		await call(watchAt({ x: 0, y: 0, width: 1240, height: 860 }, [atOrigin], BROWSER));
+		await call(watchAt(FRAME, [TAB_WINDOW, twin], BROWSER));
+		await call(watchAt(FRAME, [other], BROWSER));
+		await call(watchAt(FRAME, [TAB_WINDOW], undefined));
+		await call(watchAt(FRAME, [TAB_WINDOW, other], BROWSER));
+		expect(proofs).toEqual([false, false, false, false, true]);
+	});
+
+	test("skips entries that are not pages", async () => {
+		const entries = [{ id: "worker", type: "service_worker" }, { id: "frame", type: "iframe" }, ...list("agent")];
+		expect(await chrome("agent", { agent: 1 }).inFront(entries)).toBe(true);
+	});
+
+	test("cannot say from an unreadable list, a missing tab or a window it cannot read", async () => {
+		const agent = chrome("agent", { agent: 1 });
+		for (const unreadable of [undefined, null, "[]", { pages: list("agent") }]) {
+			expect(await agent.inFront(unreadable)).toBeUndefined();
+		}
+		expect(await agent.inFront(list("user"))).toBeUndefined();
+		// The user's tab has no browser window to report.
+		expect(await agent.inFront(list("user", "agent"))).toBeUndefined();
+	});
+
+	test("takes the relay extension's active flag for the tab", async () => {
+		const entries = [
+			{ id: "user", type: "page", active: "true" },
+			{ id: "agent", type: "page", active: "false" },
+			{ id: "older", type: "page" },
+		];
+		const windowOf = vi.fn(windows({}));
+		const relay = (id: string) =>
+			new FrontTab("relay", "ws://127.0.0.1:9224/devtools/browser/x", id, windowOf, false);
+		expect(await relay("user").inFront(entries)).toBe(true);
+		expect(await relay("agent").inFront(entries)).toBe(false);
+		expect(await relay("older").inFront(entries)).toBeUndefined();
+		expect(await relay("gone").inFront(entries)).toBeUndefined();
+		expect(windowOf).not.toHaveBeenCalled();
+	});
+
+	test("reads the list beside the endpoint the worker drives, and cannot say when it is unreachable", async () => {
+		let body = JSON.stringify(list("user", "agent"));
+		const requested: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch(request) {
+				requested.push(new URL(request.url).pathname);
+				return new Response(body, { headers: { "content-type": "application/json" } });
+			},
+		});
+		const endpoint = `ws://127.0.0.1:${server.port}/devtools/browser/omp?claim=agent`;
+		const placement: Record<string, number> = { user: 1, agent: 2 };
+		const agent = new FrontTab("chrome", endpoint, "agent", windows(placement), false);
+		try {
+			expect(await agent.read()).toBe(true);
+			placement.agent = 1;
+			expect(await agent.read()).toBe(false);
+			body = "<html>starting</html>";
+			expect(await agent.read()).toBeUndefined();
+			expect(requested).toEqual(["/json/list", "/json/list", "/json/list"]);
+		} finally {
+			server.stop(true);
+		}
+		expect(await agent.read()).toBeUndefined();
+	});
+
+	test("keeps the proof a read was given though the list could not answer it", async () => {
+		let body = "<html>starting</html>";
+		const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(body) });
+		const endpoint = `ws://127.0.0.1:${server.port}/devtools/browser/omp`;
+		const agent = new FrontTab("chrome", endpoint, "agent", windows({ agent: 1, user: 1 }), false);
+		try {
+			expect(await agent.read(true)).toBeUndefined();
+			body = JSON.stringify(list("agent", "user"));
+			expect(await agent.read()).toBe(true);
+		} finally {
+			server.stop(true);
+		}
+	});
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("managed browser process", () => {
+	test("carries the managed browser's own process, which limits the window match", async () => {
+		const handle = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		try {
+			if (!("browser" in handle)) throw new Error("Expected a puppeteer browser handle");
+			expect(handle.pid).toBeGreaterThan(0);
+			expect(handle.pid).toBe(handle.browser.process()?.pid);
+		} finally {
+			await releaseBrowser(handle, { kill: true });
+		}
 	});
 });

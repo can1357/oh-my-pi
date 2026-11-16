@@ -228,7 +228,7 @@ import {
 } from "./screenshot";
 import { PointerSpace } from "./pointer-space";
 import { type DialogPolicy, type DialogState, dialogBlocksPageError, RuntimeDialogController } from "./dialogs";
-import { NativeWindowWatch, readBrowserPageFrames, readTabFrame } from "./native-windows";
+import { FrontTab, NativeWindowWatch, readBrowserPageFrames, readTabFrame } from "./native-windows";
 import {
 	type BrowserFrameApi,
 	type BrowserFrameInfo,
@@ -2233,21 +2233,31 @@ export class WorkerCore {
 				await this.#page.emulateFocusedPage(true);
 			}
 			this.#webmcp = new WebMcpController(this.#page);
-			// Only a browser that draws its windows on the user's screen raises native ones.
-			if (payload.showsWindows && process.platform === "darwin") {
+			await installVitalsObservers(this.#page);
+			await installCancelledReleaseGuard(this.#page);
+			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
+			if (payload.insecure) this.#certificateOverride = await applyInsecure(this.#page);
+			const targetId = await targetIdForPage(this.#page);
+			this.#targetId = targetId;
+			// Only a browser that draws its windows on the user's screen raises native ones, and they are this tab's only
+			// while the browser's tab list shows it in front of its window. A headless-mode worker opens its tab in front;
+			// an attaching one opens it in the background or adopts it, recycled managed tabs aside.
+			const frontTabSource = payload.frontTab;
+			if (frontTabSource && process.platform === "darwin") {
 				const page = this.#page;
+				const browser = this.#browser;
+				const windowOf = async (id: string) =>
+					(await browserConnection(browser).send("Browser.getWindowForTarget", { targetId: id })).windowId;
+				const openedInFront = payload.mode === "headless" || payload.openedInFront === true;
+				const front = new FrontTab(frontTabSource, payload.browserWSEndpoint, targetId, windowOf, openedInFront);
 				this.#nativeWindows = new NativeWindowWatch(
 					() => readTabFrame(page),
+					shown => front.read(shown),
 					undefined,
 					payload.browserPid,
 					() => readBrowserPageFrames(page.browser()),
 				);
 			}
-			await installVitalsObservers(this.#page);
-			await installCancelledReleaseGuard(this.#page);
-			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
-			if (payload.insecure) this.#certificateOverride = await applyInsecure(this.#page);
-			this.#targetId = await targetIdForPage(this.#page);
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;

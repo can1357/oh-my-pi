@@ -25,6 +25,7 @@ import { gracefulKillTreeOnce, isChromiumBrowserExecutable, pickElectronTarget }
 import type * as Cmux from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { browserConnection, DEFAULT_VIEWPORT } from "./launch";
+import type { FrontTabSource } from "./native-windows";
 import {
 	closeCdpTarget,
 	closeRelayTarget,
@@ -2230,11 +2231,24 @@ function sweepClosedTabUploads(): void {
 	void sweepUploadStaging(live, now).catch(() => undefined);
 }
 
-/** Whether the browser draws its windows on the user's screen; a headless one keeps that through a tab's recycle. */
-export function browserShowsWindows(kind: PuppeteerBrowserKind): boolean {
-	if (kind.kind === "relay") return isLoopbackRelayUrl(kind.cdpUrl);
-	// A connected endpoint may be remote or headless; its geometry cannot identify a local window.
-	return kind.kind !== "connected" && (kind.kind !== "headless" || !kind.headless);
+/**
+ * The tab list that says whether a call's tab is the one in front of its window, for a browser that draws its windows
+ * on the user's screen; undefined names no native window. omp's own Chromium (the managed launch, or a Chromium browser
+ * omp spawned) ranks its `/json/list` by when each tab was last shown; the loopback relay's marks the extension's active
+ * tab of each window. A headless browser keeps that through a tab's recycle. A connected endpoint may be remote,
+ * headless or a build whose list was never measured, and a spawned app's windows are not browser tabs.
+ */
+export function frontTabSource(kind: PuppeteerBrowserKind): FrontTabSource | undefined {
+	switch (kind.kind) {
+		case "headless":
+			return kind.headless ? undefined : "chrome";
+		case "spawned":
+			return isChromiumBrowserExecutable(kind.path) ? "chrome" : undefined;
+		case "relay":
+			return isLoopbackRelayUrl(kind.cdpUrl) ? "relay" : undefined;
+		case "connected":
+			return undefined;
+	}
 }
 async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
@@ -2249,7 +2263,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			// Visible launches still need an OMP-owned page, stealth setup, and
 			// independent lifecycle; only their fixed device emulation is disabled.
 			emulateViewport: browser.kind.headless,
-			showsWindows: browserShowsWindows(browser.kind),
+			frontTab: frontTabSource(browser.kind),
 			browserPid: browser.pid,
 			viewport: opts.viewport,
 			dialogs: opts.dialogs,
@@ -2298,7 +2312,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		insecure: opts.insecure,
 		userDriven,
 		relay: browser.kind.kind === "relay",
-		showsWindows: browserShowsWindows(browser.kind),
+		frontTab: frontTabSource(browser.kind),
 		browserPid: browser.pid,
 	};
 }
@@ -2548,7 +2562,8 @@ async function recycleTimedOutWorkerTab(
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
 		relay: tab.kindTag === "relay",
-		showsWindows: browserShowsWindows(tab.browser.kind),
+		frontTab: frontTabSource(tab.browser.kind),
+		openedInFront: tab.kindTag === "headless",
 		browserPid: tab.browser.pid,
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
