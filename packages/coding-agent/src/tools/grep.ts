@@ -1116,6 +1116,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const details: GrepToolDetails = {
 						scopePath,
 						searchPath,
+						isDirectory,
 						cwd: this.session.cwd,
 						matchCount: 0,
 						fileCount: 0,
@@ -1337,6 +1338,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const details: GrepToolDetails = {
 					scopePath,
 					searchPath,
+					isDirectory,
 					cwd: this.session.cwd,
 					matchCount: selectedMatches.length,
 					fileCount: fileList.length,

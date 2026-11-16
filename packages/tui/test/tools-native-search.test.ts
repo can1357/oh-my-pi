@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { ReadToolGroupComponent } from "../src/chat/read-tool-group";
 import { setTranscriptPresenters } from "../src/chat/transcript-presentation";
@@ -9,6 +9,7 @@ import { type GrepToolDetails, grepToolRenderer } from "../src/tools/grep";
 import { lspToolRenderer } from "../src/tools/lsp";
 import { readToolRenderer } from "../src/tools/read";
 import type { RenderResultOptions } from "../src/tools/renderer";
+import { applyLinkMapSetting } from "../src/render/link-map";
 
 const collapsed: RenderResultOptions = { expanded: false, isPartial: false };
 const expanded: RenderResultOptions = { expanded: true, isPartial: false };
@@ -164,12 +165,47 @@ describe("grep native view", () => {
 });
 
 describe("read native view", () => {
-	it("numbers a legacy result (no displayContent) from the selector's range start", () => {
-		const view = readToolRenderer.describeResult({ content: [{ type: "text", text: "a\nb" }] }, collapsed, {
-			path: "src/x.ts:13-36",
-		});
-		expect(codeStarts(view.body)).toEqual([13]);
-		expect(view.tool?.target).toBe("src/x.ts:13-36");
+	beforeAll(async () => {
+		await initTheme();
+	});
+	afterEach(() => applyLinkMapSetting({}));
+
+	it("numbers legacy read content and links standalone and grouped reads at the requested start", () => {
+		const sourcePath = "/workspace/src/x.ts";
+		const cases = [
+			{ path: "src/x.ts:13-36", line: 13 },
+			{ path: "src/x.ts:raw:13-36", line: 13 },
+			{ path: "src/x.ts:13-36:raw", line: 13 },
+			{ path: "src/x.ts:13-36,90", line: 13 },
+			{ path: "src/x.ts", offset: 30, line: 30 },
+			{ path: "src/x.ts:13-36", offset: 30, line: 13 },
+		];
+		for (const target of ["vscode://vscode-remote/ssh-remote+devbox/workspace", "ompfile://devbox/workspace"]) {
+			applyLinkMapSetting({ "/workspace": target });
+			for (const { line, ...args } of cases) {
+				for (const isDirectory of [false, true]) {
+					const result = {
+						content: [{ type: "text", text: "a\nb" }],
+						details: { resolvedPath: sourcePath, isDirectory },
+					};
+					const href = `${target}/src/x.ts${isDirectory ? "" : target.startsWith("vscode:") ? `:${line}` : `?line=${line}`}`;
+					const view = readToolRenderer.describeResult(result, collapsed, args);
+					expect(view.tool?.href).toBe(href);
+					if (!isDirectory) expect(codeStarts(view.body)).toEqual([line]);
+					const group = new ReadToolGroupComponent();
+					group.updateArgs(args, "read");
+					group.updateResult(result, false, "read");
+					for (const context of [undefined, toolCx]) {
+						expect(JSON.stringify(group.describe(context))).toContain(`"href":${JSON.stringify(href)}`);
+					}
+					// A second target exercises the per-file native row rather than only the group head.
+					group.updateArgs({ path: "src/other.ts" }, "other");
+					for (const context of [undefined, toolCx]) {
+						expect(JSON.stringify(group.describe(context))).toContain(`"href":${JSON.stringify(href)}`);
+					}
+				}
+			}
+		}
 	});
 
 	it("follows displayContent line numbers across an elided block", () => {

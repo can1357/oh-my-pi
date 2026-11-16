@@ -149,6 +149,8 @@ type ReadEntry = {
 	contentType?: string;
 	/** The call's `raw` arg, which keeps Markdown previews as source. */
 	raw?: boolean;
+	/** Legacy line offset; selectors take precedence when both are present. */
+	offset?: number;
 	conflictCount?: number;
 	codeStartLine?: number;
 	codeLineNumbers?: Array<number | null>;
@@ -280,7 +282,7 @@ function firstSelectorLine(selector: string | undefined): number | undefined {
 function firstSelectorLineForTargets(targets: ReadDisplayTarget[]): number | undefined {
 	let line: number | undefined;
 	for (const target of targets) {
-		const targetLine = firstSelectorLine(target.selector);
+		const targetLine = firstSelectorLine(target.selector) ?? target.entry.offset;
 		if (targetLine === undefined) continue;
 		if (line === undefined || targetLine < line) line = targetLine;
 	}
@@ -572,6 +574,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		entry.path = displayPath;
 		entry.linkPath = path.isAbsolute(rawPath) ? rawPath : undefined;
 		entry.raw = args.raw === true;
+		entry.offset = args.offset;
 		entry.args = args;
 		entry.presentation.markStale();
 		this.#entries.set(toolCallId, entry);
@@ -880,7 +883,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	/** The native link of a summary row's filesystem target, when it has one. */
 	#rowHref(row: ReadSummaryRow): string | undefined {
 		const link = linkForTargets(row.targets);
-		return link && fileHref(link.path, link.kind);
+		return link && fileHref(link.path, link.kind, { line: firstSelectorLineForTargets(row.targets) });
 	}
 
 	/** Head data for one summary row: the path (+ selector) target, its link, correction and conflicts. */

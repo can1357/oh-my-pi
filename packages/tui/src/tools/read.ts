@@ -500,6 +500,7 @@ function readNativeHead(
 		href: fileHref(
 			linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details),
 			readLinkKind(details),
+			{ line: firstReadSelectorLine(split.sel) ?? args?.offset },
 		),
 		meta,
 		badges:

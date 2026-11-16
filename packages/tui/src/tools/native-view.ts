@@ -7,7 +7,7 @@ import * as path from "node:path";
 import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { ansi, code, compact, keyed, node, row, span, text } from "../native/describe";
 import type { NativeChild, NativeNode } from "../native/node";
-import { type FileLinkKind, resolveFileLink } from "../render/hyperlink";
+import { type FileLink, type FileLinkKind, resolveFileLink } from "../render/hyperlink";
 import { type ParsedDiagnostic, parseDiagnosticMessage, pathNameStart, shortenPath } from "../render/render-utils";
 import { plainText } from "../native/spans";
 import type { FileDiagnosticsResult } from "./lsp";
@@ -24,8 +24,12 @@ export function displayPath(filePath: string): string {
 }
 
 /** Configured file link for a head's path target, when the path is absolute. */
-export function fileHref(filePath: string | undefined, kind: FileLinkKind): string | undefined {
-	return filePath && path.isAbsolute(filePath) ? resolveFileLink({ path: filePath, kind }) : undefined;
+export function fileHref(
+	filePath: string | undefined,
+	kind: FileLinkKind,
+	at?: Pick<FileLink, "line" | "col">,
+): string | undefined {
+	return filePath && path.isAbsolute(filePath) ? resolveFileLink({ path: filePath, kind, ...at }) : undefined;
 }
 
 /** Link for a head target that is a web URL (`www.` gains `https://`), else undefined. */
