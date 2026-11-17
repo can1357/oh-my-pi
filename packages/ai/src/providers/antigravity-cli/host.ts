@@ -25,7 +25,7 @@ import type {
 	ToolResultMessage,
 } from "../../types";
 import { normalizeSchemaForCCA, toolWireSchema } from "../../utils/schema";
-import { validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
+import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 import agentDefinition from "./agent.md" with { type: "text" };
 import { resolveAgyBinary } from "./binary";
 import {
@@ -38,6 +38,7 @@ import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
 import type { StepWriter } from "./step-writer";
+import { normalizeToolArguments } from "./tool-arguments";
 
 const AGENT_NAME = "bridge";
 const STARTUP_TIMEOUT_MS = 60_000;
@@ -623,18 +624,14 @@ export class AgyHost implements ProviderSessionState {
 		}
 	}
 
-	async #onToolCall(
-		token: object,
-		name: string,
-		args: Record<string, unknown>,
-		callerId: string | undefined,
-	): Promise<McpToolOutput> {
+	async #onToolCall(token: object, name: string, args: unknown, callerId: string | undefined): Promise<McpToolOutput> {
 		const agy = this.#process;
 		if (!agy || agy.token !== token) return errorOutput("Tool call belongs to a stopped process.");
 		const tool = agy.tools.get(name);
-		if (!tool || !validateJsonSchemaValue(tool.inputSchema, args).success) {
-			this.#fail(new Error("Antigravity CLI requested an unknown tool or invalid arguments"));
-			return errorOutput("Unknown tool or invalid arguments; no execution occurred.");
+		if (!tool) {
+			const shownName = name.slice(0, MAX_DIAGNOSTIC_TOOL_NAME);
+			this.#fail(new Error(`Antigravity CLI requested an unknown tool: ${shownName}`));
+			return errorOutput(`Unknown tool: ${shownName}; no execution occurred.`);
 		}
 		const announced = await this.#awaitAnnouncement(name);
 		const step = this.#step;
@@ -654,6 +651,15 @@ export class AgyHost implements ProviderSessionState {
 			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
 			return errorOutput("Tool call rejected; no execution occurred.");
 		}
+		let accepted = normalizeToolArguments(tool.inputSchema, args).arguments;
+		let validation = validateJsonSchemaValue(tool.inputSchema, accepted);
+		if (!validation.success) {
+			// Normalization must never reject arguments the schema already accepted.
+			accepted = args;
+			validation = validateJsonSchemaValue(tool.inputSchema, accepted);
+		}
+		if (!validation.success) return errorOutput(describeToolArguments(tool, accepted, validation));
+		if (!isRecord(accepted)) return errorOutput(describeToolArguments(tool, accepted));
 		const id = `agy_${crypto.randomUUID().replaceAll("-", "")}`;
 		const result = Promise.withResolvers<McpToolOutput>();
 		const pending: PendingCall = {
@@ -663,7 +669,7 @@ export class AgyHost implements ProviderSessionState {
 			expiry: this.#options.schedule(this.#options.holdLimitMs, () => this.#detach(pending)),
 		};
 		this.#pending = pending;
-		step.writer.toolCall({ type: "toolCall", id, name, arguments: args });
+		step.writer.toolCall({ type: "toolCall", id, name, arguments: accepted });
 		step.writer.usage(this.#contextTokens);
 		const digest = transcriptDigest([...step.messages, step.writer.output]);
 		step.writer.finish("toolUse", { type: "antigravityCli", conversationId, digest });
@@ -871,6 +877,52 @@ function toMcpOutput(result: ToolResultMessage): McpToolOutput {
 
 function errorOutput(text: string): McpToolOutput {
 	return { content: [{ type: "text", text }], isError: true };
+}
+
+const MAX_DIAGNOSTIC_ISSUES = 8;
+const MAX_DIAGNOSTIC_PATH_SEGMENTS = 8;
+const MAX_DIAGNOSTIC_PATH_SEGMENT = 64;
+const MAX_DIAGNOSTIC_TOOL_NAME = 128;
+const MAX_DIAGNOSTIC_SCHEMA = 8_192;
+const MAX_DIAGNOSTIC_MESSAGE = 16_384;
+
+/** Explains rejected arguments with the failing paths and the tool's expected schema. */
+export function describeToolArguments(
+	tool: McpToolDefinition,
+	args: unknown,
+	validation?: JsonSchemaValidationResult,
+): string {
+	const name = tool.name.slice(0, MAX_DIAGNOSTIC_TOOL_NAME);
+	const schema = JSON.stringify(tool.inputSchema);
+	const boundedSchema =
+		schema.length > MAX_DIAGNOSTIC_SCHEMA ? `${schema.slice(0, MAX_DIAGNOSTIC_SCHEMA)}...` : schema;
+	let problem: string;
+	if (!isRecord(args)) problem = "expected an object";
+	else {
+		const result = validation ?? validateJsonSchemaValue(tool.inputSchema, args);
+		if (result.success) problem = "arguments are valid";
+		else {
+			const shown = result.issues.slice(0, MAX_DIAGNOSTIC_ISSUES);
+			const issues = shown
+				.map(issue => {
+					const path = issue.path
+						.slice(0, MAX_DIAGNOSTIC_PATH_SEGMENTS)
+						.map(segment => {
+							const text = String(segment);
+							return text.length > MAX_DIAGNOSTIC_PATH_SEGMENT
+								? `${text.slice(0, MAX_DIAGNOSTIC_PATH_SEGMENT)}...`
+								: text;
+						})
+						.join(".");
+					return `${path.length === 0 ? "(root)" : path}: ${issue.message}`;
+				})
+				.join("; ");
+			const remaining = result.issues.length - shown.length;
+			problem = remaining > 0 ? `${issues}; and ${remaining} more` : issues;
+		}
+	}
+	const message = `Invalid arguments for tool ${name}: ${problem}. Expected schema: ${boundedSchema}`;
+	return message.length > MAX_DIAGNOSTIC_MESSAGE ? `${message.slice(0, MAX_DIAGNOSTIC_MESSAGE)}...` : message;
 }
 
 function mapAgyError(error: unknown): Error {

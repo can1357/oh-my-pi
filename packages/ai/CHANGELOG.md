@@ -34,6 +34,10 @@
 ### Fixed
 
 - Fixed credential rotation and one-shot retries so custom providers pointing at the Zhipu Coding Plan endpoint honor the Beijing-time quota reset instead of waiting about eight hours too long ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+### Fixed
+
+- Invalid Antigravity CLI tool arguments now return the validation issues and the tool's expected schema to the model instead of ending the turn. ([#19413](https://github.com/can1357/oh-my-pi/pull/19413) by [@SenCha930511](https://github.com/SenCha930511))
+- Antigravity CLI tool calls that pass a habitual alias such as `path`, `command`, `cwd`, or `description` now rename it to the tool's declared parameter before schema validation; arguments the schema already accepted are left untouched, and ambiguous or non-string aliases keep the existing diagnostic. ([#19413](https://github.com/can1357/oh-my-pi/pull/19413) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 

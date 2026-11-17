@@ -7,6 +7,7 @@ import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
+	describeToolArguments,
 	type AgyConnection,
 	type AgyHostOptions,
 	type AgyScheduler,
@@ -601,6 +602,187 @@ describe("AgyHost stateful steps", () => {
 			expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
 			expect(fake.closed).toBe(true);
 		}
+	});
+
+	it("returns invalid tool arguments to the model and parks a corrected call", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: 2 }, fake.currentId);
+		const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		const [diagnostic, schema] = text.split("Expected schema: ");
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(diagnostic).toContain("read");
+		expect(diagnostic).toContain("path: expected string, received integer");
+		expect(schema).toBe(JSON.stringify(advertised));
+		expect(state.host.hasPendingTurn).toBe(true);
+		const corrected = fake.call("read", { path: "a" });
+		let released = false;
+		void corrected.then(() => {
+			released = true;
+		});
+		await run.done;
+		expect(released).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await corrected).isError).toBe(true);
+	});
+
+	it("normalizes an unambiguous alias before validating tool arguments", async () => {
+		const fileTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: type({ file_path: "string" }),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = fake.call("read", { path: "a.txt" }, fake.currentId);
+		await run.done;
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
+		expect(call.arguments).toEqual({ file_path: "a.txt" });
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await output).isError).toBe(true);
+	});
+	it("parks the original arguments when the target key is already present", async () => {
+		const fileTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { file_path: { type: "string" }, path: { type: "string" } },
+			},
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = fake.call("read", { file_path: "/a", path: "/b" }, fake.currentId);
+		await run.done;
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
+		expect(call.arguments).toEqual({ file_path: "/a", path: "/b" });
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await output).isError).toBe(true);
+	});
+
+	it("keeps the actionable diagnostic when an alias cannot be normalized", async () => {
+		const fileTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: type({ file_path: "string" }),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: 2 }, fake.currentId);
+		const text = textOf(output.content);
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(text).toContain("file_path: is required");
+		expect(text).toContain("Expected schema: ");
+		expect(text).toContain(JSON.stringify(advertised));
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
+	it("parks the original arguments when normalization would reject a previously valid call", async () => {
+		const enumTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { file_path: { type: "string", enum: ["/tmp/a"] } },
+			},
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read /tmp")], { tools: [enumTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = fake.call("read", { path: "/tmp" }, fake.currentId);
+		await run.done;
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
+		expect(call.arguments).toEqual({ path: "/tmp" });
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await output).isError).toBe(true);
+	});
+
+	it("reports the original issues when a normalized call is still invalid", async () => {
+		const pairTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { file_path: { type: "string" }, cwd: { type: "string" } },
+				required: ["file_path", "cwd"],
+			},
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [pairTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("read", { path: "a.txt" }, fake.currentId);
+		const text = textOf(output.content);
+		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
+		if (!advertised) throw new Error("Missing read tool schema");
+		expect(output.isError).toBe(true);
+		expect(text).toContain("file_path: is required");
+		expect(text).toContain("cwd: is required");
+		expect(text).toContain(JSON.stringify(advertised));
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
+	it("bounds a large invalid-arguments diagnostic and keeps the turn active", async () => {
+		const keys = Array.from({ length: 200 }, (_, index) => `key${index}`);
+		const wide: Tool = {
+			name: "wide",
+			description: "Wide schema",
+			parameters: type(Object.fromEntries(keys.map(key => [key, "string"]))),
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("wide")], { tools: [wide] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = await fake.call("wide", {}, fake.currentId);
+		const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(text.length).toBeLessThanOrEqual(16_387);
+		expect(text).toContain("more");
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		await expect(run.done).rejects.toThrow("session closed");
+	});
+
+	it("bounds long diagnostic paths without dropping the expected schema", () => {
+		const message = describeToolArguments(
+			{
+				name: "read",
+				description: "Read",
+				inputSchema: {
+					type: "object",
+					properties: {},
+					additionalProperties: false,
+				},
+			},
+			{ ["x".repeat(17_000)]: 1 },
+		);
+		expect(message).toContain("Expected schema:");
+		expect(message.length).toBeLessThanOrEqual(16_387);
 	});
 
 	it("close clears pending calls and deadline timers without a later cancel", async () => {
