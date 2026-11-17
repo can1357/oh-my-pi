@@ -17,10 +17,11 @@ import builtins
 import os
 
 _LOG = os.environ["OMP_R2_STUB_LOG"]
+_FAIL_PDGJ = {"value": False}
 
 def _record(line):
     with builtins.open(_LOG, "a", encoding="utf-8") as handle:
-        handle.write(line + "\\n")
+        handle.write(line + chr(10))
 
 class StubR2:
     def __init__(self, target, flags):
@@ -28,11 +29,46 @@ class StubR2:
         self.flags = flags
     def cmd(self, text):
         _record("cmd:" + text)
+        if text == "__stub_fail_pdgj":
+            _FAIL_PDGJ["value"] = True
+        elif text == "__stub_ok_pdgj":
+            _FAIL_PDGJ["value"] = False
+        elif text.startswith("?v "):
+            return "0x1000" + chr(10)
         return ""
     def cmdj(self, text):
         _record("cmdj:" + text)
         if text == "iIj":
             return {"arch": "x86", "bits": 64, "bintype": "elf", "class": "ELF64", "os": "linux"}
+        if text == "iSj":
+            return [{"name": ".text", "vaddr": 4096, "size": 128, "perm": "r-x"}]
+        if text == "iej":
+            return [{"vaddr": 4096}]
+        if text == "aflj":
+            return [{"name": "main", "offset": 4096, "size": 64}]
+        if text == "iij":
+            return [{"name": "puts", "libname": "libc.so.6"}]
+        if text == "iEj":
+            return [{"name": "main", "vaddr": 4096}]
+        if text == "izzj":
+            return [{"vaddr": 8192, "string": "hello"}]
+        if text.startswith("pdgj"):
+            if _FAIL_PDGJ["value"]:
+                raise RuntimeError("pdgj unavailable")
+            return {"code": chr(10) + "int main(void) {" + chr(10) + "  return 0;" + chr(10) + "}" + chr(10), "annotations": []}
+        if text.startswith("pdcj"):
+            return {"code": chr(10) + "int main(void) { return 0; }" + chr(10), "annotations": []}
+        if text.startswith("pdfj"):
+            return {"name": "main", "addr": 4096, "size": 64, "ops": [
+                {"addr": 4096, "opcode": "push rbp", "disasm": "push rbp"},
+                {"addr": 4097, "opcode": "ret", "disasm": "ret"},
+            ]}
+        if text.startswith("pdj"):
+            return [{"addr": 4096, "opcode": "push rbp", "disasm": "push rbp"}]
+        if text.startswith("axtj"):
+            return [{"from": 8192, "type": "CALL", "fcn": {"name": "caller"}}]
+        if text.startswith("axfj"):
+            return [{"to": 4096, "type": "CALL", "fcn": {"name": "callee"}}]
         return {}
     def quit(self):
         _record("quit")
@@ -191,5 +227,113 @@ describe("radare2 saved-project reopen", () => {
 describe("radare2 daemon labels", () => {
 	it("labels omp.radare2.* hosts as radare2", () => {
 		expect(backendForHost("omp.radare2.abc")).toBe("radare2");
+	});
+});
+
+type ExecResult = { output: string; value: string | null; error: string | null };
+
+describe("radare2 views and exec", () => {
+	let dir: string | undefined;
+	let databaseDir: string;
+	let log: string;
+	let worker: DisasmWorker;
+
+	beforeAll(async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "radare2-views-"));
+		dir = tempDir;
+		databaseDir = path.join(tempDir, ".omp", "db");
+		log = path.join(tempDir, "r2.log");
+		await Bun.write(log, "");
+		await Bun.write(path.join(tempDir, "stubs", "r2pipe.py"), STUB_R2PIPE);
+		const binary = path.join(databaseDir, "stub.bin");
+		await Bun.write(binary, "radare2 views fixture\n");
+
+		const env: Record<string, string> = {};
+		for (const key in process.env) {
+			const value = process.env[key];
+			if (value !== undefined) env[key] = value;
+		}
+		env.PYTHONPATH = path.join(tempDir, "stubs");
+		env.PYTHONUNBUFFERED = "1";
+		env.PYTHONIOENCODING = "utf-8";
+		env.RADARE2_BIN = path.join(tempDir, "radare2");
+		env.OMP_R2_STUB_LOG = log;
+		const loc: DatabaseLocation = {
+			id: "stub",
+			dir: databaseDir,
+			sourcePath: binary,
+			stagedPath: binary,
+			kind: "store",
+			openPath: binary,
+			isNew: true,
+			lockTarget: path.join(databaseDir, "omp.r2"),
+		};
+		const lock = await acquireFileLock(loc.lockTarget);
+		try {
+			worker = await DisasmWorker.start(DISASM_BACKENDS.radare2, loc, { pythonPath, env }, lock, 0);
+		} catch (error) {
+			lock.release();
+			throw error;
+		}
+	});
+
+	afterAll(async () => {
+		try {
+			await worker?.close({ save: false });
+		} finally {
+			if (dir !== undefined) await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns every dsm view from r2 JSON commands", async () => {
+		const views = [
+			{ kind: "overview" },
+			{ kind: "imports" },
+			{ kind: "exports" },
+			{ kind: "strings" },
+			{ kind: "pseudocode", target: "0x1000" },
+			{ kind: "asm", target: "0x1000" },
+			{ kind: "xrefs", target: "0x1000" },
+		];
+		for (const view of views) {
+			const result = await worker.request<{ text: string }>("view", view);
+			expect(typeof result.text).toBe("string");
+			expect(result.text.length).toBeGreaterThan(0);
+		}
+		const lines = (await Bun.file(log).text()).split("\n").filter(Boolean);
+		for (const command of ["iij", "iEj", "izzj", "pdgj", "pdfj", "axtj"]) {
+			expect(lines.some(line => line.startsWith("cmdj:" + command))).toBe(true);
+		}
+	});
+
+	it("falls back to pdcj when pdgj is unavailable", async () => {
+		await worker.request("exec", { code: "r2.cmd('__stub_fail_pdgj')" });
+		try {
+			const result = await worker.request<{ text: string }>("view", { kind: "pseudocode", target: "0x1000" });
+			expect(typeof result.text).toBe("string");
+			expect(result.text.length).toBeGreaterThan(0);
+			const lines = (await Bun.file(log).text()).split("\n").filter(Boolean);
+			expect(lines.some(line => line.startsWith("cmdj:pdcj"))).toBe(true);
+		} finally {
+			await worker.request("exec", { code: "r2.cmd('__stub_ok_pdgj')" });
+		}
+	});
+
+	it("exec captures output, last value and error with a persistent namespace", async () => {
+		const set = await worker.request<ExecResult>("exec", { code: "print('setting'); r2_answer = 6 * 7" });
+		expect(set).toEqual({ output: "setting\n", value: null, error: null });
+
+		const read = await worker.request<ExecResult>("exec", { code: "r2_answer" });
+		expect(read).toEqual({ output: "", value: "42", error: null });
+
+		const failed = await worker.request<ExecResult>("exec", { code: "raise ValueError('boom')" });
+		expect(failed.output).toBe("");
+		expect(failed.value).toBeNull();
+		expect(failed.error).toContain("ValueError: boom");
+
+		const helpers = await worker.request<ExecResult>("exec", {
+			code: "sorted(name for name in globals() if name in ('r2', 'help_radare2'))",
+		});
+		expect(helpers.value).toBe("['help_radare2', 'r2']");
 	});
 });

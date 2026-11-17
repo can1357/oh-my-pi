@@ -61,7 +61,8 @@ await db.close(save=True)
 - IDA additionally preloads `db` (ida_domain Database), `ida_domain`, `ida_*`, `idautils`; `help_ida()` lists its helpers. `setType`/`set_type` accepts a C declaration.
 - Ghidra additionally preloads `program` / `currentProgram`, `project`, `flat`, `monitor`, `pyghidra`, `jpype`; `help_ghidra()` lists its helpers. Types are C prototypes at function entries and type expressions (`char[16]`, `uint32_t *`) elsewhere.
 - Binary Ninja additionally preloads `bv` (the BinaryView), `binaryninja`, `wait_analysis()`; `help_binja()` lists its helpers. Types work as for Ghidra: a C prototype at a function entry, a type expression elsewhere. `repeatable` on comments is accepted and ignored. Inside a function an address comment is that function's (`func.get_comment_at(ea)`), not a view comment (`bv.get_comment_at(ea)`). A function, its PLT entry and its import slot share one name: `callers`/`xrefs_to` on the function include calls through the other two.
-- Default exec timeout is 120 s; an unresponsive worker is killed after cancellation. Ghidra pseudocode falls back to disassembly when its decompiler is unavailable.
+- Radare2 additionally preloads `r2` / `radare2` (the r2pipe session); `help_radare2()` lists its helpers.
+- Default exec timeout is 120 s; an unresponsive worker is killed after cancellation. Ghidra pseudocode falls back to disassembly when its decompiler is unavailable. Radare2 pseudocode tries `pdgj` (r2ghidra) and falls back to `pdcj` (core pseudo-C) without surfacing an error.
 - Retained references pin against idle-close and LRU eviction; close every owned handle when done. `disassembler.maxOpen` bounds databases across all backends; unreferenced idle databases may be evicted or closed by `disassembler.idleCloseSec`.
 </instruction>
 
