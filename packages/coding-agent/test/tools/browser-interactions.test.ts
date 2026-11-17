@@ -578,7 +578,7 @@ return { ...refused, received: await tab.evaluate(() => window.received), name: 
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
-	}, 30_000);
+	});
 
 	test("guards covered clicks and drives keyboard, pointer, drop-zone, checked-state, and highlight interactions", async () => {
 		const session = makeSession();
