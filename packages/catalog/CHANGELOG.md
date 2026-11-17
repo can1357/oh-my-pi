@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `Model.snapcompactShape` (`{ variant, frameSize? }`) gives a model its own snapcompact frame shape ([#19591](https://github.com/can1357/oh-my-pi/pull/19591) by [@ryanskidmore](https://github.com/ryanskidmore))
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
