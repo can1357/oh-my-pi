@@ -149,11 +149,12 @@ export class LoopWatchdog {
 		if (!this.#running || generation !== this.#generation) return;
 		const now = this.#now();
 		const blockedMs = now - this.#expected;
-		const cpuMs = this.#cpuNow() - this.#expectedCpu;
 		// Consume every valid tick, even without a warning, so no phase carries
 		// forward into a later, phase-less block.
 		const phase = takeLoopPhaseAttribution(now);
 		if (blockedMs > this.#thresholdMs) {
+			// Only a late tick needs CPU time: to classify the gap and to log it.
+			const cpuMs = this.#cpuNow() - this.#expectedCpu;
 			if (this.#isSuspension(blockedMs, cpuMs)) {
 				this.#wasBlocked = false;
 			} else {
