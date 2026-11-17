@@ -2125,6 +2125,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			identity?.email ?? "",
 			identity?.projectId ?? "",
 			identity?.orgId ?? "",
+			// Credential-scoped identities (API-key accounts) invalidate by row
+			// id: rotation to a sibling account must drop the old account's
+			// cached usage instead of showing it for the rest of the TTL.
+			identity?.credentialId ?? "",
 		].join("\0");
 	}
 

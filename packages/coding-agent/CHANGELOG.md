@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the status-line usage segment showing another account's quota for multi-credential API-key providers such as `opencode-go`; it now follows the credential row the session router actually serves from ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
 ### Added
 
 - Added the `providers.webKeyless` setting (default on): turn it off and `web_search` and URL reading use only services you configured, skipping keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines even when your `web` chain lists them; `omp q --model web/<engine>` still runs one on request ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#16336](https://github.com/can1357/oh-my-pi/issues/16336))
