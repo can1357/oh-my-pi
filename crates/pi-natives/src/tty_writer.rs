@@ -1,61 +1,326 @@
 //! Off-thread terminal output pump.
 //!
-//! `write(2)` to a TTY/PTY from the JS thread blocks the whole event loop
-//! until the terminal drains: a slow, busy, or occluded terminal emulator
-//! freezes the TUI for the duration of the frame (multi-MB full repaints can
-//! stall for minutes). Bun's `process.stdout.write` performs exactly that
-//! blocking write, and `fcntl(F_SETFL, O_NONBLOCK)` cannot be issued through
-//! `bun:ffi` (variadic ABI), so the blocking write moves to a dedicated OS
-//! thread instead:
+//! `write(2)` to a TTY from the JS thread blocks the event loop until the
+//! terminal drains, so a slow or occluded emulator froze the TUI for the
+//! length of a repaint. [`TtyWriter`] moves that work to a dedicated thread:
 //!
-//! - JS enqueues frames via [`TtyWriter::write`] — never blocks. The JS string
-//!   is read as UTF-16 through the scratch arena and transcoded with `xutf`
-//!   straight into the shared back buffer — no per-call heap allocation once
-//!   the buffers are warm.
-//! - The pump thread swaps the back buffer out and performs the blocking write,
-//!   preserving FIFO order.
-//! - JS polls [`TtyWriter::pending`] for backpressure-aware frame skipping.
-//!
-//! A write error on the pump thread (dead PTY) marks the writer
-//! [`TtyWriter::dead`] and drops all queued output; the JS side maps that to
-//! its terminal-disconnected teardown.
+//! - JS copies each string's UTF-16 into a pooled batch ([`TtyWriter::write`]);
+//!   no UTF-8 sizing or transcoding happens on its thread.
+//! - The worker transcodes one bounded chunk at a time and writes it to an
+//!   independently opened, nonblocking handle to the same TTY, so stdout's own
+//!   file-status flags are never touched and a stalled write can be cancelled.
+//! - [`TtyWriter::pending`] is a conservative UTF-8 bound (three bytes per
+//!   queued code unit), tightened as chunks are encoded and written. Crossing
+//!   the drain threshold, or a fatal write error, notifies JS.
+//! - [`TtyWriter::stop`] wakes both the queue wait and a `POLLOUT` wait, then
+//!   joins the worker: nothing is written after it returns.
 
 #[cfg(unix)]
-use std::os::fd::{BorrowedFd, IntoRawFd};
+use std::os::{
+	fd::{AsRawFd, FromRawFd, OwnedFd},
+	unix::net::UnixStream,
+};
 use std::{
 	sync::{
 		Arc,
-		atomic::{AtomicBool, AtomicUsize, Ordering},
+		atomic::{AtomicBool, Ordering},
 	},
 	thread::JoinHandle,
 	time::{Duration, Instant},
 };
 
-use napi::{Error, JsString, Result};
+#[cfg(unix)]
+use napi::threadsafe_function::ThreadsafeFunctionCallMode;
+use napi::{Error, JsString, Result, Status, threadsafe_function::ThreadsafeFunction};
 use napi_derive::napi;
 use parking_lot::{Condvar, Mutex};
 
 use crate::js;
 
-struct Inner {
-	/// Bytes accepted from JS but not yet claimed by the pump thread. The
-	/// pump swaps this out wholesale, so enqueue cost is an in-place append
-	/// and chunks coalesce into one contiguous drain buffer per drain cycle.
-	back:    Mutex<Vec<u8>>,
-	/// Bytes accepted but not yet written to the fd.
-	pending: AtomicUsize,
-	/// Signals the pump thread on enqueue/stop, and waiters on drain.
-	cv:      Condvar,
-	stop:    AtomicBool,
-	dead:    AtomicBool,
-}
-
-/// Keep each Unix PTY syscall small enough for terminal emulators to consume
-/// incrementally. In particular, Terminal.app can stop draining a PTY when a
-/// large normal-screen history replay arrives as one multi-hundred-KiB write,
-/// leaving the writer blocked and every later frame queued behind it.
 #[cfg(unix)]
 const MAX_TTY_WRITE_CHUNK_BYTES: usize = 16 * 1024;
+// At most two normal-sized UTF-16 batches survive a drain. A large repaint or
+// a burst of tiny writes must not permanently enlarge either reusable buffer.
+#[cfg(unix)]
+const MAX_RETAINED_UNITS: usize = 256 * 1024;
+#[cfg(unix)]
+const MAX_RETAINED_FRAMES: usize = 4096;
+
+type DrainCallback = ThreadsafeFunction<(), (), (), Status, false, true>;
+
+#[cfg(unix)]
+enum DrainNotifier {
+	Js(DrainCallback),
+	#[cfg(test)]
+	Test(Arc<std::sync::atomic::AtomicUsize>),
+}
+
+#[cfg(unix)]
+impl DrainNotifier {
+	fn notify(&self) {
+		match self {
+			Self::Js(callback) => {
+				// Weak TSFN: does not keep the event loop alive. An unlimited NAPI
+				// queue makes this nonblocking without dropping threshold edges.
+				let _ = callback.call((), ThreadsafeFunctionCallMode::NonBlocking);
+			},
+			#[cfg(test)]
+			Self::Test(count) => {
+				count.fetch_add(1, Ordering::AcqRel);
+			},
+		}
+	}
+}
+
+#[derive(Default)]
+struct Batch {
+	units: Vec<u16>,
+	/// Each write is an independent JS string: never join its trailing high
+	/// surrogate to the next string's leading low surrogate.
+	ends:  Vec<usize>,
+}
+
+#[cfg(unix)]
+impl Batch {
+	fn clear(&mut self) {
+		self.units.clear();
+		self.ends.clear();
+		if self.units.capacity() > MAX_RETAINED_UNITS {
+			self.units = Vec::new();
+		}
+		if self.ends.capacity() > MAX_RETAINED_FRAMES {
+			self.ends = Vec::new();
+		}
+	}
+}
+
+#[derive(Default)]
+struct Queue {
+	back:    Batch,
+	pending: usize,
+}
+
+struct Inner {
+	queue:           Mutex<Queue>,
+	/// All predicate changes and condvar waits hold queue, including stop and
+	/// partial progress, so neither idle stop nor flush can lose a wakeup.
+	cv:              Condvar,
+	cancelled:       AtomicBool,
+	dead:            AtomicBool,
+	#[cfg(unix)]
+	drain_threshold: usize,
+}
+
+#[cfg(unix)]
+impl Inner {
+	fn new(drain_threshold: u32) -> Self {
+		Self {
+			queue:           Mutex::new(Queue::default()),
+			cv:              Condvar::new(),
+			cancelled:       AtomicBool::new(false),
+			dead:            AtomicBool::new(false),
+			drain_threshold: drain_threshold as usize,
+		}
+	}
+
+	fn progress(&self, bytes: usize, notifier: &DrainNotifier) {
+		if bytes == 0 {
+			return;
+		}
+		let crossed = {
+			let mut queue = self.queue.lock();
+			let before = queue.pending;
+			queue.pending -= bytes;
+			if queue.pending == 0 {
+				self.cv.notify_all();
+			}
+			before > self.drain_threshold && queue.pending <= self.drain_threshold
+		};
+		if crossed {
+			notifier.notify();
+		}
+	}
+
+	fn finish(&self, failed: bool, notifier: &DrainNotifier) {
+		let crossed = {
+			let mut queue = self.queue.lock();
+			if failed {
+				self.dead.store(true, Ordering::Release);
+			}
+			let crossed = queue.pending > self.drain_threshold;
+			queue.pending = 0;
+			queue.back = Batch::default();
+			self.cv.notify_all();
+			crossed
+		};
+		// A fatal write must wake JS even if there never was backpressure.
+		if failed || crossed {
+			notifier.notify();
+		}
+	}
+}
+
+const fn pending_number(bytes: usize) -> f64 {
+	// JS numbers represent every practical queue size exactly. Do not clamp
+	// a large queue to u32::MAX: that would cease to be an upper bound.
+	if bytes as u128 > (1u128 << 53) - 1 {
+		f64::INFINITY
+	} else {
+		bytes as f64
+	}
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct EncodeCursor {
+	unit:    usize,
+	frame:   usize,
+	/// End of the current surrogate-free UTF-16 span.
+	bmp_end: usize,
+}
+
+/// Fill one bounded output buffer, coalescing independent small writes without
+/// coalescing their Unicode boundaries. Returns (UTF-16 units read, UTF-8
+/// bytes).
+#[cfg(unix)]
+fn encode_chunk(batch: &Batch, cursor: &mut EncodeCursor, output: &mut [u8]) -> (usize, usize) {
+	let start = cursor.unit;
+	let mut written = 0;
+	while cursor.frame < batch.ends.len() && output.len() - written >= char::MAX_LEN_UTF8 {
+		let frame_end = batch.ends[cursor.frame];
+		if cursor.unit == frame_end {
+			cursor.frame += 1;
+			continue;
+		}
+		if cursor.unit >= cursor.bmp_end {
+			let end = (cursor.unit + MAX_TTY_WRITE_CHUNK_BYTES).min(frame_end);
+			if batch.units[cursor.unit..end]
+				.iter()
+				.any(|unit| unit & 0xf800 == 0xd800)
+			{
+				// xutf is permissive on malformed surrogates and its mixed-pair
+				// path is slower than std. Decode only this independent string;
+				// the output budget bounds work without splitting a valid pair.
+				let mut decoder =
+					char::decode_utf16(batch.units[cursor.unit..frame_end].iter().copied());
+				while output.len() - written >= char::MAX_LEN_UTF8 {
+					let Some(decoded) = decoder.next() else { break };
+					let ch = decoded.unwrap_or(char::REPLACEMENT_CHARACTER);
+					cursor.unit += ch.len_utf16();
+					written += ch.encode_utf8(&mut output[written..]).len();
+				}
+				continue;
+			}
+			cursor.bmp_end = end;
+		}
+		let (read, bytes) = xutf::transcode_into::<xutf::Utf16, xutf::Utf8>(
+			&batch.units[cursor.unit..cursor.bmp_end],
+			&mut output[written..],
+			xutf::AsciiCase::Preserve,
+		);
+		cursor.unit += read;
+		written += bytes;
+	}
+	(cursor.unit - start, written)
+}
+
+#[cfg(unix)]
+fn reopen_tty(fd: i32) -> std::io::Result<OwnedFd> {
+	let mut original = std::mem::MaybeUninit::<libc::stat>::uninit();
+	// SAFETY: fd is only inspected; original is valid storage for fstat.
+	if unsafe { libc::fstat(fd, original.as_mut_ptr()) } != 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	// SAFETY: fstat succeeded.
+	let original = unsafe { original.assume_init() };
+	let mut name = [0 as libc::c_char; libc::PATH_MAX as usize];
+	// SAFETY: name is valid writable storage. ttyname_r rejects non-TTYs.
+	let rc = unsafe { libc::ttyname_r(fd, name.as_mut_ptr(), name.len()) };
+	if rc != 0 {
+		return Err(std::io::Error::from_raw_os_error(rc));
+	}
+	// SAFETY: successful ttyname_r NUL-terminates name.
+	let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+	// Reopening a clone-device master would allocate a *different* PTY even
+	// though its stat identity matches. Only actual terminal destinations work.
+	if matches!(path.to_bytes(), b"/dev/ptmx" | b"/dev/pts/ptmx") {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			"PTY masters cannot be reopened",
+		));
+	}
+	// A dup shares O_NONBLOCK with stdout. Opening its actual TTY path gives
+	// this worker independent status flags; never substitute /dev/tty.
+	// SAFETY: name is a valid C string; flags require no variadic mode argument.
+	let opened = unsafe {
+		libc::open(
+			name.as_ptr(),
+			libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
+		)
+	};
+	if opened < 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	// SAFETY: open returned a new descriptor, uniquely owned here.
+	let owned = unsafe { OwnedFd::from_raw_fd(opened) };
+	let mut reopened = std::mem::MaybeUninit::<libc::stat>::uninit();
+	// SAFETY: owned is live and reopened is valid fstat storage.
+	if unsafe { libc::fstat(owned.as_raw_fd(), reopened.as_mut_ptr()) } != 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	// SAFETY: fstat succeeded.
+	let reopened = unsafe { reopened.assume_init() };
+	if original.st_dev != reopened.st_dev
+		|| original.st_ino != reopened.st_ino
+		|| original.st_rdev != reopened.st_rdev
+	{
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			"TTY destination changed while reopening",
+		));
+	}
+	Ok(owned)
+}
+
+#[cfg(unix)]
+fn cancelled_error() -> std::io::Error {
+	std::io::ErrorKind::ConnectionAborted.into()
+}
+
+#[cfg(unix)]
+fn wait_writable(fd: i32, cancel_fd: i32, inner: &Inner) -> std::io::Result<()> {
+	let mut fds = [libc::pollfd { fd, events: libc::POLLOUT, revents: 0 }, libc::pollfd {
+		fd:      cancel_fd,
+		events:  libc::POLLIN,
+		revents: 0,
+	}];
+	loop {
+		if inner.cancelled.load(Ordering::Acquire) {
+			return Err(cancelled_error());
+		}
+		// SAFETY: fds contains two valid poll entries; the worker owns both.
+		let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+		if result > 0 {
+			if fds[1].revents != 0 || inner.cancelled.load(Ordering::Acquire) {
+				return Err(cancelled_error());
+			}
+			if fds[0].revents & libc::POLLNVAL != 0 {
+				return Err(std::io::Error::from_raw_os_error(libc::EBADF));
+			}
+			if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+				return Err(std::io::ErrorKind::BrokenPipe.into());
+			}
+			if fds[0].revents & libc::POLLOUT != 0 {
+				return Ok(());
+			}
+		} else if result < 0 {
+			let err = std::io::Error::last_os_error();
+			if err.kind() != std::io::ErrorKind::Interrupted {
+				return Err(err);
+			}
+		}
+	}
+}
 
 #[cfg(unix)]
 fn write_all_with(
@@ -63,13 +328,13 @@ fn write_all_with(
 	buf: &[u8],
 	mut on_progress: impl FnMut(usize),
 ) -> std::io::Result<()> {
-	let mut off = 0usize;
-	while off < buf.len() {
-		let end = (off + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
-		match write(&buf[off..end]) {
+	let mut offset = 0;
+	while offset < buf.len() {
+		let end = (offset + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
+		match write(&buf[offset..end]) {
 			Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
 			Ok(written) => {
-				off += written;
+				offset += written;
 				on_progress(written);
 			},
 			Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {},
@@ -80,248 +345,205 @@ fn write_all_with(
 }
 
 #[cfg(unix)]
-fn wait_writable(fd: i32) -> std::io::Result<()> {
-	let mut pollfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
-	loop {
-		// A child can change O_NONBLOCK on a shared open file description;
-		// backpressure is not a dead terminal. SAFETY: pollfd points to one
-		// valid element; TtyWriter owns fd until the pump stops.
-		let result = unsafe { libc::poll(&mut pollfd, 1, -1) };
-		if result > 0 {
-			if pollfd.revents & libc::POLLNVAL != 0 {
-				return Err(std::io::Error::from_raw_os_error(libc::EBADF));
-			}
-			return Ok(());
-		}
-		let err = std::io::Error::last_os_error();
-		if err.kind() != std::io::ErrorKind::Interrupted {
-			return Err(err);
-		}
-	}
-}
-
-#[cfg(unix)]
-fn write_all(fd: i32, buf: &[u8], on_progress: impl FnMut(usize)) -> std::io::Result<()> {
+fn write_all(
+	fd: i32,
+	cancel_fd: i32,
+	inner: &Inner,
+	buf: &[u8],
+	notifier: &DrainNotifier,
+) -> std::io::Result<()> {
 	write_all_with(
 		|chunk| loop {
-			// SAFETY: `chunk` is a valid initialized slice; `fd` is owned by
-			// the writer (dup'd at construction) and stays open until drop.
+			if inner.cancelled.load(Ordering::Acquire) {
+				return Err(cancelled_error());
+			}
+			// SAFETY: chunk is initialized storage and fd is worker-owned and
+			// nonblocking. No original stdout descriptor flags are shared.
 			let rc = unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) };
 			if rc >= 0 {
-				break Ok(rc as usize);
+				return Ok(rc as usize);
 			}
 			let err = std::io::Error::last_os_error();
 			if err.kind() == std::io::ErrorKind::WouldBlock {
-				wait_writable(fd)?;
+				wait_writable(fd, cancel_fd, inner)?;
 				continue;
 			}
-			break Err(err);
+			return Err(err);
 		},
 		buf,
-		on_progress,
+		|bytes| inner.progress(bytes, notifier),
 	)
 }
 
 #[cfg(unix)]
-fn pump_loop(fd: i32, inner: &Inner) {
-	let mut front: Vec<u8> = Vec::new();
+fn pump_loop(fd: OwnedFd, cancel: UnixStream, inner: &Inner, notifier: DrainNotifier) {
+	let mut front = Batch::default();
+	let mut output = [0u8; MAX_TTY_WRITE_CHUNK_BYTES];
 	loop {
 		{
-			let mut back = inner.back.lock();
-			while back.is_empty() {
-				if inner.stop.load(Ordering::Acquire) {
-					return;
-				}
-				inner.cv.wait(&mut back);
+			let mut queue = inner.queue.lock();
+			while queue.back.units.is_empty() && !inner.cancelled.load(Ordering::Acquire) {
+				inner.cv.wait(&mut queue);
 			}
-			std::mem::swap(&mut *back, &mut front);
+			if inner.cancelled.load(Ordering::Acquire) {
+				drop(queue);
+				inner.finish(false, &notifier);
+				return;
+			}
+			std::mem::swap(&mut queue.back, &mut front);
 		}
-		if inner.dead.load(Ordering::Acquire) {
-			// Dead fd: drain-drop so enqueuers observing `pending` never wedge.
-			inner.pending.fetch_sub(front.len(), Ordering::AcqRel);
-		} else {
-			// Account each chunk as it reaches the fd so `pending()` tracks real
-			// drain progress, not just whole-batch completion — the TUI's stall
-			// watchdog and frame gate read a shrinking `pending()` as the sole
-			// liveness signal for a slow-but-alive terminal (#10430).
-			let mut written = 0usize;
-			let result = write_all(fd, &front, |n| {
-				written += n;
-				inner.pending.fetch_sub(n, Ordering::AcqRel);
-			});
-			if result.is_err() {
-				inner.dead.store(true, Ordering::Release);
-				// Chunks already written were subtracted above; drop the rest —
-				// the unwritten front remainder plus everything still queued.
-				let mut back = inner.back.lock();
-				let dropped = back.len() + (front.len() - written);
-				back.clear();
-				inner.pending.fetch_sub(dropped, Ordering::AcqRel);
+		let mut cursor = EncodeCursor::default();
+		while cursor.unit < front.units.len() {
+			if inner.cancelled.load(Ordering::Acquire) {
+				inner.finish(false, &notifier);
+				return;
+			}
+			let (units, bytes) = encode_chunk(&front, &mut cursor, &mut output);
+			// UTF-16 needs at most three UTF-8 bytes per code unit. Once encoded,
+			// only actual bytes remain outstanding, including partial writes.
+			inner.progress(units * 3 - bytes, &notifier);
+			if write_all(fd.as_raw_fd(), cancel.as_raw_fd(), inner, &output[..bytes], &notifier)
+				.is_err()
+			{
+				inner.finish(!inner.cancelled.load(Ordering::Acquire), &notifier);
+				return;
 			}
 		}
 		front.clear();
-		// Wake `flushSync` waiters parked on the same condvar.
-		inner.cv.notify_all();
 	}
 }
 
-/// Dedicated writer thread for one terminal fd.
-///
-/// Duplicated (close-on-exec) at construction and closed on drop. The
-/// duplicate keeps the pump's fd alive if the original is closed or replaced;
-/// file-status flags such as `O_NONBLOCK` are shared and handled by polling for
-/// `POLLOUT`. Close-on-exec keeps the terminal out of every child the process
-/// spawns without explicit fd handling (`std::process::Command`, gitoxide
-/// filter drivers), which could otherwise read the user's keystrokes and
-/// terminal replies through it.
+/// Dedicated, cancellable terminal writer. The destination must be a TTY that
+/// can be independently reopened; pipes and files are deliberately rejected.
 #[napi]
 pub struct TtyWriter {
 	inner:  Arc<Inner>,
 	thread: Option<JoinHandle<()>>,
 	#[cfg(unix)]
-	fd:     i32,
+	cancel: Option<UnixStream>,
+}
+
+impl TtyWriter {
+	#[cfg(unix)]
+	fn start(fd: i32, drain_threshold: u32, notifier: DrainNotifier) -> Result<Self> {
+		let output = reopen_tty(fd)
+			.map_err(|err| Error::from_reason(format!("opening tty fd {fd} failed: {err}")))?;
+		// UnixStream::pair owns close-on-exec endpoints. Closing the sender
+		// wakes poll without writes, SIGPIPE, or a potentially full wake pipe.
+		let (cancel_read, cancel_write) = UnixStream::pair()
+			.map_err(|err| Error::from_reason(format!("tty cancellation socket failed: {err}")))?;
+		let inner = Arc::new(Inner::new(drain_threshold));
+		let thread_inner = Arc::clone(&inner);
+		let thread = std::thread::Builder::new()
+			.name("tty-writer".into())
+			.spawn(move || pump_loop(output, cancel_read, &thread_inner, notifier))
+			.map_err(|err| Error::from_reason(format!("tty writer thread spawn failed: {err}")))?;
+		// Every descriptor is RAII-owned, including inside a failed spawn.
+		Ok(Self { inner, thread: Some(thread), cancel: Some(cancel_write) })
+	}
+
+	fn enqueue(&self, fill: impl FnOnce(&mut Vec<u16>) -> Result<()>) -> Result<f64> {
+		let mut queue = self.inner.queue.lock();
+		if self.inner.dead.load(Ordering::Acquire) || self.inner.cancelled.load(Ordering::Acquire) {
+			return Ok(pending_number(queue.pending));
+		}
+		let start = queue.back.units.len();
+		if let Err(err) = fill(&mut queue.back.units) {
+			queue.back.units.truncate(start);
+			return Err(err);
+		}
+		let end = queue.back.units.len();
+		if end != start {
+			let Some(pending) = (end - start)
+				.checked_mul(3)
+				.and_then(|n| queue.pending.checked_add(n))
+			else {
+				queue.back.units.truncate(start);
+				return Err(Error::from_reason("TTY pending byte bound overflow"));
+			};
+			queue.back.ends.push(end);
+			queue.pending = pending;
+			self.inner.cv.notify_all();
+		}
+		// Publish accounting before releasing the queue: the worker cannot
+		// subtract newly accepted units before they have been counted.
+		Ok(pending_number(queue.pending))
+	}
 }
 
 #[napi]
 impl TtyWriter {
-	/// Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
-	/// when the descriptor cannot be duplicated.
+	/// Start an independently opened terminal writer. onDrain runs when the
+	/// pending bound crosses from above drainThreshold to at/below it, and on
+	/// fatal writes even below the threshold. It does not retain the event loop.
 	#[napi(constructor)]
-	pub fn new(fd: i32) -> Result<Self> {
+	pub fn new(
+		fd: i32,
+		drain_threshold: u32,
+		#[napi(ts_arg_type = "() => void")] on_drain: DrainCallback,
+	) -> Result<Self> {
 		#[cfg(unix)]
 		{
-			// SAFETY: the caller's fd stays open for this call; the borrow only
-			// lives long enough to duplicate it.
-			let owned = unsafe { BorrowedFd::borrow_raw(fd) }
-				.try_clone_to_owned()
-				.map_err(|err| Error::from_reason(format!("duplicating fd {fd} failed: {err}")))?
-				.into_raw_fd();
-			let inner = Arc::new(Inner {
-				back:    Mutex::new(Vec::new()),
-				pending: AtomicUsize::new(0),
-				cv:      Condvar::new(),
-				stop:    AtomicBool::new(false),
-				dead:    AtomicBool::new(false),
-			});
-			let thread_inner = Arc::clone(&inner);
-			let thread = std::thread::Builder::new()
-				.name("tty-writer".into())
-				.spawn(move || pump_loop(owned, &thread_inner))
-				.map_err(|err| Error::from_reason(format!("tty writer thread spawn failed: {err}")))?;
-			Ok(Self { inner, thread: Some(thread), fd: owned })
+			Self::start(fd, drain_threshold, DrainNotifier::Js(on_drain))
 		}
 		#[cfg(not(unix))]
 		{
-			let _ = fd;
+			let _ = (fd, drain_threshold, on_drain);
 			Err(Error::from_reason("TtyWriter is unix-only"))
 		}
 	}
 
-	/// Enqueue terminal output; never blocks. Returns the total bytes now
-	/// pending (including this chunk).
-	///
-	/// Reads the JS string as UTF-16 through the thread's scratch arena and
-	/// transcodes it with `xutf` straight into the shared back buffer, so a
-	/// warm writer costs no per-call heap allocation.
+	/// Copy UTF-16 into pooled storage without UTF-8 sizing or transcoding on
+	/// JS's thread. Returns a conservative pending UTF-8 byte upper bound.
 	#[napi]
-	pub fn write(&self, data: JsString) -> Result<u32> {
-		if self.inner.dead.load(Ordering::Acquire) {
-			return Ok(self.pending());
-		}
-		let units = js::utf16(data)?;
-		if units.is_empty() {
-			return Ok(self.pending());
-		}
-		Ok(self.append(|back| {
-			let start = back.len();
-			back.resize(start + xutf::transcoded_len::<xutf::Utf16, xutf::Utf8>(&units), 0);
-			let (_, written) = xutf::transcode_into::<xutf::Utf16, xutf::Utf8>(
-				&units,
-				&mut back[start..],
-				xutf::AsciiCase::Preserve,
-			);
-			back.truncate(start + written);
-			written
-		}))
+	pub fn write(&self, data: JsString) -> Result<f64> {
+		self.enqueue(|units| js::utf16_append(data, units).map(|_| ()))
 	}
 
-	/// Append into the back buffer under its lock, account the added bytes,
-	/// and wake the pump. `fill` returns the byte count it appended.
-	fn append(&self, fill: impl FnOnce(&mut Vec<u8>) -> usize) -> u32 {
-		{
-			let mut back = self.inner.back.lock();
-			let added = fill(&mut back);
-			// Publish the pending-byte accounting while `back` is still locked.
-			// Once this lock is released, the pump may claim and drain the buffer;
-			// accounting afterward lets its `fetch_sub` win the race and underflow
-			// the counter, permanently pinning JS-side render backpressure on.
-			self.inner.pending.fetch_add(added, Ordering::AcqRel);
-		}
-		self.inner.cv.notify_all();
-		self.pending()
-	}
-
-	/// Bytes accepted but not yet written to the terminal.
+	/// Conservative UTF-8 bytes not yet written (tightened by the worker).
 	#[napi]
-	pub fn pending(&self) -> u32 {
-		self
-			.inner
-			.pending
-			.load(Ordering::Acquire)
-			.min(u32::MAX as usize) as u32
+	pub fn pending(&self) -> f64 {
+		pending_number(self.inner.queue.lock().pending)
 	}
 
-	/// True once a write failed (dead PTY); queued output has been dropped.
+	/// True after a terminal write failed; all pending output is dropped.
 	#[napi(getter)]
 	pub fn dead(&self) -> bool {
 		self.inner.dead.load(Ordering::Acquire)
 	}
 
-	/// Block the calling thread until the queue drains, the writer dies, or
-	/// `timeout_ms` elapses. Returns true when fully drained. Exit paths only.
+	/// Wait for queued output until the deadline. False on timeout or failure.
 	#[napi]
 	pub fn flush_sync(&self, timeout_ms: u32) -> bool {
 		let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
-		let mut back = self.inner.back.lock();
-		while self.inner.pending.load(Ordering::Acquire) > 0
-			&& !self.inner.dead.load(Ordering::Acquire)
-		{
+		let mut queue = self.inner.queue.lock();
+		while queue.pending != 0 && !self.inner.dead.load(Ordering::Acquire) {
 			let now = Instant::now();
 			if now >= deadline {
 				return false;
 			}
-			self.inner.cv.wait_for(&mut back, deadline - now);
+			self.inner.cv.wait_for(&mut queue, deadline - now);
 		}
-		drop(back);
-		self.inner.pending.load(Ordering::Acquire) == 0
+		queue.pending == 0 && !self.inner.dead.load(Ordering::Acquire)
 	}
 
-	/// Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
-	///
-	/// A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
-	/// cannot be joined without freezing the caller: when the bounded flush
-	/// times out the thread is detached instead and its dup'd fd is leaked —
-	/// closing it under a blocked write would race kernel fd reuse.
+	/// Drain until the deadline, then cancel and join. Never detaches a writer
+	/// or leaves old output running after return. Already queued JS callbacks
+	/// may still run; callers must ignore callbacks from a stopped writer.
 	#[napi]
 	pub fn stop(&mut self, flush_timeout_ms: u32) {
 		let Some(thread) = self.thread.take() else {
 			return;
 		};
-		let drained = self.flush_sync(flush_timeout_ms);
-		self.inner.stop.store(true, Ordering::Release);
-		self.inner.cv.notify_all();
-		if !drained && !self.inner.dead.load(Ordering::Acquire) {
-			// Likely mid-blocking-write; detach and leak the fd.
-			return;
-		}
-		let _ = thread.join();
-		#[cfg(unix)]
+		self.flush_sync(flush_timeout_ms);
 		{
-			// SAFETY: `fd` was dup'd in the constructor and the pump thread has
-			// exited; nothing else references it.
-			unsafe { libc::close(self.fd) };
-			self.fd = -1;
+			let _queue = self.inner.queue.lock();
+			self.inner.cancelled.store(true, Ordering::Release);
+			self.inner.cv.notify_all();
 		}
+		#[cfg(unix)]
+		drop(self.cancel.take());
+		let _ = thread.join();
 	}
 }
 
@@ -333,275 +555,452 @@ impl Drop for TtyWriter {
 
 #[cfg(all(test, unix))]
 mod tests {
+	use std::sync::atomic::AtomicUsize;
+
 	use super::*;
 
+	struct Pty {
+		master: OwnedFd,
+		slave:  OwnedFd,
+	}
+
+	impl Pty {
+		fn new() -> Self {
+			let mut master = -1;
+			let mut slave = -1;
+			// SAFETY: both outputs point to valid storage. No optional name,
+			// termios, or window-size pointers are passed.
+			assert_eq!(
+				unsafe {
+					libc::openpty(
+						&mut master,
+						&mut slave,
+						std::ptr::null_mut(),
+						std::ptr::null_mut(),
+						std::ptr::null_mut(),
+					)
+				},
+				0,
+				"openpty: {}",
+				std::io::Error::last_os_error()
+			);
+			// SAFETY: openpty succeeded and returned two newly owned fds.
+			let (master, slave) =
+				unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+			let mut attrs = std::mem::MaybeUninit::<libc::termios>::uninit();
+			// SAFETY: slave is a live TTY and attrs is valid output storage.
+			assert_eq!(unsafe { libc::tcgetattr(slave.as_raw_fd(), attrs.as_mut_ptr()) }, 0);
+			// SAFETY: tcgetattr succeeded.
+			let mut attrs = unsafe { attrs.assume_init() };
+			// SAFETY: attrs is initialized, and this test owns the PTY.
+			unsafe { libc::cfmakeraw(&mut attrs) };
+			assert_eq!(unsafe { libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &attrs) }, 0);
+			for fd in [master.as_raw_fd(), slave.as_raw_fd()] {
+				// SAFETY: these are live, test-owned descriptors.
+				assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
+			}
+			// The test's reads must have deadlines even if the writer fails.
+			let flags = flags(master.as_raw_fd());
+			// SAFETY: master is test-owned, unrelated to stdout.
+			assert_eq!(
+				unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) },
+				0
+			);
+			Self { master, slave }
+		}
+
+		fn writer(&self, threshold: u32) -> (TtyWriter, Arc<AtomicUsize>) {
+			let calls = Arc::new(AtomicUsize::new(0));
+			let writer = TtyWriter::start(
+				self.slave.as_raw_fd(),
+				threshold,
+				DrainNotifier::Test(Arc::clone(&calls)),
+			)
+			.unwrap();
+			(writer, calls)
+		}
+	}
+
+	fn flags(fd: i32) -> i32 {
+		// SAFETY: callers pass a live test-owned descriptor.
+		let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+		assert!(flags >= 0);
+		flags
+	}
+
+	fn push(writer: &TtyWriter, units: &[u16]) -> f64 {
+		writer
+			.enqueue(|back| {
+				back.extend_from_slice(units);
+				Ok(())
+			})
+			.unwrap()
+	}
+
+	fn wait_until(mut ready: impl FnMut() -> bool) {
+		let deadline = Instant::now() + Duration::from_secs(3);
+		while !ready() {
+			assert!(Instant::now() < deadline, "timed out waiting for worker");
+			std::thread::sleep(Duration::from_millis(1));
+		}
+	}
+
+	fn read_available(fd: i32, output: &mut Vec<u8>) {
+		let mut buf = [0u8; 16 * 1024];
+		loop {
+			// SAFETY: fd is a live nonblocking PTY master; buf is writable.
+			let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+			if n > 0 {
+				output.extend_from_slice(&buf[..n as usize]);
+				continue;
+			}
+			if n == 0 {
+				return;
+			}
+			let err = std::io::Error::last_os_error();
+			if err.kind() == std::io::ErrorKind::Interrupted {
+				continue;
+			}
+			if err.kind() == std::io::ErrorKind::WouldBlock || err.raw_os_error() == Some(libc::EIO) {
+				return;
+			}
+			panic!("PTY read: {err}");
+		}
+	}
+
+	fn read_exact_output(fd: i32, expected: usize) -> Vec<u8> {
+		let mut output = Vec::with_capacity(expected);
+		wait_until(|| {
+			read_available(fd, &mut output);
+			output.len() >= expected
+		});
+		output
+	}
+
 	#[test]
-	fn large_frame_is_split_into_bounded_tty_writes() {
-		let frame = vec![b'x'; MAX_TTY_WRITE_CHUNK_BYTES * 2 + 7];
-		let mut requested = Vec::new();
+	fn reopening_preserves_original_flags_and_sets_close_on_exec() {
+		let pty = Pty::new();
+		let original_flags = flags(pty.slave.as_raw_fd());
+		let output = reopen_tty(pty.slave.as_raw_fd()).unwrap();
+		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
+		assert_eq!(flags(output.as_raw_fd()) & libc::O_NONBLOCK, libc::O_NONBLOCK);
+		// SAFETY: output is live and owned for the entire inspection.
+		assert_ne!(unsafe { libc::fcntl(output.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+		// Changing the original's flags cannot turn the worker into a blocking
+		// writer (which is exactly what dup-based implementations permit).
+		assert_eq!(
+			unsafe {
+				libc::fcntl(pty.slave.as_raw_fd(), libc::F_SETFL, original_flags & !libc::O_NONBLOCK)
+			},
+			0
+		);
+		assert_ne!(flags(output.as_raw_fd()) & libc::O_NONBLOCK, 0);
+		let (mut writer, _) = pty.writer(0);
+		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
+		let cancel = writer.cancel.as_ref().unwrap().as_raw_fd();
+		assert_ne!(unsafe { libc::fcntl(cancel, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+		writer.stop(0);
+		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
+	}
+
+	#[test]
+	fn rejects_non_tty_and_invalid_descriptors() {
+		let (socket, _peer) = UnixStream::pair().unwrap();
+		assert!(reopen_tty(socket.as_raw_fd()).is_err());
+		assert!(reopen_tty(-1).is_err());
+		#[cfg(target_os = "linux")]
+		{
+			let pty = Pty::new();
+			assert!(reopen_tty(pty.master.as_raw_fd()).is_err());
+		}
+	}
+
+	#[test]
+	fn writes_fifo_and_drains_before_stop() {
+		let pty = Pty::new();
+		let (mut writer, _) = pty.writer(0);
+		push(&writer, &[b'h' as u16, b'i' as u16, b' ' as u16]);
+		push(&writer, &[0x754c, 0xd83d, 0xde80]);
+		writer.stop(2_000);
+		assert_eq!(writer.pending(), 0.0);
+		assert_eq!(read_exact_output(pty.master.as_raw_fd(), 10), "hi 界🚀".as_bytes());
+		assert_eq!(push(&writer, &[b'!' as u16]), 0.0);
+		let mut extra = Vec::new();
+		read_available(pty.master.as_raw_fd(), &mut extra);
+		assert!(extra.is_empty());
+	}
+
+	#[test]
+	fn stalled_stop_cancels_joins_and_never_resumes_old_output() {
+		let pty = Pty::new();
+		let (mut writer, _) = pty.writer(1024);
+		let frame = vec![b'x' as u16; 1024 * 1024];
+		assert_eq!(push(&writer, &frame), (frame.len() * 3) as f64);
+		wait_until(|| writer.pending() > 0.0 && writer.pending() < (frame.len() * 3) as f64);
+		assert!(!writer.flush_sync(10));
+		let start = Instant::now();
+		writer.stop(20);
+		assert!(start.elapsed() < Duration::from_secs(1), "stop did not cancel a stalled PTY");
+		assert_eq!(writer.pending(), 0.0);
+		assert!(!writer.dead());
+		assert!(writer.thread.is_none());
+		assert!(writer.cancel.is_none());
+
+		// Bytes already accepted by the kernel are allowed; a detached old
+		// worker would resume as soon as these bytes are read.
+		let mut accepted = Vec::new();
+		read_available(pty.master.as_raw_fd(), &mut accepted);
+		assert!(!accepted.is_empty());
+		assert!(accepted.len() < frame.len());
+		assert!(accepted.iter().all(|&byte| byte == b'x'));
+		let (mut replacement, _) = pty.writer(0);
+		push(&replacement, &[b'n' as u16, b'e' as u16, b'w' as u16]);
+		assert!(replacement.flush_sync(1_000));
+		assert_eq!(read_exact_output(pty.master.as_raw_fd(), 3), b"new");
+		replacement.stop(0);
+		writer.stop(0);
+	}
+
+	#[test]
+	fn idle_stop_cannot_lose_a_queue_wakeup() {
+		let pty = Pty::new();
+		for _ in 0..64 {
+			let (mut writer, _) = pty.writer(0);
+			// Exercise stop both before and after the worker reaches its wait.
+			std::thread::yield_now();
+			writer.stop(0);
+			assert_eq!(writer.pending(), 0.0);
+		}
+	}
+
+	#[test]
+	fn backpressure_tracks_partial_progress_then_flush_wakes_on_drain() {
+		let pty = Pty::new();
+		let (mut writer, notifications) = pty.writer(1024);
+		let units = vec![b'x' as u16; 512 * 1024];
+		let bound = push(&writer, &units);
+		wait_until(|| writer.pending() > 0.0 && writer.pending() < bound);
+		assert!(!writer.dead());
+		assert!(!writer.flush_sync(10));
+		let master = pty.master;
+		let reader = std::thread::spawn(move || {
+			let output = read_exact_output(master.as_raw_fd(), units.len());
+			// Keep the master alive until the writer has flushed and stopped.
+			(master, output)
+		});
+		assert!(writer.flush_sync(3_000));
+		assert_eq!(writer.pending(), 0.0);
+		writer.stop(0);
+		let (_master, output) = reader.join().unwrap();
+		assert_eq!(output, vec![b'x'; 512 * 1024]);
+		assert!(notifications.load(Ordering::Acquire) >= 1);
+	}
+
+	#[test]
+	fn rapid_small_writes_do_not_underflow_accounting() {
+		const WRITES: usize = 10_000;
+		let pty = Pty::new();
+		let (mut writer, _) = pty.writer(64);
+		let master = pty.master;
+		let reader = std::thread::spawn(move || {
+			let output = read_exact_output(master.as_raw_fd(), WRITES);
+			(master, output)
+		});
+		for _ in 0..WRITES {
+			push(&writer, &[b'x' as u16]);
+		}
+		assert!(writer.flush_sync(3_000));
+		assert_eq!(writer.pending(), 0.0);
+		writer.stop(0);
+		let (_master, output) = reader.join().unwrap();
+		assert_eq!(output, vec![b'x'; WRITES]);
+	}
+
+	#[test]
+	fn dead_terminal_drops_backlog_and_notifies_even_below_threshold() {
+		let pty = Pty::new();
+		let (mut writer, notifications) = pty.writer(u32::MAX);
+		drop(pty.master);
+		push(&writer, &[b'x' as u16]);
+		wait_until(|| writer.dead());
+		assert_eq!(writer.pending(), 0.0);
+		assert!(!writer.flush_sync(100));
+		// Dead writes must not read the JS string or resurrect the queue.
+		assert_eq!(
+			writer
+				.enqueue(|_| panic!("dead enqueue read input"))
+				.unwrap(),
+			0.0
+		);
+		writer.stop(100);
+		assert_eq!(notifications.load(Ordering::Acquire), 1);
+		assert_eq!(writer.inner.queue.lock().back.units.capacity(), 0);
+	}
+
+	#[test]
+	fn notifications_are_threshold_crossings_and_unconditional_on_failure() {
+		let inner = Inner::new(10);
+		let calls = Arc::new(AtomicUsize::new(0));
+		let notifier = DrainNotifier::Test(Arc::clone(&calls));
+		inner.queue.lock().pending = 30;
+		inner.progress(19, &notifier);
+		assert_eq!(calls.load(Ordering::Acquire), 0);
+		inner.progress(1, &notifier);
+		assert_eq!(calls.load(Ordering::Acquire), 1);
+		inner.progress(10, &notifier);
+		assert_eq!(calls.load(Ordering::Acquire), 1);
+		inner.queue.lock().pending = 15;
+		inner.progress(5, &notifier);
+		assert_eq!(calls.load(Ordering::Acquire), 2);
+		inner.finish(true, &notifier);
+		assert!(inner.dead.load(Ordering::Acquire));
+		assert_eq!(calls.load(Ordering::Acquire), 3);
+		assert_eq!(inner.queue.lock().pending, 0);
+	}
+
+	#[test]
+	fn bounded_writes_preserve_partial_offsets_and_exact_progress() {
+		let input = vec![b'x'; MAX_TTY_WRITE_CHUNK_BYTES * 2 + 7];
 		let mut output = Vec::new();
 		let mut progress = Vec::new();
+		let mut interrupted = false;
 		write_all_with(
 			|chunk| {
-				requested.push(chunk.len());
-				output.extend_from_slice(chunk);
-				Ok(chunk.len())
+				assert!(chunk.len() <= MAX_TTY_WRITE_CHUNK_BYTES);
+				if !interrupted {
+					interrupted = true;
+					return Err(std::io::ErrorKind::Interrupted.into());
+				}
+				let written = chunk.len().min(137);
+				output.extend_from_slice(&chunk[..written]);
+				Ok(written)
 			},
-			&frame,
-			|n| progress.push(n),
+			&input,
+			|bytes| progress.push(bytes),
 		)
 		.unwrap();
-
-		assert_eq!(requested, [MAX_TTY_WRITE_CHUNK_BYTES, MAX_TTY_WRITE_CHUNK_BYTES, 7]);
-		// Progress is reported per completed chunk and sums to the whole frame.
-		assert_eq!(progress, [MAX_TTY_WRITE_CHUNK_BYTES, MAX_TTY_WRITE_CHUNK_BYTES, 7]);
-		assert_eq!(output, frame);
-	}
-
-	fn push(writer: &TtyWriter, data: &[u8]) {
-		writer.append(|back| {
-			back.extend_from_slice(data);
-			data.len()
-		});
-	}
-
-	fn pipe_pair() -> (i32, i32) {
-		let mut fds = [0i32; 2];
-		// SAFETY: fds is a valid out-array for pipe(2).
-		assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-		(fds[0], fds[1])
+		assert_eq!(output, input);
+		assert_eq!(progress.iter().sum::<usize>(), input.len());
+		assert!(progress.iter().all(|&bytes| bytes <= 137));
 	}
 
 	#[test]
-	fn spawned_children_do_not_inherit_the_writer_fd() {
-		let (read_fd, write_fd) = pipe_pair();
-		let mut writer = TtyWriter::new(write_fd).unwrap();
-		let open_in_child = |fd: i32| {
-			std::process::Command::new("/bin/sh")
-				.arg("-c")
-				.arg(format!("test -e /dev/fd/{fd}"))
-				.status()
-				.unwrap()
-				.success()
-		};
-		// The caller's pipe end lacks close-on-exec, so the probe sees it.
-		assert!(open_in_child(write_fd));
-		assert!(!open_in_child(writer.fd));
-		writer.stop(1_000);
-		// SAFETY: closing test-owned fds.
-		unsafe {
-			libc::close(read_fd);
-			libc::close(write_fd);
-		}
-	}
-
-	#[test]
-	fn writes_in_order_and_drains() {
-		let (read_fd, write_fd) = pipe_pair();
-		let mut writer = TtyWriter::new(write_fd).unwrap();
-		push(&writer, b"hello ");
-		push(&writer, b"world");
-		assert!(writer.flush_sync(2_000));
-		assert_eq!(writer.pending(), 0);
-		let mut buf = [0u8; 64];
-		// SAFETY: buf is a valid out-buffer for read(2).
-		let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
-		assert_eq!(&buf[..n as usize], b"hello world");
-		writer.stop(1_000);
-		// SAFETY: closing test-owned fds.
-		unsafe {
-			libc::close(read_fd);
-			libc::close(write_fd);
-		}
-	}
-
-	#[test]
-	fn nonblocking_writer_waits_for_drain_instead_of_dying() {
-		let (read_fd, write_fd) = pipe_pair();
-		let mut writer = TtyWriter::new(write_fd).unwrap();
-		// Set the flag after construction to exercise the pump's dup of the same
-		// open file description. SAFETY: write_fd remains open until the
-		// writer stops; this only reads its flags.
-		let flags = unsafe { libc::fcntl(write_fd, libc::F_GETFL) };
-		assert!(flags >= 0);
-		// SAFETY: write_fd remains open; this simulates an inherited child
-		// changing the shared flags.
-		assert_eq!(unsafe { libc::fcntl(write_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
-		let total = 512 * 1024;
-		push(&writer, &vec![b'x'; total]);
-
-		let deadline = Instant::now() + Duration::from_secs(2);
-		loop {
-			let pending = writer.pending();
-			assert!(!writer.dead(), "temporary backpressure killed the terminal writer");
-			if pending > 0 && pending < total as u32 {
-				break;
-			}
-			assert!(Instant::now() < deadline, "pump made no write progress");
-			std::thread::sleep(Duration::from_millis(10));
-		}
-
-		let reader = std::thread::spawn(move || {
-			let mut buf = [0u8; 64 * 1024];
-			let mut received = 0usize;
-			while received < total {
-				// SAFETY: this thread owns read_fd and buf is valid writable
-				// storage.
-				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
-				if n <= 0 {
-					break;
+	fn write_zero_and_failures_do_not_claim_unwritten_bytes() {
+		let mut progress = 0;
+		let err = write_all_with(|_| Ok(0), b"abc", |n| progress += n).unwrap_err();
+		assert_eq!(err.kind(), std::io::ErrorKind::WriteZero);
+		assert_eq!(progress, 0);
+		let mut first = true;
+		let err = write_all_with(
+			|chunk| {
+				if first {
+					first = false;
+					assert_eq!(chunk, b"abc");
+					Ok(1)
+				} else {
+					assert_eq!(chunk, b"bc");
+					Err(std::io::ErrorKind::BrokenPipe.into())
 				}
-				received += n as usize;
-			}
-			// SAFETY: this thread no longer accesses read_fd.
-			unsafe { libc::close(read_fd) };
-			received
-		});
-		assert!(writer.flush_sync(5_000));
-		assert!(!writer.dead());
-		writer.stop(1_000);
-		// SAFETY: the pump has stopped and no longer accesses write_fd.
-		unsafe { libc::close(write_fd) };
-		assert_eq!(reader.join().unwrap(), total);
+			},
+			b"abc",
+			|n| progress += n,
+		)
+		.unwrap_err();
+		assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe);
+		assert_eq!(progress, 1);
 	}
 
-	#[test]
-	fn enqueue_never_blocks_on_full_pipe_and_reports_pending() {
-		let (read_fd, write_fd) = pipe_pair();
-		let mut writer = TtyWriter::new(write_fd).unwrap();
-		// Overwhelm the kernel pipe buffer (64 KiB default) without a reader:
-		// enqueue must return immediately and report a growing backlog.
-		let chunk = vec![b'x'; 256 * 1024];
-		let start = Instant::now();
-		push(&writer, &chunk);
-		push(&writer, &chunk);
-		assert!(start.elapsed() < Duration::from_millis(200), "enqueue blocked on a full pipe");
-		assert!(writer.pending() > 0);
-		// Drain concurrently, then the queue must empty.
-		let reader = std::thread::spawn(move || {
-			let mut buf = vec![0u8; 64 * 1024];
-			let mut total = 0usize;
-			while total < 512 * 1024 {
-				// SAFETY: buf is a valid out-buffer for read(2).
-				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
-				if n <= 0 {
-					break;
-				}
-				total += n as usize;
-			}
-			total
-		});
-		assert!(writer.flush_sync(5_000));
-		writer.stop(1_000);
-		// SAFETY: closing the test-owned write fd unblocks the reader at EOF.
-		unsafe { libc::close(write_fd) };
-		assert_eq!(reader.join().unwrap(), 512 * 1024);
-		// SAFETY: closing test-owned fd.
-		unsafe { libc::close(read_fd) };
-	}
-
-	#[test]
-	fn pending_tracks_partial_drain_progress() {
-		let (read_fd, write_fd) = pipe_pair();
-		let mut writer = TtyWriter::new(write_fd).unwrap();
-		// Far larger than any kernel pipe buffer, so the pump writes what fits
-		// and then blocks on the remainder with no reader draining.
-		let total = 1024 * 1024;
-		push(&writer, &vec![b'x'; total]);
-		// Wait until the pump has written at least one chunk, but remains blocked
-		// on the undrained tail. Do not treat one unchanged sample as stability:
-		// under full-suite load the pump thread may not be scheduled before the
-		// first poll.
-		let deadline = Instant::now() + Duration::from_secs(2);
-		loop {
-			std::thread::sleep(Duration::from_millis(20));
-			let pending = writer.pending();
-			if pending > 0 && pending < total as u32 {
-				break;
-			}
-			assert!(
-				Instant::now() < deadline,
-				"pump made no observable partial progress; pending {pending} of {total}"
-			);
+	fn encoded_frames(frames: &[&[u16]], chunk_size: usize) -> Vec<u8> {
+		let mut batch = Batch::default();
+		for frame in frames {
+			batch.units.extend_from_slice(frame);
+			batch.ends.push(batch.units.len());
 		}
-		// Drain the rest so stop() can join the pump thread.
-		let reader = std::thread::spawn(move || {
-			let mut buf = vec![0u8; 64 * 1024];
-			let mut got = 0usize;
-			while got < total {
-				// SAFETY: buf is a valid out-buffer for read(2).
-				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
-				if n <= 0 {
-					break;
-				}
-				got += n as usize;
-			}
-			got
-		});
-		assert!(writer.flush_sync(5_000));
-		writer.stop(1_000);
-		// SAFETY: closing the test-owned write fd unblocks the reader at EOF.
-		unsafe { libc::close(write_fd) };
-		assert_eq!(reader.join().unwrap(), total);
-		// SAFETY: closing test-owned fd.
-		unsafe { libc::close(read_fd) };
+		let mut cursor = EncodeCursor::default();
+		let mut buffer = vec![0u8; chunk_size];
+		let mut output = Vec::new();
+		let mut consumed = 0;
+		while cursor.unit < batch.units.len() {
+			let (units, bytes) = encode_chunk(&batch, &mut cursor, &mut buffer);
+			assert!(units > 0 && bytes > 0);
+			assert!(bytes <= chunk_size);
+			assert!(bytes <= units * 3);
+			consumed += units;
+			output.extend_from_slice(&buffer[..bytes]);
+		}
+		assert_eq!(consumed, batch.units.len());
+		output
 	}
 
 	#[test]
-	fn rapid_small_writes_never_underflow_pending_accounting() {
-		let (read_fd, write_fd) = pipe_pair();
-		let mut writer = TtyWriter::new(write_fd).unwrap();
-		const WRITES: usize = 100_000;
-		let reader = std::thread::spawn(move || {
-			let mut buf = [0u8; 4096];
-			let mut total = 0usize;
-			while total < WRITES {
-				// SAFETY: buf is a valid out-buffer and read_fd stays open for this
-				// loop.
-				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
-				if n <= 0 {
-					break;
-				}
-				total += n as usize;
-			}
-			// SAFETY: the reader thread owns read_fd.
-			unsafe { libc::close(read_fd) };
-			total
-		});
-
-		for _ in 0..WRITES {
-			push(&writer, b"x");
+	fn unicode_invalid_surrogates_and_independent_writes_match_js_replacement() {
+		let valid: Vec<u16> = "ASCII \0 é 界 🚀 tail".encode_utf16().collect();
+		let invalid = [0xd800, b'a' as u16, 0xdc00, 0xdbff, 0xdfff, 0xd800, 0xd800, 0xdc00];
+		let high = [0xd83d];
+		let low = [0xde80];
+		let frames: [&[u16]; 6] = [&valid, &invalid, &high, &low, &[], &valid];
+		let expected: String = frames
+			.iter()
+			.map(|frame| String::from_utf16_lossy(frame))
+			.collect();
+		for chunk_size in [4, 5, 7, MAX_TTY_WRITE_CHUNK_BYTES] {
+			assert_eq!(encoded_frames(&frames, chunk_size), expected.as_bytes());
 		}
-		assert!(writer.flush_sync(5_000));
-		assert_eq!(writer.pending(), 0);
-		writer.stop(1_000);
-		// SAFETY: closing the test-owned original write fd lets the reader
-		// observe EOF.
-		unsafe { libc::close(write_fd) };
-		assert_eq!(reader.join().unwrap(), WRITES);
 	}
 
 	#[test]
-	fn dead_fd_marks_writer_and_drops_queue() {
-		let (read_fd, write_fd) = pipe_pair();
-		// SAFETY: closing the read end makes writes fail with EPIPE... after
-		// the kernel buffer fills. Close read end first so the failure is
-		// immediate.
-		unsafe { libc::close(read_fd) };
-		// Writes to a pipe with no reader raise SIGPIPE by default; suppress it
-		// for the test process so the failure surfaces as EPIPE instead.
-		// SAFETY: standard signal disposition change.
-		unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
-		let mut writer = TtyWriter::new(write_fd).unwrap();
-		push(&writer, b"doomed");
-		let deadline = Instant::now() + Duration::from_secs(2);
-		while !writer.dead() && Instant::now() < deadline {
-			std::thread::sleep(Duration::from_millis(5));
+	fn surrogate_pairs_survive_input_and_output_chunk_boundaries() {
+		let mut frame = vec![b'x' as u16; MAX_TTY_WRITE_CHUNK_BYTES - 1];
+		frame.extend_from_slice(&[0xd83d, 0xde80, 0xd800, b'!' as u16]);
+		frame.extend(std::iter::repeat_n(0x754c, MAX_TTY_WRITE_CHUNK_BYTES));
+		frame.extend_from_slice(&[0xd83d, 0xde80, 0xdc00]);
+		let expected = String::from_utf16_lossy(&frame);
+		for chunk_size in [7, MAX_TTY_WRITE_CHUNK_BYTES] {
+			assert_eq!(encoded_frames(&[&frame], chunk_size), expected.as_bytes());
 		}
-		assert!(writer.dead());
-		assert_eq!(writer.pending(), 0);
-		writer.stop(100);
-		// SAFETY: closing test-owned fd.
-		unsafe { libc::close(write_fd) };
+	}
+
+	#[test]
+	fn normal_buffers_are_reused_and_oversized_buffers_are_retired() {
+		let mut batch = Batch { units: Vec::with_capacity(1024), ends: Vec::with_capacity(16) };
+		batch.units.extend_from_slice(&[1, 2, 3]);
+		batch.ends.push(3);
+		let units = batch.units.as_ptr();
+		let ends = batch.ends.as_ptr();
+		batch.clear();
+		assert_eq!(batch.units.as_ptr(), units);
+		assert_eq!(batch.ends.as_ptr(), ends);
+		assert!(batch.units.is_empty() && batch.ends.is_empty());
+
+		batch.units.reserve(MAX_RETAINED_UNITS + 1);
+		batch.ends.reserve(MAX_RETAINED_FRAMES + 1);
+		batch.clear();
+		assert_eq!(batch.units.capacity(), 0);
+		assert_eq!(batch.ends.capacity(), 0);
+	}
+
+	#[test]
+	fn enqueue_failures_preserve_prior_frames_and_pending_bound() {
+		let writer = TtyWriter { inner: Arc::new(Inner::new(0)), thread: None, cancel: None };
+		assert_eq!(push(&writer, &[b'a' as u16]), 3.0);
+		assert!(
+			writer
+				.enqueue(|back| {
+					back.extend_from_slice(&[0xd800, 0xdc00]);
+					Err(Error::from_reason("copy failed"))
+				})
+				.is_err()
+		);
+		assert_eq!(writer.pending(), 3.0);
+		let queue = writer.inner.queue.lock();
+		assert_eq!(queue.back.units, [b'a' as u16]);
+		assert_eq!(queue.back.ends, [1]);
+	}
+
+	#[test]
+	#[cfg(target_pointer_width = "64")]
+	fn pending_bounds_are_not_truncated_to_u32() {
+		assert_eq!(pending_number(u32::MAX as usize + 1), u32::MAX as f64 + 1.0);
+		assert_eq!(pending_number(usize::MAX), f64::INFINITY);
 	}
 }

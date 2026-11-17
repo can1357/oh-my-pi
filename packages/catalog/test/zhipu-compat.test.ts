@@ -217,10 +217,10 @@ describe("zhipu-coding-plan model discovery", () => {
 
 		expect(flash53?.reasoning).toBe(true);
 		expect(flash53 && buildModel(flash53).input).toEqual(["text", "image"]);
-		// Older flash SKUs stay non-reasoning and text-only.
-		expect(flash47?.reasoning).toBe(false);
+		// Older flash SKUs claim no reasoning identity and stay text-only.
+		expect(flash47?.reasoning).toBeUndefined();
 		expect(flash47 && buildModel(flash47).input).toEqual(["text"]);
-		expect(flashx47?.reasoning).toBe(false);
+		expect(flashx47?.reasoning).toBeUndefined();
 		expect(flashx47 && buildModel(flashx47).input).toEqual(["text"]);
 	});
 });

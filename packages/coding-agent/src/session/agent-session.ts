@@ -534,6 +534,7 @@ import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } fr
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
+import { cfgDisasmBackend } from "../disasm/active";
 import { cfgBrowserEnabled, cfgBrowserFreezeOnTurnEnd, cfgBrowserIdleCloseSec } from "../tools/browser/settings";
 import {
 	cfgClaudeResets,
@@ -2258,8 +2259,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					},
 				),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
-			setModelTemporary: (model, thinkingLevel) =>
-				this.#models.setModelTemporary(model, thinkingLevel, { prewalk: true }, "automatic"),
+			setModelTemporary: (model, thinkingLevel, isCurrent) =>
+				this.#models.setModelTemporary(model, thinkingLevel, { prewalk: true }, "automatic", isCurrent),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
 			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
 				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
@@ -2335,9 +2336,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model);
-				// Only a completed explicit selection, including same-model reselection, takes ownership.
+				// An explicit selection, including same-model reselection, takes ownership when it publishes. The reset
+				// publishes before its first await, so releasing first lets an in-flight prewalk switch see the newer
+				// selection without a window where the new model is live but the handoff still owns the session.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				await this.#setModelWithProviderSessionReset(model);
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -3061,8 +3064,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
-			setModelTemporary: (model, thinkingLevel, options) =>
-				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
+			setModelTemporary: async (model, thinkingLevel, options) => {
+				await this.#models.setModelTemporary(model, thinkingLevel, options, "automatic");
+			},
 			abort: options => this.abort(options),
 			abortHandoff: () => this.abortHandoff(),
 		};
@@ -3135,6 +3139,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgRatchetEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("ratchet.enabled", enabled));
 		cfgArchiveEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("archive.enabled", enabled));
 		cfgCommitEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("commit.enabled", enabled));
+		cfgDisasmBackend.listen(this, backend =>
+			this.#reconcileEvalPreludeSetting("disassembler.backend", backend !== undefined),
+		);
 		cfgBrowserIdleCloseSec.listen(this, seconds => {
 			const ownerId = this.sessionManager.getSessionId() ?? "";
 			// Any change invalidates the armed deadline: cancel first (its
@@ -3195,14 +3202,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * `browser.enabled` / `computer.enabled` / `ratchet.enabled` / `archive.enabled` / `commit.enabled` change the live eval preludes; the browser toggle also
+	 * Capability settings change the live eval preludes; the browser toggle also
 	 * re-filters its MCP tools first. An empty transcript rebuilds the system prompt to advertise
 	 * them; mid-session the cached prompt stays byte-stable and the next user prompt carries a
 	 * hidden prelude notice instead (see {@link SessionTools.takeEvalPreludeNotice}).
 	 * A failed browser switch-on reverts to off.
 	 */
 	async #reconcileEvalPreludeSetting(
-		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled" | "archive.enabled" | "commit.enabled",
+		path:
+			| "browser.enabled"
+			| "computer.enabled"
+			| "ratchet.enabled"
+			| "archive.enabled"
+			| "commit.enabled"
+			| "disassembler.backend",
 		enabled: boolean,
 	): Promise<void> {
 		try {
@@ -12867,12 +12880,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
-	setModelTemporary(
+	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
-		return this.#models.setModelTemporary(model, thinkingLevel, options);
+		await this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
@@ -12911,8 +12924,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		this.#prewalk.releaseHandoff();
-		return this.#models.cycleThinkingLevel();
+		// Ownership transfers only when a level is selected; the level is applied synchronously, before any
+		// in-flight prewalk switch can resume and read the epoch.
+		const level = this.#models.cycleThinkingLevel();
+		if (level !== undefined) this.#prewalk.releaseHandoff();
+		return level;
 	}
 
 	/** Lists all selectable effort selectors for the active model. */
@@ -16154,9 +16170,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Get text content of last assistant message.
-	 * Consumed by the `/copy` command and by the yield tool's empty-last-turn
-	 * guard (a data-less `useLastTurn` finalize is rejected when this is
-	 * undefined, so a thinking-only turn cannot become a null-data run failure).
+	 * Consumed by the `/copy` command and the RPC `get_last_assistant_text` request.
 	 * @returns Trimmed text content, or undefined if no assistant message has text
 	 */
 	getLastAssistantText(): string | undefined {

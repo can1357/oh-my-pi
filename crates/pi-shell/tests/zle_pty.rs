@@ -30,7 +30,7 @@ fn spawn(real: bool, rc: &str) -> Spawn {
 	s.args(["-f", "-i"])
 		.env("PS1", "%~ %# ")
 		.env("RPS1", "[%?]")
-		.rc_file(".zshrc", rc)
+		.rc_file(".zshrc", format!("{rc}\nprint -r -- RCDONE\n"))
 		.size(24, 80)
 }
 
@@ -48,9 +48,11 @@ fn screens(
 ) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
 		pty.wait_raw(TIMEOUT)?;
-		pty.settle(QUIET, TIMEOUT)?;
+		pty.wait_raw(TIMEOUT)?;
 		if !rc.is_empty() {
-			keys(pty, ". ~/.zshrc\r")?;
+			pty.type_keys(". ~/.zshrc\r", KEY)?;
+			pty.read_until("RCDONE", TIMEOUT)?;
+			pty.wait_raw(TIMEOUT)?;
 			// A clean screen for the case itself.
 			keys(pty, "\x0c")?;
 		}

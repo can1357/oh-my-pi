@@ -84,7 +84,6 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 		}
 		const sessionFileOfRef = ref.sessionFile;
 		const agentName = persistedAgentName(ref.displayName, init);
-		const structured = init.tools.includes("yield");
 		const steps = readStepProgress(sub.entries);
 		manager.register(
 			"task",
@@ -96,7 +95,6 @@ async function restoreSubagents(session: AgentSession, options: RestoreOptions):
 					message: init.task,
 					restore: true,
 					steps,
-					structured,
 					workPoolYieldItems: init.workPoolYieldItems,
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,

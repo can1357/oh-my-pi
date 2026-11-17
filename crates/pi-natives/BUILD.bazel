@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_shared_library", "rust_test")
 load("//bazel/toolchains/swift:defs.bzl", "applefm_bridge")
@@ -118,6 +119,17 @@ rust_binary(
     target_compatible_with = ["@platforms//os:macos"],
 )
 
+# The Linux addon's only export: the N-API entry point. Linked in place of
+# rustc's version script, which lists every #[no_mangle] function in the crate
+# graph (wasmtime's C API for tree-sitter, src/bundled_libc.rs). Generated
+# rather than checked in: next to the generated :syntax_set, rules_rust moves
+# source compile_data, so a source file's $(execpath) misses the action input.
+write_file(
+    name = "exports_map",
+    out = "exports.map",
+    content = ["{ global: napi_register_module_v1; local: *; };"],
+)
+
 # The NAPI cdylib. build.rs is intentionally not wired in: napi_build::setup()
 # link args are hardcoded below, and the OAuth relay executable and the
 # `:syntax_set` genrule output are separate targets embedded as compile data.
@@ -128,7 +140,10 @@ rust_shared_library(
     name = "pi_natives",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    compile_data = [":syntax_set"] + glob([
+    compile_data = [
+        ":exports_map",
+        ":syntax_set",
+    ] + glob([
         "src/syntaxes/*.sublime-syntax",
         "src/fonts/*",
         "data/*.bin.zst",
@@ -177,12 +192,19 @@ rust_shared_library(
         # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
         # x86_64; every shipped darwin addon carries a signature.
         # -install_name: otherwise the addon's id is its sandbox output path.
+        # --version-script (linux): export only the N-API entry point. zig cc
+        # keeps the last version script it is given, so :exports_map replaces
+        # the one rustc writes; every other symbol (src/bundled_libc.rs, the
+        # wasm C API) becomes local and binds within the addon.
         "@platforms//os:macos": [
             "-Clink-arg=-Wl,-undefined,dynamic_lookup",
             "-Clink-arg=-Wl,-adhoc_codesign",
             "-Clink-arg=-Wl,-install_name,@rpath/libpi_natives.dylib",
         ],
-        "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
+        "@platforms//os:linux": [
+            "-Clink-arg=-Wl,-z,nodelete",
+            "-Clink-arg=-Wl,--version-script=$(execpath :exports_map)",
+        ],
         "//conditions:default": [],
     }) + select({
         # musl defaults to +crt-static, under which rustc silently emits no

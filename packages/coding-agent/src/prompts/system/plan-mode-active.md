@@ -107,7 +107,7 @@ Review options:
 - **Approve and execute** — fresh context (session cleared).
 - **Approve and compact context** — discussion distilled, then executes here.
 - **Approve and keep context** — executes here with exploration history.
-- **Save and quit** — copies the plan to a chosen path, then starts a new session.
+- **Save** — copies the plan to a chosen path; the review stays open.
 
 All require self-contained file.
 </caution>
