@@ -3,13 +3,7 @@
  *
  * Subagents can call this tool incrementally or terminally depending on `type`.
  */
-import type {
-	AgentMessage,
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai/types";
 import {
 	dereferenceJsonSchema,
@@ -28,50 +22,13 @@ import { buildOutputValidator, formatAllValidationIssues } from "./output-schema
 
 const YIELD_FORMAT_HINT = 'Submit success as {"data":<your output>} or failure as {"error":"message"}.';
 
-export function resolveYieldReportText(messages: readonly AgentMessage[], toolCallId: string): string | undefined {
-	const current = messages.at(-1);
-	if (current?.role !== "assistant" || ["error", "aborted", "length"].includes(current.stopReason)) return;
-	const calls = current.content.filter(block => block.type === "toolCall");
-	if (calls.length !== 1 || calls[0].name !== "yield" || calls[0].id !== toolCallId) return;
-	const currentText = current.content
-		.filter(block => block.type === "text")
-		.map(block => block.text)
-		.join("\n");
-	if (currentText.trim()) return currentText;
-	for (let index = messages.length - 2; index >= 0; index--) {
-		const previous = messages[index];
-		if (previous.role === "developer") {
-			const blocks =
-				typeof previous.content === "string" ? [{ type: "text", text: previous.content }] : previous.content;
-			if (
-				blocks.length &&
-				blocks.every(block => block.type === "text" && block.text.startsWith("<system-reminder>"))
-			)
-				continue;
-		}
-		if (
-			previous.role !== "assistant" ||
-			previous.stopReason !== "stop" ||
-			previous.content.some(block => block.type === "toolCall")
-		)
-			return;
-		const text = previous.content
-			.filter(block => block.type === "text")
-			.map(block => block.text)
-			.join("\n");
-		return text.trim() ? text : undefined;
-	}
-}
-
 export interface YieldDetails {
-	/** Successful result payload, or omitted when `useLastTurn` requests last-turn extraction. */
+	/** Successful result payload; omitted when a terminal `type` finalizes the submitted sections. */
 	data?: unknown;
 	status: "success" | "aborted";
 	error?: string;
 	/** Optional result section/classification supplied by the yield caller. */
 	type?: string | string[];
-	/** True when the caller intentionally omitted success data so the executor uses the last assistant turn. */
-	useLastTurn?: boolean;
 	/** True when this incremental workpool yield completed every item in the active batch. */
 	complete?: boolean;
 	/**
@@ -129,7 +86,8 @@ const yieldTypeSchema: Record<string, unknown> = {
 			items: { type: "string" },
 		},
 	],
-	description: "Optional result type. A non-empty string array is incremental; a string is terminal.",
+	description:
+		"Optional result type. A non-empty string array labels an incremental section; a string is terminal and, without data, finalizes the submitted sections.",
 };
 
 function isYieldType(value: unknown): value is string | string[] {
@@ -485,10 +443,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	 * new monitored turn. The tool instance is stored once in the session's tool
 	 * registry and reused across follow-up turns (`runSubagentFollowUpTurn`), so a
 	 * prior run's incremental-section flag and retry counters would otherwise leak
-	 * forward: a later thinking-only `{type:"result"}` would skip the empty-last-
-	 * turn and schema guards (which require `!#hasIncrementalSections`) and fail
-	 * the run post-mortem. Workpool submission state resets separately via the
-	 * batch key in {@link #workPoolItems}.
+	 * forward: a later data-less `{type:"result"}` would pass as finalizing the
+	 * previous run's sections and fail this run post-mortem with no result.
+	 * Workpool submission state resets separately via the batch key in
+	 * {@link #workPoolItems}.
 	 */
 	resetTurnState(): void {
 		this.#hasIncrementalSections = false;
@@ -507,7 +465,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	}
 
 	async execute(
-		toolCallId: string,
+		_toolCallId: string,
 		params: unknown,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<YieldDetails>,
@@ -541,7 +499,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		} else {
 			yieldType = parseYieldType(raw.type);
 		}
-		let useLastTurn = errorMessage === undefined && data === undefined && yieldType !== undefined;
 		// Incremental array-typed sections carry partial data (one finding, one
 		// field) that cannot satisfy the full output schema; the assembled result
 		// is validated as a whole at finalization (executor finalizeSubprocessOutput).
@@ -550,7 +507,16 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		if (errorMessage !== undefined && data !== undefined) {
 			throw new Error(renderDataErrorConflictMessage(errorMessage, yieldType));
 		}
-		if (errorMessage === undefined && data === undefined && yieldType === undefined) {
+		// A data-less yield carries a result only as a terminal `type` closing
+		// sections already submitted; anything else is empty and would fail the
+		// run post-mortem, so reject it here while the child can still resubmit.
+		const finalizesSections =
+			errorMessage === undefined &&
+			data === undefined &&
+			yieldType !== undefined &&
+			!isIncremental &&
+			this.#hasIncrementalSections;
+		if (errorMessage === undefined && data === undefined && !finalizesSections) {
 			this.#emptyResultFailures++;
 			if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
 				const attemptCount = this.#emptyResultFailures;
@@ -567,9 +533,12 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				};
 			}
 			const remaining = MAX_EMPTY_RESULT_RETRIES - this.#emptyResultFailures;
-			throw new Error(
-				`yield must contain either \`data\` or \`error\`. ${YIELD_FORMAT_HINT} Empty untyped result retries remaining before abort: ${remaining}.`,
-			);
+			const reason = isIncremental
+				? `Section ${formatYieldLabels(yieldType as string[])} carries no \`data\`.`
+				: yieldType !== undefined
+					? "A data-less `type` only finalizes previously submitted sections, and none were submitted."
+					: "yield must contain either `data` or `error`.";
+			throw new Error(`${reason} ${YIELD_FORMAT_HINT} Empty result retries remaining before abort: ${remaining}.`);
 		}
 
 		const status = errorMessage !== undefined && workPoolItemId === undefined ? "aborted" : "success";
@@ -577,8 +546,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		let schemaValidationOverridden = false;
 		let schemaValidationFailureCount = 0;
 		// Unknown incremental labels are a hard contract mismatch with the closed caller
-		// schema. Reject before the last-turn short-circuit too: `type: ["findings"], result: {}`
-		// would otherwise be accepted as a typed last-turn incremental yield, then a sibling
+		// schema: `type: ["findings"], data: {}` would otherwise be accepted as a
+		// section the assembled result can never carry, then a sibling
 		// section's MAX_SCHEMA_RETRIES override flips schemaOverridden in finalization and the
 		// stale section rides along untouched.
 		if (status === "success" && isIncremental && workPoolItemId === undefined) {
@@ -591,60 +560,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				);
 			}
 		}
-		// A schema-bound terminal last-turn yield with no accumulated sections can
-		// only assemble raw prose, which finalization then rejects post-mortem as a
-		// fatal schema_violation the child can no longer correct. Catch it here as
-		// a retryable error instead. With sections present, a data-less finalize
-		// legitimately closes the incremental flow (assembly keeps the sections).
-		if (status === "success" && useLastTurn && !isIncremental && this.#validate && !this.#hasIncrementalSections) {
-			throw new Error(
-				"This task requires structured output matching the declared schema; a last-turn result cannot satisfy it. " +
-					`Submit the full object: {"data":<object matching the schema>}.`,
-			);
-		}
-		// A data-less `useLastTurn` yield resolves to the last assistant turn's
-		// text. A thinking-only turn carries none, so accepting an incremental
-		// call records an empty section and accepting a terminal call with no
-		// accumulated sections records an empty result. Finalization would fail
-		// either run post-mortem with SUBAGENT_WARNING_NULL_YIELD, after the child
-		// can no longer correct it. Reject at the boundary so the reminder ladder
-		// re-prompts for `data`. A terminal data-less yield after valid incremental
-		// sections still closes that flow without reading last-turn text.
-		if (
-			status === "success" &&
-			useLastTurn &&
-			(isIncremental || !this.#hasIncrementalSections) &&
-			(this.#session.getLastAssistantText !== undefined || this.#session.getYieldReportText !== undefined)
-		) {
-			const resolveReport = !isIncremental && this.#session.getYieldReportText;
-			const lastTurnText = resolveReport ? resolveReport(toolCallId) : this.#session.getLastAssistantText?.();
-			if (lastTurnText === undefined || lastTurnText.trim().length === 0) {
-				this.#emptyResultFailures++;
-				if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
-					const attemptCount = this.#emptyResultFailures;
-					this.#emptyResultFailures = 0;
-					const error = `yield resolved to an empty last-turn result after ${attemptCount} consecutive attempt(s); aborting child instead of retrying forever. ${YIELD_FORMAT_HINT}`;
-					return {
-						content: [{ type: "text", text: `Task aborted: ${error}` }],
-						details: {
-							data: undefined,
-							status: "aborted",
-							error,
-							type: yieldType,
-						},
-					};
-				}
-				const remaining = MAX_EMPTY_RESULT_RETRIES - this.#emptyResultFailures;
-				throw new Error(
-					`yield used the last assistant turn as the result, but that turn contains no text (thinking only). ` +
-						`Put your result in \`data\`: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
-				);
-			}
-			if (resolveReport) {
-				data = lastTurnText;
-				useLastTurn = false;
-			}
-		}
 		const normalizeData = (value: unknown): unknown =>
 			workPoolItemId !== undefined
 				? value
@@ -654,7 +569,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						? (this.#normalizeData?.(value) ?? value)
 						: value;
 		if (status === "success" && data !== undefined) data = normalizeData(data);
-		if (status === "success" && !useLastTurn) {
+		if (status === "success" && !finalizesSections) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined
 					? undefined
@@ -742,7 +657,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				status,
 				error: errorMessage,
 				type: yieldType,
-				useLastTurn: useLastTurn || undefined,
 				complete: workPoolComplete || undefined,
 				schemaOverridden: schemaValidationOverridden || undefined,
 			},
@@ -811,7 +725,6 @@ subprocessToolRegistry.register<YieldDetails>("yield", {
 			status,
 			error: typeof record.error === "string" ? record.error : undefined,
 			type: isYieldType(record.type) ? record.type : undefined,
-			useLastTurn: record.useLastTurn === true ? true : undefined,
 			complete: record.complete === true ? true : undefined,
 			schemaOverridden: record.schemaOverridden === true ? true : undefined,
 		};

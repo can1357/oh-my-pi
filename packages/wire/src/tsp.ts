@@ -356,6 +356,8 @@ export interface TspDiffProps {
 	/** A language overriding the one `path` gives. */
 	lang?: string;
 	mode?: "unified" | "split" | "auto";
+	/** Long lines wrap inside their rows (absent: `true`); `false` keeps a line per row, scrolled sideways together. */
+	wrap?: boolean;
 }
 export interface TspAnsiProps {
 	/** Raw terminal output (SGR, OSC 8, `\r`, `\b` allowed). */
@@ -756,6 +758,8 @@ export interface TspPickerLevel {
 	label: string;
 	/** An icon drawn in place of the label. */
 	icon?: string;
+	/** A dim note after the value in its chip (the model switcher: the highlighted model's provider). */
+	detail?: string;
 	/** Its steps, low to high: the terminal heats the track up the ladder (color, then motion). */
 	steps: readonly { id: string; label: string }[];
 	/** The current step's id. */

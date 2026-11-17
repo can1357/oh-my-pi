@@ -390,7 +390,7 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 		preview: "none",
 		scopeStyle: "rail",
 		scope: "all",
-		placeholder: "Search models, @ for quick roles…",
+		placeholder: "Search, @ for roles…",
 		selected: "demo/demo",
 	});
 	expect(p.title).toBeUndefined();
@@ -420,6 +420,7 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 			{ id: "xhigh", label: "XHigh" },
 		],
 		value: "high",
+		detail: "demo",
 		icon: "brain",
 		keys: ["left", "right"],
 	});
@@ -429,13 +430,14 @@ test("the quick picker is a composer drop-up with a provider rail, a thinking sl
 	expect(props(picker.describe(withPicker)).level).toMatchObject({
 		steps: ["off", "minimal", "low", "medium", "high"].map(id => expect.objectContaining({ id })),
 		value: "off",
+		detail: "local",
 		disabled: "tiny does not reason",
 	});
 
 	quickAct(picker, "task");
 	root = picker.describe(withPicker);
 	p = props(root);
-	expect(p.placeholder).toBe("Search models for Task subagents…");
+	expect(p.placeholder).toBe("Search Task models…");
 	expect(p.actions).toEqual([
 		{ id: "task", label: "Task / Main", keys: ["alt", "p"], on: true, head: true, icon: "users" },
 	]);
@@ -456,7 +458,15 @@ test("a provider scope lists only its models, Tab cycles scopes, and the active 
 
 	// Search applies within the scope.
 	for (const char of "mini") picker.handleInput(char);
-	expect(rowIds(props(picker.describe(withPicker)))).toEqual(["openai/gpt-5.6-mini"]);
+	const searched = props(picker.describe(withPicker));
+	expect(rowIds(searched)).toEqual(["openai/gpt-5.6-mini"]);
+	// The row shows the model id alone (its provider in the tooltip); the hit marks the id.
+	const label = "gpt-5.6-mini";
+	const row = searched.items?.find(item => item.id === "openai/gpt-5.6-mini");
+	expect(row?.label).toBe(label);
+	expect(row?.title?.startsWith("openai")).toBe(true);
+	const [[from, to]] = searched.hits?.["openai/gpt-5.6-mini"] ?? [[0, 0]];
+	expect(label.slice(from, to)).toBe("mini");
 	quickAct(picker, "clear");
 
 	quickAct(picker, "scope", "provider:openai");
