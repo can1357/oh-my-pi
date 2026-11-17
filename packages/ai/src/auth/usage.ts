@@ -675,6 +675,9 @@ export class UsageService implements UsageApi {
 					if (entry.credential.type !== "oauth") continue;
 					const request = oauthUsageRequest(provider, entry.credential, baseUrl);
 					if (providerImpl.supports && !providerImpl.supports(request)) continue;
+					// Same stored-row attribution contract as the generic loop
+					// below (e.g. xai-oauth probes take this path).
+					request.credentialId = entry.id;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
 				}

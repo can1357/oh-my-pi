@@ -124,6 +124,9 @@ export function limitMatchesActiveAccount(
 	if (!identity) return false;
 	const metadata = report.metadata ?? {};
 	if (identity.credentialId !== undefined) {
+		// Merged same-account reports carry every contributing row id.
+		const mergedIds = metadata.credentialIds;
+		if (Array.isArray(mergedIds)) return mergedIds.includes(identity.credentialId);
 		return metadata.credentialId === identity.credentialId;
 	}
 	const activeAccountId = normalizeIdentityValue(identity.accountId);

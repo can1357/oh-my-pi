@@ -320,3 +320,13 @@ describe("limitMatchesActiveAccount: credential-scoped identity (API-key account
 		expect(reportMatchesActiveAccount(makeReport({ metadata: { credentialId: 2 } }), identity)).toBe(false);
 	});
 });
+
+describe("limitMatchesActiveAccount: merged same-account reports", () => {
+	test("a report carrying every contributing row id matches a pin on any of them", () => {
+		const identity = { credentialId: 4 };
+		const merged = makeReport({ metadata: { credentialId: 2, credentialIds: [2, 4] } });
+		expect(limitMatchesActiveAccount(merged, makeLimit(), { credentialId: 2 })).toBe(true);
+		expect(limitMatchesActiveAccount(merged, makeLimit(), identity)).toBe(true);
+		expect(limitMatchesActiveAccount(merged, makeLimit(), { credentialId: 7 })).toBe(false);
+	});
+});

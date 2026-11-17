@@ -226,9 +226,20 @@ export class SessionAffinity implements SessionsApi {
 	 * `SessionsApi.sticky`: read-only display/attribution view of {@link get} —
 	 * the stored credential row that most recently served the session,
 	 * including API-key rows (which have no OAuth identity to attribute by).
+	 *
+	 * Returns `undefined` when an override would be served instead of stored
+	 * rows: `KeyCascade` resolves runtime (`--api-key`) and config keys ahead
+	 * of the pool, and an env key can take over once stored rows go unusable —
+	 * its branch only forgets the in-memory pin, so a persisted row survives
+	 * and must not be reported as the session's auth source.
 	 */
 	sticky(provider: string, sessionId: string | undefined): SessionCredential | undefined {
-		return this.get(provider, sessionId);
+		const pin = this.get(provider, sessionId);
+		if (!pin) return undefined;
+		const restricted = this.isRestricted(provider, sessionId);
+		if (this.#overrides.suppressesOAuth(provider, restricted)) return undefined;
+		if (!restricted && getEnvApiKey(provider)) return undefined;
+		return pin;
 	}
 
 	#lookup(provider: string, sessionId: string): SessionCredential | undefined {
