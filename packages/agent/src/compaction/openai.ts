@@ -78,6 +78,7 @@ import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
+import { withResolvedHeaders } from "./request-headers";
 import { isOpenAiRemoteCompactionApi, remoteCompactionPolicyModel } from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
@@ -893,6 +894,7 @@ export async function requestOpenAiRemoteCompaction(
 		rewriteOutputs?: boolean;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
+	model = await withResolvedHeaders(model, signal);
 	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
 		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));

@@ -39,6 +39,7 @@ import {
 import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson, toError } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
+import { withResolvedHeaders } from "./request-headers";
 
 // ============================================================================
 // Types & Configuration
@@ -283,6 +284,7 @@ export async function requestCompactionV2Streaming(
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
+	model = await withResolvedHeaders(model, signal);
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
 		({
