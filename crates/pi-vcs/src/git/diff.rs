@@ -340,12 +340,17 @@ fn index_changes(
 	files: &[String],
 ) -> Result<Vec<FileChange>> {
 	let index = load_index_or_empty(repo, "git diff --cached")?;
+	let expanded = index
+		.is_sparse()
+		.then(|| expand_sparse_index(repo, &index))
+		.transpose()?;
+	let index = expanded.as_ref().unwrap_or(&index);
 	let mut pathspec = make_pathspec(repo, files, false)?;
 	let mut out = Vec::new();
 	repo
 		.tree_index_status(
 			&tree_id,
-			&index,
+			index,
 			pathspec.as_mut(),
 			gix::status::tree_index::TrackRenames::AsConfigured,
 			|change, _, _| -> Result<_> {
@@ -357,6 +362,40 @@ fn index_changes(
 	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
+}
+
+/// gix's tree/index diff does not accept sparse-directory entries; expand only
+/// for this comparison.
+fn expand_sparse_index(
+	repo: &gix::Repository,
+	index: &gix::index::File,
+) -> Result<gix::index::File> {
+	use gix::index::entry::{Flags, Mode, Stat};
+
+	let mut state = gix::index::State::new(repo.object_hash());
+	for entry in index.entries() {
+		let path = entry.path(index);
+		if entry.mode == Mode::DIR {
+			let subtree = repo
+				.index_from_tree(&entry.id)
+				.map_err(|err| Error::backend("git diff --cached", err))?;
+			for leaf in subtree.entries() {
+				let mut full_path = path.to_owned();
+				full_path.extend_from_slice(leaf.path(&subtree));
+				state.dangerously_push_entry(
+					Stat::default(),
+					leaf.id,
+					Flags::EXTENDED | Flags::SKIP_WORKTREE,
+					leaf.mode,
+					full_path.as_ref(),
+				);
+			}
+		} else {
+			state.dangerously_push_entry(entry.stat, entry.id, entry.flags, entry.mode, path);
+		}
+	}
+	state.sort_entries();
+	Ok(gix::index::File::from_state(state, repo.index_path()))
 }
 
 /// gix's rename tracker only considers blobs, but git pairs a deleted and an

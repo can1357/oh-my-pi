@@ -18,6 +18,7 @@ import {
 	withLiveElement,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
 import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import { normalizeSelectOptions } from "@oh-my-pi/pi-coding-agent/tools/browser/select-options";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { TERN_KIT_SOURCE } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/page-kit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
@@ -175,7 +176,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 				return Promise.withResolvers<void>().promise;
 			};
 
-			const error = await rejectionOf(fillViaHandle(editor, "new text", controller.signal));
+			const error = await rejectionOf(fillViaHandle(editor, "new text", "handle.fill()", controller.signal));
 			if (!(error instanceof TypingInterruptedError))
 				throw new Error(`Expected TypingInterruptedError, got ${error}`);
 			expect(error.progress).toContain("replacement text was already sent");
@@ -322,7 +323,7 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 	}, 40_000);
 });
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
-	test("clicks a link that wraps across two lines on the link, not on its paragraph, on puppeteer and Tern", async () => {
+	test("clicks and drags a wrapped link on its visible fragment, not its paragraph, on puppeteer and Tern", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const context = { session, toolCallId: "browser-wrapped-link" };
@@ -346,15 +347,22 @@ const ternHit = await tab.evaluate(async () => {
 	const target = await globalThis.__ompTernKit.target({ engine: "css", query: "#link" }, "click");
 	return target.ok ? document.elementFromPoint(target.x, target.y)?.id : target.reason;
 });
-return { fragments, clicked: await tab.evaluate(() => window.clicked), ternHit };`,
+const clicked = await tab.evaluate(() => window.clicked);
+await tab.evaluate(() => {
+	window.dragStarts = [];
+	document.addEventListener("mousedown", event => window.dragStarts.push(event.target.id), true);
+});
+await tab.drag("#link", { x: 200, y: 100, css: true });
+return { fragments, clicked, ternHit, dragStarts: await tab.evaluate(() => window.dragStarts) };`,
 					timeout: 15,
 				},
 				context,
 			);
-			expect(valueFrom<{ fragments: number; clicked: string[]; ternHit: string }>(result)).toEqual({
+			expect(valueFrom<unknown>(result)).toEqual({
 				fragments: 2,
 				clicked: ["link"],
 				ternHit: "link",
+				dragStarts: ["link"],
 			});
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
@@ -470,6 +478,122 @@ return {
 		}
 	}, 40_000);
 
+	test("refuses keys and drags aimed at a control a modal dialog covers, on puppeteer and Tern", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const tabName = `modal-${crypto.randomUUID()}`;
+		// The dialog's button takes focus when it opens; a key meant for the field behind it activated that button.
+		// Without a modal dialog keys keep going where focus goes: a field under a banner, a board under a HUD, a
+		// field whose focus handler opens a picker over it. A drag to an element off screen does not scroll its start away.
+		const modalHtml = `<!doctype html><label>Name <input id="name"></label> <button id="go">Go</button> <input id="off" disabled>
+<div id="src" draggable="true" style="width:80px;height:30px">Drag</div><div id="dst" style="width:80px;height:30px">Drop</div>
+<p style="position:relative"><input id="under"><span style="position:absolute;inset:0;background:#fec">Banner</span></p>
+<div style="position:relative"><div id="board" style="width:120px;height:30px">Board</div><div id="hud" style="position:absolute;inset:0"></div></div>
+<div style="position:relative"><input id="date"><div id="pop" hidden style="position:absolute;inset:0"><input id="popin"></div></div>
+<iframe id="inner" srcdoc="<input id=deep><dialog id=framed><button>OK</button></dialog><script>document.querySelector('dialog').showModal()</script>"></iframe>
+<div style="height:3000px"></div><div id="far">Far</div>
+<dialog id="modal"><button id="stay">Stay signed in</button></dialog>
+<script>
+window.received = [];
+for (const type of ["keydown", "click", "input", "mousedown", "dragstart"]) document.addEventListener(type, event => received.push(type + ":" + event.target.id), true);
+document.querySelector("#date").addEventListener("focus", () => { document.querySelector("#pop").hidden = false; document.querySelector("#popin").focus(); });
+</script>`;
+		const context = { session, toolCallId: "browser-modal-cover" };
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(modalHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const attempt = action => action().then(() => "sent", error => error.message);
+await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
+const aim = (query, actions) => tab.evaluate(async (query, actions) => {
+	const aims = {};
+	for (const action of actions) {
+		const target = await globalThis.__ompTernKit.target({ engine: "css", query }, action);
+		aims[action] = target.ok ? "ok" : target.detail;
+	}
+	return aims;
+}, query, actions);
+await tab.evaluate(() => document.querySelector("#go").focus());
+const disabledPress = await attempt(() => tab.press("Enter", { selector: "#off" }));
+const banner = {
+	fill: await attempt(() => tab.fill("#under", "kept")),
+	press: await attempt(() => tab.press("End", { selector: "#under" })),
+	value: await tab.value("#under"),
+	board: await attempt(() => tab.press("ArrowLeft", { selector: "#board" })),
+	picker: await attempt(() => tab.type("#date", "abc")),
+	picked: await tab.value("#popin"),
+	tern: { under: await aim("#under", ["fill", "press"]), board: await aim("#board", ["press"]), date: await aim("#date", ["type"]) },
+};
+await tab.evaluate(() => document.activeElement.blur());
+const beforePress = await tab.evaluate(() => scrollY);
+await tab.press("ArrowLeft", { selector: "#far" });
+const offscreenPressScrolled = await tab.evaluate(() => scrollY) !== beforePress;
+await tab.evaluate(() => { window.received = []; });
+const farDrag = await attempt(() => tab.drag("#src", "#far"));
+const farDragMisses = await tab.evaluate(() => window.received.filter(entry => !entry.endsWith(":src")));
+const observed = await tab.observe();
+const field = await tab.id(observed.elements.find(element => element.role === "textbox" && element.name.includes("Name")).id);
+await tab.evaluate(() => { document.querySelector("#modal").showModal(); window.received = []; });
+const frame = await tab.frame("#inner");
+const refused = {
+	disabledPress,
+	banner,
+	offscreenPressScrolled,
+	farDrag,
+	farDragMisses,
+	fill: await attempt(() => tab.fill("#name", "Ada Lovelace")),
+	type: await attempt(() => tab.type("#name", "Ada Lovelace")),
+	press: await attempt(() => tab.press("Enter", { selector: "#name" })),
+	handleFill: await attempt(() => field.fill("Ada Lovelace")),
+	handleType: await attempt(() => field.type("Ada Lovelace")),
+	handlePress: await attempt(() => field.press("Enter")),
+	frameFill: await attempt(() => frame.fill("#deep", "Ada Lovelace")),
+	framePress: await attempt(() => frame.press("Enter", { selector: "#deep" })),
+	drag: await attempt(() => tab.drag("#src", "#dst")),
+};
+const tern = await aim("#name", ["fill", "type", "press"]);
+return { ...refused, received: await tab.evaluate(() => window.received), name: await tab.value("#name"), tern };`,
+					timeout: 30,
+				},
+				context,
+			);
+			expect(valueFrom<unknown>(result)).toEqual({
+				disabledPress: 'tab.press("Enter", { selector: "#off" }) blocked: the element is disabled',
+				banner: {
+					fill: "sent",
+					press: "sent",
+					value: "kept",
+					board: "sent",
+					picker: "sent",
+					picked: "abc",
+					tern: { under: { fill: "ok", press: "ok" }, board: { press: "ok" }, date: { type: "ok" } },
+				},
+				offscreenPressScrolled: false,
+				farDrag: "sent",
+				farDragMisses: [],
+				fill: 'tab.fill("#name") blocked: covered by <dialog#modal>',
+				type: 'tab.type("#name") blocked: covered by <dialog#modal>',
+				press: 'tab.press("Enter", { selector: "#name" }) blocked: covered by <dialog#modal>',
+				handleFill: "handle.fill() blocked: covered by <dialog#modal>",
+				handleType: "handle.type() blocked: covered by <dialog#modal>",
+				handlePress: "handle.press() blocked: covered by <dialog#modal>",
+				frameFill: 'frame.fill("#deep") blocked: covered by <dialog#framed>',
+				framePress: 'frame.press("Enter", { selector: "#deep" }) blocked: covered by <dialog#framed>',
+				drag: 'tab.drag() from "#src" blocked: covered by <dialog#modal>',
+				received: [],
+				name: "",
+				tern: { fill: "<dialog#modal>", type: "<dialog#modal>", press: "<dialog#modal>" },
+			});
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	});
+
 	test("guards covered clicks and drives keyboard, pointer, drop-zone, checked-state, and highlight interactions", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
@@ -543,17 +667,18 @@ return { during, after };`,
 		}
 	}, 30_000);
 
-	test("selects options by value, then by visible label, from tabs and element handles", async () => {
+	test("selects options by explicit label, value, or index while preserving string matching and failed selections", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const context = { session, toolCallId: "browser-select" };
 		const selectHtml = `<!doctype html>
 <select id="country"><option value="">Choose…</option><option value="us">United States</option><option value="ca">Canada</option></select>
 <select id="size"><option value="m">Large</option><option value="Large">Extra large</option></select>
-<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option></select>
+<select id="extras" multiple><option value="cheese">Cheese</option><option value="ham">Ham</option><option value="olives">Olives</option><option value="priority" label="Priority">  Priority   boarding + $15  </option><option value="2">Two</option><option value="true">Enabled</option></select>
 <select id="jump"><option value="">Jump to…</option><option value="docs">Docs</option></select>
 <select id="swap"></select>
 <script>
+window.selectEvents = []; for (const type of ["input", "change"]) window.addEventListener(type, event => selectEvents.push(type + ":" + event.target.id), true);
 // A jump menu acts on the choice and resets itself, as "add filter" and "go to" menus do.
 document.querySelector("#jump").addEventListener("change", event => { event.target.value = ""; });
 // A cascading menu replaces its own options on a change.
@@ -590,11 +715,30 @@ const reset = await tab.select("#jump", "Docs");
 const handleReset = await (await tab.waitFor("#jump")).select("docs");
 const afterReset = await tab.value("#jump");
 await tab.evaluate(() => resetSwap());
-const swapped = await tab.select("#swap", "b");
+const swapped = await tab.select("#swap", { value: "b" });
 await tab.evaluate(() => resetSwap());
 await tab.evaluate(${JSON.stringify(`(function () {\n${TERN_KIT_SOURCE}\n})()`)});
-const ternSwapped = await tab.evaluate(() => globalThis.__ompTernKit.select({ engine: "css", query: "#swap" }, ["b"]));
-return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cleared, afterCleared, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple, reset, handleReset, afterReset, swapped, ternSwapped };`,
+const ternSwapped = await tab.evaluate(() => globalThis.__ompTernKit.select({ engine: "css", query: "#swap" }, [{ value: "b" }]));
+const explicitLabel = await tab.select("#size", { label: "Large" });
+const explicitValue = await tab.select("#size", { value: "Large" });
+const firstIndex = await tab.select("#country", { index: 0 });
+const laterIndex = await handle.select({ index: 2 });
+const mixed = await tab.select("#extras", { label: "Cheese" }, { value: "ham" }, { index: 2 }, "Priority");
+const fullLabel = await tab.select("#extras", { label: "Priority boarding + $15" });
+const eventsBefore = await tab.evaluate(() => window.selectEvents);
+const invalid = [];
+for (const option of [{}, { unknown: "us" }, { label: "Canada", value: "ca" }, { label: 2 }, { value: 2 }, { index: -1 }, { index: 0.5 }, { index: "0" }, null]) {
+	invalid.push(await tab.select("#country", { value: "us" }, option).then(() => "selected", error => error.message));
+}
+const valueDoesNotMatchLabel = await tab.select("#size", { value: "Extra large" }).then(() => "selected", error => error.message);
+const missingIndex = await handle.select({ index: 99 }).then(() => "selected", error => error.message);
+const invalidOnMissing = await tab.select("#missing", { label: 1 }).then(() => "selected", error => error.message);
+return {
+	byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cleared, afterCleared, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple, reset, handleReset, afterReset, swapped, ternSwapped,
+	explicitLabel, explicitValue, firstIndex, laterIndex, mixed, fullLabel, invalid, valueDoesNotMatchLabel, missingIndex, invalidOnMissing,
+	afterInvalid: await tab.value("#country"), afterInvalidValue: await tab.value("#size"),
+	eventsBefore, eventsAfter: await tab.evaluate(() => window.selectEvents),
+};`,
 					timeout: 20,
 				},
 				context,
@@ -621,7 +765,45 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cl
 				afterReset: "",
 				swapped: ["z"],
 				ternSwapped: ["z"],
+				explicitLabel: ["m"],
+				explicitValue: ["Large"],
+				firstIndex: [""],
+				laterIndex: ["ca"],
+				mixed: ["cheese", "ham", "olives", "priority"],
+				fullLabel: ["priority"],
+				invalid: Array.from({ length: 9 }, () => expect.stringMatching(/label.*value.*index/i)),
+				valueDoesNotMatchLabel: expect.stringContaining("Extra large"),
+				missingIndex: expect.stringContaining("99"),
+				invalidOnMissing: expect.stringMatching(/label.*value.*index/i),
+				afterInvalid: "ca",
+				afterInvalidValue: "Large",
+				eventsBefore: expect.any(Array),
+				eventsAfter: expect.any(Array),
 			});
+			const selection = valueFrom<{ eventsBefore: string[]; eventsAfter: string[] }>(result);
+			expect(selection.eventsAfter).toEqual(selection.eventsBefore);
+			expect(selection.eventsBefore).toEqual(
+				[
+					"country",
+					"country",
+					"country",
+					"size",
+					"size",
+					"country",
+					"country",
+					"extras",
+					"jump",
+					"jump",
+					"swap",
+					"swap",
+					"size",
+					"size",
+					"country",
+					"country",
+					"extras",
+					"extras",
+				].flatMap(id => [`input:${id}`, `change:${id}`]),
+			);
 
 			// cmux tabs run the same rules in their injected page script; replay it in this page.
 			const cmux = new CmuxTab({
@@ -642,14 +824,68 @@ return { byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cl
 				context,
 			);
 			expect({
-				byLabel: await cmux.select("#country", "United States"),
+				byLabel: await cmux.elementHandle("#size").select({ label: "Large" }),
+				stringLabel: await cmux.select("#country", "United States"),
 				firstOnSingle: await cmux.select("#country", "Canada", "us"),
-				multiple: await cmux.select("#extras", "Ham", "olives"),
-				swapped: await cmux.select("#swap", "b"),
-			}).toEqual({ byLabel: ["us"], firstOnSingle: ["ca"], multiple: ["ham", "olives"], swapped: ["z"] });
-			const noMatch = await cmux.select("#country", "Mexico").catch((error: Error) => error.message);
-			expect(noMatch).toContain('No <select> option matches "Mexico"');
+				byValue: await cmux.select("#size", { value: "Large" }),
+				firstIndex: await cmux.select("#country", { index: 0 }),
+				laterIndex: await cmux.select("#country", { index: 2 }),
+				multiple: await cmux.select("#extras", "Cheese", { value: "ham" }, { index: 2 }),
+				fullLabel: await cmux.select("#extras", { label: "Priority boarding + $15" }),
+				swapped: await cmux.select("#swap", { value: "b" }),
+				primitives: await Reflect.apply(cmux.select, cmux, ["#extras", 2, true]),
+			}).toEqual({
+				byLabel: ["m"],
+				stringLabel: ["us"],
+				firstOnSingle: ["ca"],
+				byValue: ["Large"],
+				firstIndex: [""],
+				laterIndex: ["ca"],
+				multiple: ["cheese", "ham", "olives"],
+				fullLabel: ["priority"],
+				swapped: ["z"],
+				primitives: ["2", "true"],
+			});
+			const beforeRefusal = await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)");
+			const noMatch = await cmux
+				.select("#country", { value: "us" }, { label: "Mexico" })
+				.catch((error: Error) => error.message);
+			expect(noMatch).toContain('No <select> option matches {"label":"Mexico"}');
 			expect(await cmux.value("#country")).toBe("ca");
+			expect(await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)")).toBe(beforeRefusal);
+
+			const ternCases = [
+				{ selector: "#size", options: [{ label: "Large" }], expected: ["m"] },
+				{ selector: "#size", options: [{ value: "Large" }], expected: ["Large"] },
+				{ selector: "#country", options: [{ index: 0 }], expected: [""] },
+				{ selector: "#country", options: [{ index: 2 }], expected: ["ca"] },
+				{
+					selector: "#extras",
+					options: ["Cheese", { value: "ham" }, { index: 2 }],
+					expected: ["cheese", "ham", "olives"],
+				},
+				{ selector: "#extras", options: [{ label: "Priority boarding + $15" }], expected: ["priority"] },
+				{ selector: "#extras", options: [2, true], expected: ["2", "true"] },
+			];
+			await cmux.evaluate(`(function () {\n${TERN_KIT_SOURCE}\n})()`);
+			for (const { selector, options, expected } of ternCases) {
+				const choices = normalizeSelectOptions(options, { coercePrimitives: true });
+				expect(
+					await cmux.evaluate<string[], []>(
+						`globalThis.__ompTernKit.select(${JSON.stringify({ engine: "css", query: selector })}, ${JSON.stringify(choices)})`,
+					),
+				).toEqual(expected);
+			}
+			const ternBefore = await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)");
+			const ternMissing = normalizeSelectOptions([{ value: "us" }, { value: "Canada" }]);
+			const ternRefusal = await cmux
+				.evaluate(
+					`globalThis.__ompTernKit.select({ engine: "css", query: "#country" }, ${JSON.stringify(ternMissing)})`,
+				)
+				.catch((error: Error) => error.message);
+			expect(ternRefusal).toContain("Canada");
+			expect(await cmux.value("#country")).toBe("ca");
+			expect(await cmux.evaluate<string, []>("JSON.stringify(window.selectEvents)")).toBe(ternBefore);
 		} finally {
 			await prelude.invoke({ action: "close", name: SELECT_TAB_NAME, kill: true }, context).catch(() => undefined);
 		}
