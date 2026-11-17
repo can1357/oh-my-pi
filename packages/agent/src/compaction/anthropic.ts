@@ -60,22 +60,32 @@ function isBedrockConverseModel(model: Model): model is Model<"bedrock-converse-
 }
 
 /**
+ * Whether a custom api (an extension's `registerProvider` stream) declares
+ * that it serves its model over Anthropic Messages (`remoteCompaction.api`)
+ * and opts that model into on-demand compaction (`remoteCompaction.enabled`).
+ * The request goes through the model's own api like any turn, so the custom
+ * stream shapes and authenticates it; whether the beta is actually sent is
+ * decided by the Anthropic provider it delegates to.
+ */
+function declaresAnthropicCompaction(model: Model): boolean {
+	return model.remoteCompaction?.api === "anthropic-messages" && model.remoteCompaction.enabled === true;
+}
+
+/**
  * Whether a model compacts through the Anthropic compaction beta. Model
  * eligibility is catalog policy (`compat.supportsServerCompaction`, the
  * lineage the beta documents); endpoint eligibility is resolved the way the
  * provider routes requests, so a Foundry or `ANTHROPIC_BASE_URL` reroute of a
  * first-party model is excluded unless the route opted in with
  * `remoteCompaction.enabled`. Bedrock Converse models compact through a
- * Bedrock Runtime side request; their ordinary turns stay on Converse.
+ * Bedrock Runtime side request; their ordinary turns stay on Converse. A
+ * custom api qualifies through {@link declaresAnthropicCompaction}.
  */
-export function shouldUseAnthropicNativeCompaction(
-	model: Model,
-): model is Model<"anthropic-messages" | "bedrock-converse-stream"> {
+export function shouldUseAnthropicNativeCompaction(model: Model): boolean {
 	if (isAnthropicMessagesModel(model)) return supportsAnthropicCompaction(model);
-	return isBedrockConverseModel(model) && supportsBedrockConverseCompaction(model);
+	if (isBedrockConverseModel(model)) return supportsBedrockConverseCompaction(model);
+	return declaresAnthropicCompaction(model);
 }
-
-type AnthropicNativeCompactionModel = Model<"anthropic-messages" | "bedrock-converse-stream">;
 
 export function getPreservedAnthropicCompactionData(
 	preserveData: Record<string, unknown> | undefined,
@@ -244,7 +254,7 @@ export interface AnthropicNativeCompactionOptions
  * output limits; the configured method order can then choose a fallback.
  */
 export async function requestAnthropicNativeCompaction(
-	model: AnthropicNativeCompactionModel,
+	model: Model,
 	apiKey: ApiKey,
 	request: AnthropicNativeCompactionRequest,
 	signal: AbortSignal | undefined,

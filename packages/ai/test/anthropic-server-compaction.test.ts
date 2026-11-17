@@ -300,6 +300,23 @@ describe("Anthropic on-demand compaction requests", () => {
 		expect(supportsAnthropicCompaction(bedrock, `${origin}/openai/v1`)).toBe(false);
 	});
 
+	it("sends on-demand compaction to an opted-in gateway at the model's own endpoint only", async () => {
+		const gateway = "https://llm-gateway.example.test/anthropic";
+		const gatewaySpec = {
+			...spec,
+			provider: "llm-gateway",
+			baseUrl: gateway,
+			compat: { supportsServerCompaction: true },
+		};
+		expect(supportsAnthropicCompaction(buildModel(gatewaySpec))).toBe(false);
+		const optedIn = buildModel({ ...gatewaySpec, remoteCompaction: { enabled: true } });
+		const response = await captureRequest(optedIn, { anthropicCompaction: {} });
+		expect(response.payload.compaction).toEqual({ type: "summarize" });
+		expect(response.beta).toContain("compact-2026-09-04");
+		// The opt-in vouches for the configured endpoint, not a route elsewhere.
+		expect(supportsAnthropicCompaction(optedIn, "https://other-gateway.example.test/anthropic")).toBe(false);
+	});
+
 	it("gates a first-party reroute and an opt-out on compat.bedrockMessagesApi", () => {
 		const runtimeRoute = "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic";
 		// Rerouted without the flag: excluded, as before Bedrock support.

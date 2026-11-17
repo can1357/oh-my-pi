@@ -8,7 +8,7 @@ function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
 	return model.compat.supportsServerCompaction === true && model.remoteCompaction?.enabled !== false;
 }
 
-/** Supported Anthropic Messages deployments; gateways require an explicit opt-in. */
+/** Anthropic Messages deployments known to implement on-demand compaction. */
 function isSupportedCompactionEndpoint(baseUrl: string | undefined): boolean {
 	if (isOfficialAnthropicApiUrl(baseUrl)) return true;
 	if (!baseUrl) return false;
@@ -54,6 +54,12 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 		model.compat.bedrockMessagesApi === true &&
 		(isBedrockAnthropicRoute(route) || route === normalizeAnthropicBaseUrl(model.baseUrl))
 	) {
+		return true;
+	}
+	// An explicit opt-in vouches for the endpoint the model is configured with, on any
+	// host, as `remoteCompaction.enabled` does for the OpenAI lanes and Bedrock Converse.
+	// A reroute away from that endpoint still has to reach a known deployment.
+	if (model.remoteCompaction?.enabled === true && route === normalizeAnthropicBaseUrl(model.baseUrl)) {
 		return true;
 	}
 	return (
