@@ -60,6 +60,7 @@ const FLAG_OPTS: [OptId; 19] = [
 ];
 
 /// Why an expansion stopped.
+#[derive(strum::VariantNames)]
 pub enum Stop {
 	/// A command substitution must run first (the op parks, then replays).
 	Sub {

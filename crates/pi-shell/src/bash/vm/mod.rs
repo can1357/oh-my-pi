@@ -33,6 +33,9 @@ mod xtrace;
 mod zle;
 mod zsh;
 
+#[cfg(test)]
+mod fatal_sites;
+
 use std::{
 	collections::{HashMap, HashSet, VecDeque},
 	sync::Arc,
