@@ -3638,8 +3638,12 @@ export class WorkerCore {
 			}
 			const remaining = deadline - Date.now();
 			// A navigation that commits mid-wait destroys the context; the loop then waits in the new document.
+			// The isolated realm shares the DOM but not the page's globals, so page-patched timers or observers
+			// (Zone.js, fake clocks) cannot stretch or fake the quiet period.
 			const quiet = await withTimeout(
-				Promise.all(page.frames().map(frame => frame.evaluate(waitForQuietDom, SETTLE_QUIET_MS, remaining))),
+				Promise.all(
+					page.frames().map(frame => frame.isolatedRealm().evaluate(waitForQuietDom, SETTLE_QUIET_MS, remaining)),
+				),
 				remaining + SETTLE_POLL_MS,
 				"settle wait timed out",
 			).catch(async () => {
