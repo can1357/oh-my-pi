@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import * as natives from "@oh-my-pi/pi-natives";
 
-const postmortemModuleUrl = pathToFileURL(join(import.meta.dir, "../src/index.ts")).href;
+const postmortemModuleUrl = pathToFileURL(path.join(import.meta.dir, "../src/index.ts")).href;
 
 // The child prints "ready", then, from its cleanup pass, the sender postmortem
 // recorded. With PROBE_SELF_HUP set it raises SIGHUP on itself after "ready".
@@ -26,14 +26,14 @@ async function stopProbe(
 	send: (pid: number) => number | undefined,
 	env: Record<string, string> = {},
 ): Promise<{ exitCode: number; senderPid: number | undefined; recorded: unknown }> {
-	const root = await mkdtemp(join(tmpdir(), "omp-signal-sender-"));
-	const probePath = join(root, "probe.ts");
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-signal-sender-"));
+	const probePath = path.join(root, "probe.ts");
 	try {
 		await Bun.write(probePath, probeSource);
 		const proc = Bun.spawn([process.execPath, probePath], {
 			stdout: "pipe",
 			stderr: "inherit",
-			env: { ...process.env, ...env, OMP_AGENT_DIR: join(root, "agent") },
+			env: { ...process.env, ...env, OMP_AGENT_DIR: path.join(root, "agent") },
 		});
 		const lines = (async function* () {
 			let buffered = "";
@@ -53,7 +53,7 @@ async function stopProbe(
 		const exitCode = await proc.exited;
 		return { exitCode, senderPid, recorded: recorded === undefined ? undefined : JSON.parse(recorded) };
 	} finally {
-		await rm(root, { recursive: true, force: true });
+		await fs.rm(root, { recursive: true, force: true });
 	}
 }
 
