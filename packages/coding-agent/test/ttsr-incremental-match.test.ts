@@ -269,4 +269,34 @@ describe("TTSR tool inspection cache", () => {
 		meta.mode = "b";
 		expect(inspector.digest(toolCall)).toBe("evil:b");
 	});
+
+	it("reuses an unchanged inspection and re-inspects when a key or a value's type changes", () => {
+		let digests = 0;
+		const write: TtsrTool = {
+			name: "write",
+			matcherDigest: args => {
+				digests++;
+				return JSON.stringify(args);
+			},
+		};
+		const inspector = new TtsrToolInspector(
+			() => [write],
+			() => "/repo",
+		);
+		const args: Record<string, unknown> = { path: "a.ts", count: 1 };
+		const toolCall: ToolCall = { type: "toolCall", id: "call-1", name: "write", arguments: args };
+		inspector.digest(toolCall);
+		inspector.digest(toolCall);
+		expect(digests).toBe(1);
+
+		args.count = "1";
+		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1"}');
+		args.extra = null;
+		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1","extra":null}');
+		// A renamed key keeps the value and the snapshot's length.
+		delete args.extra;
+		args.other = null;
+		expect(inspector.digest(toolCall)).toBe('{"path":"a.ts","count":"1","other":null}');
+		expect(digests).toBe(4);
+	});
 });
