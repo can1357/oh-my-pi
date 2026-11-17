@@ -714,6 +714,36 @@ describe("RPC form dialog", () => {
 		expect(await result).toEqual({ data: { tier: "basic" } });
 	});
 
+	it("keeps an Other answer that matches a same-name hidden value", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <input type="hidden" name="tier" value="custom">
+  <label><input type="radio" name="tier" value="basic" required> Basic</label>
+  <label><input type="radio" name="tier" value="pro"> Pro</label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { tier: "custom" } });
+
+		expect(await result).toEqual({ data: { tier: "custom" } });
+	});
+
+	it("rejects a hidden fallback for an unchecked required checkbox", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const html = `<form>
+  <input type="hidden" name="enabled" value="off">
+  <label><input type="checkbox" name="enabled" value="on" required> Enabled</label>
+</form>`;
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, html);
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { data: { enabled: "off" } });
+
+		await expect(result).rejects.toThrow("Required");
+		expect(pendingRequests.size).toBe(0);
+	});
+
 	it("fails a form too large for one frame without sending a truncated copy", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

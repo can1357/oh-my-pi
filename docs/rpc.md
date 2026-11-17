@@ -1393,6 +1393,8 @@ Unknown names, disabled options, wrong types, and answers that break `required`,
 exceeds the transport limit (1 MiB under protocol v1, 64 MiB after `negotiate_protocol` to v2) fails the `ask` tool
 call without being sent, instead of reaching the host truncated.
 
+A valid choice answer, including a permitted "Other" answer, takes precedence over a same-name hidden value. An otherwise invalid choice value that exactly matches that hidden value counts as no selection; it does not satisfy a required field.
+
 An invalid `data` reply fails the whole `ask` call, with no round for correcting a field, so hosts must enforce the form's constraints before sending: `required` (a whitespace-only text answer counts as empty), `min`/`max`, `minlength`/`maxlength`, `email`, `url`, and `pattern` (anchored to the whole value; an invalid pattern is ignored).
 
 ```json

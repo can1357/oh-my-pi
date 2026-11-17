@@ -1241,6 +1241,20 @@ function parseFormChoice(field: ChoiceField, value: unknown): HtmlFormValue | un
 	return choiceValue(field, checked, other);
 }
 
+/** Keeps valid selections, treating an otherwise invalid echoed hidden value as no selection. */
+function parseChoiceOrHiddenFallback(
+	field: ChoiceField,
+	value: unknown,
+	hiddenValue: string | undefined,
+): HtmlFormValue | undefined {
+	try {
+		return parseFormChoice(field, value);
+	} catch (error) {
+		if (hiddenValue === undefined || value !== hiddenValue) throw error;
+		return parseFormChoice(field, undefined);
+	}
+}
+
 /** Value a text field's submitted entry gives: a string, or a number for `number`/`range` inputs; absent counts as empty. */
 function parseFormText(field: TextField, value: unknown): HtmlFormValue {
 	if (value === undefined) return textValue(field, "");
@@ -1276,18 +1290,11 @@ function parseFormDialogResponse(
 	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
 	const hidden = new Map(form.hidden);
 	for (const field of named) {
-		let entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
-		// An echoed same-name hidden input that no enabled option offers is the unchecked fallback (`off` beside a
-		// checkbox), not a selection.
-		if (
-			field.kind === "choice" &&
-			entry !== undefined &&
-			entry === hidden.get(field.name) &&
-			!field.options.some(option => !option.disabled && option.value === entry)
-		) {
-			entry = undefined;
-		}
-		const value = field.kind === "choice" ? parseFormChoice(field, entry) : parseFormText(field, entry);
+		const entry = Object.hasOwn(submitted, field.name) ? submitted[field.name] : undefined;
+		const value =
+			field.kind === "choice"
+				? parseChoiceOrHiddenFallback(field, entry, hidden.get(field.name))
+				: parseFormText(field, entry);
 		const problem = fieldError(field, value);
 		if (problem) throw new Error(`Form field ${JSON.stringify(field.name)}: ${problem}`);
 		if (value !== undefined) data[field.name] = value;
