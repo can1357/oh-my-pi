@@ -58,6 +58,7 @@
 - `watchexec` runs in the bash tool's own shell as a builtin with watchexec 2.3.2's options, messages and event formats (`-w`/`-W`/`-F`, `-e`/`-f`/`-i`, ignore files, `-r`, `-s`, `-o`, `--stop-signal`/`--stop-timeout`, `-d`, `-p`, `--poll`, `--emit-events-to`, `--only-emit-events`, …), so it works where the program is not installed, its command can use builtins and `scheme://` paths, and a stopped watcher leaves no process behind.
 - `fswatch` is a bash-tool builtin (fswatch 1.22 command line and output: `-0`, `-1`, `-o`, `-x`/`-n`, `-t`/`-u`/`-f`, `--format`, `--batch-marker`, `-e`/`-i`/`-E`/`-I`, `--filter-from`, `--event`, `-l`, `-r`, `-m`/`-M`, `--fire-idle-event`, …) on FSEvents, inotify and ReadDirectoryChangesW, so file watches work where fswatch is not installed and as background jobs or services; `fswatch -1 -o` exits after the first batch and a path that does not exist yet is reported once it appears
 - The shell's `entr` builtin (entr 5.9: `-a`, `-c`, `-d`, `-n`, `-p`, `-r`, `-s`, `-x`, `-z`, `/_`) runs its utility inside the shell on native change notification, so `ls *.rs | entr -r cmd` works where entr is not installed, without a terminal, with `scheme://` paths in the list, and as a background job or service
+- After a `computer` letter key on a macOS popup button, `ax()`, `find` and `value()` show the option the letters chose instead of the one from before the key ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -410,7 +411,6 @@
 - Fixed RPC login for providers that require an at-your-own-risk confirmation; the confirmation is now presented to the host and login proceeds only after approval.
 - On Linux, language-server file watching no longer consumes excessive inotify watches in `node_modules` and `.git/objects`.
 
-- After a `computer` letter key on a macOS popup button, `ax()`, `find` and `value()` show the option the letters chose instead of the one from before the key
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes
