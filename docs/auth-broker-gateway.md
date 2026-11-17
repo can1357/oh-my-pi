@@ -141,7 +141,7 @@ Capability-dependent responses include `Vary: OMP-Auth-Broker-Capabilities` so i
 `AuthBrokerRefresher` reloads active credentials before each sweep and does not overlap sweeps. Manual and background refreshes share the per-credential single-flight in `OAuthRefresher`; SQLite refresh leases also coordinate writers across processes.
 
 - **Definitive failures**, as classified by `isDefinitiveOAuthFailure()`, disable only the credential version that failed. Compare-and-set persistence protects a credential rotated by a concurrent login/refresh; the refresher logs the result rather than disabling the row again.
-- **Transient failures** (for example network timeouts) leave the credential in place for the next sweep.
+- **Transient failures** (for example network timeouts) leave the credential in place for the next sweep. They log at `debug` while the access token outlives the next sweep, and at `warn` once it expires before the next retry, so a login that keeps failing to refresh shows up before and after it lapses.
 
 The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using their stored MCP token endpoint/client metadata; it does not need to load the MCP manager.
 
