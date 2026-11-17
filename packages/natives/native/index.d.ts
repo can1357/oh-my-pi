@@ -1695,9 +1695,11 @@ export interface DesktopDragResult {
 export declare function desktopEscapeStops(key: string): number
 
 /**
- * Where focus ended after a takeover input call, as `WindowServer` reports
- * it. Input calls resolve to it on macOS when they took over; other
- * backends and background delivery resolve to `null`.
+ * Where focus ended after a takeover input call.
+ *
+ * Input calls resolve to it on macOS and Windows when they took over, as
+ * the window server reports it; other backends and background delivery
+ * resolve to `null`.
  */
 export interface DesktopFocusReturn {
   /** Whether the takeover handed the front back to the app front before it. */
