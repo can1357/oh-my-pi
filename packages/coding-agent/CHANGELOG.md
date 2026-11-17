@@ -67,6 +67,7 @@
 ### Fixed
 
 - `omp usage` no longer marks an account exhausted when only a model-scoped row is spent (a Claude account at 100% of its Fable weekly while its shared windows still have room): the policy state and percent left follow the shared windows, the line names the spent row (`· Claude 7 Day (Fable) exhausted`), and `--json` lists its limit ids in `policy.scopedExhausted`
+- `omp usage` judges an account's policy state and percent left by its account-wide windows, so a Claude account at 100% of its Fable weekly with room left in its shared windows no longer shows as exhausted; the policy line names the spent row (`· Claude 7 Day (Fable) exhausted`) and `--json` lists its limit ids in `policy.scopedExhausted`
 
 ## [18.22.1] - 2026-11-17
 

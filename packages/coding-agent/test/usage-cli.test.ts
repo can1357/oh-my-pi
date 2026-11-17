@@ -596,7 +596,7 @@ describe("usage JSON policy", () => {
 
 	it("reports a provider-exhausted account as exhausted and carries reclaimAbovePct", () => {
 		const walled = makeReport("anthropic", "walled@example.test", [
-			makeLimit({ id: "5h", provider: "anthropic", usedFraction: 0.995, status: "exhausted" }),
+			makeLimit({ id: "5h", provider: "anthropic", usedFraction: 0.995, status: "exhausted", shared: true }),
 		]);
 		const options: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: 10,
@@ -641,6 +641,7 @@ describe("usage JSON policy", () => {
 			makeLimit({ id: "anthropic:5h", usedFraction: 0.3, windowId: "5h", shared: true }),
 			makeLimit({ id: "anthropic:7d", usedFraction: 0.98, windowId: "7d", shared: true }),
 			makeLimit({ id: "anthropic:7d:fable", label: "Claude 7 Day (Fable)", usedFraction: 1, tier: "fable" }),
+			makeLimit({ id: "anthropic:7d:opus", label: "Claude 7 Day (Opus)", usedFraction: 0.995, tier: "opus" }),
 		]);
 		const options: UsagePolicyDiagnosticsOptions = {
 			globalReservePct: 1,
@@ -657,6 +658,28 @@ describe("usage JSON policy", () => {
 		});
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
 		expect(text).toContain("eligible · 2.0% left · Claude 7 Day (Fable) exhausted");
+	});
+
+	it("keeps every row in the pool when only subpool rows are marked shared", () => {
+		// Antigravity marks its third-party subpool `shared` with a `sharedGroup`; its Gemini counter stays unmarked.
+		const report = makeReport("google-antigravity", "subpool@example.test", [
+			makeLimit({ id: "gemini", provider: "google-antigravity", usedFraction: 0.95 }),
+			makeLimit({
+				id: "third-party",
+				provider: "google-antigravity",
+				usedFraction: 0.2,
+				sharedGroup: "third-party",
+			}),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({
+				provider: "google-antigravity",
+				account: { email: identity.email },
+			}),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toMatchObject({ state: "inside-reserve", remainingPct: 5 });
 	});
 });
 

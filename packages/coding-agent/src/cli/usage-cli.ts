@@ -689,13 +689,14 @@ function computePolicyDiagnostics(
 	const configuredReservePct = policy?.reservePct;
 	const reservePct = Math.max(0, Math.min(100, configuredReservePct ?? options.globalReservePct));
 	// `omp usage` has no model/session context, so report the conservative
-	// account-wide state from the most-consumed shared window. Rows outside the
-	// shared pool (a Claude Fable or Opus weekly counter) gate only their own
-	// models in AuthStorage, so they are listed separately instead; a provider
-	// that marks no shared window keeps every row in the pool.
+	// account-wide state from the most-consumed account-wide window. Rows
+	// outside those windows (a Claude Fable or Opus weekly counter) gate only
+	// their own models in AuthStorage, so they are listed separately instead.
+	// A `sharedGroup` row is one subpool's quota, not an account-wide window,
+	// and a provider that marks no account-wide window keeps every row.
 	const reported = limits ?? [];
-	const shared = reported.filter(limit => limit.scope.shared === true);
-	const pool = shared.length > 0 ? shared : reported;
+	const accountWide = reported.filter(limit => limit.scope.shared === true && limit.scope.sharedGroup === undefined);
+	const pool = accountWide.length > 0 ? accountWide : reported;
 	const scopedExhausted = reported
 		.filter(limit => !pool.includes(limit) && resolveStatus(limit) === "exhausted")
 		.map(limit => limit.id);
