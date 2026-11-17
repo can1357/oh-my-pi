@@ -36,9 +36,12 @@ use omp_proto::{prost::Message as _, toolhost::v1::HookEventId};
 use parking_lot::{Mutex, RwLock};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 
-use super::registry::{
-	ControlConnectionKey, RegistryControlFactory, connection_key, require_active_invocation,
-	required_string, required_u16, same_connection, stale_connection,
+use super::{
+	continuation::ContinuationBook,
+	registry::{
+		ControlConnectionKey, RegistryControlFactory, connection_key, require_active_invocation,
+		required_string, required_u16, same_connection, stale_connection,
+	},
 };
 use crate::{
 	exthost::{
@@ -339,6 +342,7 @@ pub struct HookControlFactory {
 	settings:                     Arc<BTreeMap<(Str, Str, Str), JsonMap<String, JsonValue>>>,
 	tool_call_timeout:            time::Duration,
 	admission_gate:               Arc<HookGate>,
+	continuations:                ContinuationBook,
 }
 
 fn extension_callback_timeout(
@@ -381,6 +385,7 @@ impl HookControlFactory {
 			settings: Arc::new(settings),
 			tool_call_timeout,
 			admission_gate: Arc::new(admission_gate),
+			continuations: ContinuationBook::new(),
 		});
 		let weak = Arc::downgrade(&owner);
 		tokio::spawn(async move {
@@ -524,6 +529,12 @@ impl HookControlFactory {
 	/// Returns the per-session admission gate backed by this live composer.
 	pub fn admission_gate(&self) -> Arc<HookGate> {
 		Arc::clone(&self.admission_gate)
+	}
+
+	/// Session-scoped continuation ledger shared with Agents CONTROL.
+	#[must_use]
+	pub fn continuations(&self) -> ContinuationBook {
+		self.continuations.clone()
 	}
 
 	/// Returns the shared runtime provider usage registry.
@@ -800,77 +811,87 @@ impl HookControlFactory {
 				session_generation,
 			)
 		};
-		super::settled::resolve_settled(&rows, |row, pending| {
-			let row = row.clone();
-			let pending = pending.cloned();
-			async move {
-				let expected = <omp_contract::AgentSettledEvent as omp_contract::HookEvent>::REV;
-				if u32::from(row.event_policy.revision) != expected {
-					tracing::warn!(
-						extension = %row.identity.extension,
-						hook = %row.name,
-						expected,
-						declared = row.event_policy.revision,
-						"agent_settled hook skipped: event revision mismatch"
-					);
-					return None;
+		let submission_reset = payload
+			.get("continuations_used")
+			.and_then(JsonValue::as_u64)
+			.is_some_and(|used| used == 0);
+		super::settled::resolve_settled(
+			&rows,
+			&self.continuations,
+			submission_reset,
+			|row, pending| {
+				let row = row.clone();
+				let pending = pending.cloned();
+				async move {
+					let expected = <omp_contract::AgentSettledEvent as omp_contract::HookEvent>::REV;
+					if u32::from(row.event_policy.revision) != expected {
+						tracing::warn!(
+							extension = %row.identity.extension,
+							hook = %row.name,
+							expected,
+							declared = row.event_policy.revision,
+							"agent_settled hook skipped: event revision mismatch"
+						);
+						return None;
+					}
+					let context = ControlRequestContext {
+						connection: Arc::clone(&row.identity),
+						request_id: 0,
+						invocation: Some(ControlInvocationAuthority {
+							invocation:        sf!("{EVENT}:{}", Ulid::generate()),
+							phase:             InvocationPhase::EffectsAuthorized,
+							session:           row.session.clone(),
+							turn:              None,
+							event:             Some(Str::new_static(EVENT)),
+							call:              None,
+							device:            None,
+							effects:           Box::new([]),
+							place_kind:        sf!("host"),
+							lifecycle:         LifecyclePhase::Active,
+							roots:             Box::new([]),
+							remote:            false,
+							has_ui:            false,
+							headless:          true,
+							settings:          self.settings_for(&row.identity),
+							secret_settings:   Box::new([]),
+							data:              None,
+							direct_filesystem: None,
+						}),
+					};
+					let mut callback = JsonMap::new();
+					callback.insert("event".to_owned(), JsonValue::String(EVENT.to_owned()));
+					callback.insert("phase".to_owned(), JsonValue::String("domain".to_owned()));
+					callback.insert("name".to_owned(), JsonValue::String(row.name.to_string()));
+					callback.insert("payload".to_owned(), payload.clone());
+					if let Some(pending) = pending {
+						let mut pending_obj = JsonMap::new();
+						pending_obj
+							.insert("prompt".to_owned(), JsonValue::String(pending.prompt.to_string()));
+						pending_obj.insert(
+							"label".to_owned(),
+							pending
+								.label
+								.map(|label| JsonValue::String(label.to_string()))
+								.unwrap_or(JsonValue::Null),
+						);
+						callback
+							.insert("pending_continuation".to_owned(), JsonValue::Object(pending_obj));
+					}
+					self
+						.callbacks
+						.dispatch_provider_hook(
+							Arc::clone(&row.identity),
+							&context,
+							EVENT,
+							callback,
+							row.concurrency,
+							row.timeout.unwrap_or(row.event_policy.timeout),
+						)
+						.await
+						.ok()
 				}
-				let context = ControlRequestContext {
-					connection: Arc::clone(&row.identity),
-					request_id: 0,
-					invocation: Some(ControlInvocationAuthority {
-						invocation:        sf!("{EVENT}:{}", Ulid::generate()),
-						phase:             InvocationPhase::EffectsAuthorized,
-						session:           row.session.clone(),
-						turn:              None,
-						event:             Some(Str::new_static(EVENT)),
-						call:              None,
-						device:            None,
-						effects:           Box::new([]),
-						place_kind:        sf!("host"),
-						lifecycle:         LifecyclePhase::Active,
-						roots:             Box::new([]),
-						remote:            false,
-						has_ui:            false,
-						headless:          true,
-						settings:          self.settings_for(&row.identity),
-						secret_settings:   Box::new([]),
-						data:              None,
-						direct_filesystem: None,
-					}),
-				};
-				let mut callback = JsonMap::new();
-				callback.insert("event".to_owned(), JsonValue::String(EVENT.to_owned()));
-				callback.insert("phase".to_owned(), JsonValue::String("domain".to_owned()));
-				callback.insert("name".to_owned(), JsonValue::String(row.name.to_string()));
-				callback.insert("payload".to_owned(), payload.clone());
-				if let Some(pending) = pending {
-					let mut pending_obj = JsonMap::new();
-					pending_obj
-						.insert("prompt".to_owned(), JsonValue::String(pending.prompt.to_string()));
-					pending_obj.insert(
-						"label".to_owned(),
-						pending
-							.label
-							.map(|label| JsonValue::String(label.to_string()))
-							.unwrap_or(JsonValue::Null),
-					);
-					callback.insert("pending_continuation".to_owned(), JsonValue::Object(pending_obj));
-				}
-				self
-					.callbacks
-					.dispatch_provider_hook(
-						Arc::clone(&row.identity),
-						&context,
-						EVENT,
-						callback,
-						row.concurrency,
-						row.timeout.unwrap_or(row.event_policy.timeout),
-					)
-					.await
-					.ok()
-			}
-		})
+			},
+		)
 		.await
 	}
 

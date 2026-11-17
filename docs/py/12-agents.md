@@ -747,12 +747,16 @@ What follows are the boundary decisions and helpers `omp.agents` owns.
 
 The decision that declines to settle. Returned from an `agent_settled` hook.
 
-> **Honored today:** `prompt` (a non-empty string; an empty prompt counts as `Settle`) and `label` only, plus the
-> `ctx.pending_continuation` Settle veto. `visible`, `role` and
-> `collapse_prior` are accepted but **not yet honored** (the continuation is
-> appended as a hidden developer message, `<developer kind=hook>`, not displayed);
-> `ContinuationPolicy` below is likewise not yet honored. The core cap of 8
-> counts continuations from every source per submission, not per extension.
+> **Honored today:** `prompt` (a non-empty string; an empty prompt counts as `Settle`),
+> `label`, `visible`, `role`, and `collapse_prior`, plus the
+> `ctx.pending_continuation` Settle veto. `visible=false` journals a bookkeeping
+> marker (`display=false`); `visible=true` shows the item. `role="system"` appends
+> a `<developer kind=hook>` item; `role="user"` appends a `<user>` continuation
+> item. `collapse_prior=true` hides earlier same-source continuation items.
+> `ContinuationPolicy` and the session-scoped continuation ledger are honored
+> (see below). The core cap of 8 is the hard ceiling per submission; a tighter
+> per-extension policy wins. Recursive debit across a spawned agent tree is not
+> implemented yet (session-scoped ledger only).
 
 | Field | Type | Default | Semantics |
 |---|---|---|---|
@@ -786,19 +790,22 @@ Multiple extensions may subscribe. Resolution is declared, not incidental:
    after a Continue does not veto.
 3. A hook that raises or times out contributes `Settle()` — `agent_settled` is
    fail-open, because an extension crash must not spin the loop.
-4. If a `Continue` survives, the core applies its cap of 8 per submission. *(No continuation
-   ledger is consulted yet.)*
+4. If a `Continue` survives, the session ledger and the core cap of 8 per
+   submission are applied; the tighter ceiling wins. A refused Continue is
+   never a silent drop: the ledger's `refusals` increments, and a core-cap
+   refusal is journaled as a notice.
 
 #### `@dataclass(frozen=True, slots=True) class omp.agents.ContinuationPolicy`
-
-*Not yet honored by the core.*
 
 `max_consecutive: int = DEFAULT_CONTINUATION_CAP`, `max_total: int | None = None`,
 `min_interval: omp.Duration = omp.Duration("0s")`, `on_exhausted: Literal["settle", "notify"] = "notify"`.
 Declared per extension at load through the manifest (see
 `docs/py/14-deploy.md`) or set at runtime with
 `omp.agents.set_continuation_policy(policy)`. `max_consecutive` counts
-continuations since the last *user* item; any real user input resets it.
+continuations since the last *user* submission; any real user input resets it.
+`on_exhausted` settles either way today; `notify` is the default and still
+increments `refusals` so the next `continuations()` read surfaces the stop
+(a distinct user-visible notify channel is not wired yet).
 
 Two ceilings, and the tighter one always wins. `omp.limits.SETTLE_CONTINUATION_CAP`
 (`8` — `docs/py/05-hooks.md`) is what the Core enforces before it refuses
@@ -813,16 +820,16 @@ a human can see it, not asserting it from a plugin.
 
 `consecutive: int`, `total: int`, `cap: int` (the *effective* ceiling after
 clamping), `last_ms: int`, `refusals: int`, `owner: str | None`. Returned by
-`await omp.agents.continuations()`. Journaled, so it survives a host restart —
-a goal loop that restarts mid-run resumes with the budget it had spent, not a
-fresh one.
+`await omp.agents.continuations()`. Honored as a **session-scoped** ledger owned
+by the environment host for the live session (readable/writable through Agents
+CONTROL even when a chat Agents lease is unbound). Continuation items are also
+journaled into the session DOM; projecting the ledger solely from the OMS
+journal across an envd restart is not yet implemented.
 
-The accounting is **recursive over the agent tree** (Revision 2): a
-continuation accepted in a child debits the child's ledger *and* every
-ancestor's, so a goal loop cannot multiply its autonomy by the width of the
-tree it spawns — the "recursive continuation budget" on the review's list of
-hard ceilings. Revision 1 scoped the cap to the session and left the subtree
-question open (open question 6); that question is now recorded as resolved.
+The accounting is **session-scoped today**. Revision 2 of this document requires
+recursive debit over the agent tree (a continuation accepted in a child debits
+the child's ledger *and* every ancestor's). That tree-recursion debit is the
+remaining gap — see `docs/adr/TASKS.md`.
 
 #### `async omp.agents.continuations() -> ContinuationLedger`
 

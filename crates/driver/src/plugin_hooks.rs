@@ -670,7 +670,7 @@ impl PluginHookHost {
 				effect
 					.context
 					.into_iter()
-					.map(|body| HookContext { source: effect.plugin.clone(), body }),
+					.map(|body| HookContext::new(effect.plugin.clone(), body)),
 			);
 		}
 		match block {
@@ -706,7 +706,7 @@ impl PluginHookHost {
 					.block
 					.into_iter()
 					.chain(effect.context)
-					.map(move |body| HookContext { source: plugin.clone(), body })
+					.map(move |body| HookContext::new(plugin.clone(), body))
 			})
 			.collect::<Vec<_>>();
 		if context.is_empty() {
@@ -741,7 +741,7 @@ impl PluginHookHost {
 				effect
 					.context
 					.into_iter()
-					.map(move |body| HookContext { source: plugin.clone(), body })
+					.map(move |body| HookContext::new(plugin.clone(), body))
 			})
 			.collect()
 	}
@@ -993,7 +993,7 @@ impl PluginHookHost {
 				effect
 					.context
 					.into_iter()
-					.map(|body| HookContext { source: effect.plugin.clone(), body }),
+					.map(|body| HookContext::new(effect.plugin.clone(), body)),
 			);
 		}
 		NativeReply::defer()
