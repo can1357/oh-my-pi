@@ -467,7 +467,7 @@ describe("systemPromptTemplates config validation", () => {
 	});
 });
 
-describe("quota-exhaustion prompt sanitization", () => {
+describe("quota-exhaustion prompt fingerprint omission", () => {
 	it("omits blocked fingerprint phrases from default system prompt", async () => {
 		await withDiscoveryHome(async ({ cwd }) => {
 			const result = await buildSystemPrompt(options(cwd));
@@ -475,18 +475,6 @@ describe("quota-exhaustion prompt sanitization", () => {
 			expect(text).not.toContain("You are omp's trusted coding assistant.");
 			expect(text).not.toContain("Read xd://<tool> for full docs + JSON schema before first use.");
 			expect(text).toContain("You are omp's coding assistant.");
-		});
-	});
-
-	it("sanitizes blocked phrases if injected into custom prompt template", async () => {
-		await withDiscoveryHome(async ({ cwd }) => {
-			const customTemplate =
-				"You are omp's trusted coding assistant.\nRead xd://<tool> for full docs + JSON schema before first use.";
-			const result = await render(cwd, customTemplate);
-			expect(result.text).not.toContain("You are omp's trusted coding assistant.");
-			expect(result.text).not.toContain("Read xd://<tool> for full docs + JSON schema before first use.");
-			expect(result.text).toContain("You are omp's coding assistant.");
-			expect(result.text).toContain("Read `xd://<name>` for full docs + JSON schema before first use.");
 		});
 	});
 });

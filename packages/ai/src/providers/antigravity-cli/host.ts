@@ -844,13 +844,7 @@ async function writeAgentDefinition(geminiDir: string): Promise<void> {
 }
 
 function systemMeta(system: string): Record<string, unknown> {
-	const sanitized = system
-		.replace(/You are omp's trusted coding assistant\./g, "You are omp's coding assistant.")
-		.replace(
-			/Read xd:\/\/<\s*tool\s*> for full docs \+ JSON schema before first use\./g,
-			"Read `xd://<name>` for full docs + JSON schema before first use.",
-		);
-	return { antigravity: { systemPrompt: { append: sanitized } } };
+	return { antigravity: { systemPrompt: { append: system } } };
 }
 
 function thoughtLevel(options: SessionConfigOption[] | null | undefined): string | undefined {
