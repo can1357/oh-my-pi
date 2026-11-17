@@ -29,7 +29,7 @@ use std::{
 	mem::MaybeUninit,
 	net::{Shutdown, TcpStream},
 	os::{
-		fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+		fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
 		unix::{
 			fs::{FileExt, PermissionsExt},
 			net::UnixStream,
@@ -101,6 +101,9 @@ pub(super) struct ReleaseWatcher {
 	xtest:   u8,
 	socket:  UnixStream,
 	watcher: libc::pid_t,
+	/// A pidfd of the watcher, which leads its process group; `None` on a
+	/// kernel that cannot wait on one (before 5.4).
+	leader:  Option<OwnedFd>,
 }
 
 impl ReleaseWatcher {
@@ -183,10 +186,14 @@ impl ReleaseWatcher {
 			.collect();
 		requests.extend(closing(root, gc));
 		slots.write_all_at(&requests, 0)?;
+		let pidfds = pidfds()?;
 		let (socket, watched) = UnixStream::pair()?;
 		let watcher = spawn_shell(watched.as_raw_fd(), x11, slots.as_raw_fd())?;
 		drop(watched);
-		let watcher = Self { slots, xtest, socket, watcher };
+		// A watcher whose pidfd cannot be opened ends as `socket` drops,
+		// sending no-ops, and is left unwaited rather than waited for by pid.
+		let leader = pidfds.then(|| pidfd_open(watcher)).transpose()?;
+		let watcher = Self { slots, xtest, socket, watcher, leader };
 		// A shell that has not written its line by then is killed, holding
 		// nothing, and reaped as the watcher drops. A signal ends the read
 		// early, and the next one waits only for what is left.
@@ -234,9 +241,43 @@ impl ReleaseWatcher {
 	/// what is down.
 	pub(super) fn abandon(self) {
 		if !self.closed(Duration::ZERO) {
-			// SAFETY: kill takes integers only; the group's id names the
-			// watcher's group alone, as in `drop`.
-			unsafe { libc::kill(-self.watcher, libc::SIGKILL) };
+			self.kill_group();
+		}
+	}
+
+	/// Kills the watcher's process group, with its `cat`. The group's id is
+	/// the watcher's pid, which stays the watcher's while it is this
+	/// process's child, running or a zombie; once another waiter in this
+	/// process (a SIGCHLD handler reaping every child) has reaped it, the id
+	/// may name another group, which is left alone, as it is when the pidfd
+	/// cannot be read. A kernel without pidfds cannot tell, and the group is
+	/// killed. Whether a wait for the watcher can end: not when the group
+	/// was left alone with the watcher perhaps still running.
+	fn kill_group(&self) -> bool {
+		match self
+			.leader
+			.as_ref()
+			.map_or(Ok(true), |leader| unreaped(leader.as_fd()))
+		{
+			Ok(true) => {
+				// SAFETY: kill takes integers only.
+				unsafe { libc::kill(-self.watcher, libc::SIGKILL) };
+				true
+			},
+			Ok(false) => {
+				log::debug!(
+					"the X11 release watcher {} was reaped elsewhere; its group is not killed",
+					self.watcher
+				);
+				true
+			},
+			Err(error) => {
+				log::debug!(
+					"the X11 release watcher {} cannot be checked ({error}); its group is not killed",
+					self.watcher
+				);
+				false
+			},
 		}
 	}
 
@@ -267,19 +308,32 @@ impl Drop for ReleaseWatcher {
 		// or on a server that stopped reading) is killed with its `cat`, so
 		// the session's end never waits on it for long.
 		let _ = self.socket.shutdown(Shutdown::Write);
-		if !self.closed(EXIT_TIMEOUT) {
-			// SAFETY: kill takes integers only. The watcher leads its group,
-			// and its pid, the group's id, stays its own until the waitpid
-			// below: omp reaps only children it started, and `spawn_shell`
-			// starts none where SIGCHLD would reap them.
-			unsafe { libc::kill(-self.watcher, libc::SIGKILL) };
+		let ended = self.closed(EXIT_TIMEOUT) || self.kill_group();
+		// Unless its group was left alone, every process of the group has
+		// exited or been killed. Through the pidfd, a watcher reaped
+		// elsewhere ends the wait at once instead of it waiting for another
+		// child that took its pid.
+		let hang = if ended { 0 } else { libc::WNOHANG };
+		loop {
+			let waited = match &self.leader {
+				// SAFETY: waitid on this code's own child, with a writable
+				// siginfo, valid zeroed.
+				Some(leader) => unsafe {
+					let mut info: libc::siginfo_t = std::mem::zeroed();
+					libc::waitid(
+						libc::P_PIDFD,
+						leader.as_raw_fd() as libc::id_t,
+						&raw mut info,
+						libc::WEXITED | hang,
+					)
+				},
+				// SAFETY: waitpid with a null status pointer and integer flags.
+				None => unsafe { libc::waitpid(self.watcher, ptr::null_mut(), hang) },
+			};
+			if waited != -1 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+				break;
+			}
 		}
-		// Every process of the group has exited or been killed.
-		// SAFETY: waitpid on this code's own child, with a null status
-		// pointer and no flags.
-		while unsafe { libc::waitpid(self.watcher, ptr::null_mut(), 0) } == -1
-			&& io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
-		{}
 	}
 }
 
@@ -371,7 +425,13 @@ fn connect_to<S: From<OwnedFd> + AsRawFd>(
 	send_timeout(&socket, Some(left(deadline)?))?;
 	// SAFETY: connect reads the first `length` bytes of `address`.
 	if unsafe { libc::connect(socket.as_raw_fd(), ptr::from_ref(address).cast(), length) } == -1 {
-		return Err(io::Error::last_os_error());
+		let error = io::Error::last_os_error();
+		// The send timeout ends a Unix connect with EAGAIN, a TCP one with
+		// EINPROGRESS.
+		return Err(match error.raw_os_error() {
+			Some(libc::EAGAIN | libc::EINPROGRESS) => io::ErrorKind::TimedOut.into(),
+			_ => error,
+		});
 	}
 	send_timeout(&socket, None)?;
 	Ok(socket)
@@ -383,6 +443,61 @@ fn left(deadline: Instant) -> io::Result<Duration> {
 		.checked_duration_since(Instant::now())
 		.filter(|left| !left.is_zero())
 		.ok_or_else(|| io::ErrorKind::TimedOut.into())
+}
+
+/// Whether the process `leader`, a pidfd, refers to is still this process's
+/// child, running or a zombie, which keeps its pid and group id its own.
+/// Fails where the kernel cannot wait on a pidfd (before 5.4).
+fn unreaped(leader: BorrowedFd<'_>) -> io::Result<bool> {
+	loop {
+		// SAFETY: siginfo_t is plain data, valid zeroed.
+		let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+		// SAFETY: waitid writes `info`; WNOWAIT leaves the child waitable.
+		let waited = unsafe {
+			libc::waitid(
+				libc::P_PIDFD,
+				leader.as_raw_fd() as libc::id_t,
+				&raw mut info,
+				libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+			)
+		};
+		if waited == 0 {
+			return Ok(true);
+		}
+		let error = io::Error::last_os_error();
+		match error.raw_os_error() {
+			Some(libc::ECHILD) => return Ok(false),
+			Some(libc::EINTR) => {},
+			_ => return Err(error),
+		}
+	}
+}
+
+/// A pidfd of `pid`, through the system call, which the glibc omp is built
+/// against predates.
+fn pidfd_open(pid: libc::pid_t) -> io::Result<OwnedFd> {
+	// SAFETY: pidfd_open takes a pid and flags and returns a fresh descriptor
+	// or -1.
+	match unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } {
+		-1 => Err(io::Error::last_os_error()),
+		// SAFETY: the descriptor is open and owned here alone.
+		fd => Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) }),
+	}
+}
+
+/// Whether the kernel can wait on a pidfd (Linux 5.4), so the watcher's
+/// group is killed only while it is unreaped: not before 5.3, without
+/// pidfds, nor on 5.3, whose `waitid` takes none. Any other failure fails
+/// the start, so no watcher runs that cannot be checked.
+fn pidfds() -> io::Result<bool> {
+	let own = match pidfd_open(std::process::id() as libc::pid_t) {
+		Err(error) if error.raw_os_error() == Some(libc::ENOSYS) => return Ok(false),
+		own => own?,
+	};
+	match unreaped(own.as_fd()) {
+		Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(false),
+		waited => waited.map(|_| true),
+	}
 }
 
 /// The `XTest` release of `held` on `root`.
@@ -429,9 +544,9 @@ fn closing(root: Window, gc: Gcontext) -> Vec<u8> {
 /// and a process group of its own, so a terminal's Ctrl+C, Ctrl+Z or hangup
 /// reaches omp alone.
 fn spawn_shell(socket: RawFd, x11: RawFd, slots: RawFd) -> io::Result<libc::pid_t> {
-	// Ending the watcher signals its group and waits for it by pid, which
-	// stays its own only while its exit leaves a zombie for that wait; an
-	// omp whose SIGCHLD reaps children at once gets no watcher.
+	// Ending the watcher signals its group, whose id is the watcher's pid
+	// while its exit leaves a zombie for omp to reap; an omp whose SIGCHLD
+	// reaps children at once gets no watcher.
 	let mut sigchld = MaybeUninit::<libc::sigaction>::uninit();
 	// SAFETY: with no new action, sigaction only writes the current one.
 	if unsafe { libc::sigaction(libc::SIGCHLD, ptr::null(), sigchld.as_mut_ptr()) } == -1 {
@@ -576,13 +691,18 @@ fn closes_through(highest: RawFd, open_max: libc::c_long) -> RawFd {
 
 #[cfg(test)]
 mod tests {
-	use std::os::{
-		fd::{AsFd as _, AsRawFd as _},
-		linux::net::SocketAddrExt as _,
-		unix::net::{SocketAddr, UnixListener, UnixStream},
+	use std::{
+		io,
+		os::{
+			fd::{AsFd as _, AsRawFd as _},
+			linux::net::SocketAddrExt as _,
+			unix::net::{SocketAddr, UnixListener, UnixStream},
+		},
+		ptr,
+		time::{Duration, Instant},
 	};
 
-	use super::{ReleaseWatcher, closes_through};
+	use super::{ReleaseWatcher, closes_through, unreaped};
 
 	/// A server whose accept queue stays full: the start gives up instead of
 	/// waiting for room.
@@ -595,7 +715,42 @@ mod tests {
 		assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
 		// omp's connection, the one connection a backlog of 0 holds.
 		let x11 = UnixStream::connect_addr(&listener.local_addr().unwrap()).unwrap();
-		assert!(ReleaseWatcher::start(x11.as_fd(), Some(":0".into()), 0).is_err());
+		let error = ReleaseWatcher::start(x11.as_fd(), Some(":0".into()), 0)
+			.err()
+			.expect("no watcher starts");
+		assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+	}
+
+	/// A watcher that another waiter in omp reaped, such as a host's SIGCHLD
+	/// handler reaping every child, gets no group kill: its pid, the group's
+	/// id, may already name another group. A zombie still does.
+	#[test]
+	fn a_watcher_reaped_elsewhere_gets_no_group_kill() {
+		let (x11, _server) = UnixStream::pair().unwrap();
+		let far = Instant::now() + Duration::from_secs(3600);
+		let watcher = ReleaseWatcher::spawn(x11.as_raw_fd(), 0, 0, 0, far).unwrap();
+		// A kernel that cannot wait on a pidfd (before 5.4) kills unchecked.
+		let Some(leader) = &watcher.leader else {
+			return;
+		};
+		// SAFETY: kill and waitid with integer arguments and a writable
+		// siginfo; WNOWAIT waits for the exit without reaping it.
+		unsafe {
+			libc::kill(watcher.watcher, libc::SIGKILL);
+			let mut info: libc::siginfo_t = std::mem::zeroed();
+			libc::waitid(
+				libc::P_PID,
+				watcher.watcher as libc::id_t,
+				&raw mut info,
+				libc::WEXITED | libc::WNOWAIT,
+			);
+		}
+		assert!(unreaped(leader.as_fd()).unwrap(), "a zombie keeps its group id");
+		// The host's reaper, by pid: a waitpid(-1) here would also reap the
+		// children of tests running alongside.
+		// SAFETY: waitpid with a null status pointer and no flags.
+		assert_eq!(unsafe { libc::waitpid(watcher.watcher, ptr::null_mut(), 0) }, watcher.watcher);
+		assert!(!unreaped(leader.as_fd()).unwrap(), "a reaped watcher's group id is not its own");
 	}
 
 	/// Closing stops at the descriptor limit, except to reach a descriptor
