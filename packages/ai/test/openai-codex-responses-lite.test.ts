@@ -3,6 +3,7 @@ import {
 	type InputItem,
 	moveCodexInstructionsToInput,
 	transformRequestBody,
+	withCodexRoutingFieldsFirst,
 } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	buildTransformedCodexRequestBody,
@@ -432,6 +433,32 @@ describe("openai-codex Responses Lite input shaping", () => {
 	});
 });
 
+describe("withCodexRoutingFieldsFirst", () => {
+	it("leads with codex-rs routing fields and keeps the rest in place", () => {
+		const body = {
+			input: [],
+			tools: [],
+			previous_response_id: "resp_1",
+			service_tier: "priority",
+			stream: true,
+			model: "gpt-6.2-sol",
+			type: "response.create",
+			store: false,
+		};
+		expect(Object.keys(withCodexRoutingFieldsFirst(body))).toEqual([
+			"type",
+			"model",
+			"stream",
+			"service_tier",
+			"previous_response_id",
+			"input",
+			"tools",
+			"store",
+		]);
+		expect(Object.keys(body)[0]).toBe("input");
+	});
+});
+
 describe("moveCodexInstructionsToInput", () => {
 	it("derives the codex-rs item id from the thread and the text", () => {
 		// uuid5(uuid5(NAMESPACE_OID, "thread-1"), "sys"), as codex-rs build_responses_request computes it.
@@ -758,6 +785,7 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(captured?.headers.get("x-openai-internal-codex-responses-lite")).toBeNull();
 		expect(captured?.body.instructions).toBeUndefined();
+		expect(Object.keys(captured?.body ?? {}).slice(0, 3)).toEqual(["model", "stream", "input"]);
 		expect((captured?.body.input as Array<Record<string, unknown>>)[0]).toMatchObject(
 			baseInstructions("You are a helpful assistant."),
 		);

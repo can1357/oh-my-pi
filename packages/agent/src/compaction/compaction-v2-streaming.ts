@@ -13,6 +13,7 @@ import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/provi
 import {
 	applyCodexResponsesLiteShape,
 	moveCodexInstructionsToInput,
+	withCodexRoutingFieldsFirst,
 } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import type {
 	OpenAICodexCompactionBody,
@@ -398,7 +399,7 @@ async function attemptCompactionV2Streaming(
 	const response = await fetchImpl(endpoint, {
 		method: "POST",
 		headers: buildCompactionV2Headers(model, apiKey, request, options.codexMetadata),
-		body: stringifyJson(body),
+		body: stringifyJson(withCodexRoutingFieldsFirst(body)),
 		signal,
 	});
 

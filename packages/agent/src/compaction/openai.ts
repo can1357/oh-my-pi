@@ -21,6 +21,7 @@ import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/provi
 import {
 	applyCodexResponsesLiteShape,
 	moveCodexInstructionsToInput,
+	withCodexRoutingFieldsFirst,
 } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	applyInferenceHeaders,
@@ -1012,7 +1013,7 @@ export async function requestOpenAiRemoteCompaction(
 	const response = await fetchImpl(endpoint, {
 		method: "POST",
 		headers,
-		body: stringifyJson(request),
+		body: stringifyJson(isCodexResponses ? withCodexRoutingFieldsFirst(request) : request),
 		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
 	});
 

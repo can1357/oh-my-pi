@@ -345,6 +345,27 @@ export interface CodexLiteShapedBody {
 	parallel_tool_calls?: unknown;
 }
 
+/** Request fields codex-rs serializes ahead of `input` (`ResponsesApiRequest`, `ResponseCreateWsRequest`). */
+const CODEX_ROUTING_FIELDS = ["type", "model", "stream", "service_tier", "previous_response_id"] as const;
+
+/**
+ * Returns a shallow copy whose routing fields lead in codex-rs order; every
+ * other field keeps its position. Since 0.161 (openai/codex#49675) codex-rs
+ * serializes `model`, `stream` and `service_tier` before a potentially
+ * multi-megabyte `input`, so gateways can route on the leading bytes.
+ * WebSocket frames keep `type` first, as serde's tagged enum does.
+ */
+export function withCodexRoutingFieldsFirst<T extends object>(body: T): T {
+	const ordered: Record<string, unknown> = {};
+	for (const key of CODEX_ROUTING_FIELDS) {
+		if (Object.hasOwn(body, key)) ordered[key] = (body as Record<string, unknown>)[key];
+	}
+	for (const [key, value] of Object.entries(body)) {
+		if (!Object.hasOwn(ordered, key)) ordered[key] = value;
+	}
+	return ordered as T;
+}
+
 /** Content-item kind codex-rs tags its base-instructions developer message with. */
 const CODEX_BASE_INSTRUCTIONS_KIND = "model.base_instructions";
 

@@ -88,6 +88,7 @@ import {
 	resolveCodexResponsesLite,
 	sanitizeCodexCallId,
 	transformRequestBody,
+	withCodexRoutingFieldsFirst,
 } from "./openai-codex/request-transformer";
 import { applyCodexAccessPrograms, dropRejectedCodexAccessPrograms } from "./openai-codex/access-programs";
 import {
@@ -1842,7 +1843,7 @@ async function openCodexWebSocketTransport(
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 			});
 		const eventStream = websocketConnection.streamRequest(
-			{ send: websocketRequest },
+			{ send: withCodexRoutingFieldsFirst(websocketRequest) },
 			timeouts,
 			requestSetup.requestSignal,
 			onSseEvent,
@@ -4123,7 +4124,7 @@ async function openCodexSseEventStream(
 		response = await fetchWithRetry(url, {
 			method: "POST",
 			headers,
-			body: JSON.stringify(body),
+			body: JSON.stringify(withCodexRoutingFieldsFirst(body)),
 			signal,
 			prepareInit: () => {
 				// A retried non-2xx attempt leaves its guard armed for the retry-status

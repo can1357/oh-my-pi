@@ -4762,6 +4762,13 @@ describe("openai-codex streaming", () => {
 		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
 		expect(sentRequests[1]?.prompt_cache_key).toBe("ws-delta-session");
 		expect(sentRequests[1]?.instructions).toBeUndefined();
+		expect(Object.keys(sentRequests[1] ?? {}).slice(0, 5)).toEqual([
+			"type",
+			"model",
+			"stream",
+			"previous_response_id",
+			"input",
+		]);
 		const deltaInput = sentRequests[1]?.input;
 		expect(Array.isArray(deltaInput)).toBe(true);
 		const deltaItems = deltaInput as Array<{ role?: string }>;
