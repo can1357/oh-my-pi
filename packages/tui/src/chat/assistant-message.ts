@@ -41,7 +41,7 @@ import { sanitizeStatusText } from "../chrome/shared";
 import { fileLinkSpan, urlLinkSpan } from "../render/hyperlink";
 import { type ServedModelMismatch, ServedModelMarkerComponent } from "./served-model-marker";
 import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
-import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome/transcript-container";
+import { isRowPrefix, RowPrefixCheck, type TranscriptStableRow, trimBlankEdges } from "../chrome/transcript-container";
 import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
 import { embedHost, loadEmbed } from "./embed-host";
 import { type Embed, type EmbedSegment, hasEmbed, imgTag, splitEmbeds } from "./embed-source";
@@ -431,6 +431,8 @@ export class AssistantMessageComponent extends Container {
 	/** Reused for final parts of published snapshots rendered off-ledger (reflow, replay). */
 	#stableReplayRenderer: StablePartRenderer | undefined;
 	#stableRenderInputs: StableRenderInputs | undefined;
+	/** Proves a publication candidate's rows prefix the block render; re-proves carried-over rows by pointer. */
+	#candidatePrefix = new RowPrefixCheck();
 	/** Provider-reported tokens in the live thinking block — reasoning tokens when
 	 *  the provider streams them, else total output — shown dimmed beside the
 	 *  speed badge. 0 when no thinking is streaming. */
@@ -1398,7 +1400,7 @@ export class AssistantMessageComponent extends Container {
 		this.#syncStableRenderInputs();
 		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head", openTable);
 		// The container verifies stable rows against the blank-trimmed render.
-		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
+		if (!this.#candidatePrefix.holds(currentRows, trimBlankEdges(rendered))) return;
 		const previousRows = previous
 			? this.renderTranscriptStableRows(this.#stableSnapshots.length, width)
 			: EMPTY_STABLE_RENDER;
@@ -1754,6 +1756,7 @@ export class AssistantMessageComponent extends Container {
 	#dropStableRenders(): void {
 		this.#stableLedgers.clear();
 		this.#stableRenderCache.clear();
+		this.#candidatePrefix = new RowPrefixCheck();
 		this.#stableHeadRenderer = undefined;
 		this.#stableReplayRenderer = undefined;
 	}
