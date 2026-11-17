@@ -397,6 +397,43 @@ describe("LoopWatchdog", () => {
 		setNow(5_000); // a stopped watchdog's stale deadline is not a stall
 		expect(wd.isStalled()).toBe(false);
 	});
+
+	test("a healthy loop reads CPU time once per tick; isStalled() only for a suspension-length gap", () => {
+		let nowValue = 0;
+		let cpuReads = 0;
+		let scheduled: (() => void) | undefined;
+		const wd = new LoopWatchdog({
+			intervalMs: 100,
+			thresholdMs: 100,
+			sleepMs: 10_000,
+			now: () => nowValue,
+			cpuNow: () => {
+				cpuReads++;
+				return 0;
+			},
+			schedule: cb => {
+				scheduled = cb;
+				return {};
+			},
+		});
+		wd.start(); // deadline 100; arming samples the CPU baseline
+		expect(cpuReads).toBe(1);
+
+		for (let t = 100; t <= 500; t += 100) {
+			nowValue = t; // on its deadline
+			scheduled?.();
+		}
+		expect(cpuReads).toBe(6); // one baseline per re-arm, none to classify an on-time tick
+
+		nowValue = 1_500; // overdue past thresholdMs but well short of sleepMs
+		for (let i = 0; i < 5; i++) expect(wd.isStalled()).toBe(true);
+		expect(cpuReads).toBe(6);
+
+		nowValue = 50_000; // past sleepMs: only CPU time can tell a suspension from a block
+		wd.isStalled();
+		expect(cpuReads).toBe(7);
+		wd.stop();
+	});
 });
 
 /**

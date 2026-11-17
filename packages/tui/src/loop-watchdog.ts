@@ -126,7 +126,9 @@ export class LoopWatchdog {
 		const now = this.#now();
 		if (now - this.#stallEndedAt <= this.#thresholdMs) return true;
 		const overdueMs = now - this.#expected;
-		return overdueMs > this.#thresholdMs && !this.#isSuspension(overdueMs, this.#cpuNow() - this.#expectedCpu);
+		if (overdueMs <= this.#thresholdMs) return false;
+		// Sampling CPU time is a syscall; only a gap long enough to be a suspension needs it.
+		return overdueMs <= this.#sleepMs || !this.#isSuspension(overdueMs, this.#cpuNow() - this.#expectedCpu);
 	}
 
 	/** A long gap the process spent negligible CPU on: it was suspended, not blocked. */
@@ -147,11 +149,12 @@ export class LoopWatchdog {
 		if (!this.#running || generation !== this.#generation) return;
 		const now = this.#now();
 		const blockedMs = now - this.#expected;
-		const cpuMs = this.#cpuNow() - this.#expectedCpu;
 		// Consume every valid tick, even without a warning, so no phase carries
 		// forward into a later, phase-less block.
 		const phase = takeLoopPhaseAttribution(now);
 		if (blockedMs > this.#thresholdMs) {
+			// Only a late tick needs CPU time: to classify the gap and to log it.
+			const cpuMs = this.#cpuNow() - this.#expectedCpu;
 			if (this.#isSuspension(blockedMs, cpuMs)) {
 				this.#wasBlocked = false;
 			} else {
