@@ -266,6 +266,47 @@ describe("openai-completions reasoning_details", () => {
 		expect(assistant.content.map(block => block.type)).toEqual(["thinking", "toolCall"]);
 	});
 
+	it("keeps appending reasoning.text once it won the turn, even beside a reasoning string", async () => {
+		const model = completionsModel("google/gemini-3-pro-preview", "openrouter", "https://openrouter.ai/api/v1");
+		const format = "google-gemini-v1";
+		const firstTurn = sseChunks(model.id, [
+			{
+				delta: {
+					role: "assistant",
+					reasoning_details: [{ type: "reasoning.text", text: "Check the city. ", format, index: 0 }],
+				},
+			},
+			{
+				delta: {
+					reasoning: "Call the tool.",
+					reasoning_details: [{ type: "reasoning.text", text: "Call the tool.", format, index: 0 }],
+				},
+			},
+			{
+				delta: {
+					tool_calls: [
+						{
+							index: 0,
+							id: "call_1",
+							type: "function",
+							function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+						},
+					],
+				},
+			},
+			{ delta: {}, finish: "tool_calls" },
+		]);
+		const { assistant, thinkingDeltas, replayed } = await streamAndReplay(model, firstTurn);
+
+		expect(thinkingDeltas.join("")).toBe("Check the city. Call the tool.");
+		const thinkingBlocks = assistant.content.filter(block => block.type === "thinking");
+		expect(thinkingBlocks).toHaveLength(1);
+		expect(thinkingBlocks[0]).toMatchObject({ thinking: "Check the city. Call the tool." });
+		expect(replayed.reasoning_details).toEqual([
+			{ type: "reasoning.text", text: "Check the city. Call the tool.", format, index: 0 },
+		]);
+	});
+
 	it("replays only encrypted and signed entries when the request drops the model's own thinking", () => {
 		const model = completionsModel("gemini/gemini-2.5-flash", "bifrost", "http://localhost:8080/v1");
 		const unsigned = { type: "reasoning.text", text: "Plain thought.", index: 0 };

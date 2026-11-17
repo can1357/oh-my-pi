@@ -1605,10 +1605,8 @@ const streamOpenAICompletionsOnce = (
 					if (liteLLMThinkingBlocks) {
 						for (const entry of liteLLMThinkingBlocks) appendLiteLLMThinkingBlock(entry);
 						suppressHealedThinking = true;
-					} else if (foundReasoningField && !hasTypedThinking) {
-						if (reasoningSource === "details") {
-							if (isReasoningField(foundReasoningField)) mirroredReasoningField ??= foundReasoningField;
-						} else {
+					} else if (!hasTypedThinking) {
+						if (foundReasoningField && reasoningSource !== "details") {
 							reasoningSource = "field";
 							appendThinkingDelta(
 								foundReasoningDelta,
@@ -1616,12 +1614,17 @@ const streamOpenAICompletionsOnce = (
 								explicitReasoningDeltasMayBeCumulative ? "cumulative" : "delta",
 							);
 							suppressHealedThinking = true;
+						} else if (reasoningSource !== "field") {
+							// Bifrost streams Gemini thinking only as `reasoning.text` entries. Once they
+							// won the turn, a plain field beside them is OpenRouter's mirror: kept as
+							// the replay marker, never rendered.
+							if (isReasoningField(foundReasoningField)) mirroredReasoningField ??= foundReasoningField;
+							if (reasoningDetailsText) {
+								reasoningSource = "details";
+								appendThinkingDelta(reasoningDetailsText);
+								suppressHealedThinking = true;
+							}
 						}
-					} else if (reasoningDetailsText && !hasTypedThinking && reasoningSource !== "field") {
-						// Bifrost streams Gemini thinking only as `reasoning.text` entries.
-						reasoningSource = "details";
-						appendThinkingDelta(reasoningDetailsText);
-						suppressHealedThinking = true;
 					}
 					if (mistralParts) {
 						for (const part of mistralParts) {
