@@ -15,6 +15,10 @@
   - For edits and Python scripting, use eval's `dsm` namespace → xd://eval/dsm.
 {{/if}}
 - Video requires ffmpeg/ffprobe: bare preview grid+metadata, :412 frame, :1h5m42s/:90s/:01:23 time.
+- Audio (mp3/wav/m4a/flac/ogg/opus…) requires ffprobe: bare duration, codec and size.
+{{#if TRANSCRIBES_AUDIO}}
+  - :transcript timestamped transcript from a model that hears audio, one request per hour of audio; clip.mp4:transcript for a video's soundtrack; transcript times are frame selectors (clip.mp4:1:02.5).
+{{/if}}
 - SVG/SVGZ default text; :img rasterizes an SVG/SVGZ into an image, :raw original.
   - Raster images (PNG, JPEG) need no selector; :img rejects them.
 - Merge conflicts: :conflicts lists one line per unresolved merge block.

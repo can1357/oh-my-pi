@@ -3,6 +3,7 @@ import type {
 	AnthropicCompactionPayload,
 	AssistantMessage,
 	Context,
+	AudioContent,
 	ImageContent,
 	Message,
 	ProviderPayload,
@@ -507,13 +508,13 @@ export function obfuscateNativeReplay<
 type UserFacingMessage = Extract<Message, { role: "user" | "developer" | "toolResult" }>;
 
 /** Obfuscate `text` blocks of a content array; image and other blocks pass through. */
-function obfuscateTextBlocks(
+function obfuscateTextBlocks<T extends TextContent | ImageContent | AudioContent>(
 	obfuscator: SecretObfuscator,
-	content: (TextContent | ImageContent)[],
+	content: T[],
 	sharedRegexSecretValues?: ReadonlySet<string>,
-): (TextContent | ImageContent)[] {
+): T[] {
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): T => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.obfuscate(block.text, sharedRegexSecretValues);
 		if (text === block.text) return block;
@@ -524,12 +525,12 @@ function obfuscateTextBlocks(
 }
 
 /** Restore placeholders in `text` blocks of a content array; image and other blocks pass through. */
-function deobfuscateTextBlocks(
+function deobfuscateTextBlocks<T extends TextContent | ImageContent | AudioContent>(
 	obfuscator: SecretObfuscator,
-	content: (TextContent | ImageContent)[],
-): (TextContent | ImageContent)[] {
+	content: T[],
+): T[] {
 	let changed = false;
-	const result = content.map((block): TextContent | ImageContent => {
+	const result = content.map((block): T => {
 		if (block.type !== "text") return block;
 		const text = obfuscator.deobfuscate(block.text);
 		if (text === block.text) return block;

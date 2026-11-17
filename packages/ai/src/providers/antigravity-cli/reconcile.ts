@@ -4,6 +4,7 @@ import { prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { ContentBlock } from "@oh-my-pi/pi-utils/acp";
 import type {
 	AntigravityCliCheckpoint,
+	AudioContent,
 	DeveloperMessage,
 	ImageContent,
 	Message,
@@ -13,6 +14,7 @@ import type {
 } from "../../types";
 import lateToolResultTemplate from "./late-tool-result.md" with { type: "text" };
 import transcriptTemplate from "./transcript.md" with { type: "text" };
+import { replaceAudioWithPlaceholder } from "../vision-guard";
 
 /** The exact leading transcript represented by the live conversation. */
 export interface Ledger {
@@ -153,9 +155,9 @@ export function isInputMessage(message: Message): message is InputMessage {
 	return message.role === "user" || message.role === "developer";
 }
 
-function contentBlocks(content: string | readonly (TextContent | ImageContent)[]): ContentBlock[] {
+function contentBlocks(content: string | readonly (TextContent | ImageContent | AudioContent)[]): ContentBlock[] {
 	if (typeof content === "string") return [{ type: "text", text: content }];
-	return content.map(part =>
+	return replaceAudioWithPlaceholder(content).map(part =>
 		part.type === "text"
 			? { type: "text", text: part.text }
 			: { type: "image", data: part.data, mimeType: part.mimeType },

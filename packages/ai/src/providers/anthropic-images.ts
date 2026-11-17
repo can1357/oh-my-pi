@@ -5,7 +5,7 @@
  * the host's limits (`max-image-dimension` / `max-image-payload-bytes`).
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { Context, ImageContent, Message, Model, TextContent } from "../types";
+import type { AudioContent, Context, ImageContent, Message, Model, TextContent } from "../types";
 
 const ANTHROPIC_MANY_IMAGE_THRESHOLD = 20;
 const ANTHROPIC_MANY_IMAGE_MAX_DIMENSION = 2000;
@@ -174,12 +174,12 @@ async function resizeAnthropicImageBlock(block: ImageContent, caps: AnthropicIma
 	}
 }
 
-async function resizeAnthropicImageContent(
-	content: (TextContent | ImageContent)[],
+async function resizeAnthropicImageContent<T extends TextContent | ImageContent | AudioContent>(
+	content: T[],
 	state: { resized: number },
 	limit: ResizeLimiter,
 	caps: AnthropicImageCaps,
-): Promise<(TextContent | ImageContent)[]> {
+): Promise<(T | ImageContent)[]> {
 	let changed = false;
 	const cache = anthropicImageResizeCache(caps);
 	const next = await Promise.all(
@@ -206,7 +206,12 @@ async function resizeAnthropicImageMessage(
 	limit: ResizeLimiter,
 	caps: AnthropicImageCaps,
 ): Promise<Message> {
-	if (message.role === "user" || message.role === "developer") {
+	if (message.role === "user") {
+		if (!Array.isArray(message.content)) return message;
+		const content = await resizeAnthropicImageContent(message.content, state, limit, caps);
+		return content === message.content ? message : { ...message, content };
+	}
+	if (message.role === "developer") {
 		if (!Array.isArray(message.content)) return message;
 		const content = await resizeAnthropicImageContent(message.content, state, limit, caps);
 		return content === message.content ? message : { ...message, content };

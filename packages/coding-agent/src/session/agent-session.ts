@@ -15444,7 +15444,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 *  positional markers resolvable on resubmit. */
 	#extractUserMessageImages(content: UserMessage["content"] | CustomMessage["content"]): ImageContent[] {
 		if (!Array.isArray(content)) return [];
-		return content.filter((c): c is ImageContent => c.type === "image");
+		return content.flatMap(c => (c.type === "image" ? [c] : []));
 	}
 
 	/**

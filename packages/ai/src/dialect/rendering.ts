@@ -2,6 +2,7 @@ import { stringifyJson as stringifyJsonValue } from "@oh-my-pi/pi-utils";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "../types";
 import { buildArgShapes, type ToolArgShape } from "./coercion";
 import type { DialectRenderOptions, DialectToolResult } from "./types";
+import { NON_AUDIO_PLACEHOLDER } from "../providers/vision-guard";
 
 export function renderToolResponseResults(results: readonly DialectToolResult[]): string {
 	return results.map(result => `<tool_response>\n${result.text}\n</tool_response>`).join("\n");
@@ -226,6 +227,7 @@ export function messageContentText(
 	for (const block of content) {
 		if (block.type === "text" && block.text !== undefined) text += block.text;
 		else if (block.type === "image") text += block.mimeType ? `[Image: ${block.mimeType}]` : "[Image]";
+		else if (block.type === "audio") text += NON_AUDIO_PLACEHOLDER;
 	}
 	return text;
 }

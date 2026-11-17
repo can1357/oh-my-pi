@@ -68,6 +68,7 @@ import {
 	responsesCallComponent,
 	transformMessages,
 } from "./transform-messages";
+import { NON_AUDIO_PLACEHOLDER } from "./vision-guard";
 
 /** Base host for Codeium/Windsurf's Cascade chat API (Connect protocol over HTTP/1.1). */
 export const DEVIN_API_URL = DEVIN_DEFAULT_BASE_URL;
@@ -736,6 +737,8 @@ function buildUserPrompt(msg: UserMessage | DeveloperMessage, messageId: string)
 				prompt += part.text;
 			} else if (part.type === "image") {
 				images.push(create(ImageDataSchema, { base64Data: part.data, mimeType: part.mimeType }));
+			} else {
+				prompt += NON_AUDIO_PLACEHOLDER;
 			}
 		}
 	}

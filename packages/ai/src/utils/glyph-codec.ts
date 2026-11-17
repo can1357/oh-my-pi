@@ -1,6 +1,7 @@
 import type {
 	AssistantMessage,
 	AssistantMessageEvent,
+	AudioContent,
 	Context,
 	CursorExecHandlers,
 	ImageContent,
@@ -206,11 +207,11 @@ function transformRecord(input: Record<string, unknown>, transform: GlyphTextTra
 	return output ?? input;
 }
 
-function transformTextBlocks(
-	content: Array<TextContent | ImageContent>,
+function transformTextBlocks<T extends TextContent | ImageContent | AudioContent>(
+	content: T[],
 	transform: GlyphTextTransform,
-): Array<TextContent | ImageContent> {
-	let output: Array<TextContent | ImageContent> | undefined;
+): T[] {
+	let output: T[] | undefined;
 	for (const [index, block] of content.entries()) {
 		let transformed = block;
 		if (block.type === "text") {
@@ -253,7 +254,13 @@ function transformAssistantContent(
 
 function transformMessage(message: Message, transform: GlyphTextTransform): Message {
 	switch (message.role) {
-		case "user":
+		case "user": {
+			const content =
+				typeof message.content === "string"
+					? transform(message.content)
+					: transformTextBlocks(message.content, transform);
+			return content === message.content ? message : { ...message, content };
+		}
 		case "developer": {
 			const content =
 				typeof message.content === "string"

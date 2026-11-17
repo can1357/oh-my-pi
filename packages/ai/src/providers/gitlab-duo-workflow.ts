@@ -26,6 +26,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toolWireSchema } from "../utils/schema/wire";
 import chatmlHistoryNote from "./gitlab-duo-workflow-chatml-note.md" with { type: "text" };
 import { redactSensitiveCredentials } from "./transform-messages";
+import { NON_AUDIO_PLACEHOLDER } from "./vision-guard";
 
 export const GITLAB_DUO_WORKFLOW_PROVIDER_ID = "gitlab-duo-agent";
 export const GITLAB_DUO_WORKFLOW_API = "gitlab-duo-agent";
@@ -2815,7 +2816,11 @@ function gitLabDuoWorkflowMessageContentToText(message: Message): string {
 
 function gitLabDuoWorkflowUserContentToText(message: Exclude<Message, AssistantMessage>): string {
 	if (typeof message.content === "string") return message.content;
-	return message.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return message.content
+		.map(item =>
+			item.type === "text" ? item.text : item.type === "audio" ? NON_AUDIO_PLACEHOLDER : `[${item.mimeType} image]`,
+		)
+		.join("\n");
 }
 
 export function describeGitLabDuoWorkflowSocketEvent(event: unknown): string {

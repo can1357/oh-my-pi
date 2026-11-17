@@ -7,7 +7,7 @@
  * as one-liners. No system prompt, no tool catalog, no config sections.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AudioContent, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { countNewlines, escapeXmlText, isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
@@ -150,13 +150,13 @@ export function formatExecutionSourcePreview(source: string, transform?: ToolIOT
 	return previewLine(source, transform);
 }
 
-/** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
-function contentToText(content: string | readonly (TextContent | ImageContent)[]): string {
+/** Join the text blocks of a string-or-blocks content field. Images become `[image]`, audio `[audio]`. */
+function contentToText(content: string | readonly (TextContent | ImageContent | AudioContent)[]): string {
 	if (typeof content === "string") return content;
 	const parts: string[] = [];
 	for (const block of content) {
 		if (block.type === "text") parts.push(block.text);
-		else parts.push("[image]");
+		else parts.push(block.type === "audio" ? "[audio]" : "[image]");
 	}
 	return parts.join("\n");
 }

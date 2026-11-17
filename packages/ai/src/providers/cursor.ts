@@ -188,6 +188,7 @@ import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	Api,
 	AssistantMessage,
+	AudioContent,
 	Context,
 	CursorExecFrameContext,
 	CursorExecHandlerResult,
@@ -212,6 +213,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 	Usage,
+	UserMessage,
 } from "../types";
 import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import {
@@ -268,6 +270,7 @@ import {
 } from "./cursor/exec-modern";
 import { CursorExecOrder } from "./cursor/exec-order";
 import { handleInteractionQuery, protoUnknownFields } from "./cursor/interaction-query";
+import { replaceAudioWithPlaceholder } from "./vision-guard";
 
 export const CURSOR_API_URL = CURSOR_DEFAULT_BASE_URL;
 export { CURSOR_CLIENT_VERSION };
@@ -6282,7 +6285,7 @@ interface CursorTurnBinding {
 
 /** Chains `Bun.hash` over message parts from `seed`, without copying them. */
 function hashCursorParts(
-	parts: string | readonly (TextContent | ImageContent)[],
+	parts: string | readonly (TextContent | ImageContent | AudioContent)[],
 	seed: number | bigint,
 ): number | bigint {
 	if (typeof parts === "string") return Bun.hash(parts, seed);
@@ -6533,11 +6536,7 @@ function extractUserMessageText(msg: Message): string {
 	if (msg.role !== "user" && msg.role !== "developer") return "";
 	const content = msg.content;
 	if (typeof content === "string") return content.trim();
-	const text = content
-		.filter((c): c is TextContent => c.type === "text")
-		.map(c => c.text)
-		.join("\n");
-	return text.trim();
+	return extractText(content).trim();
 }
 
 function hasUserMessageImages(msg: Message): boolean {
@@ -6550,13 +6549,13 @@ function hasUserMessageImages(msg: Message): boolean {
 
 type CursorRootPromptContentPart = { type: "text"; text: string } | { type: "image"; image: string; mediaType: string };
 
-function buildCursorRootPromptContent(content: string | (TextContent | ImageContent)[]): CursorRootPromptContentPart[] {
+function buildCursorRootPromptContent(content: UserMessage["content"]): CursorRootPromptContentPart[] {
 	if (typeof content === "string") {
 		const text = content.trim();
 		return text ? [{ type: "text", text }] : [];
 	}
 	const parts: CursorRootPromptContentPart[] = [];
-	for (const item of content) {
+	for (const item of replaceAudioWithPlaceholder(content)) {
 		if (item.type === "text") {
 			const text = item.text.trim();
 			if (text) {
@@ -6569,7 +6568,7 @@ function buildCursorRootPromptContent(content: string | (TextContent | ImageCont
 	return parts;
 }
 
-function cursorUserContentKey(content: string | (TextContent | ImageContent)[]): string {
+function cursorUserContentKey(content: UserMessage["content"]): string {
 	if (typeof content === "string") {
 		return content.trim();
 	}
@@ -7150,11 +7149,7 @@ export function buildCursorHistoryForTest(
 	}
 	return { rootPromptMessagesJson, turnUserMessagesJson, turnStepMessagesJson };
 }
-function createCursorUserMessage(
-	content: string | (TextContent | ImageContent)[],
-	text: string,
-	messageId = crypto.randomUUID(),
-) {
+function createCursorUserMessage(content: UserMessage["content"], text: string, messageId = crypto.randomUUID()) {
 	const images = typeof content === "string" ? [] : extractImages(content);
 	return create(UserMessageSchema, {
 		text,
@@ -7169,7 +7164,7 @@ function createCursorUserMessage(
 	});
 }
 
-function extractImages(content: (TextContent | ImageContent)[]) {
+function extractImages(content: (TextContent | ImageContent | AudioContent)[]) {
 	return content
 		.filter((item): item is ImageContent => item.type === "image")
 		.map(image =>
@@ -7339,7 +7334,7 @@ async function buildGrpcRequestForWireMode(
 	const activeUserMessage =
 		!state.resume && (lastMessage?.role === "user" || lastMessage?.role === "developer") ? lastMessage : undefined;
 	const historyEndIndex = activeUserMessage ? context.messages.length - 1 : -1;
-	let userContent: string | (TextContent | ImageContent)[] | undefined;
+	let userContent: UserMessage["content"] | undefined;
 	let userText = "";
 	let hasUserImages = false;
 	if (activeUserMessage) {
@@ -7587,11 +7582,11 @@ export async function buildGrpcRequest(
 	return buildGrpcRequestForWireMode(model, withPromptLast(context), options, state, "normalized");
 }
 
-function hasImages(content: (TextContent | ImageContent)[]): boolean {
+function hasImages(content: (TextContent | ImageContent | AudioContent)[]): boolean {
 	return content.some(item => item.type === "image");
 }
-function extractText(content: (TextContent | ImageContent)[]): string {
-	return content
+function extractText(content: (TextContent | ImageContent | AudioContent)[]): string {
+	return replaceAudioWithPlaceholder(content)
 		.filter((c): c is TextContent => c.type === "text")
 		.map(c => c.text)
 		.join("\n");

@@ -41,6 +41,7 @@ import { parseToolCallArguments, replayableToolCallArguments } from "../utils/to
 import {
 	type Api,
 	type AssistantMessage,
+	type AudioContent,
 	type CacheRetention,
 	type ComputerAction,
 	type ComputerToolCallMetadata,
@@ -120,6 +121,7 @@ import type {
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
 	ResponseInput,
+	ResponseInputAudio,
 	ResponseInputContent,
 	ResponseInputImage,
 	ResponseInputItem,
@@ -137,7 +139,14 @@ import {
 	setHeaderIfAbsent,
 } from "./inference-headers";
 import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import {
+	audioInputMimeType,
+	inputAudioFormat,
+	joinTextWithImagePlaceholder,
+	NON_VISION_IMAGE_PLACEHOLDER,
+	partitionVisionContent,
+	replaceAudioWithPlaceholder,
+} from "./vision-guard";
 
 export interface OpenAIModelIdentity {
 	provider: string;
@@ -1907,10 +1916,11 @@ function convertResponsesInputImage(image: ImageContent, supportsImageDetailOrig
 }
 
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | Array<TextContent | ImageContent | AudioContent>,
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
+	supportsAudio = false,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
 		if (content.trim().length === 0) return undefined;
@@ -1923,7 +1933,13 @@ export function convertResponsesInputContent(
 		];
 	}
 
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
+	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(
+		supportsAudio
+			? content.filter((block): block is TextContent | ImageContent => block.type !== "audio")
+			: replaceAudioWithPlaceholder(content),
+		supportsImages,
+	);
+	const audioBlocks = supportsAudio ? content.filter((block): block is AudioContent => block.type === "audio") : [];
 	const normalizedContent: ResponseInputContent[] = [];
 	for (const item of textBlocks) {
 		const raw = item.text.toWellFormed();
@@ -1936,6 +1952,12 @@ export function convertResponsesInputContent(
 	}
 	for (const item of imageBlocks) {
 		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
+	}
+	for (const item of audioBlocks) {
+		normalizedContent.push({
+			type: "input_audio",
+			input_audio: { data: item.data, format: inputAudioFormat(item) },
+		} satisfies ResponseInputAudio);
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -2397,6 +2419,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model.input.includes("image"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
+				audioInputMimeType(options.model) !== undefined,
 			);
 			if (!content) continue;
 			const developerText =
@@ -2878,7 +2901,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
  * cannot carry the native output array.
  */
 export interface ResponsesToolResultOutputEncoding {
-	output: string | ResponseInputContent[];
+	output: string | Array<ResponseInputText | ResponseInputImage>;
 	outputText: string;
 }
 
@@ -2914,9 +2937,9 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	// data; escape the transport copy so a grep/read result cannot poison the
 	// session (#6913). Covers every downstream branch that consumes `output`.
 	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
-	const output: string | ResponseInputContent[] =
+	const output: string | Array<ResponseInputText | ResponseInputImage> =
 		hasImages && supportsImages
-			? toolResult.content.map((block): ResponseInputContent => {
+			? toolResult.content.map((block): ResponseInputText | ResponseInputImage => {
 					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
 					const text = block.text.toWellFormed();
 					return {

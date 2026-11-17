@@ -37,6 +37,7 @@ import type { Content, GenerateContentResponse, Part } from "../google-types";
 import { redactSensitiveInObject, transformMessages } from "../transform-messages";
 import { toolNamesByWire } from "../../utils/tool-names";
 import { sanitizeFactoryDroidToolName } from "./tool-names";
+import { NON_AUDIO_PLACEHOLDER } from "../vision-guard";
 
 /** Factory's Gemini endpoint speaks native generateContent SSE at `/api/llm/g/v1/generate`. */
 
@@ -259,6 +260,7 @@ function toGeminiContents(
 					if (block.type === "text" && block.text) parts.push({ text: block.text });
 					else if (block.type === "image")
 						parts.push({ inlineData: { mimeType: block.mimeType, data: block.data } });
+					else if (block.type === "audio") parts.push({ text: NON_AUDIO_PLACEHOLDER });
 				}
 			}
 			if (parts.length > 0) contents.push({ role: "user", parts });

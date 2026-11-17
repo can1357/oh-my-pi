@@ -486,6 +486,7 @@ const MIME_TYPES: ReadonlySet<string> = new Set([
 	"image/svg+xml",
 	"video/mp4",
 	"audio/mpeg",
+	"audio/ogg",
 	"unknown",
 ]);
 
@@ -666,6 +667,7 @@ const TOOL_CALL_TYPES: Record<string, true> = {
 const CONTENT_BLOCK_KEYS: Record<string, ReadonlySet<string>> = {
 	text: new Set(["type", "text", "textSignature"]),
 	image: new Set(["type", "data", "mimeType", "detail", "providerFile", "url"]),
+	audio: new Set(["type", "data", "mimeType"]),
 	thinking: new Set(["type", "thinking", "thinkingSignature", "itemId", "summary"]),
 	redactedThinking: new Set(["type", "data"]),
 	toolCall: new Set([

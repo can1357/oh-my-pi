@@ -1,5 +1,11 @@
 import type { AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { AnthropicServerToolContent, AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AnthropicServerToolContent,
+	AssistantMessage,
+	AudioContent,
+	ImageContent,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import { isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import {
 	CONTEXT_CATEGORIES,
@@ -29,12 +35,13 @@ function opaqueSize(name: string, value: string): string {
 }
 
 /** One text or image block as readable text, without retaining binary data. */
-function summarizeBlockForView(block: TextContent | ImageContent): string {
+function summarizeBlockForView(block: TextContent | ImageContent | AudioContent): string {
 	if (block.type === "text") return block.text;
+	if (block.type === "audio") return "";
 	return `[image · ${block.mimeType} · ~${Math.floor((block.data.length * 3) / 4)} bytes]`;
 }
 
-function summarizeContentForView(content: string | readonly (TextContent | ImageContent)[]): string {
+function summarizeContentForView(content: string | readonly (TextContent | ImageContent | AudioContent)[]): string {
 	return typeof content === "string" ? content : content.map(summarizeBlockForView).join("\n");
 }
 

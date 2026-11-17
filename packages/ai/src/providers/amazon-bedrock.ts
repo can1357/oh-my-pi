@@ -60,6 +60,7 @@ import { parseAnthropicInputTransformations, THINKING_BINDING_CONTROLS_BETA } fr
 import { fitBedrockAnthropicPayload } from "./bedrock-anthropic";
 import { isBedrockRequestMetadataValue } from "./bedrock-request-metadata";
 import { transformMessages } from "./transform-messages";
+import { NON_AUDIO_PLACEHOLDER } from "./vision-guard";
 
 /**
  * Headers SigV4 generates for itself. A caller cannot be allowed to supply these:
@@ -1407,6 +1408,9 @@ function convertMessages(
 							}
 							case "image":
 								contentBlocks.push({ image: createImageBlock(c.mimeType, c.data) });
+								break;
+							case "audio":
+								contentBlocks.push({ text: NON_AUDIO_PLACEHOLDER });
 								break;
 							default:
 								throw new AIError.ValidationError("Unknown user content type");

@@ -173,7 +173,16 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 
 - Requires `ffmpeg` and `ffprobe`. Bare video reads return metadata plus a contact-sheet preview for image-capable models; text-only models receive metadata and frame-read hints.
 - `:412` selects a frame index; `:1h5m42s`, `:90s`, or `:01:23` selects a timestamp. These are frame selectors, not text line numbers.
+- `:transcript` returns a timestamped transcript of the soundtrack (see Audio); bare reads of a video with an audio stream name it when a model that hears audio is available.
 - `?q=` image questions are not supported for video.
+
+### Audio
+
+- A bare read of an audio file (`.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`, `.oga`, `.opus`, `.wma`, `.aif`, `.aiff`, `.caf`) returns its duration, codec and size, and names `:transcript` with the model and the number of requests it would take; it calls no model.
+- `talk.mp3:transcript` and `clip.mp4:transcript` read as a timestamped transcript, one `[m:ss.s-m:ss.s] text` line per sentence. The times are valid video frame selectors.
+- Requires `ffmpeg`/`ffprobe` and an available chat model that hears audio: its catalog `input` includes `audio` (Gemini on Google's own transports, OpenRouter models whose listing takes audio) and its transport carries it (`audioInputMimeType()` in `packages/ai/src/providers/vision-guard.ts`: Google's GenerateContent gets mono Opus inline, Chat Completions and Responses get an mp3 `input_audio` part). The model is chosen like an image question's (`@vision`, `@default`, the active model, then the active provider's, then any), runs at minimal reasoning, and gets one request per hour of audio.
+- With no such model, or with `images.blockImages` on, a bare audio read says why there is no transcript and `:transcript` fails with the same text. `xd://read/sources` names `:transcript` when a model that hears audio is available.
+- An empty answer, or one without timestamped lines, fails naming the model; the model answers `(no speech)` for a silent recording. A transcript cut short by the model's output limit drops its unfinished last line and says where it stops. A large transcript spills to an artifact like any tool result. Selectors on an audio file keep their usual meaning (`:raw` reads bytes).
 
 ### Profiler reports
 

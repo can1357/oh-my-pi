@@ -16,6 +16,7 @@ import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	AssistantMessage,
+	AudioContent,
 	Context,
 	ImageContent,
 	Message,
@@ -30,7 +31,7 @@ import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJso
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { decodeFoundationModelsArguments, toFoundationModelsSchema, toolWireSchema } from "../utils/schema";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder, partitionVisionContent, replaceAudioWithPlaceholder } from "./vision-guard";
 
 /** Options for the `apple-foundation-models` API. */
 export interface AppleFoundationModelsOptions extends StreamOptions {
@@ -116,12 +117,15 @@ export async function getAppleFoundationModelsAvailability(): Promise<AppleFound
  * the prefix cache valid.
  */
 function toParts(
-	content: string | ReadonlyArray<TextContent | ImageContent>,
+	content: string | ReadonlyArray<TextContent | ImageContent | AudioContent>,
 	supportsImages: boolean,
 	images: { count: number },
 ): Part[] {
 	if (typeof content === "string") return [{ type: "text", text: content }];
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
+	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(
+		replaceAudioWithPlaceholder(content),
+		supportsImages,
+	);
 	const text = joinTextWithImagePlaceholder(textBlocks.map(block => block.text).join("\n"), omittedImages);
 	const parts: Part[] = text ? [{ type: "text", text }] : [];
 	for (const image of imageBlocks) parts.push({ type: "image", data: image.data, label: `image-${++images.count}` });

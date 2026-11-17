@@ -279,7 +279,7 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 		const result = config.tryLoad();
 		expect(result.status).toBe("ok");
 		if (result.status !== "ok") throw new Error("expected the file to load");
-		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toEqual(catalogInputModalities());
+		expect(result.value?.providers?.openrouter?.models?.[0]?.input).toEqual(["text", "image"]);
 		const [warning] = result.warnings;
 		expect(warning).toContain('provider "openrouter"');
 		expect(warning).toContain('model "some/video-capable-model"');
@@ -351,7 +351,7 @@ describe("models.yml input modality the catalog cannot express (#16342)", () => 
 			expect(registry.getError()).toBeUndefined();
 			const model = registry.getAll().find(entry => entry.id === "some/video-capable-model");
 			const input: readonly string[] = model?.input ?? [];
-			expect(input).toEqual(catalogInputModalities());
+			expect(input).toEqual(["text", "image"]);
 			const warnings = registry.drainConfigWarnings().filter(warning => warning.includes('modality "video"'));
 			expect(warnings).toHaveLength(1);
 			expect(warnings[0]).toContain('model "some/video-capable-model"');

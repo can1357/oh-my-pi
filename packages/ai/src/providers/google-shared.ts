@@ -44,7 +44,7 @@ import type {
 	UsageMetadata,
 } from "./google-types";
 import { transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import { NON_AUDIO_PLACEHOLDER, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export type {
 	Content,
@@ -242,11 +242,16 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				const supportsImages = model.input.includes("image");
 				const parts: Part[] = [];
 				let omittedImages = false;
+				let omittedAudio = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
+					} else if (item.type === "audio") {
+						if (model.input.includes("audio"))
+							parts.push({ inlineData: { mimeType: item.mimeType, data: item.data } });
+						else omittedAudio = true;
 					} else if (supportsImages) {
 						parts.push(convertGoogleImagePart(item));
 					} else {
@@ -255,6 +260,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				}
 				if (omittedImages) {
 					parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
+				}
+				if (omittedAudio) {
+					parts.push({ text: NON_AUDIO_PLACEHOLDER });
 				}
 				if (parts.length === 0) continue;
 				contents.push({
