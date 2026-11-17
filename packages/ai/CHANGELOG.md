@@ -5,6 +5,15 @@
 ### Fixed
 
 - Fixed Google Antigravity request identity so a pooled-account switch mid-conversation starts a fresh agent, trajectory and session under the new account instead of reusing the previous account's, which linked the accounts ([#19276](https://github.com/can1357/oh-my-pi/pull/19276) by [@Xytronix](https://github.com/Xytronix))
+- Fenced (```thinking) reasoning with very long unbroken lines no longer slows down as it streams ([#19493](https://github.com/can1357/oh-my-pi/pull/19493) by [@H4vC](https://github.com/H4vC))
+- Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.22.0] - 2026-11-16
+
+### Fixed
+
+- Fixed slow streaming of Gemma tool calls with large arguments.
+
 ## [18.21.0] - 2026-11-16
 
 ### Added
