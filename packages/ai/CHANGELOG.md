@@ -20,6 +20,10 @@
 - Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Fixed
+
+- Fixed a Claude account staying blocked for Fable and Mythos after the shared weekly limit behind their 429 recovered, when `/usage` reported only that weekly window, so failover could not return to it
+
 ## [18.22.1] - 2026-11-17
 
 ### Added
