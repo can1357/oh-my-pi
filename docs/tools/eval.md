@@ -102,6 +102,23 @@ A requested unavailable runtime raises `ToolError` with the bounded, sanitized p
 
 The renderer merges call and result inline, syntax-highlights from the declared language, renders cell views as tables, JSON trees, and Markdown in place of their text, and shows timeout/truncation metadata. `session.allocateOutputArtifact?.("eval")` backs spilled output; a `local://N.log` URL in `meta` reaches the full capture.
 
+## Dedicated-tool routing (`toolInterceptor`)
+
+`toolInterceptor` is an opt-in routing layer (`toolInterceptor.enabled` defaults to `false`). When enabled, `ExtensionToolWrapper` checks `toolInterceptor.rules` before prompting for approval and before executing the cell. Matching cells are refused with a guidance message redirecting the model to the appropriate tool.
+
+```yaml
+toolInterceptor:
+  enabled: true
+  rules:
+    - tools: [eval]
+      suggestedTool: read
+      pattern: '\bjson\s*\.\s*loads?\s*\(|\bJSON\s*\.\s*parse\s*\('
+      question: "Is this code primarily parsing or filtering JSON that could be queried with the read tool's ?q= selector?"
+      message: "Do not use eval to parse JSON; use the read tool with a jq selector."
+```
+
+Each rule accepts `tools` (target tool name or `*` wildcard, or all tools when omitted), optional `suggestedTool` (replacement tool that must be active in the session), optional `whenPolicy` (`"prompt"` or `"allow"`, to skip rules when a call is already permitted without prompting), `pattern` (JavaScript regular expression, used as a standalone match or as a 0ms prefilter when paired with `question`), optional `flags`, `question` (natural-language yes/no question evaluated by the session `judge` model role), optional `threshold` (default `0.7`), and `message`. Like `bashInterceptor.patterns`, `toolInterceptor.rules` supports [path-scoped entries](../settings.md#path-scoped-arrays) and prepends project and `--config` overlay rules ahead of global rules (or `DEFAULT_TOOL_INTERCEPTOR_RULES` in `packages/coding-agent/src/tools/settings.ts` when global rules are unset).
+
 ## Execution flow
 
 1. `EvalTool` builds a session-specific schema from enabled languages. It is essential, strict, `approval="exec"`, and `concurrency="exclusive"` within one agent session.

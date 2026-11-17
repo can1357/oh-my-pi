@@ -125,12 +125,13 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
 
 ## Command policy and dedicated-tool routing
 
-Two independent settings can prevent a Bash subprocess from starting. They serve different purposes and run at different points in the tool-call lifecycle.
+Three settings can refuse or redirect a Bash call before a subprocess starts. They serve different purposes and run at specific points in the tool-call lifecycle:
 
-| Setting                    | Purpose                           | Rule syntax                                                           | Result when matched                                                                   |
-| -------------------------- | --------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `bash.patterns`            | Command-specific execution policy | Literal text with `*` wildcards                                       | Allows the call, requests human approval, or denies it.                               |
-| `bashInterceptor.patterns` | Prefer a dedicated tool over Bash | JavaScript regular expression, optional flags, tool name, and message | Returns a Bash tool error telling the model to call the named dedicated tool instead. |
+| Setting                    | Purpose                                             | Rule syntax                                                                    | Result when matched                                                                   |
+| -------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| `bashInterceptor.patterns` | Prefer a dedicated tool over Bash (fast regex)      | JavaScript regular expression, optional flags, target `tool`, and `message`    | Denies the call before prompting and tells the model to call `tool` instead.          |
+| `bash.patterns`            | Command-specific execution policy                   | Literal text with `*` wildcards and `approval: allow \| prompt \| deny`        | Allows the call (`write` tier), requests human approval, or denies it.                |
+| `toolInterceptor.rules`    | Cross-tool regex and/or `judge`-model interception  | `tools` glob, optional `suggestedTool`, regex `pattern`, `question`, `message` | Denies the call before prompting and returns `message` (and optional tool guidance).  |
 
 ### `bash.patterns`: permission policy
 
@@ -190,16 +191,29 @@ GIT_AUTHOR_NAME=Dev git commit -m "message"
 
 An anchored rule such as `^\s*git\s+commit\b` can therefore match the `git commit` command in both examples. A stage that consumes another command's stdout through an unquoted `|` or `|&` (for example `grep x` in `printf 'x\n' | grep x`) is **not** treated as an interception candidate: it reads piped stdin, which the path-based dedicated tools cannot supply, so only a standalone or first-stage command is matched. Blank and comment-only continuation lines after the pipe preserve that context. Quoted, escaped, and commented text is not treated as a command. Heredocs, parameter expansion, command substitution, backticks, grouping, and malformed quoting retain only the complete-command check; the interceptor deliberately does not attempt to become a full shell parser.
 
-### Interaction and selection guide
+### Evaluation order and interaction
 
-The approval policy is resolved before execution. A matching `bash.patterns` `deny` never reaches the interceptor. A matching `prompt` reaches the interceptor only after the user accepts the approval request. If an accepted call then matches an interceptor rule, the Bash call still does not run; the model receives the routing error and should invoke the dedicated tool.
+For a `bash` tool call, `ExtensionToolWrapper` (`packages/coding-agent/src/extensibility/extensions/wrapper.ts`) and `BashTool.approval` (`packages/coding-agent/src/tools/bash.ts`) evaluate interceptor, deny, and approval rules in this order:
 
-Avoid configuring the same operation in both places unless that two-step behavior is intended. For example, a `prompt` rule for `cat *` plus an enabled `cat`-to-`read` interceptor first asks the user to approve Bash, then rejects Bash and asks the model to use `read`.
+1. **Pre-emit `resolveApproval` (`deny` short-circuit)**:
+   1. **`bashInterceptor.patterns`** (when `bashInterceptor.enabled` is `true`): tests both the raw command and the command after a leading `cd <dir> &&` (skipping `tool: "bash"` rules when `name` is set, and skipping rules whose replacement `tool` is not active in the session). A match immediately resolves to `policy: "deny"` (`source: "tool"`).
+   2. **`bash.patterns` `deny` rules**: evaluates operator-authority (`Settings.grantAuthority()`) and session `bash.patterns` (whole command and compound segments). Any matching `deny` immediately resolves to `policy: "deny"`.
+   3. **User per-tool `deny`**: `tools.approval.bash: deny` resolves to `policy: "deny"` (`source: "user"`).
+2. **Extension `tool_call` handlers and preflight rules**: extensions may block execution or rewrite `params` into `effectiveParams`.
+3. **Post-emit `resolveApproval` on `effectiveParams`**: re-runs step 1 against `effectiveParams` in case an extension handler modified the command, and checks `tools.restrictedFolders`. Any `deny` throws immediately.
+4. **`toolInterceptor.rules` (`pattern` + batched `judge` `question` rules)**: when `toolInterceptor.enabled` is `true`, evaluates rules matching `"bash"` on `effectiveParams`. Rules with `whenPolicy: prompt` are skipped if the call is already permitted without a prompt (for example, matched by a `bash.patterns` `allow` rule or an active session grant). Surviving `question` rules use `pattern` (if present) as a `0ms` prefilter, batch their questions into a single `judge` model request, and deny before any user prompt when `P(yes) >= threshold` (default `0.7`).
+5. **Policy and tier resolution**: if not denied or intercepted, the non-deny decision from step 3 determines whether to prompt:
+   1. **`tools.restrictedFolders`**: touching a restricted folder forces a per-call `prompt` (`source: "restriction"`), overriding modes, policies, and cached grants.
+   2. **Explicit tool override (`override: true`)**: a `bash.patterns` `prompt` rule or `CRITICAL_BASH_PATTERNS` match forces `prompt` in all modes except `yolo`.
+   3. **Explicit user policy (`tools.approval.bash`)**: `allow` or `prompt` overrides the mode tier comparison.
+   4. **Approval mode vs. tier**: a `bash.patterns` `allow` match lowers the call's tier from `exec` to `write` (`policy: "allow"`); unmatched commands stay at tier `exec` and are compared against `tools.approvalMode` (`yolo`, `write`, `always-ask`, `always-ask-cached`).
+6. **Interactive user approval prompt**: shown only when step 5 requires a prompt (never for calls refused by `bashInterceptor`, `bash.patterns` `deny`, `tools.approval.bash: deny`, or `toolInterceptor`).
+7. **`BashTool.#execute` runtime guards**: re-checks `bashInterceptor` as a defense-in-depth guard for direct callers and enforces `bash.gitGuard` in the shell engine.
 
 Choose the setting by the desired outcome:
 
-- Use `bash.patterns` when the question is **whether the command may execute**.
-- Use `bashInterceptor.patterns` when the question is **which tool should perform the operation**.
+- Use `bash.patterns` when the question is **whether the command may execute** (`allow`, `prompt`, `deny`).
+- Use `bashInterceptor.patterns` (fast regex) or `toolInterceptor.rules` (regex + `judge` questions across tools) when the question is **which tool or pattern the model should use instead**.
 
 ## Flow
 

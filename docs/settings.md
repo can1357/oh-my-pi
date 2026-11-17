@@ -166,7 +166,7 @@ Provider API keys are resolved separately (stored auth, OAuth, `models.yml`, env
 Layers are combined with a deep merge:
 
 - **Objects are deep-merged** — keys present only in a lower layer are kept; keys present in a higher layer override.
-- **Scalars and most arrays are replaced wholesale** by the higher-precedence layer. Rule-list arrays configured with `merge: "prepend"` (`bash.patterns` and `bashInterceptor.patterns`) are the exception: project and `--config` overlay entries prepend ahead of global entries (or the schema default when the global layer leaves the list unset), while a configured `null` or empty `[]` resets the list and runtime overrides still replace it wholesale.
+- **Scalars and most arrays are replaced wholesale** by the higher-precedence layer. Rule-list arrays configured with `merge: "prepend"` (`bash.patterns`, `bashInterceptor.patterns`, and `toolInterceptor.rules`) are the exception: project and `--config` overlay entries prepend ahead of global entries (or the schema default when the global layer leaves the list unset), while a configured `null` or empty `[]` resets the list and runtime overrides still replace it wholesale.
 - **A configured `null` counts as unset at read time**, so the schema default (or a fallback env var) applies rather than a lower-layer value. Project `modelRoles` entries are an exception: cleared/null project roles fall back to global roles.
 - **Named model presets are resolved whole**, not deep-merged across layers. A project preset of the same name replaces the global preset. Runtime/overlay `null` entries can hide a lower-layer preset.
 
@@ -254,6 +254,32 @@ bashInterceptor:
 
 The named replacement tool must be available in the current session or the interceptor does not block the Bash call. For a detailed comparison of permission policy and dedicated-tool routing, including compound-command behavior and ordering, see [the Bash tool documentation](tools/bash.md#command-policy-and-dedicated-tool-routing).
 
+### Tool interceptor rules
+
+`toolInterceptor` intercepts tool calls before the approval prompt runs, using regular expressions (`pattern`), natural-language yes/no questions evaluated by the session's `judge` model role (`question`), or both (`pattern` as a 0ms prefilter for `question`):
+
+```yaml
+toolInterceptor:
+   enabled: true
+   rules:
+      - tools: [eval]
+        suggestedTool: read
+        pattern: '\bjson\s*\.\s*loads?\s*\(|\bJSON\s*\.\s*parse\s*\('
+        question: "Is this code primarily parsing or filtering JSON that could be queried with the read tool's ?q= selector?"
+        message: "Do not use eval to parse JSON; use the read tool with a jq selector."
+      - tools: [bash]
+        whenPolicy: prompt
+        question: "Is this unapproved command performing file inspection that the read or grep tool handles directly?"
+        message: "Use read or grep instead of unapproved shell inspection commands."
+      - tools: ["mcp__deploy_*"]
+        question: "Does this call deploy to production without a CR ticket?"
+        message: "Include a CR ticket before calling production deploy tools."
+```
+
+Each rule specifies `tools` (supporting `*` wildcards; omitted applies to all tools), `message`, and `pattern` and/or `question` (with optional `flags`, `threshold`, `suggestedTool`, and `whenPolicy: prompt` / `whenPolicy: prompt | allow`). Setting `whenPolicy: prompt` skips the rule when the call is already allowed by policy (for example, a `bash` command permitted by `bash.patterns`). All matching `question` rules for a call are batched into a single `judge` request.
+
+During a tool call, `resolveApproval` `deny` checks (including `bashInterceptor.patterns`, `bash.patterns` `deny` rules, and `tools.approval.<tool>: deny`) run before extension `tool_call` handlers; after any `tool_call` input rewrite and post-emit `resolveApproval` check, `toolInterceptor.rules` (`pattern` + batched `judge` questions) run before the interactive approval prompt. See [the Bash tool documentation](tools/bash.md#evaluation-order-and-interaction) for the complete step-by-step sequence.
+
 ### Worked example: global vs. project
 
 ```yaml
@@ -288,7 +314,7 @@ disabledProviders:
    - groq # project array REPLACES the global array
 ```
 
-Array replacement is the most common surprise for non-merged lists: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every array setting other than `bash.patterns` and `bashInterceptor.patterns` (which prepend project entries ahead of global ones).
+Array replacement is the most common surprise for non-merged lists: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every array setting other than `bash.patterns`, `bashInterceptor.patterns`, and `toolInterceptor.rules` (which prepend project entries ahead of global ones).
 
 ## Project-local config
 
@@ -333,7 +359,7 @@ Overlay paths are resolved relative to the process working directory (and `~` is
 
 ## Path-scoped arrays
 
-Four array settings — `enabledModels`, `disabledProviders`, `bash.patterns`, and `bashInterceptor.patterns` — accept path-scoped entries in addition to unscoped entries, so a single global config can behave differently per directory without maintaining separate `<repo>/.omp/config.yml` files:
+Five array settings — `enabledModels`, `disabledProviders`, `bash.patterns`, `bashInterceptor.patterns`, and `toolInterceptor.rules` — accept path-scoped entries in addition to unscoped entries, so a single global config can behave differently per directory without maintaining separate `<repo>/.omp/config.yml` files:
 
 ```yaml
 enabledModels:
@@ -363,13 +389,13 @@ bash:
         approval: allow
 ```
 
-Unscoped entries (bare strings for model/provider lists, or direct rule objects for `bash.patterns` and `bashInterceptor.patterns`) apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
+Unscoped entries (bare strings for model/provider lists, or direct rule objects for `bash.patterns`, `bashInterceptor.patterns`, and `toolInterceptor.rules`) apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
 
 Accepted **path** keys (any of them, combined): `path`, `paths`, `pathPrefix`, `pathPrefixes`.
 
 Accepted **value** keys:
 
-- `models` (for `enabledModels`), `providers` (for `disabledProviders`), or `patterns` (for `bash.patterns` and `bashInterceptor.patterns`)
+- `models` (for `enabledModels`), `providers` (for `disabledProviders`), `patterns` (for `bash.patterns` and `bashInterceptor.patterns`), or `rules` (for `toolInterceptor.rules`)
 - `values` or `items` (for any path-scoped setting)
 
 For `bash.patterns` and `bashInterceptor.patterns`, a scoped entry may wrap a list under `patterns` / `values` / `items`, carry the rule fields itself (`{ path, match, approval }`), or both; inside its scope it contributes its own rule first, then the listed rules in order. Listed rules may be path-scoped themselves, narrowing the outer scope. An entry whose path keys hold no string (for example `path: ~`, which YAML reads as null; quote it as `"~"` for your home directory) is not scoped and applies everywhere. When `bashInterceptor.patterns` contains only path-scoped entries, the built-in interceptor rules still apply after any matching scoped rules; one unscoped rule in that list makes it replace the built-ins, but rules a project or `--config` overlay prepends onto it do not. For the other settings, malformed scoped entries are ignored. Path scoping is resolved **after** the layer merge, so it reads the final effective array for the active working directory.
@@ -1300,7 +1326,7 @@ Selected migrations applied whenever raw settings are loaded (global, project, o
 
 ### A global array disappeared in a project
 
-Most arrays replace rather than append (`bash.patterns` and `bashInterceptor.patterns` prepend project entries ahead of global entries). If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or another replacing array, include the **complete** desired value in the project layer — the global array is fully replaced.
+Most arrays replace rather than append (`bash.patterns`, `bashInterceptor.patterns`, and `toolInterceptor.rules` prepend project entries ahead of global entries). If a project sets `disabledProviders`, `enabledModels`, `cycleOrder`, `extensions`, or another replacing array, include the **complete** desired value in the project layer — the global array is fully replaced.
 
 ### A provider is still available after editing config
 

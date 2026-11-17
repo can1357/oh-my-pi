@@ -9,6 +9,91 @@ import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 
+/**
+ * One tool-interceptor rule (`toolInterceptor.rules`).
+ *
+ * Applies to tools matching `tools` (omitted matches all tools, `*` wildcards supported).
+ * - `pattern` alone: blocks synchronously when the regex matches.
+ * - `question` alone: asks the `judge` model role whether the yes/no question holds (`P(yes) >= threshold`).
+ * - `pattern` + `question`: `pattern` is a fast regex prefilter; the judge is queried only when `pattern` matches.
+ */
+export interface ToolInterceptorRule {
+	/** Tool name(s) or `*` glob pattern(s) this rule applies to (e.g. `"eval"`, `["eval", "bash"]`, `"mcp__*"`). */
+	tools?: string | readonly string[];
+	/** Optional replacement tool that must be active in the session for the rule to fire. */
+	suggestedTool?: string;
+	/** Optional resolved approval policy filter (`"prompt"` or `"allow"`). */
+	whenPolicy?: "prompt" | "allow";
+	/** Optional JavaScript regex pattern (standalone match when `question` is omitted, or prefilter when `question` is set). */
+	pattern?: string;
+	/** Optional regex flags for `pattern` (e.g. `"i"`, `"m"`). */
+	flags?: string;
+	/** Natural-language yes/no question evaluated by the session's `judge` model role. */
+	question?: string;
+	/** Minimum yes-probability (0–1) for `question` to block. Default: 0.7 (`JUDGED_RULE_THRESHOLD`). */
+	threshold?: number;
+	/** Guidance message returned to the agent when the call is intercepted. */
+	message: string;
+}
+
+export const DEFAULT_TOOL_INTERCEPTOR_RULES: ToolInterceptorRule[] = [
+	{
+		tools: ["eval"],
+		pattern: "\\btool\\.(?:read|write|edit|apply_patch|grep|glob|bash)\\s*\\(",
+		question:
+			"Is this code merely wrapping one or a few direct session tool calls (`tool.<name>(...)`, including `xd://` device writes) that could be invoked directly as tool calls, rather than orchestrating them inside a programmatic loop or reusable `@tool` definition?",
+		message:
+			"Do not call dedicated session tools (read, write, edit, grep, glob, bash) through `eval`'s tool bridge when a direct tool call suffices; invoke the tool directly.",
+	},
+	{
+		tools: ["eval"],
+		suggestedTool: "bash",
+		pattern:
+			"(?:^|[^\\w.])sh\\s*(?:\\(|`)|\\bsubprocess\\.|\\bos\\.(?:system|popen)\\s*\\(|\\bBun\\.(?:spawn(?:Sync)?|\\$)|\\bchild_process\\b|\\bexec(?:File)?(?:Sync)?\\s*\\(",
+		question:
+			"Is this code merely running one or a few shell commands that could be executed directly with the bash tool (rather than programmatically parsing or aggregating command output, looping over dynamic inputs, or driving a benchmark or test harness)?",
+		message: "Do not use `eval` to run standalone shell commands; use the `bash` tool directly.",
+	},
+	{
+		tools: ["eval"],
+		suggestedTool: "read",
+		pattern:
+			"^(?=[\\s\\S]*(?:\\bjson\\s*\\.\\s*loads?\\s*\\(|\\bJSON\\s*\\.\\s*parse\\s*\\(|\\bBun\\.JSONL\\b))(?=[\\s\\S]*(?:(?:^|[^\\w.])(?:read|output|(?:io\\.)?open)\\s*\\(|\\.\\s*read_(?:text|bytes)\\s*\\(|\\bBun\\.file\\s*\\(|\\breadFile(?:Sync)?\\s*\\())",
+		question:
+			"Is this code only reading a single JSON or JSONL file or artifact to extract, filter, or inspect fields—without joining multiple sources, computing statistical aggregations, or mutating persistent kernel state—such that a single read tool call with a ?q=<jq filter> selector handles it directly?",
+		message:
+			"Do not use `eval` to parse or filter a single JSON file or artifact; use the `read` tool with a jq query selector (e.g. path: 'file.json?q=<filter>' or 'artifact://<id>?q=<filter>').",
+	},
+	{
+		tools: ["eval"],
+		suggestedTool: "read",
+		pattern:
+			"(?:^|[^\\w.])read\\s*\\(|(?:^|[^\\w.])(?:io\\.)?open\\s*\\(|\\.\\s*read_(?:text|bytes)\\s*\\(|\\bBun\\.file\\s*\\(|\\breadFile(?:Sync)?\\s*\\(",
+		question:
+			"Is this code merely reading, slicing, or printing a file's contents without performing non-trivial computation, statistical aggregation, cross-file analysis, or testing that the read tool cannot do?",
+		message:
+			"Do not use `eval` to read or slice a file; use the `read` tool (with line selectors or query selectors) instead.",
+	},
+	{
+		tools: ["eval"],
+		suggestedTool: "glob",
+		pattern:
+			"\\bglob\\.i?glob\\s*\\(|\\bos\\.(?:walk|listdir|scandir)\\s*\\(|\\.\\s*(?:r?glob|iterdir)\\s*\\(|\\bnew\\s+Bun\\.Glob\\s*\\(|\\breaddir(?:Sync)?\\s*\\(",
+		question:
+			"Is this code merely listing or walking directories to find file paths that the glob tool could find (rather than reading and analyzing or aggregating the contents of many files in bulk)?",
+		message: "Use the `glob` tool instead of listing or walking directories in `eval`.",
+	},
+	{
+		tools: ["eval"],
+		suggestedTool: "write",
+		pattern:
+			"(?:^|[^\\w.])write\\s*\\(|\\.\\s*write_(?:text|bytes)\\s*\\(|(?:^|[^\\w.])(?:io\\.)?open\\s*\\([^()\\n]*,\\s*(?:mode\\s*=\\s*)?(?:[\"'][waxWAX][^\"']*[\"']|[\"'][^\"']*\\+[^\"']*[\"'])|\\bBun\\.write\\s*\\(|\\b(?:writeFile|appendFile)(?:Sync)?\\s*\\(",
+		question:
+			"Is this code writing or modifying text files in the project or workspace that should be written with the write or edit tool (rather than writing to an internal URL such as out://, local://, or agent://, generating binary/plot/image data, or creating an isolated temporary test fixture)?",
+		message: "Use the `write` or `edit` tool instead of writing or modifying workspace text files in `eval`.",
+	},
+];
+
 export const cfgToolsArtifactSpillThreshold = register({
 	id: "tools.artifactSpillThreshold",
 	type: "number",
@@ -369,6 +454,27 @@ export const cfgToolsRestrictedFolders = register({
 			throw new Error("tools.restrictedFolders must be a list of folder paths");
 		}
 	},
+});
+
+// Tool interceptor
+export const cfgToolInterceptorEnabled = register({
+	id: "toolInterceptor.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Tool Interceptor",
+		description: "Block tool calls that match interceptor patterns or judge questions before prompting for approval",
+	},
+});
+
+export const cfgToolInterceptorRules = register({
+	id: "toolInterceptor.rules",
+	type: "array",
+	default: DEFAULT_TOOL_INTERCEPTOR_RULES,
+	pathScoped: { valuesKey: "rules", itemType: "object" },
+	merge: "prepend",
 });
 
 // Todo tool

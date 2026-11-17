@@ -2899,6 +2899,19 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			before: (toolCallId, tool, args) => this.#ttsr.beforeBridgedToolCall(toolCallId, tool, args),
 			after: (toolCallId, result, context) => this.#ttsr.afterBridgedToolCall(toolCallId, result, context),
 			cancel: toolCallId => this.#ttsr.cancelBridgedToolCall(toolCallId),
+			judge: (purpose, settingsOverride) =>
+				resolveJudge({
+					settings: settingsOverride ?? this.settings,
+					registry: this.#modelRegistry,
+					sessionModel: this.model,
+					sessionId: this.sessionId,
+					metadataResolver: provider => this.agent.metadataForProvider(provider),
+					purpose,
+					onUsage: journalJudgmentUsage(this.sessionManager),
+					telemetry: this.agent.telemetry,
+					cache: sharedJudgmentCache(),
+					costGate: this.#costGate,
+				}),
 		});
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
 		this.agent.setOnModelCallSystemPrompt(prompt => {
