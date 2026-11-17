@@ -13,8 +13,14 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
-async function git(cwd: string, args: readonly string[]): Promise<string> {
-	const env = { ...process.env, HOME: cwd, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" };
+async function git(cwd: string, args: readonly string[], extraEnv: Record<string, string> = {}): Promise<string> {
+	const env = {
+		...process.env,
+		HOME: cwd,
+		GIT_CONFIG_GLOBAL: "/dev/null",
+		GIT_CONFIG_SYSTEM: "/dev/null",
+		...extraEnv,
+	};
 	const proc = Bun.spawn(["git", "-C", cwd, ...args], { env, stdout: "pipe", stderr: "pipe" });
 	const [out, err, code] = await Promise.all([
 		new Response(proc.stdout).text(),
@@ -164,8 +170,16 @@ describe("selective commit flow", () => {
 		draft.take({ path: "**" });
 		await commitSelection(draft, { subject: "chore: committed everything" }, { journal, agent: { agent: "Main" } });
 
-		// Index and worktree both match the commit, byte for byte and mode for mode.
+		// The commit is exactly git's own snapshot of the worktree on top of the seed: same paths,
+		// bytes, and modes as `git add -A` records into a throwaway index on this filesystem.
+		const oracleIndex = { GIT_INDEX_FILE: path.join(root, ".git", "oracle-index") };
+		await git(root, ["read-tree", "HEAD~1"], oracleIndex);
+		await git(root, ["add", "-A"], oracleIndex);
+		expect(await git(root, ["rev-parse", "HEAD^{tree}"])).toBe(await git(root, ["write-tree"], oracleIndex));
+		// The shared index and worktree match the commit too.
 		expect(await git(root, ["status", "--porcelain"])).toBe("");
+
+		// The fixture really exercised each case: otherwise the snapshot comparison passes vacuously.
 		const modes = Object.fromEntries(
 			(await git(root, ["ls-tree", "HEAD"]))
 				.trim()
@@ -175,13 +189,14 @@ describe("selective commit flow", () => {
 					return [file, meta.split(" ")[0]];
 				}),
 		);
-		expect(modes).toEqual({
-			"bom.ass": "100644",
-			"latin1.txt": "100644",
-			link: "120000",
-			"plain.txt": "100755",
-			"run.sh": "100644",
-		});
+		expect(modes).toEqual(expect.objectContaining({ "bom.ass": "100644", "latin1.txt": "100644", link: "120000" }));
+		expect(modes).not.toHaveProperty("tool.sh");
+		// Git records executable bits only with core.fileMode, which `git init` turns off where the
+		// filesystem has none (NTFS); there a chmod is invisible to git and to the snapshot alike.
+		const tracksExecBit = await git(root, ["config", "--type=bool", "--default=true", "--get", "core.filemode"]);
+		if (tracksExecBit.trim() === "true") {
+			expect(modes).toEqual(expect.objectContaining({ "plain.txt": "100755", "run.sh": "100644" }));
+		}
 	});
 
 	it("makes the first commit of a repository without commits", async () => {
