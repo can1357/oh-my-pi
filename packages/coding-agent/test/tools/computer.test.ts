@@ -4480,25 +4480,37 @@ describe("computer background fallback", () => {
 		return text.slice(ran.length);
 	}
 
-	async function run(
+	/** Runs code on one worker, so state the worker keeps across runs (its desktop session) carries over. */
+	function worker(
+		native: NativeDesktopSession,
+	): (
+		code: string,
+		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
+	) => Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		return async (code, backgroundFallback) => {
+			const id = crypto.randomUUID();
+			transport.inbound({
+				type: "run",
+				id,
+				code,
+				timeoutMs: 2_000,
+				session: snapshot(false, undefined, backgroundFallback),
+				escape: escapeScope(),
+			});
+			const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+			if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+			return message;
+		};
+	}
+
+	function run(
 		native: NativeDesktopSession,
 		code: string,
 		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
 	): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
-		const transport = new MemoryTransport();
-		new ComputerWorkerCore(transport, () => native);
-		const id = crypto.randomUUID();
-		transport.inbound({
-			type: "run",
-			id,
-			code,
-			timeoutMs: 2_000,
-			session: snapshot(false, undefined, backgroundFallback),
-			escape: escapeScope(),
-		});
-		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
-		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
-		return message;
+		return worker(native)(code, backgroundFallback);
 	}
 
 	function texts(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string[] {
@@ -4568,6 +4580,78 @@ describe("computer background fallback", () => {
 		expect(texts(await run(native, 'await (await desktop.window("42")).type("hi")', "takeover"))).toEqual([
 			`type ran in takeover because ${reason}; the input was delivered, and focus returned to Notes`,
 		]);
+	});
+
+	it("says once per desktop session that a macOS background move gives no hover, and only then", async () => {
+		class MoveSession extends RefusingSession {
+			constructor(readonly backend: string) {
+				super();
+			}
+			override get capabilities(): DesktopCapabilities {
+				return { ...super.capabilities, backend: this.backend };
+			}
+			override async moveMouse(
+				_target: string,
+				_x: number,
+				_y: number,
+				opts?: PointerOptions | null,
+			): Promise<void> {
+				this.sent.push(opts);
+				if (this.refuseMove && opts?.takeover !== true) throw new Error(this.refusal);
+			}
+			refuseMove = false;
+		}
+		const win = 'const w = await desktop.window("42");';
+		const hover = "move ran in the background, which gives the app no hover";
+		// Negative controls first, on one worker: runs with no background move (a requested takeover move, a
+		// silent screenshot, desktop and display moves, which drive the user's pointer) and a fallback rerun in
+		// takeover print no note and do not use it up.
+		const mac = new MoveSession("quartz");
+		const runMac = worker(mac);
+		expect(texts(await runMac(`${win} await w.move(1, 2, { takeover: true });`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.screenshot({ silent: true });`, "takeover"))).toEqual([]);
+		expect(
+			texts(
+				await runMac(
+					'await desktop.move(1, 2); await (await desktop.display("display-1")).move(1, 2);',
+					"takeover",
+				),
+			),
+		).toEqual([]);
+		mac.refuseMove = true;
+		const fellBack = texts(await runMac(`${win} await w.move(1, 2);`, "takeover"));
+		expect(fellBack).toHaveLength(1);
+		expect(fellBack[0]).toStartWith("move ran in takeover because");
+		mac.refuseMove = false;
+		// A run that fails after a background move delivers only its error, so it leaves the note unspent.
+		const failed = await runMac(`${win} await w.move(1, 2); assert(false, "stop");`, "takeover");
+		expect(failed.ok).toBe(false);
+		// Background moves, with and without `takeover: false`, in one run and then as separate runs (as eval
+		// sends each window call), print one note for the whole session.
+		mac.sent.length = 0;
+		const [note, ...rest] = texts(
+			await runMac(`${win} await w.move(1, 2); await w.move(3, 4, { takeover: false });`, "takeover"),
+		);
+		expect(rest).toEqual([]);
+		expect(note).toStartWith(hover);
+		expect(note).toEndWith("click it with { takeover: true }");
+		expect(texts(await runMac(`${win} await w.move(5, 6);`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.move(7, 8);`, "takeover"))).toEqual([]);
+		expect(mac.sent).toEqual([{}, { takeover: false }, {}, {}]);
+		// Under refuse, the note names no takeover, which the setting would refuse.
+		const [refused, ...more] = texts(await run(mac, `${win} await w.move(1, 2); await w.move(3, 4);`, "refuse"));
+		expect(more).toEqual([]);
+		expect(refused).toStartWith(hover);
+		expect(refused).not.toContain("takeover: true");
+		expect(refused).toContain("the user's setting refuses takeover");
+		// Background moves on Linux and Windows print nothing.
+		for (const backend of ["x11", "wayland", "win32"]) {
+			const other = new MoveSession(backend);
+			expect(texts(await run(other, `${win} await w.move(1, 2); await w.move(3, 4);`, "takeover")), backend).toEqual(
+				[],
+			);
+			expect(other.sent, backend).toEqual([{}, {}]);
+		}
 	});
 
 	it("refuses without a takeover under refuse, and tells the model so without suggesting one", async () => {
