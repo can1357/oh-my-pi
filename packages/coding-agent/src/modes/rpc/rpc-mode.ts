@@ -2769,6 +2769,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// Track whether onAuth has fired. Providers that require interactive
 				// input before a browser URL cannot be satisfied headlessly; after
 				// onAuth, prompt input is the pasted OAuth code/redirect URL path.
+				// The login-warning acceptance is the exception: a plain yes/no the host can show.
 				let authEmitted = false;
 				try {
 					await session.modelRegistry.authStorage.oauth.login(command.providerId, {
@@ -2793,7 +2794,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 										"which is not supported in RPC mode. Use the terminal UI to log in.",
 								);
 							}
-							if (!authEmitted) {
+							if (!authEmitted && !prompt.riskAcknowledgement) {
 								// onPrompt called before any auth URL — provider requires
 								// interactive input that cannot be satisfied headlessly.
 								return Promise.reject(
