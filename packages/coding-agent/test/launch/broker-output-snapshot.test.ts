@@ -33,6 +33,111 @@ function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 }
 
 describe("daemon broker log snapshots", () => {
+	it.each([false, true])(
+		"matches an anchored readiness line after startup output (pty: %s)",
+		async pty => {
+			using tempDir = TempDir.createSync("@omp-launch-ready-lines-");
+			const projectDir = path.join(tempDir.path(), "project");
+			const runtimeDir = path.join(tempDir.path(), "runtime");
+			await fs.mkdir(projectDir);
+			const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			const previousTitle = process.title;
+			const broker = startBroker(projectDir, runtimeDir);
+			try {
+				const started = await client.request({
+					op: "start",
+					spec: {
+						name: "ready-lines",
+						application: process.execPath,
+						args: ["-e", "process.stdout.write('booting\\nREADY\\n'); process.stdin.resume();"],
+						env: {},
+						cwd: projectDir,
+						pty,
+						ready: { log: "^READY$", timeoutMs: 1_000 },
+						restart: "no",
+						persist: false,
+						detached: false,
+					},
+				});
+				if (started.op !== "start") throw new Error("unexpected start result");
+				expect(started.readyTimedOut).toBeFalse();
+				expect(started.daemon.state).toBe("ready");
+				expect(started.daemon.readyMatch).toBe("READY");
+			} finally {
+				await client.request({ op: "stop", name: "ready-lines", timeoutMs: 2_000 }).catch(() => undefined);
+				await client.request({ op: "shutdown" }).catch(() => undefined);
+				client.close();
+				await broker;
+				setProcessName(previousTitle);
+			}
+		},
+		10_000,
+	);
+
+	it("matches an anchored wait pattern across output chunks after startup output", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-wait-lines-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name: "wait-lines",
+					application: process.execPath,
+					args: [
+						"-e",
+						`process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+process.stdout.write("booting\\n");`,
+					],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					ready: { log: "booting", timeoutMs: 1_000 },
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			expect(started.readyTimedOut).toBeFalse();
+
+			await client.request({ op: "send", name: "wait-lines", data: "RE" });
+			const partial = await client.request({
+				op: "wait",
+				name: "wait-lines",
+				for: "exit",
+				pattern: "^RE$",
+				timeoutMs: 1_000,
+			});
+			if (partial.op !== "wait") throw new Error("unexpected wait result");
+			expect(partial.timedOut).toBeFalse();
+			expect(partial.matched).toBe("RE");
+
+			await client.request({ op: "send", name: "wait-lines", data: "ADY\n" });
+			const completed = await client.request({
+				op: "wait",
+				name: "wait-lines",
+				for: "exit",
+				pattern: "^READY$",
+				timeoutMs: 1_000,
+			});
+			if (completed.op !== "wait") throw new Error("unexpected wait result");
+			expect(completed.timedOut).toBeFalse();
+			expect(completed.matched).toBe("READY");
+		} finally {
+			await client.request({ op: "stop", name: "wait-lines", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 10_000);
+
 	it("returns the cursor captured with the PTY bytes rendered in the response", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-cursor-");
 		const projectDir = path.join(tempDir.path(), "project");
