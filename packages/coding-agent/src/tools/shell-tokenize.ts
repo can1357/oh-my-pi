@@ -1709,9 +1709,9 @@ function shellScriptSource(argv: readonly string[]): string | undefined {
 	return stdin || i >= argv.length ? "stdin" : undefined;
 }
 
-/** The script a `bash -c '...'` or `eval ...` runs. */
+/** The script a `bash -c '...'` or `eval ...` runs; eval takes a leading `--` as the end of its options. */
 function inlineShellScript(argv: readonly string[]): string | undefined {
-	if (argv[0] === "eval") return argv.slice(1).join(" ");
+	if (argv[0] === "eval") return argv.slice(argv[1] === "--" ? 2 : 1).join(" ");
 	if (!Object.hasOwn(SCRIPT_SHELLS, argv[0])) return undefined;
 	const source = shellScriptSource(argv);
 	return source === "stdin" ? undefined : source;
