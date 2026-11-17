@@ -4,15 +4,19 @@ Request:  {"id": int, "method": str, "params": dict}
 Response: {"id", "ok": true, "result", "dirty"} | {"id", "ok": false, "error": {"type", "message"}}
 """
 
+import _thread
 import ast
 import io
 import json
 import os
+import queue
 import re
 import signal
 import sys
+import threading
+import time
 import traceback
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 # Diagnostics and user prints must never corrupt the protocol stream.
@@ -50,10 +54,11 @@ def _program():
 
 def _json(r2, text):
     """cmdj with a raw cmd fallback when radare2 emits non-JSON output."""
-    try:
-        return r2.cmdj(text)
-    except Exception:
-        return r2.cmd(text)
+    with _nul_io():
+        try:
+            return r2.cmdj(text)
+        except Exception:
+            return r2.cmd(text)
 
 
 def _items(value):
@@ -97,10 +102,14 @@ def resolve(t):
         return _addr(token)
     except (ValueError, TypeError):
         pass
-    answer = str(_program().cmd("?v " + token)).strip()
+    with _nul_io():
+        answer = str(_program().cmd("?v " + token)).strip()
     if answer:
         try:
-            return _addr(answer)
+            ea = _addr(answer)
+            # r2 prints 0x0 on stdout and the real error on stderr for unknown symbols.
+            if ea != 0 or token in ("0", "0x0"):
+                return ea
         except (ValueError, TypeError):
             pass
     raise ValueError("cannot resolve target: " + repr(t))
@@ -312,9 +321,96 @@ def help_radare2():
     ])
 
 
+@contextmanager
+def _nul_io():
+    """Defer SIGINT around r2's NUL-terminated reads so a cancel cannot desync them."""
+    if _WINDOWS:
+        yield
+        return
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+
+
+def _clean_decl(decl):
+    """Return a normalized C prototype, or None for empty/garbage declarations."""
+    if not isinstance(decl, str):
+        return None
+    text = decl.strip()
+    if len(text) > 1 and text[0] in "\"'":
+        text = text[1:-1].strip()
+    text = text.rstrip("; ").strip()
+    if "(" not in text or not text.endswith(")") or ")" in text[:-1]:
+        return None
+    head, _, args = text.partition("(")
+    head = head.strip()
+    args = args[:-1].strip()
+    if not head or (" " not in head and "*" not in head):
+        return None
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_ \*]*", head):
+        return None
+    if args and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_ \*,\. \[\]]*", args):
+        return None
+    return text
+
+
+def rename(t, name):
+    """Rename a function with afn; returns {"ea"}."""
+    global _DIRTY
+    r2 = _program()
+    ea = resolve(t)
+    with _nul_io():
+        r2.cmd(f"afn {name} @ {_hex(ea)}")
+    _DIRTY = True
+    return {"ea": _hex(ea)}
+
+
+def comment(t, text, repeatable=False):
+    """Set an address comment with CC; repeatable also comments every xref."""
+    global _DIRTY
+    r2 = _program()
+    ea = resolve(t)
+    targets = [ea]
+    if repeatable:
+        targets.extend(ref["from"] for ref in xrefs_to(ea) if ref["from"] is not None and ref["from"] != ea)
+    with _nul_io():
+        for addr in targets:
+            r2.cmd(f"CC {text} @ {_hex(addr)}")
+    _DIRTY = True
+    return {"ea": _hex(ea)}
+
+
+def set_type(t, decl):
+    """Apply a validated C function prototype with afs; returns {"ea", "type"}."""
+    global _DIRTY
+    r2 = _program()
+    ea = resolve(t)
+    prototype = _clean_decl(decl)
+    if prototype is None:
+        raise ValueError("set_type needs a C function declaration, got: " + repr(decl))
+    with _nul_io():
+        r2.cmd(f"afs {prototype} @ {_hex(ea)}")
+    _DIRTY = True
+    return {"ea": _hex(ea), "type": prototype}
+
+
+def make_function(t):
+    """Create a function at the target with af; returns {"ea"}."""
+    global _DIRTY
+    r2 = _program()
+    ea = resolve(t)
+    with _nul_io():
+        r2.cmd(f"af @ {_hex(ea)}")
+    _DIRTY = True
+    return {"ea": _hex(ea)}
+
+
 _HELPERS = (
     resolve, func, name_of, pseudocode, asm, xrefs_to, xrefs_from, callers,
     callees, functions, strings, imports, hexdump, read_bytes, help_radare2,
+    rename, comment, set_type, make_function,
 )
 
 # ---------------------------------------------------------------------------
@@ -512,7 +608,28 @@ def _rpc_exec(params):
     return {"output": buf.getvalue(), "value": value, "error": error}
 
 
-_METHODS = {"open": _rpc_open, "view": _rpc_view, "exec": _rpc_exec, "save": _rpc_save}
+def _rpc_rename(params):
+    return rename(params["target"], params["name"])
+
+
+def _rpc_comment(params):
+    return comment(params["target"], params["text"], params.get("repeatable", False))
+
+
+def _rpc_set_type(params):
+    return set_type(params["target"], params["decl"])
+
+
+def _rpc_make_function(params):
+    return make_function(params["target"])
+
+
+_METHODS = {
+    "open": _rpc_open, "view": _rpc_view, "exec": _rpc_exec,
+    "rename": _rpc_rename, "comment": _rpc_comment,
+    "set_type": _rpc_set_type, "make_function": _rpc_make_function,
+    "save": _rpc_save,
+}
 
 
 def _error(exc):
@@ -533,6 +650,83 @@ def _send(frame):
         _proto.flush()
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+
+
+# A cancel must SIGKILL/reap r2 (SIGINT is swallowed by `r2 -q0` and desyncs its NUL
+# stream) and abandon the in-memory session, while still answering the request.
+_INTERRUPT_ABSORB_S = 0.5
+_requests = queue.Queue()
+_running_lock = threading.Lock()
+_running_id = None
+_interrupt_pending = False
+
+
+def _cancel_session():
+    global R2, _DIRTY
+    r2 = R2
+    R2 = None
+    _DIRTY = False
+    NS.clear()
+    if r2 is not None:
+        try:
+            r2.terminate()
+        except Exception:
+            traceback.print_exc()
+
+
+def _on_sigint(signum, frame):
+    _cancel_session()
+    raise KeyboardInterrupt()
+
+
+def _read_requests():
+    global _interrupt_pending
+    for line in sys.stdin:
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            frame = None
+        if isinstance(frame, dict) and "interrupt" in frame:
+            with _running_lock:
+                if not _interrupt_pending and _running_id is not None and _running_id == frame["interrupt"]:
+                    _interrupt_pending = True
+                    _cancel_session()
+                    _thread.interrupt_main()
+            continue
+        _requests.put(line)
+    _requests.put("")
+
+
+def _run(req_id, handler, params):
+    """Run one request; absorb a scheduled interrupt before writing its response."""
+    global _running_id, _interrupt_pending
+    ok, value, started, finished, delivered = False, None, False, False, False
+    while True:
+        try:
+            if not started:
+                started = True
+                with _running_lock:
+                    _running_id = req_id
+            if not finished:
+                finished = True
+                try:
+                    value, ok = handler(params), True
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as exc:
+                    value = exc
+            with _running_lock:
+                _running_id = None
+                pending = _interrupt_pending and not delivered
+                _interrupt_pending = False
+            deadline = time.monotonic() + _INTERRUPT_ABSORB_S if pending else 0
+            while time.monotonic() < deadline:
+                pass
+            return ok, value
+        except KeyboardInterrupt as exc:
+            delivered = True
+            if not ok:
+                value = exc
 
 
 def _close(save):
@@ -572,16 +766,26 @@ def _handle(line):
         handler = _METHODS.get(method)
         if handler is None:
             raise ValueError("unknown method: " + str(method))
-        result = handler(params)
-        _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
     except SystemExit:
         raise
     except BaseException as exc:
         _send({"id": req_id, "ok": False, "error": _error(exc)})
+        return
+    ok, result = _run(req_id, handler, params)
+    if ok:
+        _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
+    else:
+        _send({"id": req_id, "ok": False, "error": _error(result)})
 
 
 def main():
-    for line in sys.stdin:
+    if not _WINDOWS:
+        signal.signal(signal.SIGINT, _on_sigint)
+    threading.Thread(target=_read_requests, name="omp-radare2-stdin", daemon=True).start()
+    while True:
+        line = _requests.get()
+        if not line:
+            break
         if line.strip():
             _handle(line)
     _close(True)

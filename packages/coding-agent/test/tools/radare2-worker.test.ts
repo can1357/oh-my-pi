@@ -338,3 +338,136 @@ describe("radare2 views and exec", () => {
 		expect(helpers.value).toBe("['help_radare2', 'r2']");
 	});
 });
+
+type StubWorker = { worker: DisasmWorker; dir: string; databaseDir: string; log: string; marker: string };
+type MutationResult = { ea: string; [key: string]: unknown };
+
+/** Start a radare2 worker against a fresh temp tree; frameMode forces an stdin interrupt frame. */
+async function startStubWorker(prefix: string, frameMode = false): Promise<StubWorker> {
+	const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+	const databaseDir = path.join(dir, ".omp", "db");
+	const log = path.join(dir, "r2.log");
+	const stubs = path.join(dir, "stubs");
+	await Bun.write(log, "");
+	await Bun.write(path.join(stubs, "r2pipe.py"), STUB_R2PIPE);
+	const binary = path.join(databaseDir, "stub.bin");
+	await Bun.write(binary, "radare2 mutation fixture\n");
+	const env: Record<string, string> = {};
+	for (const key in process.env) {
+		const value = process.env[key];
+		if (value !== undefined) env[key] = value;
+	}
+	env.PYTHONPATH = stubs;
+	env.PYTHONUNBUFFERED = "1";
+	env.PYTHONIOENCODING = "utf-8";
+	env.RADARE2_BIN = path.join(dir, "radare2");
+	env.OMP_R2_STUB_LOG = log;
+	const loc: DatabaseLocation = {
+		id: "stub",
+		dir: databaseDir,
+		sourcePath: binary,
+		stagedPath: binary,
+		kind: "store",
+		openPath: binary,
+		isNew: true,
+		lockTarget: path.join(databaseDir, "omp.r2"),
+	};
+	const backend = frameMode ? { ...DISASM_BACKENDS.radare2, interrupt: "frame" as const } : DISASM_BACKENDS.radare2;
+	const lock = await acquireFileLock(loc.lockTarget);
+	try {
+		return {
+			worker: await DisasmWorker.start(backend, loc, { pythonPath, env }, lock, 0),
+			dir,
+			databaseDir,
+			log,
+			marker: path.join(databaseDir, "omp.r2"),
+		};
+	} catch (error) {
+		lock.release();
+		throw error;
+	}
+}
+
+async function stopStubWorker(stub: StubWorker): Promise<void> {
+	try {
+		await stub.worker.close({ save: false });
+	} finally {
+		await fs.rm(stub.dir, { recursive: true, force: true });
+	}
+}
+
+describe("radare2 mutations and cancellation", () => {
+	let stub: StubWorker;
+
+	beforeAll(async () => {
+		stub = await startStubWorker("radare2-mutations-");
+	});
+
+	afterAll(async () => {
+		await stopStubWorker(stub);
+	});
+
+	it("renames, comments, sets types and creates functions", async () => {
+		const renamed = await stub.worker.request<MutationResult>("rename", { target: "main", name: "entry_main" });
+		expect(renamed).toMatchObject({ ea: "0x1000" });
+
+		const commented = await stub.worker.request<MutationResult>("comment", { target: "main", text: "entry" });
+		expect(commented).toMatchObject({ ea: "0x1000" });
+
+		const typed = await stub.worker.request<MutationResult>("set_type", { target: "main", decl: "int main(void)" });
+		expect(typed).toMatchObject({ ea: "0x1000" });
+
+		const made = await stub.worker.request<MutationResult>("make_function", { target: "0x2000" });
+		expect(made).toMatchObject({ ea: "0x2000" });
+
+		const lines = (await Bun.file(stub.log).text()).split("\n").filter(Boolean);
+		for (const cmd of [
+			"cmd:afn entry_main @ 0x1000",
+			"cmd:CC entry @ 0x1000",
+			"cmd:afs int main(void) @ 0x1000",
+			"cmd:af @ 0x2000",
+		]) {
+			expect(lines).toContain(cmd);
+		}
+
+		expect(stub.worker.needsSave).toBe(true);
+		expect(await stub.worker.request<{ idb: string }>("save", {})).toEqual({ idb: stub.marker });
+		expect(stub.worker.needsSave).toBe(false);
+	});
+
+	it("repeatable comments are written at the target and its xrefs", async () => {
+		await stub.worker.request("comment", { target: "main", text: "shared", repeatable: true });
+		const lines = (await Bun.file(stub.log).text()).split("\n").filter(Boolean);
+		for (const addr of ["0x1000", "0x2000"]) {
+			expect(lines).toContain(`cmd:CC shared @ ${addr}`);
+		}
+		expect(lines.some(line => line.startsWith("cmdj:axtj"))).toBe(true);
+	});
+
+	it("rejects a type declaration that r2 cannot parse without renaming the function", async () => {
+		const before = await Bun.file(stub.log).text();
+		await expect(stub.worker.request("set_type", { target: "main", decl: "not a declaration" })).rejects.toThrow(/declaration/i);
+		const after = await Bun.file(stub.log).text();
+		expect(after.slice(before.length)).not.toContain("cmd:afs");
+	});
+
+	it("interrupt frame terminates r2 and preserves the last saved project", async () => {
+		const cancelStub = await startStubWorker("radare2-cancel-", true);
+		try {
+			await cancelStub.worker.request("save", {});
+			expect(await Bun.file(cancelStub.marker).exists()).toBe(true);
+			expect((await Bun.file(cancelStub.log).text()).split("\n")).not.toContain("terminate");
+
+			const interrupted = await cancelStub.worker.request<ExecResult>(
+				"exec",
+				{ code: "while True: pass" },
+				{ timeoutMs: 300 },
+			);
+			expect(interrupted.error?.toLowerCase()).toContain("interrupted");
+			expect((await Bun.file(cancelStub.log).text()).split("\n")).toContain("terminate");
+			expect(await Bun.file(cancelStub.marker).exists()).toBe(true);
+		} finally {
+			await stopStubWorker(cancelStub);
+		}
+	}, 15_000);
+});
