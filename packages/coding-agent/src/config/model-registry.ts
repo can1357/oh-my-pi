@@ -39,6 +39,7 @@ import {
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
+	kiroModelManagerOptions,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
 	modelsDevCatalogFallback,
 	openaiCodexModelManagerOptions,
@@ -2857,6 +2858,24 @@ export class ModelRegistry {
 					}),
 			},
 			{
+				providerId: "kiro",
+				resolveKey: value => value,
+				createOptions: apiKey =>
+					kiroModelManagerOptions({
+						apiKey,
+						resolveAccounts: async () => {
+							const accounts = await resolveOAuthDiscoveryAccounts(this.authStorage, "kiro", apiKey);
+							return (
+								accounts?.map(account => ({
+									apiKey: account.apiKey,
+									accountKey: oauthAccountKey(account),
+								})) ?? null
+							);
+						},
+						fetch: this.#fetch,
+					}),
+			},
+			{
 				providerId: "openai-codex",
 				resolveKey: value => value,
 				createOptions: accessToken => {
@@ -2918,7 +2937,7 @@ export class ModelRegistry {
 				this.#resolveBuiltInDiscoveryApiKey(
 					descriptor.providerId,
 					strategy,
-					descriptor.providerId,
+					isCredentialScopedModelCacheProvider(descriptor.providerId) ? undefined : descriptor.providerId,
 					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
 			),
