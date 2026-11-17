@@ -12,6 +12,10 @@
 - `ShellRunOptions.speech` bridges the host's speech handler to the shell's `say`.
 - In-process `file` shell builtin, a port of file 5.41 with its magic database that prints what the system tool prints (text encodings and line terminators, scripts, ELF linkage/interpreter/BuildID, Mach-O incl. per-architecture lines on macOS, archives, images, documents), with the flags `-b -i/-I --mime-type --mime-encoding --extension --apple -L -h -z -Z -E -e --exclude-quiet -f -F -0 -N -n -p -r -s -k -m -P -S -d --help -v`
 
+### Fixed
+
+- Fixed a read of a macOS popup button right after a `computer` letter key showing the option from before the key; the read now waits for the option the letters choose ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
@@ -58,8 +62,6 @@
 ### Removed
 
 - Removed the obsolete `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES` configuration variable.
-- Removed the `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES`, which only existed to pass it ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed a read of a macOS popup button right after a `computer` letter key showing the option from before the key; the read now waits for the option the letters choose ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
