@@ -894,8 +894,8 @@ impl GitRepo {
 		Ok(out)
 	}
 
-	/// List the blobs and symlinks of a tree recursively with their modes,
-	/// sorted by path, optionally filtered by pathspec-like prefixes.
+	/// List the blobs, symlinks, and gitlinks of a tree recursively with their
+	/// modes, sorted by path, optionally filtered by pathspec-like prefixes.
 	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<TreeEntry>> {
 		if self.is_reftable() {
 			let mut owned =
@@ -912,7 +912,8 @@ impl GitRepo {
 					let (meta, path) = record.split_once('\t')?;
 					let mut fields = meta.split(' ');
 					let mode = u32::from_str_radix(fields.next()?, 8).ok()?;
-					(fields.next()? == "blob").then(|| TreeEntry { path: path.to_owned(), mode })
+					matches!(fields.next()?, "blob" | "commit")
+						.then(|| TreeEntry { path: path.to_owned(), mode })
 				})
 				.collect());
 		}
@@ -930,7 +931,7 @@ impl GitRepo {
 			.files()
 			.map_err(|e| Error::backend("git ls-tree", e))?
 			.into_iter()
-			.filter(|e| e.mode.is_blob() || e.mode.is_link())
+			.filter(|e| e.mode.is_blob() || e.mode.is_link() || e.mode.is_commit())
 			.map(|e| TreeEntry {
 				path: bytes_to_path(e.filepath.as_bstr()),
 				mode: u32::from(e.mode.value()),
@@ -1818,6 +1819,28 @@ mod tests {
 		assert_eq!(repo.remote_url("origin")?.as_deref(), Some("https://example.test/repo"));
 		assert_eq!(repo.lfs_media_dir()?, Some(repo.info().common_dir.join("lfs").join("objects")));
 		assert_eq!(repo.head_watch_target(), repo.info().head_path);
+		Ok(())
+	}
+
+	#[test]
+	fn read_ls_tree_includes_gitlinks_without_loading_their_objects() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "plain", "text\n", "seed")?;
+		let missing = "1234567890123456789012345678901234567890";
+		git(dir.path(), &[
+			"update-index",
+			"--add",
+			"--cacheinfo",
+			&format!("160000,{missing},nested/module"),
+		])?;
+		git(dir.path(), &["commit", "-qm", "gitlink"])?;
+		let expected =
+			vec![TreeEntry { path: "nested/module".to_owned(), mode: 0o160000 }, TreeEntry {
+				path: "plain".to_owned(),
+				mode: 0o100644,
+			}];
+		assert_eq!(repo.ls_tree("HEAD", &[])?, expected);
+		assert_eq!(repo.ls_tree("HEAD", &["nested".to_owned()])?, expected[..1]);
 		Ok(())
 	}
 

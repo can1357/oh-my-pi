@@ -92,7 +92,17 @@ function shortSha(sha: string | null): string {
 }
 
 async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedChange): Promise<string> {
-	if (change.kind === "text") return formatTextPatch(change.path, change.before, change.after);
+	if (change.kind === "text") {
+		if (change.after?.mode === "160000") {
+			const absolute = path.join(repo.info().repoRoot, change.path);
+			const module = vcs.git(absolute);
+			const sameRoot = module && (await fs.realpath(module.info().repoRoot)) === (await fs.realpath(absolute));
+			if (!sameRoot || `Subproject commit ${await module.headSha()}\n` !== change.after.text) {
+				throw new Error(`${change.path}: submodule HEAD changed since the draft; build a new draft.`);
+			}
+		}
+		return formatTextPatch(change.path, change.before, change.after);
+	}
 	return change.added || head === null
 		? repo.diffNoIndex("/dev/null", change.path, true)
 		: repo.diffText({ base: head, files: [change.path], binary: true });

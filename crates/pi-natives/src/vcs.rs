@@ -161,12 +161,12 @@ pub struct VcsNumstatEntry {
 	pub added:   Option<u32>,
 	pub removed: Option<u32>,
 }
-/// One blob or symlink of a tree listing.
+/// One blob, symlink, or gitlink of a tree listing.
 #[napi(object)]
 pub struct VcsTreeEntry {
 	pub path: String,
-	/// Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
-	/// `120000`.
+	/// Octal git mode as `git ls-tree` prints it: `100644`, `100755`,
+	/// `120000`, or `160000`.
 	pub mode: String,
 }
 /// Bounded object contents.
@@ -1029,7 +1029,7 @@ impl VcsGitRepo {
 		})
 	}
 
-	/// List a tree's blobs and symlinks recursively with their modes.
+	/// List a tree's blobs, symlinks, and gitlinks recursively with their modes.
 	#[napi]
 	pub fn ls_tree(
 		&self,

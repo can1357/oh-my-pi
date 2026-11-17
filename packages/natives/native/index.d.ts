@@ -878,7 +878,7 @@ export declare class VcsGitRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** List a tree's blobs and symlinks recursively with their modes. */
+  /** List a tree's blobs, symlinks, and gitlinks recursively with their modes. */
   lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsTreeEntry>>
   /** List submodule paths. */
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
@@ -4503,12 +4503,12 @@ export interface VcsStatusSummary {
   untracked: number
 }
 
-/** One blob or symlink of a tree listing. */
+/** One blob, symlink, or gitlink of a tree listing. */
 export interface VcsTreeEntry {
   path: string
   /**
-   * Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
-   * `120000`.
+   * Octal git mode as `git ls-tree` prints it: `100644`, `100755`,
+   * `120000`, or `160000`.
    */
   mode: string
 }
