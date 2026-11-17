@@ -7,6 +7,8 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
+import { captureSignalSender, type SignalSender, takeSignalSender } from "@oh-my-pi/pi-natives";
 import { APP_NAME } from "./dirs";
 import * as logger from "./logger";
 import { restoreTerminalStderr } from "./stderr-guard";
@@ -752,6 +754,33 @@ process.on("exit", () => {
 
 let processHandlersInstalled = false;
 
+/** Signals whose sender the exit record names; see {@link terminationSignalSender}. */
+const SENDER_SIGNALS = [os.constants.signals.SIGTERM, os.constants.signals.SIGHUP];
+
+let terminationSender: SignalSender | undefined;
+
+/**
+ * The other process that sent the SIGTERM or SIGHUP now stopping this process:
+ * its pid and uid as the kernel reported them, plus its command name and parent
+ * pid when it could still be identified. Absent for any other exit, for a signal
+ * this process raised itself (the terminal owner's disconnect SIGHUP), for one
+ * the Linux kernel generated (a terminal hangup), and on Windows.
+ */
+export function terminationSignalSender(): SignalSender | undefined {
+	return terminationSender;
+}
+
+function takeSender(signal: number): SignalSender | undefined {
+	try {
+		const sender = takeSignalSender(signal) ?? undefined;
+		// Recorded as a sender, this process would read as another omp stopping it.
+		return sender?.pid === process.pid ? undefined : sender;
+	} catch (err) {
+		logger.warn("Failed to read signal sender", { err, signal });
+		return undefined;
+	}
+}
+
 /**
  * Exit through a termination signal: clean up, print the recovery hints, exit.
  *
@@ -760,8 +789,10 @@ let processHandlersInstalled = false;
  * pty, so the write would hang the process before the exit below. A repeated
  * signal joins the same cleanup and the hints still print once.
  */
-async function exitAfterSignal(reason: Reason, heading: string, exitCode: number): Promise<never> {
+async function exitAfterSignal(reason: Reason, signal: number, heading: string, exitCode: number): Promise<never> {
 	const hintProviders = [...fatalRecoveryHintProviders];
+	// The first signal names the exit; cleanup callbacks read its sender.
+	if (cleanupStage === "idle") terminationSender = takeSender(signal);
 	await runCleanup(reason);
 	if (!terminalDeclaredDead) writeRecoveryHints(hintProviders, heading);
 	exitProcess(exitCode);
@@ -845,13 +876,25 @@ export function installProcessHandlers(): void {
 		.on("SIGTERM", async () => {
 			// A stopped session otherwise leaves its last frame above the shell prompt,
 			// which reads as a crash.
-			await exitAfterSignal(Reason.SIGTERM, "\n[Stopped by SIGTERM]", 143); // 128 + SIGTERM (15)
+			await exitAfterSignal(Reason.SIGTERM, os.constants.signals.SIGTERM, "\n[Stopped by SIGTERM]", 143); // 128 + SIGTERM (15)
 		})
 		.on("SIGHUP", async () => {
 			// Same report as SIGTERM: a runtime that stops the program with a hangup
 			// keeps its screen, so the resume command survives the death.
-			await exitAfterSignal(Reason.SIGHUP, "\n[Stopped by SIGHUP]", 129); // 128 + SIGHUP (1)
+			await exitAfterSignal(Reason.SIGHUP, os.constants.signals.SIGHUP, "\n[Stopped by SIGHUP]", 129); // 128 + SIGHUP (1)
 		});
+
+	// The runtime's handlers above drop the kernel's siginfo; a native wrapper in
+	// front of them keeps the sender. It must follow the listeners (it wraps the
+	// handler they install), and those listeners are never removed: with none
+	// left, the runtime would reinstate the wrapper and the signal would do nothing.
+	for (const signal of SENDER_SIGNALS) {
+		try {
+			captureSignalSender(signal);
+		} catch (err) {
+			logger.warn("Failed to capture signal sender", { err, signal });
+		}
+	}
 }
 
 /** Controls when a registered cleanup callback participates in cleanup passes. */

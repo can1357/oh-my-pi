@@ -4064,6 +4064,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			recordedAt: new Date().toISOString(),
 		};
 		if (pendingToolCalls.length > 0) data.pendingToolCalls = pendingToolCalls;
+		const sender = kind === "signal" ? postmortem.terminationSignalSender() : undefined;
+		if (sender) data.sender = sender;
 		try {
 			this.sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, data);
 			this.sessionManager.flushSync();
@@ -4076,6 +4078,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				reason,
 				kind,
 				pendingToolCalls: pendingToolCalls.length,
+				sender,
 			});
 		} catch (error) {
 			logger.error("Failed to record session exit", {

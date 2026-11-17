@@ -4,6 +4,7 @@
 
 ### Added
 
+- Sessions stopped by SIGTERM or SIGHUP on Linux and macOS now record which process sent the signal (pid, uid, and, when it can still be identified, its command name and parent pid) in the `session_exit` entry and the "Session exit recorded" log line ([#19511](https://github.com/can1357/oh-my-pi/pull/19511) by [@bse-ai](https://github.com/bse-ai))
 - Added `live.endpoint` and `live.apiKey` settings: live voice (`/live`, RPC `live_start`/`live_connect`, extension `startLive`) can run on any OpenAI Realtime WebRTC-compatible server instead of Codex, with no ChatGPT sign-in and in offline mode; `live.voice` accepts any voice name
 
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))

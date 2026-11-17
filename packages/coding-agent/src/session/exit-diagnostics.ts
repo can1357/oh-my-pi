@@ -35,12 +35,23 @@ export interface PendingToolCallDiagnostic {
 	startedAt?: string;
 }
 
+/** The process that sent the stopping signal, as the kernel reported it. */
+export interface SessionExitSender {
+	pid: number;
+	uid: number;
+	/** Command name only: a command line can carry secrets or prompts. */
+	command?: string;
+	parentPid?: number;
+}
+
 /** Session shutdown marker written during normal and fatal process teardown. */
 export interface SessionExitData {
 	reason: string;
 	kind: "normal" | "signal" | "fatal" | "process_exit";
 	recordedAt: string;
 	pendingToolCalls?: PendingToolCallDiagnostic[];
+	/** Who sent a SIGTERM or SIGHUP, when a process (not the kernel) sent it. */
+	sender?: SessionExitSender;
 }
 
 interface PendingToolCallRecord extends PendingToolCallDiagnostic {
