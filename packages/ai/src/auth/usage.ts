@@ -114,6 +114,20 @@ type UsageReportsOptions = {
 	signal?: AbortSignal;
 };
 
+/**
+ * Copy of `report` carrying the durable row id of the stored credential the
+ * probe ran as (`metadata.credentialId`). API-key accounts have no OAuth
+ * identity, so the row id is the only attribute that ties a report to the
+ * account the session router actually serves from; consumers that don't read
+ * it are unaffected. Returns cached objects untouched for unattributed
+ * requests (env/runtime keys, broker aggregates).
+ */
+function tagReportCredentialId(report: UsageReport | null, request: UsageRequestDescriptor): UsageReport | null {
+	if (!report || request.credentialId === undefined) return report;
+	if (report.metadata?.credentialId === request.credentialId) return report;
+	return { ...report, metadata: { ...report.metadata, credentialId: request.credentialId } };
+}
+
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
 export class UsageService implements UsageApi {
 	#deps: UsageServiceDeps;
@@ -639,6 +653,19 @@ export class UsageService implements UsageApi {
 				}
 				if (!apiKey) continue;
 				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+				// Attribute the probe to the stored row the resolved key belongs
+				// to (literal material or a resolved reference), so a session
+				// pinned to that row can match its report. Runtime, config, and
+				// env keys match no row and stay untagged — the sticky gate
+				// already treats those as unknown attribution.
+				for (const entry of this.#deps.pool.entries(providerId)) {
+					if (entry.credential.type !== "api_key") continue;
+					const storedMaterial = await this.#deps.overrides.resolve(entry.credential.key);
+					if (entry.credential.key === apiKey || storedMaterial === apiKey) {
+						request.credentialId = entry.id;
+						break;
+					}
+				}
 				if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
 				continue;
 			}
@@ -661,6 +688,9 @@ export class UsageService implements UsageApi {
 					if (entry.credential.type !== "oauth") continue;
 					const request = oauthUsageRequest(provider, entry.credential, baseUrl);
 					if (providerImpl.supports && !providerImpl.supports(request)) continue;
+					// Same stored-row attribution contract as the generic loop
+					// below (e.g. xai-oauth probes take this path).
+					request.credentialId = entry.id;
 					requests.push(request);
 					hasUsableStoredOAuthCredential = true;
 				}
@@ -703,6 +733,7 @@ export class UsageService implements UsageApi {
 					request = oauthUsageRequest(provider, credential, baseUrl);
 				}
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;
+				request.credentialId = entry.id;
 				requests.push(request);
 			}
 		}
@@ -821,7 +852,7 @@ export class UsageService implements UsageApi {
 				);
 				return current;
 			}),
-		);
+		).then(reports => reports.map((report, index) => tagReportCredentialId(report, requests[index])));
 	}
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */
