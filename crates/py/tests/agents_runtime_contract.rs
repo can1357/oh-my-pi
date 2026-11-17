@@ -29,6 +29,7 @@ USAGE = {
 class RecordingControl:
     def __init__(self):
         self.calls = []
+        self.deny_continuation_policy = False
 
     async def request(self, operation, arguments):
         self.calls.append((operation, arguments))
@@ -57,6 +58,12 @@ class RecordingControl:
         if operation in ("omp.agents.steer", "omp.agents.inject",
                          "omp.agents.schedule.fire_now"):
             return "delivered"
+        if operation == "omp.agents.set_continuation_policy" and self.deny_continuation_policy:
+            from omp._host import ControlProtocolError
+            raise ControlProtocolError(
+                "PolicyDenied", "continuation authority not granted",
+                details={"reason": "continuation authority (`agents.continuation`) is not granted to this extension",
+                         "code": "capability_denied", "decision_id": "", "rules": []})
         if operation in ("omp.agents.cancel", "omp.agents.release",
                          "omp.agents.set_continuation_policy", "omp.agents.schedule.pause",
                          "omp.agents.schedule.resume", "omp.agents.schedule.delete"):
@@ -218,6 +225,14 @@ async def contract():
     assert (await omp.agents.continuations()).cap == 8
     await omp.agents.set_continuation_policy(omp.agents.ContinuationPolicy(min_interval=omp.Duration("1s")))
     assert backend.calls[-1][1]["policy"]["min_interval_ms"] == 1000
+    backend.deny_continuation_policy = True
+    try:
+        await omp.agents.set_continuation_policy(omp.agents.ContinuationPolicy(min_interval=omp.Duration("1s")))
+    except omp.PolicyDenied as denied:
+        assert denied.code == "capability_denied"
+    else:
+        raise AssertionError("a PolicyDenied reply must raise omp.PolicyDenied")
+    backend.deny_continuation_policy = False
     assert not (await omp.agents.loop_signal()).stalled
     assert (await omp.agents.limits()).spawn_allowed
     assert (await omp.agents.list())[0].output_url.uri == "agent://child"

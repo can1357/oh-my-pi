@@ -837,9 +837,12 @@ CONTROL, per-turn, fail-open.
 
 #### `async omp.agents.set_continuation_policy(policy: ContinuationPolicy) -> None`
 
-CONTROL, per-session, fail-closed. Raises `PolicyDenied` if the manifest did not
-grant continuation authority, which is the difference between an extension that
-may keep the loop alive and one that may only observe.
+CONTROL, per-session, fail-closed. Raises `PolicyDenied` (`code == "capability_denied"`)
+unless the extension holds the operator grant `agents.continuation`: the manifest declares
+it in `capabilities` and a digest-pinned grant covers it ([`14-deploy.md`](14-deploy.md) §3.9).
+The grant controls only who may set a policy. Reading `continuations()` needs no grant, and an
+`agent_settled` hook without it may still return `Continue`, which the core cap of 8 per
+submission still bounds.
 
 #### `@dataclass(frozen=True, slots=True) class omp.agents.LoopSignal`
 

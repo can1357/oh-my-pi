@@ -428,7 +428,9 @@ because pi conflated all four into one boolean flag.
 1. **Artifact ↔ author.** Enforced cryptographically: publisher ed25519 signature over the
    wheel digest, TOFU-pinned on first install (§3.10.2).
 2. **Declared ↔ granted.** Enforced by the grant record: a capability the manifest declares
-   is not a capability the extension has until a digest-pinned grant covers it (§3.9).
+   is not a capability the extension has until a digest-pinned grant covers it (§3.9). For
+   example, `omp.agents.set_continuation_policy` needs the grant `agents.continuation`
+   ([`12-agents.md`](12-agents.md)).
 3. **Tier ↔ process, and extension ↔ process.** Enforced by process separation:
    `(layer, tier, extension)` host keying (§2.2). A tier is a property of a host child, never
    of an extension inside a shared one; and by default an extension is alone in its child, so

@@ -307,6 +307,22 @@ fn now_ms() -> u64 {
 		.unwrap_or(0)
 }
 
+/// Grant an extension must hold before `omp.agents.set_continuation_policy`
+/// changes its continuation policy. Reading `omp.agents.continuations` and
+/// returning `Continue` from an `agent_settled` hook need no grant.
+pub const CONTINUATION_CAPABILITY: &str = "agents.continuation";
+
+fn continuation_authority_denied() -> ControlProtocolError {
+	const REASON: &str =
+		"continuation authority (`agents.continuation`) is not granted to this extension";
+	ControlProtocolError::new("PolicyDenied", REASON).with_details(json!({
+		"reason": REASON,
+		"code": "capability_denied",
+		"decision_id": "",
+		"rules": [],
+	}))
+}
+
 fn is_continuation_control(operation: &str) -> bool {
 	matches!(operation, "omp.agents.continuations" | "omp.agents.set_continuation_policy")
 }
@@ -376,6 +392,11 @@ impl ControlAuthority for ContinuationAwareAgentsAuthority {
 				"StaleGeneration",
 				"Agents authority belongs to a replaced extension-host connection",
 			));
+		}
+		if operation == "omp.agents.set_continuation_policy"
+			&& !self.identity.capabilities.contains(CONTINUATION_CAPABILITY)
+		{
+			return Err(continuation_authority_denied());
 		}
 		if is_continuation_control(operation) {
 			return Ok(());
@@ -521,7 +542,11 @@ mod tests {
 			host_generation:    1,
 			session_generation: 1,
 			capabilities:       Arc::new(
-				capabilities.iter().copied().map(Str::new_static).collect::<BTreeSet<_>>(),
+				capabilities
+					.iter()
+					.copied()
+					.map(Str::new_static)
+					.collect::<BTreeSet<_>>(),
 			),
 		})
 	}
@@ -575,7 +600,11 @@ mod tests {
 		assert_eq!(error.details["code"], "capability_denied");
 		assert_eq!(error.details["decision_id"], "");
 		assert_eq!(error.details["rules"], json!([]));
-		assert!(error.details["reason"].as_str().is_some_and(|reason| reason.contains("agents.continuation")));
+		assert!(
+			error.details["reason"]
+				.as_str()
+				.is_some_and(|reason| reason.contains("agents.continuation"))
+		);
 		assert_eq!(book.policy_for("dev.example.goal"), ContinuationPolicy::default());
 	}
 
@@ -604,5 +633,4 @@ mod tests {
 			.await
 			.expect("reading continuations needs no grant");
 	}
-
 }
