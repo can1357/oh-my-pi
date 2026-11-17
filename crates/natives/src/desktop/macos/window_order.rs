@@ -10,6 +10,8 @@
 //! background app's window cannot be put back either: raising it through
 //! accessibility leaves the stacking as it is, without activating that app.
 
+use std::time::Duration;
+
 use libc::pid_t;
 
 /// An on-screen normal-layer window as `WindowServer` stacks it.
@@ -100,27 +102,36 @@ const RAISE_TRIES: u8 = 3;
 
 /// How many readings a pass takes for its raise to show: the window list
 /// catches up with `AXRaise` a little after it returns, and a pass that read
-/// it too early would raise again, or report a raise that held.
-const SHOW_READS: usize = 5;
+/// it too early would raise again, or report a raise that held. They span
+/// 40 ms: after a takeover's hand-back, 20 ms of readings once missed a raise
+/// that held.
+const SHOW_READS: usize = 21;
+
+/// The wait between those readings. macOS shows the raise 4 to 17 ms after
+/// `AXRaise` returns; reading only every guard poll (10 ms) let a click's
+/// second ordering of the target land before the raise showed, and the pass
+/// then waited out its readings with the target in front, for about 75 ms.
+pub(super) const SHOW_WAIT: Duration = Duration::from_millis(2);
 
 /// One pass of the background guard keeping `order`: raises the key window
-/// when [`EntryOrder::to_raise`] finds it behind in `stack`'s reading, for at
-/// most [`RAISE_TRIES`] passes during the action; the `last` pass always
-/// raises. Just before raising, `still_kept` is asked again, since the user
-/// may have switched or come to the target after the caller's check. After
-/// raising it reads the stacking again, `wait`ing between readings up to
-/// [`SHOW_READS`] times, until the raise shows; the last pass returns the
-/// window if it is still behind.
+/// when [`EntryOrder::to_raise`] finds it behind in `stack`'s reading of the
+/// windows down to it, for at most [`RAISE_TRIES`] passes during the action;
+/// the `last` pass always raises. Just before raising, `still_kept` is asked
+/// again, since the user may have switched or come to the target after the
+/// caller's check. After raising it reads the stacking again, `wait`ing
+/// between readings up to [`SHOW_READS`] times, until the raise shows; the
+/// last pass returns the window if it is still behind.
 pub(super) fn keep(
 	order: &mut EntryOrder,
 	tries: &mut u8,
-	stack: impl Fn() -> Option<Vec<Stacked>>,
+	stack: impl Fn(u32) -> Option<Vec<Stacked>>,
 	still_kept: impl Fn() -> bool,
 	mut raise: impl FnMut(&Stacked) -> Raised,
 	wait: impl Fn(),
 	last: bool,
 ) -> Result<(), Stacked> {
-	let Some(window) = stack().and_then(|now| order.to_raise(&now)) else {
+	let key = order.key;
+	let Some(window) = stack(key).and_then(|now| order.to_raise(&now)) else {
 		return Ok(());
 	};
 	if (!last && *tries >= RAISE_TRIES) || !still_kept() {
@@ -135,7 +146,7 @@ pub(super) fn keep(
 		if read > 0 {
 			wait();
 		}
-		behind = stack().and_then(|now| order.to_raise(&now));
+		behind = stack(key).and_then(|now| order.to_raise(&now));
 		if behind.is_none() {
 			return Ok(());
 		}
@@ -259,7 +270,11 @@ mod tests {
 			*stack.borrow_mut() = vec![user, target];
 			Raised::Asked
 		};
-		let read = || Some(stack.borrow().clone());
+		// Every reading goes down to the user's key window.
+		let read = |key| {
+			assert_eq!(key, user.id);
+			Some(stack.borrow().clone())
+		};
 		assert_eq!(keep(&mut order, &mut tries, read, || true, raise, || {}, false), Ok(()));
 		assert_eq!(keep(&mut order, &mut tries, read, || true, |_| panic!(), || {}, true), Ok(()));
 		assert_eq!(raised.get(), 1);
@@ -268,7 +283,7 @@ mod tests {
 		// raises once more, reads again, and names the window.
 		let (mut order, mut tries) = (fresh(), 0);
 		let raised = Cell::new(0);
-		let again = || Some(vec![target, user]);
+		let again = |_| Some(vec![target, user]);
 		let count = |_: &Stacked| {
 			raised.set(raised.get() + 1);
 			Raised::Asked
@@ -285,7 +300,7 @@ mod tests {
 		// that shows only on a later reading counts.
 		let (mut order, mut tries) = (fresh(), RAISE_TRIES);
 		let reads = Cell::new(0);
-		let late = || {
+		let late = |_| {
 			reads.set(reads.get() + 1);
 			Some(if reads.get() < 3 {
 				vec![target, user]
@@ -308,6 +323,6 @@ mod tests {
 		let (mut order, mut tries) = (fresh(), 0);
 		assert_eq!(keep(&mut order, &mut tries, again, || false, |_| panic!(), || {}, true), Ok(()));
 		// Unreadable stacking: nothing raised, nothing claimed.
-		assert_eq!(keep(&mut fresh(), &mut 0, || None, || true, |_| panic!(), || {}, true), Ok(()));
+		assert_eq!(keep(&mut fresh(), &mut 0, |_| None, || true, |_| panic!(), || {}, true), Ok(()));
 	}
 }

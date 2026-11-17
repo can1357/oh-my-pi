@@ -526,10 +526,23 @@ pub(super) fn menu_windows(pid: libc::pid_t) -> Option<Vec<u32>> {
 /// them, or `None` when the list cannot be read. Owner and layer need no Screen
 /// Recording permission.
 pub(super) fn stacked_windows() -> Option<Vec<window_order::Stacked>> {
-	let snapshot = CGWindowListCopyWindowInfo(
-		CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
-		0,
-	)?;
+	stacked(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements, 0)
+}
+
+/// [`stacked_windows`] down to window `id`, which comes last: only the windows
+/// in front of it are read, so a reading costs the same however many windows
+/// are behind it. With `id` off screen it reads every window.
+pub(super) fn stacked_down_to(id: u32) -> Option<Vec<window_order::Stacked>> {
+	stacked(
+		CGWindowListOption::OptionOnScreenAboveWindow
+			| CGWindowListOption::OptionIncludingWindow
+			| CGWindowListOption::ExcludeDesktopElements,
+		id,
+	)
+}
+
+fn stacked(options: CGWindowListOption, relative_to: u32) -> Option<Vec<window_order::Stacked>> {
+	let snapshot = CGWindowListCopyWindowInfo(options, relative_to)?;
 	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
 	// documented window keys are CFStrings and whose values are CFTypes.
 	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
