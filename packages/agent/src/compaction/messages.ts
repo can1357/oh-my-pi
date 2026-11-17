@@ -25,6 +25,8 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Rendered and saved, never sent to the model (like `!!` bash rows). */
+	excludeFromContext?: boolean;
 	timestamp: number;
 }
 
@@ -180,6 +182,7 @@ export function createCustomMessage(
 	details: unknown | undefined,
 	timestamp: string,
 	attribution?: MessageAttribution,
+	excludeFromContext?: boolean,
 ): CustomMessage {
 	return {
 		role: "custom",
@@ -188,6 +191,7 @@ export function createCustomMessage(
 		display,
 		details,
 		attribution,
+		...(excludeFromContext ? { excludeFromContext: true } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -216,6 +220,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 		switch (message.role) {
 			case "custom":
 			case "hookMessage": {
+				if (message.role === "custom" && message.excludeFromContext) return undefined;
 				const content =
 					typeof message.content === "string"
 						? [{ type: "text" as const, text: message.content }]
@@ -309,6 +314,7 @@ export function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefin
 			entry.details,
 			entry.timestamp,
 			entry.attribution,
+			entry.excludeFromContext,
 		);
 	}
 	if (entry.type === "branch_summary") {

@@ -4577,6 +4577,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					// otherwise records emission time, which on rebuild excludes
 					// provider preparation / hook time from the prompt→yield anchor.
 					message.timestamp,
+					message.role === "custom" ? message.excludeFromContext : undefined,
 				);
 			}
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
@@ -11202,9 +11203,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			display: normalizedPayload.display,
 			details,
 			attribution: normalizedPayload.attribution,
+			excludeFromContext: normalizedPayload.excludeFromContext,
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (normalizedAppMessage.excludeFromContext) {
+			// The model never sees this row, so it must not start or extend a turn: a steer or aside would
+			// buy a provider call on unchanged context. Mid-run it waits for the next turn, as `!!` bash
+			// rows wait for the run to end; idle it is appended where the caller asked.
+			options = {
+				...options,
+				triggerTurn: false,
+				deliverAs: this.isStreaming || options?.deliverAs === "nextTurn" ? "nextTurn" : undefined,
+			};
+		}
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only
 			// from another prompt's setup claims nothing (that prompt decides).
@@ -11251,6 +11263,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				normalizedAppMessage.display,
 				normalizedAppMessage.details,
 				normalizedAppMessage.attribution,
+				normalizedAppMessage.timestamp,
+				normalizedAppMessage.excludeFromContext,
 			);
 			return false;
 		}
@@ -11313,6 +11327,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Its own timestamp, as `#persistMessageEnd` keeps one: a view rebuilt while its events are
 			// queued matches the entry to them by it.
 			normalizedAppMessage.timestamp,
+			normalizedAppMessage.excludeFromContext,
 		);
 		if (normalizedAppMessage.display === true) {
 			// Idle display append with no turn: notify session listeners so the interactive

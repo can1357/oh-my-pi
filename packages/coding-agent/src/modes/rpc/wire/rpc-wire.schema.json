@@ -1499,6 +1499,9 @@
 				"details": {},
 				"attribution": {
 					"$ref": "#/$defs/Attribution"
+				},
+				"excludeFromContext": {
+					"type": "boolean"
 				}
 			},
 			"required": [

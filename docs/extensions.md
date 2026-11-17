@@ -364,6 +364,15 @@ re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
 
+Set `excludeFromContext: true` on the payload for a row that is drawn and saved
+but never sent to the model, like a `!!` bash run: per-turn stats or status
+lines. The flag is persisted on the `custom_message` entry, so the row stays out
+of context after resume, compaction and branch summaries. Such a row never
+starts or extends a turn: `triggerTurn` and `"aside"` are ignored, and while a
+run streams it waits for the next turn as with `"nextTurn"`. Like `!!` and `$$`
+runs, it leaves a shown composer prediction in place, since the model's view is
+unchanged.
+
 ## 2) Handler context (`ExtensionContext`)
 
 Handlers and tool `execute` receive `ctx` with:

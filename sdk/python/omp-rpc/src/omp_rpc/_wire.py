@@ -371,6 +371,7 @@ class CustomMessage(TypedDict):
     timestamp: float
     details: NotRequired[JsonValue]
     attribution: NotRequired[Attribution]
+    excludeFromContext: NotRequired[bool]
 
 
 class HookMessage(TypedDict):
