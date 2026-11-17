@@ -28,6 +28,9 @@
 - Fixed macOS posting Escape to an application whose background menu had already closed, or whose menu windows could not be read, when closing a menu a click opened: Escape now goes only to a menu window listed right before it, so it cannot cancel a dialog or form in the app instead ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `setValue` on macOS sliders, steppers and other number-valued controls failing with `AXError(-25201)`: the value is now written as a number and read back, and a value the control clamped or rounded is reported with what it now reads ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
 - `setValue` on a macOS control whose value is not settable but that steps (a SwiftUI `Slider`) now refuses naming the `AXIncrement`/`AXDecrement` actions it offers and the number it reads, so the next call can step it ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
+### Fixed
+
+- Fixed macOS takeover putting a typing user's keys into the agent's target: a takeover, the background fallback's rerun included, now waits until you have pressed no key or button anywhere for 5 s and hold no modifier or mouse button, failing `UserIntervened` with nothing sent if you are still at it near the run's timeout ([#19296](https://github.com/can1357/oh-my-pi/pull/19296) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 

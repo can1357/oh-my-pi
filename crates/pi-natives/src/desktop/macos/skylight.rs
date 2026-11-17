@@ -70,6 +70,7 @@ const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
 const EXPIRED_FRONT_REQUEST: i32 = -13066;
 
 unsafe extern "C" {
+	fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
 	fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
 	fn CGEventSourceFlagsState(state: i32) -> u64;
 	fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
@@ -617,6 +618,33 @@ const PICK_WATCH: Duration = Duration::from_secs(1);
 /// How often [`FrontApp::keep_in_front`] checks the front app; a keystroke
 /// typed between an activation and the next check goes to the activated app.
 const HOLD_POLL: Duration = Duration::from_millis(2);
+
+/// The flags a held modifier shows in the HID state: ⇧, ⌃, ⌥, ⌘ and fn
+/// (`kCGEventFlagMaskShift | Control | Alternate | Command | SecondaryFn`).
+/// Caps Lock's alpha-shift flag is left out: it is a lock, set from the press
+/// that turns it on to the one that turns it off.
+const HELD_MODIFIERS: u64 = 0x0002_0000 | SWITCH_MODIFIERS | OPTION_MODIFIER | 0x0080_0000;
+
+/// Whether the user holds a modifier or a mouse button in the HID system
+/// state. Holding one makes no new presses, so a takeover's pause waits for it
+/// to be let go ([`control::intervention::admit_takeover`]). Any other key
+/// repeats while it is held, and the repeats keep that pause waiting already;
+/// read as held instead, a key a program posts down and never releases would
+/// hold every takeover off, since nothing the user types releases it.
+pub(crate) fn input_held() -> bool {
+	held(
+		// SAFETY: a read-only query of the HID system state.
+		unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) },
+		// SAFETY: as above, with a mouse button number in the range
+		// CGEventSource.h defines.
+		|button| unsafe { CGEventSourceButtonState(HID_SYSTEM_STATE, button) },
+	)
+}
+
+/// [`input_held`] over the given HID flags and button state.
+fn held(flags: u64, button_down: impl Fn(u32) -> bool) -> bool {
+	flags & HELD_MODIFIERS != 0 || (0..32u32).any(button_down)
+}
 
 /// The HID counters of `MOUSE_BUTTON_EVENTS`.
 fn hid_buttons() -> [u32; 6] {
@@ -2231,7 +2259,11 @@ pub(super) enum ForegroundInput {
 /// re-activating it can clear Chromium's renderer focus. The window is made
 /// key without being raised; callers that need it unobstructed raise it.
 /// `return_focus` restores even after user input during the action; see
-/// [`hands_focus_back`].
+/// [`hands_focus_back`]. It starts from the worker's admission, which waited
+/// for the user to pause in every app, and fails without sending anything if
+/// they pressed a key or clicked since
+/// ([`control::intervention::start_takeover`]): a key they type once the target
+/// is in front lands in it.
 pub(super) fn with_foreground<T>(
 	pid: pid_t,
 	wid: u32,
@@ -2240,6 +2272,7 @@ pub(super) fn with_foreground<T>(
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
+	control::intervention::start_takeover()?;
 	let choices = control::user_choices();
 	// Read with `choices`, before takeover posts anything: a click of the
 	// user's at any later point is then a choice the monitor counts once it has
@@ -2271,6 +2304,9 @@ pub(super) fn with_foreground<T>(
 	})?;
 	let previous_key = takeover_key(restoration_key(previous_pid), previous_pid == pid)
 		.map_err(DesktopError::input_failed)?;
+	// The reads above can take a while in a busy app; a press or hold of the
+	// user's meanwhile refuses here, before the target comes forward.
+	control::intervention::start_takeover()?;
 	let handed_back = Cell::new(false);
 	let keyboard = Cell::new(None);
 	let restore = || {
@@ -2853,6 +2889,20 @@ mod tests {
 			sample_switches(lease, front, signals, at, &visit);
 		}
 		visit.load(Ordering::Acquire)
+	}
+
+	#[test]
+	fn a_held_modifier_or_button_counts_and_a_lock_or_other_key_does_not() {
+		let no_button = |_| false;
+		// Nothing held; Caps Lock on; a key a program posted down and never
+		// released (flags as the HID state read on a VM).
+		for flags in [NO_MODIFIERS, CAPS_LOCK, 0x2000_0000] {
+			assert!(!held(flags, no_button), "{flags:#x}");
+		}
+		for flags in [SHIFT, CONTROL, OPTION, COMMAND, FN, SHIFT | CAPS_LOCK] {
+			assert!(held(flags, no_button), "{flags:#x}");
+		}
+		assert!(held(NO_MODIFIERS, |button| button == 0));
 	}
 
 	#[test]
