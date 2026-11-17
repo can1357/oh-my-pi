@@ -12,7 +12,7 @@
 //!   pointer position and previously active window.
 
 use std::{
-	cell::Cell,
+	cell::{Cell, RefCell},
 	sync::Arc,
 	time::{Duration, Instant},
 };
@@ -38,6 +38,7 @@ use super::{
 	keyboard_state::NeutralKeyboard,
 	keymap::{self, KeyStep, Keymap},
 	mpx::Mpx,
+	release_watcher::{Held, ReleaseWatcher},
 	text_mapping::TextMapping,
 	toolkit, uinput,
 	wm::{Atoms, FocusSnapshot, Wm},
@@ -101,6 +102,12 @@ pub struct X11Input {
 	/// Whether this connection speaks XKB, which `XTest` keys need to clear
 	/// the user's locks, latches and layout group ([`NeutralKeyboard`]).
 	xkb:              bool,
+	/// Releases this session's `XTest` presses if omp dies holding them;
+	/// started by the first `XTest` call that can press, and again by the
+	/// next one if it died.
+	release:          RefCell<Option<ReleaseWatcher>>,
+	/// The release watcher could not start; not tried again.
+	release_failed:   Cell<bool>,
 }
 
 /// Keyboard input to plan against a keymap.
@@ -173,6 +180,8 @@ impl X11Input {
 			mpx_unavailable,
 			xkb,
 			text_mapping,
+			release: RefCell::new(None),
+			release_failed: Cell::new(false),
 		})
 	}
 
@@ -191,6 +200,11 @@ impl X11Input {
 	) -> CoreResult<()> {
 		if matches!(target, Target::Desktop | Target::Display(_)) || mode != DeliveryMode::Background
 		{
+			// Before every check, so no watcher start sits between a check and
+			// the press it guards.
+			if !matches!(event, PointerEvent::Move { .. }) {
+				self.watch_releases();
+			}
 			self.keymap = Keymap::xtest(&self.conn)?;
 			// Held keys use the layout's rows, as chords do.
 			if matches!(&event, PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. } if !keys.is_empty())
@@ -303,6 +317,7 @@ impl X11Input {
 		input: &ElementInput,
 		prepare: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
+		self.watch_releases();
 		self.keymap = Keymap::xtest(&self.conn)?;
 		let keys = match input {
 			ElementInput::Text(text) => Keys::Text(text),
@@ -412,6 +427,7 @@ impl X11Input {
 		self.keymap = if matches!(target, Target::Window(_)) && mode == DeliveryMode::Background {
 			Keymap::core(&self.conn)?
 		} else {
+			self.watch_releases();
 			Keymap::xtest(&self.conn)?
 		};
 		match (target, mode) {
@@ -1013,48 +1029,85 @@ impl X11Input {
 		self.conn.flush().map_err(input_failed)
 	}
 
+	/// Starts the session's release watcher, or a new one if it died, as an
+	/// `XTest` call that can press begins. One that cannot start is not tried
+	/// again, and the session runs without it.
+	fn watch_releases(&self) {
+		let mut release = self.release.borrow_mut();
+		if self.release_failed.get() || release.as_ref().is_some_and(ReleaseWatcher::running) {
+			return;
+		}
+		// Reaps a watcher that died before its replacement starts.
+		*release = None;
+		match ReleaseWatcher::start(self.display.clone(), self.root) {
+			Ok(watcher) => *release = Some(watcher),
+			Err(_) => self.release_failed.set(true),
+		}
+	}
+
+	/// Arms `input`'s release in the watcher before its press, or disarms it
+	/// after its confirmed release. A watcher whose slot cannot be written no
+	/// longer knows what is down: it is ended without sending anything, and
+	/// the session runs without one.
+	fn tell_watcher(&self, input: Held, press: bool) {
+		let mut release = self.release.borrow_mut();
+		let Some(watcher) = release.as_ref() else {
+			return;
+		};
+		let told = if press {
+			watcher.pressing(input)
+		} else {
+			watcher.released(input)
+		};
+		if told.is_err()
+			&& let Some(watcher) = release.take()
+		{
+			watcher.abandon();
+			self.release_failed.set(true);
+		}
+	}
+
 	fn xtest_key(&self, keycode: u8, press: bool) -> CoreResult<()> {
 		// A release always goes out: a cancel stops only the next press.
 		if press {
 			control::check()?;
 			self.check_takeover_focus()?;
 		}
-		self.send_xtest(press, || {
-			let cookie = self
-				.conn
-				.xtest_fake_input(
-					if press {
-						KEY_PRESS_EVENT
-					} else {
-						KEY_RELEASE_EVENT
-					},
-					keycode,
-					CURRENT_TIME,
-					self.root,
-					0,
-					0,
-					0,
-				)
-				.map_err(input_failed)?;
-			if press {
-				self.text_mapping.pressed(keycode);
-			}
-			cookie.check().map_err(input_failed)
-		})
+		self.send_xtest(Held::Key(keycode), press)
 	}
 
-	/// Sends one XTEST event, counting a press as this session's own before
-	/// it can reach the user-activity listener.
-	fn send_xtest(&self, press: bool, send: impl FnOnce() -> CoreResult<()>) -> CoreResult<()> {
+	/// Sends one `XTest` press or release of `input`. A press is counted as
+	/// this session's own before it can reach the user-activity listener, and
+	/// armed in the release watcher before it goes out; a release is disarmed
+	/// once the server confirmed it.
+	fn send_xtest(&self, input: Held, press: bool) -> CoreResult<()> {
+		let (event, detail) = match (input, press) {
+			(Held::Key(code), true) => (KEY_PRESS_EVENT, code),
+			(Held::Key(code), false) => (KEY_RELEASE_EVENT, code),
+			(Held::Button(code), true) => (BUTTON_PRESS_EVENT, code),
+			(Held::Button(code), false) => (BUTTON_RELEASE_EVENT, code),
+		};
 		let activity = self.activity.as_ref().filter(|_| press);
-		if let Some(activity) = activity {
-			activity.sending(false);
+		if press {
+			if let Some(activity) = activity {
+				activity.sending(false);
+			}
+			self.tell_watcher(input, true);
 		}
-		let result = send();
-		if result.is_err()
-			&& let Some(activity) = activity
-		{
-			activity.sending(true);
+		let result = self
+			.conn
+			.xtest_fake_input(event, detail, CURRENT_TIME, self.root, 0, 0, 0)
+			.map_err(input_failed)
+			.and_then(|cookie| {
+				if let (Held::Key(code), true) = (input, press) {
+					self.text_mapping.pressed(code);
+				}
+				cookie.check().map_err(input_failed)
+			});
+		match (&result, activity) {
+			(Err(_), Some(activity)) => activity.sending(true),
+			(Ok(()), _) if !press => self.tell_watcher(input, false),
+			_ => {},
 		}
 		result
 	}
@@ -1281,26 +1334,7 @@ impl X11Input {
 				self.wm().check_pointer_target(window, x, y, true)?;
 			}
 		}
-		self.send_xtest(press, || {
-			self
-				.conn
-				.xtest_fake_input(
-					if press {
-						BUTTON_PRESS_EVENT
-					} else {
-						BUTTON_RELEASE_EVENT
-					},
-					detail,
-					CURRENT_TIME,
-					self.root,
-					0,
-					0,
-					0,
-				)
-				.map_err(input_failed)?
-				.check()
-				.map_err(input_failed)
-		})
+		self.send_xtest(Held::Button(detail), press)
 	}
 
 	fn check_released_keys(&self, keycodes: impl IntoIterator<Item = u8>) -> CoreResult<()> {
@@ -2321,6 +2355,183 @@ mod tests {
 			.type_text(&takeover, "x", DeliveryMode::Foreground)
 			.unwrap();
 		assert_eq!(presses(&target), 1, "the focused window gets the key once the grab ends");
+	}
+
+	/// Set for the process `a_killed_holder_leaves_no_xtest_key_or_button_down`
+	/// starts and kills.
+	const HOLDER: &str = "PI_TEST_XTEST_HOLDER";
+
+	/// A process killed while it holds an `XTest` key and button leaves
+	/// neither down. Starts its own `Xvfb`: `cargo test -p omp-natives --
+	/// --ignored killed_holder`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn a_killed_holder_leaves_no_xtest_key_or_button_down() {
+		use x11rb::protocol::{Event, xinput};
+
+		struct Reaped(Child);
+		impl Drop for Reaped {
+			fn drop(&mut self) {
+				let _ = self.0.kill();
+				let _ = self.0.wait();
+			}
+		}
+		let (_server, display) = start_server();
+		let (conn, screen) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let root = conn.setup().roots[screen].root;
+		let shift = Keymap::core(&conn)
+			.unwrap()
+			.held_keycodes(&[KeyName::Shift])
+			.unwrap()[0];
+		let held = || {
+			let keys = conn.query_keymap().unwrap().reply().unwrap().keys;
+			let buttons = conn.query_pointer(root).unwrap().reply().unwrap().mask;
+			(
+				keys[usize::from(shift / 8)] & (1 << (shift % 8)) != 0,
+				buttons.contains(KeyButMask::BUTTON1),
+			)
+		};
+		conn.xinput_xi_query_version(2, 0).unwrap().reply().unwrap();
+		conn
+			.xinput_xi_select_events(root, &[xinput::EventMask {
+				deviceid: xinput::Device::ALL.into(),
+				mask:     vec![
+					xinput::XIEventMask::RAW_KEY_PRESS | xinput::XIEventMask::RAW_BUTTON_PRESS,
+				],
+			}])
+			.unwrap()
+			.check()
+			.unwrap();
+
+		let mut holder = Reaped(
+			Command::new(std::env::current_exe().unwrap())
+				.args(["--exact", "desktop::linux::x11::input::tests::xtest_holder", "--ignored"])
+				.env("DISPLAY", &display)
+				.env(HOLDER, "1")
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.spawn()
+				.expect("holder starts"),
+		);
+		let mut pressed = (false, false);
+		while pressed != (true, true) {
+			match conn.wait_for_event().unwrap() {
+				Event::XinputRawKeyPress(raw) if raw.detail == u32::from(shift) => pressed.0 = true,
+				Event::XinputRawButtonPress(raw) if raw.detail == 1 => pressed.1 = true,
+				_ => {},
+			}
+		}
+		assert_eq!(held(), (true, true), "the holder holds Shift and button 1");
+		// What the holder started outlives it; once that has exited, the
+		// server has read whatever it sent.
+		let started: Vec<std::os::fd::OwnedFd> =
+			std::fs::read_dir(format!("/proc/{}/task", holder.0.id()))
+				.unwrap()
+				.flat_map(|task| {
+					std::fs::read_to_string(task.unwrap().path().join("children"))
+						.unwrap()
+						.split_whitespace()
+						.map(|pid| pid.parse::<libc::pid_t>().unwrap())
+						.collect::<Vec<_>>()
+				})
+				.filter_map(|pid| {
+					// SAFETY: pidfd_open takes a pid and no flags.
+					let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+					if pidfd < 0 {
+						let error = std::io::Error::last_os_error();
+						assert_eq!(
+							error.raw_os_error(),
+							Some(libc::ESRCH),
+							"pidfd_open (Linux 5.3): {error}"
+						);
+						return None;
+					}
+					// SAFETY: the descriptor is open and owned here alone.
+					Some(unsafe { std::os::fd::FromRawFd::from_raw_fd(pidfd as std::os::fd::RawFd) })
+				})
+				.collect();
+		holder.0.kill().expect("SIGKILL the holder");
+		holder.0.wait().expect("reap the holder");
+		for pidfd in &started {
+			let mut exited = libc::pollfd {
+				fd:      std::os::fd::AsRawFd::as_raw_fd(pidfd),
+				events:  libc::POLLIN,
+				revents: 0,
+			};
+			// SAFETY: one valid pollfd for the duration of the call.
+			while unsafe { libc::poll(&raw mut exited, 1, -1) } != 1 {
+				assert_eq!(std::io::Error::last_os_error().kind(), std::io::ErrorKind::Interrupted);
+			}
+		}
+		assert_eq!(held(), (false, false), "Shift and button 1 after the holder died");
+	}
+
+	/// The holder `a_killed_holder_leaves_no_xtest_key_or_button_down` kills:
+	/// holds Shift and button 1 through `XTest` for longer than any test run.
+	#[test]
+	#[ignore = "run by a_killed_holder_leaves_no_xtest_key_or_button_down"]
+	fn xtest_holder() {
+		if std::env::var_os(HOLDER).is_none() {
+			return;
+		}
+		let (conn, screen) = x11rb::connect(None).unwrap();
+		let root = conn.setup().roots[screen].root;
+		let mut input = X11Input::new(Arc::new(conn), root, None).unwrap();
+		let hold = PointerEvent::Hold {
+			x:        10.0,
+			y:        10.0,
+			button:   MouseButton::Left,
+			keys:     vec![KeyName::Shift],
+			duration: Duration::from_hours(24),
+		};
+		input
+			.pointer(&Target::Desktop, hold, DeliveryMode::Background)
+			.expect("the hold");
+	}
+
+	/// A session whose release watcher cannot start, here because the display
+	/// it is given is unreachable, presses and releases as it would without
+	/// one. Starts its own `Xvfb`: `cargo test -p omp-natives -- --ignored
+	/// without_a_release_watcher`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn a_session_without_a_release_watcher_still_presses() {
+		use x11rb::protocol::{Event, xinput};
+
+		let (_server, display) = start_server();
+		let (conn, screen) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let root = conn.setup().roots[screen].root;
+		let shift = Keymap::core(&conn)
+			.unwrap()
+			.held_keycodes(&[KeyName::Shift])
+			.unwrap()[0];
+		conn.xinput_xi_query_version(2, 0).unwrap().reply().unwrap();
+		conn
+			.xinput_xi_select_events(root, &[xinput::EventMask {
+				deviceid: xinput::Device::ALL_MASTER.into(),
+				mask:     vec![
+					xinput::XIEventMask::RAW_KEY_PRESS | xinput::XIEventMask::RAW_KEY_RELEASE,
+				],
+			}])
+			.unwrap()
+			.check()
+			.unwrap();
+		let (input_conn, _) = x11rb::connect(Some(&display)).expect("connect to Xvfb");
+		let mut input =
+			X11Input::new(Arc::new(input_conn), root, Some("invalid-display".into())).unwrap();
+		input
+			.key_chord(&Target::Desktop, &[KeyName::Shift], DeliveryMode::Background)
+			.expect("the chord");
+		conn.get_input_focus().unwrap().reply().unwrap();
+		let (mut pressed, mut released) = (0, 0);
+		while let Some(event) = conn.poll_for_event().unwrap() {
+			match event {
+				Event::XinputRawKeyPress(raw) if raw.detail == u32::from(shift) => pressed += 1,
+				Event::XinputRawKeyRelease(raw) if raw.detail == u32::from(shift) => released += 1,
+				_ => {},
+			}
+		}
+		assert_eq!((pressed, released), (1, 1), "Shift goes down and up once");
 	}
 }
 
