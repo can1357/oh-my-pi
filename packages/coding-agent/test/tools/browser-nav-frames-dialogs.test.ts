@@ -495,7 +495,7 @@ return { blocked, fast: blockedMs < 2000, answered: await tab.evaluate(() => glo
 				return await tab.waitForFunction("window.hang ? new Promise(() => {}) : document.body?.dataset.path", { timeout: 10_000 });`,
 		});
 		expect(valueOf(result)).toBe("/b");
-	}, 30_000);
+	});
 
 	test("observes controls inside iframes and acts on them by id", async () => {
 		const invoke = createHost();
