@@ -840,6 +840,20 @@ describe("html form", () => {
 				expect(view.term.graphicsPlacements()).toEqual([]);
 			});
 
+			it("sends a WebP picture's rows as PNG, the only format Kitty draws, and keeps the original natively", async () => {
+				const WEBP_1PX = "UklGRhwAAABXRUJQVlA4TBAAAAAvAAAAAAcQ/e9//wMR0f8A";
+				const view = await kittyForm(`<form><img src="data:image/webp;base64,${WEBP_1PX}" alt="dot">${OK}</form>`);
+				const sent = view.writes.join("");
+				expect(sent).toContain("f=100");
+				expect(sent).toContain("iVBORw0KGgo");
+				expect(sent).not.toContain("UklGR");
+				// A native renderer (Tern) decodes the original itself, so a GIF there keeps its animation.
+				const find = (node: NativeNode): NativeNode | undefined =>
+					node.k === "image" ? node : (node.c ?? []).filter(isNode).map(find).find(Boolean);
+				const image = find(view.form.describe(CX));
+				expect(getNativeBlob(String(image?.p && "blob" in image.p ? image.p.blob : ""))?.mime).toBe("image/webp");
+			});
+
 			it("spends image slots only on the pictures of the page shown", async () => {
 				// One live image: a picture on a later page must not take it from the one shown.
 				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
