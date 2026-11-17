@@ -89,7 +89,7 @@ impl PortalGeometry {
 	/// `CaptureFailed` when the toolkit could not report the window's global
 	/// position (native Wayland clients answer with window-relative `0,0`, which
 	/// would crop whatever sits at the monitor's top-left), or when the window
-	/// lies outside the captured monitor.
+	/// extends outside the captured monitor.
 	fn window_crop(&self, window: &AtSpiWindow) -> CoreResult<(u32, u32, u32, u32)> {
 		let AtSpiWindow { window, position_known } = window;
 		if !position_known {
@@ -106,15 +106,19 @@ impl PortalGeometry {
 				window.id
 			))
 		};
-		let scale_x = f64::from(self.pixel_width) / f64::from(self.logical_width.max(1));
-		let scale_y = f64::from(self.pixel_height) / f64::from(self.logical_height.max(1));
-		let rel_x = window.x - self.logical_x;
-		let rel_y = window.y - self.logical_y;
-		if rel_x < 0 || rel_y < 0 {
+		let rel_x = i64::from(window.x) - i64::from(self.logical_x);
+		let rel_y = i64::from(window.y) - i64::from(self.logical_y);
+		if rel_x < 0
+			|| rel_y < 0
+			|| rel_x + i64::from(window.width) > i64::from(self.logical_width)
+			|| rel_y + i64::from(window.height) > i64::from(self.logical_height)
+		{
 			return Err(outside());
 		}
-		let px_x = (f64::from(rel_x) * scale_x).round() as u32;
-		let px_y = (f64::from(rel_y) * scale_y).round() as u32;
+		let scale_x = f64::from(self.pixel_width) / f64::from(self.logical_width.max(1));
+		let scale_y = f64::from(self.pixel_height) / f64::from(self.logical_height.max(1));
+		let px_x = (rel_x as f64 * scale_x).round() as u32;
+		let px_y = (rel_y as f64 * scale_y).round() as u32;
 		if px_x >= self.pixel_width || px_y >= self.pixel_height {
 			return Err(outside());
 		}
@@ -932,6 +936,36 @@ mod tests {
 				.expect_err("window outside monitor");
 			assert!(err.message.contains("outside the selected portal monitor"), "{err}");
 		}
+	}
+
+	#[test]
+	fn window_crop_rejects_partial_windows_at_right_and_bottom_edges() {
+		for (origin_x, origin_y, pixel_width, pixel_height) in
+			[(0, 0, 1920, 1080), (1920, -1080, 2400, 1350)]
+		{
+			let geometry = PortalGeometry::new(
+				Some((origin_x, origin_y)),
+				Some((1920, 1080)),
+				pixel_width,
+				pixel_height,
+			);
+			for (x, y) in [(1800, 100), (100, 1000), (1800, 1000)] {
+				let window = portal_window(origin_x + x, origin_y + y, 400, 200, true);
+				let err = geometry
+					.window_crop(&window)
+					.expect_err("partially visible window must not become a full-window frame");
+				assert_eq!(err.code.as_str(), "CaptureFailed");
+			}
+		}
+	}
+
+	#[test]
+	fn window_crop_accepts_fractional_scale_rounding_at_monitor_edges() {
+		let geometry = PortalGeometry::new(Some((-1280, -720)), Some((1280, 720)), 1920, 1080);
+		let crop = geometry
+			.window_crop(&portal_window(-279, -219, 279, 219, true))
+			.expect("fully contained window at the monitor edges");
+		assert_eq!(crop, (1502, 752, 418, 328));
 	}
 
 	#[test]

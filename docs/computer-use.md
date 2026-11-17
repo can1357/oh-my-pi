@@ -253,6 +253,8 @@ Inside `computer.run`, `wait(milliseconds)` sleeps and `wait(predicate, { timeou
 
 The Wayland PipeWire backend refreshes portal stream geometry before coordinate input and zoom so a changed monitor layout cannot silently reuse an old frame. This adds portal overhead and may require renewed consent if the saved ScreenCast permission is no longer reusable.
 
+Wayland window capture requires a known screen position and a window fully contained in the captured monitor. Otherwise it fails with `CaptureFailed`, rather than returning partial pixels with full-window coordinates.
+
 X11 background input uses an independent XI2 pointer/keyboard and requires writable `/dev/uinput`, working udev/libinput hotplug, and a compatible toolkit/window manager. Core-only clients and popup grabs may require AX or takeover. Windows uses physical screen coordinates throughout capture, AX and input, converting only at the target window's DPI-aware message boundary; mixed-DPI monitor origins are never divided by individual display scales.
 
 Inspect `computer.capabilities()` rather than assuming capture, input, AX, or permission state. On Wayland, input reports `prompt-or-granted` before first native input without opening a RemoteDesktop session, or `input: false` with `inputPermission: "unavailable"` when `LIBEI_SOCKET` is unset and xdg-desktop-portal has no RemoteDesktop backend (wlroots compositors such as sway); that check reads the portal's properties and opens no session. Without a loadable `libpipewire-0.3.so.0`, `capabilities()` reports `capture: false`; otherwise a missing portal/PipeWire feature or denied RemoteDesktop portal is reported as a capture/input/permission failure rather than falling back to X11.
