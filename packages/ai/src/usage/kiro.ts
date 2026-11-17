@@ -68,8 +68,6 @@ function precise(record: Record<string, unknown>, key: string): number | undefin
 const text = (value: unknown): string | undefined =>
 	typeof value === "string" && value.trim() ? value.trim() : undefined;
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 /**
  * Parse a `GetUsageLimits` response: the plan credits, one limit per active
  * bonus grant, and the overage credits when overage billing is enabled. A spent
@@ -161,10 +159,8 @@ export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageR
 		});
 	}
 
-	const userEmail = isRecord(payload.userInfo) ? text(payload.userInfo.email) : undefined;
-	const email = userEmail && EMAIL.test(userEmail) ? userEmail : undefined;
-	const metadata = { ...(title ? { planType: planName } : {}), ...(email ? { email } : {}) };
-	return { provider: PROVIDER_ID, fetchedAt, limits, ...(title || email ? { metadata } : {}) };
+	// Response `userInfo` (the account email) is deliberately not carried over.
+	return { provider: PROVIDER_ID, fetchedAt, limits, ...(title ? { metadata: { planType: planName } } : {}) };
 }
 
 export const kiroUsageProvider: UsageProvider = {
@@ -189,7 +185,6 @@ export const kiroUsageProvider: UsageProvider = {
 					origin: "KIRO_CLI",
 					...(route.profileArn ? { profileArn: route.profileArn } : {}),
 					resourceType: "AGENTIC_REQUEST",
-					isEmailRequired: true,
 				},
 				fetch: ctx.fetch,
 				signal: params.signal,

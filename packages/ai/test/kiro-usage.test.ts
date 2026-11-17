@@ -3,7 +3,6 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
-import { dedupeUsageReports } from "../src/auth/usage-report";
 import type { UsageFetchContext, UsageFetchParams, UsageReport } from "../src/usage";
 import { kiroRankingStrategy, kiroUsageProvider, parseKiroUsage } from "../src/usage/kiro";
 
@@ -29,7 +28,7 @@ function livePayload(
 	return {
 		overageConfiguration: { overageStatus: overrides.overage ?? "DISABLED" },
 		subscriptionInfo: { subscriptionTitle: "KIRO PRO" },
-		userInfo: { email: "someone@example.com", userId: "d-0000000000.00000000-0000-0000-0000-000000000000" },
+		userInfo: { email: "someone@example.com" },
 		usageBreakdownList: [
 			{
 				resourceType: "CREDIT",
@@ -91,7 +90,6 @@ describe("kiroUsageProvider", () => {
 			origin: "KIRO_CLI",
 			profileArn: PROFILE_ARN,
 			resourceType: "AGENTIC_REQUEST",
-			isEmailRequired: true,
 		});
 
 		expect(report?.limits.map(limit => limit.id)).toEqual(["kiro:credits", "kiro:bonus:0"]);
@@ -107,8 +105,8 @@ describe("kiroUsageProvider", () => {
 			amount: { used: 0, limit: 500, unit: "credits" },
 			window: { resetsAt: BONUS_EXPIRES_S * 1000, resetLabel: "expires" },
 		});
-		// Overage disabled: no overage row. The requested `userInfo.email` names the account.
-		expect(report?.metadata).toMatchObject({ planType: "Kiro Pro", email: "someone@example.com" });
+		// Overage disabled: no overage row; the account email never leaves the response.
+		expect(JSON.stringify(report)).not.toContain("someone@example.com");
 	});
 
 	it("marks a spent plan exhausted only when no bonus or overage remains, and flags paid overage", () => {
@@ -161,30 +159,13 @@ describe("kiroUsageProvider", () => {
 			context(() => json(livePayload()), captured),
 		);
 		expect(captured[0]?.url).toBe("https://management.eu-central-1.kiro.dev/");
-		expect(captured[0]?.body).toEqual({ origin: "KIRO_CLI", resourceType: "AGENTIC_REQUEST", isEmailRequired: true });
+		expect(captured[0]?.body).toEqual({ origin: "KIRO_CLI", resourceType: "AGENTIC_REQUEST" });
 		expect(
 			await kiroUsageProvider.fetchUsage(
 				params,
 				context(() => json({}, 403)),
 			),
 		).toBeNull();
-	});
-
-	it("keeps two logins that share an email as two accounts, each labelled by the email", async () => {
-		const reports: UsageReport[] = [];
-		for (const accountId of ["login-a", "login-b"]) {
-			const params = socialParams();
-			params.credential.accountId = accountId;
-			const report = await kiroUsageProvider.fetchUsage(
-				params,
-				context(() => json(livePayload())),
-			);
-			if (report) reports.push(report);
-		}
-		expect(dedupeUsageReports(reports).map(report => report.metadata)).toEqual([
-			{ planType: "Kiro Pro", email: "someone@example.com", accountId: "login-a" },
-			{ planType: "Kiro Pro", email: "someone@example.com", accountId: "login-b" },
-		]);
 	});
 });
 

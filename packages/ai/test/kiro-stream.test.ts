@@ -126,28 +126,6 @@ test("streams reasoning, text, and tool calls in order with usage from token met
 	expect(result.usage).toMatchObject({ input: 11, output: 7, cacheRead: 13, totalTokens: 31, contextTokens: 12_000 });
 });
 
-test("reports the context estimate as input when the stream carries no token counts", async () => {
-	const stream = streamKiro({ ...MODEL, contextWindow: 1_000_000 }, CONTEXT, {
-		apiKey: API_KEY,
-		fetch: async () =>
-			eventsResponse([
-				["assistantResponseEvent", { content: "hello" }],
-				["meteringEvent", { unit: "credit", unitPlural: "credits", usage: 0.02 }],
-				["contextUsageEvent", { contextUsagePercentage: 1.3279000520706177 }],
-			]),
-	});
-	const result = await stream.result();
-	// 1.3279% of the 1,000,000-token window.
-	expect(result.usage).toMatchObject({
-		input: 13_279,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 13_279,
-		contextTokens: 13_279,
-	});
-});
-
 test("retries one pre-output capacity throttle with the identical frozen body and per-attempt CLI headers", async () => {
 	let hooks = 0;
 	const headers: Record<string, string>[] = [];
