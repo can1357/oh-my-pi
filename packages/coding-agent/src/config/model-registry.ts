@@ -215,6 +215,127 @@ interface ConfiguredModelDiscoveryResult {
 	replaceRuntimeModels: boolean;
 }
 
+/** One configured provider's discovery outcome within a discovery pass. */
+type ConfiguredDiscoveryPassResult = ConfiguredModelDiscoveryResult & { provider: DiscoveryProviderConfig };
+
+/** What a discovery pass lands against the current configuration. */
+interface RuntimeDiscoveryLanding {
+	/** Discovered rows in merge order: configured providers still configured, then built-in managers. */
+	discovered: Model<Api>[];
+	/** Configured providers whose runtime rows the pass replaces. */
+	replacedConfiguredProviders: string[];
+	/** Every provider whose runtime layer the pass rewrites. */
+	touchedProviders: Set<string>;
+}
+
+/** Both context-window resolutions of one row, and its tiers when the extended window is larger. */
+interface ContextWindowResolution {
+	standard: Model<Api>;
+	extended: Model<Api>;
+	tiers: ContextWindowTiers | undefined;
+	/** First instant a rebuild could select another dated price card; the resolution holds until then. */
+	validUntil: number;
+}
+
+/** What the hardcoded window policies read besides the row, fixed for one composition. */
+interface HardcodedPolicyInputs {
+	extendedContext: boolean;
+	compactionPoints: unknown;
+	now: number;
+}
+
+/** A row rebuilt under an override object, valid while that object is the override in force. */
+interface OverrideBuild {
+	override: object;
+	built: Model<Api>;
+	validUntil: number;
+}
+
+/** A replacement row merged onto `existing` with the capacity fields it lacked. */
+interface CapacityMerge {
+	existing: Model<Api>;
+	merged: Model<Api>;
+}
+
+/** `#contextWindowResolution` of a row; depends on the row alone. */
+const kContextWindowResolution = Symbol("model-registry.contextWindowResolution");
+/** A bundled row rebuilt under its provider's models.yml override (`#overriddenBuiltInModel`). */
+const kProviderOverrideBuild = Symbol("model-registry.providerOverrideBuild");
+/** A row rebuilt by `#applyProviderTransportOverrideToModel`. */
+const kTransportOverrideBuild = Symbol("model-registry.transportOverrideBuild");
+/** A replacement row's capacity merge in `#mergeResolvedModels`. */
+const kCapacityMerge = Symbol("model-registry.capacityMerge");
+
+/**
+ * Composition results memoized on the row they derive from. Recomposing after
+ * a discovery lands re-derives every bundled and cached row; with these, only
+ * rows whose inputs changed resolve catalog policy again, and an unchanged row
+ * keeps its identity, which the discovered-merge memo keys references on. Each
+ * entry records the inputs besides the row it was derived from and is reused
+ * only while they hold, so registries sharing a bundled row stay correct.
+ */
+type TaggedModel = Model<Api> & {
+	[kContextWindowResolution]?: ContextWindowResolution;
+	[kProviderOverrideBuild]?: OverrideBuild;
+	[kTransportOverrideBuild]?: OverrideBuild;
+	[kCapacityMerge]?: CapacityMerge;
+};
+
+/**
+ * Records `state` on `row` under `key`. Non-enumerable: object spreads that
+ * derive a new row from `row` must not carry its memo along.
+ */
+function tagModel<T>(row: Model<Api>, key: symbol, state: T): T {
+	Object.defineProperty(row, key, { value: state, writable: true, configurable: true });
+	return state;
+}
+
+/**
+ * Main-thread time one slice of a sliced registry merge may run before it
+ * yields the event loop: about half a 60 Hz frame, so input and rendering
+ * keep up while thousands of discovered rows merge.
+ */
+const MERGE_SLICE_MS = 8;
+
+/**
+ * Advances `work` until it finishes or the slice has run {@link MERGE_SLICE_MS};
+ * true once it finished. Each `yield` of `work` marks a point where it may pause.
+ */
+function runMergeSlice(work: Iterator<void>): boolean {
+	const start = performance.now();
+	do {
+		if (work.next().done) return true;
+	} while (performance.now() - start < MERGE_SLICE_MS);
+	return false;
+}
+
+/**
+ * Runs `work` in slices of {@link MERGE_SLICE_MS}, yielding one macrotask
+ * between slices. The first slice runs synchronously: work that finishes
+ * within it returns undefined and costs the caller no extra turn.
+ */
+function runSlicedMerge(work: Iterator<void>): Promise<void> | undefined {
+	return runMergeSlice(work) ? undefined : finishSlicedMerge(work);
+}
+
+/** The slices of {@link runSlicedMerge} after the first, each behind a macrotask. */
+async function finishSlicedMerge(work: Iterator<void>): Promise<void> {
+	do {
+		await yieldMacrotask();
+	} while (!runMergeSlice(work));
+}
+
+/**
+ * One event-loop turn through the immediate queue. Not a timer: `Bun.sleep(0)`
+ * sits in the timer heap, which fake timers freeze, and a merge parked there
+ * would never land under a caller that only advances time at its own deadlines.
+ */
+function yieldMacrotask(): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	setImmediate(resolve);
+	return promise;
+}
+
 /**
  * Credential-aware model projection supplied by an extension provider. Receives
  * the fully composed catalog and returns the list the host should serve.
@@ -371,6 +492,12 @@ export class ModelRegistry {
 			validUntil: number;
 		}
 	>();
+	// Provider overrides as last loaded; a reload keeps the object of every entry that reads the same,
+	// so memos keyed on override identity survive reloads that left the entry alone.
+	#loadedProviderOverrides: Map<string, ProviderOverride> = new Map();
+	// The latest discovery pass still preparing its land. A later pass lands after it, so
+	// passes land in the order their fetches finished.
+	#discoveryLandingTail: Promise<void> | undefined;
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
 	// `provider/id:kind` of modelOverrides kinds already reported as unserved, so
 	// every rebuild does not log the same ignored override again.
@@ -1413,7 +1540,7 @@ export class ModelRegistry {
 		this.#keylessProviders = keylessProviders;
 		this.#discoverableProviders = discoverableProviders;
 		this.#customModelOverlays = customModels;
-		this.#providerOverrides = overrides;
+		this.#providerOverrides = this.#internProviderOverrides(overrides);
 		this.#modelOverrides = modelOverrides;
 
 		this.#addImplicitDiscoverableProviders(configuredProviders);
@@ -1429,6 +1556,20 @@ export class ModelRegistry {
 		);
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
 		this.#syncLiteLLMUsage();
+	}
+
+	/**
+	 * Swap each loaded provider override that reads the same as the previous
+	 * load's for that object: rows built under an override are memoized on its
+	 * identity, and a reload that left the entry alone must not rebuild them.
+	 */
+	#internProviderOverrides(overrides: Map<string, ProviderOverride>): Map<string, ProviderOverride> {
+		for (const [provider, override] of overrides) {
+			const previous = this.#loadedProviderOverrides.get(provider);
+			if (previous !== undefined && Bun.deepEquals(previous, override, true)) overrides.set(provider, previous);
+		}
+		this.#loadedProviderOverrides = new Map(overrides);
+		return overrides;
 	}
 
 	/**
@@ -1668,20 +1809,29 @@ export class ModelRegistry {
 	/** Load built-in models, applying provider-level overrides only.
 	 *  Per-model overrides are applied later by #applyModelOverrides. */
 	#loadBuiltInModels(overrides: Map<string, ProviderOverride>, providerFilter?: ReadonlySet<string>): Model<Api>[] {
+		const now = Date.now();
 		return getBundledProviders().flatMap(provider => {
 			if (providerFilter && !providerFilter.has(provider)) return [];
 			const models = getBundledModels(provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[];
 			const providerOverride = overrides.get(provider);
-
-			return models.map(m => {
-				if (!providerOverride) return m;
-				const withTransportOverride = this.#applyProviderTransportOverride(toModelSpec(m), providerOverride);
-				return buildModel({
-					...withTransportOverride,
-					compat: mergeCompat(m.compatConfig, providerOverride.compat),
-				} as ModelSpec<Api>);
-			});
+			if (!providerOverride) return models;
+			return models.map(model => this.#overriddenBuiltInModel(model, providerOverride, now));
 		});
+	}
+
+	/** `model`, a bundled row, rebuilt under its provider's models.yml override; memoized on the row. */
+	#overriddenBuiltInModel(model: Model<Api>, providerOverride: ProviderOverride, now: number): Model<Api> {
+		const memo = (model as TaggedModel)[kProviderOverrideBuild];
+		if (memo && memo.override === providerOverride && now < memo.validUntil) return memo.built;
+		// Measured before the build: a card falling due mid-build expires the memo at once.
+		const validUntil = nextBuildPriceChange(model.cost, now);
+		const withTransportOverride = this.#applyProviderTransportOverride(toModelSpec(model), providerOverride);
+		const built = buildModel({
+			...withTransportOverride,
+			compat: mergeCompat(model.compatConfig, providerOverride.compat),
+		} as ModelSpec<Api>);
+		tagModel(model, kProviderOverrideBuild, { override: providerOverride, built, validUntil });
+		return built;
 	}
 
 	#mergeResolvedModels(baseModels: Model<Api>[], replacementModels: Model<Api>[]): Model<Api>[] {
@@ -1699,13 +1849,17 @@ export class ModelRegistry {
 			) {
 				return replacementModel;
 			}
-			return {
+			// Same pair, same row: a recomposition hands it on unchanged.
+			const memo = (replacementModel as TaggedModel)[kCapacityMerge];
+			if (memo?.existing === existing) return memo.merged;
+			const merged: Model<Api> = {
 				...replacementModel,
 				contextWindow,
 				maxTokens,
 				omitMaxOutputTokens,
 				...(supportsTools !== undefined ? { supportsTools } : {}),
 			};
+			return tagModel(replacementModel, kCapacityMerge, { existing, merged }).merged;
 		});
 	}
 
@@ -2354,7 +2508,40 @@ export class ModelRegistry {
 			configuredDiscoveriesPromise,
 			this.#discoverBuiltInProviderModels(strategy, providerFilter),
 		]);
-		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
+		// A pass whose fetch finished while an earlier one still prepares lands after it,
+		// preserving the land order of fetch completion.
+		const precedingLanding = this.#discoveryLandingTail;
+		const preparing = precedingLanding
+			? undefined
+			: this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery);
+		if (!precedingLanding && !preparing) {
+			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter);
+			return;
+		}
+		const { promise: landing, resolve: landed } = Promise.withResolvers<void>();
+		this.#discoveryLandingTail = landing;
+		try {
+			if (precedingLanding) {
+				await precedingLanding;
+				await this.#prepareRuntimeDiscoveryLanding(configuredDiscoveryResults, builtInDiscovery);
+			} else {
+				await preparing;
+			}
+			this.#landRuntimeDiscoveries(configuredDiscoveryResults, builtInDiscovery, providerFilter);
+		} finally {
+			if (this.#discoveryLandingTail === landing) this.#discoveryLandingTail = undefined;
+			landed();
+		}
+	}
+
+	/**
+	 * What a discovery pass lands against the current configuration. Results of
+	 * configured providers dropped from models.yml while the pass ran are left out.
+	 */
+	#runtimeDiscoveryLanding(
+		configuredDiscoveryResults: readonly ConfiguredDiscoveryPassResult[],
+		builtInDiscovery: BuiltInDiscoveryResult,
+	): RuntimeDiscoveryLanding {
 		const currentDiscoverableProviders = new Set(this.#discoverableProviders);
 		const currentConfiguredDiscoveryResults = configuredDiscoveryResults.filter(result =>
 			currentDiscoverableProviders.has(result.provider),
@@ -2364,6 +2551,82 @@ export class ModelRegistry {
 			result.replaceRuntimeModels ? [result.provider.provider] : [],
 		);
 		const discovered = [...configuredDiscovered, ...builtInDiscovery.models];
+		const touchedProviders = new Set(discovered.map(model => model.provider));
+		for (const provider of replacedConfiguredProviders) touchedProviders.add(provider);
+		for (const provider of builtInDiscovery.replaceRuntimeProviders) touchedProviders.add(provider);
+		for (const provider of builtInDiscovery.authoritativeProviders) touchedProviders.add(provider);
+		return { discovered, replacedConfiguredProviders, touchedProviders };
+	}
+
+	/**
+	 * Builds, ahead of a discovery pass's land, everything the land would: the
+	 * touched providers' cached slices, their bundled rows with window policies,
+	 * and every discovered row merged onto its reference. The results stay in
+	 * the row memos, so the land repeats none of it while its inputs hold and
+	 * runs as one short synchronous step. The work runs in slices
+	 * ({@link runSlicedMerge}) without touching the composed catalog: until the
+	 * pass lands, readers get the last landed catalog, as while the pass
+	 * fetched. Returns undefined when the work fit in the first slice.
+	 */
+	#prepareRuntimeDiscoveryLanding(
+		configuredDiscoveryResults: readonly ConfiguredDiscoveryPassResult[],
+		builtInDiscovery: BuiltInDiscoveryResult,
+	): Promise<void> | undefined {
+		const { discovered, touchedProviders } = this.#runtimeDiscoveryLanding(
+			configuredDiscoveryResults,
+			builtInDiscovery,
+		);
+		if (touchedProviders.size === 0) return undefined;
+		return runSlicedMerge(this.#runtimeDiscoveryMergeWork(discovered, touchedProviders));
+	}
+
+	/** The work of {@link #prepareRuntimeDiscoveryLanding}; it may pause at every `yield`. */
+	*#runtimeDiscoveryMergeWork(
+		discovered: readonly Model<Api>[],
+		touchedProviders: ReadonlySet<string>,
+	): Generator<void, void, undefined> {
+		// Loaded before the first pause, where the unsliced land loaded them: loading
+		// a slice records its provider's discovery state, which must not overwrite a
+		// state another pass records while this one is paused.
+		this.#getCachedStandardModels(touchedProviders);
+		yield;
+		const now = Date.now();
+		for (const provider of getBundledProviders()) {
+			if (!touchedProviders.has(provider)) continue;
+			const providerOverride = this.#providerOverrides.get(provider);
+			for (const bundled of getBundledModels(provider as Parameters<typeof getBundledModels>[0]) as Model<Api>[]) {
+				const model = providerOverride ? this.#overriddenBuiltInModel(bundled, providerOverride, now) : bundled;
+				if (!model.contextWindowAuthoritative) this.#contextWindowResolution(model, now);
+				yield;
+			}
+		}
+		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
+		yield;
+		for (const model of discovered) {
+			const merged = this.#mergeDiscoveredModelMemoized(
+				model,
+				resolveProviderModelReference(model.provider, model.id, referenceModels),
+				this.#providerOverrides.get(model.provider),
+			);
+			if (!merged.contextWindowAuthoritative) this.#contextWindowResolution(merged, now);
+			yield;
+		}
+	}
+
+	/**
+	 * Lands a discovery pass: replaces the runtime layer of every provider it
+	 * touched and recomposes the catalog, in one synchronous step.
+	 */
+	#landRuntimeDiscoveries(
+		configuredDiscoveryResults: readonly ConfiguredDiscoveryPassResult[],
+		builtInDiscovery: BuiltInDiscoveryResult,
+		providerFilter: ReadonlySet<string> | undefined,
+	): void {
+		this.#captureCatalogMetrics(builtInDiscovery.models, providerFilter === undefined);
+		const { discovered, replacedConfiguredProviders, touchedProviders } = this.#runtimeDiscoveryLanding(
+			configuredDiscoveryResults,
+			builtInDiscovery,
+		);
 		if (
 			discovered.length === 0 &&
 			builtInDiscovery.authoritativeProviders.size === 0 &&
@@ -2372,10 +2635,6 @@ export class ModelRegistry {
 		) {
 			return;
 		}
-		const touchedProviders = new Set(discovered.map(model => model.provider));
-		for (const provider of replacedConfiguredProviders) touchedProviders.add(provider);
-		for (const provider of builtInDiscovery.replaceRuntimeProviders) touchedProviders.add(provider);
-		for (const provider of builtInDiscovery.authoritativeProviders) touchedProviders.add(provider);
 		const referenceModels = this.#composeDiscoveryReferenceModels(touchedProviders);
 		const discoveredModels = this.#applyHardcodedModelPolicies(
 			discovered.map(model =>
@@ -3186,7 +3445,16 @@ export class ModelRegistry {
 			"baseUrl" | "baseUrlApis" | "headers" | "authHeader" | "apiKey" | "remoteCompaction" | "transport"
 		>,
 	): Model<Api> {
-		return buildModel(this.#applyProviderTransportOverride(toModelSpec(model), override));
+		// Every projection rebuilds the rows of runtime-overridden providers; an
+		// unchanged row under the same override object reuses its last build.
+		const now = Date.now();
+		const memo = (model as TaggedModel)[kTransportOverrideBuild];
+		if (memo && memo.override === override && now < memo.validUntil) return memo.built;
+		// Measured before the build: a card falling due mid-build expires the memo at once.
+		const validUntil = nextBuildPriceChange(model.cost, now);
+		const built = buildModel(this.#applyProviderTransportOverride(toModelSpec(model), override));
+		tagModel(model, kTransportOverrideBuild, { override, built, validUntil });
+		return built;
 	}
 
 	#applyProviderBedrockOverrides(models: Model<Api>[]): Model<Api>[] {
@@ -3395,48 +3663,69 @@ export class ModelRegistry {
 	}
 
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
-		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
-		const compactionPoints = getModelCompactionPointsFromSettings(this.#settings);
-		return models.map(model => {
-			let tiers: ContextWindowTiers | undefined;
-			// Hosts whose context window is authoritative (subscription limits that
-			// carry public price tiers only as estimates) skip every inferred
-			// window policy.
-			if (!model.contextWindowAuthoritative) {
-				({ model, tiers } = this.#applyContextWindowPolicies(model, extendedContext, compactionPoints));
-			}
-			if (tiers) this.#policyWindowTiers.set(model, tiers);
-			return model;
-		});
+		const inputs = this.#hardcodedPolicyInputs();
+		return models.map(model => this.#applyHardcodedModelPolicy(model, inputs));
+	}
+
+	/** The settings and clock {@link #applyHardcodedModelPolicy} reads, captured once per composition. */
+	#hardcodedPolicyInputs(): HardcodedPolicyInputs {
+		return {
+			extendedContext: isExtendedContextEnabledFromSettings(this.#settings),
+			compactionPoints: getModelCompactionPointsFromSettings(this.#settings),
+			now: Date.now(),
+		};
 	}
 
 	/**
-	 * Resolves both window tiers and picks one: extended when the setting is on
-	 * or the model's own compaction point reaches past its standard window
-	 * (an explicit per-model opt-in, confirmed in the model hub). `tiers` is
-	 * absent when no larger window exists.
+	 * Picks one of the row's window tiers: extended when the setting is on or
+	 * the model's own compaction point reaches past its standard window (an
+	 * explicit per-model opt-in, confirmed in the model hub). Records the tiers
+	 * of the picked row when a larger window exists.
 	 */
-	#applyContextWindowPolicies(
-		model: Model<Api>,
-		extendedContext: boolean,
-		compactionPoints: unknown,
-	): { model: Model<Api>; tiers?: ContextWindowTiers } {
-		// Without a maximum or a long-context tier both resolutions are identical.
+	#applyHardcodedModelPolicy(model: Model<Api>, inputs: HardcodedPolicyInputs): Model<Api> {
+		// Hosts whose context window is authoritative (subscription limits that
+		// carry public price tiers only as estimates) skip every inferred
+		// window policy.
+		if (model.contextWindowAuthoritative) return model;
+		const { standard, extended, tiers } = this.#contextWindowResolution(model, inputs.now);
+		if (!tiers) return inputs.extendedContext ? extended : standard;
+		const optedIn = inputs.extendedContext || compactionPointReaches(inputs.compactionPoints, model, tiers.standard);
+		const resolved = optedIn ? extended : standard;
+		this.#policyWindowTiers.set(resolved, tiers);
+		return resolved;
+	}
+
+	/**
+	 * Both window resolutions of `model` and its tiers (absent when no larger
+	 * window exists), memoized on the row: they depend on the row alone, so a
+	 * recomposition re-resolves catalog policy only for rows that changed.
+	 * Expires when a rebuild could select another dated price card.
+	 */
+	#contextWindowResolution(model: Model<Api>, now: number): ContextWindowResolution {
+		const memo = (model as TaggedModel)[kContextWindowResolution];
+		if (memo && now < memo.validUntil) return memo;
+		// Without a maximum or a long-context tier both resolutions are the row
+		// itself; nothing is built, so the resolution never expires.
 		if (resolveMaxContextWindow(model) === undefined && model.cost.longContext?.inputThreshold === undefined) {
-			return { model: this.#resolveContextWindowPolicies(model, false) };
+			const standard = this.#resolveContextWindowPolicies(model, false);
+			return tagModel(model, kContextWindowResolution, {
+				standard,
+				extended: standard,
+				tiers: undefined,
+				validUntil: Number.POSITIVE_INFINITY,
+			});
 		}
+		// Measured before the builds: a card falling due mid-build expires the memo at once.
+		const validUntil = nextBuildPriceChange(model.cost, now);
 		const standard = this.#resolveContextWindowPolicies(model, false);
 		const extended = this.#resolveContextWindowPolicies(model, true);
 		const standardWindow = standard.contextWindow;
 		const extendedWindow = extended.contextWindow;
-		if (standardWindow === null || extendedWindow === null || extendedWindow <= standardWindow) {
-			return { model: extendedContext ? extended : standard };
-		}
-		const optedIn = extendedContext || compactionPointReaches(compactionPoints, model, standardWindow);
-		return {
-			model: optedIn ? extended : standard,
-			tiers: { standard: standardWindow, extended: extendedWindow },
-		};
+		const tiers =
+			standardWindow === null || extendedWindow === null || extendedWindow <= standardWindow
+				? undefined
+				: { standard: standardWindow, extended: extendedWindow };
+		return tagModel(model, kContextWindowResolution, { standard, extended, tiers, validUntil });
 	}
 
 	#resolveContextWindowPolicies(model: Model<Api>, extendedContext: boolean): Model<Api> {

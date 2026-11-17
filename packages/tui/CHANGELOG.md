@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+
 ## [18.22.1] - 2026-11-17
 
 ### Added
