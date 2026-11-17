@@ -29,13 +29,7 @@ import { getBundledModelReferenceIndex } from "../identity/bundled";
 import { bareModelId } from "../identity/id";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
-import {
-	type GeneratedProvider,
-	getBundledModel,
-	getBundledModels,
-	getBundledProviders,
-	isGeneratedProvider,
-} from "../models";
+import { type GeneratedProvider, getBundledModel, getBundledModels, getBundledProviders } from "../models";
 import {
 	KIND_API_KINDS,
 	MODEL_KINDS,
@@ -8605,7 +8599,7 @@ export interface BifrostModelManagerConfig {
 
 let bundledJudgeModelIds: Set<string> | undefined;
 
-/** Ids of every bundled judge row (decision and System One runner APIs). */
+/** Ids of every bundled judge row, under any provider and judge API. */
 function getBundledJudgeModelIds(): Set<string> {
 	if (bundledJudgeModelIds) return bundledJudgeModelIds;
 	const ids = new Set<string>();
@@ -8618,51 +8612,41 @@ function getBundledJudgeModelIds(): Set<string> {
 	return ids;
 }
 
-/** `<bifrost-provider>/<model>` → its parts; the model part may itself contain `/`. */
-function splitBifrostModelId(id: string): { upstream: string; model: string } | undefined {
-	const slash = id.indexOf("/");
-	if (slash <= 0 || slash === id.length - 1) return undefined;
-	return { upstream: id.slice(0, slash), model: id.slice(slash + 1) };
-}
-
 /**
- * Whether a Bifrost row answers on the gateway's `/decisions` route: rows that
- * declare `decisions` output (OpenRouter's decision roster, which Bifrost
- * merges into its listing) or whose upstream model id is a bundled judge row
- * (`openai/gpt-6-luna-decisions`, `openrouter/typesafe/jev-1.14`,
- * `<custom-provider>/drex-max-v1.1`).
+ * Whether a Bifrost row is a decision model. Bifrost answers every upstream's
+ * decision models on its unified `/decisions` route, but its `/models` rows
+ * declare `decisions` output only for OpenRouter's. Most specific evidence
+ * wins: the row's output modalities, then the upstream provider's bundled row
+ * for the same model, then whether the full id or its model part is a judge
+ * anywhere in the bundled catalog (custom or non-omp upstream names, and
+ * bundled upstreams that lack the model). Decision ids absent from the bundle
+ * (self-hosted, aliased) stay chat rows.
  */
-function isBifrostDecisionModel(entry: OpenAICompatibleModelRecord, id: string): boolean {
-	const output = isRecord(entry.architecture) ? entry.architecture.output_modalities : undefined;
-	if (Array.isArray(output) && output.includes("decisions")) return true;
+function isBifrostDecisionModel(
+	output: unknown,
+	upstreamRow: Model<Api> | undefined,
+	id: string,
+	modelPart: string,
+): boolean {
+	if (Array.isArray(output) && output.length > 0) return output.includes("decisions");
+	if (upstreamRow) return runnerApiKind(upstreamRow.api) === "judge";
 	const judges = getBundledJudgeModelIds();
-	if (judges.has(id)) return true;
-	const split = splitBifrostModelId(id);
-	return split !== undefined && judges.has(split.model);
+	return judges.has(id) || judges.has(modelPart);
 }
 
 /**
  * Bifrost model manager. The gateway's `/models` roster (every configured
  * upstream, narrowed by the virtual key) is the whole catalog, so nothing is
  * bundled and a successful fetch is authoritative. Rows are OpenRouter-shaped
- * (`context_length`, `max_output_tokens`, `architecture` modalities,
- * `supported_parameters`, per-token USD `pricing`) where Bifrost's model
- * datasheet knows the model; fields it omits fall back to the bundled row of
- * the upstream provider named by the id prefix, then to a bare-id reference.
- * Chat rows run over Chat Completions; known decision models become
- * `openai-decisions` judges on the same base URL (`POST {baseUrl}/decisions`).
+ * where Bifrost's model datasheet knows the model; fields a row omits fall back
+ * to the upstream provider's bundled row, then to a bare-id reference. Chat
+ * rows run over Chat Completions; decision models become `openai-decisions`
+ * judges on the same base URL (`POST {baseUrl}/decisions`).
  */
 export function bifrostModelManagerOptions(config?: BifrostModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("bifrost")!;
 	const resolveBareReference = createReferenceResolver<Api>(new Map());
-	const resolveReference = (id: string): ModelSpec<Api> | undefined => {
-		const split = splitBifrostModelId(id);
-		if (!split) return resolveBareReference(id);
-		const upstream = split.upstream.toLowerCase();
-		const local = isGeneratedProvider(upstream) ? getBundledModel(upstream, split.model) : undefined;
-		return local ? toModelSpec(local) : resolveBareReference(split.model);
-	};
 	return {
 		providerId: "bifrost",
 		cacheProviderId: resolveModelCacheProviderId("bifrost", { apiKey, baseUrl }),
@@ -8686,7 +8670,14 @@ export function bifrostModelManagerOptions(config?: BifrostModelManagerConfig): 
 					return !isExcludedModel("bifrost", model.id);
 				},
 				mapModel: (entry, defaults): ModelSpec<Api> => {
-					const reference = resolveReference(defaults.id);
+					// `<bifrost-provider>/<model>`; the model part may itself contain `/`.
+					const slash = defaults.id.indexOf("/");
+					const modelPart = defaults.id.slice(slash + 1);
+					const upstreamRow: Model<Api> | undefined =
+						slash > 0 ? getBundledModel(defaults.id.slice(0, slash).toLowerCase(), modelPart) : undefined;
+					const reference = upstreamRow
+						? toModelSpec(upstreamRow)
+						: (resolveBareReference(modelPart) ?? resolveBareReference(defaults.id));
 					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
 					const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 					const name = toModelName(entry.name, reference?.name ?? defaults.name);
@@ -8704,7 +8695,7 @@ export function bifrostModelManagerOptions(config?: BifrostModelManagerConfig): 
 					const rates = isRecord(entry.pricing) ? entry.pricing : undefined;
 					const priced = rates !== undefined && (rates.prompt != null || rates.completion != null);
 					const cost = priced ? perTokenPricingCost(rates) : (reference?.cost ?? perTokenPricingCost(undefined));
-					if (isBifrostDecisionModel(entry, defaults.id)) {
+					if (isBifrostDecisionModel(architecture?.output_modalities, upstreamRow, defaults.id, modelPart)) {
 						return {
 							...defaults,
 							name,

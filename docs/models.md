@@ -609,16 +609,7 @@ If every metadata route is unavailable, discovery falls back to the OpenAI-compa
 
 ### Bifrost provider discovery
 
-When `bifrost` has a credential (`BIFROST_API_KEY` or stored `/login bifrost` auth), runtime discovery reads the gateway's `GET /models` roster:
-
-- provider: `bifrost`; model ids keep Bifrost's `<bifrost-provider>/<model>` form (`anthropic/claude-opus-5-5`, `openrouter/google/gemini-decision-1`)
-- api: `openai-completions` for chat models; `openai-decisions` (kind `judge`, `POST {baseUrl}/decisions`) for rows that declare `decisions` output or whose `<model>` part is a bundled judge model (`openai/gpt-6-luna-decisions`, `<provider>/drex-max-v1.1`)
-- base URL: explicit provider `baseUrl` / `models.yml` config, otherwise `BIFROST_BASE_URL`, otherwise `http://localhost:8080/v1`
-- auth mode: the Bifrost virtual key as a bearer token; a gateway without governance accepts any value. Discovery does not run without a credential, because the default port is also llama.cpp's
-
-The live roster is authoritative and cached per key and base URL, since virtual keys can restrict it. Limits, modalities, reasoning, tool support, and prices come from the row's OpenRouter-style metadata; fields the row omits fall back to the bundled model of the upstream provider named by the id prefix, then to a bundled model with the same bare id. Rows whose `architecture.output_modalities` contain neither `text` nor `decisions` are skipped, as are metadata-less embedding, speech, transcription, and image ids.
-
-When a Bifrost decision model is a judge, choose one fallback layer: omp's judge chain (`retry.fallbackChains.judge`) or Bifrost's own retries and routing-rule fallbacks. Using both multiplies upstream calls during an outage; see [Bifrost judge retries](provider-quirks.md#bifrost-bifrost).
+When `bifrost` has a credential (`BIFROST_API_KEY` or stored `/login bifrost` auth), runtime discovery reads the gateway's `GET /models` roster from the provider `baseUrl` / `models.yml` config, otherwise `BIFROST_BASE_URL`, otherwise `http://localhost:8080/v1`. Model ids keep Bifrost's `<bifrost-provider>/<model>` form. Chat models use `openai-completions`; decision models become `openai-decisions` judges on `POST {baseUrl}/decisions`. The roster is authoritative and cached per key and base URL. Row mapping, decision-model detection, and judge retry guidance are in [Bifrost](provider-quirks.md#bifrost-bifrost).
 
 ### Generic OpenAI-compatible discovery
 
