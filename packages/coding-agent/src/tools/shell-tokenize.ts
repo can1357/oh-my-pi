@@ -1848,15 +1848,21 @@ const SHELL_WRAPPER_CHDIRS: Record<string, { letter: string; long: string; short
 };
 /** env's option whose value holds the command it runs, with the shortest abbreviation of its long form. */
 const ENV_SPLIT_OPTION = { letter: "S", long: "--split-string", shortest: "--s" };
+/**
+ * A variable env and sudo set for the command they run: `NAME=value` with any name that has no `=`
+ * (`A-B=1`), where the shell's own assignment before a command takes only an identifier.
+ */
+const WRAPPER_ASSIGNMENT_RE = /^[^=-][^=]*=/;
 
 /**
  * The command a wrapper chain runs in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`), after
- * the shell's own assignments (`NAME=value`) and a `!`, with the directories a wrapper's directory
- * option ({@link SHELL_WRAPPER_CHDIRS}) moves it to, in order. A long option may be abbreviated, as
- * getopt allows (`--us root`); in a bundle of short options (`-nu root`), the first that takes a
- * value takes the rest of the word, or the next word when it ends the bundle. env and sudo also take
- * the variables they set. `undefined` when env runs the command an `env -S` string holds, which the
- * guard does not split.
+ * the shell's own assignments (an identifier name only: bash runs `A-B=1 cmd` as a command named
+ * `A-B=1`) and a `!`, with the directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS})
+ * moves it to, in order. A long option may be abbreviated, as getopt allows (`--us root`); in a
+ * bundle of short options (`-nu root`), the first that takes a value takes the rest of the word, or
+ * the next word when it ends the bundle. env and sudo also take the variables they set
+ * ({@link WRAPPER_ASSIGNMENT_RE}). `undefined` when env runs the command an `env -S` string holds,
+ * which the guard does not split.
  */
 function unwrapShellCommand(words: readonly string[]): { argv: string[]; chdirs: string[] } | undefined {
 	let i = 0;
@@ -1876,7 +1882,7 @@ function unwrapShellCommand(words: readonly string[]): { argv: string[]; chdirs:
 			const arg = words[i];
 			if (options && arg === "--") {
 				options = false;
-			} else if (assigns && SHELL_ASSIGNMENT.test(arg)) {
+			} else if (assigns && WRAPPER_ASSIGNMENT_RE.test(arg)) {
 				// A variable it sets.
 			} else if (options && name === "env" && arg === "-") {
 				// `env -`, the same as `env -i`.
