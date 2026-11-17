@@ -158,6 +158,7 @@ The automatic paths are intentionally different:
    - While the pass rewrites history, prompts, turn-starting custom messages, IRC wakes and background-result deliveries wait for it to finish and then run on the compacted context.
    - Uses `reason: "idle"` and does not auto-continue afterward.
    - Walks `compaction.idleMethodOrder` when it names at least one method, otherwise `compaction.methodOrder`. This lets an idle pass pay for a model summary (e.g. `[remote, snapcompact, soft]`) while threshold, overflow and incomplete-output recovery keep a local method first (e.g. `methodOrder: [snapcompact, remote, soft]`).
+   - Background speculation still arms from `compaction.methodOrder`, so under a non-empty idle order an idle pass reuses an armed summary only when the selected idle method produced it; otherwise it discards the armed result and runs the selected method.
 
 ### Payload-rejection guard
 
