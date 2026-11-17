@@ -267,6 +267,39 @@ describe("AgyHost stateful steps", () => {
 		await expect(run.done).rejects.toThrow("without a usable response");
 		expect(fake.closed).toBe(true);
 	});
+	it("publishes host tools with mixed-type unions without collapsing their properties", async () => {
+		// Shape of a typed `yield`: section variants make `data` an object|string union,
+		// which the CCA pipeline could only replace with an empty-object fallback (#19502).
+		const yieldTool: Tool = {
+			name: "yield",
+			description: "Submit result",
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					type: { anyOf: [{ type: "string" }, { type: "array", minItems: 1, items: { type: "string" } }] },
+					data: {
+						anyOf: [
+							{ type: "object", properties: { status: { enum: ["ok", "fail"], type: "string" } } },
+							{ enum: ["ok", "fail"], type: "string" },
+						],
+					},
+					error: { type: "string" },
+				},
+				required: [],
+			},
+		};
+		const state = await fixture();
+		step(state.host, [user("finish")], { tools: [yieldTool] });
+		const fake = await state.started.next();
+		const [published] = fake.options.tools;
+		const props = published.inputSchema.properties;
+		expect(props && typeof props === "object" ? Object.keys(props) : []).toEqual(["type", "data", "error"]);
+		expect(published.inputSchema).toMatchObject({
+			additionalProperties: false,
+			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
+		});
+	});
 	it("parks and resumes multiple serial tool steps under exactly one ACP prompt", async () => {
 		const state = await parked();
 		let released = false;

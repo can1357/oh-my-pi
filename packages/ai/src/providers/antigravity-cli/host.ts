@@ -24,7 +24,7 @@ import type {
 	Tool,
 	ToolResultMessage,
 } from "../../types";
-import { normalizeSchemaForCCA, toolWireSchema } from "../../utils/schema";
+import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
 import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 import agentDefinition from "./agent.md" with { type: "text" };
 import { resolveAgyBinary } from "./binary";
@@ -858,8 +858,9 @@ function thoughtLevel(options: SessionConfigOption[] | null | undefined): string
 	return option?.type === "select" ? option.currentValue : undefined;
 }
 
+/** Project a tool onto MCP `tools/list`; the official CLI owns any provider-specific schema conversion. */
 function toMcpTool(tool: Tool): McpToolDefinition {
-	const schema: unknown = normalizeSchemaForCCA(toolWireSchema(tool));
+	const schema: unknown = normalizeSchemaForMCP(toolWireSchema(tool));
 	if (!isRecord(schema)) throw new Error(`Invalid schema for Antigravity CLI tool ${tool.name}`);
 	return { name: tool.name, description: tool.description, inputSchema: schema };
 }
