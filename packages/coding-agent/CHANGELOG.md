@@ -139,6 +139,11 @@
 - Rich-text pastes during approval type-to-steer, or into a dialog opened over a draft that still holds typing, now reach the chat editor as Markdown with their images instead of as plain text ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
 - Fixed prewalk handoffs overriding model or effort choices made mid-switch, and auto handoffs not returning to the planning model after `prewalk.auto` changed or `/prewalk off` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
 - Rex and other OSC 7501 terminals no longer play a success sound mid-run when a stale agent end arrives after another run has opened ([#17307](https://github.com/can1357/oh-my-pi/issues/17307))
+- Pasting an image while a dialog that can't hold one has focus (the `ask` form, agents hub, `/annotate`, selectors) now shows "Image paste is not supported in this prompt" instead of attaching it to the chat editor hidden behind it ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
+- Rich-text pastes during approval type-to-steer, or into a dialog opened over a draft that still holds typing, now reach the chat editor as Markdown with their images instead of as plain text ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
+- Fixed prewalk handoffs overriding model or effort choices made mid-switch, and auto handoffs not returning to the planning model after `prewalk.auto` changed or `/prewalk off` ([#17292](https://github.com/can1357/oh-my-pi/pull/17292) by [@taibenvenuti](https://github.com/taibenvenuti))
+- `^model` references followed by sentence punctuation now register their model agent instead of remaining literal ([#19369](https://github.com/can1357/oh-my-pi/issues/19369))
+- `^model` references followed by sentence punctuation now register their model agent instead of remaining literal ([#19445](https://github.com/can1357/oh-my-pi/pull/19445) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.3] - 2026-11-16
 

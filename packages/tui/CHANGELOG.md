@@ -49,6 +49,10 @@
 
 - Fixed fallback model selection so roles are offered only models they can use, excluding incompatible image and speech models.
 - Fixed macOS spelling assistance, autocorrect, replacements, and word completion for shell (`!`) and Python (`$`) drafts.
+- Models awaiting reasoning-capability discovery now follow the session's thinking default and offer auto alongside off and every effort level.
+- `html-form/media` moved to `media`, with `loadFormImage`, `FormMedia` and `MAX_FORM_IMAGE_BYTES` renamed `loadMedia`, `Media` and `MAX_MEDIA_BYTES`
+- Model mentions followed by punctuation collapse into editable chips without swallowing the punctuation ([#19369](https://github.com/can1357/oh-my-pi/issues/19369))
+- Model mentions followed by punctuation collapse into editable chips without swallowing the punctuation ([#19445](https://github.com/can1357/oh-my-pi/pull/19445) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.1] - 2026-11-14
 
