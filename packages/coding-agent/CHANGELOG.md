@@ -4,13 +4,12 @@
 
 ### Added
 
-- On macOS the `computer` tool's takeover notice now says what it did with your keyboard ("handed the keyboard back to Notes's window", "left as the user chose") instead of "focus returned", which it could not verify ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Changed
 
+- On macOS the `computer` tool's takeover notice now says what it did with your keyboard ("handed the keyboard back to Notes's window", "left as the user chose") instead of "focus returned", which it could not verify ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `tab.observe()` and `tab.ariaSnapshot()` on Chromium tabs now wait, up to 3 seconds, for the requests and page updates (including child frames) the actions since your last look started, so a cell that clicks and then observes shows the result instead of the page before it; concurrent looks share the wait even across another action, clearing the request log does not discard pending work, and requests already open before the action do not delay the look ([#19045](https://github.com/can1357/oh-my-pi/pull/19045) by [@will-bogusz](https://github.com/will-bogusz))
-### Changed
-
 - When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
