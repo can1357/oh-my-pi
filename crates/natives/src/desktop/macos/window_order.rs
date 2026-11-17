@@ -93,6 +93,9 @@ pub(super) enum Raised {
 	Asked,
 	/// Accessibility has no such window to raise: it is not kept any more.
 	Unraisable,
+	/// The user switched or came to the target while the window was being
+	/// looked up, so no raise was sent.
+	NotSent,
 }
 
 /// How many times one background action raises the user's key window again
@@ -100,12 +103,16 @@ pub(super) enum Raised {
 /// there until the last pass.
 const RAISE_TRIES: u8 = 3;
 
-/// How many readings a pass takes for its raise to show: the window list
-/// catches up with `AXRaise` a little after it returns, and a pass that read
-/// it too early would raise again, or report a raise that held. They span
-/// 40 ms: after a takeover's hand-back, 20 ms of readings once missed a raise
-/// that held.
-const SHOW_READS: usize = 21;
+/// How many readings a pass during the action takes for its raise to show:
+/// the window list catches up with `AXRaise` a little after it returns, and a
+/// pass that read it too early would raise again. A raise that has not shown
+/// in that time is left to the next poll.
+const SHOW_READS: usize = 10;
+
+/// The same for the last pass, which names the window if its raise does not
+/// show, over 40 ms: after a takeover's hand-back, 20 ms of readings once
+/// missed a raise that held.
+const LAST_SHOW_READS: usize = 21;
 
 /// The wait between those readings. macOS shows the raise 4 to 17 ms after
 /// `AXRaise` returns; reading only every guard poll (10 ms) let a click's
@@ -118,9 +125,11 @@ pub(super) const SHOW_WAIT: Duration = Duration::from_millis(2);
 /// windows down to it, for at most [`RAISE_TRIES`] passes during the action;
 /// the `last` pass always raises. Just before raising, `still_kept` is asked
 /// again, since the user may have switched or come to the target after the
-/// caller's check. After raising it reads the stacking again, `wait`ing
-/// between readings up to [`SHOW_READS`] times, until the raise shows; the
-/// last pass returns the window if it is still behind.
+/// caller's check, and `raise` asks it once more right before it sends. After
+/// raising it reads the stacking again, `wait`ing between readings up to
+/// [`SHOW_READS`] times ([`LAST_SHOW_READS`] on the last pass), until the raise
+/// shows or the order is no longer kept; the last pass returns the window if
+/// it is still behind.
 pub(super) fn keep(
 	order: &mut EntryOrder,
 	tries: &mut u8,
@@ -137,14 +146,20 @@ pub(super) fn keep(
 	if (!last && *tries >= RAISE_TRIES) || !still_kept() {
 		return Ok(());
 	}
-	*tries = tries.saturating_add(1);
-	if raise(&window) == Raised::Unraisable {
-		order.forget();
+	match raise(&window) {
+		Raised::NotSent => return Ok(()),
+		Raised::Unraisable => order.forget(),
+		Raised::Asked => {},
 	}
+	*tries = tries.saturating_add(1);
 	let mut behind = None;
-	for read in 0..SHOW_READS {
+	for read in 0..if last { LAST_SHOW_READS } else { SHOW_READS } {
 		if read > 0 {
 			wait();
+			// A switch of the user's while the raise shows is theirs to keep.
+			if !still_kept() {
+				return Ok(());
+			}
 		}
 		behind = stack(key).and_then(|now| order.to_raise(&now));
 		if behind.is_none() {
@@ -279,8 +294,9 @@ mod tests {
 		assert_eq!(keep(&mut order, &mut tries, read, || true, |_| panic!(), || {}, true), Ok(()));
 		assert_eq!(raised.get(), 1);
 		// A target that orders itself in front again on every reading: three
-		// passes raise during the action, later ones leave it, and the last
-		// raises once more, reads again, and names the window.
+		// passes raise during the action and read back for a short while, later
+		// ones leave it, and the last raises once more, reads back for longer,
+		// and names the window.
 		let (mut order, mut tries) = (fresh(), 0);
 		let raised = Cell::new(0);
 		let again = |_| Some(vec![target, user]);
@@ -288,14 +304,15 @@ mod tests {
 			raised.set(raised.get() + 1);
 			Raised::Asked
 		};
-		for _ in 0..5 {
-			assert_eq!(keep(&mut order, &mut tries, again, || true, count, || {}, false), Ok(()));
-		}
-		assert_eq!(raised.get(), 3);
 		let waits = Cell::new(0);
 		let waited = || waits.set(waits.get() + 1);
+		for _ in 0..5 {
+			assert_eq!(keep(&mut order, &mut tries, again, || true, count, waited, false), Ok(()));
+		}
+		assert_eq!((raised.get(), waits.get()), (3, 3 * (SHOW_READS - 1)));
+		waits.set(0);
 		assert_eq!(keep(&mut order, &mut tries, again, || true, count, waited, true), Err(user));
-		assert_eq!((raised.get(), waits.get()), (4, SHOW_READS - 1));
+		assert_eq!((raised.get(), waits.get()), (4, LAST_SHOW_READS - 1));
 		// The last pass after the budget is spent still repairs, and a raise
 		// that shows only on a later reading counts.
 		let (mut order, mut tries) = (fresh(), RAISE_TRIES);
@@ -322,6 +339,35 @@ mod tests {
 		// nothing is raised.
 		let (mut order, mut tries) = (fresh(), 0);
 		assert_eq!(keep(&mut order, &mut tries, again, || false, |_| panic!(), || {}, true), Ok(()));
+		// They switched while the window was looked up: no raise was sent, so
+		// nothing is read back or counted.
+		let (mut order, mut tries) = (fresh(), 0);
+		let reads = Cell::new(0);
+		let counted = |_| {
+			reads.set(reads.get() + 1);
+			Some(vec![target, user])
+		};
+		assert_eq!(
+			keep(&mut order, &mut tries, counted, || true, |_| Raised::NotSent, || {}, true),
+			Ok(())
+		);
+		assert_eq!((reads.get(), tries), (1, 0));
+		// They switched or came to the target while the raise was being read
+		// back: the last pass stands down instead of naming the window.
+		let (mut order, mut tries) = (fresh(), 0);
+		let switched = Cell::new(false);
+		assert_eq!(
+			keep(
+				&mut order,
+				&mut tries,
+				again,
+				|| !switched.get(),
+				|_| Raised::Asked,
+				|| switched.set(true),
+				true
+			),
+			Ok(())
+		);
 		// Unreadable stacking: nothing raised, nothing claimed.
 		assert_eq!(keep(&mut fresh(), &mut 0, |_| None, || true, |_| panic!(), || {}, true), Ok(()));
 	}

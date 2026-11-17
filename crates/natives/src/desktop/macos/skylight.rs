@@ -1536,10 +1536,18 @@ fn keep_key_window(
 		tries,
 		capture::stacked_down_to,
 		still_kept,
-		|window| match ax::raise_window_id(window.pid, window.id) {
+		// The lookup can block on a busy app, so the user's choice is asked
+		// again between it and the raise.
+		|window| match ax::window_by_id(window.pid, window.id) {
 			Err(error) if error.code == ErrorCode::WindowNotFound => window_order::Raised::Unraisable,
+			Ok(_) if !still_kept() => window_order::Raised::NotSent,
+			Ok(found) => {
+				// A failure shows in a later reading.
+				let _ = ax::raise(&found);
+				window_order::Raised::Asked
+			},
 			// Any other failure shows in a later reading.
-			_ => window_order::Raised::Asked,
+			Err(_) => window_order::Raised::Asked,
 		},
 		|| thread::sleep(window_order::SHOW_WAIT),
 		last,
