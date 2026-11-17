@@ -765,11 +765,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const budget = new GuardProbeBudget();
 		const guardRules = cfgToolsGuardRules.get(this.session.settings);
 		const scope = this.#guardScope(cwd);
+		// The whole chain first: a `git stash pop` anywhere in it may run before any segment, so each
+		// segment is checked with the chain's count of them.
+		const whole = guardRules ? checkShellGuard(command, scope, { budget }) : undefined;
+		const wholeHit = whole ? whole.hit : this.#guardHit(command, cwd, { budget });
 		// Each segment is checked where the ones before it leave the shell (after their `cd`s, with
 		// their `git stash`es known to have succeeded), as the whole chain checks it.
 		let after: ShellScriptEnd | undefined;
 		const segmentHits = segments.map((segment): GuardHit | undefined => {
-			const check = guardRules ? checkShellGuard(segment.text, scope, { budget, after }) : undefined;
+			const check = whole
+				? checkShellGuard(segment.text, scope, { budget, after, releases: whole.releases })
+				: undefined;
 			after = check?.end;
 			const literalCommand = segment.literal?.argv.join(" ");
 			if (literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
@@ -777,8 +783,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			}
 			return check ? check.hit : this.#guardHit(segment.text, cwd, { budget });
 		});
-		const wholeChainOnlyCritical =
-			this.#guardHit(command, cwd, { budget }) !== undefined && !segmentHits.some(hit => hit !== undefined);
+		const wholeChainOnlyCritical = wholeHit !== undefined && !segmentHits.some(hit => hit !== undefined);
 		if (wholeChainOnlyCritical) return null;
 
 		let chainUntainted = true;

@@ -1050,6 +1050,32 @@ describe("guard rule review regressions", () => {
 		}
 	});
 
+	it("stops crediting a stash at a release that may run, wherever the release is", async () => {
+		await dirtyRepo(cwd);
+		fs.writeFileSync(path.join(cwd, "u.txt"), "u\n");
+		for (const command of [
+			"git stash && git stash pop 2>&1 | tail -n 3 && git checkout .",
+			"git stash && git stash pop | tail -n 3 && git reset --hard",
+			"git stash && git stash drop | cat && git reset --hard",
+			"git stash && (git stash pop || true) && git reset --hard",
+			"git stash && (git stash pop; git status -s) && git reset --hard",
+			"git stash && out=$(git stash pop 2>&1) && git reset --hard",
+			"git stash && bash -c 'git stash pop' && git reset --hard",
+			"git stash && g() { git reset --hard; }; git stash pop; g",
+			"g() { git stash pop; } && git stash && g && git reset --hard",
+			"git stash -u && git stash pop 2>&1 | tail -n 2 && git clean -fd",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+		// A release known to have run before the stash leaves it holding the work.
+		for (const command of [
+			"git stash pop && git stash && git reset --hard",
+			"git stash && git stash pop && git stash && git reset --hard",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
+		}
+	});
+
 	it("keeps a stash after an `||` earlier in the list, and one run elsewhere in the same work tree", async () => {
 		await dirtyRepo(cwd);
 		fs.mkdirSync(path.join(cwd, "sub"));
@@ -1150,9 +1176,13 @@ describe("guard rule review regressions", () => {
 			const row = tool.formatApprovalDetails({ command }).find(line => line.includes(discarding));
 			expect({ command, row }).toEqual({ command, row: `  ✓ ${discarding} (allowed: git *)` });
 		}
-		const row = tool
-			.formatApprovalDetails({ command: "git status && git reset --hard && npm test" })
-			.find(line => line.includes("git reset --hard"));
-		expect(row).toBe("  ? git reset --hard (discard_changes)");
+		for (const [command, discarding] of [
+			["git status && git reset --hard && npm test", "git reset --hard"],
+			// The pop's stage is no link of the reset's chain, but it runs before it.
+			["git stash && git stash pop 2>&1 | tail -n 3 && git reset --hard", "git reset --hard"],
+		] as const) {
+			const row = tool.formatApprovalDetails({ command }).find(line => line.includes(discarding));
+			expect({ command, row }).toEqual({ command, row: `  ? ${discarding} (discard_changes)` });
+		}
 	});
 });

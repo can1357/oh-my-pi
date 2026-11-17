@@ -1729,6 +1729,22 @@ function stashSaves(rest: readonly string[]): Stashed | undefined {
 /** `git stash` subcommands that take saved work back out of the stash: into the tree, or away. */
 const STASH_RELEASES: Record<string, true> = { pop: true, drop: true, clear: true, branch: true };
 
+/**
+ * The arguments after `stash` and the target of a `git stash` that git runs, or `undefined` for any
+ * other command and for one git exits before (`git --version stash`).
+ */
+function gitStash(command: ShellCommand, home: string): { rest: string[]; target?: GitTarget } | undefined {
+	if (command.argv[0] !== "git") return undefined;
+	const { sub, rest, target, exits } = gitInvocation(command, home);
+	return sub === "stash" && !exits ? { rest, target } : undefined;
+}
+
+/** Whether `command` takes saved work back out of the stash (`git stash pop`, `drop`, `clear`, `branch`). */
+function releasesStash(command: ShellCommand, home: string): boolean {
+	const rest = gitStash(command, home)?.rest;
+	return rest !== undefined && rest.length > 0 && Object.hasOwn(STASH_RELEASES, rest[0]);
+}
+
 /** A `git stash` that has succeeded in a `&&` chain. */
 interface StashLink {
 	/** The chain link whose command it is. */
@@ -1757,14 +1773,11 @@ function gitRepository(target: GitTarget | undefined): string | undefined {
 	}
 }
 
-/**
- * The `git stash` that is `link`'s command, or `undefined` when the command is no `git stash` or
- * one git exits before (`git --version stash`).
- */
+/** The `git stash` that is `link`'s command, or `undefined` when the command is none ({@link gitStash}). */
 function stashAt(link: SucceededLink, scope: GuardScope): StashLink | undefined {
-	if (link.command.argv[0] !== "git") return undefined;
-	const { sub, rest, target, exits } = gitInvocation(link.command, scope.home);
-	if (sub !== "stash" || exits) return undefined;
+	const stash = gitStash(link.command, scope.home);
+	if (!stash) return undefined;
+	const { rest, target } = stash;
 	const release = rest.length > 0 && Object.hasOwn(STASH_RELEASES, rest[0]);
 	const saved = release ? undefined : stashSaves(rest);
 	return { link, release, repository: saved && gitRepository(target), saved };
@@ -1797,6 +1810,31 @@ function latestStash(link: SucceededLink | undefined, scope: GuardScope): StashL
 	return found;
 }
 
+/** How many links of the chain at or before each link looked at release the stash ({@link releasesStash}). */
+const chainReleases = new WeakMap<SucceededLink, number>();
+
+/**
+ * How many links of `link`'s `&&` chain, at or before it, take saved work back out of the stash.
+ * Every link is looked at once, as in {@link latestStash}.
+ */
+function releasesThrough(link: SucceededLink | undefined, scope: GuardScope): number {
+	const pending: SucceededLink[] = [];
+	let count = 0;
+	for (; link; link = link.before) {
+		const known = chainReleases.get(link);
+		if (known !== undefined) {
+			count = known;
+			break;
+		}
+		pending.push(link);
+	}
+	for (let i = pending.length - 1; i >= 0; i--) {
+		if (releasesStash(pending[i].command, scope.home)) count++;
+		chainReleases.set(pending[i], count);
+	}
+	return count;
+}
+
 /**
  * The most `git stash` commands {@link stashedBefore} looks back through. One further back is not
  * counted: the command is checked as if it had not run, so the rule can fire on work it saved, but
@@ -1807,15 +1845,25 @@ const STASH_LOOKBACK = 64;
 /**
  * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its `&&`
  * chain) saved in the repository and work tree `target` works on and still hold, or `undefined` for
- * none: what the stashes there saved after the latest `pop`, `drop`, `clear` or `branch`, wherever
- * that ran. Only stashes are visited, at most {@link STASH_LOOKBACK} of them.
+ * none. `releases` counts the commands anywhere in the command line that take saved work back out
+ * of the stash (`pop`, `drop`, `clear`, `branch`; in any pipeline stage, group, substitution, nested
+ * script or function). A stash holds its work only when every one of them is a link of its chain
+ * before it, known to have run first; any other may run between it and `command`. Only stashes are
+ * visited, at most {@link STASH_LOOKBACK} of them.
  */
-function stashedBefore(command: ShellCommand, target: GitTarget, scope: GuardScope): Stashed | undefined {
+function stashedBefore(
+	command: ShellCommand,
+	target: GitTarget,
+	scope: GuardScope,
+	releases: number,
+): Stashed | undefined {
 	let stashed: Stashed | undefined;
 	let stash = latestStash(command.succeeded, scope);
 	// Looked up at the first stash that saved something.
 	let repository: string | undefined | null = null;
 	for (let seen = 0; stash && !stash.release && seen < STASH_LOOKBACK; seen++) {
+		// The releases before this stash are before every older one too: none of those holds more.
+		if (releases > 0 && releasesThrough(stash.link.before, scope) < releases) break;
 		const { saved } = stash;
 		if (saved && stash.repository !== undefined) {
 			if (repository === null) repository = gitRepository(target);
@@ -1833,7 +1881,13 @@ function stashedBefore(command: ShellCommand, target: GitTarget, scope: GuardSco
 	return stashed;
 }
 
-function discardChanges(command: ShellCommand, scope: GuardScope, probes: GuardProbeBudget): GuardHit | undefined {
+/** `releases`: as for {@link stashedBefore}. */
+function discardChanges(
+	command: ShellCommand,
+	scope: GuardScope,
+	probes: GuardProbeBudget,
+	releases: number,
+): GuardHit | undefined {
 	if (command.argv[0] !== "git") return undefined;
 	const { sub, rest, target } = gitInvocation(command, scope.home);
 	const probe = discardProbe(command, scope, sub, rest);
@@ -1841,7 +1895,7 @@ function discardChanges(command: ShellCommand, scope: GuardScope, probes: GuardP
 	let check: VcsDiscardCheck = { ...probe.check, gitDir: target.gitDir, workTree: target.workTree };
 	// A stash just before keeps what it saved; only what it left behind can be lost. It keeps no
 	// nested repository, only a pointer to its commit, so a `git clean -ff` is checked in full.
-	const stashed = check.nestedRepositories ? undefined : stashedBefore(command, target, scope);
+	const stashed = check.nestedRepositories ? undefined : stashedBefore(command, target, scope, releases);
 	if (stashed) {
 		if (!check.clean || stashed.ignored) return undefined;
 		if (stashed.untracked) {
@@ -2097,6 +2151,12 @@ export interface ShellGuardOptions {
 	 * there, after the `cd`s and `git stash`es of the part before it.
 	 */
 	after?: ShellScriptEnd;
+	/**
+	 * For a segment of a compound prompt, the `releases` that checking the whole command line
+	 * reported: a release elsewhere in the line may run before the segment. Without it, the
+	 * command's own.
+	 */
+	releases?: number;
 }
 
 /** What {@link checkShellGuard} found, and where the command leaves the shell. */
@@ -2104,6 +2164,11 @@ export interface ShellGuardCheck {
 	hit: GuardHit | undefined;
 	/** For the next segment of a compound prompt, as its {@link ShellGuardOptions.after}. */
 	end: ShellScriptEnd | undefined;
+	/**
+	 * How many commands in the command take saved work back out of the stash (`git stash pop`,
+	 * `drop`, `clear`, `branch`), anywhere, nested ones included (see {@link stashedBefore}).
+	 */
+	releases: number;
 }
 
 /** The first fixed rule a shell command breaks, or `undefined` (see {@link checkShellGuard}). */
@@ -2125,16 +2190,28 @@ export function findShellGuardHit(
  * probes share one budget: the ones left without time count as no match.
  */
 export function checkShellGuard(command: string, scope: GuardScope, options: ShellGuardOptions = {}): ShellGuardCheck {
-	if (command.trim() === "") return { hit: undefined, end: options.after };
+	if (command.trim() === "") return { hit: undefined, end: options.after, releases: options.releases ?? 0 };
 	const parsed = parseShellScript(command, { ...scope, after: options.after });
-	return { hit: firstHit(command, parsed, scope, options), end: parsed.end };
+	const releases = options.releases ?? stashReleases(parsed.pipelines, scope.home);
+	return { hit: firstHit(command, parsed, scope, options, releases), end: parsed.end, releases };
 }
 
+/** How many of the commands in `pipelines` take saved work back out of the stash ({@link releasesStash}). */
+function stashReleases(pipelines: readonly ShellCommand[][], home: string): number {
+	let count = 0;
+	for (const command of new Set(pipelines.flat())) {
+		if (releasesStash(command, home)) count++;
+	}
+	return count;
+}
+
+/** `releases`: as for {@link stashedBefore}. */
 function firstHit(
 	command: string,
 	{ pipelines, scripts, truncated }: ParsedShellScript,
 	scope: GuardScope,
 	options: ShellGuardOptions,
+	releases: number,
 ): GuardHit | undefined {
 	braceTextLeft = MAX_BRACE_TEXT;
 	// The raw line, each nested script, and each simple command in canonical quoting: the program
@@ -2189,7 +2266,7 @@ function firstHit(
 	let found: GuardHit | undefined;
 	probing: for (const pipeline of pipelines) {
 		for (const simple of pipeline) {
-			found = discardChanges(simple, scope, budget) ?? killsHarness(simple, scope, budget);
+			found = discardChanges(simple, scope, budget, releases) ?? killsHarness(simple, scope, budget);
 			if (found) break probing;
 		}
 	}
