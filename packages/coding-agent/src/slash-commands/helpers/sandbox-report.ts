@@ -179,7 +179,7 @@ function policyFileLines(
 		const note = found && found.state !== "present" ? found.state : found?.entries?.length === 0 ? "empty" : "";
 		lines.push({
 			lead: `${last ? "└─" : "├─"} ${file.label}: `,
-			text: shown(file.path),
+			text: shown(sanitizeText(file.path).replace(/\s+/g, " ").trim()),
 			path: file.path,
 			tail: note ? ` (${note})` : "",
 		});
@@ -224,7 +224,11 @@ function networkSection(status: SandboxStatus, env: Record<string, string | unde
 	);
 	for (const name of PROXY_VARS) {
 		const value = env[name];
-		if (value) rows.push({ label: name, value: shown(sanitizeText(redactProxyCredentials(value))) });
+		if (value)
+			rows.push({
+				label: name,
+				value: shown(sanitizeText(redactProxyCredentials(value)).replace(/\s+/g, " ").trim()),
+			});
 	}
 	if (rows.length === 0) rows.push({ label: "Network", value: "no layer reports it and no proxy is set" });
 	return { key: "network", title: "Network", rows };

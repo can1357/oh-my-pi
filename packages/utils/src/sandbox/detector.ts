@@ -51,7 +51,7 @@ function cleanDetail(detail: SandboxDetail): SandboxDetail {
 	if ("files" in detail) {
 		const files = detail.files.map(file => ({
 			label: oneLine(file.label),
-			path: oneLine(file.path),
+			path: String(file.path),
 			...(file.directory === true ? { directory: true } : {}),
 		}));
 		return { title: oneLine(detail.title), files };
@@ -60,8 +60,8 @@ function cleanDetail(detail: SandboxDetail): SandboxDetail {
 }
 
 /**
- * A probe's layer with every string made safe to show: one line each, except a detail's markdown, which keeps
- * its newlines. Throws on a network access the report has no words for.
+ * A probe's layer with display strings made safe to show: one line each, except a detail's markdown, which
+ * keeps its newlines. Policy paths stay raw for disk lookups and links. Throws on an invalid network access.
  */
 function cleanLayer(probe: SandboxProbe, layer: SandboxLayer): SandboxLayer {
 	const out: SandboxLayer = {

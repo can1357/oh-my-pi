@@ -78,6 +78,11 @@ export function mapLandlockProbeResult(result: LandlockProbeResult): SandboxLand
 	return { state: "unknown" };
 }
 
+/** The ABI child inherits only launcher variables, never dotenv additions. */
+export function landlockChildEnv(): Record<string, string> {
+	return { ...filterLauncherEnv(process.env), BUN_BE_BUN: "1" };
+}
+
 async function queryLandlockAbi(): Promise<SandboxLandlock> {
 	// The syscall number below is verified for these architectures only.
 	if (process.platform !== "linux" || (process.arch !== "x64" && process.arch !== "arm64"))
@@ -86,7 +91,7 @@ async function queryLandlockAbi(): Promise<SandboxLandlock> {
 		const child = Bun.spawn([process.execPath, "--no-env-file", "-e", LANDLOCK_QUERY_SCRIPT], {
 			// Bun runs the `preload` of a bunfig.toml in its working directory; only root can put one in `/`.
 			cwd: "/",
-			env: { ...process.env, BUN_BE_BUN: "1" },
+			env: landlockChildEnv(),
 			timeout: 2000,
 			killSignal: "SIGKILL",
 			maxBuffer: 1024,

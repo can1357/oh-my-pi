@@ -391,25 +391,35 @@ describe("sandbox layers", () => {
 		expect(await layers(repo)).toEqual([]);
 	});
 
-	it("keeps the launcher's NONO_CAP_FILE in a real process whose launch directory's .env sets another", async () => {
+	it("keeps launcher variables in the host and ABI child, excluding dotenv's LD_PRELOAD", async () => {
 		const dir = TempDir.createSync("@omp-sandbox-launch-env-");
 		dirs.push(dir);
 		const launch = path.join(dir.path(), "launch");
 		const other = path.join(dir.path(), "other");
 		fs.mkdirSync(launch);
 		fs.mkdirSync(other);
-		fs.writeFileSync(path.join(launch, ".env"), "NONO_CAP_FILE=/tmp/from-dotenv.json\n");
+		fs.writeFileSync(
+			path.join(launch, ".env"),
+			"NONO_CAP_FILE=/tmp/from-dotenv.json\nLD_PRELOAD=/tmp/dotenv-preload.so\n",
+		);
 		const script = [
 			`import { setProjectDir } from ${JSON.stringify(path.join(import.meta.dir, "../src/dirs.ts"))};`,
 			`import { createSandboxHost } from ${JSON.stringify(path.join(import.meta.dir, "../src/sandbox.ts"))};`,
+			`import { landlockChildEnv } from ${JSON.stringify(path.join(import.meta.dir, "../src/sandbox/host.ts"))};`,
 			`setProjectDir(${JSON.stringify(other)});`,
-			"process.stdout.write(JSON.stringify(createSandboxHost().env.NONO_CAP_FILE ?? null));",
+			"const child = landlockChildEnv();",
+			"process.stdout.write(JSON.stringify({ marker: createSandboxHost().env.NONO_CAP_FILE ?? null, childMarker: child.NONO_CAP_FILE ?? null, preload: process.env.LD_PRELOAD, childPreload: child.LD_PRELOAD ?? null, launch: child.SANDBOX_LAUNCH_TEST, bun: child.BUN_BE_BUN }));",
 		].join("\n");
 		const run = async (launcherValue: string | undefined): Promise<unknown> => {
 			// Bun and omp load `launch/.env` at startup; the script then moves to `other`, as `--cwd` does.
 			const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
 				cwd: launch,
-				env: { ...process.env, NONO_CAP_FILE: launcherValue },
+				env: {
+					...process.env,
+					NONO_CAP_FILE: launcherValue,
+					LD_PRELOAD: undefined,
+					SANDBOX_LAUNCH_TEST: "launcher",
+				},
 				stdout: "pipe",
 				stderr: "pipe",
 			});
@@ -421,8 +431,15 @@ describe("sandbox layers", () => {
 			expect(exitCode, stderr).toBe(0);
 			return JSON.parse(stdout);
 		};
-		expect(await run(undefined)).toBeNull();
-		expect(await run("/tmp/from-launcher.json")).toBe("/tmp/from-launcher.json");
+		for (const marker of [undefined, "/tmp/from-launcher.json"])
+			expect(await run(marker)).toEqual({
+				marker: marker ?? null,
+				childMarker: marker ?? null,
+				preload: "/tmp/dotenv-preload.so",
+				childPreload: null,
+				launch: "launcher",
+				bun: "1",
+			});
 	});
 
 	it("reports container markers as declared layers, outermost first, and does not call containerd docker", async () => {
@@ -495,6 +512,7 @@ describe("sandbox layers", () => {
 	});
 
 	it("flattens probe text to one line, so a newline cannot add lines to /sandbox", async () => {
+		const policyPath = " /run/devbox/policy  file\t.json\n- injected ";
 		const probe: SandboxProbe = {
 			id: "devbox",
 			detect: () => ({
@@ -506,7 +524,7 @@ describe("sandbox layers", () => {
 				details: [
 					{ label: "Policy\n", value: "/run/devbox/policy.json\n- injected" },
 					{ title: "Hosts", markdown: "- registry.contoso.example\n- git.contoso.example" },
-					{ title: "Policy\nfiles", files: [{ label: "policy\t", path: "/run/devbox/policy.json\n- injected" }] },
+					{ title: "Policy\nfiles", files: [{ label: "policy\t", path: policyPath }] },
 				],
 				evidence: ["marker\npresent"],
 			}),
@@ -522,7 +540,7 @@ describe("sandbox layers", () => {
 			...(layer.details ?? []).flatMap(detail =>
 				"label" in detail
 					? [detail.label, detail.value]
-					: [detail.title, ...("files" in detail ? detail.files.flatMap(file => [file.label, file.path]) : [])],
+					: [detail.title, ...("files" in detail ? detail.files.map(file => file.label) : [])],
 			),
 		];
 		for (const text of oneLiners) {
@@ -531,6 +549,8 @@ describe("sandbox layers", () => {
 		}
 		expect(layer.id).toBe("devbox");
 		expect(layer.role).toContain("build");
+		const files = layer.details?.flatMap(detail => ("files" in detail ? detail.files : []));
+		expect(files).toEqual([{ label: "policy", path: policyPath }]);
 		// A markdown section keeps its lines: it is rendered as markdown, never as a summary line.
 		expect(markdown).toEqual(["- registry.contoso.example\n- git.contoso.example"]);
 	});

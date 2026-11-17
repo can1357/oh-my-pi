@@ -95,6 +95,12 @@ describe("/sandbox report", () => {
 		expect(text).not.toContain("p@ss");
 		expect(text).toContain("127.0.0.1:41000");
 		expect(text).toContain("localhost");
+		const multiline = buildSandboxReport(status(), {
+			...CONTEXT,
+			env: { HTTP_PROXY: "http://proxy.example\n\t/path" },
+		});
+		const proxyLines = sandboxReportText(multiline, "network").split("\n");
+		expect(proxyLines.slice(2)).toEqual(["HTTP_PROXY: http://proxy.example /path"]);
 	});
 
 	it("leads with layer, files, network, approvals and kernel; detail stays in the sections", () => {
@@ -219,7 +225,7 @@ describe("/sandbox report", () => {
 			(_, index) => `rule-${String(index).padStart(2, "0")}.json`,
 		);
 		const disk = new Map<string, string[] | "file" | "denied">([
-			["/run/devbox/policy.json", "file"],
+			["/tmp/policy  file.json", "file"],
 			["/etc/devbox/profiles", ["build.json", "audit.json"]],
 			["/etc/devbox/rules", [...many].reverse()],
 			["/etc/devbox/keys", "denied"],
@@ -247,7 +253,7 @@ describe("/sandbox report", () => {
 				{
 					title: "Policy files",
 					files: [
-						{ label: "policy", path: "/run/devbox/policy.json" },
+						{ label: "policy", path: "/tmp/policy  file.json" },
 						{ label: "profiles", path: "/etc/devbox/profiles", directory: true },
 						{ label: "rules", path: "/etc/devbox/rules", directory: true },
 						{ label: "user config", path: "/home/alice/.devbox.yaml" },
@@ -258,15 +264,20 @@ describe("/sandbox report", () => {
 			evidence: [],
 		};
 		const detected = status({ layers: [devbox] });
-		const report = buildSandboxReport(detected, {
-			...CONTEXT,
-			policyFiles: await resolvePolicyFiles(detected, reader),
+		const policyFiles = await resolvePolicyFiles(detected, reader);
+		expect(policyFiles.get("/tmp/policy  file.json")).toEqual({ state: "present" });
+		const report = buildSandboxReport(detected, { ...CONTEXT, policyFiles });
+		expect(report.sections.find(section => section.key === "policy-files")?.tree?.[0]).toEqual({
+			lead: "├─ policy: ",
+			text: "/tmp/policy file.json",
+			path: "/tmp/policy  file.json",
+			tail: "",
 		});
 		expect(report.sections.map(section => section.key)).toContain("policy-files");
 
 		const lines = sandboxReportText(report, "policy-files").split("\n");
 		const line = (text: string) => lines.find(candidate => candidate.includes(text)) ?? "";
-		expect(line("/run/devbox/policy.json")).not.toMatch(/absent|unreadable/);
+		expect(line("/tmp/policy file.json")).not.toMatch(/absent|unreadable/);
 		expect(line("/home/alice/.devbox.yaml")).toContain("absent");
 		expect(line("/etc/devbox/keys")).toContain("unreadable");
 		// A directory lists its entries sorted, up to the preview limit, then counts the rest.
@@ -285,7 +296,7 @@ describe("/sandbox report", () => {
 				candidate => candidate.id === "policy-files",
 			);
 			const drawn = section?.body?.render(200).join("\n") ?? "";
-			for (const target of ["/run/devbox/policy.json", "/etc/devbox/profiles/audit.json"]) {
+			for (const target of ["/tmp/policy  file.json", "/etc/devbox/profiles/audit.json"]) {
 				expect(drawn).toContain(`${target}\x1b\\`);
 			}
 			expect(Bun.stripANSI(drawn)).toContain("/home/alice/.devbox.yaml");
