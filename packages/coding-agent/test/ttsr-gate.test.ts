@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { TtsrCoordinator } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
@@ -251,6 +252,40 @@ describe("TTSR gate rules", () => {
 		expect(expected).toContain("no-rm guidance");
 		expect(error).toBeInstanceOf(Error);
 		expect((error as Error).message).toBe(expected!);
+		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("[gate-17] refuses through the tool wrapper a call the user approved in a prompt", async () => {
+		const { judge } = fakeJudge({ [DELETES]: 0.9 });
+		const settings = Settings.isolated({ "tools.approvalMode": "always-ask" });
+		const { coordinator, events } = setup([gateRule("no-rm", {})], judge, settings);
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			"/work",
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const select = vi.fn(async () => "Approve");
+		runner.initialize(
+			{} as Parameters<ExtensionRunner["initialize"]>[0],
+			{} as Parameters<ExtensionRunner["initialize"]>[1],
+			undefined,
+			{ select } as unknown as ExtensionUIContext,
+		);
+		runner.setToolGuard(guardOver(coordinator, settings));
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+		const wrapped = new ExtensionToolWrapper({ ...bash, execute } as AgentTool, runner) as ExtensionToolWrapper<any>;
+
+		const error = await wrapped.execute("call-1", RM, undefined, undefined, { settings } as AgentToolContext).then(
+			() => undefined,
+			(err: unknown) => err,
+		);
+
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("no-rm guidance");
+		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(1);
 		expect(execute).not.toHaveBeenCalled();
 	});
 
