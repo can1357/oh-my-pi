@@ -2746,7 +2746,7 @@ export class ModelRegistry {
 	 * `offline` strategy nothing else refetches them.
 	 */
 	advertisedReasoningCacheSuffix(providerConfig: DiscoveryProviderConfig): string {
-		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v6" : "context-v6";
+		return providerConfig.discovery.advertisedReasoning === false ? "advertised-off-context-v7" : "context-v7";
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -2770,6 +2770,10 @@ export class ModelRegistry {
 			// model; warm v5 rows stayed without the aliases, so an unsupported
 			// requested effort kept clamping to the tier below and a thinking-off
 			// request could reach a route that rejects it.
+			// context-v7 invalidates rows cached before a row's top-level
+			// `display_name` / `name` were read; warm v6 rows kept the bundled
+			// name. The suffix is shared with the proxy cache id, so proxy
+			// caches refetch once too.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.

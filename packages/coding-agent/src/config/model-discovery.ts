@@ -1227,6 +1227,8 @@ export async function discoverOpenAIModelsList(
 				return (await res.json()) as {
 					data?: Array<{
 						id?: string;
+						name?: unknown;
+						display_name?: unknown;
 						max_model_len?: unknown;
 						context_length?: unknown;
 						max_output_tokens?: unknown;
@@ -1280,7 +1282,21 @@ export async function discoverOpenAIModelsList(
 		// codex-lb and similar registries nest the route's identity beside its
 		// reasoning ladder: `display_name`, `context_window`, `input_modalities`.
 		const metadata = isRecord(item.metadata) ? item.metadata : undefined;
-		const advertisedName = typeof metadata?.display_name === "string" ? metadata.display_name.trim() : "";
+		// Gateways nest the display name under `metadata.display_name`
+		// (codex-lb), spell it `display_name` (Anthropic, Together, Novita) or
+		// `name` (OpenRouter, agentgateway). `display_name` outranks `name`
+		// because some lists put a repo path in `name` (Synthetic:
+		// `openai/gpt-oss-120b`) and the label in `display_name`. A value equal
+		// to the id (Envoy and new-api send `display_name == id`) adds nothing
+		// over the bundled name.
+		let advertisedName = "";
+		for (const candidate of [metadata?.display_name, item.display_name, item.name]) {
+			const trimmed = typeof candidate === "string" ? candidate.trim() : "";
+			if (trimmed && trimmed !== id) {
+				advertisedName = trimmed;
+				break;
+			}
+		}
 		const input = nativeMetadataForModel?.input ??
 			extractOpenAIModelsListInputCapabilities(item) ??
 			reference?.input ?? ["text"];
