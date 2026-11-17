@@ -41,8 +41,10 @@ import { formatTextPatch } from "./patch";
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
 /** Git mode of a symlink. */
 const SYMLINK_MODE = "120000";
-/** Tolerance when matching a file's mtime to a tool call window (event and fs clock skew). */
+/** Tolerance when matching a file's ctime to a tool call window (event and fs clock skew). */
 const WINDOW_SLACK_MS = 1500;
+/** Path-like runs of a call script; anything else (space, quotes, `=`, `,`, glob characters) separates them. */
+const PATH_TOKEN = /[\p{L}\p{N}_.+@/-]+/gu;
 /** Concurrent file reads while building a draft. */
 const READ_CONCURRENCY = 16;
 /** Display cap for one change line. */
@@ -108,8 +110,19 @@ interface FileChange {
 	wholeSelected: boolean;
 	/** Agents with recorded edits of this path. */
 	editors: string[];
-	/** Call window covering the last modification of a file no usable record explains. */
+	/**
+	 * For a file no usable record explains: the call whose window covers its last change, or, once
+	 * the file is deleted (`mode: null`), the call whose script names it.
+	 */
 	hint?: CallRecord;
+}
+
+/** In-scope calls that may explain a change no edit record covers; built by {@link createDraft}. */
+interface CallEvidence {
+	/** The single in-scope call whose window covers `ms`; none when out-of-scope calls overlap too. */
+	during(ms: number | undefined): CallRecord | undefined;
+	/** The latest in-scope call whose script names deleted `file`; none when an out-of-scope call names it too. */
+	naming(file: string): Promise<CallRecord | undefined>;
 }
 
 /**
@@ -147,6 +160,30 @@ function clock(ms: number): string {
 
 function describeCall(call: CallRecord): string {
 	return `${call.agent}'s ${call.tool} \`${call.label}\` (${clock(call.end)})`;
+}
+
+/** How `hint` ties a file no edit record explains to a call; see {@link FileChange.hint}. */
+function describeHint(file: FileChange, hint: CallRecord): string {
+	return file.mode === null ? `deleted; named in ${describeCall(hint)}` : `modified during ${describeCall(hint)}`;
+}
+
+/** Path-like tokens of a script, without `./` prefixes or trailing slashes: `rm -r ./src/old/` names `src/old`. */
+function pathTokens(script: string): Set<string> {
+	const tokens = new Set<string>();
+	for (const [token] of script.matchAll(PATH_TOKEN)) {
+		const trimmed = token.replace(/^(?:\.\/)+|\/+$/g, "");
+		if (trimmed) tokens.add(trimmed);
+	}
+	return tokens;
+}
+
+/**
+ * Tokens a script may spell repo-relative `file` with: absolute under any of `roots`, or any
+ * trailing run of its segments, since the script may have run (or `cd`ed) anywhere above it.
+ */
+function spellings(file: string, roots: readonly string[]): string[] {
+	const segments = file.split("/");
+	return [...roots.map(root => path.join(root, file)), ...segments.map((_, index) => segments.slice(index).join("/"))];
 }
 
 function describeReason(reason: ReviewReason): string {
@@ -222,7 +259,7 @@ function resolveScope(spec: ScopeSpec, caller: string, parents: Map<string, stri
 async function loadEdits(
 	journal: ChangeJournal,
 	records: readonly ChangeRecord[],
-	windowAgent: (ms: number | undefined) => string | undefined,
+	calls: CallEvidence,
 ): Promise<RecordedEdit[] | undefined> {
 	const edits: RecordedEdit[] = [];
 	for (const record of records) {
@@ -234,7 +271,7 @@ async function loadEdits(
 			actor: record.agent,
 			before: toLines(before),
 			after: toLines(after),
-			gapHint: edits.length > 0 ? windowAgent(record.beforeMtimeMs) : undefined,
+			gapHint: edits.length > 0 ? calls.during(record.beforeMtimeMs)?.agent : undefined,
 		});
 	}
 	return edits;
@@ -259,15 +296,53 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 	}
 	const scope = resolveScope(source.agents, source.caller, parents);
 	const calls = records.filter((record): record is CallRecord => record.type === "call");
-	/** The single in-scope agent whose call window covers `ms`; none when out-of-scope calls overlap too. */
-	const windowCall = (ms: number | undefined): CallRecord | undefined => {
-		if (ms === undefined) return undefined;
-		const covering = calls.filter(call => call.start - WINDOW_SLACK_MS <= ms && ms <= call.end + WINDOW_SLACK_MS);
-		if (covering.length === 0 || covering.some(call => !scope.has(call.agent))) return undefined;
-		return covering[covering.length - 1];
+	const [realRoot, realCwd] = await Promise.all([
+		fs.realpath(root).catch(() => root),
+		fs.realpath(source.cwd).catch(() => source.cwd),
+	]);
+	// Scripts spell absolute paths the way the session cwd does, which may run through a symlink.
+	const roots = [...new Set([root, realRoot, path.resolve(source.cwd, path.relative(realCwd, realRoot))])];
+	/** Path tokens per call script; built on first use, since only deleted files consult them. */
+	let callTokens: Array<Set<string>> | undefined;
+	/** Whether a repo-relative directory is gone, i.e. may have been removed along with a deleted file. */
+	const removedDirs = new Map<string, Promise<boolean>>();
+	const isRemoved = (dir: string): Promise<boolean> => {
+		let removed = removedDirs.get(dir);
+		if (!removed) {
+			removed = fs.lstat(path.join(root, dir)).then(
+				stat => !stat.isDirectory(),
+				() => true,
+			);
+			removedDirs.set(dir, removed);
+		}
+		return removed;
 	};
-
-	const realRoot = await fs.realpath(root).catch(() => root);
+	const evidence: CallEvidence = {
+		during(ms) {
+			if (ms === undefined) return undefined;
+			const covering = calls.filter(call => call.start - WINDOW_SLACK_MS <= ms && ms <= call.end + WINDOW_SLACK_MS);
+			if (covering.length === 0 || covering.some(call => !scope.has(call.agent))) return undefined;
+			return covering[covering.length - 1];
+		},
+		async naming(file) {
+			// `rm -r old/` names the directory, not the file; a directory that still exists names nothing
+			// (`cd pkg && bun test` must not claim every file someone deleted under `pkg`).
+			const targets = [file];
+			for (
+				let dir = path.posix.dirname(file);
+				dir !== "." && (await isRemoved(dir));
+				dir = path.posix.dirname(dir)
+			) {
+				targets.push(dir);
+			}
+			const names = targets.flatMap(target => spellings(target, roots));
+			callTokens ??= calls.map(call => pathTokens(call.script ?? ""));
+			const tokens = callTokens;
+			const naming = calls.filter((_, index) => names.some(name => tokens[index].has(name)));
+			if (naming.length === 0 || naming.some(call => !scope.has(call.agent))) return undefined;
+			return naming[naming.length - 1];
+		},
+	};
 	// Journaled paths keep the spelling the agent used, which may run through a symlinked
 	// directory (`~/.agent` → `~/.dotfiles/agent`). Resolve the directory, not the file: the
 	// file may be a symlink itself or already deleted.
@@ -313,7 +388,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 			entry.path,
 			byPath.get(entry.path) ?? [],
 			source.journal,
-			windowCall,
+			evidence,
 		);
 		if (result === "skip") skipped.push(entry.path);
 		else if (result) files.push(result);
@@ -361,15 +436,16 @@ async function loadFile(
 	file: string,
 	records: readonly ChangeRecord[],
 	journal: ChangeJournal | null,
-	windowCall: (ms: number | undefined) => CallRecord | undefined,
+	calls: CallEvidence,
 ): Promise<FileChange | "skip" | undefined> {
 	const absolute = path.join(root, file);
 	let workBytes: Uint8Array | null = null;
-	let mtimeMs: number | undefined;
+	let changedMs: number | undefined;
 	let mode: string | null = null;
 	try {
 		const stat = await fs.lstat(absolute);
-		mtimeMs = stat.mtimeMs;
+		// ctime, not mtime: `mv` and `cp -p` keep the mtime but bump the ctime.
+		changedMs = stat.ctimeMs;
 		if (stat.isSymbolicLink()) mode = SYMLINK_MODE;
 		else if (!stat.isFile()) return "skip";
 		else {
@@ -380,6 +456,8 @@ async function loadFile(
 		if (!isEnoent(error)) throw error;
 	}
 	if (head.mode === null && mode === null) return undefined;
+	// A deletion leaves no timestamp to match against a call window.
+	const lastCall = mode === null ? await calls.naming(file) : calls.during(changedMs);
 	const base = {
 		path: file,
 		headMode: head.mode,
@@ -393,7 +471,7 @@ async function loadFile(
 		head: null,
 		work: null,
 		whole: reason,
-		hint: records.length === 0 ? windowCall(mtimeMs) : undefined,
+		hint: records.length === 0 ? lastCall : undefined,
 	});
 	// Symlinks commit as their link target, whole; this also covers a file replaced by a link and back.
 	if (head.mode === SYMLINK_MODE || mode === SYMLINK_MODE) return whole("symlink");
@@ -404,15 +482,14 @@ async function loadFile(
 	if (headText === workText) return head.mode === mode ? undefined : whole("mode");
 	const headLines = toLines(headText);
 	const workLines = toLines(workText);
-	const windowAgent = (ms: number | undefined) => windowCall(ms)?.agent;
-	const edits = journal && records.length > 0 ? await loadEdits(journal, records, windowAgent) : undefined;
-	const steps = historySteps(headLines, edits ?? [], workLines, windowAgent(mtimeMs));
+	const edits = journal && records.length > 0 ? await loadEdits(journal, records, calls) : undefined;
+	const steps = historySteps(headLines, edits ?? [], workLines, lastCall?.agent);
 	return {
 		...base,
 		head: headText,
 		work: workText,
 		attribution: attribute(headLines, steps, workLines),
-		hint: edits === undefined ? windowCall(mtimeMs) : undefined,
+		hint: edits === undefined ? lastCall : undefined,
 	};
 }
 
@@ -537,10 +614,22 @@ export class Draft {
 		return this.#select(target, false);
 	}
 
-	/** Deselect every path matching none of `globs` (exact paths, globs, or unique suffixes). */
+	/**
+	 * Deselect every path matching none of `globs` (exact paths, globs, or unique suffixes).
+	 * Report unmatched targets. @throws if none match, leaving the selection unchanged.
+	 */
 	only(globs: readonly string[]): string {
 		if (globs.length === 0) throw new Error("Name at least one path or glob to keep.");
-		const keep = new Set(globs.flatMap(glob => this.#match(glob)));
+		const keep = new Set<FileChange>();
+		const unmatched: string[] = [];
+		for (const glob of globs) {
+			const matched = this.#resolve(glob);
+			if (matched.length === 0) unmatched.push(glob);
+			for (const file of matched) keep.add(file);
+		}
+		if (keep.size === 0) {
+			throw new Error(`No changed path matches any keep target: ${unmatched.join(", ")}.`);
+		}
 		let dropped = 0;
 		for (const file of this.#files) {
 			if (keep.has(file) || (file.selected.size === 0 && !file.wholeSelected)) continue;
@@ -548,7 +637,8 @@ export class Draft {
 			file.wholeSelected = false;
 			dropped++;
 		}
-		return `Deselected ${dropped} path(s) outside ${globs.join(", ")}.`;
+		const report = `Deselected ${dropped} path(s) outside ${globs.join(", ")}.`;
+		return unmatched.length > 0 ? `${report} Unmatched: ${unmatched.join(", ")}.` : report;
 	}
 
 	#select(target: SelectionTarget, take: boolean): string {
@@ -617,22 +707,29 @@ export class Draft {
 		return ops;
 	}
 
-	/** Files a path argument names: exact path, glob, or unique path suffix. @throws when none or several suffix matches. */
+	/** Files a path argument names; unmatched paths and ambiguous suffixes throw. */
 	#match(target: string): FileChange[] {
+		const matched = this.#resolve(target);
+		if (matched.length === 0) {
+			const label = /[*?[{]/.test(target) ? target : `"${target}"`;
+			throw new Error(`No changed path matches ${label}.`);
+		}
+		return matched;
+	}
+
+	/** Resolve an exact path, glob, or unique path suffix. Only ambiguous suffixes throw. */
+	#resolve(target: string): FileChange[] {
 		const exact = this.#files.find(file => file.path === target);
 		if (exact) return [exact];
 		if (/[*?[{]/.test(target)) {
 			const glob = new Bun.Glob(target);
-			const matched = this.#files.filter(file => glob.match(file.path));
-			if (matched.length === 0) throw new Error(`No changed path matches ${target}.`);
-			return matched;
+			return this.#files.filter(file => glob.match(file.path));
 		}
 		const suffix = this.#files.filter(file => file.path.endsWith(`/${target}`));
-		if (suffix.length === 1) return suffix;
 		if (suffix.length > 1) {
 			throw new Error(`"${target}" is ambiguous: ${suffix.map(file => file.path).join(", ")}`);
 		}
-		throw new Error(`No changed path matches "${target}".`);
+		return suffix;
 	}
 
 	/** Summary of the selection, review items, and what stays out; shown on draft creation and in `/commit`. */
@@ -676,7 +773,7 @@ export class Draft {
 			const label = wholeLabel(file);
 			if (file.wholeSelected) return { selected: `  ✓ ${file.path}  whole ${label}`, review: [], outOfScopeAgents };
 			const reason = file.hint
-				? `modified during ${describeCall(file.hint)}`
+				? describeHint(file, file.hint)
 				: file.editors.some(agent => this.scope.has(agent))
 					? `edited by ${file.editors.join(", ")}`
 					: undefined;
@@ -699,7 +796,7 @@ export class Draft {
 		});
 		if (chosen.length === 0 && file.hint && review.length === 0) {
 			review.push(
-				`  ? ${file.path}  ${formatCounts(countOps(file))}${modeChange(file)}; no edit record; modified during ${describeCall(file.hint)}`,
+				`  ? ${file.path}  ${formatCounts(countOps(file))}${modeChange(file)}; no edit record; ${describeHint(file, file.hint)}`,
 			);
 		}
 		for (const op of ops) {
@@ -738,7 +835,7 @@ export class Draft {
 	#renderFile(file: FileChange): string {
 		if (!file.attribution) {
 			const mark = file.wholeSelected ? "✓" : file.hint ? "?" : "·";
-			const hint = file.hint ? `; modified during ${describeCall(file.hint)}` : "";
+			const hint = file.hint ? `; ${describeHint(file, file.hint)}` : "";
 			return `${file.path}  whole-file change (${wholeLabel(file)})${hint}\n  1 ${mark} whole file`;
 		}
 		const { ops, hunks } = file.attribution;
