@@ -686,7 +686,7 @@ async function resolveMnemopiProviderOptions(
 								),
 							);
 						},
-						{ provider: model.provider, signal },
+						{ provider: model.provider, retryResetTimezoneOffset: model.retryResetTimezoneOffset, signal },
 					);
 					if (message.stopReason === "aborted" || signal?.aborted) return null;
 					if (message.stopReason === "error") {

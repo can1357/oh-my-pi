@@ -932,7 +932,11 @@ async function runStage1Job(options: {
 					},
 				);
 			},
-			{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
+			{
+				provider: model.provider,
+				retryResetTimezoneOffset: model.retryResetTimezoneOffset,
+				maxAttempts: model.api === "openai-completions" ? 1 : undefined,
+			},
 		);
 
 		if (response.stopReason === "error") {
@@ -1081,7 +1085,11 @@ async function runConsolidationModel(options: {
 				},
 			);
 		},
-		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
+		{
+			provider: model.provider,
+			retryResetTimezoneOffset: model.retryResetTimezoneOffset,
+			maxAttempts: model.api === "openai-completions" ? 1 : undefined,
+		},
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");

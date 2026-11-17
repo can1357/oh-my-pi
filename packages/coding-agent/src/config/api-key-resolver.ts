@@ -9,7 +9,7 @@ import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storag
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
-export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
+export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "retryResetTimezoneOffset">;
 
 export interface ApiKeyResolverOptions {
 	/** Session id for credential stickiness; read at resolve time by the caller. */
@@ -18,6 +18,8 @@ export interface ApiKeyResolverOptions {
 	baseUrl?: string;
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
+	/** Fixed UTC offset for reset timestamps that omit a timezone. */
+	retryResetTimezoneOffset?: string;
 }
 
 /**
@@ -58,7 +60,7 @@ export function createApiKeyResolver(
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
-	const { sessionId, baseUrl, modelId } = options;
+	const { sessionId, baseUrl, modelId, retryResetTimezoneOffset } = options;
 	// One resolver serves many requests, and they fail out of order, so the
 	// token a 401 rejected is looked up from the bearer that request sent.
 	const provenance = createOAuthProvenance();
@@ -93,6 +95,7 @@ export function createApiKeyResolver(
 			// server usage-report reset) and the outer whole-turn retry layer.
 			const rotation = await registry.authStorage.limits.rotate(provider, sessionId, {
 				error,
+				retryResetTimezoneOffset,
 				modelId,
 				baseUrl,
 				signal,

@@ -397,7 +397,7 @@ export async function attemptEditAutoRepair(options: {
 				session.costGate?.record(attempt.usage.cost.total);
 				return attempt;
 			},
-			{ signal, provider: model.provider },
+			{ signal, provider: model.provider, retryResetTimezoneOffset: model.retryResetTimezoneOffset },
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage ?? "auto-repair completion failed");

@@ -187,7 +187,7 @@ export async function callConfiguredCompletion(
 						temperature,
 					},
 				),
-			{ provider: model.provider },
+			{ provider: model.provider, retryResetTimezoneOffset: model.retryResetTimezoneOffset },
 		);
 		return assistantText(message).trim() || null;
 	} catch {

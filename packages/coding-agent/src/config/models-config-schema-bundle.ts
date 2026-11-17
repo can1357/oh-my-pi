@@ -3,6 +3,11 @@ import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
 
+/** Fixed UTC offsets accepted for timezone-naive retry reset timestamps. */
+export function isRetryResetTimezoneOffset(value: string): boolean {
+	return /^(?:Z|[+-](?:0[0-9]|1[0-3]):[0-5][0-9]|[+-]14:00)$/.test(value);
+}
+
 /**
  * Input modalities the catalog can express (`input-modalities` axis). A
  * models.yml may name others; the file normalizer drops those before this
@@ -48,6 +53,10 @@ function validateImageCountBudget(value: { imageCountBudget?: number }, ctx: Nar
 }
 
 export const getModelsConfigSchemaBundle = once(() => {
+	const RetryResetTimezoneOffsetSchema = type("string").narrow(
+		(value, ctx) =>
+			isRetryResetTimezoneOffset(value) || ctx.mustBe("Z or a UTC offset ±HH:MM between -14:00 and +14:00"),
+	);
 	const OpenRouterRoutingSchema = type({
 		"only?": "string[]",
 		"order?": "string[]",
@@ -234,6 +243,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ModelDefinitionSchema = type({
 		id: "string",
+		"retryResetTimezoneOffset?": RetryResetTimezoneOffsetSchema,
 		"name?": "string",
 		"api?": ModelApiSchema,
 		"kind?": ModelKindSchema,
@@ -295,6 +305,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	});
 
 	const ModelOverrideSchema = type({
+		"retryResetTimezoneOffset?": RetryResetTimezoneOffsetSchema,
 		"name?": "string",
 		"api?": ModelApiSchema,
 		"kind?": ModelKindSchema,
@@ -395,6 +406,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ProviderAuthSchema = type('"apiKey" | "none" | "oauth"');
 
 	const ProviderConfigSchema = type({
+		"retryResetTimezoneOffset?": RetryResetTimezoneOffsetSchema,
 		"baseUrl?": "string",
 		"apiKey?": "string",
 		"api?": ApiSchema,

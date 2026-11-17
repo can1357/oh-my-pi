@@ -76,6 +76,8 @@ export interface OneshotRetryOptions {
 	 * Beijing time), so an over-cap wait is not misread as UTC and discarded.
 	 */
 	provider?: string;
+	/** Explicit UTC offset for timezone-naive reset dates; overrides the provider's catalog default. */
+	retryResetTimezoneOffset?: string;
 	/** Observability hook. Fires immediately before sleeping. */
 	onRetry?: (info: OneshotRetryInfo) => void;
 }
@@ -205,7 +207,7 @@ export async function retryTransientCompletion(
 		// errors (e.g. AnthropicApiError) carry their own headers.
 		const headers: HeadersLike = thrown !== undefined ? getHeadersFromError(thrown) : options?.getResponseHeaders?.();
 		const headerHintMs = getRetryAfterMsFromHeaders(headers);
-		const extractedTextHintMs = extractProviderRetryHint(options?.provider, errorMessage);
+		const extractedTextHintMs = extractProviderRetryHint(options?.provider, errorMessage, options);
 		const suffixValue = RETRY_AFTER_MS_SUFFIX.exec(errorMessage)?.[1];
 		const parsedSuffixMs = suffixValue === undefined ? undefined : Number(suffixValue);
 		const suffixHintMs =

@@ -1,14 +1,17 @@
 import { retryResetTimezoneOffsetFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { extractRetryHint } from "@oh-my-pi/pi-utils";
 
 export type HeadersLike = Headers | Record<string, string | undefined> | undefined | null;
 
-/** Extracts retry timing using the provider's catalog-declared timestamp timezone. */
+/** Extracts retry timing using an explicit reset timezone before the provider's catalog default. */
 export function extractProviderRetryHint(
 	provider: string | undefined,
 	message: string | undefined,
+	options?: Pick<Model, "retryResetTimezoneOffset">,
 ): number | undefined {
-	const naiveResetTimezoneOffset = provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider);
+	const naiveResetTimezoneOffset =
+		options?.retryResetTimezoneOffset ?? (provider === undefined ? undefined : retryResetTimezoneOffsetFor(provider));
 	return extractRetryHint(undefined, message, { naiveResetTimezoneOffset });
 }
 

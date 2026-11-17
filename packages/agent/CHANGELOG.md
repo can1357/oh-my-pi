@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed one-shot retries to honor an explicitly configured quota reset timezone for custom providers.
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

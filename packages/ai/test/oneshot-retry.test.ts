@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { retryTransientCompletion } from "@oh-my-pi/pi-ai/oneshot-retry";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai/types";
 
@@ -54,6 +54,10 @@ const rateLimited = (): AssistantMessage =>
 const fast = { baseDelayMs: 1, maxAttempts: 3 } as const;
 
 describe("retryTransientCompletion", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("re-issues an Anthropic 529 error-stop and returns the eventual success", async () => {
 		const results = [overloaded(), overloaded(), message({ stopReason: "stop" })];
 		let calls = 0;
@@ -418,6 +422,80 @@ describe("retryTransientCompletion", () => {
 		await expect(attempt).rejects.toThrow(/overloaded_error/);
 		expect(calls).toBe(2);
 		expect(observedDelay).toBe(90);
+	});
+
+	it("uses a custom provider's reset timezone while preserving the longer response-header wait", async () => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2099-09-01T00:00:00.900Z"));
+		const errorMessage = "429 Usage limit reached. Your limit will reset at 2099-09-01 08:00:01";
+		let calls = 0;
+		const delays: number[] = [];
+		const final = await retryTransientCompletion(
+			async () => {
+				calls += 1;
+				return calls === 1 ? message({ stopReason: "error", errorStatus: 429, errorMessage }) : message();
+			},
+			{
+				...fast,
+				provider: "local-reset-test",
+				retryResetTimezoneOffset: "+08:00",
+				maxDelayMs: 500,
+				getResponseHeaders: () => ({ "retry-after-ms": "150" }),
+				onRetry: info => delays.push(info.delayMs),
+			},
+		);
+
+		expect(delays).toEqual([150]);
+		expect(calls).toBe(2);
+		expect(final.stopReason).toBe("stop");
+	});
+
+	it("fails fast on an explicit UTC reset that exceeds the cap despite Zhipu's Beijing default", async () => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2099-09-01T00:00:00.900Z"));
+		let calls = 0;
+		const final = await retryTransientCompletion(
+			async () => {
+				calls += 1;
+				return message({
+					stopReason: "error",
+					errorStatus: 429,
+					errorMessage: "429 Usage limit reached. Your limit will reset at 2099-09-01 08:00:01",
+				});
+			},
+			{ ...fast, provider: "zhipu-coding-plan", retryResetTimezoneOffset: "Z", maxDelayMs: 500 },
+		);
+
+		expect(calls).toBe(1);
+		expect(final.stopReason).toBe("error");
+	});
+
+	it("preserves an explicitly zoned reset over a shorter relative hint with a configured timezone", async () => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2099-09-01T00:00:00.900Z"));
+		let calls = 0;
+		const delays: number[] = [];
+		const final = await retryTransientCompletion(
+			async () => {
+				calls += 1;
+				return calls === 1
+					? message({
+							stopReason: "error",
+							errorStatus: 429,
+							errorMessage:
+								"429 Usage limit reached. Your limit will reset at 2099-09-01T00:00:01Z retry-after-ms=40",
+						})
+					: message();
+			},
+			{
+				...fast,
+				provider: "local-reset-test",
+				retryResetTimezoneOffset: "+08:00",
+				maxDelayMs: 500,
+				onRetry: info => delays.push(info.delayMs),
+			},
+		);
+
+		expect(delays).toEqual([100]);
+		expect(calls).toBe(2);
+		expect(final.stopReason).toBe("stop");
 	});
 
 	it("applies the provider reset-timezone policy to a naive absolute reset", async () => {

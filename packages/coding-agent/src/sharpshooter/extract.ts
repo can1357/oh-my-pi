@@ -269,7 +269,7 @@ async function runSharpshooterExtraction(
 				},
 			);
 		},
-		{ provider: model.provider },
+		{ provider: model.provider, retryResetTimezoneOffset: model.retryResetTimezoneOffset },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "Sharpshooter extraction model error");

@@ -586,6 +586,32 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(laterSelections.has(sticky)).toBe(true);
 	});
 
+	test("rotation blocks a custom-provider credential only until its configured local reset", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		const now = Date.parse("2099-09-01T00:00:00Z");
+		vi.spyOn(Date, "now").mockReturnValue(now);
+		await authStorage.credentials.set(PROVIDER, [
+			{ type: "api_key", key: "limited-key" },
+			{ type: "api_key", key: "healthy-key" },
+		]);
+		const failedRow = store
+			.listAuthCredentials(PROVIDER)
+			.find(row => row.credential.type === "api_key" && row.credential.key === "limited-key");
+		if (!failedRow) throw new Error("expected limited credential");
+		const sessionId = "custom-reset-timezone";
+		const result = await authStorage.limits.rotate(PROVIDER, sessionId, {
+			error: quotaPayloadError("429 Usage limit reached. Your limit will reset at 2099-09-01 08:00:01", 429),
+			apiKey: "limited-key",
+			baseUrl: "http://127.0.0.1:12345/v1",
+			retryResetTimezoneOffset: "+08:00",
+			waitForSibling: false,
+		});
+
+		expect(result.switched).toBe(true);
+		expect(store.getCredentialBlock?.(failedRow.id, `${PROVIDER}:api_key`, "")).toBe(now + 1_000);
+		expect(await authStorage.keys.get(PROVIDER, sessionId)).toBe("healthy-key");
+	});
+
 	test("rotateSessionCredential(usage-limit) delegates to markUsageLimitReached", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		registerProvider();

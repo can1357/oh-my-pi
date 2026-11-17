@@ -12,6 +12,7 @@ import { SPECIAL_MODEL_MANAGER_PROVIDER_IDS } from "./model-provider-discovery";
 import type { ModelOverride } from "./models-config-schema";
 /** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
+	retryResetTimezoneOffset?: string;
 	baseUrl?: string;
 	/** APIs covered by the provider `baseUrl`: effective APIs of custom models
 	 * inheriting that URL, plus a provider-level `api` for override-only
@@ -242,6 +243,7 @@ export function mergeProviderRemoteCompactionConfig(
  * always means "leave the base value alone".
  */
 export interface ModelPatch {
+	retryResetTimezoneOffset?: string;
 	name?: string;
 	api?: Api;
 	kind?: ModelKind;
@@ -280,6 +282,7 @@ export interface ModelPatch {
 type ModelTransportPolicy = "merge" | "replace";
 export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
+	if (patch.retryResetTimezoneOffset !== undefined) result.retryResetTimezoneOffset = patch.retryResetTimezoneOffset;
 	if (patch.name !== undefined) result.name = patch.name;
 	if (patch.api !== undefined) result.api = patch.api;
 	if (patch.kind !== undefined) {

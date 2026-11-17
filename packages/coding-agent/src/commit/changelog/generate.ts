@@ -68,7 +68,7 @@ export async function generateChangelogEntries({
 				},
 				{ apiKey, sessionId, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
 			),
-		{ provider: model.provider },
+		{ provider: model.provider, retryResetTimezoneOffset: model.retryResetTimezoneOffset },
 	);
 
 	if (response.stopReason === "error") {

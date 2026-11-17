@@ -173,6 +173,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 	const rotation = await storage.limits.rotate(provider, sessionId, {
 		error,
 		modelId: model.id,
+		retryResetTimezoneOffset: model.retryResetTimezoneOffset,
 		baseUrl: model.baseUrl,
 		apiKey: oldKey,
 		signal,

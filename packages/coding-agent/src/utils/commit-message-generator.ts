@@ -126,7 +126,7 @@ export async function generateCommitMessage(
 							reasoning: toReasoningEffort(candidate.thinkingLevel),
 						},
 					),
-				{ provider: candidate.model.provider },
+				{ provider: candidate.model.provider, retryResetTimezoneOffset: candidate.model.retryResetTimezoneOffset },
 			);
 
 			if (response.stopReason === "error") {

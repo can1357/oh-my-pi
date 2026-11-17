@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed memory completion retries to honor the model's configured quota reset timezone.
+
 ## [18.21.0] - 2026-11-16
 
 ### Changed

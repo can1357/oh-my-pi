@@ -250,7 +250,7 @@ async function consolidateLocked(
 					},
 				);
 			},
-			{ provider: model.provider },
+			{ provider: model.provider, retryResetTimezoneOffset: model.retryResetTimezoneOffset },
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");

@@ -485,7 +485,9 @@ export class ModelRegistry {
 			if (learned === models) learned = models.slice();
 			learned[index] = projected;
 		}
-		return this.#orderImplicitProvidersLast(applyCatalogMetrics(learned, this.#catalogMetrics));
+		return this.#orderImplicitProvidersLast(
+			applyCatalogMetrics(this.#applyProviderRetryResetTimezoneOffsets(learned), this.#catalogMetrics),
+		);
 	}
 
 	/**
@@ -2238,6 +2240,7 @@ export class ModelRegistry {
 				providerConfig.guardrailIdentifier ||
 				providerConfig.requestMetadata ||
 				providerConfig.remoteCompaction ||
+				providerConfig.retryResetTimezoneOffset !== undefined ||
 				providerConfig.transport
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
@@ -2255,6 +2258,7 @@ export class ModelRegistry {
 					authHeader: providerConfig.authHeader,
 					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
 					remoteCompaction: providerConfig.remoteCompaction,
+					retryResetTimezoneOffset: providerConfig.retryResetTimezoneOffset,
 					transport: providerConfig.transport,
 					guardrailIdentifier: providerConfig.guardrailIdentifier,
 					guardrailVersion: providerConfig.guardrailVersion,
@@ -3120,6 +3124,7 @@ export class ModelRegistry {
 				override.headers || baseOverride?.headers ? { ...baseOverride?.headers, ...override.headers } : undefined,
 			compat: override.compat ? mergeCompat(baseOverride?.compat, override.compat) : baseOverride?.compat,
 			remoteCompaction: mergeRemoteCompactionConfig(baseOverride?.remoteCompaction, override.remoteCompaction),
+			retryResetTimezoneOffset: override.retryResetTimezoneOffset ?? baseOverride?.retryResetTimezoneOffset,
 			transport: override.transport ?? baseOverride?.transport,
 		};
 	}
@@ -3194,6 +3199,25 @@ export class ModelRegistry {
 			const override = this.#runtimeProviderOverrides.get(model.provider);
 			if (!override) return model;
 			return this.#applyProviderTransportOverrideToModel(model, override);
+		});
+	}
+
+	/** Apply the offset after modifier-created rows exist; unprojected models never retain provider defaults. */
+	#applyProviderRetryResetTimezoneOffsets(models: Model<Api>[]): Model<Api>[] {
+		const modelKeys = new Set(models.map(model => `${model.provider}\u0000${model.id}`));
+		const hasLiveModel = (provider: string, id: string) => modelKeys.has(`${provider}\u0000${id}`);
+		return models.map(model => {
+			const providerOffset =
+				this.#runtimeProviderOverrides.get(model.provider)?.retryResetTimezoneOffset ??
+				this.#providerOverrides.get(model.provider)?.retryResetTimezoneOffset;
+			const overrides = this.#modelOverrides.get(model.provider);
+			const modelOffset = overrides
+				? resolveModelOverrideWithAliases(overrides, model, hasLiveModel)?.retryResetTimezoneOffset
+				: undefined;
+			const retryResetTimezoneOffset = modelOffset ?? model.retryResetTimezoneOffset ?? providerOffset;
+			return retryResetTimezoneOffset === model.retryResetTimezoneOffset
+				? model
+				: { ...model, retryResetTimezoneOffset };
 		});
 	}
 	#resolveLiveModelOverride(model: Model<Api>): ModelOverride | undefined {
@@ -3905,6 +3929,7 @@ export class ModelRegistry {
 			...options,
 			baseUrl: target.baseUrl,
 			modelId: target.id,
+			retryResetTimezoneOffset: target.retryResetTimezoneOffset,
 		});
 	}
 
@@ -4072,6 +4097,7 @@ export class ModelRegistry {
 				apiKey: config.apiKey,
 				api: config.api,
 				oauthConfigured: Boolean(config.oauth),
+				retryResetTimezoneOffset: config.retryResetTimezoneOffset,
 				models: (config.models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
@@ -4132,6 +4158,14 @@ export class ModelRegistry {
 			this.#runtimeProviderApiKeys.set(providerName, { keyConfig: config.apiKey, fallback });
 		}
 		this.#recordRuntimeCommandConfigs(providerName, config);
+		if (config.retryResetTimezoneOffset !== undefined) {
+			this.#runtimeProviderOverrides.set(
+				providerName,
+				this.#mergeProviderOverride(this.#runtimeProviderOverrides.get(providerName), {
+					retryResetTimezoneOffset: config.retryResetTimezoneOffset,
+				}),
+			);
+		}
 
 		if (config.models && config.models.length > 0) {
 			// Build model overlays that persist across refresh() cycles
@@ -4276,6 +4310,7 @@ export class ModelRegistry {
 			config.apiKey ||
 			config.authHeader !== undefined ||
 			config.remoteCompaction !== undefined ||
+			config.retryResetTimezoneOffset !== undefined ||
 			config.transport !== undefined
 		) {
 			const transportOverride = {
@@ -4284,6 +4319,7 @@ export class ModelRegistry {
 				apiKey: config.apiKey,
 				authHeader: config.authHeader,
 				remoteCompaction: config.remoteCompaction,
+				retryResetTimezoneOffset: config.retryResetTimezoneOffset,
 				transport: config.transport,
 			};
 			const nextRuntimeOverride = this.#mergeProviderOverride(
@@ -4471,6 +4507,8 @@ function sameDiscoveredRows(a: readonly Model<Api>[], b: readonly Model<Api>[]):
  * Input type for registerProvider API (from extensions).
  */
 export interface ProviderConfigInput {
+	/** Fixed UTC offset for reset timestamps that omit a timezone; model values take precedence. */
+	retryResetTimezoneOffset?: string;
 	baseUrl?: string;
 	apiKey?: string;
 	api?: Api;
@@ -4501,6 +4539,7 @@ export interface ProviderConfigInput {
 	) => Promise<readonly NonNullable<ProviderConfigInput["models"]>[number][]>;
 	models?: Array<{
 		id: string;
+		retryResetTimezoneOffset?: string;
 		name: string;
 		api?: Api;
 		kind?: ModelKind;

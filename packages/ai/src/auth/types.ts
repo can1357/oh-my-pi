@@ -796,6 +796,8 @@ export type MarkUsageLimitOptions = {
 export type RotateCredentialOptions = {
 	error?: unknown;
 	modelId?: string;
+	/** Explicit UTC offset for timezone-naive reset dates returned by this request. */
+	retryResetTimezoneOffset?: string;
 	/** Provider base URL for usage-report probes during a usage-limit block. */
 	baseUrl?: string;
 	apiKey?: string;

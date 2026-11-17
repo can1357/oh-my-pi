@@ -1647,6 +1647,8 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	providerType?: string;
 	baseUrl: string;
+	/** UTC offset for timezone-naive quota reset dates; overrides the provider's catalog default. */
+	retryResetTimezoneOffset?: string;
 	reasoning: boolean;
 	/**
 	 * Exact local tokenizer family resolved from the model identity or supplied

@@ -269,6 +269,98 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).stopReason).toBe("stop");
 		expect(session.isRetrying).toBe(false);
 	});
+	it("retries a localhost custom provider at its configured reset instead of failing the delay cap", async () => {
+		const bundled = getBundledModel("openai", "gpt-4o-mini");
+		if (!bundled) throw new Error("Expected bundled OpenAI test model to exist");
+		const provider = "local-reset-test";
+		let requests = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch() {
+				requests += 1;
+				if (requests === 1) {
+					return Response.json(
+						{
+							error: {
+								message: "Usage limit reached. Your limit will reset at 2099-09-01 08:00:01",
+								code: "1308",
+							},
+						},
+						{ status: 429 },
+					);
+				}
+				const chunk = {
+					id: "local-reset-response",
+					object: "chat.completion.chunk",
+					created: 0,
+					model: "local-reset-model",
+					choices: [
+						{
+							index: 0,
+							delta: { role: "assistant", content: "recovered after local reset" },
+							finish_reason: "stop",
+						},
+					],
+				};
+				return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+					headers: { "content-type": "text/event-stream" },
+				});
+			},
+		});
+
+		try {
+			const model: Model = {
+				...bundled,
+				api: "openai-completions",
+				id: "local-reset-model",
+				provider,
+				baseUrl: `${server.url}v1`,
+				retryResetTimezoneOffset: "+08:00",
+			};
+			authStorage.keys.setRuntime(provider, "local-test-key");
+			let now = Date.parse("2099-09-01T00:00:00Z");
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const agent = new Agent({
+				getApiKey: () => "local-test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxDelayMs": 1_500,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+			});
+			settings.setModelRole("default", `${provider}/${model.id}`);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+			vi.spyOn(scheduler, "wait").mockImplementation(async (delayMs, options) => {
+				options?.signal?.throwIfAborted();
+				now += delayMs;
+			});
+			const retryDelays: number[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_start") retryDelays.push(event.delayMs);
+			});
+
+			await session.prompt("Recover after the local quota reset");
+			await session.waitForIdle();
+
+			expect(requests).toBe(2);
+			expect(retryDelays).toEqual([1_000]);
+			expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "recovered after local reset" });
+			expect(lastAssistant(session).stopReason).toBe("stop");
+		} finally {
+			authStorage.keys.removeRuntime(provider);
+			server.stop(true);
+		}
+	});
+
 	it("probes after the relative hint when a naive stamp conflicts, then recovers", async () => {
 		// Contract: a naive `reset at` wall stamp conflicting with the relative
 		// hint sleeps the relative signal only; the retry after that wait is

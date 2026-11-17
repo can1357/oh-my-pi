@@ -111,7 +111,7 @@ export class SpeechEnhancer {
 						},
 					);
 				},
-				{ signal, provider: model.provider },
+				{ signal, provider: model.provider, retryResetTimezoneOffset: model.retryResetTimezoneOffset },
 			);
 			if (response.stopReason === "error") {
 				logger.debug("speech-enhancer: rewrite errored", { error: response.errorMessage });

@@ -2269,6 +2269,8 @@ export interface ExtensionAPI {
 export interface ProviderConfig {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
+	/** Fixed UTC offset for timezone-naive quota reset dates; individual model values take precedence. */
+	retryResetTimezoneOffset?: string;
 	/**
 	 * API key or environment variable name. Required when defining models unless oauth is provided.
 	 *
@@ -2316,6 +2318,8 @@ export interface ProviderConfig {
 export interface ProviderModelConfig {
 	/** Model ID (e.g., "claude-sonnet-4@20250514"). */
 	id: string;
+	/** Fixed UTC offset for timezone-naive quota reset dates; overrides the provider default. */
+	retryResetTimezoneOffset?: string;
 	/** Display name (e.g., "Claude Sonnet 4 (Vertex)"). */
 	name: string;
 	/** API type override for this model. */

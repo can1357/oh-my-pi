@@ -12,6 +12,7 @@ import type { ModelsConfig, ProviderAuthMode, ProviderDiscovery } from "./models
 import {
 	getModelsConfigSchema,
 	getModelsConfigSchemaBundle,
+	isRetryResetTimezoneOffset,
 	supportedInputModalities,
 } from "./models-config-schema-bundle";
 
@@ -19,6 +20,7 @@ export type ProviderValidationMode = "models-config" | "runtime-register";
 
 export interface ProviderValidationModel {
 	id: string;
+	retryResetTimezoneOffset?: string;
 	api?: Api;
 	kind?: ModelKind;
 	contextWindow?: number;
@@ -27,6 +29,7 @@ export interface ProviderValidationModel {
 }
 
 export interface ProviderValidationConfig {
+	retryResetTimezoneOffset?: string;
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
@@ -39,7 +42,7 @@ export interface ProviderValidationConfig {
 	disableStrictTools?: boolean;
 	guardrailIdentifier?: string;
 	requestMetadata?: Record<string, string>;
-	modelOverrides?: Record<string, { api?: Api; kind?: ModelKind }>;
+	modelOverrides?: Record<string, { api?: Api; kind?: ModelKind; retryResetTimezoneOffset?: string }>;
 	models: ProviderValidationModel[];
 }
 
@@ -126,6 +129,14 @@ export function validateProviderConfiguration(
 ): void {
 	const hasProviderApi = !!config.api;
 	const models = config.models;
+	const checkRetryResetTimezoneOffset = (subject: string, offset: string | undefined) => {
+		if (offset !== undefined && !isRetryResetTimezoneOffset(offset)) {
+			throw new Error(
+				`Provider ${providerName}${subject}: retryResetTimezoneOffset must be Z or a UTC offset ±HH:MM between -14:00 and +14:00.`,
+			);
+		}
+	};
+	checkRetryResetTimezoneOffset("", config.retryResetTimezoneOffset);
 
 	if (models.length === 0) {
 		if (mode === "models-config") {
@@ -140,11 +151,12 @@ export function validateProviderConfiguration(
 				!config.guardrailIdentifier &&
 				!config.requestMetadata &&
 				!config.remoteCompaction &&
+				config.retryResetTimezoneOffset === undefined &&
 				!hasModelOverrides &&
 				!config.discovery
 			) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "requestMetadata", "remoteCompaction", "modelOverrides", "discovery", or "models"`,
+					`Provider ${providerName}: must specify "baseUrl", "headers", "apiKey", "auth: none", "compat", "disableStrictTools", "guardrailIdentifier", "requestMetadata", "remoteCompaction", "retryResetTimezoneOffset", "modelOverrides", "discovery", or "models"`,
 				);
 			}
 		}
@@ -179,6 +191,7 @@ export function validateProviderConfiguration(
 		);
 	};
 	for (const modelDef of models) {
+		checkRetryResetTimezoneOffset(`, model ${modelDef.id}`, modelDef.retryResetTimezoneOffset);
 		if (!hasProviderApi && !modelDef.api) {
 			throw new Error(
 				mode === "runtime-register"
@@ -204,6 +217,7 @@ export function validateProviderConfiguration(
 	// Only an api this file names is known here. Built-in, discovered, and `kind-apis`
 	// rows get their api later, so `applyModelOverride` checks their kind against it.
 	for (const [modelId, override] of Object.entries(config.modelOverrides ?? {})) {
+		checkRetryResetTimezoneOffset(`, modelOverrides.${modelId}`, override.retryResetTimezoneOffset);
 		if (override.kind === undefined) continue;
 		const declared = models.find(model => model.id === modelId);
 		const api = override.api ?? (declared ? (declared.api ?? config.api) : undefined);
@@ -292,6 +306,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", {
 					discovery: providerConfig.discovery as ProviderDiscovery | undefined,
 					compat: providerConfig.compat,
 					remoteCompaction: providerConfig.remoteCompaction,
+					retryResetTimezoneOffset: providerConfig.retryResetTimezoneOffset,
 					disableStrictTools: providerConfig.disableStrictTools,
 					guardrailIdentifier: providerConfig.guardrailIdentifier,
 					requestMetadata: providerConfig.requestMetadata,

@@ -107,6 +107,33 @@ Per-model overrides, including retired variant aliases, are resolved before
 selecting the extended window.
 
 Custom `models` entries can set their own `baseUrl`; otherwise they inherit the provider URL.
+
+`retryResetTimezoneOffset` sets a fixed UTC offset for quota-reset timestamps that
+omit their timezone, such as `2026-11-17 18:00:00`. It is available at provider
+level, on `models` entries, and in `modelOverrides`. A model value overrides the
+provider default; `modelOverrides` takes precedence over the model definition.
+Explicit configuration also overrides the built-in provider timezone. Timestamps
+that already include a timezone keep that timezone.
+
+```yaml
+providers:
+   local-proxy:
+      baseUrl: http://localhost:8080/v1
+      api: openai-completions
+      auth: none
+      retryResetTimezoneOffset: "+08:00"
+      models:
+         - id: route-a
+         - id: route-b
+           retryResetTimezoneOffset: "Z"
+```
+
+Use `Z` or `±HH:MM`, from `-14:00` through `+14:00`, with minutes from `00`
+through `59` (only `00` at either 14-hour boundary). These are fixed offsets,
+not timezone names or daylight-saving rules. For a proxy routing to backends
+with different reset timezones, configure separate routes/providers or per-model
+offsets. One fixed offset cannot follow a route that changes backends dynamically.
+
 For built-in models, a provider `baseUrl` override is scoped to the effective APIs of custom models
 that inherit it, or to the provider's `api` for an override-only configuration. Without either
 scope it applies provider-wide. `transport: pi-native` always applies the gateway URL provider-wide.
@@ -355,6 +382,7 @@ Must define at least one of:
 - non-empty `modelOverrides`
 - `discovery`
 - `remoteCompaction`
+- `retryResetTimezoneOffset`
 
 ### Discovery
 
