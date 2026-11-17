@@ -237,3 +237,37 @@ describe("sessions.sticky attribution gating", () => {
 		expect(storage.sessions.sticky?.("anthropic", sessionId)).toBeUndefined();
 	});
 });
+
+describe("usage reports carry the row id on the usesRequestKey path", () => {
+	let storage: AuthStorage;
+
+	beforeEach(async () => {
+		const store = makeStore([apiKeyRow(2, "sk-account-two")]);
+		const provider: UsageProvider = {
+			...claudeUsage.claudeUsageProvider,
+			usesRequestKey: true,
+			supports: () => true,
+			async fetchUsage(request) {
+				const apiKey = request.credential.type === "api_key" ? request.credential.apiKey : undefined;
+				return apiReport(apiKey?.slice(3) ?? "unknown");
+			},
+		};
+		storage = new AuthStorage(store, {
+			usageProviderResolver: candidate => (candidate === "anthropic" ? provider : undefined),
+		});
+		await storage.credentials.reload();
+	});
+
+	afterEach(() => {
+		storage.close();
+		vi.restoreAllMocks();
+	});
+
+	it("attributes the probe to the stored row the resolved key belongs to", async () => {
+		const reports = (await storage.usage.reports()) ?? [];
+		const tagged = reports
+			.filter(report => report.provider === "anthropic")
+			.map(report => report.metadata?.credentialId);
+		expect(tagged).toEqual([2]);
+	});
+});

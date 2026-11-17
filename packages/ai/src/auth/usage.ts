@@ -653,6 +653,19 @@ export class UsageService implements UsageApi {
 				}
 				if (!apiKey) continue;
 				const request = usageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+				// Attribute the probe to the stored row the resolved key belongs
+				// to (literal material or a resolved reference), so a session
+				// pinned to that row can match its report. Runtime, config, and
+				// env keys match no row and stay untagged — the sticky gate
+				// already treats those as unknown attribution.
+				for (const entry of this.#deps.pool.entries(providerId)) {
+					if (entry.credential.type !== "api_key") continue;
+					const storedMaterial = await this.#deps.overrides.resolve(entry.credential.key);
+					if (entry.credential.key === apiKey || storedMaterial === apiKey) {
+						request.credentialId = entry.id;
+						break;
+					}
+				}
 				if (!providerImpl.supports || providerImpl.supports(request)) requests.push(request);
 				continue;
 			}
