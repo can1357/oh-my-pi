@@ -732,10 +732,12 @@ const TAR_ENTRY_OPTIONS: Record<string, string> = {
 
 /**
  * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
- * that directory, as tar does; each `-C` is relative to the one before it. Option values stay as
- * written, and exclusions are left out. A member after a directory the guard cannot resolve is
- * left out unless it is absolute. An extraction, listing or deletion (`x`, `t`, `--delete`) reads
- * only the archive and the member lists: its members name entries of the archive, not files.
+ * that directory, as tar does; each `-C` is relative to the one before it. A member's braces are
+ * expanded before it is resolved, as the shell expands them before tar sees the member
+ * (`{/etc/shadow,x}`, `{~/.ssh,~/.aws}`). Option values stay as written, and exclusions are left
+ * out. A member after a directory the guard cannot resolve is left out unless it is absolute. An
+ * extraction, listing or deletion (`x`, `t`, `--delete`) reads only the archive and the member
+ * lists: its members name entries of the archive, not files.
  */
 function tarReadWords(command: ShellCommand, home: string): string[] {
 	const argv = args(command);
@@ -790,13 +792,17 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 			if (arg[k] === "C") changeDir(value);
 			else if (arg[k] !== TAR_EXCLUDE_LETTER) words.push(value);
 		} else {
-			const member: string | undefined =
-				dir !== undefined
-					? resolveCommandWordPath(command, arg, dir, home)
-					: path.isAbsolute(arg) || ABSOLUTE_EXPANSION_RE.test(arg)
-						? arg
-						: undefined;
-			if (member !== undefined) members.push(member);
+			const literalTilde = command.literalTildes.has(arg);
+			for (const expanded of shellBraces(command, arg)) {
+				const word = literalTilde ? `./${expanded}` : expanded;
+				const member: string | undefined =
+					dir !== undefined
+						? resolveShellWordPath(word, dir, home)
+						: path.isAbsolute(word) || ABSOLUTE_EXPANSION_RE.test(word)
+							? word
+							: undefined;
+				if (member !== undefined) members.push(member);
+			}
 		}
 	}
 	return entries ? words : [...words, ...members];

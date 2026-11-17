@@ -807,4 +807,17 @@ describe("guard rule regressions", () => {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
 		}
 	});
+
+	it("expands a tar member's braces before resolving it against the tar directory", () => {
+		for (const command of [
+			"tar czf - {/etc/shadow,x}",
+			"tar czf keys.tgz {~/.ssh,~/.aws}",
+			"tar -C build -czf keys.tgz {~/.netrc,x}",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+		for (const command of ["tar -C build -czf out.tgz {src,docs}", "tar czf x.tgz '{~/.ssh,y}'"]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+	});
 });
