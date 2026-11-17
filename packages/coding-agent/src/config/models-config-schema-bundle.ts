@@ -2,7 +2,12 @@ import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
-import { isShapeVariantName, SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
+import {
+	isConfigurableFrameSize,
+	MAX_CONFIGURED_FRAME_SIZE,
+	MIN_CONFIGURED_FRAME_SIZE,
+	SHAPE_VARIANT_NAMES,
+} from "@oh-my-pi/snapcompact";
 
 /**
  * Input modalities the catalog can express (`input-modalities` axis). A
@@ -34,21 +39,6 @@ function validateMaxContextWindow(
 			(value.contextWindow !== undefined && value.maxContextWindow < value.contextWindow))
 	) {
 		return ctx.mustBe("maxContextWindow a positive integer no smaller than contextWindow");
-	}
-	return true;
-}
-
-function validateSnapcompactShape(
-	value: { snapcompactShape?: { variant: string; frameSize?: number } },
-	ctx: NarrowContext,
-): boolean {
-	const shape = value.snapcompactShape;
-	if (shape === undefined) return true;
-	if (!isShapeVariantName(shape.variant)) {
-		return ctx.mustBe(`snapcompactShape.variant one of ${SHAPE_VARIANT_NAMES.join(", ")}`);
-	}
-	if (shape.frameSize !== undefined && (!Number.isSafeInteger(shape.frameSize) || shape.frameSize <= 0)) {
-		return ctx.mustBe("snapcompactShape.frameSize a positive integer");
 	}
 	return true;
 }
@@ -221,9 +211,16 @@ export const getModelsConfigSchemaBundle = once(() => {
 	);
 
 	const SnapcompactShapeSchema = type({
-		variant: "string",
+		variant: type.enumerated(...SHAPE_VARIANT_NAMES),
 		"frameSize?": "number",
-	});
+	}).narrow(
+		(value, ctx) =>
+			value.frameSize === undefined ||
+			isConfigurableFrameSize(value.frameSize) ||
+			ctx.mustBe(
+				`snapcompactShape.frameSize an integer from ${MIN_CONFIGURED_FRAME_SIZE} to ${MAX_CONFIGURED_FRAME_SIZE}`,
+			),
+	);
 
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
@@ -313,11 +310,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return (
-			validateImageCountBudget(value, ctx) &&
-			validateSnapcompactShape(value, ctx) &&
-			validateMaxContextWindow(value, ctx)
-		);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
@@ -371,11 +364,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return (
-			validateImageCountBudget(value, ctx) &&
-			validateSnapcompactShape(value, ctx) &&
-			validateMaxContextWindow(value, ctx)
-		);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ProviderDiscoverySchema = type({

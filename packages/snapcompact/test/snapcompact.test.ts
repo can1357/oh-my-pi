@@ -343,6 +343,16 @@ describe("shape resolution", () => {
 		expect(claudeShaped.frameSize).toBe(1932);
 		// The variant's own frame size applies when none is configured.
 		expect(snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw" } }).frameSize).toBe(1568);
+		// An out-of-range frame size falls back to the variant's own rather than
+		// rendering one character per frame or an unbounded PNG.
+		for (const frameSize of [4, 63, 2577, 100_000]) {
+			expect(
+				snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw", frameSize } }).frameSize,
+			).toBe(1568);
+		}
+		expect(
+			snapcompact.resolveShape({ ...gemini, snapcompactShape: { variant: "11on16-bw", frameSize: 64 } }).frameSize,
+		).toBe(64);
 		// Billing still follows the reader, not the borrowed shape.
 		expect(claudeShaped.frameTokenEstimate).toBe(snapcompact.resolveShape(gemini).frameTokenEstimate);
 		// An unknown variant leaves the model-line default; an explicit setting wins over the model.

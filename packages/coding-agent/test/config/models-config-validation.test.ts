@@ -101,13 +101,21 @@ describe("ModelsConfigSchema snapcompactShape", () => {
 		},
 	});
 
-	test("accepts a known variant with an optional frame size", () => {
-		expect(ModelsConfigSchema(config({ variant: "11on16-bw", frameSize: 1932 }))).not.toBeInstanceOf(OmpErrors);
+	test("accepts a known variant with an optional frame size at either bound", () => {
 		expect(ModelsConfigSchema(config({ variant: "11on16-bw" }))).not.toBeInstanceOf(OmpErrors);
+		for (const frameSize of [64, 1932, 2576]) {
+			expect(ModelsConfigSchema(config({ variant: "11on16-bw", frameSize }))).not.toBeInstanceOf(OmpErrors);
+		}
 	});
 
-	test("rejects an unknown variant or a non-positive frame size in models and modelOverrides", () => {
-		for (const shape of [{ variant: "11on16" }, { variant: "11on16-bw", frameSize: 0 }]) {
+	test("rejects an unknown variant or an out-of-range frame size in models and modelOverrides", () => {
+		const rejected = [
+			{ variant: "11on16" },
+			{ variant: "11on16-bw", frameSize: 63 },
+			{ variant: "11on16-bw", frameSize: 2577 },
+			{ variant: "11on16-bw", frameSize: 1932.5 },
+		];
+		for (const shape of rejected) {
 			const checked = ModelsConfigSchema(config(shape));
 			if (!(checked instanceof OmpErrors)) throw new Error(`expected ${JSON.stringify(shape)} to be rejected`);
 			expect(new Set(checked.map(error => error.path.slice(0, 4).join(".")))).toEqual(

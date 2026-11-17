@@ -224,6 +224,23 @@ export function isShapeVariantName(value: unknown): value is ShapeVariantName {
 	return typeof value === "string" && value in SHAPE_VARIANTS;
 }
 
+/** Smallest configurable frame edge: the renderer's 64px floor, which still
+ *  fits at least one row and column of every variant's cell. */
+export const MIN_CONFIGURED_FRAME_SIZE = 64;
+/** Largest configurable frame edge: the largest any variant renders at. */
+export const MAX_CONFIGURED_FRAME_SIZE = 2576;
+
+/** Whether `value` is a frame edge a configured shape may set: an integer in
+ *  [{@link MIN_CONFIGURED_FRAME_SIZE}, {@link MAX_CONFIGURED_FRAME_SIZE}]. */
+export function isConfigurableFrameSize(value: unknown): value is number {
+	return (
+		typeof value === "number" &&
+		Number.isSafeInteger(value) &&
+		value >= MIN_CONFIGURED_FRAME_SIZE &&
+		value <= MAX_CONFIGURED_FRAME_SIZE
+	);
+}
+
 /** Wire API families with distinct default shapes and request hints. */
 type ApiFamily = "anthropic" | "google" | "openai" | "unknown";
 
@@ -446,12 +463,14 @@ export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "
 	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
 }
 
-/** The model's configured shape; an unknown variant name or a non-positive frame size is ignored. */
+/** The model's configured shape. An unknown variant name is ignored, and a
+ *  frame size outside {@link isConfigurableFrameSize} falls back to the
+ *  variant's own. */
 function configuredShape(target: ShapeTarget | undefined): IdealShape | undefined {
 	const configured = target?.snapcompactShape;
 	if (!configured || !isShapeVariantName(configured.variant)) return undefined;
 	const { frameSize } = configured;
-	return frameSize !== undefined && Number.isSafeInteger(frameSize) && frameSize > 0
+	return isConfigurableFrameSize(frameSize)
 		? { variant: configured.variant, frameSize }
 		: { variant: configured.variant };
 }
