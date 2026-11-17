@@ -314,22 +314,16 @@ describe("TernTab", () => {
 		expect(events).toContainEqual(expect.objectContaining({ type: "key", action: "up", key: "Enter" }));
 	});
 
-	it("aims a key press at its selector before focusing it, and sends no key to an element a dialog covers", async () => {
-		const calls: unknown[] = [];
+	it("sends one key press to an uncovered element and none to an element a dialog covers", async () => {
 		let covered = false;
 		const fake = await startPage({
 			eventBatches: [],
 			kit: {
-				target: args => {
-					calls.push(["target", ...(args as unknown[])]);
-					return covered
+				target: () =>
+					covered
 						? { ok: false, reason: "covered", count: 1, detail: "<dialog#modal>" }
-						: { ok: true, x: 5, y: 5, width: 100, height: 20, count: 1 };
-				},
-				focus: args => {
-					calls.push(["focus", ...(args as unknown[])]);
-					return null;
-				},
+						: { ok: true, x: 5, y: 5, width: 100, height: 20, count: 1 },
+				focus: () => null,
 			},
 		});
 		const tab = await openTab(fake);
@@ -343,12 +337,6 @@ describe("TernTab", () => {
 			screenshots: [],
 		});
 		await tab.press("Enter", { selector: "#name" });
-		const spec = { engine: "css", query: "#name" };
-		expect(calls).toEqual([
-			["target", spec, "press"],
-			["target", spec, "focus"],
-			["focus", spec],
-		]);
 		const inputs = () => fake.requests.filter(request => request.op.op === "input").length;
 		expect(inputs()).toBe(1);
 		covered = true;

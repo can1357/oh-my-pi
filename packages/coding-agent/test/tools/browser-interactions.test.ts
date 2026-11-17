@@ -322,7 +322,7 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 	}, 40_000);
 });
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
-	test("clicks a link that wraps across two lines on the link, not on its paragraph, on puppeteer and Tern", async () => {
+	test("clicks and drags a wrapped link on its visible fragment, not its paragraph, on puppeteer and Tern", async () => {
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);
 		const context = { session, toolCallId: "browser-wrapped-link" };
@@ -346,15 +346,22 @@ const ternHit = await tab.evaluate(async () => {
 	const target = await globalThis.__ompTernKit.target({ engine: "css", query: "#link" }, "click");
 	return target.ok ? document.elementFromPoint(target.x, target.y)?.id : target.reason;
 });
-return { fragments, clicked: await tab.evaluate(() => window.clicked), ternHit };`,
+const clicked = await tab.evaluate(() => window.clicked);
+await tab.evaluate(() => {
+	window.dragStarts = [];
+	document.addEventListener("mousedown", event => window.dragStarts.push(event.target.id), true);
+});
+await tab.drag("#link", { x: 200, y: 100, css: true });
+return { fragments, clicked, ternHit, dragStarts: await tab.evaluate(() => window.dragStarts) };`,
 					timeout: 15,
 				},
 				context,
 			);
-			expect(valueFrom<{ fragments: number; clicked: string[]; ternHit: string }>(result)).toEqual({
+			expect(valueFrom<unknown>(result)).toEqual({
 				fragments: 2,
 				clicked: ["link"],
 				ternHit: "link",
+				dragStarts: ["link"],
 			});
 		} finally {
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
@@ -521,6 +528,10 @@ const banner = {
 	picked: await tab.value("#popin"),
 	tern: { under: await aim("#under", ["fill", "press"]), board: await aim("#board", ["press"]), date: await aim("#date", ["type"]) },
 };
+await tab.evaluate(() => document.activeElement.blur());
+const beforePress = await tab.evaluate(() => scrollY);
+await tab.press("ArrowLeft", { selector: "#far" });
+const offscreenPressScrolled = await tab.evaluate(() => scrollY) !== beforePress;
 await tab.evaluate(() => { window.received = []; });
 const farDrag = await attempt(() => tab.drag("#src", "#far"));
 const farDragMisses = await tab.evaluate(() => window.received.filter(entry => !entry.endsWith(":src")));
@@ -531,6 +542,7 @@ const frame = await tab.frame("#inner");
 const refused = {
 	disabledPress,
 	banner,
+	offscreenPressScrolled,
 	farDrag,
 	farDragMisses,
 	fill: await attempt(() => tab.fill("#name", "Ada Lovelace")),
@@ -560,6 +572,7 @@ return { ...refused, received: await tab.evaluate(() => window.received), name: 
 					picked: "abc",
 					tern: { under: { fill: "ok", press: "ok" }, board: { press: "ok" }, date: { type: "ok" } },
 				},
+				offscreenPressScrolled: false,
 				farDrag: "sent",
 				farDragMisses: [],
 				fill: 'tab.fill("#name") blocked: covered by <dialog#modal>',

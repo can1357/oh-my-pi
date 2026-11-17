@@ -2,6 +2,7 @@ import type { Protocol } from "devtools-protocol";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
+	BoundingBox,
 	ElementHandle,
 	Frame,
 	JSHandle,
@@ -354,6 +355,17 @@ export async function isClickActionable(
 	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
 }
 
+function sameBox(previous: BoundingBox | null, current: BoundingBox | null): boolean {
+	return (
+		previous !== null &&
+		current !== null &&
+		Math.abs(previous.x - current.x) < 0.5 &&
+		Math.abs(previous.y - current.y) < 0.5 &&
+		Math.abs(previous.width - current.width) < 0.5 &&
+		Math.abs(previous.height - current.height) < 0.5
+	);
+}
+
 async function actionableClickPoint(
 	handle: ElementHandle,
 	label: string,
@@ -373,13 +385,7 @@ async function actionableClickPoint(
 			throwIfAborted(signal);
 			await untilAborted(signal, () => Bun.sleep(16));
 			const current = await untilAborted(signal, () => handle.boundingBox());
-			const stable =
-				previous !== null &&
-				current !== null &&
-				Math.abs(previous.x - current.x) < 0.5 &&
-				Math.abs(previous.y - current.y) < 0.5 &&
-				Math.abs(previous.width - current.width) < 0.5 &&
-				Math.abs(previous.height - current.height) < 0.5;
+			const stable = sameBox(previous, current);
 			const result = await isClickActionable(handle, signal, options);
 			if (!result.ok && result.detached) throw new ElementDetachedError(label);
 			// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
@@ -431,7 +437,8 @@ export async function refuseCoveredTarget(
 	label: string,
 	signal: AbortSignal | undefined,
 	{ modalOnly, scroll }: CoverCheck,
-): Promise<void> {
+): Promise<ActionabilityResult | undefined> {
+	if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
 	let result = await isClickActionable(handle, signal);
 	if (scroll && !result.ok && result.reason === "off-viewport") {
 		await untilAborted(signal, () =>
@@ -442,25 +449,19 @@ export async function refuseCoveredTarget(
 		);
 		result = await isClickActionable(handle, signal);
 	}
-	if (result.ok || !result.coveredBy) return;
-	if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
+	if (result.ok || !result.coveredBy) return result;
 	let coveredBy = result.coveredBy;
 	let previous = await untilAborted(signal, () => handle.boundingBox());
 	try {
 		while (true) {
 			await untilAborted(signal, () => Bun.sleep(16));
+			if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
 			const current = await untilAborted(signal, () => handle.boundingBox());
 			result = await isClickActionable(handle, signal);
-			if (result.ok || !result.coveredBy) return;
+			if (result.ok || !result.coveredBy) return result;
 			coveredBy = result.coveredBy;
 			// A cover counts once the element holds still, as for a click: an overlay may be animating away.
-			const stable =
-				previous !== null &&
-				current !== null &&
-				Math.abs(previous.x - current.x) < 0.5 &&
-				Math.abs(previous.y - current.y) < 0.5 &&
-				Math.abs(previous.width - current.width) < 0.5 &&
-				Math.abs(previous.height - current.height) < 0.5;
+			const stable = sameBox(previous, current);
 			if (stable) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
 			previous = current;
 		}

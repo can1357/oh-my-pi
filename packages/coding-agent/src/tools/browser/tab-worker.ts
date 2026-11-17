@@ -3987,14 +3987,21 @@ export class WorkerCore {
 						: asElementHandle(await untilAborted(signal, () => page.$(normalizeSelector(target))));
 				if (!handle) throw new ToolError(`Drag ${role} selector did not resolve: ${target}`);
 				let box: { x: number; y: number; width: number; height: number } | null;
+				let point: { x: number; y: number } | undefined;
 				try {
 					// A drag sends pointer input where the element is drawn, so any cover takes it, as for a click; no
 					// scroll, which would move the other end after its point was read.
-					await refuseCoveredTarget(handle, `tab.drag() ${role} ${JSON.stringify(target)}`, signal, {
-						modalOnly: false,
-						scroll: false,
-					});
+					const checked = await refuseCoveredTarget(
+						handle,
+						`tab.drag() ${role} ${JSON.stringify(target)}`,
+						signal,
+						{
+							modalOnly: false,
+							scroll: false,
+						},
+					);
 					box = await untilAborted(signal, () => handle.boundingBox());
+					if (box && checked?.ok) point = { x: box.x + checked.x, y: box.y + checked.y };
 				} catch (error) {
 					await handle.dispose().catch(() => undefined);
 					throw error;
@@ -4003,7 +4010,7 @@ export class WorkerCore {
 					await handle.dispose().catch(() => undefined);
 					throw new ToolError(`Drag ${role} element has no bounding box (likely not visible): ${target}`);
 				}
-				return { x: box.x + box.width / 2, y: box.y + box.height / 2, handle };
+				return { x: point?.x ?? box.x + box.width / 2, y: point?.y ?? box.y + box.height / 2, handle };
 			}
 			if (
 				target !== null &&
