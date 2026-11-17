@@ -271,7 +271,7 @@ export const streamGoogleVertex = createLazyProviderStream(
  * a static import would pull the Kiro transport into every process's startup.
  */
 export const streamKiro = createLazyProviderStream(
-	() => import("./kiro/index"),
+	() => import("./kiro/stream"),
 	(mod): ProviderStream<"kiro-api"> => mod.streamKiro,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );

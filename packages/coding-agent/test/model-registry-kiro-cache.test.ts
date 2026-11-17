@@ -7,13 +7,13 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { kiroModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models";
-import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
+import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const RUNTIME = "https://runtime.us-east-1.kiro.dev/";
-const apiKey = (apiEndpoint: string) => encodeKiroCredential({ kind: "api_key", token: "ksk_key", apiEndpoint });
+const apiKey = (region: string) => encodeKiroCredential({ kind: "api_key", token: "ksk_key", region });
 
 let tempDir: string;
 let authStorage: AuthStorage;
@@ -31,7 +31,7 @@ afterEach(() => {
 
 test("an offline ModelRegistry restores only the Kiro cache keyed by the stored login", async () => {
 	const cacheDbPath = path.join(tempDir, "models.db");
-	const seededKey = apiKey("https://runtime.eu-central-1.kiro.dev/");
+	const seededKey = apiKey("eu-central-1");
 	const discovered = {
 		modelId: "kiro-discovered",
 		modelName: "Discovered",
@@ -71,5 +71,5 @@ test("an offline ModelRegistry restores only the Kiro cache keyed by the stored 
 			.map(model => model.id);
 	};
 	expect(await restore(seededKey)).toEqual(["kiro-discovered"]);
-	expect(await restore(apiKey(RUNTIME))).toEqual([]);
+	expect(await restore(apiKey("us-east-1"))).toEqual([]);
 });

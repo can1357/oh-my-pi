@@ -29,7 +29,7 @@ export const KIRO_CLI_SOCIAL_HEADERS: Readonly<Record<string, string>> = Object.
 });
 
 /** The AWS JSON 1.0 operations omp calls, each as the CLI's SDK client issues it. */
-export type KiroCliOperation =
+type KiroCliOperation =
 	| "GenerateAssistantResponse"
 	| "ListAvailableModels"
 	| "ListAvailableProfiles"
@@ -74,18 +74,8 @@ const OPERATIONS: Readonly<Record<KiroCliOperation, SdkClient & { target: string
 const SSO_OIDC_CLIENT: SdkClient = { api: "api/ssooidc/1.100.0", features: "E,N", appVersion: false };
 
 /** The `os/<family>` token the AWS Rust SDK derives from the host platform. */
-export function kiroCliOsFamily(platform: string = process.platform): string {
-	switch (platform) {
-		case "linux":
-			return "linux";
-		case "darwin":
-			return "macos";
-		case "win32":
-			return "windows";
-		default:
-			return "other";
-	}
-}
+const OS_FAMILY =
+	({ linux: "linux", darwin: "macos", win32: "windows" } as Record<string, string>)[process.platform] ?? "other";
 
 /** One request's position in its retry budget: `attempt` is 1-based. */
 export interface KiroCliAttempt {
@@ -94,7 +84,7 @@ export interface KiroCliAttempt {
 }
 
 function userAgents(client: SdkClient): { "user-agent": string; "x-amz-user-agent": string } {
-	const base = `${AWS_SDK_RUST_UA} ${client.api} os/${kiroCliOsFamily()} ${RUST_LANG}`;
+	const base = `${AWS_SDK_RUST_UA} ${client.api} os/${OS_FAMILY} ${RUST_LANG}`;
 	return {
 		"user-agent": client.appVersion
 			? `${base} md/appVersion-${KIRO_CLI_APP_VERSION} ${KIRO_CLI_APP}`

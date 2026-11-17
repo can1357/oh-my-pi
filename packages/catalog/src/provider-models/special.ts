@@ -5,7 +5,7 @@ import { providerEntry, seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { fetchKiroModels } from "../discovery/kiro";
-import { decodeKiroCredential, type KiroCredential } from "../wire/kiro-credential";
+import { decodeKiroCredential } from "../wire/kiro";
 
 import {
 	type FactoryDroidModelDiscoveryOptions,
@@ -480,27 +480,15 @@ export interface KiroModelManagerConfig {
 }
 
 export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): ModelManagerOptions<"kiro-api"> {
+	const { apiKey, fetch } = config;
 	return {
 		providerId: "kiro",
 		staticModels: [],
 		dynamicModelsAuthoritative: true,
-		cacheProviderId: resolveModelCacheProviderId("kiro", { apiKey: config.apiKey }),
-		...(config.apiKey
-			? {
-					fetchDynamicModels: async () => {
-						let credential: KiroCredential;
-						try {
-							credential = decodeKiroCredential(config.apiKey as string);
-						} catch (error) {
-							// Keep the last safe cache rather than failing the model refresh.
-							logger.warn("Kiro model discovery skipped: credential does not decode", {
-								error: error instanceof Error ? error.message : String(error),
-							});
-							return null;
-						}
-						return fetchKiroModels({ credential, fetch: config.fetch });
-					},
-				}
+		cacheProviderId: resolveModelCacheProviderId("kiro", { apiKey }),
+		// A credential that does not decode throws; the model manager keeps the last cache.
+		...(apiKey
+			? { fetchDynamicModels: async () => fetchKiroModels({ credential: decodeKiroCredential(apiKey), fetch }) }
 			: undefined),
 	};
 }

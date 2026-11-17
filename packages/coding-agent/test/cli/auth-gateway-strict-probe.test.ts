@@ -4,7 +4,7 @@ import type { CompletionProbeInput, Provider } from "@oh-my-pi/pi-ai";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
-import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
+import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { createStrictCompletionProbe } from "../../src/cli/auth-gateway-cli";
 
 afterEach(() => {
@@ -75,8 +75,7 @@ describe("auth-gateway check --strict completion probe", () => {
 				access: "kiro-access",
 				refresh: "kiro-refresh",
 				expires: Date.now() + 3_600_000,
-				apiEndpoint: runtime,
-				kiroLoginId: "login-a",
+				region: "us-east-1",
 				accountId: "login-a",
 			});
 			const [result] = await storage.health.check({ completionProbe: createStrictCompletionProbe() });
@@ -85,7 +84,7 @@ describe("auth-gateway check --strict completion probe", () => {
 			expect(decodeKiroCredential(typeof apiKey === "string" ? apiKey : "", {})).toEqual({
 				kind: "oauth",
 				token: "kiro-access",
-				apiEndpoint: runtime,
+				region: "us-east-1",
 				loginId: "login-a",
 			});
 		} finally {

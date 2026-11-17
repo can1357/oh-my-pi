@@ -50,7 +50,7 @@ import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
-import type { KiroOptions } from "./providers/kiro/types";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";

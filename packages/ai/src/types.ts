@@ -51,7 +51,7 @@ import type { GitLabDuoWorkflowOptions } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
-import type { KiroOptions } from "./providers/kiro/types";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";

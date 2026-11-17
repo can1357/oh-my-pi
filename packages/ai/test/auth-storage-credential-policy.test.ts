@@ -12,13 +12,13 @@ describe("AuthStorage remote snapshots", () => {
 				expires: Date.now() + 60_000,
 				kiroClientId: "client-id",
 				kiroClientSecret: "real-client-secret",
-				kiroTokenEndpoint: "https://oidc.us-east-1.amazonaws.com/token",
+				kiroOidcRegion: "us-east-1",
 			});
 			const credential = auth.credentials.snapshot().credentials.find(e => e.provider === "kiro")?.credential;
 			expect(credential).toMatchObject({
 				refresh: "__remote__",
 				kiroClientId: "client-id",
-				kiroTokenEndpoint: "https://oidc.us-east-1.amazonaws.com/token",
+				kiroOidcRegion: "us-east-1",
 			});
 			expect(credential).not.toHaveProperty("kiroClientSecret");
 		} finally {

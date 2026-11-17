@@ -14,7 +14,7 @@ import {
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
+import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { removeWithRetries } from "../../utils/src/temp";
 import { withEnv } from "./helpers";
 
@@ -514,8 +514,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			access: "access-stale",
 			refresh: "refresh-kiro",
 			expires: Date.now() - 1_000,
-			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
-			kiroLoginId: "login-a",
+			region: "us-east-1",
 			accountId: "login-a",
 		});
 		remote = new RemoteAuthCredentialStore({ client: new AuthBrokerClient({ url: handle!.url, token }) });
@@ -529,7 +528,7 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 			const apiKey = await clientStorage.keys.get("kiro", "kiro-session");
 			expect(decodeKiroCredential(apiKey ?? "", {})).toMatchObject({
 				token: "access-fresh",
-				apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+				region: "us-east-1",
 				loginId: "login-a",
 			});
 		} finally {

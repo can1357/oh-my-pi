@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { transformKiroRequest } from "@oh-my-pi/pi-ai/providers/kiro/index";
+import { transformKiroRequest } from "@oh-my-pi/pi-ai/providers/kiro/transform";
 import type { AssistantMessage, Context, Message, Model, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -10,14 +10,14 @@ const lookupTool = { name: "lookup", description: "Look up a path.", parameters:
 const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const zeroUsage: Usage = { ...zero, totalTokens: 0, cost: { ...zero, total: 0 } };
 
-function createModel(options: { reasoning?: boolean; thinking?: Model["thinking"]; contextWindow?: number } = {}) {
+function createModel(options: { thinking?: Model["thinking"]; contextWindow?: number } = {}) {
 	return buildModel({
 		id: "kiro-test-model",
 		name: "Kiro test model",
 		api: "kiro-api",
 		provider: "kiro",
 		baseUrl: "https://runtime.us-east-1.kiro.dev/",
-		reasoning: options.reasoning ?? false,
+		reasoning: options.thinking !== undefined,
 		...(options.thinking ? { thinking: options.thinking } : {}),
 		input: ["text", "image"],
 		cost: zero,
@@ -27,19 +27,21 @@ function createModel(options: { reasoning?: boolean; thinking?: Model["thinking"
 }
 
 function assistant(content: AssistantMessage["content"], stopReason: AssistantMessage["stopReason"] = "stop") {
-	const base = {
+	return {
+		role: "assistant",
+		content,
+		stopReason,
 		api: "kiro-api",
 		provider: "kiro",
 		model: "kiro-test-model",
 		usage: zeroUsage,
 		timestamp: 1,
-	} as const;
-	return { role: "assistant", content, stopReason, ...base } satisfies AssistantMessage;
+	} satisfies AssistantMessage;
 }
-const toolCalls = (ids: string[], stop: AssistantMessage["stopReason"] = "toolUse") =>
+const toolCalls = (ids: string[]) =>
 	assistant(
 		ids.map(id => ({ type: "toolCall" as const, id, name: "lookup", arguments: { path: id } })),
-		stop,
+		"toolUse",
 	);
 const text = (t: string) => assistant([{ type: "text", text: t }]);
 const user = (content: Extract<Message, { role: "user" }>["content"]): Message => ({
@@ -51,15 +53,8 @@ const png = (data = "aGVsbG8=") => ({ type: "image" as const, data, mimeType: "i
 function toolResult(
 	toolCallId: string,
 	content: ToolResultMessage["content"] = [{ type: "text", text: "file contents" }],
-) {
-	return {
-		role: "toolResult",
-		toolCallId,
-		toolName: "lookup",
-		content,
-		isError: false,
-		timestamp: 2,
-	} satisfies Message;
+): Message {
+	return { role: "toolResult", toolCallId, toolName: "lookup", content, isError: false, timestamp: 2 };
 }
 const transform = (messages: Message[], contextWindow?: number) =>
 	transformKiroRequest(createModel({ contextWindow }), { messages }).conversationState;
@@ -74,28 +69,32 @@ function expectOverflow(run: () => unknown) {
 }
 
 describe("Kiro request transformation", () => {
-	test("serializes images, tools, paired historical tool results, and profile-safe tool ids", () => {
+	test("serializes the system prompt, images, tools, and paired tool calls", () => {
 		const context: Context = {
 			systemPrompt: ["Follow the system instruction."],
 			messages: [
 				user("Earlier question"),
-				toolCalls(["wire/tool.id"]),
-				toolResult("wire/tool.id"),
+				toolCalls(["tooluse_1"]),
+				toolResult("tooluse_1", [{ type: "text", text: "shot" }, png()]),
 				user([
 					{ type: "text", text: "Current question" },
 					{ type: "image", data: "aGk=", mimeType: "image/jpeg" },
-					png(),
 				]),
 			],
 			tools: [lookupTool],
 		};
 		const { history = [], currentMessage } = transformKiroRequest(createModel(), context).conversationState;
 		const current = currentMessage.userInputMessage;
-		const use = history.find(entry => entry.assistantResponseMessage)?.assistantResponseMessage?.toolUses?.[0];
-		const result = current.userInputMessageContext?.toolResults?.[0];
+		const use = history[1]?.assistantResponseMessage?.toolUses?.[0];
 
+		expect(history).toHaveLength(2);
 		expect(history[0]?.userInputMessage?.content).toContain("Follow the system instruction.");
-		expect(current.content).toBe("Current question");
+		expect(use?.toolUseId).toBe("tooluse_1");
+		expect(current.content).toContain("Current question");
+		expect(current.userInputMessageContext?.toolResults).toEqual([
+			{ content: [{ text: "shot" }], status: "success", toolUseId: use!.toolUseId },
+		]);
+		// The tool-result image rides along with the current turn.
 		expect(current.images).toEqual([
 			{ format: "jpeg", source: { bytes: "aGk=" } },
 			{ format: "png", source: { bytes: "aGVsbG8=" } },
@@ -104,22 +103,51 @@ describe("Kiro request transformation", () => {
 			name: "lookup",
 			inputSchema: { json: { type: "object", properties: { path: { type: "string" } } } },
 		});
-		expect(use?.toolUseId).toMatch(/^call_/);
-		expect(result).toMatchObject({ status: "success", toolUseId: use?.toolUseId });
+		expect(() => transform([user([{ type: "image", data: "Qk0=", mimeType: "image/bmp" }])])).toThrow(
+			/Kiro does not support image type: image\/bmp/,
+		);
 	});
 
-	test("substitutes one continuation prompt for image-only, empty, and assistant-last turns", () => {
-		const cases: Message[][] = [[user([png()])], [user(" \t\n")], [user("Start"), text("The first answer")]];
-		const contents = cases.map(messages => transform(messages).currentMessage.userInputMessage.content);
-		expect(new Set(contents).size).toBe(1);
+	test("pairs another model's tool ids with their results under wire-safe, unique ids", () => {
+		const foreign = {
+			...toolCalls(["call_A|fc_1", "call.a", "call_a"]),
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-x",
+		} satisfies AssistantMessage;
+		const { currentMessage, history = [] } = transform([
+			user("Go"),
+			foreign,
+			toolResult("call_A|fc_R"),
+			toolResult("call.a"),
+			toolResult("call_a"),
+		]);
+		const uses = history[1]?.assistantResponseMessage?.toolUses?.map(use => use.toolUseId) ?? [];
+		const results = currentMessage.userInputMessage.userInputMessageContext?.toolResults?.map(r => r.toolUseId);
+
+		expect(new Set(uses).size).toBe(3);
+		for (const id of uses) expect(id).toMatch(/^[a-zA-Z0-9_-]+$/);
+		expect(results).toEqual(uses);
+	});
+
+	test("substitutes the continuation prompt for empty and assistant-last turns and keeps turns alternating", () => {
+		const contents = [[user(" \t\n")], [user("Start"), text("The first answer")]].map(
+			messages => transform(messages).currentMessage.userInputMessage.content,
+		);
+		expect(contents[0]).toBe(contents[1]!);
 		expect(contents[0]?.trim()).not.toBe("");
-		expect(transform(cases[0]!).currentMessage.userInputMessage.images).toHaveLength(1);
-		expect(transform(cases[2]!).history?.at(-1)?.assistantResponseMessage?.content).toBe("The first answer");
+
+		const turns = ["t1", "t2"].flatMap(id => [user(id), toolCalls([id]), toolResult(id), text(`${id} done`)]);
+		const history = transform([...turns, user("Continue")]).history ?? [];
+		const uses = history.flatMap(entry => entry.assistantResponseMessage?.toolUses ?? []);
+		const results = history.flatMap(entry => entry.userInputMessage?.userInputMessageContext?.toolResults ?? []);
+		expect(history.map(entry => (entry.userInputMessage ? "u" : "a")).join("")).toBe("uauauaua");
+		expect(results.map(result => result.toolUseId)).toEqual(uses.map(use => use.toolUseId));
 	});
 
-	test("clamps adaptive effort and output cap, and omits reasoning when disabled", () => {
-		const model = createModel({
-			reasoning: true,
+	test("maps adaptive effort with the output cap, GPT reasoning effort, and omits both when disabled", () => {
+		const context: Context = { messages: [user("Think")] };
+		const adaptive = createModel({
 			thinking: {
 				mode: "anthropic-adaptive",
 				efforts: [Effort.Low, Effort.High],
@@ -127,81 +155,44 @@ describe("Kiro request transformation", () => {
 				supportsDisplay: true,
 			},
 		});
-		const context: Context = { messages: [user("Think")] };
 		expect(
-			transformKiroRequest(model, context, { reasoning: Effort.Medium, hideThinkingSummary: true, maxTokens: 9_999 })
-				.additionalModelRequestFields,
+			transformKiroRequest(adaptive, context, {
+				reasoning: Effort.Medium,
+				hideThinkingSummary: true,
+				maxTokens: 9_999,
+			}).additionalModelRequestFields,
 		).toEqual({
 			thinking: { type: "adaptive", display: "omitted" },
 			output_config: { effort: "low" },
 			max_tokens: 4_096,
 		});
+		const gpt = createModel({
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High], defaultLevel: Effort.Medium },
+		});
+		expect(transformKiroRequest(gpt, context, { reasoning: Effort.High }).additionalModelRequestFields).toEqual({
+			reasoning: { mode: "standard", effort: "high" },
+		});
 		expect(
-			transformKiroRequest(model, context, { reasoning: Effort.High, disableReasoning: true })
+			transformKiroRequest(adaptive, context, { reasoning: Effort.High, disableReasoning: true })
 				.additionalModelRequestFields,
 		).toBeUndefined();
 	});
 
-	test("drops aborted or unmatched tool state and rejects duplicate tool ids", () => {
-		for (const messages of [
-			[user("Start"), toolCalls(["gone"], "aborted"), toolResult("gone"), user("Continue")],
-			[user("Start"), toolCalls(["gone"]), toolResult("orphan"), user("Continue")],
-		]) {
-			const state = JSON.stringify(transform(messages));
-			expect(state).not.toContain("toolUses");
-			expect(state).not.toContain("toolResults");
-		}
-		expect(() => transform([user("Start"), toolCalls(["dup"]), toolCalls(["dup"]), toolResult("dup")])).toThrow(
-			/duplicate tool call id/,
-		);
-	});
-
-	test("fails closed for unsupported image formats in user messages and tool results", () => {
-		const bmp = { type: "image" as const, data: "Qk0=", mimeType: "image/bmp" };
-		for (const messages of [[user([bmp])], [user("Start"), toolCalls(["t"]), toolResult("t", [bmp])]]) {
-			expect(() => transform(messages)).toThrow(/Kiro does not support image type: image\/bmp/);
-		}
-	});
-
-	test("promotes tool-result images onto the paired user input", () => {
-		const state = transform([
-			user("Start"),
-			toolCalls(["t"]),
-			toolResult("t", [{ type: "text", text: "shot" }, png()]),
-		]);
-		const current = state.currentMessage.userInputMessage;
-		const use = state.history?.find(entry => entry.assistantResponseMessage)?.assistantResponseMessage?.toolUses?.[0];
-		expect(current.userInputMessageContext?.toolResults?.[0]).toMatchObject({
-			content: [{ text: "shot" }],
-			toolUseId: use?.toolUseId,
-		});
-		expect(current.images).toEqual([{ format: "png", source: { bytes: "aGVsbG8=" } }]);
-	});
-
-	test("cuts tool results over the 800 KB limit with an omitted-bytes marker", () => {
+	test("cuts a tool result over the 800 KB service limit with an omitted-bytes marker", () => {
 		const original = "é".repeat(450_000); // 900,000 UTF-8 bytes
-		const exact = "a".repeat(800_000);
 		const state = transform(
-			[
-				user("Start"),
-				toolCalls(["big", "exact"]),
-				toolResult("big", [{ type: "text", text: original }]),
-				toolResult("exact", [{ type: "text", text: exact }]),
-			],
+			[user("Start"), toolCalls(["big"]), toolResult("big", [{ type: "text", text: original }])],
 			1_000_000,
 		);
-		const [big, atCap] = state.currentMessage.userInputMessage.userInputMessageContext?.toolResults ?? [];
-		const result = big?.content[0]?.text ?? "";
-		const kept = result.slice(0, result.indexOf("\n\n["));
-
-		expect(bytes(result)).toBeLessThanOrEqual(800_000);
+		const result = state.currentMessage.userInputMessage.userInputMessageContext?.toolResults?.[0]?.content[0]?.text;
+		const kept = result!.slice(0, result!.indexOf("\n\n["));
+		expect(bytes(result!)).toBeLessThanOrEqual(800_000);
 		expect(bytes(kept)).toBeGreaterThan(799_000);
 		expect(original.startsWith(kept)).toBe(true);
-		expect(result.slice(kept.length)).toContain("900000");
-		expect(atCap?.content[0]?.text).toBe(exact);
+		expect(result!.slice(kept.length)).toContain("900000");
 	});
 
-	test("shrinks oldest historical tool results to 25 KB until the request fits, else overflows", () => {
+	test("shrinks the oldest tool results to 25 KB until the request fits, else overflows", () => {
 		const texts = ["h1", "h2", "h3", "current"].map(id => `${id}:${"x".repeat(300_000)}`);
 		const messages: Message[] = ["h1", "h2", "h3"].flatMap((id, i) => [
 			user(`Turn ${id}`),
@@ -217,10 +208,9 @@ describe("Kiro request transformation", () => {
 
 		// A 200k-token window allows 850,000 bytes: the 1.2 MB of results must shrink.
 		const state = transform(messages, 200_000);
-		const historical = (state.history ?? []).flatMap(
-			e => e.userInputMessage?.userInputMessageContext?.toolResults ?? [],
-		);
-		const [h1, h2, h3] = historical.map(result => result.content[0]?.text ?? "");
+		const [h1, h2, h3] = (state.history ?? [])
+			.flatMap(e => e.userInputMessage?.userInputMessageContext?.toolResults ?? [])
+			.map(result => result.content[0]?.text ?? "");
 		for (const [shrunk, original] of [
 			[h1!, texts[0]!],
 			[h2!, texts[1]!],
@@ -233,40 +223,11 @@ describe("Kiro request transformation", () => {
 			texts[3],
 		);
 
-		// A 20k-token window allows 85,000 bytes; four results shrunk to 25 KB each still exceed it.
+		// A 20k-token window allows 85,000 bytes: four results shrunk to 25 KB each, or a long prompt, still exceed it.
 		const ids = ["r1", "r2", "r3", "r4"];
 		const results = ids.map(id => toolResult(id, [{ type: "text", text: "x".repeat(100_000) }]));
 		expectOverflow(() => transform([user("Start"), toolCalls(ids), ...results], 20_000));
-	});
-
-	test("counts the current user message text and images toward the request budget", () => {
-		// A 20k-token window allows 85,000 bytes, with no history to shrink.
 		expectOverflow(() => transform([user("x".repeat(100_000))], 20_000));
 		expectOverflow(() => transform([user([{ type: "text", text: "Describe." }, png("A".repeat(100_000))])], 20_000));
-		expect(transform([user("x".repeat(80_000))], 20_000).currentMessage.userInputMessage.content).toHaveLength(
-			80_000,
-		);
-	});
-
-	test("keeps the system prompt when no history user turn can carry it", () => {
-		for (const messages of [[toolCalls(["t"]), toolResult("t")], []]) {
-			const state = transformKiroRequest(createModel(), {
-				systemPrompt: ["Follow the system instruction."],
-				messages,
-			}).conversationState;
-			expect(state.history).toBeUndefined();
-			expect(state.currentMessage.userInputMessage.content).toContain("Follow the system instruction.");
-		}
-	});
-
-	test("keeps repeated historical tool turns paired and alternating", () => {
-		const turns = ["t1", "t2"].flatMap(id => [user(id), toolCalls([id]), toolResult(id), text(`${id} done`)]);
-		const history = transform([...turns, user("Continue")]).history ?? [];
-		const uses = history.flatMap(entry => entry.assistantResponseMessage?.toolUses ?? []);
-		const results = history.flatMap(entry => entry.userInputMessage?.userInputMessageContext?.toolResults ?? []);
-
-		expect(history.map(entry => (entry.userInputMessage ? "u" : "a")).join("")).toBe("uauauaua");
-		expect(uses).toHaveLength(2);
-		expect(results.map(result => result.toolUseId)).toEqual(uses.map(use => use.toolUseId));
 	});
 });

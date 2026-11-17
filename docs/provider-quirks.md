@@ -669,7 +669,7 @@ The Devin integration (`devin-agent` API) communicates with Codeium Cascade back
 
 ## Kiro
 
-The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the Kiro API. Stream logic lives in `packages/ai/src/providers/kiro/` (`streamKiro`, `transformKiroRequest`), login in `packages/ai/src/registry/oauth/kiro.ts`, usage in `packages/ai/src/usage/kiro.ts`, and discovery in `packages/catalog/src/discovery/kiro.ts`. User-facing setup is in [Kiro](./kiro.md).
+The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the Kiro API. The stream and request mapping live in `packages/ai/src/providers/kiro/` (`stream.ts`, `transform.ts`), login in `packages/ai/src/registry/oauth/kiro.ts`, usage in `packages/ai/src/usage/kiro.ts`, discovery in `packages/catalog/src/discovery/kiro.ts`, and routing plus the credential codec in `packages/catalog/src/wire/kiro.ts`. User-facing setup is in [Kiro](./kiro.md).
 
 ### Special casings
 
@@ -684,11 +684,11 @@ The native Kiro provider (`kiro-api`) streams AWS event-stream frames from the K
 
 ### Auth & usage
 
-- **Token usage**: Usage comes only from Kiro's token metrics (including `metadataEvent.tokenUsage`); when none arrive, usage is zero, never estimated.
+- **Token usage**: Usage comes only from `metadataEvent.tokenUsage`; when none arrives, usage is zero, never estimated.
 
 ### Catalog model handling
 
-- **Per-credential discovery**: The roster is discovered per credential and never bundled; default model `auto`. The model cache is scoped per OAuth login, or per API key and endpoint.
+- **Per-credential discovery**: The roster is discovered per credential and never bundled; default model `auto`. The model cache is scoped per OAuth login (login id, profile, region), or per API key and region.
 
 ## GitLab Duo
 

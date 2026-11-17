@@ -38,13 +38,13 @@ describe("AuthStorage keys.peek", () => {
 		const storage = await AuthStorage.create(":memory:");
 		storages.push(storage);
 		const expires = Date.now() + 3_600_000;
-		// A row without `kiroLoginId` (an older or hand-written login) cannot be encoded.
+		// A row without `accountId` (the login id) cannot be encoded.
 		const incomplete = {
 			type: "oauth" as const,
 			access: "incomplete-access",
 			refresh: "refresh-a",
 			expires,
-			apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+			region: "us-east-1",
 		};
 		await storage.credentials.set("kiro", incomplete);
 		expect(await storage.keys.peek("kiro")).toBeUndefined();
@@ -52,7 +52,7 @@ describe("AuthStorage keys.peek", () => {
 
 		await storage.credentials.set("kiro", [
 			incomplete,
-			{ ...incomplete, access: "complete-access", refresh: "refresh-b", kiroLoginId: "login-b" },
+			{ ...incomplete, access: "complete-access", refresh: "refresh-b", accountId: "login-b" },
 		]);
 		expect(JSON.parse((await storage.keys.peek("kiro")) ?? "null")).toMatchObject({
 			kind: "oauth",

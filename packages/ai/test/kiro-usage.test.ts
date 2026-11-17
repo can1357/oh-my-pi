@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
-import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
+import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import type { UsageFetchContext, UsageFetchParams, UsageReport } from "../src/usage";
 import { kiroRankingStrategy, kiroUsageProvider, parseKiroUsage } from "../src/usage/kiro";
 
@@ -68,7 +68,7 @@ const socialParams = (): UsageFetchParams => ({
 		accessToken: "social-access",
 		expiresAt: Date.now() + 3_600_000,
 		kiroProfileArn: PROFILE_ARN,
-		apiEndpoint: "https://runtime.us-east-1.kiro.dev/",
+		region: "us-east-1",
 	},
 });
 
@@ -92,7 +92,7 @@ describe("kiroUsageProvider", () => {
 			resourceType: "AGENTIC_REQUEST",
 		});
 
-		expect(report?.limits.map(limit => limit.id)).toEqual(["kiro:credits", "kiro:bonus:first-upgrade-trial"]);
+		expect(report?.limits.map(limit => limit.id)).toEqual(["kiro:credits", "kiro:bonus:0"]);
 		const [plan, bonus] = report!.limits;
 		expect(plan).toMatchObject({
 			label: "Kiro Pro credits",
@@ -141,7 +141,7 @@ describe("kiroUsageProvider", () => {
 		).rejects.toMatchObject({ status: 403 });
 	});
 
-	it("routes an API key by its stored endpoint without a profile and never fails on a refusal", async () => {
+	it("routes an API key by its stored region without a profile and never fails on a refusal", async () => {
 		const captured: Captured[] = [];
 		const params: UsageFetchParams = {
 			provider: "kiro",
@@ -150,7 +150,7 @@ describe("kiroUsageProvider", () => {
 				apiKey: encodeKiroCredential({
 					kind: "api_key",
 					token: "ksk_key",
-					apiEndpoint: "https://runtime.eu-central-1.kiro.dev/",
+					region: "eu-central-1",
 				}),
 			},
 		};

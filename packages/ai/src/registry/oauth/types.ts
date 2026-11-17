@@ -1,4 +1,3 @@
-import type { KiroSocialLoginProvider } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
 import type { FetchImpl } from "../../types";
 import type { OAuthProviderUnion } from "../registry";
 
@@ -23,7 +22,8 @@ export type OAuthCredentials = {
 	 * Account residency region (e.g. `"eu"`), when the provider is
 	 * region-partitioned. Captured at login; refreshed identity may update it
 	 * when the account migrates, while failed lookups preserve the stored value.
-	 * Residency selects the API host, not inference eligibility.
+	 * Residency selects the API host, not inference eligibility. For Kiro, the
+	 * API region the login routes to.
 	 */
 	region?: string;
 	/** Factory organization inference scope, independent of account residency. */
@@ -31,26 +31,13 @@ export type OAuthCredentials = {
 	/** WorkOS selected organization; never used as a Factory API organization header. */
 	activeOrganizationId?: string;
 	/**
-	 * Kiro IAM Identity Center device-grant binding. The OIDC client
-	 * registration is per-region and server-issued, so refresh must reuse the
-	 * exact client; these fields persist that binding alongside the grant.
+	 * Kiro AWS SSO-OIDC client binding (IAM Identity Center / Builder ID). Refresh
+	 * must reuse the registered client at `oidc.{kiroOidcRegion}`; a row without
+	 * `kiroClientId` is a Google/GitHub sign-in refreshed by the Kiro auth service.
 	 */
 	kiroClientId?: string;
 	kiroClientSecret?: string;
-	kiroClientSecretExpiresAt?: number;
-	kiroTokenEndpoint?: string;
 	kiroOidcRegion?: string;
-	/**
-	 * Random id minted at each Kiro login. Survives token refresh; keys the
-	 * model cache per login so a second account on the same endpoint cannot inherit
-	 * the first account's catalog.
-	 */
-	kiroLoginId?: string;
-	/**
-	 * Identity provider of a Kiro Google/GitHub sign-in. Its presence selects the
-	 * Kiro auth service's `/refreshToken` grant instead of the OIDC client binding.
-	 */
-	kiroLoginProvider?: KiroSocialLoginProvider;
 	/** Kiro profile ARN the login routes by; absent for Builder ID. Embeds the AWS account id, so never displayed. */
 	kiroProfileArn?: string;
 	/**

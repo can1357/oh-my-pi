@@ -75,11 +75,7 @@ export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 	"authorizedAt?": "number",
 	"kiroClientId?": "string",
 	"kiroClientSecret?": "string",
-	"kiroClientSecretExpiresAt?": "number",
-	"kiroTokenEndpoint?": "string",
 	"kiroOidcRegion?": "string",
-	"kiroLoginId?": "string",
-	"kiroLoginProvider?": "'Google' | 'Github'",
 	"kiroProfileArn?": "string",
 });
 
@@ -103,11 +99,7 @@ export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = ty
 	"kiroClientId?": "string",
 	// Redacted by `redactCredentialForWire`; a snapshot carrying it is rejected.
 	"kiroClientSecret?": "undefined",
-	"kiroClientSecretExpiresAt?": "number",
-	"kiroTokenEndpoint?": "string",
 	"kiroOidcRegion?": "string",
-	"kiroLoginId?": "string",
-	"kiroLoginProvider?": "'Google' | 'Github'",
 	"kiroProfileArn?": "string",
 });
 

@@ -1,137 +1,150 @@
 /**
- * Identity-free Kiro route helpers: region/endpoint/profile validation and
- * SSRF-safe management/runtime URL construction. No credentials here.
+ * Kiro routing and the credential codec. The `apiKey` string auth hands to Kiro
+ * discovery, usage and the stream is produced and read only here, so every
+ * consumer routes a credential to the same region and cache scope.
  */
+import { isRecord } from "@oh-my-pi/pi-utils";
 
-/**
- * Kiro API keys are always `ksk_…`, so the token shape distinguishes an API key
- * from an OAuth bearer. The credential projection carries no other marker.
- */
+/** Kiro API keys are `ksk_…`; the prefix tells a raw key from an encoded credential. */
 export const KIRO_API_KEY_PREFIX = "ksk_";
 
-/** Bootstrap-only management probes — not an availability allowlist. */
+/** Regions probed when a region is unknown: an unpinned API key, or a login's profile listing. */
 export const KIRO_BOOTSTRAP_REGIONS = ["us-east-1", "eu-central-1"] as const;
 
-export type KiroBootstrapRegion = (typeof KIRO_BOOTSTRAP_REGIONS)[number];
+const REGION = /^[a-z]{2}(?:-[a-z0-9]+)+-\d+$/;
+const PROFILE_ARN = /^arn:aws:codewhisperer:([a-z]{2}(?:-[a-z0-9]+)+-\d+):\d+:profile\/[A-Za-z0-9_-]+$/;
 
-/** AWS-style region id used in `management.{region}.kiro.dev`. */
-const KIRO_API_REGION_RE = /^[a-z]{2}(?:-[a-z0-9]+)+-\d+$/;
-
-/**
- * CodeWhisperer/Kiro profile ARN. Capture group 1 is the API region.
- * Account id and profile suffix are validated but never logged or cached.
- */
-const KIRO_PROFILE_ARN_RE = /^arn:aws:codewhisperer:([a-z]{2}(?:-[a-z0-9]+)+-\d+):\d+:profile\/[A-Za-z0-9_-]+$/;
-
-/** Map SSO/OIDC login regions onto Kiro's current management/runtime regions. */
-const SSO_TO_API_REGION: Readonly<Record<string, string>> = Object.freeze({
-	"us-west-1": "us-east-1",
-	"us-west-2": "us-east-1",
-	"us-east-2": "us-east-1",
-	"ap-southeast-1": "us-east-1",
-	"ap-southeast-2": "us-east-1",
-	"ap-northeast-1": "us-east-1",
-	"ap-south-1": "us-east-1",
-	"eu-west-1": "eu-central-1",
-	"eu-west-2": "eu-central-1",
-	"eu-west-3": "eu-central-1",
-	"eu-north-1": "eu-central-1",
-	"eu-south-1": "eu-central-1",
-	"eu-south-2": "eu-central-1",
-	"eu-central-2": "eu-central-1",
-});
-
-export interface KiroProfileRoute {
-	apiRegion: string;
-	profileArn: string;
+/** Whether `value` is an AWS region id, safe to place in a Kiro host name. */
+export function isKiroRegion(value: unknown): value is string {
+	return typeof value === "string" && REGION.test(value);
 }
 
-export type KiroEndpointKind = "management" | "runtime";
-
-export interface KiroEndpointRoute {
-	kind: KiroEndpointKind;
-	apiRegion: string;
-	baseUrl: string;
+/** The region a Kiro profile ARN routes to, or `undefined` when the value is not a profile ARN. */
+export function kiroProfileRegion(profileArn: unknown): string | undefined {
+	return typeof profileArn === "string" ? PROFILE_ARN.exec(profileArn)?.[1] : undefined;
 }
 
-/** Return the region when it is a safe Kiro API region; otherwise `undefined`. */
-export function validateKiroApiRegion(region: string | undefined | null): string | undefined {
-	if (typeof region !== "string" || region.length === 0 || region.length > 64) return undefined;
-	if (!KIRO_API_REGION_RE.test(region)) return undefined;
-	return region;
-}
-
-/**
- * Map an SSO/OIDC region hint to a Kiro API region. Unknown valid API regions
- * pass through; invalid values fall back to `us-east-1` only when absent.
- */
-export function resolveKiroApiRegion(ssoRegion: string | undefined | null): string {
-	if (!ssoRegion) return "us-east-1";
-	const mapped = SSO_TO_API_REGION[ssoRegion] ?? ssoRegion;
-	return validateKiroApiRegion(mapped) ?? "us-east-1";
-}
-
-/** Construct `https://management.{region}.kiro.dev/` after region validation. */
-export function kiroManagementBaseUrl(apiRegion: string): string {
-	const region = validateKiroApiRegion(apiRegion);
-	if (!region) throw new Error("Invalid Kiro API region");
-	return `https://management.${region}.kiro.dev/`;
-}
-
-/** Construct `https://runtime.{region}.kiro.dev/` after region validation. */
-export function kiroRuntimeBaseUrl(apiRegion: string): string {
-	const region = validateKiroApiRegion(apiRegion);
-	if (!region) throw new Error("Invalid Kiro API region");
+export function kiroRuntimeBaseUrl(region: string): string {
 	return `https://runtime.${region}.kiro.dev/`;
 }
 
-/**
- * Parse and validate a Kiro management or runtime base URL. Rejects userinfo,
- * non-HTTPS, non-default ports, unexpected hosts/paths, and region injection.
- */
-export function parseKiroEndpoint(endpoint: string | undefined | null): KiroEndpointRoute | undefined {
-	if (typeof endpoint !== "string" || endpoint.length === 0 || endpoint.length > 256) return undefined;
-	let url: URL;
-	try {
-		url = new URL(endpoint);
-	} catch {
-		return undefined;
+export function kiroManagementBaseUrl(region: string): string {
+	return `https://management.${region}.kiro.dev/`;
+}
+
+export type KiroCredential =
+	/**
+	 * A device or social login. `loginId` is minted at login and survives refresh;
+	 * Builder ID logins have no profile ARN and route by region alone.
+	 */
+	| { kind: "oauth"; token: string; region: string; loginId: string; profileArn?: string }
+	/** A `ksk_…` key; `region` is absent for an env key with no `KIRO_API_REGION`. */
+	| { kind: "api_key"; token: string; region?: string };
+
+/** A Kiro credential string that cannot be decoded, or a stored row that cannot be encoded. */
+class KiroCredentialError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "KiroCredentialError";
 	}
-	if (url.protocol !== "https:") return undefined;
-	if (url.username || url.password) return undefined;
-	if (url.port && url.port !== "443") return undefined;
-	if (url.search || url.hash) return undefined;
-	const path = url.pathname === "" ? "/" : url.pathname;
-	if (path !== "/") return undefined;
+}
 
-	const labels = url.hostname.split(".");
-	if (labels.length !== 4) return undefined;
-	const [kindLabel, region, second, tld] = labels;
-	if (second !== "kiro" || tld !== "dev") return undefined;
-	if (kindLabel !== "management" && kindLabel !== "runtime") return undefined;
-	const apiRegion = validateKiroApiRegion(region);
-	if (!apiRegion || apiRegion !== region) return undefined;
+export function encodeKiroCredential(credential: KiroCredential): string {
+	return JSON.stringify(credential);
+}
 
-	const kind: KiroEndpointKind = kindLabel;
-	const baseUrl = kind === "management" ? kiroManagementBaseUrl(apiRegion) : kiroRuntimeBaseUrl(apiRegion);
-	return { kind, apiRegion, baseUrl };
+/** The stored OAuth row fields a Kiro request key carries. */
+export interface KiroOAuthRow {
+	access: string;
+	/** Kiro API region: the profile's region, or `us-east-1` for Builder ID. */
+	region?: string;
+	/** The login id minted at sign-in. */
+	accountId?: string;
+	kiroProfileArn?: string;
+}
+
+/** The request key for a stored Kiro OAuth row (`ProviderDefinition.getApiKey`). */
+export function encodeKiroOAuthRow(row: KiroOAuthRow): string {
+	if (!isKiroRegion(row.region) || !row.accountId) {
+		throw new KiroCredentialError("Kiro login is incomplete; run /login kiro again");
+	}
+	return encodeKiroCredential({
+		kind: "oauth",
+		token: row.access,
+		region: row.region,
+		loginId: row.accountId,
+		...(row.kiroProfileArn ? { profileArn: row.kiroProfileArn } : {}),
+	});
+}
+
+function decodeEncoded(value: string): KiroCredential {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch {
+		throw new KiroCredentialError("Kiro credential is not valid JSON");
+	}
+	if (!isRecord(parsed) || typeof parsed.token !== "string" || parsed.token.length === 0) {
+		throw new KiroCredentialError("Kiro credential has no token");
+	}
+	const { token, region, profileArn } = parsed;
+	if (region !== undefined && !isKiroRegion(region))
+		throw new KiroCredentialError("Kiro credential has an invalid region");
+	if (parsed.kind === "api_key") {
+		if (!token.startsWith(KIRO_API_KEY_PREFIX))
+			throw new KiroCredentialError("Kiro API keys must use the ksk_… format");
+		return { kind: "api_key", token, ...(region ? { region } : {}) };
+	}
+	if (parsed.kind !== "oauth") throw new KiroCredentialError("Kiro credential has an unknown kind");
+	if (!region || typeof parsed.loginId !== "string" || parsed.loginId.length === 0) {
+		throw new KiroCredentialError("Kiro login is incomplete; run /login kiro again");
+	}
+	if (profileArn !== undefined && kiroProfileRegion(profileArn) === undefined) {
+		throw new KiroCredentialError("Kiro credential has an invalid profile ARN");
+	}
+	return {
+		kind: "oauth",
+		token,
+		region,
+		loginId: parsed.loginId,
+		...(profileArn ? { profileArn: profileArn as string } : {}),
+	};
 }
 
 /**
- * Validate a CodeWhisperer/Kiro profile ARN and derive its API region.
- * Returns `undefined` for malformed or SSRF-shaped values.
+ * Decode the `apiKey` string: the {@link encodeKiroCredential} form or a raw
+ * `ksk_…` key. A key with no region takes `KIRO_API_REGION` when set, so
+ * discovery and streaming route an env key alike; an invalid pin throws.
  */
-export function parseKiroProfileArn(profileArn: string | undefined | null): KiroProfileRoute | undefined {
-	if (typeof profileArn !== "string" || profileArn.length === 0 || profileArn.length > 512) return undefined;
-	const match = profileArn.match(KIRO_PROFILE_ARN_RE);
-	if (!match) return undefined;
-	const apiRegion = validateKiroApiRegion(match[1]);
-	if (!apiRegion) return undefined;
-	return { apiRegion, profileArn };
+export function decodeKiroCredential(
+	value: string,
+	env: Readonly<Record<string, string | undefined>> = Bun.env,
+): KiroCredential {
+	const trimmed = value.trim();
+	if (!trimmed) throw new KiroCredentialError("Kiro credential is missing");
+	if (!trimmed.startsWith("{") && !trimmed.startsWith(KIRO_API_KEY_PREFIX)) {
+		throw new KiroCredentialError("Kiro API keys must use the ksk_… format");
+	}
+	const credential: KiroCredential = trimmed.startsWith("{")
+		? decodeEncoded(trimmed)
+		: { kind: "api_key", token: trimmed };
+	if (credential.kind === "api_key" && !credential.region && env.KIRO_API_REGION !== undefined) {
+		if (!isKiroRegion(env.KIRO_API_REGION))
+			throw new KiroCredentialError("KIRO_API_REGION is not a valid AWS region");
+		return { ...credential, region: env.KIRO_API_REGION };
+	}
+	return credential;
 }
 
-/** Extract the display-safe trailing profile segment from a validated ARN. */
-export function extractKiroProfileSegment(profileArn: string | undefined | null): string | undefined {
-	const parsed = parseKiroProfileArn(profileArn);
-	return parsed?.profileArn.slice(parsed.profileArn.lastIndexOf("/") + 1);
+/**
+ * Model-cache scope of one credential. A login is scoped by its login id plus
+ * its route: profiles are shared org-wide (or by every social user without one),
+ * and a refresh can move a login to another profile whose catalog differs. An
+ * API key is scoped by a hash of the key and its region.
+ */
+export function kiroCredentialCacheScope(credential: KiroCredential): string {
+	if (credential.kind === "oauth") {
+		return `oauth:${credential.loginId}\u0000${credential.profileArn ?? ""}\u0000${credential.region}`;
+	}
+	return `api_key:${Bun.hash(`${credential.token}\u0000${credential.region ?? ""}`).toString(36)}`;
 }

@@ -1,16 +1,18 @@
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { kiroRuntimeBaseUrl, parseKiroEndpoint, parseKiroProfileArn } from "@oh-my-pi/pi-catalog/wire/kiro";
+import { decodeKiroCredential, kiroRuntimeBaseUrl } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { kiroCliServiceHeaders } from "@oh-my-pi/pi-catalog/wire/kiro-cli";
-import { decodeKiroCredential, type KiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro-credential";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
 import * as AIError from "../../error";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
 	Model,
-	StopReason,
+	SimpleStreamOptions,
 	TextContent,
 	ThinkingContent,
+	ToolCall,
 } from "../../types";
 import { hasVisibleAssistantContent } from "../../utils/empty-completion-retry";
 import { AssistantMessageEventStream as MessageEventStream } from "../../utils/event-stream";
@@ -22,342 +24,322 @@ import {
 } from "../../utils/idle-iterator";
 import { notifyProviderResponse } from "../../utils/provider-response";
 import { waitForRetry } from "../../utils/retry-wait";
-import { decodeEventStream } from "../aws-eventstream";
-import {
-	isKiroCapacityError,
-	isKiroTransientToolFormatError,
-	KiroApiError,
-	KiroStreamError,
-	kiroHttpError,
-} from "./errors";
-
-import { mergeKiroUsage, normalizeKiroFrame } from "./event-normalizer";
-import { KiroToolAssembler } from "./tool-assembler";
+import { decodeEventStream, type EventStreamMessage } from "../aws-eventstream";
 import { transformKiroRequest } from "./transform";
-import type { KiroNormalizedEvent, KiroOptions, KiroRefusalDetails, KiroUsageMetrics } from "./types";
+
+export interface KiroOptions extends SimpleStreamOptions {
+	/** A raw `ksk_…` key or the `encodeKiroCredential` string auth resolves for Kiro. */
+	apiKey?: string;
+}
 
 /** Requests per call: the first plus at most one pre-output retry. */
 const MAX_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 500;
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const IDLE_TIMEOUT_ERROR = "Kiro stream timed out while waiting for the next event";
 const FIRST_EVENT_TIMEOUT_ERROR = "Kiro stream timed out while waiting for the first visible output";
+/** `ThrottlingError.reason` when the selected model has no capacity (Smithy model in aws/amazon-q-developer-cli). */
+const INSUFFICIENT_MODEL_CAPACITY = "INSUFFICIENT_MODEL_CAPACITY";
+/**
+ * HTTP-equivalent status of in-stream exception shapes, keyed lowercase. Exception
+ * frames ride inside an HTTP 200, so without this the shared retry classifier
+ * would read a temporary throttle as terminal. Unknown shapes stay status-less.
+ */
+const STREAM_EXCEPTION_STATUS: Record<string, number> = {
+	accessdeniedexception: 403,
+	internalserverexception: 500,
+	internalservererror: 500,
+	modeltimeoutexception: 408,
+	serviceunavailableexception: 503,
+	throttlingerror: 429,
+	throttlingexception: 429,
+};
+/** Event frames this provider reads; every other event type is skipped undecoded. */
+const HANDLED_EVENTS: Record<string, true> = {
+	"initial-response": true,
+	metadataEvent: true,
+	reasoningContentEvent: true,
+	assistantResponseEvent: true,
+	toolUseEvent: true,
+	contextUsageEvent: true,
+	meteringEvent: true,
+};
+const PAYLOAD_DECODER = new TextDecoder("utf-8", { fatal: true });
 
-function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
-	const merged: Record<string, string> = {};
-	const keyByLower = new Map<string, string>();
-	for (const headers of headerSources) {
-		if (!headers) continue;
-		for (const [key, value] of Object.entries(headers)) {
-			const lower = key.toLowerCase();
-			const existing = keyByLower.get(lower);
-			if (existing !== undefined && existing !== key) delete merged[existing];
-			keyByLower.set(lower, key);
-			merged[key] = value;
-		}
+class KiroApiError extends AIError.ProviderHttpError {
+	override readonly name = "KiroApiError";
+	/**
+	 * The identical request is known to succeed on replay: a model-capacity
+	 * throttle, or the fleet's transient `ValidationException: Invalid tool use
+	 * format.` that a byte-identical retry clears.
+	 */
+	readonly replayable: boolean;
+
+	constructor(message: string, status: number, code: string | undefined, reason: unknown, headers?: Headers) {
+		super(message, status, { code, headers });
+		this.replayable =
+			reason === INSUFFICIENT_MODEL_CAPACITY ||
+			(status === 400 && code === "ValidationException" && /invalid tool use format[.\s]*$/i.test(message));
 	}
-	return merged;
 }
 
-const INLINE_THINKING_TAGS: ReadonlyArray<readonly [string, string]> = [
-	["<thinking>", "</thinking>"],
-	["<think>", "</think>"],
-	["<reasoning>", "</reasoning>"],
-	["<thought>", "</thought>"],
-];
+const kiroString = (value: unknown): string | undefined => (typeof value === "string" && value ? value : undefined);
 
-interface AttemptState {
-	output: AssistantMessage;
-	visible: boolean;
-	started: boolean;
-	firstOutputTime?: number;
-	textIndex?: number;
-	thinkingIndex?: number;
-	nativeReasoning: boolean;
-	inlineMode: "undecided" | "thinking" | "text";
-	inlineBuffer: string;
-	inlineClose?: string;
-	pendingThinkingSignature?: string;
-	usage: KiroUsageMetrics;
-	/** The service sent `meteringEvent`: this request was billed and must not be replayed. */
-	metered: boolean;
-	stopReason?: string;
-	refusal?: KiroRefusalDetails;
-	/** Latest `contextUsageEvent.contextUsagePercentage` (0–100). */
-	contextUsagePercentage?: number;
-	toolAssembler: KiroToolAssembler;
+function responseError(message: string, kind: AIError.ProviderResponseErrorKind = "output"): Error {
+	return new AIError.ProviderResponseError(message, { provider: "kiro", kind });
 }
 
-function emptyOutput(model: Model, timestamp: number): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp,
-	};
-}
-
-function parseCredential(value: string | undefined): KiroCredential {
-	if (!value) throw new KiroApiError("Kiro credential is missing", 401, { code: "AUTH_MISSING" });
+function parsePayload(bytes: Uint8Array): Record<string, unknown> | undefined {
 	try {
-		return decodeKiroCredential(value);
-	} catch (error) {
-		throw new KiroApiError("Kiro credential projection is invalid", 401, {
-			code: "AUTH_INVALID",
-			cause: error,
+		const value: unknown = JSON.parse(PAYLOAD_DECODER.decode(bytes));
+		return isRecord(value) ? value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function httpError(response: Response, signal: AbortSignal | undefined): Promise<Error> {
+	// A proxy can answer 429/503 with a short body and hold the connection open,
+	// so the body read honours the caller's deadline.
+	const body = await readBoundedBody(response, MAX_ERROR_BODY_BYTES, { signal });
+	const payload = (body && parsePayload(body.bytes)) ?? {};
+	const code = kiroString(payload.__type ?? payload.code)
+		?.split("#")
+		.at(-1);
+	const detail = kiroString(payload.message) ?? kiroString(payload.reason);
+	const message = `Kiro HTTP ${response.status}${code ? ` ${code}` : ""}${detail ? `: ${detail}` : ""}`;
+	const error = new KiroApiError(message, response.status, code, payload.reason, response.headers);
+	return response.status === 413 ? AIError.attach(error, AIError.create(AIError.Flag.ContextOverflow)) : error;
+}
+
+/** An `exception`/`error` frame: the failure is in its headers, a payload (when present) adds the shape's fields. */
+function frameError(frame: EventStreamMessage): Error {
+	const payload = parsePayload(frame.payload) ?? {};
+	const code =
+		frame.headers[":exception-type"] ??
+		frame.headers[":error-code"] ??
+		kiroString(payload.code ?? payload.__type) ??
+		"KIRO_EVENTSTREAM_ERROR";
+	const detail = kiroString(payload.message) ?? frame.headers[":error-message"];
+	const message = `${code}${detail ? `: ${detail}` : ""}`;
+	// A capacity reason is a throttle whatever shape carries it.
+	const status =
+		STREAM_EXCEPTION_STATUS[code.toLowerCase()] ?? (payload.reason === INSUFFICIENT_MODEL_CAPACITY ? 429 : undefined);
+	return status === undefined ? responseError(message) : new KiroApiError(message, status, code, payload.reason);
+}
+
+interface KiroEvent {
+	type: string;
+	payload: Record<string, unknown>;
+}
+
+async function* kiroEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<KiroEvent> {
+	for await (const frame of decodeEventStream(body)) {
+		const messageType = frame.headers[":message-type"];
+		if (messageType === "exception" || messageType === "error") throw frameError(frame);
+		const type = frame.headers[":event-type"];
+		if (messageType !== "event" || !type || HANDLED_EVENTS[type] !== true) continue;
+		const payload = parsePayload(frame.payload);
+		if (!payload) throw responseError(`Kiro sent a malformed ${type} payload`, "envelope");
+		yield { type, payload };
+	}
+}
+
+function isProgressEvent({ type, payload }: KiroEvent): boolean {
+	if (type === "toolUseEvent") return true;
+	if (type === "reasoningContentEvent") return Boolean(kiroString(payload.text));
+	return type === "assistantResponseEvent" && Boolean(kiroString(payload.content)?.trim());
+}
+
+interface PendingTool {
+	index: number;
+	fragments: string;
+	snapshot?: Record<string, unknown>;
+	done: boolean;
+}
+
+/** One request's output: content blocks, tool-call assembly, and the terminal metadata. */
+class KiroAttempt {
+	readonly output: AssistantMessage;
+	/** Output reached the consumer; the request is no longer replayable. */
+	visible = false;
+	/** The service sent `meteringEvent`: this request was billed and must not be replayed. */
+	metered = false;
+	stopReason: string | undefined;
+	refusal: Record<string, unknown> | undefined;
+	tokenUsage: Record<string, unknown> = {};
+	contextUsagePercentage: number | undefined;
+	firstOutputTime: number | undefined;
+	emittedTools = 0;
+	readonly #stream: AssistantMessageEventStream;
+	#textIndex: number | undefined;
+	#thinkingIndex: number | undefined;
+	readonly #tools = new Map<string, PendingTool>();
+
+	constructor(model: Model, stream: AssistantMessageEventStream, timestamp: number) {
+		this.#stream = stream;
+		this.output = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp,
+		};
+	}
+
+	#markVisible(): void {
+		if (!this.visible) this.#stream.push({ type: "start", partial: this.output });
+		this.visible = true;
+		this.firstOutputTime ??= performance.now();
+	}
+
+	#closeThinking(): void {
+		if (this.#thinkingIndex === undefined) return;
+		const block = this.output.content[this.#thinkingIndex] as ThinkingContent;
+		this.#stream.push({
+			type: "thinking_end",
+			contentIndex: this.#thinkingIndex,
+			content: block.thinking,
+			partial: this.output,
 		});
+		this.#thinkingIndex = undefined;
 	}
-}
 
-function resolveKiroRuntimeBaseUrl(model: Model, credential: KiroCredential): string {
-	if (credential.kind === "oauth" && credential.profileArn !== undefined) {
-		const profile = parseKiroProfileArn(credential.profileArn);
-		if (!profile) {
-			throw new KiroApiError("Invalid Kiro profile ARN", 0, { code: "INVALID_PROFILE" });
+	/** Close the open text block so a tool call or later text cannot merge into it. */
+	#closeText(): void {
+		if (this.#textIndex === undefined) return;
+		const block = this.output.content[this.#textIndex] as TextContent;
+		this.#stream.push({ type: "text_end", contentIndex: this.#textIndex, content: block.text, partial: this.output });
+		this.#textIndex = undefined;
+	}
+
+	text(text: string): void {
+		if (!text) return;
+		this.#markVisible();
+		this.#closeThinking();
+		if (this.#textIndex === undefined) {
+			this.#textIndex = this.output.content.push({ type: "text", text: "" }) - 1;
+			this.#stream.push({ type: "text_start", contentIndex: this.#textIndex, partial: this.output });
 		}
-		return kiroRuntimeBaseUrl(profile.apiRegion);
+		(this.output.content[this.#textIndex] as TextContent).text += text;
+		this.#stream.push({ type: "text_delta", contentIndex: this.#textIndex, delta: text, partial: this.output });
 	}
 
-	// The codec validated the endpoint and applied `KIRO_API_REGION` to an API
-	// key without one, matching the route discovery resolves.
-	if (credential.apiEndpoint !== undefined) return credential.apiEndpoint;
-
-	const modelEndpoint = parseKiroEndpoint(model.baseUrl);
-	if (modelEndpoint?.kind !== "runtime") {
-		throw new KiroApiError("Invalid Kiro runtime endpoint", 0, { code: "INVALID_ENDPOINT" });
-	}
-	return modelEndpoint.baseUrl;
-}
-
-function mapStopReason(
-	reason: string | undefined,
-	toolCalls: number,
-): Extract<StopReason, "stop" | "length" | "toolUse"> {
-	// Truncation wins over an emitted tool call: a tool frame cut off by
-	// MAX_TOKENS holds incomplete arguments, and reporting `toolUse` would let
-	// the agent loop execute it instead of applying its length safeguard.
-	if (reason === "MAX_TOKENS" || reason === "LENGTH") return "length";
-	if (toolCalls > 0) return "toolUse";
-	return reason === "TOOL_USE" ? "toolUse" : "stop";
-}
-
-function markVisible(state: AttemptState, stream: AssistantMessageEventStream): void {
-	if (!state.started) {
-		state.started = true;
-		stream.push({ type: "start", partial: state.output });
-	}
-	state.visible = true;
-	state.firstOutputTime ??= performance.now();
-}
-
-function emitText(state: AttemptState, stream: AssistantMessageEventStream, text: string): void {
-	if (!text) return;
-	markVisible(state, stream);
-	if (state.textIndex === undefined) {
-		state.textIndex = state.output.content.length;
-		state.output.content.push({ type: "text", text: "" });
-		stream.push({ type: "text_start", contentIndex: state.textIndex, partial: state.output });
-	}
-	const block = state.output.content[state.textIndex] as TextContent;
-	block.text += text;
-	stream.push({ type: "text_delta", contentIndex: state.textIndex, delta: text, partial: state.output });
-}
-
-function emitThinking(
-	state: AttemptState,
-	stream: AssistantMessageEventStream,
-	text: string,
-	signature?: string,
-): void {
-	if (signature !== undefined) state.pendingThinkingSignature = signature;
-	if (!text) {
-		if (state.thinkingIndex !== undefined && signature !== undefined) {
-			const block = state.output.content[state.thinkingIndex] as ThinkingContent;
-			block.thinkingSignature = signature;
+	thinking(text: string, signature: string | undefined): void {
+		if (text) {
+			this.#markVisible();
+			if (this.#thinkingIndex === undefined) {
+				this.#thinkingIndex = this.output.content.push({ type: "thinking", thinking: "" }) - 1;
+				this.#stream.push({ type: "thinking_start", contentIndex: this.#thinkingIndex, partial: this.output });
+			}
 		}
-		return;
-	}
-	markVisible(state, stream);
-	if (state.thinkingIndex === undefined) {
-		state.thinkingIndex = state.output.content.length;
-		state.output.content.push({ type: "thinking", thinking: "" });
-		stream.push({ type: "thinking_start", contentIndex: state.thinkingIndex, partial: state.output });
-	}
-	const block = state.output.content[state.thinkingIndex] as ThinkingContent;
-	block.thinking += text;
-	if (state.pendingThinkingSignature !== undefined) block.thinkingSignature = state.pendingThinkingSignature;
-	stream.push({ type: "thinking_delta", contentIndex: state.thinkingIndex, delta: text, partial: state.output });
-}
-
-function closeThinking(state: AttemptState, stream: AssistantMessageEventStream): void {
-	if (state.thinkingIndex === undefined) return;
-	const block = state.output.content[state.thinkingIndex] as ThinkingContent;
-	stream.push({
-		type: "thinking_end",
-		contentIndex: state.thinkingIndex,
-		content: block.thinking,
-		partial: state.output,
-	});
-	state.thinkingIndex = undefined;
-}
-
-/**
- * Close the open text block so a tool call cannot be appended into it. Without
- * this, `text_end` trails `toolcall_end` and later text merges into the block
- * that preceded the tool.
- */
-function closeText(state: AttemptState, stream: AssistantMessageEventStream): void {
-	if (state.textIndex === undefined) return;
-	const block = state.output.content[state.textIndex] as TextContent;
-	stream.push({ type: "text_end", contentIndex: state.textIndex, content: block.text, partial: state.output });
-	state.textIndex = undefined;
-}
-
-function hasVisibleInlineText(value: string): boolean {
-	return value.trim().length > 0;
-}
-
-/** What one content chunk does to the inline-thinking parser, without emitting it. */
-interface InlineStep {
-	mode: AttemptState["inlineMode"];
-	close?: string;
-	/** Unemitted tail kept for the next chunk (a partial tag). */
-	buffer: string;
-	thinking: string;
-	closesThinking: boolean;
-	text: string;
-}
-
-/**
- * The single inline-tag parser. Models without native reasoning may open their
- * answer with `<thinking>`-style tags; this decides which part of a chunk is
- * thinking, which is text, and what stays buffered. The progress probe and the
- * emitter both run it, so they can never disagree.
- */
-function stepInlineContent(state: AttemptState, chunk: string): InlineStep {
-	if (state.nativeReasoning || state.inlineMode === "text") {
-		return {
-			mode: state.inlineMode,
-			close: state.inlineClose,
-			buffer: state.inlineBuffer,
-			thinking: "",
-			closesThinking: true,
-			text: chunk,
-		};
-	}
-	let buffer = state.inlineBuffer + chunk;
-	let close = state.inlineClose;
-	if (state.inlineMode === "undecided") {
-		const match = INLINE_THINKING_TAGS.find(([open]) => buffer.startsWith(open));
-		if (match) {
-			close = match[1];
-			buffer = buffer.slice(match[0].length);
-		} else if (INLINE_THINKING_TAGS.some(([open]) => open.startsWith(buffer))) {
-			return { mode: "undecided", buffer, thinking: "", closesThinking: false, text: "" };
-		} else {
-			return { mode: "text", buffer: "", thinking: "", closesThinking: false, text: buffer };
+		if (this.#thinkingIndex === undefined) return;
+		const block = this.output.content[this.#thinkingIndex] as ThinkingContent;
+		block.thinking += text;
+		if (signature) block.thinkingSignature = signature;
+		if (text) {
+			this.#stream.push({
+				type: "thinking_delta",
+				contentIndex: this.#thinkingIndex,
+				delta: text,
+				partial: this.output,
+			});
 		}
 	}
-	if (!close) return { mode: "thinking", buffer, thinking: "", closesThinking: false, text: "" };
-	const end = buffer.indexOf(close);
-	if (end < 0) {
-		const safeLength = Math.max(0, buffer.length - close.length + 1);
-		return {
-			mode: "thinking",
-			close,
-			buffer: buffer.slice(safeLength),
-			thinking: buffer.slice(0, safeLength),
-			closesThinking: false,
-			text: "",
-		};
+
+	/** A `toolUseEvent`: string `input` streams argument JSON fragments; an object `input` is a full snapshot. */
+	tool(payload: Record<string, unknown>): void {
+		const id = kiroString(payload.toolUseId);
+		if (!id) throw responseError("Kiro tool event has no toolUseId");
+		let tool = this.#tools.get(id);
+		if (tool?.done) throw responseError(`Kiro tool ${id} received data after completion`);
+		if (!tool) {
+			const name = kiroString(payload.name);
+			if (!name) throw responseError(`Kiro tool ${id} started without a name`);
+			this.#markVisible();
+			this.#closeThinking();
+			this.#closeText();
+			const index = this.output.content.push({ type: "toolCall", id, name, arguments: {} }) - 1;
+			tool = { index, fragments: "", done: false };
+			this.#tools.set(id, tool);
+			this.#stream.push({ type: "toolcall_start", contentIndex: index, partial: this.output });
+		}
+		const input = payload.input;
+		if (typeof input === "string" && input) {
+			tool.fragments += input;
+			this.#stream.push({ type: "toolcall_delta", contentIndex: tool.index, delta: input, partial: this.output });
+		} else if (isRecord(input)) {
+			tool.snapshot = input;
+		}
+		if (payload.stop === true) this.#finishTool(tool);
 	}
-	return {
-		mode: "text",
-		buffer: "",
-		thinking: buffer.slice(0, end),
-		closesThinking: true,
-		text: buffer.slice(end + close.length).replace(/^\n\n/, ""),
-	};
-}
 
-function isInlineContentProgress(state: AttemptState, chunk: string): boolean {
-	if (!hasVisibleInlineText(chunk)) return false;
-	const step = stepInlineContent(state, chunk);
-	return hasVisibleInlineText(step.thinking) || hasVisibleInlineText(step.text);
-}
-
-function processInlineContent(state: AttemptState, stream: AssistantMessageEventStream, chunk: string): void {
-	const step = stepInlineContent(state, chunk);
-	state.inlineMode = step.mode;
-	state.inlineClose = step.close;
-	state.inlineBuffer = step.buffer;
-	emitThinking(state, stream, step.thinking);
-	if (step.closesThinking) closeThinking(state, stream);
-	emitText(state, stream, step.text);
-}
-
-function finalizeInline(state: AttemptState, stream: AssistantMessageEventStream): void {
-	if (state.inlineBuffer) {
-		if (state.inlineMode === "thinking") emitThinking(state, stream, state.inlineBuffer);
-		else emitText(state, stream, state.inlineBuffer);
-		state.inlineBuffer = "";
+	#finishTool(tool: PendingTool): void {
+		let args = tool.snapshot;
+		if (!args) {
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(tool.fragments.trim() || "{}");
+			} catch {}
+			if (!isRecord(parsed)) {
+				const { id } = this.output.content[tool.index] as ToolCall;
+				throw responseError(`Kiro tool ${id} completed with malformed JSON input`);
+			}
+			args = parsed;
+		}
+		const block = this.output.content[tool.index] as ToolCall;
+		block.arguments = args;
+		tool.done = true;
+		this.emittedTools++;
+		this.#stream.push({ type: "toolcall_end", contentIndex: tool.index, toolCall: block, partial: this.output });
 	}
-	closeThinking(state, stream);
-	closeText(state, stream);
-}
 
-/**
- * Usage from the service's token metrics only; a stream that reports none counts 0.
- * `contextUsageEvent` reports occupancy as a share of the model's window, which
- * becomes the provider-reported `contextTokens`, never an input estimate.
- */
-function finalizeUsage(state: AttemptState, model: Model): void {
-	const usage = state.output.usage;
-	usage.input = state.usage.inputTokens ?? 0;
-	usage.output = state.usage.outputTokens ?? 0;
-	usage.cacheRead = state.usage.cacheReadTokens ?? 0;
-	usage.cacheWrite = state.usage.cacheWriteTokens ?? 0;
-	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-	if (state.usage.reasoningTokens !== undefined && state.usage.reasoningTokens <= usage.output) {
-		usage.reasoningTokens = state.usage.reasoningTokens;
+	/**
+	 * Close open blocks and finalize tools that never got `stop`. A truncated or
+	 * filtered turn's unfinished calls carry cut-off arguments, so they are
+	 * dropped instead and never reach the agent loop.
+	 */
+	finish(dropUnfinishedTools: boolean): void {
+		this.#closeThinking();
+		this.#closeText();
+		const dropped: number[] = [];
+		for (const tool of this.#tools.values()) {
+			if (tool.done) continue;
+			if (dropUnfinishedTools) dropped.push(tool.index);
+			else this.#finishTool(tool);
+		}
+		// Splice from the end so earlier indices stay valid.
+		for (const index of dropped.reverse()) this.output.content.splice(index, 1);
 	}
-	const contextWindow = model.contextWindow ?? 0;
-	if (state.contextUsagePercentage !== undefined && contextWindow > 0) {
-		usage.contextTokens = Math.round((state.contextUsagePercentage / 100) * contextWindow);
-	}
-	calculateCost(model, usage);
-}
 
-function createAttempt(model: Model, stream: AssistantMessageEventStream, timestamp: number): AttemptState {
-	const output = emptyOutput(model, timestamp);
-	// The callback runs only once a tool event arrives, after `state` exists.
-	const toolAssembler = new KiroToolAssembler(output, stream, () => {
-		markVisible(state, stream);
-		closeThinking(state, stream);
-		closeText(state, stream);
-	});
-	const state: AttemptState = {
-		output,
-		visible: false,
-		started: false,
-		nativeReasoning: false,
-		inlineMode: "undecided",
-		inlineBuffer: "",
-		usage: {},
-		metered: false,
-		toolAssembler,
-	};
-	return state;
+	/**
+	 * Usage comes from `metadataEvent.tokenUsage` (the runtime's `TokenUsage`;
+	 * `uncachedInputTokens` excludes cache reads and writes). `contextUsageEvent`
+	 * reports occupancy as a share of the model's window.
+	 */
+	finalizeUsage(model: Model): void {
+		const count = (value: unknown) => (typeof value === "number" && value >= 0 ? value : 0);
+		const usage = this.output.usage;
+		usage.input = count(this.tokenUsage.uncachedInputTokens);
+		usage.output = count(this.tokenUsage.outputTokens);
+		usage.cacheRead = count(this.tokenUsage.cacheReadInputTokens);
+		usage.cacheWrite = count(this.tokenUsage.cacheWriteInputTokens);
+		usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+		if (this.contextUsagePercentage !== undefined && model.contextWindow) {
+			usage.contextTokens = Math.round((this.contextUsagePercentage / 100) * model.contextWindow);
+		}
+		calculateCost(model, usage);
+	}
 }
 
 /**
@@ -365,26 +347,12 @@ function createAttempt(model: Model, stream: AssistantMessageEventStream, timest
  * where the identical request is known to succeed: a capacity throttle, a
  * transient tool-format rejection, or a body cut off inside a frame.
  */
-function shouldRetry(state: AttemptState, attempt: number, error: unknown): boolean {
-	if (attempt >= MAX_ATTEMPTS || state.visible || state.metered) return false;
+function shouldRetry(attempt: KiroAttempt, attemptNumber: number, error: unknown): boolean {
+	if (attemptNumber >= MAX_ATTEMPTS || attempt.visible || attempt.metered) return false;
 	return (
-		isKiroCapacityError(error) ||
-		isKiroTransientToolFormatError(error) ||
+		(error instanceof KiroApiError && error.replayable) ||
 		(error instanceof AIError.EventStreamFrameError && error.kind === "truncated")
 	);
-}
-
-/** The service's classifier ended the turn: a terminal, non-retryable content block. */
-function contentFilteredError(state: AttemptState): KiroStreamError {
-	const category = state.refusal?.category?.trim() || undefined;
-	const explanation = state.refusal?.explanation?.trim() || undefined;
-	state.output.stopDetails = { type: "refusal", category: category ?? null, explanation: explanation ?? null };
-	const label = category ? `Refusal (${category})` : "Refusal";
-	return new KiroStreamError(explanation ? `${label}: ${explanation}` : `${label}: content was filtered by Kiro`, {
-		code: "CONTENT_FILTERED",
-		requestId: state.output.responseId,
-		kind: "content-blocked",
-	});
 }
 
 /** Native Kiro stream implementation. */
@@ -392,176 +360,139 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 	const stream = new MessageEventStream();
 	const timestamp = Date.now();
 	const startTime = performance.now();
-	const conversationId = options.sessionId ?? crypto.randomUUID();
 	void (async () => {
-		let state = createAttempt(model, stream, timestamp);
+		let attempt = new KiroAttempt(model, stream, timestamp);
 		try {
-			const credential = parseCredential(typeof options.apiKey === "string" ? options.apiKey : undefined);
-			const runtimeBaseUrl = resolveKiroRuntimeBaseUrl(model, credential);
-			// Build the wire body once: a provider retry must replay byte-identical
-			// bytes and must not rerun a stateful payload hook.
+			if (!options.apiKey) throw new AIError.ProviderHttpError("Kiro credential is missing", 401);
+			const credential = decodeKiroCredential(options.apiKey);
+			// An API key without a pinned region uses the runtime discovery resolved for this model.
+			const url = credential.region ? kiroRuntimeBaseUrl(credential.region) : model.baseUrl;
+			// Built once: a retry replays byte-identical bytes and never reruns a stateful payload hook.
 			let payload = transformKiroRequest(model, context, {
 				reasoning: options.reasoning,
 				disableReasoning: options.disableReasoning,
 				hideThinkingSummary: options.hideThinkingSummary,
 				maxTokens: options.maxTokens,
-				conversationId,
+				conversationId: options.sessionId,
 			});
 			if (credential.kind === "oauth" && credential.profileArn) payload.profileArn = credential.profileArn;
-			const replacement = await options.onPayload?.(payload, model);
-			if (replacement !== undefined) payload = replacement as typeof payload;
+			payload = ((await options.onPayload?.(payload, model)) as typeof payload | undefined) ?? payload;
 			const body = JSON.stringify(payload);
-			// Resolved once per request: caller option → environment override → shared helper default.
 			const idleTimeoutMs = options.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const firstEventTimeoutMs = options.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			for (let attempt = 1; ; attempt++) {
-				state = createAttempt(model, stream, timestamp);
+			for (let attemptNumber = 1; ; attemptNumber++) {
+				attempt = new KiroAttempt(model, stream, timestamp);
 				const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
-				// Aborted by the stream watchdogs. The body reader holds the stream
-				// lock while a read is pending, so only aborting the fetch itself
+				// Aborted by the watchdogs and before a retry: the frame decoder holds the
+				// body's reader lock while a read is pending, so only aborting the fetch
 				// releases a stalled connection.
 				const transport = new AbortController();
-				let response: Response;
 				try {
-					response = await (options.fetch ?? globalThis.fetch)(runtimeBaseUrl, {
+					const headers = new Headers(model.headers);
+					for (const [key, value] of Object.entries({
+						...options.headers,
+						...kiroCliServiceHeaders("GenerateAssistantResponse", credential.token, {
+							attempt: attemptNumber,
+							maxAttempts: MAX_ATTEMPTS,
+						}),
+					})) {
+						headers.set(key, value);
+					}
+					const response = await (options.fetch ?? globalThis.fetch)(url, {
 						method: "POST",
-						headers: mergeHeaders(
-							model.headers,
-							options.headers,
-							kiroCliServiceHeaders("GenerateAssistantResponse", credential.token, {
-								attempt,
-								maxAttempts: MAX_ATTEMPTS,
-							}),
-						),
+						headers,
 						body,
 						signal: watchdog.signal ? AbortSignal.any([watchdog.signal, transport.signal]) : transport.signal,
 					});
+					// On success the idle iterator owns the deadline; an error body read keeps the watchdog.
+					if (response.ok) watchdog.clear();
+					const requestId = response.headers.get("x-amzn-requestid") ?? response.headers.get("x-amz-request-id");
+					await notifyProviderResponse(options, response, model, requestId);
+					if (!response.ok) throw await httpError(response, watchdog.signal);
+					if (!response.body) throw responseError("Kiro response has no body", "empty-body");
+					attempt.output.responseId = requestId ?? undefined;
+					const events = iterateWithIdleTimeout(kiroEvents(response.body), {
+						idleTimeoutMs,
+						firstItemTimeoutMs: firstEventTimeoutMs,
+						errorMessage: IDLE_TIMEOUT_ERROR,
+						firstItemErrorMessage: FIRST_EVENT_TIMEOUT_ERROR,
+						onIdle: () => transport.abort(new AIError.StreamTimeoutError(IDLE_TIMEOUT_ERROR)),
+						onFirstItemTimeout: () => transport.abort(new AIError.StreamTimeoutError(FIRST_EVENT_TIMEOUT_ERROR)),
+						abortSignal: options.signal,
+						isProgressItem: event => isProgressEvent(event as KiroEvent),
+					});
+					for await (const { type, payload: event } of events) {
+						switch (type) {
+							case "initial-response":
+							case "metadataEvent":
+								// The runtime reports stopReason, classifier details, and token usage here.
+								attempt.output.responseId = kiroString(event.requestId) ?? attempt.output.responseId;
+								attempt.stopReason = kiroString(event.stopReason) ?? attempt.stopReason;
+								if (isRecord(event.stopDetails) && isRecord(event.stopDetails.refusal)) {
+									attempt.refusal = event.stopDetails.refusal;
+								}
+								if (isRecord(event.tokenUsage)) attempt.tokenUsage = event.tokenUsage;
+								break;
+							case "reasoningContentEvent":
+								attempt.thinking(kiroString(event.text) ?? "", kiroString(event.signature));
+								break;
+							case "assistantResponseEvent":
+								if (typeof event.content !== "string") {
+									throw responseError("Kiro assistant event has no content", "envelope");
+								}
+								attempt.text(event.content);
+								break;
+							case "toolUseEvent":
+								attempt.tool(event);
+								break;
+							case "contextUsageEvent": {
+								const percentage = event.contextUsagePercentage;
+								if (typeof percentage === "number" && percentage >= 0 && percentage <= 100) {
+									attempt.contextUsagePercentage = percentage;
+								}
+								break;
+							}
+							case "meteringEvent":
+								attempt.metered = true;
+								break;
+						}
+					}
 				} catch (error) {
+					transport.abort();
+					if (!shouldRetry(attempt, attemptNumber, error)) throw error;
+					await waitForRetry(options.providerRetryWait, RETRY_DELAY_MS, options.signal);
+					continue;
+				} finally {
 					watchdog.clear();
-					throw error;
 				}
-				// The success path hands the body to the idle-timeout iterator, which
-				// owns its own deadline. The error path still needs this watchdog:
-				// reading an error body must not outlive the deadline.
-				if (response.ok) watchdog.clear();
-				const headerRequestId =
-					response.headers.get("x-amzn-requestid") ?? response.headers.get("x-amz-request-id");
-				await notifyProviderResponse(options, response, model, headerRequestId);
-				if (!response.ok) {
-					try {
-						// An HTTP rejection has produced no output and no bill.
-						const error = await kiroHttpError(response, watchdog.signal);
-						if (shouldRetry(state, attempt, error)) {
-							await waitForRetry(options.providerRetryWait, RETRY_DELAY_MS, options.signal);
-							continue;
-						}
-						throw error;
-					} finally {
-						watchdog.clear();
-					}
-				}
-				const responseBody = response.body;
-				if (!responseBody) {
-					throw new KiroStreamError("Kiro response has no body", { code: "EMPTY_BODY", kind: "empty-body" });
-				}
-				state.output.responseId = headerRequestId ?? undefined;
-				const normalizedFrames = (async function* () {
-					for await (const frame of decodeEventStream(responseBody)) {
-						yield normalizeKiroFrame(frame);
-					}
-				})();
-				const frames = iterateWithIdleTimeout(normalizedFrames, {
-					idleTimeoutMs,
-					firstItemTimeoutMs: firstEventTimeoutMs,
-					errorMessage: IDLE_TIMEOUT_ERROR,
-					firstItemErrorMessage: FIRST_EVENT_TIMEOUT_ERROR,
-					onIdle: () => transport.abort(new AIError.StreamTimeoutError(IDLE_TIMEOUT_ERROR)),
-					onFirstItemTimeout: () => transport.abort(new AIError.StreamTimeoutError(FIRST_EVENT_TIMEOUT_ERROR)),
-					abortSignal: options.signal,
-					isProgressItem: event => {
-						const normalizedEvent = event as KiroNormalizedEvent;
-						switch (normalizedEvent.type) {
-							case "reasoning":
-								return Boolean(normalizedEvent.text);
-							case "content":
-								return isInlineContentProgress(state, normalizedEvent.content);
-							case "tool":
-								return true;
-							default:
-								return false;
-						}
-					},
-				});
-				try {
-					for await (const event of frames) {
-						switch (event.type) {
-							case "metadata":
-								if (event.requestId) state.output.responseId = event.requestId;
-								if (event.stopReason) state.stopReason = event.stopReason;
-								if (event.refusal) state.refusal = event.refusal;
-								if (event.usage) mergeKiroUsage(state.usage, event.usage);
-								break;
-							case "reasoning":
-								state.nativeReasoning = true;
-								emitThinking(state, stream, event.text ?? "", event.signature);
-								break;
-							case "content":
-								processInlineContent(state, stream, event.content);
-								if (event.stopReason) state.stopReason = event.stopReason;
-								break;
-							case "tool":
-								state.toolAssembler.update(event);
-								break;
-							case "metering":
-								state.metered = true;
-								break;
-							case "contextUsage":
-								state.contextUsagePercentage = event.percentage;
-								break;
-							case "usage":
-								mergeKiroUsage(state.usage, event.usage);
-								break;
-							case "ignored":
-								break;
-						}
-					}
-				} catch (error) {
-					// Replay only before output or billing; the error frame itself
-					// (capacity throttle) produced neither.
-					if (shouldRetry(state, attempt, error)) {
-						await waitForRetry(options.providerRetryWait, RETRY_DELAY_MS, options.signal);
-						continue;
-					}
-					throw error;
-				}
-				const contentFiltered = state.stopReason === "CONTENT_FILTERED" || state.refusal !== undefined;
-				finalizeInline(state, stream);
-				// A filtered turn's unfinished tool calls are as unusable as truncated ones.
-				state.toolAssembler.finishAll(
-					contentFiltered || state.stopReason === "MAX_TOKENS" || state.stopReason === "LENGTH",
-				);
+
+				const contentFiltered = attempt.stopReason === "CONTENT_FILTERED" || attempt.refusal !== undefined;
+				const truncated = attempt.stopReason === "MAX_TOKENS" || attempt.stopReason === "LENGTH";
+				attempt.finish(contentFiltered || truncated);
+				attempt.finalizeUsage(model);
 				if (contentFiltered) {
-					finalizeUsage(state, model);
-					throw contentFilteredError(state);
+					const category = kiroString(attempt.refusal?.category);
+					const explanation = kiroString(attempt.refusal?.explanation);
+					attempt.output.stopDetails = {
+						type: "refusal",
+						category: category ?? null,
+						explanation: explanation ?? null,
+					};
+					const label = category ? `Refusal (${category})` : "Refusal";
+					throw responseError(`${label}: ${explanation ?? "content was filtered by Kiro"}`, "content-blocked");
 				}
-				if (!state.visible) {
-					throw new KiroStreamError("Kiro stream ended without visible output", {
-						code: "EMPTY_STREAM",
-						kind: "incomplete-stream",
-					});
+				if (!attempt.visible) {
+					throw responseError("Kiro stream ended without visible output", "incomplete-stream");
 				}
-				if (!hasVisibleAssistantContent(state.output) && options.acceptEmptyResponse !== true) {
-					throw new KiroStreamError("Kiro stream ended with reasoning but without final output", {
-						code: "EMPTY_OUTPUT",
-						kind: "empty-output",
-					});
+				if (!hasVisibleAssistantContent(attempt.output) && options.acceptEmptyResponse !== true) {
+					throw responseError("Kiro stream ended with reasoning but without final output", "empty-output");
 				}
-				finalizeUsage(state, model);
-				const stopReason = mapStopReason(state.stopReason, state.toolAssembler.emittedCount);
-				state.output.stopReason = stopReason;
-				state.output.duration = performance.now() - startTime;
-				if (state.firstOutputTime !== undefined) state.output.ttft = state.firstOutputTime - startTime;
-				stream.push({ type: "done", reason: stopReason, message: state.output });
+				// Truncation wins over an emitted tool call: its arguments may be cut off.
+				const stopReason = truncated ? "length" : attempt.emittedTools > 0 ? "toolUse" : "stop";
+				attempt.output.stopReason = stopReason;
+				attempt.output.duration = performance.now() - startTime;
+				if (attempt.firstOutputTime !== undefined) attempt.output.ttft = attempt.firstOutputTime - startTime;
+				stream.push({ type: "done", reason: stopReason, message: attempt.output });
 				stream.end();
 				return;
 			}
@@ -571,13 +502,14 @@ export function streamKiro(model: Model, context: Context, options: KiroOptions 
 				provider: model.provider,
 				signal: options.signal,
 			});
-			state.output.stopReason = result.stopReason;
-			state.output.errorMessage = result.message;
-			state.output.errorStatus = result.status;
-			state.output.errorId = result.id;
-			state.output.duration = performance.now() - startTime;
-			if (state.firstOutputTime !== undefined) state.output.ttft = state.firstOutputTime - startTime;
-			stream.push({ type: "error", reason: result.stopReason, error: state.output });
+			attempt.finalizeUsage(model);
+			attempt.output.stopReason = result.stopReason;
+			attempt.output.errorMessage = result.message;
+			attempt.output.errorStatus = result.status;
+			attempt.output.errorId = result.id;
+			attempt.output.duration = performance.now() - startTime;
+			if (attempt.firstOutputTime !== undefined) attempt.output.ttft = attempt.firstOutputTime - startTime;
+			stream.push({ type: "error", reason: result.stopReason, error: attempt.output });
 			stream.end();
 		}
 	})().catch(error => stream.fail(error));
