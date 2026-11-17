@@ -338,10 +338,36 @@ export interface PagePredicateWaitOptions {
 	signal: AbortSignal;
 }
 
-/** Whether a source string is a function (`function …`, `async (…) => …`, `x => …`) rather than an expression. */
-export function isFunctionSource(source: string): boolean {
-	return /^\s*(?:async\b\s*)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/.test(source);
+/** Page-side call that invokes a callable expression with its predicate arguments. */
+export const PREDICATE_CALL_SOURCE = `function (predicate, args) {
+	return typeof predicate === "function" ? predicate(...args) : predicate;
+}`;
+
+/** Answer of {@link PREDICATE_ANSWER_SOURCE}. */
+export interface PredicateAnswer {
+	held: boolean;
+	value?: unknown;
 }
+
+/**
+ * Page-side function source that turns a predicate's value into a {@link PredicateAnswer}: truthiness is decided
+ * in the page, and a truthy value that cannot be copied out (a node, a function, a cyclic object) is `true`.
+ */
+export const PREDICATE_ANSWER_SOURCE = `function (value) {
+	if (!value) return { held: false };
+	if (typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) {
+		return { held: true, value };
+	}
+	// A symbol, a bigint or an infinite number has no JSON form.
+	if (typeof value !== "object" && typeof value !== "function") return { held: true, value: true };
+	if (typeof Node === "function" && value instanceof Node) return { held: true, value: true };
+	try {
+		const json = JSON.stringify(value);
+		return { held: true, value: json === undefined ? true : JSON.parse(json) };
+	} catch {
+		return { held: true, value: true };
+	}
+}`;
 
 /**
  * Poll a page-world predicate in `frame`'s main world, where the page's own globals live (the world
@@ -359,26 +385,11 @@ export async function waitForPagePredicate(
 	if (typeof predicate !== "string" && typeof predicate !== "function") {
 		throw new ToolError(`${label} expects a function or an expression string; got ${typeof predicate}`);
 	}
-	const source = String(predicate);
-	const call =
-		typeof predicate === "function" || isFunctionSource(source)
-			? `(${source}\n)(...${JSON.stringify(opts.args ?? [])})`
-			: `(${source}\n)`;
-	const script = `(async () => {
-	const value = await ${call};
-	if (!value) return { held: false };
-	if (typeof value !== "object" && typeof value !== "function") return { held: true, value };
-	if (typeof Node === "function" && value instanceof Node) return { held: true, value: true };
-	try {
-		const json = JSON.stringify(value);
-		return { held: true, value: json === undefined ? true : JSON.parse(json) };
-	} catch {
-		return { held: true, value: true };
-	}
-})()`;
+	const call = `(${PREDICATE_CALL_SOURCE})((${String(predicate)}\n), ${JSON.stringify(opts.args ?? [])})`;
+	const script = `(async () => (${PREDICATE_ANSWER_SOURCE})(await ${call}))()`;
 	return await pollPage(
 		async () => {
-			let answer: { held: boolean; value?: unknown };
+			let answer: PredicateAnswer;
 			try {
 				answer = (await untilAborted(opts.signal, () => frame.mainRealm().evaluate(script))) as typeof answer;
 			} catch (error) {

@@ -621,10 +621,15 @@ describe("TernTab", () => {
 		const polls = fake.requests.slice(before).map(request => request.op);
 		expect(polls.length).toBeGreaterThan(0);
 		for (const op of polls) expect(op).toMatchObject({ op: "eval", world: "page", frame: "0.1" });
-		// A string holding a function is sent as the function, called with the extra arguments.
+		// A string holding a function is called with the extra arguments, and truthiness is decided where it runs:
+		// a value that cannot be copied out (here a cyclic object) comes back as `true`.
 		const sent = fake.requests.length;
-		await rejectionOf(frame.waitForFunction("(n) => window.paid === n", { timeout: 50, polling: 10 }, 7));
-		expect(fake.requests[sent]?.op).toMatchObject({ function: "(n) => window.paid === n", args: [7] });
+		const cyclic = "(n) => { const o = { n }; o.self = o; return n === 7 && o; }";
+		await rejectionOf(frame.waitForFunction(cyclic, { timeout: 50, polling: 10 }, 7));
+		const op = fake.requests[sent]?.op as { function: string; args: unknown[] };
+		expect(op.args).toEqual([7]);
+		const run = new Function(`return (${op.function}\n)`)() as (...args: unknown[]) => Promise<unknown>;
+		expect(await run(...op.args)).toEqual({ held: true, value: true });
 	});
 
 	it("names the Tern backend and the reason for helpers it cannot provide", async () => {

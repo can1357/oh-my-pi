@@ -65,7 +65,12 @@ import type {
 } from "../network";
 import { normalizeAllowedDomains, urlMatcher } from "../network";
 import { resolveOpTimeouts, resolveWaitTimeout, ZERO_MATCH_FAIL_FAST_MS } from "../op-timeouts";
-import { DEFAULT_STYLE_PROPERTIES, isFunctionSource } from "../queries";
+import {
+	DEFAULT_STYLE_PROPERTIES,
+	PREDICATE_ANSWER_SOURCE,
+	PREDICATE_CALL_SOURCE,
+	type PredicateAnswer,
+} from "../queries";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import {
 	enableReact,
@@ -2880,11 +2885,16 @@ export class TernTab implements InProcessRunTab {
 	): Promise<unknown> {
 		const interval = typeof opts?.polling === "number" && opts.polling > 0 ? opts.polling : 100;
 		const deadline = Date.now() + resolveWaitTimeout(this.#cellMs, opts?.timeout);
-		// A string holding a function (Python's only way to pass one) is called, not returned as a truthy function.
-		const callSource = typeof fn === "string" && isFunctionSource(fn);
+		if (typeof fn !== "function" && typeof fn !== "string") {
+			throw new ToolError(`${label} expects a function or a source string`);
+		}
+		// Truthiness is decided in the page, so a value that cannot be copied out still ends the wait (as `true`).
+		const source = `async function (...args) {
+	return (${PREDICATE_ANSWER_SOURCE})(await (${PREDICATE_CALL_SOURCE})((${String(fn)}\n), args));
+}`;
 		for (;;) {
-			const value = await this.#evalUser(label, fn, args, frame, callSource);
-			if (value) return value;
+			const answer = (await this.#evalUser(label, source, args, frame, true)) as PredicateAnswer | undefined;
+			if (answer?.held) return answer.value;
 			if (Date.now() >= deadline) {
 				throw new ToolError(`${label} timed out after ${resolveWaitTimeout(this.#cellMs, opts?.timeout)}ms`);
 			}
