@@ -694,15 +694,19 @@ pub(super) struct UserInputMonitor {
 
 impl UserInputMonitor {
 	pub(super) fn start(inputs: Arc<UserInputs>) -> CoreResult<Self> {
-		inputs.tap_started(Instant::now(), since_last_press());
+		// Read before the tap exists, so no press is missed between the two, but
+		// recorded only once it does: a tap that keeps failing to start must not
+		// seed a press, counting omp's own posted input, on every retry.
+		let (started, idle) = (Instant::now(), since_last_press());
 		let tap = TapThread::start(
 			"desktop-user-input",
 			"user input",
 			ANNOTATED_SESSION_TAP,
 			USER_INPUT_MASK,
-			inputs,
+			Arc::clone(&inputs),
 			observe_user,
 		)?;
+		inputs.tap_started(started, idle);
 		Ok(Self { _tap: tap })
 	}
 }
