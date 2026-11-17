@@ -31,7 +31,7 @@ const bash = {
 
 const RM = { command: "rm -rf /srv/data" };
 
-const stuckJudge = { label: "stuck", judge: () => new Promise(() => {}) } as unknown as Judge;
+const stuckJudge = { label: "stuck", judge: () => Promise.withResolvers<never>().promise } as unknown as Judge;
 const failingJudge = {
 	label: "failing",
 	judge: async () => {
