@@ -60,6 +60,7 @@ pi-predict.workspace = true
 pi-shell.workspace = true
 pi-vfs.workspace = true
 pi-voice.workspace = true
+ptts.workspace = true
 portable-pty.workspace = true
 png.workspace = true
 rayon.workspace = true
@@ -82,6 +83,9 @@ reis = { version = "=0.5.0", features = ["tokio"] }
 x11rb = { version = "=0.13.2", features = ["composite", "randr", "render", "screensaver", "shape", "xinput", "xkb", "xtest"] }
 xkeysym = "=0.2.1"
 zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libm.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # Peer-to-peer connections stand in for applications in the AT-SPI tests.

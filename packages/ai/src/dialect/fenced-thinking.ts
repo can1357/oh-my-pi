@@ -57,6 +57,8 @@ export class FencedThinkingScanner {
 	#inner = "";
 	/** Bytes of the leading (incomplete) line already returned as thinking. */
 	#emitted = 0;
+	/** Leading bytes of {@link #buffer} already searched for a newline (they hold none). */
+	#scanned = 0;
 
 	/**
 	 * Feed bytes and return thinking deltas plus close state. When `final`, the
@@ -67,7 +69,7 @@ export class FencedThinkingScanner {
 		this.#buffer += text;
 		let thinking = "";
 		for (;;) {
-			const nl = this.#buffer.indexOf("\n");
+			const nl = this.#buffer.indexOf("\n", this.#scanned);
 			if (nl === -1) break;
 			const line = this.#buffer.slice(0, nl);
 			if (!this.#inner) {
@@ -84,14 +86,25 @@ export class FencedThinkingScanner {
 			this.#updateInner(line);
 			this.#buffer = this.#buffer.slice(nl + 1);
 			this.#emitted = 0;
+			this.#scanned = 0;
 		}
 
 		const tail = this.#buffer;
+		this.#scanned = tail.length;
 		if (this.#inner) {
 			// Inside a nested block every byte is thinking content: emit eagerly,
 			// keeping it buffered until the newline classifies the line.
 			thinking += tail.slice(this.#emitted);
 			this.#emitted = tail.length;
+			return { thinking, closed: false, rest: "" };
+		}
+
+		if (this.#emitted > 0) {
+			// Bytes of this line already went out as thinking, which only happens
+			// once its start ruled out a fence: the rest of the line is content too.
+			thinking += tail.slice(this.#emitted);
+			if (final) this.#reset();
+			else this.#emitted = tail.length;
 			return { thinking, closed: false, rest: "" };
 		}
 
@@ -164,6 +177,7 @@ export class FencedThinkingScanner {
 		this.#buffer = "";
 		this.#inner = "";
 		this.#emitted = 0;
+		this.#scanned = 0;
 	}
 
 	/** Toggle nested-fence state for a completed content line. */

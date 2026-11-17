@@ -12,7 +12,9 @@ import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
+import { MNEMOPI_NOTICE_SOURCE } from "../mnemopi/embedding-notice";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
+import { toWireEvent } from "../session/loop-end-wire";
 import { COST_GATE_NOTICE_SOURCE } from "../session/cost-gate";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
@@ -85,8 +87,11 @@ function stripProviderPayload<T extends AgentMessage>(message: T): T {
  *   is printed. The authoritative message follows in `message_end`.
  * - `providerPayload` is transport-native replay state, opaque and useless
  *   outside this process.
+ * - Loop pauses and the run's end keep the JSON stream's per-loop `agent_end`
+ *   shape (`isTerminal`, `yielded`, `awaitingAsyncWork`; see `loop-end-wire.ts`).
  */
-export function printableEvent(event: AgentSessionEvent): unknown {
+export function printableEvent(sessionEvent: AgentSessionEvent): unknown {
+	const event = toWireEvent(sessionEvent);
 	switch (event.type) {
 		case "tool_stream_update":
 			return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName };
@@ -390,6 +395,7 @@ async function runPrintModeCore(
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||
 				event.source === COST_GATE_NOTICE_SOURCE ||
 				event.source === HINDSIGHT_NOTICE_SOURCE ||
+				event.source === MNEMOPI_NOTICE_SOURCE ||
 				event.source === SPOTLIGHT_NOTICE_SOURCE)
 		) {
 			// Text mode renders no session notices, but an automatic sign-out must not stay
@@ -514,14 +520,15 @@ async function runPrintModeCore(
 	}
 
 	// Opt-in (`async.printWake` / `--wait-async`): background jobs the run started
-	// would otherwise be cancelled by the dispose below. Keep the process alive and
-	// let each job's async-result wake the same session for another turn, until no
-	// owned job or delivery remains (a follow-up turn may start new jobs). This runs
-	// before the headless advisor drain because these follow-ups are primary turns
-	// whose answer print mode still reports. The `--max-time` deadline only aborts
-	// running turns, not idle waiting or a retry backoff sleep, so every wait here
-	// races it; reaching it cancels the jobs and any pending retry (dispose below)
-	// and fails the run.
+	// would otherwise be cancelled by the dispose below. Keep the process alive until
+	// the run ends: each job's async-result (or a child agent's message) resumes the
+	// same run for another loop, and the session ends the run once no wake source
+	// remains. This runs before the headless advisor drain because these follow-ups
+	// are primary turns whose answer print mode still reports. The `--max-time`
+	// deadline only aborts running turns, not a paused run or a retry backoff sleep,
+	// so the wait races it; reaching it cancels the jobs and any pending retry
+	// (dispose below) and fails the run. Signal teardown disposes the session, which
+	// ends the wait.
 	let asyncWaitExpired = false;
 	if (admittedAgentTurn && !strictMCPFailure && cfgAsyncPrintWake.get(session.settings)) {
 		const { deadline } = options;
@@ -543,25 +550,13 @@ async function runPrintModeCore(
 			return true;
 		};
 		try {
-			// Without owned jobs a late primary turn is not this wait's business: it keeps its own exit path.
-			asyncWaitExpired = (await expires(session.waitForIdle())) && session.hasPendingAsyncWork();
-			while (!asyncWaitExpired && session.hasPendingAsyncWork() && !session.isDisposed && !signalTeardownActive()) {
-				// Checked synchronously too: an already-due timer fires only in the timers
-				// phase, after a settle of finished work would have resolved. The deadline
-				// stops new waits; a settle that already finished is kept: its follow-up turn
-				// ran under the agent-loop deadline (which aborts a turn that crosses it), so
-				// its answer is complete.
-				if (deadline !== undefined && Date.now() >= deadline) {
-					asyncWaitExpired = true;
-					break;
-				}
-				asyncWaitExpired = await expires(session.settleAsyncWork());
-			}
+			// A run that ended just as the deadline fired is complete: its answer stands.
+			asyncWaitExpired = (await expires(session.waitForRunEnd())) && session.isRunActive;
 		} finally {
 			clearTimeout(deadlineTimer);
 		}
 		if (asyncWaitExpired) {
-			writeStderrLine("Error: --max-time reached before background work settled; any running jobs were cancelled.");
+			writeStderrLine("Error: --max-time reached before the run ended; any running jobs were cancelled.");
 		}
 	}
 

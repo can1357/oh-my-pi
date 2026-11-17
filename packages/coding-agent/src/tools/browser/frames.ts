@@ -1,10 +1,5 @@
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-
-import { Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { ElementHandle, ElementScreenshotOptions, Frame, Page } from "puppeteer-core";
-import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { throwIfAborted } from "../tool-errors";
 import { markHandled } from "../run-scope";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -16,10 +11,8 @@ import {
 } from "./aria/aria-snapshot";
 import { clickElement, fillViaHandle, pressKey, typeIntoElement, withLiveElement } from "./interactions";
 import { readPageViewport } from "./launch";
-import { RunOutput } from "./run-output";
-import { whileDrawing } from "./screenshot";
+import { emitScreenshot, type ScreenshotRun, whileDrawing } from "./screenshot";
 import { selectorWaitOptions, type SelectorWaitOptions, waitForDetached, waitForSelectorHandle } from "./selector-wait";
-import type { ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** JSON-safe metadata for one document frame. */
 export interface BrowserFrameInfo {
@@ -405,9 +398,7 @@ export async function captureFrameScreenshot(
 	selector: string,
 	signal: AbortSignal,
 	normalizeSelector: (selector: string) => string,
-	session: SessionSnapshot,
-	output: RunOutput,
-	screenshots: ScreenshotResult[],
+	run: ScreenshotRun,
 ): Promise<string> {
 	const handle = await untilAborted(signal, () => frame.$(normalizeSelector(selector)));
 	if (!handle) throw new ToolError(`frame.screenshot(${JSON.stringify(selector)}) matched no element`);
@@ -430,38 +421,9 @@ export async function captureFrameScreenshot(
 	} finally {
 		await handle.dispose().catch(() => undefined);
 	}
-	const resized = await resizeImage(
-		{ type: "image", data: buffer.toBase64(), mimeType: "image/png" },
-		{ maxWidth: 1024, maxHeight: 1024, maxBytes: 150 * 1024, jpegQuality: 70, excludeWebP: session.excludeWebP },
+	return await emitScreenshot(
+		{ bytes: buffer, mimeType: "image/png", area: "element", scale: captureScale, inFrame: true },
+		run,
+		signal,
 	);
-	const saveFullRes = !!session.browserScreenshotDir;
-	const savedBuffer = saveFullRes ? buffer : resized.buffer;
-	const savedMimeType = saveFullRes ? ("image/png" as const) : resized.mimeType;
-	const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-	const dest = session.browserScreenshotDir
-		? path.join(
-				session.browserScreenshotDir,
-				`frame-screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-			)
-		: path.join(os.tmpdir(), `omp-frame-sshots-${Snowflake.next()}.${ext}`);
-	await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-	await Bun.write(dest, savedBuffer);
-	screenshots.push({
-		dest,
-		mimeType: savedMimeType,
-		bytes: savedBuffer.length,
-		width: resized.width,
-		height: resized.height,
-	});
-	output.push({
-		type: "text",
-		text: formatScreenshot({
-			saveFullRes,
-			dest,
-			resized,
-			capture: { area: "element", scale: captureScale },
-		}).join("\n"),
-	});
-	output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-	return dest;
 }

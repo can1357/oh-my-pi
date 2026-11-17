@@ -73,7 +73,7 @@ it("shares Vibe sibling cache routing by worker type while keeping conversations
 	});
 	const requests: Array<{ key: unknown; sessionId: string | undefined }> = [];
 	const mock = createMockModel({
-		handler: { content: [{ type: "toolCall", name: "yield", arguments: { data: { findings: [] } } }] },
+		handler: { content: ["No findings."] },
 	});
 	const realStreamFactory = settingsStream.createSettingsAwareStreamFn;
 	vi.spyOn(settingsStream, "createSettingsAwareStreamFn").mockImplementation((streamSettings, _base, slow) =>

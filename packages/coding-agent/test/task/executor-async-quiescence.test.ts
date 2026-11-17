@@ -1,7 +1,7 @@
 /**
  * Quiescence barrier fresh-yield contract (PR #6119 review): a terminal
- * `yield` recorded while owner background jobs are still pending parks the
- * run instead of terminating it, and an async-result delivered after that
+ * `yield` recorded while an owner background job can still wake the run parks
+ * the run instead of terminating it, and an async-result delivered after that
  * yield supersedes it — the run only completes on a yield that postdates
  * every delivered result. A model that never refreshes its yield must fail
  * the run rather than surface the stale payload as a clean success.
@@ -44,7 +44,7 @@ interface AsyncQuiescenceHarness {
 	session: AgentSession;
 	prompts: string[];
 	abortCalls: () => number;
-	settleCalls: () => number;
+	runEndWaits: () => number;
 	emitTerminalYield: (data: unknown) => void;
 	emitAssistant: (text: string, totalTokens?: number) => void;
 	finishJob: () => void;
@@ -53,14 +53,17 @@ interface AsyncQuiescenceHarness {
 interface AsyncSessionOptions {
 	abort?: () => Promise<void>;
 	dispose?: () => Promise<void>;
+	/** The run is held open by this live child agent instead of a background job. */
+	childAgent?: string;
 }
 
 /**
- * Mock session with the owner-async surface the barrier drives:
- * `hasPendingAsyncWork` / `getAsyncJobSnapshot` / `settleAsyncWork`. The job
- * "finishes" during the first settle, which injects the async-result
- * follow-up (custom message_start) and a plain assistant reaction WITHOUT a
- * fresh yield — exactly the review's stale-yield scenario.
+ * Mock session with the run-lifecycle surface the barrier drives:
+ * `isRunActive` / `wakeSources` / `getAsyncJobSnapshot` / `waitForRunEnd`.
+ * The run stays open while the job runs; the job "finishes" during the first
+ * wait for the run end, which injects the async-result follow-up (custom
+ * message_start) and a plain assistant reaction WITHOUT a fresh yield —
+ * exactly the review's stale-yield scenario.
  */
 function createAsyncSession(
 	onPrompt: (params: { text: string; promptIndex: number; harness: AsyncQuiescenceHarness }) => void,
@@ -70,9 +73,11 @@ function createAsyncSession(
 	const state = { messages: [] as AssistantMessage[] };
 	const prompts: string[] = [];
 	let abortCount = 0;
-	let settleCount = 0;
+	let runEndWaitCount = 0;
 	let pendingAsync = true;
-	let runningJobs: Array<{ id: string; label?: string }> = [{ id: "job-1", label: "background build" }];
+	let runningJobs: Array<{ id: string; label?: string }> = options.childAgent
+		? []
+		: [{ id: "job-1", label: "background build" }];
 	let toolCallSeq = 0;
 
 	const emit = (event: AgentSessionEvent) => {
@@ -123,7 +128,7 @@ function createAsyncSession(
 		session: undefined as unknown as AgentSession,
 		prompts,
 		abortCalls: () => abortCount,
-		settleCalls: () => settleCount,
+		runEndWaits: () => runEndWaitCount,
 		emitTerminalYield,
 		emitAssistant,
 		finishJob,
@@ -152,11 +157,21 @@ function createAsyncSession(
 			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
-		hasPendingAsyncWork: () => pendingAsync,
+		get isRunActive() {
+			return pendingAsync;
+		},
+		get wakeSources() {
+			if (!pendingAsync) return undefined;
+			const agents = options.childAgent ? [options.childAgent] : [];
+			return { jobs: runningJobs.map(job => job.id), agents, queued: false };
+		},
 		getAsyncJobSnapshot: () => ({ running: runningJobs, recent: [] }),
-		settleAsyncWork: async () => {
-			settleCount += 1;
-			harness.finishJob();
+		waitForRunEnd: async () => {
+			runEndWaitCount += 1;
+			if (!pendingAsync) return;
+			// A child agent that finishes without messaging back ends the run as is.
+			if (options.childAgent) pendingAsync = false;
+			else harness.finishJob();
 		},
 		abort: async () => {
 			abortCount += 1;
@@ -192,7 +207,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			}
 			if (promptIndex === 2) {
 				// Async-pending notice: the model stands by. The job then
-				// finishes during the barrier's settle.
+				// finishes while the barrier waits for the run to end.
 				return;
 			}
 			// Reminder ladder after the async-result invalidated the yield:
@@ -204,15 +219,17 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-fresh-yield",
 		});
 
 		// Run did not terminate on the parked yield: the barrier noticed, the
-		// job settled, and the ladder demanded exactly one more prompt.
+		// run ended once the job delivered, and the ladder demanded exactly one
+		// more prompt.
 		expect(harness.prompts).toHaveLength(3);
-		expect(harness.settleCalls()).toBe(1);
+		expect(harness.runEndWaits()).toBe(1);
 		// The parked yield stopped the turn without killing the run.
 		expect(harness.abortCalls()).toBeGreaterThanOrEqual(1);
 		// The fresh yield — not the stale one — is the result of record.
@@ -223,7 +240,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 
 	it("waits for a pending owner job before spending a yield reminder", async () => {
 		const harness = createAsyncSession(({ harness: h }) => {
-			if (h.settleCalls() === 0) {
+			if (h.runEndWaits() === 0) {
 				h.emitAssistant("Waiting for job-1.");
 				return;
 			}
@@ -234,12 +251,13 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "verify the build",
 			index: 0,
 			id: "quiescence-wait-before-yield",
 		});
 
-		expect(harness.settleCalls()).toBe(1);
+		expect(harness.runEndWaits()).toBe(1);
 		expect(harness.prompts).toHaveLength(2);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("Build failed; job-1 delivered its result.");
@@ -257,6 +275,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-stale-refusal",
@@ -271,7 +290,35 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(result.output).toContain("STALE: build passing");
 	});
 
-	it("terminates immediately on yield when no owner async work is pending", async () => {
+	it("holds a yield until a live child agent that can wake the run is done", async () => {
+		const harness = createAsyncSession(
+			({ promptIndex, harness: h }) => {
+				if (promptIndex === 1) h.emitTerminalYield({ report: "REPORT: child reviewed" });
+			},
+			{ childAgent: "Child" },
+		);
+		mockCreateAgentSession(harness.session);
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent: baseAgent,
+			outputSchema: {},
+			task: "do the work",
+			index: 0,
+			id: "quiescence-child-agent",
+		});
+
+		// The yield parked behind the barrier, which waited for the run to end
+		// instead of completing while the child could still wake it. No job is
+		// running, so no async-pending notice was sent.
+		expect(harness.abortCalls()).toBeGreaterThanOrEqual(1);
+		expect(harness.runEndWaits()).toBe(1);
+		expect(harness.prompts).toHaveLength(1);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("REPORT: child reviewed");
+	});
+
+	it("terminates immediately on yield when nothing can wake the run", async () => {
 		const harness = createAsyncSession(({ promptIndex, harness: h }) => {
 			if (promptIndex === 1) {
 				h.finishJob();
@@ -283,6 +330,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-no-async",
@@ -313,6 +361,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const run = runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-no-second-idle",
@@ -371,6 +420,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			cwd: "/tmp",
 			asyncJobManager: manager,
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "cleanup-timeout",
