@@ -330,7 +330,7 @@ describe("TernTab on native DOM reads", () => {
 		expect(kitCalls).toEqual([
 			["markAll", [{ engine: "pierce", query: 'select[name="state"][class="a \\"b\\""]' }]],
 			["unmark", [["t1"]]],
-			["select", [{ engine: "handle", token: "t2" }, ["ca"]]],
+			["select", [{ engine: "handle", token: "t2" }, [{ kind: "string", value: "ca" }]]],
 			["unmark", ["t2"]],
 		]);
 	});
