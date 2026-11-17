@@ -102,7 +102,8 @@ impl PortalGeometry {
 		}
 		let outside = || {
 			DesktopError::capture_failed(format!(
-				"Wayland window {} is outside the selected portal monitor",
+				"Wayland window {} cannot be fully captured from the selected portal monitor; move it \
+				 farther inside the monitor or capture the desktop instead",
 				window.id
 			))
 		};
@@ -934,7 +935,7 @@ mod tests {
 			let err = geometry
 				.window_crop(&window)
 				.expect_err("window outside monitor");
-			assert!(err.message.contains("outside the selected portal monitor"), "{err}");
+			assert_eq!(err.code.as_str(), "CaptureFailed");
 		}
 	}
 
