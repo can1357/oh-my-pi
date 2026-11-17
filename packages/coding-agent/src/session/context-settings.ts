@@ -11,6 +11,7 @@ import {
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_COMPACTION_METHOD_ORDER: CompactionMethod[] = [];
 const EMPTY_MODEL_COMPACTION_THRESHOLDS: Record<string, AgentCompactionThresholdOverride> = {};
 
 export const cfgWorkspaceAdditionalDirectories = register({
@@ -342,7 +343,7 @@ export const cfgCompactionIdleThresholdTokens = register({
 export const cfgCompactionIdleMethodOrder = register({
 	id: "compaction.idleMethodOrder",
 	type: "array",
-	default: [] as CompactionMethod[],
+	default: EMPTY_COMPACTION_METHOD_ORDER,
 	ui: {
 		tab: "context",
 		group: "Compaction",
