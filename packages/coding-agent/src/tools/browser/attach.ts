@@ -881,3 +881,10 @@ export async function gracefulKillTreeOnce(pid: number, gracePeriodMs = 2000): P
 	if (!process) return;
 	await process.terminate({ gracefulMs: gracePeriodMs, timeoutMs: 500 });
 }
+
+/** SIGKILL the process tree at once, for our own child whose graceful shutdown has nothing worth keeping. */
+export async function killTreeOnce(pid: number): Promise<void> {
+	const process = Process.fromPid(pid);
+	if (!process) return;
+	await process.terminate({ gracefulMs: -1, timeoutMs: 500 });
+}
