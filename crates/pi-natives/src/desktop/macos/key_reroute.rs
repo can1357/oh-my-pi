@@ -207,12 +207,14 @@ struct Held {
 	lifted_at: Option<Instant>,
 }
 
-/// What every action's taps share: the latest armed action and its target,
-/// whether the target holds the keyboard uninvited as that action sees it,
-/// and the keys pressed through any target's tap that have not come up.
+/// What every action's taps share: the latest armed action, its target and
+/// its user's app, whether the target holds the keyboard uninvited as that
+/// action sees it, and the keys pressed through any target's tap that have not
+/// come up.
 #[derive(Debug)]
 struct Registry {
 	latest: (u64, pid_t),
+	user:   pid_t,
 	/// The latest action's [`Holder::Stolen`] mouse buttons while its target
 	/// holds the keyboard uninvited, for a newer action on the same target to
 	/// take over: the target already has the keyboard then, so no
@@ -221,8 +223,67 @@ struct Registry {
 	held:   Vec<Held>,
 }
 
+/// Where a key the user types into a target lands, as far as the registry
+/// decides it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Landing {
+	/// In this app (`Some`), or in the target (`None`).
+	Decided(Option<pid_t>),
+	/// In `user`'s app, unless a mouse button went down or up since the theft
+	/// (the buttons differ from `at_theft`) or secure entry is on.
+	Theft { user: pid_t, at_theft: [u32; 6] },
+}
+
+impl Landing {
+	/// The app the key reaches, `None` for the target; `signals` reads secure
+	/// entry and the mouse buttons, only for a theft.
+	fn resolve(self, signals: impl FnOnce() -> (bool, [u32; 6])) -> Option<pid_t> {
+		match self {
+			Self::Decided(to) => to,
+			Self::Theft { user, at_theft } => {
+				let (secure, buttons) = signals();
+				(buttons == at_theft && !secure).then_some(user)
+			},
+		}
+	}
+}
+
+impl Registry {
+	/// Where `key`, delivered to `target`, goes as the target's taps route it
+	/// ([`Theft::route`]): a key a process posted stays; a repeat of a key down
+	/// goes where its press went; any other press goes to the user's app while
+	/// the latest action sees `target` holding the keyboard uninvited.
+	fn landing(&self, target: pid_t, key: Key) -> Landing {
+		if !key.physical {
+			return Landing::Decided(None);
+		}
+		if key.stroke == Some(Stroke::Repeat)
+			&& let Some(held) = self
+				.held
+				.iter()
+				.find(|held| held.target == target && held.code == key.code)
+		{
+			return Landing::Decided(held.to);
+		}
+		match self.stolen {
+			Some(at_theft) if self.latest.1 == target => Landing::Theft { user: self.user, at_theft },
+			_ => Landing::Decided(None),
+		}
+	}
+}
+
 static REGISTRY: Mutex<Registry> =
-	Mutex::new(Registry { latest: (0, -1), stolen: None, held: Vec::new() });
+	Mutex::new(Registry { latest: (0, -1), user: -1, stolen: None, held: Vec::new() });
+
+/// Where a key down `event`, addressed to `target`, lands: `Some` is the
+/// user's app, where the target's taps move it ([`KeyReroute`]), `None` is
+/// `target` itself. The user-input monitor reads it before those taps see the
+/// key, so a key they move counts as input into the app it reaches.
+pub(in crate::desktop) fn rerouted_to(target: pid_t, event: Ref) -> Option<pid_t> {
+	let landing = REGISTRY.lock().landing(target, key_of(event, KEY_DOWN));
+	// Read after the lock is let go, which the target's tap waits on.
+	landing.resolve(|| (secure_entry(), mouse_buttons()))
+}
 
 /// Numbers armed actions.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -440,6 +501,7 @@ impl Theft {
 			self.resync(front, key_focus, signals, now);
 		}
 		registry.latest = (self.generation, self.target);
+		registry.user = self.user;
 		self.publish(registry);
 	}
 
@@ -479,7 +541,8 @@ impl Theft {
 	/// where its press went, whoever holds the keyboard by then; a key first
 	/// seen repeating counts as pressed then. Everything else is decided by
 	/// [`Self::reroutes`]. Once a newer action taps the same target, its taps
-	/// decide alone.
+	/// decide alone. [`Registry::landing`] mirrors this rule for the
+	/// user-input monitor; change both.
 	fn route(
 		&mut self,
 		registry: &mut Registry,
@@ -649,21 +712,11 @@ unsafe extern "C" fn route_key(_proxy: Ref, kind: u32, event: Ref, user: Ref) ->
 	if event.is_null() || !matches!(kind, KEY_DOWN | KEY_UP | FLAGS_CHANGED) {
 		return event;
 	}
-	let code = field(event, FIELD_KEYCODE);
-	let stroke = match kind {
-		KEY_DOWN if field(event, FIELD_AUTOREPEAT) != 0 => Some(Stroke::Repeat),
-		KEY_DOWN => Some(Stroke::Press),
-		KEY_UP => Some(Stroke::Release),
-		// SAFETY: a read-only query of a live event.
-		_ => Stroke::of_modifier(code, unsafe { CGEventGetFlags(event) }),
-	};
-	let source = (field(event, FIELD_SOURCE_PID), field(event, FIELD_SOURCE_USER_DATA));
-	let physical = typed_by_user(source.0, source.1);
+	let key = key_of(event, kind);
 	// A key a process posted always passes, before the per-key system reads.
-	if !physical {
+	if !key.physical {
 		return event;
 	}
-	let key = Key { physical, code, stroke };
 	let secure = secure_entry();
 	let buttons = mouse_buttons();
 	let Some(to) = context
@@ -676,6 +729,22 @@ unsafe extern "C" fn route_key(_proxy: Ref, kind: u32, event: Ref, user: Ref) ->
 	// user's app, and returning null drops the original.
 	unsafe { CGEventPostToPid(to, event) };
 	ptr::null_mut()
+}
+
+/// The key event `event` of type `kind` is, as the target's tap and the
+/// user-input monitor both read it.
+fn key_of(event: Ref, kind: u32) -> Key {
+	let code = field(event, FIELD_KEYCODE);
+	let stroke = match kind {
+		KEY_DOWN if field(event, FIELD_AUTOREPEAT) != 0 => Some(Stroke::Repeat),
+		KEY_DOWN => Some(Stroke::Press),
+		KEY_UP => Some(Stroke::Release),
+		// SAFETY: a read-only query of a live event.
+		_ => Stroke::of_modifier(code, unsafe { CGEventGetFlags(event) }),
+	};
+	let physical =
+		typed_by_user(field(event, FIELD_SOURCE_PID), field(event, FIELD_SOURCE_USER_DATA));
+	Key { physical, code, stroke }
 }
 
 /// Whether a key event was typed on a keyboard: no process posted it, and it
@@ -896,7 +965,7 @@ mod tests {
 
 	impl Rig {
 		fn new() -> Self {
-			let registry = Registry { latest: (0, -1), stolen: None, held: Vec::new() };
+			let registry = Registry { latest: (0, -1), user: -1, stolen: None, held: Vec::new() };
 			let mut rig = Self { theft: theft(), registry };
 			register(&mut rig.theft, &mut rig.registry);
 			rig
@@ -931,6 +1000,71 @@ mod tests {
 		fn settled(&self) -> bool {
 			self.theft.settled(&self.registry.held)
 		}
+
+		/// Where the user-input monitor reads `key` landing before the target's
+		/// tap sees it, and where the tap then sends it.
+		fn read_then_route(
+			&mut self,
+			key: Key,
+			secure: bool,
+			buttons: [u32; 6],
+		) -> (Option<pid_t>, Option<pid_t>) {
+			let read = self
+				.registry
+				.landing(TARGET, key)
+				.resolve(|| (secure, buttons));
+			(read, self.theft.route(&mut self.registry, key, secure, buttons))
+		}
+
+		/// A press and release of `q`, the press read and routed.
+		fn press_with(&mut self, secure: bool, buttons: [u32; 6]) -> (Option<pid_t>, Option<pid_t>) {
+			let press = self.read_then_route(user_key(Q, Stroke::Press), secure, buttons);
+			self
+				.theft
+				.route(&mut self.registry, user_key(Q, Stroke::Release), secure, buttons);
+			press
+		}
+	}
+
+	#[test]
+	fn the_monitor_reads_a_press_landing_where_the_targets_tap_sends_it() {
+		let mut rig = Rig::new();
+		assert_eq!(rig.press_with(false, BUTTONS), (KEPT, KEPT), "the user's app has the keyboard");
+		rig.steal();
+		let posted = rig.read_then_route(posted_key(Q, Stroke::Press), false, BUTTONS);
+		assert_eq!(posted, (KEPT, KEPT), "a key a process posted");
+		assert_eq!(rig.press_with(true, BUTTONS), (KEPT, KEPT), "secure entry");
+		let elsewhere = rig
+			.registry
+			.landing(OTHER_TARGET, user_key(Q, Stroke::Press));
+		assert_eq!(elsewhere.resolve(|| panic!("no theft of it")), KEPT);
+		assert_eq!(rig.press_with(false, BUTTONS), (MOVED, MOVED));
+		assert_eq!(rig.press_with(false, CLICKED), (KEPT, KEPT), "a click since the theft");
+		// The click picked the target: its keys stay there from then on.
+		assert_eq!(rig.press_with(false, BUTTONS), (KEPT, KEPT));
+
+		let mut rig = Rig::new();
+		rig.steal();
+		rig.registry.latest = (2, OTHER_TARGET);
+		assert_eq!(rig.press_with(false, BUTTONS), (KEPT, KEPT), "a newer action elsewhere");
+	}
+
+	#[test]
+	fn the_monitor_reads_a_repeat_landing_where_its_press_went() {
+		// Pressed during the theft, still down once the user has the keyboard
+		// back.
+		let mut rig = Rig::new();
+		rig.steal();
+		assert_eq!(rig.read_then_route(user_key(Q, Stroke::Press), false, BUTTONS), (MOVED, MOVED));
+		rig.give_back();
+		assert_eq!(rig.read_then_route(user_key(Q, Stroke::Repeat), false, BUTTONS), (MOVED, MOVED));
+		// Pressed into the target before the theft.
+		let mut rig = Rig::new();
+		assert_eq!(rig.read_then_route(user_key(Q, Stroke::Press), false, BUTTONS), (KEPT, KEPT));
+		rig.steal();
+		assert_eq!(rig.read_then_route(user_key(Q, Stroke::Repeat), false, BUTTONS), (KEPT, KEPT));
+		// First seen repeating during the theft: decided as a press then.
+		assert_eq!(rig.read_then_route(user_key(13, Stroke::Repeat), false, BUTTONS), (MOVED, MOVED));
 	}
 
 	#[test]

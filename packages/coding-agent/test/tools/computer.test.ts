@@ -4306,6 +4306,137 @@ describe("display hold follows the agent turn", () => {
 	});
 });
 
+describe("menu.items beneath a named menu", () => {
+	class MenuSession extends FakeNativeSession {
+		readonly read: string[] = [];
+		override async menuItems(_target: string, path: string[] = []) {
+			this.read.push(path.join("/") || "<bar>");
+			const item = (title: string, hasSubmenu = false, enabled = true) => ({
+				title,
+				path: [...path, title],
+				enabled,
+				checked: false,
+				hasSubmenu,
+			});
+			switch (path.join("/")) {
+				case "":
+					return [item("Edit", true), item("View", true)];
+				case "Edit":
+					return [
+						item("Undo"),
+						item("List", true),
+						item("Speech", true, false),
+						item("Services", true),
+						item("Help", true),
+					];
+				case "Edit/List":
+					return [item("Local", true)];
+				case "Edit/List/Local":
+					return [item("Groceries"), item("Errands")];
+				default:
+					throw new Error(`AxFailed: menu ${path.join("/")} has no items until it opens`);
+			}
+		}
+	}
+
+	async function items(native: FakeNativeSession, code: string): Promise<string[]> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(transport, crypto.randomUUID(), code);
+		if (!message.ok) throw new Error(`menu run failed: ${JSON.stringify(message)}`);
+		return (message.payload.returnValue as Array<{ path: string[] }>).map(entry => entry.path.join("/"));
+	}
+
+	it("lists descendants depth-first and stops expansion after an unreadable submenu, retaining siblings", async () => {
+		const native = new MenuSession();
+		expect(await items(native, 'return await (await desktop.window("42")).menu.items("Edit")')).toEqual([
+			"Edit/Undo",
+			"Edit/List",
+			"Edit/List/Local",
+			"Edit/List/Local/Groceries",
+			"Edit/List/Local/Errands",
+			"Edit/Speech",
+			"Edit/Services",
+			"Edit/Help",
+		]);
+		expect(native.read).toEqual(["Edit", "Edit/List", "Edit/List/Local", "Edit/Services"]);
+	});
+
+	it("keeps the menu bar one level", async () => {
+		const bar = new MenuSession();
+		expect(await items(bar, 'return await (await desktop.window("42")).menu.items()')).toEqual(["Edit", "View"]);
+		expect(bar.read).toEqual(["<bar>"]);
+	});
+
+	it("leaves oversized submenus unexpanded without dropping sibling commands", async () => {
+		class LargeMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 149 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new LargeMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(149);
+		expect(paths[0]).toBe("Edit/0");
+		expect(paths[148]).toBe("Edit/148");
+	});
+
+	it("expands a submenu that exactly fills the remaining budget", async () => {
+		class ExactMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 148 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new ExactMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(150);
+		expect(paths.slice(0, 3)).toEqual(["Edit/0", "Edit/0/0", "Edit/0/1"]);
+		expect(paths[149]).toBe("Edit/147");
+	});
+
+	it("keeps an unexposed Windows submenu available for an explicit path read", async () => {
+		class UnexposedMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/Services") throw new Error("BackgroundUnavailable: menu is unexposed");
+				return await super.menuItems(target, path);
+			}
+		}
+		expect(
+			await items(new UnexposedMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")'),
+		).toContain("Edit/Services");
+	});
+
+	it("propagates UserIntervened during expansion without reading another submenu", async () => {
+		class FailingMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/List") throw new Error("UserIntervened: submenu read failed");
+				return await super.menuItems(target, path);
+			}
+		}
+		const native = new FailingMenuSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(
+			transport,
+			crypto.randomUUID(),
+			'return await (await desktop.window("42")).menu.items("Edit")',
+		);
+		expect(message.ok).toBe(false);
+		expect(message.ok ? undefined : message.error.message).toContain("UserIntervened:");
+		expect(native.read).toEqual(["Edit"]);
+	});
+});
+
 describe("computer background fallback", () => {
 	const reason = "window 42 (Wish) reads the hardware pointer for button presses";
 	const ran = `click ran in takeover because ${reason}; the input was delivered, and `;
@@ -4349,25 +4480,37 @@ describe("computer background fallback", () => {
 		return text.slice(ran.length);
 	}
 
-	async function run(
+	/** Runs code on one worker, so state the worker keeps across runs (its desktop session) carries over. */
+	function worker(
+		native: NativeDesktopSession,
+	): (
+		code: string,
+		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
+	) => Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		return async (code, backgroundFallback) => {
+			const id = crypto.randomUUID();
+			transport.inbound({
+				type: "run",
+				id,
+				code,
+				timeoutMs: 2_000,
+				session: snapshot(false, undefined, backgroundFallback),
+				escape: escapeScope(),
+			});
+			const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
+			if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
+			return message;
+		};
+	}
+
+	function run(
 		native: NativeDesktopSession,
 		code: string,
 		backgroundFallback: ComputerSessionSnapshot["backgroundFallback"],
 	): Promise<Extract<ComputerWorkerOutbound, { type: "result" }>> {
-		const transport = new MemoryTransport();
-		new ComputerWorkerCore(transport, () => native);
-		const id = crypto.randomUUID();
-		transport.inbound({
-			type: "run",
-			id,
-			code,
-			timeoutMs: 2_000,
-			session: snapshot(false, undefined, backgroundFallback),
-			escape: escapeScope(),
-		});
-		const message = await transport.waitFor(candidate => candidate.type === "result" && candidate.id === id);
-		if (message.type !== "result") throw new Error(`Expected computer result, received ${message.type}`);
-		return message;
+		return worker(native)(code, backgroundFallback);
 	}
 
 	function texts(result: Extract<ComputerWorkerOutbound, { type: "result" }>): string[] {
@@ -4437,6 +4580,78 @@ describe("computer background fallback", () => {
 		expect(texts(await run(native, 'await (await desktop.window("42")).type("hi")', "takeover"))).toEqual([
 			`type ran in takeover because ${reason}; the input was delivered, and focus returned to Notes`,
 		]);
+	});
+
+	it("says once per desktop session that a macOS background move gives no hover, and only then", async () => {
+		class MoveSession extends RefusingSession {
+			constructor(readonly backend: string) {
+				super();
+			}
+			override get capabilities(): DesktopCapabilities {
+				return { ...super.capabilities, backend: this.backend };
+			}
+			override async moveMouse(
+				_target: string,
+				_x: number,
+				_y: number,
+				opts?: PointerOptions | null,
+			): Promise<void> {
+				this.sent.push(opts);
+				if (this.refuseMove && opts?.takeover !== true) throw new Error(this.refusal);
+			}
+			refuseMove = false;
+		}
+		const win = 'const w = await desktop.window("42");';
+		const hover = "move ran in the background, which gives the app no hover";
+		// Negative controls first, on one worker: runs with no background move (a requested takeover move, a
+		// silent screenshot, desktop and display moves, which drive the user's pointer) and a fallback rerun in
+		// takeover print no note and do not use it up.
+		const mac = new MoveSession("quartz");
+		const runMac = worker(mac);
+		expect(texts(await runMac(`${win} await w.move(1, 2, { takeover: true });`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.screenshot({ silent: true });`, "takeover"))).toEqual([]);
+		expect(
+			texts(
+				await runMac(
+					'await desktop.move(1, 2); await (await desktop.display("display-1")).move(1, 2);',
+					"takeover",
+				),
+			),
+		).toEqual([]);
+		mac.refuseMove = true;
+		const fellBack = texts(await runMac(`${win} await w.move(1, 2);`, "takeover"));
+		expect(fellBack).toHaveLength(1);
+		expect(fellBack[0]).toStartWith("move ran in takeover because");
+		mac.refuseMove = false;
+		// A run that fails after a background move delivers only its error, so it leaves the note unspent.
+		const failed = await runMac(`${win} await w.move(1, 2); assert(false, "stop");`, "takeover");
+		expect(failed.ok).toBe(false);
+		// Background moves, with and without `takeover: false`, in one run and then as separate runs (as eval
+		// sends each window call), print one note for the whole session.
+		mac.sent.length = 0;
+		const [note, ...rest] = texts(
+			await runMac(`${win} await w.move(1, 2); await w.move(3, 4, { takeover: false });`, "takeover"),
+		);
+		expect(rest).toEqual([]);
+		expect(note).toStartWith(hover);
+		expect(note).toEndWith("click it with { takeover: true }");
+		expect(texts(await runMac(`${win} await w.move(5, 6);`, "takeover"))).toEqual([]);
+		expect(texts(await runMac(`${win} await w.move(7, 8);`, "takeover"))).toEqual([]);
+		expect(mac.sent).toEqual([{}, { takeover: false }, {}, {}]);
+		// Under refuse, the note names no takeover, which the setting would refuse.
+		const [refused, ...more] = texts(await run(mac, `${win} await w.move(1, 2); await w.move(3, 4);`, "refuse"));
+		expect(more).toEqual([]);
+		expect(refused).toStartWith(hover);
+		expect(refused).not.toContain("takeover: true");
+		expect(refused).toContain("the user's setting refuses takeover");
+		// Background moves on Linux and Windows print nothing.
+		for (const backend of ["x11", "wayland", "win32"]) {
+			const other = new MoveSession(backend);
+			expect(texts(await run(other, `${win} await w.move(1, 2); await w.move(3, 4);`, "takeover")), backend).toEqual(
+				[],
+			);
+			expect(other.sent, backend).toEqual([{}, {}]);
+		}
 	});
 
 	it("refuses without a takeover under refuse, and tells the model so without suggesting one", async () => {

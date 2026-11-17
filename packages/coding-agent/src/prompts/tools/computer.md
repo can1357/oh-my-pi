@@ -44,9 +44,13 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
   - Linux and Windows show 80-character previews without that promise; Linux text values may already be clipped by AT-SPI.
   - To look inside a long value, slice or search it in JS (`v.slice(-300)`, `v.indexOf("…")`, a regex with context) rather than printing all of it;
     large printed output is saved as an artifact you can grep.
-- `await win.menu.items(path?)` lists native menu items;
-  `await win.menu.select(["File", "Export…"])` selects an enabled, unambiguous command in that window's menu context.
-  Matching is case-insensitive and tolerates a trailing ellipsis; missing/disabled/ambiguous paths fail rather than guessing shortcuts.
+- `await win.menu.items(path?)` lists native menu items: with no path the menu bar's menus;
+  with a path that menu's items and exposed descendants depth-first, every item with its full `path`.
+  - Enabled submenus expand up to 150 total items (the named menu's own items are never dropped);
+    a submenu that would exceed the limit or cannot be read stays listed with `hasSubmenu`, so request its path explicitly.
+  - The first unreadable submenu stops further expansion, keeping items already discovered.
+  - `await win.menu.select(["File", "Export…"])` selects an enabled, unambiguous command in that window's menu context.
+    Matching is case-insensitive and tolerates a trailing ellipsis; missing/disabled/ambiguous paths fail rather than guessing shortcuts.
 - `computer.apps.list({query?, runningOnly?})` discovers native application IDs, paths and running PIDs.
 - `computer.apps.open(idOrNameOrNativeAppPath, {activate?})` launches an exact ID/path or unique exact name.
   - On macOS it launches or reopens only when needed, behind the user's app,
@@ -184,6 +188,8 @@ await win.click(120, 48, button="right")
   NEVER call them to make input work; launching, reopening and window input work in the background.
 - macOS background routes cover left-button drags and `holdMouse` that start on a slider, scroll bar, splitter or stepper,
   middle-button drags, modified clicks, right-clicks and scrolls.
+  - A background `win.move` gives the app no hover, and a takeover move's hover ends before it returns. On a web page a plain click
+    often reaches a control shown only on hover; otherwise click it with `{ takeover: true }`.
   - A plain left drag across the text of one native text element (TextEdit, other AppKit text views and fields)
     becomes an AX selection with no mouse input: `drag` returns `{start, length, text}`,
     or throws `AxFailed`/`AxUnconfirmed` as `selectText` does (check the selection before retrying).

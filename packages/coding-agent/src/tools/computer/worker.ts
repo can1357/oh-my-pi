@@ -36,6 +36,8 @@ import { expandTilde } from "@oh-my-pi/pi-utils/path";
 import { truncate } from "@oh-my-pi/pi-utils/format";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import backgroundMoveNote from "../../prompts/tools/computer-background-move.md" with { type: "text" };
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { cloneSafe, RunOutput } from "../browser/run-output";
 import {
@@ -223,6 +225,8 @@ interface ComputerRunContext {
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
+	/** Whether this run's output holds the background-move note, spent for the session only if the run succeeds. */
+	backgroundMoveNote: boolean;
 	confirmControl(reason: string): Promise<ControlVerdict>;
 	screenshots: ComputerScreenshot[];
 }
@@ -509,10 +513,26 @@ async function entryExists(local: string): Promise<boolean> {
 
 const MENU_ROUTE =
 	"Use the window's menu bar with win.menu.select(...), or an element action such as press(), instead.";
+const MENU_TREE_LIMIT = 150;
+const MENU_TREE_SKIPPABLE = ["AxFailed:", BACKGROUND_UNAVAILABLE, "InvalidTarget:"];
 /** AX roles of the controls that open a menu when pressed, as native's `open_menu` reads them. */
 const MENU_CONTROL_ROLES = ["AXPopUpButton", "AXMenuButton"];
 const MENU_CONTROL_ROUTE =
 	"Its options are chosen only through that menu: use the window's menu bar with win.menu.select(...) if it has the same command, or tell the user the step needs their screen.";
+
+/**
+ * The note after a macOS background `move`, printed for the first one in a
+ * desktop session: eval sends each window call as its own run, so a per-run
+ * note would repeat once per move. A failed run delivers only its error, so
+ * the session counts as told only once a successful run carries the note.
+ * Measured in a macOS 26 guest on an `AppKit` tracking area and a Chrome
+ * `:hover` element: a background move gave neither any hover; a takeover
+ * move's hover ended when native warped the pointer back, before the call
+ * returned; a takeover click on the hidden control reached it every time.
+ * Under `refuse` both takeover routes are refused, so that ending names
+ * neither.
+ */
+const backgroundMoveNoted = new WeakSet<NativeDesktopSession>();
 
 /**
  * Under `refuse`, a macOS call that opens a menu is refused before anything is
@@ -1253,14 +1273,29 @@ class Win {
 		strictOptions(options, inputOptionsKeys, "move");
 		const context = this.#guardInput("move");
 		const native = pointerOptions(options);
+		// A desktop or display move drives the user's own pointer whatever the options, so it is never background.
+		let background = native.takeover !== true && this.id !== "desktop" && !this.id.startsWith("display:");
 		await sendInput(
 			this.#session,
 			context,
 			"move",
 			native.takeover,
-			fallback => this.#session.moveMouse(this.id, x, y, { ...native, ...fallback }),
+			fallback => {
+				if (fallback) background = false;
+				return this.#session.moveMouse(this.id, x, y, { ...native, ...fallback });
+			},
 			this.pid,
 		);
+		if (
+			background &&
+			this.#session.capabilities.backend === "quartz" &&
+			!context.backgroundMoveNote &&
+			!backgroundMoveNoted.has(this.#session)
+		) {
+			context.backgroundMoveNote = true;
+			const refuse = context.snapshot.backgroundFallback === "refuse";
+			context.output.push({ type: "text", text: prompt.render(backgroundMoveNote, { refuse }).trim() });
+		}
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
@@ -1411,7 +1446,8 @@ class Win {
 					path.length <= 1 && path[0] === undefined
 						? undefined
 						: menuPath("menu.items", path, { allowEmpty: true });
-				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				const items = await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+				return segments?.length ? await this.#menuTree(items, context.signal) : items;
 			},
 			select: async (...path: [string, ...string[]] | [string[]]): Promise<void> => {
 				const context = this.#getContext();
@@ -1420,6 +1456,33 @@ class Win {
 				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, segments));
 			},
 		};
+	}
+
+	async #menuTree(items: MenuItem[], signal: AbortSignal): Promise<MenuItem[]> {
+		const listed: MenuItem[] = [];
+		let budget = MENU_TREE_LIMIT - items.length;
+		const visit = async (level: MenuItem[]): Promise<void> => {
+			for (const item of level) {
+				listed.push(item);
+				if (!item.hasSubmenu || !item.enabled || budget <= 0) continue;
+				let children: MenuItem[];
+				try {
+					children = await nativeCall(signal, () => this.#session.menuItems(this.id, item.path));
+				} catch (error) {
+					// A refusal or AX timeout stops expansion, but keeps discovered paths available.
+					if (error instanceof ToolError && MENU_TREE_SKIPPABLE.some(code => error.message.startsWith(code))) {
+						budget = 0;
+						continue;
+					}
+					throw error;
+				}
+				if (children.length > budget) continue;
+				budget -= children.length;
+				await visit(children);
+			}
+		};
+		await visit(items);
+		return listed;
 	}
 
 	async bringToCurrentSpace(): Promise<void> {
@@ -1627,6 +1690,7 @@ export class ComputerWorkerCore {
 			readOnly: message.session.readOnly,
 			snapshot: message.session,
 			output,
+			backgroundMoveNote: false,
 			screenshots,
 			confirmControl: reason =>
 				this.#confirmControl(active, reason, deadline - Math.min(CONTROL_ANSWER_RESERVE_MS, message.timeoutMs / 4)),
@@ -1735,6 +1799,7 @@ export class ComputerWorkerCore {
 				});
 				return;
 			}
+			if (runContext.backgroundMoveNote && this.#guarded) backgroundMoveNoted.add(this.#guarded);
 			this.#transport.send({
 				type: "result",
 				id: message.id,

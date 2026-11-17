@@ -183,6 +183,7 @@ import {
 	clickQueryHandlerText,
 	dragBetween,
 	fillViaHandle,
+	focusKeyTarget,
 	highlightElement,
 	hoverElement,
 	type HighlightOptions,
@@ -194,6 +195,7 @@ import {
 	mouseMove,
 	mouseUp,
 	pressKey,
+	refuseCoveredTarget,
 	releaseButtonOffPage,
 	selectElementOptions,
 	setElementChecked,
@@ -205,6 +207,7 @@ import {
 	wheel,
 	withLiveElement,
 } from "./interactions";
+import { normalizeSelectOptions, type SelectOptionInput } from "./select-options";
 import {
 	captureScreenshotBuffer,
 	createPngDiff,
@@ -228,6 +231,7 @@ import {
 } from "./screenshot";
 import { PointerSpace } from "./pointer-space";
 import { type DialogPolicy, type DialogState, dialogBlocksPageError, RuntimeDialogController } from "./dialogs";
+import { FrontTab, NativeWindowWatch, readBrowserPageFrames, readTabFrame } from "./native-windows";
 import {
 	type BrowserFrameApi,
 	type BrowserFrameInfo,
@@ -446,7 +450,7 @@ interface TabApi {
 	waitFor(selector: string, opts?: { timeout?: number }): Promise<ActionableHandle>;
 	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	scrollIntoView(selector: string): Promise<void>;
-	select(selector: string, ...values: string[]): Promise<string[]>;
+	select(selector: string, ...values: SelectOptionInput[]): Promise<string[]>;
 	uploadFile(selector: string, ...filePaths: string[]): Promise<void>;
 	waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string>;
 	waitForResponse(
@@ -1083,7 +1087,7 @@ export function toActionableHandle(
 				if (original) methods[method] = original;
 			}
 		}
-		enriched.fill = value => fillViaHandle(enriched, value);
+		enriched.fill = value => fillViaHandle(enriched, value, "handle.fill()");
 		enriched.click = options =>
 			clickElement(enriched, "handle.click()", undefined, {
 				button: options?.button,
@@ -1092,7 +1096,8 @@ export function toActionableHandle(
 		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { count: 2 });
 		enriched.check = () => setElementChecked(enriched, true, "handle.check()");
 		enriched.uncheck = () => setElementChecked(enriched, false, "handle.uncheck()");
-		enriched.select = (...values) => selectElementOptions(enriched, values, "handle.select()");
+		enriched.select = async (...values) =>
+			await selectElementOptions(enriched, normalizeSelectOptions(values), "handle.select()");
 		enriched.highlight = options => highlightElement(enriched, options);
 		const controller = new AbortController();
 		return enrichElementQueries(enriched, (_label, fn) => fn(controller.signal));
@@ -1108,14 +1113,11 @@ export function toActionableHandle(
 		// Puppeteer's `ElementHandle.press` takes a single key name; focus and press
 		// through `pressKey` so combos and the macOS editing commands work on handles too.
 		// The guard below passes its signal, so a cut-off press releases what it held.
-		const focus = interactive.focus;
-		if (focus) {
-			const press = async (key: KeyInput, options?: KeyPressOptions, signal?: AbortSignal): Promise<void> => {
-				await untilAborted(signal, () => focus());
-				await pressKey(enriched.frame.page(), key, options, signal);
-			};
-			interactive.press = press as RawHandleMethod;
-		}
+		const press = async (key: KeyInput, options?: KeyPressOptions, signal?: AbortSignal): Promise<void> => {
+			await focusKeyTarget(enriched, "handle.press()", signal);
+			await pressKey(enriched.frame.page(), key, options, signal);
+		};
+		interactive.press = press as RawHandleMethod;
 		originals = { interactive };
 		enriched[RAW_HANDLE_METHODS] = originals;
 	}
@@ -1146,7 +1148,7 @@ export function toActionableHandle(
 				originals,
 				"handle.type()",
 				signal,
-				() => typeIntoElement(enriched, text, signal, options),
+				() => typeIntoElement(enriched, text, "handle.type()", signal, options),
 				invalidate,
 			),
 		);
@@ -1157,7 +1159,7 @@ export function toActionableHandle(
 				originals,
 				"handle.fill()",
 				signal,
-				() => fillViaHandle(enriched, value, signal),
+				() => fillViaHandle(enriched, value, "handle.fill()", signal),
 				invalidate,
 			),
 		);
@@ -1226,17 +1228,19 @@ export function toActionableHandle(
 				invalidate,
 			),
 		);
-	enriched.select = (...values) =>
-		guard<string[]>("handle.select()", signal =>
+	enriched.select = async (...values) => {
+		const choices = normalizeSelectOptions(values);
+		return await guard<string[]>("handle.select()", signal =>
 			runGuardedHandleAction(
 				enriched,
 				originals,
 				"handle.select()",
 				signal,
-				() => selectElementOptions(enriched, values, "handle.select()", signal),
+				() => selectElementOptions(enriched, choices, "handle.select()", signal),
 				invalidate,
 			),
 		);
+	};
 	enriched.highlight = (options?: HighlightOptions) =>
 		guard<void>("handle.highlight()", signal =>
 			runGuardedHandleAction(
@@ -1932,6 +1936,8 @@ export class WorkerCore {
 	#webmcp?: WebMcpController;
 	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
+	/** Names the native windows a call raised on screen; only for a browser that shows windows, on macOS. */
+	#nativeWindows?: NativeWindowWatch;
 	/** Request boundary of the earliest action since the last look; the next look settles it. */
 	#actionRequestSeq?: number;
 	#actionGeneration = 0;
@@ -2234,7 +2240,27 @@ export class WorkerCore {
 			await installCancelledReleaseGuard(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.insecure) this.#certificateOverride = await applyInsecure(this.#page);
-			this.#targetId = await targetIdForPage(this.#page);
+			const targetId = await targetIdForPage(this.#page);
+			this.#targetId = targetId;
+			// Only a browser that draws its windows on the user's screen raises native ones, and they are this tab's only
+			// while the browser's tab list shows it in front of its window. A headless-mode worker opens its tab in front;
+			// an attaching one opens it in the background or adopts it, recycled managed tabs aside.
+			const frontTabSource = payload.frontTab;
+			if (frontTabSource && process.platform === "darwin") {
+				const page = this.#page;
+				const browser = this.#browser;
+				const windowOf = async (id: string) =>
+					(await browserConnection(browser).send("Browser.getWindowForTarget", { targetId: id })).windowId;
+				const openedInFront = payload.mode === "headless" || payload.openedInFront === true;
+				const front = new FrontTab(frontTabSource, payload.browserWSEndpoint, targetId, windowOf, openedInFront);
+				this.#nativeWindows = new NativeWindowWatch(
+					() => readTabFrame(page),
+					shown => front.read(shown),
+					undefined,
+					payload.browserPid,
+					() => readBrowserPageFrames(page.browser()),
+				);
+			}
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
@@ -2544,6 +2570,7 @@ export class WorkerCore {
 			if (signal.aborted) onCancel();
 			else signal.addEventListener("abort", onCancel, { once: true });
 			try {
+				this.#nativeWindows?.beginCall(this.#dialogs?.state().open === true);
 				const hooks = this.#hooksForActiveRun();
 				if (!hooks) throw new ToolError("Browser runtime started without an active run");
 				returnValue = await withBrowserPromiseCombinatorTracking(
@@ -2594,6 +2621,14 @@ export class WorkerCore {
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
 		}
+		// What the call raised on screen that no page call can reach, named on failures too: a native panel is often
+		// why the call failed.
+		// Aborted runs must answer inside the supervisor's grace after interception cleanup; sampling can wait on
+		// both a previous tail and unresponsive pages, so it adds no work on this path.
+		const nativeNotices =
+			ac.signal.aborted || timeoutSignal.aborted
+				? []
+				: ((await this.#nativeWindows?.endCall(this.#dialogs?.state().open === true)) ?? []);
 		// A renderer crash or a debugger detach answers the run itself; what the relay hid stays with it for the next
 		// worker. Otherwise what it hid during the run goes out with the run's result.
 		if (this.#unanswered === active && this.#hiddenFramesWaiting && this.#page)
@@ -2615,10 +2650,16 @@ export class WorkerCore {
 				if (this.#unanswered !== active) return;
 			}
 			this.#unanswered = null;
-			this.#sendResult({ id: msg.id, ok: false, error: errorPayload(failure.error) });
+			const error = errorPayload(failure.error);
+			if (nativeNotices.length > 0) {
+				error.message = [error.message, ...nativeNotices].join("\n");
+				if (error.stack) error.stack = [error.stack, ...nativeNotices].join("\n");
+			}
+			this.#sendResult({ id: msg.id, ok: false, error });
 			return;
 		}
 		if (completed) {
+			for (const notice of nativeNotices) output.push({ type: "text", text: notice });
 			await this.#postReadyInfo();
 			if (this.#unanswered !== active) return;
 			this.#unanswered = null;
@@ -3081,7 +3122,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await typeIntoElement(handle, text, sig);
+							await typeIntoElement(handle, text, `tab.type(${JSON.stringify(selector)})`, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
@@ -3095,7 +3136,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
-							await fillViaHandle(handle, value, sig);
+							await fillViaHandle(handle, value, `tab.fill(${JSON.stringify(selector)})`, sig);
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
@@ -3110,14 +3151,21 @@ export class WorkerCore {
 						assertTabPressArgs(key, opts);
 						const selector = opts?.selector;
 						if (selector) {
-							if (parseAriaRefSelector(selector) !== null) {
-								const handle = await this.#resolveAriaRef(selector);
-								try {
-									await untilAborted(sig, () => handle.focus());
-								} finally {
-									await handle.dispose().catch(() => undefined);
-								}
-							} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
+							const normalized = normalizeSelector(selector);
+							const handle =
+								parseAriaRefSelector(selector) !== null
+									? await this.#resolveAriaRef(selector)
+									: asElementHandle(await untilAborted(sig, () => page.$(normalized)));
+							if (!handle) throw new ToolError(`No element found for selector: ${normalized}`);
+							try {
+								await focusKeyTarget(
+									handle,
+									`tab.press(${JSON.stringify(key)}, { selector: ${JSON.stringify(selector)} })`,
+									sig,
+								);
+							} finally {
+								await handle.dispose().catch(() => undefined);
+							}
 						}
 						await pressKey(page, key, undefined, sig);
 					},
@@ -3942,17 +3990,31 @@ export class WorkerCore {
 						? await this.#resolveAriaRef(target)
 						: asElementHandle(await untilAborted(signal, () => page.$(normalizeSelector(target))));
 				if (!handle) throw new ToolError(`Drag ${role} selector did not resolve: ${target}`);
-				const box = (await untilAborted(signal, () => handle.boundingBox())) as {
-					x: number;
-					y: number;
-					width: number;
-					height: number;
-				} | null;
+				let box: { x: number; y: number; width: number; height: number } | null;
+				let point: { x: number; y: number } | undefined;
+				try {
+					// A drag sends pointer input where the element is drawn, so any cover takes it, as for a click; no
+					// scroll, which would move the other end after its point was read.
+					const checked = await refuseCoveredTarget(
+						handle,
+						`tab.drag() ${role} ${JSON.stringify(target)}`,
+						signal,
+						{
+							modalOnly: false,
+							scroll: false,
+						},
+					);
+					box = await untilAborted(signal, () => handle.boundingBox());
+					if (box && checked?.ok) point = { x: box.x + checked.x, y: box.y + checked.y };
+				} catch (error) {
+					await handle.dispose().catch(() => undefined);
+					throw error;
+				}
 				if (!box) {
 					await handle.dispose().catch(() => undefined);
 					throw new ToolError(`Drag ${role} element has no bounding box (likely not visible): ${target}`);
 				}
-				return { x: box.x + box.width / 2, y: box.y + box.height / 2, handle };
+				return { x: point?.x ?? box.x + box.width / 2, y: point?.y ?? box.y + box.height / 2, handle };
 			}
 			if (
 				target !== null &&
@@ -3978,10 +4040,16 @@ export class WorkerCore {
 		}
 	}
 
-	async #select(selector: string, values: string[], timeoutMs: number, signal: AbortSignal): Promise<string[]> {
+	async #select(
+		selector: string,
+		values: SelectOptionInput[],
+		timeoutMs: number,
+		signal: AbortSignal,
+	): Promise<string[]> {
+		const choices = normalizeSelectOptions(values);
 		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
 		try {
-			return await selectElementOptions(handle, values, "tab.select()", signal);
+			return await selectElementOptions(handle, choices, "tab.select()", signal);
 		} finally {
 			await handle.dispose().catch(() => undefined);
 		}
