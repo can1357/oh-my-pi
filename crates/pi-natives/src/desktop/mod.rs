@@ -13,6 +13,7 @@ mod macos;
 mod menus;
 #[cfg(target_os = "macos")]
 mod native_helper;
+mod roster;
 mod text_range;
 mod types;
 #[cfg(any(target_os = "windows", test))]
@@ -1964,13 +1965,18 @@ struct SessionCore {
 	operation_timeout: Duration,
 }
 impl SessionCore {
-	fn new(selector: DisplaySelector, escape_stops: Arc<AtomicU32>) -> Arc<Self> {
-		Self::with_operation_timeout(selector, escape_stops, OPERATION_TIMEOUT)
+	fn new(
+		selector: DisplaySelector,
+		escape_stops: Arc<AtomicU32>,
+		agent: Option<Arc<str>>,
+	) -> Arc<Self> {
+		Self::with_operation_timeout(selector, escape_stops, agent, OPERATION_TIMEOUT)
 	}
 
 	fn with_operation_timeout(
 		selector: DisplaySelector,
 		escape_stops: Arc<AtomicU32>,
+		agent: Option<Arc<str>>,
 		operation_timeout: Duration,
 	) -> Arc<Self> {
 		Arc::new(Self {
@@ -1984,7 +1990,7 @@ impl SessionCore {
 			capabilities: Arc::default(),
 			display_awake: Arc::default(),
 			in_flight: AtomicUsize::new(0),
-			cancellation: CancellationSource::counting_escapes(escape_stops),
+			cancellation: CancellationSource::counting_escapes(escape_stops, agent),
 			operation_timeout,
 		})
 	}
@@ -2140,7 +2146,10 @@ impl DesktopSession {
 	pub fn new(options: Option<DesktopSessionOptions>) -> Result<Self> {
 		let options = options.unwrap_or_default();
 		let escape_stops = control::escape_stop_counter(options.escape_stop_key.as_deref());
-		Ok(Self { core: SessionCore::new(DisplaySelector::parse(options.display), escape_stops) })
+		let agent = options.agent_id.map(Arc::from);
+		Ok(Self {
+			core: SessionCore::new(DisplaySelector::parse(options.display), escape_stops, agent),
+		})
 	}
 
 	/// Asks the worker when it is idle, so permissions are read live. While
@@ -3093,6 +3102,7 @@ mod capture_tests {
 				child_count: 0,
 				selected: false,
 				role_name: None,
+				unread_children: 0,
 			})
 		}
 
@@ -3279,7 +3289,7 @@ mod capture_tests {
 					after_write(&mut tree, id);
 				}
 			}
-			ax::confirm_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))
+			ax::confirm_read_as("the text", || self.read_as(h).map(ax::AxReadAs::from_props))
 		}
 
 		fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
@@ -3842,6 +3852,7 @@ mod capture_tests {
 		let core = SessionCore::with_operation_timeout(
 			DisplaySelector::Active,
 			Arc::default(),
+			None,
 			HUNG_CALL_TIMEOUT,
 		);
 		let display_awake = Arc::clone(&core.display_awake);
@@ -4957,7 +4968,7 @@ mod capture_tests {
 
 	#[test]
 	fn capture_refreshes_the_nonblocking_capabilities_snapshot() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		let mut worker = worker_with(FakeWaylandBackend::new());
 		worker.capabilities = Arc::clone(&core.capabilities);
 		worker
@@ -4976,7 +4987,7 @@ mod capture_tests {
 
 	#[test]
 	fn screen_state_never_queues_behind_a_stuck_request() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		// A worker that never serves its queue, with a request outstanding and
 		// no capabilities snapshot: a queued read would wait out its timeout.
 		let (tx, stuck) = flume::unbounded();
@@ -4989,7 +5000,7 @@ mod capture_tests {
 
 	#[test]
 	fn cancelled_calls_never_start_the_worker_or_count_as_in_flight() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		let token = core.cancellation.token();
 		core.cancellation.cancel();
 		assert_eq!(
@@ -5006,7 +5017,7 @@ mod capture_tests {
 
 	#[test]
 	fn failed_queue_delivery_releases_the_in_flight_count() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		let (tx, rx) = flume::unbounded();
 		core.lifecycle.lock().tx = Some(tx);
 		drop(rx);
