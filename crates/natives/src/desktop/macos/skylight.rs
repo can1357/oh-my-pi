@@ -677,6 +677,32 @@ fn switch_modifier_held() -> bool {
 	flags & SWITCH_MODIFIERS != 0
 }
 
+/// `kCGEventFlagsChanged`: a modifier went down or up.
+const FLAGS_CHANGED: u32 = 12;
+/// How recent a modifier change keeps [`rekey_unless_chosen`]'s records back.
+/// A ⌃-arrow or ⌘-Tab released just before the check may still sit in the
+/// monitor's queue, where nothing else shows it. The monitor's lag behind a
+/// typing stream is not measured; 250 ms is five times the 50 ms it is waited
+/// for, and a typist's next ⇧ or a text expander's ⌘V inside it reports
+/// nothing sent.
+const MODIFIER_QUIET: Duration = Duration::from_millis(250);
+
+/// Whether a modifier went down or up within [`MODIFIER_QUIET`], given how many
+/// seconds ago the last change was. `WindowServer` keeps one time for all
+/// modifiers, ⇧ and keys another process posts to the HID event tap included.
+fn modifier_changed_recently(since_change: f64) -> bool {
+	Duration::try_from_secs_f64(since_change).is_ok_and(|since| since < MODIFIER_QUIET)
+}
+
+/// [`switch_modifier_held`], or a modifier changed within [`MODIFIER_QUIET`].
+fn switch_modifier_held_or_recent() -> bool {
+	// SAFETY: as in `switch_modifier_held`.
+	switch_modifier_held()
+		|| modifier_changed_recently(unsafe {
+			CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, FLAGS_CHANGED)
+		})
+}
+
 /// What one reading sees of how the user could be switching apps. Typing,
 /// Shift and Caps Lock pick no app, so none of them appear here.
 #[derive(Clone, Copy)]
@@ -2296,11 +2322,12 @@ fn hand_back_through_typing(
 /// it and nothing shows a choice, up to [`TAKEOVER_HAND_BACK_TRIES`] requests:
 /// such a refusal came from input that picked nothing, such as typing. Each
 /// request is checked first: `chose` reads the user's choices without the
-/// monitor, `held` whether ⌘ or ⌃ is down, and `in_front` whether their app
-/// is still the front one. `None` when `chose` stood the records down;
-/// `UserActed` when nothing was sent for another reason (`WindowServer` kept
-/// refusing, another app came forward, or a modifier was down, which another
-/// process's posted shortcut holds as well as the user's own).
+/// monitor, `held` whether ⌘ or ⌃ is down or a modifier changed within
+/// [`MODIFIER_QUIET`], and `in_front` whether their app is still the front
+/// one. `None` when `chose` stood the records down; `UserActed` when nothing
+/// was sent for another reason (`WindowServer` kept refusing, another app
+/// came forward, or a modifier was down or just changed, which another
+/// process's posted shortcut does as well as the user's own chord).
 fn rekey_unless_chosen(
 	mut now: impl FnMut() -> u64,
 	mut chose: impl FnMut() -> bool,
@@ -2599,10 +2626,12 @@ pub(super) fn with_foreground<T>(
 		// While the monitor is behind, a choice since `since` is read without
 		// it: one it has counted already, a press on the HID counters, or
 		// another window of their app focused, as a window picked from the
-		// keyboard is (read once: AX can block). A ⌘ or ⌃ held now also keeps
-		// the records back. Keys another process posts to the HID event tap
-		// are counted by `WindowServer` but never seen by the monitor, so such
-		// typing keeps it behind for as long as it lasts.
+		// keyboard is (read once: AX can block). A ⌘ or ⌃ held now, or any
+		// modifier changed within `MODIFIER_QUIET` (a ⌃-arrow whose arrow the
+		// monitor has not reached), also keeps the records back. Keys another
+		// process posts to the HID event tap are counted by `WindowServer` but
+		// never seen by the monitor, so such typing keeps it behind for as
+		// long as it lasts.
 		let rekey_unseen = |key| {
 			let picked = ax::focused_window_id(previous_pid)
 				.is_some_and(|focused| focused != key && !(same_app && focused == wid));
@@ -2613,7 +2642,7 @@ pub(super) fn with_foreground<T>(
 						|| control::user_choices() != since.0
 						|| PointerPresses::now().user_pressed_since(since.1)
 				},
-				switch_modifier_held,
+				switch_modifier_held_or_recent,
 				|| front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn),
 				|asked| make_window_key_unless_user_acted(spi, previous.psn, key, asked),
 			)
@@ -2742,9 +2771,10 @@ const fn hands_focus_back(return_focus: bool, user_chose: bool, now: FocusAfterT
 /// monitor may not catch up, and typing it never sees (keys another process
 /// posts) keeps it behind for good; an app left in front without its key
 /// window would then show the user's window inactive. So while the monitor
-/// is behind, `rekey_unseen` makes the window key unless a choice or a held
-/// ⌘ or ⌃ shows without it ([`rekey_unless_chosen`]), and says what it did:
-/// `None` when a choice showed, `UserActed` when nothing was sent for another
+/// is behind, `rekey_unseen` makes the window key unless a choice, a held ⌘
+/// or ⌃, or a recent modifier change shows without it
+/// ([`rekey_unless_chosen`]), and says what it did: `None` when a choice
+/// showed, `UserActed` when nothing was sent for another
 /// reason. Sent records are confirmed as on the monitor's own path. A
 /// previous app that showed no window gets only its front status back.
 fn give_key_back(
@@ -4848,6 +4878,41 @@ mod tests {
 		);
 		// A real choice alongside it is still named as one.
 		assert_eq!(held(true), Some(None));
+	}
+
+	#[test]
+	fn a_modifier_change_just_before_the_records_keeps_them_back() {
+		// A ⌃-→ released just before the check, its arrow still in the
+		// monitor's queue: nothing is sent, and no choice is claimed. Outside
+		// the window, the records go as before.
+		let rekey = |since_change: f64| {
+			let requests = std::cell::Cell::new(0);
+			let returned = give_key_back(
+				Some(7),
+				false,
+				|| Some(7),
+				|| UserChoice::Pending,
+				|_| panic!("the monitor is behind"),
+				|_| {
+					rekey_unless_chosen(
+						|| 1,
+						|| false,
+						|| modifier_changed_recently(since_change),
+						|| true,
+						|_| {
+							requests.update(|v| v + 1);
+							Ok(FrontRequest::Done)
+						},
+					)
+				},
+				|_| Ok(()),
+			);
+			(returned.ok(), requests.get())
+		};
+		let inside = MODIFIER_QUIET.as_secs_f64() - 0.01;
+		let outside = MODIFIER_QUIET.as_secs_f64() + 0.01;
+		assert_eq!(rekey(inside), (Some(DesktopKeyboardReturn::NotSent), 0));
+		assert_eq!(rekey(outside), (Some(DesktopKeyboardReturn::HandedBack), 1));
 	}
 
 	#[test]
