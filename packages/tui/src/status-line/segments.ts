@@ -284,6 +284,30 @@ const statusSegment: StatusLineSegment = {
 	},
 };
 
+function accountLabel(ctx: SegmentContext): string {
+	const identity = ctx.activeAccount;
+	if (!identity) return "";
+	const label =
+		sanitizeStatusText(identity.email ?? "") ||
+		sanitizeStatusText(identity.accountId ?? "") ||
+		sanitizeStatusText(identity.projectId ?? "");
+	if (!label) return "";
+	const organization = sanitizeStatusText(identity.orgName ?? "") || sanitizeStatusText(identity.orgId ?? "");
+	return organization ? `${label} (${organization})` : label;
+}
+
+const accountSegment: StatusLineSegment = {
+	id: "account",
+	render(ctx) {
+		const label = accountLabel(ctx);
+		return { content: label ? theme.fg("muted", label) : "", visible: label.length > 0 };
+	},
+	describe(ctx) {
+		const label = accountLabel(ctx);
+		return label ? segView([span(label, "muted")]) : null;
+	},
+};
+
 /** Display name of the active model (`Claude ` prefix dropped). */
 function modelDisplayName(ctx: SegmentContext): string {
 	const state = ctx.session.state;
@@ -1332,6 +1356,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	pi: piSegment,
 	status: statusSegment,
 	model: modelSegment,
+	account: accountSegment,
 	mode: modeSegment,
 	path: pathSegment,
 	git: gitSegment,

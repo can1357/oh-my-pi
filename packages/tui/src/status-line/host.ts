@@ -10,6 +10,7 @@ export interface StatusAccountIdentity {
 	email?: string;
 	projectId?: string;
 	orgId?: string;
+	orgName?: string;
 }
 
 /** Nested repository selected as the active workspace context. */

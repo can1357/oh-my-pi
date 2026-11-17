@@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
-import type { ActiveRepoContext, PromptCacheStatus, StatusLineSession } from "./host";
+import type { ActiveRepoContext, PromptCacheStatus, StatusAccountIdentity, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -76,6 +76,7 @@ export type RGB = readonly [number, number, number];
 
 export interface SegmentContext {
 	session: StatusLineSession;
+	activeAccount?: StatusAccountIdentity;
 	/** Deterministic wall clock for previews/tests; production omits it. */
 	now?: Date;
 	/** Deterministic host label for previews/tests; production omits it. */
