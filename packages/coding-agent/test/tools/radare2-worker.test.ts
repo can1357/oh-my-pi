@@ -32,7 +32,7 @@ class StubR2:
     def cmdj(self, text):
         _record("cmdj:" + text)
         if text == "iIj":
-            return [{"name": "stub.bin", "bin": {"arch": "x86", "bits": 64, "class": "elf"}}]
+            return {"arch": "x86", "bits": 64, "bintype": "elf", "class": "ELF64", "os": "linux"}
         return {}
     def quit(self):
         _record("quit")
@@ -109,6 +109,82 @@ describe("radare2 worker protocol from a hidden managed store", () => {
 
 		await worker.close({ save: false });
 		expect(await Bun.file(log).text()).toContain("quit");
+	});
+});
+
+describe("radare2 saved-project reopen", () => {
+	let dir: string | undefined;
+	let databaseDir: string;
+	let log: string;
+	let reopened: DisasmWorker | undefined;
+
+	beforeAll(async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "radare2-reopen-"));
+		dir = tempDir;
+		databaseDir = path.join(tempDir, ".omp", "db");
+		log = path.join(tempDir, "r2.log");
+		const stubs = path.join(tempDir, "stubs");
+		await Bun.write(path.join(stubs, "r2pipe.py"), STUB_R2PIPE);
+		await Bun.write(log, "");
+		const binary = path.join(databaseDir, "stub.bin");
+		await Bun.write(binary, "radare2 reopen fixture\n");
+
+		const env: Record<string, string> = {};
+		for (const key in process.env) {
+			const value = process.env[key];
+			if (value !== undefined) env[key] = value;
+		}
+		env.PYTHONPATH = stubs;
+		env.PYTHONUNBUFFERED = "1";
+		env.PYTHONIOENCODING = "utf-8";
+		env.OMP_R2_STUB_LOG = log;
+		const loc: DatabaseLocation = {
+			id: "stub",
+			dir: databaseDir,
+			sourcePath: binary,
+			stagedPath: binary,
+			kind: "store",
+			openPath: binary,
+			isNew: true,
+			lockTarget: path.join(databaseDir, "omp.r2"),
+		};
+		const createdLock = await acquireFileLock(loc.lockTarget);
+		let created: DisasmWorker | undefined;
+		try {
+			created = await DisasmWorker.start(DISASM_BACKENDS.radare2, loc, { pythonPath, env }, createdLock, 0);
+			await created.request("save", {});
+		} finally {
+			await created?.close({ save: false });
+		}
+		const reopenLock = await acquireFileLock(loc.lockTarget);
+		try {
+			reopened = await DisasmWorker.start(
+				DISASM_BACKENDS.radare2,
+				{ ...loc, isNew: false },
+				{ pythonPath, env },
+				reopenLock,
+				0,
+			);
+		} catch (error) {
+			reopenLock.release();
+			throw error;
+		}
+	});
+
+	afterAll(async () => {
+		try {
+			await reopened?.close({ save: false });
+		} finally {
+			if (dir !== undefined) await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("reopens a saved project with dir.projects configured before the project load", async () => {
+		expect(reopened?.info).toEqual({ module: "stub.bin", format: "elf", arch: "x86", bitness: 64 });
+		const lines = (await Bun.file(log).text()).split("\n").filter(Boolean);
+		expect(lines.find(line => line.startsWith("open:-:"))).toBe(
+			`open:-:-e,dir.projects=${databaseDir},-p,omp`,
+		);
 	});
 });
 

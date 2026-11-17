@@ -54,7 +54,7 @@ def _rpc_open(params):
     if is_new:
         r2 = r2pipe.open(binary, flags=["-N"])
     else:
-        r2 = r2pipe.open("-", flags=["-p", "omp"])
+        r2 = r2pipe.open("-", flags=["-e", "dir.projects=" + project_dir, "-p", "omp"])
     for setting in settings:
         r2.cmd("e " + setting)
     r2.cmd("aa")
@@ -70,17 +70,17 @@ def _rpc_open(params):
         "__name__": "__radare2_exec__", "__builtins__": __builtins__,
         "r2": r2, "radare2": r2,
     })
-    info_list = r2.cmdj("iIj") or []
-    info = info_list[0] if isinstance(info_list, list) and info_list else info_list
+    info = r2.cmdj("iIj") or {}
+    if isinstance(info, list):
+        info = info[0] if info else {}
     if not isinstance(info, dict):
         info = {}
-    bininfo = info.get("bin") if isinstance(info.get("bin"), dict) else {}
     return {
         "idb": marker,
         "module": str(info.get("name") or os.path.basename(binary)),
-        "format": str(bininfo.get("class") or bininfo.get("bintype") or "unknown"),
-        "arch": str(bininfo.get("arch") or "unknown"),
-        "bitness": int(bininfo.get("bits") or 0),
+        "format": str(info.get("bintype") or "unknown"),
+        "arch": str(info.get("arch") or "unknown"),
+        "bitness": int(info.get("bits") or 0),
     }
 
 
