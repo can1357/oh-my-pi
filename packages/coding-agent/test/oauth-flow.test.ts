@@ -133,7 +133,7 @@ describe("mcp oauth flow", () => {
 		expect(flow.resolvedClientId).toBe(OMP_CLIENT_METADATA_URL);
 	});
 
-	it("prefers the client metadata document over dynamic registration", async () => {
+	it("keeps dynamic registration for servers that also support the metadata document", async () => {
 		const calls: string[] = [];
 		const flow = new MCPOAuthFlow(
 			{ ...clerkEndpoints, fetch: mockCimdAuthorizationServer({ registrationEndpoint: true, calls }) },
@@ -142,8 +142,8 @@ describe("mcp oauth flow", () => {
 
 		const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:41234/callback");
 
-		expect(new URL(url).searchParams.get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
-		expect(calls).not.toContain("https://clerk.example/oauth/register");
+		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
+		expect(calls).toContain("https://clerk.example/oauth/register");
 	});
 
 	it("uses discovered CIMD support without probing metadata again", async () => {
@@ -157,21 +157,6 @@ describe("mcp oauth flow", () => {
 
 		expect(new URL(url).searchParams.get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
 		expect(calls).toEqual([]);
-	});
-
-	it("registers a client when the redirect is not one the metadata document lists", async () => {
-		const flow = new MCPOAuthFlow(
-			{
-				...clerkEndpoints,
-				callbackPath: "/oauth/done",
-				fetch: mockCimdAuthorizationServer({ registrationEndpoint: true }),
-			},
-			{},
-		);
-
-		const { url } = await flow.generateAuthUrl("state", "http://localhost:41234/oauth/done");
-
-		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
 	});
 
 	it("publishes a metadata document whose identity and redirects match the client", async () => {

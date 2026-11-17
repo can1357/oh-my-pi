@@ -109,7 +109,7 @@ export const OMP_CLIENT_METADATA_URL =
 /** The authorization-server metadata fields that decide how omp gets a client id. */
 interface ClientIdentityMetadata {
 	registrationEndpoint?: string;
-	clientIdMetadataDocumentSupported?: boolean;
+	clientIdMetadataDocumentSupported?: true;
 }
 
 function isGoogleAuthorizationHost(hostname: string): boolean {
@@ -330,7 +330,7 @@ export interface MCPOAuthConfig {
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
 	/** Whether the authorization server advertised `client_id_metadata_document_supported`. */
-	clientIdMetadataDocumentSupported?: boolean;
+	clientIdMetadataDocumentSupported?: true;
 	/** Client ID (optional when already embedded in authorization URL) */
 	clientId?: string;
 	/** Client secret (optional for PKCE flows) */
@@ -633,27 +633,28 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	/**
-	 * Get a client id when none is configured, preferring a Client ID Metadata
-	 * Document over dynamic client registration, as the MCP authorization spec
-	 * orders them. A redirect the metadata document does not list, such as a
-	 * custom callback path, falls through to registration. Metadata is probed
-	 * only when discovery supplied neither field.
-	 *
-	 * There is no fallback to registration when the server cannot fetch the
-	 * document: that error shows in the browser only. Accepted because a
-	 * stored client id still wins on later sign-ins.
+	 * Get a client id when none is configured. Dynamic client registration
+	 * stays first when the server offers it, so servers that sign in through
+	 * it today keep doing so; omp's Client ID Metadata Document is used only
+	 * when the server supports it and offers no registration. If the server
+	 * cannot fetch the document, the error shows only in the browser, so the
+	 * document is never chosen over a working alternative. A redirect the
+	 * document does not list, such as a custom callback path, cannot use it.
+	 * Metadata is probed only when discovery supplied neither field.
 	 */
 	async #resolveClientIdentity(redirectUri: string): Promise<void> {
 		const { registrationUrl, clientIdMetadataDocumentSupported } = this.config;
 		const metadata =
-			registrationUrl !== undefined || clientIdMetadataDocumentSupported !== undefined
+			registrationUrl !== undefined || clientIdMetadataDocumentSupported
 				? { registrationEndpoint: registrationUrl, clientIdMetadataDocumentSupported }
 				: await this.#readClientIdentityMetadata();
-		if (metadata?.clientIdMetadataDocumentSupported && matchesMetadataDocumentRedirect(redirectUri)) {
-			this.#resolvedClientId = OMP_CLIENT_METADATA_URL;
+		if (metadata?.registrationEndpoint) {
+			await this.#tryRegisterClient(redirectUri, metadata.registrationEndpoint);
 			return;
 		}
-		await this.#tryRegisterClient(redirectUri, metadata?.registrationEndpoint);
+		if (metadata?.clientIdMetadataDocumentSupported && matchesMetadataDocumentRedirect(redirectUri)) {
+			this.#resolvedClientId = OMP_CLIENT_METADATA_URL;
+		}
 	}
 
 	/**
@@ -754,7 +755,8 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 				client_id_metadata_document_supported?: boolean;
 			};
 			const registrationEndpoint = metadata.registration_endpoint?.trim() || undefined;
-			const clientIdMetadataDocumentSupported = metadata.client_id_metadata_document_supported === true;
+			const clientIdMetadataDocumentSupported =
+				metadata.client_id_metadata_document_supported === true ? true : undefined;
 			if (registrationEndpoint || clientIdMetadataDocumentSupported) {
 				return { registrationEndpoint, clientIdMetadataDocumentSupported };
 			}

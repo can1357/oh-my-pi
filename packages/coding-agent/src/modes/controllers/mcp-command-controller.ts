@@ -665,7 +665,7 @@ export class MCPCommandController {
 			prompt?: string;
 			serverUrl?: string;
 			registrationUrl?: string;
-			clientIdMetadataDocumentSupported?: boolean;
+			clientIdMetadataDocumentSupported?: true;
 			issuerUrl?: string;
 			resource?: string;
 			stripSameOriginResource?: boolean;
