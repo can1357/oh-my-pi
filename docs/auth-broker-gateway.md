@@ -363,9 +363,9 @@ When a provider has account policies, OMP ranks its accounts whenever it selects
 That ranking picks the account for a **new** session. A running session remembers the account it used last (its pin) and keeps it while the pin is warm, so the provider's prompt cache and signed reasoning stay valid:
 
 - Anthropic pins go cold after an hour without a request; other providers' pins stay warm indefinitely. A cold or blocked pin re-ranks.
-- A warm pin moves only away from a bad account: when the pinned account enters its reserve and another account is measured outside its own reserve, or when its allowance is spent and an unblocked sibling still has allowance.
-- A warm pin does not move back when a higher-priority account recovers. New sessions use the recovered account; running ones stay where they are until one of the cases above applies.
-- An account the user chose explicitly for a session is never moved by ranking or reserve. It is still skipped while blocked, after a failed token refresh, or when it fails a required plan check; the session then falls through to a sibling.
+- A warm automatic pin moves away from a bad account: when the pinned account enters its reserve and another account is measured outside its own reserve, or when its allowance is spent and an unblocked sibling still has allowance.
+- A warm automatic pin moves back to a recovered account only through `reclaimAbovePct`: when the sibling the ranking would pick next has a higher `priority` than the pinned account and has at least its `reclaimAbovePct` left. This is checked on every request, against the limits of the requested model (the shared windows plus that model family's own, where the provider reports them), from a usage report up to about five minutes old. Without `reclaimAbovePct`, new sessions use the recovered account and running ones stay where they are until one of the cases above applies.
+- An account the user chose explicitly for a session is never moved by ranking, reserve or reclaim. It is still skipped while blocked, after a failed token refresh, or when it fails a required plan check; the session then falls through to a sibling.
 - Pins are saved with the session. A resumed session restores its pin with its original last-use time, and subagents start on their parent's pins. When a parked subagent is revived in the same session, its saved pin wins over the parent's automatic affinity; an explicit parent pin still wins, subject to the child's account pool.
 
 ### Token files
