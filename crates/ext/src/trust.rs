@@ -1266,16 +1266,11 @@ mod tests {
 			path_grant_digest([sf!("ab"), sf!("c")], &manifest),
 			path_grant_digest([sf!("a"), sf!("bc")], &manifest)
 		);
-		let mut expected = blake3::Hasher::new();
-		expected.update(b"omp.path-grant.v1");
-		for entry in ["a", "bc"] {
-			expected.update(&(entry.len() as u64).to_le_bytes());
-			expected.update(entry.as_bytes());
-		}
-		expected.update(&manifest);
+		// Pinned: blake3 over "omp.path-grant.v1", then 1u64 LE "a", 2u64 LE "bc",
+		// then the 32 manifest bytes. A change to the algorithm must fail here.
 		assert_eq!(
 			path_grant_digest([sf!("bc"), sf!("a")], &manifest).as_str(),
-			format!("b3:{}", expected.finalize().to_hex())
+			"b3:fa6b07326ab655f64fa4990b6a8e3b8624871256d314b641842a1eb5d5f1ecf2"
 		);
 	}
 

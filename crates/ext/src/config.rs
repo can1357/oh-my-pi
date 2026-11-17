@@ -1911,19 +1911,26 @@ fn canonical_digest(value: &impl Serialize) -> Result<Str, ExtensionError> {
 	Ok(Str::new(format!("b3:{}", blake3::hash(&bytes).to_hex())))
 }
 
-/// Capability names use only `[a-z0-9._-]`, so no declared name can carry a
-/// separator or masquerade as another entry in a grant digest.
+/// Capability names are non-empty and use only `[a-z0-9._:-]`.
+///
+/// A name starting with `tools.hard:` collides with a hard-tool entry in
+/// `capability_digest`.
 fn validate_capability_name(extension: &str, capability: &str) -> Result<(), ExtensionError> {
-	let valid = !capability.is_empty()
+	let charset_ok = !capability.is_empty()
 		&& capability
 			.bytes()
-			.all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'));
-	if valid {
+			.all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' | b':'));
+	if charset_ok && !capability.starts_with("tools.hard:") {
 		return Ok(());
 	}
+	let reason = if capability.starts_with("tools.hard:") {
+		"must not start with tools.hard:"
+	} else {
+		"use only [a-z0-9._:-]"
+	};
 	Err(ExtensionError::new(
 		ExtensionCode::EManifestParse,
-		format!("{extension} declares invalid capability name {capability:?}; use only [a-z0-9._-]"),
+		format!("{extension} declares invalid capability name {capability:?}; {reason}"),
 	))
 }
 
@@ -2933,10 +2940,24 @@ capabilities = ["approvals.decide\nzz"]
 	}
 
 	#[test]
+	fn capability_name_with_hard_tool_prefix_is_rejected() {
+		for name in ["tools.hard:x", "tools.hard:"] {
+			let error = capability_manifest(&[name], &[])
+				.validate()
+				.expect_err("hard-tool digest entry must not be a base capability");
+			assert_eq!(error.code, ExtensionCode::EManifestParse, "{name:?}");
+			let error = capability_manifest(&[], &[name])
+				.validate()
+				.expect_err("hard-tool digest entry must not be a feature capability");
+			assert_eq!(error.code, ExtensionCode::EManifestParse, "{name:?}");
+		}
+	}
+
+	#[test]
 	fn valid_capability_names_load() {
 		let manifest = capability_manifest(
-			&["agents.continuation", "approvals.decide", "policy.write", "net"],
-			&["tools.hard", "fs_read-2.0"],
+			&["agents.continuation", "approvals.decide", "policy.write", "net", "schedules:project"],
+			&["tools.hard", "fs_read-2.0", "schedules:project"],
 		);
 		manifest.validate().expect("valid capability names load");
 		let projection = manifest.project(&[sf!("extra")]).expect("projection");
@@ -2946,5 +2967,37 @@ capabilities = ["approvals.decide\nzz"]
 				.iter()
 				.any(|name| name.as_str() == "fs_read-2.0")
 		);
+	}
+
+	/// The bundled source manifests use the shorthand `[settings]` and
+	/// `[requires]` forms, so lift their identity and capabilities into the
+	/// deployment shape and run the same validation a projected wheel gets.
+	#[test]
+	fn bundled_extension_capabilities_load() {
+		for text in [
+			include_str!("../../../extensions/green-loop/omp.toml"),
+			include_str!("../../../extensions/remote-approve/omp.toml"),
+		] {
+			let source = toml::from_str::<toml::Value>(text).expect("bundled manifest is TOML");
+			let mut projected = toml::Table::new();
+			for key in ["id", "entry", "capabilities"] {
+				let value = source.get(key).expect("bundled manifest field").clone();
+				projected.insert(key.to_owned(), value);
+			}
+			let manifest = toml::Value::Table(projected)
+				.try_into::<DeploymentManifest>()
+				.expect("bundled manifest projects");
+			manifest
+				.validate()
+				.unwrap_or_else(|error| panic!("{} must load: {}", manifest.id, error.detail));
+			assert!(
+				manifest
+					.capabilities
+					.iter()
+					.any(|name| name.as_str() == "schedules:project"),
+				"{}",
+				manifest.id
+			);
+		}
 	}
 }
