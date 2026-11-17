@@ -434,7 +434,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: AskParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<AskToolDetails>,
@@ -496,7 +496,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			if (extensionUi.formDialog) {
 				const formDialog = extensionUi.formDialog.bind(extensionUi);
 				answered = await untilAborted(dialogSignal, () =>
-					formDialog(params.html, { timeout, signal: dialogSignal, acceptImages: true }),
+					formDialog(params.html, { timeout, signal: dialogSignal, acceptImages: true, toolCallId }),
 				);
 			} else {
 				answered = await askFieldByField(extensionUi, form, timeout, dialogSignal);
