@@ -59,6 +59,7 @@ import {
 	resolveCommandWordPath,
 	resolveShellWordPath,
 	SHELL_SCRIPT_MAX_DEPTH,
+	SHELL_SCRIPT_MAX_DIRECTORY,
 	SHELL_SCRIPT_MAX_HEREDOC_SEARCH,
 	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
@@ -731,13 +732,21 @@ const TAR_ENTRY_OPTIONS: Record<string, string> = {
 };
 
 /**
+ * Set while the guard checks one command line once a `tar -C` goes past
+ * {@link SHELL_SCRIPT_MAX_DIRECTORY} characters, so the members after it are not resolved; the
+ * command then fails closed (`nesting_limit`). {@link findShellGuardHit} resets it.
+ */
+let tarDirectoryUnfollowed = false;
+
+/**
  * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
  * that directory, as tar does; each `-C` is relative to the one before it. A member's braces are
  * expanded before it is resolved, as the shell expands them before tar sees the member
  * (`{/etc/shadow,x}`, `{~/.ssh,~/.aws}`). Option values stay as written, and exclusions are left
- * out. A member after a directory the guard cannot resolve is left out unless it is absolute. An
- * extraction, listing or deletion (`x`, `t`, `--delete`) reads only the archive and the member
- * lists: its members name entries of the archive, not files.
+ * out. A member after a directory the guard cannot resolve, or one longer than
+ * {@link SHELL_SCRIPT_MAX_DIRECTORY}, is left out unless it is absolute. An extraction, listing or
+ * deletion (`x`, `t`, `--delete`) reads only the archive and the member lists: its members name
+ * entries of the archive, not files.
  */
 function tarReadWords(command: ShellCommand, home: string): string[] {
 	const argv = args(command);
@@ -747,6 +756,10 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 	let dir: string | undefined = command.cwd;
 	const changeDir = (word: string) => {
 		dir = dir === undefined ? undefined : resolveCommandWordPath(command, word, dir, home);
+		if (dir !== undefined && dir.length > SHELL_SCRIPT_MAX_DIRECTORY) {
+			dir = undefined;
+			tarDirectoryUnfollowed = true;
+		}
 	};
 	let i = 0;
 	// An old-style first word (`tar cfC x.tar ~ .ssh`): each letter that takes a value takes the next word.
@@ -1453,13 +1466,15 @@ function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | u
  * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
  * against the command and every nested script it runs; the other rules against every simple
  * command it runs. A command nested deeper than the parser follows, with more nested script text
- * than it reads, with more text to search for heredoc delimiters that never come, or with brace
- * lists that expand past {@link MAX_BRACE_TEXT} and break no rule before that, fails closed
- * (`nesting_limit`).
+ * than it reads, with more text to search for heredoc delimiters that never come, or that changes
+ * to a directory longer than {@link SHELL_SCRIPT_MAX_DIRECTORY} characters, fails closed
+ * (`nesting_limit`); so does one whose brace lists expand past {@link MAX_BRACE_TEXT}, or whose
+ * `tar -C` goes past {@link SHELL_SCRIPT_MAX_DIRECTORY}, and that breaks no rule before that.
  */
 export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
 	braceTextLeft = MAX_BRACE_TEXT;
+	tarDirectoryUnfollowed = false;
 	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
 	// The raw line, each nested script, and each simple command in canonical quoting: the program
 	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
@@ -1484,7 +1499,7 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 	if (truncated) {
 		return hit(
 			"nesting_limit",
-			`it nests \`bash -c\`, \`eval\`, \`env -S\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, or has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, past what the guard can check`,
+			`it nests \`bash -c\`, \`eval\`, \`env -S\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, or runs in or changes to a directory longer than ${SHELL_SCRIPT_MAX_DIRECTORY} characters, past what the guard can check`,
 		);
 	}
 	const outputs = new SecretOutputs(scope);
@@ -1498,6 +1513,12 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 		return hit(
 			"nesting_limit",
 			`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
+		);
+	}
+	if (tarDirectoryUnfollowed) {
+		return hit(
+			"nesting_limit",
+			`its \`tar -C\` changes to a directory longer than ${SHELL_SCRIPT_MAX_DIRECTORY} characters, past what the guard can check`,
 		);
 	}
 	return undefined;

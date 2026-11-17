@@ -869,4 +869,23 @@ describe("guard rule regressions", () => {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
 		}
 	});
+
+	it("bounds the directory it follows and fails closed past it, in time linear in the command", () => {
+		const started = performance.now();
+		for (const command of [
+			`${"cd a;".repeat(25_000)}cat x`,
+			`${"pushd a;".repeat(16_000)}cat x`,
+			`env ${"-C a ".repeat(25_000)}cat x`,
+			`tar cf x.tar ${"-C a ".repeat(25_000)}b`,
+		]) {
+			expect({ command: command.slice(0, 16), rule: ruleOf(bashApproval(cwd, command)) }).toEqual({
+				command: command.slice(0, 16),
+				rule: "nesting_limit",
+			});
+		}
+		expect(performance.now() - started).toBeLessThan(1_000);
+		// Directory changes that stay short are followed however many there are.
+		expect(bashApproval(cwd, `${"cd a; cd ..; ".repeat(10_000)}cat README.md`)).toBe("exec");
+		expect(ruleOf(bashApproval(cwd, `${"cd a; cd ..; ".repeat(100)}cd ~/.ssh; cat id_rsa`))).toBe("credential_read");
+	});
 });

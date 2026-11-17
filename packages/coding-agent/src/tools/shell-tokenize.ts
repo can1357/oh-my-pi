@@ -980,6 +980,15 @@ export const SHELL_SCRIPT_MAX_NESTED_TEXT = 256 * 1024;
  */
 export const SHELL_SCRIPT_MAX_HEREDOC_SEARCH = 256 * 1024;
 
+/**
+ * The longest directory, in characters, {@link parseShellScript} follows a script into: the one
+ * it starts in, or one a `cd`, `pushd`, `env -C` or `sudo -D` changes to; past it the script is
+ * truncated. Every later path is resolved against that directory, so following longer ones would
+ * cost the directory's length per path, and a chain of directory changes, each a step deeper, the
+ * square of the script's length. No real directory a command runs in comes near it.
+ */
+export const SHELL_SCRIPT_MAX_DIRECTORY = 1024;
+
 /** One simple command found by {@link parseShellScript}, with its wrappers peeled off. */
 export interface ShellCommand {
 	/**
@@ -1055,8 +1064,9 @@ export interface ParsedShellScript {
 	 * {@link SHELL_SCRIPT_MAX_NESTED_TEXT} characters of nested script, was left unparsed, possibly
 	 * with the rest of the text after it, when heredocs whose delimiter line never comes took
 	 * more than {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH} characters of searching, so later ones were
-	 * not read as heredocs, or when a command had more than {@link SHELL_SCRIPT_MAX_DEPTH} `env -S`
-	 * strings, so the later ones were not split.
+	 * not read as heredocs, when a directory change went past {@link SHELL_SCRIPT_MAX_DIRECTORY}
+	 * characters, so the directory was not followed, or when a command had more than
+	 * {@link SHELL_SCRIPT_MAX_DEPTH} `env -S` strings, so the later ones were not split.
 	 */
 	truncated: boolean;
 }
@@ -1879,8 +1889,8 @@ class ShellScriptParser {
 	#ambiguous = false;
 	/**
 	 * Set when something was left unparsed: nested too deep, past the nested text budget, or past
-	 * the budget for searching delimiters of heredocs that never close; or when a command had too
-	 * many `env -S` strings.
+	 * the budget for searching delimiters of heredocs that never close; or when a directory change
+	 * went past {@link SHELL_SCRIPT_MAX_DIRECTORY}, or a command had too many `env -S` strings.
 	 */
 	truncated = false;
 	/** Characters read looking for heredoc delimiter lines that never came, against {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH}. */
@@ -1895,6 +1905,16 @@ class ShellScriptParser {
 	 */
 	readonly #taken = new Map<readonly ShellCommand[], number[]>();
 	constructor(readonly home: string) {}
+
+	/**
+	 * `dir`, the directory a change takes the script to, or `undefined`, with the script truncated,
+	 * when it is longer than {@link SHELL_SCRIPT_MAX_DIRECTORY}.
+	 */
+	directory(dir: string | undefined): string | undefined {
+		if (dir === undefined || dir.length <= SHELL_SCRIPT_MAX_DIRECTORY) return dir;
+		this.truncated = true;
+		return undefined;
+	}
 
 	/**
 	 * The pipelines `source` runs, nested ones after the top level, with `input` upstream of it.
@@ -1989,7 +2009,10 @@ class ShellScriptParser {
 			if (pipeline.length > 0) {
 				pipelines.push(pipeline);
 				const only = pipeline.length === 1 ? pipeline[0] : undefined;
-				if (only && Object.hasOwn(DIRECTORY_CHANGERS, only.argv[0])) dirs = changeDirectory(only, dirs, this.home);
+				if (only && Object.hasOwn(DIRECTORY_CHANGERS, only.argv[0])) {
+					const changed = changeDirectory(only, dirs, this.home);
+					dirs = { ...changed, cwd: this.directory(changed.cwd) };
+				}
 				pipeline = [];
 			}
 			if (segment.operator === "(") subshellDirs.push(dirs);
@@ -2545,7 +2568,9 @@ class ShellScriptParser {
 		if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
 		let programCwd = cwd;
 		for (const dir of chdirs) {
-			programCwd = resolveShellWordPath(segment.literalTildes.has(dir) ? `./${dir}` : dir, programCwd, this.home);
+			programCwd = this.directory(
+				resolveShellWordPath(segment.literalTildes.has(dir) ? `./${dir}` : dir, programCwd, this.home),
+			);
 		}
 		const command: ShellCommand = {
 			argv,
@@ -2612,14 +2637,16 @@ class ShellScriptParser {
  * (read as commands to the `)` that closes them, fed what the command they are in reads, or for
  * `>( )` writes, and also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval`
  * strings and scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd`
- * (`cd -` included), `pushd` and `popd` between commands, and wrappers (`sudo`, `env`, `timeout`,
- * `xargs`, `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in, and
- * the command an `env -S` string holds). It is a tokenizer, not a shell: variables other than
+ * (`cd -` included), `pushd` and `popd` between commands (up to directories of
+ * {@link SHELL_SCRIPT_MAX_DIRECTORY} characters), and wrappers (`sudo`, `env`, `timeout`, `xargs`,
+ * `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in, and the
+ * command an `env -S` string holds). It is a tokenizer, not a shell: variables other than
  * `$HOME`/`$PWD`, aliases, calls to functions, and code run by other interpreters are not
  * followed, and after a `cd` to a directory it cannot resolve, relative paths are not resolved.
  */
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);
-	const pipelines = parser.parse(command, scope.cwd, 0);
+	// A call's own `cwd` is a directory the script starts in, bounded like one it changes to.
+	const pipelines = parser.parse(command, parser.directory(scope.cwd), 0);
 	return { pipelines, scripts: parser.scripts, truncated: parser.truncated };
 }
