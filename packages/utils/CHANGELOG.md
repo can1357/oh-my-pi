@@ -8,6 +8,10 @@
 
 - Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
 
+### Fixed
+
+- `OMP_LOG_LEVEL` now also limits what console-logging services such as `omp auth-broker serve` print to stdout; it applied only to the log file, so an `info` setting still let every debug line into the service's journal
+
 ## [18.21.0] - 2026-11-16
 
 ### Fixed

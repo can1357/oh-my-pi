@@ -308,6 +308,21 @@ describe("central logger transport lifecycle", () => {
 		expect((await readSingleLog(both.primaryDir)).text).toBe(bothLine);
 	});
 
+	test.each([
+		{ logLevel: "info", messages: ["console-warn", "console-info"] },
+		{ logLevel: "", messages: ["console-warn", "console-info", "console-debug"] },
+	])("OMP_LOG_LEVEL=$logLevel gates the console transport", async ({ logLevel, messages }) => {
+		const result = await runScenario("console-levels", { logLevel });
+		const messagesPrinted = result.stdout
+			.split(os.EOL)
+			.filter(line => line.length > 0)
+			.map(line => {
+				const entry: LogEntry = JSON.parse(line);
+				return entry.message;
+			});
+		expect(messagesPrinted).toEqual([...messages]);
+	});
+
 	test("keeps disabled mode silent, sends sinks, preserves void returns, and re-enables", async () => {
 		const result = await runScenario("disabled-reenable");
 		expect(result.stdout).toBe("");
