@@ -16,7 +16,7 @@ import {
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { removeWithRetries } from "../../utils/src/temp";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
@@ -681,6 +681,66 @@ describe("auth-broker wire surface", () => {
 		expect(afterNewer.clients.find(c => c.installId === "install-3")?.providers[0]).toMatchObject({ requests: 2 });
 	});
 
+	test("versions travel both ways: a differing broker warns once, the reporter's own version is recorded", async () => {
+		await closeFixture();
+		const db = new Database(":memory:");
+		await startFixture(new SqliteAuthCredentialStore(db));
+		const warn = vi.spyOn(logger, "warn");
+		const skewWarnings = () => warn.mock.calls.filter(([, context]) => context?.brokerVersion !== undefined);
+		const sameVersionBroker = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			version: VERSION,
+		});
+		const olderBroker = startAuthBroker({
+			storage: storage!,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			version: "0.0.1",
+		});
+		try {
+			const current = new AuthBrokerClient({ url: sameVersionBroker.url, token });
+			await current.healthz();
+			await current.fetchSnapshot();
+			expect(skewWarnings()).toEqual([]);
+
+			const skewed = new AuthBrokerClient({ url: olderBroker.url, token });
+			await skewed.healthz();
+			await skewed.fetchSnapshot();
+			expect(skewWarnings()).toEqual([
+				[expect.any(String), { url: olderBroker.url, brokerVersion: "0.0.1", clientVersion: VERSION }],
+			]);
+
+			const entry = {
+				at: Date.now(),
+				provider: "anthropic",
+				model: "claude-x",
+				requests: 1,
+				inputTokens: 10,
+				outputTokens: 5,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				costUsd: 0,
+			};
+			// A gateway relays other installs' usage over its own connection; only the
+			// sender's own row may take the sender's version.
+			await skewed.reportClientUsage({ installId: getInstallId(), entries: [entry] });
+			await skewed.reportClientUsage({ installId: "relayed-install", entries: [entry] });
+			expect(
+				db.query("SELECT install_id, version FROM clients ORDER BY install_id = 'relayed-install'").all(),
+			).toEqual([
+				{ install_id: getInstallId(), version: VERSION },
+				{ install_id: "relayed-install", version: null },
+			]);
+		} finally {
+			await sameVersionBroker.close();
+			await olderBroker.close();
+		}
+	});
+
 	test("Unknown route returns 404", async () => {
 		const res = await fetch(`${handle!.url}/v1/nope`, {
 			headers: { Authorization: `Bearer ${token}` },
@@ -1058,7 +1118,7 @@ describe("auth-broker wire surface", () => {
 });
 
 describe("client_usage app column migration", () => {
-	test("pre-app broker DBs gain the app column; legacy rows stay queryable as unlabeled", async () => {
+	test("pre-app broker DBs gain the app and version columns; legacy rows stay queryable", async () => {
 		// Replicate the pre-app schema exactly as older brokers created it, plus
 		// one recorded legacy row — `CREATE TABLE IF NOT EXISTS` must skip it and
 		// the ALTER-based migration must add the column without losing the row.
@@ -1102,6 +1162,7 @@ describe("client_usage app column migration", () => {
 			migrated.recordClientUsage({
 				installId: "legacy-install",
 				app: "robomp",
+				version: "18.0.0",
 				entries: [
 					{
 						at: now,
@@ -1127,6 +1188,9 @@ describe("client_usage app column migration", () => {
 				provider: "anthropic",
 				requests: 1,
 				inputTokens: 10,
+			});
+			expect(legacy.query("SELECT version FROM clients WHERE install_id = 'legacy-install'").get()).toEqual({
+				version: "18.0.0",
 			});
 		} finally {
 			migrated.close();

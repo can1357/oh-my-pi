@@ -801,6 +801,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			CREATE TABLE IF NOT EXISTS clients (
 				install_id TEXT PRIMARY KEY,
 				hostname TEXT,
+				version TEXT,
 				first_seen INTEGER NOT NULL,
 				last_seen INTEGER NOT NULL
 			);
@@ -821,7 +822,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			CREATE INDEX IF NOT EXISTS idx_client_usage_series ON client_usage(install_id, provider, model, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
 		`);
-		this.#ensureClientUsageAppColumn();
+		this.#ensureColumn("client_usage", "app", "TEXT NOT NULL DEFAULT ''");
+		this.#ensureColumn("clients", "version", "TEXT");
 
 		if (!this.#authCredentialsTableExists()) {
 			this.#createAuthCredentialsTable();
@@ -2022,14 +2024,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Add the `app` attribution column to `client_usage` tables created before
-	 * it existed. `CREATE TABLE IF NOT EXISTS` skips established broker DBs, so
-	 * the column arrives via ALTER; legacy rows keep the `''` (unlabeled) app.
+	 * Add a column to a table created before it existed. `CREATE TABLE IF NOT
+	 * EXISTS` skips established broker DBs, so the column arrives via ALTER and
+	 * legacy rows take its default (`client_usage.app` `''` reads as unlabeled).
 	 */
-	#ensureClientUsageAppColumn(): void {
-		const columns = this.#db.query("PRAGMA table_info(client_usage)").all() as Array<{ name: string }>;
-		if (!columns.some(column => column.name === "app")) {
-			this.#db.run("ALTER TABLE client_usage ADD COLUMN app TEXT NOT NULL DEFAULT ''");
+	#ensureColumn(table: "client_usage" | "clients", column: string, definition: string): void {
+		const columns = this.#db.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+		if (!columns.some(existing => existing.name === column)) {
+			this.#db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 		}
 	}
 
@@ -2037,10 +2039,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		const now = Date.now();
 		this.#db
 			.query(
-				`INSERT INTO clients (install_id, hostname, first_seen, last_seen) VALUES (?, ?, ?, ?)
-				 ON CONFLICT(install_id) DO UPDATE SET hostname = COALESCE(excluded.hostname, hostname), last_seen = excluded.last_seen`,
+				`INSERT INTO clients (install_id, hostname, version, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(install_id) DO UPDATE SET hostname = COALESCE(excluded.hostname, hostname),
+				 version = COALESCE(excluded.version, version), last_seen = excluded.last_seen`,
 			)
-			.run(report.installId, report.hostname ?? null, now, now);
+			.run(report.installId, report.hostname ?? null, report.version ?? null, now, now);
 		const app = report.app?.trim() ?? "";
 		const findBucket = this.#db.query(
 			`SELECT id FROM client_usage

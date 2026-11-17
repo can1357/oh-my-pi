@@ -7,7 +7,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { isRecord, readSseEvents } from "@oh-my-pi/pi-utils";
+import { getInstallId, isRecord, logger, readSseEvents, VERSION } from "@oh-my-pi/pi-utils";
 import type { AuthCredential, DisabledCredentialSummary, OAuthRefreshReason } from "../auth-storage";
 import type {
 	ClientUsageReportRequest,
@@ -30,7 +30,13 @@ import type {
 	UsageResponse,
 	UsageStaleResponse,
 } from "./types";
-import { AUTH_BROKER_CAPABILITIES_HEADER, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES } from "./types";
+import {
+	AUTH_BROKER_CAPABILITIES_HEADER,
+	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CLIENT_INSTALL_ID_HEADER,
+	AUTH_BROKER_CLIENT_VERSION_HEADER,
+	AUTH_BROKER_VERSION_HEADER,
+} from "./types";
 import { parseGenerationTag } from "./protocol";
 import {
 	clientUsageReportResponseSchema,
@@ -152,6 +158,9 @@ export class AuthBrokerClient {
 	readonly #timeoutMs: number;
 	readonly #maxRetries: number;
 	readonly #fetch: typeof fetch;
+	readonly #identityHeaders: Record<string, string>;
+	/** Last broker version seen in a response header; a change to a version unlike ours warns once. */
+	#brokerVersion: string | undefined;
 
 	constructor(opts: AuthBrokerClientOptions) {
 		this.#baseUrl = opts.url.replace(/\/+$/, "");
@@ -159,6 +168,10 @@ export class AuthBrokerClient {
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.#maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
 		this.#fetch = opts.fetchImpl ?? fetch;
+		this.#identityHeaders = {
+			[AUTH_BROKER_CLIENT_VERSION_HEADER]: VERSION,
+			[AUTH_BROKER_CLIENT_INSTALL_ID_HEADER]: getInstallId(),
+		};
 	}
 
 	healthz(signal?: AbortSignal): Promise<HealthzResponse> {
@@ -218,6 +231,7 @@ export class AuthBrokerClient {
 	async *openSnapshotStream(opts: { signal?: AbortSignal } = {}): AsyncGenerator<SnapshotStreamEvent> {
 		const url = `${this.#baseUrl}/v1/snapshot/stream`;
 		const headers: Record<string, string> = {
+			...this.#identityHeaders,
 			Accept: "text/event-stream",
 			Authorization: `Bearer ${this.#token}`,
 			[AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
@@ -255,6 +269,7 @@ export class AuthBrokerClient {
 				body: contentType ?? "",
 			});
 		}
+		this.#noteBrokerVersion(response.headers);
 
 		let sawFirstEvent = false;
 		for await (const sse of readSseEvents(response.body, opts.signal)) {
@@ -493,7 +508,7 @@ export class AuthBrokerClient {
 	): Promise<Response> {
 		const auth = opts.auth ?? true;
 		const url = `${this.#baseUrl}${path}`;
-		const headers: Record<string, string> = { Accept: "application/json", ...opts.headers };
+		const headers: Record<string, string> = { ...this.#identityHeaders, Accept: "application/json", ...opts.headers };
 		if (auth) headers.Authorization = `Bearer ${this.#token}`;
 		let payload: string | undefined;
 		if (opts.body !== undefined) {
@@ -518,6 +533,7 @@ export class AuthBrokerClient {
 					body: payload,
 					signal,
 				});
+				this.#noteBrokerVersion(response.headers);
 				if (!response.ok && response.status !== 304) {
 					let text = "";
 					try {
@@ -550,6 +566,18 @@ export class AuthBrokerClient {
 		}
 		throw new AuthBrokerError(`Auth broker request failed after ${this.#maxRetries + 1} attempt(s)`, {
 			cause: lastError,
+		});
+	}
+
+	#noteBrokerVersion(headers: Headers): void {
+		const brokerVersion = headers.get(AUTH_BROKER_VERSION_HEADER);
+		if (!brokerVersion || brokerVersion === this.#brokerVersion) return;
+		this.#brokerVersion = brokerVersion;
+		if (brokerVersion === VERSION) return;
+		logger.warn("auth-broker runs a different omp version than this client", {
+			url: this.#baseUrl,
+			brokerVersion,
+			clientVersion: VERSION,
 		});
 	}
 }
