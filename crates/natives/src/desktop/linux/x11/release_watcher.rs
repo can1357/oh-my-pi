@@ -27,20 +27,18 @@ use std::{
 	fs::File,
 	io::{self, Read as _},
 	mem::MaybeUninit,
-	net::Shutdown,
+	net::{Shutdown, TcpStream},
 	os::{
-		fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
+		fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
 		unix::{
 			fs::{FileExt, PermissionsExt},
 			net::UnixStream,
 		},
 	},
 	ptr,
-	sync::Arc,
 	time::{Duration, Instant},
 };
 
-use parking_lot::Mutex;
 use x11rb::{
 	connection::{Connection as _, RequestConnection as _},
 	protocol::{
@@ -50,8 +48,12 @@ use x11rb::{
 		},
 		xtest,
 	},
-	reexports::x11rb_protocol::{parse_display::parse_display, xauth::get_auth},
-	rust_connection::{DefaultStream, RustConnection},
+	reexports::x11rb_protocol::{
+		parse_display::parse_display,
+		xauth::{Family, get_auth},
+	},
+	rust_connection::{DefaultStream, PollMode, RustConnection, Stream},
+	utils::RawFdContainer,
 };
 
 /// One `XTest` key or button, by X keycode or button number.
@@ -102,45 +104,28 @@ pub(super) struct ReleaseWatcher {
 }
 
 impl ReleaseWatcher {
-	/// Spawns the watcher with its own X connection to `display` (`DISPLAY`'s
-	/// server when `None`), whose root window is `root`, within
-	/// [`START_TIMEOUT`]. Past it the start's X socket is shut down, so a
-	/// start still waiting on the server ends, and a watcher that started
-	/// later is ended where it started.
-	pub(super) fn start(display: Option<String>, root: Window) -> io::Result<Self> {
-		let connecting = Arc::new(Mutex::new(Connecting::default()));
-		let (started, start) = std::sync::mpsc::sync_channel(1);
-		let worker = Arc::clone(&connecting);
-		std::thread::Builder::new()
-			.name("xtest-release".into())
-			.spawn(move || {
-				let _ = started.send(Self::connect(display.as_deref(), root, &worker));
-			})?;
-		start.recv_timeout(START_TIMEOUT).unwrap_or_else(|_| {
-			connecting.lock().abandon();
-			Err(io::Error::new(io::ErrorKind::TimedOut, "the release watcher did not start"))
-		})
-	}
-
-	/// `x11rb::connect`, with the socket handed to `connecting` before the
-	/// server's setup is awaited.
-	fn connect(
-		display: Option<&str>,
+	/// Spawns the watcher with its own connection to the X server at the other
+	/// end of `x11`, omp's connection to `display` (`DISPLAY` when `None`),
+	/// whose root window is `root`. Every wait, on the server's accept queue,
+	/// its replies or the shell's line, ends within [`START_TIMEOUT`], so a
+	/// start that runs out of time leaves nothing.
+	pub(super) fn start(
+		x11: BorrowedFd<'_>,
+		display: Option<String>,
 		root: Window,
-		connecting: &Mutex<Connecting>,
 	) -> io::Result<Self> {
-		let display = parse_display(display).map_err(io::Error::other)?;
-		let (stream, (family, address)) = display
-			.connect_instruction()
-			.find_map(|address| DefaultStream::connect(&address).ok())
-			.ok_or_else(|| io::Error::other("the X server cannot be reached"))?;
-		connecting.lock().watch(stream.as_fd())?;
+		let deadline = Instant::now() + START_TIMEOUT;
+		let display = parse_display(display.as_deref()).map_err(io::Error::other)?;
+		let (stream, (family, address)) = connect(x11, deadline)?;
+		// x11rb keeps no copy of the authority omp's connection used, so the
+		// file is read again: a local read the deadline does not bound, as
+		// omp's own connect does not.
 		let (name, data) = get_auth(family, &address, display.display)
 			.ok()
 			.flatten()
 			.unwrap_or_default();
 		let conn = RustConnection::connect_to_stream_with_auth_info(
-			stream,
+			Deadlined { stream, deadline },
 			display.screen.into(),
 			name,
 			data,
@@ -154,7 +139,7 @@ impl ReleaseWatcher {
 		let gc = conn.generate_id().map_err(io::Error::other)?;
 		// x11rb made the socket nonblocking, and `cat` gives up on a read or
 		// write that would block instead of waiting for the server.
-		let x11 = conn.stream().as_raw_fd();
+		let x11 = conn.stream().stream.as_raw_fd();
 		// SAFETY: fcntl on an open descriptor with integer arguments.
 		let flags = unsafe { libc::fcntl(x11, libc::F_GETFL) };
 		// SAFETY: as above.
@@ -163,12 +148,19 @@ impl ReleaseWatcher {
 			return Err(io::Error::last_os_error());
 		}
 		// The watcher keeps the connection; omp's copy closes with `conn`.
-		Self::spawn(x11, xtest, root, gc)
+		Self::spawn(x11, xtest, root, gc, deadline)
 	}
 
 	/// Spawns a watcher that sends its releases on `x11`, then has the server
-	/// close it through the unused id `gc`.
-	fn spawn(x11: RawFd, xtest: u8, root: Window, gc: Gcontext) -> io::Result<Self> {
+	/// close it through the unused id `gc`, once its shell writes its line by
+	/// `deadline`.
+	fn spawn(
+		x11: RawFd,
+		xtest: u8,
+		root: Window,
+		gc: Gcontext,
+		deadline: Instant,
+	) -> io::Result<Self> {
 		// Through the system call, which the glibc omp is built against
 		// predates; a kernel without it fails with ENOSYS.
 		// SAFETY: memfd_create takes a NUL-terminated name and returns a fresh
@@ -195,11 +187,27 @@ impl ReleaseWatcher {
 		let watcher = spawn_shell(watched.as_raw_fd(), x11, slots.as_raw_fd())?;
 		drop(watched);
 		let watcher = Self { slots, xtest, socket, watcher };
-		// A shell that never gets going times out here instead of writing its
-		// line; dropping it reaps it.
-		watcher.socket.set_read_timeout(Some(EXIT_TIMEOUT))?;
-		(&watcher.socket).read_exact(&mut [0])?;
-		Ok(watcher)
+		// A shell that has not written its line by then is killed, holding
+		// nothing, and reaped as the watcher drops. A signal ends the read
+		// early, and the next one waits only for what is left.
+		let line = loop {
+			let read = left(deadline).and_then(|left| {
+				watcher.socket.set_read_timeout(Some(left))?;
+				(&watcher.socket).read(&mut [0])
+			});
+			match read {
+				Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+				Ok(0) => break Err(io::ErrorKind::UnexpectedEof.into()),
+				read => break read,
+			}
+		};
+		match line {
+			Ok(_) => Ok(watcher),
+			Err(error) => {
+				watcher.abandon();
+				Err(error)
+			},
+		}
 	}
 
 	/// Whether the watcher is still waiting on its socket: one that died or
@@ -275,32 +283,106 @@ impl Drop for ReleaseWatcher {
 	}
 }
 
-/// A start that may outlive the call waiting for it: a copy of its X socket,
-/// which that call shuts down when it stops waiting.
-#[derive(Default)]
-struct Connecting {
-	socket:    Option<OwnedFd>,
-	abandoned: bool,
+/// The start's X stream, whose waits for the server end at `deadline`.
+struct Deadlined {
+	stream:   DefaultStream,
+	deadline: Instant,
 }
 
-impl Connecting {
-	/// Keeps a copy of `socket`, or fails once the call stopped waiting.
-	fn watch(&mut self, socket: BorrowedFd<'_>) -> io::Result<()> {
-		if self.abandoned {
-			return Err(io::Error::new(io::ErrorKind::TimedOut, "the release watcher did not start"));
+impl Stream for Deadlined {
+	fn poll(&self, mode: PollMode) -> io::Result<()> {
+		let events = match mode {
+			PollMode::Readable => libc::POLLIN,
+			PollMode::Writable => libc::POLLOUT,
+			PollMode::ReadAndWritable => libc::POLLIN | libc::POLLOUT,
+		};
+		let mut ready = libc::pollfd { fd: self.stream.as_raw_fd(), events, revents: 0 };
+		loop {
+			let timeout =
+				libc::c_int::try_from(left(self.deadline)?.as_millis()).unwrap_or(libc::c_int::MAX);
+			// SAFETY: one valid pollfd for the duration of the call.
+			match unsafe { libc::poll(&raw mut ready, 1, timeout) } {
+				0 => return Err(io::ErrorKind::TimedOut.into()),
+				-1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => {},
+				-1 => return Err(io::Error::last_os_error()),
+				_ => return Ok(()),
+			}
 		}
-		self.socket = Some(socket.try_clone_to_owned()?);
-		Ok(())
 	}
 
-	/// Makes the start's reads and writes on the server fail, so it ends.
-	fn abandon(&mut self) {
-		self.abandoned = true;
-		if let Some(socket) = &self.socket {
-			// SAFETY: shutdown on an open descriptor with an integer flag.
-			unsafe { libc::shutdown(socket.as_raw_fd(), libc::SHUT_RDWR) };
-		}
+	fn read(&self, buf: &mut [u8], fd_storage: &mut Vec<RawFdContainer>) -> io::Result<usize> {
+		self.stream.read(buf, fd_storage)
 	}
+
+	fn write(&self, buf: &[u8], fds: &mut Vec<RawFdContainer>) -> io::Result<usize> {
+		self.stream.write(buf, fds)
+	}
+}
+
+/// A new connection to the server at the other end of `x11`, made by
+/// `deadline`. Its address is `x11`'s peer, so no host name is looked up.
+fn connect(
+	x11: BorrowedFd<'_>,
+	deadline: Instant,
+) -> io::Result<(DefaultStream, (Family, Vec<u8>))> {
+	// SAFETY: sockaddr_storage is plain data, valid zeroed.
+	let mut address: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+	let mut length = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+	// SAFETY: getpeername writes at most `length` bytes of `address`, and
+	// how many it wrote to `length`.
+	if unsafe { libc::getpeername(x11.as_raw_fd(), (&raw mut address).cast(), &raw mut length) }
+		== -1
+	{
+		return Err(io::Error::last_os_error());
+	}
+	match libc::c_int::from(address.ss_family) {
+		libc::AF_UNIX => DefaultStream::from_unix_stream(connect_to(
+			&address,
+			length,
+			UnixStream::set_write_timeout,
+			deadline,
+		)?),
+		libc::AF_INET | libc::AF_INET6 => DefaultStream::from_tcp_stream(connect_to(
+			&address,
+			length,
+			TcpStream::set_write_timeout,
+			deadline,
+		)?),
+		_ => Err(io::Error::other("omp's X connection is neither a Unix nor a TCP socket")),
+	}
+}
+
+/// A socket connected to the first `length` bytes of `address` by
+/// `deadline`, through `send_timeout`: Linux ends a connect waiting for room
+/// in the accept queue, or for a TCP handshake, once the send timeout passes.
+fn connect_to<S: From<OwnedFd> + AsRawFd>(
+	address: &libc::sockaddr_storage,
+	length: libc::socklen_t,
+	send_timeout: fn(&S, Option<Duration>) -> io::Result<()>,
+	deadline: Instant,
+) -> io::Result<S> {
+	let family = libc::c_int::from(address.ss_family);
+	// SAFETY: socket takes integers and returns a fresh descriptor or -1.
+	let socket = match unsafe { libc::socket(family, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) } {
+		-1 => return Err(io::Error::last_os_error()),
+		// SAFETY: the descriptor is open and owned here alone.
+		fd => S::from(unsafe { OwnedFd::from_raw_fd(fd) }),
+	};
+	send_timeout(&socket, Some(left(deadline)?))?;
+	// SAFETY: connect reads the first `length` bytes of `address`.
+	if unsafe { libc::connect(socket.as_raw_fd(), ptr::from_ref(address).cast(), length) } == -1 {
+		return Err(io::Error::last_os_error());
+	}
+	send_timeout(&socket, None)?;
+	Ok(socket)
+}
+
+/// The time left until `deadline`, or a timeout once none is.
+fn left(deadline: Instant) -> io::Result<Duration> {
+	deadline
+		.checked_duration_since(Instant::now())
+		.filter(|left| !left.is_zero())
+		.ok_or_else(|| io::ErrorKind::TimedOut.into())
 }
 
 /// The `XTest` release of `held` on `root`.
@@ -389,9 +471,9 @@ fn spawn_shell(socket: RawFd, x11: RawFd, slots: RawFd) -> io::Result<libc::pid_
 	};
 	let (socket, x11, slots) = (high(socket)?, high(x11)?, high(slots)?);
 	// glibc 2.34 closes the rest in the child. Elsewhere (older glibc, musl)
-	// the child closes every descriptor from 4 to [`CLOSE_MARGIN`] past the
-	// highest omp has open now, so also those other threads open before the
-	// spawn; a host that cannot list them gets no watcher.
+	// the child closes every descriptor from 4 to [`closes_through`], so also
+	// those other threads open before the spawn; a host that cannot list
+	// them gets no watcher.
 	// SAFETY: dlsym takes a NUL-terminated name; the symbol, where present,
 	// has this signature.
 	let close_from = unsafe {
@@ -407,21 +489,16 @@ fn spawn_shell(socket: RawFd, x11: RawFd, slots: RawFd) -> io::Result<libc::pid_
 	let close_through: RawFd = if close_from.is_some() {
 		3
 	} else {
-		let through = std::fs::read_dir("/proc/self/fd")?
+		let highest = std::fs::read_dir("/proc/self/fd")?
 			.map(|fd| {
 				fd?.file_name()
 					.to_str()
 					.and_then(|fd| fd.parse().ok())
 					.ok_or_else(|| io::Error::other("unreadable /proc/self/fd entry"))
 			})
-			.try_fold(3, |highest, fd| fd.map(|fd: RawFd| highest.max(fd)))?
-			.saturating_add(CLOSE_MARGIN);
-		// glibc refuses to close a descriptor at or past this limit.
+			.try_fold(3, |highest, fd| fd.map(|fd: RawFd| highest.max(fd)))?;
 		// SAFETY: sysconf takes an integer.
-		match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
-			limit if limit > 0 => through.min(RawFd::try_from(limit - 1).unwrap_or(RawFd::MAX)),
-			_ => through,
-		}
+		closes_through(highest, unsafe { libc::sysconf(libc::_SC_OPEN_MAX) })
 	};
 	let argv = [c"sh".as_ptr(), c"-c".as_ptr(), script.as_ptr(), ptr::null()];
 	let env = [ptr::null::<libc::c_char>()];
@@ -480,5 +557,52 @@ fn spawn_shell(socket: RawFd, x11: RawFd, slots: RawFd) -> io::Result<libc::pid_
 			0 => Ok(watcher),
 			error => Err(io::Error::from_raw_os_error(error)),
 		}
+	}
+}
+
+/// The last descriptor the watcher's child closes where the C library cannot
+/// close the rest: [`CLOSE_MARGIN`] past `highest`, the highest omp has open,
+/// up to the descriptor limit `open_max`, which no new descriptor reaches and
+/// glibc refuses to close at or past. A `highest` past the limit, opened
+/// before it was lowered, is still included: glibc's refusal then fails the
+/// spawn rather than leaving it open in the watcher.
+fn closes_through(highest: RawFd, open_max: libc::c_long) -> RawFd {
+	let through = highest.saturating_add(CLOSE_MARGIN);
+	match RawFd::try_from(open_max - 1) {
+		Ok(last) if open_max > 0 => through.min(last).max(highest),
+		_ => through,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::os::{
+		fd::{AsFd as _, AsRawFd as _},
+		linux::net::SocketAddrExt as _,
+		unix::net::{SocketAddr, UnixListener, UnixStream},
+	};
+
+	use super::{ReleaseWatcher, closes_through};
+
+	/// A server whose accept queue stays full: the start gives up instead of
+	/// waiting for room.
+	#[test]
+	fn a_start_gives_up_on_a_server_whose_accept_queue_stays_full() {
+		let name = format!("pi-natives-release-watcher-{}", std::process::id());
+		let listener =
+			UnixListener::bind_addr(&SocketAddr::from_abstract_name(name).unwrap()).unwrap();
+		// SAFETY: listen on an open socket with an integer backlog.
+		assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+		// omp's connection, the one connection a backlog of 0 holds.
+		let x11 = UnixStream::connect_addr(&listener.local_addr().unwrap()).unwrap();
+		assert!(ReleaseWatcher::start(x11.as_fd(), Some(":0".into()), 0).is_err());
+	}
+
+	/// Closing stops at the descriptor limit, except to reach a descriptor
+	/// opened before the limit was lowered.
+	#[test]
+	fn closing_reaches_a_descriptor_above_a_lowered_limit() {
+		assert_eq!(closes_through(20, 64), 63);
+		assert_eq!(closes_through(256, 64), 256);
 	}
 }
