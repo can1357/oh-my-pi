@@ -1255,10 +1255,7 @@ impl omp_agent::NativeHookHost for SettleHost {
 		self.asked.lock().push(payload.clone());
 		Box::pin(std::future::ready(omp_agent::NativeReply {
 			verdict: omp_agent::NativeVerdict::Continue,
-			context: vec![omp_agent::hooks::HookContext {
-				source: sf!("test"),
-				body:   sf!("keep going"),
-			}],
+			context: vec![omp_agent::hooks::HookContext::new(sf!("test"), sf!("keep going"))],
 		}))
 	}
 }
@@ -1297,7 +1294,8 @@ async fn run_settle_submissions(submissions: usize) -> Vec<Value> {
 
 #[tokio::test]
 async fn settle_cap_stops_continuation_after_eight() {
-	assert_eq!(run_settle_submissions(1).await.len(), 8);
+	// Eight accepted Continues, then one more ask that the kernel refuses.
+	assert_eq!(run_settle_submissions(1).await.len(), 9);
 }
 
 #[tokio::test]
@@ -1307,12 +1305,116 @@ async fn continuations_used_counts_up_from_zero() {
 		.iter()
 		.map(|payload| payload["continuations_used"].as_u64().expect("count"))
 		.collect();
-	assert_eq!(used, [0, 1, 2, 3, 4, 5, 6, 7]);
+	assert_eq!(used, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 }
 
 #[tokio::test]
 async fn a_new_submission_starts_the_count_again() {
 	let asked = run_settle_submissions(2).await;
-	assert_eq!(asked.len(), 16);
-	assert_eq!(asked[8]["continuations_used"], 0);
+	assert_eq!(asked.len(), 18);
+	assert_eq!(asked[9]["continuations_used"], 0);
+}
+
+/// Returns scripted Continues then Settle; records nothing.
+struct FieldedSettleHost {
+	replies: Mutex<Vec<omp_agent::NativeReply>>,
+}
+
+impl omp_agent::NativeHookHost for FieldedSettleHost {
+	fn decide<'a>(
+		&'a self,
+		event: HookEventId,
+		_payload: &'a Value,
+	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
+		assert_eq!(event, HookEventId::HookEventAgentSettled);
+		let reply = self.replies.lock().pop().unwrap_or_default();
+		Box::pin(std::future::ready(reply))
+	}
+}
+
+#[tokio::test]
+async fn continue_visible_role_and_collapse_prior_are_honored() {
+	use omp_agent::hooks::{HookContext, HookContextRole};
+	use omp_dom::{PropKey, Tag, Value};
+	use omp_session::custom_message::{CONTINUATION_PROP, DISPLAY_PROP};
+
+	let (gate, _receiver) = HookGate::channel();
+	let gate = Arc::new(gate);
+	let replies = Mutex::new(
+		[
+			omp_agent::NativeReply {
+				verdict: omp_agent::NativeVerdict::Continue,
+				context: vec![HookContext {
+					source:         sf!("goal"),
+					body:           sf!("first"),
+					visible:        true,
+					role:           HookContextRole::System,
+					collapse_prior: true,
+				}],
+			},
+			omp_agent::NativeReply {
+				verdict: omp_agent::NativeVerdict::Continue,
+				context: vec![HookContext {
+					source:         sf!("goal"),
+					body:           sf!("second"),
+					visible:        false,
+					role:           HookContextRole::User,
+					collapse_prior: true,
+				}],
+			},
+			omp_agent::NativeReply::default(),
+		]
+		.into_iter()
+		.rev()
+		.collect(),
+	);
+	gate.attach_native(Arc::new(FieldedSettleHost { replies }), &[
+		HookEventId::HookEventAgentSettled,
+	]);
+	let temp = tempfile::tempdir().expect("tempdir");
+	let (inference, _) = ScriptedInference::new((0..8).map(|_| text_script("done")));
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(Registry::new()),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_hook_gate(gate);
+	let mut session = fresh_session(&temp.path().join("fields.oms"));
+	kernel
+		.run_turn(
+			&mut session,
+			TurnInput { text: sf!("go"), attachments: Vec::new() },
+			RunControl::default(),
+		)
+		.await
+		.expect("turn settles");
+
+	let display_key = PropKey::Custom(Str::new_static(DISPLAY_PROP));
+	let continuation_key = PropKey::Custom(Str::new_static(CONTINUATION_PROP));
+	let mut continuation_nodes = Vec::new();
+	for turn in session.dom().children(session.dom().body()) {
+		for child in session.dom().children(*turn) {
+			let Some(node) = session.dom().get(*child) else {
+				continue;
+			};
+			if matches!(node.prop(&continuation_key), Some(Value::Bool(true))) {
+				continuation_nodes.push((*child, node.tag.clone(), node.prop(&display_key).cloned()));
+			}
+		}
+	}
+	assert!(
+		continuation_nodes.len() >= 2,
+		"both Continuations were journaled: {continuation_nodes:?}"
+	);
+	let first = continuation_nodes
+		.iter()
+		.find(|(_, tag, _)| matches!(tag, Tag::Known(omp_dom::KnownTag::Developer)))
+		.expect("system-role continuation");
+	assert_eq!(first.2, Some(Value::Bool(false)), "collapse_prior hid the older system item");
+	let second = continuation_nodes
+		.iter()
+		.find(|(_, tag, _)| matches!(tag, Tag::Known(omp_dom::KnownTag::User)))
+		.expect("user-role continuation");
+	assert_eq!(second.2, Some(Value::Bool(false)), "visible=false on the user continuation");
 }

@@ -4,6 +4,7 @@
 //! and privacy match the previous single file.
 
 mod bridges;
+mod continuation;
 mod hooks;
 mod registry;
 mod roster_host;
@@ -21,6 +22,10 @@ pub(super) use bridges::{
 	with_invocation_scope, with_invocation_session_scope, with_output_request_scope,
 };
 pub(crate) use bridges::{invocation_reflection, with_invocation_reflection};
+pub use continuation::{
+	ContinuationAwareAgentsFactory, ContinuationBook, ContinuationLedger, ContinuationPolicy,
+	OnExhausted,
+};
 pub use hooks::{
 	HookControlFactory, HookEventPolicy, HookFailurePolicy, HookFieldComposition, HookSubscription,
 };

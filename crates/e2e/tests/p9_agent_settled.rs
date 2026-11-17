@@ -95,3 +95,43 @@ async fn python_agent_settled_later_settle_vetoes_continue() -> Result<()> {
 	harness.shutdown().await;
 	Ok(())
 }
+
+const FIELDS_SOURCE: &str = r#"
+import omp
+
+
+@omp.hook("agent_settled")
+async def settled(event, ctx):
+    return omp.agents.Continue(
+        prompt="visible user continue",
+        visible=True,
+        role="user",
+        label="fields",
+        collapse_prior=False,
+    )
+"#;
+
+static FIELDS_EXTENSION: PythonExtension =
+	PythonExtension::new("p9_settled_fields_extension", FIELDS_SOURCE, &[]).trusting();
+
+#[tokio::test]
+async fn python_agent_settled_continue_fields_reach_hook_context() -> Result<()> {
+	use omp_agent::hooks::HookContextRole;
+
+	let scratch = Scratch::new()?;
+	let harness = InProcessEnvHarness::spawn_with_extension(scratch, &FIELDS_EXTENSION).await?;
+	let hooks = LifecycleHooks::new(harness.server().admission_gate());
+
+	let settled = hooks.agent_settled(payload()).await;
+	assert_eq!(settled.decision, AgentSettled::Continue);
+	assert_eq!(settled.context.len(), 1);
+	let context = &settled.context[0];
+	assert_eq!(context.body, "visible user continue");
+	assert_eq!(context.source, "fields");
+	assert!(context.visible);
+	assert_eq!(context.role, HookContextRole::User);
+	assert!(!context.collapse_prior);
+
+	harness.shutdown().await;
+	Ok(())
+}
