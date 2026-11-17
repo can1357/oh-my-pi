@@ -25,8 +25,29 @@ async def settled(event, ctx):
     return omp.agents.Settle()
 "#;
 
+const VETO_SOURCE: &str = r#"
+import omp
+
+
+# Domain hooks cannot set order; envd sorts by name within an extension.
+@omp.hook("agent_settled", name="a_propose")
+async def propose(event, ctx):
+    return omp.agents.Continue(prompt="keep going", label="goal")
+
+
+@omp.hook("agent_settled", name="b_guard")
+async def guard(event, ctx):
+    assert ctx.pending_continuation is not None
+    assert ctx.pending_continuation.prompt == "keep going"
+    assert ctx.pending_continuation.label == "goal"
+    return omp.agents.Settle()
+"#;
+
 static EXTENSION: PythonExtension =
 	PythonExtension::new("p9_settled_extension", SOURCE, &[]).trusting();
+
+static VETO_EXTENSION: PythonExtension =
+	PythonExtension::new("p9_settled_veto_extension", VETO_SOURCE, &[]).trusting();
 
 fn payload() -> serde_json::Value {
 	json!({
@@ -56,6 +77,20 @@ async fn python_agent_settled_continue_runs_one_more_turn() -> Result<()> {
 
 	let second = hooks.agent_settled(payload()).await;
 	assert_eq!(second.decision, AgentSettled::Settle);
+
+	harness.shutdown().await;
+	Ok(())
+}
+
+#[tokio::test]
+async fn python_agent_settled_later_settle_vetoes_continue() -> Result<()> {
+	let scratch = Scratch::new()?;
+	let harness = InProcessEnvHarness::spawn_with_extension(scratch, &VETO_EXTENSION).await?;
+	let hooks = LifecycleHooks::new(harness.server().admission_gate());
+
+	let settled = hooks.agent_settled(payload()).await;
+	assert_eq!(settled.decision, AgentSettled::Settle, "the guard vetoed the pending Continue");
+	assert!(settled.context.is_empty());
 
 	harness.shutdown().await;
 	Ok(())

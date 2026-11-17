@@ -747,10 +747,11 @@ What follows are the boundary decisions and helpers `omp.agents` owns.
 
 The decision that declines to settle. Returned from an `agent_settled` hook.
 
-> **Honored today:** `prompt` (a non-empty string; an empty prompt counts as `Settle`) and `label` only. `visible`, `role` and
+> **Honored today:** `prompt` (a non-empty string; an empty prompt counts as `Settle`) and `label` only, plus the
+> `ctx.pending_continuation` Settle veto. `visible`, `role` and
 > `collapse_prior` are accepted but **not yet honored** (the continuation is
-> appended as a hidden developer message, `<developer kind=hook>`, not displayed); the `ctx.pending_continuation` veto and
-> `ContinuationPolicy` below are likewise not yet honored. The core cap of 8
+> appended as a hidden developer message, `<developer kind=hook>`, not displayed);
+> `ContinuationPolicy` below is likewise not yet honored. The core cap of 8
 > counts continuations from every source per submission, not per extension.
 
 | Field | Type | Default | Semantics |
@@ -779,11 +780,11 @@ Multiple extensions may subscribe. Resolution is declared, not incidental:
    `(layer, publisher, extension_id)` order (`docs/py/05-hooks.md`) — never in
    load order. *(Divergence: envd currently orders by `(layer, extension, order, name)`,
    comparing `layer` as a string.)*
-2. The **first** `Continue` wins. *(Veto not yet honored: hooks after the first `Continue` are not called at
-   all, so there is no `pending_continuation` veto yet.)* Later hooks see it in
-   `ctx.pending_continuation` and may return `Settle()` to veto it, which is
-   how a guard extension overrides a goal extension without either knowing
-   about the other.
+2. The **first** `Continue` wins. Later hooks see it in
+   `ctx.pending_continuation` (`omp.PendingContinuation` with `prompt` / `label`)
+   and may return `Settle()` to veto it, which is how a guard extension overrides
+   a goal extension without either knowing about the other. A raise or timeout
+   after a Continue does not veto.
 3. A hook that raises or times out contributes `Settle()` — `agent_settled` is
    fail-open, because an extension crash must not spin the loop.
 4. If a `Continue` survives, the core applies its cap of 8 per submission. *(No continuation

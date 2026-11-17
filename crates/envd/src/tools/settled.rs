@@ -1,4 +1,4 @@
-//! `agent_settled` hook reply decoding, row selection and first-Continue fold.
+//! `agent_settled` hook reply decoding, row selection and Continue/Settle fold.
 
 use std::{
 	cmp::Ordering,
@@ -64,28 +64,44 @@ pub(crate) fn settled_rows<'a>(
 	selected
 }
 
-/// Calls rows in order and returns the first Continue; otherwise Defer.
-pub(crate) async fn first_continue<F, Fut>(rows: &[HookSubscription], mut call: F) -> NativeReply
+/// Calls rows in order: the first Continue is pending; later hooks see it and
+/// may veto with Settle. A failed or timed-out call never vetoes (fail-open).
+pub(crate) async fn resolve_settled<F, Fut>(rows: &[HookSubscription], mut call: F) -> NativeReply
 where
-	F: FnMut(&HookSubscription) -> Fut,
+	F: FnMut(&HookSubscription, Option<&SettledContinue>) -> Fut,
 	Fut: Future<Output = Option<JsonValue>>,
 {
+	let mut pending: Option<(SettledContinue, Str)> = None;
 	for row in rows {
-		let Some(reply) = call(row).await else {
+		let pending_continue = pending.as_ref().map(|(continuation, _)| continuation);
+		let Some(reply) = call(row, pending_continue).await else {
+			// Raise / timeout: contribute Settle without vetoing a pending Continue.
 			continue;
 		};
-		let Some(found) = decode_settled_reply(&reply) else {
-			continue;
-		};
-		let source = found
-			.label
-			.unwrap_or_else(|| row.identity.extension.clone());
-		return NativeReply {
+		match decode_settled_reply(&reply) {
+			Some(found) => {
+				if pending.is_none() {
+					let source = found
+						.label
+						.clone()
+						.unwrap_or_else(|| row.identity.extension.clone());
+					pending = Some((found, source));
+				}
+			},
+			None if pending.is_some() => {
+				// Explicit Settle after a Continue vetoes it.
+				return NativeReply { verdict: NativeVerdict::Defer, context: Vec::new() };
+			},
+			None => {},
+		}
+	}
+	match pending {
+		Some((found, source)) => NativeReply {
 			verdict: NativeVerdict::Continue,
 			context: vec![HookContext { source, body: found.prompt }],
-		};
+		},
+		None => NativeReply { verdict: NativeVerdict::Defer, context: Vec::new() },
 	}
-	NativeReply { verdict: NativeVerdict::Defer, context: Vec::new() }
 }
 
 /// In-process host that answers `agent_settled` from the session's Python
@@ -233,28 +249,74 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn first_continue_wins() {
+	async fn first_continue_wins_and_later_continues_are_ignored() {
 		let rows = vec![settled("a", 0), settled("b", 0), settled("c", 0)];
 		let mut calls = 0;
-		let reply = first_continue(&rows, |r| {
+		let reply = resolve_settled(&rows, |r, pending| {
 			calls += 1;
 			let out = match r.identity.extension.as_str() {
 				"a" => json!({}),
-				"b" => json!({"prompt":"x"}),
-				_ => json!({"prompt":"y"}),
+				"b" => {
+					assert!(pending.is_none());
+					json!({"prompt":"x"})
+				},
+				_ => {
+					assert_eq!(pending.map(|c| c.prompt.as_str()), Some("x"));
+					json!({"prompt":"y"})
+				},
 			};
 			async move { Some(out) }
 		})
 		.await;
-		assert_eq!(calls, 2);
+		assert_eq!(calls, 3, "hooks after the first Continue still run");
 		assert_eq!(reply.verdict, NativeVerdict::Continue);
 		assert_eq!(reply.context, vec![HookContext { source: sf!("b"), body: sf!("x") }]);
 	}
 
 	#[tokio::test]
+	async fn later_settle_vetoes_a_pending_continue() {
+		let rows = vec![settled("a", 0), settled("b", 0), settled("c", 0)];
+		let mut calls = 0;
+		let reply = resolve_settled(&rows, |r, pending| {
+			calls += 1;
+			let out = match r.identity.extension.as_str() {
+				"a" => json!({"prompt":"keep"}),
+				"b" => {
+					assert_eq!(pending.map(|c| c.prompt.as_str()), Some("keep"));
+					json!({})
+				},
+				_ => panic!("veto stops further hooks"),
+			};
+			async move { Some(out) }
+		})
+		.await;
+		assert_eq!(calls, 2);
+		assert_eq!(reply, NativeReply::default());
+	}
+
+	#[tokio::test]
+	async fn failed_call_after_continue_does_not_veto() {
+		let rows = vec![settled("a", 0), settled("b", 0)];
+		let reply = resolve_settled(&rows, |r, pending| {
+			let out = match r.identity.extension.as_str() {
+				"a" => Some(json!({"prompt":"keep"})),
+				"b" => {
+					assert_eq!(pending.map(|c| c.prompt.as_str()), Some("keep"));
+					None
+				},
+				_ => unreachable!(),
+			};
+			async move { out }
+		})
+		.await;
+		assert_eq!(reply.verdict, NativeVerdict::Continue);
+		assert_eq!(reply.context[0].body, "keep");
+	}
+
+	#[tokio::test]
 	async fn failed_call_counts_as_settle_and_the_next_hook_runs() {
 		let rows = vec![settled("a", 0), settled("b", 0)];
-		let reply = first_continue(&rows, |r| {
+		let reply = resolve_settled(&rows, |r, _pending| {
 			let out = (r.identity.extension == "b").then(|| json!({"prompt":"z","label":"L"}));
 			async move { out }
 		})
@@ -267,7 +329,7 @@ mod tests {
 	#[tokio::test]
 	async fn no_continue_defers() {
 		let rows = vec![settled("a", 0)];
-		let reply = first_continue(&rows, |_| async { Some(json!({})) }).await;
+		let reply = resolve_settled(&rows, |_, _| async { Some(json!({})) }).await;
 		assert_eq!(reply, NativeReply::default());
 	}
 }
