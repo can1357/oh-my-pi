@@ -1239,3 +1239,80 @@ async fn a_refused_session_start_is_a_typed_denial() {
 		.await
 		.expect("an unsubscribed start never fails");
 }
+
+/// Always answers `continue` at the settle seam and records each payload.
+struct SettleHost {
+	asked: Arc<Mutex<Vec<Value>>>,
+}
+
+impl omp_agent::NativeHookHost for SettleHost {
+	fn decide<'a>(
+		&'a self,
+		event: HookEventId,
+		payload: &'a Value,
+	) -> omp_agent::BoxFut<'a, omp_agent::NativeReply> {
+		assert_eq!(event, HookEventId::HookEventAgentSettled);
+		self.asked.lock().push(payload.clone());
+		Box::pin(std::future::ready(omp_agent::NativeReply {
+			verdict: omp_agent::NativeVerdict::Continue,
+			context: vec![omp_agent::hooks::HookContext {
+				source: sf!("test"),
+				body:   sf!("keep going"),
+			}],
+		}))
+	}
+}
+
+/// Runs `submissions` prompts against an always-continuing settle host.
+async fn run_settle_submissions(submissions: usize) -> Vec<Value> {
+	let (gate, _receiver) = HookGate::channel();
+	let gate = Arc::new(gate);
+	let asked = Arc::new(Mutex::new(Vec::new()));
+	gate.attach_native(Arc::new(SettleHost { asked: Arc::clone(&asked) }), &[
+		HookEventId::HookEventAgentSettled,
+	]);
+	let temp = tempfile::tempdir().expect("tempdir");
+	let (inference, _) = ScriptedInference::new((0..32).map(|_| text_script("done")));
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(Registry::new()),
+		DispatchPolicy::new(BlobStore::open(temp.path().join("blobs")).expect("blobs")),
+		StaticPrompt(sf!("system")),
+	)
+	.with_hook_gate(gate);
+	let mut session = fresh_session(&temp.path().join("settle.oms"));
+	for _ in 0..submissions {
+		kernel
+			.run_turn(
+				&mut session,
+				TurnInput { text: sf!("go"), attachments: Vec::new() },
+				RunControl::default(),
+			)
+			.await
+			.expect("turn settles");
+	}
+	let asked = std::mem::take(&mut *asked.lock());
+	asked
+}
+
+#[tokio::test]
+async fn settle_cap_stops_continuation_after_eight() {
+	assert_eq!(run_settle_submissions(1).await.len(), 8);
+}
+
+#[tokio::test]
+async fn continuations_used_counts_up_from_zero() {
+	let used: Vec<u64> = run_settle_submissions(1)
+		.await
+		.iter()
+		.map(|payload| payload["continuations_used"].as_u64().expect("count"))
+		.collect();
+	assert_eq!(used, [0, 1, 2, 3, 4, 5, 6, 7]);
+}
+
+#[tokio::test]
+async fn a_new_submission_starts_the_count_again() {
+	let asked = run_settle_submissions(2).await;
+	assert_eq!(asked.len(), 16);
+	assert_eq!(asked[8]["continuations_used"], 0);
+}

@@ -430,6 +430,11 @@ impl EnvServer {
 		let provider_response_hooks =
 			omp_ai::ProviderResponseHooks::new(control_bindings.hooks.clone());
 		let admission_gate = control_bindings.hooks.admission_gate();
+		crate::tools::AgentSettledHost::attach(
+			&control_bindings.hooks,
+			session_id.clone(),
+			ext_hosts.session_generation(),
+		);
 		Ok(Self::new(
 			identity,
 			Some(EnvironmentAuthorities {
@@ -742,6 +747,11 @@ impl EnvServer {
 		let provider_response_hooks =
 			omp_ai::ProviderResponseHooks::new(control_bindings.hooks.clone());
 		let admission_gate = control_bindings.hooks.admission_gate();
+		crate::tools::AgentSettledHost::attach(
+			&control_bindings.hooks,
+			session_id.clone(),
+			ext_hosts.session_generation(),
+		);
 		Ok(Self::new(
 			identity,
 			Some(EnvironmentAuthorities {
@@ -992,6 +1002,11 @@ impl EnvServer {
 		let provider_response_hooks =
 			omp_ai::ProviderResponseHooks::new(control_bindings.hooks.clone());
 		let admission_gate = control_bindings.hooks.admission_gate();
+		crate::tools::AgentSettledHost::attach(
+			&control_bindings.hooks,
+			session_id.clone(),
+			ext_hosts.session_generation(),
+		);
 		Ok(Self::new(
 			identity,
 			None,

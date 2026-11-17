@@ -23,9 +23,10 @@ use crate::{Context as _, Result, error};
 /// with `@omp.tool(name, rev=1)`.
 #[derive(Clone, Copy, Debug)]
 pub struct PythonExtension {
-	module: &'static str,
-	source: &'static str,
-	tools:  &'static [&'static str],
+	module:  &'static str,
+	source:  &'static str,
+	tools:   &'static [&'static str],
+	trusted: bool,
 }
 
 pub(super) struct ExtensionInstall {
@@ -41,7 +42,14 @@ impl PythonExtension {
 		source: &'static str,
 		tools: &'static [&'static str],
 	) -> Self {
-		Self { module, source, tools }
+		Self { module, source, tools, trusted: false }
+	}
+
+	/// Lets the module publish hooks its manifest does not declare, as an
+	/// operator-trusted module may.
+	pub const fn trusting(mut self) -> Self {
+		self.trusted = true;
+		self
 	}
 
 	/// Returns the tool revision `InvokeTool.rev` must carry (`<module>.1`).
@@ -91,7 +99,7 @@ impl PythonExtension {
 				}
 			})
 			.collect();
-		let manifest = ExtensionManifest::new_with_static(
+		let mut manifest = ExtensionManifest::new_with_static(
 			provenance,
 			Str::new_static(self.module),
 			[],
@@ -105,6 +113,9 @@ impl PythonExtension {
 			[],
 			[ActivationTrigger::FirstReach],
 		);
+		if self.trusted {
+			manifest.trust_runtime_declarations();
+		}
 		let mut spec = ExtHostSpec::new(key.clone(), manifest);
 		spec.python_site = Some(root.to_path_buf());
 		spec.entry_path = Some(entry);

@@ -439,6 +439,11 @@ impl InProcessEnvHarness {
 		self.primary.client()
 	}
 
+	/// Returns the environment authority, for its hook gate.
+	pub fn server(&self) -> &Arc<EnvServer> {
+		&self.server
+	}
+
 	/// Returns the project root used by the authority.
 	pub fn project(&self) -> &Path {
 		match &self.roots {

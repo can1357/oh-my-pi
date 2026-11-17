@@ -1428,6 +1428,7 @@ impl<C: Inference> Kernel<C> {
 		let mut tokens_in = 0_u64;
 		let mut tokens_out = 0_u64;
 		let mut was_steered = false;
+		let mut settle_continuations = 0_u32;
 		let mut empty_output_retries = 0_u8;
 		let mut requests_started = 0_u32;
 		let mut request_budget_notice_sent = false;
@@ -2051,7 +2052,11 @@ impl<C: Inference> Kernel<C> {
 				LoopDecision::Continue { .. } => continue,
 				LoopDecision::Yield => {
 					// An extension may block the stop and demand another turn.
-					if let Some(hooks) = &self.lifecycle_hooks {
+					if let Some(hooks) = self
+						.lifecycle_hooks
+						.as_ref()
+						.filter(|_| settle_continuations < omp_contract::hooks::SETTLE_CONTINUATION_CAP)
+					{
 						let settled = hooks
 							.agent_settled(serde_json::json!({
 								"submission_id": turn.to_string(),
@@ -2059,11 +2064,12 @@ impl<C: Inference> Kernel<C> {
 								"committed_turns": requests_started,
 								"last_stop": turn_view.stop_reason,
 								"pending_jobs": self.dispatcher.jobs().list().iter().map(|job| job.id.clone()).collect::<Vec<_>>(),
-								"continuations_used": 0,
+								"continuations_used": settle_continuations,
 								"incomplete_todos": [],
 							}))
 							.await;
 						if settled.decision == crate::AgentSettled::Continue {
+							settle_continuations += 1;
 							append_hook_context(session, turn, settled.context)?;
 							self.apply_live_components(session)?;
 							continue;
