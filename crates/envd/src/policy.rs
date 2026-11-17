@@ -52,6 +52,11 @@ pub const CAPABILITIES: &[&str] = &[
 	"env.dap.execute",
 ];
 
+/// CONTROL capabilities an extension receives only through an operator grant
+/// record; never DATA grants.
+pub const CONTROL_CAPABILITIES: &[&str] =
+	&["agents.continuation", "approvals.decide", "policy.write"];
+
 /// An exact, wildcard-free set of DATA grants.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Grants(Arc<[Str]>);

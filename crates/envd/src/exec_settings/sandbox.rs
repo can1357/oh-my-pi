@@ -1,6 +1,9 @@
 //! Agent command sandbox posture and policy settings.
 
-use std::{collections::BTreeMap, path::Path};
+use std::{
+	collections::BTreeMap,
+	path::{Path, PathBuf},
+};
 
 use omp_con::{Ctx, Kv, Value};
 use omp_core::Str;
@@ -330,96 +333,101 @@ omp_con::var! {
 #[serde(default, deny_unknown_fields)]
 pub struct SandboxSettings {
 	/// Sandbox posture applied to agent command execution.
-	pub mode:               ExecSandboxMode,
+	pub mode:                  ExecSandboxMode,
 	/// Network authority granted to sandboxed commands.
-	pub network_mode:       SandboxNetworkMode,
+	pub network_mode:          SandboxNetworkMode,
 	/// Whether the user set `network_mode` or it is the shipped default. A
 	/// defaulted mode never sandboxes an explicit `sv_sandbox_mode off`.
-	pub network_provenance: Provenance,
+	pub network_provenance:    Provenance,
 	/// CPU-core ceiling for one sandboxed command tree; zero is unlimited.
-	pub cpu_cores:          f64,
+	pub cpu_cores:             f64,
 	/// Resident-memory ceiling for one sandboxed command tree; zero is
 	/// unlimited.
-	pub memory_bytes:       i64,
+	pub memory_bytes:          i64,
 	/// Live-process ceiling for one sandboxed command tree; zero is unlimited.
-	pub pids:               u32,
+	pub pids:                  u32,
 	/// Exact or leading `*.` wildcard domain names allowed in scoped mode.
-	pub allow_domains:      Vec<Str>,
+	pub allow_domains:         Vec<Str>,
 	/// Domain names denied before scoped allow rules.
-	pub deny_domains:       Vec<Str>,
+	pub deny_domains:          Vec<Str>,
 	/// TCP ports allowed in scoped mode.
-	pub allow_ports:        Vec<u16>,
+	pub allow_ports:           Vec<u16>,
 	/// Most reruns one command may take on network endpoints approved for the
 	/// session; at least 1.
-	pub network_reruns:     u32,
+	pub network_reruns:        u32,
 	/// Whether scoped mode may connect to loopback addresses.
-	pub allow_localhost:    bool,
+	pub allow_localhost:       bool,
 	/// Existing absolute Unix-domain socket paths allowed independently of IP
 	/// networking.
-	pub allow_unix_sockets: Vec<Str>,
+	pub allow_unix_sockets:    Vec<Str>,
 	/// Additional absolute roots that workspace-write mode may modify.
-	pub writable_roots:     Vec<Str>,
+	pub writable_roots:        Vec<Str>,
 	/// Policy for writes outside configured roots in workspace-write mode.
-	pub unscoped_writes:    UnscopedWrites,
+	pub unscoped_writes:       UnscopedWrites,
 	/// Exported environment variable name globs withheld from external commands.
-	pub env_deny:           Vec<Str>,
+	pub env_deny:              Vec<Str>,
 	/// Base environment inherited by child processes.
-	pub env_inherit:        EnvironmentInheritance,
+	pub env_inherit:           EnvironmentInheritance,
 	/// Environment variable name globs retained before deny filtering.
-	pub env_include_only:   Vec<Str>,
+	pub env_include_only:      Vec<Str>,
 	/// Explicit child environment values applied after filtering.
-	pub env_set:            BTreeMap<Str, Str>,
+	pub env_set:               BTreeMap<Str, Str>,
 	/// Whether workspace-write excludes the platform temporary directory.
-	pub exclude_tmpdir:     bool,
+	pub exclude_tmpdir:        bool,
 	/// Whether workspace-write excludes `/tmp`.
-	pub exclude_slash_tmp:  bool,
+	pub exclude_slash_tmp:     bool,
 	/// Additional absolute paths hidden from sandboxed processes.
-	pub read_deny:          Vec<Str>,
+	pub read_deny:             Vec<Str>,
 	/// Additional absolute roots available for reads in scoped mode.
-	pub readable_roots:     Vec<Str>,
+	pub readable_roots:        Vec<Str>,
 	/// Read authority posture for shell operations and sandboxed children.
-	pub read_mode:          ReadMode,
+	pub read_mode:             ReadMode,
 	/// Denied path globs, rejected when the selected backend cannot enforce
 	/// future matches.
-	pub read_deny_globs:    Vec<Str>,
+	pub read_deny_globs:       Vec<Str>,
 	/// Additional absolute paths protected from writes in both policy lanes.
-	pub write_deny:         Vec<Str>,
+	pub write_deny:            Vec<Str>,
+	/// Absolute paths the session owner protects from every sandboxed write,
+	/// in every mode, whether they exist yet or not: the operator grants store
+	/// and the user extension root. Not a user convar.
+	pub protected_write_paths: Vec<PathBuf>,
 	/// Whether the user set any `sv_sandbox_*` convar, rather than leaving the
 	/// shipped posture. A sandbox the user asked for that cannot be built is a
 	/// hard error; the shipped default degrades to unsandboxed commands under
 	/// approval.
-	pub explicit:           bool,
+	pub explicit:              bool,
 }
 
 impl Default for SandboxSettings {
 	fn default() -> Self {
 		Self {
-			mode:               ExecSandboxMode::WorkspaceWrite,
-			network_mode:       SandboxNetworkMode::Scoped,
-			network_provenance: Provenance::Default,
-			cpu_cores:          0.0,
-			memory_bytes:       0,
-			pids:               0,
-			allow_domains:      Vec::new(),
-			deny_domains:       Vec::new(),
-			allow_ports:        vec![80, 443],
-			network_reruns:     DEFAULT_NETWORK_SESSION_RERUNS,
-			allow_localhost:    false,
-			allow_unix_sockets: Vec::new(),
-			writable_roots:     Vec::new(),
-			unscoped_writes:    UnscopedWrites::Deny,
-			env_deny:           default_env_deny(),
-			env_inherit:        EnvironmentInheritance::All,
-			env_include_only:   Vec::new(),
-			env_set:            BTreeMap::new(),
-			exclude_tmpdir:     false,
-			exclude_slash_tmp:  false,
-			read_deny:          Vec::new(),
-			readable_roots:     Vec::new(),
-			read_mode:          ReadMode::Host,
-			read_deny_globs:    Vec::new(),
-			write_deny:         Vec::new(),
-			explicit:           false,
+			mode:                  ExecSandboxMode::WorkspaceWrite,
+			network_mode:          SandboxNetworkMode::Scoped,
+			network_provenance:    Provenance::Default,
+			cpu_cores:             0.0,
+			memory_bytes:          0,
+			pids:                  0,
+			allow_domains:         Vec::new(),
+			deny_domains:          Vec::new(),
+			allow_ports:           vec![80, 443],
+			network_reruns:        DEFAULT_NETWORK_SESSION_RERUNS,
+			allow_localhost:       false,
+			allow_unix_sockets:    Vec::new(),
+			writable_roots:        Vec::new(),
+			unscoped_writes:       UnscopedWrites::Deny,
+			env_deny:              default_env_deny(),
+			env_inherit:           EnvironmentInheritance::All,
+			env_include_only:      Vec::new(),
+			env_set:               BTreeMap::new(),
+			exclude_tmpdir:        false,
+			exclude_slash_tmp:     false,
+			read_deny:             Vec::new(),
+			readable_roots:        Vec::new(),
+			read_mode:             ReadMode::Host,
+			read_deny_globs:       Vec::new(),
+			write_deny:            Vec::new(),
+			protected_write_paths: Vec::new(),
+			explicit:              false,
 		}
 	}
 }
@@ -480,37 +488,38 @@ impl SandboxSettings {
 	#[must_use]
 	pub fn from_con(ctx: &Ctx) -> Self {
 		Self {
-			mode:               SV_SANDBOX_MODE.get(ctx),
-			network_mode:       SV_SANDBOX_NETWORK_MODE.get(ctx),
-			network_provenance: Provenance::of_convar(ctx, SV_SANDBOX_NETWORK_MODE.name()),
-			cpu_cores:          SV_SANDBOX_CPU_CORES.get(ctx),
-			memory_bytes:       SV_SANDBOX_MEMORY_BYTES.get(ctx),
-			pids:               SV_SANDBOX_PIDS.get(ctx),
-			allow_domains:      SV_SANDBOX_ALLOW_DOMAINS.get(ctx),
-			deny_domains:       SV_SANDBOX_DENY_DOMAINS.get(ctx),
-			allow_ports:        SV_SANDBOX_ALLOW_PORTS.get(ctx),
-			network_reruns:     SV_SANDBOX_NETWORK_SESSION_RERUNS.get(ctx),
-			allow_localhost:    SV_SANDBOX_ALLOW_LOCALHOST.get(ctx),
-			allow_unix_sockets: SV_SANDBOX_ALLOW_UNIX_SOCKETS.get(ctx),
-			writable_roots:     SV_SANDBOX_WRITABLE_ROOTS.get(ctx),
-			unscoped_writes:    SV_SANDBOX_UNSCOPED_WRITES.get(ctx),
-			env_deny:           SV_SANDBOX_ENV_DENY.get(ctx),
-			env_inherit:        SV_SANDBOX_ENV_INHERIT.get(ctx),
-			env_include_only:   SV_SANDBOX_ENV_INCLUDE_ONLY.get(ctx),
-			env_set:            SV_SANDBOX_ENV_SET
+			mode:                  SV_SANDBOX_MODE.get(ctx),
+			network_mode:          SV_SANDBOX_NETWORK_MODE.get(ctx),
+			network_provenance:    Provenance::of_convar(ctx, SV_SANDBOX_NETWORK_MODE.name()),
+			cpu_cores:             SV_SANDBOX_CPU_CORES.get(ctx),
+			memory_bytes:          SV_SANDBOX_MEMORY_BYTES.get(ctx),
+			pids:                  SV_SANDBOX_PIDS.get(ctx),
+			allow_domains:         SV_SANDBOX_ALLOW_DOMAINS.get(ctx),
+			deny_domains:          SV_SANDBOX_DENY_DOMAINS.get(ctx),
+			allow_ports:           SV_SANDBOX_ALLOW_PORTS.get(ctx),
+			network_reruns:        SV_SANDBOX_NETWORK_SESSION_RERUNS.get(ctx),
+			allow_localhost:       SV_SANDBOX_ALLOW_LOCALHOST.get(ctx),
+			allow_unix_sockets:    SV_SANDBOX_ALLOW_UNIX_SOCKETS.get(ctx),
+			writable_roots:        SV_SANDBOX_WRITABLE_ROOTS.get(ctx),
+			unscoped_writes:       SV_SANDBOX_UNSCOPED_WRITES.get(ctx),
+			env_deny:              SV_SANDBOX_ENV_DENY.get(ctx),
+			env_inherit:           SV_SANDBOX_ENV_INHERIT.get(ctx),
+			env_include_only:      SV_SANDBOX_ENV_INCLUDE_ONLY.get(ctx),
+			env_set:               SV_SANDBOX_ENV_SET
 				.get(ctx)
 				.0
 				.into_iter()
 				.filter_map(|(key, value)| Some((key, Str::new(value.as_str()?))))
 				.collect(),
-			exclude_tmpdir:     SV_SANDBOX_EXCLUDE_TMPDIR.get(ctx),
-			exclude_slash_tmp:  SV_SANDBOX_EXCLUDE_SLASH_TMP.get(ctx),
-			read_deny:          SV_SANDBOX_READ_DENY.get(ctx),
-			readable_roots:     SV_SANDBOX_READABLE_ROOTS.get(ctx),
-			read_mode:          SV_SANDBOX_READ_MODE.get(ctx),
-			read_deny_globs:    SV_SANDBOX_READ_DENY_GLOBS.get(ctx),
-			write_deny:         SV_SANDBOX_WRITE_DENY.get(ctx),
-			explicit:           ctx
+			exclude_tmpdir:        SV_SANDBOX_EXCLUDE_TMPDIR.get(ctx),
+			exclude_slash_tmp:     SV_SANDBOX_EXCLUDE_SLASH_TMP.get(ctx),
+			read_deny:             SV_SANDBOX_READ_DENY.get(ctx),
+			readable_roots:        SV_SANDBOX_READABLE_ROOTS.get(ctx),
+			read_mode:             SV_SANDBOX_READ_MODE.get(ctx),
+			read_deny_globs:       SV_SANDBOX_READ_DENY_GLOBS.get(ctx),
+			write_deny:            SV_SANDBOX_WRITE_DENY.get(ctx),
+			protected_write_paths: Vec::new(),
+			explicit:              ctx
 				.vars()
 				.any(|var| var.name.starts_with("sv_sandbox_") && ctx.is_user_set(var.name)),
 		}
