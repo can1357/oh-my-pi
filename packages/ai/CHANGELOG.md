@@ -4,10 +4,10 @@
 
 ### Added
 
-- Added `metadata.credentialId` to usage reports probed from stored credential rows (API-key and OAuth), and a read-only `AuthStorage.sessions.sticky` lookup of the credential a session is currently served from ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
-- Added `riskAcknowledgement` to `OAuthPrompt`, set on the login-warning acceptance prompt so hosts that refuse input before the auth URL can still show it ([#19523](https://github.com/can1357/oh-my-pi/issues/19523))
 - `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `metadata.credentialId` to usage reports probed from stored credential rows (API-key and OAuth), and a read-only `AuthStorage.sessions.sticky` lookup of the credential a session is currently served from ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
+- Added `riskAcknowledgement` to `OAuthPrompt`, set on the login-warning acceptance prompt so hosts that refuse input before the auth URL can still show it ([#19523](https://github.com/can1357/oh-my-pi/issues/19523))
 
 ### Fixed
 
@@ -16,6 +16,11 @@
 - Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
 - Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed credential rotation and one-shot retries so custom providers pointing at the Zhipu Coding Plan endpoint honor the Beijing-time quota reset instead of waiting about eight hours too long ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed Claude Fable and Mythos usage-limit rejections rotating to a sibling account that still has quota, instead of waiting out the capped account or falling back to another model ([#19484](https://github.com/can1357/oh-my-pi/pull/19484) by [@BadAd84](https://github.com/BadAd84))
+- Invalid Antigravity CLI tool arguments now return the validation issues and the tool's expected schema to the model instead of ending the turn. ([#19413](https://github.com/can1357/oh-my-pi/pull/19413) by [@SenCha930511](https://github.com/SenCha930511))
+- Abandoned Antigravity CLI login directories without a credential are removed after 24 hours, so cancelled or crashed sign-ins do not accumulate. ([#19420](https://github.com/can1357/oh-my-pi/pull/19420) by [@SenCha930511](https://github.com/SenCha930511))
+- Fixed the managed Antigravity CLI download failing on slow connections and being reported as a sign-in timeout; it now aborts only after 60 seconds with no data and reports the bytes received ([#19463](https://github.com/can1357/oh-my-pi/issues/19463))
 - Fixed Antigravity CLI host tools whose schemas contain mixed-type unions (such as `yield` with a typed output schema) being published as empty objects, which left subagents unable to submit results ([#19502](https://github.com/can1357/oh-my-pi/issues/19502))
 
 ## [18.22.0] - 2026-11-16
@@ -23,29 +28,12 @@
 ### Fixed
 
 - Fixed slow streaming of Gemma tool calls with large arguments.
-### Fixed
-
-- Fixed Claude Fable and Mythos usage-limit rejections rotating to a sibling account that still has quota, instead of waiting out the capped account or falling back to another model.
-### Fixed
-
-- Fixed the managed Antigravity CLI download failing on slow connections and being reported as a sign-in timeout; it now aborts only after 60 seconds with no data and reports the bytes received ([#19463](https://github.com/can1357/oh-my-pi/issues/19463))
 
 ## [18.21.0] - 2026-11-16
 
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
-- Added parallel, persistent thinking-capability probes for unknown models, including alternate effort and token-budget request formats.
-### Fixed
-
-- Fixed credential rotation and one-shot retries so custom providers pointing at the Zhipu Coding Plan endpoint honor the Beijing-time quota reset instead of waiting about eight hours too long ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-### Fixed
-
-- Invalid Antigravity CLI tool arguments now return the validation issues and the tool's expected schema to the model instead of ending the turn. ([#19413](https://github.com/can1357/oh-my-pi/pull/19413) by [@SenCha930511](https://github.com/SenCha930511))
-- Antigravity CLI tool calls that pass a habitual alias such as `path`, `command`, `cwd`, or `description` now rename it to the tool's declared parameter before schema validation; arguments the schema already accepted are left untouched, and ambiguous or non-string aliases keep the existing diagnostic. ([#19413](https://github.com/can1357/oh-my-pi/pull/19413) by [@SenCha930511](https://github.com/SenCha930511))
-### Fixed
-
-- Abandoned Antigravity CLI login directories without a credential are removed after 24 hours, so cancelled or crashed sign-ins do not accumulate. ([#19420](https://github.com/can1357/oh-my-pi/pull/19420) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
