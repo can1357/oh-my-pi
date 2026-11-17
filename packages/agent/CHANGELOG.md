@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Remote compaction through Amazon Bedrock still retries when its connection drops before any response, now that the error says how far the compaction request had uploaded ([#19513](https://github.com/can1357/oh-my-pi/pull/19513) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.2.1] - 2026-11-25
 
 ### Added
@@ -60,10 +64,6 @@
 - Fixed provider-error handling so failed tool calls are no longer fed back to the model as refusal explanations.
 - Fixed one-shot retries and title generation for custom Zhipu Coding Plan providers so Beijing-time quota resets are honored.
 - Fixed OpenAI remote compaction (V1 and V2) dropping configured headers of models.yml and extension-registered models, so header-authenticated gateways returned 401 ([#19579](https://github.com/can1357/oh-my-pi/pull/19579) by [@ryanskidmore](https://github.com/ryanskidmore))
-
-### Fixed
-
-- Remote compaction through Amazon Bedrock still retries when its connection drops before any response, now that the error says how far the compaction request had uploaded.
 
 ## [18.20.1] - 2026-11-14
 
