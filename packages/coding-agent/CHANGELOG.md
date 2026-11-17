@@ -370,6 +370,10 @@
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
 
+### Fixed
+
+- A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, a drag that leaves a web slider part-way names the value it reached, and a drag whose slider or scroll bar did not move now fails with `InputFailed` instead of reporting success ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
@@ -494,8 +498,6 @@
 - Fixed browser interactions behind modal dialogs incorrectly reporting success; covered fields and disabled elements are now rejected, and covered drag endpoints are detected.
 - Fixed RPC login for providers that require an at-your-own-risk confirmation; the confirmation is now presented to the host and login proceeds only after approval.
 - On Linux, language-server file watching no longer consumes excessive inotify watches in `node_modules` and `.git/objects`.
-
-- A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, a drag that leaves a web slider part-way names the value it reached, and a drag whose slider, scroll bar or splitter did not move now fails with `InputFailed` instead of reporting success ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 

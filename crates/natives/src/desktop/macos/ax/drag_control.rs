@@ -56,8 +56,8 @@ impl Pressed {
 	}
 }
 
-/// A control that tracks a drag itself and publishes its position as a
-/// number: a slider, a scroll bar, a splitter.
+/// A control that publishes its position as a number: a slider, a scroll
+/// bar, or another one a drag may start on (a checkbox, a splitter).
 pub(crate) struct Control {
 	element:             CFRetained<AXUIElement>,
 	pub(crate) role:     String,
@@ -95,8 +95,10 @@ impl Control {
 	/// Whether a pointer moving by `(dx, dy)` moves the control toward its
 	/// maximum: rightward on a horizontal slider or scroll bar, up on a
 	/// vertical slider (its maximum is at the top), down on a vertical scroll
-	/// bar. `None` for any other control (a splitter, a stepper), whose
-	/// direction its orientation does not tell.
+	/// bar. `None` for any other control: a drag from a checkbox, radio button
+	/// or stepper need not change it (a row reorder, a segmented control), and
+	/// a splitter publishes no range, so one held at its stop cannot be told
+	/// from one that ignored the drag.
 	pub(crate) fn toward_max(&self, dx: f64, dy: f64) -> Option<bool> {
 		match (self.role.as_str(), self.vertical) {
 			("AXSlider" | "AXScrollBar", false) => Some(dx > 0.0),
