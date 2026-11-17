@@ -60,6 +60,13 @@ export function formatCodexUsageReportLabel(
 	return `${identity}${org}${plan ? ` · plan: ${plan}` : ""}`;
 }
 
+/**
+ * Identity a usage limit is attributed to: an OAuth account identity, or —
+ * when the account has no OAuth identifiers at all (API-key credentials) — a
+ * durable credential row id. See {@link limitMatchesActiveAccount}.
+ */
+export type ActiveAccountIdentity = OAuthAccountIdentity & { credentialId?: number };
+
 function normalizeIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
@@ -101,14 +108,27 @@ export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefi
  * - `accountId` ↔ report metadata `accountId`/`account_id` or `limit.scope.accountId`
  * - `projectId` ↔ report metadata `projectId` or `limit.scope.projectId`
  *   (Google-style providers key usage on the GCP project, not an account id)
+ *
+ * A credential-scoped identity (`credentialId` set, no OAuth identifiers — an
+ * API-key account) matches only the report probed from that stored row
+ * (`metadata.credentialId`). Decisive: reports without a row tag (env keys,
+ * broker aggregates) can never be attributed to a pinned stored row, and
+ * letting them match would merge sibling API-key accounts into one pool —
+ * the exact wrong-account display this rule prevents.
  */
 export function limitMatchesActiveAccount(
 	report: UsageReport,
 	limit: UsageLimit,
-	identity: OAuthAccountIdentity | undefined,
+	identity: ActiveAccountIdentity | undefined,
 ): boolean {
 	if (!identity) return false;
 	const metadata = report.metadata ?? {};
+	if (identity.credentialId !== undefined) {
+		// Merged same-account reports carry every contributing row id.
+		const mergedIds = metadata.credentialIds;
+		if (Array.isArray(mergedIds)) return mergedIds.includes(identity.credentialId);
+		return metadata.credentialId === identity.credentialId;
+	}
 	const activeAccountId = normalizeIdentityValue(identity.accountId);
 	const activeEmail = normalizeIdentityValue(identity.email);
 	const activeProjectId = normalizeIdentityValue(identity.projectId);
@@ -136,7 +156,7 @@ export function limitMatchesActiveAccount(
 }
 
 /** True when any limit column in `report` belongs to the given OAuth identity. */
-export function reportMatchesActiveAccount(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
+export function reportMatchesActiveAccount(report: UsageReport, identity: ActiveAccountIdentity | undefined): boolean {
 	if (!identity) return false;
 	return report.limits.some(limit => limitMatchesActiveAccount(report, limit, identity));
 }

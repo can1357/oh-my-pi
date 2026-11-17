@@ -83,7 +83,7 @@ export type SelectedChange =
  * Why a file has no line attribution and is committed whole: binary, non-UTF-8, or oversized
  * content; a symlink on either side; or a mode change with identical content.
  */
-type WholeReason = "content" | "symlink" | "mode";
+type WholeReason = "content" | "symlink" | "mode" | "gitlink";
 
 /** What to select or deselect: a path (exact, glob, or unique suffix), hunk/unit ids, and/or a regex over change lines. */
 export interface SelectionTarget {
@@ -439,6 +439,29 @@ async function loadFile(
 	calls: CallEvidence,
 ): Promise<FileChange | "skip" | undefined> {
 	const absolute = path.join(root, file);
+	if (head.mode === "160000") {
+		const stat = await fs.lstat(absolute).catch(error => {
+			if (!isEnoent(error)) throw error;
+			return undefined;
+		});
+		if (!stat?.isDirectory()) return "skip";
+		const module = vcs.git(absolute);
+		if (!module || (await fs.realpath(module.info().repoRoot)) !== (await fs.realpath(absolute))) return "skip";
+		const [before, after] = await Promise.all([repo.resolveRef(`${head.sha}:${file}`), module.headSha()]);
+		if (!before || !after) return "skip";
+		if (before === after) return undefined;
+		return {
+			path: file,
+			head: before,
+			work: after,
+			headMode: "160000",
+			mode: "160000",
+			whole: "gitlink",
+			selected: new Set<number>(),
+			wholeSelected: false,
+			editors: [],
+		};
+	}
 	let workBytes: Uint8Array | null = null;
 	let changedMs: number | undefined;
 	let mode: string | null = null;
@@ -535,6 +558,8 @@ function modeChange(file: FileChange): string {
 /** What a whole-file change is, for the summary and `show()`. */
 function wholeLabel(file: FileChange): string {
 	switch (file.whole) {
+		case "gitlink":
+			return `gitlink ${file.head} → ${file.work}`;
 		case "symlink":
 			return "symlink";
 		case "mode":
@@ -589,7 +614,17 @@ export class Draft {
 		const changes: SelectedChange[] = [];
 		for (const file of this.#files) {
 			if (!file.attribution) {
-				if (file.wholeSelected) changes.push({ kind: "whole", path: file.path, added: file.headMode === null });
+				if (!file.wholeSelected) continue;
+				if (file.whole === "gitlink") {
+					changes.push({
+						kind: "text",
+						path: file.path,
+						before: { text: `Subproject commit ${file.head}\n`, mode: "160000" },
+						after: { text: `Subproject commit ${file.work}\n`, mode: "160000" },
+					});
+				} else {
+					changes.push({ kind: "whole", path: file.path, added: file.headMode === null });
+				}
 				continue;
 			}
 			if (file.selected.size === 0) continue;
@@ -776,7 +811,9 @@ export class Draft {
 				? describeHint(file, file.hint)
 				: file.editors.some(agent => this.scope.has(agent))
 					? `edited by ${file.editors.join(", ")}`
-					: undefined;
+					: file.whole === "gitlink"
+						? "select explicitly to update the submodule pointer"
+						: undefined;
 			return { review: reason ? [`  ? ${file.path}  whole ${label}; ${reason}`] : [], outOfScopeAgents };
 		}
 		const { ops, hunks } = file.attribution;
@@ -825,7 +862,7 @@ export class Draft {
 	}
 
 	#needsAttention(file: FileChange): boolean {
-		if (!file.attribution) return file.hint !== undefined && !file.wholeSelected;
+		if (!file.attribution) return (file.hint !== undefined || file.whole === "gitlink") && !file.wholeSelected;
 		const status = file.classification?.status ?? [];
 		const selected = file.selected.size;
 		if (selected > 0 && selected < file.attribution.ops.length) return true;
@@ -834,7 +871,7 @@ export class Draft {
 
 	#renderFile(file: FileChange): string {
 		if (!file.attribution) {
-			const mark = file.wholeSelected ? "✓" : file.hint ? "?" : "·";
+			const mark = file.wholeSelected ? "✓" : file.hint || file.whole === "gitlink" ? "?" : "·";
 			const hint = file.hint ? `; ${describeHint(file, file.hint)}` : "";
 			return `${file.path}  whole-file change (${wholeLabel(file)})${hint}\n  1 ${mark} whole file`;
 		}
