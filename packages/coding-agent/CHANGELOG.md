@@ -120,6 +120,7 @@
 ### Fixed
 
 - `/commit` now shows the subject a commit-msg hook wrote onto the commit, instead of the subject from before the hook ran ([#19448](https://github.com/can1357/oh-my-pi/pull/19448) by [@eggpeat](https://github.com/eggpeat))
+- The eval `commit` helper now runs Git hooks defined in config (`hook.<name>.event`, Git 2.54+) alongside `.git/hooks/` ones, as `git commit` does, so a failing config-defined `pre-commit` or `commit-msg` hook stops the commit ([#19443](https://github.com/can1357/oh-my-pi/issues/19443))
 - The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
 - Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
 - `/move` and resuming a session from another project now switch task agents, project extensions, custom tools, and MCP servers to the destination project without a restart ([#19416](https://github.com/can1357/oh-my-pi/pull/19416) by [@yuzu-octopus](https://github.com/yuzu-octopus))

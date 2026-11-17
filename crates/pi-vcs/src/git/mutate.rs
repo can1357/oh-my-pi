@@ -1120,8 +1120,19 @@ fn run_commit_hook(
 	args: &[&OsStr],
 	index_path: Option<&Path>,
 ) -> Result<()> {
-	let Some(hook) = repository.hook_path(name)? else {
-		return Ok(());
+	let configured = hook_configured(repository, name)?;
+	let mut command = match repository.hook_path(name)? {
+		// Windows CreateProcess cannot execute a shebang script directly.
+		Some(hook) if !configured && !cfg!(windows) => Command::new(hook),
+		None if !configured => return Ok(()),
+		// Only git runs config-defined hooks, together with the hooks-directory
+		// file in its own order, and through its own shell on Windows, exactly
+		// as `git commit` does.
+		_ => {
+			let mut command = Command::new("git");
+			command.args(["hook", "run", "--ignore-missing", name, "--"]);
+			command
+		},
 	};
 	let command_name = || format!("git commit ({name} hook)");
 	let io_failed = |err: io::Error| Error::Cli {
@@ -1130,17 +1141,6 @@ fn run_commit_hook(
 		stdout:    String::new(),
 		stderr:    err.to_string(),
 	};
-	// Windows CreateProcess cannot execute a shebang script directly. Let Git
-	// invoke the hook through its own shell, as `git commit` does.
-	#[cfg(windows)]
-	let mut command = {
-		let _ = hook;
-		let mut command = Command::new("git");
-		command.args(["hook", "run", "--ignore-missing", name, "--"]);
-		command
-	};
-	#[cfg(not(windows))]
-	let mut command = Command::new(&hook);
 	super::cli::detach_from_terminal(&mut command);
 	if let Some(index_path) = index_path {
 		command.env("GIT_INDEX_FILE", index_path);
@@ -1174,6 +1174,24 @@ fn run_commit_hook(
 		stdout:    String::new(),
 		stderr:    String::from_utf8_lossy_owned(output),
 	})
+}
+
+/// Whether any `hook.<id>.event` names the hook `name`. Git (2.54+) runs such
+/// config-defined hooks in addition to the hooks-directory file; whether one is
+/// disabled or lacks a command is left to `git hook run`.
+fn hook_configured(repository: &GitRepo, name: &str) -> Result<bool> {
+	Ok(repository
+		.gix()?
+		.config_snapshot()
+		.sections_by_name("hook")
+		.into_iter()
+		.flatten()
+		.any(|section| {
+			section
+				.values("event")
+				.iter()
+				.any(|event| event.as_ref() == name)
+		}))
 }
 
 /// Write a signed commit object through `git commit-tree -S`, which runs the
@@ -2627,6 +2645,36 @@ mod tests {
 			.commit_create("unverified", &CommitOptions { no_verify: true, ..options })
 			.unwrap();
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), id);
+	}
+
+	/// Config-defined hooks (`hook.<id>.event`, git 2.54+) run exactly when
+	/// `git commit` runs them; older git ignores them on both paths.
+	#[cfg(unix)]
+	#[test]
+	fn commit_runs_config_defined_hooks_like_git_commit() {
+		let (temp, repo) = fixture();
+		let options = CommitOptions { allow_empty: true, ..Default::default() };
+		git(temp.path(), &["config", "hook.trailer.event", "commit-msg"]);
+		git(temp.path(), &["config", "hook.trailer.command", "printf '\\nHook: ran\\n' >> \"$1\""]);
+		git(temp.path(), &["commit", "-q", "--allow-empty", "-m", "subject"]);
+		let expected = git(temp.path(), &["log", "-1", "--format=%B"]);
+		repo.commit_create("subject\n", &options).unwrap();
+		assert_eq!(git(temp.path(), &["log", "-1", "--format=%B"]), expected);
+
+		git(temp.path(), &["config", "hook.policy.event", "pre-commit"]);
+		git(temp.path(), &["config", "hook.policy.command", "exit 1"]);
+		let git_rejects = !Command::new("git")
+			.arg("-C")
+			.arg(temp.path())
+			.args(["commit", "-q", "--allow-empty", "-m", "policy"])
+			.status()
+			.unwrap()
+			.success();
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		// The cached gix handle snapshots config at first use.
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert_eq!(repo.commit_create("policy", &options).is_err(), git_rejects);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]) == head, git_rejects);
 	}
 
 	#[cfg(unix)]
