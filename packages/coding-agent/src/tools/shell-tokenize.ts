@@ -2459,8 +2459,10 @@ class ShellScriptParser {
 	 * word, and the index after it. What it runs is parsed when the command it is in is built, from
 	 * that command's directory and with its input (for `>( )`, its output). A `$( )` body is read as
 	 * commands up to the `)` that closes it, so a `)` in quotes, in a comment or in a heredoc body
-	 * does not end it. A backtick body loses the backslashes bash removes before parsing it
-	 * (`quoted`: inside double quotes), so `` \` `` nests a substitution and `\"` is a quote again.
+	 * does not end it. A `$((` body that bash does not evaluate as arithmetic, and that holds a `<<`,
+	 * is read again on its own, where that `<<` opens a heredoc; each such reading counts against
+	 * {@link SHELL_SCRIPT_MAX_NESTED_TEXT}. A backtick body loses the backslashes bash removes before
+	 * parsing it (`quoted`: inside double quotes), so `` \` `` nests a substitution and `\"` is a quote again.
 	 */
 	#substitution(text: string, start: number, scope: ReadScope, quoted: boolean): { key: string; after: number } {
 		const key = `\0${this.#count++}\0`;
@@ -2477,11 +2479,33 @@ class ShellScriptParser {
 			this.truncated = true;
 			return { key, after: text.length };
 		}
-		const inner: ReadScope = { depth, subs: new Map() };
-		// `$(( ))` is arithmetic, or a command substitution that starts with a subshell: it is read as
-		// commands either way, but a `<<` in it is never a heredoc.
-		const { tokens, end } = this.#tokens(text, start + 2, inner, !text.startsWith("$((", start), true);
-		this.scripts.push(text.slice(start + 2, end));
+		let inner: ReadScope = { depth, subs: new Map() };
+		// `$(( ))` is arithmetic, or a command substitution that starts with a subshell or `(( ))`:
+		// either way it ends at the `)` that closes it, found with `<<` read as a shift.
+		const arithmetic = text.startsWith("$((", start);
+		const first = this.#tokens(text, start + 2, inner, !arithmetic, true);
+		const end = first.end;
+		let tokens = first.tokens;
+		const body = text.slice(start + 2, end);
+		this.scripts.push(body);
+		if (arithmetic && tokens.some(token => token.operator && (token.text === "<<" || token.text === "<<-"))) {
+			// bash evaluates it as arithmetic only when its first `(` closes right before that `)`;
+			// otherwise it parses the text again on its own as commands, where a `<<` opens a heredoc.
+			let parens = 0;
+			let closes = tokens.length;
+			for (const [index, token] of tokens.entries()) {
+				if (token.operator && token.text === "(") parens++;
+				else if (token.operator && token.text === ")" && --parens === 0) {
+					closes = index;
+					break;
+				}
+			}
+			const command = closes !== tokens.length - 1 || text[end - 1] !== ")";
+			if (command && this.#budget(body, depth)) {
+				inner = { depth, subs: new Map() };
+				tokens = this.#tokens(body, 0, inner, true, false).tokens;
+			}
+		}
 		const read: Substitution["read"] = (cwd, input) => this.#pipelines(tokens, inner, cwd, input);
 		scope.subs.set(key, text[start] === ">" ? { read, output: true } : { read });
 		return { key, after: end + 1 };
