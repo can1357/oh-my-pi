@@ -1,0 +1,3 @@
+upstream = "no"
+layer = 60
+reason = "Foreground tool parking: once a foreground bash call outlives the settle window it becomes a broker-owned job, so omp can exit mid-tool without killing it; a key re-attaches and Ctrl+C interrupts through the holder. Builds on parked-tool-calls."
