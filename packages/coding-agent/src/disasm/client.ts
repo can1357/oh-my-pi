@@ -1,9 +1,9 @@
 /**
- * omp-side access to IDA databases hosted by broker-supervised daemons (`host.ts`).
+ * omp-side access to disassembler databases hosted by broker-supervised daemons (`host.ts`).
  *
- * Every open database is one `omp.ida.<id>` daemon in the project's daemon broker, so `omp ps`
+ * Every open database is one `omp.<backend>.<id>` daemon in the project's daemon broker, so `omp ps`
  * lists, stops, and tails it, and every omp process in the project shares it. This module starts
- * hosts on demand (evicting the least recently used idle one beyond `ida.maxOpen`), attaches to
+ * hosts on demand (evicting the least recently used idle one beyond `disassembler.maxOpen`), attaches to
  * hosts other processes started, and forwards requests over each host's socket.
  */
 import * as fs from "node:fs/promises";
@@ -19,28 +19,46 @@ import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { daemonRuntimeDir } from "../launch/paths";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../subprocess/worker-client";
 import type { ToolSession } from "../tools";
+import { DISASM_BACKENDS, type DisasmBackendId } from "./backend";
 import {
 	errorMessage,
-	IDA_DAEMON_PREFIX,
-	IDA_HOST_CONFIG_ENV,
-	IDA_HOST_READY_PATTERN,
-	IDA_HOST_WORKER_ARG,
-	type IdaCallMethod,
-	type IdaHostConfig,
-	type IdaHostRequest,
-	type IdaHostResponse,
-	type IdaHostStatus,
-	idaDaemonName,
-	idaHostEndpoint,
-	parseIdaHostResponse,
-	parseIdaHostStatus,
+	daemonPrefix,
+	DISASM_DAEMON_PREFIXES,
+	DISASM_HOST_CONFIG_ENV,
+	hostReadyPattern,
+	DISASM_HOST_WORKER_ARG,
+	type HostCallMethod,
+	type HostConfig,
+	type HostRequest,
+	type HostResponse,
+	type HostStatus,
+	daemonName,
+	hostEndpoint as databaseHostEndpoint,
+	parseHostResponse,
+	parseHostStatus,
+	formatDatabaseHandle,
+	type DatabaseHandle,
+	parseRetainedReference,
+	type RetainedReference,
 } from "./protocol";
-import { resolveIdaRuntime } from "./runtime";
-import { cfgIdaIdleCloseSec, cfgIdaMaxOpen } from "./settings";
-import { type FatSelection, type IdbLocation, idbRef, type LocateIdbOptions, locateIdb } from "./store";
-import type { IdaDatabaseInfo, IdaRequestOptions } from "./supervisor";
+import { installStatus, resolveWorkerRuntime } from "./runtime";
+import { cfgDisasmIdleCloseSec, cfgDisasmMaxOpen } from "./settings";
+import {
+	type FatSelection,
+	type DatabaseLocation,
+	databaseRef,
+	type LocateDatabaseOptions,
+	locateDatabase,
+} from "./store";
+import type { DatabaseInfo, WorkerRequestOptions } from "./supervisor";
 
-const HOST_LABEL = "IDA host";
+function backendForHost(name: string): DisasmBackendId {
+	return name.startsWith(daemonPrefix("ghidra")) ? "ghidra" : "ida";
+}
+
+function hostLabel(name: string): string {
+	return `${DISASM_BACKENDS[backendForHost(name)].label} host`;
+}
 const CONNECT_TIMEOUT_MS = 3_000;
 /** Budget for a host to print its listening banner; the database opens after that. */
 const READY_TIMEOUT_MS = 15_000;
@@ -51,13 +69,13 @@ const EXIT_WAIT_MS = 10_000;
 /** How long release waits for a host's save; the host finishes it regardless. */
 const FLUSH_WAIT_MS = 8_000;
 /**
- * How long one caller waits for a database to open. IDA's initial auto-analysis of a large binary
+ * How long one caller waits for a database to open. Initial auto-analysis of a large binary
  * can run for hours; it keeps going in the host past this, and a later call picks up the result.
  */
 const OPEN_WAIT_MS = 120_000;
 
 /** The host connection dropped (host exited or is exiting). */
-class IdaHostGoneError extends ToolError {}
+class HostGoneError extends ToolError {}
 
 /** Connect to `endpoint`; undefined when nothing listens there. */
 function connectSocket(endpoint: string): Promise<IpcConnection | undefined> {
@@ -78,9 +96,9 @@ class HostConnection {
 		conn.start(
 			line => this.#onLine(line),
 			reason => {
-				if (reason) logger.debug("IDA host connection error", { name, error: reason });
+				if (reason) logger.debug(`${hostLabel(name)} connection error`, { name, error: reason });
 				this.#open = false;
-				const error = new IdaHostGoneError(`IDA host ${name} exited; see \`omp ps logs ${name}\``);
+				const error = new HostGoneError(`${hostLabel(name)} ${name} exited; see \`omp ps logs ${name}\``);
 				for (const entry of this.#pending.values()) entry.reject(error);
 				this.#pending.clear();
 				onClose();
@@ -97,10 +115,10 @@ class HostConnection {
 	}
 
 	/** Send `request` and wait for its answer; host-side failures reject with a {@link ToolError}. */
-	call(request: IdaHostRequest): Promise<unknown> {
+	call(request: HostRequest): Promise<unknown> {
 		if (!this.#open) {
 			return Promise.reject(
-				new IdaHostGoneError(`IDA host ${this.#name} exited; see \`omp ps logs ${this.#name}\``),
+				new HostGoneError(`${hostLabel(this.#name)} ${this.#name} exited; see \`omp ps logs ${this.#name}\``),
 			);
 		}
 		const entry = Promise.withResolvers<unknown>();
@@ -110,7 +128,7 @@ class HostConnection {
 	}
 
 	/** Send a request that has no answer (`cancel`). */
-	notify(request: IdaHostRequest): void {
+	notify(request: HostRequest): void {
 		this.#conn.send(JSON.stringify(request));
 	}
 
@@ -119,11 +137,14 @@ class HostConnection {
 	}
 
 	#onLine(line: string): void {
-		let response: IdaHostResponse;
+		let response: HostResponse;
 		try {
-			response = parseIdaHostResponse(line);
+			response = parseHostResponse(line);
 		} catch (error) {
-			logger.warn("IDA host sent a malformed response", { name: this.#name, error: errorMessage(error) });
+			logger.warn(`${hostLabel(this.#name)} sent a malformed response`, {
+				name: this.#name,
+				error: errorMessage(error),
+			});
 			return;
 		}
 		const entry = this.#pending.get(response.id);
@@ -135,16 +156,16 @@ class HostConnection {
 }
 
 /**
- * An open IDA database as seen from this omp process: a connection to its host daemon plus the
- * last reported {@link IdaHostStatus}. Shared by every agent in the process.
+ * An open disassembler database as seen from this omp process: a connection to its host daemon plus the
+ * last reported {@link HostStatus}. Shared by every agent in the process.
  */
-export class IdaDatabase {
+export class DisasmDatabase {
 	/** Broker daemon name (`omp ps` row, `omp ps logs <name>`). */
 	readonly name: string;
 	readonly #conn: HostConnection;
-	#status: IdaHostStatus;
+	#status: HostStatus;
 
-	private constructor(name: string, conn: HostConnection, status: IdaHostStatus) {
+	constructor(name: string, conn: HostConnection, status: HostStatus) {
 		this.name = name;
 		this.#conn = conn;
 		this.#status = status;
@@ -154,16 +175,16 @@ export class IdaDatabase {
 	 * Connect to the host for `name` and fetch its status (`open` waits for the database to open).
 	 * Undefined when no host listens; throws the host's open failure.
 	 */
-	static async attach(name: string, endpoint: string, op: "open" | "status"): Promise<IdaDatabase | undefined> {
+	static async attach(name: string, endpoint: string, op: "open" | "status"): Promise<DisasmDatabase | undefined> {
 		const socket = await connectSocket(endpoint);
 		if (!socket) return undefined;
-		let db: IdaDatabase | undefined;
+		let db: DisasmDatabase | undefined;
 		const conn = new HostConnection(name, socket, () => {
-			if (db && handles.get(name) === db) handles.delete(name);
+			if (db && handles.get(endpoint) === db) handles.delete(endpoint);
 		});
 		try {
-			const status = parseIdaHostStatus(await conn.call({ id: conn.nextId(), op }));
-			db = new IdaDatabase(name, conn, status);
+			const status = parseHostStatus(await conn.call({ id: conn.nextId(), op }));
+			db = new DisasmDatabase(name, conn, status);
 			return db;
 		} catch (error) {
 			conn.close();
@@ -171,14 +192,19 @@ export class IdaDatabase {
 		}
 	}
 
-	/** Registry key from `locateIdb`. */
+	/** Registry key from `locateDatabase`. */
 	get id(): string {
 		return this.#status.id;
 	}
 
-	/** Reference `read` and `ida db=` resolve back to this database (see `idbRef`). */
+	/** Reference `read` and the backend tool resolve back to this database (see `databaseRef`). */
 	get ref(): string {
 		return this.#status.ref;
+	}
+
+	/** Portable reference to this live incarnation; opening it never creates another database. */
+	get handle(): string {
+		return this.#status.handle;
 	}
 
 	/** For universal binaries: the analyzed slice and its siblings. */
@@ -186,18 +212,18 @@ export class IdaDatabase {
 		return this.#status.fat;
 	}
 
-	/** Path of the IDB file as reported by IDA. */
+	/** Database path reported by the backend. */
 	get idbPath(): string {
 		return this.#status.idbPath;
 	}
 
 	/** Loader facts reported when the database opened. */
-	get info(): IdaDatabaseInfo {
+	get info(): DatabaseInfo {
 		return this.#status.info;
 	}
 
 	/** Last status fetched from the host. */
-	get status(): IdaHostStatus {
+	get status(): HostStatus {
 		return this.#status;
 	}
 
@@ -207,16 +233,16 @@ export class IdaDatabase {
 	}
 
 	/** Refetch the host's status; `open` first waits for the database to finish opening. */
-	async refresh(op: "open" | "status" = "status"): Promise<IdaHostStatus> {
-		this.#status = parseIdaHostStatus(await this.#conn.call({ id: this.#conn.nextId(), op }));
+	async refresh(op: "open" | "status" = "status"): Promise<HostStatus> {
+		this.#status = parseHostStatus(await this.#conn.call({ id: this.#conn.nextId(), op }));
 		return this.#status;
 	}
 
 	/**
 	 * Run one worker request on the host, queued behind requests from every omp process.
-	 * `timeoutMs` covers the queue wait; an abort cancels this request only (see `IdaWorker.request`).
+	 * `timeoutMs` covers the queue wait; an abort cancels this request only (see `DisasmWorker.request`).
 	 */
-	async request<T>(method: IdaCallMethod, params: object, options: IdaRequestOptions = {}): Promise<T> {
+	async request<T>(method: HostCallMethod, params: object, options: WorkerRequestOptions = {}): Promise<T> {
 		const { signal, timeoutMs } = options;
 		signal?.throwIfAborted();
 		const id = this.#conn.nextId();
@@ -236,25 +262,39 @@ export class IdaDatabase {
 		await this.#conn.call({ id: this.#conn.nextId(), op: "flush" });
 	}
 
-	/** Close the database (saving first when `save`); its host exits afterwards. */
+	/** Acquire a connection-owned reference; an expected handle rejects stale or foreign incarnations. */
+	async retain(expected = this.handle): Promise<RetainedReference> {
+		const retained = parseRetainedReference(
+			await this.#conn.call({ id: this.#conn.nextId(), op: "retain", handle: expected }),
+		);
+		this.#status.references = retained.references;
+		return retained;
+	}
+
+	/** Release one owned reference; the last release closes, honoring any owner's request to save. */
+	async release(lease: string, options: { save: boolean }): Promise<void> {
+		await this.#conn.call({ id: this.#conn.nextId(), op: "release", lease, save: options.save });
+	}
+
+	/** Close an unreferenced database for eviction; active owned references reject this operation. */
 	async close(options: { save: boolean }): Promise<void> {
 		await this.#conn.call({ id: this.#conn.nextId(), op: "close", save: options.save });
 	}
 
-	/** Drop this process's connection; the host keeps running. */
+	/** Drop this process's connection and its owned references; other owners keep the host alive. */
 	disconnect(): void {
 		this.#conn.close();
 	}
 }
 
-/** Attached hosts by daemon name. */
-const handles = new Map<string, IdaDatabase>();
-/** In-flight opens by `locateIdb` id, shared by concurrent callers in this process. */
-const pending = new Map<string, Promise<IdaDatabase>>();
+/** Attached hosts by project-scoped endpoint; identical daemon names in different projects never alias. */
+const handles = new Map<string, DisasmDatabase>();
+/** In-flight opens by project-scoped endpoint, shared by concurrent callers in this process. */
+const pending = new Map<string, Promise<DisasmDatabase>>();
 let cleanupRegistered = false;
 
 function hostEndpoint(broker: DaemonBrokerClient, name: string): string {
-	return idaHostEndpoint(daemonRuntimeDir(broker.projectDir), name);
+	return databaseHostEndpoint(daemonRuntimeDir(broker.projectDir), name);
 }
 
 /** Attach to the host `name`, reusing this process's live connection; undefined when none listens. */
@@ -262,60 +302,67 @@ async function attachHost(
 	broker: DaemonBrokerClient,
 	name: string,
 	op: "open" | "status",
-): Promise<IdaDatabase | undefined> {
-	const cached = handles.get(name);
+): Promise<DisasmDatabase | undefined> {
+	const endpoint = hostEndpoint(broker, name);
+	const cached = handles.get(endpoint);
 	if (cached?.connected) {
 		await cached.refresh(op);
 		return cached;
 	}
-	const db = await IdaDatabase.attach(name, hostEndpoint(broker, name), op);
+	const db = await DisasmDatabase.attach(name, endpoint, op);
 	if (!db) return undefined;
 	// A concurrent attach won; keep one connection per host.
-	const winner = handles.get(name);
+	const winner = handles.get(endpoint);
 	if (winner?.connected) {
 		db.disconnect();
 		return winner;
 	}
-	handles.set(name, db);
+	handles.set(endpoint, db);
 	if (!cleanupRegistered) {
 		cleanupRegistered = true;
-		postmortem.register("ida-release", releaseIdaDatabases);
+		postmortem.register("disasm-release", releaseDatabases);
 	}
 	return db;
 }
 
 /** Attach to every host in `names` that answers; unreachable ones are skipped. */
-async function attachAll(broker: DaemonBrokerClient, names: string[]): Promise<IdaDatabase[]> {
+async function attachAll(broker: DaemonBrokerClient, names: string[]): Promise<DisasmDatabase[]> {
 	const dbs = await Promise.all(names.map(name => attachHost(broker, name, "status").catch(() => undefined)));
 	return dbs.filter(db => db !== undefined);
 }
 
-/** Names of the scope's IDA daemons that have not exited. */
-async function liveHostNames(broker: DaemonBrokerClient): Promise<string[]> {
+/** Names of the scope's disassembler daemons that have not exited. */
+async function liveHostNames(broker: DaemonBrokerClient, backend?: DisasmBackendId): Promise<string[]> {
 	const result = await broker.request({ op: "list" });
 	if (result.op !== "list") return [];
 	return result.daemons
-		.filter(daemon => daemon.name.startsWith(IDA_DAEMON_PREFIX) && !TERMINAL_STATES[daemon.state])
+		.filter(
+			daemon =>
+				(backend
+					? daemon.name.startsWith(daemonPrefix(backend))
+					: DISASM_DAEMON_PREFIXES.some(prefix => daemon.name.startsWith(prefix))) &&
+				!TERMINAL_STATES[daemon.state],
+		)
 		.map(daemon => daemon.name);
 }
 
-/** Save and close least recently used idle hosts until starting one more stays within `ida.maxOpen`. */
+/** Save and close least recently used idle hosts until starting one more stays within `disassembler.maxOpen`. */
 async function makeRoom(session: ToolSession, broker: DaemonBrokerClient, name: string): Promise<void> {
-	const maxOpen = Math.max(1, cfgIdaMaxOpen.get(session.settings));
+	const maxOpen = Math.max(1, cfgDisasmMaxOpen.get(session.settings));
 	for (;;) {
 		const others = (await liveHostNames(broker)).filter(other => other !== name);
 		if (others.length < maxOpen) return;
 		const victim = (await attachAll(broker, others))
-			.filter(db => db.status.state === "open" && !db.status.busy)
+			.filter(db => db.status.state === "open" && !db.status.busy && db.status.references === 0)
 			.sort((a, b) => a.status.lastUsed - b.status.lastUsed)[0];
 		if (!victim) {
 			throw new ToolError(
-				`IDA database limit reached (${maxOpen} open, all busy: ${others.join(", ")}); close one with ida close or raise ida.maxOpen`,
+				`Disassembler database limit reached (${maxOpen} open, all busy or retained: ${others.join(", ")}); release a dsm reference or raise disassembler.maxOpen`,
 			);
 		}
 		await victim.close({ save: true });
 		await broker.request({ op: "wait", name: victim.name, for: "exit", timeoutMs: EXIT_WAIT_MS }).catch(error => {
-			logger.debug("IDA host exit wait failed", { name: victim.name, error: errorMessage(error) });
+			logger.debug(`${hostLabel(victim.name)} exit wait failed`, { name: victim.name, error: errorMessage(error) });
 		});
 	}
 }
@@ -324,16 +371,19 @@ async function makeRoom(session: ToolSession, broker: DaemonBrokerClient, name: 
 async function startHost(
 	session: ToolSession,
 	broker: DaemonBrokerClient,
-	loc: IdbLocation,
+	backend: DisasmBackendId,
+	loc: DatabaseLocation,
 	name: string,
 ): Promise<void> {
-	const config: IdaHostConfig = {
+	const config: HostConfig = {
+		backend,
+		projectDir: broker.projectDir,
 		endpoint: hostEndpoint(broker, name),
 		loc,
-		runtime: await resolveIdaRuntime(session),
-		idleCloseMs: cfgIdaIdleCloseSec.get(session.settings) * 1000,
+		runtime: await resolveWorkerRuntime(session, backend),
+		idleCloseMs: cfgDisasmIdleCloseSec.get(session.settings) * 1000,
 	};
-	const spawn = resolveWorkerSpawnCmd(IDA_HOST_WORKER_ARG);
+	const spawn = resolveWorkerSpawnCmd(DISASM_HOST_WORKER_ARG);
 	let started: DaemonSnapshot;
 	try {
 		const result = await broker.request({
@@ -342,11 +392,11 @@ async function startHost(
 				name,
 				application: spawn.cmd[0]!,
 				// The trailing ref is ignored by the host; it labels the `omp ps` COMMAND column.
-				args: [...spawn.cmd.slice(1), idbRef(loc)],
-				env: { [IDA_HOST_CONFIG_ENV]: JSON.stringify(config) },
+				args: [...spawn.cmd.slice(1), databaseRef(loc)],
+				env: { [DISASM_HOST_CONFIG_ENV]: JSON.stringify(config) },
 				cwd: spawn.cwd ?? broker.projectDir,
 				pty: false,
-				ready: { log: IDA_HOST_READY_PATTERN, timeoutMs: READY_TIMEOUT_MS },
+				ready: { log: hostReadyPattern(backend), timeoutMs: READY_TIMEOUT_MS },
 				restart: "no",
 				persist: false,
 				detached: false,
@@ -356,45 +406,50 @@ async function startHost(
 		started = result.daemon;
 	} catch (error) {
 		// Lost a cross-process start race; the next round attaches to the winner.
-		logger.debug("IDA host start contention", { name, error: errorMessage(error) });
+		logger.debug(`${hostLabel(name)} start contention`, { name, error: errorMessage(error) });
 		return;
 	}
 	if (TERMINAL_STATES[started.state]) {
 		const reason = started.exitReason ?? `code ${started.exitCode}`;
-		throw new ToolError(`IDA host ${name} exited during startup (${reason}); see \`omp ps logs ${name}\``);
+		throw new ToolError(`${hostLabel(name)} ${name} exited during startup (${reason}); see \`omp ps logs ${name}\``);
 	}
 }
 
 /** Attach to the host for `loc`, starting it (and waiting for the open) when none runs. */
-async function openIdaDatabase(session: ToolSession, loc: IdbLocation): Promise<IdaDatabase> {
-	const broker = await daemonClientForProject(session.cwd);
+async function openDatabase(
+	session: ToolSession,
+	backend: DisasmBackendId,
+	loc: DatabaseLocation,
+	broker: DaemonBrokerClient,
+): Promise<DisasmDatabase> {
 	// The broker connection doubles as the presence lease keeping the host alive.
 	await broker.request({ op: "ping" });
-	const name = idaDaemonName(loc.id);
+	const name = daemonName(backend, loc.id);
 	for (let attempt = 0; ; attempt++) {
 		const db = await attachHost(broker, name, "open").catch(error => {
 			// A host exiting (idle close, eviction) is replaced below; open failures surface.
-			if (error instanceof IdaHostGoneError) return undefined;
+			if (error instanceof HostGoneError) return undefined;
 			throw error;
 		});
 		if (db) return db;
 		if (attempt === ENSURE_ATTEMPTS) {
-			throw new ToolError(`IDA host ${name} did not come up; see \`omp ps logs ${name}\``);
+			throw new ToolError(`${hostLabel(name)} ${name} did not come up; see \`omp ps logs ${name}\``);
 		}
-		const existing = await describeQuietly(broker, name, HOST_LABEL);
+		const existing = await describeQuietly(broker, name, hostLabel(name));
 		if (existing && !TERMINAL_STATES[existing.state]) {
 			// Starting (possibly by another omp process): wait for its banner. Ready yet unreachable: replace it.
-			if (existing.readyAt === undefined) await waitReady(broker, name, HOST_LABEL, undefined, READY_TIMEOUT_MS);
-			else await stopQuietly(broker, name, HOST_LABEL);
+			if (existing.readyAt === undefined)
+				await waitReady(broker, name, hostLabel(name), undefined, READY_TIMEOUT_MS);
+			else await stopQuietly(broker, name, hostLabel(name));
 			continue;
 		}
 		await makeRoom(session, broker, name);
-		await startHost(session, broker, loc, name);
+		await startHost(session, broker, backend, loc, name);
 	}
 }
 
-/** Options for {@link acquireIdaDatabase}. */
-export interface AcquireIdaDatabaseOptions extends LocateIdbOptions {
+/** Options for {@link acquireDatabase}. */
+export interface AcquireDatabaseOptions extends LocateDatabaseOptions {
 	signal?: AbortSignal;
 }
 
@@ -406,32 +461,47 @@ export interface AcquireIdaDatabaseOptions extends LocateIdbOptions {
  *
  * Throws a ToolError when the database is still opening after {@link OPEN_WAIT_MS}.
  */
-export async function acquireIdaDatabase(
+export async function acquireDatabase(
 	session: ToolSession,
+	backend: DisasmBackendId,
 	sourcePath: string,
-	options: AcquireIdaDatabaseOptions = {},
-): Promise<IdaDatabase> {
+	options: AcquireDatabaseOptions = {},
+): Promise<DisasmDatabase> {
 	const { signal, arch } = options;
-	const loc = await locateIdb(sourcePath, { arch });
-	const cached = handles.get(idaDaemonName(loc.id));
+	const loc = await locateDatabase(DISASM_BACKENDS[backend], sourcePath, { arch });
+	const name = daemonName(backend, loc.id);
+	const broker = await daemonClientForProject(session.cwd);
+	const endpoint = hostEndpoint(broker, name);
+	const cached = handles.get(endpoint);
 	if (cached?.connected && cached.status.state === "open") return cached;
-	let opening = pending.get(loc.id);
+	let opening = pending.get(endpoint);
 	if (!opening) {
-		opening = openIdaDatabase(session, loc).finally(() => pending.delete(loc.id));
+		opening = openDatabase(session, backend, loc, broker).finally(() => pending.delete(endpoint));
 		// Every caller may have stopped waiting; remaining ones still receive the failure.
-		opening.catch(error => logger.debug("IDA database open failed", { id: loc.id, error: errorMessage(error) }));
-		pending.set(loc.id, opening);
+		opening.catch(error =>
+			logger.debug(`${DISASM_BACKENDS[backend].label} database open failed`, {
+				id: loc.id,
+				error: errorMessage(error),
+			}),
+		);
+		pending.set(endpoint, opening);
 	}
 	const deadline = AbortSignal.timeout(OPEN_WAIT_MS);
 	try {
 		return await untilAborted(signal ? AbortSignal.any([signal, deadline]) : deadline, opening);
 	} catch (error) {
 		if (signal?.aborted || !deadline.aborted) throw error;
-		const name = idaDaemonName(loc.id);
+		const label = DISASM_BACKENDS[backend].label;
+		const status = installStatus(backend);
+		if (status !== undefined) {
+			throw new ToolError(
+				`${label} is still being installed (${status}); it continues in the background. Retry later.`,
+			);
+		}
 		const since = await openingSince(session, name);
 		const age = since === undefined ? "" : ` for ${Math.round((Date.now() - since) / 60_000)}m`;
 		throw new ToolError(
-			`IDA is still analyzing ${idbRef(loc)} (opening${age}); the analysis continues in \`${name}\`. Retry later, or stop it with \`omp ps stop ${name}\``,
+			`${label} is still analyzing ${databaseRef(loc)} (opening${age}); the analysis continues in \`${name}\`. Retry later, or stop it with \`omp ps stop ${name}\``,
 		);
 	}
 }
@@ -441,7 +511,7 @@ async function openingSince(session: ToolSession, name: string): Promise<number 
 	try {
 		const broker = await daemonClientForProject(session.cwd);
 		// A separate connection: caching an `opening` status in `handles` would hand stale status to the pending open.
-		const db = await IdaDatabase.attach(name, hostEndpoint(broker, name), "status");
+		const db = await DisasmDatabase.attach(name, hostEndpoint(broker, name), "status");
 		if (!db) return undefined;
 		db.disconnect();
 		return db.status.state === "opening" ? db.status.lastUsed : undefined;
@@ -450,25 +520,48 @@ async function openingSince(session: ToolSession, name: string): Promise<number 
 	}
 }
 
-/** The open database with `locateIdb` id (or daemon name) `ref` in this project, if any. */
-export async function findOpenIdaDatabase(session: ToolSession, ref: string): Promise<IdaDatabase | undefined> {
-	const broker = await daemonClientForProject(session.cwd);
-	const name = ref.startsWith(IDA_DAEMON_PREFIX) ? ref : idaDaemonName(ref);
+/** The open database with `locateDatabase` id (or daemon name) `ref` in this project, if any. */
+export async function findOpenDatabase(
+	session: ToolSession,
+	backend: DisasmBackendId,
+	ref: string,
+): Promise<DisasmDatabase | undefined> {
+	return findOpenDatabaseAt(session.cwd, backend, ref);
+}
+
+async function findOpenDatabaseAt(
+	project: string,
+	backend: DisasmBackendId,
+	ref: string,
+): Promise<DisasmDatabase | undefined> {
+	const broker = await daemonClientForProject(project);
+	const name = ref.startsWith(daemonPrefix(backend)) ? ref : daemonName(backend, ref);
 	const db = await attachHost(broker, name, "status").catch(() => undefined);
 	return db?.status.state === "open" ? db : undefined;
 }
 
+/** Find a portable reference in its originating project, rejecting a stopped or replaced host. */
+export async function findDatabaseHandle(handle: DatabaseHandle): Promise<DisasmDatabase> {
+	const db = await findOpenDatabaseAt(handle.project, handle.backend, handle.id);
+	if (!db || db.handle !== formatDatabaseHandle(handle)) {
+		throw new ToolError(
+			"dsm handle has expired; the original database is no longer open. Ask its owner for a live handle.",
+		);
+	}
+	return db;
+}
+
 /** Every database hosted in this project, including ones other omp processes opened. */
-export async function listIdaDatabases(session: ToolSession): Promise<IdaDatabase[]> {
+export async function listDatabases(session: ToolSession, backend: DisasmBackendId): Promise<DisasmDatabase[]> {
 	const broker = await daemonClientForProject(session.cwd);
-	return attachAll(broker, await liveHostNames(broker));
+	return attachAll(broker, await liveHostNames(broker, backend));
 }
 
 /**
  * Save every attached database with unsaved changes and drop this process's connections; the hosts
  * keep running for other omp processes and exit with the project's broker. Failures are logged.
  */
-export async function releaseIdaDatabases(): Promise<void> {
+export async function releaseDatabases(): Promise<void> {
 	const dbs = [...handles.values()];
 	handles.clear();
 	await Promise.all(
@@ -478,7 +571,7 @@ export async function releaseIdaDatabases(): Promise<void> {
 			try {
 				await Promise.race([db.flush(), wait.promise]);
 			} catch (error) {
-				logger.warn("IDA flush on release failed", { name: db.name, error: errorMessage(error) });
+				logger.warn(`${hostLabel(db.name)} flush on release failed`, { name: db.name, error: errorMessage(error) });
 			} finally {
 				clearTimeout(timer);
 				db.disconnect();
@@ -487,17 +580,20 @@ export async function releaseIdaDatabases(): Promise<void> {
 	);
 }
 
-/** Exercise worker-host IDA host startup and the ping handshake for distribution smoke tests. */
-export async function smokeTestIdaHost(): Promise<void> {
+/** Exercise disassembler-host startup and ping without requiring a backend install. */
+export async function smokeTestDisasmHost(): Promise<void> {
 	const dir = path.join(os.tmpdir(), `omp-ida-smoke-${process.pid.toString(36)}`);
 	const endpoint = ipcEndpoint(os.tmpdir(), `omp-ida-smoke-${process.pid.toString(36)}`);
 	// A missing source makes the open fail after the host listens; `ping` still answers.
-	const config: IdaHostConfig = {
+	const config: HostConfig = {
+		backend: "ida",
+		projectDir: dir,
 		endpoint,
 		loc: {
 			id: "smoke",
 			dir,
 			sourcePath: path.join(dir, "missing"),
+			stagedPath: path.join(dir, "missing"),
 			kind: "store",
 			openPath: path.join(dir, "missing"),
 			isNew: true,
@@ -506,10 +602,10 @@ export async function smokeTestIdaHost(): Promise<void> {
 		runtime: { pythonPath: "python3", env: {} },
 		idleCloseMs: 0,
 	};
-	const spawn = resolveWorkerSpawnCmd(IDA_HOST_WORKER_ARG);
+	const spawn = resolveWorkerSpawnCmd(DISASM_HOST_WORKER_ARG);
 	const proc = ptree.spawn(spawn.cmd, {
 		cwd: spawn.cwd,
-		env: workerEnvFromParent({ [IDA_HOST_CONFIG_ENV]: JSON.stringify(config) }),
+		env: workerEnvFromParent({ [DISASM_HOST_CONFIG_ENV]: JSON.stringify(config) }),
 	});
 	try {
 		const deadline = Date.now() + SMOKE_TEST_TIMEOUT_MS;

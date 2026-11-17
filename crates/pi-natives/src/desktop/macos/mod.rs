@@ -19,6 +19,9 @@ pub(super) use ax::application_handle;
 pub(super) use ax::{ax_window_ids, has_open_window, is_standard_window, menus};
 pub(super) use capture::{application_windows, has_onscreen_window, window_titles};
 use image::RgbaImage;
+#[cfg(test)]
+pub(super) use input::entry_front_pinned;
+pub(super) use input::pin_entry_front;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use process::started as process_started;
 pub(super) use session::screen_state;
@@ -277,9 +280,14 @@ impl Backend for MacosBackend {
 		Self::require_input_permission()?;
 		// The element's bounds and window are read from its application, which
 		// blocks while it is busy; the user's front app is read before them.
-		let (entry_front, (target, event)) = EntryFront::before(skylight::front_pid, || {
-			ax::require_element_read_as(ax::mac_handle(element)?)?;
-			locate_element_click(self, element, click)
+		let mac = ax::mac_handle(element)?;
+		let (entry_front, (target, event, _aimed)) = EntryFront::before(skylight::front_pid, || {
+			ax::require_element_read_as(mac)?;
+			let (target, event) = locate_element_click(self, element, click)?;
+			// The click goes to the element's frame as read just now; no press
+			// is posted once the app has sorted another row into that place.
+			let aimed = input::aim_at_element(mac)?;
+			Ok((target, event, aimed))
 		})?;
 		if click.checks_menu_press() {
 			self.refuse_menu_press(&target, &event)?;
