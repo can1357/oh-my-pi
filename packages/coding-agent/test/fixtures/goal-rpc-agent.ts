@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -45,6 +46,7 @@ const { session } = await createAgentSession({
 	enableLsp: false,
 	// Extension commands that change the session (/goaltest-new-session), navigate within it (/goaltest-navigate-here),
 	// or end the "slow" script's stalled turn (/goaltest-release).
+	// A deferred extension tool (/goaltest-enable-late-tool) is registered inactive, then enabled after goal entry.
 	extensions: [
 		pi => {
 			pi.registerCommand("goaltest-new-session", {
@@ -71,6 +73,22 @@ const { session } = await createAgentSession({
 				handler: async (_args, ctx) => {
 					const leaf = ctx.sessionManager.getLeafId();
 					if (leaf) await ctx.navigateTree(leaf);
+				},
+			});
+			pi.registerTool({
+				name: "goaltest_late_tool",
+				label: "Goal test late tool",
+				description: "Registered before goal entry but enabled only after it.",
+				parameters: type({}),
+				defaultInactive: true,
+				async execute() {
+					return { content: [{ type: "text", text: "late tool ran" }] };
+				},
+			});
+			pi.registerCommand("goaltest-enable-late-tool", {
+				description: "enable the deferred late tool after goal entry",
+				handler: async () => {
+					await pi.setActiveTools([...pi.getActiveTools(), "goaltest_late_tool"]);
 				},
 			});
 		},
