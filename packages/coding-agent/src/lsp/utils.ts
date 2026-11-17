@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { stripBom } from "../edit/normalize";
 import { formatPathRelativeToCwd, resolveToCwd, specialFileKind } from "../tools/path-utils";
 import type {
 	CodeAction,
@@ -20,11 +21,22 @@ import type {
 
 export { detectLanguageId } from "@oh-my-pi/pi-tui/lang-from-path";
 
-/** Read a file's text, refusing FIFOs, devices and sockets, whose reads can block forever or never end. */
-export async function readTextFromDisk(filePath: string): Promise<string> {
-	const kind = specialFileKind(await fs.stat(filePath));
+const UTF8_KEEPING_BOM = new TextDecoder("utf-8", { ignoreBOM: true });
+
+/**
+ * Read a regular file's text exactly as on disk (a BOM is kept) with its mtime, refusing FIFOs,
+ * devices and sockets, whose reads can block forever or never end.
+ */
+export async function readDiskSnapshot(filePath: string): Promise<{ text: string; mtimeMs: number }> {
+	const stat = await fs.stat(filePath);
+	const kind = specialFileKind(stat);
 	if (kind) throw new Error(`Cannot open '${filePath}': it is a ${kind}, not a regular file or directory.`);
-	return Bun.file(filePath).text();
+	return { text: UTF8_KEEPING_BOM.decode(await Bun.file(filePath).bytes()), mtimeMs: stat.mtimeMs };
+}
+
+/** Read a file's text without a BOM, refusing FIFOs, devices and sockets. */
+export async function readTextFromDisk(filePath: string): Promise<string> {
+	return stripBom((await readDiskSnapshot(filePath)).text).text;
 }
 
 // =============================================================================

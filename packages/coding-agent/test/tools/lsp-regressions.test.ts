@@ -51,7 +51,7 @@ import {
 	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { FileChangeReport, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -969,7 +969,13 @@ describe("lsp regressions", () => {
 			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { "fake-lsp": serverConfig } });
 			const client = await lspClient.getOrCreateClient(serverConfig, tempDir.path(), 1_000);
 			const targetPath = await openDocument(client, "target.ts");
-			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const before = await Bun.file(targetPath).text();
+			const beforeMtimeMs = (await fsp.stat(targetPath)).mtimeMs;
+			const recorded: FileChangeReport[] = [];
+			const tool = new LspTool({
+				...makeLspSession(tempDir.path()),
+				recordFileChange: change => recorded.push(change),
+			});
 
 			const listed = await tool.execute("list-source-actions", {
 				action: "code_actions",
@@ -980,6 +986,7 @@ describe("lsp regressions", () => {
 				type: "text",
 				text: "3 code action(s):\n  0: [refactor.rewrite] Convert named imports to namespace import\n  1: [refactor.rewrite] Convert named imports to namespace import\n  2: [source.organizeImports] Organize Imports",
 			});
+			expect(recorded).toEqual([]);
 
 			await tool.execute("apply-source-action", {
 				action: "code_actions",
@@ -989,6 +996,9 @@ describe("lsp regressions", () => {
 				apply: true,
 			});
 			expect(await Bun.file(targetPath).text()).toBe("organized\n");
+			expect(recorded).toEqual([
+				{ path: await fsp.realpath(targetPath), tool: "lsp", before, after: "organized\n", beforeMtimeMs },
+			]);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -2793,6 +2803,89 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("records a command's server-applied edit for its caller only while it is the sole command in flight", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-command-edit-");
+		const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+		try {
+			const filePath = path.join(tempDir.path(), "a.ts");
+			await Bun.write(filePath, "const oldName = 1;\n");
+			const uri = fileToUri(filePath);
+			const held = Promise.withResolvers<void>();
+			let nextEditId = 1_000;
+			const fakeServer = installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({
+						jsonrpc: "2.0",
+						id: message.id,
+						result: { capabilities: { executeCommandProvider: { commands: ["rename", "hold"] } } },
+					});
+				} else if (message.method === "workspace/executeCommand") {
+					const { command, arguments: args } = message.params as { command: string; arguments: string[] };
+					if (command === "hold") {
+						void held.promise.then(() => server.send({ jsonrpc: "2.0", id: message.id, result: null }));
+						return;
+					}
+					// Like a real server: apply the edit, wait for the client's answer, then answer the command.
+					const [from, to] = args;
+					const editId = nextEditId++;
+					const edit = {
+						changes: {
+							[uri]: [
+								{
+									range: { start: { line: 0, character: 6 }, end: { line: 0, character: 6 + from.length } },
+									newText: to,
+								},
+							],
+						},
+					};
+					server.send({ jsonrpc: "2.0", id: editId, method: "workspace/applyEdit", params: { edit } });
+					void server
+						.waitFor(reply => reply.id === editId && reply.method === undefined)
+						.then(() => server.send({ jsonrpc: "2.0", id: message.id, result: null }));
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const client = await lspClient.getOrCreateClient(config, tempDir.path());
+			const recorded: FileChangeReport[] = [];
+			const record = (change: Omit<FileChangeReport, "tool">) => recorded.push({ ...change, tool: "lsp" });
+
+			await lspClient.executeCommandWithLsp(
+				client,
+				{ command: "rename", arguments: ["oldName", "newName"] },
+				undefined,
+				record,
+			);
+			// A second command in flight makes the owner of the next edit ambiguous.
+			const hold = lspClient.executeCommandWithLsp(client, { command: "hold" });
+			await fakeServer.waitFor(message => (message.params as { command?: string } | undefined)?.command === "hold");
+			await lspClient.executeCommandWithLsp(
+				client,
+				{ command: "rename", arguments: ["newName", "lastName"] },
+				undefined,
+				record,
+			);
+			held.resolve();
+			await hold;
+
+			expect(await Bun.file(filePath).text()).toBe("const lastName = 1;\n");
+			expect(recorded).toEqual([
+				{
+					path: await fsp.realpath(filePath),
+					tool: "lsp",
+					before: "const oldName = 1;\n",
+					after: "const newName = 1;\n",
+					beforeMtimeMs: expect.any(Number),
+				},
+			]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("does not reuse stale file diagnostics after another URI publishes", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-stale-diags-");
 		try {
@@ -4196,10 +4289,15 @@ describe("lsp regressions", () => {
 				idleTimeoutMs: undefined,
 			});
 
-			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const recorded: FileChangeReport[] = [];
+			const tool = new LspTool({
+				...makeLspSession(tempDir.path()),
+				recordFileChange: change => recorded.push(change),
+			});
 			expect(
 				textResult(await tool.execute("symbols-before-rename", { action: "symbols", file: filePath })),
 			).toContain("OldName");
+			const beforeMtimeMs = (await fsp.stat(filePath)).mtimeMs;
 			await tool.execute("rename-open-document", {
 				action: "rename",
 				file: filePath,
@@ -4208,6 +4306,15 @@ describe("lsp regressions", () => {
 				new_name: "NewName",
 			});
 			expect(await Bun.file(filePath).text()).toContain("NewName");
+			expect(recorded).toEqual([
+				{
+					path: await fsp.realpath(filePath),
+					tool: "lsp",
+					before: "package main\nfunc OldName() {}\n",
+					after: "package main\nfunc NewName() {}\n",
+					beforeMtimeMs,
+				},
+			]);
 
 			const symbols = await tool.execute("symbols-after-rename", { action: "symbols", file: filePath });
 			expect(textResult(symbols)).toContain("NewName");

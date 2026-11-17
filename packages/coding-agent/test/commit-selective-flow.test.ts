@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { commitSelection } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
 import { ChangeJournal } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
+import { applyWorkspaceEditWithLsp } from "@oh-my-pi/pi-coding-agent/lsp/client";
+import { fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -86,6 +88,54 @@ async function sharedWorkspace() {
 }
 
 describe("selective commit flow", () => {
+	it.each(["regular", "symlink", "BOM"] as const)(
+		"selects journaled LSP rename lines without selecting a pre-existing user edit (%s)",
+		async kind => {
+			const { root, journal } = await emptyRepo();
+			const declaration = path.join(root, "declaration.ts");
+			const usage = path.join(root, "usage.ts");
+			const before = `${kind === "BOM" ? "\uFEFF" : ""}export const oldName = 1;\n`;
+			await Bun.write(declaration, before);
+			await Bun.write(usage, "console.log(oldName);\n");
+			const edited = kind === "symlink" ? path.join(root, "declaration-link.ts") : declaration;
+			if (kind === "symlink") await fs.symlink("declaration.ts", edited);
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-q", "-m", "seed"]);
+			await Bun.write(declaration, `${before}// user note\n`);
+
+			await applyWorkspaceEditWithLsp(
+				{
+					changes: {
+						[fileToUri(edited)]: [
+							{
+								range: { start: { line: 0, character: 13 }, end: { line: 0, character: 20 } },
+								newText: "newName",
+							},
+						],
+						[fileToUri(usage)]: [
+							{
+								range: { start: { line: 0, character: 12 }, end: { line: 0, character: 19 } },
+								newText: "newName",
+							},
+						],
+					},
+				},
+				root,
+				undefined,
+				change => journal.recordChange({ ...change, agent: "Main", tool: "lsp" }),
+			);
+			await journal.flush();
+
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			expect(draft.selection().map(change => change.path)).toEqual(["declaration.ts", "usage.ts"]);
+			await commitSelection(draft, { subject: "refactor: rename symbol" }, { journal, agent: { agent: "Main" } });
+			expect(await git(root, ["show", "HEAD:declaration.ts"])).toBe("export const newName = 1;\n");
+			expect(await git(root, ["show", "HEAD:usage.ts"])).toBe("console.log(newName);\n");
+			expect(await fs.readFile(declaration, "utf8")).toBe("export const newName = 1;\n// user note\n");
+			if (kind === "symlink") expect(await fs.readlink(edited)).toBe("declaration.ts");
+		},
+	);
+
 	it("commits the agent tree's lines and leaves the user's staged and unstaged work alone", async () => {
 		const { root, journal, head } = await sharedWorkspace();
 		const worktreeBefore = await git(root, ["diff", "HEAD"]);

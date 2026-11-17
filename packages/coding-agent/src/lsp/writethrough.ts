@@ -5,11 +5,11 @@ import { isPermissionDeniedError, writeFileWithFallback } from "../tools/file-wr
 import {
 	beginPendingDiskWrite,
 	endPendingDiskWrite,
+	executeCommandWithLsp,
 	getActiveOrPendingClient,
 	getOrCreateClient,
 	notifyWorkspaceWatchedFiles,
 	reconcileOpenFilesFromDisk,
-	sendRequest,
 } from "./client";
 import { getConfig, getServersForFile } from "./config";
 import {
@@ -63,9 +63,8 @@ async function reloadTypeScriptProjectsAfterCreate(
 			}
 			if (!client) return;
 			if (!supportsTsserverRequest(client.serverCapabilities)) return;
-			const response = await sendRequest(
+			const response = await executeCommandWithLsp(
 				client,
-				"workspace/executeCommand",
 				{
 					command: TSSERVER_REQUEST_COMMAND,
 					arguments: [

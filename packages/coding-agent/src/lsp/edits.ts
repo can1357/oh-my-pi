@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEexist, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { readSnapshot } from "../commit/selective/journal";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
@@ -16,7 +17,8 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
-import { readTextFromDisk, uriToFile } from "./utils";
+import { stripBom } from "../edit/normalize";
+import { readDiskSnapshot, uriToFile } from "./utils";
 
 // =============================================================================
 // Text Edit Application
@@ -156,14 +158,30 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 	return out;
 }
 
+/** A file's on-disk text before text edits (a BOM is kept) and the text written. */
+export interface TextEditOutcome {
+	before: string;
+	after: string;
+	beforeMtimeMs: number;
+}
+
 /**
- * Apply text edits to a file.
+ * Apply text edits to a file, reading it once.
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
+ * `onFileChange` receives the change under the file's real path.
  */
-export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
-	const content = await readTextFromDisk(filePath);
-	const result = applyTextEditsToString(content, edits);
-	await Bun.write(filePath, result);
+export async function applyTextEdits(
+	filePath: string,
+	edits: TextEdit[],
+	onFileChange?: (change: WorkspaceFileChange) => void,
+): Promise<TextEditOutcome> {
+	const snapshot = await readDiskSnapshot(filePath);
+	// LSP positions address the text after a BOM; the edited text is written without it.
+	const after = applyTextEditsToString(stripBom(snapshot.text).text, edits);
+	await Bun.write(filePath, after);
+	const outcome = { before: snapshot.text, after, beforeMtimeMs: snapshot.mtimeMs };
+	if (onFileChange) onFileChange({ path: await fs.realpath(filePath), ...outcome });
+	return outcome;
 }
 
 /** A reference file and the text edits a rename computed for it. */
@@ -172,40 +190,94 @@ export interface RenameReferenceEdit {
 	edits: TextEdit[];
 }
 
+/** A file a rename moves, `from` its old path `to` its new one. */
+export interface RenameMove {
+	from: string;
+	to: string;
+}
+
 /**
  * Apply a rename's reference edits and then move `source` → `dest` as one unit.
  *
  * The reference edits (import/usage rewrites in other files) must be written
  * before the move so their positions match the pre-move file contents, but a
- * failed move must not leave those files half-rewritten: each edited file is
- * snapshotted first, and if `mkdir`/`rename` throws, every snapshot is restored
- * before the error propagates. A failed move therefore leaves the source,
- * destination, and every reference file exactly as they were.
+ * failure must not leave those files half-rewritten: if a later edit, the
+ * journal snapshot, or `mkdir`/`rename` throws, every edited file gets its
+ * original bytes back before the error propagates. A failed rename therefore
+ * leaves the source, destination, and every reference file exactly as they were.
  *
- * @throws the original `mkdir`/`rename` error, after rolling back the edits.
+ * `onFileChange` receives the reference edits and then each moved regular file
+ * (symlinks are left out) as a deletion at `from` and a creation at `to`, only
+ * once the move succeeded. Paths keep the moved entry itself, resolving only its
+ * directory.
+ *
+ * @throws the original error, after rolling back the edits.
  */
 export async function applyEditsThenRename(
 	references: RenameReferenceEdit[],
 	source: string,
 	dest: string,
+	moves: readonly RenameMove[],
+	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<void> {
-	const backups: Array<{ filePath: string; original: string }> = [];
-	for (const { filePath, edits } of references) {
-		backups.push({ filePath, original: await readTextFromDisk(filePath) });
-		await applyTextEdits(filePath, edits);
-	}
+	// One realpath per directory: a directory rename moves up to `MAX_RENAME_PAIRS` siblings.
+	const realDirs = new Map<string, Promise<string>>();
+	const entryLocation = async (filePath: string): Promise<string> => {
+		const dir = path.dirname(filePath);
+		let realDir = realDirs.get(dir);
+		if (!realDir) {
+			realDir = fs.realpath(dir);
+			realDirs.set(dir, realDir);
+		}
+		return path.join(await realDir, path.basename(filePath));
+	};
+	const edited: Array<{ filePath: string; outcome: TextEditOutcome }> = [];
+	const editChanges: WorkspaceFileChange[] = [];
+	let moved: Array<{ from: string; to: string; text: string; mtimeMs?: number } | undefined> = [];
 	try {
+		for (const { filePath, edits } of references) {
+			edited.push({ filePath, outcome: await applyTextEdits(filePath, edits) });
+		}
+		// Journal paths and moved contents must be taken before the move takes them away.
+		if (onFileChange) {
+			for (const { filePath, outcome } of edited) {
+				editChanges.push({ path: await fs.realpath(filePath), ...outcome });
+			}
+			moved = await Promise.all(
+				moves.map(async ({ from, to }) => {
+					if ((await fs.lstat(from)).isSymbolicLink()) return undefined;
+					const snapshot = await readSnapshot(from);
+					if (snapshot?.text == null) return undefined;
+					return { from: await entryLocation(from), to, text: snapshot.text, mtimeMs: snapshot.mtimeMs };
+				}),
+			);
+		}
 		await fs.mkdir(path.dirname(dest), { recursive: true });
 		await fs.rename(source, dest);
 	} catch (err) {
-		await Promise.all(backups.map(({ filePath, original }) => Bun.write(filePath, original)));
+		await Promise.all(edited.map(({ filePath, outcome }) => Bun.write(filePath, outcome.before)));
 		throw err;
+	}
+	if (!onFileChange) return;
+	for (const change of editChanges) onFileChange(change);
+	for (const entry of moved) {
+		if (!entry) continue;
+		onFileChange({ path: entry.from, before: entry.text, after: null, beforeMtimeMs: entry.mtimeMs });
+		onFileChange({ path: await entryLocation(entry.to), before: null, after: entry.text });
 	}
 }
 
 // =============================================================================
 // Workspace Edit Application
 // =============================================================================
+
+/** A file mutation reported after it lands, for selective-commit attribution. */
+export interface WorkspaceFileChange {
+	path: string;
+	before: string | null;
+	after: string | null;
+	beforeMtimeMs?: number;
+}
 
 type WorkspaceEditOp =
 	| { kind: "text"; uri: string; edits: TextEdit[] }
@@ -312,11 +384,15 @@ export interface WorkspaceEditResult {
  * the callback has already reported the executed prefix — callers that must
  * reconcile external state (e.g. LSP overlays) rely on this because the
  * returned {@link WorkspaceEditResult} is lost on failure.
+ * `onFileChange` reports the before/after contents of each successful text edit,
+ * including the executed prefix when a later operation fails. Resource operations
+ * remain unjournaled.
  */
 export async function applyWorkspaceEdit(
 	edit: WorkspaceEdit,
 	cwd: string,
 	onExecuted?: (change: ExecutedWorkspaceChange) => void,
+	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<WorkspaceEditResult> {
 	const applied: string[] = [];
 	const executed: ExecutedWorkspaceChange[] = [];
@@ -333,7 +409,7 @@ export async function applyWorkspaceEdit(
 		for (const op of ops) {
 			if (op.kind === "text") {
 				const filePath = uriToFile(op.uri);
-				await applyTextEdits(filePath, op.edits);
+				await applyTextEdits(filePath, op.edits, onFileChange);
 				applied.push(`Applied ${op.edits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
 				record({ kind: "edit", uri: op.uri });
 			} else if (op.kind === "create") {
@@ -442,7 +518,7 @@ export async function applyWorkspaceEdit(
 			const textEdits = changes[uri];
 			if (textEdits.length === 0) continue;
 			const filePath = uriToFile(uri);
-			await applyTextEdits(filePath, textEdits);
+			await applyTextEdits(filePath, textEdits, onFileChange);
 			applied.push(`Applied ${textEdits.length} edit(s) to ${formatPathRelativeToCwd(filePath, cwd)}`);
 			record({ kind: "edit", uri });
 		}
