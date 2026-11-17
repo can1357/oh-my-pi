@@ -74,6 +74,7 @@ function makeSession(getPreludes?: () => readonly EvalPreludeDefinition[]): Tool
 			"browser.relay": false,
 			"browser.cmux": false,
 			"browser.tern": false,
+			"tools.outputMaxColumns": 256,
 		}),
 		...(getPreludes === undefined ? {} : { getEvalPreludes: getPreludes }),
 	};

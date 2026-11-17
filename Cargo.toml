@@ -27,7 +27,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.21.0"
+version = "18.22.0"
 edition = "2024"
 rust-version = "1.101"
 license = "MIT"
@@ -438,7 +438,7 @@ html-to-markdown-rs = { version = "3.18.3", default-features = false }
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization
 # ──────────────────────────────────────────────────────────────────────────────
-xutf = "1.5"
+xutf = "2.3"
 zstd = "0.14"
 fancy-regex = "0.17"
 tiktoken-rs = "0.12"
