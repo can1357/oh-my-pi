@@ -136,6 +136,7 @@ class ProtocolTests(unittest.TestCase):
         api = FakeAPI({f"repos/{req['repository']}/contents/.github/workflows/ci.yml?ref={req['source_sha']}": {
             "content": base64.b64encode(code).decode(), "encoding": "base64"}})
         env = {"CI_MACOS_FALLBACK_ENABLED": "true", "CI_MACOS_FALLBACK_TRUST": "repository-writers",
+               "CI_MACOS_CONTROL_POLICY": "",
                "CI_MACOS_PARENT_WORKFLOW_SHA256": hashlib.sha256(code).hexdigest()}
         with patch.dict(os.environ, env):
             common.verify_mac_configuration(api, req)
