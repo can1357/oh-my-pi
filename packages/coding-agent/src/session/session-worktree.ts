@@ -14,11 +14,17 @@ import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreeDir, hashPath, logger } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import type { SettingValueOf } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { resolveAvailableWorktreePath } from "../tools/gh-pr-checkout";
 
-import { cfgIsolationBackend, cfgWorktreeCleanSource, cfgWorktreeClone } from "../task/settings";
+import {
+	cfgIsolationBackend,
+	cfgWorktreeCleanSource,
+	cfgWorktreeClone,
+	type cfgWorktreeOnExit,
+} from "../task/settings";
 
 export interface SessionWorktree {
 	/** Absolute, realpath'd worktree root. */
@@ -47,15 +53,20 @@ export interface SessionWorktreeState {
 	offBranch: boolean;
 }
 
+/** `worktree.onExit` policy for worktrees this launch created. */
+export type WorktreeExitPolicy = SettingValueOf<typeof cfgWorktreeOnExit>;
+
 /** What to do with a session-owned worktree when the session exits. */
 export type WorktreeExitAction = "keep" | "remove" | "prompt";
 
 /**
  * Map the `worktree.onExit` policy and the worktree's state to an exit action.
- * `remove` only removes worktrees with nothing to lose; anything else prompts.
+ * `remove` only removes worktrees with nothing to lose; `force` removes every
+ * worktree; anything else prompts.
  */
-export function decideWorktreeExit(policy: "keep" | "ask" | "remove", state: SessionWorktreeState): WorktreeExitAction {
+export function decideWorktreeExit(policy: WorktreeExitPolicy, state: SessionWorktreeState): WorktreeExitAction {
 	if (policy === "keep") return "keep";
+	if (policy === "force") return "remove";
 	if (policy === "remove" && !state.dirty && !state.moved && !state.offBranch) return "remove";
 	return "prompt";
 }
@@ -231,8 +242,11 @@ function describeWorktreeRisk(wt: SessionWorktree, state: SessionWorktreeState):
 /** A worktree chosen for removal at exit. */
 export interface WorktreeExitPlan {
 	worktree: SessionWorktree;
-	/** Snapshot fingerprint at the time removal was decided or approved. */
-	approvedFingerprint: string;
+	/**
+	 * Snapshot fingerprint at the time removal was decided or approved; the
+	 * worktree is kept if it changed since. Absent under `force`: removed regardless.
+	 */
+	approvedFingerprint?: string;
 }
 
 /**
@@ -242,7 +256,7 @@ export interface WorktreeExitPlan {
  */
 export async function planWorktreeExit(
 	owned: readonly SessionWorktree[],
-	policy: "keep" | "ask" | "remove",
+	policy: WorktreeExitPolicy,
 	confirm: (title: string, message: string) => Promise<boolean>,
 	warn: (message: string) => void,
 ): Promise<WorktreeExitPlan[]> {
@@ -255,7 +269,7 @@ export async function planWorktreeExit(
 			const action = decideWorktreeExit(policy, state);
 			if (action === "keep") continue;
 			if (action === "remove") {
-				plan.push({ worktree, approvedFingerprint: fingerprint });
+				plan.push(policy === "force" ? { worktree } : { worktree, approvedFingerprint: fingerprint });
 				continue;
 			}
 			const risk = describeWorktreeRisk(worktree, state);
@@ -269,9 +283,10 @@ export async function planWorktreeExit(
 }
 
 /**
- * Removes the planned worktrees in order, keeping any that changed at all since
- * removal was decided or approved. Returns one message per kept or failed
- * worktree, plus a resume note when the worktree holding the process cwd is removed.
+ * Removes the planned worktrees in order, keeping any with an `approvedFingerprint`
+ * that changed at all since removal was decided or approved. Returns one message
+ * per kept or failed worktree, plus a resume note when the worktree holding the
+ * process cwd is removed.
  */
 export async function removeExitWorktrees(plan: readonly WorktreeExitPlan[]): Promise<string[]> {
 	const messages: string[] = [];
@@ -279,7 +294,7 @@ export async function removeExitWorktrees(plan: readonly WorktreeExitPlan[]): Pr
 		try {
 			const { state, fingerprint, present } = await snapshotSessionWorktree(worktree);
 			// A vanished worktree holds nothing to lose; `state.moved` still guards the branch.
-			if (present && fingerprint !== approvedFingerprint) {
+			if (present && approvedFingerprint !== undefined && fingerprint !== approvedFingerprint) {
 				messages.push(`Kept worktree ${shortenPath(worktree.path)}: it changed while the session was closing.`);
 				continue;
 			}

@@ -111,7 +111,7 @@ it.each([
 				modelRegistry,
 				settings,
 				costGate: gate,
-				structured,
+				outputSchema: structured ? {} : undefined,
 				enableLsp: false,
 				enableMCP: false,
 				enableIrc: false,

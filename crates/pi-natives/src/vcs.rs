@@ -833,6 +833,16 @@ impl VcsGitRepo {
 		blocking("vcs.isDirty", self.inner.clone(), signal, |repo| repo.is_dirty())
 	}
 
+	/// Operation underway, including unresolved index conflicts without state
+	/// files.
+	#[napi(ts_return_type = "Promise<\"merge\" | \"cherry-pick\" | \"revert\" | \"rebase\" | \
+	                         \"am\" | \"unmerged-index\" | null>")]
+	pub fn operation_kind(&self, signal: Option<Unknown>) -> Promise<Option<String>> {
+		blocking("vcs.operationKind", self.inner.clone(), signal, |repo| {
+			repo.operation_kind().map(|kind| kind.map(str::to_owned))
+		})
+	}
+
 	/// Porcelain status.
 	#[napi]
 	pub fn status_porcelain(
