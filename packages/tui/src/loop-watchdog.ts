@@ -126,7 +126,9 @@ export class LoopWatchdog {
 		const now = this.#now();
 		if (now - this.#stallEndedAt <= this.#thresholdMs) return true;
 		const overdueMs = now - this.#expected;
-		return overdueMs > this.#thresholdMs && !this.#isSuspension(overdueMs, this.#cpuNow() - this.#expectedCpu);
+		if (overdueMs <= this.#thresholdMs) return false;
+		// Sampling CPU time is a syscall; only a gap long enough to be a suspension needs it.
+		return overdueMs <= this.#sleepMs || !this.#isSuspension(overdueMs, this.#cpuNow() - this.#expectedCpu);
 	}
 
 	/** A long gap the process spent negligible CPU on: it was suspended, not blocked. */
