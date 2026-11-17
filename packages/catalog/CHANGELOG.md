@@ -2,13 +2,11 @@
 
 ## [Unreleased]
 
-## [18.22.2] - 2026-11-18
-
 ### Fixed
 
-- Devin's Gemini 3.7 Flash, 3.8 Flash, 4 Argon and 4 Carbon now switch from promo to list price when each promotion ends, instead of showing and billing the promo price indefinitely
+- Devin's Gemini 3.7 Flash, 3.8 Flash, 4 Argon and 4 Carbon now switch from promo to list price when each promotion ends, instead of showing and billing the promo price indefinitely ([#19601](https://github.com/can1357/oh-my-pi/pull/19601) by [@will-bogusz](https://github.com/will-bogusz))
 
-## [18.22.1] - 2026-11-17
+## [18.22.2] - 2026-11-18
 
 ### Added
 
