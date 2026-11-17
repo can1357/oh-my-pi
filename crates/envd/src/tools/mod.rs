@@ -7,6 +7,7 @@ mod bridges;
 mod hooks;
 mod registry;
 mod roster_host;
+mod settled;
 
 pub use bridges::{
 	ActiveContentInputs, CommandCredentialExecutorFactory, ContentResolver, DynamicTool,
@@ -35,3 +36,4 @@ pub(crate) use registry::{
 	SessionRegistryBridges, build_environment_declaration_inputs, environment_tool_names,
 	production_registry, session_registry,
 };
+pub(crate) use settled::AgentSettledHost;

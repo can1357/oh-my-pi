@@ -187,6 +187,7 @@ ci-p9-p10-linux:
     cargo nextest run --profile ci -p omp-e2e --locked \
         --test p9_isolation \
         --test p9_extension_control \
+        --test p9_agent_settled \
         --test p10_lift_idempotence \
         --test p11_collab_spectator \
         --test p14_session_attach
@@ -346,7 +347,8 @@ e2e-p8:
 e2e-p9:
     cargo nextest run -p omp-e2e --locked \
         --test p9_isolation \
-        --test p9_extension_control
+        --test p9_extension_control \
+        --test p9_agent_settled
 
 # Run proof P10: idempotent historical tool lift through live dispatch.
 [group('e2e')]
