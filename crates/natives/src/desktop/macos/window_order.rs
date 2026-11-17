@@ -86,16 +86,15 @@ impl EntryOrder {
 	}
 }
 
-/// What raising one window did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Raised {
-	/// The raise was asked for; a later reading shows whether it held.
-	Asked,
+/// What looking up the window to raise found.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Found<W> {
+	/// The window, ready for the raise.
+	Window(W),
 	/// Accessibility has no such window to raise: it is not kept any more.
 	Unraisable,
-	/// The user switched or came to the target while the window was being
-	/// looked up, so no raise was sent.
-	NotSent,
+	/// The lookup failed otherwise; a later reading shows the order.
+	Failed,
 }
 
 /// How many times one background action raises the user's key window again
@@ -123,33 +122,41 @@ pub(super) const SHOW_WAIT: Duration = Duration::from_millis(2);
 /// One pass of the background guard keeping `order`: raises the key window
 /// when [`EntryOrder::to_raise`] finds it behind in `stack`'s reading of the
 /// windows down to it, for at most [`RAISE_TRIES`] passes during the action;
-/// the `last` pass always raises. Just before raising, `still_kept` is asked
-/// again, since the user may have switched or come to the target after the
-/// caller's check, and `raise` asks it once more right before it sends. After
+/// the `last` pass always raises. `find` looks the window up, which can block
+/// on a busy app, so right before `send` raises it, `still_kept` is asked
+/// again and the stacking read again: the user may have switched, come to the
+/// target, or brought another of their windows in front meanwhile. After
 /// raising it reads the stacking again, `wait`ing between readings up to
-/// [`SHOW_READS`] times ([`LAST_SHOW_READS`] on the last pass), until the raise
-/// shows or the order is no longer kept; the last pass returns the window if
-/// it is still behind.
-pub(super) fn keep(
+/// [`SHOW_READS`] times ([`LAST_SHOW_READS`] on the last pass), until the
+/// raise shows or the order is no longer kept; the last pass returns the
+/// window if it is still behind.
+pub(super) fn keep<W>(
 	order: &mut EntryOrder,
 	tries: &mut u8,
 	stack: impl Fn(u32) -> Option<Vec<Stacked>>,
 	still_kept: impl Fn() -> bool,
-	mut raise: impl FnMut(&Stacked) -> Raised,
+	find: impl FnOnce(&Stacked) -> Found<W>,
+	send: impl FnOnce(W),
 	wait: impl Fn(),
 	last: bool,
 ) -> Result<(), Stacked> {
 	let key = order.key;
-	let Some(window) = stack(key).and_then(|now| order.to_raise(&now)) else {
+	let behind_now = |order: &EntryOrder| stack(key).and_then(|now| order.to_raise(&now));
+	let Some(window) = behind_now(order) else {
 		return Ok(());
 	};
 	if (!last && *tries >= RAISE_TRIES) || !still_kept() {
 		return Ok(());
 	}
-	match raise(&window) {
-		Raised::NotSent => return Ok(()),
-		Raised::Unraisable => order.forget(),
-		Raised::Asked => {},
+	match find(&window) {
+		Found::Window(found) => {
+			if !still_kept() || behind_now(order).is_none() {
+				return Ok(());
+			}
+			send(found);
+		},
+		Found::Unraisable => order.forget(),
+		Found::Failed => {},
 	}
 	*tries = tries.saturating_add(1);
 	let mut behind = None;
@@ -161,7 +168,7 @@ pub(super) fn keep(
 				return Ok(());
 			}
 		}
-		behind = stack(key).and_then(|now| order.to_raise(&now));
+		behind = behind_now(order);
 		if behind.is_none() {
 			return Ok(());
 		}
@@ -275,23 +282,26 @@ mod tests {
 		use std::cell::{Cell, RefCell};
 		let (user, target) = (w(1, USER), w(3, TARGET));
 		let fresh = || EntryOrder::new(TARGET, USER, Some(1), &[user, target]).unwrap();
+		let found = |_: &Stacked| Found::Window(());
 		// A raise that works: one pass puts the user's window back, and the
 		// last pass finds nothing to do.
 		let stack = RefCell::new(vec![target, user]);
 		let raised = Cell::new(0);
 		let (mut order, mut tries) = (fresh(), 0);
-		let raise = |_: &Stacked| {
+		let raise = |()| {
 			raised.set(raised.get() + 1);
 			*stack.borrow_mut() = vec![user, target];
-			Raised::Asked
 		};
 		// Every reading goes down to the user's key window.
 		let read = |key| {
 			assert_eq!(key, user.id);
 			Some(stack.borrow().clone())
 		};
-		assert_eq!(keep(&mut order, &mut tries, read, || true, raise, || {}, false), Ok(()));
-		assert_eq!(keep(&mut order, &mut tries, read, || true, |_| panic!(), || {}, true), Ok(()));
+		assert_eq!(keep(&mut order, &mut tries, read, || true, found, raise, || {}, false), Ok(()));
+		assert_eq!(
+			keep(&mut order, &mut tries, read, || true, |_| panic!(), |()| panic!(), || {}, true),
+			Ok(())
+		);
 		assert_eq!(raised.get(), 1);
 		// A target that orders itself in front again on every reading: three
 		// passes raise during the action and read back for a short while, later
@@ -300,18 +310,21 @@ mod tests {
 		let (mut order, mut tries) = (fresh(), 0);
 		let raised = Cell::new(0);
 		let again = |_| Some(vec![target, user]);
-		let count = |_: &Stacked| {
-			raised.set(raised.get() + 1);
-			Raised::Asked
-		};
+		let count = |()| raised.set(raised.get() + 1);
 		let waits = Cell::new(0);
 		let waited = || waits.set(waits.get() + 1);
 		for _ in 0..5 {
-			assert_eq!(keep(&mut order, &mut tries, again, || true, count, waited, false), Ok(()));
+			assert_eq!(
+				keep(&mut order, &mut tries, again, || true, found, count, waited, false),
+				Ok(())
+			);
 		}
 		assert_eq!((raised.get(), waits.get()), (3, 3 * (SHOW_READS - 1)));
 		waits.set(0);
-		assert_eq!(keep(&mut order, &mut tries, again, || true, count, waited, true), Err(user));
+		assert_eq!(
+			keep(&mut order, &mut tries, again, || true, found, count, waited, true),
+			Err(user)
+		);
 		assert_eq!((raised.get(), waits.get()), (4, LAST_SHOW_READS - 1));
 		// The last pass after the budget is spent still repairs, and a raise
 		// that shows only on a later reading counts.
@@ -319,39 +332,86 @@ mod tests {
 		let reads = Cell::new(0);
 		let late = |_| {
 			reads.set(reads.get() + 1);
-			Some(if reads.get() < 3 {
+			Some(if reads.get() < 4 {
 				vec![target, user]
 			} else {
 				vec![user, target]
 			})
 		};
-		assert_eq!(
-			keep(&mut order, &mut tries, late, || true, |_| Raised::Asked, || {}, true),
-			Ok(())
-		);
+		assert_eq!(keep(&mut order, &mut tries, late, || true, found, |()| {}, || {}, true), Ok(()));
 		// A window accessibility cannot raise is dropped, not reported.
 		let (mut order, mut tries) = (fresh(), 0);
 		assert_eq!(
-			keep(&mut order, &mut tries, again, || true, |_| Raised::Unraisable, || {}, true),
+			keep(
+				&mut order,
+				&mut tries,
+				again,
+				|| true,
+				|_| Found::Unraisable,
+				|()| panic!(),
+				|| {},
+				true
+			),
 			Ok(())
 		);
 		// The user switched or came to the target after the caller's check:
-		// nothing is raised.
+		// nothing is looked up or raised.
 		let (mut order, mut tries) = (fresh(), 0);
-		assert_eq!(keep(&mut order, &mut tries, again, || false, |_| panic!(), || {}, true), Ok(()));
-		// They switched while the window was looked up: no raise was sent, so
-		// nothing is read back or counted.
-		let (mut order, mut tries) = (fresh(), 0);
-		let reads = Cell::new(0);
-		let counted = |_| {
-			reads.set(reads.get() + 1);
-			Some(vec![target, user])
-		};
 		assert_eq!(
-			keep(&mut order, &mut tries, counted, || true, |_| Raised::NotSent, || {}, true),
+			keep(&mut order, &mut tries, again, || false, |_| panic!(), |()| panic!(), || {}, true),
 			Ok(())
 		);
-		assert_eq!((reads.get(), tries), (1, 0));
+		// While the window was looked up, which can block on a busy app, the
+		// user brought another window of their app in front (a click in it, or
+		// ⌘`): the fresh reading shows it, nothing is raised, read back or
+		// counted. The sampler cannot see a switch within their app, and the
+		// guard's own key read waits on this lookup.
+		let (mut order, mut tries) = (fresh(), 0);
+		let other = w(2, USER);
+		let stack = RefCell::new(vec![target, user]);
+		let reads = Cell::new(0);
+		let read = |_| {
+			reads.set(reads.get() + 1);
+			Some(stack.borrow().clone())
+		};
+		let switch_while_found = |_: &Stacked| {
+			*stack.borrow_mut() = vec![other, target, user];
+			Found::Window(())
+		};
+		assert_eq!(
+			keep(
+				&mut order,
+				&mut tries,
+				read,
+				|| true,
+				switch_while_found,
+				|()| panic!(),
+				|| {},
+				true
+			),
+			Ok(())
+		);
+		assert_eq!((reads.get(), tries), (2, 0));
+		// They switched apps or came to the target during the lookup: no raise.
+		let (mut order, mut tries) = (fresh(), 0);
+		let switched = Cell::new(false);
+		let switch_app = |_: &Stacked| {
+			switched.set(true);
+			Found::Window(())
+		};
+		assert_eq!(
+			keep(
+				&mut order,
+				&mut tries,
+				again,
+				|| !switched.get(),
+				switch_app,
+				|()| panic!(),
+				|| {},
+				true
+			),
+			Ok(())
+		);
 		// They switched or came to the target while the raise was being read
 		// back: the last pass stands down instead of naming the window.
 		let (mut order, mut tries) = (fresh(), 0);
@@ -362,13 +422,17 @@ mod tests {
 				&mut tries,
 				again,
 				|| !switched.get(),
-				|_| Raised::Asked,
+				found,
+				|()| {},
 				|| switched.set(true),
 				true
 			),
 			Ok(())
 		);
 		// Unreadable stacking: nothing raised, nothing claimed.
-		assert_eq!(keep(&mut fresh(), &mut 0, |_| None, || true, |_| panic!(), || {}, true), Ok(()));
+		assert_eq!(
+			keep(&mut fresh(), &mut 0, |_| None, || true, |_| panic!(), |()| panic!(), || {}, true),
+			Ok(())
+		);
 	}
 }

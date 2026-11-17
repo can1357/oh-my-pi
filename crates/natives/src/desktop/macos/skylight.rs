@@ -1536,18 +1536,14 @@ fn keep_key_window(
 		tries,
 		capture::stacked_down_to,
 		still_kept,
-		// The lookup can block on a busy app, so the user's choice is asked
-		// again between it and the raise.
 		|window| match ax::window_by_id(window.pid, window.id) {
-			Err(error) if error.code == ErrorCode::WindowNotFound => window_order::Raised::Unraisable,
-			Ok(_) if !still_kept() => window_order::Raised::NotSent,
-			Ok(found) => {
-				// A failure shows in a later reading.
-				let _ = ax::raise(&found);
-				window_order::Raised::Asked
-			},
-			// Any other failure shows in a later reading.
-			Err(_) => window_order::Raised::Asked,
+			Ok(found) => window_order::Found::Window(found),
+			Err(error) if error.code == ErrorCode::WindowNotFound => window_order::Found::Unraisable,
+			Err(_) => window_order::Found::Failed,
+		},
+		|found| {
+			// A failure shows in a later reading.
+			let _ = ax::raise(&found);
 		},
 		|| thread::sleep(window_order::SHOW_WAIT),
 		last,
@@ -1587,7 +1583,10 @@ fn guard_focus(
 	desktop: &impl GuardedDesktop,
 	visit: &AtomicBool,
 ) -> CoreResult<()> {
-	let previous = lease.lock().previous;
+	let (previous, entry_key) = {
+		let lease = lease.lock();
+		(lease.previous, lease.key)
+	};
 	let observe = |front, key| {
 		let now = desktop.now();
 		let signals = desktop.signals(now);
@@ -1698,17 +1697,20 @@ fn guard_focus(
 		visit.store(lease.lock().visited, Ordering::Release);
 		// The user's key window goes back in front of a target the action
 		// ordered over it while their app is in front and they have neither
-		// switched nor come to the target. `keep_order` asks again right
-		// before it raises, so a switch of theirs between this check and its
-		// reading of the stacking is honoured; one inside the few microseconds
-		// between that last check and `AXRaise` itself still sees one raise of
-		// their key window, which the next poll then leaves alone. Once a poll
-		// is enough: checking every millisecond showed the target for 19 ms
-		// rather than 28 (median, on a VM) at four times the window-list reads.
+		// switched, come to the target, nor picked another of their windows (a
+		// click in their app the lease kept). `keep_order` asks again after
+		// looking the window up and reads the stacking again, so a switch of
+		// theirs meanwhile is honoured, a switch within their app included,
+		// which only the stacking shows while the lookup blocks this thread;
+		// one inside the few microseconds between that last check and
+		// `AXRaise` itself still sees one raise of their key window, which the
+		// next poll then leaves alone. Once a poll is enough: checking every
+		// millisecond showed the target for 19 ms rather than 28 (median, on a
+		// VM) at four times the window-list reads.
 		let keeps_order = || {
 			let armed = {
 				let lease = lease.lock();
-				!lease.disarmed && !lease.visited
+				!lease.disarmed && !lease.visited && lease.key == entry_key
 			};
 			armed && desktop.front() == Some(previous)
 		};
@@ -4089,28 +4091,37 @@ mod tests {
 				key_read_takes:     Duration::ZERO,
 				refused_key_for:    Cell::new(None),
 				order_passes:       std::cell::RefCell::default(),
-				has_order:          false,
+				// Window 42 covered the target when the action began.
+				has_order:          true,
 				polls:              Cell::new(0),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
 			assert!(result.is_ok(), "the guard ends without an error");
 			let lease = lease.into_inner();
-			(desktop.front.get().low, desktop.keys.into_inner(), lease.key, lease.disarmed)
+			let passes = desktop.order_passes.take().len();
+			((desktop.front.get().low, desktop.keys.into_inner(), lease.key, lease.disarmed), passes)
 		};
 		let own = clicked_at(t0 + ms(15)).in_user_app();
 		// A click in their app picked window 43: it is put back, and the lease
 		// keeps it, so the next poll does not take it for a switch of theirs.
-		assert_eq!(run(own, None), (PREVIOUS.low, vec![43], Some(43), false));
-		// With no click, the window the action began with is put back; 43
-		// turning up later in the user's app is then their switch.
-		assert_eq!(run(input(0, NO_MODIFIERS), None), (PREVIOUS.low, vec![42], Some(42), true));
+		// Window 42 is then no longer theirs to have kept in front: no order
+		// pass raises it over the window they picked.
+		let (picked, passes) = run(own, None);
+		assert_eq!(picked, (PREVIOUS.low, vec![43], Some(43), false));
+		assert_eq!(passes, 0, "window 42 is not raised over the window they picked");
+		// With no click, the window the action began with is put back and kept
+		// in front of the target; 43 turning up later in the user's app is
+		// then their switch.
+		let (kept, passes) = run(input(0, NO_MODIFIERS), None);
+		assert_eq!(kept, (PREVIOUS.low, vec![42], Some(42), true));
+		assert!(passes > 0, "window 42 is kept in front until the switch");
 		// The user went to another app while their key window was read: no
 		// window of the app they left is made key.
-		assert_eq!(run(own, Some((THIRD, input(1, COMMAND)))), (THIRD.low, vec![], Some(42), true));
+		assert_eq!(run(own, Some((THIRD, input(1, COMMAND)))).0, (THIRD.low, vec![], Some(42), true));
 		// The target came forward again while that window was read: the next
 		// hand-back still puts back the window the user clicked.
-		assert_eq!(run(own, Some((TARGET, own))), (PREVIOUS.low, vec![43], Some(43), false));
+		assert_eq!(run(own, Some((TARGET, own))), ((PREVIOUS.low, vec![43], Some(43), false), 0));
 	}
 
 	#[test]
