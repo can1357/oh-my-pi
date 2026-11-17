@@ -3542,10 +3542,10 @@ fn report_pointer(
 
 /// Runs `send`, first priming window `wid` of `pid` once `before_post` passes
 /// when a takeover pointer call activated it since its last primer
-/// (`awaiting`). The mark clears once `prime` has pressed Shift or the key
-/// route refused it; a refused primer still sends, as `main` did. Any other
-/// primer failure keeps the mark, and it or a cancel stops the call before any
-/// pointer event.
+/// (`awaiting`). The mark clears once `prime` has run; a primer the key route
+/// refused or that failed still sends, unprimed, as `main` did. A primer the
+/// user stopped (`UserIntervened`) or a cancel keeps the mark and stops the
+/// call before any pointer event.
 fn primed<T>(
 	awaiting: &mut HashSet<(libc::pid_t, u32)>,
 	(pid, wid): (libc::pid_t, u32),
@@ -3556,7 +3556,7 @@ fn primed<T>(
 	if awaiting.contains(&(pid, wid)) {
 		before_post()?;
 		if let Err(error) = prime()
-			&& error.code != ErrorCode::BackgroundUnavailable
+			&& matches!(error.code, ErrorCode::UserIntervened | ErrorCode::Cancelled)
 		{
 			return Err(DesktopError::new(
 				error.code,
@@ -8860,19 +8860,27 @@ mod tests {
 		primed(&mut awaiting, (7, 42), check, prime, tap).unwrap();
 		assert_eq!(log.take(), unprimed);
 		assert_eq!(awaiting, HashSet::from([(7, 43)]));
-		// A primer the key route refuses still taps, and is not retried.
-		awaiting.insert((7, 42));
-		let unroutable = || Err(DesktopError::background_unavailable("the keys cannot reach it"));
-		primed(&mut awaiting, (7, 42), check, unroutable, tap).unwrap();
-		assert_eq!(log.take(), [("check", 0), ("check", 0), ("post", down), ("post", up)]);
-		assert!(!awaiting.contains(&(7, 42)));
+		// A primer the key route refuses, or one that fails otherwise, still
+		// taps, and is not retried.
+		for failure in [
+			DesktopError::background_unavailable("the keys cannot reach it"),
+			DesktopError::invalid_target("a sheet attached to window 42 has focus"),
+			DesktopError::input_failed("cannot read the sender connection"),
+		] {
+			awaiting.insert((7, 42));
+			let failing = || Err(failure.clone());
+			primed(&mut awaiting, (7, 42), check, failing, tap).unwrap();
+			assert_eq!(log.take(), [("check", 0), ("check", 0), ("post", down), ("post", up)]);
+			primed(&mut awaiting, (7, 42), check, prime, tap).unwrap();
+			assert_eq!(log.take(), unprimed);
+		}
 		// The user already has the target: nothing primes or posts.
 		awaiting.insert((7, 42));
 		let refused = || Err(DesktopError::user_intervened("the user has the target"));
 		let error = primed(&mut awaiting, (7, 42), refused, prime, no_tap).unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(log.take().is_empty());
-		// Any other primer failure keeps its code, sends no pointer input, and
+		// A primer the user stopped keeps its code, sends no pointer input, and
 		// leaves the next call primed.
 		let error = primed(&mut awaiting, (7, 42), check, refused, no_tap).unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
