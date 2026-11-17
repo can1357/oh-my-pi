@@ -181,6 +181,8 @@ function replayWrite(target: Settings, write: SettingsMirrorWrite): void {
 			return target.unsetGlobalValue(settingById(write.id));
 		case "writeEntry":
 			return target.writeEntry(settingById(write.id), write.key, write.value);
+		case "writeProjectEntry":
+			return target.writeProjectEntry(settingById(write.id), write.key, write.value);
 		case "writeMember":
 			return target.writeMember(settingById(write.id), write.item, { member: write.member });
 		case "pinDefaultValue":

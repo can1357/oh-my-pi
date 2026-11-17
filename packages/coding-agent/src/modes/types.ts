@@ -644,6 +644,8 @@ export interface InteractiveModeContext {
 	showAdvisorConfigure(): void;
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
+	/** Open the `/model-rules` selector. */
+	showModelRulesSelector(): void;
 	showAgentsDashboard(): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;

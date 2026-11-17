@@ -259,6 +259,7 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 | Goal                                                                       | Use                                                                                                                    |
 | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                         |
+| Add instructions only for models matching a glob                           | [Model rules](./model-rules.md) in `~/.omp/agent/model-rules/` or `<cwd>/.omp/model-rules/`                            |
 | Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                       |
 | Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                              |
 | Replace the default instruction block for specific models                  | `systemPromptTemplates` setting, starting from a copy of [`system-prompt.md`](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/src/prompts/system/system-prompt.md) |

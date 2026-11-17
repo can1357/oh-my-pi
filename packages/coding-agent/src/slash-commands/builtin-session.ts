@@ -588,6 +588,15 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "model-rules",
+		icon: "extension",
+		description: "List model rules, toggle them on or off, and preview their content",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showModelRulesSelector();
+			clearSubmittedText(runtime);
+		},
+	},
+	{
 		name: "agents",
 		icon: "agents",
 		description: "Open the agents hub (per-agent model, prewalk, and advisor)",
