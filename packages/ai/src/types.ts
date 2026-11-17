@@ -1505,6 +1505,14 @@ export interface CursorMcpCall {
 	approvalOnly?: boolean;
 }
 
+/** A native Cursor `AskQuestion` interaction, translated to local `ask` kwargs. */
+export interface CursorAskQuestionCall {
+	toolCallId: string;
+	args: { html: string };
+	/** Aborted when the request is aborted or the Cursor stream ends. */
+	signal?: AbortSignal;
+}
+
 export interface CursorTodoSnapshotItem {
 	content: string;
 	status: "pending" | "in_progress" | "completed" | "abandoned";
@@ -1682,6 +1690,12 @@ export interface CursorExecHandlers {
 		 */
 		downloadPath?: string;
 	}) => Promise<CursorMcpResourceContent | null>;
+	/**
+	 * Run Cursor's native `AskQuestion` as the local `ask` tool; without it the
+	 * question is rejected. The result's `details.data`, the submitted form data
+	 * by control name, becomes Cursor's answer.
+	 */
+	askQuestion?: (call: CursorAskQuestionCall) => Promise<ToolResultMessage>;
 	/** Mirror Cursor's server-owned todo list into local session state. */
 	todoSync?: CursorTodoSyncHandler;
 	/**
