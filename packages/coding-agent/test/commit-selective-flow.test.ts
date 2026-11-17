@@ -54,6 +54,32 @@ async function emptyRepo() {
 	return { root, journal, write };
 }
 
+async function gitlinkWorkspace() {
+	const workspace = await emptyRepo();
+	const { root } = workspace;
+	const module = path.join(root, "module");
+	await fs.mkdir(module);
+	await git(module, ["init", "-q", "-b", "main"]);
+	await git(module, ["config", "user.email", "test@example.com"]);
+	await git(module, ["config", "user.name", "Test"]);
+	await git(module, ["config", "commit.gpgSign", "false"]);
+	const commits: string[] = [];
+	for (const content of ["one\n", "two\n", "three\n"]) {
+		await Bun.write(path.join(module, "content.txt"), content);
+		await git(module, ["add", "content.txt"]);
+		await git(module, ["commit", "-qm", content.trim()]);
+		commits.push((await git(module, ["rev-parse", "HEAD"])).trim());
+	}
+	const [before, after, later] = commits;
+	await git(module, ["checkout", "-q", before]);
+	await Bun.write(path.join(root, "user.txt"), "original\n");
+	await git(root, ["add", "user.txt"]);
+	await git(root, ["update-index", "--add", "--cacheinfo", `160000,${before},module`]);
+	await git(root, ["commit", "-qm", "seed gitlink"]);
+	await git(module, ["checkout", "-q", after]);
+	return { ...workspace, module, before, after, later };
+}
+
 /**
  * Shared workspace: the user staged a fix in `b.ts` and added a changelog bullet; agent Main
  * edited `a.ts` and added its own bullet; its subagent ParserFix created `parser.ts`.
@@ -86,6 +112,111 @@ async function sharedWorkspace() {
 }
 
 describe("selective commit flow", () => {
+	it("explicitly selects a gitlink SHA with ordinary edits without committing child dirt or other staged work", async () => {
+		const { root, module, journal, write, before, after } = await gitlinkWorkspace();
+		await Bun.write(path.join(root, "user.txt"), "user staged\n");
+		await git(root, ["add", "user.txt"]);
+		await write("Main", undefined, "agent.txt", "agent\n");
+		await journal.flush();
+		await Bun.write(path.join(module, "content.txt"), "child dirty\n");
+		const childStatus = await git(module, ["status", "--porcelain"]);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+
+		expect(draft.selection().map(change => change.path)).toEqual(["agent.txt"]);
+		expect(draft.skipped).not.toContain("module");
+		expect(draft.show()).toContain(`${before} → ${after}`);
+		expect(() => draft.take({ path: "module", units: ["2"] })).toThrow(/only unit 1/);
+		draft.take({ path: "module", units: ["1"] });
+		draft.drop({ path: "module" });
+		expect(draft.selection().map(change => change.path)).toEqual(["agent.txt"]);
+		draft.take({ path: "module" });
+		draft.only(["module", "agent.txt"]);
+		expect(draft.diff()).toContain(`-Subproject commit ${before}\n+Subproject commit ${after}\n`);
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "fix: update module and agent" },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		expect(outcome.paths.sort()).toEqual(["agent.txt", "module"]);
+		expect(outcome.indexNotes).toEqual([]);
+		expect(await git(root, ["ls-tree", "HEAD", "module"])).toBe(`160000 commit ${after}\tmodule\n`);
+		expect(await git(root, ["show", "HEAD:agent.txt"])).toBe("agent\n");
+		expect(await git(root, ["show", "HEAD:user.txt"])).toBe("original\n");
+		expect(await git(root, ["diff", "--cached", "--name-only"])).toBe("user.txt\n");
+		expect(await git(module, ["status", "--porcelain"])).toBe(childStatus);
+		expect(await Bun.file(path.join(module, "content.txt")).text()).toBe("child dirty\n");
+	});
+
+	it("does not offer a gitlink update when only files inside the child are dirty", async () => {
+		const { root, module, journal, before } = await gitlinkWorkspace();
+		await git(module, ["checkout", "-q", before]);
+		await Bun.write(path.join(module, "content.txt"), "dirty\n");
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(draft.paths).not.toContain("module");
+		expect(draft.selection()).toEqual([]);
+	});
+
+	it("rejects a changed child HEAD after drafting without changing the parent HEAD or index", async () => {
+		const { root, module, journal, later } = await gitlinkWorkspace();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "module" });
+		await git(module, ["checkout", "-q", later]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		const index = await git(root, ["ls-files", "--stage"]);
+		await expect(
+			commitSelection(draft, { subject: "fix: stale" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/submodule HEAD changed.*new draft/);
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await git(root, ["ls-files", "--stage"])).toBe(index);
+		expect((await git(module, ["rev-parse", "HEAD"])).trim()).toBe(later);
+	});
+
+	it("preserves a different staged gitlink while committing the selected worktree SHA", async () => {
+		const { root, journal, after, later } = await gitlinkWorkspace();
+		await git(root, ["update-index", "--cacheinfo", `160000,${later},module`]);
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "module" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "fix: selected pointer" },
+			{ journal, agent: { agent: "Main" } },
+		);
+		expect((await git(root, ["rev-parse", "HEAD:module"])).trim()).toBe(after);
+		expect(await git(root, ["ls-files", "--stage", "module"])).toBe(`160000 ${later} 0\tmodule\n`);
+		expect(outcome.indexNotes).toEqual([expect.stringContaining("someone else's staged changes")]);
+	});
+
+	it("rejects a conflicting superproject commit instead of overwriting its gitlink SHA", async () => {
+		const { root, journal, later } = await gitlinkWorkspace();
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		draft.take({ path: "module" });
+		await git(root, ["update-index", "--cacheinfo", `160000,${later},module`]);
+		await git(root, ["commit", "-qm", "other pointer"]);
+		const head = await git(root, ["rev-parse", "HEAD"]);
+		const index = await git(root, ["ls-files", "--stage"]);
+		await expect(
+			commitSelection(draft, { subject: "fix: conflict" }, { journal, agent: { agent: "Main" } }),
+		).rejects.toThrow(/HEAD moved.*module.*new draft/);
+		expect(await git(root, ["rev-parse", "HEAD"])).toBe(head);
+		expect(await git(root, ["ls-files", "--stage"])).toBe(index);
+	});
+
+	it.each(["uninitialized", "deleted", "file"])(
+		"skips an unsupported %s gitlink checkout while still drafting ordinary edits",
+		async state => {
+			const { root, module, journal, write } = await gitlinkWorkspace();
+			await fs.rm(module, { recursive: true });
+			if (state === "uninitialized") await fs.mkdir(module);
+			if (state === "file") await Bun.write(module, "not a checkout\n");
+			await write("Main", undefined, "agent.txt", "agent\n");
+			await journal.flush();
+			const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+			expect(draft.paths).not.toContain("module");
+			expect(draft.selection().map(change => change.path)).toEqual(["agent.txt"]);
+		},
+	);
+
 	it("commits the agent tree's lines and leaves the user's staged and unstaged work alone", async () => {
 		const { root, journal, head } = await sharedWorkspace();
 		const worktreeBefore = await git(root, ["diff", "HEAD"]);
