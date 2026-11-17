@@ -297,6 +297,7 @@ async function runComputer(
 	for (const image of run.displays) {
 		if (image.type === "image") content.push({ ...image, detail: "original" });
 	}
+	if (run.error) content.push({ type: "text", text: `${run.error.name}: ${run.error.message}` });
 	return { content, details, ...(run.error ? { isError: true } : {}) };
 }
 

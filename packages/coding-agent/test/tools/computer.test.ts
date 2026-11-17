@@ -485,6 +485,36 @@ afterAll(async () => {
 });
 
 describe("computer prelude", () => {
+	it("returns the failure name and message in direct computer tool content after partial output", async () => {
+		const session = toolSession();
+		const supervisor = new ComputerSupervisor(
+			session,
+			() => liveWorker(new FakeNativeSession()),
+			undefined,
+			undefined,
+			{ read: () => 0, forget: () => {} },
+		);
+		const tool = createComputerPrelude(session, () => supervisor);
+		try {
+			const result = await tool.invoke(
+				{
+					action: "run",
+					code: `console.log("MARK"); await desktop.screenshot(); const error = new Error("the user changed the target"); error.name = "UserIntervened"; throw error;`,
+				},
+				{ session, toolCallId: "direct-failure" },
+			);
+			expect(result.isError).toBe(true);
+			expect(result.content).toContainEqual({ type: "text", text: expect.stringContaining("MARK") });
+			expect(result.content).toContainEqual(expect.objectContaining({ type: "image" }));
+			expect(result.content).toContainEqual({
+				type: "text",
+				text: "UserIntervened: the user changed the target",
+			});
+		} finally {
+			await supervisor.close();
+		}
+	});
+
 	it("keeps partial failure evidence through JavaScript Eval", async () => {
 		let definitions: readonly EvalPreludeDefinition[] = [];
 		const session: ToolSession = { ...toolSession(), getEvalPreludes: () => definitions };
@@ -3501,7 +3531,9 @@ describe("expanded computer APIs", () => {
 			);
 			try {
 				if (mode === "no output") {
-					await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(partial);
+					await expect(supervisor.run("1", 1_000, snapshot())).rejects.toThrow(
+						`${partial}\n\n${ESCAPE_STOPPED_MESSAGE}`,
+					);
 				} else {
 					const result = await supervisor.run("1", 1_000, snapshot());
 					expect(result.displays).toEqual(output.displays);
