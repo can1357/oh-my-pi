@@ -41,6 +41,7 @@ import { parseToolCallArguments, replayableToolCallArguments } from "../utils/to
 import {
 	type Api,
 	type AssistantMessage,
+	type AudioContent,
 	type CacheRetention,
 	type ComputerAction,
 	type ComputerToolCallMetadata,
@@ -139,11 +140,12 @@ import {
 } from "./inference-headers";
 import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
 import {
+	audioInputMimeType,
 	inputAudioFormat,
 	joinTextWithImagePlaceholder,
-	NON_AUDIO_PLACEHOLDER,
 	NON_VISION_IMAGE_PLACEHOLDER,
 	partitionVisionContent,
+	replaceAudioWithPlaceholder,
 } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -1914,7 +1916,7 @@ function convertResponsesInputImage(image: ImageContent, supportsImageDetailOrig
 }
 
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | Array<TextContent | ImageContent | AudioContent>,
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
@@ -1931,11 +1933,13 @@ export function convertResponsesInputContent(
 		];
 	}
 
-	const { textBlocks, imageBlocks, audioBlocks, omittedImages, omittedAudio } = partitionVisionContent(
-		content,
+	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(
+		supportsAudio
+			? content.filter((block): block is TextContent | ImageContent => block.type !== "audio")
+			: replaceAudioWithPlaceholder(content),
 		supportsImages,
-		supportsAudio,
 	);
+	const audioBlocks = supportsAudio ? content.filter((block): block is AudioContent => block.type === "audio") : [];
 	const normalizedContent: ResponseInputContent[] = [];
 	for (const item of textBlocks) {
 		const raw = item.text.toWellFormed();
@@ -1960,9 +1964,6 @@ export function convertResponsesInputContent(
 			type: "input_text",
 			text: NON_VISION_IMAGE_PLACEHOLDER,
 		} satisfies ResponseInputText);
-	}
-	if (omittedAudio) {
-		normalizedContent.push({ type: "input_text", text: NON_AUDIO_PLACEHOLDER } satisfies ResponseInputText);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -2418,7 +2419,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				options.model.input.includes("image"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
-				options.model.input.includes("audio"),
+				audioInputMimeType(options.model) !== undefined,
 			);
 			if (!content) continue;
 			const developerText =

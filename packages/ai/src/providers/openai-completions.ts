@@ -126,7 +126,6 @@ import {
 import { completionsSendsOwnThinking, transformMessages } from "./transform-messages";
 import {
 	inputAudioFormat,
-	isAudioContent,
 	isOpenAICompletionsVisionSupported,
 	joinTextWithImagePlaceholder,
 	NON_AUDIO_PLACEHOLDER,
@@ -2554,7 +2553,7 @@ export function convertMessages(
 							type: "text",
 							text,
 						} satisfies ChatCompletionContentPartText);
-					} else if (isAudioContent(item)) {
+					} else if (item.type === "audio") {
 						if (model.input.includes("audio")) {
 							content.push({
 								type: "input_audio",

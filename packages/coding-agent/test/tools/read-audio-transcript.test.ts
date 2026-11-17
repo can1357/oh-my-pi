@@ -168,7 +168,7 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 		expect(text).toContain("Transcript of talk.mp3 (0:06.0, 2 lines, google/gemini-2.5-flash).");
 		expect(text).toContain("[0:00.5-0:03.2] Good morning everyone.\n[0:03.2-0:06.0] The budget is approved.");
 		const sent = model.contexts[0]?.messages[0]?.content;
-		expect(Array.isArray(sent) && sent[0]?.type === "image" ? sent[0].mimeType : undefined).toBe("audio/ogg");
+		expect(Array.isArray(sent) && sent[0]?.type === "audio" ? sent[0].mimeType : undefined).toBe("audio/ogg");
 	});
 
 	it("transcribes with any model the catalog says hears audio, in the encoding its transport takes", async () => {
@@ -179,7 +179,7 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 
 		expect(text).toContain("Transcript of talk.mp3 (0:06.0, 1 line, openrouter/openai/gpt-audio-mini).");
 		const sent = model.contexts[0]?.messages[0]?.content;
-		expect(Array.isArray(sent) && sent[0]?.type === "image" ? sent[0].mimeType : undefined).toBe("audio/mpeg");
+		expect(Array.isArray(sent) && sent[0]?.type === "audio" ? sent[0].mimeType : undefined).toBe("audio/mpeg");
 	});
 
 	it("does not treat a model as hearing audio when its catalog input lacks it", async () => {

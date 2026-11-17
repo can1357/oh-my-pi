@@ -853,7 +853,7 @@ export class SnapcompactInlineTransformer {
 			}
 			const frames = cached.frames;
 			const original = messages[userIndex] as UserMessage;
-			const originalContent: (TextContent | ImageContent)[] =
+			const originalContent: Exclude<UserMessage["content"], string> =
 				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
 			messages[userIndex] = {
 				...original,

@@ -155,7 +155,7 @@ import { isAnthropicNarrationSignature, servedModelFromAnthropicSignature } from
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { hasAnthropicMessageControls, redactSensitiveCredentials, transformMessages } from "./transform-messages";
-import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import { NON_VISION_IMAGE_PLACEHOLDER, replaceAudioWithPlaceholder } from "./vision-guard";
 import {
 	injectedClientBaseUrl,
 	resolvesToOfficialAnthropicEndpoint,
@@ -5992,7 +5992,7 @@ function encodeAnthropicMessages(
 					content = msg.content.toWellFormed();
 				}
 			} else {
-				const contentBlocks = convertContentBlocks(msg.content, {
+				const contentBlocks = convertContentBlocks(replaceAudioWithPlaceholder(msg.content), {
 					supportsImages: model.input.includes("image"),
 					rejectUnsupportedMedia: i === unansweredUserIndex,
 				});

@@ -8,6 +8,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type {
+	AudioContent,
 	Context,
 	ImageContent,
 	Message,
@@ -118,7 +119,7 @@ function nativeTextOf(part: unknown): string {
 	return part.text;
 }
 
-function textOf(part: TextContent | ImageContent | undefined): string {
+function textOf(part: TextContent | ImageContent | AudioContent | undefined): string {
 	if (part?.type !== "text") throw new Error(`expected a text block, got ${part?.type}`);
 	return part.text;
 }

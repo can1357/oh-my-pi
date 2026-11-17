@@ -1018,6 +1018,17 @@ export interface ImageContent {
 	url?: string;
 }
 
+/**
+ * Inline audio in a user message, for a model whose `input` has `audio`. Only the providers whose
+ * transport carries audio map it (see `audioInputMimeType`); every other converter sends
+ * `NON_AUDIO_PLACEHOLDER` text in its place.
+ */
+export interface AudioContent {
+	type: "audio";
+	data: string; // base64 encoded audio data
+	mimeType: string; // e.g., "audio/ogg", "audio/mpeg"
+}
+
 export type ComputerAction =
 	| {
 			type: "click";
@@ -1268,7 +1279,7 @@ export interface ProviderInputTransformation {
 
 export interface UserMessage {
 	role: "user";
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | ImageContent | AudioContent)[];
 	/** Original sender and body of a parent-agent IRC steer, for transcript presentation only. */
 	parentIrc?: { from: string; body: string };
 	/** True if the message was injected by the system (e.g., auto-continue). */

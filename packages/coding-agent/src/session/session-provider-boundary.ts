@@ -2,7 +2,15 @@
 
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	AudioContent,
+	ImageContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
@@ -35,7 +43,7 @@ import {
 	validateProviderMaxInFlightRequests,
 } from "./settings";
 
-type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent;
+type NormalizableContentBlock = AssistantMessage["content"][number] | TextContent | ImageContent | AudioContent;
 
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionProviderBoundaryHost {
@@ -76,7 +84,7 @@ export class SessionProviderBoundary {
 			const message = this.#host.agent.state.messages[i];
 			if (!message) continue;
 			if ((message.role !== "user" && message.role !== "developer") || !Array.isArray(message.content)) continue;
-			const images = message.content.filter((part): part is ImageContent => part.type === "image");
+			const images = message.content.flatMap(part => (part.type === "image" ? [part] : []));
 			if (images.length === 0) continue;
 			return images.flatMap((image, index) => {
 				const label = `Image #${index + 1}`;

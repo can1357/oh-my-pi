@@ -52,7 +52,7 @@ import {
 	registerMessageCacheInvalidator,
 } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
 import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
-import type { AssistantMessage, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AudioContent, ImageContent, Message, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
@@ -771,7 +771,7 @@ function renderSteeringEnvelope(message: string): string {
 	return prompt.render(userInterjectionTemplate, { message });
 }
 
-function getArrayContentText(content: (TextContent | ImageContent)[]): string {
+function getArrayContentText(content: (TextContent | ImageContent | AudioContent)[]): string {
 	let firstText: string | undefined;
 	let textParts: string[] | undefined;
 	for (const part of content) {
@@ -786,16 +786,6 @@ function getArrayContentText(content: (TextContent | ImageContent)[]): string {
 		textParts.push(part.text);
 	}
 	return textParts === undefined ? (firstText ?? "") : textParts.join("\n");
-}
-
-function getArrayContentImages(content: (TextContent | ImageContent)[]): ImageContent[] {
-	let images: ImageContent[] | undefined;
-	for (const part of content) {
-		if (part.type !== "image") continue;
-		if (images === undefined) images = [];
-		images.push(part);
-	}
-	return images ?? [];
 }
 
 function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
@@ -816,8 +806,10 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 
 	const text = getArrayContentText(message.content);
 	if (text.length === 0) return message.role === "user" ? message : userMessage;
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
-	content.push(...getArrayContentImages(message.content));
+	const content: (TextContent | ImageContent | AudioContent)[] = [
+		{ type: "text", text: renderSteeringEnvelope(text) },
+	];
+	content.push(...message.content.filter(part => part.type !== "text"));
 	return { ...userMessage, content };
 }
 
@@ -851,15 +843,17 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	return wrappedMessages ?? messages;
 }
 
-/** Result of filtering image blocks out of a `(TextContent | ImageContent)[]` array. */
-interface StripContentResult {
-	content: (TextContent | ImageContent)[];
+/** Result of filtering image blocks out of a content array. */
+interface StripContentResult<T extends ImageContent | AudioContent> {
+	content: (TextContent | T)[];
 	removed: number;
 }
 
-function stripImagesFromArrayContent(content: (TextContent | ImageContent)[]): StripContentResult {
+function stripImagesFromArrayContent<T extends ImageContent | AudioContent>(
+	content: (TextContent | T)[],
+): StripContentResult<T> {
 	let removed = 0;
-	const kept: (TextContent | ImageContent)[] = [];
+	const kept: (TextContent | T)[] = [];
 	for (const part of content) {
 		if (part.type === "image") {
 			removed++;
@@ -902,16 +896,19 @@ function stripImagesFromMessageContent(message: AgentMessage): number {
 			if (removed > 0) message.images = undefined;
 			return removed;
 		}
-		case "user":
+		case "user": {
+			if (typeof message.content === "string") return 0;
+			const { content, removed } = stripImagesFromArrayContent(message.content);
+			if (removed > 0) message.content = content;
+			return removed;
+		}
 		case "developer":
 		case "custom":
 		case "hookMessage": {
 			if (typeof message.content === "string") return 0;
 			const { content, removed } = stripImagesFromArrayContent(message.content);
 			if (removed > 0) {
-				// All four roles type `content` as `string | (TextContent | ImageContent)[]`;
-				// TypeScript can't narrow the assignment across the union, so cast once.
-				(message as { content: typeof content }).content = content;
+				message.content = content;
 			}
 			return removed;
 		}
@@ -977,7 +974,7 @@ export function replaceLlmImagesWithText(messages: Message[], placeholder: strin
 		if (msg.role !== "user" && msg.role !== "developer" && msg.role !== "toolResult") continue;
 		const content = msg.content;
 		if (!Array.isArray(content) || !content.some(part => part.type === "image")) continue;
-		const replaced: (TextContent | ImageContent)[] = [];
+		const replaced: (TextContent | ImageContent | AudioContent)[] = [];
 		for (const part of content) {
 			if (part.type !== "image") {
 				replaced.push(part);

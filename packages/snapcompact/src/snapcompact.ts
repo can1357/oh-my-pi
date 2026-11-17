@@ -54,7 +54,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import type { Api, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { Api, AudioContent, ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
@@ -2043,10 +2043,10 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
  * fit, priced as {@link historyBlocks} prices them, and replaces each run of dropped frames with one omission notice.
  * Returns `blocks` itself when every frame fits.
  */
-export function capFrameDataBytes(
-	blocks: (TextContent | ImageContent)[],
+export function capFrameDataBytes<T extends AudioContent | ImageContent>(
+	blocks: (TextContent | T)[],
 	maxFrameDataBytes: number,
-): (TextContent | ImageContent)[] {
+): (TextContent | T)[] {
 	const kept = new Set<number>();
 	let usedBytes = 0;
 	let dropped = false;
@@ -2062,7 +2062,7 @@ export function capFrameDataBytes(
 	}
 	if (!dropped) return blocks;
 
-	const capped: (TextContent | ImageContent)[] = [];
+	const capped: (TextContent | T)[] = [];
 	let omittedFrames = 0;
 	let omittedBytes = 0;
 	const flushOmitted = (): void => {

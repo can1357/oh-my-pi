@@ -1,7 +1,10 @@
-// Contract: an `audio/*` inline block reaches models that hear audio as the transport's audio
-// part (Google inline data, an `input_audio` part on Chat Completions and Responses), and
-// `audioInputMimeType` names the encoding only where the model and its transport both carry it.
+// Contract: a user `audio` block reaches models that hear audio as the transport's audio part
+// (Google inline data, an `input_audio` part on Chat Completions and Responses), every other
+// converter sends a placeholder in its place, and `audioInputMimeType` names the encoding only
+// where the model and its transport both carry it.
 import { describe, expect, it } from "bun:test";
+import { messageContentText } from "@oh-my-pi/pi-ai/dialect/rendering";
+import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { convertMessages as convertGoogleMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { convertResponsesInputContent } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -15,7 +18,7 @@ function audioMessage(mimeType: string): UserMessage {
 	return {
 		role: "user",
 		content: [
-			{ type: "image", data: AUDIO_B64, mimeType },
+			{ type: "audio", data: AUDIO_B64, mimeType },
 			{ type: "text", text: "Transcribe this." },
 		],
 		timestamp: 0,
@@ -59,8 +62,8 @@ describe("audio input", () => {
 			{ type: "input_audio", input_audio: { data: AUDIO_B64, format: "mp3" } },
 		]);
 		expect(convertResponsesInputContent(message.content, true, false)).toEqual([
-			{ type: "input_text", text: "Transcribe this." },
 			{ type: "input_text", text: NON_AUDIO_PLACEHOLDER },
+			{ type: "input_text", text: "Transcribe this." },
 		]);
 	});
 
@@ -92,5 +95,13 @@ describe("audio input", () => {
 			{ type: "text", text: "Transcribe this." },
 			{ type: "text", text: NON_AUDIO_PLACEHOLDER },
 		]);
+	});
+
+	it("a provider that maps no audio sends the placeholder in its place", () => {
+		const claude = getBundledModel("anthropic", "claude-sonnet-4-5") as Model<"anthropic-messages">;
+		const [message] = convertAnthropicMessages([audioMessage("audio/ogg")], hearing(claude), false);
+		expect(message.content).toBe(`${NON_AUDIO_PLACEHOLDER}\nTranscribe this.`);
+		// Text-dialect transports (local models) render user content through one function.
+		expect(messageContentText(audioMessage("audio/ogg").content)).toBe(`${NON_AUDIO_PLACEHOLDER}Transcribe this.`);
 	});
 });

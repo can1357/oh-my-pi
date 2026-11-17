@@ -6,6 +6,7 @@ import { getEnvApiKey } from "../env-api-key";
 import type {
 	Api,
 	AssistantMessage,
+	AudioContent,
 	Context,
 	ImageContent,
 	Message,
@@ -34,7 +35,7 @@ import {
 	type StreamMarkupHealingEvent,
 } from "../utils/stream-markup-healing";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder, partitionVisionContent, replaceAudioWithPlaceholder } from "./vision-guard";
 
 export interface OllamaChatOptions extends StreamOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -177,7 +178,7 @@ function selectToolsForToolChoice(tools: Tool[] | undefined, toolChoice: ToolCho
 }
 
 function toPlainContent(
-	content: string | ReadonlyArray<TextContent | ImageContent>,
+	content: string | ReadonlyArray<TextContent | ImageContent | AudioContent>,
 	supportsImages: boolean,
 ): {
 	content: string;
@@ -186,7 +187,10 @@ function toPlainContent(
 	if (typeof content === "string") {
 		return { content };
 	}
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
+	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(
+		replaceAudioWithPlaceholder(content),
+		supportsImages,
+	);
 	const text = textBlocks.map(block => block.text).join("\n");
 	return {
 		content: joinTextWithImagePlaceholder(text, omittedImages),

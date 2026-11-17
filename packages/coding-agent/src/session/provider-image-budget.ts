@@ -1,6 +1,7 @@
 import type {
 	Context,
 	DeveloperMessage,
+	AudioContent,
 	ImageContent,
 	Message,
 	Model,
@@ -132,11 +133,11 @@ function needsImageDrop(state: ImageBudgetState): boolean {
 	return state.remainingDrops > 0 || state.inlineBytes > state.byteBudget;
 }
 
-function clampContent(
-	content: readonly (TextContent | ImageContent)[],
+function clampContent<T extends ImageContent | AudioContent>(
+	content: readonly (TextContent | T)[],
 	state: ImageBudgetState,
-): (TextContent | ImageContent)[] | undefined {
-	let clamped: (TextContent | ImageContent)[] | undefined;
+): (TextContent | T)[] | undefined {
+	let clamped: (TextContent | T)[] | undefined;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type === "image" && needsImageDrop(state)) {
@@ -333,7 +334,7 @@ function otherRequestBytes(context: Context, model: Model, metadataWire: boolean
 			return { ...message, details: undefined, content: [], providerMetadata: { ...metadata, screenshot } };
 		}
 		const content = Array.isArray(message.content)
-			? measuredContent(message.content, stringArguments)
+			? measuredContent<{ type: string }>(message.content, stringArguments)
 			: message.content;
 		const payload = message.providerPayload;
 		if (!payload) return { ...message, content };
@@ -526,11 +527,11 @@ function inlineImageFromDataUri(imageUrl: unknown): ImageContent | undefined {
 }
 
 /** `undefined` when every image decodes, so callers can keep the original array. */
-async function replaceUnreadableContent(
-	content: readonly (TextContent | ImageContent)[],
+async function replaceUnreadableContent<T extends ImageContent | AudioContent>(
+	content: readonly (TextContent | T)[],
 	model: Model,
-): Promise<(TextContent | ImageContent)[] | undefined> {
-	let replaced: (TextContent | ImageContent)[] | undefined;
+): Promise<(TextContent | T)[] | undefined> {
+	let replaced: (TextContent | T)[] | undefined;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type !== "image" || !sendsInlineImageBytes(part, model)) continue;
@@ -628,7 +629,14 @@ async function unreadableComputerScreenshotReason(
 /** `undefined` when the message needs no rewrite. */
 async function dropUnreadableFromMessage(message: Message, model: Model): Promise<Message | undefined> {
 	switch (message.role) {
-		case "user":
+		case "user": {
+			const content = Array.isArray(message.content)
+				? await replaceUnreadableContent(message.content, model)
+				: undefined;
+			const providerPayload = await replaceUnreadableNativePayload(message.providerPayload);
+			if (!content && !providerPayload) return undefined;
+			return { ...message, ...(content ? { content } : {}), ...(providerPayload ? { providerPayload } : {}) };
+		}
 		case "developer": {
 			// Both views matter, and they can disagree: a native input image is
 			// stripped out of generic content and survives only on the payload.

@@ -47,6 +47,7 @@ import type {
 	ToolChoice,
 	ToolResultMessage,
 	Usage,
+	UserMessage,
 } from "../types";
 import { getPremiumServiceTierRequests, parseServiceTier } from "../types";
 import {
@@ -4469,9 +4470,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 
 function normalizeInputMessageContent(
 	model: Model<"openai-codex-responses">,
-	content:
-		| string
-		| Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string; url?: string }>,
+	content: UserMessage["content"],
 ): ResponseInputContent[] {
 	// gpt-5.x codex rejects reserved Harmony control-token spellings in input
 	// data; escape the transport copy of untrusted user text so ordinary docs or

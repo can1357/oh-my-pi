@@ -115,6 +115,21 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).toContain("→ grep() ⇒ ok · 1 line");
 	});
 
+	it("labels a user message's audio as audio, not as an image", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "user",
+				content: [
+					{ type: "audio", data: "AAAA", mimeType: "audio/ogg" },
+					{ type: "text", text: "Transcribe this." },
+				],
+				timestamp: 1,
+			},
+		]);
+		expect(output).toContain("[audio]\nTranscribe this.");
+		expect(output).not.toContain("[image]");
+	});
+
 	it("renders find paths without falling back to JSON arguments", () => {
 		const output = formatSessionHistoryMarkdown([
 			{

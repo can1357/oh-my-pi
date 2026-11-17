@@ -1,46 +1,39 @@
 import { $env } from "@oh-my-pi/pi-utils";
-import type { Api, ImageContent, Model, TextContent } from "../types";
+import type { Api, AudioContent, ImageContent, Model, TextContent } from "../types";
 
 export const NON_VISION_IMAGE_PLACEHOLDER = "[image omitted: model does not support vision]";
 export const NON_AUDIO_PLACEHOLDER = "[audio omitted: model does not hear audio]";
 
-/**
- * Whether an inline block carries audio rather than an image. `ImageContent` is the inline-media
- * block; Google sends any MIME type as inline data, and the OpenAI-style converters turn an
- * `audio/*` block into an `input_audio` part. Converters send it only to a model whose `input`
- * has `audio` and put {@link NON_AUDIO_PLACEHOLDER} in its place otherwise.
- */
-export function isAudioContent(block: ImageContent): boolean {
-	return block.mimeType.startsWith("audio/");
-}
-
 /** The `input_audio` format of an audio block: Chat Completions and Responses take mp3 and wav. */
-export function inputAudioFormat(block: ImageContent): "mp3" | "wav" {
+export function inputAudioFormat(block: AudioContent): "mp3" | "wav" {
 	return block.mimeType === "audio/wav" ? "wav" : "mp3";
 }
 
 export function partitionVisionContent(
 	content: ReadonlyArray<TextContent | ImageContent>,
 	supportsImages: boolean,
-	supportsAudio = false,
 ): {
 	textBlocks: TextContent[];
 	imageBlocks: ImageContent[];
-	audioBlocks: ImageContent[];
 	omittedImages: boolean;
-	omittedAudio: boolean;
 } {
 	const textBlocks = content.filter((block): block is TextContent => block.type === "text");
-	const mediaBlocks = content.filter((block): block is ImageContent => block.type === "image");
-	const audioBlocks = mediaBlocks.filter(isAudioContent);
-	const imageBlocks = mediaBlocks.filter(block => !isAudioContent(block));
+	const imageBlocks = content.filter((block): block is ImageContent => block.type === "image");
 	return {
 		textBlocks,
 		imageBlocks: supportsImages ? imageBlocks : [],
-		audioBlocks: supportsAudio ? audioBlocks : [],
 		omittedImages: !supportsImages && imageBlocks.length > 0,
-		omittedAudio: !supportsAudio && audioBlocks.length > 0,
 	};
+}
+
+/**
+ * User content for a converter that maps no audio: each audio block becomes
+ * {@link NON_AUDIO_PLACEHOLDER} text, so the model learns a recording was left out.
+ */
+export function replaceAudioWithPlaceholder(
+	content: ReadonlyArray<TextContent | ImageContent | AudioContent>,
+): (TextContent | ImageContent)[] {
+	return content.map(block => (block.type === "audio" ? { type: "text", text: NON_AUDIO_PLACEHOLDER } : block));
 }
 
 export function joinTextWithImagePlaceholder(text: string, omittedImages: boolean): string {

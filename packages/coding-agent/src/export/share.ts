@@ -20,7 +20,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AudioContent, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
@@ -357,11 +357,11 @@ function redactShareEntry(
 	}
 }
 
-function redactShareContent(
+function redactShareContent<T extends TextContent | ImageContent | AudioContent>(
 	o: SecretObfuscator,
-	content: string | (TextContent | ImageContent)[],
+	content: string | T[],
 	sharedRegexSecretValues: ReadonlySet<string>,
-): string | (TextContent | ImageContent)[] {
+): string | T[] {
 	if (typeof content === "string") return o.obfuscate(content, sharedRegexSecretValues);
 	return content.map(block =>
 		block.type === "text" ? { ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) } : block,
@@ -399,6 +399,11 @@ function redactShareMessage(
 ): AgentMessage {
 	switch (message.role) {
 		case "user":
+			return {
+				...message,
+				providerPayload: undefined,
+				content: redactShareContent(o, message.content, sharedRegexSecretValues),
+			};
 		case "developer":
 			return {
 				...message,

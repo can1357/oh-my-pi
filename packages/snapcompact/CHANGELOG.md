@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `capFrameDataBytes()` accepts content that holds `audio` blocks and leaves them in place ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.20.0] - 2026-11-12
 
 ### Added

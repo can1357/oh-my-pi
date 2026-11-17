@@ -106,7 +106,7 @@ export async function transcribeRecording(
 					{
 						role: "user",
 						content: [
-							{ type: "image", data: audio, mimeType },
+							{ type: "audio", data: audio, mimeType },
 							{ type: "text", text: prompt.render(transcribeInstruction) },
 						],
 						timestamp: Date.now(),

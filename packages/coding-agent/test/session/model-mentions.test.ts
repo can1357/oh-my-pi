@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, UserMessage } from "@oh-my-pi/pi-ai";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -103,7 +103,7 @@ describe("model mentions", () => {
 			expect(agentSession.modelMentions).toEqual([{ agent: "m1", selector: "b/y", name: "Y" }]);
 			const promptText = agent.state.messages
 				.filter(message => message.role === "user" || message.role === "developer")
-				.map(message =>
+				.map((message: Pick<UserMessage, "content">) =>
 					typeof message.content === "string"
 						? message.content
 						: message.content
