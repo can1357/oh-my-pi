@@ -3296,31 +3296,19 @@ struct TrackedDrag<'a> {
 	before:     f64,
 	/// Its `AXMinValue` and `AXMaxValue`, when it publishes both.
 	range:      Option<(f64, f64)>,
-	/// The path ends toward the control's maximum; `None` when which way it
-	/// pushes the control is not known.
+	/// The path ends toward the control's maximum; `None` for a control other
+	/// than a slider or scroll bar ([`ax::drag_control::Control::toward_max`]).
 	toward_max: Option<bool>,
 	/// The path ends at least a pixel from where it started.
 	moved:      bool,
-}
-
-impl TrackedDrag<'_> {
-	/// The path pushes the control against the end of its range it already
-	/// sits at, so it cannot change; at either end when the direction is not
-	/// known.
-	fn pinned(&self) -> bool {
-		self.range.is_some_and(|(min, max)| match self.toward_max {
-			Some(true) => self.before >= max,
-			Some(false) => self.before <= min,
-			None => self.before <= min || self.before >= max,
-		})
-	}
 }
 
 /// What a left drag that started on a control publishing its position does
 /// after the release.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragCheck {
-	/// The control could not move: done without a read, as on `main`.
+	/// The control could not move, or need not have: done without a read, as
+	/// on `main`.
 	Done,
 	/// Its value is read back ([`tracked_drag_outcome`]).
 	Confirm,
@@ -3331,7 +3319,18 @@ enum DragCheck {
 }
 
 fn drag_check(drag: &TrackedDrag<'_>, keys_held: bool, steppable: bool) -> DragCheck {
-	if !drag.moved || drag.pinned() {
+	let Some(toward_max) = drag.toward_max else {
+		return DragCheck::Done;
+	};
+	// Pushed against the end of its range it already sits at, it cannot change.
+	let pinned = drag.range.is_some_and(|(min, max)| {
+		if toward_max {
+			drag.before >= max
+		} else {
+			drag.before <= min
+		}
+	});
+	if !drag.moved || pinned {
 		DragCheck::Done
 	} else if steppable && !keys_held {
 		DragCheck::StepOn
@@ -9261,8 +9260,8 @@ mod tests {
 			moved,
 		};
 		let slider = |before, toward_max| drag("AXSlider", before, Some(toward_max), true);
-		// A web slider with no key held is stepped on; with a key held, or any
-		// other control, its value is only read back.
+		// A web slider with no key held is stepped on; with a key held, or a
+		// slider that takes no steps, its value is only read back.
 		assert_eq!(drag_check(&slider(0.0, true), false, true), DragCheck::StepOn);
 		assert_eq!(drag_check(&slider(0.0, true), true, true), DragCheck::Confirm);
 		assert_eq!(drag_check(&slider(0.0, true), false, false), DragCheck::Confirm);
@@ -9278,18 +9277,17 @@ mod tests {
 		}
 		// At the other end, a drag away from it should have moved it.
 		assert_eq!(drag_check(&slider(100.0, false), false, false), DragCheck::Confirm);
-		// A control whose direction is unknown (a splitter) is left alone at
-		// either end, and read back between them.
-		for before in [0.0, 100.0] {
-			assert_eq!(
-				drag_check(&drag("AXSplitter", before, None, true), false, false),
-				DragCheck::Done
-			);
+	}
+
+	#[test]
+	fn a_drag_from_a_checkbox_or_splitter_is_done_without_a_read() {
+		// A row reorder from a checkbox leaves its value as it was, and a
+		// splitter dragged against its stop does not move and publishes no
+		// range to say so: neither drag is judged by its value.
+		for (role, before) in [("AXCheckBox", 1.0), ("AXSplitter", 240.0)] {
+			let drag = TrackedDrag { role, before, range: None, toward_max: None, moved: true };
+			assert_eq!(drag_check(&drag, false, false), DragCheck::Done, "{role}");
 		}
-		assert_eq!(
-			drag_check(&drag("AXSplitter", 40.0, None, true), false, false),
-			DragCheck::Confirm
-		);
 	}
 
 	#[test]
