@@ -115,7 +115,8 @@ whose text is reproduced below.
 Modified for omp: rewritten in TypeScript; a rule hit returns an approval
 override instead of refusing the call, and the rules are opt-in
 (tools.guardRules); credential locations include omp's own credential stores;
-the parser reads only top-level commands, tracks cd, and skips heredoc bodies.
+the parser reads only top-level commands, tracks cd, and stops at the first
+nested part or heredoc.
 
 BUNDLED NPM PACKAGES
 ====================

