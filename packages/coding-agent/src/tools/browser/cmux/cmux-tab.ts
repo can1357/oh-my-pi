@@ -51,7 +51,7 @@ import type {
 import { urlMatcher } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import { normalizeSelectOptions, type SelectOptionInput } from "../select-options";
-import { assertTabPressArgs } from "../tab-arguments";
+import { assertTabPressArgs, assertTabScrollArgs } from "../tab-arguments";
 import { readFilePayloads } from "../upload-files";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
 import type { RecordingOptions, RecordingStartResult, RecordingStatus, RecordingStopResult } from "../recording";
@@ -1011,6 +1011,7 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async scroll(dx: number, dy: number, opts?: { selector?: string }): Promise<void> {
+		assertTabScrollArgs(dx, dy, opts);
 		if (opts?.selector) {
 			await this.#selectorAction(opts.selector, "scroll", { dx, dy });
 			return;

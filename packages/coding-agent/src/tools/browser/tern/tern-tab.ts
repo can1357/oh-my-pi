@@ -136,7 +136,7 @@ import {
 	storageValue,
 	writeStorageInPage,
 } from "../storage-state";
-import { assertTabPressArgs } from "../tab-arguments";
+import { assertTabPressArgs, assertTabScrollArgs } from "../tab-arguments";
 import type { Observation, ReadyInfo, SessionSnapshot } from "../tab-protocol";
 import { readFilePayloads } from "../upload-files";
 import {
@@ -2446,6 +2446,7 @@ export class TernTab implements InProcessRunTab {
 	 * (`scrollBy`; on native reads a trusted wheel over the element).
 	 */
 	async scroll(dx: number, dy: number, opts?: { selector?: string }): Promise<void> {
+		assertTabScrollArgs(dx, dy, opts);
 		if (opts?.selector) {
 			const spec = this.#spec(opts.selector);
 			const box = await this.#target(`tab.scroll(${describe(opts.selector)})`, spec, "point", null);
