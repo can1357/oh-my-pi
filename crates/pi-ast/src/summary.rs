@@ -256,7 +256,12 @@ fn count_lines(source: &str) -> u32 {
 	if source.is_empty() {
 		0
 	} else {
-		source.lines().count().max(1).min(u32::MAX as usize) as u32
+		let count = if source.len() < 64 {
+			source.lines().count()
+		} else {
+			xutf::lines_str(source, xutf::LineEnds::Lf).count()
+		};
+		count.max(1).min(u32::MAX as usize) as u32
 	}
 }
 
@@ -908,6 +913,15 @@ fn join_line_range(source_lines: &[&str], start_line: u32, end_line: u32) -> Str
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn count_lines_matches_str_lines_for_long_sources() {
+		for suffix in ["", "\n", "\r\n", "\n\n", "\r", "\u{2028}"] {
+			let source = format!("{}\r\nlast{suffix}", "é".repeat(40));
+			assert_eq!(count_lines(&source) as usize, source.lines().count(), "{suffix:?}");
+		}
+		assert_eq!(count_lines(""), 0);
+	}
 
 	fn summarize(code: &str, path: &str) -> SummaryResult {
 		summarize_code(SummaryOptions {

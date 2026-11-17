@@ -140,6 +140,7 @@ async function spawn(): Promise<{ exitCode: number; requests: string[] }> {
 			assignment: ASSIGNMENT,
 			index: 0,
 			id: "Judged",
+			outputSchema: {},
 			modelOverride: `mock/${PLANNER}:medium`,
 			authStorage,
 			modelRegistry,
