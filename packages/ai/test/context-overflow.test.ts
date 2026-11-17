@@ -463,6 +463,24 @@ describe("Context overflow error handling", () => {
 	});
 
 	// =============================================================================
+	// Requesty
+	// Expected pattern: "exceeds the model's maximum of X tokens" (Requesty rewrites
+	// Anthropic/Bedrock/Gemini overflow into this wording)
+	// =============================================================================
+
+	describe.skipIf(!e2eApiKey("REQUESTY_API_KEY"))("Requesty", () => {
+		it("anthropic/claude-haiku-4-5 via Requesty - should detect overflow via isContextOverflow", async () => {
+			const model = getBundledModel("requesty", "anthropic/claude-haiku-4-5");
+			const result = await testContextOverflow(model, Bun.env.REQUESTY_API_KEY!);
+			logResult(result);
+
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toMatch(/exceeds the model's maximum of \d+ tokens/i);
+			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+		}, 120000);
+	});
+
+	// =============================================================================
 	// Cerebras
 	// Expected: 400/413 status code with no body
 	// =============================================================================

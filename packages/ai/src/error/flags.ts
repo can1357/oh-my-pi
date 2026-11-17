@@ -106,6 +106,8 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/greater than the context length/i, // LM Studio
 	/context window exceeds limit/i, // MiniMax
 	/exceeded model token limit/i, // Kimi For Coding
+	/your input (?:is \d+ tokens, which )?exceeds the model's maximum of \d+ tokens/i, // Requesty (normalized Anthropic/Bedrock/Gemini overflow)
+	/prompt\s*超长/i, // Zhipu GLM ("prompt too long")
 	/context[_ ]length[_ ]exceeded/i, // Generic fallback
 	/too many tokens/i, // Generic fallback
 	/token limit exceeded/i, // Generic fallback

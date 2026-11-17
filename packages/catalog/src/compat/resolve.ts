@@ -538,6 +538,8 @@ function detectOpenAICompat(
 		requiresAssistantAfterToolResult: isMistral,
 		requiresThinkingAsText: isMistral,
 		requiresMistralToolIds: isMistral,
+		// Declared (unset) so user/KDL overrides apply; rows bake without the key.
+		escapeBuiltinToolNames: undefined,
 		thinkingFormat,
 		kimiApiFormat: undefined,
 		reasoningDisableMode: d.isVenice ? "venice-disable-thinking" : resolveReasoningDisableMode(thinkingFormat),

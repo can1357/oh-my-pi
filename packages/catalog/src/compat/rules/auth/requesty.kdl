@@ -1,0 +1,9 @@
+auth "requesty" {
+	name "Requesty"
+	login "api-key" {
+		auth-url "https://app.requesty.ai/api-keys"
+		instructions "Create or copy your API key from the Requesty dashboard"
+		prompt "Paste your Requesty API key" placeholder="rqsty-sk..."
+		validate "models-endpoint" url="https://api-v2.requesty.ai/v1/manage/apikey/self"
+	}
+}

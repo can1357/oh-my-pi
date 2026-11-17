@@ -1,0 +1,42 @@
+provider "requesty" {
+	default-model "openai/gpt-5.5"
+	env "REQUESTY_API_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Requesty" allow-unauthenticated=#true ignore-api-key=#true
+
+	// Requesty's request schema rejects `minimal` for every model; its own
+	// lowest named effort is `min` (https://docs.requesty.ai/features/reasoning).
+	reasoning-effort-map {
+		minimal "min"
+	}
+
+	// Requesty swaps a Gemini function tool named `web_search` for Google's
+	// native search: alone it never reaches the client, beside other function
+	// tools Google 400s ("enable tool_config.include_server_side_tool_invocations").
+	class "gemini" {
+		escape-builtin-tool-names #true
+	}
+
+	// Requesty's /models reports these as `supports_reasoning: false` although
+	// the same models think on their first-party hosts; repair the stale flag
+	// with the reviewed first-party ladder.
+	class "anthropic" {
+		revision ">=4.5 <4.6" {
+			thinking-upgrade-neutral #true
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "deepseek" {
+		family "r1" {
+			thinking-upgrade-neutral #true
+		}
+	}
+	// residue: a class-wide upgrade would also catch non-reasoning siblings.
+	models "google/gemini-2.5-flash:flex" "google/gemini-2.5-flash-lite:flex" {
+		thinking-upgrade-neutral #true
+	}
+	models "xai/grok-build-0.1" "fireworks/glm-5.1" "fireworks/qwen3.7-plus" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

@@ -6,6 +6,13 @@
 
 - `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `PI_ANTHROPIC_API_VERSION=2026-10-21` to send Anthropic API version 2026-10-21 to the official Anthropic API; sampling parameters are omitted under that version, which rejects them ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
+- Added Requesty provider support with mixed API routing: `/login requesty` API-key flow validated against the Requesty management endpoint, plus `REQUESTY_API_KEY` env-var discovery ([#6492](https://github.com/can1357/oh-my-pi/pull/6492) by [@ApplY3D](https://github.com/ApplY3D))
+- OpenAI Chat Completions requests now honor the `escapeBuiltinToolNames` compat flag: a client tool named like a gateway built-in (`web_search`) is `_`-prefixed on the wire and unprefixed in returned calls, so gateways that swap such names for native server tools keep it an ordinary function call ([#6492](https://github.com/can1357/oh-my-pi/pull/6492) by [@ApplY3D](https://github.com/ApplY3D))
+
+### Fixed
+
+- Fixed context-overflow detection missing Requesty's normalized `exceeds the model's maximum of N tokens` errors (Claude, Bedrock, Gemini routes) and Zhipu GLM's `Prompt 超长`, which left auto-compaction untriggered on those routes ([#6492](https://github.com/can1357/oh-my-pi/pull/6492) by [@ApplY3D](https://github.com/ApplY3D))
 
 ### Fixed
 

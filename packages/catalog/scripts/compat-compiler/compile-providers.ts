@@ -73,7 +73,7 @@ const SEED_PROPS = ["api", "base-url", "bundle", "precedence"] as const;
 const MODEL_PROPS = ["name", "api", "base-url"] as const;
 const COST_PROPS = ["input", "output", "cache-read", "cache-write"] as const;
 const LIMIT_PROPS = ["context", "max-tokens"] as const;
-const DISCOVERY_PROPS = ["label", "oauth-provider", "allow-unauthenticated"] as const;
+const DISCOVERY_PROPS = ["label", "oauth-provider", "allow-unauthenticated", "ignore-api-key"] as const;
 
 /** Provider-root node names owned by this compiler; the cascade compiler skips them. */
 export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
@@ -343,6 +343,8 @@ function parseDiscovery(node: KdlNodeView): CompiledProviderDiscovery {
 	if (oauthProvider !== undefined) discovery.oauthProvider = oauthProvider;
 	const allowUnauthenticated = propBool(node, "allow-unauthenticated");
 	if (allowUnauthenticated !== undefined) discovery.allowUnauthenticated = allowUnauthenticated;
+	const ignoreApiKey = propBool(node, "ignore-api-key");
+	if (ignoreApiKey !== undefined) discovery.ignoreApiKey = ignoreApiKey;
 	for (const child of node.children ?? []) {
 		if (child.name !== "env") unexpected(child, "discovery");
 		if (discovery.envVars !== undefined) malformed(child);

@@ -623,6 +623,8 @@ export interface CompiledProviderDiscovery {
 	oauthProvider?: string;
 	/** Discovery proceeds without credentials. */
 	allowUnauthenticated?: boolean;
+	/** Discovery intentionally ignores local credentials to fetch the full public catalog. */
+	ignoreApiKey?: boolean;
 }
 
 /**
