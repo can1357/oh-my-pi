@@ -17,7 +17,7 @@ import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-ga
 import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
-import { applyLinkMapSetting } from "@oh-my-pi/pi-tui/render/link-map";
+import { applyLinkMapSetting, parseLinkMap } from "@oh-my-pi/pi-tui/render/link-map";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
@@ -663,6 +663,8 @@ export const cfgTuiLinkMap = register({
 	default: EMPTY_STRING_RECORD,
 	// A repository must not be able to point clicks on local file links at a remote URL.
 	operatorOnly: true,
+	read: (raw, warn) => parseLinkMap(raw, "read", warn),
+	normalize: raw => parseLinkMap(raw, "write"),
 	ui: {
 		tab: "appearance",
 		group: "Display",

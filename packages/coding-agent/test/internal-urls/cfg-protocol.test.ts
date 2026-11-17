@@ -17,6 +17,8 @@ import { cfgEditFuzzyMatch } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgBashPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
+import { cfgTuiLinkMap } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { InternalWriteResult } from "@oh-my-pi/pi-coding-agent/internal-urls/types";
 
 function sessionWith(settings: Settings, caller: Partial<ToolSession> = {}): ToolSession {
@@ -298,6 +300,56 @@ describe("CfgProtocolHandler", () => {
 		expect(applied).toHaveLength(2);
 		expect(applied[0]).toBe(persistent);
 		expect(applied[1]).toBe(settings);
+	});
+
+	it("rejects invalid link maps before approval or applied callbacks", async () => {
+		const settings = Settings.isolated();
+		cfgTuiLinkMap.set(settings, { "/saved": "file:///S:/" });
+		const asked: CfgChangeRequest[] = [];
+		const applied: CfgAppliedChange[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(request), "once"),
+			applied: change => applied.push(change),
+			persistentSettings: settings,
+		});
+		await expect(write("cfg://tui/linkMap", '{"relative":"file:///Z:/"}', settings)).rejects.toThrow(
+			"Start with / or ~",
+		);
+		await expect(write("cfg://tui/linkMap/save", '{"/bad":42}', settings)).rejects.toThrow("Use a URI with a scheme");
+		expect(asked).toEqual([]);
+		expect(applied).toEqual([]);
+		expect(cfgTuiLinkMap.get(settings)).toEqual({ "/saved": "file:///S:/" });
+	});
+
+	it("reports canonical saved link maps separately from the active overlay", async () => {
+		using dir = TempDir.createSync("@pi-cfg-link-map-");
+		const overlay = dir.join("overlay.yml");
+		await Bun.write(overlay, YAML.stringify({ tui: { linkMap: { "/work": "file:///O:/" } } }));
+		const settings = await Settings.loadIsolated({
+			cwd: dir.join("project"),
+			agentDir: dir.join("agent"),
+			configFiles: [overlay],
+		});
+		const asked: CfgChangeRequest[] = [];
+		setCfgApprovalHost({
+			approve: async request => (asked.push(request), "once"),
+			applied: () => {},
+			persistentSettings: settings,
+		});
+		try {
+			const result = await write("cfg://tui/linkMap/save", '{"/work":"file://z:/saved"}', settings);
+			expect(asked).toHaveLength(1);
+			expect(asked[0]?.shadowedBy).toBeDefined();
+			expect(result.details?.cfg?.effective).toContain("file:///O:/");
+			expect(textOf(result)).toContain("file:///Z:/saved/");
+			expect(cfgTuiLinkMap.get(settings)).toEqual({ "/work": "file:///O:/" });
+			expect(YAML.parse(await Bun.file(dir.join("agent", "config.yml")).text())).toEqual({
+				tui: { linkMap: { "/work": "file:///Z:/saved/" } },
+			});
+		} finally {
+			settings.cancelPendingSaves();
+			AgentStorage.close();
+		}
 	});
 
 	it("rejects namespace targets and values outside the schema before asking", async () => {

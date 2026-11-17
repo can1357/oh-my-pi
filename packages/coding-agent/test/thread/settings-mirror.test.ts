@@ -7,6 +7,7 @@ import { initializeWithSettings, resetCapabilityForTests } from "../../src/capab
 import { type Rule, resetActiveRulesForTests, setActiveRules } from "../../src/capability/rule";
 import { cfgDisabledProviders } from "../../src/config/model-settings";
 import { Settings } from "../../src/config/settings";
+import { cfgTuiLinkMap } from "../../src/modes/settings";
 import type { MainThreadLink, SubagentMainApi, SubagentWorkerApi } from "../../src/thread/protocol";
 import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { WorkerPeer } from "../../src/thread/services";
@@ -111,6 +112,40 @@ async function startWorker(): Promise<Probe> {
 }
 
 describe("settings worker mirror", () => {
+	it("rejects invalid worker replay writes without dirtying main or mirror state", async () => {
+		const main = Settings.isolated();
+		cfgTuiLinkMap.set(main, { "/a/b": "file:///A:/" });
+		const probe = await startWorker();
+		await probe("keep", "map", main);
+		await expect(probe("writeEntry", "map", cfgTuiLinkMap.id, "/a//b", "file:///B:/")).rejects.toThrow(
+			"/a/b is already the entry for that prefix.",
+		);
+		await expect(probe("writeEntry", "map", cfgTuiLinkMap.id, "/bad", 42)).rejects.toThrow("Use a URI with a scheme");
+		await expect(probe("writeValue", "map", cfgTuiLinkMap.id, { relative: "file:///R:/" })).rejects.toThrow(
+			"Start with / or ~",
+		);
+		await expect(
+			probe("writeValue", "map", cfgTuiLinkMap.id, { "/a/b": "file:///A:/", "/a//b": "file:///B:/" }),
+		).rejects.toThrow("/a/b is already the entry for that prefix.");
+		expect(cfgTuiLinkMap.get(main)).toEqual({ "/a/b": "file:///A:/" });
+		expect(await probe("get", "map", cfgTuiLinkMap.id)).toEqual({ "/a/b": "file:///A:/" });
+	});
+
+	it("reads dirty legacy main config cleanly in the worker without rewriting it", async () => {
+		const agentDir = makeDir("legacy-agent");
+		const configPath = path.join(agentDir, "config.yml");
+		const original =
+			"tui:\n  linkMap:\n    /valid: file://z:/src\n    /bad: 42\n    relative: file:///R:/\n    /disabled: ''\n";
+		await Bun.write(configPath, original);
+		const main = await Settings.loadReadOnly({ cwd: makeDir("legacy-cwd"), agentDir });
+		const probe = await startWorker();
+		await probe("keep", "legacy", main);
+		const clean = { "/valid": "file:///Z:/src/", "/disabled": "" };
+		expect(cfgTuiLinkMap.get(main)).toEqual(clean);
+		expect(await probe("get", "legacy", cfgTuiLinkMap.id)).toEqual(clean);
+		expect(await Bun.file(configPath).text()).toBe(original);
+	});
+
 	it("installs main's global as the worker global and follows main set/override pushes", async () => {
 		const cwd = makeDir("cwd");
 		const global = await Settings.init({ inMemory: true, cwd, agentDir: makeDir("agent") });

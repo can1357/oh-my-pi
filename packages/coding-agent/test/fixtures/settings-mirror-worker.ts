@@ -55,6 +55,13 @@ const probe: SettingsProbe = async (op, ...args) => {
 		case "override":
 			setting(args[1]).override(instance(args[0]), args[2]);
 			return setting(args[1]).get(instance(args[0]));
+		case "writeValue":
+			instance(args[0]).writeValue(setting(args[1]), args[2], "global");
+			return setting(args[1]).get(instance(args[0]));
+		case "writeEntry":
+			if (typeof args[2] !== "string") throw new Error("writeEntry expects a key");
+			instance(args[0]).writeEntry(setting(args[1]), args[2], args[3]);
+			return setting(args[1]).get(instance(args[0]));
 		case "overlay": {
 			const [parent, child, overrides] = args;
 			if (typeof child !== "string") throw new Error("overlay expects a child name");

@@ -11,6 +11,10 @@
 
 - The Agent Hub's output path, an agent definition's file, the extension inspector's path, an attached image's chip and `/debug` report paths are ordinary file links: they follow `tui.linkMap`, `PI_LINK_SCHEME` and `tui.hyperlinks` ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
+### Fixed
+
+- `tui.linkMap` uses `parseLinkMap` for clean canonical reads without rewriting legacy configuration and strict write validation that rejects malformed or colliding entries ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+
 ## [18.21.0] - 2026-11-16
 
 ### Breaking Changes

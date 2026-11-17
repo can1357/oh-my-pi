@@ -4,6 +4,7 @@ import { runConfigCommand } from "@oh-my-pi/pi-coding-agent/cli/config-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getConfigRootDir, getProjectDir, setAgentDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 
 let testAgentDir: TempDir | undefined;
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -53,6 +54,39 @@ afterEach(async () => {
 });
 
 describe("config CLI schema coverage", () => {
+	it("exits nonzero on an invalid link map without changing config.yml", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const configPath = path.join(testAgentDir.path(), "config.yml");
+		const original = "temperature: 0.4\ntui:\n  linkMap:\n    /saved: file:///S:/\n";
+		await Bun.write(configPath, original);
+		const result = await runCliProcess(["config", "set", "tui.linkMap", '{"relative":"file:///Z:/"}', "--json"], {
+			PI_CODING_AGENT_DIR: testAgentDir.path(),
+		});
+		expect(result.exitCode).not.toBe(0);
+		expect(result.error).toContain("Start with / or ~");
+		expect(await Bun.file(configPath).text()).toBe(original);
+	});
+
+	it("prints a canonical saved link map when a config overlay still shadows it", async () => {
+		if (!testAgentDir) throw new Error("Test agent directory was not initialized");
+		const overlayPath = path.join(testAgentDir.path(), "link-map-overlay.yml");
+		await Bun.write(overlayPath, "tui:\n  linkMap:\n    /work: file:///O:/\n");
+		const result = await runCliProcess(["config", "set", "tui.linkMap", '{"/work":"file://z:/saved"}', "--json"], {
+			PI_CODING_AGENT_DIR: testAgentDir.path(),
+			PI_CONFIG_FILES: overlayPath,
+		});
+		expect(result.exitCode).toBe(0);
+		expect(result.error).toBe("");
+		expect(JSON.parse(result.output)).toEqual({
+			key: "tui.linkMap",
+			value: { "/work": "file:///Z:/saved/" },
+			overriddenBy: "overlay",
+		});
+		expect(YAML.parse(await Bun.file(path.join(testAgentDir.path(), "config.yml")).text())).toEqual({
+			tui: { linkMap: { "/work": "file:///Z:/saved/" } },
+		});
+	});
+
 	it("renders record settings as JSON and with record type in text output", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 

@@ -1,13 +1,4 @@
-/**
- * `tui.linkMap`: where file links under a path prefix point.
- *
- * Each entry replaces a path prefix with a URI prefix in any scheme: the rest of the path is appended to the URI
- * prefix one percent-encoded segment at a time. Keys are cleaned up once, when the map is pushed: a leading `~`
- * becomes the home directory, and also its real path when the home is a symlink; `{user}` becomes the login name;
- * the result is normalised with `path.posix.normalize` and loses a trailing slash. Keys that come out as the same
- * prefix are one entry, and the later one is ignored with a warning. The longest prefix wins, by whole segments.
- * The map is not applied when omp itself runs on Windows.
- */
+/** Path-prefix URI mappings: normalized once, matched by whole segments with the longest prefix winning. */
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -17,15 +8,13 @@ import { logger } from "@oh-my-pi/pi-utils";
 export const LINK_SCHEME = /^[a-z][a-z0-9+.-]*$/;
 
 interface LinkMapEntry {
-	/** The key as written in the setting. */
 	key: string;
-	/** What the key stands for, from {@link linkMapPrefixes}. */
 	prefix: string;
-	/** `prefix` ending in `/`: what a path under the directory starts with. */
 	dir: string;
-	/** URI prefix ending in `/`. */
 	target: string;
 }
+
+export type LinkMapWarn = (message: string, details: Record<string, unknown>) => void;
 
 /** Valid entries of the pushed map, most specific first. */
 let entries: readonly LinkMapEntry[] = [];
@@ -33,12 +22,7 @@ let entries: readonly LinkMapEntry[] = [];
 const MATCH_CACHE_LIMIT = 512;
 const matchCache = new Map<string, { key: string; uri: string } | null>();
 
-/**
- * Parse a map value into a URI prefix ending in `/`. Any scheme of two or more characters is accepted (a
- * one-letter "scheme" is a Windows drive such as `Z:`); a value with a query or a fragment is not. A `file:`
- * value may be written Windows-style: backslashes become slashes, and `file://Z:/p` or `file:\\Z:\p` become
- * `file:///Z:/p`, with the drive letter uppercased. Anything else yields `undefined`.
- */
+/** Canonical URI prefix without query/fragment; accepts Windows-style file URIs but not drive-letter schemes. */
 export function parseLinkTarget(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	let text = value.trim();
@@ -66,10 +50,7 @@ export function isLinkMapKey(key: string): boolean {
 	return key === "~" || key.startsWith("~/") || key.startsWith("/");
 }
 
-/**
- * The normalised prefixes a key stands for, including a symlinked home's real path; none for an invalid key or
- * unknown login name.
- */
+/** Expand a key, including symlinked home paths; an unknown login has no prefixes. */
 export function linkMapPrefixes(key: string): string[] {
 	if (!isLinkMapKey(key)) return [];
 	let text = key;
@@ -106,51 +87,81 @@ export function linkMapPrefixes(key: string): string[] {
 	return prefixes;
 }
 
-/**
- * Push `tui.linkMap`, such as `{ "/mnt/projects": "file:///Z:/", "/srv/handbook":
- * "https://git.contoso.example/handbook/blob/main" }`. Entries whose key fails {@link isLinkMapKey} or whose value
- * fails {@link parseLinkTarget} are ignored with a warning, as is an entry whose key stands for the prefix of an
- * earlier one; an empty value is ignored silently. Anything but a plain object clears the map.
- */
-export function applyLinkMapSetting(value?: unknown): void {
-	// Keys are evaluated here, when the setting changes, so drawing a link does not touch the user database.
-	const next = new Map<string, LinkMapEntry>();
-	if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-		for (const [key, raw] of Object.entries(value)) {
-			if (raw === "") continue;
-			const target = parseLinkTarget(raw);
-			if (!target || !isLinkMapKey(key)) {
-				logger.warn("Ignoring invalid tui.linkMap entry", { key, target: raw });
-				continue;
-			}
-			const prefixes = linkMapPrefixes(key);
-			// `{user}` without a login name: the key stays unmatched.
-			if (prefixes.length === 0) continue;
-			let first: LinkMapEntry | undefined;
-			for (const prefix of prefixes) {
-				first = next.get(prefix);
-				if (first) break;
-			}
-			if (first) {
-				logger.warn("Ignoring duplicate tui.linkMap entry", { key, sameAs: first.key });
-				continue;
-			}
-			for (const prefix of prefixes) {
-				next.set(prefix, { key, prefix, dir: prefix === "/" ? "/" : `${prefix}/`, target });
-			}
-		}
+/** Clean configured maps on reads; reject invalid or colliding entries on writes. */
+export function parseLinkMap(
+	value: unknown,
+	mode: "read" | "write" = "read",
+	warn?: LinkMapWarn,
+): Record<string, string> {
+	return compileLinkMap(value, mode, warn).value;
+}
+
+function compileLinkMap(
+	value: unknown,
+	mode: "read" | "write",
+	warn?: LinkMapWarn,
+): { value: Record<string, string>; entries: LinkMapEntry[] } {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		if (mode === "write") throw new Error("tui.linkMap must be an object mapping path prefixes to URI prefixes");
+		if (value !== undefined && value !== null) warn?.("Ignoring invalid tui.linkMap value", { value });
+		return { value: {}, entries: [] };
 	}
-	entries = [...next.values()].sort((a, b) => b.prefix.length - a.prefix.length);
+	const owners = new Map<string, string>();
+	const clean: Record<string, string> = {};
+	const compiled: LinkMapEntry[] = [];
+	for (const [key, raw] of Object.entries(value)) {
+		if (raw === "") {
+			if (!isLinkMapKey(key)) {
+				if (mode === "write") throw new Error("Start with / or ~, for example /mnt/projects or ~/src");
+				continue;
+			}
+			clean[key] = "";
+			continue;
+		}
+		const target = parseLinkTarget(raw);
+		if (target === undefined || !isLinkMapKey(key)) {
+			if (mode === "write") {
+				throw new Error(
+					target === undefined
+						? "Use a URI with a scheme and no query or fragment, such as file:///Z:/"
+						: "Start with / or ~, for example /mnt/projects or ~/src",
+				);
+			}
+			warn?.("Ignoring invalid tui.linkMap entry", { key, target: raw });
+			continue;
+		}
+		const prefixes = linkMapPrefixes(key);
+		if (prefixes.length === 0) {
+			clean[key] = target;
+			continue;
+		}
+		let owner: string | undefined;
+		for (const prefix of prefixes) {
+			owner = owners.get(prefix);
+			if (owner !== undefined) break;
+		}
+		if (owner !== undefined) {
+			if (mode === "write") throw new Error(`${owner} is already the entry for that prefix.`);
+			warn?.("Ignoring duplicate tui.linkMap entry", { key, sameAs: owner });
+			continue;
+		}
+		for (const prefix of prefixes) {
+			owners.set(prefix, key);
+			compiled.push({ key, prefix, dir: prefix === "/" ? "/" : `${prefix}/`, target });
+		}
+		clean[key] = target;
+	}
+	return { value: clean, entries: compiled };
+}
+
+/** Push clean mappings to the renderer, warning about ignored entries. */
+export function applyLinkMapSetting(value?: unknown): void {
+	const next = compileLinkMap(value, "read", (message, details) => logger.warn(message, details));
+	entries = next.entries.sort((a, b) => b.prefix.length - a.prefix.length);
 	matchCache.clear();
 }
 
-/**
- * The map entry covering `filePath` (its key as written) and the link target it yields, or `undefined` when no
- * entry covers it. Relative paths resolve against the working directory first, as file links do. Matching is
- * segment-wise and case-sensitive, so `/data` covers `/data/x` but not `/data-x`.
- *
- * @throws URIError when a path segment cannot be percent-encoded (a lone surrogate).
- */
+/** Match whole path segments. Relative paths resolve against cwd; encoding can throw URIError. */
 export function matchLinkEntry(filePath: string): { key: string; uri: string } | undefined {
 	if (entries.length === 0 || process.platform === "win32") return undefined;
 	const resolved = path.resolve(filePath);
@@ -167,12 +178,7 @@ export function matchLinkEntry(filePath: string): { key: string; uri: string } |
 	return match ?? undefined;
 }
 
-/**
- * The `tui.linkMap` target for `filePath`, such as `file:///Z:/q3/report.csv`, or `undefined` when no entry
- * covers it.
- *
- * @throws URIError when a path segment cannot be percent-encoded (a lone surrogate).
- */
+/** Return a mapped URI, if any. Path encoding can throw URIError. */
 export function mappedLinkUri(filePath: string): string | undefined {
 	return matchLinkEntry(filePath)?.uri;
 }

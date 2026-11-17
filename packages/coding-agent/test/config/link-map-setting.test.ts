@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { bindEffects } from "@oh-my-pi/pi-coding-agent/config/registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -18,6 +19,113 @@ afterEach(() => {
 });
 
 describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
+	it("cleans legacy reads without losing raw values or rewriting config", async () => {
+		using dir = TempDir.createSync("@pi-link-map-legacy-");
+		const configPath = dir.join("agent", "config.yml");
+		const raw = {
+			"/windows": "file://z:/src",
+			"/web": "https://example.com/docs",
+			"/number": 42,
+			"/invalid": "not-a-uri",
+			relative: "file:///R:/",
+			"/a/b": "file:///A:/",
+			"/a//b": "file:///B:/",
+			"/disabled": "",
+			"/home/{user}": "https://example.com/users",
+		};
+		const original = `${YAML.stringify({ tui: { linkMap: raw } })}    /cycle: &cycle [*cycle]\n`;
+		const expectedRaw = YAML.parse(original) as { tui: { linkMap: Record<string, unknown> } };
+		await Bun.write(configPath, original);
+		vi.spyOn(os, "userInfo").mockImplementation(() => {
+			throw new Error("no login name");
+		});
+		const settings = await Settings.loadIsolated({ agentDir: dir.join("agent"), cwd: dir.join("project") });
+		try {
+			await settings.reloadFromDisk();
+			const clean = {
+				"/windows": "file:///Z:/src/",
+				"/web": "https://example.com/docs/",
+				"/a/b": "file:///A:/",
+				"/disabled": "",
+				"/home/{user}": "https://example.com/users/",
+			};
+			expect(cfgTuiLinkMap.get(settings)).toEqual(clean);
+			expect(cfgTuiLinkMap.layered(settings)).toEqual(clean);
+			expect(settings.rawValue(cfgTuiLinkMap)).toEqual(expectedRaw.tui.linkMap);
+			expect(await Bun.file(configPath).text()).toBe(original);
+		} finally {
+			settings.cancelPendingSaves();
+			AgentStorage.close();
+		}
+	});
+
+	it.each(["", "not-a-uri"])("cleans only after overlay precedence for target %j", async target => {
+		using dir = TempDir.createSync("@pi-link-map-mask-");
+		await Bun.write(
+			dir.join("agent", "config.yml"),
+			YAML.stringify({ tui: { linkMap: { "/mnt/projects": "file:///Z:/" } } }),
+		);
+		const overlay = dir.join("overlay.yml");
+		await Bun.write(overlay, YAML.stringify({ tui: { linkMap: { "/mnt/projects": target } } }));
+		const settings = await Settings.loadIsolated({
+			agentDir: dir.join("agent"),
+			cwd: dir.join("project"),
+			configFiles: [overlay],
+		});
+		try {
+			expect(cfgTuiLinkMap.get(settings)).toEqual(target === "" ? { "/mnt/projects": "" } : {});
+			expect(cfgTuiLinkMap.layered(settings)).toEqual(target === "" ? { "/mnt/projects": "" } : {});
+		} finally {
+			settings.cancelPendingSaves();
+			AgentStorage.close();
+		}
+	});
+
+	it("rejects invalid whole writes on every boundary without changing layers or disk", async () => {
+		using dir = TempDir.createSync("@pi-link-map-write-");
+		const configPath = dir.join("agent", "config.yml");
+		const original = "tui:\n  linkMap:\n    /saved: file:///S:/\n";
+		await Bun.write(configPath, original);
+		const settings = await Settings.loadIsolated({ agentDir: dir.join("agent"), cwd: dir.join("project") });
+		cfgTuiLinkMap.override(settings, { "/runtime": "file:///R:/" });
+		const before = settings.rawValue(cfgTuiLinkMap);
+		const globalBefore = settings.getGlobalSettings();
+		const invalid: unknown[] = [
+			{ relative: "file:///Z:/" },
+			{ "/number": 42 },
+			{ "/query": "https://example.com/?q=1" },
+			{ "/fragment": "https://example.com/#L1" },
+			{ "/a/b": "file:///A:/", "/a//b": "file:///B:/" },
+			[],
+			42,
+		];
+		try {
+			for (const value of invalid) {
+				// Unknown input is intentional: these are public runtime validation boundaries.
+				const typed = value as Record<string, string>;
+				expect(() => settings.writeValue(cfgTuiLinkMap, value, "global")).toThrow();
+				expect(() => settings.writeValue(cfgTuiLinkMap, value, "override")).toThrow();
+				expect(() => cfgTuiLinkMap.set(settings, typed)).toThrow();
+				expect(() => cfgTuiLinkMap.override(settings, typed)).toThrow();
+				expect(() => cfgTuiLinkMap.parse(JSON.stringify(value))).toThrow();
+				expect(() => Settings.isolated({ [cfgTuiLinkMap.id]: typed })).toThrow();
+				expect(settings.rawValue(cfgTuiLinkMap)).toEqual(before);
+				expect(settings.getGlobalSettings()).toEqual(globalBefore);
+			}
+			await settings.flush();
+			expect(await Bun.file(configPath).text()).toBe(original);
+			cfgTuiLinkMap.set(settings, { "/runtime": "file://z:/saved" });
+			await settings.flush();
+			expect(cfgTuiLinkMap.get(settings)["/runtime"]).toBe("file:///R:/");
+			expect(YAML.parse(await Bun.file(configPath).text())).toEqual({
+				tui: { linkMap: { "/runtime": "file:///Z:/saved/" } },
+			});
+		} finally {
+			settings.cancelPendingSaves();
+			AgentStorage.close();
+		}
+	});
+
 	it("follows the global config and never a project's settings", async () => {
 		using dir = TempDir.createSync("@pi-link-map-scope-");
 		const agentDir = dir.join("agent");

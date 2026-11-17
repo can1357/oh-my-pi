@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgTuiLinkMap } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { cfgTaskDisabledAgents } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -44,6 +45,34 @@ describe("Settings entry-level writes", () => {
 		await Bun.write(overlayPath, YAML.stringify(overlay));
 		return Settings.loadIsolated({ agentDir, cwd, configFiles: [overlayPath] });
 	}
+
+	it("rejects appended normalized duplicates without staging a write", async () => {
+		const settings = await load({ tui: { linkMap: { "/a/b": "file:///A:/" } } }, {});
+		const original = await Bun.file(configPath()).text();
+		expect(() => settings.writeEntry(cfgTuiLinkMap, "/a//b", "file:///B:/")).toThrow(
+			"/a/b is already the entry for that prefix.",
+		);
+		expect(settings.getGlobalSettings()).toEqual({ tui: { linkMap: { "/a/b": "file:///A:/" } } });
+		await settings.flush();
+		expect(await Bun.file(configPath()).text()).toBe(original);
+	});
+
+	it("updates a valid entry alongside legacy bad siblings and deletes malformed keys", async () => {
+		const raw = { "/a/b": "file:///A:/", relative: "file:///R:/", "/bad": false };
+		await Bun.write(configPath(), YAML.stringify({ tui: { linkMap: raw } }));
+		await Bun.write(overlayPath, YAML.stringify({ tui: { linkMap: { "/overlay": "file:///O:/" } } }));
+		const settings = await Settings.loadIsolated({ agentDir, cwd, configFiles: [overlayPath] });
+		settings.writeEntry(cfgTuiLinkMap, "/a/b", "file://a:/fixed");
+		expect(cfgTuiLinkMap.get(settings)).toEqual({ "/a/b": "file:///A:/fixed/", "/overlay": "file:///O:/" });
+		await settings.flush();
+		expect(await readConfig()).toEqual({ tui: { linkMap: { ...raw, "/a/b": "file:///A:/fixed/" } } });
+
+		settings.writeEntry(cfgTuiLinkMap, "relative", undefined);
+		await settings.flush();
+		expect(await readConfig()).toEqual({
+			tui: { linkMap: { "/a/b": "file:///A:/fixed/", "/bad": false } },
+		});
+	});
 
 	it("persists one fallback chain without the chains a --config overlay supplies", async () => {
 		const settings = await load({}, { retry: { fallbackChains: { smol: ["overlay/cheap"] } } });

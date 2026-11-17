@@ -887,9 +887,8 @@ export class Settings {
 		for (const setting of allSettings()) {
 			const value = getByPath(layer, setting.segments);
 			if (value === undefined || value === null) continue;
-			const normalized = setting.definition.normalize ? setting.definition.normalize(value) : value;
-			setting.assertWritable(normalized);
-			setByPath(layer, setting.segments, normalized);
+			const prepared = setting.prepareWritable(value);
+			setByPath(layer, setting.segments, prepared);
 		}
 		return layer;
 	}
@@ -1245,7 +1244,7 @@ export class Settings {
 	 */
 	writeValue(setting: AnySetting, value: unknown, layer: "global" | "override"): void {
 		if (this.#mirror) return this.#forward(this.#mirror, { op: "writeValue", id: setting.id, value, layer });
-		setting.assertWritable(value);
+		const prepared = setting.prepareWritable(value);
 		if (layer === "override" && setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
@@ -1253,12 +1252,12 @@ export class Settings {
 		const prev = setting.get(this);
 		// Re-setting the persisted global value is a no-op for config.yml: staging it would still
 		// queue a full re-read, rewrite, fsync, and rename of the file.
-		const persistGlobal = layer === "global" && !this.#globalWriteIsNoop(setting.segments, value);
+		const persistGlobal = layer === "global" && !this.#globalWriteIsNoop(setting.segments, prepared);
 		if (layer === "global") {
-			if (persistGlobal) this.#stageGlobal(setting.segments, value);
+			if (persistGlobal) this.#stageGlobal(setting.segments, prepared);
 			this.#releaseSoftPin(setting);
 		} else {
-			setByPath(this.#overrides, setting.segments, value);
+			setByPath(this.#overrides, setting.segments, prepared);
 		}
 		this.#rebuildMerged();
 		if (persistGlobal) this.#queueSave();
@@ -1293,12 +1292,24 @@ export class Settings {
 	writeEntry(setting: AnySetting, key: string, value: unknown): void {
 		if (setting.type !== "record") throw new Error(`Setting ${setting.id} is not a record`);
 		if (this.#mirror) return this.#forward(this.#mirror, { op: "writeEntry", id: setting.id, key, value });
-		if (value !== undefined) setting.assertWritable({ [key]: value });
 		const record = getByPath(this.#global, setting.segments);
+		let prepared = value;
+		if (value !== undefined) {
+			const base =
+				setting.definition.type === "record" && setting.definition.read
+					? setting.definition.read(record, () => {})
+					: record;
+			const prospective =
+				isRecord(base) && Object.hasOwn(base, key)
+					? Object.fromEntries(Object.entries(base).map(([listed, raw]) => [listed, listed === key ? value : raw]))
+					: { ...(isRecord(base) ? base : {}), [key]: value };
+			const preparedMap = setting.prepareWritable(prospective);
+			prepared = isRecord(preparedMap) && Object.hasOwn(preparedMap, key) ? preparedMap[key] : value;
+		}
 		// An entry re-set to its persisted value stages nothing (no config.yml rewrite).
 		const staged =
 			value !== undefined
-				? !this.#globalWriteIsNoop([...setting.segments, key], value)
+				? !this.#globalWriteIsNoop([...setting.segments, key], prepared)
 				: isRecord(record) && Object.hasOwn(record, key);
 		if (!staged && !this.#softPins.has(setting)) return;
 		const prev = setting.get(this);
@@ -1306,7 +1317,7 @@ export class Settings {
 		if (staged) {
 			// Replace rather than mutate the record: the merged view and cached reads may share it.
 			if (isRecord(record)) setByPath(this.#global, setting.segments, { ...record });
-			this.#stageGlobal([...setting.segments, key], value);
+			this.#stageGlobal([...setting.segments, key], prepared);
 		}
 		this.#rebuildMerged();
 		if (staged) this.#queueSave();

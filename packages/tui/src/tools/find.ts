@@ -232,7 +232,7 @@ function describeHit(hit: FindHit, rangeLimit: number, cwd: string | undefined, 
 				"muted",
 			),
 		],
-		href: isUrlHit || cwd === undefined ? undefined : fileHref(path.join(cwd, rawRel), "file"),
+		href: isUrlHit || cwd === undefined ? undefined : fileHref({ path: path.join(cwd, rawRel), kind: "file" }),
 		key: "hit",
 	});
 	const snippets = ranges.map(range =>

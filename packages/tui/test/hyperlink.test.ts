@@ -221,7 +221,7 @@ describe("fileHyperlink", () => {
 			expect(fileHyperlink(file(malformed), "evp.h")).toBe("evp.h");
 			expect(fileLinkSpan(file(malformed), "evp.h")).toEqual({ t: "evp.h", s: "path" });
 			// Native heads and image props share the same converter.
-			expect(fileHref(malformed, "file")).toBeUndefined();
+			expect(fileHref(file(malformed))).toBeUndefined();
 			expect(openableImageProps(malformed)).toEqual({});
 		},
 	);
@@ -287,7 +287,7 @@ describe("fileHyperlink", () => {
 		const filePath = path.resolve("/tmp/remote project/a.ts");
 		const href = `ompfile://beelink${url.pathToFileURL(filePath).pathname}`;
 		expect(fileLinkSpan(file(filePath), "a.ts")).toEqual({ t: "a.ts", s: "path", href });
-		expect(fileHref(filePath, "file")).toBe(href);
+		expect(fileHref(file(filePath))).toBe(href);
 		expect(openableImageProps(filePath)).toEqual({
 			href: url.pathToFileURL(filePath).href,
 			actions: { menu: ["open"] },
@@ -326,7 +326,7 @@ describe("fileHyperlink", () => {
 		expect(resolveFileLink(file(malformed), "vscode")).toBeUndefined();
 		expect(fileHyperlink(file(malformed), "a.ts")).toBe("a.ts");
 		expect(fileLinkSpan(file(malformed), "a.ts")).toEqual({ t: "a.ts", s: "path" });
-		expect(fileHref(malformed, "file")).toBeUndefined();
+		expect(fileHref(file(malformed))).toBeUndefined();
 		expect(openableImageProps(malformed)).toEqual({});
 	});
 
@@ -410,7 +410,7 @@ describe.skipIf(process.platform === "win32")("tui.linkMap", () => {
 		const mapped = "file:///Z:/q3/report.csv";
 		expect(extractLinkUri(fileHyperlink(file(filePath), "report.csv"))).toBe(mapped);
 		expect(fileLinkSpan(file(filePath), "report.csv")).toEqual({ t: "report.csv", s: "path", href: mapped });
-		expect(fileHref(filePath, "file")).toBe(mapped);
+		expect(fileHref(file(filePath))).toBe(mapped);
 		const skill = new SkillMessageComponent({
 			role: "custom",
 			customType: "skill-prompt",

@@ -883,7 +883,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	/** The native link of a summary row's filesystem target, when it has one. */
 	#rowHref(row: ReadSummaryRow): string | undefined {
 		const link = linkForTargets(row.targets);
-		return link && fileHref(link.path, link.kind, { line: firstSelectorLineForTargets(row.targets) });
+		if (link) link.line = firstSelectorLineForTargets(row.targets);
+		return fileHref(link);
 	}
 
 	/** Head data for one summary row: the path (+ selector) target, its link, correction and conflicts. */

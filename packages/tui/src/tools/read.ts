@@ -493,14 +493,15 @@ function readNativeHead(
 		meta.push(`summary: ${n} elided span${n === 1 ? "" : "s"}`);
 	}
 	const conflicts = details?.conflictCount ?? 0;
+	const filePath = linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details);
 	return {
 		title: "Read",
 		target: sanitizeText(target) || "…",
 		targetKind: "path",
 		href: fileHref(
-			linkPath ?? details?.resolvedPath ?? details?.displayTarget ?? readSourceFsPath(details),
-			readLinkKind(details),
-			{ line: firstReadSelectorLine(split.sel) ?? args?.offset },
+			filePath === undefined
+				? undefined
+				: { path: filePath, kind: readLinkKind(details), line: firstReadSelectorLine(split.sel) ?? args?.offset },
 		),
 		meta,
 		badges:

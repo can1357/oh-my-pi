@@ -91,7 +91,7 @@ export type SettingEnv<T> =
 /** Protocol host that re-applies a setting's default instead of the user's persisted preference. */
 export type ProtocolHost = "rpc" | "acp";
 
-interface DefinitionBase {
+interface DefinitionBase<T = unknown> {
 	/** Dotted setting path as written in config files, e.g. `"lsp.diagnosticsOnWrite"`. */
 	id: string;
 	/**
@@ -127,7 +127,7 @@ interface DefinitionBase {
 	 * Canonicalizes a value on its way in — text parsed by {@link Setting.parse} and every
 	 * `set`/`override` — e.g. flooring request limits. May throw like `validate`.
 	 */
-	normalize?: (value: unknown) => unknown;
+	readonly normalize?: (value: unknown) => T;
 }
 
 export interface BooleanDefinition extends DefinitionBase {
@@ -188,6 +188,7 @@ export interface RecordDefinition<T = unknown> extends DefinitionBase {
 	type: "record";
 	default: Readonly<Record<string, T>>;
 	env?: SettingEnv<Readonly<Record<string, T>>>;
+	readonly read?: (raw: unknown, warn: (message: string, details: Record<string, unknown>) => void) => T;
 	ui?: UiRecord;
 }
 
@@ -616,8 +617,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	 * @throws Error when the text does not fit the type or enum values.
 	 */
 	parse(text: string): T {
-		const value = this.#parseText(text);
-		return (this.definition.normalize ? this.definition.normalize(value) : value) as T;
+		return this.prepareWritable(this.#parseText(text));
 	}
 
 	#parseText(text: string): T {
@@ -699,6 +699,19 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 
 	compute(inputs: readonly unknown[], settings: Settings): T {
 		const raw = inputs[0];
+		if (this.definition.type === "record" && this.definition.read && raw !== undefined) {
+			const warned = settings.warnState.invalid;
+			const alreadyWarned = warned.has(this.id) && Bun.deepEquals(warned.get(this.id), raw);
+			let invalid = false;
+			const warnOnce = (message: string, details: Record<string, unknown>) => {
+				invalid = true;
+				if (!alreadyWarned) logger.warn(message, { setting: this.id, ...details });
+			};
+			const clean = this.definition.read(raw, warnOnce);
+			if (invalid) warned.set(this.id, raw);
+			else warned.delete(this.id);
+			return clean as T;
+		}
 		if (raw === undefined || this.accepts(raw)) {
 			// A fixed value re-arms this instance's warning, so breaking it again is reported again.
 			settings.warnState.invalid.delete(this.id);
@@ -710,6 +723,13 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 			logger.warn("Settings: ignoring invalid value, using the default", { setting: this.id, value: raw });
 		}
 		return this.default;
+	}
+
+	/** Normalize and validate a proposed write before the settings store changes any state. */
+	prepareWritable(raw: unknown): T {
+		const prepared = this.definition.normalize ? this.definition.normalize(raw) : raw;
+		this.assertWritable(prepared);
+		return prepared as T;
 	}
 
 	/**
@@ -777,7 +797,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	 */
 	set(scope: ScopeLike, value: T): void {
 		if (value === undefined) settingsOf(scope).unsetGlobalValue(this);
-		else settingsOf(scope).writeValue(this, this.#normalize(value), "global");
+		else settingsOf(scope).writeValue(this, value, "global");
 	}
 
 	/**
@@ -787,7 +807,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	 */
 	override(scope: ScopeLike, value: T): void {
 		if (value === undefined) settingsOf(scope).clearOverrideValue(this);
-		else settingsOf(scope).writeValue(this, this.#normalize(value), "override");
+		else settingsOf(scope).writeValue(this, value, "override");
 	}
 
 	/**
@@ -805,7 +825,7 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	 * @throws Error when this is not a record setting or the entry does not fit the definition.
 	 */
 	setEntry(scope: ScopeLike, key: string, value: RecordEntryOf<T> | undefined): void {
-		settingsOf(scope).writeEntry(this, key, value === undefined ? undefined : this.#normalizeEntry(key, value));
+		settingsOf(scope).writeEntry(this, key, value);
 	}
 
 	/**
@@ -826,16 +846,6 @@ export class Setting<T, Id extends string = string> extends Derived<T> {
 	 */
 	pinDefault(scope: ScopeLike): void {
 		if (this.envValue() === undefined) settingsOf(scope).pinDefaultValue(this);
-	}
-
-	#normalize(value: T): unknown {
-		return this.definition.normalize ? this.definition.normalize(value) : value;
-	}
-
-	/** `value` as the `key` entry of this record, normalized like a whole-record write. */
-	#normalizeEntry(key: string, value: unknown): unknown {
-		const normalize = this.definition.normalize;
-		return normalize ? (normalize({ [key]: value }) as Record<string, unknown>)[key] : value;
 	}
 
 	/** Removes a runtime override, restoring the persisted/default value. */

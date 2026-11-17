@@ -571,7 +571,7 @@ function writeToolHead(
 		title: "Write",
 		target: rawPath ? sanitizeText(displayPath(rawPath)) : undefined,
 		targetKind: "path",
-		href: fileHref(details?.resolvedPath, "file"),
+		href: fileHref(details?.resolvedPath === undefined ? undefined : { path: details.resolvedPath, kind: "file" }),
 		meta: lineCount > 0 ? [`${lineCount} line${lineCount === 1 ? "" : "s"}`] : undefined,
 		badges: badges.length > 0 ? badges : undefined,
 	};

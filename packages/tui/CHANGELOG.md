@@ -4,8 +4,8 @@
 
 ### Breaking Changes
 
-- File links resolve through `resolveFileLink(link, terminalId?)` (`render/hyperlink`), which replaces `tryFileUri` and `fileUriForTerminal`. `fileHyperlink`, `fileLinkSpan` and `FileListOptions.hyperlinkFn` take a `FileLink` (`{ path, kind, line?, col? }`) in place of a path and position options, and `fileHref` (`tools/native-view`) takes the kind as its second argument. `kind` is required: `file`, `dir`, or `unknown` where the caller cannot tell; a `dir` link never carries a line or column ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
-- `SettingsHost` now requires `setEntry(path, key, value)` and `shadowingLayer(path, key)` ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- File links resolve through `resolveFileLink(link, terminalId?)` (`render/hyperlink`), which replaces `tryFileUri` and `fileUriForTerminal`. `fileHyperlink`, `fileLinkSpan` and `FileListOptions.hyperlinkFn` take a `FileLink` (`{ path, kind, line?, col? }`) in place of a path and position options, and `fileHref` (`tools/native-view`) takes a `FileLink | undefined` instead of positional path, kind and position arguments. `kind` is required: `file`, `dir`, or `unknown` where the caller cannot tell; a `dir` link never carries a line or column ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- `parseLinkMap` (`render/link-map`) provides clean reads and strict write validation for path-prefix mappings ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ### Added
 
@@ -14,7 +14,7 @@
 
 ### Fixed
 
-- Link Map target forms keep save refusals visible when a higher config layer takes ownership and reject edits to ignored duplicate entries; clearing the target still removes an ignored global entry. Ignored aliases do not block adding or editing a mapping for an otherwise unclaimed prefix ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Link Map editing uses clean entries and shared strict write validation, with fresh higher-layer ownership checks protecting read-only entries ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 - Native read links retain selector and legacy offset start lines, while paginated directory reads and directory grep scopes open as folders under VS Code Remote mappings ([#18848](https://github.com/can1357/oh-my-pi/pull/18848) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ## [18.21.0] - 2026-11-16

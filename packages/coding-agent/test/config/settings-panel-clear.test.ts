@@ -85,3 +85,19 @@ it("keeps the per-call allowlist editor when only the global layer supplies it",
 	const entry = createSettingsHost().entries.find(candidate => candidate.path === "task.perCallModelAllow");
 	expect(entry?.condition?.()).toBe(true);
 });
+
+it("unsets a dirty global link map without removing its config overlay", async () => {
+	const configPath = path.join(agentDir, "config.yml");
+	await Bun.write(
+		configPath,
+		YAML.stringify({ tui: { linkMap: { "/number": 42, relative: "not-a-uri" } }, temperature: 0.4 }),
+	);
+	const overlay = tempDir.join("overlay.yml");
+	await Bun.write(overlay, YAML.stringify({ tui: { linkMap: { "/overlay": "file:///O:/" } } }));
+	const loaded = await Settings.init({ cwd: projectDir, agentDir, configFiles: [overlay] });
+	const host = createSettingsHost();
+	host.unset("tui.linkMap");
+	await loaded.flush();
+	expect(host.get("tui.linkMap")).toEqual({ "/overlay": "file:///O:/" });
+	expect(YAML.parse(await Bun.file(configPath).text())).toEqual({ temperature: 0.4 });
+});

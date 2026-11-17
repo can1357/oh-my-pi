@@ -1314,7 +1314,7 @@ export const editToolRenderer = {
 		return {
 			tool: editToolHead({
 				...file,
-				href: fileHref(file.resolvedPath, "file"),
+				href: fileHref(file.resolvedPath === undefined ? undefined : { path: file.resolvedPath, kind: "file" }),
 				diagnostics: [file.fileDiagnostics],
 			}),
 			body: file.body,
