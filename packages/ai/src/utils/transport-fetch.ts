@@ -15,10 +15,10 @@ type TransportFetch = FetchImpl & { [TRANSPORT_FETCH]?: true };
  * The one fetch every inference request goes through. Per call it applies, in
  * order: the inference User-Agent default, `NODE_EXTRA_CA_CERTS`, the
  * per-provider proxy, and `PI_REQ_DEBUG` request/response recording — then
- * calls `fetchImpl` (or the model's default fetch) exactly once. On the Bun
- * `fetch` default, a large request body is streamed so a connection lost
- * before the response names how far the upload got
- * ({@link fetchWithUploadProgress}).
+ * calls `fetchImpl` (or the model's default fetch) once per redirect hop. On
+ * the Bun `fetch` default, a large request body is streamed so a connection
+ * lost before the response names how far the upload got
+ * ({@link fetchWithUploadProgress}), and its redirects are followed there.
  *
  * `beforeDispatch` runs for every HTTP attempt, including retries, before
  * dispatch bookkeeping; a thrown refusal prevents that attempt.
