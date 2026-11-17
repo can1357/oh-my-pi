@@ -1537,6 +1537,29 @@ describe("NativeJudge OpenAI Decisions dialect", () => {
 		expect(result.usage).toMatchObject({ input: 42, output: 0, totalTokens: 42 });
 	});
 
+	it("reads chat-style prompt/completion usage from gateways such as Bifrost", async () => {
+		const judge = createNativeJudge(
+			{ ...luna, provider: "bifrost", baseUrl: "http://bifrost.test:8080/v1" },
+			{
+				apiKey: "sk-bf-test",
+				fetch: async () =>
+					Response.json({
+						model: "gpt-6-luna",
+						answers: [{ type: "predicate", name: "urgent", probability: 0.8 }],
+						usage: { prompt_tokens: 437, completion_tokens: 72, total_tokens: 509 },
+					}),
+			},
+		);
+
+		const result = await judge.judge({
+			state: { ticket: "The site is down." },
+			questions: { urgent: { type: "noul", instructions: "Is it urgent?" } },
+		});
+
+		expect(result.answers).toEqual({ urgent: { type: "noul", noul: 0.8 } });
+		expect(result.usage).toMatchObject({ input: 437, output: 72, totalTokens: 509 });
+	});
+
 	it("encodes separate ordered images as data URLs after JSON state text", async () => {
 		const visionLuna = { ...luna, input: ["text" as const, "image" as const] };
 		const state = {
