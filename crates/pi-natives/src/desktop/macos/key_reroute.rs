@@ -541,7 +541,8 @@ impl Theft {
 	/// where its press went, whoever holds the keyboard by then; a key first
 	/// seen repeating counts as pressed then. Everything else is decided by
 	/// [`Self::reroutes`]. Once a newer action taps the same target, its taps
-	/// decide alone.
+	/// decide alone. [`Registry::landing`] mirrors this rule for the
+	/// user-input monitor; change both.
 	fn route(
 		&mut self,
 		registry: &mut Registry,
