@@ -267,6 +267,26 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("takes the value of grep's context and count options from the next word, not the pattern", () => {
+		for (const command of [
+			"grep -C 2 ~/.ssh/id_rsa notes.txt",
+			"grep --context 2 ~/.ssh/id_rsa notes.txt",
+			"grep --context=2 ~/.ssh/id_rsa notes.txt",
+			"grep -iC2 ~/.ssh/id_rsa notes.txt",
+			"grep --cont 2 ~/.ssh/id_rsa notes.txt",
+			"grep --max 3 ~/.ssh/id_rsa notes.txt",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+		for (const command of [
+			"grep -C 2 PRIVATE ~/.ssh/id_rsa",
+			"grep -m 1 -e PRIVATE ~/.ssh/id_rsa",
+			"grep -C 2 -f ~/.ssh/id_rsa notes.txt",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
+
 	it("does not count where a download, a copy or a move writes as read", () => {
 		for (const command of [
 			"mkdir -p ~/.docker/cli-plugins && curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose",

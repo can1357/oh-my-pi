@@ -776,17 +776,20 @@ const PATTERN_READERS: Record<
 		valued: [
 			"-A",
 			"-B",
+			"-C",
 			"-D",
 			"-d",
 			"-m",
 			"--after-context",
 			"--before-context",
 			"--binary-files",
+			"--context",
 			"--devices",
 			"--directories",
 			"--exclude",
 			"--exclude-dir",
 			"--exclude-from",
+			"--group-separator",
 			"--include",
 			"--label",
 			"--max-count",
@@ -846,7 +849,7 @@ const PATTERN_READERS: Record<
 /**
  * The words a {@link PATTERN_READERS} command reads files from: its operands, without the first
  * when no option supplied the pattern, and a pattern file. A long option that abbreviates one
- * that supplies the pattern (`--reg=x`, `--fil x`), or one that makes the search recurse
+ * that takes a value (`--reg=x`, `--fil x`, `--cont 2`), or one that makes the search recurse
  * (`--rec`), counts as that option. A search with a pattern and no file operand that reads the
  * directory it runs in ({@link PATTERN_READERS} `walks`) reads `.`; one with no pattern
  * (`rg --files`, `rg --version`) searches nothing.
@@ -883,7 +886,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 			const eq = arg.indexOf("=");
 			let name = eq > 0 ? arg.slice(0, eq) : arg;
 			if (supplier(name) === undefined && !valued.includes(name) && name.length > 2) {
-				const expanded = Object.keys(supplies).filter(option => option.startsWith(name));
+				const expanded = [...Object.keys(supplies), ...valued].filter(option => option.startsWith(name));
 				if (expanded.length === 1) name = expanded[0];
 			}
 			if (supplier(name) !== undefined || valued.includes(name)) take(name, eq > 0 ? arg.slice(eq + 1) : argv[++i]);
