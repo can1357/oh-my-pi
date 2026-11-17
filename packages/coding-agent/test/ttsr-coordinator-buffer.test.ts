@@ -488,3 +488,103 @@ describe("TTSR injection notice", () => {
 		expect(injection.content).not.toContain("was not interrupted");
 	});
 });
+
+/**
+ * An injection quotes an excerpt; without naming the unit the excerpt came from,
+ * a reader cannot tell a match on a still-streaming tool call (whose recorded
+ * message may not hold the quoted arguments) from a match on delivered prose.
+ */
+describe("TTSR judged unit", () => {
+	function interruptDelivery() {
+		const bundle = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 0,
+		});
+		expect(manager.addRule(makeRule("tool:edit"))).toBe(true);
+		return { ...bundle, coordinator: new TtsrCoordinator(bundle.host, manager) };
+	}
+
+	function toolCallEnd(message: AgentMessage, id: string, name: string, args: Record<string, unknown>): AgentEvent {
+		return update(message, {
+			type: "toolcall_end",
+			contentIndex: 0,
+			partial: message as never,
+			toolCall: { type: "toolCall", id, name, arguments: args },
+		});
+	}
+
+	function deliveredInjection(appendMessage: Mock<(message: AgentMessage) => void>): string {
+		const injection = appendMessage.mock.calls[0]?.[0];
+		if (injection?.role !== "custom") throw new Error("Expected a custom TTSR injection");
+		if (typeof injection.content !== "string") throw new Error("Expected text injection content");
+		return injection.content;
+	}
+
+	it("names a tool call matched while its arguments streamed as partial", async () => {
+		const { appendMessage, schedulePostPromptTask, coordinator, host } = interruptDelivery();
+		const message = assistantMessage([{ type: "toolCall", id: "call-40a16a4d", name: "edit", arguments: {} }]);
+		host.agent.state.messages.push(message);
+
+		coordinator.onAssistantMessageStart();
+		expect(await coordinator.checkMessageUpdate(toolDelta(message, `{"input":"${CONDITION}"}`))).toBe(true);
+
+		const task = schedulePostPromptTask.mock.calls[0]?.[0];
+		if (!task) throw new Error("Expected a scheduled retry task");
+		await task(new AbortController().signal);
+
+		const content = deliveredInjection(appendMessage);
+		expect(content).toContain("Unit: tool edit call-40a16a4d (partial)");
+		expect(content).toContain("still streaming when the match interrupted it");
+	});
+
+	it("names a tool call matched at toolcall_end as complete", async () => {
+		const { appendMessage, schedulePostPromptTask, coordinator, host } = interruptDelivery();
+		const message = assistantMessage([{ type: "toolCall", id: "call-40a16a4d", name: "edit", arguments: {} }]);
+		host.agent.state.messages.push(message);
+
+		coordinator.onAssistantMessageStart();
+		const args = { path: "src/foo.ts", input: CONDITION };
+		expect(await coordinator.checkMessageUpdate(toolCallEnd(message, "call-40a16a4d", "edit", args))).toBe(true);
+
+		const task = schedulePostPromptTask.mock.calls[0]?.[0];
+		if (!task) throw new Error("Expected a scheduled retry task");
+		await task(new AbortController().signal);
+
+		const content = deliveredInjection(appendMessage);
+		expect(content).toContain("Unit: tool edit call-40a16a4d (complete)");
+		expect(content).not.toContain("still streaming");
+	});
+
+	it("names the assistant message a text match judged, on the deferred notice too", async () => {
+		const { host, followUp } = makeHost();
+		const manager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "never",
+			repeatMode: "after-gap",
+			repeatGap: 0,
+		});
+		expect(manager.addRule(makeRule("text"))).toBe(true);
+		const coordinator = new TtsrCoordinator(host, manager);
+		const message = assistantMessage();
+
+		coordinator.onAssistantMessageStart();
+		await coordinator.checkMessageUpdate(textDelta(message, CONDITION));
+		coordinator.onAssistantMessageEnd({ ...message, stopReason: "stop" } as AssistantMessage);
+
+		const delivery = followUp.mock.calls[0]?.[0];
+		if (delivery?.role !== "custom") throw new Error("Expected a custom TTSR delivery");
+		const timestamp = (message as AssistantMessage).timestamp;
+		expect(delivery.content).toContain(`Unit: text message ${new Date(timestamp).toISOString()}`);
+		const unit = (delivery.details as { unit?: Record<string, Record<string, unknown>> }).unit;
+		expect(unit?.["stream-boundary-text"]).toEqual({
+			source: "text",
+			phase: "partial",
+			messageTimestamp: timestamp,
+		});
+	});
+});

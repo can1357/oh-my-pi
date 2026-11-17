@@ -30,6 +30,38 @@ export interface TtsrMatchContext {
 	streamKey?: string;
 }
 
+/**
+ * The unit a rule judged, named so an injection's excerpt can be checked against
+ * it without replaying the session. A match taken while a tool's arguments were
+ * still streaming describes an excerpt the abort may have destroyed, so the phase
+ * is carried beside the identity.
+ */
+export interface TtsrJudgedUnit {
+	source: TtsrMatchSource;
+	/** `partial`: matched mid-stream; `complete`: matched the finished unit. */
+	phase: "partial" | "complete";
+	/** Tool name, for tool-scope matches. */
+	toolName?: string;
+	/** `toolCallId`, for tool-scope matches that streamed under an id. */
+	toolCallId?: string;
+	/** Timestamp of the assistant message judged, for text- and thinking-scope matches. */
+	messageTimestamp?: number;
+}
+
+/**
+ * How an injection names the unit it judged, e.g. `tool bash call_40a16a4d (partial)`
+ * or `text message 2026-11-17T19:55:16.972Z`. The phase is spelled out only for
+ * tool units: a partial tool match is arguments still streaming, not a malformed call.
+ */
+export function describeJudgedUnit(unit: TtsrJudgedUnit): string {
+	if (unit.source === "tool") {
+		const id = unit.toolCallId === undefined ? "" : ` ${unit.toolCallId}`;
+		return `tool ${unit.toolName ?? "call"}${id} (${unit.phase})`;
+	}
+	if (unit.messageTimestamp === undefined) return `${unit.source} output (${unit.phase})`;
+	return `${unit.source} message ${new Date(unit.messageTimestamp).toISOString()}`;
+}
+
 /** Options for {@link TtsrManager.checkDelta} and {@link TtsrManager.checkSnapshot}. */
 export interface TtsrCheckOptions {
 	/**
