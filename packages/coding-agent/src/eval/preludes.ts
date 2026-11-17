@@ -44,6 +44,14 @@ export interface EvalPreludeDefinition {
 	 * as an `xd://eval/<name>` topic, so the first call needs no `read`.
 	 */
 	inlineDocumentation?: boolean;
+	/**
+	 * Short guide the session sends as a hidden message after the tool batch
+	 * holding this prelude's first call, so the model can start without reading
+	 * the `xd://eval/<name>` topic (which keeps `documentation`) while the
+	 * always-on tool description keeps one line. Sent again once the context no
+	 * longer holds it. Sessions that cannot send it list the prelude as read-first.
+	 */
+	firstCallDocumentation?: string;
 	/** JavaScript source installed into an ordinary JavaScript eval realm. */
 	javascript: string;
 	/** Python source installed into a Python eval kernel. */
@@ -94,6 +102,25 @@ export function evalPreludeSummary(definition: Pick<EvalPreludeDefinition, "docu
 export function findEnabledEvalPrelude(session: ToolSession, name: string): EvalPreludeDefinition | undefined {
 	const definition = session.getEvalPreludes?.().find(candidate => candidate.name === name);
 	return definition?.enabled?.() === false ? undefined : definition;
+}
+
+const STRINGS_AND_COMMENTS = /("""|''')[\s\S]*?\1|(["'`])(?:\\.|(?!\2)[^\\])*\2|\/\/.*|\/\*[\s\S]*?\*\/|#.*/g;
+
+/**
+ * Notes each guide-bearing prelude whose global a cell's code names outside strings, comments, other objects'
+ * members and object keys. A first cell often only probes the global (`browser.list?.()`, `Object.keys(browser)`):
+ * no host call, so no guide would follow.
+ */
+export function noteEvalPreludesNamed(code: string, session: ToolSession): void {
+	if (!session.noteEvalPreludeCall) return;
+	const bare = code.replace(STRINGS_AND_COMMENTS, '""');
+	for (const definition of getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])) {
+		if (!definition.firstCallDocumentation?.trim()) continue;
+		const named =
+			new RegExp(`(?<![\\w$./-])(?:globalThis\\s*\\.\\s*)?${definition.name}(?![\\w$/-]|\\s*:)`).test(bare) ||
+			new RegExp(`\\{[^{}]*\\b${definition.name}\\s*[:,}=][^{}]*\\}\\s*=\\s*globalThis\\b`).test(bare);
+		if (named) session.noteEvalPreludeCall(definition.name);
+	}
 }
 
 async function approvePreludeInvocation(
@@ -163,5 +190,7 @@ export async function invokeEvalPrelude(
 			throw new Error(`Eval prelude "${name}" changed while authorizing the call.`);
 		}
 	}
+	// Even a call that fails shows the model has reached for this prelude, so its guide is due.
+	if (definition.firstCallDocumentation?.trim()) context.session.noteEvalPreludeCall?.(definition.name);
 	return definition.invoke(parameters, context);
 }

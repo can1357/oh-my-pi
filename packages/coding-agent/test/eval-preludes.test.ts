@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "bun:test";
 import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval";
-import { getEnabledEvalPreludes, invokeEvalPrelude } from "@oh-my-pi/pi-coding-agent/eval";
+import { getEnabledEvalPreludes, invokeEvalPrelude, noteEvalPreludesNamed } from "@oh-my-pi/pi-coding-agent/eval";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { rejectionOf } from "./helpers/rejection";
 
 function makeSession(getEvalPreludes: () => EvalPreludeDefinition[]): ToolSession {
 	return {
@@ -130,5 +131,57 @@ describe("eval prelude host invocation", () => {
 			/blocked by tool policy/,
 		);
 		expect(invoke).not.toHaveBeenCalled();
+	});
+
+	it("notes first use on the host before invoking a prelude, without changing its output", async () => {
+		const note = vi.fn();
+		let fail = true;
+		const definition: EvalPreludeDefinition = {
+			name: "probe",
+			documentation: "Probe documentation",
+			firstCallDocumentation: "PROBE GUIDE",
+			javascript: "",
+			python: "",
+			exports: [],
+			invoke: async () => {
+				expect(note).toHaveBeenLastCalledWith("probe");
+				if (fail) throw new Error("no such tab");
+				return { content: [{ type: "text", text: "ran" }] };
+			},
+		};
+		const session = { ...makeSession(() => [definition]), noteEvalPreludeCall: note };
+		expect(await rejectionOf(invokeEvalPrelude("probe", {}, { session, toolCallId: "failed" }))).toBeInstanceOf(
+			Error,
+		);
+		fail = false;
+		expect(await invokeEvalPrelude("probe", {}, { session, toolCallId: "call" })).toEqual({
+			content: [{ type: "text", text: "ran" }],
+		});
+	});
+
+	it("notes a prelude a cell names in code, even when the cell reaches no host call", () => {
+		const definition = {
+			name: "probe",
+			documentation: "Probe documentation",
+			firstCallDocumentation: "PROBE GUIDE",
+			javascript: "",
+			python: "",
+			exports: [],
+			invoke: async () => ({ content: [] }),
+		} satisfies EvalPreludeDefinition;
+		const noted = (code: string) => {
+			const note = vi.fn();
+			noteEvalPreludesNamed(code, { ...makeSession(() => [definition]), noteEvalPreludeCall: note });
+			return note.mock.calls.length;
+		};
+		expect(noted("const tabs = await probe.list?.(); print(tabs)")).toBe(1);
+		expect(noted("print(Object.keys(probe))")).toBe(1);
+		expect(noted("print(Object.keys(globalThis.probe))")).toBe(1);
+		expect(noted("const { probe: alias } = globalThis; print(Object.keys(alias))")).toBe(1);
+		expect(noted("const { probe } = globalThis; print(Object.keys(probe))")).toBe(1);
+		expect(noted("print(Object.keys(page.globalThis.probe))")).toBe(0);
+		expect(noted("const { probe: alias } = page; print(Object.keys(alias))")).toBe(0);
+		expect(noted('print("open the probe") // probe\nprint(page.probe, myprobe, Object.keys(globalThis))')).toBe(0);
+		expect(noted('# probe\nprint("""probe""")')).toBe(0);
 	});
 });

@@ -21,7 +21,12 @@ import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
-import { type EvalPreludeDefinition, evalPreludeSummary, getEnabledEvalPreludes } from "../eval/preludes";
+import {
+	type EvalPreludeDefinition,
+	evalPreludeSummary,
+	getEnabledEvalPreludes,
+	noteEvalPreludesNamed,
+} from "../eval/preludes";
 import { prepareEvalSource } from "../eval/input";
 import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
@@ -193,7 +198,12 @@ export interface EvalToolDescriptionOptions {
 	/** Point blocked callers at the `wait` tool; false when the session lacks it (subagents). Default: true. */
 	waitTool?: boolean;
 	/** Enabled preludes; each becomes an `xd://eval/<name>` doc topic, inlined when it asks to be. */
-	preludes?: readonly Pick<EvalPreludeDefinition, "name" | "documentation" | "inlineDocumentation">[];
+	preludes?: readonly Pick<
+		EvalPreludeDefinition,
+		"name" | "documentation" | "inlineDocumentation" | "firstCallDocumentation"
+	>[];
+	/** The session can send first-call guides; without it such a prelude is listed as read-first. */
+	firstCallGuides?: boolean;
 	/**
 	 * Inline every doc topic instead of linking `xd://eval/<topic>`. Required
 	 * when the session cannot `read` (the only transport for topic docs).
@@ -249,6 +259,7 @@ export function getEvalDocTopics(options: EvalToolDescriptionOptions = {}): Reco
 /** Model-facing eval description: core kernel surface plus one pointer per linked doc topic. */
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const preludes: { name: string; summary: string }[] = [];
+	const firstCallPreludes: { name: string; summary: string }[] = [];
 	const inlinePreludes: { name: string; documentation: string }[] = [];
 	for (const prelude of options.preludes ?? []) {
 		if (prelude.inlineDocumentation && !options.inlineTopics) {
@@ -257,11 +268,18 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 			continue;
 		}
 		const summary = evalPreludeSummary(prelude);
-		if (summary) preludes.push({ name: prelude.name, summary });
+		if (!summary) continue;
+		// Without `read` every topic is inlined in full, so a first-call guide changes nothing there.
+		if (prelude.firstCallDocumentation?.trim() && options.firstCallGuides && !options.inlineTopics) {
+			firstCallPreludes.push({ name: prelude.name, summary });
+		} else {
+			preludes.push({ name: prelude.name, summary });
+		}
 	}
 	return prompt.render(evalDescription, {
 		...evalTemplateContext(options),
 		preludes,
+		firstCallPreludes: firstCallPreludes.length > 0 ? firstCallPreludes : undefined,
 		toolNames: options.toolNames,
 		inlinePreludes,
 		inlineTopics: options.inlineTopics ? Object.values(getEvalDocTopics(options)).join("\n\n") : undefined,
@@ -403,6 +421,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			waitTool: hasWaitTool(session),
 			preludes: this.#advertisedPreludes(session),
 			inlineTopics: !docTopicsReadable(session),
+			firstCallGuides: session.noteEvalPreludeCall !== undefined,
 			autoProvision: cfgEvalAutoProvision.get(session.settings),
 			perCallModel,
 			perCallModelAdvertisement,
@@ -536,6 +555,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
+		noteEvalPreludesNamed(params.code, session);
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : params.language;

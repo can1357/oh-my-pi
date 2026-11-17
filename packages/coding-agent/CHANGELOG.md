@@ -14,6 +14,9 @@
 ### Changed
 
 - Subagents no longer open browser tabs in your Chrome (with `browser.relay` on) or over your Tern or cmux pane unless the open asks with `app: "relay"` or `app: "tern"`; they use `browser.cdpUrl` or omp's own Chromium ([#18789](https://github.com/can1357/oh-my-pi/pull/18789) by [@will-bogusz](https://github.com/will-bogusz))
+### Changed
+
+- Browser tasks start without reading `xd://eval/browser`: a short guide follows the first browser call as a hidden session message, outside cell output limits and shaping. Compaction or a rewind that drops or shortens it sends it again. Advisors keep reading the full guide first; real-session, borrowed-tab and page-integrity safety rules arrive before the first call ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
