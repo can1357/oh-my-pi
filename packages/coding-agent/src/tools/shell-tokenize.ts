@@ -2271,8 +2271,9 @@ class ShellScriptParser {
 	 * where the script goes on. In an unquoted heredoc, a backslash-newline joins two lines before the
 	 * delimiter is looked for. Inside a `$( )` (`close`), a line that starts with the delimiter and
 	 * has a `)` after it ends the heredoc too, as in bash, and the script goes on right after the
-	 * delimiter (`EOF)`). When a delimiter line never comes, every line stays in place and is parsed
-	 * as commands: a `<<` misread as a heredoc must not hide what follows it. Such searches read to
+	 * delimiter (`EOF)`). When a delimiter line never comes, bash ends the heredoc at the end of the
+	 * text, so every line after it is its body; those lines also stay in place and are parsed as
+	 * commands: a `<<` misread as a heredoc must not hide what follows it. Such searches read to
 	 * the end of the text, so past {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH} characters of them no more
 	 * are made and the script is truncated.
 	 */
@@ -2283,9 +2284,12 @@ class ShellScriptParser {
 		}
 		const bodies: string[] = [];
 		let pos = start;
+		// Whether the last heredoc found its delimiter line: once one reads to the end of the text,
+		// those after it are empty and none does.
+		let closed = false;
 		for (const { delimiter, stripTabs, doc } of pending) {
 			const lines: string[] = [];
-			let closed = false;
+			closed = false;
 			while (pos < text.length && !closed) {
 				// The physical lines joined into this line, and where each starts in it and in `text`.
 				const pieces: string[] = [];
@@ -2321,20 +2325,22 @@ class ShellScriptParser {
 					lines.push(stripped);
 				}
 			}
-			if (!closed) {
-				this.#heredocSearch += text.length - start;
-				if (this.#heredocSearch > SHELL_SCRIPT_MAX_HEREDOC_SEARCH) this.truncated = true;
+			bodies.push(lines.join("\n"));
+		}
+		if (!closed) {
+			this.#heredocSearch += text.length - start;
+			if (this.#heredocSearch > SHELL_SCRIPT_MAX_HEREDOC_SEARCH) {
+				this.truncated = true;
 				pending.length = 0;
 				return start;
 			}
-			bodies.push(lines.join("\n"));
 		}
 		for (const [index, { doc }] of pending.entries()) {
 			doc.body = bodies[index];
 			if (doc.expands) doc.subs = this.#expansions(doc.body, scope);
 		}
 		pending.length = 0;
-		return pos;
+		return closed ? pos : start;
 	}
 
 	/**
@@ -2645,8 +2651,9 @@ class ShellScriptParser {
  * shell syntax. Follows quotes (`$'...'` included), escapes, comments, `;`/`&&`/`||`/`|` chains
  * (continued on the next line after `|`, `&&` or `||`), `( )` groups and the other compound
  * commands (each one pipeline stage, fed by its own input redirections too; a function body's
- * commands are read where it is defined, after `f()` or `function f`), redirections,
- * heredocs (quote-aware, so a quoted `<<` opens none), `$( )`/backtick/`<( )`/`>( )` substitutions
+ * commands are read where it is defined, after `f()` or `function f`), redirections, heredocs
+ * (quote-aware, so a quoted `<<` opens none; one whose delimiter line never comes runs to the end
+ * of the text, and its lines are read as commands too), `$( )`/backtick/`<( )`/`>( )` substitutions
  * (read as commands to the `)` that closes them, fed what the command they are in reads, or for
  * `>( )` writes, and also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval`
  * strings and scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd`
