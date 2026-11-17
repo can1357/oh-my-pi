@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed embedding requests failing with HTTP 400 (`Invalid JSON`) when clipping an oversized input cut an emoji or other astral-plane character in half ([#19455](https://github.com/can1357/oh-my-pi/issues/19455))
+- Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.
 
 ## [18.21.0] - 2026-11-16
 

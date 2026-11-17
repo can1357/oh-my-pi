@@ -4,22 +4,19 @@
 
 ### Added
 
-- Agent names in Task tool rows and agent hub rows take a colour of their own in the terminal UI: Main takes the theme accent, and subagents take one of six colours in the order they arrive, picked from the theme's own palette so each stays readable on its background; themes can set them with the optional `subagent1`–`subagent6` tokens ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
-- Added a `wrap` overflow for `TableColumn` and `renderTableRowLines()`, which word-wraps such cells over extra lines and keeps their hard line breaks; `Table` renders them the same way ([#19506](https://github.com/can1357/oh-my-pi/issues/19506))
+- Task tool and agent hub rows now use distinct, theme-aware colours for the main agent and subagents; themes can optionally customize the six subagent colours.
+- Added word wrapping for table columns and rows, preserving hard line breaks so long table content remains readable.
 
 ### Changed
 
-- `StatusAccountIdentity` now carries an optional `credentialId` so hosts can attribute the usage segment to a credential-scoped (API-key) account, and cached usage invalidates when it changes ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
-- The event-loop watchdog reads process CPU time half as often while the loop is healthy, and stall checks on input read it only after a pause long enough to be a suspend ([#19538](https://github.com/can1357/oh-my-pi/pull/19538) by [@H4vC](https://github.com/H4vC))
-- Streaming a long answer takes less CPU: the finished part of the message is no longer re-rendered from the top each time a block completes, its rows are checked against the screen without re-comparing unchanged ones every frame, and between seconds the status line redraws only its spinner.
-- Typing with macOS spell checking on does less work per key: placing the last check's undercurls on the edited line no longer compares it character by character against every line checked before.
+- Improved terminal UI responsiveness and reduced CPU usage while streaming long responses, monitoring the event loop, and typing with macOS spell checking enabled.
+- Status account identities can now include an optional credential ID, allowing usage to be attributed to API-key accounts and cached usage to refresh when the credential changes.
 
 ### Fixed
 
-- Ask form pictures in WebP, JPEG or GIF now show in Kitty-protocol terminals (Kitty, Ghostty, herdr) instead of leaving a blank gap ([#19512](https://github.com/can1357/oh-my-pi/pull/19512) by [@jaredlyon](https://github.com/jaredlyon))
-- Model mentions followed by punctuation collapse into editable chips without swallowing the punctuation ([#19445](https://github.com/can1357/oh-my-pi/pull/19445) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- `/copy` copies the prose a mid-turn `out://` reply showed, including a reply a command sent in its result, instead of the reply tool's own "Shown to the user." result ([#19551](https://github.com/can1357/oh-my-pi/pull/19551) by [@bannert1337](https://github.com/bannert1337))
-- Fixed tables in Ask forms cutting long cells off with an ellipsis and dropping their `<br>` lines; cells now wrap within their column ([#19506](https://github.com/can1357/oh-my-pi/issues/19506))
+- Images in Ask forms now render correctly in Kitty-protocol terminals, including Kitty, Ghostty, and herdr.
+- Fixed model mentions followed by punctuation so they become editable chips without consuming the punctuation.
+- Fixed /copy to copy the visible prose from mid-turn out:// replies, including replies sent by commands, instead of the tool's internal result text.
 
 ## [18.22.0] - 2026-11-16
 

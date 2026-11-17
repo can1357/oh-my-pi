@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The stats Gain tab counts the context snapcompact compactions free, beside imaged tool results, so sessions that compact with snapcompact no longer show zero savings; the first sync after upgrading re-reads transcripts written since 2026-08-20 once to fill in that history ([#19120](https://github.com/can1357/oh-my-pi/pull/19120) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the Gain tab undercounting savings for sessions that use snapcompact context compaction, including backfilling recent compaction history after upgrading.
 
 ## [18.20.1] - 2026-11-14
 
