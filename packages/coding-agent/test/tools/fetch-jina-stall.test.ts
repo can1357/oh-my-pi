@@ -163,6 +163,36 @@ describe("renderHtmlToText: Jina response validation", () => {
 		}
 	});
 
+	it("never calls the keyless reader when providers.webKeyless is off", async () => {
+		const originalApiKey = process.env.JINA_API_KEY;
+		delete process.env.JINA_API_KEY;
+		try {
+			const settings = Settings.isolated({ "providers.fetch": "jina", "providers.webKeyless": false });
+			const article = `<p>${"Substantive article content for the native renderer to keep. ".repeat(8)}</p>`;
+			let jinaRequests = 0;
+			const fetchMock = asGlobalFetch(input => {
+				if (String(input).startsWith("https://r.jina.ai/")) jinaRequests++;
+				return new Response("", { status: 404 });
+			});
+
+			const result = await renderHtmlToText(
+				"https://example.com/article",
+				`<html><body><article><h1>Example</h1>${article}</article></body></html>`,
+				1,
+				settings,
+				undefined,
+				null,
+				fetchMock,
+			);
+
+			expect(jinaRequests).toBe(0);
+			expect(result).toMatchObject({ ok: true, method: "native" });
+		} finally {
+			if (originalApiKey === undefined) delete process.env.JINA_API_KEY;
+			else process.env.JINA_API_KEY = originalApiKey;
+		}
+	});
+
 	it("requests fresh markdown and strips the Jina metadata preamble", async () => {
 		const settings = Settings.isolated({ "providers.fetch": "jina" });
 		const markdown = `# Extracted article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
