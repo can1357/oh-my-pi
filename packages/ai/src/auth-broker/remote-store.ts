@@ -1637,6 +1637,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 						app: client.app,
 						entries,
 					},
+					undefined,
 					{ relayed },
 				);
 			} catch (error) {
