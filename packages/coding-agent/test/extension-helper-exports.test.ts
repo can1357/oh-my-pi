@@ -13,7 +13,6 @@ const rootHelpers: [name: string, kind: "function" | "object"][] = [
 	["styledSpans", "function"],
 	["parseXdUrl", "function"],
 	["cfgExtensionTranscriptPresenters", "object"],
-	["CRITICAL_BASH_PATTERNS", "object"],
 ];
 
 describe("extension helpers exported from the package root", () => {

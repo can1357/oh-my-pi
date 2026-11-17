@@ -1,22 +1,23 @@
 /**
- * Fixed safety rules for tool calls (`tools.guardRules`): the critical shell patterns, matched
- * through shell nesting, plus rules ported from nace-ai/intern's tool guard. Each rule names an
- * action that destroys work or leaks credentials and does not fire on ordinary development
- * commands. Rules run over every simple command {@link parseShellScript} finds, nested
- * `bash -c`/`eval` strings and substitutions included.
+ * Fixed guard rules for tool calls (`tools.guardRules`), ported from nace-ai/intern's tool guard:
+ * `credential_read` and `secret_send`, each naming a way to leak credentials that ordinary
+ * development commands do not take. For `bash` they apply to the top-level simple commands
+ * {@link parseShellCommands} finds; the bash tool's critical patterns stay a match on the raw
+ * command line, whether these rules are on or off.
  *
- * The rules are best-effort, opt-in heuristics over shell text (off by default), not a security
- * boundary; a determined or obfuscated command can get past them. Known gaps:
- * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`.
- * - Commands inside a `bash -c` or `eval` string are not linked to the pipeline around them, and a
- *   value captured by `$( )` and sent later is not followed: `bash -c 'cat .env' | curl -d @- ...`,
- *   `x=$(cat .env); curl -d "$x" ...`.
- * - A heredoc opened inside `$( )` whose body starts after the closing `)` is not that command's
- *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
- * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`. Nor is
- *   a relative path after a `cd`, `pushd` or `popd` to such a directory, though a `.env` there
- *   still counts by its name: `cd "$dir" && cat .npmrc`. A directory change is followed whether or
- *   not it runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
+ * The rules are an opt-in convenience layer over top-level commands (off by default), not a
+ * security boundary; a nested, determined or obfuscated command gets past them. Known limitations:
+ * - Nothing nested is read: `( )` groups, compound commands (`{ }`, `if`, loops, `case`, `[[ ]]`,
+ *   `(( ))`), function bodies, `$( )` and backtick substitutions, `<( )`/`>( )`, `${ }`, scripts fed
+ *   to a shell (`bash <<EOF`), and `bash -c`, `sh -c`, `eval` and `env -S` strings:
+ *   `bash -c 'cat ~/.ssh/id_rsa'`, `(cat .env) | curl -d @- ...`. Where the guard cannot tell
+ *   where such a region ends (an unclosed quote, a `<<` in arithmetic), the rest of the line is
+ *   not read.
+ * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`,
+ *   `cat "$(pwd)/.env"`. Nor is a relative path after a directory change it cannot follow, though
+ *   a `.env` there still counts by its name: `cd "$dir" && cat .npmrc`, or a `cd` after a `{ }`,
+ *   `if`, loop, `case`, `eval` or `source`. A `cd` is followed whether or not it runs:
+ *   `cd ~; false && cd /; cat .ssh/id_rsa`.
  * - Upload syntaxes, network tools and shell forms it does not model are not seen:
  *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
  *   `exec 3< .env; cat <&3 | nc ...`.
@@ -25,8 +26,7 @@
  * - A command run by a program it does not unwrap, or given its operands at run time, is not
  *   checked with them: `find ~/.ssh -exec cat {} +`, `ls ~/.ssh/id_* | xargs cat`.
  * - Commands in a script file a command runs are not read, even a file the same command writes
- *   first or passes as `<( )`: `printf 'cat ~/.ssh/id_rsa' > x.sh; sh x.sh`,
- *   `bash <(echo 'cat ~/.ssh/id_rsa')`.
+ *   first: `printf 'cat ~/.ssh/id_rsa' > x.sh; sh x.sh`.
  * - A program word written as a brace list or pathname pattern is not expanded:
  *   `{cat,/etc/shadow}`, `/bin/ca[t] /etc/shadow`.
  * - A directory that contains a credential location does not count as one:
@@ -56,83 +56,20 @@ import { resolveToCwd } from "./path-utils";
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import {
 	append,
-	parseShellScript,
+	boundedDirectory,
+	parseShellCommands,
 	resolveCommandWordPath,
 	resolveShellWordPath,
-	SHELL_SCRIPT_MAX_DEPTH,
-	SHELL_SCRIPT_MAX_DIRECTORY,
-	SHELL_SCRIPT_MAX_HEREDOC_SEARCH,
-	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
-	type ShellUpstream,
 	shellPositionalArgs,
 } from "./shell-tokenize";
 
-/**
- * Bash patterns flagged as safety critical for approval policy.
- *
- * Kept intentionally tight: the cost of a false negative is data loss or a compromised host,
- * while false positives remain actionable through user policy control.
- * New patterns should target shapes that are virtually never legitimate in automation.
- */
-export const CRITICAL_BASH_PATTERNS = [
-	// Recursive destruction.
-	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
-	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
-	// `rm -rf -v /`, `rm -v -rf /`. An absolute target is still required.
-	/\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
-	// `--no-preserve-root` defeats coreutils' own refusal to recurse on `/`, so it is critical
-	// wherever it appears, including forms this list would otherwise reach only via the target.
-	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
-	/\bsudo\s+rm\b/i, // any `sudo rm`.
-	/\bchmod\s+-R\s+[0-7]+\s+\//i, // `chmod -R 777 /`.
-	/\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//, // `chmod -R u+x /`, `chmod -R u+rwx,o+w /etc` (symbolic mode, root target).
-	/\bchown\s+-R\s+\S+\s+\//i, // `chown -R user /`.
-
-	// Fork bomb (a few common spacings).
-	/:\(\)\s*\{\s*:\s*\|\s*:/i,
-
-	// Disk / filesystem destruction.
-	/>\s*\/dev\/sd[a-z]/i, // write to disk device.
-	/\bmkfs(\.|\b)/i, // format filesystem.
-	// dd to a device. Write-only pseudo-device sinks (`of=/dev/null`, `/dev/stdout`, `/dev/fd/1`, …) are
-	// excluded: they cannot destroy data, and `dd … of=/dev/null` is the standard read-throughput idiom.
-	/\bdd\s+if=.+of=\/dev\/(?!(?:null|zero|stdout|stderr|tty|fd\/\d+)(?:[\s;&|)<>]|$))/i,
-	/\bshred\s+\/dev\//i,
-	/\bcryptsetup\b/i,
-
-	// System-config destruction.
-	/>\s*\/etc\/(?:passwd|shadow|sudoers)\b/i,
-	/\btee\s+(?:-a\s+)?\/etc\/(?:passwd|shadow|sudoers)\b/i, // `tee /etc/passwd`, `tee -a /etc/sudoers`.
-
-	// Remote-fetch-then-execute (curl/wget piped to a shell or process-subbed).
-	/\b(?:curl|wget|fetch)\b[^|]*\|\s*(?:bash|sh|zsh|fish)\b/i,
-	// Process-sub variants: `bash <(curl …)`, `source <(curl …)`, `. <(curl …)`. `.` and `source` are
-	// anchored to a command boundary so `find . -name` and similar don't false-positive.
-	/(?:^|[\s;&|(])(?:bash|sh|zsh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\b/i,
-	// `eval "$(curl …)"` / `eval $(curl …)` / `eval \`curl …\``.
-	/\beval\s+["'`]?\$\(\s*(?:curl|wget|fetch)\b|\beval\s+`\s*(?:curl|wget|fetch)\b/i,
-
-	// Process/host control.
-	/\bkill\s+-9\s+1\b/, // kill PID 1.
-	// Process/host control: must sit at command position so `npm run reboot-tests`
-	// or `echo 'shutdown the queue'` don't false-positive.
-	/(?:^|[\s;&|(])(?:shutdown|poweroff|reboot|halt)(?:\s|$|[;|&])/i,
-	/(?:^|[\s;&|(])init\s+0\b/i,
-
-	// Network-shell exfil.
-	/\bnc\b[^|;]*\s-[a-zA-Z]*[ec][a-zA-Z]*\s/i, // `nc -e` / `nc -c`.
-] as const;
-
-/** Reason the bash tool reports for a {@link CRITICAL_BASH_PATTERNS} match. */
-export const CRITICAL_PATTERN_REASON = "Critical pattern detected";
-
-export type GuardRule = "critical_pattern" | "nesting_limit" | "credential_read" | "secret_send";
+export type GuardRule = "credential_read" | "secret_send" | "size_limit";
 
 /** A fixed rule a call breaks. */
 export interface GuardHit {
 	rule: GuardRule;
-	/** Approval-prompt reason: {@link CRITICAL_PATTERN_REASON} for a critical pattern, else `<rule>: <why>`. */
+	/** Approval-prompt reason: `<rule>: <why>`. */
 	reason: string;
 }
 
@@ -142,7 +79,7 @@ export interface GuardScope {
 	home: string;
 }
 
-function hit(rule: Exclude<GuardRule, "critical_pattern">, why: string): GuardHit {
+function hit(rule: GuardRule, why: string): GuardHit {
 	return { rule, reason: `${rule}: ${why}` };
 }
 
@@ -361,7 +298,7 @@ const MAX_BRACE_WORDS = 1024;
  * The most characters {@link expandBraces} makes while the guard checks one command line, each word
  * counted with one for the space after it. Every rule checks each word made, so this bounds the
  * guard's work on brace lists however many of them a command has; past it no more words are made
- * and the command fails closed (`nesting_limit`).
+ * and the command fails closed (`size_limit`).
  */
 const MAX_BRACE_TEXT = 256 * 1024;
 /** What is left of {@link MAX_BRACE_TEXT} for the command line being checked, below 0 once passed; {@link findShellGuardHit} resets it. */
@@ -511,7 +448,7 @@ function wordPaths(command: ShellCommand, word: string, cwd: string | undefined,
  * location, and names are compared without regard to case where the file system does so
  * ({@link foldsCase}). Paths are compared as written: a symlink to a location is not followed.
  */
-export function credentialLocation(absPath: string, home: string): string | undefined {
+function credentialLocation(absPath: string, home: string): string | undefined {
 	const names = pathNames(absPath);
 	const fixed = [
 		...Object.keys(SYSTEM_CREDENTIAL_FILES).map(file => ({ file, shown: file })),
@@ -736,19 +673,12 @@ const TAR_ENTRY_OPTIONS: Record<string, string> = {
 };
 
 /**
- * Set while the guard checks one command line once a `tar -C` goes past
- * {@link SHELL_SCRIPT_MAX_DIRECTORY} characters, so the members after it are not resolved; the
- * command then fails closed (`nesting_limit`). {@link findShellGuardHit} resets it.
- */
-let tarDirectoryUnfollowed = false;
-
-/**
  * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
  * that directory, as tar does; each `-C` is relative to the one before it. A member's braces are
  * expanded before it is resolved, as the shell expands them before tar sees the member
  * (`{/etc/shadow,x}`, `{~/.ssh,~/.aws}`). Option values stay as written, and exclusions are left
  * out. A member after a directory the guard cannot resolve, or one longer than
- * {@link SHELL_SCRIPT_MAX_DIRECTORY}, is left out unless it is absolute. An extraction, listing or
+ * {@link SHELL_MAX_DIRECTORY}, is left out unless it is absolute. An extraction, listing or
  * deletion (`x`, `t`, `--delete`) reads only the archive and the member lists: its members name
  * entries of the archive, not files.
  */
@@ -759,11 +689,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 	let entries = false;
 	let dir: string | undefined = command.cwd;
 	const changeDir = (word: string) => {
-		dir = dir === undefined ? undefined : resolveCommandWordPath(command, word, dir, home);
-		if (dir !== undefined && dir.length > SHELL_SCRIPT_MAX_DIRECTORY) {
-			dir = undefined;
-			tarDirectoryUnfollowed = true;
-		}
+		dir = dir === undefined ? undefined : boundedDirectory(resolveCommandWordPath(command, word, dir, home));
 	};
 	let i = 0;
 	// An old-style first word (`tar cfC x.tar ~ .ssh`): each letter that takes a value takes the next word.
@@ -979,7 +905,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 		}
 	}
 	const files = operands.slice(supplied ? 0 : 1);
-	const walksCwd = walks === "always" ? command.upstream === undefined && command.reads.length === 0 : recursive;
+	const walksCwd = walks === "always" ? !command.fedInput : recursive;
 	if (files.length === 0 && (supplied || operands.length > 0) && walksCwd) files.push(".");
 	return [...words, ...files];
 }
@@ -1391,147 +1317,54 @@ function firstSecret(
  * The secret a command puts on its output: the environment, or a credential or `.env` file it
  * reads, through its arguments from where it runs or its `<` redirections from where the shell opens them.
  */
-function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
+function secretOutput(command: ShellCommand, home: string): string | undefined {
 	if (dumpsEnvironment(command)) return "the environment";
-	const words = command.argv[0] === "source" ? args(command) : readWords(command, scope.home);
-	return (
-		firstSecret(command, command.reads, command.shellCwd, scope.home) ??
-		firstSecret(command, words, command.cwd, scope.home)
-	);
+	const words = command.argv[0] === "source" ? args(command) : readWords(command, home);
+	return firstSecret(command, command.reads, command.shellCwd, home) ?? firstSecret(command, words, command.cwd, home);
 }
 
 /**
- * The secrets commands put on their output, each command and upstream stage worked out once per
- * {@link findShellGuardHit}, so a long pipeline of senders costs no more than its length.
+ * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, or
+ * `upstream`, the secret an earlier stage of its pipeline puts on its output.
  */
-class SecretOutputs {
-	readonly #commands = new Map<ShellCommand, string | undefined>();
-	/** Per command list of an upstream stage, the index of the first command from each index on that puts a secret out. */
-	readonly #next = new Map<readonly ShellCommand[], Int32Array>();
-	readonly #upstream = new Map<ShellUpstream, string | undefined>();
-
-	constructor(readonly scope: GuardScope) {}
-
-	/**
-	 * The secret `command` can put on its output: its own ({@link secretOutput}), or one a command
-	 * in its substitutions puts in its words (`printf "$(cat .env)"`), at any depth.
-	 */
-	of(command: ShellCommand): string | undefined {
-		if (this.#commands.has(command)) return this.#commands.get(command);
-		const found = secretOutput(command, this.scope) ?? this.first(command.subs);
-		this.#commands.set(command, found);
-		return found;
-	}
-
-	/** The first secret one of `commands` can put on its output. */
-	first(commands: readonly ShellCommand[]): string | undefined {
-		for (const command of commands) {
-			const found = this.of(command);
-			if (found) return found;
-		}
-		return undefined;
-	}
-
-	/** The first secret a command upstream can put on its output, the earliest stage first. */
-	upstream(upstream: ShellUpstream | undefined): string | undefined {
-		const stages: ShellUpstream[] = [];
-		let known = upstream;
-		for (; known && !this.#upstream.has(known); known = known.before) stages.push(known);
-		let found = known === undefined ? undefined : this.#upstream.get(known);
-		for (const stage of stages.reverse()) {
-			found ??= this.#stage(stage);
-			this.#upstream.set(stage, found);
-		}
-		return found;
-	}
-
-	/** The first secret a command of the stage itself can put on its output. */
-	#stage({ commands, from, to }: ShellUpstream): string | undefined {
-		let next = this.#next.get(commands);
-		if (!next) {
-			next = new Int32Array(commands.length + 1);
-			next[commands.length] = commands.length;
-			for (let i = commands.length - 1; i >= 0; i--) next[i] = this.of(commands[i]) ? i : next[i + 1];
-			this.#next.set(commands, next);
-		}
-		return next[from] < to ? this.of(commands[next[from]]) : undefined;
-	}
-}
-
-/**
- * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, from
- * an upstream stage's output, or from a substitution's.
- */
-function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | undefined {
-	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
-	const { home } = outputs.scope;
+function secretSend(command: ShellCommand, upstream: string | undefined, home: string): GuardHit | undefined {
 	const found =
 		firstSecret(command, command.reads, command.shellCwd, home) ??
 		firstSecret(command, sentFiles(command), command.cwd, home) ??
-		outputs.upstream(command.upstream) ??
-		outputs.first(command.subs);
+		upstream;
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
 // -- entry points ------------------------------------------------------------------------------------
 
 /**
- * The first fixed rule a shell command breaks, or `undefined`. Critical patterns are matched
- * against the command and every nested script it runs; the other rules against every simple
- * command it runs. A command nested deeper than the parser follows, with more nested script text
- * than it reads, with more text to search for heredoc delimiters that never come, or that changes
- * to a directory longer than {@link SHELL_SCRIPT_MAX_DIRECTORY} characters, fails closed
- * (`nesting_limit`); so does one whose brace lists expand past {@link MAX_BRACE_TEXT}, or whose
- * `tar -C` goes past {@link SHELL_SCRIPT_MAX_DIRECTORY}, and that breaks no rule before that.
+ * The first fixed rule a shell command line breaks, or `undefined`, over its top-level simple
+ * commands ({@link parseShellCommands}): `secret_send` across a pipeline first, then
+ * `credential_read`. A command line whose brace lists expand past {@link MAX_BRACE_TEXT} before a
+ * rule matches fails closed (`size_limit`).
  */
 export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
 	if (command.trim() === "") return undefined;
 	braceTextLeft = MAX_BRACE_TEXT;
-	tarDirectoryUnfollowed = false;
-	const { pipelines, scripts, truncated } = parseShellScript(command, scope);
-	// The raw line, each nested script, and each simple command in canonical quoting: the program
-	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
-	// matches like `rm -rf /`, while an argument quoted in the source (`git commit -m "reboot"`)
-	// stays quoted, as it is in the raw line. A program named by an absolute path (`/sbin/reboot`)
-	// is its basename; one named by a relative path (`./scripts/shutdown`) stays as written.
-	const canonical = pipelines.flat().map(c =>
-		[
-			...c.wrappers,
-			...c.argv.map((arg, index) => {
-				const word = index === 0 && !c.program.startsWith("/") ? c.program : arg;
-				return /^[\w@%+=:,./-]+$/.test(word) && (index === 0 || !c.quoted[index])
-					? word
-					: `'${word.replaceAll("'", "'\\''")}'`;
-			}),
-		].join(" "),
-	);
-	const texts = [command, ...scripts, ...canonical];
-	if (CRITICAL_BASH_PATTERNS.some(pattern => texts.some(text => pattern.test(text)))) {
-		return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
-	}
-	if (truncated) {
-		return hit(
-			"nesting_limit",
-			`it nests \`bash -c\`, \`eval\`, \`env -S\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, or runs in or changes to a directory longer than ${SHELL_SCRIPT_MAX_DIRECTORY} characters, past what the guard can check`,
-		);
-	}
-	const outputs = new SecretOutputs(scope);
-	for (const pipeline of pipelines) {
-		const found =
-			pipeline.map(c => secretSend(c, outputs)).find(Boolean) ??
-			pipeline.map(c => credentialRead(c, scope)).find(Boolean);
-		if (found) return found;
+	for (const pipeline of parseShellCommands(command, scope)) {
+		// The first secret a stage before the sender being checked puts out; each stage is read once.
+		let upstream: string | undefined;
+		let read = 0;
+		for (const [index, sender] of pipeline.entries()) {
+			if (!Object.hasOwn(SENDERS, sender.argv[0])) continue;
+			for (; read < index && upstream === undefined; read++) upstream = secretOutput(pipeline[read], scope.home);
+			const found = secretSend(sender, upstream, scope.home);
+			if (found) return found;
+		}
+		for (const reader of pipeline) {
+			const found = credentialRead(reader, scope);
+			if (found) return found;
+		}
 	}
 	if (braceTextLeft < 0) {
 		return hit(
-			"nesting_limit",
+			"size_limit",
 			`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
-		);
-	}
-	if (tarDirectoryUnfollowed) {
-		return hit(
-			"nesting_limit",
-			`its \`tar -C\` changes to a directory longer than ${SHELL_SCRIPT_MAX_DIRECTORY} characters, past what the guard can check`,
 		);
 	}
 	return undefined;

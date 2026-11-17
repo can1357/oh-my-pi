@@ -8,7 +8,7 @@
 
 ### Added
 
-- Added opt-in `tools.guardRules` setting: best-effort checks that ask before bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19293](https://github.com/can1357/oh-my-pi/pull/19293) by [@Xytronix](https://github.com/Xytronix))
+- Added opt-in `tools.guardRules` setting: best-effort checks that ask before top-level bash commands read credentials or send secrets over the network, and before `read`/`grep` of credential files ([#19293](https://github.com/can1357/oh-my-pi/pull/19293) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
