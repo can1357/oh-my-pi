@@ -109,6 +109,42 @@ describe("a JavaScript cell aborted while its output is still queued", () => {
 	});
 });
 
+describe("a JavaScript cell that emits a status payload advanced IPC can carry but JSON cannot", () => {
+	// The outbox stands in for the IPC channel, so it must keep that transport's
+	// structured-clone contract: JSON would throw on BigInt and break circular links.
+	const code = [
+		'const payload = { value: 1n, when: new Date(0), tags: new Set(["a"]) };',
+		"payload.self = payload;",
+		'globalThis.__omp_emit_status__("review", { payload });',
+		'console.log("after the status");',
+	].join("\n");
+
+	it("keeps BigInt and circular status values in subprocess mode", async () => {
+		using dir = TempDir.createSync("@omp-js-status-payload-");
+		const result = await executeJs(code, {
+			session: toolSession(dir.path()),
+			sessionId: `js-status-payload:${crypto.randomUUID()}`,
+			code,
+			filename: "status-payload.js",
+			timeoutMs: 60_000,
+		});
+		expect(result.output).toContain("after the status");
+		const review = result.displayOutputs
+			.filter(
+				(output): output is Extract<typeof output, { type: "status" }> =>
+					output.type === "status" && output.event.op === "review",
+			)
+			.at(-1);
+		const payload = review?.event.payload as
+			| { value: bigint; when: Date; tags: Set<string>; self: unknown }
+			| undefined;
+		expect(payload?.value).toBe(1n);
+		expect(payload?.self).toBe(payload);
+		expect(payload?.when).toEqual(new Date(0));
+		expect(payload?.tags).toEqual(new Set(["a"]));
+	});
+});
+
 interface StoppedRun {
 	/** Whether the host operation saw its cancellation. */
 	aborted: boolean;

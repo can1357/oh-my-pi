@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import * as v8 from "node:v8";
 import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:worker_threads";
 import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
@@ -1111,8 +1112,8 @@ function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
 	let delivered = 0;
 	const deliverOutput = (sequence: number): void => {
 		if (sequence <= delivered) return;
-		const filename = path.join(outbox, `${sequence}.json`);
-		const message = JSON.parse(fs.readFileSync(filename, "utf8")) as ProcessWorkerOutput;
+		const filename = path.join(outbox, `${sequence}.bin`);
+		const message = v8.deserialize(fs.readFileSync(filename)) as ProcessWorkerOutput;
 		fs.unlinkSync(filename);
 		delivered = sequence;
 		for (const listener of listeners) listener(message);
@@ -1131,8 +1132,8 @@ function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
 				await spawned.proc.exited;
 				const sequences = fs
 					.readdirSync(outbox)
-					.filter(name => /^\d+\.json$/.test(name))
-					.map(name => Number(name.slice(0, -5)))
+					.filter(name => /^\d+\.bin$/.test(name))
+					.map(name => Number(name.slice(0, -4)))
 					.sort((a, b) => a - b);
 				for (const sequence of sequences) deliverOutput(sequence);
 			} catch (error) {

@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as v8 from "node:v8";
 import { type RejectionInterceptor, WorkerCore } from "./worker-core";
 import {
 	JS_EVAL_OUTBOX_ENV,
@@ -29,10 +30,13 @@ export function startJsEvalProcess(
 				}
 				// A killed process can lose its pending process.send queue. Publish
 				// complete output synchronously, then use IPC only as a notification.
+				// `v8.serialize` keeps the IPC channel's structured-clone contract, so
+				// payload values JSON cannot represent (BigInt, circular references,
+				// Map/Set, Date, typed arrays) still cross the outbox untouched.
 				const id = ++sequence;
-				const filename = path.join(outbox, `${id}.json`);
+				const filename = path.join(outbox, `${id}.bin`);
 				const pending = `${filename}.tmp`;
-				fs.writeFileSync(pending, JSON.stringify(message));
+				fs.writeFileSync(pending, v8.serialize(message));
 				fs.renameSync(pending, filename);
 				transport.send({ type: "output-ready", sequence: id });
 			},
