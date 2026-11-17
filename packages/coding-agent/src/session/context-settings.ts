@@ -3,10 +3,15 @@ import {
 	validateModelCompactionThresholds,
 } from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
-import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
+import {
+	COMPACTION_METHOD_CHOICES,
+	type CompactionMethod,
+	DEFAULT_COMPACTION_METHOD_ORDER,
+} from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_COMPACTION_METHOD_ORDER: CompactionMethod[] = [];
 const EMPTY_MODEL_COMPACTION_THRESHOLDS: Record<string, AgentCompactionThresholdOverride> = {};
 
 export const cfgWorkspaceAdditionalDirectories = register({
@@ -335,6 +340,21 @@ export const cfgCompactionIdleThresholdTokens = register({
 	},
 });
 
+export const cfgCompactionIdleMethodOrder = register({
+	id: "compaction.idleMethodOrder",
+	type: "array",
+	default: EMPTY_COMPACTION_METHOD_ORDER,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Idle Compaction Method Order",
+		description:
+			"Fallback order for idle compaction only; leave empty to use Compaction Method Order. Lets idle passes pay for a model summary while in-turn passes stay local",
+		options: COMPACTION_METHOD_CHOICES,
+		ordered: true,
+	},
+});
+
 export const cfgCompactionIdleTimeoutSeconds = register({
 	id: "compaction.idleTimeoutSeconds",
 	type: "number",
@@ -399,6 +419,7 @@ export const cfgCompaction = combine({
 	v2RetainedMessageBudget: cfgCompactionV2RetainedMessageBudget,
 	idleEnabled: cfgCompactionIdleEnabled,
 	idleThresholdTokens: cfgCompactionIdleThresholdTokens,
+	idleMethodOrder: cfgCompactionIdleMethodOrder,
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
