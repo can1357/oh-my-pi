@@ -429,6 +429,8 @@ export interface WithOAuthAccessOptions {
 	/** Session id for credential stickiness, threaded into every resolve. */
 	sessionId?: string;
 	signal?: AbortSignal;
+	/** Explicit UTC offset for timezone-naive reset dates returned by this request. */
+	retryResetTimezoneOffset?: string;
 	/** Override the retryable-error classifier (default {@link isAuthRetryableError}). */
 	isAuthError?: (error: unknown) => boolean;
 	/**
@@ -556,6 +558,7 @@ export async function withOAuthAccess<T>(
 		try {
 			const rotation = await storage.limits.rotate(provider, sessionId, {
 				error: lastError,
+				retryResetTimezoneOffset: opts?.retryResetTimezoneOffset,
 				signal,
 				apiKey: lastAccess.accessToken,
 				credentialId: lastAccess.credentialId,

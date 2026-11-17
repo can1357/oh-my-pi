@@ -2,11 +2,13 @@ import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage, type FetchImpl, type Model, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { serializeCloudflareCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SSE_RESPONSE =
 	'data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Gemini answer"}]}}],"modelVersion":"gemini-2.5-flash"}}\n\n';
@@ -56,6 +58,88 @@ type CapturedRequest = {
 	headers: Record<string, string>;
 	body: Record<string, unknown> | null;
 };
+
+it("rotates Gemini OAuth search credentials until the model's configured local reset", async () => {
+	const provider = "gemini-search-reset-test";
+	const now = Date.parse("2099-09-01T00:00:00Z");
+	using dir = TempDir.createSync("@gemini-search-reset-");
+	const authStorage = await AuthStorage.create(":memory:");
+	const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+	registerOAuthProvider({
+		id: provider,
+		name: "Gemini Search Reset Test",
+		sourceId: provider,
+		async login() {
+			throw new Error("test credentials must not log in");
+		},
+		async refreshToken() {
+			throw new Error("test credentials must not refresh");
+		},
+		getApiKey: credentials => credentials.access,
+	});
+	try {
+		const file = dir.join("models.yml");
+		await Bun.write(
+			file,
+			Bun.YAML.stringify({
+				providers: {
+					[provider]: {
+						api: "google-gemini-cli",
+						auth: "oauth",
+						baseUrl: "https://gemini-search-reset.example",
+						retryResetTimezoneOffset: "+08:00",
+						models: [{ id: "gemini-search-reset" }],
+					},
+				},
+			}),
+		);
+		await authStorage.credentials.set(
+			provider,
+			["limited", "healthy"].map(account => ({
+				type: "oauth" as const,
+				access: `${account}-access`,
+				refresh: `${account}-refresh`,
+				expires: now + 24 * 60 * 60_000,
+				projectId: "test-project",
+				email: `${account}@example.com`,
+			})),
+		);
+		const limited = authStorage.credentials
+			.list(provider)
+			.find(row => row.credential.type === "oauth" && row.credential.access === "limited-access");
+		if (!limited) throw new Error("expected limited test account");
+		const modelRegistry = new ModelRegistry(authStorage, file);
+		const model = modelRegistry.find(provider, "gemini-search-reset");
+		if (!model) throw new Error("expected configured Gemini model");
+		const sessionId = "gemini-search-reset-session";
+		authStorage.sessions.pin(provider, sessionId, limited.id);
+		const bearers: string[] = [];
+		const fetchMock: FetchImpl = (_url, init) => {
+			const bearer = new Headers(init?.headers).get("Authorization") ?? "";
+			bearers.push(bearer);
+			return Promise.resolve(
+				bearer === "Bearer limited-access"
+					? new Response("Usage limit reached. Your limit will reset at 2099-09-01 09:00:00", { status: 429 })
+					: new Response(SSE_RESPONSE, { headers: { "Content-Type": "text/event-stream" } }),
+			);
+		};
+		const response = await searchGemini({
+			query: "configured reset",
+			authStorage,
+			modelRegistry,
+			model,
+			sessionId,
+			fetch: fetchMock,
+		});
+		expect(response.answer).toBe("Gemini answer");
+		expect(bearers).toEqual(["Bearer limited-access", "Bearer healthy-access"]);
+		expect(authStorage.blocks.list([limited.id]).map(block => block.blockedUntilMs)).toEqual([now + 60 * 60_000]);
+	} finally {
+		clock.mockRestore();
+		unregisterOAuthProviders(provider);
+		authStorage.close();
+	}
+});
 
 describe("searchGemini tools serialization", () => {
 	let capturedRequest: CapturedRequest | null = null;

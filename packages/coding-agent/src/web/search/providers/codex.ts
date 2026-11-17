@@ -632,7 +632,12 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 						accessToken: access.accessToken,
 						accountId: access.accountId ?? getCodexAccountId(access.accessToken),
 					}),
-				{ sessionId: params.sessionId, signal: params.signal, seed },
+				{
+					sessionId: params.sessionId,
+					signal: params.signal,
+					seed,
+					retryResetTimezoneOffset: params.model.retryResetTimezoneOffset,
+				},
 			);
 		}
 	}

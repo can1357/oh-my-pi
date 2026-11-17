@@ -605,7 +605,12 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 					params.timeoutMs,
 				);
 			},
-			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
+			{
+				sessionId: params.sessionId,
+				signal: params.signal,
+				seed: seed.access,
+				retryResetTimezoneOffset: params.model.retryResetTimezoneOffset,
+			},
 		);
 	} else if (params.model.api === "google-generative-ai") {
 		const endpoint = resolveGeminiDeveloperEndpoint(params.model.baseUrl);
