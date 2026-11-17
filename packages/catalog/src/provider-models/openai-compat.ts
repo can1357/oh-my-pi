@@ -29,7 +29,7 @@ import { getBundledModelReferenceIndex } from "../identity/bundled";
 import { bareModelId } from "../identity/id";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
-import { type GeneratedProvider, getBundledModels } from "../models";
+import { type GeneratedProvider, getBundledModel, getBundledModels, getBundledProviders } from "../models";
 import {
 	KIND_API_KINDS,
 	MODEL_KINDS,
@@ -8579,5 +8579,155 @@ export function modalModelManagerOptions(config?: ModalModelManagerConfig): Mode
 					fetch: config?.fetch,
 				}),
 		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Bifrost
+// ---------------------------------------------------------------------------
+
+/**
+ * Bifrost discovery configuration: the API (virtual) key plus optional base-URL
+ * (the gateway's OpenAI-compatible root, `http://host:8080/v1`) and fetch
+ * overrides. Consumed by {@link bifrostModelManagerOptions}.
+ */
+export interface BifrostModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+let bundledJudgeModelIds: Set<string> | undefined;
+
+/** Ids of every bundled judge row, under any provider and judge API. */
+function getBundledJudgeModelIds(): Set<string> {
+	if (bundledJudgeModelIds) return bundledJudgeModelIds;
+	const ids = new Set<string>();
+	for (const provider of getBundledProviders()) {
+		for (const model of getBundledModels(provider)) {
+			if (runnerApiKind(model.api) === "judge") ids.add(model.id);
+		}
+	}
+	bundledJudgeModelIds = ids;
+	return ids;
+}
+
+/**
+ * Whether a Bifrost row is a decision model. Bifrost answers every upstream's
+ * decision models on its unified `/decisions` route, but its `/models` rows
+ * declare `decisions` output only for OpenRouter's. Most specific evidence
+ * wins: the row's output modalities, then the upstream provider's bundled row
+ * for the same model, then whether the full id or its model part is a judge
+ * anywhere in the bundled catalog (custom or non-omp upstream names, and
+ * bundled upstreams that lack the model). Decision ids absent from the bundle
+ * (self-hosted, aliased) stay chat rows.
+ */
+function isBifrostDecisionModel(
+	output: unknown,
+	upstreamRow: Model<Api> | undefined,
+	id: string,
+	modelPart: string,
+): boolean {
+	if (Array.isArray(output) && output.length > 0) return output.includes("decisions");
+	if (upstreamRow) return runnerApiKind(upstreamRow.api) === "judge";
+	const judges = getBundledJudgeModelIds();
+	return judges.has(id) || judges.has(modelPart);
+}
+
+/**
+ * Bifrost model manager. The gateway's `/models` roster (every configured
+ * upstream, narrowed by the virtual key) is the whole catalog, so nothing is
+ * bundled and a successful fetch is authoritative. Rows are OpenRouter-shaped
+ * where Bifrost's model datasheet knows the model; fields a row omits fall back
+ * to the upstream provider's bundled row, then to a bare-id reference. Chat
+ * rows run over Chat Completions; decision models become `openai-decisions`
+ * judges on the same base URL (`POST {baseUrl}/decisions`).
+ */
+export function bifrostModelManagerOptions(config?: BifrostModelManagerConfig): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("bifrost")!;
+	const resolveBareReference = createReferenceResolver<Api>(new Map());
+	return {
+		providerId: "bifrost",
+		cacheProviderId: resolveModelCacheProviderId("bifrost", { apiKey, baseUrl }),
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels<Api>({
+				api: "openai-completions",
+				provider: "bifrost",
+				baseUrl,
+				apiKey,
+				filterModel: (entry, model) => {
+					const output = isRecord(entry.architecture) ? entry.architecture.output_modalities : undefined;
+					if (
+						Array.isArray(output) &&
+						output.length > 0 &&
+						!output.includes("text") &&
+						!output.includes("decisions")
+					) {
+						return false;
+					}
+					return !isExcludedModel("bifrost", model.id);
+				},
+				mapModel: (entry, defaults): ModelSpec<Api> => {
+					// `<bifrost-provider>/<model>`; the model part may itself contain `/`.
+					const slash = defaults.id.indexOf("/");
+					const modelPart = defaults.id.slice(slash + 1);
+					const upstreamRow: Model<Api> | undefined =
+						slash > 0 ? getBundledModel(defaults.id.slice(0, slash).toLowerCase(), modelPart) : undefined;
+					const reference = upstreamRow
+						? toModelSpec(upstreamRow)
+						: (resolveBareReference(modelPart) ?? resolveBareReference(defaults.id));
+					const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+					const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+					const name = toModelName(entry.name, reference?.name ?? defaults.name);
+					const input = Array.isArray(architecture?.input_modalities)
+						? toInputCapabilities(architecture.input_modalities)
+						: (reference?.input ?? defaults.input);
+					const contextWindow = toPositiveNumber(
+						entry.context_length,
+						toPositiveNumber(
+							topProvider?.context_length,
+							toPositiveNumber(entry.max_input_tokens, reference?.contextWindow ?? defaults.contextWindow),
+						),
+					);
+					// A row that prices itself (even at "0") is authoritative; only absent rates inherit the reference.
+					const rates = isRecord(entry.pricing) ? entry.pricing : undefined;
+					const priced = rates !== undefined && (rates.prompt != null || rates.completion != null);
+					const cost = priced ? perTokenPricingCost(rates) : (reference?.cost ?? perTokenPricingCost(undefined));
+					if (isBifrostDecisionModel(architecture?.output_modalities, upstreamRow, defaults.id, modelPart)) {
+						return {
+							...defaults,
+							name,
+							api: "openai-decisions",
+							kind: "judge",
+							reasoning: false,
+							supportsTools: false,
+							input,
+							cost,
+							contextWindow,
+							maxTokens: null,
+						};
+					}
+					const params = Array.isArray(entry.supported_parameters) ? entry.supported_parameters : undefined;
+					const supportsTools = params ? params.includes("tools") : reference?.supportsTools;
+					return {
+						...defaults,
+						name,
+						reasoning:
+							isRecord(entry.reasoning) ||
+							(params ? params.includes("reasoning") : (reference?.reasoning ?? false)),
+						input,
+						cost,
+						contextWindow,
+						maxTokens: toPositiveNumber(
+							entry.max_output_tokens,
+							toPositiveNumber(topProvider?.max_completion_tokens, reference?.maxTokens ?? defaults.maxTokens),
+						),
+						...(supportsTools !== undefined ? { supportsTools } : {}),
+					};
+				},
+				fetch: config?.fetch,
+			}),
 	};
 }
