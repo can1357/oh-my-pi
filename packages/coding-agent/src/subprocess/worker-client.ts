@@ -166,21 +166,6 @@ export function resolveCliEntryCmd(): string[] {
 export const DEV_LAUNCHER_ENV = "OMP_DEV_LAUNCHER";
 
 /**
- * Command for a full process relaunch (`/restart`, executable-update restart).
- * A source launch that came through the dev launcher re-enters it, because the
- * launcher starts Bun from a bunfig-free directory and restores the cwd via its
- * preload; a bare `bun src/cli.ts` relaunch would lose both. A launcher that no
- * longer exists (moved repo, deleted worktree) is ignored rather than exec'd.
- */
-export function resolveRestartCmd(): string[] {
-	if (!isCompiledBinary()) {
-		const launcher = process.env[DEV_LAUNCHER_ENV]?.trim();
-		if (launcher && fs.existsSync(launcher)) return [launcher];
-	}
-	return resolveCliEntryCmd();
-}
-
-/**
  * Resolve the command for `/restart` to re-exec the build the launcher on PATH
  * now names. A compiled binary's `process.execPath` is the realpath of the
  * image that started this process; with versioned installs (Homebrew kegs) an
@@ -194,10 +179,17 @@ export function resolveRestartCmd(): string[] {
  * still passes the bare name, while PowerShell passes the full path. Keep the
  * unchanged entry command otherwise, and leave workers on
  * {@link resolveExecutablePath} so they stay pinned to the parent build
- * (issues #16262, #19259).
+ * (issues #16262, #19259). A source launch that came through the dev launcher
+ * re-enters it, because the launcher starts Bun from a bunfig-free directory
+ * and restores the cwd via its preload; a launcher that no longer exists is
+ * ignored rather than exec'd.
  */
 export function resolveRestartCmd(): string[] {
-	if (!isCompiledBinary()) return resolveCliEntryCmd();
+	if (!isCompiledBinary()) {
+		const launcher = process.env[DEV_LAUNCHER_ENV]?.trim();
+		if (launcher && fs.existsSync(launcher)) return [launcher];
+		return resolveCliEntryCmd();
+	}
 	const executable = resolveExecutablePath();
 	const running = stripWindowsExtendedLengthPathPrefix(process.execPath);
 	const argv0 = stripWindowsExtendedLengthPathPrefix(process.argv0);
