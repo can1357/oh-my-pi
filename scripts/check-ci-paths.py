@@ -50,8 +50,7 @@ HOSTED = r"(?:ubuntu|macos|windows)-[0-9A-Za-z.-]+"
 # This expression can select only standard hosted labels; it never accepts a
 # runner label from a variable. Keep the event boundary explicit and audited.
 MACOS_ELIGIBLE = (
-    "needs.changes.outputs.macos_controls != 'true' && "
-    "vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && "
+    "github.repository == 'blyzer/oh-my-pi' && "
     "((github.event_name == 'pull_request' && "
     "github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || "
     "(github.event_name == 'push' && github.ref == 'refs/heads/omp2') || "

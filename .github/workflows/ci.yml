@@ -6,7 +6,7 @@ on:
     branches: [main, omp2]
   # No `paths` filter here on purpose: a workflow that a path filter keeps out
   # never reports its jobs, and the required checks would stay pending. The
-  # `changes` job below reads .github/ci-paths.txt instead, and every other
+  # `changes` job below reads .github/ci-job-paths.json instead, and every other
   # job is skipped, which a required check counts as passing.
   pull_request:
     branches: [main, omp2]
@@ -24,10 +24,14 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # Pin admission/transport separately from the exact candidate's native commands.
+  CI_MACOS_WORKER_REF: ci-macos-worker-source-bound-v2
+  CI_MACOS_WORKER_SHA: 3e30ac22b27d516b0727a2e0fae85093a4ad6e5f
+  CI_MACOS_CONTROL_POLICY: source-bound
 
 jobs:
-  # Native jobs default to hosted; the two macOS checks retain their reviewed
-  # hosted-first worker opt-in. CI_LINUX_MODE/CI_LINUX_RUNNER/MACOS_RUNNER retain their
+  # Native jobs default to hosted; the two macOS checks use their version-pinned
+  # hosted-first workers for eligible requests. CI_LINUX_MODE/CI_LINUX_RUNNER/MACOS_RUNNER retain their
   # existing behavior only for the BuildBuddy-capable lintx_ratchet, runtime_spec,
   # remote_linux and remote_seed jobs; their trust and remote execution stay
   # unchanged. Each remaining self-hosted-capable runs-on routes fork pull
@@ -383,13 +387,13 @@ jobs:
     name: Rust workspace and acceptance proofs
     needs: [changes, push_verified, affected]
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    runs-on: ${{ (needs.changes.outputs.macos_controls != 'true' && vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
-    timeout-minutes: ${{ (needs.changes.outputs.macos_controls != 'true' && vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 120 }}
+    runs-on: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 120 }}
     permissions:
       contents: read
       actions: write
     env:
-      MACOS_CONTROLLER: ${{ needs.changes.outputs.macos_controls != 'true' && vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
+      MACOS_CONTROLLER: ${{ github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
@@ -414,32 +418,29 @@ jobs:
         if: env.MACOS_CONTROLLER == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ vars.CI_MACOS_WORKER_SHA }}
+          ref: ${{ env.CI_MACOS_WORKER_SHA }}
           path: .ci-control
           persist-credentials: false
       - name: Coordinate macOS objective
         if: env.MACOS_CONTROLLER == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_MACOS_WORKER_REF: ${{ vars.CI_MACOS_WORKER_REF }}
-          CI_MACOS_WORKER_SHA: ${{ vars.CI_MACOS_WORKER_SHA }}
-          CI_MACOS_PARENT_WORKFLOW_SHA256: ${{ vars.CI_MACOS_PARENT_WORKFLOW_SHA256 }}
-          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED }}
-          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST }}
-          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS }}
+          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED || 'true' }}
+          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST || 'repository-writers' }}
+          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS || '["self-hosted","macOS","ARM64"]' }}
         run: python3 .ci-control/scripts/macos_fallback_controller.py --objective rust
 
   lint_macos:
     name: Lint workspace (macOS)
     needs: [changes, push_verified]
     if: ${{ !cancelled() && needs.changes.outputs.lint_macos != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    runs-on: ${{ (needs.changes.outputs.macos_controls != 'true' && vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
-    timeout-minutes: ${{ (needs.changes.outputs.macos_controls != 'true' && vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 45 }}
+    runs-on: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: ${{ (github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 45 }}
     permissions:
       contents: read
       actions: write
     env:
-      MACOS_CONTROLLER: ${{ needs.changes.outputs.macos_controls != 'true' && vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
+      MACOS_CONTROLLER: ${{ github.repository == 'blyzer/oh-my-pi' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
@@ -464,19 +465,16 @@ jobs:
         if: env.MACOS_CONTROLLER == 'true'
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ vars.CI_MACOS_WORKER_SHA }}
+          ref: ${{ env.CI_MACOS_WORKER_SHA }}
           path: .ci-control
           persist-credentials: false
       - name: Coordinate macOS objective
         if: env.MACOS_CONTROLLER == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          CI_MACOS_WORKER_REF: ${{ vars.CI_MACOS_WORKER_REF }}
-          CI_MACOS_WORKER_SHA: ${{ vars.CI_MACOS_WORKER_SHA }}
-          CI_MACOS_PARENT_WORKFLOW_SHA256: ${{ vars.CI_MACOS_PARENT_WORKFLOW_SHA256 }}
-          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED }}
-          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST }}
-          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS }}
+          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED || 'true' }}
+          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST || 'repository-writers' }}
+          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS || '["self-hosted","macOS","ARM64"]' }}
         run: python3 .ci-control/scripts/macos_fallback_controller.py --objective lint_macos
 
   lint_linux:

@@ -1,5 +1,10 @@
 # Hosted-first macOS routing implementation and rollout
 
+> Historical v1 rollout record below. The [source-bound v2 update](source-bound.md)
+> supersedes its configuration defaults, frozen parent-workflow digest requirement
+> and direct-hosted exception for control changes. Existing timing, ownership,
+> cancellation, lease and result contracts remain unless that update states otherwise.
+
 Status: implementation under review; no live fallback activation or Mac canary
 claimed. Base `omp2@98303fde57bcaeb4d34149df5ec6f302c3ed8179`, 2026-11-17.
 Follows the approved [plan](README.md) and [S0 design](design.md).

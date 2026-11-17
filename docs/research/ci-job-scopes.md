@@ -76,10 +76,13 @@ GitHub-hosted macOS remains first, then the self-hosted Mac when the reviewed
 fallback admission conditions permit it. The historical Mac/trust evidence is
 recorded in the updated [preflight](ci-macos-queue-fallback/preflight.md).
 
-Changes to the worker/control/provisioning code select direct hosted validation
-instead of executing an older pinned controller release and claiming the modified
-commands were exercised. Unknown control provenance stays conservative. This
-exception does not make the Mac primary or change BuildBuddy configuration.
+Worker/control/provisioning changes also retain hosted-first fallback. The
+versioned worker supplies admission and transport; the admitted source supplies
+the native composite action, provisioning actions, state preparation and commands.
+The source and tree are checked before execution and publication. See the
+[source-bound fallback update](ci-macos-queue-fallback/source-bound.md) for the
+owner-only trust boundary and the distinction between candidate commands and the
+pinned protocol guard. This does not make the Mac primary or change BuildBuddy.
 
 Only a fully executed, successful native Rust objective may publish `proved-tree`.
 Skipping unrelated jobs is not evidence that those checks ran. Existing proof

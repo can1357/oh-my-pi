@@ -88,6 +88,22 @@ class HostedRunnerPolicy(unittest.TestCase):
         self.assertEqual([failure[0] for failure in native_runner_failures(redirected)], ['rust'])
 
     @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
+    def test_control_changes_keep_pinned_hosted_first_fallback_without_admin_variables(self):
+        ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
+        self.assertEqual(ci['env']['CI_MACOS_CONTROL_POLICY'], 'source-bound')
+        self.assertRegex(ci['env']['CI_MACOS_WORKER_SHA'], r'^[0-9a-f]{40}$')
+        self.assertEqual(ci['env']['CI_MACOS_WORKER_REF'], 'ci-macos-worker-source-bound-v2')
+        for name in MACOS_JOBS:
+            job = ci['jobs'][name]
+            self.assertNotIn('macos_controls', job['runs-on'])
+            self.assertIn("github.repository == 'blyzer/oh-my-pi'", job['runs-on'])
+            control = next(step for step in job['steps'] if step.get('name') == 'Check out reviewed macOS controller')
+            self.assertEqual(control['with']['ref'], '${{ env.CI_MACOS_WORKER_SHA }}')
+            coordinate = next(step for step in job['steps'] if step.get('name') == 'Coordinate macOS objective')
+            self.assertEqual(coordinate['env']['CI_MACOS_FALLBACK_ENABLED'], "${{ vars.CI_MACOS_FALLBACK_ENABLED || 'true' }}")
+            self.assertNotIn('CI_MACOS_WORKER_SHA', coordinate['env'])
+
+    @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
     def test_worker_and_shared_action_parse_as_real_yaml(self):
         worker = yaml.load((ROOT / '.github/workflows/macos-verification.yml').read_text(), Loader=yaml.BaseLoader)
         ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
