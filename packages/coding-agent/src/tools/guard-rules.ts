@@ -1225,28 +1225,35 @@ function sentFiles(command: ShellCommand): string[] {
 			const arg = argv[i];
 			let option: string;
 			let value: string | undefined;
+			// The word the value is in, which tells whether the source quoted its braces.
+			let source: string | undefined = arg;
 			if (arg.startsWith("--")) {
 				const eq = arg.indexOf("=");
 				option = eq > 0 ? arg.slice(0, eq) : arg;
 				if (!Object.hasOwn(CURL_DATA_OPTIONS, option)) continue;
-				value = eq > 0 ? arg.slice(eq + 1) : argv[++i];
+				if (eq < 0) source = argv[++i];
+				value = eq > 0 ? arg.slice(eq + 1) : source;
 			} else if (arg.startsWith("-") && arg.length > 1) {
 				let k = 1;
 				while (k < arg.length && !CURL_VALUE_LETTERS.includes(arg[k])) k++;
 				if (k === arg.length) continue;
 				option = `-${arg[k]}`;
-				value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
+				if (k + 1 === arg.length) source = argv[++i];
+				value = k + 1 < arg.length ? arg.slice(k + 1) : source;
 				if (!Object.hasOwn(CURL_DATA_OPTIONS, option)) continue;
 			} else {
 				continue;
 			}
-			if (value === undefined) continue;
+			if (value === undefined || source === undefined) continue;
 			if (option === "-T" || option === "--upload-file") {
 				// curl globs the value itself, quoted or not: `-T "{a,b}"` uploads each file of the list,
 				// and curl reads a set of one, `-T "{.env}"`, as its file.
 				append(files, expandBraces(value.replace(/\{([^{},]*)\}/g, "$1")));
 			} else if (option === "-F" || option === "--form") {
-				append(files, formFiles(value));
+				// The shell brace-expands an unquoted field as it does a `-d @file` value (`f=@{a,.env}`).
+				for (const field of command.literalBraces.has(source) ? [value] : expandBraces(value)) {
+					append(files, formFiles(field));
+				}
 			} else if (option === "--data-urlencode") {
 				// `name@file` or `@file`; after an `=`, the rest is the content.
 				const at = value.indexOf("@");
