@@ -1519,7 +1519,8 @@ export class RelayBridge {
 				if (parsed && tab) {
 					const info =
 						parsed.kind === "tab" ? this.#tabInfo(tab, tab.attached) : this.#pageInfo(tab, tab.attached);
-					this.#reply(conn, msg, { targetInfo: info });
+					// Relay-private beside the result: why the tab is withheld, so a client that cannot find it can say.
+					this.#reply(conn, msg, tab.refusal ? { targetInfo: info, refusal: tab.refusal } : { targetInfo: info });
 					return;
 				}
 				this.#reply(conn, msg, {
