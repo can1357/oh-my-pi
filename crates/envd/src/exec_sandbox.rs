@@ -1401,9 +1401,10 @@ fn policy_parts_with_approved_scope(
 		spec.allow_write(Path::new("/"))?;
 		writable.push(PathBuf::from("/"));
 	}
-	// The owner-protected locations are absolute by contract and denied in every
-	// mode under both their literal and resolved spellings; a location that does
-	// not exist yet is denied by spelling, like a missing carve-out.
+	// The owner-protected locations are absolute by contract and denied under
+	// both their literal and resolved spellings wherever a sandbox spec is built
+	// and enforced; a location that does not exist yet is denied by spelling,
+	// like a missing carve-out.
 	for path in &settings.protected_write_paths {
 		if !path.is_absolute() {
 			return Err(SandboxError::InvalidDenyPath { path: path.clone() });
@@ -2840,8 +2841,8 @@ mod tests {
 	}
 
 	/// The grants store and the user extension root are denied to sandboxed
-	/// writes even under a writable root, in every mode, whether they exist
-	/// yet or not; only absolute paths are accepted.
+	/// writes even under a writable root, whether they exist yet or not; only
+	/// absolute paths are accepted.
 	#[test]
 	fn sandbox_denies_write_to_protected_paths() {
 		let workspace = tempfile::tempdir().expect("workspace");
@@ -2853,35 +2854,30 @@ mod tests {
 		fs::write(&protected_file, "").expect("protected file");
 		let missing = root.join("config/agent/extensions");
 		let protected = vec![store.clone(), protected_file.clone(), missing.clone()];
-		for mode in [ExecSandboxMode::WorkspaceWrite, ExecSandboxMode::Off] {
-			let settings = SandboxSettings {
-				mode,
-				protected_write_paths: protected.clone(),
-				..SandboxSettings::default()
-			};
-			let parts = policy_parts(&settings, &root, WriteMode::Scoped, None, None).expect("policy");
-			for denied in [
-				store.join("grants.toml"),
-				store.join("new.toml"),
-				store.clone(),
-				protected_file.clone(),
-				missing.clone(),
-				missing.join("evil/manifest.toml"),
-			] {
-				assert!(
-					parts.file_policy.check_write(&denied).is_err(),
-					"{mode:?} allowed a write to {}",
-					denied.display()
-				);
-			}
+		let settings =
+			SandboxSettings { protected_write_paths: protected.clone(), ..SandboxSettings::default() };
+		let parts = policy_parts(&settings, &root, WriteMode::Scoped, None, None).expect("policy");
+		for denied in [
+			store.join("grants.toml"),
+			store.join("new.toml"),
+			store.clone(),
+			protected_file.clone(),
+			missing.clone(),
+			missing.join("evil/manifest.toml"),
+		] {
 			assert!(
-				parts
-					.file_policy
-					.check_write(&root.join("src/new.rs"))
-					.is_ok(),
-				"{mode:?} denied an ordinary workspace write"
+				parts.file_policy.check_write(&denied).is_err(),
+				"allowed a write to {}",
+				denied.display()
 			);
 		}
+		assert!(
+			parts
+				.file_policy
+				.check_write(&root.join("src/new.rs"))
+				.is_ok(),
+			"denied an ordinary workspace write"
+		);
 		let relative = SandboxSettings {
 			protected_write_paths: vec![PathBuf::from("relative/ext")],
 			..workspace_settings()

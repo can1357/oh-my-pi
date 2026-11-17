@@ -4946,6 +4946,25 @@ mod tests {
 		}
 	}
 
+	/// Only names in `CONTROL_CAPABILITIES` pass from the control grants to the
+	/// CONTROL identity: a DATA capability or an unknown name placed there is
+	/// dropped, while the real control grant beside it still arrives.
+	#[test]
+	fn identity_drops_non_control_names_in_control_grants() {
+		let config = control_grant_config();
+		let mut spec = control_grant_spec();
+		spec.control_grants =
+			BTreeSet::from([sf!("policy.write"), sf!("env.lsp"), sf!("admin.root")]);
+		let identity = control_connection_identity(&config, &spec, 1);
+		assert!(identity.capabilities.contains("policy.write"), "the control grant was dropped");
+		for name in ["env.lsp", "admin.root"] {
+			assert!(
+				!identity.capabilities.contains(name),
+				"non-control name {name} reached the CONTROL identity"
+			);
+		}
+	}
+
 	/// Control grants never reach the DATA plane: the DATA grant set cannot
 	/// hold a control name, the spec's DATA grants stay as admitted, and the
 	/// manifest snapshot reports only DATA capabilities.

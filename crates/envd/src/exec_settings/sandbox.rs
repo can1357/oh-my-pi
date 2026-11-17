@@ -387,9 +387,12 @@ pub struct SandboxSettings {
 	pub read_deny_globs:       Vec<Str>,
 	/// Additional absolute paths protected from writes in both policy lanes.
 	pub write_deny:            Vec<Str>,
-	/// Absolute paths the session owner protects from every sandboxed write,
-	/// in every mode, whether they exist yet or not: the operator grants store
-	/// and the user extension root. Not a user convar.
+	/// Absolute paths the session owner protects from sandboxed writes,
+	/// wherever a sandbox spec is built and enforced, whether they exist yet or
+	/// not: the operator grants store and the user extension root. Not a user
+	/// convar. Skipped when empty so the policy digest of settings without
+	/// protected paths is unchanged.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
 	pub protected_write_paths: Vec<PathBuf>,
 	/// Whether the user set any `sv_sandbox_*` convar, rather than leaving the
 	/// shipped posture. A sandbox the user asked for that cannot be built is a
@@ -932,5 +935,28 @@ mod tests {
 				.set(&ctx, vec![Str::new_static("[")])
 				.is_err()
 		);
+	}
+
+	/// Settings without protected paths serialize exactly as before the field
+	/// existed, so the daemon policy digest of such a posture is unchanged; the
+	/// field defaults when absent and round-trips when set.
+	#[test]
+	fn empty_protected_write_paths_stay_out_of_serialized_settings() {
+		let plain = serde_json::to_value(SandboxSettings::default()).expect("settings JSON");
+		assert!(
+			plain.get("protected_write_paths").is_none(),
+			"empty protected paths changed the serialized settings: {plain}"
+		);
+		let restored: SandboxSettings =
+			serde_json::from_value(plain).expect("settings without the field");
+		assert_eq!(restored, SandboxSettings::default());
+
+		let protected = SandboxSettings {
+			protected_write_paths: vec![PathBuf::from("/srv/grants")],
+			..SandboxSettings::default()
+		};
+		let value = serde_json::to_value(&protected).expect("settings JSON");
+		assert_eq!(value["protected_write_paths"], serde_json::json!(["/srv/grants"]));
+		assert_eq!(serde_json::from_value::<SandboxSettings>(value).expect("round trip"), protected);
 	}
 }
