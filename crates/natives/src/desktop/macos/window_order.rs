@@ -123,19 +123,22 @@ pub(super) const SHOW_WAIT: Duration = Duration::from_millis(2);
 /// when [`EntryOrder::to_raise`] finds it behind in `stack`'s reading of the
 /// windows down to it, for at most [`RAISE_TRIES`] passes during the action;
 /// the `last` pass always raises. `find` looks the window up, which can block
-/// on a busy app, so right before `send` raises it, `still_kept` is asked
-/// again and the stacking read again: the user may have switched, come to the
-/// target, or brought another of their windows in front meanwhile. After
-/// raising it reads the stacking again, `wait`ing between readings up to
-/// [`SHOW_READS`] times ([`LAST_SHOW_READS`] on the last pass), until the
-/// raise shows or the order is no longer kept; the last pass returns the
-/// window if it is still behind.
+/// on a busy app, so right before `send` raises it, the user's app is asked
+/// which window is key (`key_now`), `still_kept` is asked again and the
+/// stacking read again: meanwhile the user may have switched, come to the
+/// target, brought another of their windows in front, or made one key that
+/// the stacking does not show, such as a floating panel. After raising it
+/// reads the stacking again, `wait`ing between readings up to [`SHOW_READS`]
+/// times ([`LAST_SHOW_READS`] on the last pass), until the raise shows or the
+/// order is no longer kept; the last pass returns the window if it is still
+/// behind.
 pub(super) fn keep<W>(
 	order: &mut EntryOrder,
 	tries: &mut u8,
 	stack: impl Fn(u32) -> Option<Vec<Stacked>>,
 	still_kept: impl Fn() -> bool,
 	find: impl FnOnce(&Stacked) -> Found<W>,
+	key_now: impl FnOnce(&Stacked) -> Option<u32>,
 	send: impl FnOnce(W),
 	wait: impl Fn(),
 	last: bool,
@@ -150,7 +153,7 @@ pub(super) fn keep<W>(
 	}
 	match find(&window) {
 		Found::Window(found) => {
-			if !still_kept() || behind_now(order).is_none() {
+			if key_now(&window) != Some(key) || !still_kept() || behind_now(order).is_none() {
 				return Ok(());
 			}
 			send(found);
@@ -283,6 +286,8 @@ mod tests {
 		let (user, target) = (w(1, USER), w(3, TARGET));
 		let fresh = || EntryOrder::new(TARGET, USER, Some(1), &[user, target]).unwrap();
 		let found = |_: &Stacked| Found::Window(());
+		// The user's app reports their key window, 1, as key.
+		let key = |_: &Stacked| Some(1);
 		// A raise that works: one pass puts the user's window back, and the
 		// last pass finds nothing to do.
 		let stack = RefCell::new(vec![target, user]);
@@ -297,9 +302,12 @@ mod tests {
 			assert_eq!(key, user.id);
 			Some(stack.borrow().clone())
 		};
-		assert_eq!(keep(&mut order, &mut tries, read, || true, found, raise, || {}, false), Ok(()));
 		assert_eq!(
-			keep(&mut order, &mut tries, read, || true, |_| panic!(), |()| panic!(), || {}, true),
+			keep(&mut order, &mut tries, read, || true, found, key, raise, || {}, false),
+			Ok(())
+		);
+		assert_eq!(
+			keep(&mut order, &mut tries, read, || true, |_| panic!(), key, |()| panic!(), || {}, true),
 			Ok(())
 		);
 		assert_eq!(raised.get(), 1);
@@ -315,14 +323,14 @@ mod tests {
 		let waited = || waits.set(waits.get() + 1);
 		for _ in 0..5 {
 			assert_eq!(
-				keep(&mut order, &mut tries, again, || true, found, count, waited, false),
+				keep(&mut order, &mut tries, again, || true, found, key, count, waited, false),
 				Ok(())
 			);
 		}
 		assert_eq!((raised.get(), waits.get()), (3, 3 * (SHOW_READS - 1)));
 		waits.set(0);
 		assert_eq!(
-			keep(&mut order, &mut tries, again, || true, found, count, waited, true),
+			keep(&mut order, &mut tries, again, || true, found, key, count, waited, true),
 			Err(user)
 		);
 		assert_eq!((raised.get(), waits.get()), (4, LAST_SHOW_READS - 1));
@@ -338,7 +346,10 @@ mod tests {
 				vec![user, target]
 			})
 		};
-		assert_eq!(keep(&mut order, &mut tries, late, || true, found, |()| {}, || {}, true), Ok(()));
+		assert_eq!(
+			keep(&mut order, &mut tries, late, || true, found, key, |()| {}, || {}, true),
+			Ok(())
+		);
 		// A window accessibility cannot raise is dropped, not reported.
 		let (mut order, mut tries) = (fresh(), 0);
 		assert_eq!(
@@ -348,6 +359,7 @@ mod tests {
 				again,
 				|| true,
 				|_| Found::Unraisable,
+				key,
 				|()| panic!(),
 				|| {},
 				true
@@ -358,7 +370,17 @@ mod tests {
 		// nothing is looked up or raised.
 		let (mut order, mut tries) = (fresh(), 0);
 		assert_eq!(
-			keep(&mut order, &mut tries, again, || false, |_| panic!(), |()| panic!(), || {}, true),
+			keep(
+				&mut order,
+				&mut tries,
+				again,
+				|| false,
+				|_| panic!(),
+				key,
+				|()| panic!(),
+				|| {},
+				true
+			),
 			Ok(())
 		);
 		// While the window was looked up, which can block on a busy app, the
@@ -385,6 +407,7 @@ mod tests {
 				read,
 				|| true,
 				switch_while_found,
+				key,
 				|()| panic!(),
 				|| {},
 				true
@@ -392,6 +415,25 @@ mod tests {
 			Ok(())
 		);
 		assert_eq!((reads.get(), tries), (2, 0));
+		// While the window was looked up, the user clicked into a floating
+		// panel of their app: it is key now, and the stacking, which reads only
+		// normal windows, does not show it. Nothing is raised or counted.
+		let (mut order, mut tries) = (fresh(), 0);
+		assert_eq!(
+			keep(
+				&mut order,
+				&mut tries,
+				again,
+				|| true,
+				found,
+				|_| Some(41),
+				|()| panic!(),
+				|| {},
+				true
+			),
+			Ok(())
+		);
+		assert_eq!(tries, 0);
 		// They switched apps or came to the target during the lookup: no raise.
 		let (mut order, mut tries) = (fresh(), 0);
 		let switched = Cell::new(false);
@@ -406,6 +448,7 @@ mod tests {
 				again,
 				|| !switched.get(),
 				switch_app,
+				key,
 				|()| panic!(),
 				|| {},
 				true
@@ -423,6 +466,7 @@ mod tests {
 				again,
 				|| !switched.get(),
 				found,
+				key,
 				|()| {},
 				|| switched.set(true),
 				true
@@ -431,7 +475,17 @@ mod tests {
 		);
 		// Unreadable stacking: nothing raised, nothing claimed.
 		assert_eq!(
-			keep(&mut fresh(), &mut 0, |_| None, || true, |_| panic!(), |()| panic!(), || {}, true),
+			keep(
+				&mut fresh(),
+				&mut 0,
+				|_| None,
+				|| true,
+				|_| panic!(),
+				key,
+				|()| panic!(),
+				|| {},
+				true
+			),
 			Ok(())
 		);
 	}

@@ -1541,6 +1541,9 @@ fn keep_key_window(
 			Err(error) if error.code == ErrorCode::WindowNotFound => window_order::Found::Unraisable,
 			Err(_) => window_order::Found::Failed,
 		},
+		// The user's own app, which just answered the lookup, says which of its
+		// windows is key; a panel the stacking leaves out counts too.
+		|window| ax::key_window_id(window.pid),
 		|found| {
 			// A failure shows in a later reading.
 			let _ = ax::raise(&found);
@@ -1698,15 +1701,15 @@ fn guard_focus(
 		// The user's key window goes back in front of a target the action
 		// ordered over it while their app is in front and they have neither
 		// switched, come to the target, nor picked another of their windows (a
-		// click in their app the lease kept). `keep_order` asks again after
-		// looking the window up and reads the stacking again, so a switch of
-		// theirs meanwhile is honoured, a switch within their app included,
-		// which only the stacking shows while the lookup blocks this thread;
-		// one inside the few microseconds between that last check and
-		// `AXRaise` itself still sees one raise of their key window, which the
-		// next poll then leaves alone. Once a poll is enough: checking every
-		// millisecond showed the target for 19 ms rather than 28 (median, on a
-		// VM) at four times the window-list reads.
+		// click in their app the lease kept). After looking the window up,
+		// `keep_order` asks their app which window is key, asks again and
+		// reads the stacking again, so a switch of theirs meanwhile is
+		// honoured, one within their app included, which this thread cannot
+		// see while the lookup blocks it; one inside the few microseconds
+		// between that last check and `AXRaise` itself still sees one raise of
+		// their key window, which the next poll then leaves alone. Once a poll
+		// is enough: checking every millisecond showed the target for 19 ms
+		// rather than 28 (median, on a VM) at four times the window-list reads.
 		let keeps_order = || {
 			let armed = {
 				let lease = lease.lock();
