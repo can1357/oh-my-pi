@@ -114,6 +114,7 @@
 - Block edits (`PUT N*`, `CUT N*`) anchored on the first `#[...]` attribute or `///` doc comment of a Rust item now cover the item, instead of failing as a single-line block ([#19464](https://github.com/can1357/oh-my-pi/pull/19464) by [@acfrazier](https://github.com/acfrazier))
 - Fixed Linux `find()`, `ax()` and element reads taking seconds in large apps: each element's independent accessibility questions now go out together, so `find()` takes about half as long in Kate, Dolphin and LibreOffice Writer ([#19521](https://github.com/can1357/oh-my-pi/pull/19521) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed X11 typing of characters outside the keyboard layout, including non-Latin text, failing with "X11 keymap has no keycode for keysym ...". Temporary keycodes stay bound for the session and are restored on close; chords and holds of characters outside the layout still refuse.
+- Fixed X11 typing of characters outside the keyboard layout, including non-Latin text, failing with "X11 keymap has no keycode for keysym ...". They are typed through spare keycodes, restored when the session closes; a text with more distinct such characters than the layout has spare keycodes is refused before any key, and chords and holds of them still refuse.
 
 ### Removed
 

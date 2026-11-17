@@ -83,13 +83,8 @@ fn core_symbols(conn: &x11rb::rust_connection::RustConnection) -> Vec<u32> {
 		.unwrap()
 		.keysyms
 }
-#[derive(Clone, Copy)]
-enum Receiver {
-	Live,
-	AfterSend,
-}
-
-fn text_is_translated(mode: DeliveryMode, text: &str, receiver_state: Receiver) {
+/// Types `text` while the receiver reads nothing until the call returned.
+fn text_is_translated(mode: DeliveryMode, text: &str) {
 	static XLIB: std::sync::Once = std::sync::Once::new();
 	XLIB.call_once(|| {
 		// SAFETY: this precedes both fixture threads' first Xlib call.
@@ -122,9 +117,7 @@ fn text_is_translated(mode: DeliveryMode, text: &str, receiver_state: Receiver) 
 			XSetInputFocus(display, window, 1, 0);
 			XSync(display, 0);
 			ready.send(window as u32).unwrap();
-			if matches!(receiver_state, Receiver::AfterSend) {
-				receive.recv().unwrap();
-			}
+			receive.recv().unwrap();
 			let mut text = String::new();
 			while text.chars().count() < expected {
 				let mut event = [0 as c_long; 24];
@@ -182,9 +175,7 @@ fn text_is_translated(mode: DeliveryMode, text: &str, receiver_state: Receiver) 
 			.check()
 			.unwrap();
 	}
-	if matches!(receiver_state, Receiver::AfterSend) {
-		resume.send(()).unwrap();
-	}
+	resume.send(()).unwrap();
 	let received = receiver.join().unwrap();
 	result.unwrap();
 	assert_eq!(received, text);
@@ -197,21 +188,33 @@ fn text_is_translated(mode: DeliveryMode, text: &str, receiver_state: Receiver) 
 #[test]
 #[ignore = "starts Xvfb and uses Xlib"]
 fn remapped_xtest_text_survives_a_receiver_stalled_until_after_send() {
-	text_is_translated(DeliveryMode::Foreground, "héllo wörld ✓", Receiver::AfterSend);
+	text_is_translated(DeliveryMode::Foreground, "héllo wörld ✓");
 }
 #[test]
 #[ignore = "starts Xvfb and uses Xlib"]
 fn remapped_send_event_text_survives_a_receiver_stalled_until_after_send() {
-	text_is_translated(DeliveryMode::Background, "héllo wörld ✓", Receiver::AfterSend);
+	text_is_translated(DeliveryMode::Background, "héllo wörld ✓");
 }
 #[test]
-#[ignore = "starts Xvfb and uses Xlib"]
-fn remapped_russian_pangram_spans_more_characters_than_spare_rows() {
-	text_is_translated(
-		DeliveryMode::Foreground,
-		"Съешь ещё этих мягких французских булок, да выпей чаю.",
-		Receiver::Live,
-	);
+#[ignore = "starts Xvfb"]
+fn text_beyond_the_spare_rows_is_refused_before_any_key() {
+	let (_server, display) = server();
+	let (conn, screen) = x11rb::connect(Some(&display)).unwrap();
+	let root = conn.setup().roots[screen].root;
+	let conn = Arc::new(conn);
+	let before = core_symbols(&conn);
+	let mut input = X11Input::new(Arc::clone(&conn), root, Some(display)).unwrap();
+	// More distinct Cyrillic letters than Xvfb's layout has spare rows (19).
+	let error = input
+		.type_text(
+			&Target::Desktop,
+			"Съешь ещё этих мягких французских булок, да выпей чаю.",
+			DeliveryMode::Foreground,
+		)
+		.unwrap_err();
+	assert!(error.message.contains("no input was sent"), "{}", error.message);
+	assert_eq!(input.text_mapping.presses(), 0, "a key went out before the refusal");
+	assert_eq!(core_symbols(&conn), before, "the refusal left a binding");
 }
 
 #[test]

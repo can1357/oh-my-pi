@@ -111,11 +111,6 @@ enum Keys<'a> {
 	Hold(&'a [KeyName], Duration),
 }
 
-struct PlannedKeys<'a> {
-	steps:     Vec<KeyStep>,
-	remaining: Vec<&'a str>,
-}
-
 impl Keys<'_> {
 	const fn duration(self) -> Duration {
 		if let Self::Hold(_, duration) = self {
@@ -308,12 +303,12 @@ impl X11Input {
 			ElementInput::Text(text) => Keys::Text(text),
 			ElementInput::Chord(keys) => Keys::Chord(keys),
 		};
-		self.with_planned_keys(keys, |this, plan| {
+		self.with_planned_keys(keys, |this, steps| {
 			this.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
 				this.check_user()?;
 				prepare()?;
 				this.check_keyboard_grab(window)?;
-				this.deliver_planned(plan, keys, None)
+				this.xtest_steps(&steps, keys)
 			})
 		})
 	}
@@ -418,10 +413,10 @@ impl X11Input {
 			(Target::Desktop | Target::Display(_), _) => self.xtest_keys(keys),
 			(Target::Window(id), DeliveryMode::Foreground | DeliveryMode::ForegroundReturnFocus) => {
 				let window = parse_window(id)?;
-				self.with_planned_keys(keys, |this, plan| {
+				self.with_planned_keys(keys, |this, steps| {
 					this.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
 						this.check_keyboard_grab(window)?;
-						this.deliver_planned(plan, keys, None)
+						this.xtest_steps(&steps, keys)
 					})
 				})
 			},
@@ -872,26 +867,23 @@ impl X11Input {
 		}
 	}
 
-	fn with_planned_keys<'a>(
+	/// Plans `keys`, binding a text's characters outside the layout to spare
+	/// keycodes first, so a text that cannot be bound is refused before any
+	/// key is sent or any window is activated.
+	fn with_planned_keys(
 		&mut self,
-		keys: Keys<'a>,
-		body: impl FnOnce(&mut Self, PlannedKeys<'a>) -> CoreResult<()>,
+		keys: Keys<'_>,
+		body: impl FnOnce(&mut Self, Vec<KeyStep>) -> CoreResult<()>,
 	) -> CoreResult<()> {
-		let plan = if let Keys::Text(text) = keys {
-			let mut segments = self.text_mapping.plan(&mut self.keymap, text)?.into_iter();
-			let steps = if let Some(first) = segments.next() {
-				self.text_mapping.bind(&mut self.keymap, first)?;
-				self.keymap.plan_text(first)?
-			} else {
-				Vec::new()
-			};
-			PlannedKeys { steps, remaining: segments.collect() }
+		let steps = if let Keys::Text(text) = keys {
+			self.text_mapping.bind(&mut self.keymap, text)?;
+			self.keymap.plan_text(text)?
 		} else {
 			self.text_mapping.hide(&mut self.keymap);
-			PlannedKeys { steps: keys.plan(&self.keymap)?, remaining: Vec::new() }
+			keys.plan(&self.keymap)?
 		};
 		let before = self.text_mapping.presses();
-		body(self, plan).map_err(|mut error| {
+		body(self, steps).map_err(|mut error| {
 			if matches!(keys, Keys::Text(_)) && self.text_mapping.presses() != before {
 				error
 					.message
@@ -901,31 +893,14 @@ impl X11Input {
 		})
 	}
 
-	fn deliver_planned(
-		&mut self,
-		plan: PlannedKeys<'_>,
-		keys: Keys<'_>,
-		window: Option<Window>,
-	) -> CoreResult<()> {
-		let deliver = |this: &Self, steps: &[KeyStep]| match window {
-			Some(window) => this.send_key_steps(window, steps, keys.duration()),
-			None => this.xtest_steps(steps, keys),
-		};
-		deliver(self, &plan.steps)?;
-		for segment in plan.remaining {
-			self.text_mapping.bind(&mut self.keymap, segment)?;
-			let steps = self.keymap.plan_text(segment)?;
-			deliver(self, &steps)?;
-		}
-		Ok(())
-	}
-
 	fn xtest_keys(&mut self, keys: Keys<'_>) -> CoreResult<()> {
-		self.with_planned_keys(keys, |this, plan| this.deliver_planned(plan, keys, None))
+		self.with_planned_keys(keys, |this, steps| this.xtest_steps(&steps, keys))
 	}
 
 	fn send_keys(&mut self, window: Window, keys: Keys<'_>) -> CoreResult<()> {
-		self.with_planned_keys(keys, |this, plan| this.deliver_planned(plan, keys, Some(window)))
+		self.with_planned_keys(keys, |this, steps| {
+			this.send_key_steps(window, &steps, keys.duration())
+		})
 	}
 
 	/// Sends `steps` through `XTest`. A `text` run is typed through a

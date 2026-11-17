@@ -156,23 +156,11 @@ impl TextMapping {
 			.collect()
 	}
 
-	/// The grab covers only the keymap reads: splitting a long text under it
-	/// would stall every X client. `bind` re-reads the keymap under its own
-	/// grab before it writes.
-	pub(super) fn plan<'a>(&self, map: &mut Keymap, text: &'a str) -> CoreResult<Vec<&'a str>> {
-		let (fresh, other) = {
-			let _grab = ServerGrab::new(&self.conn)?;
-			self.snapshots(map)?
-		};
-		let capacity = self.available(&fresh, other.as_ref()).len();
-		let natives = self.natives(&fresh);
-		let result = segments(text, capacity, |symbol| !natives.contains(&symbol));
-		*map = fresh;
-		result
-	}
-
-	/// Wait outside `GrabServer`: the target must be able to consume old keys.
-	/// The text is read before the grab; under it only its distinct keysyms are.
+	/// Binds every character of `text` outside the layout, or refuses the whole
+	/// text before any key when they outnumber the spare rows: rebinding a row
+	/// mid-text would make a receiver that reads late translate the earlier
+	/// keys through the new keysym. Waits outside `GrabServer`, so the target
+	/// can consume old keys; the text is read before the grab.
 	pub(super) fn bind(&mut self, map: &mut Keymap, text: &str) -> CoreResult<()> {
 		let symbols = symbols(text);
 		loop {
@@ -202,8 +190,8 @@ impl TextMapping {
 				})
 				.map(|last| last + REBIND_GRACE)
 				.max();
-			// The input lease stays held through this wait: releasing it between
-			// segments would let another session's keys land inside this text.
+			// Only a row an earlier call used can be this recent; the wait comes
+			// before this text's first key, under the caller's input lease.
 			if let Some(until) = until
 				&& let Some(wait) = until.checked_duration_since(Instant::now())
 			{
@@ -265,7 +253,7 @@ impl TextMapping {
 				.any(|&symbol| applied.lookup(symbol).is_none())
 			{
 				return Err(DesktopError::input_failed(
-					"X11 device did not adopt the temporary text mapping; no further input was sent",
+					"X11 device did not adopt the temporary text mapping; no input was sent",
 				));
 			}
 			for &(code, symbol) in &writes {
@@ -352,35 +340,6 @@ fn symbols(text: &str) -> Vec<u32> {
 		.collect()
 }
 
-fn segments(
-	text: &str,
-	capacity: usize,
-	mut dynamic: impl FnMut(u32) -> bool,
-) -> CoreResult<Vec<&str>> {
-	let mut result = Vec::new();
-	let mut required = HashSet::new();
-	let mut start = 0;
-	for (index, ch) in text.char_indices() {
-		control::check()?;
-		let symbol = keysym_for_key(KeyName::Char(ch));
-		if dynamic(symbol) && !required.contains(&symbol) {
-			if capacity == 0 {
-				return Err(no_rows(1, 0));
-			}
-			if required.len() == capacity {
-				result.push(&text[start..index]);
-				start = index;
-				required.clear();
-			}
-			required.insert(symbol);
-		}
-	}
-	if start < text.len() {
-		result.push(&text[start..]);
-	}
-	Ok(result)
-}
-
 fn assignments(required: &[u32], available: &[u8], bound: &[Binding]) -> Vec<(u8, u32)> {
 	let mut result = Vec::new();
 	let protected: Vec<_> = required
@@ -425,8 +384,9 @@ fn assignments(required: &[u32], available: &[u8], bound: &[Binding]) -> Vec<(u8
 
 fn no_rows(needed: usize, available: usize) -> DesktopError {
 	DesktopError::input_failed(format!(
-		"X11 text needs {needed} spare keycodes but only {available} empty rows are available; no \
-		 further input was sent. If a killed input tool left temporary mappings, reset the layout \
+		"X11 text needs {needed} spare keycodes for characters outside the keyboard layout, but \
+		 only {available} are free; no input was sent. Send at most {available} distinct such \
+		 characters per call, or if a killed input tool left temporary mappings, reset the layout \
 		 with setxkbmap and retry"
 	))
 }
@@ -508,9 +468,7 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn segmentation_preserves_text_and_eviction_keeps_current_symbols() {
-		let text = "αβαγδ";
-		assert_eq!(segments(text, 2, |_| true).unwrap(), ["αβα", "γδ"]);
+	fn eviction_keeps_the_symbols_a_text_needs() {
 		let start = Instant::now();
 		let bound = [
 			Binding {
@@ -533,12 +491,5 @@ mod tests {
 			},
 		];
 		assert_eq!(assignments(&[1, 4], &[255, 254, 253], &bound), [(254, 4)]);
-	}
-
-	#[test]
-	fn no_empty_rows_refuses_before_a_segment_is_emitted() {
-		let error = segments("é", 0, |_| true).unwrap_err();
-		assert!(error.message.contains("only 0"));
-		assert!(error.message.contains("setxkbmap"));
 	}
 }

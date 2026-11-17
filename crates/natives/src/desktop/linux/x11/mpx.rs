@@ -136,6 +136,8 @@ pub(super) struct Mpx {
 struct VirtualKeyboard {
 	device: UInputDevice,
 	slave:  u16,
+	/// Whether the warm-up key went through; see [`Mpx::warm`].
+	warm:   bool,
 }
 
 /// A slave a call sends through and the master of this pair it must sit on.
@@ -466,17 +468,10 @@ impl Mpx {
 	pub(super) fn type_text(&mut self, target: Window, text: &str) -> CoreResult<()> {
 		self.begin(false)?;
 		let mut keymap = self.keyboard_keymap()?;
-		let segments = self.text_mapping.plan(&mut keymap, text)?;
+		self.text_mapping.bind(&mut keymap, text)?;
+		let steps = keymap.plan_text(text)?;
 		let before = self.text_mapping.presses();
-		let result = (|| {
-			for segment in segments {
-				self.text_mapping.bind(&mut keymap, segment)?;
-				let steps = keymap.plan_text(segment)?;
-				self.deliver_keys(target, &steps)?;
-			}
-			Ok(())
-		})();
-		result.map_err(|mut error: DesktopError| {
+		self.deliver_keys(target, &steps).map_err(|mut error| {
 			if self.text_mapping.presses() != before {
 				error
 					.message
@@ -493,6 +488,7 @@ impl Mpx {
 	}
 
 	fn deliver_keys(&mut self, target: Window, steps: &[KeyStep]) -> CoreResult<()> {
+		self.warm()?;
 		self.focus(target)?;
 		let result = self.emit_keys(steps);
 		if result.is_err() {
@@ -571,6 +567,7 @@ impl Mpx {
 				keycodes.push(code);
 			}
 		}
+		self.warm()?;
 		self.focus(target)?;
 		let presses: Vec<KeyStep> = keycodes
 			.iter()
@@ -897,6 +894,7 @@ impl Mpx {
 			// call that follows focuses its own.
 			unfocus(&self.conn, self.master_keyboard);
 			let warmed = self.warm_up(&mut keyboard.device, keyboard.slave);
+			keyboard.warm = warmed.is_ok();
 			self.keyboard = Some(keyboard);
 			warmed?;
 		}
@@ -963,7 +961,7 @@ impl Mpx {
 
 	fn create_keyboard(&self) -> CoreResult<VirtualKeyboard> {
 		let device_name = format!("{} uinput keyboard", self.name);
-		let mut device = UInputDevice::keyboard(&device_name)?;
+		let device = UInputDevice::keyboard(&device_name)?;
 		let slave = wait_for_slave(&self.conn, &device_name, DeviceType::SLAVE_KEYBOARD)?;
 		attach(&self.conn, slave, self.master_keyboard)?;
 		select_raw(
@@ -972,10 +970,22 @@ impl Mpx {
 			slave,
 			XIEventMask::RAW_KEY_PRESS | XIEventMask::RAW_KEY_RELEASE,
 		)?;
-		// The first events of a fresh keyboard were observed to vanish while
-		// the master switches to the slave's keymap.
-		self.warm_up(&mut device, slave)?;
-		Ok(VirtualKeyboard { device, slave })
+		Ok(VirtualKeyboard { device, slave, warm: false })
+	}
+
+	/// Warms a keyboard created for this call, focused nowhere, before its
+	/// first keys: the first events of a fresh keyboard were observed to
+	/// vanish while the master switches to the slave's keymap. Deferred from
+	/// creation, so a call refused while it plans sends no key at all.
+	fn warm(&mut self) -> CoreResult<()> {
+		let Some(mut keyboard) = self.keyboard.take_if(|keyboard| !keyboard.warm) else {
+			return Ok(());
+		};
+		unfocus(&self.conn, self.master_keyboard);
+		let warmed = self.warm_up(&mut keyboard.device, keyboard.slave);
+		keyboard.warm = warmed.is_ok();
+		self.keyboard = Some(keyboard);
+		warmed
 	}
 
 	/// Pushes a symbol-less key through the whole pipeline of a keyboard
@@ -2385,7 +2395,11 @@ mod tests {
 			master_keyboard: keyboard,
 			pointer: UInputDevice::test_sink(),
 			pointer_slave: 0,
-			keyboard: Some(VirtualKeyboard { device: UInputDevice::test_sink(), slave: keyboard }),
+			keyboard: Some(VirtualKeyboard {
+				device: UInputDevice::test_sink(),
+				slave:  keyboard,
+				warm:   true,
+			}),
 			uncertain: false,
 			sent: false,
 			release_events: None,
