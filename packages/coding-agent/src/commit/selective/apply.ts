@@ -100,18 +100,30 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
 
 /**
  * Commit the draft's selection on top of the current HEAD.
- * @throws when nothing is selected; on `amend` when HEAD is not a selective commit of this
- * session; when HEAD moved onto changes that conflict with the selection; or when a hook fails.
+ * @throws when a merge, cherry-pick, revert, rebase, or git am is in progress, or the index has
+ * unresolved conflicts; when nothing is selected;
+ * on `amend` when HEAD is not a selective commit of this session; when HEAD moved onto changes
+ * that conflict with the selection; or when a hook fails.
  */
 export async function commitSelection(
 	draft: Draft,
 	request: CommitRequest,
 	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
 ): Promise<CommitOutcome> {
+	const repo = vcs.requireGit(draft.root);
+	const operation = await repo.operationKind(context.signal);
+	if (operation === "unmerged-index") {
+		throw new Error("The index has unresolved conflicts; resolve them before using commit().");
+	}
+	if (operation) {
+		throw new Error(
+			`A ${operation === "am" ? "git am" : operation} is in progress; finish or abort it before using commit(). Use plain \`git commit\` for commits within that operation.`,
+		);
+	}
+	const gitDir = repo.info().gitDir;
 	const message = composeMessage(request);
 	const changes = draft.selection();
 	if (changes.length === 0) throw new Error("Nothing selected; use take() first.");
-	const repo = vcs.requireGit(draft.root);
 	const patches: Array<{ path: string; patch: string }> = [];
 	for (const change of changes) {
 		const patch = await patchFor(repo, draft.head, change);
@@ -127,7 +139,7 @@ export async function commitSelection(
 		: undefined;
 	const joined = vcs.joinPatches(patches.map(entry => entry.patch));
 	const indexPath = path.join(
-		repo.info().gitDir,
+		gitDir,
 		`omp-commit-${draft.id}-${Math.floor(Math.random() * 46656).toString(36)}.index`,
 	);
 	let sha: string | undefined;
@@ -177,7 +189,7 @@ export async function commitSelection(
 	const indexNotes: string[] = [];
 	// A new repository may have no index file yet. Git reads that as an empty index, but patch
 	// application reads HEAD in its place, so seed it with the root commit's tree instead.
-	const seedIndex = parent === null && !(await Bun.file(path.join(repo.info().gitDir, "index")).exists());
+	const seedIndex = parent === null && !(await Bun.file(path.join(gitDir, "index")).exists());
 	if (seedIndex) await repo.readTree(sha, undefined, context.signal);
 	// One write for every path: each write takes `index.lock`, which a concurrent git (a prompt's
 	// or an editor's `git status`) may hold. Per-path writes only when a path's entry differs.

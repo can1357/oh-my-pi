@@ -364,8 +364,6 @@ export class StdoutStallWatchdog {
  * Minimal terminal interface for TUI
  */
 
-// Track if a terminal was ever started (for emergency restore logic)
-let terminalEverStarted = false;
 // Whether the alternate screen buffer is currently active (mirrors the TUI's
 // overlay enter/leave writes). Consulted by emergencyTerminalRestore: DECRST
 // 1049 must never be written blindly, because Windows' shared VT dispatcher
@@ -483,35 +481,9 @@ export function emergencyTerminalRestore(): void {
 				terminal.write(`${keyboardExit}\x1b[?1049l`);
 				altScreenActive = false;
 			}
-			terminal.stop();
+			// Queue every restore before stop retires the bounded output pump.
 			terminal.showCursor(true);
-		} else if (terminalEverStarted && !isTerminalHeadless()) {
-			// Blind restore only if we know a terminal was started but lost track of it
-			// This avoids writing escape sequences for non-TUI commands (grep, commit, etc.)
-			process.stdout.write(
-				"\x1b[?2026l" + // End synchronized output
-					"\x1b[?7h" + // Restore autowrap
-					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
-					"\x1b[?2004l" + // Disable bracketed paste
-					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
-					"\x1b[?2048l" + // Disable in-band resize notifications
-					"\x1b[?5522l" + // Disable enhanced paste notifications
-					"\x1b[<u" + // Pop kitty keyboard protocol
-					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
-					"\x1b[?9001l" + // Disable win32-input-mode fallback (Windows console)
-					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
-					// Leave the alternate screen only when a fullscreen overlay
-					// actually holds it — on Windows, DECRST 1049 on the main
-					// buffer homes the cursor (unconditional CursorRestoreState
-					// with no prior save), corrupting the shell handoff on exit.
-					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
-					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
-					"\x1b[?25h", // Show cursor
-			);
-			altScreenActive = false;
-			if (process.stdin.setRawMode) {
-				process.stdin.setRawMode(false);
-			}
+			terminal.stop();
 		}
 	} catch {
 		// Terminal may already be dead during crash cleanup - ignore errors
@@ -622,10 +594,19 @@ export interface Terminal {
 	 * Output bytes accepted but not yet delivered to the terminal, when the
 	 * implementation can report it. The renderer skips composing new frames
 	 * while this backlog is deep, so a slow terminal receives only fresh
-	 * frames instead of a queue of stale ones. Optional so custom Terminals
-	 * built against older pi-tui versions keep working.
+	 * frames instead of a queue of stale ones. May be a conservative UTF-8
+	 * upper bound. Implementations reporting a backlog must also implement
+	 * {@link onOutputDrain}; terminals without backpressure may omit both.
 	 */
 	readonly pendingOutputBytes?: number;
+
+	/**
+	 * Subscribe to output becoming healthy (at or below
+	 * {@link STDOUT_BACKLOG_CLEAR_BYTES}). Returns an unsubscribe function.
+	 * Callers must recheck the backlog after subscribing: it may have drained
+	 * before the listener was installed. Notifications may be coalesced.
+	 */
+	onOutputDrain?(callback: () => void): () => void;
 
 	/**
 	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
@@ -952,6 +933,11 @@ export class ProcessTerminal implements Terminal {
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
 	#pumpBacklogBound = 0;
+	#outputSession = 0;
+	#outputStopped = false;
+	#outputDrainCallback?: () => void;
+	#stdoutDrainListener?: () => void;
+	#outputDrainListeners = new Set<() => void>();
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -1174,6 +1160,7 @@ export class ProcessTerminal implements Terminal {
 		onDisconnect?: () => void,
 		options?: TerminalStartOptions,
 	): void {
+		this.#outputStopped = false;
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
@@ -1194,18 +1181,40 @@ export class ProcessTerminal implements Terminal {
 		setActiveTerminal(this);
 		// RGB belongs to this ownership session, including deferred-input prepaint.
 		setTerminalBackgroundColor(undefined);
-		terminalEverStarted = true;
-		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
-		// prebuilt natives module without the export falls back to direct writes.
+		const outputSession = ++this.#outputSession;
+		const terminalRef = new WeakRef(this);
+		this.#outputDrainCallback = () => {
+			// The native callback must not root its own writer through the terminal.
+			const terminal = terminalRef.deref();
+			if (!terminal || outputSession !== terminal.#outputSession || terminal.#dead) return;
+			const pump = terminal.#outputPump;
+			if (pump?.dead) {
+				terminal.#markTerminalDisconnected("stdout failed; output pump died");
+				return;
+			}
+			// A notification can be queued behind another enqueue. Refresh instead
+			// of assuming the queue is still below the threshold.
+			const pending = pump?.pending() ?? process.stdout.writableLength ?? 0;
+			terminal.#pumpBacklogBound = pending;
+			terminal.#trackStdoutBacklog(pending);
+			if (terminal.#dead || pending > STDOUT_BACKLOG_CLEAR_BYTES) return;
+			for (const listener of terminal.#outputDrainListeners) listener();
+		};
+		// Own write(2) on a dedicated pump thread (unix TTYs only).
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
 		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
 		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
 			try {
-				this.#outputPump = new TtyWriter(1);
+				this.#outputPump = new TtyWriter(1, STDOUT_BACKLOG_CLEAR_BYTES, this.#outputDrainCallback);
 				this.#pumpBacklogBound = 0;
 			} catch (err) {
 				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
 			}
+		}
+
+		if (!this.#outputPump) {
+			this.#stdoutDrainListener = this.#outputDrainCallback;
+			process.stdout.on("drain", this.#stdoutDrainListener);
 		}
 
 		// Keep unmanaged native fd-2 writes off the viewport while we own the
@@ -2608,6 +2617,16 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	stop(): void {
+		if (this.#outputStopped) return;
+		// Invalidate even callbacks already queued before removing their source.
+		this.#outputSession++;
+		this.#outputDrainCallback = undefined;
+		if (this.#stdoutDrainListener) {
+			process.stdout.removeListener("drain", this.#stdoutDrainListener);
+			this.#stdoutDrainListener = undefined;
+		}
+		this.#outputDrainListeners.clear();
+		this.#outputDrainListeners = new Set();
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
@@ -2617,7 +2636,10 @@ export class ProcessTerminal implements Terminal {
 			setActiveTerminal(null);
 			setTerminalBackgroundColor(undefined);
 		}
-		if (this.#headless) return;
+		if (this.#headless) {
+			this.#outputStopped = true;
+			return;
+		}
 
 		// Release terminal ownership of fd 2 first so external programs,
 		// suspend, and shutdown see the real stderr even if a later teardown
@@ -2759,12 +2781,15 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#disarmStdoutStallWatchdog();
 		this.#resizeHandler = undefined;
-		// Flush the restore sequences enqueued above (bounded — a stalled PTY
-		// must not wedge exit), then retire the pump. Later writes (emergency
-		// restore's showCursor) fall back to direct stdout writes.
+		this.showCursor(true);
+		// Queue all restoration before retiring the pump. This instance cannot
+		// write again until start(), even when the bounded drain times out.
+		this.#outputStopped = true;
 		if (this.#outputPump) {
-			this.#outputPump.stop(1000);
+			const pump = this.#outputPump;
 			this.#outputPump = undefined;
+			this.#pumpBacklogBound = 0;
+			pump.stop(1000);
 		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
@@ -2848,7 +2873,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#safeWrite(data: string): void {
-		if (this.#headless) return;
+		if (this.#headless || this.#outputStopped) return;
 		if (this.#dead) return;
 		// Skip control sequences when stdout isn't a TTY (piped output, tests, log
 		// files). They serve no purpose there and would surface as visible noise.
@@ -2864,14 +2889,8 @@ export class ProcessTerminal implements Terminal {
 				this.#markTerminalDisconnected("stdout failed", err);
 				return;
 			}
-			// A live enqueue reports at least this chunk's UTF-8 size, never below
-			// its UTF-16 length; a dead pump enqueues nothing and reports only the
-			// remainder it is dropping (soon zero). Only a report that small can
-			// come from a dead pump, so the native `dead` read is skipped otherwise.
-			if ((pending < data.length || data.length === 0) && pump.dead) {
-				this.#markTerminalDisconnected("stdout failed; output pump died");
-				return;
-			}
+			// Terminal failures are reported by the pump's drain callback even
+			// while idle; enqueue counts cannot distinguish failure from progress.
 			this.#pumpBacklogBound = pending;
 			// Feed the live backlog to the stall watchdog rather than tripping on
 			// the instantaneous byte count: a single large-but-draining frame (a
@@ -2925,6 +2944,12 @@ export class ProcessTerminal implements Terminal {
 		if (this.#inBandResizeActive && this.#reportedColumns) return this.#reportedColumns;
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
 	}
+	onOutputDrain(callback: () => void): () => void {
+		const listeners = this.#outputDrainListeners;
+		listeners.add(callback);
+		return () => listeners.delete(callback);
+	}
+
 	/**
 	 * With the output pump, a backlog bound at or below
 	 * {@link STDOUT_BACKLOG_CLEAR_BYTES} is reported as-is instead of re-read:

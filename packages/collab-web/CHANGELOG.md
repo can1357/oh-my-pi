@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.22.0] - 2026-11-16
+
+### Fixed
+
+- Improved streaming performance in the collab viewer, preventing long replies from becoming progressively slower as they are received.
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed
