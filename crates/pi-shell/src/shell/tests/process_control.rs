@@ -1489,26 +1489,35 @@ async fn spawn_peer_session(command: &std::path::Path, duration: Duration) -> Pe
 		.trim()
 		.parse()
 		.expect("peer pid");
-	PeerSession(pid)
+	PeerSession::open(pid)
 }
 
-/// A detached peer is nobody's child here, so nothing reaps it on drop.
+/// A detached peer is nobody's child here, so nothing reaps it on drop. The
+/// handle is pinned to the process it opened (a pidfd on Linux, the start
+/// time on macOS), so neither the probe nor the cleanup can reach a process
+/// that reuses the pid after the peer exits.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-struct PeerSession(i32);
+struct PeerSession(proctree::Process);
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl PeerSession {
+	fn open(pid: i32) -> Self {
+		Self(proctree::Process::from_pid(pid).expect("peer process is running"))
+	}
+
+	const fn pid(&self) -> i32 {
+		self.0.pid()
+	}
+
 	fn is_alive(&self) -> bool {
-		// SAFETY: plain syscall without pointer arguments; signal 0 only probes.
-		unsafe { libc::kill(self.0, 0) == 0 }
+		self.0.status() == proctree::ProcessStatus::Running
 	}
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for PeerSession {
 	fn drop(&mut self) {
-		// SAFETY: plain syscall without pointer arguments.
-		unsafe { libc::kill(self.0, libc::SIGKILL) };
+		self.0.signal(libc::SIGKILL);
 	}
 }
 
@@ -1531,7 +1540,7 @@ async fn pkill_full_pattern_skips_peer_sessions_but_signals_own_children() {
 		.arg(&name)
 		.spawn()
 		.expect("own plain child");
-	wait_for_process_name(peer.0, &name).await;
+	wait_for_process_name(peer.pid(), &name).await;
 	wait_for_process_name(own_copy_pid, &name).await;
 
 	let (result, output) =
@@ -1547,7 +1556,7 @@ async fn pkill_full_pattern_skips_peer_sessions_but_signals_own_children() {
 	assert!(
 		output.contains(&format!(
 			"pkill: refusing to signal pid {} (another session of this program",
-			peer.0
+			peer.pid()
 		)),
 		"the skipped peer must be reported: {output:?}"
 	);
@@ -1574,13 +1583,13 @@ async fn kill_builtin_refuses_peer_sessions_but_not_own_copies() {
 		.spawn()
 		.expect("own copy of the program");
 	let own_copy_pid = i32::try_from(own_copy.id().expect("own copy pid")).expect("pid fits i32");
-	wait_for_process_name(peer.0, &name).await;
+	wait_for_process_name(peer.pid(), &name).await;
 	wait_for_process_name(own_copy_pid, &name).await;
 
 	let (result, output) = execute_captured(format!(
 		"kill -CONT {peer}; printf 'peer=%s\n' \"$?\"; kill -TERM {own_copy_pid}; printf 'own=%s\n' \
 		 \"$?\"",
-		peer = peer.0
+		peer = peer.pid()
 	))
 	.await;
 
