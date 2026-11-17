@@ -61,18 +61,18 @@ describe("TTSR gate rules", () => {
 		const { judge, requests } = fakeJudge({ [DELETES]: 0.9 });
 		const { coordinator } = setup([gateRule("no-rm", {})], judge, Settings.isolated());
 
-		const refusal = await coordinator.gateToolCall(bash, RM, "call-1");
+		const { refusal } = await coordinator.gateToolCall(bash, RM, "call-1");
 
 		expect(refusal).toContain("no-rm guidance");
 		expect(requests).toHaveLength(1);
 		expect(JSON.stringify(requests[0].state)).toContain("rm -rf /srv/data");
 	});
 
-	it("[gate-02] runs a call the judge answers below the threshold", async () => {
+	it("[gate-02] runs a call the judge answers below the threshold, reporting the gate covered it", async () => {
 		const { judge, requests } = fakeJudge({ [DELETES]: 0.69 });
 		const { coordinator } = setup([gateRule("no-rm", {})], judge, Settings.isolated());
 
-		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toBeUndefined();
+		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toEqual({ covered: true });
 		expect(requests).toHaveLength(1);
 	});
 
@@ -82,8 +82,8 @@ describe("TTSR gate rules", () => {
 		const allowing = setup([gateRule("no-rm", {})], stuckJudge, settings);
 
 		const started = Date.now();
-		const refusal = await blocking.coordinator.gateToolCall(bash, RM, "call-1");
-		const allowed = await allowing.coordinator.gateToolCall(bash, RM, "call-2");
+		const { refusal } = await blocking.coordinator.gateToolCall(bash, RM, "call-1");
+		const { refusal: allowed } = await allowing.coordinator.gateToolCall(bash, RM, "call-2");
 
 		expect(Date.now() - started).toBeLessThan(2_000);
 		expect(refusal).toContain("no-rm guidance");
@@ -94,16 +94,16 @@ describe("TTSR gate rules", () => {
 		const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], failingJudge, Settings.isolated());
 		const allowing = setup([gateRule("no-rm", {})], failingJudge, Settings.isolated());
 
-		expect(await blocking.coordinator.gateToolCall(bash, RM, "call-1")).toContain("no-rm guidance");
-		expect(await allowing.coordinator.gateToolCall(bash, RM, "call-2")).toBeUndefined();
+		expect((await blocking.coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
+		expect((await allowing.coordinator.gateToolCall(bash, RM, "call-2")).refusal).toBeUndefined();
 	});
 
 	it("[gate-05] with judged rules off, onJudgeError block refuses and allow runs", async () => {
 		const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], undefined, Settings.isolated());
 		const allowing = setup([gateRule("no-rm", { onJudgeError: "allow" })], undefined, Settings.isolated());
 
-		expect(await blocking.coordinator.gateToolCall(bash, RM, "call-1")).toContain("no-rm guidance");
-		expect(await allowing.coordinator.gateToolCall(bash, RM, "call-2")).toBeUndefined();
+		expect((await blocking.coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
+		expect((await allowing.coordinator.gateToolCall(bash, RM, "call-2")).refusal).toBeUndefined();
 	});
 
 	it("[gate-08] never judges a gate rule after the output completes", async () => {
@@ -126,8 +126,8 @@ describe("TTSR gate rules", () => {
 		const { judge, requests } = fakeJudge({ [DELETES]: 0.9 });
 		const { coordinator } = setup([gateRule("no-rm", { repeatMode: "once" })], judge, Settings.isolated());
 
-		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toContain("no-rm guidance");
-		expect(await coordinator.gateToolCall(bash, RM, "call-2")).toContain("no-rm guidance");
+		expect((await coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
+		expect((await coordinator.gateToolCall(bash, RM, "call-2")).refusal).toContain("no-rm guidance");
 		expect(requests).toHaveLength(2);
 	});
 
@@ -157,7 +157,7 @@ describe("TTSR gate rules", () => {
 		await coordinator.settleJudgments();
 		expect(requests).toHaveLength(0);
 
-		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toContain("no-rm guidance");
+		expect((await coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
 		expect(requests).toHaveLength(1);
 	});
 
@@ -175,6 +175,28 @@ describe("TTSR gate rules", () => {
 
 		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(3);
 		expect(stops).toEqual(["The tool guard refused 3 tool calls in a row; the run stopped."]);
+	});
+
+	it("[gate-16] a read-tier call a gate judged and allowed ends a run of refusals", async () => {
+		const SECRETS = "Does this call read a file under secrets/?";
+		const verdicts = { [SECRETS]: 0 };
+		const { judge } = fakeJudge(verdicts);
+		const settings = Settings.isolated();
+		const { coordinator } = setup([judgedRule("no-secrets", { gate: "before", question: SECRETS })], judge, settings);
+		const stops: string[] = [];
+		const guard = guardOver(coordinator, settings, stops);
+		const read = { ...bash, name: "read", label: "read", approval: "read" } as AgentTool;
+		const results: (string | undefined)[] = [];
+
+		for (let i = 0; i < 5; i++) {
+			const refused = i % 2 === 0;
+			verdicts[SECRETS] = refused ? 1 : 0;
+			const path = refused ? `secrets/${i}` : `src/${i}.ts`;
+			results.push(await guard.check({ toolCallId: `call-${i}`, tool: read, args: { path }, tier: "read" }));
+		}
+
+		expect(results.map(result => result !== undefined)).toEqual([true, false, true, false, true]);
+		expect(stops).toEqual([]);
 	});
 
 	it("[gate-15] neither refuses, reports nor counts calls aborted while the judge is pending", async () => {
@@ -209,7 +231,7 @@ describe("TTSR gate rules", () => {
 		const { judge } = fakeJudge({ [DELETES]: 0.9 });
 		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
 		const { coordinator } = setup([gateRule("no-rm", {})], judge, settings);
-		const expected = await coordinator.gateToolCall(bash, RM, "call-1");
+		const { refusal: expected } = await coordinator.gateToolCall(bash, RM, "call-1");
 		const runner = new ExtensionRunner(
 			[],
 			new ExtensionRuntime(),
@@ -244,7 +266,7 @@ describe("TTSR gate rules", () => {
 			Settings.isolated(),
 		);
 
-		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toBeUndefined();
+		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toEqual({ covered: false });
 		expect(requests).toHaveLength(0);
 	});
 

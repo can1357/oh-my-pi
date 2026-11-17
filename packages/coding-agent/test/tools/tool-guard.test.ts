@@ -232,7 +232,7 @@ describe("tool guard", () => {
 
 	it("[gate-06] runs rule gates while the setting is off", async () => {
 		const judge = fakeJudge({ destroys_data: 1 }, 0);
-		const gate = vi.fn(async () => "gate refused");
+		const gate = vi.fn(async () => ({ covered: true, refusal: "gate refused" }));
 		const { guard } = guardWith(judge, {}, gate);
 
 		expect(await guard.check(call(bash, { command: "rm -rf /srv/db" }, "exec"))).toBe("gate refused");
@@ -243,7 +243,7 @@ describe("tool guard", () => {
 	it("[gate-07] runs rule gates on a call the user approved in a prompt, which the harm judge skips", async () => {
 		const judge = fakeJudge({ destroys_data: 1 }, 0);
 		let refuse = true;
-		const gate = vi.fn(async () => (refuse ? "gate refused" : undefined));
+		const gate = vi.fn(async () => ({ covered: true, refusal: refuse ? "gate refused" : undefined }));
 		const { guard } = guardWith(judge, undefined, gate);
 
 		expect(await guard.check(call(bash, { command: "rm -rf /srv/db" }, "exec", true))).toBe("gate refused");
@@ -394,7 +394,7 @@ describe("tool guard", () => {
 			},
 		};
 		let refuse = false;
-		const gate = vi.fn(async () => (refuse ? "gate refused" : undefined));
+		const gate = vi.fn(async () => ({ covered: true, refusal: refuse ? "gate refused" : undefined }));
 		const { guard } = guardWith(failing, undefined, gate);
 		const risky = { command: "rm -rf /srv/db" };
 

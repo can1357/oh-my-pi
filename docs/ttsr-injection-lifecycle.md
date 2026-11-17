@@ -351,7 +351,7 @@ Never delete files outside the working directory; ask the user first.
 
 - `ExtensionToolWrapper` calls the session's tool guard (`ExtensionRunner.setToolGuard`) once per call, after the approval gate, with the arguments that will run. Agent-loop and bridged (eval, Cursor exec) calls both pass through it.
 - `ToolGuard.check()` runs the gate first on every call: calls the user approved in a prompt too, and whether or not `tools.guard.enabled` is on. Only then does the harm guard screen calls approval let through on its own. The harm guard's judge breaker never skips gates.
-- A gate refusal counts toward the tool guard's stop rule: three refusals in a row (or 20 in one run) stop the run.
+- A gate refusal counts toward the tool guard's stop rule: three refusals in a row (or 20 in one run) stop the run. A call that runs ends a streak, except a read-tier call no gate rule covers, since nothing could have refused it; a read-tier call a gate rule covers and lets through does end it.
 
 ### Matching and judging
 

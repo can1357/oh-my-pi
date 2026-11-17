@@ -173,8 +173,16 @@ export interface ToolGuardHost {
 	 * Defaults to {@link readHostPressure} for the working directory.
 	 */
 	hostPressure?(): Promise<HostPressure | undefined>;
-	/** Judges the call against the session's TTSR gate rules: the refusal, or undefined to go on. */
-	gate?(tool: AgentTool, args: unknown, toolCallId: string, signal?: AbortSignal): Promise<string | undefined>;
+	/** Judges the call against the session's TTSR gate rules. */
+	gate?(tool: AgentTool, args: unknown, toolCallId: string, signal?: AbortSignal): Promise<GateVerdict>;
+}
+
+/** What a session's TTSR gate rules made of one tool call. */
+export interface GateVerdict {
+	/** False when no gate rule covers the call: the gates had no say in it. */
+	covered: boolean;
+	/** The refusal shown to the model in place of the call's result; undefined runs the call. */
+	refusal?: string;
 }
 
 function stringArg(args: unknown, key: string): string | undefined {
@@ -543,7 +551,6 @@ function guardEnabled(settings: Settings): boolean {
 /**
  * One session's tool guard: runs the rule gates on every call, screens each call approval allowed on
  * its own, and counts what both refused. A run is one request: the counts restart when a new one arrives.
- * one request: the counts restart when a new one arrives.
  */
 export class ToolGuard {
 	readonly #host: ToolGuardHost;
@@ -572,14 +579,17 @@ export class ToolGuard {
 			this.#total = 0;
 		}
 		// Rule gates never consult the judge breaker below: a failing judge must not open them.
-		const gated = await this.#host.gate?.(tool, args, toolCall.toolCallId, signal);
-		if (gated !== undefined) {
+		const gate = await this.#host.gate?.(tool, args, toolCall.toolCallId, signal);
+		if (gate?.refusal !== undefined) {
 			logger.warn("tool guard: a rule gate refused a call", { tool: tool.name });
-			return this.#refused(gated);
+			return this.#refused(gate.refusal);
 		}
+		// An allowed call ends a run of refusals, except a read-tier call no gate covers: nothing could
+		// have refused it.
+		const endsRefusals = tier !== "read" || gate?.covered === true;
 		const settings = this.#host.settings;
 		if (toolCall.prompted || !guardEnabled(settings)) {
-			if (tier !== "read") this.#consecutive = 0;
+			if (endsRefusals) this.#consecutive = 0;
 			return undefined;
 		}
 		const cwd = this.#host.cwd();
@@ -597,7 +607,7 @@ export class ToolGuard {
 			judged = true; // a command the scanner cannot follow is judged
 		}
 		if (!judged) {
-			if (tier !== "read") this.#consecutive = 0;
+			if (endsRefusals) this.#consecutive = 0;
 			return undefined;
 		}
 		const verdict = await this.#judge(call, messages, guardRequests(messages), cwd, signal);

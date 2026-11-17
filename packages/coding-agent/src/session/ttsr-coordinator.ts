@@ -32,6 +32,7 @@ import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { t
 import ttsrProseNoticeTemplate from "../prompts/system/ttsr-prose-notice.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
+import type { GateVerdict } from "../tools/tool-guard";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { SessionManager } from "./session-manager";
@@ -630,18 +631,13 @@ export class TtsrCoordinator {
 
 	/**
 	 * Judges a call against `gate: before` rules before it runs: the refusal shown in place of its
-	 * result, or undefined to run it. When the judge is off, fails, outlasts `ttsr.gateTimeoutMs` or
-	 * answers no number, each rule's `onJudgeError` decides. Rejects when `signal` aborts the wait: an
-	 * aborted call is neither refused nor run.
+	 * result, or none to run it, and whether any gate rule covered the call at all. When the judge is
+	 * off, fails, outlasts `ttsr.gateTimeoutMs` or answers no number, each rule's `onJudgeError`
+	 * decides. Rejects when `signal` aborts the wait: an aborted call is neither refused nor run.
 	 */
-	async gateToolCall(
-		tool: AgentTool,
-		args: unknown,
-		toolCallId: string,
-		signal?: AbortSignal,
-	): Promise<string | undefined> {
+	async gateToolCall(tool: AgentTool, args: unknown, toolCallId: string, signal?: AbortSignal): Promise<GateVerdict> {
 		const manager = this.#manager;
-		if (!manager?.hasGateRules()) return undefined;
+		if (!manager?.hasGateRules()) return { covered: false };
 		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
 		const settings = this.#host.settings;
 		// Read from the operator layers only; a project layer does not set the gate's wait.
@@ -652,26 +648,33 @@ export class TtsrCoordinator {
 				.toolCallOutputs(toolCall, 0)
 				.map(output => this.#gateOutput(manager, output, signal, deadline)),
 		);
-		const refused = verdicts.find(verdict => verdict !== undefined);
-		if (!refused) return undefined;
+		const covered = verdicts.some(verdict => verdict !== undefined);
+		const refused = verdicts.find(verdict => verdict?.rule !== undefined);
+		if (!refused?.rule) return { covered };
 		const { rule, output, unjudged } = refused;
 		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: [rule] }).catch(() => {});
-		return prompt.render(ttsrGateRefusedTemplate, {
-			name: rule.name,
-			path: this.#displayRulePath(rule.path),
-			subject: output.subject,
-			content: rule.content,
-			unjudged,
-		});
+		return {
+			covered,
+			refusal: prompt.render(ttsrGateRefusedTemplate, {
+				name: rule.name,
+				path: this.#displayRulePath(rule.path),
+				subject: output.subject,
+				content: rule.content,
+				unjudged,
+			}),
+		};
 	}
 
-	/** The first gate rule, in rule order, that refuses `output`; `unjudged` when the judge gave no answer. */
+	/**
+	 * Undefined when no gate rule covers `output`; else the first gate rule, in rule order, that refuses
+	 * it (`unjudged` when the judge gave no answer), or no rule when every one allows it.
+	 */
 	async #gateOutput(
 		manager: TtsrManager,
 		output: TtsrOutput,
 		signal: AbortSignal | undefined,
 		deadline: AbortSignal,
-	): Promise<{ rule: Rule; output: TtsrOutput; unjudged: boolean } | undefined> {
+	): Promise<{ output: TtsrOutput; rule?: Rule; unjudged?: boolean } | undefined> {
 		const candidates = await manager.gateCandidates(output.content, output.context);
 		if (candidates.length === 0) return undefined;
 		const judge = this.#host.ruleJudge();
@@ -700,7 +703,7 @@ export class TtsrCoordinator {
 				logger.warn("TTSR gate judge gave no answer; running the call", { rule: rule.name });
 			}
 		}
-		return undefined;
+		return { output };
 	}
 
 	#getStreamingToolCallBlock(message: AgentMessage, contentIndex: number): ToolCall | undefined {
