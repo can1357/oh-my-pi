@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Fixed
 
 - Fixed provider-error handling so failed tool calls are no longer fed back to the model as refusal explanations.

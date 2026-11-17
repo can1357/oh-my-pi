@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Added
 
 - Added `DesktopFocusReturn.keyboard`, which reports what happened to the user's keyboard after a macOS takeover: handed back, left as chosen, kept, brought to the front only, or not sent.

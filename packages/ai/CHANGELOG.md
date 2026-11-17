@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Added
 
 - Added support for request-specific Anthropic beta headers through the `extraBetas` option in `buildAnthropicSearchHeaders`.

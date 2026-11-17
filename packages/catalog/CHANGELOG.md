@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Fixed
 
 - Fixed Factory Droid's Muse Spark 1.3 support so image inputs work and the model is available without the retired feature flag.

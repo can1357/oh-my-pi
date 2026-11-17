@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Fixed
 
 - Fixed embedding requests failing when oversized inputs were clipped in the middle of an emoji or other Unicode character.

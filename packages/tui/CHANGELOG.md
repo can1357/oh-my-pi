@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Added
 
 - Task tool and agent hub rows now use distinct, theme-aware colours for the main agent and subagents; themes can optionally customize the six subagent colours.

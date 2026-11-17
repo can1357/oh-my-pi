@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Breaking Changes
 
 - The JavaScript eval `commit` helper now validates its arguments strictly: unknown option names and non-object options throw a `TypeError` that lists the supported options. Update scripts that pass extra options. Committing an unchanged draft repository now reports that it is unchanged instead of suggesting `take()`.
