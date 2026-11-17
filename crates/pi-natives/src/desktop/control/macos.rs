@@ -433,10 +433,10 @@ const fn foreign(tag: i64, source_pid: i64, own_pid: i64) -> bool {
 
 const fn foreign_input(tag: i64, source_pid: i64, own_pid: i64, kind: u32, point: CGPoint) -> bool {
 	// Raw make-key records have no tag; another omp process posts them as
-	// left presses at the origin. The tap subscribes only to presses, not
-	// releases. Hardware input still has source pid zero. A foreign tool's
-	// untagged origin press is indistinguishable from this measured make-key
-	// shape.
+	// left presses at the origin. Releases never reach this check: they only
+	// place the click their press began. Hardware input still has source pid
+	// zero. A foreign tool's untagged origin press is indistinguishable from
+	// this measured make-key shape.
 	let make_key =
 		tag == 0 && source_pid != 0 && kind == LEFT_MOUSE_DOWN && point.x == 0.0 && point.y == 0.0;
 	foreign(tag, source_pid, own_pid) && !make_key
@@ -586,7 +586,10 @@ unsafe extern "C" fn observe_user(_proxy: Ref, kind: u32, event: Ref, user: Ref)
 				ButtonRecord::Skipped => {},
 			}
 		}
-		if let Some(hardware) = observed(tag, source, own, kind, point) {
+		// A release only places the click its press already counted, above.
+		if !is_pointer_release(kind)
+			&& let Some(hardware) = observed(tag, source, own, kind, point)
+		{
 			let at = Instant::now();
 			if hardware {
 				context.inner.pressed(at);
