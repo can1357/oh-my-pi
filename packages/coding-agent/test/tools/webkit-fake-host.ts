@@ -20,8 +20,9 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
  * - `fail-open`: answers `open` with a `failed` error.
  * - `fail-navigation`: reports a `failed` load for every `goto`.
  * - `ignore-eof`: keeps running after its input ended.
+ * - `late-welcome`: holds its welcome until {@link FakeHost.welcome} lets it answer.
  */
-export type FakeHostMode = "ok" | "exit-on-hello" | "fail-open" | "fail-navigation" | "ignore-eof";
+export type FakeHostMode = "ok" | "exit-on-hello" | "fail-open" | "fail-navigation" | "ignore-eof" | "late-welcome";
 
 /** A fake engine directory. */
 export interface FakeHost {
@@ -35,6 +36,8 @@ export interface FakeHost {
 	pid(): Promise<number>;
 	/** Whether a host process saw the end of its input. */
 	sawEndOfInput(): Promise<boolean>;
+	/** Let a `late-welcome` host answer the greeting it holds. */
+	welcome(): Promise<void>;
 	remove(): Promise<void>;
 }
 
@@ -129,7 +132,15 @@ process.stdin.on("data", chunk => {
 		buffered = buffered.subarray(4 + length);
 		if (message.hello) {
 			if (mode === "exit-on-hello") process.exit(3);
-			send({ welcome: { ops: ["browser", "dom", "console", "network"] } });
+			const welcome = () => send({ welcome: { ops: ["browser", "dom", "console", "network"] } });
+			if (mode !== "late-welcome") welcome();
+			else {
+				const held = setInterval(() => {
+					if (!fs.existsSync(path.join(dir, "welcome"))) return;
+					clearInterval(held);
+					welcome();
+				}, 10);
+			}
 		} else if (message.browser) {
 			fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(message.browser) + "\n");
 			const result = answer(message.browser, message.id);
@@ -166,6 +177,9 @@ export async function createFakeHost(mode: FakeHostMode = "ok"): Promise<FakeHos
 		requests: async () => Bun.JSONL.parse((await read("requests.jsonl")) ?? "") as Array<Record<string, unknown>>,
 		pid: async () => Number(await read("pid")),
 		sawEndOfInput: async () => (await read("eof")) !== null,
+		welcome: async () => {
+			await Bun.write(path.join(dir, "welcome"), "");
+		},
 		remove: async () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		},

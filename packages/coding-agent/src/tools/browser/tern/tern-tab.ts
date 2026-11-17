@@ -109,6 +109,7 @@ import {
 	screenshotScope,
 	screenshotThreshold,
 } from "../screenshot";
+import { normalizeSelectOptions, type SelectOptionInput } from "../select-options";
 import {
 	type AriaSnapshotBaseline,
 	type AriaSnapshotDiffResult,
@@ -311,6 +312,7 @@ const RESOLVE_ACTIONS: Record<TernTargetAction, DomResolveAction> = {
 	drag: "hover",
 	type: "type",
 	fill: "type",
+	press: "none",
 	focus: "none",
 	point: "none",
 };
@@ -694,9 +696,9 @@ export class TernTab implements InProcessRunTab {
 		this.#runContext = context;
 	}
 
-	/** Forget the finished run. */
-	clearRunContext(): void {
-		this.#runContext = undefined;
+	/** Forget finished run `context`; a later run's context stays. */
+	clearRunContext(context: InProcessRunContext): void {
+		if (this.#runContext === context) this.#runContext = undefined;
 	}
 
 	/** Page facts the supervisor records for the tab. */
@@ -2338,7 +2340,13 @@ export class TernTab implements InProcessRunTab {
 	/** {@link press} inside `frame`. */
 	async pressIn(key: string, opts: { selector?: string | TernSelector } | undefined, frame: FramePath): Promise<void> {
 		assertTabPressArgs(key, opts);
-		if (opts?.selector) await this.focus(opts.selector, frame);
+		if (opts?.selector) {
+			if (!this.#native) {
+				const label = `tab.press(${JSON.stringify(key)}, { selector: ${describe(opts.selector)} })`;
+				await this.#target(label, opts.selector, "press", frame);
+			}
+			await this.focus(opts.selector, frame);
+		}
 		await this.#input(pressSteps(key, this.#mods));
 	}
 
@@ -2505,12 +2513,13 @@ export class TernTab implements InProcessRunTab {
 		if (!this.#native) await this.#kit("scrollIntoView", [spec]);
 	}
 
-	/** Select `<select>` options by value (then label). */
-	async select(selector: string | TernSelector, ...values: string[]): Promise<string[]> {
+	/** Select `<select>` options by value, label, or zero-based index. */
+	async select(selector: string | TernSelector, ...values: SelectOptionInput[]): Promise<string[]> {
+		const choices = normalizeSelectOptions(values, { coercePrimitives: true });
 		const spec = this.#spec(selector);
 		await this.#target(`tab.select(${describe(selector)})`, spec, "point", null);
 		return await this.#onKit(spec, null, (kitSpec, kitFrame) =>
-			this.#kit<string[]>("select", [kitSpec, values.map(String)], kitFrame),
+			this.#kit<string[]>("select", [kitSpec, choices], kitFrame),
 		);
 	}
 
@@ -4094,7 +4103,7 @@ export class TernElementHandle {
 	}
 
 	/** Select options. */
-	async select(...values: string[]): Promise<string[]> {
+	async select(...values: SelectOptionInput[]): Promise<string[]> {
 		return await this.#tab.select(this.#spec, ...values);
 	}
 

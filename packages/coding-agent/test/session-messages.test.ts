@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/message-cache";
-import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
+import {
+	type AgentMessage,
+	filterProviderReplayMessages,
+	PROVIDER_ERROR_NOT_EXECUTED_TEXT,
+} from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
@@ -95,6 +99,48 @@ describe("assistant refusal replay policy", () => {
 		const replayed = filterProviderReplayMessages(converted);
 		expect(replayed.map(message => message.role)).toEqual(["user", "user"]);
 		expect(JSON.stringify(replayed)).not.toContain("Refusal (bio)");
+	});
+
+	it("replays a refused turn's tool placeholders without the provider's refusal text", () => {
+		const refusal =
+			"Refusal (reasoning_extraction): This request was blocked as it seems to violate Anthropic's Terms of Service";
+		const messages: AgentMessage[] = [
+			{ role: "user", content: [{ type: "text", text: "go" }], timestamp: 1 },
+			{
+				role: "toolResult",
+				toolCallId: "toolu_refused",
+				toolName: "bash",
+				content: [
+					{
+						type: "text",
+						text: `Tool call was not executed because the provider stream ended with an error before the tool could run: ${refusal}`,
+					},
+				],
+				details: { __synthetic: true, source: "assistant_stop_error", executed: false, upstreamError: refusal },
+				isError: true,
+				timestamp: 2,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "toolu_ran",
+				toolName: "bash",
+				content: [{ type: "text", text: `grep output quoting ${refusal}` }],
+				isError: false,
+				timestamp: 3,
+			},
+		];
+
+		const converted = convertToLlm(messages);
+		expect(JSON.stringify(converted[1])).toContain("reasoning_extraction");
+
+		const replayed = filterProviderReplayMessages(converted);
+		expect(replayed[1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "toolu_refused",
+			isError: true,
+			content: [{ type: "text", text: PROVIDER_ERROR_NOT_EXECUTED_TEXT }],
+		});
+		expect(replayed[2]).toBe(converted[2]);
 	});
 });
 
