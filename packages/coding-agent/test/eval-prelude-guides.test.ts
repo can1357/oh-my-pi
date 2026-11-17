@@ -40,7 +40,8 @@ describe("Eval first-call guide messages", () => {
 		removeSyncWithRetries(dir);
 	});
 
-	async function open(sessionManager = SessionManager.inMemory(), toolNames?: string[]) {
+	// In-memory sessions default to the process cwd, which keys the process-wide eval registry; keep them in `dir`.
+	async function open(sessionManager = SessionManager.inMemory(dir), toolNames?: string[]) {
 		const { session } = await createAgentSession({
 			cwd: dir,
 			agentDir: dir,
@@ -144,7 +145,7 @@ describe("Eval first-call guide messages", () => {
 	});
 
 	it("does not duplicate documentation already inlined in a read-less session", async () => {
-		const { session } = await open(SessionManager.inMemory(), ["eval"]);
+		const { session } = await open(SessionManager.inMemory(dir), ["eval"]);
 		await drive(session, ["await browser.tabs()"]);
 		expect(
 			session.agent.state.messages.some(
