@@ -816,13 +816,13 @@ export class SelectorController {
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
-				onPick: async (model, selector, { overContext }) => {
+				onPick: async (model, selector, { overContext, thinkingLevel }) => {
 					if (!isCurrent()) return;
 					try {
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
 						if (overContext) done();
-						await this.#applySessionModel(model, selector, undefined, overContext);
+						await this.#applySessionModel(model, selector, thinkingLevel, overContext);
 						if (!overContext) done();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
@@ -864,6 +864,15 @@ export class SelectorController {
 				quickRoles: quickRoleCycle?.models,
 				quickRoleOrder,
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
+				// What #applySessionModel applies without a slider level: the model's role
+				// level, else the session's (auto carries over; a fixed level yields to the
+				// model's own default, as setModelTemporary re-applies it).
+				thinkingLevelFor: model => {
+					const roleLevel = viewed.resolveTemporaryModelThinkingLevel(model);
+					if (roleLevel !== undefined) return roleLevel;
+					const configured = viewed.configuredThinkingLevel();
+					return configured === AUTO_THINKING ? configured : (model.thinking?.defaultLevel ?? configured);
+				},
 			},
 		);
 		this.#mountMenu(menu, picker, () => {

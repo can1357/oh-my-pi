@@ -144,11 +144,11 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 
 	it("renders typed yield sections compactly in the progress branch", async () => {
 		const text = await renderProgressText({
-			yield: { type: ["notes"], useLastTurn: true, status: "success" },
+			yield: { type: ["notes"], data: "first note", status: "success" },
 		});
 
 		expect(text).toContain("yield+[notes]");
-		expect(text).toContain("last assistant turn");
+		expect(text).toContain("first note");
 	});
 
 	it("renders reviewer results assembled from incremental yield sections", async () => {

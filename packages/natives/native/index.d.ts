@@ -775,47 +775,31 @@ export declare class TextPredictor {
 }
 
 /**
- * Dedicated writer thread for one terminal fd.
- *
- * Duplicated (close-on-exec) at construction and closed on drop. The
- * duplicate keeps the pump's fd alive if the original is closed or replaced;
- * file-status flags such as `O_NONBLOCK` are shared and handled by polling for
- * `POLLOUT`. Close-on-exec keeps the terminal out of every child the process
- * spawns without explicit fd handling (`std::process::Command`, gitoxide
- * filter drivers), which could otherwise read the user's keystrokes and
- * terminal replies through it.
+ * Dedicated, cancellable terminal writer. The destination must be a TTY that
+ * can be independently reopened; pipes and files are deliberately rejected.
  */
 export declare class TtyWriter {
   /**
-   * Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
-   * when the descriptor cannot be duplicated.
+   * Start an independently opened terminal writer. onDrain runs when the
+   * pending bound crosses from above drainThreshold to at/below it, and on
+   * fatal writes even below the threshold. It does not retain the event loop.
    */
-  constructor(fd: number)
+  constructor(fd: number, drainThreshold: number, onDrain: () => void)
   /**
-   * Enqueue terminal output; never blocks. Returns the total bytes now
-   * pending (including this chunk).
-   *
-   * Reads the JS string as UTF-16 through the thread's scratch arena and
-   * transcodes it with `xutf` straight into the shared back buffer, so a
-   * warm writer costs no per-call heap allocation.
+   * Copy UTF-16 into pooled storage without UTF-8 sizing or transcoding on
+   * JS's thread. Returns a conservative pending UTF-8 byte upper bound.
    */
   write(data: string): number
-  /** Bytes accepted but not yet written to the terminal. */
+  /** Conservative UTF-8 bytes not yet written (tightened by the worker). */
   pending(): number
-  /** True once a write failed (dead PTY); queued output has been dropped. */
+  /** True after a terminal write failed; all pending output is dropped. */
   get dead(): boolean
-  /**
-   * Block the calling thread until the queue drains, the writer dies, or
-   * `timeout_ms` elapses. Returns true when fully drained. Exit paths only.
-   */
+  /** Wait for queued output until the deadline. False on timeout or failure. */
   flushSync(timeoutMs: number): boolean
   /**
-   * Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
-   *
-   * A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
-   * cannot be joined without freezing the caller: when the bounded flush
-   * times out the thread is detached instead and its dup'd fd is leaked —
-   * closing it under a blocked write would race kernel fd reuse.
+   * Drain until the deadline, then cancel and join. Never detaches a writer
+   * or leaves old output running after return. Already queued JS callbacks
+   * may still run; callers must ignore callbacks from a stopped writer.
    */
   stop(flushTimeoutMs: number): void
 }
@@ -853,6 +837,11 @@ export declare class VcsGitRepo {
    * change.
    */
   isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /**
+   * Operation underway, including unresolved index conflicts without state
+   * files.
+   */
+  operationKind(signal?: unknown | undefined | null): Promise<"merge" | "cherry-pick" | "revert" | "rebase" | "am" | "unmerged-index" | null>
   /** Porcelain status. */
   statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
   /** Status counts. */
@@ -1706,12 +1695,44 @@ export declare function desktopEscapeStops(key: string): number
  * backends and background delivery resolve to `null`.
  */
 export interface DesktopFocusReturn {
-  /** Whether the takeover handed focus back to the app front before it. */
+  /** Whether the takeover handed the front back to the app front before it. */
   handedBack: boolean
   /** The process front before the takeover. */
   previousPid?: number
   /** The process front once the takeover ended; absent when unreadable. */
   frontPid?: number
+  /**
+   * What a macOS takeover did with the user's keyboard; absent elsewhere and
+   * when it did not reach the hand-back.
+   */
+  keyboard?: DesktopKeyboardReturn
+}
+
+/**
+ * What a macOS takeover did to give the user back their keyboard. Nothing
+ * outside an app can see which of its windows is key, so these name what was
+ * sent, not a key state that was observed.
+ */
+export declare enum DesktopKeyboardReturn {
+  /** The window that was key when the takeover began was made key again. */
+  HandedBack = 'handedBack',
+  /**
+   * The user clicked, used a shortcut or switched during the takeover, so
+   * nothing was sent over their choice.
+   */
+  LeftAsChosen = 'leftAsChosen',
+  /**
+   * The user's app never left the front (the target was another of its
+   * windows) and still reported its key window, so nothing was sent.
+   */
+  Kept = 'kept',
+  /** The user's app showed no window: only its front status came back. */
+  FrontOnly = 'frontOnly',
+  /**
+   * macOS refused the hand-back or the user's last input was still being
+   * read, so their window was not made key.
+   */
+  NotSent = 'notSent'
 }
 
 /**
@@ -1738,6 +1759,41 @@ export interface DesktopPoint {
 }
 
 /**
+ * One on-screen window from the unfiltered roster. Unlike
+ * [`super::DesktopWindow`] it keeps popup menus, pickers and system panels,
+ * which publish no title or sharing state and sit above layer 0.
+ */
+export interface DesktopRosterWindow {
+  /** `kCGWindowNumber`, decimal; the same id `listWindows` reports. */
+  id: string
+  /** Owning process id. */
+  pid: number
+  /** Owning process name. */
+  app: string
+  /**
+   * Window title; empty without Screen Recording permission and for
+   * windows that publish none.
+   */
+  title: string
+  x: number
+  y: number
+  width: number
+  height: number
+  /**
+   * `kCGWindowLayer`: 0 for ordinary windows, 3 for floating panels, 101
+   * for popup menus, higher for system panels.
+   */
+  layer: number
+  /** `kCGWindowAlpha`; 0 is an invisible overlay. */
+  alpha: number
+  /**
+   * Whether `listWindows` reports this window, so `computer.window(id)`
+   * resolves it.
+   */
+  listed: boolean
+}
+
+/**
  * Lock and display-sleep state of the user session, read live per call.
  * macOS detects both; Windows detects lock state; Linux reports both false.
  */
@@ -1753,6 +1809,11 @@ export interface DesktopSessionOptions {
    * count, which `desktopEscapeStops` reads after they close.
    */
   escapeStopKey?: string
+  /**
+   * The registry id of the agent this session acts for, named to other
+   * sessions that wait for its input/focus control.
+   */
+  agentId?: string
 }
 
 /** What a typing call did. */
@@ -1792,6 +1853,12 @@ export interface DesktopWindow {
   /** Whether the window currently holds input focus. */
   focused: boolean
 }
+
+/**
+ * Samples every on-screen window, front to back, in one `WindowServer` pass,
+ * with no desktop session and no permission prompt. Empty off macOS.
+ */
+export declare function desktopWindowRoster(): Array<DesktopRosterWindow>
 
 /**
  * Detect macOS system appearance via CoreFoundation.

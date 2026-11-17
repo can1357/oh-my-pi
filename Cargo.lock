@@ -6439,7 +6439,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6481,7 +6481,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6567,11 +6567,14 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.21.0"
+version = "18.22.0"
+dependencies = [
+ "xutf",
+]
 
 [[package]]
 name = "pi-edit"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6590,7 +6593,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6598,11 +6601,12 @@ dependencies = [
  "pi-diff",
  "tokio",
  "windows-sys 0.61.2",
+ "xutf",
 ]
 
 [[package]]
 name = "pi-natives"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6660,7 +6664,6 @@ dependencies = [
  "pi-vfs",
  "pi-voice",
  "pi-walker",
- "pipewire",
  "png",
  "portable-pty",
  "ptts",
@@ -6698,7 +6701,7 @@ dependencies = [
 
 [[package]]
 name = "pi-predict"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6711,12 +6714,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "xutf",
  "zstd",
 ]
 
 [[package]]
 name = "pi-shell"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6749,12 +6753,13 @@ dependencies = [
  "toml",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
+ "xutf",
  "xxhash-rust",
 ]
 
 [[package]]
 name = "pi-vcs"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "futures",
  "gix",
@@ -6766,11 +6771,12 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
+ "xutf",
 ]
 
 [[package]]
 name = "pi-vfs"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6783,7 +6789,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "bytes",
  "flume",
@@ -6797,7 +6803,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.21.0"
+version = "18.22.0"
 dependencies = [
  "async-trait",
  "flume",
@@ -6817,6 +6823,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "windows-sys 0.61.2",
+ "xutf",
 ]
 
 [[package]]
@@ -7493,12 +7500,14 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reis"
-version = "0.5.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00939c5c526a1b4054ef8d9d96b3f92227f08ca355965e986741b556eda6d289"
+checksum = "4b967ec6489a42067a20724f11987bb96178ea796873cbe1afd25fb93ee6f85f"
 dependencies = [
- "futures",
- "rustix 0.38.44",
+ "enumflags2",
+ "futures-util",
+ "log",
+ "rustix 1.1.5",
  "tokio",
 ]
 
@@ -10851,9 +10860,9 @@ dependencies = [
 
 [[package]]
 name = "xutf"
-version = "1.5.0"
+version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "990cc0159ef1d38b900524ac2308778ce60de2d32af70f40a71517c6b299fe8a"
+checksum = "704bc7ae7d98d2d4bbb024f35cf8e706021bdc13a3a7257d741cb64ca71e8cfe"
 
 [[package]]
 name = "xxhash-rust"

@@ -143,7 +143,7 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 			id: AGENT_ID,
 			parentAgentId: PARENT_ID,
 			asyncJobManager: manager,
-			structured: options?.structured,
+			outputSchema: options?.structured === false ? undefined : {},
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
