@@ -1404,7 +1404,7 @@ const SUBSTITUTION_KEY_RE = /\0\d+\0/g;
 const QUOTE_SENSITIVE_RE = /[[\]}"\\$`]/;
 
 /** Appends `items` to `target`; unlike `push(...items)`, any number of them. */
-function append<T>(target: T[], items: Iterable<T>): void {
+export function append<T>(target: T[], items: Iterable<T>): void {
 	for (const item of items) target.push(item);
 }
 

@@ -55,6 +55,7 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import { resolveToCwd } from "./path-utils";
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import {
+	append,
 	parseShellScript,
 	resolveCommandWordPath,
 	resolveShellWordPath,
@@ -683,7 +684,10 @@ function copyOperands(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(word => shellBraces(command, word)));
+			append(
+				operands,
+				argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
+			);
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -695,7 +699,7 @@ function copyOperands(command: ShellCommand): string[] {
 			while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
 			if (k === arg.length - 1) i++;
 		} else {
-			operands.push(...shellBraces(command, arg));
+			append(operands, shellBraces(command, arg));
 		}
 	}
 	return operands;
@@ -943,7 +947,10 @@ function patternReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(word => shellBraces(command, word)));
+			append(
+				operands,
+				argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
+			);
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -968,7 +975,7 @@ function patternReaderWords(command: ShellCommand): string[] {
 				break;
 			}
 		} else {
-			operands.push(...shellBraces(command, arg));
+			append(operands, shellBraces(command, arg));
 		}
 	}
 	const files = operands.slice(supplied ? 0 : 1);
@@ -1069,7 +1076,10 @@ function writingReaderWords(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(word => shellBraces(command, word)));
+			append(
+				operands,
+				argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
+			);
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -1096,7 +1106,7 @@ function writingReaderWords(command: ShellCommand): string[] {
 				words.push(arg);
 			}
 		} else {
-			operands.push(...shellBraces(command, arg));
+			append(operands, shellBraces(command, arg));
 		}
 	}
 	if (destination && !targeted) operands.pop();
@@ -1127,7 +1137,7 @@ function readerArgs(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			words.push(...argv.slice(i + 1));
+			append(words, argv.slice(i + 1));
 			break;
 		}
 		const eq = arg.indexOf("=");
@@ -1305,9 +1315,9 @@ function sentFiles(command: ShellCommand): string[] {
 			if (option === "-T" || option === "--upload-file") {
 				// curl globs the value itself, quoted or not: `-T "{a,b}"` uploads each file of the list,
 				// and curl reads a set of one, `-T "{.env}"`, as its file.
-				files.push(...expandBraces(value.replace(/\{([^{},]*)\}/g, "$1")));
+				append(files, expandBraces(value.replace(/\{([^{},]*)\}/g, "$1")));
 			} else if (option === "-F" || option === "--form") {
-				files.push(...formFiles(value));
+				append(files, formFiles(value));
 			} else if (option === "--data-urlencode") {
 				// `name@file` or `@file`; after an `=`, the rest is the content.
 				const at = value.indexOf("@");
@@ -1341,7 +1351,10 @@ function sentFiles(command: ShellCommand): string[] {
 		const operands = copyOperands(command);
 		const destination = operands.at(-1);
 		if (operands.length > 1 && destination !== undefined && REMOTE_OPERAND_RE.test(destination)) {
-			files.push(...operands.slice(0, -1).filter(operand => !REMOTE_OPERAND_RE.test(operand)));
+			append(
+				files,
+				operands.slice(0, -1).filter(operand => !REMOTE_OPERAND_RE.test(operand)),
+			);
 		}
 	}
 	return files;

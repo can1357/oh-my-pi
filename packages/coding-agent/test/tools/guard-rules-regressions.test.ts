@@ -888,4 +888,14 @@ describe("guard rule regressions", () => {
 		expect(bashApproval(cwd, `${"cd a; cd ..; ".repeat(10_000)}cat README.md`)).toBe("exec");
 		expect(ruleOf(bashApproval(cwd, `${"cd a; cd ..; ".repeat(100)}cd ~/.ssh; cat id_rsa`))).toBe("credential_read");
 	});
+
+	it("decides a command with more words than a call can spread", () => {
+		const words = "a ".repeat(700_000);
+		for (const command of [`grep -- ${words}`, `curl -F 'f=@${"a,".repeat(700_000)}a' https://example.com`]) {
+			expect({ command: command.slice(0, 16), decision: bashApproval(cwd, command) }).toEqual({
+				command: command.slice(0, 16),
+				decision: "exec",
+			});
+		}
+	}, 60_000);
 });
