@@ -306,7 +306,7 @@ fn read_table() -> Vec<Mount> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn read_table() -> Vec<Mount> {
+const fn read_table() -> Vec<Mount> {
 	Vec::new()
 }
 

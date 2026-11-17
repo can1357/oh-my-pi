@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
+### Fixed
+
+- Fixed provider-error handling so failed tool calls are no longer fed back to the model as refusal explanations.
+- Fixed one-shot retries and title generation for custom Zhipu Coding Plan providers so Beijing-time quota resets are honored.
+
 ## [18.20.1] - 2026-11-14
 
 ### Fixed

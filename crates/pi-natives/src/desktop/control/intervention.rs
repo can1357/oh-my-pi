@@ -18,7 +18,10 @@ use std::{
 use parking_lot::Mutex;
 
 use super::{DEADLINE_MARGIN, OperationToken, USER_QUIET as QUIET, macos::UserInputMonitor};
-use crate::desktop::error::{CoreResult, DesktopError};
+use crate::desktop::{
+	error::{CoreResult, DesktopError},
+	macos::ClickJournal,
+};
 
 const READ_AGAIN: &str =
 	"read the window again (win.ax(), win.observe() or win.screenshot()) before acting on it";
@@ -68,11 +71,13 @@ impl State {
 type Started = fn(libc::pid_t) -> Option<u64>;
 
 /// The user's input into each app this session has read or sent input to,
-/// shared by the tap thread and the session worker.
+/// shared by the tap thread and the session worker, with where the user's
+/// clicks went.
 pub(crate) struct UserInputs(
 	Mutex<State>,
 	/// Tells a route's process from a later one under the same id.
 	Started,
+	Arc<ClickJournal>,
 );
 
 impl Default for UserInputs {
@@ -83,7 +88,11 @@ impl Default for UserInputs {
 
 impl UserInputs {
 	fn new(started: Started) -> Self {
-		Self(Mutex::default(), started)
+		Self(Mutex::default(), started, Arc::default())
+	}
+
+	pub(super) fn clicks(&self) -> &ClickJournal {
+		&self.2
 	}
 
 	/// Starts recording the user's input into `pid`, which started at
@@ -309,6 +318,12 @@ pub(crate) fn input_goes_to(pid: libc::pid_t) {
 	});
 }
 
+/// Where the user's clicks went, as the current input call's session saw
+/// them; `None` outside an admitted input call.
+pub(in crate::desktop) fn clicks() -> Option<Arc<ClickJournal>> {
+	WATCH.with_borrow(|watch| watch.as_ref().map(|watch| Arc::clone(&watch.inputs.2)))
+}
+
 /// Before a key or pointer press, or an accessibility action or write, of the
 /// current input call: refuses once the user has pressed a key or clicked in
 /// its app since the call was admitted, so at most the press already under way
@@ -356,7 +371,11 @@ fn admit_takeover_with(
 	}) else {
 		return Ok(());
 	};
-	let limit = if waits { wait_limit(now(), deadline) } else { now() };
+	let limit = if waits {
+		wait_limit(now(), deadline)
+	} else {
+		now()
+	};
 	let presses = inputs.pause_before_takeover(limit, now, held, wait)?;
 	WATCH.with_borrow(|watch| {
 		if let Some(watch) = watch {
@@ -440,6 +459,7 @@ impl Listener {
 		if let Tap::Stopped(start) = self.tap
 			&& let Ok(tap) = start(Arc::clone(&self.inputs))
 		{
+			self.inputs.clicks().start();
 			self.tap = Tap::Running(tap);
 		}
 		!matches!(self.tap, Tap::Stopped(_))
@@ -796,8 +816,8 @@ mod tests {
 		assert_eq!(waits, [Duration::from_millis(150)]);
 		// A takeover the worker did not admit, starting with the lease held,
 		// refuses at once while the user is active rather than waiting.
-		let error =
-			start_takeover_with(|| clock.get(), free, |_| panic!("no wait under the lease")).unwrap_err();
+		let error = start_takeover_with(|| clock.get(), free, |_| panic!("no wait under the lease"))
+			.unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		drop(watch);
 		// Outside an input call nothing waits, held or not.
