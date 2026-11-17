@@ -397,6 +397,30 @@ describe("LoopWatchdog", () => {
 		setNow(5_000); // a stopped watchdog's stale deadline is not a stall
 		expect(wd.isStalled()).toBe(false);
 	});
+
+	test("isStalled() samples CPU time only for a gap long enough to be a suspension", () => {
+		let nowValue = 0;
+		let cpuReads = 0;
+		const wd = new LoopWatchdog({
+			now: () => nowValue,
+			cpuNow: () => {
+				cpuReads++;
+				return 0;
+			},
+			schedule: () => ({}),
+		});
+		wd.start(); // deadline 250, sleepMs 60_000
+		const armedReads = cpuReads;
+
+		nowValue = 1_000; // 750ms overdue: a block, too short to be a suspension
+		for (let i = 0; i < 5; i++) expect(wd.isStalled()).toBe(true);
+		expect(cpuReads).toBe(armedReads);
+
+		nowValue = 70_250; // 70s overdue and no CPU spent: CPU time decides it was a suspension
+		expect(wd.isStalled()).toBe(false);
+		expect(cpuReads).toBe(armedReads + 1);
+		wd.stop();
+	});
 });
 
 /**
