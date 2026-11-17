@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Typing on iPhone Mirroring is about twice as fast (about 150 ms per character instead of 290), and key presses there are quicker ([#17897](https://github.com/can1357/oh-my-pi/pull/17897) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
@@ -48,10 +52,6 @@
 ### Removed
 
 - Removed the obsolete `wayland-pipewire` Cargo feature and `OMP_NATIVE_FEATURES` configuration variable.
-
-### Changed
-
-- Typing on iPhone Mirroring is about twice as fast (about 150 ms per character instead of 290), and key presses there are quicker ([#17897](https://github.com/can1357/oh-my-pi/pull/17897) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
