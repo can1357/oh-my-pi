@@ -87,6 +87,7 @@ async function main(): Promise<void> {
 				outputPath,
 			]);
 		}
+
 	} finally {
 		await runCommand(["bun", "--cwd=../stats", "run", "gen:stats:reset"]);
 	}

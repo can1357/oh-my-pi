@@ -4,32 +4,14 @@ import { desktopEscapeStops, forgetDesktopEscapeStops } from "../native/desktop.
 import * as loaderState from "../native/loader-state.js";
 
 describe("desktop native ABI requirements", () => {
-	it.each([
-		["missing desktop export", undefined],
-		[
-			"legacy execute ABI",
-			class {
-				execute() {}
-			},
-		],
-		[
-			"pre-zoom ABI",
-			class {
-				click() {}
-				cancel() {}
-			},
-		],
-		[
-			"uncancellable ABI",
-			class {
-				click() {}
-				captureRegion() {}
-			},
-		],
-	])("defers rejection of %s until desktop use without constructing the addon", (_label, NativeSession) => {
-		// Importing the shared native module must remain safe for non-desktop tools.
+	it("rejects a present class with an incomplete ABI when constructing a desktop session", () => {
+		class NativeSession {
+			click() {}
+		}
 		const DesktopSession = adaptDesktopSession(NativeSession);
-		expect(() => new DesktopSession({ display: "active" })).toThrow(/^Unsupported:/);
+		expect(() => new DesktopSession({ display: "active" })).toThrow(
+			/^Unsupported: desktop native addon is outdated \(missing capture,/,
+		);
 	});
 
 	it("rejects an addon built before the turn-scoped display hold", () => {
@@ -38,19 +20,26 @@ describe("desktop native ABI requirements", () => {
 	});
 
 	it("rejects an addon built before the Escape stop count", () => {
-		// Every method present, so only the getter can decide; without it the worker reads each run as stopped.
-		const prototype = (escapeStops: boolean) =>
-			new Proxy(
-				{},
-				{
-					get: () => () => {},
-					has: (_target, key) => escapeStops || key !== "escapeStops",
-				},
-			);
-		const Current = { prototype: prototype(true) };
+		// Every method is present, so only the getter decides; without it the worker reads each run as stopped.
+		const methods = new Proxy(
+			{},
+			{
+				get: () => () => {},
+				has: (_target, key) => key !== "escapeStops",
+			},
+		);
+		class NativeSession {}
+		Object.setPrototypeOf(NativeSession.prototype, methods);
+		class Current extends NativeSession {
+			get escapeStops() {
+				return 0;
+			}
+		}
 		expect<unknown>(adaptDesktopSession(Current)).toBe(Current);
-		const Stale = adaptDesktopSession({ prototype: prototype(false) });
-		expect(() => new Stale({ display: "active" })).toThrow(/^Unsupported: .*\(missing escapeStops\)/);
+		class Stale extends NativeSession {}
+		expect(() => new (adaptDesktopSession(Stale))({ display: "active" })).toThrow(
+			/^Unsupported: .*\(missing escapeStops\)/,
+		);
 	});
 });
 

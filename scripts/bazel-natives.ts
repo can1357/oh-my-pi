@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
 /**
- * Canonical Bazel driver for the shipping pi_natives addons.
+ * Canonical Bazel driver for shipping pi_natives addons and the explicit Android ARM64 target.
  *
  * Usage: bun scripts/bazel-natives.ts <target>... [--dest <dir>] [--source <dir>] [-- <extra bazel args>]
  *
- * Targets are the //:natives-* names from BUILD.bazel (e.g. linux-x64-baseline,
- * darwin-arm64) plus three pseudo-targets:
+ * Targets are the `//:natives-*` names from `BUILD.bazel` (e.g. linux-x64-baseline,
+ * darwin-arm64, or the experimental `android-arm64` cross-target) plus three pseudo-targets:
  *   - host        the single addon matching this machine (x64 hosts pick
  *                 modern vs baseline via AVX2 detection; a musl Bun gets the
  *                 musl addon)
  *   - all         every shipped addon (linux hosts cross-build all of them)
  *   - darwin-all  both darwin addons
  *
+ * The Android target is explicit-only and is deliberately absent from `all`.
  * One `bazel build` covers all requested targets; outputs are located via
  * `bazel cquery --output=files` (falling back to the bazel-bin path convention)
  * and copied dereferenced into --dest (default packages/natives/native).
@@ -24,7 +25,7 @@
  * for plain host iteration. Bazel is opt-in for host via
  * `OMP_NATIVE_BUILD_BACKEND=bazel` or by passing extra bazel args after `--`;
  * explicit //:natives-* targets and aggregates always build through bazel.
- * Release CI builds every addon through that path on Linux.
+ * Release CI builds every shipping addon through that path on Linux.
  *
  * Windows hosts: the msvc cc toolchain in bazel/toolchains/msvc only supports
  * linux/mac exec hosts (its clang-cl+xwin wrappers replace the MSVC a Windows
@@ -54,6 +55,7 @@ export const ADDON_OUTPUTS: Record<string, string> = {
 	"linux-x64-baseline": "pi_natives.linux-x64-baseline.node",
 	"linux-x64-modern": "pi_natives.linux-x64-modern.node",
 	"linux-arm64": "pi_natives.linux-arm64.node",
+	"android-arm64": "pi_natives.android-arm64.node",
 	"linux-musl-x64-baseline": "pi_natives.linux-x64-baseline.node",
 	"linux-musl-arm64": "pi_natives.linux-arm64.node",
 	"darwin-x64-baseline": "pi_natives.darwin-x64-baseline.node",
@@ -89,9 +91,10 @@ export interface HostInfo {
 /**
  * The single addon target this host can load: modern iff x64 + AVX2, musl iff
  * the running Bun is musl. There is no modern musl addon; the runtime loader
- * falls back from modern to baseline.
+ * falls back from modern to baseline. Termux resolves to its Android ARM64 addon.
  */
 export function hostTargetName(host: HostInfo): string {
+	if (host.platform === "android" && host.arch === "arm64") return "android-arm64";
 	if (host.platform === "darwin") {
 		if (host.arch === "arm64") return "darwin-arm64";
 		if (host.arch === "x64") return "darwin-x64-baseline";
@@ -139,6 +142,15 @@ export function resolveTargetMembers(names: string[], host: HostInfo): string[] 
 }
 
 /**
+ * Add the local Android NDK toolchain only when resolved members include Android.
+ */
+export function targetToolchainArgs(names: string[], host: HostInfo): string[] {
+	return resolveTargetMembers(names, host).includes("android-arm64")
+		? ["--extra_toolchains=@androidndk//:all"]
+		: [];
+}
+
+/**
  * Workspace-relative output paths by bazel-bin convention:
  * bazel-bin/natives-<t>/<canonical>.node. Fallback when cquery is unavailable.
  */
@@ -156,6 +168,8 @@ export function conventionOutputPaths(names: string[], host: HostInfo): string[]
  * that artifact on a glibc runner. Only the host's own target, which matches
  * the running Bun's libc, is probed, and one invocation can never hold both
  * spellings of a basename because the install loop refuses duplicates.
+ * Android uses a distinct target/triple from Linux even on ARM64, so a Linux
+ * builder never probes `android-arm64`.
  */
 export function hostProbeFilename(names: string[], host: HostInfo): string | null {
 	let hostTarget: string;
@@ -282,7 +296,7 @@ async function installAddon(
 		await fs.rename(tempPath, destPath); // atomic even if dest is a loaded addon
 		return stamp;
 	} catch (err) {
-		await fs.unlink(tempPath).catch(() => {});
+		await fs.unlink(tempPath).catch(() => { });
 		throw err;
 	}
 }
@@ -317,7 +331,7 @@ export async function verifyHostAddonLoads(
 		expectedVersion === undefined
 			? ""
 			: `const reported = typeof m.exports.__piNativesBuildVersion === "function" ? m.exports.__piNativesBuildVersion() : undefined; ` +
-				`if (reported !== ${JSON.stringify(expectedVersion)}) { console.error("addon reports build version " + JSON.stringify(reported) + ", expected " + ${JSON.stringify(JSON.stringify(expectedVersion))}); process.exit(1); }`;
+			`if (reported !== ${JSON.stringify(expectedVersion)}) { console.error("addon reports build version " + JSON.stringify(reported) + ", expected " + ${JSON.stringify(JSON.stringify(expectedVersion))}); process.exit(1); }`;
 	const probe =
 		`const m = { exports: {} }; try { process.dlopen(m, ${JSON.stringify(destPath)}); } ` +
 		"catch (error) { console.error(error && error.message ? error.message : String(error)); process.exit(1); } " +
@@ -449,14 +463,14 @@ export async function verifyLinuxAddon(file: string): Promise<void> {
 	if (exports.length > 0) {
 		problems.push(
 			`exports ${exports.length} symbols beside ${LINUX_ADDON_EXPORT} (${exports.slice(0, 3).join(", ")}, …): ` +
-				"the link did not apply :exports_map from crates/pi-natives/BUILD.bazel",
+			"the link did not apply :exports_map from crates/pi-natives/BUILD.bazel",
 		);
 	}
 	const needed = image.needed.filter(library => !GLIBC_ADDON_NEEDED.has(library));
 	if (image.needed.includes("libc.so.6") && needed.length > 0) {
 		problems.push(
 			`needs ${needed.join(", ")}: define the functions it imports from there in ` +
-				"crates/pi-natives/src/bundled_libc.rs (`llvm-readelf --dyn-syms` lists them)",
+			"crates/pi-natives/src/bundled_libc.rs (`llvm-readelf --dyn-syms` lists them)",
 		);
 	}
 	if (problems.length > 0) throw new Error(`built addon ${path.basename(file)} ${problems.join("; ")}`);
@@ -513,8 +527,8 @@ async function main(): Promise<void> {
 			if (host.platform === "win32") {
 				throw new Error(
 					`Cannot bazel-build [${options.targets.join(", ")}] on a Windows host: the msvc cross ` +
-						"toolchain (bazel/toolchains/msvc) only runs on linux/mac exec hosts. Use `host` here " +
-						"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
+					"toolchain (bazel/toolchains/msvc) only runs on linux/mac exec hosts. Use `host` here " +
+					"(local napi build via VS Build Tools), or run this script from WSL/linux for cross targets.",
 				);
 			}
 			throw new Error("OMP_NATIVE_BUILD_BACKEND=cargo supports only the host target");
@@ -536,7 +550,7 @@ async function main(): Promise<void> {
 			if (options.targets.length !== 1 || options.targets[0] !== "host") {
 				throw new Error(
 					`Neither \`bazelisk\` nor \`bazel\` found on PATH; Cargo fallback supports only the host target, not [${options.targets.join(", ")}]. ` +
-						"Install bazelisk or request `host` for a local Cargo/N-API build.",
+					"Install bazelisk or request `host` for a local Cargo/N-API build.",
 				);
 			}
 			console.log("bazelisk/bazel not found; falling back to the local Cargo/N-API host build");
@@ -547,8 +561,16 @@ async function main(): Promise<void> {
 		// endpoint composition stays in .github/actions/bazel-cache.
 		const rcPath = Bun.env.OMP_BAZEL_RC?.trim();
 		const startupArgs = rcPath ? [`--bazelrc=${rcPath}`] : [];
+		const toolchainArgs = targetToolchainArgs(options.targets, host);
 
-		const buildArgs = [...startupArgs, "build", ...options.bazelArgs, "--", ...labels];
+		const buildArgs = [
+			...startupArgs,
+			"build",
+			...options.bazelArgs,
+			...toolchainArgs,
+			"--",
+			...labels,
+		];
 		console.log(`$ ${path.basename(bazel)} ${buildArgs.join(" ")}`);
 		const build = await runBazel(bazel, buildArgs, "inherit");
 		if (build.exitCode !== 0) {
@@ -561,7 +583,14 @@ async function main(): Promise<void> {
 		// into a single union rather than positional args.
 		const cquery = await runBazel(
 			bazel,
-			[...startupArgs, "cquery", ...options.bazelArgs, "--output=files", labels.join(" + ")],
+			[
+				...startupArgs,
+				"cquery",
+				...options.bazelArgs,
+				...toolchainArgs,
+				"--output=files",
+				labels.join(" + "),
+			],
 			"pipe",
 		);
 		if (cquery.exitCode === 0) {
@@ -585,7 +614,7 @@ async function main(): Promise<void> {
 			// installing both into one dest would silently clobber.
 			console.error(
 				`refusing to install ${output}: ${base} already provided by ${prior}. ` +
-					"Build gnu and musl targets in separate invocations with separate --dest dirs.",
+				"Build gnu and musl targets in separate invocations with separate --dest dirs.",
 			);
 			process.exit(1);
 		}
@@ -603,7 +632,9 @@ async function main(): Promise<void> {
 				? `installed ${path.basename(output)} (stamped ${version}) → ${destPath}`
 				: `installed ${path.basename(output)} (prebuilt without a version stamp slot; left unstamped) → ${destPath}`,
 		);
-		if (!options.source) await verifyLinuxAddon(destPath);
+		if (!options.source && path.basename(output).startsWith("pi_natives.linux-")) {
+			await verifyLinuxAddon(destPath);
+		}
 		if (probeFilename && path.basename(output) === probeFilename) {
 			await verifyHostAddonLoads(destPath, undefined, stamped ? version : undefined);
 		}

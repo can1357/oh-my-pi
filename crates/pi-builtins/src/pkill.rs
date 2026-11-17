@@ -64,4 +64,7 @@ mod tests {
 		assert_eq!(signal_number("NOPE"), None);
 		assert_eq!(signal_number("-1"), None);
 	}
+
+	#[cfg(any(target_os = "android", target_os = "linux"))]
+	mod realtime_signal_tests;
 }

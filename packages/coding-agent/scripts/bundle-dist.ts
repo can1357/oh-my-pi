@@ -2,20 +2,22 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
 const packageDir = path.join(import.meta.dir, "..");
-const defaultOutDir = path.join(packageDir, "dist");
+const configuredOutDir = Bun.env.OMP_BUNDLE_OUTDIR;
+const defaultOutDir = configuredOutDir ? path.resolve(configuredOutDir) : path.join(packageDir, "dist");
 const shebang = "#!/usr/bin/env bun\n";
 // Remove old inline-viewer sidecars left in an existing output directory.
 const obsoleteHtmlExportAssetPattern =
 	/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/;
 
-// Native/platform dependencies and on-demand model runtimes stay outside the bundle.
+// Native and optional dependencies load from installed files in desktop npm bundles.
 const ALWAYS_EXTERNAL = ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+const RUNTIME_EXTERNAL = ["puppeteer-core", "@babel/parser"];
 
 /**
  * Embeds `@oh-my-pi/pi-natives/THIRD-PARTY-NOTICES.txt` even though the natives package is external. An external
@@ -38,7 +40,6 @@ const inlineNativeNoticesPlugin: Bun.BunPlugin = {
 // import would load the unpatched npm package in users' installs (currently
 // @ark/schema is patched, so it — and arktype, which pulls @ark/schema — stay
 // bundled).
-const RUNTIME_EXTERNAL = ["puppeteer-core", "@babel/parser"];
 
 async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {
@@ -78,6 +79,8 @@ async function cleanBundleOutputs(outDir: string): Promise<void> {
 				entry =>
 					entry === "cli.js" ||
 					entry === "docs-index.generated.txt" ||
+					entry === "embedded-addon.js" ||
+					(entry.startsWith("embedded-addons.") && entry.endsWith(".tar.gz")) ||
 					entry.endsWith(".node") ||
 					entry.endsWith(".js.map") ||
 					/\.json-[^/]+\.zst$/.test(entry) ||
@@ -97,10 +100,10 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	// archive the same way compiled binaries do (scripts/build-binary.ts). Reset
 	// afterwards to keep the checked-in placeholder empty.
 	await runCommand(["bun", "--cwd=../stats", "run", "gen:stats"]);
-	// One payload for both consumers: inlined into dist/cli.js via `--define` for
-	// the bundled CLI entrypoint, and written to dist/docs-index.generated.txt so
-	// SDK consumers importing `@oh-my-pi/pi-coding-agent/*` (TypeScript source, no
-	// build-time embed) can still resolve omp:// docs (see src/internal-urls/docs-index.ts).
+	// One payload for both consumers: inlined into the bundled CLI entrypoint,
+	// and written to dist/docs-index.generated.txt so SDK consumers importing
+	// @oh-my-pi/pi-coding-agent/* (TypeScript source, no build-time embed) can
+	// still resolve omp:// docs (see src/internal-urls/docs-index.ts).
 	try {
 		const docsPayload = await buildDocsIndexPayload();
 		// Build in-process: the docs embed payload is far larger than Linux's

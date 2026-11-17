@@ -4,6 +4,19 @@
 
 ### Added
 
+- Added an explicit Android ARM64 native cross-build using the Android NDK (API level 28) for standalone Termux binaries.
+
+### Changed
+
+- Added Android ARM64/Bionic process-management support.
+- Android desktop sessions now report `Unsupported`; desktop capture and input remain unavailable.
+
+### Fixed
+
+- Android native-load failures now report attempted addon paths and rebuild guidance instead of incorrectly reporting an unsupported platform.
+
+### Added
+
 - `DesktopFocusReturn.keyboard` says what a macOS takeover did with the user's keyboard (`handedBack`, `leftAsChosen`, `kept`, `frontOnly`, `notSent`) ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `desktopWindowRoster()` to `@oh-my-pi/pi-natives/desktop`: every on-screen window on macOS, popup menus, pickers and system prompts included, with owner, layer and whether `listWindows` reports it, in one pass and without a desktop session ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 

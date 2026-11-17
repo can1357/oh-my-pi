@@ -40,7 +40,9 @@ pub(super) fn gai_text(code: i32) -> String {
 		return format!("Unknown error {code}");
 	}
 	// SAFETY: non-null, NUL-terminated, static.
-	unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+	unsafe { CStr::from_ptr(text) }
+		.to_string_lossy()
+		.into_owned()
 }
 
 /// Address family for `-4`/`-6`.
@@ -75,7 +77,10 @@ pub(super) fn resolve(
 	passive: bool,
 ) -> Result<Vec<Addr>, i32> {
 	let host = host.map(CString::new).transpose().map_err(|_| EAI_NONAME)?;
-	let service = service.map(CString::new).transpose().map_err(|_| EAI_NONAME)?;
+	let service = service
+		.map(CString::new)
+		.transpose()
+		.map_err(|_| EAI_NONAME)?;
 	// SAFETY: an all-zero addrinfo is a valid "no hints" value.
 	let mut hints: libc::addrinfo = unsafe { zeroed() };
 	hints.ai_family = family;
@@ -139,7 +144,7 @@ pub(super) fn numeric_host(addr: &Addr) -> String {
 			addr.as_ptr(),
 			addr.len,
 			buf.as_mut_ptr(),
-			buf.len() as libc::socklen_t,
+			buf.len() as _,
 			std::ptr::null_mut(),
 			0,
 			libc::NI_NUMERICHOST,
@@ -149,7 +154,9 @@ pub(super) fn numeric_host(addr: &Addr) -> String {
 		return format!("*getnameinfo failure: {}*", gai_text(rc));
 	}
 	// SAFETY: getnameinfo NUL-terminated the buffer on success.
-	unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
+	unsafe { CStr::from_ptr(buf.as_ptr()) }
+		.to_string_lossy()
+		.into_owned()
 }
 
 /// A socket being connected.
@@ -204,7 +211,11 @@ impl Socket {
 		if flags < 0 {
 			return Err(io::Error::last_os_error());
 		}
-		let flags = if on { flags | libc::O_NONBLOCK } else { flags & !libc::O_NONBLOCK };
+		let flags = if on {
+			flags | libc::O_NONBLOCK
+		} else {
+			flags & !libc::O_NONBLOCK
+		};
 		// SAFETY: valid fd.
 		if unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } < 0 {
 			return Err(io::Error::last_os_error());
