@@ -199,6 +199,15 @@ describe("disassembler backend selection", () => {
 			),
 		).toBeUndefined();
 	});
+
+	it("selects radare2 explicitly when configured", async () => {
+		const r2 = path.join(withoutIdalib, "radare2");
+		await Bun.write(r2, "");
+		await fs.chmod(r2, 0o755);
+		expect(
+			cfgDisasmBackend.get(Settings.isolated({ "disassembler.backend": "radare2", "radare2.r2Path": r2 })),
+		).toBe("radare2");
+	});
 });
 
 describe("database handles", () => {

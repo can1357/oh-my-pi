@@ -312,6 +312,14 @@
 			"types": "./src/ida/*.ts",
 			"import": "./src/ida/*.ts"
 		},
+		"./radare2": {
+			"types": "./src/radare2/index.ts",
+			"import": "./src/radare2/index.ts"
+		},
+		"./radare2/*": {
+			"types": "./src/radare2/*.ts",
+			"import": "./src/radare2/*.ts"
+		},
 		"./internal-urls": {
 			"types": "./src/internal-urls/index.ts",
 			"import": "./src/internal-urls/index.ts"

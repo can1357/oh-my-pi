@@ -13,8 +13,10 @@ import { createDsmPrelude, releaseDsmReferences } from "../../src/disasm/prelude
 import {
 	DISASM_UNIT_KIND,
 	formatDatabaseHandle,
+	type DatabaseHandle,
 	type HostRequest,
 	type HostStatus,
+	parseDatabaseHandle,
 	parseHostRequest,
 } from "../../src/disasm/protocol";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
@@ -304,6 +306,15 @@ async function fixture(maxTimeout = 0) {
 }
 
 describe("dsm host capability", () => {
+	it("round-trips a radare2 dsm handle", () => {
+		const handle: DatabaseHandle = {
+			backend: "radare2",
+			id: "sample-id",
+			instance: crypto.randomUUID(),
+		};
+		expect(parseDatabaseHandle(formatDatabaseHandle(handle))).toEqual(handle);
+	});
+
 	it("creates independent references only through explicit valid opens or existing get", async () => {
 		const f = await fixture();
 		const opened = await f.invoke({ action: "open", path: "sample" });

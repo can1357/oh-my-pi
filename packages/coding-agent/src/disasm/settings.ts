@@ -4,19 +4,19 @@ import { register } from "../config/registry";
 export const cfgDisassembler = register({
 	id: "disassembler.backend",
 	type: "enum",
-	values: ["auto", "ghidra", "ida", "binja", "none"] as const,
+	values: ["auto", "ghidra", "ida", "binja", "radare2", "none"] as const,
 	default: "auto",
 	ui: {
 		tab: "tools",
 		group: "Available Tools",
 		label: "Disassembler",
 		description:
-			"Backend for analysis selectors in read and eval's dsm namespace; bare executable reads show metadata only. Auto uses IDA Pro when installed, else Ghidra (downloaded on first analysis); Binary Ninja is used only when selected",
+			"Backend for analysis selectors in read and eval's dsm namespace; bare executable reads show metadata only. Auto uses IDA Pro when installed, else radare2 when available, else Ghidra (downloaded on first analysis); Binary Ninja is used only when selected",
 		options: [
 			{
 				value: "auto",
 				label: "Auto",
-				description: "IDA Pro when an install with idalib is found, otherwise Ghidra; never Binary Ninja",
+				description: "IDA Pro when an install with idalib is found, otherwise radare2 when available, otherwise Ghidra; never Binary Ninja",
 			},
 			{
 				value: "ghidra",
@@ -34,6 +34,12 @@ export const cfgDisassembler = register({
 				label: "Binary Ninja",
 				description:
 					"Binary Ninja via its headless Python API (needs a headless-capable licence); never chosen by Auto; analysis disabled when no install is found",
+			},
+			{
+				value: "radare2",
+				label: "radare2",
+				description:
+					"radare2 via r2pipe; uses radare2 on PATH or radare2.r2Path, with r2pipe provisioned in a managed venv",
 			},
 			{ value: "none", label: "None", description: "Executable metadata only; analysis disabled" },
 		],

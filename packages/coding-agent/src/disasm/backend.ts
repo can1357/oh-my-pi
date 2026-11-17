@@ -3,9 +3,10 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import binjaWorker from "../binja/worker.py" with { type: "text" };
 import ghidraWorker from "../ghidra/worker.py" with { type: "text" };
 import idaWorker from "../ida/worker.py" with { type: "text" };
+import radare2Worker from "../radare2/worker.py" with { type: "text" };
 
 /** Every backend id; handle hosts, unit params and eval arguments validate against this list. */
-export const DISASM_BACKEND_IDS = ["ida", "ghidra", "binja"] as const;
+export const DISASM_BACKEND_IDS = ["ida", "ghidra", "binja", "radare2"] as const;
 
 /** Backend identity used by settings, host daemons, and executable views. */
 export type DisasmBackendId = (typeof DISASM_BACKEND_IDS)[number];
@@ -80,6 +81,18 @@ export const DISASM_BACKENDS: Record<DisasmBackendId, DisasmBackend> = {
 		isDatabasePath: p => path.extname(p).toLowerCase() === ".bndb",
 		workerScript: binjaWorker,
 		workerStageDir: "omp-binja-worker",
+		interrupt: "signal",
+		projectAlias: false,
+	},
+	radare2: {
+		id: "radare2",
+		label: "radare2",
+		storeDir: "radare2-projects",
+		databaseExt: ".r2",
+		databaseName: () => "omp.r2",
+		isDatabasePath: () => false,
+		workerScript: radare2Worker,
+		workerStageDir: "omp-radare2-worker",
 		interrupt: "signal",
 		projectAlias: false,
 	},
