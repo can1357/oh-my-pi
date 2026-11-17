@@ -121,6 +121,15 @@ export async function commitSelection(
 	request: CommitRequest,
 	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
 ): Promise<CommitOutcome> {
+	const changes = draft.selection();
+	if (changes.length === 0) {
+		if (draft.paths.length > 0) throw new Error("Nothing selected; use take() first.");
+		throw new Error(
+			draft.skipped.length > 0
+				? `Nothing to commit: only ${draft.skipped.join(", ")} changed (submodule or nested repository), which selective commits skip.`
+				: `Nothing to commit: ${shortenPath(draft.root)} has no changes against HEAD.`,
+		);
+	}
 	const repo = vcs.requireGit(draft.root);
 	const operation = await repo.operationKind(context.signal);
 	if (operation === "unmerged-index") {
@@ -133,15 +142,6 @@ export async function commitSelection(
 	}
 	const gitDir = repo.info().gitDir;
 	const message = composeMessage(request);
-	const changes = draft.selection();
-	if (changes.length === 0) {
-		if (draft.paths.length > 0) throw new Error("Nothing selected; use take() first.");
-		throw new Error(
-			draft.skipped.length > 0
-				? `Nothing to commit: only ${draft.skipped.join(", ")} changed (submodule or nested repository), which selective commits skip.`
-				: `Nothing to commit: ${shortenPath(draft.root)} has no changes against HEAD.`,
-		);
-	}
 	const patches: Array<{ path: string; patch: string }> = [];
 	for (const change of changes) {
 		const patch = await patchFor(repo, draft.head, change);
