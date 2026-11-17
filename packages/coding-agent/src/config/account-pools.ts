@@ -161,7 +161,11 @@ export class SessionAccountPoolScope {
 						...options,
 						...(typeof resolverTarget === "string"
 							? {}
-							: { baseUrl: resolverTarget.baseUrl, modelId: resolverTarget.id }),
+							: {
+									baseUrl: resolverTarget.baseUrl,
+									modelId: resolverTarget.id,
+									retryResetTimezoneOffset: resolverTarget.retryResetTimezoneOffset,
+								}),
 						sessionId: this.#sessionIdFor(provider, options.sessionId),
 					},
 				);
