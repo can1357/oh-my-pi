@@ -2,13 +2,14 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed Wayland window captures returning partial pixels with full-window coordinates when the window extends beyond the captured monitor ([#19584](https://github.com/can1357/oh-my-pi/pull/19584) by [@Deftera186](https://github.com/Deftera186))
 ### Added
 
 - `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write
 - Added `isolateThreadStartsFromConsole()`, which keeps a Windows console whose terminal stopped reading from blocking new threads in the process
+
+### Fixed
+
+- Fixed Wayland window captures returning partial pixels with full-window coordinates when the window extends beyond the captured monitor ([#19584](https://github.com/can1357/oh-my-pi/pull/19584) by [@Deftera186](https://github.com/Deftera186))
 
 ## [18.22.1] - 2026-11-17
 
