@@ -1867,7 +1867,9 @@ const streamOpenAICompletionsOnce = (
 
 			// Keep the received `reasoning_details` on the first thinking block whose
 			// signature only names its text's source field, so replay sends them back
-			// verbatim; an encrypted-only turn gets an empty thinking block to hold them.
+			// verbatim. With no such block, an empty thinking block holds them only when
+			// the turn has other content (text or tool calls, already pushed by now): an
+			// encrypted-only turn stays empty so the empty-stop retry still runs.
 			if (receivedReasoningDetails.length > 0) {
 				const holder = output.content.find(
 					(block): block is ThinkingContent =>
@@ -1878,7 +1880,7 @@ const streamOpenAICompletionsOnce = (
 				const field = holder?.thinkingSignature;
 				if (isReasoningField(field)) stored.field = field;
 				if (holder) holder.thinkingSignature = JSON.stringify(stored);
-				else openThinkingBlock(JSON.stringify(stored));
+				else if (output.content.length > 0) openThinkingBlock(JSON.stringify(stored));
 			}
 
 			if (currentBlock?.type === "toolCall") {

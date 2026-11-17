@@ -490,4 +490,32 @@ describe("openai-completions reasoning_details", () => {
 		const replayed = replayMessages.find(message => message.role === "assistant");
 		expect(replayed?.reasoning_details).toEqual([detail]);
 	});
+
+	it("keeps an encrypted-only turn empty so it still counts as an empty stop", async () => {
+		const model = completionsModel("google/gemini-3-pro-preview", "openrouter", "https://openrouter.ai/api/v1");
+		async function mockFetch(): Promise<Response> {
+			return sse(
+				sseChunks(model.id, [
+					{
+						delta: {
+							role: "assistant",
+							reasoning_details: [{ type: "reasoning.encrypted", data: "blob", index: 0 }],
+						},
+					},
+					{ delta: {}, finish: "stop" },
+				]),
+			);
+		}
+		const fetchMock: FetchImpl = Object.assign(mockFetch, { preconnect: fetch.preconnect });
+
+		// acceptEmptyResponse skips the provider's own backoff retries of the empty turn.
+		const assistant = await streamOpenAICompletions(
+			model,
+			{ messages: [userMessage] },
+			{ apiKey: "test-key", fetch: fetchMock, acceptEmptyResponse: true },
+		).result();
+
+		expect(assistant.stopReason).toBe("stop");
+		expect(assistant.content).toEqual([]);
+	});
 });
