@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Browser tabs and frames can wait for a condition in the page with `waitForFunction(fnOrExpression, { timeout?, polling? }, ...args)`, which resolves with the condition's first truthy value, instead of a loop of `evaluate` calls and sleeps; `waitFor` and `waitForSelector` given a function or a number of milliseconds now name the call and the helper to use instead ([#19542](https://github.com/can1357/oh-my-pi/pull/19542) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes
@@ -265,12 +269,6 @@
 - Computer `el.setValue()` now accepts finite safe integer and decimal numbers and writes them as text, while continuing to reject unsupported values such as booleans, objects, `NaN`, and `Infinity`.
 - On macOS, browser results now report relevant native windows—such as pickers, print or save sheets, sign-in prompts, passkey dialogs, and permission bubbles—with their `computer.window()` identifiers.
 - Browser `select()` now accepts label-, value-, and zero-based index-based choices, including mixed choices for multi-select controls, across Chromium, Tern, and cmux tabs.
-- Added the `providers.webKeyless` setting (default on): turn it off and `web_search` and URL reading use only services you configured, skipping keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines even when your `web` chain lists them; `omp q --model web/<engine>` still runs one on request ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#16336](https://github.com/can1357/oh-my-pi/issues/16336))
-- Added `live.endpoint` and `live.apiKey` settings: live voice (`/live`, RPC `live_start`/`live_connect`, extension `startLive`) can run on any OpenAI Realtime WebRTC-compatible server instead of Codex, with no ChatGPT sign-in and in offline mode; `live.voice` accepts any voice name
-- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
-- Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
-- Browser `select()` accepts `{label}`, `{value}`, and zero-based `{index}` choices alongside strings, including mixed choices for multi-selects, on Chromium, Tern, and cmux tabs ([#19518](https://github.com/can1357/oh-my-pi/pull/19518) by [@will-bogusz](https://github.com/will-bogusz))
-- Browser tabs and frames can wait for a condition in the page with `waitForFunction(fnOrExpression, { timeout?, polling? }, ...args)`, which resolves with the condition's first truthy value, instead of a loop of `evaluate` calls and sleeps; `waitFor` and `waitForSelector` given a function or a number of milliseconds now name the call and the helper to use instead
 
 ### Changed
 
