@@ -6,6 +6,7 @@ import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import {
 	$env,
+	isRecord,
 	logger,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
@@ -304,6 +305,14 @@ function mergeStoredGeminiSignature(existing: string | undefined, update: Stored
 export function storeGeminiToolCallSignature(extraContent: unknown): string | undefined {
 	const perCall = getGeminiThoughtSignatureExtraContent(extraContent);
 	return perCall ? JSON.stringify({ perCall } satisfies StoredGeminiSignature) : undefined;
+}
+
+/** A tool call's `thoughtSignature` without the encrypted `reasoning_details` entry this provider may store on it. */
+export function dropToolCallReasoningDetail(thoughtSignature: string | undefined): string | undefined {
+	const stored = normalizeStoredGeminiSignature(parseStoredThoughtSignature(thoughtSignature));
+	const perCall = stored?.perCall;
+	if (!isRecord(perCall) || perCall.type !== "reasoning.encrypted") return thoughtSignature;
+	return stored?.message ? JSON.stringify({ message: stored.message } satisfies StoredGeminiSignature) : undefined;
 }
 
 /**
