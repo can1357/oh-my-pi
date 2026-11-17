@@ -655,7 +655,9 @@ mod tests {
 
 	#[test]
 	fn incomplete_utf8_at_eof_becomes_replacement() {
-		let mut decoder = OutputDecoder::new();
+		// `new()` falls back to the host ANSI code page at EOF on Windows
+		// (see `incomplete_utf8_at_eof_falls_back_to_acp`); pin UTF-8.
+		let mut decoder = OutputDecoder::utf8();
 		assert_eq!(decoder.push(&[0xe4]), "");
 		assert_eq!(decoder.finish(), "\u{FFFD}");
 	}
