@@ -453,26 +453,7 @@ describe("subagent warning injection", () => {
 		});
 	});
 
-	it("uses last assistant text as the raw result for terminal string-typed yields without data", () => {
-		const result = finalizeSubprocessOutput({
-			rawOutput: "",
-			exitCode: 0,
-			stderr: "",
-			doneAborted: false,
-			signalAborted: false,
-			yieldItems: [{ status: "success", type: "final" }],
-			outputSchema: undefined,
-			lastAssistantText: "final answer from the assistant",
-		});
-
-		expect(result.exitCode).toBe(0);
-		expect(result.rawOutput).toBe("final answer from the assistant");
-	});
-
 	it("keeps accumulated sections when a data-less terminal yield finalizes", () => {
-		// Previously a data-less `type: "final"` collapsed to the last assistant
-		// turn and dropped earlier incremental sections; the sections are the work
-		// product, so they must survive the finalize.
 		const result = finalizeSubprocessOutput({
 			rawOutput: "",
 			exitCode: 0,
@@ -484,7 +465,6 @@ describe("subagent warning injection", () => {
 				{ status: "success", type: "final" },
 			],
 			outputSchema: undefined,
-			lastAssistantText: "plain final answer",
 		});
 
 		expect(result.exitCode).toBe(0);
@@ -515,7 +495,6 @@ describe("subagent warning injection", () => {
 					notes: { elements: { type: "string" } },
 				},
 			},
-			lastAssistantText: "some prose that must not become the result",
 		});
 
 		expect(result.stderr).not.toContain("schema_violation");
@@ -525,22 +504,6 @@ describe("subagent warning injection", () => {
 			filesChanged: ["a.ts"],
 			notes: ["ok"],
 		});
-	});
-
-	it("serializes untyped useLastTurn yield as raw text", () => {
-		const result = finalizeSubprocessOutput({
-			rawOutput: "",
-			exitCode: 0,
-			stderr: "",
-			doneAborted: false,
-			signalAborted: false,
-			yieldItems: [{ status: "success", useLastTurn: true }],
-			outputSchema: undefined,
-			lastAssistantText: "plain final answer",
-		});
-
-		expect(result.exitCode).toBe(0);
-		expect(result.rawOutput).toBe("plain final answer");
 	});
 
 	it("rejects exhausted schema retries in strict mode and retains parsed validation metadata", () => {

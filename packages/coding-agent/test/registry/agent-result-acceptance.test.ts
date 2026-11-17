@@ -8,9 +8,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { AgentRegistry, type AgentRegistryApi } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
-/** Minimal session: the registry only reads `isStreaming` for liveness corroboration. */
-function sessionStub(isStreaming: boolean): AgentSession {
-	return { isStreaming } as unknown as AgentSession;
+/** Minimal session: the registry only reads `runStartedAt` (an open run) for liveness corroboration. */
+function sessionStub(runOpen: boolean): AgentSession {
+	return { runStartedAt: runOpen ? Date.now() : undefined } as unknown as AgentSession;
 }
 
 describe("AgentRegistry final-result acceptance", () => {
@@ -75,10 +75,10 @@ describe("AgentRegistry final-result acceptance", () => {
 	});
 
 	it("reports an accepted run whose turn never went idle", () => {
-		let streaming = true;
+		let runOpen = true;
 		const session = {
-			get isStreaming(): boolean {
-				return streaming;
+			get runStartedAt(): number | undefined {
+				return runOpen ? 1 : undefined;
 			},
 		} as unknown as AgentSession;
 		const ref = registerRunning("PolicyCommand", session);
@@ -88,8 +88,8 @@ describe("AgentRegistry final-result acceptance", () => {
 		expect(registry.get("PolicyCommand")?.status).toBe("running");
 		expect(registry.staleAcceptedRuns()).toEqual([]);
 
-		// The turn ends without the run-state mirror ever delivering `idle`.
-		streaming = false;
+		// The run ends without the run-state mirror ever delivering `idle`.
+		runOpen = false;
 
 		expect(registry.staleAcceptedRuns().map(stale => stale.id)).toEqual(["PolicyCommand"]);
 		registry.setStatus("PolicyCommand", "idle", ref);

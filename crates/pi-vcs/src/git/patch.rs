@@ -10,8 +10,9 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	fs,
+	fs, io,
 	path::{Component, Path, PathBuf},
+	time::Duration,
 };
 
 use gix::{
@@ -114,9 +115,12 @@ impl GitRepo {
 		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
 		if options.cached {
+			// Locked before the read: another git process writing the index in
+			// between would otherwise have its entries overwritten by this map.
+			let lock = lock_index(&repo, options.index_path.as_deref())?;
 			let mut state = index_map_at(&repo, options.index_path.as_deref())?;
 			apply_patches_to_map(&repo, &mut state, &patches, options)?;
-			return write_index_map_at(&repo, &state, options.index_path.as_deref());
+			return write_index_map_at(&repo, &state, options.index_path.as_deref(), lock);
 		}
 		let mut filter = apply_filter(&repo, &patches, options.reverse)?;
 		let mut state = patch_worktree_map(self, &repo, &mut filter, &patches, options.reverse)?;
@@ -561,7 +565,13 @@ fn parse_patch(text: &str) -> std::result::Result<Vec<FilePatch>, ApplyFailure> 
 }
 
 fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
-	let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+	let lines: Vec<&str> = if raw.len() < 64 {
+		raw.split_inclusive('\n').collect()
+	} else {
+		xutf::lines_str(raw, xutf::LineEnds::Lf)
+			.map(|line| line.with_end())
+			.collect()
+	};
 	let first = lines
 		.first()
 		.map_or_default(|line| line.trim_end_matches('\n'));
@@ -1773,13 +1783,31 @@ fn worktree_file_mode(_metadata: &fs::Metadata, index_mode: Mode) -> Mode {
 }
 
 fn write_index_map(repo: &gix::Repository, map: &BTreeMap<String, FileEntry>) -> Result<()> {
-	write_index_map_at(repo, map, None)
+	write_index_map_at(repo, map, None, lock_index(repo, None)?)
 }
 
+/// How long an index write waits for another git process (a prompt's or an
+/// editor's `git status`) to release `index.lock` before it fails.
+const INDEX_LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// Takes the lock of the index at `index_path` (the repository's without
+/// one), waiting up to [`INDEX_LOCK_WAIT`] for its holder.
+fn lock_index(repo: &gix::Repository, index_path: Option<&Path>) -> Result<gix::lock::File> {
+	gix::lock::File::acquire_to_update_resource(
+		index_path.map_or_else(|| repo.index_path(), Path::to_owned),
+		gix::lock::acquire::Fail::AfterDurationWithBackoff(INDEX_LOCK_WAIT),
+		None,
+	)
+	.map_err(|err| Error::backend("git lock index", err))
+}
+
+/// Writes `map` as the index at `index_path` through `lock`, which the
+/// caller took before reading the entries the map came from.
 fn write_index_map_at(
 	repo: &gix::Repository,
 	map: &BTreeMap<String, FileEntry>,
 	index_path: Option<&Path>,
+	lock: gix::lock::File,
 ) -> Result<()> {
 	// Entries the map leaves as they were keep their stat data and flags:
 	// zeroed stats make every later status re-hash each tracked file, and
@@ -1823,9 +1851,15 @@ fn write_index_map_at(
 		index_path.map_or_else(|| repo.index_path(), Path::to_owned),
 	);
 	index.remove_tree();
+	let mut out = io::BufWriter::with_capacity(64 * 1024, lock);
 	index
-		.write(gix::index::write::Options::default())
-		.map_err(|err| Error::backend("git write index", err))
+		.write_to(&mut out, gix::index::write::Options::default())
+		.map_err(|err| Error::backend("git write index", err))?;
+	out.into_inner()
+		.map_err(|err| Error::backend("git write index", err.into_error()))?
+		.commit()
+		.map_err(|err| Error::backend("git write index", err.error))?;
+	Ok(())
 }
 
 fn write_tree_map(
@@ -2370,6 +2404,18 @@ mod tests {
 		);
 		assert_eq!(git(temp.path(), &["show", "HEAD:tracked.txt"]), "updated\n");
 		assert_eq!(git(temp.path(), &["show", "HEAD~1:new-file.txt"]), "new\n");
+	}
+
+	#[test]
+	fn patch_lines_keep_crlf_and_unterminated_hunk_data() {
+		let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\r\n+new\r\n\\ No newline \
+		           at end of file";
+		let file = parse_file_patch(raw).expect("parse patch");
+		assert_eq!(file.raw, raw);
+		assert_eq!(file.hunks.len(), 1);
+		assert_eq!(file.hunks[0].lines[0].data, b"old\r");
+		assert_eq!(file.hunks[0].lines[1].data, b"new\r");
+		assert!(file.hunks[0].lines[1].no_newline);
 	}
 
 	#[test]
@@ -2977,6 +3023,35 @@ mod tests {
 		);
 		assert_eq!(checked, expected.status.success(), "{case}");
 		assert_eq!(gitlink_snapshot(ours), gitlink_snapshot(oracle), "{case}");
+	}
+
+	#[test]
+	fn cached_apply_waits_for_another_process_to_release_the_index_lock() {
+		// Regression: the index write gave up at once on a held `index.lock`
+		// (a prompt's `git status`), leaving the entry at its old blob.
+		let temp = init(&[("file.txt", b"one\n")]);
+		fs::write(temp.path().join("file.txt"), b"two\n").expect("edit");
+		let patch = repo(temp.path())
+			.diff_text(&DiffOptions::default())
+			.expect("patch");
+		let lock = temp.path().join(".git/index.lock");
+		fs::write(&lock, b"").expect("hold the lock");
+		std::thread::scope(|scope| {
+			scope.spawn(|| {
+				std::thread::sleep(Duration::from_millis(150));
+				fs::remove_file(&lock).expect("release the lock");
+			});
+			repo(temp.path())
+				.apply_patch(&patch, &ApplyOptions {
+					cached:     true,
+					index_path: None,
+					reverse:    false,
+					three_way:  false,
+				})
+				.expect("apply once the lock is free");
+		});
+		assert_eq!(git(temp.path(), &["diff", "--cached", "--name-only"]).trim(), "file.txt");
+		assert_eq!(git(temp.path(), &["diff", "--name-only"]).trim(), "");
 	}
 
 	#[test]

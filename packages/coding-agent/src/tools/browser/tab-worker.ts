@@ -25,7 +25,7 @@ import type {
 } from "puppeteer-core";
 import { stringifyFunction } from "puppeteer-core/internal/util/Function.js";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
-import { formatScreenshot, resizeImage } from "../../utils/image-resize";
+import { resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
 import {
 	bindRunFacade,
@@ -125,6 +125,7 @@ import {
 import { DownloadManager, type BrowserDownload } from "./downloads";
 import { InitScriptManager, type InitScriptInfo } from "./init-scripts";
 import { applyInsecure } from "./open-options";
+import { FOREIGN_FRAME_REFUSAL } from "./relay/protocol";
 import {
 	BrowserNetworkManager,
 	type HarContentPolicy,
@@ -209,6 +210,7 @@ import {
 	createPngDiff,
 	type DiffScreenshotOptions,
 	type DiffScreenshotResult,
+	emitScreenshot,
 	formatScreenshotLegend,
 	installScreenshotAnnotations,
 	type PdfOptions,
@@ -217,12 +219,14 @@ import {
 	type ScreenshotChangeResult,
 	type ScreenshotHistory,
 	type ScreenshotOptions,
+	type ScreenshotRun,
 	screenshotArea,
 	screenshotQuality,
 	screenshotScope,
 	screenshotThreshold,
 	whileDrawing,
 } from "./screenshot";
+import { PointerSpace } from "./pointer-space";
 import { type DialogPolicy, type DialogState, dialogBlocksPageError, RuntimeDialogController } from "./dialogs";
 import {
 	type BrowserFrameApi,
@@ -343,7 +347,7 @@ const SELECTOR_HANDLER_PREFIXES = [
 	"p-",
 ] as const;
 
-type DragTarget = string | { readonly x: number; readonly y: number };
+type DragTarget = string | { readonly x: number; readonly y: number; readonly css?: boolean };
 
 /** Maximum wait for a renderer acknowledgement after a wheel event is queued. */
 const SCROLL_ACK_TIMEOUT_MS = 2_000;
@@ -503,7 +507,7 @@ interface TabApi {
 	uncheck(selector: string): Promise<void>;
 	keyDown(key: KeyInput): Promise<void>;
 	keyUp(key: KeyInput): Promise<void>;
-	mouseMove(x: number, y: number, opts?: { steps?: number }): Promise<void>;
+	mouseMove(x: number, y: number, opts?: { steps?: number; css?: boolean }): Promise<void>;
 	mouseDown(opts?: { button?: "left" | "right" | "middle" | "back" | "forward" }): Promise<void>;
 	mouseUp(opts?: { button?: "left" | "right" | "middle" | "back" | "forward" }): Promise<void>;
 	clickAt(
@@ -512,6 +516,7 @@ interface TabApi {
 		opts?: {
 			button?: "left" | "right" | "middle" | "back" | "forward";
 			count?: number;
+			css?: boolean;
 		},
 	): Promise<void>;
 	wheel(deltaX: number, deltaY: number): Promise<void>;
@@ -1847,6 +1852,7 @@ export class WorkerCore {
 	#ariaSnapshotBaselines = new Map<string, AriaSnapshotBaseline>();
 	#emulation?: BrowserEmulationController;
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
+	readonly #pointerSpace = new PointerSpace();
 	#webmcp?: WebMcpController;
 	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
@@ -1883,6 +1889,8 @@ export class WorkerCore {
 	readonly #onDialogClosed = (event: Protocol.Page.JavascriptDialogClosedEvent): void => {
 		if (this.#beforeUnloadOpen && !event.result) this.#mainFrameNavigationRequested = false;
 		this.#beforeUnloadOpen = false;
+		// The user or another client may have answered it: the page runs again either way.
+		this.#dialogs?.closed();
 	};
 	#isMainFrame(frameId: string): boolean {
 		return this.#page !== undefined && devtoolsFrameId(this.#page.mainFrame()) === frameId;
@@ -2174,9 +2182,16 @@ export class WorkerCore {
 			if ((await targetIdForTarget(target).catch(() => "")) !== targetId) continue;
 			return target;
 		}
+		// The omp relay withholds a tab Chrome refused to attach, and says why beside `Target.getTargetInfo`. A refusal over
+		// another extension's frame fails at once, so the supervisor can keep the tab for a later call.
+		const targetInfo = await this.#browserHasTarget(this.#browser, targetId);
+		const refusal = isRecord(targetInfo) && typeof targetInfo.refusal === "string" ? targetInfo.refusal : undefined;
+		if (refusal && FOREIGN_FRAME_REFUSAL.test(refusal)) {
+			throw new ToolError(`Chrome refused to attach to target ${targetId}: ${refusal}`);
+		}
 		// Puppeteer lists a page only once its URL is non-empty, and a crashed page revived by this attach reloads
 		// with an empty URL for a moment. Wait for it while Chromium still has the target; fail at once when not.
-		if (await this.#browserHasTarget(this.#browser, targetId)) {
+		if (targetInfo) {
 			const target = await this.#browser
 				.waitForTarget(async candidate => (await targetIdForTarget(candidate).catch(() => "")) === targetId, {
 					timeout: ATTACHED_TARGET_EXPOSE_TIMEOUT_MS,
@@ -2187,16 +2202,11 @@ export class WorkerCore {
 		throw new ToolError(`Target ${targetId} is no longer available on the attached browser`);
 	}
 
-	async #browserHasTarget(browser: Browser, targetId: string): Promise<boolean> {
-		let session: CDPSession | undefined;
+	async #browserHasTarget(browser: Browser, targetId: string): Promise<unknown> {
 		try {
-			session = await browser.target().createCDPSession();
-			await session.send("Target.getTargetInfo", { targetId });
-			return true;
+			return await browserConnection(browser).send("Target.getTargetInfo", { targetId });
 		} catch {
-			return false;
-		} finally {
-			await session?.detach().catch(() => undefined);
+			return undefined;
 		}
 	}
 
@@ -2777,6 +2787,7 @@ export class WorkerCore {
 		const { budgetBound, quickOpMs, actionOpMs } = resolveOpTimeouts(timeoutMs);
 		const waitMs = (explicit?: number): number => resolveWaitTimeout(timeoutMs, explicit);
 		const INF = Number.POSITIVE_INFINITY;
+		const shots: ScreenshotRun = { session, output, screenshots, pointer: this.#pointerSpace };
 		const op = <T>(
 			label: string,
 			perOpMs: number,
@@ -2881,9 +2892,7 @@ export class WorkerCore {
 					},
 				),
 			screenshot: opts =>
-				read(describeScreenshot(opts), quickOpMs, sig =>
-					this.#captureScreenshot(session, output, screenshots, sig, opts),
-				),
+				read(describeScreenshot(opts), quickOpMs, sig => this.#captureScreenshot(shots, sig, opts)),
 			extract: (format = "markdown", opts) =>
 				read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
 					const html = (await untilAborted(sig, () => page.content())) as string;
@@ -3209,15 +3218,7 @@ export class WorkerCore {
 						waitMs,
 						op,
 						captureScreenshot: (target, selector, screenshotSignal) =>
-							captureFrameScreenshot(
-								target,
-								selector,
-								screenshotSignal,
-								normalizeSelector,
-								session,
-								output,
-								screenshots,
-							),
+							captureFrameScreenshot(target, selector, screenshotSignal, normalizeSelector, shots),
 					});
 				}),
 			dialog: () =>
@@ -3446,7 +3447,11 @@ export class WorkerCore {
 					this.#heldKeys.delete(key);
 					return keyUp(page, key, sig);
 				}),
-			mouseMove: (x, y, opts) => op("tab.mouseMove()", actionOpMs, sig => mouseMove(page, x, y, opts, sig)),
+			mouseMove: (x, y, opts) =>
+				op("tab.mouseMove()", actionOpMs, async sig => {
+					const point = this.#pointerSpace.toViewport({ x, y, css: opts?.css }, page.viewport() ?? undefined);
+					await mouseMove(page, point.x, point.y, { steps: opts?.steps }, sig);
+				}),
 			mouseDown: opts =>
 				op("tab.mouseDown()", actionOpMs, async sig => {
 					await mouseDown(page, opts, sig);
@@ -3459,7 +3464,11 @@ export class WorkerCore {
 				}),
 			// Raw pointer input runs at once, as on main: sent the moment a new document had parsed, a click did not
 			// reach it.
-			clickAt: (x, y, opts) => op("tab.clickAt()", actionOpMs, sig => clickAt(page, x, y, opts, sig)),
+			clickAt: (x, y, opts) =>
+				op("tab.clickAt()", actionOpMs, async sig => {
+					const point = this.#pointerSpace.toViewport({ x, y, css: opts?.css }, page.viewport() ?? undefined);
+					await clickAt(page, point.x, point.y, opts, sig);
+				}),
 			wheel: (deltaX, deltaY) => op("tab.wheel()", actionOpMs, sig => wheel(page, deltaX, deltaY, sig)),
 			highlight: (selector, opts) =>
 				act(
@@ -3577,9 +3586,7 @@ export class WorkerCore {
 	}
 
 	async #captureScreenshot(
-		session: SessionSnapshot,
-		output: RunOutput,
-		screenshots: ScreenshotResult[],
+		run: ScreenshotRun,
 		signal: AbortSignal | undefined,
 		opts: ScreenshotOptions = {},
 	): Promise<string | ScreenshotChangeResult> {
@@ -3640,41 +3647,19 @@ export class WorkerCore {
 			changeResult = { changed, revision, pixelChangeRatio };
 			if (!changed) return changeResult;
 		}
-		const resized = await resizeImage(
-			{ type: "image", data: buffer.toBase64(), mimeType: captureMime },
-			{ maxWidth: 1024, maxHeight: 1024, maxBytes: 150 * 1024, jpegQuality: 70, excludeWebP: session.excludeWebP },
+		const dest = await emitScreenshot(
+			{
+				bytes: buffer,
+				mimeType: captureMime,
+				area: screenshotArea(opts),
+				scale: captureScale,
+				keepCapture: opts.format !== undefined,
+				silent: opts.silent,
+				notes: opts.annotate ? [formatScreenshotLegend(annotationTargets)] : undefined,
+			},
+			run,
+			signal,
 		);
-		const preserveFormat = opts.format !== undefined;
-		const saveFullRes = !!session.browserScreenshotDir || preserveFormat;
-		const savedBuffer = saveFullRes ? buffer : resized.buffer;
-		const savedMimeType = saveFullRes ? captureMime : resized.mimeType;
-		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
-		const dest = session.browserScreenshotDir
-			? path.join(
-					session.browserScreenshotDir,
-					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-				)
-			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
-		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
-		await Bun.write(dest, savedBuffer);
-		screenshots.push({
-			dest,
-			mimeType: savedMimeType,
-			bytes: savedBuffer.length,
-			width: resized.width,
-			height: resized.height,
-		});
-		if (!opts.silent) {
-			const lines = formatScreenshot({
-				saveFullRes,
-				dest,
-				resized,
-				capture: { area: screenshotArea(opts), scale: captureScale },
-			});
-			if (opts.annotate) lines.push(formatScreenshotLegend(annotationTargets));
-			output.push({ type: "text", text: lines.join("\n") });
-			output.push({ type: "image", data: resized.data, mimeType: resized.mimeType });
-		}
 		if (changeResult) return { ...changeResult, path: dest };
 		return dest;
 	}
@@ -3769,7 +3754,8 @@ export class WorkerCore {
 				typeof (target as { x: unknown }).x === "number" &&
 				typeof (target as { y: unknown }).y === "number"
 			) {
-				return { x: (target as { x: number }).x, y: (target as { y: number }).y };
+				// A point is a position on the latest screenshot unless it says it is CSS pixels.
+				return this.#pointerSpace.toViewport(target, page.viewport() ?? undefined);
 			}
 			throw new ToolError(
 				`Drag ${role} must be a selector string or { x: number, y: number } point. Got: ${typeof target}`,
