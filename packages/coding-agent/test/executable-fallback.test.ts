@@ -226,4 +226,20 @@ process.stdout.write(Bun.spawnSync([exe, "-e", "console.log('running build')"]).
 			cmd: [oldKeg, "__omp_worker_test"],
 		});
 	});
+
+	it("restarts a build started by path as itself, not as another omp on PATH", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const root = process.platform === "win32" ? "C:" : "";
+		const devBuild = `${root}/work/omp/dist/omp`;
+
+		setProcessProp("execPath", devBuild);
+		setProcessProp("argv0", devBuild);
+
+		vi.spyOn(utils, "$which").mockImplementation((cmd: string) =>
+			cmd === "omp" ? `${root}/opt/homebrew/bin/omp` : null,
+		);
+		vi.spyOn(utils, "isExecutable").mockReturnValue(true);
+
+		expect(resolveRestartCmd()).toEqual([devBuild]);
+	});
 });

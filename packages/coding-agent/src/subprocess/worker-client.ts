@@ -166,10 +166,12 @@ export function resolveCliEntryCmd(): string[] {
  * image that started this process; with versioned installs (Homebrew kegs) an
  * upgrade repoints the launcher while the old keg stays installed, so
  * re-execing `process.execPath` would bring the open session back on the old
- * version (issue #19454). Prefer a launcher that now points at a different
- * executable; keep the unchanged entry command when there is none, and leave
- * workers on {@link resolveExecutablePath} so they stay pinned to the parent
- * build (issues #16262, #19259).
+ * version (issue #19454). Re-exec the launcher this process was started
+ * through when it now points at a different executable: `argv0` itself when
+ * it is a full path, else its PATH lookup. Never a different `omp` on PATH: a
+ * build started by path restarts as itself. Keep the unchanged entry command
+ * otherwise, and leave workers on {@link resolveExecutablePath} so they stay
+ * pinned to the parent build (issues #16262, #19259).
  */
 export function resolveRestartCmd(): string[] {
 	if (!isCompiledBinary()) return resolveCliEntryCmd();
@@ -177,22 +179,19 @@ export function resolveRestartCmd(): string[] {
 	const running = stripWindowsExtendedLengthPathPrefix(process.execPath);
 	const argv0 = stripWindowsExtendedLengthPathPrefix(process.argv0);
 	const isPath = argv0.includes("/") || argv0.includes("\\") || argv0.includes(":");
-	const candidates = [
-		isFullyQualifiedPath(argv0) ? argv0 : null,
-		!isPath ? $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }) : null,
-		$which("omp", { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass }),
-	];
-	for (const candidate of candidates) {
-		if (!candidate || !isExecutable(candidate)) continue;
-		let sameBuild: boolean;
-		try {
-			sameBuild = fs.realpathSync(candidate) === fs.realpathSync(running);
-		} catch {
-			sameBuild = path.resolve(candidate) === path.resolve(running);
-		}
-		if (!sameBuild) return [candidate];
+	const launcher = isPath
+		? isFullyQualifiedPath(argv0)
+			? argv0
+			: null
+		: $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass });
+	if (!launcher || !isExecutable(launcher)) return [executable];
+	let sameBuild: boolean;
+	try {
+		sameBuild = fs.realpathSync(launcher) === fs.realpathSync(running);
+	} catch {
+		sameBuild = path.resolve(launcher) === path.resolve(running);
 	}
-	return [executable];
+	return sameBuild ? [executable] : [launcher];
 }
 
 /** Whether the file at `process.execPath` is no longer the image this process runs (replaced or unlinked). */
