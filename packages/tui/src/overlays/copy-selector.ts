@@ -16,6 +16,7 @@
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { TspPickerColumn, TspPickerItem, TspPickerProps, TspText } from "@oh-my-pi/pi-wire";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	type Component,
 	matchesKey,
@@ -42,6 +43,7 @@ import { highlightCode, type ThemeColor, theme } from "../theme/theme";
 import { commandFromToolCall, extractBlocks, extractLinks } from "./copy-targets";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
+import { isReplyWrite, toolResultReplies } from "../chat/reply-write";
 import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
 import {
 	appendOutlineEntries,
@@ -79,13 +81,8 @@ function turnSummary(entry: TranscriptEntry): { label: string; role: string } {
 		case "user":
 			return { label: userMessageLabel(message.content), role: "omp.user" };
 		case "assistant": {
-			let prose = "";
-			const tools: string[] = [];
-			for (const content of message.content) {
-				if (content.type === "text") prose += content.text;
-				else if (content.type === "toolCall") tools.push(content.name);
-			}
-			const label = firstLine(prose) || tools.join(", ") || "thinking";
+			const tools = message.content.filter(content => content.type === "toolCall").map(content => content.name);
+			const label = firstLine(assistantVisibleText(message)) || tools.join(", ") || "thinking";
 			return { label, role: "omp.assistant" };
 		}
 		case "toolResult":
@@ -145,9 +142,7 @@ export function turnPreview(target: OutlineTarget, content: string): NativeNode 
 	switch (message?.role) {
 		case "assistant":
 			// A pure tool turn previews its joined commands/results, not prose.
-			return message.content.some(part => part.type === "text" && part.text.trim())
-				? md(content)
-				: code(content, { wrap: true });
+			return assistantVisibleText(message) ? md(content) : code(content, { wrap: true });
 		case "user":
 		case "custom":
 		case "hookMessage":
@@ -191,7 +186,7 @@ function timelineItem(target: OutlineTarget): TspPickerItem {
 	const message = transcriptEntryMessage(entry);
 	switch (message?.role) {
 		case "assistant": {
-			const prose = message.content.some(part => part.type === "text" && part.text.trim());
+			const prose = assistantVisibleText(message) !== "";
 			const calls = message.content.filter(part => part.type === "toolCall");
 			if (prose || calls.length === 0) return { id, label, node: "assistant" };
 			return {
@@ -1048,13 +1043,27 @@ function rawUserText(message: Extract<SessionMessageEntry["message"], { role: "u
 		.join("\n");
 }
 
-/** Concatenated visible text blocks of an assistant message. */
+/** Markdown a `write` call sends to the user as a reply (`out://`), else undefined. */
+function replyWriteText(name: string, args: unknown): string | undefined {
+	if (isReplyWrite(name, args) !== true || !isRecord(args)) return undefined;
+	const text = args.content;
+	return typeof text === "string" && text.trim() ? text : undefined;
+}
+
+/** Prose an assistant message shows: its text blocks and its `out://` replies, in order. */
 function assistantVisibleText(message: Extract<SessionMessageEntry["message"], { role: "assistant" }>): string {
-	let text = "";
+	const parts: string[] = [];
 	for (const content of message.content) {
-		if (content.type === "text") text += content.text;
+		if (content.type === "text") parts.push(content.text);
+		else if (content.type === "toolCall") {
+			const reply = replyWriteText(content.name, content.arguments);
+			if (reply) parts.push(reply);
+		}
 	}
-	return text.trim();
+	return parts
+		.filter(part => part.trim())
+		.join("\n\n")
+		.trim();
 }
 
 /** Joined text content of a tool result. */
@@ -1095,6 +1104,8 @@ function pushMarkdownBlocks(blocks: CopyBlock[], text: string, entry: Transcript
 /** Inner blocks of one turn: markdown code/quotes, commands, and tool output. */
 export function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] {
 	const blocks: CopyBlock[] = [];
+	/** Reply writes: their text came from the calls, their results hold a placeholder. */
+	const replyCallIds = new Set<string>();
 	for (const entry of entries) {
 		const message = transcriptEntryMessage(entry);
 		if (!message) continue;
@@ -1106,6 +1117,10 @@ export function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] 
 				pushMarkdownBlocks(blocks, assistantVisibleText(message), entry);
 				for (const content of message.content) {
 					if (content.type !== "toolCall") continue;
+					if (isReplyWrite(content.name, content.arguments) === true) {
+						replyCallIds.add(content.id);
+						continue;
+					}
 					const command = commandFromToolCall(content);
 					if (command) {
 						blocks.push({
@@ -1120,6 +1135,8 @@ export function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] 
 				break;
 			}
 			case "toolResult": {
+				if (message.isError !== true && replyCallIds.has(message.toolCallId)) break;
+				for (const reply of toolResultReplies(message.details)) pushMarkdownBlocks(blocks, reply, entry);
 				const text = toolResultText(message);
 				if (text) blocks.push({ label: `${message.toolName} result`, content: text, entry });
 				break;
@@ -1149,11 +1166,19 @@ export function targetCopy(target: OutlineTarget, blocks: readonly CopyBlock[]):
 		case "assistant": {
 			const text = assistantVisibleText(message);
 			if (text) return { content: text, label: "assistant message" };
+			// A command's `out://` reply (`bash > out://`, an eval cell's bridged write).
+			const replies = target.entries.flatMap(entry => {
+				const result = transcriptEntryMessage(entry);
+				return result?.role === "toolResult" ? toolResultReplies(result.details) : [];
+			});
+			if (replies.length > 0) return { content: replies.join("\n\n"), label: "assistant message" };
 			break;
 		}
 		case "toolResult": {
-			const text = toolResultText(message);
-			if (text) return { content: text, label: `${message.toolName} result` };
+			const content = [...toolResultReplies(message.details), toolResultText(message)]
+				.filter(part => part.trim())
+				.join("\n\n");
+			if (content) return { content, label: `${message.toolName} result` };
 			break;
 		}
 		case "bashExecution":

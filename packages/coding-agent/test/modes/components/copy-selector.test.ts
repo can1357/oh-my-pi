@@ -7,6 +7,7 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CopySelectorComponent, type CopyPickSource } from "@oh-my-pi/pi-tui/overlays/copy-selector";
@@ -64,6 +65,90 @@ function makeEntries(assistantText = ASSISTANT_TEXT): SessionMessageEntry[] {
 }
 
 const GROUPED_READ_YIELD = "The write landed; here is the yield.";
+
+const REPLY_FENCE = "flux reconcile kustomization apps";
+const REPLY_TEXT = `DEVX-1468 status:\n\nnongprod branch created.\n\n\`\`\`sh\n${REPLY_FENCE}\n\`\`\``;
+const REPLY_PLACEHOLDER = "Shown to the user.";
+const TASK_RESULT = "Spawned 2 background agents using reviewer.\n- `StandardsReview` (job `StandardsReview`)";
+
+/**
+ * user → assistant(`write out://` reply + task call) → both results. The reply
+ * draws as assistant prose in the transcript, so the turn copies as prose.
+ */
+function makeReplyTurnEntries(): SessionMessageEntry[] {
+	return [
+		entry("u-r", null, { role: "user", content: "status?", timestamp: 1 } as AgentMessage),
+		entry("a-r", "u-r", {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "reply-1", name: "write", arguments: { path: "out://", content: REPLY_TEXT } },
+				{ type: "toolCall", id: "task-1", name: "task", arguments: { tasks: [] } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2,
+		} as unknown as AgentMessage),
+		entry("t-reply", "a-r", {
+			role: "toolResult",
+			toolCallId: "reply-1",
+			toolName: "write",
+			content: [{ type: "text", text: REPLY_PLACEHOLDER }],
+			isError: false,
+			timestamp: 3,
+		} as unknown as AgentMessage),
+		entry("t-task", "a-r", {
+			role: "toolResult",
+			toolCallId: "task-1",
+			toolName: "task",
+			content: [{ type: "text", text: TASK_RESULT }],
+			isError: false,
+			timestamp: 4,
+		} as unknown as AgentMessage),
+	];
+}
+
+/** user → assistant(bash call) → bash result carrying the `> out://` reply in its details. */
+function makeBashReplyEntries(): SessionMessageEntry[] {
+	return [
+		entry("u-b", null, { role: "user", content: "status?", timestamp: 1 } as AgentMessage),
+		entry("a-b", "u-b", {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: `printf '%s' x > out://` } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "toolUse",
+			usage: {
+				input: 10,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 15,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: 2,
+		} as unknown as AgentMessage),
+		entry("t-bash", "a-b", {
+			role: "toolResult",
+			toolCallId: "bash-1",
+			toolName: "bash",
+			content: [{ type: "text", text: "12 pass" }],
+			details: { replies: [REPLY_TEXT] },
+			isError: false,
+			timestamp: 3,
+		} as unknown as AgentMessage),
+	];
+}
 
 /** user → assistant(yield + write + two filesystem reads) → write result → two read results. */
 function makeGroupedReadEntries(): SessionMessageEntry[] {
@@ -232,6 +317,39 @@ describe("CopySelectorComponent", () => {
 		selector.dispose();
 
 		expect(picks).toEqual([{ content: GROUPED_READ_YIELD, label: "assistant message" }]);
+	});
+
+	it("copies a turn whose prose is an out:// reply, not its placeholder result", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, makeReplyTurnEntries());
+		selector.render(100);
+
+		// Blocks: the reply's own fence, then the task result. The write's result is
+		// a placeholder the transcript never draws, so it must not surface either.
+		selector.handleInput(RIGHT);
+		for (let index = 0; index < 2; index++) {
+			selector.handleInput(ENTER);
+			if (index < 1) selector.handleInput("\x1b[B");
+		}
+		selector.handleInput(LEFT);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([
+			{ content: REPLY_FENCE, label: "sh code" },
+			{ content: TASK_RESULT, label: "task result" },
+			{ content: REPLY_TEXT, label: "assistant message" },
+		]);
+	});
+
+	it("copies the reply a command sent through out:// in its result details", () => {
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, makeBashReplyEntries());
+		selector.render(100);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: REPLY_TEXT, label: "assistant message" }]);
 	});
 
 	it("lists the turn's links as blocks after code and commands; Enter copies the URL, o opens it", () => {
