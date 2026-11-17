@@ -15001,7 +15001,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 		await this.#bash.flushPending();
-		this.#flushExcludedRows();
 		await this.sessionManager.flush();
 		const bashTransition = this.#bash.beginSessionTransition();
 		this.#cancelOwnAsyncJobs();
