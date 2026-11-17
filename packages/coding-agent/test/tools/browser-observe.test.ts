@@ -505,15 +505,14 @@ describe("browser reads after an action", () => {
 							reads.push(await tab.text("#pane"));
 						}
 						await tab.click("#load");
-						const together = await Promise.all([tab.text("#pane"), tab.text("#pane")]);
-						return { unprompted, reads, together };
+						reads.push(...(await Promise.all([tab.text("#pane"), tab.text("#pane")])));
+						return [unprompted, reads];
 					`,
 				);
-				expect(result).toEqual({
-					unprompted: ["Empty", ["Empty", "early"]],
-					reads: ["Detail", "Detail", "Detail"],
-					together: ["Detail", "Detail"],
-				});
+				expect(result).toEqual([
+					["Empty", ["Empty", "early"]],
+					["Detail", "Detail", "Detail", "Detail", "Detail"],
+				]);
 			} finally {
 				pages.stop();
 			}
