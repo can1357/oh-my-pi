@@ -37,6 +37,7 @@
 - Fixed Linux `ax()`, `find()`, `el.children()` and focus reads freezing a Qt app with a very long table (up to 45 s, over 1 GB) or knocking it off the accessibility bus, and showing nothing of a GTK 3 list over 65,536 cells; they read only the children they can use, and `ax()` says how many it left out ([#19036](https://github.com/can1357/oh-my-pi/pull/19036) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input leaving its target in front after you clicked in your own app while that app was busy or hung, or just before a session's first action; a drag and drop from your app onto the target, or a click on it from a remote-control tool, now counts as choosing it ([#16553](https://github.com/can1357/oh-my-pi/pull/16553) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Wayland screenshots, and the clicks, drags and scrolls that need them, failing in released Linux builds; without PipeWire installed, `capabilities()` reports `capture: false` and the capture error says why ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a Windows crash in the native IPC transport that left every daemon-served tool hanging after another session closed its pipe mid-operation ([#16045](https://github.com/can1357/oh-my-pi/issues/16045), [#19508](https://github.com/can1357/oh-my-pi/pull/19508) by [@ve3xone](https://github.com/ve3xone))
 
 ### Removed
 
