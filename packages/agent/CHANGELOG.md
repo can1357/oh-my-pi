@@ -5,6 +5,10 @@
 ### Added
 
 - Added an opt-in numeric faithfulness check for compaction summaries and handoff documents (`CompactionSettings.numberCheck`): numbers the summarizer was never shown go back to it once for a line-level fix, any left are replaced with `?`, and the findings are recorded in `details.numberCheck` ([#19290](https://github.com/can1357/oh-my-pi/pull/19290) by [@Xytronix](https://github.com/Xytronix))
+### Fixed
+
+- Provider replay (`filterProviderReplayMessages`, the default `convertToLlm`) now sends a tool call stopped by a provider error as "not executed" without the provider's error text, so a refusal explanation is never fed back to the model ([#19419](https://github.com/can1357/oh-my-pi/pull/19419) by [@flosrn](https://github.com/flosrn))
+- Fixed one-shot retries and title generation to pass the model endpoint so custom Zhipu Coding Plan providers honor the Beijing-time quota reset ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.1] - 2026-11-14
 
