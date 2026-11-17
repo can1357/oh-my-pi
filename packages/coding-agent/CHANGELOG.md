@@ -5,6 +5,72 @@
 ### Fixed
 
 - Fixed the status-line usage segment showing another account's quota for multi-credential API-key providers such as `opencode-go`; it now follows the credential row the session router actually serves from ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
+### Added
+
+- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- On macOS the `computer` tool's takeover notice now says what it did with your keyboard ("handed the keyboard back to Notes's window", "left as the user chose") instead of "focus returned", which it could not verify ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `tab.observe()` and `tab.ariaSnapshot()` on Chromium tabs now wait, up to 3 seconds, for the requests and page updates (including child frames) the actions since your last look started, so a cell that clicks and then observes shows the result instead of the page before it; concurrent looks share the wait even across another action, clearing the request log does not discard pending work, and requests already open before the action do not delay the look ([#19045](https://github.com/can1357/oh-my-pi/pull/19045) by [@will-bogusz](https://github.com/will-bogusz))
+- When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
+- Subagents no longer open browser tabs in your Chrome (with `browser.relay` on) or over your Tern or cmux pane unless the open asks with `app: "relay"` or `app: "tern"`; they use `browser.cdpUrl` or omp's own Chromium ([#18789](https://github.com/can1357/oh-my-pi/pull/18789) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser tasks start without reading `xd://eval/browser`: a short guide follows the first browser call as a hidden session message, outside cell output limits and shaping. Compaction or a rewind that drops or shortens it sends it again. Advisors keep reading the full guide first; real-session, borrowed-tab and page-integrity safety rules arrive before the first call ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
+- Named-menu reads now include exposed nested commands with their full paths, avoiding a separate read for each submenu ([#18222](https://github.com/can1357/oh-my-pi/pull/18222) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
+- Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the shell's `stat`, `diff` and `find` builtins ignoring `TZ` when printing file times; `find -ls` now prints times in the shell's time zone instead of UTC, and `find -newermt` reads dates like `Nov 15, 2023` in the shell's time zone ([#19482](https://github.com/can1357/oh-my-pi/pull/19482) by [@alphastorm](https://github.com/alphastorm))
+- With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
+- Fixed `/commit` and eval `commit` creating a single-parent commit during a merge; committing now refuses while a merge, cherry-pick, revert, rebase or `git am` is in progress or the index has unresolved conflicts ([#19474](https://github.com/can1357/oh-my-pi/pull/19474) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the `apply_patch` tool description calling it a shell command and forbidding absolute paths ([#19325](https://github.com/can1357/oh-my-pi/issues/19325), [#19468](https://github.com/can1357/oh-my-pi/pull/19468) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the shell's `rg` builtin ignoring `--glob` patterns that contain a slash ([#19476](https://github.com/can1357/oh-my-pi/pull/19476) by [@alphastorm](https://github.com/alphastorm))
+- Fixed eval `commit` `only(...)` failing when one of its paths or globs matched no changed file; unmatched ones are now reported ([#19472](https://github.com/can1357/oh-my-pi/pull/19472) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the browser tool reporting a JavaScript `confirm` or `prompt` as still open, and failing page calls on it, after the user clicked it away or another CDP client answered it ([#19481](https://github.com/can1357/oh-my-pi/pull/19481) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `computer` `setValue` on a `<select>` in Chrome or an Electron app on macOS failing with an empty list of options; it now chooses the option the value names ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
+- A relay tab is no longer closed when another extension's frame, such as a password manager's autofill menu that undoes the relay clearing it, keeps Chrome refusing omp: the call fails saying what holds the tab, the tab stays open as the user left it, and the next call reattaches to it ([#19178](https://github.com/can1357/oh-my-pi/pull/19178) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the computer tool telling the model that only an X11 takeover can end with nothing sent because the user kept typing; a macOS takeover now waits for the user's pause too and reports `UserIntervened` the same way ([#19296](https://github.com/can1357/oh-my-pi/pull/19296) by [@will-bogusz](https://github.com/will-bogusz))
+- When the browser relay hides another extension's frame in a tab omp drives (a password manager's inline menu or save card), the call that ran into it, or a later one on that tab, now names the frame's page, the extension's id and the page's own title, and says the frame is hidden for the user too ([#19001](https://github.com/can1357/oh-my-pi/pull/19001) by [@will-bogusz](https://github.com/will-bogusz))
+- Anthropic web search now passes `site:`-scoped queries to Claude with the domain and path still in the text, and tells Claude to always search, so those lookups and queries it thought it could answer from memory no longer fail with "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Anthropic web search on models with a refusal fallback (Opus 5 and 5.5, Sonnet 5.5, Fable 5) has Anthropic retry a query the safety classifier declines on another Claude model, and reports a refusal or a failed search (`too_many_requests`, …) by name instead of "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Subagents without an output schema (including eval `agent()` calls without `schema`) no longer get a `yield` tool; their final message is the result.
+- A `yield` without `data` no longer uses the subagent's last message as the result; it only finalizes incremental sections that were already submitted.
+- A `computer` key press that opens a macOS popup button's or menu button's menu in the background now fails listing the items and naming the press or click that chooses one, instead of leaving the menu open with your keyboard ([#19179](https://github.com/can1357/oh-my-pi/pull/19179) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Claude not seeing the reasoning of earlier Codex, Kimi, Grok and other non-Claude turns after a model switch, including turns kept through a compaction; it now gets that reasoning as text. When Claude refuses a turn with `Refusal (reasoning_extraction)` because of that carried reasoning, the turn is retried once without it, and the session stops sending it to Claude ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- Moved binary analysis from the standalone `ida` and `ghidra` tools into the backend-neutral `dsm` namespace (`xd://eval/dsm`).
+- Replaced the `ida.enabled`, `ida.maxOpen`, and `ida.idleCloseSec` settings with `disassembler.backend`, `disassembler.maxOpen`, and `disassembler.idleCloseSec`; shared disassembler database APIs are now available under `@oh-my-pi/pi-coding-agent/disasm`.
+
+### Added
+
+- Added Tern plan review editing and comments: double-click plans to edit them, select text to add Google Docs-style comments, and send comments to Refine.
+- Added Ghidra support with automatic setup of Ghidra, JDK, and PyGhidra when analysis is explicitly requested; Auto mode uses an installed IDA Pro when available and otherwise falls back to Ghidra.
+- Added support for sharing live analysis databases with child agents through `db.handle()` and `dsm.open(handle)`.
+- Added a `Force Remove` option to `worktree.onExit` that removes session-created worktrees without prompting, including worktrees with uncommitted changes; new commits remain on the worktree branch.
+
+### Changed
+
+- Updated Tern plan review with a single Approve control, comment-aware Refine option, model selection, and a Save action that writes the plan while keeping review open and plan mode active.
+- Plain executable reads now display Mach-O, ELF, and PE metadata without opening an analysis database or downloading a backend; request an overview, function details, or `dsm.open()` to begin analysis.
+- Improved the model switcher (`Alt+P` / `/switch`) with provider filtering and per-switch thinking-level selection. In Tern, it now opens above the composer with integrated search, provider and Task/Main filters, and a thinking-level slider.
+
+### Fixed
+
+- Deleting or moving large directory trees inside a project no longer stalls language-server file watching ([#19490](https://github.com/can1357/oh-my-pi/pull/19490) by [@H4vC](https://github.com/H4vC)).
+- Reduced CPU and memory usage for long-running subagents as their sessions grow ([#19486](https://github.com/can1357/oh-my-pi/pull/19486) by [@H4vC](https://github.com/H4vC)).
+- Fixed `commit.draft()` incorrectly classifying files deleted or renamed through bash or eval as “Not yours”; they now appear under Review.
+
+### Removed
+
+- Removed the legacy standalone disassembler tools and their associated prompt instructions.
+- Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet; use selection copying and double-click editing instead.
 
 ## [18.21.0] - 2026-11-16
 
@@ -323,6 +389,9 @@
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
 - An instruction file that leaves a code fence open has it closed at its end, so the rest of the system prompt is formatted as usual ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+
+### Fixed
+
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 

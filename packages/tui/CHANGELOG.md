@@ -5,6 +5,32 @@
 ### Changed
 
 - `StatusAccountIdentity` now carries an optional `credentialId` so hosts can attribute the usage segment to a credential-scoped (API-key) account, and cached usage invalidates when it changes ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
+### Added
+
+- Agent names in Task tool rows and agent hub rows take a colour of their own in the terminal UI: Main takes the theme accent, and subagents take one of six colours in the order they arrive, picked from the theme's own palette so each stays readable on its background; themes can set them with the optional `subagent1`–`subagent6` tokens ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- Terminals that support output backpressure must now implement onOutputDrain(callback), which returns an unsubscribe function; terminals without backpressure can omit both pendingOutputBytes and onOutputDrain.
+- Updated PlanReviewOverlay options to use PlanReviewOverlayChoice objects and report choice IDs to onPick and selectOption. Refine and Save actions now reflect plan feedback and saving behavior; removed disabledIndices and externalEditorName, and updated describe to receive DescribeContext.
+
+### Added
+
+- Added configurable model search placement, provider scopes, and an optional thinking-level slider to ModelPickerComponent; selected thinking levels are reported through onPick metadata. The native picker sheet now supports anchoring, scope styling, level display, and icon actions.
+- Added a native plan review document and dock with editable and commentable plans, quote annotations, plan-edit notifications, Approve, Save, and Cancel actions, plus model selection.
+
+### Changed
+
+- Provider scopes now show only the selected provider's models when a provider is chosen, with scope cycling able to return to the full model list.
+- Updated thinking-level controls to use left and right arrow keys, and refreshed the slider and footer hint presentation.
+- Retitled the plan-saving overlay to “Save plan” and updated its action label.
+
+### Fixed
+
+- Fixed slow scrolling and typing in long agent transcripts.
+- Fixed slow typing and cursor movement in drafts longer than 256 lines.
 
 ## [18.21.0] - 2026-11-16
 
