@@ -5,10 +5,10 @@ import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { calculateCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { commandCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { FetchImpl, ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
 
 const originalPrimaryKey = Bun.env.COMMAND_CODE_API_KEY;
 const originalLegacyKey = Bun.env.COMMANDCODE_API_KEY;
@@ -306,11 +306,15 @@ describe("Command Code provider support", () => {
 		// Chat completions only accepts low|medium|high|xhigh|max, so the old
 		// chat route clamped "off" to `reasoning_effort: "low"` and the model
 		// kept thinking. Responses accepts `reasoning.effort: "none"`.
-		const models = await discoverModels(["deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4-flash-fast"]);
-		const responses = models.find(model => model.id === "deepseek/deepseek-v4.1-flash");
+		const models = await discoverModels([
+			"deepseek/deepseek-v4.1-flash",
+			"deepseek/deepseek-v4-flash-fast",
+			"tencent/hy4-flash",
+		]);
+		const responses = models.filter(model => model.id !== "deepseek/deepseek-v4-flash-fast");
 		const chatOnly = models.find(model => model.id === "deepseek/deepseek-v4-flash-fast");
-		if (!responses || !chatOnly) throw new Error("Expected Command Code reasoning fixtures");
-		expect(responses.api).toBe("openai-responses");
+		if (responses.length !== 2 || !chatOnly) throw new Error("Expected Command Code reasoning fixtures");
+		for (const model of responses) expect(model.api, model.id).toBe("openai-responses");
 		expect(chatOnly.api).toBe("openai-completions");
 		const bodies: { url: string; body: Record<string, unknown> }[] = [];
 		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -318,14 +322,87 @@ describe("Command Code provider support", () => {
 			return new Response("stop", { status: 400 });
 		});
 		const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 0 }] };
-		for (const model of [responses, chatOnly]) {
+		for (const model of [...responses, chatOnly]) {
 			await streamSimple(model, context, { apiKey: "user_test", fetch: fetchMock, disableReasoning: true }).result();
 		}
-		const responsesBody = bodies.find(entry => entry.url.endsWith("/provider/v1/responses"))?.body;
-		expect(responsesBody?.reasoning).toEqual({ effort: "none" });
+		const responsesBodies = bodies.filter(entry => entry.url.endsWith("/provider/v1/responses"));
+		expect(responsesBodies).toHaveLength(2);
+		for (const { body } of responsesBodies) expect(body.reasoning).toEqual({ effort: "none" });
 		const chatBodies = bodies.filter(entry => entry.url.endsWith("/chat/completions"));
 		expect(chatBodies.length).toBeGreaterThan(0);
 		for (const { body } of chatBodies) expect(body.reasoning_effort).not.toBe("none");
+	});
+
+	test.each([
+		["discovery", "gpt-6.1-sol"],
+		["discovery", "gpt-6.1-terra"],
+		["bundled", "gpt-6.1-sol"],
+		["bundled", "gpt-6.1-terra"],
+	])("%s %s uses lowest effort for off and preserves explicit effort", async (source, id) => {
+		const models = source === "discovery" ? await discoverModels([id]) : getBundledModels("commandcode");
+		const model = models.find(model => model.id === id);
+		if (!model) throw new Error(`Missing Command Code fixture: ${source}/${id}`);
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = vi.fn(async (input, init) => {
+			expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/responses");
+			bodies.push(JSON.parse(String(init?.body)));
+			return new Response("stop", { status: 400 });
+		});
+		const context = { messages: [{ role: "user" as const, content: "Reply OK", timestamp: 0 }] };
+		await streamSimple(model, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			reasoning: Effort.High,
+			maxHttpAttempts: 1,
+		}).result();
+		expect(bodies.at(-1)?.reasoning).toMatchObject({ effort: "high" });
+		await streamSimple(model, context, {
+			apiKey: "user_test",
+			fetch: fetchMock,
+			disableReasoning: true,
+			maxHttpAttempts: 1,
+		}).result();
+		expect(bodies).toHaveLength(2);
+		expect(bodies[1]?.reasoning).toEqual({ effort: "low" });
+	});
+
+	test("sends each advertised Command Code Qwen effort and preserves off", async () => {
+		const models = await discoverModels(["Qwen/Qwen3.8-Max-Prime", "Qwen/Qwen4-Max"]);
+		const context = { messages: [{ role: "user" as const, content: "Reply OK", timestamp: 0 }] };
+		for (const model of models) {
+			if (!model.thinking) throw new Error(`Missing effort controls for ${model.id}`);
+			const bodies: Record<string, unknown>[] = [];
+			const fetchMock: FetchImpl = vi.fn(async (_input, init) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return new Response("stop", { status: 400 });
+			});
+			for (const effort of model.thinking.efforts) {
+				await streamSimple(model, context, {
+					apiKey: "user_test",
+					fetch: fetchMock,
+					reasoning: effort,
+					maxHttpAttempts: 1,
+				}).result();
+				const body = bodies.at(-1)!;
+				expect(body.enable_thinking, model.id).toBe(true);
+				expect(body.reasoning_effort, model.id).toBe(effort);
+				expect(body.chat_template_kwargs, model.id).toMatchObject({ reasoning_effort: effort });
+			}
+			await streamSimple(model, context, {
+				apiKey: "user_test",
+				fetch: fetchMock,
+				disableReasoning: true,
+				maxHttpAttempts: 1,
+			}).result();
+			const off = bodies.at(-1)!;
+			expect(off.enable_thinking, model.id).toBe(false);
+			expect(off.reasoning_effort, model.id).toBeUndefined();
+			expect(
+				(off.chat_template_kwargs as Record<string, unknown> | undefined)?.reasoning_effort,
+				model.id,
+			).toBeUndefined();
+			expect(bodies).toHaveLength(model.thinking.efforts.length + 1);
+		}
 	});
 
 	test("routes effort-ladder ids to Responses with the right off switch", async () => {
@@ -665,6 +742,180 @@ describe("Command Code provider support", () => {
 			cacheRead: 0.1,
 			cacheWrite: 2.5,
 			longContext: { inputThreshold: 272_000, input: 4, output: 15, cacheRead: 0.2, cacheWrite: 5 },
+		});
+	});
+
+	// Provider client catalog c8a96b62: neutral discovery must recover these deployment capabilities.
+	test("exposes newly documented image inputs and effort controls after discovery", async () => {
+		const groups = [
+			{
+				ids: [
+					"claude-fable-5-2",
+					"claude-haiku-5-5",
+					"gpt-6.1-sol",
+					"gpt-6.1-terra",
+					"meta/muse-ember",
+					"minimax/minimax-m3.1-flash",
+				],
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+			},
+			{
+				ids: ["deepseek/deepseek-v4.1-flash-ultrafast", "moonshotai/Kimi-K3.1-Pro"],
+				efforts: [Effort.Low, Effort.High, Effort.Max],
+			},
+			{
+				ids: [
+					"inclusionai/ling-3.1-flash",
+					"inclusionai/ling-3.1-flash-1019",
+					"meta/muse-spark-open",
+					"mistral/mistral-large-4",
+					"nvidia/nemotron-3.5-super-vl",
+				],
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+			},
+			{
+				ids: ["meta/muse-wonder-1.0", "stealth/glyph-cluster:free"],
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+			},
+			{ ids: ["Qwen/Qwen3.8-Max-Prime"], efforts: [Effort.Low, Effort.Medium, Effort.XHigh] },
+			{ ids: ["Qwen/Qwen4-Max"], efforts: [Effort.Low, Effort.High, Effort.XHigh] },
+			{
+				ids: ["thinkingmachines/inkling-2-small:free"],
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.Max],
+			},
+			{ ids: ["google/gemini-4-carbon"], efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			{ ids: ["ornith/ornith-1.5-122b"], efforts: undefined },
+		];
+		const textOnly: Record<string, true> = {
+			"inclusionai/ling-3.1-flash": true,
+			"inclusionai/ling-3.1-flash-1019": true,
+			"stealth/glyph-cluster:free": true,
+		};
+		const chatOnly: Record<string, true> = {
+			"inclusionai/ling-3.1-flash": true,
+			"inclusionai/ling-3.1-flash-1019": true,
+			"minimax/minimax-m3.1-flash": true,
+			"ornith/ornith-1.5-122b": true,
+			"thinkingmachines/inkling-2-small:free": true,
+			"Qwen/Qwen3.8-Max-Prime": true,
+			"Qwen/Qwen4-Max": true,
+		};
+		const models = await discoverModels(groups.flatMap(group => group.ids));
+		for (const group of groups) {
+			for (const id of group.ids) {
+				const model = models.find(model => model.id === id);
+				expect(model?.input, id).toEqual(textOnly[id] ? ["text"] : ["text", "image"]);
+				expect(model?.thinking?.efforts, id).toEqual(group.efforts);
+				expect(model?.api, id).toBe(
+					id.startsWith("claude-")
+						? "anthropic-messages"
+						: chatOnly[id]
+							? "openai-completions"
+							: "openai-responses",
+				);
+			}
+		}
+	});
+
+	test("prices newly documented paid deployments instead of reporting zero usage cost", async () => {
+		const cards = [
+			{ id: "claude-fable-5-2", input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 },
+			{ id: "google/gemini-4-carbon", input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 },
+			{ id: "meta/muse-ember", input: 0.1, output: 0.5, cacheRead: 0.004, cacheWrite: 0 },
+			{ id: "Qwen/Qwen4-Max", input: 1.5, output: 4.5, cacheRead: 0.075, cacheWrite: 1.875 },
+		];
+		const models = await discoverModels(cards.map(card => card.id));
+		for (const { id, ...cost } of cards) expect(models.find(model => model.id === id)?.cost).toEqual(cost);
+	});
+
+	test("prices published premium bands without shrinking deployment windows", async () => {
+		const cards = [
+			{
+				id: "gpt-5.6-luna",
+				window: 1_050_000,
+				threshold: 272_000,
+				base: [0.2, 1.2, 0.02, 0.25],
+				premium: [0.4, 1.8, 0.04, 0.5],
+			},
+			{
+				id: "gpt-5.6-sol",
+				window: 1_050_000,
+				threshold: 272_000,
+				base: [5, 30, 0.5, 6.25],
+				premium: [10, 45, 1, 12.5],
+			},
+			{
+				id: "gpt-5.6-terra",
+				window: 1_050_000,
+				threshold: 272_000,
+				base: [2, 12, 0.2, 2.5],
+				premium: [4, 18, 0.4, 5],
+			},
+			{
+				id: "Qwen/Qwen3.6-Plus",
+				window: 200_000,
+				threshold: 256_000,
+				base: [0.5, 3, 0.1, 0],
+				premium: [2, 6, 0.2, 0],
+			},
+		];
+		const models = await discoverModels(cards.map(card => ({ id: card.id, context_length: card.window })));
+		for (const card of cards) {
+			const model = models.find(model => model.id === card.id);
+			if (!model) throw new Error(`Missing ${card.id}`);
+			expect(model.contextWindow, card.id).toBe(card.window);
+			if (card.id.startsWith("gpt-")) expect(model.longContextWindowUncapped, card.id).toBe(true);
+			for (const promptTokens of [card.threshold - 1, card.threshold, card.threshold + 1]) {
+				const usage: Usage = {
+					input: promptTokens - 3_000,
+					output: 7,
+					cacheRead: 2_000,
+					cacheWrite: 1_000,
+					totalTokens: promptTokens + 7,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				};
+				const [input, output, cacheRead, cacheWrite] = promptTokens > card.threshold ? card.premium : card.base;
+				calculateCost(model, usage);
+				expect(usage.cost.input, card.id).toBeCloseTo((usage.input * input) / 1e6, 10);
+				expect(usage.cost.output, card.id).toBeCloseTo((usage.output * output) / 1e6, 10);
+				expect(usage.cost.cacheRead, card.id).toBeCloseTo((usage.cacheRead * cacheRead) / 1e6, 10);
+				expect(usage.cost.cacheWrite, card.id).toBeCloseTo((usage.cacheWrite * cacheWrite) / 1e6, 10);
+			}
+		}
+	});
+
+	test("prices vision-exp at the current shared Flash rates", async () => {
+		const [model] = await discoverModels(["deepseek/deepseek-v4-flash-vision-exp"]);
+		if (!model) throw new Error("Missing vision-exp");
+		const usage: Usage = {
+			input: 10_000,
+			output: 1_000,
+			cacheRead: 10_000,
+			cacheWrite: 10_000,
+			totalTokens: 31_000,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		expect(calculateCost(model, usage).total).toBeCloseTo(0.00213, 10);
+	});
+
+	test("keeps Command Code context budgets below inherited model-lineage maxima", async () => {
+		const models = await discoverModels([
+			{ id: "gpt-5.4", context_length: 400_000 },
+			{ id: "gpt-5.3-codex", context_length: 400_000 },
+		]);
+		expect(Object.fromEntries(models.map(model => [model.id, [model.contextWindow, model.maxTokens]]))).toEqual({
+			"gpt-5.4": [400_000, 65_536],
+			"gpt-5.3-codex": [272_000, 65_536],
+		});
+	});
+
+	test("exposes Hy4 Flash image input, high effort, and nonzero prices", async () => {
+		const [model] = await discoverModels([{ id: "tencent/hy4-flash", context_length: 1_024_000 }]);
+		expect(model).toMatchObject({
+			api: "openai-responses",
+			input: ["text", "image"],
+			thinking: { efforts: [Effort.High] },
+			cost: { input: 0.07, output: 0.281, cacheRead: 0.003, cacheWrite: 0 },
 		});
 	});
 
