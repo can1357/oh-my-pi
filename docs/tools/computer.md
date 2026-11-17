@@ -8,7 +8,7 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 
 - Prelude factory and host service: `packages/coding-agent/src/tools/computer.ts`
 - Direct-helper call renderer and approval policy: `packages/coding-agent/src/tools/computer/call.ts`
-- Eval facades: `packages/coding-agent/src/tools/computer/{prelude.js,prelude.py,declarations.d.ts}`
+- Eval facades: `packages/coding-agent/src/tools/computer/{prelude.js,prelude.py}`
 - Model-facing prelude documentation: `packages/coding-agent/src/prompts/tools/computer.md`
 - Computer-use prompt: `packages/coding-agent/src/prompts/system/computer-use.md`
 - Prelude registration/gate: `packages/coding-agent/src/sdk.ts`
