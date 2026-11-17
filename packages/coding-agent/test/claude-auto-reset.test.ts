@@ -346,6 +346,7 @@ describe("planClaudeResetRedemptions: window consent", () => {
 		name: string;
 		trigger?: "sweep";
 		modes: ClaudeResetPlanInput["settings"]["modes"];
+		accountModes?: ClaudeResetPlanInput["settings"]["accountModes"];
 		usage?: ReportOptions;
 		credit?: Partial<UsageResetCredit>;
 		expected: string;
@@ -407,12 +408,24 @@ describe("planClaudeResetRedemptions: window consent", () => {
 			credit: { ...expiring, usedFractions: {} },
 			expected: "window-disabled",
 		},
-	])("$name", ({ trigger, modes, usage, credit, expected }) => {
+		{
+			name: "an account policy's no withholds what the provider setting allows",
+			modes: ALL,
+			accountModes: new Map([[11, { "5h": "yes", weekly: "no" } as const]]),
+			expected: "window-disabled",
+		},
+		{
+			name: "an account policy's yes allows what the provider setting withholds",
+			modes: { "5h": "no", weekly: "no", fable: "no" },
+			accountModes: new Map([[11, { "5h": "no", weekly: "yes", fable: "no" } as const]]),
+			expected: "weekly",
+		},
+	])("$name", ({ trigger, modes, accountModes, usage, credit, expected }) => {
 		const plan = planClaudeResetRedemptions(
 			input({
 				trigger: trigger ?? "blocked",
 				modelId: "claude-fable-5",
-				settings: settings(modes),
+				settings: { ...settings(modes), accountModes },
 				...(usage ? { reports: [report(usage)] } : {}),
 				...(credit ? { statuses: [status({ credit })] } : {}),
 			}),

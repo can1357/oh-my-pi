@@ -166,7 +166,7 @@ function claudeResetReport(nowMs: number, usage: Record<string, number>, grants:
 }
 
 function resetExpiryOptions(overrides: Record<string, unknown> = {}): UsageResetExpiryOptions {
-	return { settings: Settings.isolated(overrides), accounts: () => [] };
+	return { settings: Settings.isolated(overrides), accounts: () => [], getAccountPolicy: () => undefined };
 }
 
 describe("buildRedactionMap", () => {
@@ -1557,6 +1557,47 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
 		expect(text).toContain("(codexResets.autoRedeemWeekly: yes)");
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
+	});
+
+	it("decides and shows an expiring reset by the policy of the stored account its report belongs to", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [
+			cedarGrant(now, "cedar", 3 * HOUR),
+		]);
+		// Stored before its organization was known, with the email case the selector names; the report lowercases it.
+		const stored = {
+			position: 0,
+			credentialId: 7,
+			accountId: "claude-account",
+			email: "Claude@Example.Test",
+			active: false,
+		};
+		const policy = {
+			provider: "anthropic",
+			account: { email: "Claude@Example.Test" },
+			autoRedeemWeekly: "no",
+		} as const;
+		const getAccountPolicy = (_provider: string, identity: { email?: string }) =>
+			identity.email === policy.account.email ? policy : undefined;
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(
+				[report],
+				[],
+				now,
+				undefined,
+				[],
+				{ globalReservePct: 10, getAccountPolicy, accounts: () => [stored] },
+				{
+					...resetExpiryOptions({ "claudeResets.autoRedeemWeekly": "yes" }),
+					accounts: () => [stored],
+					getAccountPolicy,
+				},
+			),
+		);
+		expect(text).toContain("auto-redeem weekly no");
+		expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost\n");
+		expect(text).toContain("→ not spent automatically  (account policy autoRedeemWeekly: no)");
+		expect(text).toContain("spend it:  /usage reset anthropic/7");
 	});
 
 	it("counts only expiring resets that the warned reset's setting decides", () => {

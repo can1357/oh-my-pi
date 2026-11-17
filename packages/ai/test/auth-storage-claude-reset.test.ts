@@ -172,6 +172,13 @@ describe("Claude saved reset account safety", () => {
 		});
 		expect(removed.code).toBe("no_account");
 		expect(f.posts.length).toBe(1);
+		// A replaced store can reuse a row id for another account; a target planned for org-a never spends org-b.
+		const reused = await f.storage.resets.redeem({
+			target: { ...f.target, accountId: "shared-account", orgId: "org-a" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(reused.code).toBe("no_account");
+		expect(f.posts.length).toBe(1);
 	});
 
 	it("lists exact account quota evidence without a second generic usage request", async () => {
