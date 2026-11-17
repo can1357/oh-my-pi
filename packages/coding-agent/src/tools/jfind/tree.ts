@@ -12,6 +12,7 @@ import { buildPathTree, type PathTreeInput, walkPathTree } from "@oh-my-pi/pi-ut
 import { InternalUrlRouter } from "../../internal-urls/router";
 import { type InternalUrlFilesystem, type UrlFileStat, UrlFsError } from "../../internal-urls/url-filesystem";
 import { resolveSearchBase, resolveSearchResultPath } from "../path-utils";
+import { throwIfAborted } from "../tool-errors";
 
 /** One eligible file under the search root. */
 export interface FileEntry {
@@ -225,6 +226,20 @@ function secret(name: string): boolean {
 	return hasExt(name.toLowerCase(), SECRET_EXT);
 }
 
+/**
+ * Walk-relative globs for paths {@link eligibleFile} always rejects (denied
+ * directories, lockfiles, credential material, binaries), derived from the same
+ * tables. Handed to the native scans so those entries never spend the scan
+ * budget; deliberately a subset (lowercase extensions, no `.env.*` variants), so
+ * it never hides an eligible file.
+ */
+export const INELIGIBLE_GLOBS: readonly string[] = [
+	...Object.keys(DENY_DIRS).map(dir => `**/${dir}/**`),
+	...Object.keys(DENY_FILES).map(name => `**/${name}`),
+	...Object.keys(SECRET_FILES).map(name => `**/${name}`),
+	...[...SECRET_EXT, ...BINARY_EXT].map(ext => `**/*.${ext}`),
+];
+
 /** Whether a root-relative regular file is searchable. */
 export function eligibleFile(rel: string, size: number, includeHidden: boolean): boolean {
 	if (size <= 0) return false;
@@ -242,7 +257,10 @@ export interface ListFilesOptions {
 	includeHidden: boolean;
 	/** Filesystem URL roots and their entries resolve through. */
 	filesystem: natives.ShellFilesystem;
+	maxScanEntries?: number;
+	maxScanBytes?: number;
 	signal?: AbortSignal;
+	timeoutMs?: number;
 }
 
 /**
@@ -269,8 +287,13 @@ export async function listFiles(root: SearchRoot, options: ListFilesOptions): Pr
 		gitignore: true,
 		sortByMtime: true,
 		filesystem: options.filesystem,
+		maxScanEntries: options.maxScanEntries,
+		maxScanBytes: options.maxScanBytes,
+		excludeGlobs: [...INELIGIBLE_GLOBS],
 		signal: options.signal,
+		timeoutMs: options.timeoutMs,
 	});
+	throwIfAborted(options.signal);
 	const entries: FileEntry[] = [];
 	for (const match of result.matches) {
 		const size = match.size ?? 0;
