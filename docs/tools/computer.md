@@ -108,7 +108,7 @@ Both a selected window and `desktop` expose:
 - `zoom({ x, y, width, height }, { silent? }) -> { path, width, height, coordinateWidth, coordinateHeight, region, screenLocked? }`
 - `click(x, y, { button?, count?, modifiers?, menu?, takeover? })`
 - `doubleClick(x, y, { button?, modifiers?, takeover? })`
-- `move(x, y, { takeover? })`
+- `move(x, y, { takeover? })`: on macOS a background window move gives the app no hover and a takeover move's hover ends before it returns, so the first background window move of a session says so and names a takeover click as the way to press a control shown only on hover
 - `drag([[x, y], ...], { button?, keys?, modifiers?, takeover? }) -> { start, length, text, focused } | undefined`: the selection when a macOS background drag was made as one (below), otherwise `undefined`
 - `scroll(x, y, { dx?, dy?, takeover? })`
 - `type(text, { takeover? })`
