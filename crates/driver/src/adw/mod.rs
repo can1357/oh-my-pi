@@ -36,7 +36,8 @@ pub struct PhaseResult {
 	/// Whether the phase met its acceptance condition.
 	pub accepted: bool,
 	/// Why the phase was rejected, forwarded verbatim as the next attempt's
-	/// correction. Empty when accepted.
+	/// correction. Legacy providers leave this empty when accepted; native
+	/// verification retains its evidence journal reference on acceptance too.
 	pub feedback: Str,
 }
 

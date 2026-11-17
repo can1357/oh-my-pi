@@ -149,6 +149,18 @@ pub fn compile(
 	for path in spec.write_deny.iter().filter(|path| {
 		path_under_any(path, &spec.writable) || path_under_any(path, &temporary_writable)
 	}) {
+		// An applied ancestor carve-out already denies every descendant,
+		// including future paths. A redundant nested mount would require bwrap
+		// to create its destination inside that read-only ancestor and fail
+		// before the sandboxed command can start.
+		if spec.write_deny.iter().any(|ancestor| {
+			ancestor != path
+				&& path.starts_with(ancestor)
+				&& (path_under_any(ancestor, &spec.writable)
+					|| path_under_any(ancestor, &temporary_writable))
+		}) {
+			continue;
+		}
 		if path.exists() {
 			push_bind(&mut argv, "--ro-bind", path);
 		} else {
@@ -186,6 +198,13 @@ pub fn compile(
 	}
 	if seccomp_helper.is_some() {
 		push_bind(&mut argv, "--ro-bind", Path::new(super::landlock::BPF_PLACEHOLDER));
+	}
+	// A scoped read view starts on a private tmpfs. Bind destinations require
+	// writable scaffolding during setup, but that scaffold is not a granted
+	// write scope. Seal only the root mount after setup: explicitly writable
+	// child bind mounts retain their own permissions.
+	if !spec.readable.is_empty() && matches!(spec.write, WriteMode::Deny | WriteMode::Scoped) {
+		argv.extend([OsString::from("--remount-ro"), OsString::from("/")]);
 	}
 
 	argv.push(OsString::from("--"));

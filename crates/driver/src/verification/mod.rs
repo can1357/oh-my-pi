@@ -3,10 +3,11 @@
 //! Evaluates an explicit inventory of host-observed checks and captures native
 //! source/context identities for conservative applicability keys. Retains
 //! evidence through the existing session journal and blob CAS.
-//! It performs no check execution, model inference or commit admission.
-//! Callers must validate evidence provenance and admit complete supplemental
-//! input identities before submitting observations. Later adapters will supply
-//! that joined path.
+//! The opt-in native package runner composes frozen source, isolated EnvD
+//! execution, complete test inventory and current-input fences. The pure
+//! reducer remains available to callers that admit their own observations.
+//! It performs no model inference or commit admission; a passing result covers
+//! only the declared deterministic check contract.
 //!
 //! ```
 //! use omp_core::{Hash32, Str};
@@ -28,7 +29,9 @@
 //! ```
 
 mod evidence;
+mod inventory;
 mod policy;
+mod runner;
 mod snapshot;
 
 pub use evidence::{
@@ -36,10 +39,15 @@ pub use evidence::{
 	EvidencePublication, EvidenceRecord, EvidenceSubmission, evidence_observation,
 	evidence_publications, load_evidence, publish_evidence,
 };
+pub use inventory::{InventoryError, ProtocolFault};
 pub use policy::{
 	CheckAssessment, CheckDisposition, CheckObservation, CheckOutcome, CheckRequirement,
 	GateAssessment, GateVerdict, InconclusiveReason, PolicyError, VerificationPolicy,
 	VerificationScope,
+};
+pub use runner::{
+	NativeVerificationError, NativeVerificationReport, NativeVerificationSpec,
+	native_verification_posture, run_native_verification,
 };
 pub use snapshot::{
 	ContextField, SnapshotContext, SnapshotError, VerificationSnapshot,

@@ -1,7 +1,7 @@
 //! Environment-owned scoped resource materialization and lease cleanup.
 
 use std::{
-	collections::HashMap,
+	collections::{BTreeSet, HashMap},
 	fs::{self, OpenOptions},
 	io::{self, Read as _, Write as _},
 	path::{Component, Path, PathBuf},
@@ -14,20 +14,24 @@ use std::{
 
 use bytes::Bytes;
 use omp_core::{Hash32, hash32::Hasher};
+use omp_exec::capture_entries;
+use omp_journal::blob::{BlobStore, Error};
 use omp_proto::env::v1::{
 	MaterializationLease, MaterializationReleased, MaterializeRequest, ReleaseMaterialization,
 };
 use parking_lot::Mutex;
-use thiserror::Error;
 use tokio::{task, time};
 use url::Url;
 
 const DEFAULT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const CAPTURE_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const CAPTURE_BLOB_BYTES: u64 = 8 * 1024 * 1024;
+const CAPTURE_MAX_PATHS: usize = 8192;
 const DEFAULT_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Scoped materialization failure.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum MaterializationError {
 	/// The resource URI is malformed.
 	#[error("materialization resource URI is invalid")]
@@ -64,6 +68,7 @@ struct Inner {
 	workspace_root: PathBuf,
 	local_root:     PathBuf,
 	lease_root:     PathBuf,
+	blobs:          BlobStore,
 	next_lease:     AtomicU64,
 	leases:         Mutex<HashMap<Bytes, LeaseRecord>>,
 }
@@ -80,6 +85,7 @@ impl ResourceMaterializer {
 		workspace_root: &Path,
 		state_dir: &Path,
 		local_root: &Path,
+		blobs: BlobStore,
 	) -> Result<Self, MaterializationError> {
 		let workspace_root = fs::canonicalize(workspace_root)?;
 		let local_root = local_root.to_path_buf();
@@ -93,6 +99,7 @@ impl ResourceMaterializer {
 				workspace_root,
 				local_root,
 				lease_root,
+				blobs,
 				next_lease: AtomicU64::new(1),
 				leases: Mutex::new(HashMap::new()),
 			}),
@@ -137,11 +144,187 @@ impl ResourceMaterializer {
 }
 
 impl Inner {
+	fn captured_blob(
+		&self,
+		hash: Hash32,
+		expected: Option<u64>,
+	) -> Result<Vec<u8>, MaterializationError> {
+		let path = self
+			.blobs
+			.path(&omp_journal::blob::BlobRef { hash, size: 0 });
+		if fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+			return Err(MaterializationError::SymbolicLink);
+		}
+		let range = self
+			.blobs
+			.open_range(hash, 0, 0)
+			.map_err(|error| match error {
+				Error::NotFound => MaterializationError::NotFound,
+				Error::Io(error) => MaterializationError::Io(error),
+				_ => MaterializationError::InvalidUri,
+			})?;
+		let size = range.reference().size;
+		if size > CAPTURE_BLOB_BYTES {
+			return Err(MaterializationError::TooLarge { limit: CAPTURE_BLOB_BYTES });
+		}
+		if expected.is_some_and(|expected| expected != size) {
+			return Err(MaterializationError::InvalidUri);
+		}
+		let mut bytes = Vec::new();
+		range.into_file().take(size + 1).read_to_end(&mut bytes)?;
+		let mut hasher = Hash32::hasher();
+		hasher.update(&bytes);
+		if bytes.len() as u64 != size || hasher.finalize() != hash {
+			return Err(MaterializationError::InvalidUri);
+		}
+		Ok(bytes)
+	}
+
+	fn materialize_capture(
+		&self,
+		request: MaterializeRequest,
+	) -> Result<MaterializationLease, MaterializationError> {
+		let source = request
+			.captured_inputs
+			.ok_or(MaterializationError::InvalidUri)?;
+		let hash = Hash32::new(
+			source
+				.manifest_hash
+				.as_ref()
+				.try_into()
+				.map_err(|_| MaterializationError::InvalidUri)?,
+		);
+		let manifest = self.captured_blob(hash, Some(source.manifest_size))?;
+		let entries = capture_entries(&manifest)?;
+		if entries.len() > CAPTURE_MAX_PATHS {
+			return Err(MaterializationError::TooLarge { limit: CAPTURE_MAX_PATHS as u64 });
+		}
+		let mut paths = BTreeSet::new();
+		for entry in &entries {
+			if entry.path.is_empty()
+				|| entry.path.contains(['\\', ':'])
+				|| entry
+					.path
+					.split('/')
+					.any(|part| part.is_empty() || part == "." || part == "..")
+				|| !matches!(entry.mode, 0o644 | 0o755)
+				|| !paths.insert(entry.path.as_str())
+			{
+				return Err(MaterializationError::InvalidUri);
+			}
+		}
+		for path in &paths {
+			for (index, _) in path.match_indices('/') {
+				if paths.contains(&path[..index]) {
+					return Err(MaterializationError::InvalidUri);
+				}
+			}
+		}
+		let limit = if request.max_bytes == 0 {
+			CAPTURE_MAX_BYTES
+		} else {
+			request.max_bytes.min(CAPTURE_MAX_BYTES)
+		};
+		let lease_id = self.new_lease_id();
+		let lease_path = self
+			.lease_root
+			.join(omp_core::hex::encode(&lease_id).to_string());
+		private_directory(&lease_path)?;
+		let copied = (|| -> Result<u64, MaterializationError> {
+			let source_root = lease_path.join("src");
+			private_directory(&source_root)?;
+			private_directory(&lease_path.join("out"))?;
+			private_directory(&lease_path.join("tmp"))?;
+			let mut size = 0u64;
+			for entry in entries {
+				let bytes = self.captured_blob(entry.hash, None)?;
+				size = size
+					.checked_add(bytes.len() as u64)
+					.ok_or(MaterializationError::TooLarge { limit })?;
+				if size > limit {
+					return Err(MaterializationError::TooLarge { limit });
+				}
+				let destination = source_root.join(&entry.path);
+				let parent = destination
+					.parent()
+					.ok_or(MaterializationError::InvalidUri)?;
+				// Every directory remains private, including intermediate parents.
+				let mut current = source_root.clone();
+				for part in parent
+					.strip_prefix(&source_root)
+					.map_err(|_| MaterializationError::InvalidUri)?
+					.components()
+				{
+					current.push(part);
+					private_directory(&current)?;
+				}
+				let mut file = OpenOptions::new()
+					.write(true)
+					.create_new(true)
+					.open(&destination)?;
+				private_file(&destination)?;
+				file.write_all(&bytes)?;
+				file.sync_all()?;
+				#[cfg(unix)]
+				{
+					use std::os::unix::fs::PermissionsExt as _;
+					file.set_permissions(fs::Permissions::from_mode(if entry.executable {
+						0o500
+					} else {
+						0o400
+					}))?;
+				}
+				#[cfg(not(unix))]
+				{
+					let mut permissions = file.metadata()?.permissions();
+					permissions.set_readonly(true);
+					file.set_permissions(permissions)?;
+				}
+			}
+			Ok(size)
+		})();
+		let size = match copied {
+			Ok(size) => size,
+			Err(error) => {
+				let _ = fs::remove_dir_all(&lease_path);
+				return Err(error);
+			},
+		};
+		let ttl = if request.ttl_ms == 0 {
+			DEFAULT_TTL
+		} else {
+			Duration::from_millis(request.ttl_ms).min(MAX_TTL)
+		};
+		let expires_at_ms = now_ms().saturating_add(ttl.as_millis().try_into().unwrap_or(u64::MAX));
+		let environment_uri = Url::from_directory_path(&lease_path)
+			.map_err(|()| MaterializationError::InvalidUri)?
+			.to_string();
+		self.leases.lock().insert(lease_id.clone(), LeaseRecord {
+			path: lease_path,
+			expires_at_ms,
+			write_back: None,
+			write_back_complete: false,
+		});
+		Ok(MaterializationLease {
+			lease_id,
+			environment_uri,
+			expires_at_ms,
+			size,
+			content_hash: Bytes::copy_from_slice(hash.as_bytes()),
+		})
+	}
+
 	fn materialize(
 		&self,
 		request: MaterializeRequest,
 	) -> Result<MaterializationLease, MaterializationError> {
 		self.reap_expired()?;
+		if request.captured_inputs.is_some() {
+			if !request.resource_uri.is_empty() {
+				return Err(MaterializationError::InvalidUri);
+			}
+			return self.materialize_capture(request);
+		}
 		let mutable_local = request.resource_uri.starts_with("local://");
 		let source = self.resolve_source(&request.resource_uri, mutable_local)?;
 		let metadata = fs::symlink_metadata(&source).map_err(|error| {
@@ -489,7 +672,280 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+	use omp_proto::env::v1::CapturedInputsSource;
+
 	use super::*;
+
+	fn capture_request(blobs: &BlobStore, entries: &[(&str, u32, Hash32)]) -> MaterializeRequest {
+		let mut manifest = b"OMPWS2\0\0\0\0\0".to_vec();
+		for (path, mode, hash) in entries {
+			manifest.extend_from_slice(&(path.len() as u32).to_be_bytes());
+			manifest.extend_from_slice(path.as_bytes());
+			manifest.extend_from_slice(&mode.to_be_bytes());
+			manifest.extend_from_slice(hash.as_bytes());
+		}
+		let reference = blobs.put(&manifest).unwrap();
+		MaterializeRequest {
+			captured_inputs: Some(CapturedInputsSource {
+				manifest_hash: Bytes::copy_from_slice(reference.hash.as_bytes()),
+				manifest_size: reference.size,
+			}),
+			ttl_ms: 60_000,
+			..Default::default()
+		}
+	}
+
+	#[tokio::test]
+	async fn captured_source_is_frozen_private_and_never_written_back() {
+		let workspace = tempfile::tempdir().unwrap();
+		let state = tempfile::tempdir().unwrap();
+		let blobs = BlobStore::open(state.path().join("cas")).unwrap();
+		let source = blobs.put(b"captured").unwrap();
+		fs::write(workspace.path().join("file"), b"live changed").unwrap();
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			blobs.clone(),
+		)
+		.unwrap();
+		let request = capture_request(&blobs, &[("nested/file", 0o755, source.hash)]);
+		let expected_hash = request
+			.captured_inputs
+			.as_ref()
+			.unwrap()
+			.manifest_hash
+			.clone();
+		let lease = materializer.materialize(request).await.unwrap();
+		let root = Url::parse(&lease.environment_uri)
+			.unwrap()
+			.to_file_path()
+			.unwrap();
+		assert_eq!(fs::read(root.join("src/nested/file")).unwrap(), b"captured");
+		assert_eq!(fs::read_dir(root.join("src")).unwrap().count(), 1);
+		assert!(root.join("out").is_dir() && root.join("tmp").is_dir());
+		assert_eq!(lease.size, 8);
+		assert_eq!(lease.content_hash, expected_hash);
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt as _;
+			assert_eq!(
+				fs::metadata(root.join("src/nested/file"))
+					.unwrap()
+					.permissions()
+					.mode() & 0o777,
+				0o500
+			);
+			assert_eq!(
+				fs::metadata(root.join("src/nested"))
+					.unwrap()
+					.permissions()
+					.mode() & 0o777,
+				0o700
+			);
+		}
+		fs::write(root.join("out/result"), b"scratch").unwrap();
+		materializer
+			.release(ReleaseMaterialization { lease_id: lease.lease_id, ..Default::default() })
+			.await
+			.unwrap();
+		assert!(!root.exists());
+		assert_eq!(fs::read(workspace.path().join("file")).unwrap(), b"live changed");
+	}
+
+	#[tokio::test]
+	async fn captured_source_rejects_unsafe_paths_modes_and_conflicting_sources() {
+		let workspace = tempfile::tempdir().unwrap();
+		let state = tempfile::tempdir().unwrap();
+		let blobs = BlobStore::open(state.path().join("cas")).unwrap();
+		let hash = blobs.put(b"a").unwrap().hash;
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			blobs.clone(),
+		)
+		.unwrap();
+		for path in
+			["", "/abs", "../escape", "a/../b", "a//b", "a/./b", "a\\b", "C:file", "trailing/"]
+		{
+			assert!(
+				materializer
+					.materialize(capture_request(&blobs, &[(path, 0o644, hash)]))
+					.await
+					.is_err(),
+				"{path:?}"
+			);
+		}
+		for entries in [
+			vec![("a", 0o644, hash), ("a", 0o644, hash)],
+			vec![("a/b", 0o644, hash), ("a", 0o644, hash)],
+			vec![("link", 0o120777, hash)],
+		] {
+			assert!(
+				materializer
+					.materialize(capture_request(&blobs, &entries))
+					.await
+					.is_err()
+			);
+		}
+		let mut request = capture_request(&blobs, &[("a", 0o644, hash)]);
+		request.resource_uri = String::from("local://other");
+		assert!(materializer.materialize(request).await.is_err());
+		assert_eq!(
+			fs::read_dir(state.path().join("materializations"))
+				.unwrap()
+				.count(),
+			0
+		);
+	}
+
+	#[tokio::test]
+	async fn captured_source_verifies_manifest_children_and_limits_before_publishing() {
+		let workspace = tempfile::tempdir().unwrap();
+		let state = tempfile::tempdir().unwrap();
+		let blobs = BlobStore::open(state.path().join("cas")).unwrap();
+		let source = blobs.put(b"original").unwrap();
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			blobs.clone(),
+		)
+		.unwrap();
+		let mut request = capture_request(&blobs, &[("a", 0o644, source.hash)]);
+		request.captured_inputs.as_mut().unwrap().manifest_size += 1;
+		assert!(materializer.materialize(request).await.is_err());
+		let mut request = capture_request(&blobs, &[("a", 0o644, source.hash)]);
+		request.max_bytes = 1;
+		assert!(matches!(
+			materializer.materialize(request).await,
+			Err(MaterializationError::TooLarge { limit: 1 })
+		));
+		let missing = Hash32::new([42; 32]);
+		assert!(matches!(
+			materializer
+				.materialize(capture_request(&blobs, &[("a", 0o644, missing)]))
+				.await,
+			Err(MaterializationError::NotFound)
+		));
+		fs::write(blobs.path(&source), b"tampered").unwrap();
+		assert!(
+			materializer
+				.materialize(capture_request(&blobs, &[("a", 0o644, source.hash)]))
+				.await
+				.is_err()
+		);
+		let mut request = capture_request(&blobs, &[]);
+		let manifest = request.captured_inputs.as_ref().unwrap();
+		let hash = Hash32::new(manifest.manifest_hash.as_ref().try_into().unwrap());
+		fs::write(
+			blobs.path(&omp_journal::blob::BlobRef { hash, size: manifest.manifest_size }),
+			b"corrupt",
+		)
+		.unwrap();
+		assert!(materializer.materialize(request.clone()).await.is_err());
+		request.captured_inputs.as_mut().unwrap().manifest_hash = Bytes::new();
+		assert!(materializer.materialize(request).await.is_err());
+		let names = (0..=CAPTURE_MAX_PATHS)
+			.map(|index| index.to_string())
+			.collect::<Vec<_>>();
+		let entries = names
+			.iter()
+			.map(|name| (name.as_str(), 0o644, source.hash))
+			.collect::<Vec<_>>();
+		assert!(
+			materializer
+				.materialize(capture_request(&blobs, &entries))
+				.await
+				.is_err()
+		);
+		let oversized = blobs.put(b"oversized").unwrap();
+		OpenOptions::new()
+			.write(true)
+			.open(blobs.path(&oversized))
+			.unwrap()
+			.set_len(CAPTURE_BLOB_BYTES + 1)
+			.unwrap();
+		assert!(matches!(
+			materializer
+				.materialize(capture_request(&blobs, &[("large", 0o644, oversized.hash)]))
+				.await,
+			Err(MaterializationError::TooLarge { limit: CAPTURE_BLOB_BYTES })
+		));
+		assert_eq!(
+			fs::read_dir(state.path().join("materializations"))
+				.unwrap()
+				.count(),
+			0
+		);
+	}
+
+	#[tokio::test]
+	async fn captured_lease_expiry_cleans_the_run_root() {
+		let workspace = tempfile::tempdir().unwrap();
+		let state = tempfile::tempdir().unwrap();
+		let blobs = BlobStore::open(state.path().join("cas")).unwrap();
+		let hash = blobs.put(b"a").unwrap().hash;
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			blobs.clone(),
+		)
+		.unwrap();
+		let lease = materializer
+			.materialize(capture_request(&blobs, &[("a", 0o644, hash)]))
+			.await
+			.unwrap();
+		let root = Url::parse(&lease.environment_uri)
+			.unwrap()
+			.to_file_path()
+			.unwrap();
+		materializer
+			.inner
+			.leases
+			.lock()
+			.get_mut(&lease.lease_id)
+			.unwrap()
+			.expires_at_ms = 0;
+		materializer.inner.reap_expired().unwrap();
+		assert!(!root.exists());
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn captured_source_rejects_a_symlink_in_the_blob_store() {
+		use std::os::unix::fs::symlink;
+
+		let workspace = tempfile::tempdir().unwrap();
+		let state = tempfile::tempdir().unwrap();
+		let blobs = BlobStore::open(state.path().join("cas")).unwrap();
+		let source = blobs.put(b"captured").unwrap();
+		let original = blobs.path(&source);
+		let target = state.path().join("target");
+		fs::rename(&original, &target).unwrap();
+		symlink(&target, &original).unwrap();
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			blobs.clone(),
+		)
+		.unwrap();
+		assert!(matches!(
+			materializer
+				.materialize(capture_request(&blobs, &[("a", 0o644, source.hash)]))
+				.await,
+			Err(MaterializationError::SymbolicLink)
+		));
+		assert_eq!(
+			fs::read_dir(state.path().join("materializations"))
+				.unwrap()
+				.count(),
+			0
+		);
+	}
 
 	#[tokio::test]
 	async fn lease_materializes_inside_scratch_and_release_is_idempotent() {
@@ -497,9 +953,13 @@ mod tests {
 		let state = tempfile::tempdir().unwrap();
 		let source = workspace.path().join("input.txt");
 		fs::write(&source, b"materialized").unwrap();
-		let materializer =
-			ResourceMaterializer::open(workspace.path(), state.path(), &state.path().join("local"))
-				.unwrap();
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			BlobStore::open(state.path().join("cas")).unwrap(),
+		)
+		.unwrap();
 		let lease = materializer
 			.materialize(MaterializeRequest {
 				resource_uri: Url::from_file_path(&source).unwrap().to_string(),
@@ -529,9 +989,13 @@ mod tests {
 	async fn mutable_local_parent_is_authorized_then_written_back_on_release() {
 		let workspace = tempfile::tempdir().unwrap();
 		let state = tempfile::tempdir().unwrap();
-		let materializer =
-			ResourceMaterializer::open(workspace.path(), state.path(), &state.path().join("local"))
-				.unwrap();
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			BlobStore::open(state.path().join("cas")).unwrap(),
+		)
+		.unwrap();
 		let lease = materializer
 			.materialize(MaterializeRequest {
 				resource_uri: String::from("local://nested/result.txt"),
@@ -561,8 +1025,13 @@ mod tests {
 		fs::create_dir_all(local_root.join("tree/kind")).unwrap();
 		fs::write(local_root.join("tree/deleted.txt"), b"remove me").unwrap();
 		fs::write(local_root.join("tree/kind/old.txt"), b"directory").unwrap();
-		let materializer =
-			ResourceMaterializer::open(workspace.path(), state.path(), &local_root).unwrap();
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&local_root,
+			BlobStore::open(state.path().join("cas")).unwrap(),
+		)
+		.unwrap();
 		let lease = materializer
 			.materialize(MaterializeRequest {
 				resource_uri: String::from("local://tree"),
@@ -596,9 +1065,13 @@ mod tests {
 		let workspace = tempfile::tempdir().unwrap();
 		let state = tempfile::tempdir().unwrap();
 		let outside = tempfile::NamedTempFile::new().unwrap();
-		let materializer =
-			ResourceMaterializer::open(workspace.path(), state.path(), &state.path().join("local"))
-				.unwrap();
+		let materializer = ResourceMaterializer::open(
+			workspace.path(),
+			state.path(),
+			&state.path().join("local"),
+			BlobStore::open(state.path().join("cas")).unwrap(),
+		)
+		.unwrap();
 		let error = materializer
 			.materialize(MaterializeRequest {
 				resource_uri: Url::from_file_path(outside.path()).unwrap().to_string(),

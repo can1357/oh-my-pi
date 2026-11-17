@@ -10,7 +10,7 @@ use bytes::Bytes;
 use omp_core::{Hash32, Str, sf};
 use omp_dom::{Handle, NodeSpec, Op, PropKey, Tag, Txn, Value};
 use omp_env::EnvClient;
-use omp_exec::Digest;
+use omp_exec::{Digest, capture_entries};
 use omp_exec_reapi::cas::InputSource as _;
 use omp_journal::{
 	Entry, EntryId,
@@ -27,7 +27,7 @@ use super::{
 	CheckObservation, CheckOutcome, SnapshotError, VerificationPolicy, VerificationScope,
 	VerificationSnapshot,
 };
-use crate::exec_composer::{EnvironmentInputs, capture_entries};
+use crate::exec_composer::EnvironmentInputs;
 
 const LABEL: &str = "verification.evidence";
 const VERSION: u32 = 1;

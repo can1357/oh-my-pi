@@ -245,7 +245,7 @@ fn repository_identity(reply: &RepositorySnapshot) -> Result<RepositoryIdentity,
 	})
 }
 
-fn capture_digest(reply: &CaptureInputsReply) -> Result<Digest, SnapshotError> {
+pub(super) fn capture_digest(reply: &CaptureInputsReply) -> Result<Digest, SnapshotError> {
 	if reply.wire_revision != omp_proto::SCHEMA_REV {
 		return Err(SnapshotError::InvalidCapture);
 	}

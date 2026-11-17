@@ -1039,6 +1039,7 @@ async fn test_connection_scoped(
 			workspace.root(),
 			state.path(),
 			&state.path().join("sessions/test/local"),
+			blobs.store().clone(),
 		)
 		.expect("resource materializer"),
 		Arc::new(Registry::new()),

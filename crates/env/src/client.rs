@@ -2061,6 +2061,36 @@ impl EnvClient {
 		}
 	}
 
+	/// Materializes a captured input tree for trusted host composition.
+	pub async fn materialize(
+		&self,
+		request: env_wire::MaterializeRequest,
+	) -> Result<env_wire::MaterializationLease, ClientError> {
+		match self
+			.exec_session_request(exec_session_op::Op::Materialize(request))
+			.await?
+			.result
+		{
+			Some(exec_session_result::Result::Materialized(lease)) => Ok(lease),
+			_ => Err(ClientError::UnexpectedResponse { expected: "MaterializationLease" }),
+		}
+	}
+
+	/// Releases a host-composed captured-input lease.
+	pub async fn release_materialization(
+		&self,
+		request: env_wire::ReleaseMaterialization,
+	) -> Result<env_wire::MaterializationReleased, ClientError> {
+		match self
+			.exec_session_request(exec_session_op::Op::ReleaseMaterialization(request))
+			.await?
+			.result
+		{
+			Some(exec_session_result::Result::MaterializationReleased(released)) => Ok(released),
+			_ => Err(ClientError::UnexpectedResponse { expected: "MaterializationReleased" }),
+		}
+	}
+
 	async fn exec_session_request(
 		&self,
 		op: exec_session_op::Op,
