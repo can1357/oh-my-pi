@@ -4,7 +4,6 @@
 
 use std::{
 	collections::{HashMap, HashSet},
-	path::PathBuf,
 	sync::{Arc, LazyLock},
 };
 
@@ -286,7 +285,7 @@ impl VirtualFile {
 /// a path that an earlier section deleted or moved.
 struct VirtualFiles<'a> {
 	source: &'a mut dyn FileSource,
-	state:  HashMap<PathBuf, Option<VirtualFile>>,
+	state:  HashMap<Location, Option<VirtualFile>>,
 }
 
 impl VirtualFiles<'_> {
@@ -440,35 +439,32 @@ fn stage_entries(
 		} else {
 			// Validate the strict Add File contract against the running state. A
 			// preceding delete permits a later add of the same path.
-			let resolved = files
+			files
 				.resolve(path, group[0].op != Operation::Create)
-				.map_err(|error| wrap_file_error(path, error, multiple_files))?;
-			let mut exists = files.exists(&resolved.location);
-			for entry in group {
-				match entry.op {
-					Operation::Create if exists => {
-						return Err(wrap_file_error(
-							path,
-							EditError::apply(format!(
-								"Cannot create {path}: file already exists. Use *** Update File to modify \
-								 it in place."
-							)),
-							multiple_files,
-						));
-					},
-					Operation::Create => exists = true,
-					Operation::Delete => exists = false,
-					Operation::Update => {},
-				}
-			}
-			let args = ArgSnapshot {
-				path: Some(path.clone()),
-				edits: group.iter().map(as_edit_entry).collect(),
-				has_edits: true,
-				complete: true,
-				..ArgSnapshot::default()
-			};
-			engine.stage(&args, &mut files, &EditStore::new())
+				.and_then(|resolved| {
+					let mut exists = files.exists(&resolved.location);
+					for entry in group {
+						match entry.op {
+							Operation::Create if exists => {
+								return Err(EditError::apply(format!(
+									"Cannot create {path}: file already exists. Use *** Update File to \
+									 modify it in place."
+								)));
+							},
+							Operation::Create => exists = true,
+							Operation::Delete => exists = false,
+							Operation::Update => {},
+						}
+					}
+					let args = ArgSnapshot {
+						path: Some(path.clone()),
+						edits: group.iter().map(as_edit_entry).collect(),
+						has_edits: true,
+						complete: true,
+						..ArgSnapshot::default()
+					};
+					engine.stage(&args, &mut files, &EditStore::new())
+				})
 		};
 		match result {
 			Ok(mut next) => {
@@ -488,10 +484,15 @@ fn stage_entries(
 	Ok(staged)
 }
 
-fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
+fn streaming_target_ready(files: &mut dyn FileSource, path: &str) -> bool {
+	!files.policy().is_internal_url(path) || files.resolve(path, false).is_ok()
+}
+
+fn natural_order_previews(input: &str, files: &mut dyn FileSource) -> Vec<PreviewFile> {
 	let mut order = Vec::<String>::new();
 	let mut groups = HashMap::<String, Vec<String>>::new();
 	let mut current = None::<String>;
+	let mut waiting = HashSet::new();
 	for raw in input.split('\n') {
 		let trimmed = raw.trim_end();
 		if matches!(trimmed, BEGIN_PATCH_MARKER | END_PATCH_MARKER | "*** Abort Patch") {
@@ -502,7 +503,10 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 			.or_else(|| trimmed.strip_prefix(DELETE_FILE_MARKER))
 			.or_else(|| trimmed.strip_prefix(UPDATE_FILE_MARKER));
 		if let Some(path) = header {
-			let path = path.to_owned();
+			let path = path.trim().to_owned();
+			if !streaming_target_ready(files, &path) {
+				waiting.insert(path.clone());
+			}
 			if !groups.contains_key(&path) {
 				order.push(path.clone());
 			}
@@ -510,7 +514,15 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 			current = Some(path);
 			continue;
 		}
-		if trimmed.starts_with("*** Move to:") || trimmed.starts_with("*** End of File") {
+		if let Some(destination) = trimmed.strip_prefix(MOVE_TO_MARKER) {
+			if let Some(path) = &current
+				&& !streaming_target_ready(files, destination.trim())
+			{
+				waiting.insert(path.clone());
+			}
+			continue;
+		}
+		if trimmed.starts_with("*** End of File") {
 			continue;
 		}
 		if let Some(path) = &current
@@ -521,6 +533,7 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 	}
 	order
 		.into_iter()
+		.filter(|path| !waiting.contains(path))
 		.filter_map(|path| {
 			let body = groups.remove(&path).unwrap_or_default();
 			(!body.is_empty()).then(|| PreviewFile {
@@ -604,7 +617,7 @@ impl ModeEngine for ApplyPatchEngine {
 			let Some(last_newline) = input.rfind('\n') else {
 				return Vec::new();
 			};
-			return natural_order_previews(&input[..=last_newline]);
+			return natural_order_previews(&input[..=last_newline], files);
 		}
 		let entries = match parse_apply_patch(input) {
 			Ok(entries) if !entries.is_empty() => entries,

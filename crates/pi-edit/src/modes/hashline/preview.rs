@@ -9,7 +9,7 @@ use super::{
 	clipboard::resolve_clipboard_edits,
 	input::{Patch, PatchSection, contains_recognizable_hashline_operations},
 	parser::parse_patch_streaming,
-	patcher::{apply_with_recovery, mismatch, recover_target},
+	patcher::{apply_with_recovery, preview_mismatch, recover_target},
 	types::{Cursor, Edit, FileOp},
 };
 use crate::{
@@ -167,7 +167,7 @@ fn preview_section(
 				None => store.head(&read.canonical),
 			};
 			Some(snapshot.ok_or_else(|| {
-				mismatch(
+				preview_mismatch(
 					target,
 					&read.canonical,
 					&read.text,
@@ -196,7 +196,7 @@ fn preview_section(
 		}
 		let parsed = target.parse()?;
 		if target.file_hash.is_none() {
-			return Err(mismatch(target, &read.canonical, text, "", store));
+			return Err(preview_mismatch(target, &read.canonical, text, "", store));
 		}
 		let edits = if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			&[][..]

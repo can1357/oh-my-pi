@@ -76,23 +76,32 @@ pub enum Location {
 	Disk(PathBuf),
 	/// An opaque host identity; never canonicalized or interpreted as a local
 	/// file.
-	Hosted(PathBuf),
+	Hosted(String),
 }
 
 impl Location {
-	/// Return the disk path or opaque hosted key passed to the host writer.
+	/// Represent a target as a path for host requests and display. Compare the
+	/// locations themselves when checking identity.
 	pub fn key(&self) -> &Path {
 		match self {
-			Self::Disk(path) | Self::Hosted(path) => path,
+			Self::Disk(path) => path,
+			Self::Hosted(key) => Path::new(key),
 		}
 	}
 
 	/// Canonicalize a disk path using the filesystem; preserve a hosted key
 	/// verbatim.
-	pub fn canonical_key(&self) -> PathBuf {
+	pub fn canonical_key(&self) -> Self {
 		match self {
-			Self::Disk(path) => crate::path_policy::canonical_key(path),
-			Self::Hosted(key) => key.clone(),
+			Self::Disk(path) => Self::Disk(crate::path_policy::canonical_key(path)),
+			Self::Hosted(_) => self.clone(),
+		}
+	}
+
+	pub(crate) fn capacity(&self) -> usize {
+		match self {
+			Self::Disk(path) => path.capacity(),
+			Self::Hosted(key) => key.capacity(),
 		}
 	}
 

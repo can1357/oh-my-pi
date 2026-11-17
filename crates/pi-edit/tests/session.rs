@@ -5,7 +5,9 @@
 mod common;
 
 use common::{DiskWriter, Workspace};
-use pi_edit::{ApplyRequest, EditError, EditMode, FileOp, UrlAnswer, session::PreviewBatch};
+use pi_edit::{
+	ApplyRequest, EditError, EditMode, FileOp, Location, UrlAnswer, session::PreviewBatch,
+};
 
 #[derive(Default)]
 struct RemoteWriter {
@@ -32,12 +34,64 @@ fn remote_answer(url: &str, content: &str) -> UrlAnswer {
 	}
 }
 
+#[tokio::test]
+async fn hosted_patch_keeps_distinct_url_paths_separate() {
+	let first = "ssh://host/a//note.txt";
+	let second = "ssh://host/a/note.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	let input = format!(
+		"*** Begin Patch\n*** Update File: {first}\n@@\n-first\n+FIRST\n*** Update File: \
+		 {second}\n@@\n-second\n+SECOND\n*** End Patch"
+	);
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	assert_eq!(session.begin_apply_url_targets(), [first, second]);
+	session.provide(first.into(), remote_answer(first, "first\n"));
+	session.provide(second.into(), remote_answer(second, "second\n"));
+	let writer = RemoteWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.unwrap();
+	let requests = writer.requests.lock();
+	assert_eq!(requests.len(), 2);
+	assert_eq!(requests[0].absolute.to_str(), Some(first));
+	assert_eq!(requests[0].content.as_deref(), Some("FIRST\n"));
+	assert_eq!(requests[1].absolute.to_str(), Some(second));
+	assert_eq!(requests[1].content.as_deref(), Some("SECOND\n"));
+}
+
+#[test]
+fn hosted_preview_does_not_record_an_unread_version() {
+	let url = "ssh://host/notes.txt";
+	let key = Location::Hosted(url.into());
+	let live = "alpha\n";
+	let tag = pi_edit::store::file_hash(live);
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({ "input": format!("[{url}#{tag}]\nPUT 1.=1:\n+ALPHA\n") }).to_string(),
+	);
+	session.provide(url.into(), remote_answer(url, live));
+	session.preview();
+	assert!(ws.store.head(&key).is_none());
+
+	session.finish();
+	let preview = session.preview();
+	assert!(preview.files[0].error.is_some(), "{preview:?}");
+	assert!(preview.files[0].diff.is_none(), "{preview:?}");
+	assert!(ws.store.head(&key).is_none());
+}
+
 #[test]
 fn hosted_tagged_preview_uses_the_read_version_instead_of_the_latest_head() {
 	let mut ws = Workspace::new(EditMode::Hashline);
 	ws.config.policy.url_schemes = vec!["ssh".into()];
 	let url = "ssh://host/notes.txt";
-	let key = std::path::Path::new(url);
+	let key = &Location::Hosted(url.into());
 	let tag = ws.store.record(key, "alpha\nbeta\n", None);
 	for head in ["different head\nbeta\n", "ALPHA\nbeta\n"] {
 		ws.store.record(key, head, None);
@@ -69,11 +123,11 @@ fn missing_hosted_snapshot_reports_an_error_and_keeps_the_local_preview() {
 			let local = ws.cwd().join("local.txt");
 			let local_tag =
 				ws.store
-					.record(&pi_edit::path_policy::canonical_key(&local), "before\n", None);
+					.record(&pi_edit::path_policy::canonical_key(&local).into(), "before\n", None);
 			let url = "ssh://host/notes.txt";
 			if has_head {
 				ws.store
-					.record(std::path::Path::new(url), "alpha\nbeta\n", None);
+					.record(&Location::Hosted(url.into()), "alpha\nbeta\n", None);
 			}
 			let remote = format!("[{url}#AB12]\nPUT 1.=1:\n+ALPHA\n");
 			let local_section = format!("[{}#{local_tag}]\nPUT 1.=1:\n+after\n", local.display());
@@ -168,14 +222,14 @@ fn hosted_aliases_share_the_latest_checkout_without_using_a_disk_path() {
 	ws.write("notes.ipynb", "disk sentinel");
 	let key = ws.cwd().join("notes.ipynb");
 	let answer = |text: &str| UrlAnswer::Hosted {
-		key:           key.clone(),
+		key:           key.to_string_lossy().into_owned(),
 		content:       Some(text.into()),
 		plan_writable: false,
 	};
 	let mut files = FileCache::new(ws.config.policy.clone());
 	files.provide("hosted://alias/a".into(), answer("{\"version\":1}"));
 	let first = files.read("hosted://alias/a").unwrap();
-	assert_eq!(first.canonical, key);
+	assert_eq!(first.canonical, Location::Hosted(key.to_string_lossy().into_owned()));
 	assert!(!first.is_notebook);
 	files.provide("hosted://alias/b".into(), answer("{\"version\":2}"));
 	assert_eq!(files.read("hosted://alias/a").unwrap().text, "{\"version\":2}");
@@ -190,7 +244,9 @@ async fn deferred_remote_preview_keeps_local_diff_and_apply_stays_atomic() {
 		let mut ws = Workspace::new(EditMode::ApplyPatch);
 		ws.config.policy.url_schemes = vec!["ssh".into()];
 		ws.write("local.txt", "before\n");
-		let remote = format!("*** Update File: {url}\n@@\n-old\n+new\n");
+		let remote = format!(
+			"*** Update File: {url}\n@@\n-old\n+new\n*** Update File: {url}\n@@\n-new\n+final\n"
+		);
 		let local = "*** Update File: local.txt\n@@\n-before\n+after\n";
 		let sections = if remote_first {
 			format!("{remote}{local}")
@@ -226,6 +282,27 @@ async fn deferred_remote_preview_keeps_local_diff_and_apply_stays_atomic() {
 		assert!(error.is_deferred(), "{error}");
 		assert!(writer.requests.lock().is_empty());
 	}
+}
+
+#[test]
+fn streaming_patch_omits_pending_targets_and_moves_to_pending_destinations() {
+	let url = "ssh://host/file.txt";
+	let destination = "ssh://host/destination.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	let input = format!(
+		"*** Begin Patch\n*** Update File: {url}\n@@\n-old\n+new\n*** Update File: move.txt\n*** \
+		 Move to: {destination}\n@@\n-before\n+after\n*** Update File: local.txt\n@@\n-old\n+local\n"
+	);
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	assert_eq!(session.preview().files[0].display, "local.txt");
+	assert_eq!(session.take_unresolved(), [url, destination]);
+	session.provide(url.into(), UrlAnswer::Pending);
+	session.provide(destination.into(), UrlAnswer::Pending);
+	let preview = session.preview();
+	assert_eq!(preview.files.len(), 1, "{preview:?}");
+	assert_eq!(preview.files[0].display, "local.txt");
 }
 
 #[tokio::test]

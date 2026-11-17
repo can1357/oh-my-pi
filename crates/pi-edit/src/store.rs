@@ -2,13 +2,15 @@
 
 use std::{
 	collections::{BTreeSet, HashMap},
-	path::{Path, PathBuf},
+	path::Path,
 	sync::{Arc, LazyLock},
 };
 
 use parking_lot::Mutex;
 use regex::Regex;
 use xxhash_rust::{xxh32::Xxh32, xxh64::xxh64};
+
+use crate::engine::Location;
 
 /// Retained path count before LRU eviction.
 pub const DEFAULT_MAX_PATHS: usize = 256;
@@ -31,8 +33,8 @@ const CARRY_MAX_EDITS: usize = 1024;
 /// One full-file version observed at a point in time.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-	/// Canonical path this version belongs to.
-	pub path:       PathBuf,
+	/// Canonical disk path or hosted identity this version belongs to.
+	pub path:       Location,
 	/// Full LF-normalized, BOM-stripped text.
 	pub text:       Arc<str>,
 	/// Four-character content tag.
@@ -175,9 +177,9 @@ impl PathHistory {
 
 #[derive(Clone)]
 struct StoreState {
-	histories:       HashMap<PathBuf, PathHistory>,
+	histories:       HashMap<Location, PathHistory>,
 	clipboard:       Clipboard,
-	noop:            HashMap<PathBuf, (u64, u32)>,
+	noop:            HashMap<Location, (u64, u32)>,
 	clock:           u64,
 	max_paths:       usize,
 	max_versions:    usize,
@@ -233,7 +235,7 @@ impl EditStore {
 	/// outside the edit tool (formatter, build step, another writer): the lines
 	/// the current version displayed keep counting as displayed where they keep
 	/// their number and content.
-	pub fn record(&self, path: &Path, text: &str, seen_lines: Option<&[u32]>) -> String {
+	pub fn record(&self, path: &Location, text: &str, seen_lines: Option<&[u32]>) -> String {
 		self.record_version(path, text, seen_lines, None)
 	}
 
@@ -243,7 +245,7 @@ impl EditStore {
 	/// response rows then join. With no retained version of `before` (or an
 	/// unrestricted one) the edit could anchor anywhere, so every such line
 	/// carries.
-	pub fn record_edit(&self, path: &Path, before: &str, after: &str) -> String {
+	pub fn record_edit(&self, path: &Location, before: &str, after: &str) -> String {
 		self.record_version(path, after, None, Some(before))
 	}
 
@@ -251,7 +253,7 @@ impl EditStore {
 	/// path's current version.
 	fn record_version(
 		&self,
-		path: &Path,
+		path: &Location,
 		text: &str,
 		seen_lines: Option<&[u32]>,
 		parent: Option<&str>,
@@ -310,7 +312,7 @@ impl EditStore {
 	/// Lines of the parent version (`parent`, else the current version) that
 	/// `text` keeps at the same number with the same content, filtered by what
 	/// the parent displayed.
-	fn carried_from_parent(&self, path: &Path, text: &str, parent: Option<&str>) -> Vec<u32> {
+	fn carried_from_parent(&self, path: &Location, text: &str, parent: Option<&str>) -> Vec<u32> {
 		let (head, parent_seen) = {
 			let state = self.inner.lock();
 			let versions = state
@@ -353,12 +355,12 @@ impl EditStore {
 		}
 		let (_, without_bom) = crate::text::strip_bom(&raw);
 		let normalized = crate::text::normalize_to_lf(without_bom);
-		let key = crate::path_policy::canonical_key(absolute);
+		let key = Location::Disk(crate::path_policy::canonical_key(absolute));
 		Some(self.record(&key, &normalized, seen_lines))
 	}
 
 	/// Union displayed lines into the most recent version matching a tag.
-	pub fn record_seen_lines(&self, path: &Path, hash: &str, lines: &[u32]) {
+	pub fn record_seen_lines(&self, path: &Location, hash: &str, lines: &[u32]) {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
 		if let Some(version) = state
@@ -375,7 +377,7 @@ impl EditStore {
 	}
 
 	/// Return the current version and refresh path recency.
-	pub fn head(&self, path: &Path) -> Option<Snapshot> {
+	pub fn head(&self, path: &Location) -> Option<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
 		state
@@ -387,7 +389,7 @@ impl EditStore {
 	}
 
 	/// Return the current version's tag and refresh path recency.
-	pub fn head_hash(&self, path: &Path) -> Option<String> {
+	pub fn head_hash(&self, path: &Location) -> Option<String> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
 		state
@@ -399,7 +401,7 @@ impl EditStore {
 	}
 
 	/// Every retained snapshot for a path, newest first.
-	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
+	pub fn versions(&self, path: &Location) -> Vec<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
 		state.histories.get(path).map_or_default(|history| {
@@ -412,7 +414,7 @@ impl EditStore {
 	}
 
 	/// Return the most recent version matching a tag and refresh path recency.
-	pub fn by_hash(&self, path: &Path, hash: &str) -> Option<Snapshot> {
+	pub fn by_hash(&self, path: &Location, hash: &str) -> Option<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
 		state
@@ -426,7 +428,7 @@ impl EditStore {
 
 	/// Whether a version matching a tag is retained; refreshes path recency
 	/// like [`Self::by_hash`].
-	pub fn has_hash(&self, path: &Path, hash: &str) -> bool {
+	pub fn has_hash(&self, path: &Location, hash: &str) -> bool {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
 		state
@@ -436,7 +438,7 @@ impl EditStore {
 	}
 
 	/// Return the version with exactly equal text and refresh path recency.
-	pub fn by_content(&self, path: &Path, text: &str) -> Option<Snapshot> {
+	pub fn by_content(&self, path: &Location, text: &str) -> Option<Snapshot> {
 		let mut state = self.inner.lock();
 		touch(&mut state, path);
 		state
@@ -448,8 +450,9 @@ impl EditStore {
 			.map(|v| v.snapshot.clone())
 	}
 
-	/// Path of every retained version matching a tag (one entry per version).
-	pub fn paths_with_hash(&self, hash: &str) -> Vec<PathBuf> {
+	/// Location of every retained version matching a tag (one entry per
+	/// version).
+	pub fn paths_with_hash(&self, hash: &str) -> Vec<Location> {
 		let state = self.inner.lock();
 		state
 			.histories
@@ -461,7 +464,7 @@ impl EditStore {
 	}
 
 	/// Remove one path's history.
-	pub fn invalidate(&self, path: &Path) {
+	pub fn invalidate(&self, path: &Location) {
 		let mut state = self.inner.lock();
 		if let Some((path, history)) = state.histories.remove_entry(path) {
 			state.retained_bytes -= history.retained_bytes(path.capacity());
@@ -469,7 +472,7 @@ impl EditStore {
 	}
 
 	/// Move source history and provenance to a destination path.
-	pub fn relocate(&self, from: &Path, to: &Path) {
+	pub fn relocate(&self, from: &Location, to: &Location) {
 		let mut state = self.inner.lock();
 		state.clock = state.clock.wrapping_add(1);
 		let touched = state.clock;
@@ -516,7 +519,7 @@ impl EditStore {
 
 	/// Record an identical no-op and return its consecutive count and escalation
 	/// state.
-	pub fn record_noop(&self, path: &Path, payload: u64) -> (u32, bool) {
+	pub fn record_noop(&self, path: &Location, payload: u64) -> (u32, bool) {
 		let mut state = self.inner.lock();
 		let count = state
 			.noop
@@ -528,7 +531,7 @@ impl EditStore {
 	}
 
 	/// Clear one path's no-op counter.
-	pub fn reset_noop(&self, path: &Path) {
+	pub fn reset_noop(&self, path: &Location) {
 		self.inner.lock().noop.remove(path);
 	}
 }
@@ -615,7 +618,7 @@ fn carried_seen_lines(parent: &str, child: &str, seen: Option<&BTreeSet<u32>>) -
 	carried
 }
 
-fn touch(state: &mut StoreState, path: &Path) {
+fn touch(state: &mut StoreState, path: &Location) {
 	if state.histories.contains_key(path) {
 		state.clock = state.clock.wrapping_add(1);
 		state
@@ -645,6 +648,10 @@ fn evict(state: &mut StoreState) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	fn disk(path: impl Into<std::path::PathBuf>) -> Location {
+		Location::Disk(path.into())
+	}
 
 	#[test]
 	fn file_hash_matches_typescript() {
@@ -696,7 +703,7 @@ mod tests {
 	#[test]
 	fn snapshots_deduplicate_promote_and_union_seen_lines() {
 		let store = EditStore::new();
-		let path = Path::new("a.ts");
+		let path = &disk("a.ts");
 		let first = store.record(path, "one", Some(&[1]));
 		store.record(path, "two", Some(&[2]));
 		assert_eq!(&*store.head(path).unwrap().text, "two");
@@ -715,7 +722,7 @@ mod tests {
 
 	#[test]
 	fn outside_change_carries_only_unshifted_unchanged_seen_lines() {
-		let path = Path::new("f.txt");
+		let path = &disk("f.txt");
 		let partial_read: Vec<u32> = (47..=55).collect();
 		let read_after = |changed: String| {
 			let store = EditStore::new();
@@ -738,7 +745,7 @@ mod tests {
 	#[test]
 	fn unrestricted_version_holds_carried_lines_until_it_is_restricted() {
 		let store = EditStore::new();
-		let path = Path::new("f.txt");
+		let path = &disk("f.txt");
 		store.record(path, &lines(10, |_| None), Some(&[5]));
 		let changed = lines(10, |n| (n == 9).then(|| "line NINE".into()));
 		let tag = store.record(path, &changed, Some(&[]));
@@ -753,7 +760,7 @@ mod tests {
 	#[test]
 	fn rewrite_past_the_diff_bound_carries_only_the_unchanged_head_and_tail() {
 		let store = EditStore::new();
-		let path = Path::new("f.txt");
+		let path = &disk("f.txt");
 		let count = 3 * CARRY_MAX_EDITS as u32;
 		store.record(path, &lines(count, |_| None), Some(&(1..=count).collect::<Vec<_>>()));
 		let rewritten =
@@ -767,7 +774,7 @@ mod tests {
 	#[test]
 	fn snapshot_lookups_share_seen_line_provenance() {
 		let store = EditStore::new();
-		let path = Path::new("source.rs");
+		let path = &disk("source.rs");
 		let text = "source";
 		let hash = store.record(path, text, Some(&(1..=5_000).collect::<Vec<_>>()));
 		let head = store.head(path).unwrap();
@@ -784,8 +791,8 @@ mod tests {
 	fn provenance_growth_evicts_older_history_without_discarding_current() {
 		// 64-bit: 8_004 text + 124 metadata + 8 slots; 299 lines add 5_980 B.
 		let store = EditStore::with_limits(10, 4, 8_128 + 8 * size_of::<StoredSnapshot>());
-		let old = Path::new("old");
-		let current = Path::new("current");
+		let old = &disk("old");
+		let current = &disk("current");
 		store.record(old, &"x".repeat(8_000), None);
 		let hash = store.record(current, "read", Some(&[1]));
 		let held = store.head(current).unwrap();
@@ -803,7 +810,7 @@ mod tests {
 	#[test]
 	fn versions_lists_newest_first() {
 		let store = EditStore::new();
-		let path = Path::new("a.ts");
+		let path = &disk("a.ts");
 		store.record(path, "one", Some(&[1]));
 		store.record(path, "two", Some(&[2]));
 		let texts: Vec<String> = store
@@ -818,38 +825,38 @@ mod tests {
 	fn version_and_lru_limits_are_enforced() {
 		let store = EditStore::with_limits(2, 2, usize::MAX);
 		for text in ["one", "two", "three"] {
-			store.record(Path::new("a"), text, None);
+			store.record(&disk("a"), text, None);
 		}
-		assert!(store.by_content(Path::new("a"), "one").is_none());
-		store.record(Path::new("b"), "b", None);
-		store.head(Path::new("a"));
-		store.record(Path::new("c"), "c", None);
-		assert!(store.head(Path::new("b")).is_none());
-		assert!(store.head(Path::new("a")).is_some());
+		assert!(store.by_content(&disk("a"), "one").is_none());
+		store.record(&disk("b"), "b", None);
+		store.head(&disk("a"));
+		store.record(&disk("c"), "c", None);
+		assert!(store.head(&disk("b")).is_none());
+		assert!(store.head(&disk("a")).is_some());
 	}
 
 	#[test]
 	fn unicode_snapshot_eviction_counts_utf8_storage() {
 		let store = EditStore::with_limits(10, 4, 4_096);
-		store.record(Path::new("ascii"), &"a".repeat(2_000), None);
-		assert!(store.head(Path::new("ascii")).is_some());
-		store.record(Path::new("cjk"), &"文".repeat(2_000), None);
-		assert!(store.head(Path::new("cjk")).is_none());
-		store.record(Path::new("emoji"), &"😀".repeat(1_100), None);
-		assert!(store.head(Path::new("emoji")).is_none());
+		store.record(&disk("ascii"), &"a".repeat(2_000), None);
+		assert!(store.head(&disk("ascii")).is_some());
+		store.record(&disk("cjk"), &"文".repeat(2_000), None);
+		assert!(store.head(&disk("cjk")).is_none());
+		store.record(&disk("emoji"), &"😀".repeat(1_100), None);
+		assert!(store.head(&disk("emoji")).is_none());
 	}
 
 	#[test]
 	fn snapshot_metadata_and_initial_provenance_use_the_budget() {
 		let store = EditStore::with_limits(10, 4, 2);
-		store.record(Path::new("empty"), "", None);
-		assert!(store.head(Path::new("empty")).is_none());
+		store.record(&disk("empty"), "", None);
+		assert!(store.head(&disk("empty")).is_none());
 
 		let store = EditStore::with_limits(10, 4, 4_096);
-		let path = Path::new("read");
+		let path = &disk("read");
 		store.record(path, "x", Some(&(1..=300).collect::<Vec<_>>()));
 		assert!(store.head(path).is_none());
-		let long_path = PathBuf::from("x".repeat(5_000));
+		let long_path = disk("x".repeat(5_000));
 		store.record(&long_path, "x", None);
 		assert!(store.head(&long_path).is_none());
 	}
@@ -857,19 +864,19 @@ mod tests {
 	#[test]
 	fn relocation_merges_and_rewrites_paths() {
 		let store = EditStore::new();
-		let shared = store.record(Path::new("from"), "same", Some(&[1]));
-		store.record(Path::new("to"), "older", None);
-		store.relocate(Path::new("from"), Path::new("to"));
-		assert!(store.head(Path::new("from")).is_none());
-		assert_eq!(store.by_hash(Path::new("to"), &shared).unwrap().path, Path::new("to"));
+		let shared = store.record(&disk("from"), "same", Some(&[1]));
+		store.record(&disk("to"), "older", None);
+		store.relocate(&disk("from"), &disk("to"));
+		assert!(store.head(&disk("from")).is_none());
+		assert_eq!(store.by_hash(&disk("to"), &shared).unwrap().path, disk("to"));
 	}
 
 	#[test]
 	fn unicode_budget_survives_promotion_and_version_truncation() {
 		// 64-bit: a + b = 6_000 text + 125 metadata + 8 slots; c adds 1_310 B.
 		let store = EditStore::with_limits(10, 2, 6_125 + 8 * size_of::<StoredSnapshot>());
-		let a = Path::new("a");
-		let b = Path::new("b");
+		let a = &disk("a");
+		let b = &disk("b");
 		let emoji = "😀".repeat(500);
 		let accented = "é".repeat(500);
 		let replacement = "x".repeat(1_000);
@@ -884,27 +891,27 @@ mod tests {
 		store.record_seen_lines(a, &file_hash(&replacement), &[1]);
 		assert!(store.head(b).is_some());
 		assert!(store.head(a).is_some());
-		store.record(Path::new("c"), &"c".repeat(1_000), None);
+		store.record(&disk("c"), &"c".repeat(1_000), None);
 		assert!(store.head(b).is_none());
 		assert_eq!(&*store.head(a).unwrap().text, replacement);
-		assert!(store.head(Path::new("c")).is_some());
+		assert!(store.head(&disk("c")).is_some());
 	}
 
 	#[test]
 	fn invalidation_and_eviction_release_their_budget() {
 		// 64-bit: next + last = 3_400 text + 120 metadata + 8 slots.
 		let store = EditStore::with_limits(10, 2, 3_520 + 8 * size_of::<StoredSnapshot>());
-		store.record(Path::new("old"), &"😀".repeat(600), None);
-		store.record(Path::new("next"), &"é".repeat(1_200), None);
-		assert!(store.head(Path::new("old")).is_none());
-		store.record(Path::new("last"), &"x".repeat(1_000), None);
-		assert!(store.head(Path::new("next")).is_some());
-		assert!(store.head(Path::new("last")).is_some());
-		store.invalidate(Path::new("next"));
-		store.invalidate(Path::new("next")); // An absent history releases nothing.
-		store.record(Path::new("replacement"), &"😀".repeat(600), None);
-		assert!(store.head(Path::new("last")).is_some());
-		assert!(store.head(Path::new("replacement")).is_some());
+		store.record(&disk("old"), &"😀".repeat(600), None);
+		store.record(&disk("next"), &"é".repeat(1_200), None);
+		assert!(store.head(&disk("old")).is_none());
+		store.record(&disk("last"), &"x".repeat(1_000), None);
+		assert!(store.head(&disk("next")).is_some());
+		assert!(store.head(&disk("last")).is_some());
+		store.invalidate(&disk("next"));
+		store.invalidate(&disk("next")); // An absent history releases nothing.
+		store.record(&disk("replacement"), &"😀".repeat(600), None);
+		assert!(store.head(&disk("last")).is_some());
+		assert!(store.head(&disk("replacement")).is_some());
 	}
 
 	#[test]
@@ -913,37 +920,37 @@ mod tests {
 		// limit. Relocation leaves `to` two slots, so after the filler
 		// 9_112 data + 10 slots sit 24 B under it.
 		let store = EditStore::with_limits(10, 2, 9_136 + 10 * size_of::<StoredSnapshot>());
-		let from = Path::new("from");
-		let to = Path::new("to");
+		let from = &disk("from");
+		let to = &disk("to");
 		let emoji = "😀".repeat(500);
 		let accented = "é".repeat(500);
 		store.record(from, &emoji, None);
 		store.record(from, &accented, None);
 		store.record(to, &emoji, None);
 		store.record(to, &"abc".repeat(500), None);
-		store.record(Path::new("other"), &"wxyz".repeat(500), None);
+		store.record(&disk("other"), &"wxyz".repeat(500), None);
 		store.relocate(from, to);
 		store.relocate(to, to); // Self-relocation preserves the budget.
-		store.relocate(Path::new("missing"), to);
-		store.record(Path::new("filler"), &"1234".repeat(1_000), None);
+		store.relocate(&disk("missing"), to);
+		store.record(&disk("filler"), &"1234".repeat(1_000), None);
 		assert!(store.head(from).is_none());
 		assert!(store.by_content(to, &"abc".repeat(500)).is_none());
-		assert_eq!(store.by_content(to, &emoji).unwrap().path, to);
+		assert_eq!(&store.by_content(to, &emoji).unwrap().path, to);
 		assert_eq!(&*store.head(to).unwrap().text, accented);
-		assert!(store.head(Path::new("other")).is_some());
-		assert!(store.head(Path::new("filler")).is_some());
+		assert!(store.head(&disk("other")).is_some());
+		assert!(store.head(&disk("filler")).is_some());
 	}
 
 	#[test]
 	fn zero_limits_reject_snapshots_and_clear_restores_default_limits() {
 		for (max_paths, max_versions, max_bytes) in [(0, 2, 10), (10, 0, 1), (10, 2, 0)] {
 			let store = EditStore::with_limits(max_paths, max_versions, max_bytes);
-			store.record(Path::new("empty"), "", None);
-			assert!(store.head(Path::new("empty")).is_none());
-			store.relocate(Path::new("empty"), Path::new("moved"));
+			store.record(&disk("empty"), "", None);
+			assert!(store.head(&disk("empty")).is_none());
+			store.relocate(&disk("empty"), &disk("moved"));
 			store.clear();
-			store.record(Path::new("after-clear"), "😀", None);
-			assert_eq!(&*store.head(Path::new("after-clear")).unwrap().text, "😀");
+			store.record(&disk("after-clear"), "😀", None);
+			assert_eq!(&*store.head(&disk("after-clear")).unwrap().text, "😀");
 		}
 	}
 
@@ -977,7 +984,7 @@ mod tests {
 	#[test]
 	fn noop_counter_resets_for_new_payload_and_commit() {
 		let store = EditStore::new();
-		let path = Path::new("a");
+		let path = &disk("a");
 		let hash = payload_hash("edit");
 		assert_eq!(store.record_noop(path, hash), (1, false));
 		assert_eq!(store.record_noop(path, hash), (2, false));

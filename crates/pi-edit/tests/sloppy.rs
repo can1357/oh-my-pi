@@ -367,7 +367,7 @@ fn escalates_the_third_identical_no_op_with_stop_guidance() {
 	let path = dir.path().join("noop.ts");
 	let content = "const a = current;\nconst b = current;\n";
 	std::fs::write(&path, content).expect("fixture");
-	let canonical = canonical_key(&path);
+	let canonical = canonical_key(&path).into();
 	let store = EditStore::new();
 	// Two no-op operations per payload still count as one repeat per attempt.
 	let input =

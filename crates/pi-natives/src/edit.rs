@@ -258,7 +258,7 @@ pub struct EditApplyOutcome {
 
 /// A canonical host resource URL, preserved byte-for-byte as an opaque key.
 /// Reject disk paths and incomplete URLs consistently on every platform.
-fn hosted_key(key: &str) -> Option<PathBuf> {
+fn hosted_key(key: &str) -> Option<String> {
 	let (scheme, rest) = key.split_once("://")?;
 	if scheme.len() == 1
 		|| scheme.eq_ignore_ascii_case("file")
@@ -277,14 +277,14 @@ fn hosted_key(key: &str) -> Option<PathBuf> {
 	if authority.is_empty() {
 		return None;
 	}
-	Some(PathBuf::from(key))
+	Some(key.to_owned())
 }
 
 /// The same hosted-URL contract is used by snapshot methods and resolver
 /// answers.
-fn store_key(key: &str) -> PathBuf {
+fn store_key(key: &str) -> Location {
 	match hosted_key(key) {
-		Some(key) => Location::Hosted(key).canonical_key(),
+		Some(key) => Location::Hosted(key),
 		None => Location::Disk(key.into()).canonical_key(),
 	}
 }
@@ -594,7 +594,14 @@ fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
 				.into(),
 		);
 	}
-	UrlAnswer::Backed { path: path.into(), plan_writable: answer.plan_writable }
+	let path = PathBuf::from(path);
+	if !path.is_absolute() {
+		return UrlAnswer::Refused(format!(
+			"Invalid backing path for {url}: expected an absolute disk path or a canonical resource \
+			 URL"
+		));
+	}
+	UrlAnswer::Backed { path, plan_writable: answer.plan_writable }
 }
 
 /// The single file or directory below `cwd` whose path ends with the missing
@@ -1205,7 +1212,35 @@ mod tests {
 		let UrlAnswer::Hosted { key: resolved, content: None, .. } = answer else {
 			panic!("missing hosted resource lost its identity: {answer:?}");
 		};
-		assert_eq!(resolved, PathBuf::from(key));
+		assert_eq!(resolved, key);
+	}
+
+	#[test]
+	fn malformed_hosted_answers_without_content_do_not_become_disk_paths() {
+		for path in ["ssh://host", "ssh:///tmp/x", "relative.txt"] {
+			let answer = url_answer("ssh://host/tmp/missing.txt", EditUrlResolution {
+				path:          Some(path.into()),
+				content:       None,
+				deferred:      None,
+				error:         None,
+				plan_writable: false,
+			});
+			assert!(matches!(answer, UrlAnswer::Refused(_)), "{path}: {answer:?}");
+		}
+	}
+
+	#[test]
+	fn hosted_snapshots_keep_distinct_url_paths_separate() {
+		let store = EditStore::new();
+		let repeated = "ssh://host/a//note.txt";
+		let single = "ssh://host/a/note.txt";
+		let tag = store.record_snapshot(repeated.into(), "first".into(), None);
+		store.record_snapshot(single.into(), "second".into(), None);
+		assert_eq!(store.head_text(repeated.into()).as_deref(), Some("first"));
+		assert_eq!(store.head_text(single.into()).as_deref(), Some("second"));
+		assert!(store.by_hash_text(single.into(), tag).is_none());
+		store.invalidate(single.into());
+		assert_eq!(store.head_text(repeated.into()).as_deref(), Some("first"));
 	}
 
 	#[test]
@@ -1214,13 +1249,13 @@ mod tests {
 		let UrlAnswer::Hosted { key: resolved, .. } = hosted_answer(key) else {
 			panic!("valid hosted URL refused");
 		};
-		assert_eq!(resolved, PathBuf::from(key));
-		assert_eq!(store_key(key), resolved);
+		assert_eq!(resolved, key);
+		assert_eq!(store_key(key), Location::Hosted(resolved.clone()));
 		let store = EditStore::new();
 		let tag = store.record_snapshot(key.into(), "alpha\n".into(), None);
 		assert_eq!(store.head_text(key.into()).as_deref(), Some("alpha\n"));
 		assert_eq!(store.by_hash_text(key.into(), tag).as_deref(), Some("alpha\n"));
-		assert!(store.inner.head(&resolved).is_some());
+		assert!(store.inner.head(&Location::Hosted(resolved)).is_some());
 	}
 
 	/// A fresh directory removed on drop.

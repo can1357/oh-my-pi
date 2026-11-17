@@ -147,7 +147,7 @@ impl Workspace {
 		let key = pi_edit::path_policy::canonical_key(&self.cwd().join(rel));
 		self
 			.store
-			.record(&key, &pi_edit::text::normalize_to_lf(text), seen)
+			.record(&key.into(), &pi_edit::text::normalize_to_lf(text), seen)
 	}
 
 	pub fn session(&self) -> Session {

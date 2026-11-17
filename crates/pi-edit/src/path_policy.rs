@@ -34,7 +34,7 @@ pub enum UrlAnswer {
 	Hosted {
 		/// Identity shared by aliases and the snapshot store; never a local
 		/// backing file.
-		key:           PathBuf,
+		key:           String,
 		/// Full UTF-8 text, or `None` for a host target that does not exist.
 		content:       Option<String>,
 		plan_writable: bool,

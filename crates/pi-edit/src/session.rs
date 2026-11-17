@@ -13,7 +13,8 @@ use crate::{
 		BlockContextSource, CompactDiffOptions, build_compact_diff_preview, generate_diff_string,
 	},
 	engine::{
-		EditMode, FileOp, FileOpIntent, HeaderKind, ModeEngine, PreviewFile, Resolved, StagedFile,
+		EditMode, FileOp, FileOpIntent, HeaderKind, Location, ModeEngine, PreviewFile, Resolved,
+		StagedFile,
 	},
 	error::{EditError, EditResult},
 	files::{FileCache, FileSource},
@@ -390,7 +391,7 @@ impl Session {
 			let mut tag: Option<String> = None;
 			// Updated files register their response rows against the minted tag
 			// (the store carries still-valid prior provenance): the store key.
-			let mut provenance: Option<PathBuf> = None;
+			let mut provenance: Option<Location> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
 				FileOp::Noop => {

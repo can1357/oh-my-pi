@@ -36,7 +36,7 @@ use crate::{
 pub struct FileRead {
 	pub resolved:    Resolved,
 	/// Snapshot-store key.
-	pub canonical:   PathBuf,
+	pub canonical:   Location,
 	/// Bytes as read (notebook JSON for `.ipynb`).
 	pub raw:         String,
 	pub bom:         &'static str,
@@ -145,8 +145,8 @@ fn stamp(absolute: &Path) -> Option<Stamp> {
 pub struct FileCache {
 	policy:          PathPolicy,
 	reads:           HashMap<PathBuf, (Stamp, Arc<FileRead>)>,
-	hosted_reads:    HashMap<PathBuf, Arc<FileRead>>,
-	hosted:          HashMap<PathBuf, Option<String>>,
+	hosted_reads:    HashMap<String, Arc<FileRead>>,
+	hosted:          HashMap<String, Option<String>>,
 	/// Authored path → resolution (so paired hunks share one recovery).
 	resolutions:     HashMap<(String, bool), Resolved>,
 	/// Host answers keyed by [`PathPolicy::url_target`].
