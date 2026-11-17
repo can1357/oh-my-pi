@@ -1710,7 +1710,12 @@ export class CustomEditor extends Editor {
 		if (this.#routeBracketedPaste(data, false)) return;
 
 		const parsedKey = parseKey(data);
-		const canonical = parsedKey !== undefined ? canonicalKeyId(parsedKey) : undefined;
+		const canonical =
+			parsedKey === "ctrl+[" && this.vimEnabled
+				? "escape"
+				: parsedKey === undefined
+					? undefined
+					: canonicalKeyId(parsedKey);
 
 		// Enter matches the disabled Send button while dictation still writes into the draft;
 		// dictation's own submit trigger goes through submit(), not this key path.

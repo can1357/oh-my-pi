@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { Editor } from "@oh-my-pi/pi-tui/components/editor";
+import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { defaultEditorTheme } from "./test-themes";
 
 const ESC = "\x1b";
+const CTRL_BRACKET_KITTY = "\x1b[91;5u";
+const CTRL_BRACKET_MODIFY_OTHER_KEYS = "\x1b[27;5;91~";
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
 const LEFT = "\x1b[D";
@@ -78,6 +81,38 @@ describe("Editor vim mode", () => {
 
 			editor.handleInput("d");
 			expect(editor.vimConsumesEscape()).toBe(true);
+		});
+
+		it("treats enhanced Ctrl+[ as Escape across Vim modes and pending commands", () => {
+			for (const [key, kitty] of [
+				[CTRL_BRACKET_KITTY, true],
+				[CTRL_BRACKET_MODIFY_OTHER_KEYS, false],
+			] as const) {
+				setKittyProtocolActive(kitty);
+				try {
+					const editor = new Editor(defaultEditorTheme);
+					editor.setVimMode(true);
+					editor.handleInput("abc");
+					editor.handleInput(key);
+					expect(editor.vimMode).toBe("normal");
+
+					editor.handleInput("2");
+					editor.handleInput("d");
+					editor.handleInput(key);
+					expect(editor.vimPending).toBe("");
+					expect(editor.getText()).toBe("abc");
+
+					editor.handleInput("v");
+					editor.handleInput(key);
+					expect(editor.vimMode).toBe("normal");
+
+					editor.handleInput("R");
+					editor.handleInput(key);
+					expect(editor.vimMode).toBe("normal");
+				} finally {
+					setKittyProtocolActive(false);
+				}
+			}
 		});
 
 		it("returns to insert mode via i/a/I/A", () => {
@@ -520,6 +555,36 @@ describe("Editor vim mode", () => {
 
 			editor.handleInput(ESC);
 			expect(editor.vimMode).toBe("normal");
+		});
+
+		it("dismisses autocomplete before leaving Insert mode on enhanced Ctrl+[", async () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setVimMode(true);
+			const { promise: shown, resolve: resolveShown } = Promise.withResolvers<void>();
+			editor.setAutocompleteProvider({
+				async getSuggestions() {
+					return { items: [{ label: "/help", value: "/help" }], prefix: "/" };
+				},
+				applyCompletion(lines, cursorLine, cursorCol) {
+					return { lines, cursorLine, cursorCol };
+				},
+			});
+			editor.onAutocompleteUpdate = resolveShown;
+			setKittyProtocolActive(true);
+			try {
+				editor.handleInput("/");
+				await shown;
+				expect(editor.isShowingAutocomplete()).toBe(true);
+
+				editor.handleInput(CTRL_BRACKET_KITTY);
+				expect(editor.isShowingAutocomplete()).toBe(false);
+				expect(editor.vimMode).toBe("insert");
+
+				editor.handleInput(CTRL_BRACKET_KITTY);
+				expect(editor.vimMode).toBe("normal");
+			} finally {
+				setKittyProtocolActive(false);
+			}
 		});
 	});
 

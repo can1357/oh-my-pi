@@ -1,8 +1,10 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const ESC = "\x1b";
+const CTRL_BRACKET_KITTY = "\x1b[91;5u";
 
 function makeEditor(vim: boolean): { editor: CustomEditor; state: { escapes: number } } {
 	const editor = new CustomEditor(getEditorTheme());
@@ -53,6 +55,27 @@ describe("CustomEditor vim mode", () => {
 		expect(state.escapes).toBe(0);
 		expect(editor.vimMode).toBe("normal");
 		expect(editor.getText()).toBe("alfa beta");
+	});
+
+	it("routes enhanced Ctrl+[ through Vim before giving quiet Normal mode back to the app", () => {
+		const { editor, state } = makeEditor(true);
+		editor.setText("draft");
+		setKittyProtocolActive(true);
+		try {
+			editor.handleInput(CTRL_BRACKET_KITTY);
+			expect(editor.vimMode).toBe("normal");
+			expect(state.escapes).toBe(0);
+
+			editor.handleInput("d");
+			editor.handleInput(CTRL_BRACKET_KITTY);
+			expect(editor.vimPending).toBe("");
+			expect(state.escapes).toBe(0);
+
+			editor.handleInput(CTRL_BRACKET_KITTY);
+			expect(state.escapes).toBe(1);
+		} finally {
+			setKittyProtocolActive(false);
+		}
 	});
 
 	it("keeps the space bar as a motion in normal mode instead of push-to-talk", () => {

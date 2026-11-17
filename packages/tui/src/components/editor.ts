@@ -2086,7 +2086,12 @@ export class Editor implements Component, Focusable {
 		// Parse the sequence once; every binding probe below is then a set
 		// lookup instead of re-parsing `data` per probe (~35 probes per key).
 		const parsedKey = parseKey(data);
-		const canonical = parsedKey === undefined ? undefined : canonicalKeyId(parsedKey);
+		const canonical =
+			parsedKey === "ctrl+[" && this.#vim !== null
+				? "escape"
+				: parsedKey === undefined
+					? undefined
+					: canonicalKeyId(parsedKey);
 		// Input wins over a pending provider lookup. The next completable edit
 		// queues one fresh request after the stale request acknowledges abort.
 		if (this.#autocompleteRequestRunning && this.#autocompleteState === null) {
