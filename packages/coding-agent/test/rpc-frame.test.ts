@@ -27,7 +27,9 @@ describe("RPC frame encoding", () => {
 		for (const endedByExit of [false, true]) {
 			for (const ephemeralShell of [false, true]) {
 				const frame = {
-					type: "response", command: "bash", success: true,
+					type: "response",
+					command: "bash",
+					success: true,
 					data: { output: "", exitCode: 0, cancelled: false, truncated: false, endedByExit, ephemeralShell },
 				};
 				for (const version of [1, 2] as const) {

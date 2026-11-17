@@ -1,4 +1,18 @@
 //! Exit notices distinguish early exit/errexit from other shell termination.
+//!
+//! Continuation input-space matrix:
+//! - loops: while/until, word/select/repeat, arithmetic (present/omitted test),
+//!   nested records, first/second iteration, condition/body interruption;
+//! - suffix: absent, unconditional, &&/||, negated, inside/outside a caller;
+//! - layout: semicolon/newline, root/brace/function/eval;
+//! - cleanup: active/unentered try, try/always interruption, nested snapshots;
+//! - traps: text/function carriers, saved success/failure,
+//!   resume-in-place/unwind;
+//! - spawns: future work versus an already-running inline stage's continuation.
+//!
+//! Status expectations follow `loop_note`/`loop_exit`,
+//! `always_enter`/`always_end` and trap restoration; loop termination is
+//! deliberately not predicted.
 
 use super::*;
 
@@ -203,7 +217,7 @@ async fn exit_classification_return_trap_winding_down_is_not_unrun_input() {
 	let result =
 		run_exit_case(&Shell::new(None), "f() { trap 'exit 0' RETURN; return 0; }; f").await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, false);
+	assert!(!result.ended_by_exit);
 }
 
 #[cfg(unix)]
@@ -254,7 +268,7 @@ async fn exit_classification_subshell_in_cleanup_does_not_end_the_walk() {
 	let result =
 		run_exit_case(&shell, "f() { { exit 0; } always { ( : ); }; printf never; }; f").await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, true);
+	assert!(result.ended_by_exit);
 }
 
 #[cfg(unix)]
@@ -267,7 +281,7 @@ async fn exit_classification_exit_trap_child_run_keeps_root_report() {
 	let result =
 		run_exit_case(&Shell::new(None), "trap 'timeout 1 true' EXIT; f() { exit 0; }; f").await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, false);
+	assert!(!result.ended_by_exit);
 }
 
 #[cfg(unix)]
@@ -290,8 +304,8 @@ async fn exit_classification_loop_matrix_operator_pairs() {
 		for (op, expected) in [("&&", and_cut), ("||", or_cut)] {
 			let src = format!("{command} {op} printf never");
 			let result = run_exit_case(&Shell::new(None), &src).await;
-			assert_eq!(result.exit_code, Some(code), "{}", src);
-			assert_eq!(result.ended_by_exit, expected, "{}", src);
+			assert_eq!(result.exit_code, Some(code), "{src}");
+			assert_eq!(result.ended_by_exit, expected, "{src}");
 		}
 	}
 }
@@ -309,8 +323,8 @@ async fn exit_classification_case_and_else_branches_carry_their_status() {
 		for (op, expected) in [("&&", and_cut), ("||", or_cut)] {
 			let src = format!("{command} {op} printf never");
 			let result = run_exit_case(&Shell::new(None), &src).await;
-			assert_eq!(result.exit_code, Some(code), "{}", src);
-			assert_eq!(result.ended_by_exit, expected, "{}", src);
+			assert_eq!(result.exit_code, Some(code), "{src}");
+			assert_eq!(result.ended_by_exit, expected, "{src}");
 		}
 	}
 }
@@ -331,7 +345,7 @@ async fn exit_classification_subshells_do_not_end_the_shell() {
 	] {
 		let result = run_exit_case(&Shell::new(None), command).await;
 		assert_eq!(result.exit_code, Some(code), "{command}");
-		assert_eq!(result.ended_by_exit, false, "{command}");
+		assert!(!result.ended_by_exit, "{command}");
 	}
 }
 
@@ -344,20 +358,20 @@ async fn exit_classification_pipeline_and_anonymous_and_eval_frames() {
 	// shell itself keeps running (cat and the suffix both run).
 	let result = run_exit_case(&shell, "exit 1 | cat; printf never").await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, false);
+	assert!(!result.ended_by_exit);
 	// A zsh anonymous function: the exit is not at the input's end when a
 	// suffix follows (it never runs); alone at the end it is trailing.
 	run_exit_case(&shell, "emulate zsh").await;
 	let result = run_exit_case(&shell, "() { exit 0; }; printf never").await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, true);
+	assert!(result.ended_by_exit);
 	let result = run_exit_case(&shell, "() { exit 0; }").await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, false);
+	assert!(!result.ended_by_exit);
 	// eval frames unwind to the caller's suffix like function frames.
 	let result = run_exit_case(&shell, "eval 'exit 1'; printf never").await;
 	assert_eq!(result.exit_code, Some(1));
-	assert_eq!(result.ended_by_exit, true);
+	assert!(result.ended_by_exit);
 }
 
 #[cfg(unix)]
@@ -395,10 +409,12 @@ async fn exit_classification_runtime_loop_records_seed_the_walk() {
 #[tokio::test(flavor = "multi_thread")]
 async fn exit_classification_omitted_arithmetic_condition_loops_forever() {
 	let _guard = shell_test_lock().lock().await;
-	// Without a condition the loop cannot leave through its test: nothing
-	// after it would ever run, not even were the exit not to happen.
+	// Owner ruling (option A, structure-based): termination is undecidable
+	// and the classifier must not attempt reachability proofs — any
+	// submitted command after the interruption counts as unrun input,
+	// regardless of whether the loop before it is infinite.
 	for (command, expected) in
-		[("for ((;;)); do exit 1; done", false), ("for ((;;)); do exit 1; done; printf never", false)]
+		[("for ((;;)); do exit 1; done", false), ("for ((;;)); do exit 1; done; printf never", true)]
 	{
 		let result = run_exit_case(&Shell::new(None), command).await;
 		assert_eq!(result.exit_code, Some(1), "{command}");
@@ -416,7 +432,7 @@ async fn exit_classification_spawn_parent_continuation_is_followed() {
 		run_exit_case(&Shell::new(None), "{ exit 0; (for ((;0;)); do :; done); printf never; }")
 			.await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, true);
+	assert!(result.ended_by_exit);
 }
 
 #[cfg(unix)]
@@ -460,5 +476,168 @@ async fn exit_classification_trap_restores_interrupted_status() {
 	let result =
 		run_exit_case(&Shell::new(None), "trap 'exit 0' USR1; kill -USR1 $$; printf never").await;
 	assert_eq!(result.exit_code, Some(0));
-	assert_eq!(result.ended_by_exit, true);
+	assert!(result.ended_by_exit);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_loop_suffix_is_structural_across_layouts() {
+	let _guard = shell_test_lock().lock().await;
+	let mut failures = Vec::new();
+	for dialect in ["bash", "zsh"] {
+		for body in [
+			"while true; do exit 1; done",
+			"until false; do exit 1; done",
+			"for x in a b; do exit 1; done",
+			"for ((;;)); do exit 1; done",
+			"for ((i=0; i<2; i++)); do exit 1; done",
+			"for ((i=0; i<2; i++)); do :; exit 1; done",
+			"for ((i=0; i<2; i++)); do if ((i==0)); then exit 1; else printf later; fi; done",
+			"for x in a; do for ((;;)); do exit 1; done; done",
+		] {
+			for separator in ["; ", "\n"] {
+				for wrapped in [false, true] {
+					for suffix in ["", "printf never"] {
+						let code = if suffix.is_empty() {
+							body.to_string()
+						} else {
+							format!("{body}{separator}{suffix}")
+						};
+						let command = if wrapped {
+							format!("f() {{ {code}\n}}; f")
+						} else {
+							code
+						};
+						let shell = Shell::new(None);
+						run_exit_case(&shell, &format!("emulate {dialect}")).await;
+						let result = run_exit_case(&shell, &command).await;
+						if result.exit_code != Some(1) || result.ended_by_exit == suffix.is_empty() {
+							failures.push(format!("{dialect}: {command:?}: {result:?}"));
+						}
+					}
+				}
+			}
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_record_lifecycle_and_cleanup_snapshots() {
+	let _guard = shell_test_lock().lock().await;
+	let mut failures = Vec::new();
+	for (body, succeeded) in [
+		("{ { exit 1; } always { :; }; } always { :; }", false),
+		("{ { exit 0; } always { :; }; } always { :; }", true),
+		("{ { false; } always { exit 0; }; } always { :; }", false),
+		("{ { true; } always { exit 1; }; } always { :; }", true),
+		("{ for x in a; do { exit 1; } always { :; }; done; } always { :; }", false),
+		("{ for x in a; do { exit 0; } always { :; }; done; } always { :; }", true),
+	] {
+		for (op, expected) in [("&&", succeeded), ("||", !succeeded)] {
+			let shell = Shell::new(None);
+			run_exit_case(&shell, "emulate zsh").await;
+			let command = format!("f() {{ {body}; }}; f {op} printf never");
+			let result = run_exit_case(&shell, &command).await;
+			if result.ended_by_exit != expected {
+				failures.push(format!("{command}: expected {expected}, {result:?}"));
+			}
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_spawn_and_trap_carriers() {
+	let _guard = shell_test_lock().lock().await;
+	let mut failures = Vec::new();
+	for (dialect, command, expected) in [
+		("bash", "exit 0; ( : )", true),
+		("bash", "exit 0; : | :", true),
+		("bash", "exit 0; : &", true),
+		("bash", "exit 0; coproc { :; }", true),
+		("bash", "shopt -s lastpipe; : | exit 0", false),
+		("bash", "shopt -s lastpipe; : | exit 0; printf never", true),
+		("bash", "shopt -s lastpipe; : | exit 1 && printf never", false),
+		("bash", "shopt -s lastpipe; : | exit 1 || printf never", true),
+		("zsh", ": | exit 0", false),
+		("zsh", ": | exit 0; printf never", true),
+		("zsh", "trap 'exit 0' USR1; kill -USR1 $$ && printf never", true),
+		("zsh", "trap 'exit 1' USR1; kill -USR1 $$ || printf never", false),
+	] {
+		let shell = Shell::new(None);
+		run_exit_case(&shell, &format!("emulate {dialect}")).await;
+		let result = run_exit_case(&shell, command).await;
+		if result.ended_by_exit != expected {
+			failures.push(format!("{dialect}: {command}: expected {expected}, {result:?}"));
+		}
+	}
+	assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_inline_pipeline_uses_all_pipefail_statuses() {
+	let _guard = shell_test_lock().lock().await;
+	for dialect in ["bash", "zsh"] {
+		for pipefail in [false, true] {
+			for left in ["true", "false"] {
+				for status in [0, 1] {
+					for op in ["&&", "||"] {
+						let shell = Shell::new(None);
+						run_exit_case(&shell, &format!("emulate {dialect}")).await;
+						// Let the first stage finish so its status is runtime fact,
+						// not a guess about an in-flight child's eventual result.
+						let setting = if pipefail { "-o" } else { "+o" };
+						let command = format!(
+							"set {setting} pipefail; shopt -s lastpipe; {left} | {{ sleep 0.01; exit \
+							 {status}; }} {op} printf never"
+						);
+						let succeeded = status == 0 && (!pipefail || left == "true");
+						let result = run_exit_case(&shell, &command).await;
+						assert_eq!(result.exit_code, Some(status), "{dialect}: {command}");
+						assert_eq!(
+							result.ended_by_exit,
+							succeeded == (op == "&&"),
+							"{dialect}: {command}"
+						);
+					}
+				}
+			}
+		}
+	}
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_counts_cleanup_only_when_it_is_left_unrun() {
+	let _guard = shell_test_lock().lock().await;
+	for wrapped in [false, true] {
+		for explicit in [false, true] {
+			let shell = Shell::new(None);
+			run_exit_case(&shell, "emulate zsh").await;
+			let interruption = if explicit { "exit 0" } else { "set -e; false" };
+			let body = format!("{{ {interruption}; }} always {{ printf cleanup; }}");
+			let command = if wrapped {
+				format!("f() {{ {body}; }}; f")
+			} else {
+				body
+			};
+			let (tx, rx) = flume::unbounded();
+			let result = shell
+				.run(
+					ShellRunOptions { command: command.clone(), ..Default::default() },
+					Some(tx),
+					CancelToken::default(),
+				)
+				.await
+				.unwrap();
+			let cleaned = wrapped && explicit;
+			let output: String = rx.try_iter().collect();
+			assert_eq!(output, if cleaned { "cleanup" } else { "" }, "{command}");
+			assert_eq!(result.ended_by_exit, !cleaned, "{command}");
+		}
+	}
 }

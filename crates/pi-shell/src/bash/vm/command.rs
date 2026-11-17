@@ -310,7 +310,15 @@ pub fn exec(
 							if fatal {
 								s.control = Some(Transfer::Exit(1));
 								let unrun = vp.frames.last().map_or(0, |f| f.pc + 1);
-								exec::capture_exit_report(k, vp, 1, unrun, exec::ExitCause::PosixFatal);
+								exec::capture_exit_report(
+									k,
+									vp,
+									cx,
+									1,
+									unrun,
+									exec::ExitCause::PosixFatal,
+									false,
+								);
 							}
 							// The message goes to stderr as the redirections so far
 							// left it (`2>&1 >&bad`), before they are undone.
