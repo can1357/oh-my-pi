@@ -49,6 +49,7 @@ import {
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
+import { waitForFullWake } from "./dark-wake";
 import type {
 	InitialRetryFallbackState,
 	UsageFallbackConfirmation,
@@ -3284,6 +3285,8 @@ export class TurnRecovery {
 			} else {
 				await sleepLong(delayMs, retryAbortController.signal);
 			}
+			// A request sent during a macOS dark wake stalls when the machine sleeps again.
+			await waitForFullWake(retryAbortController.signal);
 		} catch {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;
