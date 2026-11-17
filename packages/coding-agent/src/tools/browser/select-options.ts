@@ -1,11 +1,18 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
+/** A `select()` choice as the model writes it: a string (value, then label) or exactly one of label, value or index. */
 export type SelectOptionInput = string | { label: string } | { value: string } | { index: number };
 
+/** A validated choice, the shape the page-side matchers (Chromium, Tern's page kit, cmux) consume. */
 export type SelectOptionChoice =
 	| { kind: "string" | "label" | "value"; value: string }
 	| { kind: "index"; value: number };
 
+/**
+ * Validate `select()` choices before any element is looked up; throws `ToolError` on an object that is not exactly
+ * `{label: string}`, `{value: string}` or `{index: non-negative integer}`. `coercePrimitives` keeps Tern's and cmux's
+ * `String()` of other non-object choices.
+ */
 export function normalizeSelectOptions(
 	values: readonly unknown[],
 	options?: { coercePrimitives: boolean },
