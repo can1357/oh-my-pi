@@ -59,12 +59,14 @@ function transcriptionModel(
 	} satisfies ModelSpec<Api>);
 }
 
+const CODEX_BEARER = `header.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-gw" } }))}.signature`;
+
 async function boot(): Promise<Harness> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-transcriptions-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 	storage.keys.setRuntime("openai", "openai-secret");
 	storage.keys.setRuntime("openrouter", "openrouter-secret");
-	storage.keys.setRuntime("openai-codex", "codex-secret");
+	storage.keys.setRuntime("openai-codex", CODEX_BEARER);
 	const direct = transcriptionModel("openai", "whisper-1");
 	const routed = transcriptionModel("openrouter", "openai/whisper-large-v3");
 	const local = transcriptionModel("local", "whisper-small", "local-inference", "local://inference");
@@ -209,7 +211,7 @@ describe("auth-gateway POST /v1/audio/transcriptions", () => {
 		expect(harness.upstream).toHaveLength(1);
 		expect(harness.upstream[0]).toMatchObject({
 			url: "https://chatgpt.com/backend-api/transcribe",
-			authorization: "Bearer codex-secret",
+			authorization: `Bearer ${CODEX_BEARER}`,
 			model: null,
 			fileName: "audio.flac",
 		});

@@ -8,7 +8,7 @@ import {
 	isCodexAccessToken,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { withAuth } from "../auth-retry";
+import { isApiKeyResolver, resolvedApiKeyBearer, type ApiKey, type ResolvedApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
 import { emptyUsage } from "../images/shared";
 import { getCodexAttestationHeader } from "../providers/openai-codex-attestation";
@@ -71,15 +71,43 @@ function uploadFileName(request: TranscriptionRequest): string {
 	return container ? `audio.${container}` : name;
 }
 
+function codexCredentialError(model: Model<Api>): AIError.ConfigurationError {
+	return new AIError.ConfigurationError(
+		`${model.provider}/${model.id} only accepts a ChatGPT/Codex login; the resolved credential is not a Codex access token. Remove providers.${model.provider}.apiKey or pick another speech-to-text model`,
+	);
+}
+
+/** A Codex-shaped bearer, or a stored OAuth row whose identity was captured from the id token. */
+function acceptsCodexCredential(bearer: string, resolved: ResolvedApiKey | undefined): boolean {
+	return isCodexAccessToken(bearer) || resolved?.oauthAccess !== undefined;
+}
+
+function requireCodexCredential(model: Model<Api>, apiKey: ApiKey): ApiKey {
+	if (!isApiKeyResolver(apiKey)) {
+		if (!acceptsCodexCredential(apiKey, undefined)) throw codexCredentialError(model);
+		return apiKey;
+	}
+	return async ctx => {
+		const resolved = await apiKey(ctx);
+		const bearer = resolvedApiKeyBearer(resolved);
+		if (bearer === undefined) return resolved;
+		if (!acceptsCodexCredential(bearer, typeof resolved === "object" ? resolved : undefined)) {
+			throw codexCredentialError(model);
+		}
+		return resolved;
+	};
+}
+
 /**
  * Transcribe through the ChatGPT backend dictation endpoint (`POST /transcribe`) with a Codex OAuth bearer.
  *
  * The endpoint takes only `file` and `language` and reports no usage or segments, so prompt, temperature,
  * response format and timestamp options are not forwarded and the result carries text with zero usage.
  *
- * A `baseUrl` off the ChatGPT origin is refused. A resolved credential that is not a Codex
- * access token is refused even on that origin: `providers.openai-codex.api` can keep the
- * STT row on chatgpt.com while the provider-wide `apiKey` is still a relay secret.
+ * A `baseUrl` off the ChatGPT origin is refused. A static or config-resolved credential that is not a Codex
+ * access token is refused even on that origin: `providers.openai-codex.api` can keep the STT row on
+ * chatgpt.com while the provider-wide `apiKey` is still a relay secret. A stored OAuth credential is accepted
+ * from its resolver provenance, because its workspace identity may live only on the id token.
  */
 export async function transcribeOpenAICodex(
 	model: Model<Api>,
@@ -97,13 +125,8 @@ export async function transcribeOpenAICodex(
 
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await withAuth(
-		options.apiKey,
+		requireCodexCredential(model, options.apiKey),
 		async key => {
-			if (!isCodexAccessToken(key)) {
-				throw new AIError.ConfigurationError(
-					`${model.provider}/${model.id} only accepts a ChatGPT/Codex login; the resolved credential is not a Codex access token. Remove providers.${model.provider}.apiKey or pick another speech-to-text model`,
-				);
-			}
 			const headers: Record<string, string> = {
 				Authorization: `Bearer ${key}`,
 				Accept: "application/json",

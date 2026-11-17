@@ -202,6 +202,21 @@ describe("openai-codex-transcriptions transport", () => {
 		expect(called).toBe(true);
 	});
 
+	it("posts a stored OAuth access token whose identity lives only on the id token", async () => {
+		let authorization: string | null = null;
+		const fetchImpl: FetchImpl = async (_input, init) => {
+			authorization = new Headers(init?.headers).get("authorization");
+			return Response.json({ text: "ok" });
+		};
+		const result = await transcribeAudio(
+			model,
+			{ audio: AUDIO, mimeType: "audio/wav", fileName: "dictation.wav", responseFormat: "json" },
+			{ apiKey: async () => ({ apiKey: "opaque-access", oauthAccess: "opaque-access" }), fetch: fetchImpl },
+		);
+		expect(result.text).toBe("ok");
+		expect(authorization).toBe("Bearer opaque-access");
+	});
+
 	it("surfaces backend ASR failures as TranscriptionApiError with the upstream detail", async () => {
 		const fetchImpl: FetchImpl = async () => Response.json({ detail: "Error in ASR API" }, { status: 500 });
 		const failure = transcribeAudio(
