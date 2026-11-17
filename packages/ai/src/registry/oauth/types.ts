@@ -49,6 +49,11 @@ export type OAuthPrompt = {
 	allowEmpty?: boolean;
 	/** Request masked entry from interactive hosts. Hosts that cannot hide input must reject the prompt. */
 	secret?: boolean;
+	/**
+	 * Marks the yes/no acceptance of a provider's `login-warning`, asked before any auth URL.
+	 * Hosts that refuse pre-auth input (RPC) must still surface it; only an answer of "yes" continues.
+	 */
+	riskAcknowledgement?: boolean;
 };
 
 export type OAuthAuthInfo = {

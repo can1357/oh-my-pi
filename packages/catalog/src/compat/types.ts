@@ -332,6 +332,8 @@ export interface CompiledPricingPeer {
 /** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
 export interface CompiledRetryResetTimezone {
 	provider: string;
+	/** Exact upstream endpoint whose custom provider IDs inherit this offset. */
+	baseUrl?: string;
 	offset: string;
 }
 

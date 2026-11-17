@@ -20,7 +20,12 @@ import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ComposerFacts, ComposerFactsSource } from "../status-line/types";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
-import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
+import {
+	expandModelMentionTags,
+	MODEL_MENTION_RE,
+	modelMentionToken,
+	resolveModelMentionToken,
+} from "./model-mention-syntax";
 import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
@@ -645,6 +650,7 @@ export class CustomEditor extends Editor {
 				),
 				selector => this.#mentionChipFor(selector),
 				register,
+				selector => this.resolveModelMention(selector) !== undefined,
 			),
 		);
 		this.#syncComposerTokenPattern();
@@ -725,9 +731,19 @@ export class CustomEditor extends Editor {
 					const start = match.index + match[1].length;
 					const end = match.index + match[0].length;
 					if (end === line.length && i === lines.length - 1) break;
-					const chip = this.#mentionChipFor(selector);
-					if (chip === undefined) continue;
-					this.collapseToAtom(i, start, end, chip.label, modelMentionToken(chip.selector));
+					const mention = resolveModelMentionToken(
+						selector,
+						candidate => this.#mentionChipFor(candidate),
+						candidate => this.resolveModelMention(candidate) !== undefined,
+					);
+					if (!mention) continue;
+					this.collapseToAtom(
+						i,
+						start,
+						end - mention.suffix.length,
+						mention.value.label,
+						modelMentionToken(mention.value.selector),
+					);
 					collapsed = true;
 					anyCollapsed = true;
 					break;
