@@ -983,7 +983,7 @@ describe("devin catalog pricing", () => {
 		const gemini4List = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };
 		const clock = spyOn(Date, "now").mockReturnValue(now);
 		try {
-			for (const [id, promo, ends, list] of [
+			for (const [id, reported, ends, list] of [
 				[
 					"gemini-3-8-flash",
 					flashPromo,
@@ -991,12 +991,19 @@ describe("devin catalog pricing", () => {
 					{ ...flashPromo, input: 1.5, output: 7.5, cacheRead: 0.15 },
 				],
 				["gemini-4-argon", gemini4Promo, "2026-12-01T08:00:00Z", gemini4List],
+				// An account billed below the public promo keeps its own rate until the promo ends.
+				[
+					"gemini-4-argon-low",
+					{ input: 1, output: 5, cacheRead: 0.05, cacheWrite: 0 },
+					"2026-12-01T08:00:00Z",
+					gemini4List,
+				],
 				// A raw effort uid that arrives without family metadata.
 				["gemini-4-carbon-high", gemini4Promo, "2026-11-24T16:00:00Z", gemini4List],
 			] as const) {
-				const model = buildModel(spec(id, promo));
-				expect(model.cost, id).toMatchObject(promo);
-				expect(getEffectiveTokenCost(model.cost, Date.parse(ends) - 1), id).toMatchObject(promo);
+				const model = buildModel(spec(id, reported));
+				expect(model.cost, id).toMatchObject(reported);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends) - 1), id).toMatchObject(reported);
 				expect(getEffectiveTokenCost(model.cost, Date.parse(ends)), id).toMatchObject(list);
 			}
 			// Hydrogen shares Argon's and Carbon's class rank; Gemini 3.6 Flash sits below the promo revisions.
