@@ -1,11 +1,10 @@
 //! Open file handles: host files and provider-owned handles.
 
-#[cfg(unix)]
-use std::time::Duration;
 use std::{
 	fmt,
 	io::{self, Read, Seek, SeekFrom, Write},
 	sync::Arc,
+	time::Duration,
 };
 
 use async_trait::async_trait;
@@ -118,7 +117,6 @@ impl HostCancel {
 }
 
 /// How long one readiness wait lasts before cancellation is checked again.
-#[cfg(unix)]
 pub const POLL_SLICE: Duration = Duration::from_millis(100);
 
 /// Whether one read of a host file with `meta` can block until data arrives,
@@ -178,6 +176,48 @@ pub fn wait_readable(
 			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
 			Err(error) => return Err(error),
 		}
+	}
+}
+
+/// Waits until a read of the Windows pipe `file` would not block, checking
+/// `is_cancelled` every [`POLL_SLICE`]; fails with [`crate::cancelled`] once it
+/// is.
+///
+/// Anonymous and named Windows pipes have no pollable descriptor, so peeking is
+/// the only readiness probe. The caller classifies the handle once
+/// (`crate::reads_can_block`'s counterpart) rather than peeking before every
+/// read, and any peek failure counts as ready: a handle `GetFileType` reports
+/// as `FILE_TYPE_PIPE` can still be a socket, a server end with no client yet
+/// (`ERROR_PIPE_LISTENING`) or a pipe whose writer closed
+/// (`ERROR_BROKEN_PIPE`). None of those turns a read that would have worked
+/// into an error, so the read reports the real result.
+#[cfg(windows)]
+pub fn wait_pipe_readable(file: &std::fs::File, is_cancelled: impl Fn() -> bool) -> io::Result<()> {
+	use std::os::windows::io::AsRawHandle as _;
+
+	use windows_sys::Win32::System::Pipes::PeekNamedPipe;
+
+	loop {
+		if is_cancelled() {
+			return Err(crate::cancelled());
+		}
+		let mut available = 0;
+		// SAFETY: `file` owns the handle for the whole call, and only
+		// `available` is written.
+		let ready = unsafe {
+			PeekNamedPipe(
+				file.as_raw_handle(),
+				std::ptr::null_mut(),
+				0,
+				std::ptr::null_mut(),
+				&mut available,
+				std::ptr::null_mut(),
+			)
+		};
+		if ready == 0 || available > 0 {
+			return Ok(());
+		}
+		std::thread::sleep(POLL_SLICE);
 	}
 }
 

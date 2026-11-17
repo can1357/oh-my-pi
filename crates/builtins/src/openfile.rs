@@ -362,7 +362,7 @@ pub(crate) fn is_piped_input(file: &OpenFile) -> bool {
 }
 
 #[cfg(unix)]
-fn is_pipe(file: &std::fs::File) -> bool {
+pub(crate) fn is_pipe(file: &std::fs::File) -> bool {
 	use std::os::unix::fs::FileTypeExt as _;
 
 	file.metadata().is_ok_and(|metadata| {
@@ -371,8 +371,13 @@ fn is_pipe(file: &std::fs::File) -> bool {
 	})
 }
 
+/// Whether `file` is a Windows pipe, so a read of it can block with no
+/// pollable descriptor (see [`omp_vfs::wait_pipe_readable`]).
+///
+/// `GetFileType` answers `FILE_TYPE_PIPE` for sockets too; that misclassification
+/// is harmless because the readiness probe treats any peek failure as ready.
 #[cfg(windows)]
-fn is_pipe(file: &std::fs::File) -> bool {
+pub(crate) fn is_pipe(file: &std::fs::File) -> bool {
 	use std::os::windows::io::AsRawHandle as _;
 
 	use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType};
