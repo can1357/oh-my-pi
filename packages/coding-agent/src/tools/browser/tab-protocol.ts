@@ -1,6 +1,7 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { ImageTokenization } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { FrontTabSource } from "./native-windows";
 import type { HiddenFrame } from "./relay/protocol";
 
 export type Transferable = Bun.Transferable;
@@ -114,6 +115,13 @@ export type WorkerInitPayload =
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
 			insecure?: boolean;
+			/**
+			 * The browser draws its windows on the user's screen (a visible launch), so a call can raise native ones, and
+			 * this tab list says whether the call's tab is the one in front of its window.
+			 */
+			frontTab?: FrontTabSource;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  }
 	| {
 			mode: "attach";
@@ -150,6 +158,19 @@ export type WorkerInitPayload =
 			userDriven?: boolean;
 			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
 			relay?: boolean;
+			/**
+			 * The browser draws its windows on the user's screen, so a call can raise native ones, and this tab list says
+			 * whether the call's tab is the one in front of its window. Unset for a headless browser, whose recycled tabs
+			 * attach too, and for a browser whose tab list cannot say.
+			 */
+			frontTab?: FrontTabSource;
+			/**
+			 * The adopted tab was opened in front of its window, so it has been shown: a recycled managed browser tab,
+			 * which a headless-mode worker opened that way.
+			 */
+			openedInFront?: boolean;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */

@@ -228,6 +228,7 @@ import {
 } from "./screenshot";
 import { PointerSpace } from "./pointer-space";
 import { type DialogPolicy, type DialogState, dialogBlocksPageError, RuntimeDialogController } from "./dialogs";
+import { FrontTab, NativeWindowWatch, readBrowserPageFrames, readTabFrame } from "./native-windows";
 import {
 	type BrowserFrameApi,
 	type BrowserFrameInfo,
@@ -1932,6 +1933,8 @@ export class WorkerCore {
 	#webmcp?: WebMcpController;
 	/** Session holding `insecure`; Chromium drops the override once it detaches. */
 	#certificateOverride?: CDPSession;
+	/** Names the native windows a call raised on screen; only for a browser that shows windows, on macOS. */
+	#nativeWindows?: NativeWindowWatch;
 	/** Request boundary of the earliest action since the last look; the next look settles it. */
 	#actionRequestSeq?: number;
 	#actionGeneration = 0;
@@ -2234,7 +2237,27 @@ export class WorkerCore {
 			await installCancelledReleaseGuard(this.#page);
 			if (payload.userAgent !== undefined) await applyUserAgentOverride(this.#page, payload.userAgent);
 			if (payload.insecure) this.#certificateOverride = await applyInsecure(this.#page);
-			this.#targetId = await targetIdForPage(this.#page);
+			const targetId = await targetIdForPage(this.#page);
+			this.#targetId = targetId;
+			// Only a browser that draws its windows on the user's screen raises native ones, and they are this tab's only
+			// while the browser's tab list shows it in front of its window. A headless-mode worker opens its tab in front;
+			// an attaching one opens it in the background or adopts it, recycled managed tabs aside.
+			const frontTabSource = payload.frontTab;
+			if (frontTabSource && process.platform === "darwin") {
+				const page = this.#page;
+				const browser = this.#browser;
+				const windowOf = async (id: string) =>
+					(await browserConnection(browser).send("Browser.getWindowForTarget", { targetId: id })).windowId;
+				const openedInFront = payload.mode === "headless" || payload.openedInFront === true;
+				const front = new FrontTab(frontTabSource, payload.browserWSEndpoint, targetId, windowOf, openedInFront);
+				this.#nativeWindows = new NativeWindowWatch(
+					() => readTabFrame(page),
+					shown => front.read(shown),
+					undefined,
+					payload.browserPid,
+					() => readBrowserPageFrames(page.browser()),
+				);
+			}
 			this.#initScripts = new InitScriptManager(this.#page);
 			for (const source of payload.initScripts ?? []) await this.#initScripts.add(source);
 			this.#userDriven = payload.mode !== "headless" && payload.userDriven === true;
@@ -2544,6 +2567,7 @@ export class WorkerCore {
 			if (signal.aborted) onCancel();
 			else signal.addEventListener("abort", onCancel, { once: true });
 			try {
+				this.#nativeWindows?.beginCall(this.#dialogs?.state().open === true);
 				const hooks = this.#hooksForActiveRun();
 				if (!hooks) throw new ToolError("Browser runtime started without an active run");
 				returnValue = await withBrowserPromiseCombinatorTracking(
@@ -2594,6 +2618,14 @@ export class WorkerCore {
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
 		}
+		// What the call raised on screen that no page call can reach, named on failures too: a native panel is often
+		// why the call failed.
+		// Aborted runs must answer inside the supervisor's grace after interception cleanup; sampling can wait on
+		// both a previous tail and unresponsive pages, so it adds no work on this path.
+		const nativeNotices =
+			ac.signal.aborted || timeoutSignal.aborted
+				? []
+				: ((await this.#nativeWindows?.endCall(this.#dialogs?.state().open === true)) ?? []);
 		// A renderer crash or a debugger detach answers the run itself; what the relay hid stays with it for the next
 		// worker. Otherwise what it hid during the run goes out with the run's result.
 		if (this.#unanswered === active && this.#hiddenFramesWaiting && this.#page)
@@ -2615,10 +2647,16 @@ export class WorkerCore {
 				if (this.#unanswered !== active) return;
 			}
 			this.#unanswered = null;
-			this.#sendResult({ id: msg.id, ok: false, error: errorPayload(failure.error) });
+			const error = errorPayload(failure.error);
+			if (nativeNotices.length > 0) {
+				error.message = [error.message, ...nativeNotices].join("\n");
+				if (error.stack) error.stack = [error.stack, ...nativeNotices].join("\n");
+			}
+			this.#sendResult({ id: msg.id, ok: false, error });
 			return;
 		}
 		if (completed) {
+			for (const notice of nativeNotices) output.push({ type: "text", text: notice });
 			await this.#postReadyInfo();
 			if (this.#unanswered !== active) return;
 			this.#unanswered = null;

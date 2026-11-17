@@ -25,6 +25,7 @@ import { gracefulKillTreeOnce, isChromiumBrowserExecutable, pickElectronTarget }
 import type * as Cmux from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { browserConnection, DEFAULT_VIEWPORT } from "./launch";
+import type { FrontTabSource } from "./native-windows";
 import {
 	closeCdpTarget,
 	closeRelayTarget,
@@ -41,11 +42,13 @@ import {
 	type CmuxBrowserHandle,
 	holdBrowser,
 	type PuppeteerBrowserHandle,
+	type PuppeteerBrowserKind,
 	releaseBrowser,
 	sharedTargetScopeOf,
 	type TernBrowserHandle,
 	type WebKitBrowserHandle,
 } from "./registry";
+import { isLoopbackRelayUrl } from "./relay/daemon";
 import { FOREIGN_FRAME_REFUSAL, type HiddenFrame } from "./relay/protocol";
 import {
 	type AttachPage,
@@ -2228,6 +2231,25 @@ function sweepClosedTabUploads(): void {
 	void sweepUploadStaging(live, now).catch(() => undefined);
 }
 
+/**
+ * The tab list that says whether a call's tab is the one in front of its window, for a browser that draws its windows
+ * on the user's screen; undefined names no native window. omp's own Chromium (the managed launch, or a Chromium browser
+ * omp spawned) ranks its `/json/list` by when each tab was last shown; the loopback relay's marks the extension's active
+ * tab of each window. A headless browser keeps that through a tab's recycle. A connected endpoint may be remote,
+ * headless or a build whose list was never measured, and a spawned app's windows are not browser tabs.
+ */
+export function frontTabSource(kind: PuppeteerBrowserKind): FrontTabSource | undefined {
+	switch (kind.kind) {
+		case "headless":
+			return kind.headless ? undefined : "chrome";
+		case "spawned":
+			return isChromiumBrowserExecutable(kind.path) ? "chrome" : undefined;
+		case "relay":
+			return isLoopbackRelayUrl(kind.cdpUrl) ? "relay" : undefined;
+		case "connected":
+			return undefined;
+	}
+}
 async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
 	const uploadDir = newUploadStagingDir();
@@ -2241,6 +2263,8 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			// Visible launches still need an OMP-owned page, stealth setup, and
 			// independent lifecycle; only their fixed device emulation is disabled.
 			emulateViewport: browser.kind.headless,
+			frontTab: frontTabSource(browser.kind),
+			browserPid: browser.pid,
 			viewport: opts.viewport,
 			dialogs: opts.dialogs,
 			allowedDomains: opts.allowedDomains,
@@ -2288,6 +2312,8 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		insecure: opts.insecure,
 		userDriven,
 		relay: browser.kind.kind === "relay",
+		frontTab: frontTabSource(browser.kind),
+		browserPid: browser.pid,
 	};
 }
 
@@ -2536,6 +2562,9 @@ async function recycleTimedOutWorkerTab(
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
 		relay: tab.kindTag === "relay",
+		frontTab: frontTabSource(tab.browser.kind),
+		openedInFront: tab.kindTag === "headless",
+		browserPid: tab.browser.pid,
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.
