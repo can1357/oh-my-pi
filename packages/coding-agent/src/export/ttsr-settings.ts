@@ -128,8 +128,8 @@ export const cfgTtsrDisabledRules = register({
 	},
 });
 
-// Read from the operator layers (Settings.grantAuthority()): a project cannot shorten it so that
-// `onJudgeError: allow` gates pass unjudged.
+// Read from the operator layers (Settings.grantAuthority()) only. The gate's other inputs
+// (`ttsr.enabled`, `ttsr.judge`, `ttsr.disabledRules`, the judge model) come from merged settings.
 export const cfgTtsrGateTimeoutMs = register({
 	id: "ttsr.gateTimeoutMs",
 	type: "number",

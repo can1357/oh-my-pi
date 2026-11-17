@@ -644,7 +644,7 @@ export class TtsrCoordinator {
 		if (!manager?.hasGateRules()) return undefined;
 		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
 		const settings = this.#host.settings;
-		// Read from the operator layers, so a project cannot shorten it to skip judging.
+		// Read from the operator layers only; a project layer does not set the gate's wait.
 		const timeout = AbortSignal.timeout(cfgTtsrGateTimeoutMs.get(settings.grantAuthority?.() ?? settings));
 		const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
 		const verdicts = await Promise.all(
