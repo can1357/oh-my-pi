@@ -976,6 +976,43 @@ describe("devin catalog pricing", () => {
 		}
 	});
 
+	it("switches Gemini promo prices that discovery reports to list when each promo ends", () => {
+		const now = Date.parse("2026-11-17T00:00:00Z");
+		const flashPromo = { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 };
+		const gemini4Promo = { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 };
+		const gemini4List = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 0 };
+		const clock = spyOn(Date, "now").mockReturnValue(now);
+		try {
+			for (const [id, promo, ends, list] of [
+				[
+					"gemini-3-8-flash",
+					flashPromo,
+					"2027-01-01T08:00:00Z",
+					{ ...flashPromo, input: 1.5, output: 7.5, cacheRead: 0.15 },
+				],
+				["gemini-4-argon", gemini4Promo, "2026-12-01T08:00:00Z", gemini4List],
+				// A raw effort uid that arrives without family metadata.
+				["gemini-4-carbon-high", gemini4Promo, "2026-11-24T16:00:00Z", gemini4List],
+			] as const) {
+				const model = buildModel(spec(id, promo));
+				expect(model.cost, id).toMatchObject(promo);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends) - 1), id).toMatchObject(promo);
+				expect(getEffectiveTokenCost(model.cost, Date.parse(ends)), id).toMatchObject(list);
+			}
+			// Hydrogen shares Argon's and Carbon's class rank; Gemini 3.6 Flash sits below the promo revisions.
+			for (const [id, upstream] of [
+				["gemini-4-hydrogen", { input: 1.5, output: 7.5, cacheRead: 0.075, cacheWrite: 0 }],
+				["gemini-3-6-flash", { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 }],
+			] as const) {
+				const model = buildModel(spec(id, upstream));
+				expect(model.cost, id).toMatchObject(upstream);
+				expect(model.cost.timeBased, id).toBeUndefined();
+			}
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
 	it("switches the SWE-2 fallback to list after the promo ends, including on rows rebuilt from promo-era rows", () => {
 		const promoEra = buildModel(spec("swe-2"));
 		const clock = spyOn(Date, "now").mockReturnValue(PROMO_ENDS);

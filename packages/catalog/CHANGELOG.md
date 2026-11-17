@@ -4,6 +4,12 @@
 
 ## [18.22.2] - 2026-11-18
 
+### Fixed
+
+- Devin's Gemini 3.7 Flash, 3.8 Flash, 4 Argon and 4 Carbon now switch from promo to list price when each promotion ends, instead of showing and billing the promo price indefinitely
+
+## [18.22.1] - 2026-11-17
+
 ### Added
 
 - Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))

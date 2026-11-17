@@ -102,6 +102,66 @@ provider "devin" {
 		}
 	}
 
+	// Gemini promotions. GetCliModelConfigs reports the promo price and its end
+	// (`promoStatus.endDate`) but no list price, so each card pins the promo
+	// rate and switches to the rate the catalog reported before the promo.
+	// Gemini 3.7 and 3.8 Flash: introductory pricing through 2026-12-31 Pacific,
+	// then list (https://docs.devin.ai/desktop/models).
+	class "gemini" {
+		family "flash" {
+			revision ">=3.7 <3.9" {
+				cost-patch {
+					input 0.75
+					output 3.75
+					cache-read 0.075
+					effective-rates {
+						list-price {
+							effective-from "2027-01-01T08:00:00Z"
+							input 1.5
+							output 7.5
+							cache-read 0.15
+						}
+					}
+				}
+			}
+		}
+	}
+	// Gemini 4 Argon: 50% off list until 2026-12-01 08:00 UTC (same docs page).
+	// residue: Argon, Carbon and Hydrogen share one class rank and no family;
+	// each list names the logical id plus its raw effort uids, as for SWE-2.
+	models "gemini-4-argon" "gemini-4-argon-low" "gemini-4-argon-medium" "gemini-4-argon-high" {
+		cost-patch {
+			input 2
+			output 10
+			cache-read 0.1
+			effective-rates {
+				list-price {
+					effective-from "2026-12-01T08:00:00Z"
+					input 4
+					output 20
+					cache-read 0.2
+				}
+			}
+		}
+	}
+	// Gemini 4 Carbon: promo until 2026-11-24 16:00 UTC; the docs list no
+	// Carbon price, so list is the catalog's pre-promo rate.
+	models "gemini-4-carbon" "gemini-4-carbon-low" "gemini-4-carbon-medium" "gemini-4-carbon-high" {
+		cost-patch {
+			input 2
+			output 10
+			cache-read 0.1
+			effective-rates {
+				list-price {
+					effective-from "2026-11-24T16:00:00Z"
+					input 4
+					output 20
+					cache-read 0.2
+				}
+			}
+		}
+	}
+
 	// SWE-1.7 and GLM-5.2 High: plan-included on PRO, no published promo
 	// schedule — enterprise list is the only published per-token price.
 	models "swe-1-7" "swe-1-7-medium" {
