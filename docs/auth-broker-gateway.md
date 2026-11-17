@@ -129,7 +129,7 @@ captured before waiting.
 
 ### Version skew
 
-Every client request carries `x-omp-version` and `x-omp-install-id`, and every broker response carries `OMP-Auth-Broker-Version`. A client logs one warning each time the broker version it sees changes to one unlike its own; nothing is refused. The broker logs the client version on `snapshot served` and `stream opened`, and stores it on the client's `clients` row when that client posts its own `/v1/usage/observed` report (a gateway relaying another install's report leaves that row's version untouched).
+Every client request carries `x-omp-version`, and every broker response carries `OMP-Auth-Broker-Version`. A client logs one warning each time the broker version it sees changes to one unlike its own; nothing is refused. The broker logs the client version on `snapshot served` and `stream opened`, and stores it on the install's `clients` row when a client posts its own `/v1/usage/observed` report. An auth-gateway relays its callers' reports without the header, so they leave the row's version untouched. The row is per install, which every app sharing a config root shares (`omp`, `robomp`), so its version is the last one any of them reported.
 
 ### Codex block-scope compatibility
 

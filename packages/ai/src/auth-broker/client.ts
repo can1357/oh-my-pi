@@ -7,7 +7,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { getInstallId, isRecord, logger, readSseEvents, VERSION } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, readSseEvents, VERSION } from "@oh-my-pi/pi-utils";
 import type { AuthCredential, DisabledCredentialSummary, OAuthRefreshReason } from "../auth-storage";
 import type {
 	ClientUsageReportRequest,
@@ -33,7 +33,6 @@ import type {
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
-	AUTH_BROKER_CLIENT_INSTALL_ID_HEADER,
 	AUTH_BROKER_CLIENT_VERSION_HEADER,
 	AUTH_BROKER_VERSION_HEADER,
 } from "./types";
@@ -158,7 +157,6 @@ export class AuthBrokerClient {
 	readonly #timeoutMs: number;
 	readonly #maxRetries: number;
 	readonly #fetch: typeof fetch;
-	readonly #identityHeaders: Record<string, string>;
 	/** Last broker version seen in a response header; a change to a version unlike ours warns once. */
 	#brokerVersion: string | undefined;
 
@@ -168,10 +166,6 @@ export class AuthBrokerClient {
 		this.#timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.#maxRetries = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
 		this.#fetch = opts.fetchImpl ?? fetch;
-		this.#identityHeaders = {
-			[AUTH_BROKER_CLIENT_VERSION_HEADER]: VERSION,
-			[AUTH_BROKER_CLIENT_INSTALL_ID_HEADER]: getInstallId(),
-		};
 	}
 
 	healthz(signal?: AbortSignal): Promise<HealthzResponse> {
@@ -231,7 +225,7 @@ export class AuthBrokerClient {
 	async *openSnapshotStream(opts: { signal?: AbortSignal } = {}): AsyncGenerator<SnapshotStreamEvent> {
 		const url = `${this.#baseUrl}/v1/snapshot/stream`;
 		const headers: Record<string, string> = {
-			...this.#identityHeaders,
+			[AUTH_BROKER_CLIENT_VERSION_HEADER]: VERSION,
 			Accept: "text/event-stream",
 			Authorization: `Bearer ${this.#token}`,
 			[AUTH_BROKER_CAPABILITIES_HEADER]: AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
@@ -342,12 +336,21 @@ export class AuthBrokerClient {
 		return this.#request<UsageHistoryResponse>("GET", path, { schema: "usageHistoryResponseSchema", signal });
 	}
 
-	/** Report this client's batched observed request usage for per-install burn tracking. */
-	reportClientUsage(report: ClientUsageReportRequest, signal?: AbortSignal): Promise<ClientUsageReportResponse> {
+	/**
+	 * Report batched observed request usage for per-install burn tracking. A
+	 * `relayed` report (the auth-gateway's, for its callers) carries no
+	 * `x-omp-version`: that header names this process, and the broker records it
+	 * on the report's `clients` row.
+	 */
+	reportClientUsage(
+		report: ClientUsageReportRequest,
+		opts: { relayed?: boolean; signal?: AbortSignal } = {},
+	): Promise<ClientUsageReportResponse> {
 		return this.#request<ClientUsageReportResponse>("POST", "/v1/usage/observed", {
 			body: report,
 			schema: "clientUsageReportResponseSchema",
-			signal,
+			signal: opts.signal,
+			relayed: opts.relayed,
 		});
 	}
 
@@ -467,6 +470,7 @@ export class AuthBrokerClient {
 			auth?: boolean;
 			body?: unknown;
 			signal?: AbortSignal;
+			relayed?: boolean;
 			timeoutMs?: number;
 		},
 	): Promise<t> {
@@ -502,13 +506,16 @@ export class AuthBrokerClient {
 			auth?: boolean;
 			body?: unknown;
 			signal?: AbortSignal;
+			/** Sent for another client: omit this process's version header. */
+			relayed?: boolean;
 			headers?: Record<string, string>;
 			timeoutMs?: number;
 		},
 	): Promise<Response> {
 		const auth = opts.auth ?? true;
 		const url = `${this.#baseUrl}${path}`;
-		const headers: Record<string, string> = { ...this.#identityHeaders, Accept: "application/json", ...opts.headers };
+		const headers: Record<string, string> = { Accept: "application/json", ...opts.headers };
+		if (!opts.relayed) headers[AUTH_BROKER_CLIENT_VERSION_HEADER] = VERSION;
 		if (auth) headers.Authorization = `Bearer ${this.#token}`;
 		let payload: string | undefined;
 		if (opts.body !== undefined) {

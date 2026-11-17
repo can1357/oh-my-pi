@@ -383,8 +383,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#streamingActive = false;
 	/** Latched once the broker has answered 404 — never try the stream again. */
 	#streamingUnsupported = false;
-	/** Pending observed usage keyed by `installId\u0000app\u0000provider\u0000model`, merged until flush. */
-	#observedUsage = new Map<string, { client: ClientUsageIdentity; entry: ObservedUsageEntry }>();
+	/**
+	 * Pending observed usage keyed by `relayed\u0000installId\u0000app\u0000provider\u0000model`, merged
+	 * until flush. `relayed` marks usage recorded for another client (the auth-gateway's callers), kept
+	 * apart from this process's own even when both share an install id and app.
+	 */
+	#observedUsage = new Map<string, { client: ClientUsageIdentity; relayed: boolean; entry: ObservedUsageEntry }>();
 	#observedUsageTimer: Timer | undefined;
 	readonly #observedUsageFlushMs: number;
 	/** Latched once the broker answered 404 — old broker, never report again. */
@@ -1620,9 +1624,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 */
 	recordObservedUsage(entries: ObservedUsageEntry[], client?: ClientUsageIdentity): void {
 		if (this.#closed || this.#observedUsageUnsupported) return;
+		const relayed = client !== undefined;
 		const identity = client ?? { installId: getInstallId(), hostname: os.hostname(), app: getAppName() };
 		for (const entry of entries) {
-			const key = `${identity.installId}\u0000${identity.app ?? ""}\u0000${entry.provider}\u0000${entry.model}`;
+			const key = `${relayed}\u0000${identity.installId}\u0000${identity.app ?? ""}\u0000${entry.provider}\u0000${entry.model}`;
 			const pending = this.#observedUsage.get(key);
 			if (pending) {
 				pending.entry.at = Math.max(pending.entry.at, entry.at);
@@ -1633,7 +1638,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				pending.entry.cacheWriteTokens += entry.cacheWriteTokens;
 				pending.entry.costUsd += entry.costUsd;
 			} else {
-				this.#observedUsage.set(key, { client: identity, entry: { ...entry } });
+				this.#observedUsage.set(key, { client: identity, relayed, entry: { ...entry } });
 			}
 		}
 		if (this.#observedUsage.size > 0 && this.#observedUsageTimer === undefined) {
@@ -1673,21 +1678,27 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#observedUsage.clear();
 		// One report per distinct client identity — usually one (this install),
 		// plus one per attributed gateway caller when running inside the gateway.
-		const groups = new Map<string, { client: ClientUsageIdentity; entries: ObservedUsageEntry[] }>();
-		for (const { client, entry } of batch) {
-			const key = `${client.installId}\u0000${client.app ?? ""}`;
+		const groups = new Map<
+			string,
+			{ client: ClientUsageIdentity; relayed: boolean; entries: ObservedUsageEntry[] }
+		>();
+		for (const { client, relayed, entry } of batch) {
+			const key = `${relayed}\u0000${client.installId}\u0000${client.app ?? ""}`;
 			const group = groups.get(key);
 			if (group) group.entries.push(entry);
-			else groups.set(key, { client, entries: [entry] });
+			else groups.set(key, { client, relayed, entries: [entry] });
 		}
-		for (const { client, entries } of groups.values()) {
+		for (const { client, relayed, entries } of groups.values()) {
 			try {
-				await this.#client.reportClientUsage({
-					installId: client.installId,
-					hostname: client.hostname,
-					app: client.app,
-					entries,
-				});
+				await this.#client.reportClientUsage(
+					{
+						installId: client.installId,
+						hostname: client.hostname,
+						app: client.app,
+						entries,
+					},
+					{ relayed },
+				);
 			} catch (error) {
 				const status = error instanceof AuthBrokerError ? error.status : undefined;
 				// Only the broker's own 404 means the endpoint is missing; a proxy
@@ -1705,7 +1716,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				// Merge the failed group back under the (possibly refilled) buffer so
 				// nothing is lost; bounded because entries are keyed per
 				// (identity, provider, model).
-				if (!this.#closed) this.recordObservedUsage(entries, client);
+				if (!this.#closed) this.recordObservedUsage(entries, relayed ? client : undefined);
 			}
 		}
 	}

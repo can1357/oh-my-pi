@@ -725,16 +725,16 @@ describe("auth-broker wire surface", () => {
 				cacheWriteTokens: 0,
 				costUsd: 0,
 			};
-			// A gateway relays other installs' usage over its own connection; only the
-			// sender's own row may take the sender's version.
+			// A gateway relays its callers' usage over its own connection, a same-host
+			// caller's under the gateway's own install id; only the sender's own report
+			// may stamp the sender's version.
+			const versionRow = () => db.query("SELECT version FROM clients WHERE install_id = ?").get(getInstallId());
+			await skewed.reportClientUsage({ installId: getInstallId(), app: "omp", entries: [entry] }, { relayed: true });
+			expect(versionRow()).toEqual({ version: null });
 			await skewed.reportClientUsage({ installId: getInstallId(), entries: [entry] });
-			await skewed.reportClientUsage({ installId: "relayed-install", entries: [entry] });
-			expect(
-				db.query("SELECT install_id, version FROM clients ORDER BY install_id = 'relayed-install'").all(),
-			).toEqual([
-				{ install_id: getInstallId(), version: VERSION },
-				{ install_id: "relayed-install", version: null },
-			]);
+			expect(versionRow()).toEqual({ version: VERSION });
+			await skewed.reportClientUsage({ installId: getInstallId(), app: "omp", entries: [entry] }, { relayed: true });
+			expect(versionRow()).toEqual({ version: VERSION });
 		} finally {
 			await sameVersionBroker.close();
 			await olderBroker.close();
