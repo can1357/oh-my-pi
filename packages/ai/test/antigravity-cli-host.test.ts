@@ -650,6 +650,28 @@ describe("AgyHost stateful steps", () => {
 		state.host.close();
 		expect((await output).isError).toBe(true);
 	});
+	it("parks the original arguments when the target key is already present", async () => {
+		const fileTool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: { file_path: { type: "string" }, path: { type: "string" } },
+			},
+		};
+		const state = await fixture();
+		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const output = fake.call("read", { file_path: "/a", path: "/b" }, fake.currentId);
+		await run.done;
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
+		expect(call.arguments).toEqual({ file_path: "/a", path: "/b" });
+		expect(state.host.hasPendingTurn).toBe(true);
+		state.host.close();
+		expect((await output).isError).toBe(true);
+	});
 
 	it("keeps the actionable diagnostic when an alias cannot be normalized", async () => {
 		const fileTool: Tool = {
