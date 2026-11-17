@@ -219,6 +219,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-fresh-yield",
@@ -250,6 +251,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "verify the build",
 			index: 0,
 			id: "quiescence-wait-before-yield",
@@ -273,6 +275,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-stale-refusal",
@@ -299,6 +302,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-child-agent",
@@ -326,6 +330,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-no-async",
@@ -356,6 +361,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		const run = runSubprocess({
 			cwd: "/tmp",
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "quiescence-no-second-idle",
@@ -414,6 +420,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			cwd: "/tmp",
 			asyncJobManager: manager,
 			agent: baseAgent,
+			outputSchema: {},
 			task: "do the work",
 			index: 0,
 			id: "cleanup-timeout",

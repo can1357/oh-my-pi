@@ -511,14 +511,6 @@ export interface ToolSession {
 	commitTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
-	/**
-	 * Trimmed text of the most recent assistant message, or `undefined` when the
-	 * turn carries no text (e.g. thinking-only). The yield tool uses it to reject
-	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
-	 */
-	getLastAssistantText?: () => string | undefined;
-	/** Resolve a terminal yield's current or immediately preceding report, bound to its call ID. */
-	getYieldReportText?: (toolCallId: string) => string | undefined;
 	/** The `i` intent the model wrote on a tool call of the current turn, by call ID. */
 	getToolCallIntent?: (toolCallId: string) => string | undefined;
 	/**
@@ -532,6 +524,8 @@ export interface ToolSession {
 	 * the lines still in it (whatever a compaction, prune, clear or branch move took out does not count).
 	 */
 	getContextMessages?: () => readonly Message[];
+	/** Records a call into an eval prelude, so the session can send that prelude's first-call guide. */
+	noteEvalPreludeCall?: (name: string) => void;
 	/** The Spotlight experiment's handle on this session; present only while `spotlight.experiment.enabled`. */
 	spotlight?: SpotlightSession;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */

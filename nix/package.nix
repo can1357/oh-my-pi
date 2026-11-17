@@ -25,9 +25,9 @@
   # btop). Note the closure cost — libcublas ~745 MB, libcurand ~136 MB,
   # cuda_cudart ~74 MB — so this stays opt-in and off by default.
   cudaSupport ? config.cudaSupport,
-  # Wayland screencast support links libpipewire, whose runtime closure adds
-  # ~750 MB (gstreamer, ffmpeg, systemd, ...). Official npm/Bazel addons ship
-  # without it, so default to the lean build; opt in via `.override`.
+  # Wayland screencast loads libpipewire at runtime; this puts it on the addon's
+  # RUNPATH, whose runtime closure adds ~750 MB (gstreamer, ffmpeg, systemd,
+  # ...). Default to the lean build; opt in via `.override`.
   withWaylandScreencast ? false,
   # Downstream callers can opt out of the Swift/SDK dependency. The official
   # Apple Silicon package must include the bridge by default.
@@ -43,7 +43,6 @@ let
     inherit
       source
       craneLib
-      withWaylandScreencast
       withFatLto
       withAppleFm
       apple-sdk_27
@@ -110,9 +109,7 @@ stdenv.mkDerivation {
   ++ lib.optionals stdenv.hostPlatform.isDarwin [ darwin.autoSignDarwinBinariesHook ];
 
   # libgcc_s is resolved from the compiler's lib output during autoPatchelf.
-  buildInputs =
-    lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ]
-    ++ lib.optionals withWaylandScreencast [ pipewire ];
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
 
   strictDeps = true;
   # Nix builders cannot reliably hardlink cache files into node_modules
@@ -149,15 +146,19 @@ stdenv.mkDerivation {
       # The loader extracts this archived addon at runtime, so fix its
       # interpreter-independent Nix RPATH before Bun embeds it.
       autoPatchelf -- "packages/natives/native/${platform.addon}"
-      # pi-voice dlopens libpulse-simple.so.0 / libpulse.so.0 / libasound.so.2
-      # by bare name; glibc resolves those through the calling object's
-      # RUNPATH, so append the client libraries here. Nothing links them, so
-      # autoPatchelf cannot discover them on its own.
+      # pi-voice dlopens libpulse-simple.so.0 / libpulse.so.0 / libasound.so.2,
+      # and Wayland capture libpipewire-0.3.so.0, by bare name; glibc resolves
+      # those through the calling object's RUNPATH, so append the client
+      # libraries here. Nothing links them, so autoPatchelf cannot discover
+      # them on its own.
       patchelf --add-rpath "${
-        lib.makeLibraryPath [
-          libpulseaudio
-          alsa-lib
-        ]
+        lib.makeLibraryPath (
+          [
+            libpulseaudio
+            alsa-lib
+          ]
+          ++ lib.optional withWaylandScreencast pipewire
+        )
       }" \
         "packages/natives/native/${platform.addon}"
     ''}
