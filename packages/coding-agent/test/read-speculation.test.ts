@@ -528,7 +528,7 @@ describe("read speculation assessment", () => {
 		).resolves.toEqual({ allowed: false, reason: "local read target is unsafe" });
 	});
 
-	it("denies audio files at authorization so a transcript is never requested speculatively", async () => {
+	it("denies audio files at authorization, as it does video", async () => {
 		fs.writeFileSync(path.join(testDir, "memo.wav"), encodePcm16Wav([new Float32Array(1600)]));
 		const session = {
 			...createSession(testDir),

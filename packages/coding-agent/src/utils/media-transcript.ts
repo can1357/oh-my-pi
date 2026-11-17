@@ -45,6 +45,13 @@ export function audioMimeForPath(filePath: string): string | undefined {
 	return AUDIO_MIME_BY_EXT[path.extname(filePath).toLowerCase()];
 }
 
+/** Split `:transcript` off an audio read path (`talk.mp3:transcript`), or null for anything else. */
+export function splitAudioTranscriptTarget(rawPath: string): { path: string; sel: "transcript" } | null {
+	if (!rawPath.endsWith(":transcript")) return null;
+	const base = rawPath.slice(0, -":transcript".length);
+	return audioMimeForPath(base) === undefined ? null : { path: base, sel: "transcript" };
+}
+
 /** A chat model that hears audio its transport carries; see {@link audioInputMimeType}. */
 export function hearsAudio(model: Model<Api>): boolean {
 	return modelKind(model) === "chat" && audioInputMimeType(model) !== undefined;
@@ -75,6 +82,11 @@ export interface MediaTranscript {
 // One request carries at most an hour: at 24 kbit/s that is ~11 MB of audio, ~14 MB inline, under
 // Gemini's 20 MB inline limit, and its sentence lines stay well inside the model's output limit.
 const WINDOW_SEC = 3600;
+
+/** Model requests a transcript of `durationSec` of audio takes: one per started hour. */
+export function transcriptRequestCount(durationSec: number | undefined): number {
+	return Math.max(1, Math.ceil((durationSec ?? 0) / WINDOW_SEC));
+}
 
 /**
  * Transcribe the first audio stream of `absolutePath` with `model`, one request per hour of audio.

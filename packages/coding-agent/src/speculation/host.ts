@@ -182,7 +182,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			resolved.endsWith(".svg") ||
 			resolved.endsWith(".svgz") ||
 			// Video reads render viewer UI through a separate frame pipeline, and audio
-			// reads call a model to transcribe; neither has a lexical render path, and a
+			// reads probe the file with ffprobe; neither has a lexical render path, and a
 			// symlink could otherwise route a text file there with target-named output.
 			isVideoPath(resolved) ||
 			audioMimeForPath(resolved) !== undefined ||

@@ -160,7 +160,9 @@ import {
 	formatTranscriptLines,
 	formatTranscriptTime,
 	resolveTranscriptModel,
+	splitAudioTranscriptTarget,
 	transcribeRecording,
+	transcriptRequestCount,
 } from "../utils/media-transcript";
 import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import {
@@ -1525,23 +1527,23 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	/**
-	 * Reinterpret a read target pointing at a video file. Timestamp selectors
-	 * (`clip.mp4:1h5m42s`, `clip.mp4:0:05`) never survive line-selector parsing,
-	 * so peel one off the raw path whenever it parses as a video frame or
-	 * timestamp selector; a literal file named by the peeled path wins, and
-	 * `splitPathAndSelPreferringLiteral` already reports the full entry as the
-	 * peeled path whenever that entry exists. The base does not have to sit in
+	 * Reinterpret a read target pointing at a video or audio file. Timestamp selectors
+	 * (`clip.mp4:1h5m42s`, `clip.mp4:0:05`) and `:transcript` never survive line-selector
+	 * parsing, so peel one off the raw path whenever it parses as a video frame or
+	 * timestamp selector, or is an audio file's `:transcript`; a literal file named by the
+	 * peeled path wins, and `splitPathAndSelPreferringLiteral` already reports the full
+	 * entry as the peeled path whenever that entry exists. The base does not have to sit in
 	 * the session cwd: unique workspace suffixes still resolve it, and a genuinely
 	 * missing file then reports its path instead of a colon-mangled one.
 	 */
-	async #applyVideoSelectorFallback(
+	async #applyMediaSelectorFallback(
 		literalSplit: { path: string; sel?: string },
 		readPath: string,
 	): Promise<{ path: string; sel?: string }> {
-		const videoSplit = splitVideoReadTarget(readPath);
-		if (!videoSplit) return literalSplit;
+		const mediaSplit = splitVideoReadTarget(readPath) ?? splitAudioTranscriptTarget(readPath);
+		if (!mediaSplit) return literalSplit;
 		if ((await probeLiteralPathExists(literalSplit.path, this.session.cwd)) === "exists") return literalSplit;
-		return videoSplit;
+		return mediaSplit;
 	}
 
 	/**
@@ -1558,7 +1560,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
-		if (sel === "transcript") return this.#readTranscript(absolutePath, fileSize, suffixResolution, signal);
+		if (sel === "transcript") return this.#readAudio(absolutePath, true, fileSize, suffixResolution, signal);
 		const resolvedDisplayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 		const mimeType = videoMimeForPath(absolutePath);
 		const selector = parseVideoSelector(sel);
@@ -1650,12 +1652,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	/**
-	 * Read an audio file, or a video's soundtrack (`clip.mp4:transcript`), as a timestamped
-	 * transcript from a model that hears audio. With no such model, an audio file reads as its
-	 * metadata and how to get a transcript.
+	 * Read an audio file as its metadata (bare read), or an audio file or a video's soundtrack
+	 * (`:transcript`) as a timestamped transcript from a model that hears audio. Only
+	 * `:transcript` calls the model, one request per hour of audio.
 	 */
-	async #readTranscript(
+	async #readAudio(
 		absolutePath: string,
+		transcribe: boolean,
 		fileSize: number,
 		suffixResolution: { from: string; to: string } | undefined,
 		signal?: AbortSignal,
@@ -1677,23 +1680,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (error instanceof VideoError) throw new ToolError(error.message);
 			throw error;
 		}
-		if (meta.audioCodec === undefined) throw new ToolError(`'${displayPath}' has no audio stream to transcribe.`);
 		const duration = meta.durationSec === undefined ? "unknown length" : formatTranscriptTime(meta.durationSec);
 		const model = resolveTranscriptModel(this.session);
-		if (!model) {
-			const missing = cfgImagesBlockImages.get(this.session.settings)
-				? "There is no transcript: images.blockImages=true keeps media from model providers."
-				: "No available model hears audio, so there is no transcript. Log in to a provider with one (Gemini through /login google-antigravity or a Google API key, or OpenRouter), then read again.";
-			if (isVideo) throw new ToolError(missing);
+		const missing = cfgImagesBlockImages.get(this.session.settings)
+			? "There is no transcript: images.blockImages=true keeps media from model providers."
+			: "No available model hears audio, so there is no transcript. Log in to a provider with one (Gemini through /login google-antigravity or a Google API key, or OpenRouter), then read again.";
+		if (!transcribe) {
+			const requests = transcriptRequestCount(meta.durationSec);
+			const transcriptLine =
+				meta.audioCodec === undefined
+					? ""
+					: model
+						? `\nRead ${displayPath}:transcript for a timestamped transcript from ${model.provider}/${model.id} (${requests} ${pluralize("request", requests)}).`
+						: `\n${missing}`;
 			return toolResult(details)
 				.text(
 					applySuffix(
-						`Audio: ${displayPath} (${duration}, ${meta.audioCodec}, ${formatByteSize(fileSize)})\n${missing}`,
+						`Audio: ${displayPath} (${duration}, ${meta.audioCodec ?? "no audio stream"}, ${formatByteSize(fileSize)})${transcriptLine}`,
 					),
 				)
 				.sourcePath(absolutePath)
 				.done();
 		}
+		if (meta.audioCodec === undefined) throw new ToolError(`'${displayPath}' has no audio stream to transcribe.`);
+		if (!model) throw new ToolError(missing);
 		const transcript = await transcribeRecording(
 			this.session,
 			model,
@@ -2439,15 +2449,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const localTarget = pdfImageRead
 			? { path: pdfImageRead.pdfPath, sel: undefined }
-			: await this.#applyVideoSelectorFallback(literalSplit, readPath);
+			: await this.#applyMediaSelectorFallback(literalSplit, readPath);
 		const localReadPath = localTarget.path;
 		// Video frame selectors (`:412`, `:1h5m42s`, `:0:05`) and `:transcript` are not line
-		// selectors; keep them out of the line parser so they reach the video reader intact.
+		// selectors; keep them out of the line parser so they reach the media readers intact.
 		const parsed =
-			isVideoPath(localTarget.path) &&
-			(localTarget.sel === undefined ||
-				localTarget.sel === "transcript" ||
-				parseVideoSelector(localTarget.sel) !== null)
+			(isVideoPath(localTarget.path) &&
+				(localTarget.sel === undefined ||
+					localTarget.sel === "transcript" ||
+					parseVideoSelector(localTarget.sel) !== null)) ||
+			(localTarget.sel === "transcript" && audioMimeForPath(localTarget.path) !== undefined)
 				? { kind: "none" as const }
 				: parseSel(localTarget.sel);
 
@@ -2660,10 +2671,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (isVideoPath(absolutePath)) {
 			return this.#readVideoFile(absolutePath, localTarget.sel, fileSize, suffixResolution, question, signal);
 		}
-		// A bare audio read is its transcript; selectors keep their meaning (`:raw` reads bytes).
-		if (localTarget.sel === undefined && audioMimeForPath(absolutePath) !== undefined) {
+		// A bare audio read is its metadata and `:transcript` its transcript; other selectors keep
+		// their meaning (`:raw` reads bytes).
+		if (
+			(localTarget.sel === undefined || localTarget.sel === "transcript") &&
+			audioMimeForPath(absolutePath) !== undefined
+		) {
 			if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
-			return this.#readTranscript(absolutePath, fileSize, suffixResolution, signal);
+			return this.#readAudio(absolutePath, localTarget.sel === "transcript", fileSize, suffixResolution, signal);
 		}
 		if (parsed.kind === "image") {
 			({ content, details, sourcePath } = await this.#loadImageContent({

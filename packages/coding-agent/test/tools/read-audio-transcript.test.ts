@@ -1,6 +1,7 @@
 /**
- * Audio files and video soundtracks read as timestamped transcripts from a model that hears
- * audio. Requires ffmpeg + ffprobe on PATH; the model call is stubbed.
+ * Audio files read as metadata, and `:transcript` reads them and video soundtracks as
+ * timestamped transcripts from a model that hears audio. Requires ffmpeg + ffprobe on PATH; the
+ * model call is stubbed.
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -159,11 +160,24 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 		await removeWithRetries(testDir);
 	});
 
-	it("reads an audio file as a timestamped transcript from a model that hears audio", async () => {
-		const model = stubModel("[0:00.5] Good morning everyone.\n[0:03.2] The budget is approved.");
+	it("reads a bare audio file as metadata naming :transcript, without calling a model", async () => {
+		const model = stubModel("unused");
 		const tool = new ReadTool(makeSession(testDir, [claude, gemini]), model.fn);
 
 		const text = textOf(await tool.execute("call", { path: audioPath }));
+
+		expect(text).toContain("Audio: talk.mp3 (0:06.0, mp3,");
+		expect(text).toContain(
+			"Read talk.mp3:transcript for a timestamped transcript from google/gemini-2.5-flash (1 request).",
+		);
+		expect(model.contexts).toHaveLength(0);
+	});
+
+	it("reads an audio file's :transcript as a timestamped transcript from a model that hears audio", async () => {
+		const model = stubModel("[0:00.5] Good morning everyone.\n[0:03.2] The budget is approved.");
+		const tool = new ReadTool(makeSession(testDir, [claude, gemini]), model.fn);
+
+		const text = textOf(await tool.execute("call", { path: `${audioPath}:transcript` }));
 
 		expect(text).toContain("Transcript of talk.mp3 (0:06.0, 2 lines, google/gemini-2.5-flash).");
 		expect(text).toContain("[0:00.5-0:03.2] Good morning everyone.\n[0:03.2-0:06.0] The budget is approved.");
@@ -175,7 +189,7 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 		const model = stubModel("[0:00.5] Good morning everyone.");
 		const tool = new ReadTool(makeSession(testDir, [claude, copilotGemini, gptAudio]), model.fn);
 
-		const text = textOf(await tool.execute("call", { path: audioPath }));
+		const text = textOf(await tool.execute("call", { path: `${audioPath}:transcript` }));
 
 		expect(text).toContain("Transcript of talk.mp3 (0:06.0, 1 line, openrouter/openai/gpt-audio-mini).");
 		const sent = model.contexts[0]?.messages[0]?.content;
@@ -215,7 +229,7 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 		const model = stubModel("[0:00.5] First line.\n[0:02.0] Second", "length");
 		const tool = new ReadTool(makeSession(testDir, [gemini]), model.fn);
 
-		const text = textOf(await tool.execute("call", { path: audioPath }));
+		const text = textOf(await tool.execute("call", { path: `${audioPath}:transcript` }));
 
 		expect(text).toContain(
 			"[0:00.5-0:02.0] First line.\n[Transcript stops at 0:02.0: the model reached its output limit.]",
@@ -226,18 +240,20 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 	it("reports silence only when the model says so, and fails on an empty or untimed answer", async () => {
 		const silent = textOf(
 			await new ReadTool(makeSession(testDir, [gemini]), stubModel("(no speech)").fn).execute("call", {
-				path: audioPath,
+				path: `${audioPath}:transcript`,
 			}),
 		);
 		expect(silent).toContain("No speech detected.");
 
 		const empty = await rejectionOf(
-			new ReadTool(makeSession(testDir, [gemini]), stubModel("").fn).execute("call", { path: audioPath }),
+			new ReadTool(makeSession(testDir, [gemini]), stubModel("").fn).execute("call", {
+				path: `${audioPath}:transcript`,
+			}),
 		);
 		expect(empty).toMatchObject({ message: "google/gemini-2.5-flash returned no transcript text." });
 		const untimed = await rejectionOf(
 			new ReadTool(makeSession(testDir, [gemini]), stubModel("Good morning everyone.").fn).execute("call", {
-				path: audioPath,
+				path: `${audioPath}:transcript`,
 			}),
 		);
 		expect(untimed).toMatchObject({
@@ -255,7 +271,7 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 		expect(text).toContain("Audio: talk.mp3 (0:06.0, mp3,");
 		expect(text).toContain("images.blockImages=true keeps media from model providers");
 		expect(model.contexts).toHaveLength(0);
-		expect(tool.description).not.toContain("Audio (mp3/wav/m4a");
+		expect(tool.docTopics().sources).not.toContain(":transcript timestamped transcript");
 	});
 
 	it("shows metadata and how to get a transcript when no model hears audio", async () => {
@@ -270,22 +286,13 @@ describe.skipIf(!hasFfmpeg)("read audio transcripts", () => {
 		expect(model.contexts).toHaveLength(0);
 	});
 
-	it("names transcripts in the tool prompt only while a model hears audio", () => {
-		expect(new ReadTool(makeSession(testDir, [claude, gemini])).description).toContain("Audio (mp3/wav/m4a");
-		expect(new ReadTool(makeSession(testDir, [claude])).description).not.toContain("Audio (mp3/wav/m4a");
-	});
-
-	it("keeps the tool prompt fixed when a model that hears audio appears mid-session", async () => {
-		const available: Model[] = [claude];
-		const model = stubModel("[0:00.5] Late login.");
-		const tool = new ReadTool(makeSession(testDir, available), model.fn);
-		const before = tool.description;
-
-		available.push(gemini);
-
-		expect(tool.description).toBe(before);
-		expect(before).not.toContain("Audio (mp3/wav/m4a");
-		expect(textOf(await tool.execute("call", { path: audioPath }))).toContain("[0:00.5-0:06.0] Late login.");
+	it("names :transcript in the sources doc only while a model hears audio", () => {
+		expect(new ReadTool(makeSession(testDir, [claude, gemini])).docTopics().sources).toContain(
+			":transcript timestamped transcript",
+		);
+		expect(new ReadTool(makeSession(testDir, [claude])).docTopics().sources).not.toContain(
+			":transcript timestamped transcript",
+		);
 	});
 });
 
