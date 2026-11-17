@@ -250,3 +250,16 @@ export interface ToolResultLink {
 	resultChars: number;
 	isError: boolean;
 }
+
+/** One snapcompact compaction entry: the context size the session's estimate measured before and after it. */
+export interface SnapcompactCompactionStats {
+	sessionFile: string;
+	/** Compaction entry ID */
+	entryId: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Compaction timestamp (Unix ms) */
+	timestamp: number;
+	tokensBefore: number;
+	tokensAfter: number;
+}
