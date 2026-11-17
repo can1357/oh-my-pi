@@ -1709,7 +1709,8 @@ function shellCommand(
 }
 
 /**
- * The top-level simple commands of a command line, by pipeline, for the guard rules. Follows quotes
+ * The top-level simple commands of a command line, by pipeline, for the guard rules: one entry per
+ * pipeline, in order, empty for one with no simple command (`a=1`, `{ ...; }`). Follows quotes
  * (`$'...'` and `$"..."` included), escapes, comments, `;`/`&&`/`||`/`|` chains (continued on the
  * next line after `|`, `&&` or `||`), redirections, wrappers (`sudo`, `env`, `timeout`, `xargs`,
  * `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in), and `cd`,
@@ -1757,7 +1758,7 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellCom
 		afterTime = false;
 	};
 	const endPipeline = () => {
-		if (pipeline.length > 0) pipelines.push(pipeline);
+		if (stages > 0) pipelines.push(pipeline);
 		if (stages === 1 && last && Object.hasOwn(DIRECTORY_CHANGERS, last.argv[0])) {
 			dirs = changeDirectory(last, dirs, scope.home);
 		} else if (stages === 1 && (changesShell || (last && Object.hasOwn(SHELL_EVALUATORS, last.argv[0])))) {

@@ -1383,15 +1383,14 @@ function secretSend(command: ShellCommand, upstream: string | undefined, home: s
 // -- entry points ------------------------------------------------------------------------------------
 
 /**
- * The first fixed rule a shell command line breaks, or `undefined`, over its top-level simple
- * commands ({@link parseShellCommands}): `secret_send` across a pipeline first, then
- * `credential_read`. A command line whose brace lists expand past {@link MAX_BRACE_TEXT} before a
- * rule matches fails closed (`size_limit`).
+ * The first fixed rule each pipeline of a shell command line breaks, `undefined` for one that
+ * breaks none, one entry per pipeline {@link parseShellCommands} finds, in order: `secret_send`
+ * across the pipeline first, then `credential_read`. Each pipeline is checked from the directory
+ * the ones before it leave.
  */
-export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
-	if (command.trim() === "") return undefined;
+export function findPipelineGuardHits(command: string, scope: GuardScope): (GuardHit | undefined)[] {
 	braceTextLeft = MAX_BRACE_TEXT;
-	for (const pipeline of parseShellCommands(command, scope)) {
+	return parseShellCommands(command, scope).map(pipeline => {
 		// The first secret a stage before the sender being checked puts out; each stage is read once.
 		let upstream: string | undefined;
 		let read = 0;
@@ -1405,14 +1404,18 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 			const found = credentialRead(reader, scope);
 			if (found) return found;
 		}
-	}
-	if (braceTextLeft < 0) {
-		return hit(
-			"size_limit",
-			`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
-		);
-	}
-	return undefined;
+		return undefined;
+	});
+}
+
+/**
+ * The first fixed rule a shell command line breaks ({@link findPipelineGuardHits}), or
+ * `undefined`. A command line whose brace lists expand past {@link MAX_BRACE_TEXT} and that breaks
+ * no rule fails closed (`size_limit`).
+ */
+export function findShellGuardHit(command: string, scope: GuardScope): GuardHit | undefined {
+	const found = findPipelineGuardHits(command, scope).find(pipelineHit => pipelineHit !== undefined);
+	return found ?? (braceTextLeft < 0 ? SIZE_LIMIT_HIT : undefined);
 }
 
 /**

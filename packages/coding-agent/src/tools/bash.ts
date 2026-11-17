@@ -59,7 +59,7 @@ import {
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
-import { findShellGuardHit, type GuardHit, type GuardScope } from "./guard-rules";
+import { findPipelineGuardHits, findShellGuardHit, type GuardHit, type GuardScope } from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -799,9 +799,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) &&
 			!segmentCritical.some(Boolean);
 		if (wholeChainOnlyCritical) return null;
-		const segmentGuards = segments.map(segment => this.#guardHit(segment.text, cwd));
-		// A guard rule only the whole chain breaks (`cd ~/.ssh && cat id_rsa`) has no segment to name.
-		if (!segmentGuards.some(Boolean) && this.#guardHit(command, cwd)) return null;
+		// Each segment is one pipeline of the guard's parse of the whole chain, checked from the directory
+		// the segments before it leave. A hit no segment can carry (`size_limit`), or a parse with more
+		// pipelines than segments, leaves the chain to the plain command row.
+		const segmentGuards = cfgToolsGuardRules.get(this.session.settings)
+			? findPipelineGuardHits(command, this.#guardScope(cwd))
+			: [];
+		if (segmentGuards.length > segments.length || (!segmentGuards.some(Boolean) && this.#guardHit(command, cwd))) {
+			return null;
+		}
 
 		let chainUntainted = true;
 		const rows: string[] = [];

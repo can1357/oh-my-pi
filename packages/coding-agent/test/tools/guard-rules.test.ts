@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import type { ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -220,6 +221,18 @@ describe("tools.guardRules", () => {
 		const tool = new BashTool(createSession(temp.path(), { "bash.allowCompoundCommands": true }));
 		const rows = tool.formatApprovalDetails({ command: "cat ~/.ssh/id_rsa && echo done" });
 		expect(rows.some(row => row.includes("cat ~/.ssh/id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
+	});
+
+	it("names a segment's rule as the whole chain breaks it, after the `cd` of the segments before it", () => {
+		const allowCompound = { "bash.allowCompoundCommands": true };
+		const fromHome = new BashTool(createSession(os.homedir(), allowCompound));
+		// From home a lone `cat .npmrc` reads `~/.npmrc`; after `cd /tmp` it reads `/tmp/.npmrc`.
+		const rows = fromHome.formatApprovalDetails({ command: "cd /tmp && cat .npmrc" });
+		expect(rows.some(row => row.includes("cat .npmrc"))).toBe(true);
+		expect(rows.some(row => row.includes("credential_read"))).toBe(false);
+		const tool = new BashTool(createSession(temp.path(), allowCompound));
+		const sshRows = tool.formatApprovalDetails({ command: "cd ~/.ssh && cat id_rsa" });
+		expect(sshRows.some(row => row.includes("cat id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
 	});
 
 	it("decides a call whose `cwd` execution rejects instead of throwing", () => {
