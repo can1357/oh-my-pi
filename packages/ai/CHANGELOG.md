@@ -4,6 +4,8 @@
 
 ### Added
 
+- `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 - Added the `xai-stt` transcription API: `transcribeAudio` posts xAI's multipart `POST /v1/stt` (model and language before the file) and maps `{ text, language, duration, words }`; `isTranscriptionApi`/`TRANSCRIPTION_APIS` list the dispatchable transcription APIs, and the auth gateway's `/v1/audio/transcriptions` serves both ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added the `google-gemini-cli-transcribe` transcription API: Cloud Code Assist (`google-antigravity`, `google-gemini-cli`) serves no transcribe model, so `transcribeAudio` sends the audio as an inline-data part with a verbatim-transcription instruction to the chat model named by the row's `requestModelId`, over the existing `google-gemini-cli` transport (its OAuth, headers, project and endpoint fallback), and strips wrapper quotes or a code fence from the reply ([#19186](https://github.com/can1357/oh-my-pi/pull/19186) by [@Xytronix](https://github.com/Xytronix))
 
@@ -13,7 +15,16 @@
 
 ### Fixed
 
-- Gemma tool calls with large arguments no longer slow down as they stream ([#19487](https://github.com/can1357/oh-my-pi/pull/19487) by [@H4vC](https://github.com/H4vC))
+- Fenced (```thinking) reasoning with very long unbroken lines no longer slows down as it streams ([#19493](https://github.com/can1357/oh-my-pi/pull/19493) by [@H4vC](https://github.com/H4vC))
+- Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
+- Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.0] - 2026-11-16
+
+### Fixed
+
+- Fixed slow streaming of Gemma tool calls with large arguments.
 
 ## [18.21.0] - 2026-11-16
 
