@@ -459,8 +459,10 @@ export class PluginManager {
 
 		const errors: string[] = [];
 		const loadable: string[] = [];
-		for (const { entry, resolvedPath } of declaredEntries) {
-			if (resolvedPath === null) {
+		for (const { entry, resolvedPath, invalidReason } of declaredEntries) {
+			if (invalidReason) {
+				errors.push(`${entry}: ${invalidReason}`);
+			} else if (resolvedPath === null) {
 				errors.push(`${entry}: declared extension entry not found on disk`);
 			} else {
 				loadable.push(resolvedPath);
@@ -1202,7 +1204,18 @@ export class PluginManager {
 
 			// Check extension entry paths exist if specified
 			if (manifest?.extensions) {
-				for (const extensionPath of manifest.extensions) {
+				const extensionEntries: unknown[] = Array.isArray(manifest.extensions)
+					? manifest.extensions
+					: [manifest.extensions];
+				for (const extensionPath of extensionEntries) {
+					if (typeof extensionPath !== "string") {
+						checks.push({
+							name: `plugin:${name}:extension`,
+							status: "error",
+							message: `Extension entry ${JSON.stringify(extensionPath)} must be a string path`,
+						});
+						continue;
+					}
 					const resolvedExtensionPath = path.join(pluginPath, extensionPath);
 					if (!fs.existsSync(resolvedExtensionPath)) {
 						checks.push({

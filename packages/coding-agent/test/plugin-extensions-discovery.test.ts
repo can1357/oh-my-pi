@@ -97,6 +97,22 @@ describe("plugin extension discovery", () => {
 		expect(extension?.commands.has("plugin-ext")).toBe(true);
 	});
 
+	it("loads valid plugin extensions even when the manifest also contains an object entry", async () => {
+		const pluginDir = path.join(getPluginsDir(), "node_modules", "@demo", "plugin");
+		fs.writeFileSync(
+			path.join(pluginDir, "package.json"),
+			JSON.stringify({
+				name: "@demo/plugin",
+				version: "1.0.0",
+				omp: { extensions: [{ path: "./dist/extension.ts" }, "./dist/extension.ts"] },
+			}),
+		);
+
+		const result = await discoverAndLoadExtensions([], projectDir.path());
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions.some(ext => ext.commands.has("plugin-ext"))).toBe(true);
+	});
+
 	it("loads installed plugin extensions that detach API methods", async () => {
 		const extensionPath = path.join(getPluginsDir(), "node_modules", "@demo", "plugin", "dist", "extension.ts");
 		fs.writeFileSync(

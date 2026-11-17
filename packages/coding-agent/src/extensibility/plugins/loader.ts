@@ -345,61 +345,69 @@ function resolveManifestEntryFiles(joined: string, expandDirectory: boolean): st
  */
 function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions"): string[] {
 	const resolved: string[] = [];
-	for (const entry of resolvePluginManifestEntries(plugin, key)) {
-		if (entry.resolvedPath) {
-			resolved.push(entry.resolvedPath);
+	for (const { entry, resolvedPath, invalidReason } of resolvePluginManifestEntries(plugin, key)) {
+		if (invalidReason) {
+			logger.warn("plugins: skipping invalid manifest entry", {
+				plugin: plugin.name,
+				key,
+				entry,
+				reason: invalidReason,
+			});
+		} else if (resolvedPath) {
+			resolved.push(resolvedPath);
 		}
 	}
 	return resolved;
 }
 
 /**
- * Declared manifest entries paired with their resolved file path. Returns one
- * record per declared entry — base entries first, then enabled-feature entries
- * — so callers (e.g. install-time validation) can detect manifest entries that
- * point at missing files instead of silently skipping them like
- * {@link resolvePluginPaths} does.
+ * Declared manifest entries paired with their resolved file path. Malformed
+ * entries carry an error so installation can reject them while discovery skips
+ * only the offending entry.
  */
 export function resolvePluginManifestEntries(
 	plugin: InstalledPlugin,
 	key: "tools" | "hooks" | "commands" | "extensions",
-): Array<{ entry: string; resolvedPath: string | null }> {
-	const declared: Array<{ entry: string; resolvedPath: string | null }> = [];
+): Array<{ entry: string; resolvedPath: string | null; invalidReason?: string }> {
+	const declared: Array<{ entry: string; resolvedPath: string | null; invalidReason?: string }> = [];
 	const manifest = plugin.manifest;
 
 	const expandDirectory = key === "extensions";
-	const resolveEntry = (entry: string): Array<{ entry: string; resolvedPath: string | null }> => {
+	const resolveEntry = (
+		entry: unknown,
+	): Array<{ entry: string; resolvedPath: string | null; invalidReason?: string }> => {
+		if (typeof entry !== "string") {
+			return [
+				{
+					entry: JSON.stringify(entry) ?? String(entry),
+					resolvedPath: null,
+					invalidReason: "expected a string path",
+				},
+			];
+		}
 		const files = resolveManifestEntryFiles(path.join(plugin.path, entry), expandDirectory);
 		return files.length > 0 ? files.map(resolvedPath => ({ entry, resolvedPath })) : [{ entry, resolvedPath: null }];
 	};
-
-	const base = manifest[key];
-	if (base) {
-		const entries = Array.isArray(base) ? base : [base];
-		for (const entry of entries) {
+	const addEntries = (value: unknown): void => {
+		for (const entry of Array.isArray(value) ? value : [value]) {
 			declared.push(...resolveEntry(entry));
 		}
-	}
+	};
+
+	const base = manifest[key];
+	if (base !== undefined) addEntries(base);
 
 	if (manifest.features && plugin.enabledFeatures) {
 		const enabledSet = new Set(plugin.enabledFeatures);
 		for (const [featName, feat] of Object.entries(manifest.features)) {
 			if (!enabledSet.has(featName)) continue;
-			if (feat[key]) {
-				for (const entry of feat[key]) {
-					declared.push(...resolveEntry(entry));
-				}
-			}
+			if (feat[key] !== undefined) addEntries(feat[key]);
 		}
 	} else if (manifest.features && plugin.enabledFeatures === null) {
 		// null means use defaults - enable features with default: true
 		for (const [_featName, feat] of Object.entries(manifest.features)) {
 			if (!feat.default) continue;
-			if (feat[key]) {
-				for (const entry of feat[key]) {
-					declared.push(...resolveEntry(entry));
-				}
-			}
+			if (feat[key] !== undefined) addEntries(feat[key]);
 		}
 	}
 

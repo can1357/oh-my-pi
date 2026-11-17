@@ -425,7 +425,7 @@ describe("PluginManager.install load validation", () => {
 		expect(lock.plugins["git-plugin"]).toEqual({ version: "1.0.0", enabledFeatures: null, enabled: true });
 	});
 
-	test("rejects an install whose manifest declares a missing extension entry", async () => {
+	test("reports missing and malformed extension entries and rolls back install", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
 			expect(cmd).toEqual([process.execPath, "install", "--no-cache", "partial-plugin"]);
 
@@ -446,7 +446,7 @@ describe("PluginManager.install load validation", () => {
 						{
 							name: "partial-plugin",
 							version: "1.0.0",
-							omp: { extensions: ["./dist/valid.ts", "./dist/missing.ts"] },
+							omp: { extensions: ["./dist/valid.ts", "./dist/missing.ts", { path: "./dist/valid.ts" }] },
 						},
 						null,
 						2,
@@ -466,7 +466,9 @@ describe("PluginManager.install load validation", () => {
 			} as Subprocess;
 		}) as typeof Bun.spawn);
 
-		await expect(new PluginManager(tmpRoot).install("partial-plugin")).rejects.toThrow(/dist\/missing\.ts/);
+		await expect(new PluginManager(tmpRoot).install("partial-plugin")).rejects.toThrow(
+			/dist\/missing\.ts[\s\S]*expected a string path/,
+		);
 
 		const pluginsPackage = await Bun.file(pluginsPkgJson).json();
 		expect(pluginsPackage.dependencies ?? {}).toEqual({});

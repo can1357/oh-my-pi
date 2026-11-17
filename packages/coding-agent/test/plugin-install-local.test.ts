@@ -231,4 +231,25 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 		});
 		expect((await manager.list()).map(plugin => plugin.name)).toContain("kimi-datasource");
 	});
+
+	test("doctor reports a malformed local extension entry without crashing", async () => {
+		const localPlugin = await createLocalPlugin(tmpRoot);
+		await Bun.write(
+			path.join(localPlugin, "package.json"),
+			JSON.stringify({
+				name: "kimi-datasource",
+				version: "1.0.0",
+				omp: { extensions: [{ path: "./src/extension.ts" }] },
+			}),
+		);
+		const manager = new PluginManager(tmpRoot);
+		await manager.link(localPlugin);
+
+		const checks = await manager.doctor();
+		expect(checks).toContainEqual({
+			name: "plugin:kimi-datasource:extension",
+			status: "error",
+			message: 'Extension entry {"path":"./src/extension.ts"} must be a string path',
+		});
+	});
 });
