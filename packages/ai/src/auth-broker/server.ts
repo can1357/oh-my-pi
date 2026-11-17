@@ -36,7 +36,6 @@ import type {
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
-	AUTH_BROKER_CLIENT_INSTALL_ID_HEADER,
 	AUTH_BROKER_CLIENT_VERSION_HEADER,
 	AUTH_BROKER_VERSION_HEADER,
 	DEFAULT_AUTH_BROKER_BIND,
@@ -918,10 +917,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					// Arktype's inferred union collides the `entries` field with
 					// Array.prototype.entries; the schema already validated the shape.
 					const report = parsed.data as ClientUsageReportRequest;
-					// The identity headers name the sending process. An auth-gateway relays
-					// reports for other installs, so the version lands only on the sender's own row.
-					const sentByReporter = req.headers.get(AUTH_BROKER_CLIENT_INSTALL_ID_HEADER) === report.installId;
-					const reporterVersion = sentByReporter ? clientVersion(req) : undefined;
+					// The version header names the sending process, and only a report of its own
+					// carries it: an auth-gateway relays its callers' reports without one.
+					const reporterVersion = clientVersion(req);
 					try {
 						const recorded = opts.storage.usage.recordClient({ ...report, version: reporterVersion });
 						if (!recorded) return json(501, { error: "broker store does not persist client usage" });

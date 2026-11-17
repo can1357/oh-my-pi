@@ -178,14 +178,11 @@ export const AUTH_BROKER_CAPABILITIES_HEADER = "OMP-Auth-Broker-Capabilities";
 /** Client understands independent Codex `chat` and `spark` credential-block scopes. */
 export const AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES = "codex-meter-block-scopes";
 
-/** Request header carrying the client's omp version on every broker request. */
-export const AUTH_BROKER_CLIENT_VERSION_HEADER = "x-omp-version";
-
 /**
- * Request header carrying the client's install id on every broker request; the
- * same header pi-native clients send the auth-gateway for usage attribution.
+ * Request header carrying the client's omp version on every broker request
+ * except a usage report relayed for another client.
  */
-export const AUTH_BROKER_CLIENT_INSTALL_ID_HEADER = "x-omp-install-id";
+export const AUTH_BROKER_CLIENT_VERSION_HEADER = "x-omp-version";
 
 /** Response header carrying the broker's omp version on every response. */
 export const AUTH_BROKER_VERSION_HEADER = "OMP-Auth-Broker-Version";
