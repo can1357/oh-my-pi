@@ -64,6 +64,10 @@
 - RPC hosts now always receive a terminal `agent_end` after an over-quota 429: usage-limit bookkeeping is bounded so a stalled usage report can no longer hold the event ([#19411](https://github.com/can1357/oh-my-pi/issues/19411), [#19417](https://github.com/can1357/oh-my-pi/pull/19417) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Rex and other OSC 7501 terminals no longer play a success sound mid-run when a stale agent end arrives after another run has opened ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#19418](https://github.com/can1357/oh-my-pi/pull/19418) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
+### Fixed
+
+- Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login
+
 ## [18.22.1] - 2026-11-17
 
 ### Breaking Changes
