@@ -337,6 +337,19 @@ describe("guard rule regressions", () => {
 		expect(ruleOf(bashApproval(cwd, "cd ~/.ssh && cat -n id_rsa"))).toBe("credential_read");
 	});
 
+	it("takes a number after an option of a plain reader for its value, not a file", () => {
+		for (const command of [
+			"cd ~/.ssh && head -n 5 known_hosts",
+			"cd ~/.aws && tail -n 3 config",
+			"cd ~/.ssh && head -n 1 id_ed25519.pub",
+			"cd ~/.ssh && base64 -w 0 id_rsa.pub",
+			"cd ~/.ssh && tail -c +1K config",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+		expect(ruleOf(bashApproval(cwd, "cd ~/.ssh && head -n 5 id_rsa"))).toBe("credential_read");
+	});
+
 	it("checks every part of a `read` path list for credentials", () => {
 		const read = new ReadTool(createSession(cwd));
 		for (const readPath of ["README.md;~/.ssh/id_rsa", "README.md,~/.aws/credentials", "README.md ~/.netrc:1-5"]) {

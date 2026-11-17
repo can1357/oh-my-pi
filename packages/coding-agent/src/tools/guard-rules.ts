@@ -1064,11 +1064,15 @@ const READER_OUTPUT_OPTIONS: Record<string, readonly string[]> = {
 	gpg: ["-o", "--output"],
 };
 
+/** A number, maybe with a `+` or a unit (`5`, `+5`, `1K`): after an option, the option's value. */
+const OPTION_NUMBER_RE = /^\+?\d+[A-Za-z]*$/;
+
 /**
  * A plain reader's operands: its arguments without its options (`cat -n` names no file `-n`), and
  * without the values of its {@link KEY_VALUE_OPTIONS} (long options only) and
- * {@link READER_OUTPUT_OPTIONS}, given in the next word or after an `=`. The value of another option
- * stays, as the guard does not know which options take one.
+ * {@link READER_OUTPUT_OPTIONS}, given in the next word or after an `=`. Another option takes no
+ * word, as the guard does not know which options take one, except a number right after it
+ * ({@link OPTION_NUMBER_RE}: `head -n 5`, `tail -c +1K`), which is taken for its value.
  */
 function readerArgs(command: ShellCommand): string[] {
 	const name = command.argv[0];
@@ -1086,7 +1090,7 @@ function readerArgs(command: ShellCommand): string[] {
 		const option = eq > 0 ? arg.slice(0, eq) : arg;
 		if ((arg.startsWith("--") && keys.includes(option)) || outputs.includes(option)) {
 			if (eq < 0) i++;
-		} else if (!arg.startsWith("-")) {
+		} else if (!arg.startsWith("-") && !(OPTION_NUMBER_RE.test(arg) && argv[i - 1]?.startsWith("-"))) {
 			words.push(arg);
 		}
 	}
