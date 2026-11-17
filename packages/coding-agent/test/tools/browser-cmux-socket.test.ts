@@ -159,7 +159,6 @@ describe("CmuxSocketClient", () => {
 					await client.request("sentinel", {});
 					expect(methods).toEqual(["blocking", "sentinel"]);
 				} finally {
-					tab.clearRunContext();
 					client.close();
 				}
 			},
@@ -198,7 +197,6 @@ describe("CmuxSocketClient", () => {
 					socket.write(`${JSON.stringify({ ok: true, result: { value: { __ompOk: 42 } } })}\n`);
 					expect(await outcome).toEqual({ value: 42 });
 				} finally {
-					tab.clearRunContext();
 					client.close();
 					vi.useRealTimers();
 				}
@@ -245,7 +243,6 @@ describe("CmuxSocketClient", () => {
 					expect(error).toBeInstanceOf(ToolError);
 					expect(String(error)).toContain("Timed out waiting for cmux socket response");
 				} finally {
-					tab.clearRunContext();
 					client.close();
 					vi.useRealTimers();
 				}
