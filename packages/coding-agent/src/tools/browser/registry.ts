@@ -54,6 +54,7 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	/** Browser-level WebSocket endpoint tab workers attach through. */
 	wsEndpoint: string;
 	cdpUrl?: string;
+	/** The browser's main process, which owns its windows on screen; unknown for connected endpoints and the relay. */
 	pid?: number;
 	/** OMP-owned temp Chromium profile directory removed on dispose (process-local headless launches). */
 	userDataDir?: string;
@@ -267,6 +268,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			kind,
 			browser,
 			wsEndpoint,
+			pid: browser.process()?.pid,
 			userDataDir,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
@@ -542,6 +544,7 @@ async function openSharedHeadlessHandle(
 			kind,
 			browser,
 			wsEndpoint: shared.wsEndpoint,
+			pid: shared.pid,
 			sharedDaemon: { name: shared.daemonName, projectDir: shared.projectDir },
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
