@@ -157,7 +157,7 @@ class GitHub:
         if path.startswith(("/", "http:" , "https:")) or ".." in path or "\\" in path:
             raise VerificationError("invalid API path")
         headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github+json",
-                   "X-GitHub-Api-Version": "2026-03-10", "User-Agent": "omp-macos-verification"}
+                   "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "omp-macos-verification"}
         data = None if body is None else json.dumps(body).encode()
         if data is not None:
             headers["Content-Type"] = "application/json"

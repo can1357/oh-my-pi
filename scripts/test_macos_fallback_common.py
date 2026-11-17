@@ -184,6 +184,9 @@ class ProtocolTests(unittest.TestCase):
         api.opener = Opener()
         self.assertEqual(api.get_bytes("repos/blyzer/oh-my-pi/actions/artifacts/1/zip"), b"zip bytes")
         self.assertIsNotNone(calls[0].get_header("Authorization"))
+        # The newer API removes merge_commit_sha; source fences depend on the
+        # explicit stable contract, not the server's default version.
+        self.assertEqual(calls[0].get_header("X-github-api-version"), "2022-11-28")
         self.assertIsNone(calls[1].get_header("Authorization"))
 
     def test_only_safe_reads_retry_and_honor_retry_budget(self):
