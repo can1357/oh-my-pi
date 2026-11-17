@@ -73,7 +73,6 @@ async fn brace_limit_reports_oversized_expansions() {
 	assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn uutils_diff_reads_process_substitution_fds() {
 	let (result, output) = run_command_capture_within(
@@ -88,6 +87,23 @@ async fn uutils_diff_reads_process_substitution_fds() {
 
 	assert_eq!(result.exit_code, Some(1));
 	assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
+}
+
+/// `cat`, `grep` and `comm` open `/dev/fd/N` through the same descriptor mount
+/// as `diff`, on Windows as on Unix.
+#[tokio::test(flavor = "multi_thread")]
+async fn builtins_read_process_substitution_fds() {
+	let (result, output) = run_command_capture_within(
+		Duration::from_secs(5),
+		"cat <(echo x); grep -c x <(echo x); comm -12 <(printf 'a\\nb\\n') <(printf 'b\\n')",
+		None,
+		None,
+		CancelToken::default(),
+	)
+	.await
+	.expect("process substitution should not hang");
+
+	assert_eq!((result.exit_code, output.as_str()), (Some(0), "x\n1\nb\n"));
 }
 
 /// Every run reads through a cancellable filesystem, and its redirects must
@@ -522,7 +538,6 @@ async fn descriptor_paths_never_reach_host_only_descriptors() {
 /// `<(…)` operands resolve through the shell's descriptor table, so
 /// utilities report the name the shell passed and script-file options read
 /// them too.
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn process_substitution_operands_keep_the_shell_fd_name() {
 	let command = "wc -l <(printf 'a\\nb\\n'); ls <(true); sed -n -f <(echo p) <<< from-sed";

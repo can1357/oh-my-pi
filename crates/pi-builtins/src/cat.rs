@@ -144,7 +144,6 @@ enum InputType {
 	BlockDevice,
 	#[cfg(unix)]
 	CharacterDevice,
-	#[cfg(unix)]
 	Fifo,
 	#[cfg(unix)]
 	Socket,
@@ -401,7 +400,6 @@ fn get_input_type(fs: &BlockingFs, path: &OsString, resolved: &Path) -> CatResul
 		file_type if file_type.is_block_device() => Ok(InputType::BlockDevice),
 		#[cfg(unix)]
 		file_type if file_type.is_char_device() => Ok(InputType::CharacterDevice),
-		#[cfg(unix)]
 		file_type if file_type.is_fifo() => Ok(InputType::Fifo),
 		#[cfg(unix)]
 		file_type if file_type.is_socket() => Ok(InputType::Socket),
