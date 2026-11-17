@@ -34,6 +34,9 @@
 - Fixed macOS `press()` and background `el.click()` reporting success on a control a person could not click, such as a hover toolbar's button after the pointer left, a hidden control, or one of a window that shows a sheet; they now fail before anything is sent and name what the window shows there ([#19258](https://github.com/can1357/oh-my-pi/pull/19258) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a background `computer` key press (Space or an up or down arrow) on a macOS popup button or menu button leaving its menu open, which took your typing once omp stopped sending your keys back to your app; the menu now closes before the call returns, and holding those keys on such a control is refused before anything is sent ([#19179](https://github.com/can1357/oh-my-pi/pull/19179) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Linux `ax()`, `find()`, `el.children()` and focus reads freezing a Qt app with a very long table (up to 45 s, over 1 GB) or knocking it off the accessibility bus, and showing nothing of a GTK 3 list over 65,536 cells; they read only the children they can use, and `ax()` says how many it left out ([#19036](https://github.com/can1357/oh-my-pi/pull/19036) by [@will-bogusz](https://github.com/will-bogusz))
+### Changed
+
+- Computer `InputBusy` names the agent holding input/focus control and its omp process id (`agent "Main.Scout" (omp pid 4242) owns input/focus control`) when the holder's session set `agentId`, on macOS and Linux, and on Windows when that agent runs in the same omp; cross-process names retain the last 64 characters so long dotted ids keep their distinct suffixes ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
