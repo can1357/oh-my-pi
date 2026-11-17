@@ -368,10 +368,10 @@ Set `excludeFromContext: true` on the payload for a row that is drawn and saved
 but never sent to the model, like a `!!` bash run: per-turn stats or status
 lines. The flag is persisted on the `custom_message` entry, so the row stays out
 of context after resume, compaction and branch summaries. Such a row never
-starts or extends a turn: `triggerTurn` and `"aside"` are ignored, and while a
-run streams it waits for the next turn as with `"nextTurn"`. Like `!!` and `$$`
-runs, it leaves a shown composer prediction in place, since the model's view is
-unchanged.
+starts or extends a turn: `triggerTurn` and `"aside"` are ignored. Sent while a
+run is live, it is queued like a `!!` bash row and drawn and saved when the run
+ends or the next prompt starts. Like `!!` and `$$` runs, it leaves a shown
+composer prediction in place, since the model's view is unchanged.
 
 ## 2) Handler context (`ExtensionContext`)
 
