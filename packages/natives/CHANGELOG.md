@@ -13,6 +13,7 @@
 - Computer `InputBusy` names the agent holding input/focus control and its omp process id (`agent "Main.Scout" (omp pid 4242) owns input/focus control`) when the holder's session set `agentId`, on macOS and Linux, and on Windows when that agent runs in the same omp; cross-process names retain the last 64 characters so long dotted ids keep their distinct suffixes ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
 - Wayland `computer.type()` now types characters your keyboard layout has no key for, such as `ä`, `日本` or emoji, on compositors that offer libei text (KDE Plasma 6.8 and later); elsewhere they are still refused before anything is typed ([#18013](https://github.com/can1357/oh-my-pi/pull/18013) by [@will-bogusz](https://github.com/will-bogusz))
 - Terminal frames are prepared faster: the engine's row-reuse index hashes rows with foldhash, cutting per-frame cost by up to about 20% on tall terminals ([#19539](https://github.com/can1357/oh-my-pi/pull/19539) by [@H4vC](https://github.com/H4vC))
+- Terminal frames are prepared faster: the engine's row-reuse index hashes rows with foldhash instead of SipHash, roughly halving the time spent preparing rows that are unchanged or scrolled since the last frame ([#19539](https://github.com/can1357/oh-my-pi/pull/19539) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 
