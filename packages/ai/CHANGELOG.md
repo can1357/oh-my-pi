@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `riskAcknowledgement` to `OAuthPrompt`, set on the login-warning acceptance prompt so hosts that refuse input before the auth URL can still show it ([#19523](https://github.com/can1357/oh-my-pi/issues/19523))
 - `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 
