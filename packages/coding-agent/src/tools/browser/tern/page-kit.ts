@@ -2,6 +2,7 @@ import ariaBundle from "../aria/aria-snapshot.bundle.txt" with { type: "text" };
 import type { AriaSnapshotPayload } from "../aria/aria-snapshot";
 import { DEFAULT_STYLE_PROPERTIES, type QueryBox } from "../queries";
 import { roleRules, SEMANTIC_QUERY_HANDLERS } from "../query-handlers";
+import type { SelectOptionChoice } from "../select-options";
 import type { Observation } from "../tab-protocol";
 import type { TernSelector } from "./selectors";
 
@@ -14,6 +15,7 @@ export type TernTargetAction =
 	| "type"
 	| "fill"
 	| "focus"
+	| "press"
 	| "drag"
 	| "upload"
 	| "point";
@@ -128,8 +130,8 @@ export interface TernKitApi {
 	caretToEnd(sel: TernSelector): void;
 	/** Checked state of a checkbox, radio, or ARIA checkbox/radio/switch. */
 	checkState(sel: TernSelector): { checked: boolean };
-	/** Select `<select>` options by value, then label; returns the selected values. */
-	select(sel: TernSelector, values: string[]): string[];
+	/** Select `<select>` options by value, label, or zero-based index; returns the selected values. */
+	select(sel: TernSelector, values: SelectOptionChoice[]): string[];
 	/** Assign files to a file input, or drop them on any other element. */
 	setFiles(sel: TernSelector, files: TernFilePayload[]): void;
 	/** Whether the first match is a file input or a `<label>` whose control is one. */
@@ -213,7 +215,10 @@ const KIT_BODY = String.raw`
 const STATE_ROLES_CHECKED = new Set(["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"]);
 const SKIP_TAGS = new Set(["script", "style", "template", "noscript", "head", "meta", "link", "title"]);
 const POINTER_ACTIONS = new Set(["click", "dblclick", "hover", "check", "drag", "upload"]);
-const ENABLED_ACTIONS = new Set(["click", "dblclick", "check", "type", "fill", "upload"]);
+// Keys go wherever focus is, and a modal dialog leaves the page behind it unfocusable, so these refuse an element a
+// modal dialog covers. Under any other layer focus still reaches the element and the keys with it.
+const KEY_ACTIONS = new Set(["type", "fill", "press"]);
+const ENABLED_ACTIONS = new Set(["click", "dblclick", "check", "type", "fill", "press", "upload"]);
 const EDIT_ACTIONS = new Set(["type", "fill"]);
 const SETTER_INPUT_TYPES = new Set(["date", "datetime-local", "month", "week", "time", "color", "range"]);
 const UNTYPABLE_INPUT_TYPES = new Set(["checkbox", "radio", "button", "submit", "reset", "image", "hidden", "file"]);
@@ -246,6 +251,13 @@ const composedContains = (ancestor, descendant) => {
 	for (let current = descendant, depth = 0; current && depth < 256; depth++) {
 		if (current === ancestor) return true;
 		current = current.assignedSlot || composedParent(current);
+	}
+	return false;
+};
+// An open modal dialog of the element's document that does not hold it leaves it unfocusable under the backdrop.
+const behindModalDialog = el => {
+	for (const dialog of el.ownerDocument.querySelectorAll("dialog:modal")) {
+		if (!composedContains(dialog, el)) return true;
 	}
 	return false;
 };
@@ -832,6 +844,11 @@ const kit = {
 			if (!composedContains(el, hit) && !composedContains(hit, el)) {
 				return { ok: false, reason: "covered", count, detail: describeElement(hit) };
 			}
+		} else if (KEY_ACTIONS.has(action) && inViewport) {
+			const hit = hitTest(x, y);
+			if (hit && !composedContains(el, hit) && !composedContains(hit, el) && behindModalDialog(el)) {
+				return { ok: false, reason: "covered", count, detail: describeElement(hit) };
+			}
 		}
 		return { ok: true, x, y, width: rect.width, height: rect.height, count };
 	},
@@ -904,12 +921,14 @@ const kit = {
 		const options = Array.from(el.options);
 		const wanted = new Set();
 		const missing = [];
-		for (const value of values.map(String)) {
-			const option =
-				options.find(candidate => candidate.value === value) ||
-				options.find(candidate => candidate.label === value || normalizeSpace(candidate.text) === value);
+		for (const choice of values) {
+			const option = choice.kind === "index"
+				? options[choice.value]
+				: (choice.kind !== "label" && options.find(candidate => candidate.value === choice.value)) ||
+					(choice.kind !== "value" && options.find(candidate =>
+						candidate.label === choice.value || normalizeSpace(candidate.text) === choice.value));
 			if (option) wanted.add(option);
-			else missing.push(value);
+			else missing.push(choice.kind === "string" ? choice.value : { [choice.kind]: choice.value });
 		}
 		// A value that matches nothing leaves the select untouched rather than blanking it.
 		if (missing.length > 0) {
