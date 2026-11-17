@@ -2052,11 +2052,7 @@ impl<C: Inference> Kernel<C> {
 				LoopDecision::Continue { .. } => continue,
 				LoopDecision::Yield => {
 					// An extension may block the stop and demand another turn.
-					if let Some(hooks) = self
-						.lifecycle_hooks
-						.as_ref()
-						.filter(|_| settle_continuations < omp_contract::hooks::SETTLE_CONTINUATION_CAP)
-					{
+					if let Some(hooks) = self.lifecycle_hooks.as_ref() {
 						let settled = hooks
 							.agent_settled(serde_json::json!({
 								"submission_id": turn.to_string(),
@@ -2069,10 +2065,18 @@ impl<C: Inference> Kernel<C> {
 							}))
 							.await;
 						if settled.decision == crate::AgentSettled::Continue {
-							settle_continuations += 1;
-							append_hook_context(session, turn, settled.context)?;
-							self.apply_live_components(session)?;
-							continue;
+							if settle_continuations >= omp_contract::hooks::SETTLE_CONTINUATION_CAP {
+								append_continuation_refused_notice(
+									session,
+									turn,
+									omp_contract::hooks::SETTLE_CONTINUATION_CAP,
+								)?;
+							} else {
+								settle_continuations += 1;
+								append_hook_context(session, turn, settled.context)?;
+								self.apply_live_components(session)?;
+								continue;
+							}
 						}
 					}
 					let stop = if was_steered {
@@ -4906,19 +4910,155 @@ fn close_streams(
 	Ok(())
 }
 
-/// Journals hook-contributed context as model-visible `<developer kind=hook>`
-/// messages under `turn`, hidden from the transcript like any hook context.
+/// Journals hook-contributed context under `turn`.
+///
+/// `agent_settled` Continuations honor `visible` / `role` / `collapse_prior`.
+/// Other seams (for example `before_agent_start`) keep the historical hidden
+/// developer/hook shape via [`HookContext::new`] defaults.
 fn append_hook_context(
 	session: &mut Session,
 	turn: Handle,
 	context: Vec<crate::HookContext>,
 ) -> Result<(), KernelError> {
 	for item in context {
-		let mut message = omp_session::custom_message::CustomMessage::new(item.source, item.body);
-		message.kind = omp_session::custom_message::CustomMessageKind::Hook;
-		message.display = false;
-		append_custom_message(session, turn, message)?;
+		if item.collapse_prior {
+			collapse_prior_continuations(session, &item.source)?;
+		}
+		match item.role {
+			crate::hooks::HookContextRole::User => {
+				append_continuation_user(session, turn, &item)?;
+			},
+			crate::hooks::HookContextRole::System => {
+				let mut message =
+					omp_session::custom_message::CustomMessage::new(item.source.clone(), item.body);
+				message.kind = omp_session::custom_message::CustomMessageKind::Hook;
+				message.display = item.visible;
+				append_custom_message(session, turn, message)?;
+				mark_last_child_continuation(session, turn, &item.source)?;
+			},
+		}
 	}
+	Ok(())
+}
+
+/// Hides earlier same-source continuation items (markers), keeping model text.
+fn collapse_prior_continuations(session: &mut Session, source: &Str) -> Result<(), KernelError> {
+	let display_key = PropKey::Custom(Str::new_static(omp_session::custom_message::DISPLAY_PROP));
+	let continuation_key =
+		PropKey::Custom(Str::new_static(omp_session::custom_message::CONTINUATION_PROP));
+	let source_key =
+		PropKey::Custom(Str::new_static(omp_session::custom_message::CONTINUATION_SOURCE_PROP));
+	let mut ops = Vec::new();
+	for turn in session.dom().children(session.dom().body()) {
+		for child in session.dom().children(*turn) {
+			let Some(node) = session.dom().get(*child) else {
+				continue;
+			};
+			let is_continuation = matches!(node.prop(&continuation_key), Some(Value::Bool(true)));
+			let same_source = node
+				.prop(&source_key)
+				.and_then(Value::as_str)
+				.is_some_and(|value| value == source.as_str())
+				|| node
+					.prop(&PropKey::from(PropId::Name))
+					.and_then(Value::as_str)
+					.is_some_and(|value| value == source.as_str());
+			if is_continuation && same_source {
+				ops.push(Op::Set {
+					h:     *child,
+					prop:  display_key.clone(),
+					value: Value::Bool(false),
+				});
+			}
+		}
+	}
+	if ops.is_empty() {
+		return Ok(());
+	}
+	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
+	session.patch(Txn {
+		cause,
+		label: Some(Str::new_static("kernel.collapse-continuation")),
+		ops,
+	})?;
+	Ok(())
+}
+
+fn append_continuation_user(
+	session: &mut Session,
+	turn: Handle,
+	item: &crate::HookContext,
+) -> Result<(), KernelError> {
+	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
+	session.patch(Txn {
+		cause,
+		label: Some(Str::new_static("kernel.continuation-user")),
+		ops: vec![Op::Ins {
+			parent: turn,
+			after:  session.dom().children(turn).last().copied(),
+			node:   NodeSpec::new(KnownTag::User)
+				.with_prop(
+					PropKey::Custom(Str::new_static(omp_session::custom_message::DISPLAY_PROP)),
+					Value::Bool(item.visible),
+				)
+				.with_prop(
+					PropKey::Custom(Str::new_static(omp_session::custom_message::CONTINUATION_PROP)),
+					Value::Bool(true),
+				)
+				.with_prop(
+					PropKey::Custom(Str::new_static(
+						omp_session::custom_message::CONTINUATION_SOURCE_PROP,
+					)),
+					Value::Str(item.source.clone()),
+				)
+				.with_content(item.body.clone()),
+		}],
+	})?;
+	Ok(())
+}
+
+fn mark_last_child_continuation(
+	session: &mut Session,
+	turn: Handle,
+	source: &Str,
+) -> Result<(), KernelError> {
+	let Some(child) = session.dom().children(turn).last().copied() else {
+		return Ok(());
+	};
+	let cause = session.head().ok_or(SessionError::NoActiveTurn)?;
+	session.patch(Txn {
+		cause,
+		label: Some(Str::new_static("kernel.mark-continuation")),
+		ops: vec![
+			Op::Set {
+				h:     child,
+				prop:  PropKey::Custom(Str::new_static(omp_session::custom_message::CONTINUATION_PROP)),
+				value: Value::Bool(true),
+			},
+			Op::Set {
+				h:     child,
+				prop:  PropKey::Custom(Str::new_static(
+					omp_session::custom_message::CONTINUATION_SOURCE_PROP,
+				)),
+				value: Value::Str(source.clone()),
+			},
+		],
+	})?;
+	Ok(())
+}
+
+fn append_continuation_refused_notice(
+	session: &mut Session,
+	turn: Handle,
+	cap: u32,
+) -> Result<(), KernelError> {
+	append_named_notice(
+		session,
+		turn,
+		Str::new_static("continuation"),
+		Some(Str::new_static("refused")),
+		Str::new(format!("continuation refused at cap {cap}")),
+	)?;
 	Ok(())
 }
 

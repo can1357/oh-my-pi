@@ -49,6 +49,16 @@ FORK = (
     "github.event.pull_request.head.repo.full_name != github.repository"
 )
 HOSTED = r"(?:ubuntu|macos|windows)-[0-9A-Za-z.-]+"
+# This expression can select only standard hosted labels; it never accepts a
+# runner label from a variable. Keep the event boundary explicit and audited.
+MACOS_ELIGIBLE = (
+    "vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && "
+    "((github.event_name == 'pull_request' && "
+    "github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || "
+    "(github.event_name == 'push' && github.ref == 'refs/heads/omp2') || "
+    "(github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))"
+)
+MACOS_CONTROLLER_RUNNER = "${{ (" + MACOS_ELIGIBLE + ") && 'ubuntu-24.04' || 'macos-15' }}"
 # fromJSON((FORK) && '"<hosted label>"' || REST): `&&` binds tighter than `||`,
 # so a fork gets the hosted label whatever REST says, provided REST stays inside
 # fromJSON's one argument (see balanced()).
@@ -158,6 +168,8 @@ def fork_guard_failures() -> tuple[int, list[str]]:
         lines = path.read_text().splitlines()
         reachable = events(lines) & FORK_EVENTS
         for job, value in runs_on(lines):
+            if path.name == 'ci.yml' and job in {'rust', 'lint_macos'} and value == MACOS_CONTROLLER_RUNNER:
+                continue
             if not reachable or re.fullmatch(HOSTED, value):
                 continue
             where = f"{path.name} job {job}"
@@ -253,13 +265,11 @@ def main() -> int:
             ok = False
             print(f"the changes job must run everything when there is no pull request number: missing {needle}")
 
-    rust_job = "\n".join(block(jobs, "rust", 2))
-    start = rust_job.find("- name: Record the proved tree")
-    proved_if = rust_job[start:].split("\n")[1] if start != -1 else ""
-    for needle in ("needs.affected.outputs.scope != 'subset'", "needs.affected.outputs.scope != 'none'"):
-        if needle not in proved_if:
+    objective = (ROOT / 'scripts/ci-macos-objective.sh').read_text()
+    for needle in ('"${AFFECTED_SCOPE:-full}" != subset', '"${AFFECTED_SCOPE:-full}" != none', '"${MACOS_WORKER:-false}" != true'):
+        if needle not in objective:
             ok = False
-            print(f"the proved-tree notice must not be recorded for a narrowed run: its if lacks {needle}")
+            print(f"the proved-tree notice must be restricted to full direct native runs: missing {needle}")
 
     names = set(job_names(ci))
     required = [

@@ -6,6 +6,10 @@ use omp_dom::{KnownTag, NodeSpec, PropId, PropKey, Value};
 
 /// Custom property retaining whether a transcript message is visible.
 pub const DISPLAY_PROP: &str = "display";
+/// Custom property marking an `agent_settled` continuation item.
+pub const CONTINUATION_PROP: &str = "continuation";
+/// Custom property naming the continuation owner (extension/label source).
+pub const CONTINUATION_SOURCE_PROP: &str = "continuation-source";
 /// Custom property naming the semantic frame treatment.
 pub const PRESENTATION_PROP: &str = "presentation";
 /// Custom property retaining the renderer-owning extension.

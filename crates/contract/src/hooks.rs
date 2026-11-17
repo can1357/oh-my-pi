@@ -529,13 +529,64 @@ pub struct LifecycleAdmission {
 	pub context:   Vec<HookContext>,
 }
 
+/// Wire role for an `agent_settled` continuation item.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HookContextRole {
+	/// Mid-thread system/developer item (prefix-cache friendly).
+	#[default]
+	System,
+	/// Compatible user-role injection.
+	User,
+}
+
+impl HookContextRole {
+	/// Parses the Continue JSON `role` field; unknown values become
+	/// [`Self::System`].
+	#[must_use]
+	pub fn parse(value: &str) -> Self {
+		match value {
+			"user" => Self::User,
+			_ => Self::System,
+		}
+	}
+
+	/// Wire spelling for journals and tests.
+	#[must_use]
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::System => "system",
+			Self::User => "user",
+		}
+	}
+}
+
 /// Model-visible context one hook host contributed at a seam.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HookContext {
 	/// Producer name journaled beside the text (for example a plugin id).
-	pub source: Str,
+	pub source:         Str,
 	/// The context the model reads.
-	pub body:   Str,
+	pub body:           Str,
+	/// When false, transcript actors hide the item (bookkeeping marker).
+	pub visible:        bool,
+	/// Injected item wire role (`system` vs `user`).
+	pub role:           HookContextRole,
+	/// Collapse earlier continuation items from the same source into markers.
+	pub collapse_prior: bool,
+}
+
+impl HookContext {
+	/// Hidden system-role context (the historical default for hook seams).
+	#[must_use]
+	pub fn new(source: impl Into<Str>, body: impl Into<Str>) -> Self {
+		Self {
+			source:         source.into(),
+			body:           body.into(),
+			visible:        false,
+			role:           HookContextRole::System,
+			collapse_prior: false,
+		}
+	}
 }
 
 /// The answer an in-process hook host gives for one gateable event.
@@ -2028,7 +2079,7 @@ mod tests {
 	}
 
 	fn context(body: &'static str) -> Vec<super::HookContext> {
-		vec![super::HookContext { source: sf!("p@m"), body: Str::new_static(body) }]
+		vec![super::HookContext::new(sf!("p@m"), Str::new_static(body))]
 	}
 
 	#[tokio::test]

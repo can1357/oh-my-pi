@@ -11,6 +11,10 @@ on:
       - ".github/ci-paths.txt"
       - ".github/ci-rust-paths.txt"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/macos-verification.yml"
+      - ".github/actions/macos-*/**"
+      - "scripts/macos_*.py"
+      - "scripts/ci-macos-objective.sh"
       - "about.toml"
       - "deny.toml"
       - "justfile"
@@ -419,264 +423,104 @@ jobs:
 
   rust:
     name: Rust workspace and acceptance proofs
-    # Deliberately NOT gated on runtime_spec. That check is cheap and reports
-    # in two minutes; this one is the expensive proof and the only place the
-    # suite, P1-P8 and P12 ever run on macOS (P9-P11 and tool_sources run in
-    # p9_p10_linux). Chaining them meant a red spec gate skipped
-    # the suite entirely, so the branch could not learn whether it passed. They are independent questions and now answer in parallel.
-    # This does not weaken the gate: runtime_spec still reports its own
-    # conclusion and can still be a required check in branch protection.
-    # The license policy is the same kind of independent question and is not
-    # a precondition either; waiting on it held this job back five minutes.
-    # On a push, push_verified may show the tree already passed this job in
-    # its pull request; a skipped or failed push_verified never skips it.
-    # Nor is it gated on `Rust format`: waiting for `cargo fmt --check` held this
-    # job back ~106 s (median, n=10, docs/research/ci-test-acceleration.md). Rust
-    # format still reports, and fails, its own required check.
     needs: [changes, push_verified, affected]
     if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    # Run workspace tests and host-specific acceptance proofs on GitHub's
-    # standard macOS runner. MACOS_RUNNER no longer redirects this native job
-    # to a personal machine; BuildBuddy-capable jobs retain their own routing.
-    runs-on: macos-15
-    timeout-minutes: 120
+    runs-on: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 120 }}
+    permissions:
+      contents: read
+      actions: write
     env:
+      MACOS_CONTROLLER: ${{ vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
+      AFFECTED_SCOPE: ${{ needs.affected.outputs.scope }}
+      AFFECTED_ARGS: ${{ needs.affected.outputs.args }}
+      AFFECTED_DOC_ARGS: ${{ needs.affected.outputs.doc_args }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      # sccache is only installed by mozilla-actions/sccache-action on github-hosted
-      # runners. Clear RUSTC_WRAPPER on self-hosted runners so cargo invocations
-      # that run before or instead of the sccache step do not fail with "No such file".
-      - name: Clear sccache on self-hosted runners
-        if: runner.environment != 'github-hosted'
-        run: echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
-
-      - name: Select pinned Rust toolchain
-        run: |
-          test "$(uname -m)" = arm64
-          rustup show active-toolchain
-
-      # Hosted runners install the four tools, self-hosted runners check them.
-      - uses: ./.github/actions/macos-native-tools
-      # Hosted runners start empty, so they install one pinned release. A
-      # self-hosted runner brings its own: downloading the latest release on
-      # every run took 11m38 in run 183 and then went unused, because an
-      # existing install earlier in PATH shadowed it. There the step checks
-      # the provisioned binary against the floor in .config/nextest.toml
-      # instead; a missing or too-old nextest fails here with nextest's own
-      # upgrade hint.
-      - name: Install cargo-nextest
-        if: runner.environment == 'github-hosted'
-        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2
+      - name: Check out direct native source
+        if: env.MACOS_CONTROLLER != 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          tool: nextest@0.9.146
-      - name: Check provisioned cargo-nextest
-        if: runner.environment != 'github-hosted'
-        run: cargo nextest show-config version
-
-      # Target dir outside the checkout on a self-hosted runner, embedded
-      # CPython on both.
-      - uses: ./.github/actions/macos-build-state
+          persist-credentials: false
+      - name: Run native objective
+        if: env.MACOS_CONTROLLER != 'true'
+        uses: ./.github/actions/macos-native-objective
         with:
+          objective: rust
+          source-directory: .
+          control-directory: .
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
-
-
-      # sccache via GitHub Actions Cache — caches pre-LTO crate compilations
-      # across runs on github-hosted runners. Self-hosted runners keep their
-      # own target dir and do not need it.
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        if: runner.environment == 'github-hosted'
-
-      - name: Cache Cargo
-        # Registry and git sources only. The hosted target/ entry was ~5.2 GB of
-        # the 10 GB repository budget and lost time even on a hit: ~230 s less
-        # clippy against a ~130 s restore and a ~100 s save on every run
-        # (docs/research/ci-test-acceleration.md §4). A self-hosted runner keeps
-        # its target directory outside the checkout (see above). The new key
-        # prefix keeps old entries, which contain target/, from being restored.
-        if: runner.environment == 'github-hosted'
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      - name: Check out reviewed macOS controller
+        if: env.MACOS_CONTROLLER == 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
-
-      # No clippy here: `Lint workspace (macOS)` (lint_macos) runs the same
-      # `cargo clippy --workspace --all-targets` on its own runner in parallel
-      # and is a required check, which took ~12 min off this job.
-
-      - name: Run SSH backend loopback fixture
-        run: scripts/ssh-loopback-fixture.sh cargo nextest run --profile ci -p omp-exec-ssh --locked --run-ignored all
-
-      # One cargo invocation builds every test binary, the acceptance proofs
-      # included, so their codegen and links overlap the workspace tail instead
-      # of following it as a second invocation (265.5 s median, n=10, for one
-      # unit). Features are unified workspace-wide (.cargo/config.toml
-      # [resolver]), so the `--exclude omp-e2e` and `-p omp-e2e` runs below
-      # find these artifacts fresh.
-      #
-      # On the self-hosted Mac, CARGO_TARGET_DIR is a warm tree outside the
-      # checkout. A half-written tree leaves fingerprints that point at missing
-      # `debug/build/*/out/*.rlib`; ld64.lld then fails with "cannot open".
-      # Retry once after discarding that warm dir (hosted runners have no
-      # CARGO_TARGET_DIR override and skip the wipe).
-      - name: Build test binaries
-        run: |
-          set -euo pipefail
-          if cargo nextest run --profile ci --workspace --no-run --locked; then
-            exit 0
-          fi
-          if [ -z "${CARGO_TARGET_DIR:-}" ] || [ ! -d "${CARGO_TARGET_DIR}" ]; then
-            exit 1
-          fi
-          echo "::warning::Warm target failed to link; discarding ${CARGO_TARGET_DIR} and retrying once"
-          rm -rf "${CARGO_TARGET_DIR}"
-          mkdir -p "${CARGO_TARGET_DIR}"
-          cargo nextest run --profile ci --workspace --no-run --locked
-
-      - name: Test workspace
+          ref: ${{ vars.CI_MACOS_WORKER_SHA }}
+          path: .ci-control
+          persist-credentials: false
+      - name: Coordinate macOS objective
+        if: env.MACOS_CONTROLLER == 'true'
         env:
-          AFFECTED_SCOPE: ${{ needs.affected.outputs.scope }}
-          AFFECTED_ARGS: ${{ needs.affected.outputs.args }}
-        run: |
-          set -euo pipefail
-          case "$AFFECTED_SCOPE" in
-            subset)
-              if [ -z "$AFFECTED_ARGS" ]; then
-                cargo nextest run --profile ci --workspace --exclude omp-e2e --locked
-              else
-                read -r -a args <<< "$AFFECTED_ARGS"
-                cargo nextest run --profile ci "${args[@]}" --locked
-              fi
-              ;;
-            none) echo "No tested crate is affected; skipping the workspace tests" ;;
-            *) cargo nextest run --profile ci --workspace --exclude omp-e2e --locked ;;
-          esac
-      # nextest cannot run doctests; omp has them in 25+ modules, so they need
-      # their own libtest pass or the coverage silently disappears.
-      - name: Test doctests
-        env:
-          AFFECTED_SCOPE: ${{ needs.affected.outputs.scope }}
-          AFFECTED_ARGS: ${{ needs.affected.outputs.doc_args }}
-        run: |
-          set -euo pipefail
-          case "$AFFECTED_SCOPE" in
-            subset)
-              if [ -z "$AFFECTED_ARGS" ]; then
-                echo "No selected crate has a library target; skipping the doctests"
-              else
-                read -r -a args <<< "$AFFECTED_ARGS"
-                cargo test --doc "${args[@]}" --locked
-              fi
-              ;;
-            none) echo "No tested crate is affected; skipping the doctests" ;;
-            *) cargo test --doc --workspace --exclude omp-e2e --locked ;;
-          esac
+          GH_TOKEN: ${{ github.token }}
+          CI_MACOS_WORKER_REF: ${{ vars.CI_MACOS_WORKER_REF }}
+          CI_MACOS_WORKER_SHA: ${{ vars.CI_MACOS_WORKER_SHA }}
+          CI_MACOS_PARENT_WORKFLOW_SHA256: ${{ vars.CI_MACOS_PARENT_WORKFLOW_SHA256 }}
+          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED }}
+          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST }}
+          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS }}
+        run: python3 .ci-control/scripts/macos_fallback_controller.py --objective rust
 
-      - name: Gate frozen Python examples
-        run: python3 scripts/check-python-examples.py
-
-      - name: Run harness unit tests and acceptance proofs P1-P6
-        run: |
-          cargo nextest run --profile ci -p omp-e2e --locked \
-            --lib \
-            --test p1_doc_race \
-            --test p2_cancel_matrix \
-            --test p3_detached_jobs \
-            --test p4_schema_isolation \
-            --test p5_prefix_stability \
-            --test p6_crash_resume
-
-      - name: Run terminal proof P7
-        env:
-          TERM: xterm-256color
-        run: cargo nextest run --profile ci -p omp-e2e --test p7_tui --test p7_tsp --locked
-
-      # P12 drives the real `omp envd` child through a Seatbelt sandbox
-      # amendment, so it gates here: it skips off macOS, and on macOS a failed
-      # Seatbelt probe fails it rather than skipping it.
-      - name: Run daemon approval relay proof P12
-        run: cargo nextest run --profile ci -p omp-e2e --test p12_daemon_approvals --locked
-
-      # Only the metric contract gates a pull request. The measurement itself
-      # is recorded per omp2 commit by p8-baseline.yml, off the PR path.
-      - name: Validate P8 baseline contract
-        run: cargo nextest run --profile ci -p omp-e2e --test p8_baselines --locked
-
-      # Last step, so it only runs when everything above passed. A pull
-      # request run checks out refs/pull/N/merge (its head merged into the base
-      # of that moment), not the head itself; this notice names the tree that
-      # was actually proved, and `push_verified` compares a merge commit's tree
-      # against it.
-      - name: Record the proved tree
-        if: ${{ needs.affected.outputs.scope != 'subset' && needs.affected.outputs.scope != 'none' }}
-        run: echo "::notice title=proved-tree::$(git rev-parse 'HEAD^{tree}')"
-
-  # The only macOS clippy pass, on its own runner in parallel with `rust`, and
-  # a required check (docs/research/ci-test-acceleration.md, Phase 3): moving
-  # it out of `rust` took ~12 min (553.5 s median, n=10) off the critical
-  # path. No target/ cache: a warm clippy (394-459 s) was no faster than a
-  # cold one (371-912 s). It remains a separate GitHub-hosted macos-15 job.
-  # Linux clippy still cannot see #[cfg(target_os = "macos")].
   lint_macos:
     name: Lint workspace (macOS)
+    needs: [changes, push_verified]
+    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
+    runs-on: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 'ubuntu-24.04' || 'macos-15' }}
+    timeout-minutes: ${{ (vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2'))) && 330 || 45 }}
+    permissions:
+      contents: read
+      actions: write
     env:
+      MACOS_CONTROLLER: ${{ vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || (github.event_name == 'push' && github.ref == 'refs/heads/omp2') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/omp2')) }}
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
       CARGO_INCREMENTAL: "0"
-    needs: [changes, push_verified]
-    if: ${{ !cancelled() && needs.changes.outputs.rust != 'false' && needs.push_verified.outputs.verified != 'true' }}
-    # Clippy needs macOS coverage, not the dedicated test runner.
-    runs-on: macos-15
-    timeout-minutes: 45
+      AFFECTED_SCOPE: full
+      AFFECTED_ARGS: ''
+      AFFECTED_DOC_ARGS: ''
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - name: Select pinned Rust toolchain
-        run: |
-          test "$(uname -m)" = arm64
-          rustup show active-toolchain
-
-      # Same provisioning as `rust`: build scripts link through ld64.lld.
-      - uses: ./.github/actions/macos-native-tools
-
-      - uses: ./.github/actions/macos-build-state
+      - name: Check out direct native source
+        if: env.MACOS_CONTROLLER != 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
+      - name: Run native objective
+        if: env.MACOS_CONTROLLER != 'true'
+        uses: ./.github/actions/macos-native-objective
+        with:
+          objective: lint_macos
+          source-directory: .
+          control-directory: .
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
-
-
-      # sccache via GitHub Actions Cache for github-hosted runners.
-      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-
-      - name: Restore Cargo registry
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+      - name: Check out reviewed macOS controller
+        if: env.MACOS_CONTROLLER == 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-${{ runner.os }}-${{ runner.arch }}-
+          ref: ${{ vars.CI_MACOS_WORKER_SHA }}
+          path: .ci-control
+          persist-credentials: false
+      - name: Coordinate macOS objective
+        if: env.MACOS_CONTROLLER == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_MACOS_WORKER_REF: ${{ vars.CI_MACOS_WORKER_REF }}
+          CI_MACOS_WORKER_SHA: ${{ vars.CI_MACOS_WORKER_SHA }}
+          CI_MACOS_PARENT_WORKFLOW_SHA256: ${{ vars.CI_MACOS_PARENT_WORKFLOW_SHA256 }}
+          CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED }}
+          CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST }}
+          CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS }}
+        run: python3 .ci-control/scripts/macos_fallback_controller.py --objective lint_macos
 
-      # `--all-targets`, kept in sync with `just clippy` and the `rust` job.
-      - name: Lint workspace
-        run: cargo clippy --workspace --all-targets --locked
-
-  # The workspace lint runs on macOS, so until this job existed no
-  # `#[cfg(target_os = "linux")]` code had ever been linted by anything: the
-  # Linux job next door runs one proof and no clippy. Every Linux-only path —
-  # the ALSA/PulseAudio device backend, landlock, the envd host's fd handling —
-  # was outside the gate that the rest of the tree is held to. Lint the same
-  # workspace from the other side so a policy violation cannot hide behind a
-  # target gate.
   lint_linux:
     name: Lint workspace (Linux)
     needs: [format, changes]

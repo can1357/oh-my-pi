@@ -17,3 +17,8 @@ fixtures/**
 rust-toolchain.toml
 rustfmt.toml
 tools/lintx/**
+.github/workflows/macos-verification.yml
+.github/actions/macos-*/**
+.github/workflows/ci.yml
+scripts/macos_*.py
+scripts/ci-macos-objective.sh

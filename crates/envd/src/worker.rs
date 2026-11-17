@@ -835,6 +835,7 @@ struct AgentsControlSlot {
 	next_id:            AtomicU64,
 	was_bound:          AtomicBool,
 	binding:            Mutex<Option<AgentsControlBinding>>,
+	continuations:      Mutex<Option<crate::tools::ContinuationBook>>,
 }
 
 impl AgentsControlSlot {
@@ -1770,6 +1771,12 @@ impl ExtHostSupervisor {
 			next_id:            AtomicU64::new(1),
 			was_bound:          AtomicBool::new(false),
 			binding:            Mutex::new(None),
+			continuations:      Mutex::new(
+				config
+					.hook_control
+					.as_ref()
+					.map(|hooks| hooks.continuations()),
+			),
 		});
 		let mut service_broker = ServiceBroker::new(config.session_generation);
 		for extension in &config.extensions {
@@ -2249,6 +2256,11 @@ impl ExtHostSupervisor {
 		&self,
 		factory: Arc<dyn ControlAuthorityFactory>,
 	) -> AgentsControlAuthorityBinding {
+		let factory = match self.agents_control.continuations.lock().clone() {
+			Some(book) => Arc::new(crate::tools::ContinuationAwareAgentsFactory::new(book, factory))
+				as Arc<dyn ControlAuthorityFactory>,
+			None => factory,
+		};
 		let id = self.agents_control.next_id.fetch_add(1, Ordering::Relaxed);
 		let mut binding = self.agents_control.binding.lock();
 		self.agents_control.was_bound.store(true, Ordering::Release);
@@ -2271,6 +2283,11 @@ impl ExtHostSupervisor {
 		agents: Arc<dyn ControlAuthorityFactory>,
 		domains: ExternalDomainControlFactories,
 	) -> ExternalControlAuthorityBinding {
+		let agents = match self.agents_control.continuations.lock().clone() {
+			Some(book) => Arc::new(crate::tools::ContinuationAwareAgentsFactory::new(book, agents))
+				as Arc<dyn ControlAuthorityFactory>,
+			None => agents,
+		};
 		let agents_id = self.agents_control.next_id.fetch_add(1, Ordering::Relaxed);
 		let domains_id = self.domain_control.next_id.fetch_add(1, Ordering::Relaxed);
 		let mut agents_binding = self.agents_control.binding.lock();

@@ -103,10 +103,14 @@ and on macOS a failed Seatbelt probe fails it.
 P8 remains a non-gating recorder: only its metric schema/arithmetic test
 gates. The measured performance baseline is recorded per omp2 push by
 `.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),
-never in a PR. Native CI jobs use standard GitHub-hosted `ubuntu-24.04` or
-`macos-15`, including `Rust workspace and acceptance proofs`, macOS lint and
-manual packaging. Runner variables no longer redirect these native jobs to
-a personal machine. The BuildBuddy-capable `lintx_ratchet`, `runtime_spec`,
+never in a PR. Native CI defaults to standard GitHub-hosted `ubuntu-24.04` or
+`macos-15`. The two required macOS jobs can opt into hosted-first Ubuntu
+controllers using `CI_MACOS_WORKER_REF` plus immutable `CI_MACOS_WORKER_SHA`;
+external PRs stay direct-hosted. Mac fallback additionally requires explicit
+accepted trust, a reviewed parent-workflow digest and confirmed runner labels;
+see `docs/research/ci-macos-queue-fallback/implementation.md`. It is disabled by
+default; never repurpose `MACOS_RUNNER` to enable it. Manual packaging remains
+hosted. The BuildBuddy-capable `lintx_ratchet`, `runtime_spec`,
 `remote_linux` and `remote_seed` jobs retain their existing variable-based
 launcher routing, fork protections, keys and remote execution; BuildBuddy caches
 and the P8 BuildBuddy job are unchanged. The historical fallback arrangement is

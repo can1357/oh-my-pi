@@ -1,5 +1,10 @@
 # Standard GitHub-hosted runner restoration
 
+Implementation follow-up: [macOS queue fallback](ci-macos-queue-fallback/implementation.md)
+adds opt-in hosted-first controllers/workers. Native CI remains directly hosted
+without that configuration; Linux/BuildBuddy routing is unchanged. This record's
+historical observations are not proof of live fallback activation.
+
 Date: 2026-11-14. Inspected base: `omp2`
 `374eb3a2b0e2149bc4890be40a3b9d5bae621aa5`.
 Owner instruction: use GitHub-hosted runners for native jobs; preserve BuildBuddy.

@@ -1013,7 +1013,10 @@ pub(in crate::server) fn production_control_authorities(
 		envd,
 	);
 	let external = ExternalControlAuthorities::new(
-		Arc::new(UnboundAgentsControlFactory),
+		Arc::new(crate::tools::ContinuationAwareAgentsFactory::new(
+			hooks.continuations(),
+			Arc::new(UnboundAgentsControlFactory),
+		)),
 		Arc::new(ProductionMcpControlFactory { mcp: Arc::clone(mcp) }),
 	);
 	ProductionControlBindings {
