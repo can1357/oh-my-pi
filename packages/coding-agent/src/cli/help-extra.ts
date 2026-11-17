@@ -60,6 +60,7 @@ export function getExtraHelpText(): string {
   SCW_SECRET_KEY             - Scaleway Generative APIs models
   OTARI_API_KEY              - Otari AI gateway (workspace models)
   OTARI_BASE_URL             - Otari self-hosted API root (e.g. https://host/api/v1)
+  KELN_API_KEY               - Keln open models
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)

@@ -22,6 +22,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// including its tariff and effort ladder, comes from the live /v1/models
 	// snapshot, so no rows are frozen into the bundled catalog.
 	"charm-hyper",
+	// Public discovery via kelnModelManagerOptions: every row, including its
+	// prices and effort levels, comes from the live /v1/models snapshot, so no
+	// rows are frozen into the bundled catalog.
+	"keln",
 	// Factory has no public model-listing endpoint. Its CLI roster is a
 	// `bundle="never"` KDL seed; factoryDroidModelManagerOptions serves it
 	// offline and narrows it by account flags/org policy live.

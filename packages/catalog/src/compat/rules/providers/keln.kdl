@@ -1,0 +1,43 @@
+// Keln deployment contract (https://docs.keln.ai).
+//
+// Capability data is not restated here: the public `GET /v1/models` publishes
+// each row's context window, modalities, reasoning controls, and per-token
+// prices, and `kelnModelManagerOptions` maps them from the live row. This file
+// holds only the facts that endpoint does not publish.
+provider "keln" {
+	default-model "zai-org/glm-5.3"
+	env "KELN_API_KEY"
+	// `/v1/models` is public, so the roster loads before a key is configured.
+	// Inference still requires a key.
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	// The Keln row describes this deployment. Same-id rows on other hosts carry
+	// other limits and effort levels, so the generator must not borrow them.
+	skip-cross-provider-reference-fills #true
+	// No `discovery` node: that node enrolls a provider in generate-models.ts,
+	// which would copy one snapshot of the roster and its prices into
+	// models.json. Keln's roster and prices are read live at runtime.
+
+	// Chat Completions dialect (https://docs.keln.ai/api/chat-completions/).
+	// `developer` is accepted and treated as `system`, so system prompts use
+	// `system`, and no `store` field is sent. Keln accepts `max_tokens` and
+	// `max_completion_tokens`.
+	supports-developer-role #false
+	supports-store #false
+	max-tokens-field "max_tokens"
+	thinking-mode "effort"
+	// Reasoning streams on `reasoning_content`, and Keln's docs ask clients to
+	// replay it on assistant turns so multi-turn tool calling keeps the reasoning.
+	reasoning-content-field "reasoning_content"
+	replay-reasoning-content #true
+	// `/v1/models` publishes no output cap. `max_tokens` covers reasoning plus
+	// answer, and prompt + `max_tokens` must fit `context_length`, or Keln
+	// answers `context_length_exceeded`, which omp treats as context overflow.
+	max-tokens-fallback 32768
+
+	// Keln takes OpenAI `reasoning_effort` on every model. The Qwen lineage
+	// default would send `enable_thinking` and drop the chosen effort.
+	class "qwen" {
+		thinking-format "openai"
+	}
+}
