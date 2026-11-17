@@ -7,7 +7,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionActions,
+	ExtensionContextActions,
+	ExtensionUIContext,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { TtsrCoordinator } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
@@ -268,8 +272,8 @@ describe("TTSR gate rules", () => {
 		);
 		const select = vi.fn(async () => "Approve");
 		runner.initialize(
-			{} as Parameters<ExtensionRunner["initialize"]>[0],
-			{} as Parameters<ExtensionRunner["initialize"]>[1],
+			{} as ExtensionActions,
+			{} as ExtensionContextActions,
 			undefined,
 			{ select } as unknown as ExtensionUIContext,
 		);

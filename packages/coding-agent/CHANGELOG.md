@@ -10,7 +10,7 @@
 
 - Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls approval allowed, such as deletions outside the working directory, force pushes, or uploads, and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - On Linux the tool guard also refuses heavy work (installs, builds, test suites) started while the host is strained by memory pressure, swapping, CPU saturation, I/O stalls, or a nearly full disk, and suggests moving it to another host or waiting ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
-- Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses the call; `onJudgeError` decides when the judge cannot answer
+- Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap
 - Added the `providers.webKeyless` setting (default on): turn it off and `web_search` and URL reading use only services you configured, skipping keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines even when your `web` chain lists them; `omp q --model web/<engine>` still runs one on request ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#16336](https://github.com/can1357/oh-my-pi/issues/16336))
 - Added `live.endpoint` and `live.apiKey` settings: live voice (`/live`, RPC `live_start`/`live_connect`, extension `startLive`) can run on any OpenAI Realtime WebRTC-compatible server instead of Codex, with no ChatGPT sign-in and in offline mode; `live.voice` accepts any voice name
 
@@ -20,7 +20,6 @@
 
 ### Changed
 
-- Judged TTSR rule (`question`) requests now count toward the session cost cap
 - Keyless Parallel web searches send only the query; they no longer include your session id or model id ([#13694](https://github.com/can1357/oh-my-pi/issues/13694))
 - On macOS the `computer` tool's takeover notice now says what it did with your keyboard ("handed the keyboard back to Notes's window", "left as the user chose") instead of "focus returned", which it could not verify ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `tab.observe()` and `tab.ariaSnapshot()` on Chromium tabs now wait, up to 3 seconds, for the requests and page updates (including child frames) the actions since your last look started, so a cell that clicks and then observes shows the result instead of the page before it; concurrent looks share the wait even across another action, clearing the request log does not discard pending work, and requests already open before the action do not delay the look ([#19045](https://github.com/can1357/oh-my-pi/pull/19045) by [@will-bogusz](https://github.com/will-bogusz))
