@@ -15,6 +15,7 @@ import type {
 	AssistantMessage,
 	CredentialDisabledEvent,
 	ImageContent,
+	Judge,
 	Model,
 	ProviderResponseMetadata,
 	TextContent,
@@ -34,6 +35,7 @@ import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import { journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../../judgment";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
@@ -144,6 +146,7 @@ export interface ToolCallPreflight {
 		context?: AgentToolContext,
 	) => Promise<AgentToolResult | undefined> | AgentToolResult | undefined;
 	cancel?: (toolCallId: string) => void;
+	judge?: (purpose: string, settings?: Settings) => Judge | undefined;
 }
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
@@ -911,6 +914,26 @@ export class ExtensionRunner {
 	 */
 	get sessionSettings(): Settings | undefined {
 		return this.settings;
+	}
+
+	/**
+	 * Resolve a {@link Judge} for session-owned preflight checks (`toolInterceptor`),
+	 * billed to this session's usage ledger and backed by the shared judgment cache.
+	 */
+	getJudge(purpose = "tool-interceptor", settingsOverride?: Settings): Judge | undefined {
+		const preflightJudge = this.#toolCallPreflight?.judge?.(purpose, settingsOverride);
+		if (preflightJudge) return preflightJudge;
+		const effectiveSettings = settingsOverride ?? this.settings;
+		if (!effectiveSettings || !this.modelRegistry) return undefined;
+		return resolveJudge({
+			settings: effectiveSettings,
+			registry: this.modelRegistry,
+			sessionModel: this.#getModel(),
+			sessionId: this.sessionManager?.getSessionId?.(),
+			purpose,
+			onUsage: journalJudgmentUsage(this.sessionManager),
+			cache: sharedJudgmentCache(),
+		});
 	}
 
 	initialize(

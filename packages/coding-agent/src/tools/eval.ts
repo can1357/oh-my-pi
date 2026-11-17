@@ -77,8 +77,7 @@ import {
 import { cfgTaskMaxRecursionDepth, perCallModelEnabled } from "../task/settings";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "../task/model-approval";
 import { shapeToolResult } from "../spotlight";
-import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
-
+import { cfgToolInterceptorEnabled, cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
 const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
@@ -472,6 +471,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				// belong to the read/eval speculation slice only.
 				if (!cfgToolsSpeculativeExecutionEnabled.get(this.session.settings)) return undefined;
 				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
+				if (cfgToolInterceptorEnabled.get(this.session.settings)) return undefined;
 				const parentToolCallId = context.parentToolCallId;
 				const cell = new EvalShadowCellSession({
 					coordinator: context.coordinator,

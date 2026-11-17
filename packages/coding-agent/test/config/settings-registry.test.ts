@@ -17,6 +17,7 @@ import { cfgSteeringMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { cfgEditFuzzyMatch, cfgEditModelVariants } from "@oh-my-pi/pi-coding-agent/edit/settings";
 import { cfgTaskMaxConcurrency } from "@oh-my-pi/pi-coding-agent/task/settings";
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { cfgToolInterceptorRules, DEFAULT_TOOL_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { cfgSearxngBasicPassword, cfgSearxngEndpoint } from "@oh-my-pi/pi-coding-agent/web/settings";
 import {
@@ -472,6 +473,14 @@ describe("settings registry", () => {
 							},
 						],
 					},
+					toolInterceptor: {
+						rules: [
+							{
+								pathPrefix: repoA,
+								rules: [{ tools: ["eval"], pattern: "\\brepoAHelper\\s*\\(", message: "Use read in repo-a." }],
+							},
+						],
+					},
 				}),
 			);
 
@@ -485,6 +494,10 @@ describe("settings registry", () => {
 				{ pattern: "^\\s*repo-a-tool\\b", tool: "read", message: "Use read in repo-a." },
 				...DEFAULT_BASH_INTERCEPTOR_RULES,
 			]);
+			expect(cfgToolInterceptorRules.get(settings)).toEqual([
+				{ tools: ["eval"], pattern: "\\brepoAHelper\\s*\\(", message: "Use read in repo-a." },
+				...DEFAULT_TOOL_INTERCEPTOR_RULES,
+			]);
 
 			await settings.reloadForCwd(repoB);
 			expect(cfgBashPatterns.get(settings)).toEqual([
@@ -492,6 +505,7 @@ describe("settings registry", () => {
 				{ match: "git status*", approval: "allow" },
 			]);
 			expect(cfgBashInterceptorPatterns.get(settings)).toEqual(DEFAULT_BASH_INTERCEPTOR_RULES);
+			expect(cfgToolInterceptorRules.get(settings)).toEqual(DEFAULT_TOOL_INTERCEPTOR_RULES);
 		} finally {
 			await dir.remove();
 		}
@@ -580,6 +594,9 @@ describe("settings registry", () => {
 					bashInterceptor: {
 						patterns: [{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." }],
 					},
+					toolInterceptor: {
+						rules: [{ tools: ["eval"], pattern: "\\bcustomEval\\s*\\(", message: "Use read." }],
+					},
 				}),
 			);
 			await Bun.write(
@@ -607,6 +624,10 @@ describe("settings registry", () => {
 			expect(cfgBashInterceptorPatterns.get(settings)).toEqual([
 				{ pattern: "^\\s*custom\\s+", tool: "read", message: "Use read." },
 				...DEFAULT_BASH_INTERCEPTOR_RULES,
+			]);
+			expect(cfgToolInterceptorRules.get(settings)).toEqual([
+				{ tools: ["eval"], pattern: "\\bcustomEval\\s*\\(", message: "Use read." },
+				...DEFAULT_TOOL_INTERCEPTOR_RULES,
 			]);
 
 			// Runtime overrides still replace the effective list wholesale until cleared.

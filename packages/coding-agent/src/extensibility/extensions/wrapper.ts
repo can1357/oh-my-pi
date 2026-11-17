@@ -27,6 +27,8 @@ import { getApprovalGrants } from "../../tools/approval-cache";
 import { withToolApprovalScope } from "../../tools/approval-scope";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
+import { checkToolInterception } from "../../tools/tool-interceptor";
+import { cfgToolInterceptorEnabled, cfgToolInterceptorRules } from "../../tools/settings";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -372,6 +374,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			cancelPreflight();
 			throw denyError(resolved, this.tool.name);
 		}
+		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// Outer approvals only cover the original input. `xd://` approval skips
 		// tier-only prompts, and an explicit prompt under the policy key the outer
@@ -383,7 +386,6 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const policyKey = resolved.policyKey ?? this.tool.name;
 		const explicitPrompt =
 			resolved.override || (Object.hasOwn(userPolicies, policyKey) && policyKey !== context?.xdevPolicyKey);
-		const xdevBypass = context?.xdevPolicyKey !== undefined && effectiveParams === params;
 		const acpBypass =
 			context !== undefined &&
 			Object.hasOwn(context, "acpApprovedArgs") &&
@@ -407,6 +409,36 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				(resolved.policy === "prompt" && !acpBypass && !sessionApproved && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
+		const interceptorEnabled = approvalSettings ? cfgToolInterceptorEnabled.get(approvalSettings) : false;
+		if (interceptorEnabled && approvalSettings && !xdevBypass) {
+			const aliases = [resolved.policyKey, this.tool.customWireName].filter(
+				(alias): alias is string => typeof alias === "string" && alias.length > 0 && alias !== this.tool.name,
+			);
+			const interception = await untilAborted(signal, () =>
+				checkToolInterception(this.tool.name, resolvedArgs, {
+					availableTools: context?.toolNames,
+					toolAliases: aliases,
+					policy: approvalCheck.required ? "prompt" : "allow",
+					rules: cfgToolInterceptorRules.get(approvalSettings),
+					judge: () => this.runner.getJudge?.("tool-interceptor", approvalSettings),
+					signal,
+				}),
+			);
+			if (interception.block) {
+				cancelPreflight();
+				throw denyError(
+					{
+						policy: "deny",
+						tier: resolved.tier,
+						override: true,
+						source: "tool",
+						reason: interception.message,
+						...(resolved.policyKey ? { policyKey: resolved.policyKey } : {}),
+					},
+					this.tool.name,
+				);
+			}
+		}
 
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
