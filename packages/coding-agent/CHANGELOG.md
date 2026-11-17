@@ -392,6 +392,10 @@
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
 - An instruction file that leaves a code fence open has it closed at its end, so the rest of the system prompt is formatted as usual ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
+- Fixed Claude not seeing the reasoning of earlier Codex, Kimi, Grok and other non-Claude turns after a model switch, including turns kept through a compaction; it now gets that reasoning as text. When Claude refuses a turn with `Refusal (reasoning_extraction)` because of that carried reasoning, the turn is retried once without it, and the session stops sending it to Claude ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 
