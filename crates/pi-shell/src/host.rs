@@ -300,6 +300,8 @@ pub struct PiHost {
 	pipe_tap: Option<Arc<dyn crate::bash::PipeTap>>,
 	/// Observes the events of the command being run.
 	events:   Option<Arc<dyn crate::bash::EventSink>>,
+	/// The guard of the `kill` command being run; `None` between commands.
+	signals:  Option<SignalGuard>,
 }
 
 /// What launching an external needs of a [`PiHost`], owned and cheap to
@@ -458,6 +460,7 @@ impl PiHost {
 			vfs: None,
 			pipe_tap: None,
 			events: None,
+			signals: None,
 		}
 	}
 
@@ -633,7 +636,10 @@ impl crate::bash::Host for PiHost {
 	fn signal_process(&mut self, pid: i32, signal: Option<Signal>) -> io::Result<()> {
 		// As pi's `kill`: `-0` only probes, so it may name anything.
 		if signal.is_some() {
-			check_signal_target(pid)?;
+			match &self.signals {
+				Some(guard) => guard.check(pid)?,
+				None => check_signal_target(pid)?,
+			}
 		}
 		#[cfg(unix)]
 		{
@@ -651,6 +657,14 @@ impl crate::bash::Host for PiHost {
 			let _ = signal;
 			Err(io::ErrorKind::Unsupported.into())
 		}
+	}
+
+	fn begin_signals(&mut self) {
+		self.signals = Some(SignalGuard::default());
+	}
+
+	fn end_signals(&mut self) {
+		self.signals = None;
 	}
 
 	fn pipe_tap(&mut self) -> Option<Arc<dyn crate::bash::PipeTap>> {
@@ -814,30 +828,57 @@ impl crate::bash::Host for PiHost {
 ///
 /// `PermissionDenied` for a protected target.
 pub fn check_signal_target(pid: i32) -> io::Result<()> {
-	let refused = || {
-		// pi's wording (`kill: (PID) - refusing to signal the shell process`).
-		Err(io::Error::new(io::ErrorKind::PermissionDenied, "refusing to signal the shell process"))
-	};
-	if pid == 0 || pid == -1 {
-		return refused();
-	}
-	let protected = protected_processes();
-	let hit = if pid > 0 {
-		protected.iter().any(|&(p, _)| p == pid)
-	} else {
-		protected.iter().any(|&(_, g)| g == -pid)
-	};
-	if hit {
-		return refused();
-	}
+	SignalGuard::default().check(pid)
+}
+
+/// [`check_signal_target`] for the operands of one `kill` command: the peer
+/// sessions are resolved at the first operand that needs them and reused for
+/// the rest, so a command walks the process table once, not once per operand.
+/// Each command gets a new guard ([`crate::bash::Host::begin_signals`]).
+#[derive(Default)]
+struct SignalGuard {
 	#[cfg(any(target_os = "linux", target_os = "macos"))]
-	if pi_builtins::PeerSessions::resolve().blocks(pid) {
-		return Err(io::Error::new(
-			io::ErrorKind::PermissionDenied,
-			"refusing to signal another session of this program",
-		));
+	peers: OnceCell<pi_builtins::PeerSessions>,
+}
+
+impl SignalGuard {
+	#[cfg_attr(
+		not(any(target_os = "linux", target_os = "macos")),
+		allow(clippy::unused_self, reason = "only Linux and macOS check peers")
+	)]
+	fn check(&self, pid: i32) -> io::Result<()> {
+		let refused = || {
+			// pi's wording (`kill: (PID) - refusing to signal the shell process`).
+			Err(io::Error::new(
+				io::ErrorKind::PermissionDenied,
+				"refusing to signal the shell process",
+			))
+		};
+		if pid == 0 || pid == -1 {
+			return refused();
+		}
+		let protected = protected_processes();
+		let hit = if pid > 0 {
+			protected.iter().any(|&(p, _)| p == pid)
+		} else {
+			protected.iter().any(|&(_, g)| g == -pid)
+		};
+		if hit {
+			return refused();
+		}
+		#[cfg(any(target_os = "linux", target_os = "macos"))]
+		if self
+			.peers
+			.get_or_init(pi_builtins::PeerSessions::resolve)
+			.blocks(pid)
+		{
+			return Err(io::Error::new(
+				io::ErrorKind::PermissionDenied,
+				"refusing to signal another session of this program",
+			));
+		}
+		Ok(())
 	}
-	Ok(())
 }
 
 /// This process and its ancestors with their process groups, nearest first.

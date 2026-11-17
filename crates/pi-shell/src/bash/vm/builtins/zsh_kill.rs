@@ -219,6 +219,7 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		Err(_) => None,
 	};
 	let mut status: i32 = 0;
+	ctx.cx.host.begin_signals();
 	for arg in rest {
 		let is_job = arg.first() == Some(&b'%');
 		if !is_job && !isanum(arg) {
@@ -285,5 +286,6 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			status += 1;
 		}
 	}
+	ctx.cx.host.end_signals();
 	done(if status < 126 { status } else { 1 })
 }
