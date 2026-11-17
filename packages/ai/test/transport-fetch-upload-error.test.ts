@@ -160,6 +160,34 @@ describe("transportFetch connection lost before a response", () => {
 		);
 	});
 
+	it("says a response reached through a 307 was redirected, after sending the body again", async () => {
+		const requests: string[] = [];
+		const target = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response("done");
+			},
+		});
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${target.port}/done` } });
+			},
+		});
+		servers.push({ close: () => server.stop(true) }, { close: () => target.stop(true) });
+		const fetch = transportFetch(testModel("openai", "openai-responses"), undefined);
+
+		const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, { method: "POST", body: BODY });
+
+		expect(await response.text()).toBe("done");
+		expect(response.redirected).toBe(true);
+		expect(requests).toEqual([`POST ${BODY.length}`, `POST ${BODY.length}`]);
+	});
+
 	it("follows a cross-origin 303 as a GET without the body or credentials", async () => {
 		const requests: string[] = [];
 		const target = Bun.serve({
