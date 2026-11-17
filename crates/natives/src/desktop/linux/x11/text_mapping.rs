@@ -2,6 +2,7 @@
 //! the sending request completes, so an idle binding stays live until eviction.
 use std::{
 	cell::Cell,
+	collections::HashSet,
 	sync::Arc,
 	time::{Duration, Instant},
 };
@@ -104,42 +105,57 @@ impl TextMapping {
 			.collect()
 	}
 
-	fn native(&self, map: &Keymap, symbol: u32) -> bool {
+	/// Keysyms the layout types on its own rows' first two levels; our rows
+	/// do not count.
+	fn natives(&self, map: &Keymap) -> HashSet<u32> {
 		let width = usize::from(map.keysyms_per_keycode);
-		width != 0
-			&& map
-				.keysyms
-				.chunks_exact(width)
-				.enumerate()
-				.any(|(index, row)| {
-					let code = usize::from(map.min_keycode) + index;
-					row.iter().take(2).any(|&candidate| candidate == symbol)
-						&& !self.bound.iter().any(|binding| {
-							usize::from(binding.code) == code
-								&& row_matches(map, binding.code, binding.symbol)
-						})
+		if width == 0 {
+			return HashSet::new();
+		}
+		map.keysyms
+			.chunks_exact(width)
+			.enumerate()
+			.filter(|&(index, _)| {
+				let code = usize::from(map.min_keycode) + index;
+				!self.bound.iter().any(|binding| {
+					usize::from(binding.code) == code && row_matches(map, binding.code, binding.symbol)
 				})
+			})
+			.flat_map(|(_, row)| row.iter().take(2).copied())
+			.collect()
 	}
 
+	/// The grab covers only the keymap reads: splitting a long text under it
+	/// would stall every X client. `bind` re-reads the keymap under its own
+	/// grab before it writes.
 	pub(super) fn plan<'a>(&self, map: &mut Keymap, text: &'a str) -> CoreResult<Vec<&'a str>> {
-		let conn = Arc::clone(&self.conn);
-		let _grab = ServerGrab::new(&conn)?;
-		let (fresh, other) = self.snapshots(map)?;
+		let (fresh, other) = {
+			let _grab = ServerGrab::new(&self.conn)?;
+			self.snapshots(map)?
+		};
 		let capacity = self.available(&fresh, other.as_ref()).len();
-		let result = segments(text, capacity, |symbol| !self.native(&fresh, symbol));
+		let natives = self.natives(&fresh);
+		let result = segments(text, capacity, |symbol| !natives.contains(&symbol));
 		*map = fresh;
 		result
 	}
 
 	/// Wait outside `GrabServer`: the target must be able to consume old keys.
+	/// The text is read before the grab; under it only its distinct keysyms are.
 	pub(super) fn bind(&mut self, map: &mut Keymap, text: &str) -> CoreResult<()> {
+		let symbols = symbols(text);
 		loop {
 			control::check()?;
 			let conn = Arc::clone(&self.conn);
 			let grab = ServerGrab::new(&conn)?;
 			let (fresh, other) = self.snapshots(map)?;
 			let available = self.available(&fresh, other.as_ref());
-			let required = symbols(text, |symbol| !self.native(&fresh, symbol));
+			let natives = self.natives(&fresh);
+			let required: Vec<u32> = symbols
+				.iter()
+				.copied()
+				.filter(|symbol| !natives.contains(symbol))
+				.collect();
 			if required.len() > available.len() {
 				return Err(no_rows(required.len(), available.len()));
 			}
@@ -155,6 +171,8 @@ impl TextMapping {
 				})
 				.map(|last| last + REBIND_GRACE)
 				.max();
+			// The input lease stays held through this wait: releasing it between
+			// segments would let another session's keys land inside this text.
 			if let Some(until) = until
 				&& let Some(wait) = until.checked_duration_since(Instant::now())
 			{
@@ -280,15 +298,13 @@ impl Drop for TextMapping {
 	}
 }
 
-fn symbols(text: &str, mut dynamic: impl FnMut(u32) -> bool) -> Vec<u32> {
-	let mut result = Vec::new();
-	for ch in text.chars() {
-		let symbol = keysym_for_key(KeyName::Char(ch));
-		if dynamic(symbol) && !result.contains(&symbol) {
-			result.push(symbol);
-		}
-	}
-	result
+fn symbols(text: &str) -> Vec<u32> {
+	let mut seen = HashSet::new();
+	text
+		.chars()
+		.map(|ch| keysym_for_key(KeyName::Char(ch)))
+		.filter(|&symbol| seen.insert(symbol))
+		.collect()
 }
 
 fn segments(
@@ -297,7 +313,7 @@ fn segments(
 	mut dynamic: impl FnMut(u32) -> bool,
 ) -> CoreResult<Vec<&str>> {
 	let mut result = Vec::new();
-	let mut required = Vec::new();
+	let mut required = HashSet::new();
 	let mut start = 0;
 	for (index, ch) in text.char_indices() {
 		control::check()?;
@@ -311,7 +327,7 @@ fn segments(
 				start = index;
 				required.clear();
 			}
-			required.push(symbol);
+			required.insert(symbol);
 		}
 	}
 	if start < text.len() {
