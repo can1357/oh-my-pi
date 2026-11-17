@@ -345,7 +345,7 @@ behavior {
     exclude-discovery-modes "embedding" "moderation" provider="litellm"
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
-    retry-reset-timezone provider="zai" offset="+08:00"
+    retry-reset-timezone provider="zhipu-coding-plan" base-url="https://open.bigmodel.cn/api/coding/paas/v4" offset="+08:00"
     pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
         alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
     }
@@ -355,6 +355,8 @@ behavior {
     }
 }
 ```
+
+`retry-reset-timezone` matches the provider ID first; `base-url` also applies its offset to custom IDs using the same upstream endpoint. An explicit timezone in the response overrides either assumption.
 
 `exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
 

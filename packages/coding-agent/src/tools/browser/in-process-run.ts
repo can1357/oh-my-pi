@@ -52,8 +52,8 @@ export interface InProcessRunTab {
 	ensureRuntime(session: SessionSnapshot): JsRuntime;
 	/** Publish the active run to the facades. */
 	setRunContext(context: InProcessRunContext): void;
-	/** Forget the finished run. */
-	clearRunContext(): void;
+	/** Forget finished run `context`; a later run's context stays (a run can end after its call gave up on it). */
+	clearRunContext(context: InProcessRunContext): void;
 }
 
 /** Inputs of {@link runInProcessTab}. */
@@ -134,7 +134,11 @@ postmortem.interceptUnhandledRejections(consumeRunRejection);
 export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOptions): Promise<RunResultOk> {
 	const deadline = Date.now() + opts.timeoutMs;
 	const runAc = new AbortController();
-	const timeoutSignal = AbortSignal.timeout(opts.timeoutMs);
+	// A plain timer, not `AbortSignal.timeout`: under Bun that signal's timer may never fire while the run awaits a
+	// promise that never settles (see `raceWithTimeout` in the tab supervisor), which would hold the tab busy.
+	const timeoutAc = new AbortController();
+	const timeoutTimer = setTimeout(() => timeoutAc.abort(), opts.timeoutMs);
+	const timeoutSignal = timeoutAc.signal;
 	const signal = AbortSignal.any(
 		opts.signal ? [timeoutSignal, opts.signal, runAc.signal] : [timeoutSignal, runAc.signal],
 	);
@@ -145,7 +149,15 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 	const filename = `${tab.runLabel}-${runId}.js`;
 	const activeRun: ActiveRun = { filename, floatingRejections: [] };
 	activeRuns.set(filename, activeRun);
-	tab.setRunContext({ session: opts.snapshot, output, screenshots, signal, timeoutMs: opts.timeoutMs, deadline });
+	const runContext: InProcessRunContext = {
+		session: opts.snapshot,
+		output,
+		screenshots,
+		signal,
+		timeoutMs: opts.timeoutMs,
+		deadline,
+	};
+	tab.setRunContext(runContext);
 
 	const { promise: cancelRejection, reject } = Promise.withResolvers<never>();
 	// If the synchronous setup below throws (same-realm ownership conflict)
@@ -278,12 +290,13 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 		}
 		return { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots };
 	} finally {
+		clearTimeout(timeoutTimer);
 		runActive = false;
 		uninstallRejectionInterceptor();
 		signal.removeEventListener("abort", onAbort);
 		runAc.abort(runEndedError);
 		activeRuns.delete(filename);
 		rememberRunFile(filename);
-		tab.clearRunContext();
+		tab.clearRunContext(runContext);
 	}
 }

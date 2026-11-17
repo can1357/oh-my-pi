@@ -23,7 +23,12 @@ auth "openai-codex" {
 		after-exchange hook="openai-codex-profile"
 	}
 	refresh {
-		token url="https://auth.openai.com/oauth/token" body="form" timeout-ms=15000
+		token url="https://auth.openai.com/oauth/token" body="form" timeout-ms=15000 {
+			// AuthAPI refresh diagnostics, as codex-rs sends them (openai/codex#53991).
+			params {
+				refresh_reason "{refresh_reason}"
+			}
+		}
 		credential {
 			access "access_token"
 			refresh "refresh_token"

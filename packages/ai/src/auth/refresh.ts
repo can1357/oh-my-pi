@@ -1073,9 +1073,9 @@ export class OAuthRefresher {
 						provider,
 					});
 				}
-				refreshPromise = customProvider.refreshToken(credential, signal);
+				refreshPromise = customProvider.refreshToken(credential, signal, reason);
 			} else {
-				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal);
+				refreshPromise = refreshOAuthToken(provider as OAuthProvider, credential, signal, reason);
 			}
 		}
 		// Stop awaiting after `timeoutMs` or on `signal`. Leased exchanges pass no
