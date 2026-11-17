@@ -115,6 +115,10 @@ Settings:
 - `retry.maxDelayMs` (default `300000`, 5 minutes; `<= 0` disables the fail-fast cap)
 - `retry.waitForUsageReset` (default `false`; allows provider-timed usage resets to exceed the delay cap)
 
+Subagents can set a separate session retry budget with `task.maxRetries`. Its default, `-1`, leaves the parent's live `retry.maxRetries` setting inherited. A non-negative integer replaces that budget for newly built child sessions, including nested workers and cold revival; explicit per-spawn `retry.maxRetries` overrides still win. `0` disables same-model session retries, while configured credential recovery and model fallback remain available under the existing retry policy. The parent session is unaffected.
+
+This budget also affects provider-block waits and when the retry policy consults fallback models. It does not limit HTTP or replay-safe provider retries inside one session attempt: a persistent-503 probe of the OpenAI-compatible completions path still made 12 HTTP requests with `task.maxRetries: 0`; other error and empty-completion combinations can make more. Use `task.maxRuntimeMs` to bound the whole subagent run by wall-clock time.
+
 Attempt numbering:
 
 - attempt counter is incremented before max-check
