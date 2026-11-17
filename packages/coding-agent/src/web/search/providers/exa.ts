@@ -401,6 +401,13 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 		storedKey && params.authStorage
 			? params.authStorage.keys.resolver("exa", { sessionId: params.sessionId })
 			: getEnvApiKey("exa");
+	// A failed credential lookup must not downgrade a configured user to the anonymous MCP.
+	if (!keyOrResolver && params.authStorage?.keys.source("exa") !== undefined) {
+		throw new SearchProviderError(
+			"exa",
+			"Exa credentials could not be resolved. Check your configured API key or credential helper.",
+		);
+	}
 	const response = keyOrResolver
 		? await withAuth(keyOrResolver, key => callExaSearch(key, params), { signal: params.signal })
 		: await callExaMcpSearch(params);
@@ -457,6 +464,10 @@ export class ExaProvider extends SearchProvider {
 			// Settings may be unavailable before CLI initialization; assume not disabled.
 		}
 		return true;
+	}
+
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return authStorage.keys.source("exa") === undefined;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
