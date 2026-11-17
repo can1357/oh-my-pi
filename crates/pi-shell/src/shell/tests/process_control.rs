@@ -1492,6 +1492,40 @@ async fn spawn_peer_session(command: &std::path::Path, duration: Duration) -> Pe
 	PeerSession::open(pid)
 }
 
+/// Like [`spawn_peer_session`], but the copy runs under a shell that waits
+/// for it, and both are in a process group of their own: the shell is a
+/// process a peer runs under that is not ours, and the group belongs to no
+/// process in our own chain, so only the peer rule can refuse either.
+/// Returns the shell and the copy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn spawn_grouped_peer_session(
+	command: &std::path::Path,
+	duration: Duration,
+) -> (PeerSession, PeerSession) {
+	let duration_ms = u64::try_from(duration.as_millis()).expect("test duration fits u64");
+	let output = Command::new("/bin/sh")
+		.args(["-c", "/bin/sh -c \"$1\" \"$0\" & echo \"ancestor $!\""])
+		.arg(command)
+		.arg(
+			"\"$0\" --ignored --exact shell::tests::process_test_sleeper </dev/null >/dev/null 2>&1 \
+			 & echo \"peer $!\"; exec </dev/null >/dev/null 2>&1; wait",
+		)
+		.env("PI_SHELL_PROCESS_TEST_SLEEP_MS", duration_ms.to_string())
+		.process_group(0)
+		.output()
+		.await
+		.expect("peer launcher");
+	assert!(output.status.success(), "peer launcher failed: {output:?}");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	let pid = |label: &str| -> i32 {
+		stdout
+			.lines()
+			.find_map(|line| line.strip_prefix(label)?.strip_prefix(' ')?.parse().ok())
+			.unwrap_or_else(|| panic!("{label} pid in {stdout:?}"))
+	};
+	(PeerSession::open(pid("ancestor")), PeerSession::open(pid("peer")))
+}
+
 /// A detached peer is nobody's child here, so nothing reaps it on drop. The
 /// handle is pinned to the process it opened (a pidfd on Linux, the start
 /// time on macOS), so neither the probe nor the cleanup can reach a process
@@ -1607,4 +1641,57 @@ async fn kill_builtin_refuses_peer_sessions_but_not_own_copies() {
 		own_copy_status.is_ok_and(|status| status.is_ok_and(|status| !status.success())),
 		"{output:?}"
 	);
+}
+
+/// `kill` of a peer's process group, or of a process a peer runs under, fails
+/// the way `kill` of the peer does, and neither is signalled; an own copy
+/// named in the same command is still signalled. The peer leads a group of
+/// its own, so the guard of our own group cannot be what refuses it. `TERM`
+/// shows a regression as a dead peer, and reaches only this test's processes.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_builtin_refuses_peer_groups_and_ancestors() {
+	let (_dir, command, name) = process_test_command("okgroup");
+	let (ancestor, peer) = spawn_grouped_peer_session(&command, Duration::from_secs(30)).await;
+	let mut own_copy = process_test_child(&command, Duration::from_secs(30))
+		.spawn()
+		.expect("own copy of the program");
+	let own_copy_pid = i32::try_from(own_copy.id().expect("own copy pid")).expect("pid fits i32");
+	wait_for_process_name(peer.pid(), &name).await;
+	wait_for_process_name(own_copy_pid, &name).await;
+	let group = peer.0.group_id().expect("peer process group");
+	// SAFETY: getpgrp has no preconditions.
+	assert_ne!(group, unsafe { libc::getpgrp() }, "the peer must not share our process group");
+
+	let (result, output) = execute_captured(format!(
+		"kill -TERM -- -{group} {ancestor} {own_copy_pid}; printf 'kill=%s\n' \"$?\"",
+		ancestor = ancestor.pid()
+	))
+	.await;
+
+	let own_copy_status = time::timeout(Duration::from_secs(10), own_copy.wait()).await;
+	let _ = own_copy.start_kill();
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	assert!(
+		output.contains(&format!("(-{group}) - refusing to signal another session of this program")),
+		"the peer's group must be refused by the peer rule: {output:?}"
+	);
+	assert!(
+		output.contains(&format!(
+			"({}) - refusing to signal another session of this program",
+			ancestor.pid()
+		)),
+		"a process a peer runs under must be refused: {output:?}"
+	);
+	assert!(
+		!output.contains("refusing to signal the shell process"),
+		"neither target is in our own chain: {output:?}"
+	);
+	assert!(output.contains("kill=1"), "{output:?}");
+	assert!(
+		own_copy_status.is_ok_and(|status| status.is_ok_and(|status| !status.success())),
+		"an own copy in the same command must still be signalled: {output:?}"
+	);
+	assert!(peer.is_alive(), "the peer's group must not be signalled: {output:?}");
+	assert!(ancestor.is_alive(), "the peer's ancestor must not be signalled: {output:?}");
 }
