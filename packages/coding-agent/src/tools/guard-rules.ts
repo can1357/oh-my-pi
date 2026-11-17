@@ -1090,11 +1090,26 @@ function writingReaderWords(command: ShellCommand): string[] {
 	return [...words, ...operands];
 }
 
-/** A plain reader's arguments, without its {@link KEY_VALUE_OPTIONS} (long options only) and their values. */
+/**
+ * Options of plain readers whose value is a file they write, not read (`openssl genrsa -out
+ * ~/.ssh/deploy.pem`, `gpg --output pub.asc --export`), as each reader spells them: openssl takes
+ * its long options after one dash or two.
+ */
+const READER_OUTPUT_OPTIONS: Record<string, readonly string[]> = {
+	openssl: ["-out", "--out", "-keyout", "--keyout"],
+	gpg: ["-o", "--output"],
+};
+
+/**
+ * A plain reader's arguments, without the values of its {@link KEY_VALUE_OPTIONS} (long options
+ * only) and {@link READER_OUTPUT_OPTIONS}, given in the next word or after an `=`.
+ */
 function readerArgs(command: ShellCommand): string[] {
+	const name = command.argv[0];
 	const argv = args(command);
-	if (!Object.hasOwn(KEY_VALUE_OPTIONS, command.argv[0])) return argv;
-	const keys = KEY_VALUE_OPTIONS[command.argv[0]];
+	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, name) ? KEY_VALUE_OPTIONS[name] : [];
+	const outputs = Object.hasOwn(READER_OUTPUT_OPTIONS, name) ? READER_OUTPUT_OPTIONS[name] : [];
+	if (keys.length === 0 && outputs.length === 0) return argv;
 	const words: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -1103,7 +1118,8 @@ function readerArgs(command: ShellCommand): string[] {
 			break;
 		}
 		const eq = arg.indexOf("=");
-		if (arg.startsWith("--") && keys.includes(eq > 0 ? arg.slice(0, eq) : arg)) {
+		const option = eq > 0 ? arg.slice(0, eq) : arg;
+		if ((arg.startsWith("--") && keys.includes(option)) || outputs.includes(option)) {
 			if (eq < 0) i++;
 			continue;
 		}

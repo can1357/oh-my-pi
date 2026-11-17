@@ -852,4 +852,21 @@ describe("guard rule regressions", () => {
 		// Each string can hold another; past the depth bound the guard fails closed.
 		expect(ruleOf(bashApproval(cwd, `env ${"-S".repeat(50_000)}cat`))).toBe("nesting_limit");
 	});
+
+	it("does not count the file `openssl -out` or `gpg --output` writes as read", () => {
+		for (const command of [
+			"openssl genrsa -out ~/.ssh/deploy.pem 2048",
+			"openssl req -new -keyout ~/.ssh/client.key -out ~/.ssh/client.csr",
+			"gpg --batch --yes --output ~/.gnupg/pub.asc --export me@example.com",
+			"gpg -o ~/.gnupg/pub.asc --export me@example.com",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
+		for (const command of [
+			"openssl rsa -in ~/.ssh/id_rsa -out /tmp/key.pem",
+			"gpg -o /tmp/token -d ~/.password-store/github.gpg",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
 });

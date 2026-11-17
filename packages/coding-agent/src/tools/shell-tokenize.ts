@@ -1053,7 +1053,7 @@ export interface ParsedShellScript {
 	/**
 	 * True when something nested deeper than {@link SHELL_SCRIPT_MAX_DEPTH} levels, or past
 	 * {@link SHELL_SCRIPT_MAX_NESTED_TEXT} characters of nested script, was left unparsed, possibly
-	 * with the rest of the text after it, or when heredocs whose delimiter line never comes took
+	 * with the rest of the text after it, when heredocs whose delimiter line never comes took
 	 * more than {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH} characters of searching, so later ones were
 	 * not read as heredocs, or when a command had more than {@link SHELL_SCRIPT_MAX_DEPTH} `env -S`
 	 * strings, so the later ones were not split.
