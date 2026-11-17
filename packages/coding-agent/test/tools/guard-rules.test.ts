@@ -182,6 +182,16 @@ describe("credential_read for file tools", () => {
 		expect(read.approval({ path: "~/.ssh/id_rsa.pub" })).toBe("read");
 		expect(grep.approval({ pattern: "token", path: "src" })).toBe("read");
 	});
+
+	it("checks a grep root as execution trims and unquotes it", () => {
+		const grep = new GrepTool(createSession(temp.path()));
+		for (const root of ['"~/.config/gh"', "  ~/.ssh  ", ' "~/.aws/credentials" ']) {
+			expect({ root, rule: ruleOf(grep.approval({ pattern: "token", path: root })) }).toEqual({
+				root,
+				rule: "credential_read",
+			});
+		}
+	});
 });
 
 describe("tools.guardRules", () => {
