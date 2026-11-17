@@ -1,0 +1,3 @@
+upstream = "no"
+layer = 70
+reason = "Park guard for an active goal: the terminal-park extension keeps the process while sessionModes reports goal status active, so a session that owns unfinished work is never frozen waiting for a keystroke. Adds the sessionModes accessor to the extension context and the goal keep reason."
