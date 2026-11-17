@@ -526,6 +526,11 @@ export interface StreamOptions {
 	 */
 	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/**
+	 * Leave other models' reasoning, which would replay as text, out of the
+	 * request. Anthropic Messages only; other providers ignore it.
+	 */
+	omitDemotedReasoning?: boolean;
+	/**
 	 * Anthropic on-demand compaction (`compact-2026-09-04` beta). Sends a
 	 * top-level `compaction: { type: "summarize", instructions? }` request; the
 	 * signed summary arrives as an {@link AnthropicCompactionPayload}.
@@ -1426,6 +1431,8 @@ export interface AssistantMessage {
 	providerPayload?: ProviderPayload;
 	/** In-memory fallback credit handle attached when a refusal response carries a fallback credit token. */
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
+	/** On a refusal: how many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 	timestamp: number; // Unix timestamp in milliseconds
 	duration?: number; // Request duration in milliseconds
 	ttft?: number; // Time to first token in milliseconds
@@ -1802,4 +1809,6 @@ export interface AnthropicFallbackCreditHandle {
 	expiresAt: number;
 	/** The refused response's content, in `AssistantMessage` block form. */
 	refusedContent?: AssistantMessage["content"];
+	/** How many of other models' reasoning blocks the refused request replayed as text. */
+	demotedReasoningBlocks?: number;
 }
