@@ -158,7 +158,6 @@ describe("RPC goal command", () => {
 
 		let goalState: GoalModeState | undefined;
 		let tools: string[] = ["read"];
-		let controller!: RpcGoalController;
 		const session = {
 			settings: Settings.isolated({ "goal.continuationModes": [] }),
 			sessionManager: {
@@ -207,13 +206,17 @@ describe("RPC goal command", () => {
 					const droppedState: GoalModeState = { ...goalState, enabled: false, goal: dropped };
 					// Mirror the runtime's goal_updated(dropped): observe() queues #exit,
 					// which handle("drop") then awaits before reporting state.
-					controller.observe({ type: "goal_updated", goal: dropped, state: droppedState } as unknown as AgentSessionEvent);
+					controller.observe({
+						type: "goal_updated",
+						goal: dropped,
+						state: droppedState,
+					} as unknown as AgentSessionEvent);
 					goalState = undefined;
 					return dropped;
 				},
 			},
 		};
-		controller = new RpcGoalController(session as unknown as RpcGoalSession);
+		const controller = new RpcGoalController(session as unknown as RpcGoalSession);
 		const toolNames = (): string[] => [...tools];
 
 		expect(toolNames()).not.toContain("goaltest_late_tool");

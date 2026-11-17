@@ -501,9 +501,7 @@ describe("CustomEditor bracketed path paste", () => {
 		it("keeps a colliding exact selector with trailing punctuation literal", () => {
 			const editor = makeModelEditor();
 			editor.resolveModelMention = selector =>
-				selector === "a/x" || selector === "a/x,"
-					? { label: modelMentionChipLabel("X One"), selector }
-					: undefined;
+				selector === "a/x" || selector === "a/x," ? { label: modelMentionChipLabel("X One"), selector } : undefined;
 			for (const ch of "^a/x then ^a/x, ") editor.handleInput(ch);
 			expect(editor.getText()).toBe(`${modelMentionChipLabel("X One")} then ^a/x, `);
 			expect(editor.getExpandedText()).toBe("^a/x then ^a/x, ");

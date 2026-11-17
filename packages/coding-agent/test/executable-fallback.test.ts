@@ -2,7 +2,12 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as utils from "@oh-my-pi/pi-utils";
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { resolveCliEntryCmd, resolveExecutablePath, resolveRestartCmd, resolveWorkerSpawnCmd } from "../src/subprocess/worker-client";
+import {
+	resolveCliEntryCmd,
+	resolveExecutablePath,
+	resolveRestartCmd,
+	resolveWorkerSpawnCmd,
+} from "../src/subprocess/worker-client";
 
 describe("executable fallback on unlinked binary", () => {
 	const originalExecPathDesc = Object.getOwnPropertyDescriptor(process, "execPath");

@@ -664,6 +664,8 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["ls-files", "--stage"])).toBe(index);
 		expect(await fs.readdir(gitDir)).toEqual(state);
 		expect(await Bun.file(path.join(root, "conflict.txt")).text()).toBe(conflict);
+	});
+
 	it("tells an empty repository apart from an empty selection when committing", async () => {
 		const { root, journal } = await emptyRepo();
 		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
