@@ -11209,13 +11209,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
 		if (normalizedAppMessage.excludeFromContext) {
 			// The model never sees this row, so it must not start or extend a turn: a steer or aside would
-			// buy a provider call on unchanged context. Mid-run it waits for the next turn, as `!!` bash
-			// rows wait for the run to end; idle it is appended where the caller asked.
-			options = {
-				...options,
-				triggerTurn: false,
-				deliverAs: this.isStreaming || options?.deliverAs === "nextTurn" ? "nextTurn" : undefined,
-			};
+			// buy a provider call on unchanged context. Idle it is appended where the caller asked.
+			const deliverAs = options?.deliverAs === "nextTurn" ? "nextTurn" : undefined;
+			if (this.isStreaming) {
+				// Mid-run it is drawn and saved once the run ends, as `!!` bash rows are; a session
+				// change meanwhile drops it with the transcript it was sent to.
+				void this.waitForIdle()
+					.then(() =>
+						this.#isDisposed || this.#sessionGeneration !== sessionGeneration
+							? undefined
+							: this.sendCustomMessage(message, { deliverAs }),
+					)
+					.catch(error => logger.warn("Failed to append an excluded custom message", { error: String(error) }));
+				return false;
+			}
+			options = { ...options, triggerTurn: false, deliverAs };
 		}
 		if (this.isStreaming) {
 			// Queued into a turn the agent owns: that turn holds the session. Busy only

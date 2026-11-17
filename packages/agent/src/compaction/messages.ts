@@ -300,13 +300,14 @@ export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 
 /**
  * The context message a session entry contributes, or `undefined` for entries
- * that don't reach the LLM (compaction markers, labels, model changes, ...).
+ * that don't reach the LLM (compaction markers, labels, model changes, rows
+ * kept out of context, ...).
  */
 export function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "message") {
 		return entry.message;
 	}
-	if (entry.type === "custom_message") {
+	if (entry.type === "custom_message" && !entry.excludeFromContext) {
 		return createCustomMessage(
 			entry.customType,
 			entry.content,
@@ -314,7 +315,6 @@ export function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefin
 			entry.details,
 			entry.timestamp,
 			entry.attribution,
-			entry.excludeFromContext,
 		);
 	}
 	if (entry.type === "branch_summary") {
