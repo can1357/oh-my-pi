@@ -541,18 +541,7 @@ impl Wm<'_> {
 	}
 
 	fn is_grab_popup_of(&self, child: Window, pid: u32) -> bool {
-		let Some(attributes) = self
-			.conn
-			.get_window_attributes(child)
-			.ok()
-			.and_then(|cookie| cookie.reply().ok())
-		else {
-			return false;
-		};
-		attributes.override_redirect
-			&& attributes.map_state == MapState::VIEWABLE
-			&& self.root_child_pid(child) == Some(pid)
-			&& !self.is_passive_popup(child)
+		self.is_grab_popup(child) && self.root_child_pid(child) == Some(pid)
 	}
 
 	/// Whether screen point (`x`, `y`) lies inside `window`; `false` when its
@@ -577,6 +566,37 @@ impl Wm<'_> {
 			&& py >= top
 			&& px < left + i32::from(geometry.width)
 			&& py < top + i32::from(geometry.height)
+	}
+
+	/// Whether an active keyboard grab can be taken for `pid`'s own, as X
+	/// does not name a grab's owner: the topmost viewable, non-passive
+	/// override-redirect root child belongs to `pid`, or, with no such popup
+	/// on screen, the focus window `focus` does (a VM viewer or a game that
+	/// grabs on its own window). A foreign popup above the target's own popup
+	/// keeps keys refused.
+	pub(super) fn keyboard_grab_is_owned_by(&self, pid: u32, focus: Window) -> bool {
+		match self
+			.children(self.root)
+			.into_iter()
+			.rev()
+			.find(|&child| self.is_grab_popup(child))
+		{
+			Some(popup) => self.root_child_pid(popup) == Some(pid),
+			None => self.owning_pid(focus) == Some(pid),
+		}
+	}
+
+	fn is_grab_popup(&self, window: Window) -> bool {
+		self
+			.conn
+			.get_window_attributes(window)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+			.is_some_and(|attributes| {
+				attributes.override_redirect
+					&& attributes.map_state == MapState::VIEWABLE
+					&& !self.is_passive_popup(window)
+			})
 	}
 
 	fn is_passive_popup(&self, window: Window) -> bool {
