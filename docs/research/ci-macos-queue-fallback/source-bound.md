@@ -52,11 +52,11 @@ the heavy native objective, not all unrelated workflows or provisioning actions.
 
 ## Configuration
 
-The parent workflow now pins admission release `ci-macos-worker-source-bound-v2`
-to commit `3e30ac22b27d516b0727a2e0fae85093a4ad6e5f` in versioned workflow
+The parent workflow now pins admission release `ci-macos-worker-source-bound-v3`
+to commit `868abec9d4ecac36f981ba2c3328e2506de4f0f4` in versioned workflow
 environment values. The tag must resolve to that exact commit at every dispatch;
 a missing/moved tag fails closed. Old repository worker-ref/SHA variables do not
-override this v2 pin. Keep old tags while old generations may still need draining.
+override this pin. Keep old tags while old generations may still need draining.
 
 Following the owner's explicit instruction to use the existing Mac, eligible
 owner requests default to fallback enabled, `repository-writers` trust, and
@@ -82,3 +82,10 @@ disable and invalid labels, candidate-root versus pinned-guard checkout order,
 and existing queue/ownership/cancellation/artifact/state behavior. Local test
 counts and live rollout results are recorded in the PR. A passing offline suite
 does not prove a live GitHub dispatch, real Mac availability or native test success.
+
+The first v2 live attempt exposed an API contract mismatch: GitHub API
+`2026-03-10` omits `merge_commit_sha`, while `2022-11-28` returns it for the same
+PR. Both queries were executed against PR #685; its merge commit's parents
+matched the base/head identities. V3 explicitly pins the compatible `2022-11-28`
+API contract and keeps the existing exact-merge fence. V2 did not dispatch work
+and does not establish native verification success.
