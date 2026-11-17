@@ -4,13 +4,8 @@ import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import type { FetchImpl, ModelSpec } from "../types";
 import { discoveryFetch, parseServiceTierIds } from "../utils";
-import {
-	CODEX_BASE_URL,
-	ensureCodexClientVersion,
-	getCodexClientVersion,
-	OPENAI_HEADER_VALUES,
-	OPENAI_HEADERS,
-} from "../wire/codex";
+import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
+import { getCodexClientVersion } from "../wire/codex-version";
 
 const DEFAULT_MODEL_LIST_PATHS = ["/codex/models", "/models"] as const;
 const DEFAULT_CONTEXT_WINDOW = 272_000;
@@ -133,14 +128,10 @@ export interface CodexModelDiscoveryResult {
  * Returns `{ models: [] }` when a route succeeds but yields no usable models.
  */
 export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Promise<CodexModelDiscoveryResult | null> {
-	const explicitClientVersion = normalizeClientVersion(options.clientVersion);
-	// The backend filters the roster by client version; ask with the current release.
-	// The npm registry is not Codex: the injected transport only carries provider requests.
-	if (!explicitClientVersion) await ensureCodexClientVersion(fetch, options.signal);
 	const fetchFn = discoveryFetch(options.fetchFn);
 	const baseUrl = normalizeBaseUrl(options.baseUrl);
 	const paths = normalizePaths(options.paths);
-	const clientVersion = explicitClientVersion ?? getCodexClientVersion();
+	const clientVersion = normalizeClientVersion(options.clientVersion) ?? getCodexClientVersion();
 	const headers = buildCodexHeaders(options, clientVersion);
 
 	let sawSuccessfulResponse = false;

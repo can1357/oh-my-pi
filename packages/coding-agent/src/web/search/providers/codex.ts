@@ -9,12 +9,11 @@ import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
-	ensureCodexClientVersion,
 	getCodexAccountId,
-	getCodexClientVersion,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 import { readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -360,7 +359,6 @@ async function callCodexSearch(
 		transport: CodexSearchTransport;
 	},
 ): Promise<CodexSearchResult> {
-	await ensureCodexClientVersion(fetch, options.signal);
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
 	const requestedModel = options.modelId;

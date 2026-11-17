@@ -29,7 +29,6 @@ import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { resetCodexClientVersionForTest } from "@oh-my-pi/pi-catalog/wire/codex";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { withEnv } from "./helpers";
 
@@ -490,49 +489,6 @@ describe("openai-codex streaming", () => {
 		expect(requestHeaders?.get("originator")).toBe("omp");
 		// An opaque proxy key is not a JWT, so no residency claim to declare.
 		expect(requestHeaders?.has("x-openai-internal-codex-residency")).toBe(false);
-	});
-
-	it("sends the npm @openai/codex release as the `version` header on /responses", async () => {
-		using tempDir = TempDir.createSync("@pi-codex-stream-");
-		setAgentDir(tempDir.path());
-		const savedCodexVersion = Bun.env.PI_AI_CODEX_VERSION;
-		delete Bun.env.PI_AI_CODEX_VERSION;
-		resetCodexClientVersionForTest();
-		// The registry lookup goes through the global fetch, never the caller's transport.
-		const registryUrls: string[] = [];
-		vi.spyOn(globalThis, "fetch").mockImplementation(
-			Object.assign(
-				async (input: string | URL | Request) => {
-					registryUrls.push(input instanceof Request ? input.url : input.toString());
-					return new Response(JSON.stringify({ latest: "0.999.1" }));
-				},
-				{ preconnect: fetch.preconnect },
-			),
-		);
-		const requests: { url: string; version: string | null }[] = [];
-		const fetchMock: FetchImpl = async (input, init) => {
-			const url = input instanceof Request ? input.url : input.toString();
-			requests.push({ url, version: new Headers(init?.headers).get("version") });
-			return new Response(createCompletedCodexSse("pong"), {
-				status: 200,
-				headers: { "content-type": "text/event-stream" },
-			});
-		};
-
-		try {
-			const result = await streamOpenAICodexResponses(
-				{ ...createCodexTestModel(), preferWebsockets: false },
-				createCodexTestContext(),
-				{ apiKey: createCodexTestToken(), fetch: fetchMock },
-			).result();
-
-			expect(result.stopReason).toBe("stop");
-			expect(registryUrls).toEqual(["https://registry.npmjs.org/-/package/@openai/codex/dist-tags"]);
-			expect(requests).toEqual([{ url: "https://chatgpt.com/backend-api/codex/responses", version: "0.999.1" }]);
-		} finally {
-			resetCodexClientVersionForTest();
-			restoreEnv("PI_AI_CODEX_VERSION", savedCodexVersion);
-		}
 	});
 
 	it("declares the workspace data residency parsed from the access token", async () => {
@@ -4791,18 +4747,28 @@ describe("openai-codex streaming", () => {
 		expect(sentRequests).toHaveLength(2);
 		expect(sentRequests[0]?.previous_response_id).toBeUndefined();
 		expect(sentRequests[0]?.prompt_cache_key).toBe("ws-delta-session");
-		expect(sentRequests[0]?.instructions).toBe("You are a helpful assistant.");
+		expect(sentRequests[0]?.instructions).toBeUndefined();
 		const initialInput = sentRequests[0]?.input;
 		expect(Array.isArray(initialInput)).toBe(true);
-		const initialItems = initialInput as Array<{ role?: string; content?: unknown }>;
-		expect(initialItems).toHaveLength(2);
+		const initialItems = initialInput as Array<{ id?: string; role?: string; content?: unknown }>;
+		expect(initialItems).toHaveLength(3);
 		expect(initialItems[0]?.role).toBe("developer");
-		expect(JSON.stringify(initialItems[0]?.content)).toContain("Use concise answers.");
-		expect(initialItems[1]?.role).toBe("user");
+		expect(initialItems[0]?.id).toMatch(/^msg_[0-9a-f-]{36}$/);
+		expect(JSON.stringify(initialItems[0]?.content)).toContain("You are a helpful assistant.");
+		expect(initialItems[1]?.role).toBe("developer");
+		expect(JSON.stringify(initialItems[1]?.content)).toContain("Use concise answers.");
+		expect(initialItems[2]?.role).toBe("user");
 		expect(sentRequests[1]?.type).toBe("response.create");
 		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
 		expect(sentRequests[1]?.prompt_cache_key).toBe("ws-delta-session");
-		expect(sentRequests[1]?.instructions).toBe("You are a helpful assistant.");
+		expect(sentRequests[1]?.instructions).toBeUndefined();
+		expect(Object.keys(sentRequests[1] ?? {}).slice(0, 5)).toEqual([
+			"type",
+			"model",
+			"stream",
+			"previous_response_id",
+			"input",
+		]);
 		const deltaInput = sentRequests[1]?.input;
 		expect(Array.isArray(deltaInput)).toBe(true);
 		const deltaItems = deltaInput as Array<{ role?: string }>;

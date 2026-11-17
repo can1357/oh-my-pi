@@ -6,12 +6,11 @@ import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
 	codexRoutingHint,
-	ensureCodexClientVersion,
 	getCodexAccountId,
-	getCodexClientVersion,
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 import {
 	$env,
 	$flag,
@@ -89,6 +88,7 @@ import {
 	resolveCodexResponsesLite,
 	sanitizeCodexCallId,
 	transformRequestBody,
+	withCodexRoutingFieldsFirst,
 } from "./openai-codex/request-transformer";
 import { applyCodexAccessPrograms, dropRejectedCodexAccessPrograms } from "./openai-codex/access-programs";
 import {
@@ -157,6 +157,7 @@ import {
 	normalizeOpenAIPromptCacheKey,
 	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
+	parseAssistantMessagePhase,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
 	type SequentialCutoffSummaryState,
@@ -1158,8 +1159,9 @@ function getCodexServiceTierCostMultiplier(
 ): number {
 	// The subscription route draws on included plan usage, so its cost is the
 	// usage-equivalent: each tier's multiplier comes from the catalog table, which
-	// uses OpenAI's included-usage rates (Astra: Fast 2.5x, Ultrafast 8x). A tier
-	// with no entry stays at 1x rather than an invented multiplier.
+	// uses OpenAI's included-usage rates (GPT-6 Astra: Fast 2.5x, Ultrafast 8x;
+	// GPT-6.2: Fast 2x, Ultrafast 6x). A tier with no entry stays at 1x rather
+	// than an invented multiplier.
 	if (serviceTier !== "flex" && serviceTier !== "priority" && serviceTier !== "ultrafast") return 1;
 	return model.serviceTierCost?.[serviceTier] ?? 1;
 }
@@ -1351,11 +1353,6 @@ async function buildCodexRequestContext(
 ): Promise<CodexRequestContext> {
 	const promptCacheKey = getOpenAIPromptCacheKey(options);
 	const transformedBody = await buildTransformedCodexRequestBody(model, context, options, promptCacheKey);
-	// The backend gates models on the client version; a process that skipped
-	// discovery (fresh model cache) must still send the current one. The npm
-	// registry is not Codex, so the lookup goes through the global fetch: a
-	// caller's transport only carries provider requests.
-	await ensureCodexClientVersion(fetch, options?.signal);
 	return createCodexRequestContext(model, transformedBody, options, {
 		isolateCompactionTransport: true,
 		startNewTurn: options?.codexCompaction ? undefined : !isCodexWithinTurnContinuation(context),
@@ -1559,7 +1556,6 @@ export async function openCodexCompactionEventStream(
 		transport: CodexTransport;
 	};
 	try {
-		await ensureCodexClientVersion(fetch, options.signal);
 		requestContext = createCodexRequestContext(model, toCodexRequestBody(body), options, {
 			isolateCompactionTransport: false,
 		});
@@ -1847,7 +1843,7 @@ async function openCodexWebSocketTransport(
 				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
 			});
 		const eventStream = websocketConnection.streamRequest(
-			{ send: websocketRequest },
+			{ send: withCodexRoutingFieldsFirst(websocketRequest) },
 			timeouts,
 			requestSetup.requestSignal,
 			onSseEvent,
@@ -1958,7 +1954,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 		return { type: "thinking", thinking: "" };
 	}
 	if (item.type === "message") {
-		const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined;
+		const phase = parseAssistantMessagePhase(item.phase);
 		return { type: "text", text: "", textSignature: encodeTextSignatureV1(item.id, phase) };
 	}
 	if (item.type === "function_call") {
@@ -2497,7 +2493,7 @@ class CodexStreamProcessor {
 
 		if (item.type === "message" && block?.type === "text") {
 			block.text = finalizeMessageText(item, block.text);
-			const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined;
+			const phase = parseAssistantMessagePhase(item.phase);
 			block.textSignature = encodeTextSignatureV1(item.id, phase);
 			stream.push({
 				type: "text_end",
@@ -3327,7 +3323,6 @@ export async function prewarmOpenAICodexResponses(
 	if (!shouldUseCodexWebSocket(model, state, options?.preferWebsockets)) return;
 	const metadataSession = getOrCreateCodexMetadataSessionState(transportSessionId, providerSessionState);
 	const turnState = getOrCreateCodexTurnState(metadataSession, sessionKey);
-	await ensureCodexClientVersion(fetch, options?.signal);
 	const codexClientVersion = getCodexClientVersion();
 	const requestIdentity = createCodexCompatibilityIdentity(metadataSession);
 	const attestation = await getCodexAttestationHeader(accountId);
@@ -4129,7 +4124,7 @@ async function openCodexSseEventStream(
 		response = await fetchWithRetry(url, {
 			method: "POST",
 			headers,
-			body: JSON.stringify(body),
+			body: JSON.stringify(withCodexRoutingFieldsFirst(body)),
 			signal,
 			prepareInit: () => {
 				// A retried non-2xx attempt leaves its guard armed for the retry-status

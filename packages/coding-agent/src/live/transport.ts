@@ -1,12 +1,7 @@
 import { type AuthStorage, type OAuthAccess, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { getProxyForUrl, wrapFetchForProxy } from "@oh-my-pi/pi-ai/utils/proxy";
-import {
-	CODEX_BASE_URL,
-	ensureCodexClientVersion,
-	getCodexAccountId,
-	getCodexClientVersion,
-	OPENAI_HEADERS,
-} from "@oh-my-pi/pi-catalog/wire/codex";
+import { CODEX_BASE_URL, getCodexAccountId, OPENAI_HEADERS } from "@oh-my-pi/pi-catalog/wire/codex";
+import { getCodexClientVersion } from "@oh-my-pi/pi-catalog/wire/codex-version";
 import { LiveWebRtcPeer } from "@oh-my-pi/pi-natives";
 import { toError } from "@oh-my-pi/pi-utils";
 import type { ScopeLike } from "../config/registry";
@@ -314,7 +309,6 @@ export class LiveTransport {
 		access: OAuthAccess,
 		attestation: string | undefined,
 	): Promise<LiveSignalingResult> {
-		await ensureCodexClientVersion(fetch, this.#options.signal);
 		const headers = new Headers({
 			...liveSessionHeaders(access, this.#options.sessionId, this.#realtimeSessionId, attestation),
 			Accept: "*/*",
