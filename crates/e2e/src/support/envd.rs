@@ -289,6 +289,20 @@ enum InProcessRoots {
 	Rooted { project: PathBuf, _state: tempfile::TempDir },
 }
 
+/// Which [`EnvServer::open_*`] constructor builds the in-process authority.
+enum OpenKind {
+	Local,
+	Project { docserver_socket: PathBuf },
+	SessionHost { owner: EnvClient },
+}
+
+/// Owner resources [`OpenKind::SessionHost`] keeps alive for the harness
+/// lifetime.
+struct SessionOwner {
+	_server:     Arc<EnvServer>,
+	_connection: InProcessConnection,
+}
+
 /// In-process environment authority used by the P8 recorder.
 ///
 /// It serves `EnvClient::in_process` channels, so no process, socket or frame
@@ -299,6 +313,7 @@ pub struct InProcessEnvHarness {
 	shutdown:  CancellationToken,
 	server:    Arc<EnvServer>,
 	roots:     InProcessRoots,
+	_owner:    Option<SessionOwner>,
 }
 
 /// One hello-complete client connection to an [`InProcessEnvHarness`].
@@ -350,7 +365,8 @@ impl InProcessEnvHarness {
 	/// Opens the local authority over `scratch`.
 	pub async fn spawn(scratch: Scratch) -> Result<Self> {
 		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
-		Self::open(project, state, InProcessRoots::Scratch(scratch), None).await
+		Self::open(project, state, InProcessRoots::Scratch(scratch), OpenKind::Local, None, None)
+			.await
 	}
 
 	/// Opens the local authority over `scratch` with `extension` registered
@@ -360,7 +376,80 @@ impl InProcessEnvHarness {
 		extension: &PythonExtension,
 	) -> Result<Self> {
 		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
-		Self::open(project, state, InProcessRoots::Scratch(scratch), Some(extension)).await
+		Self::open(
+			project,
+			state,
+			InProcessRoots::Scratch(scratch),
+			OpenKind::Local,
+			Some(extension),
+			None,
+		)
+		.await
+	}
+
+	/// Opens the project-mode authority over `scratch` with `extension`
+	/// registered behind its CONTROL extension host.
+	///
+	/// Proves `AgentSettledHost::attach` on [`EnvServer::open_project`]: the
+	/// same red/green property as [`Self::spawn_with_extension`] for
+	/// `open_local`.
+	pub async fn spawn_project_with_extension(
+		scratch: Scratch,
+		extension: &PythonExtension,
+	) -> Result<Self> {
+		let docserver_socket = scratch.socket("docserver.sock");
+		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
+		Self::open(
+			project,
+			state,
+			InProcessRoots::Scratch(scratch),
+			OpenKind::Project { docserver_socket },
+			Some(extension),
+			None,
+		)
+		.await
+	}
+
+	/// Opens a session-host authority over `scratch` with `extension`
+	/// registered behind its CONTROL extension host.
+	///
+	/// Spawns a hello-complete local owner first (required by
+	/// [`EnvServer::open_session_host`]), then opens the session host against
+	/// that owner. Proves `AgentSettledHost::attach` on `open_session_host`.
+	pub async fn spawn_session_host_with_extension(
+		scratch: Scratch,
+		extension: &PythonExtension,
+	) -> Result<Self> {
+		let owner_state = scratch.root().join("owner-state");
+		fs::create_dir_all(&owner_state).context("creating session-host owner state")?;
+		let (owner_config, owner_con, owner_convars) = open_inputs()?;
+		// Owner needs no extension; it only supplies ServerHello for the peer.
+		let owner_server = Arc::new(
+			EnvServer::open_local(
+				scratch.project(),
+				&owner_state,
+				Registry::new(),
+				owner_config,
+				&owner_con,
+				owner_convars,
+				RegistryBridges::default(),
+			)
+			.await
+			.context("opening session-host owner authority")?,
+		);
+		let owner_connection =
+			InProcessConnection::open(&owner_server, "omp-e2e-session-owner").await?;
+		let owner = owner_connection.client().clone();
+		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
+		Self::open(
+			project,
+			state,
+			InProcessRoots::Scratch(scratch),
+			OpenKind::SessionHost { owner },
+			Some(extension),
+			Some(SessionOwner { _server: owner_server, _connection: owner_connection }),
+		)
+		.await
 	}
 
 	/// Opens a local authority rooted at an existing directory, such as an
@@ -372,14 +461,16 @@ impl InProcessEnvHarness {
 			.context("creating embedded environment state")?;
 		let state_path = state.path().to_path_buf();
 		let roots = InProcessRoots::Rooted { project: project.to_path_buf(), _state: state };
-		Self::open(project.to_path_buf(), state_path, roots, None).await
+		Self::open(project.to_path_buf(), state_path, roots, OpenKind::Local, None, None).await
 	}
 
 	async fn open(
 		project: PathBuf,
 		state: PathBuf,
 		roots: InProcessRoots,
+		kind: OpenKind,
 		extension: Option<&PythonExtension>,
+		owner: Option<SessionOwner>,
 	) -> Result<Self> {
 		let (mut ext_host_config, con, convars) = open_inputs()?;
 		let binding = match extension {
@@ -390,8 +481,15 @@ impl InProcessEnvHarness {
 			},
 			None => None,
 		};
-		let server = Arc::new(
-			EnvServer::open_local(
+		let trusted = RegistryBridges {
+			content: ActiveContentInputs {
+				workspace_trust: WorkspaceTrust::Trusted,
+				..ActiveContentInputs::default()
+			},
+			..RegistryBridges::default()
+		};
+		let server = Arc::new(match kind {
+			OpenKind::Local => EnvServer::open_local(
 				&project,
 				&state,
 				Registry::new(),
@@ -402,7 +500,35 @@ impl InProcessEnvHarness {
 			)
 			.await
 			.context("opening embedded environment authority")?,
-		);
+			OpenKind::Project { docserver_socket } => EnvServer::open_project(
+				&project,
+				&state,
+				&docserver_socket,
+				Registry::new(),
+				ext_host_config,
+				None,
+				false,
+				None,
+				&con,
+				convars,
+				trusted,
+			)
+			.await
+			.context("opening project environment authority")?,
+			OpenKind::SessionHost { owner } => EnvServer::open_session_host(
+				&project,
+				&state,
+				Registry::new(),
+				ext_host_config,
+				None,
+				&con,
+				convars,
+				trusted,
+				owner,
+			)
+			.await
+			.context("opening session-host environment authority")?,
+		});
 		if let Some(extension) = extension {
 			extension.verify(&server)?;
 		}
@@ -419,7 +545,7 @@ impl InProcessEnvHarness {
 		});
 		let primary = InProcessConnection::open(&server, "omp-e2e-embedded").await?;
 		cleanup.disarm();
-		Ok(Self { primary, data_task, shutdown, server, roots })
+		Ok(Self { primary, data_task, shutdown, server, roots, _owner: owner })
 	}
 
 	/// Opens another hello-complete connection to the same authority.
