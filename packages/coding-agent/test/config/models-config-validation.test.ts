@@ -210,6 +210,48 @@ describe("retry reset timezone configuration", () => {
 		}
 	});
 
+	test("alias-only timezone overrides respect direct overrides and stop applying after removal", async () => {
+		using dir = TempDir.createSync("@retry-timezone-alias-overrides-");
+		const file = path.join(dir.path(), "models.yml");
+		const provider = {
+			baseUrl,
+			api: "openai-completions",
+			auth: "none",
+			models: [
+				{ id: "gemini-99.0-flash-high" },
+				{ id: "gemini-99.1-flash-high", retryResetTimezoneOffset: "-03:30" },
+			],
+		};
+		await Bun.write(
+			file,
+			Bun.YAML.stringify({
+				providers: {
+					"google-antigravity": {
+						...provider,
+						modelOverrides: {
+							"gemini-99.0-flash-high": { retryResetTimezoneOffset: "+08:00" },
+							"gemini-99.1-flash-high": { retryResetTimezoneOffset: "Z" },
+							"gemini-99.1-flash": { contextWindow: 64000 },
+						},
+					},
+				},
+			}),
+		);
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const registry = new ModelRegistry(authStorage, file);
+			expect(retryDelay(registry, "google-antigravity", "gemini-99.0-flash")).toBe(16 * 60 * 60 * 1000);
+			expect(retryDelay(registry, "google-antigravity", "gemini-99.1-flash")).toBe(27.5 * 60 * 60 * 1000);
+			registry.getAll();
+			await Bun.write(file, Bun.YAML.stringify({ providers: { "google-antigravity": provider } }));
+			await registry.refresh("offline");
+			expect(retryDelay(registry, "google-antigravity", "gemini-99.0-flash")).toBe(24 * 60 * 60 * 1000);
+			expect(retryDelay(registry, "google-antigravity", "gemini-99.1-flash")).toBe(27.5 * 60 * 60 * 1000);
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	test("dynamic offsets survive same-id static definitions while explicit static offsets and current provider defaults retain precedence", async () => {
 		using dir = TempDir.createSync("@retry-timezone-discovery-");
 		const authStorage = await AuthStorage.create(":memory:");
@@ -248,54 +290,74 @@ describe("retry reset timezone configuration", () => {
 		}
 	});
 
-	test("OAuth-synthesized models inherit the current provider offset while keeping their explicit offsets", async () => {
-		using dir = TempDir.createSync("@retry-timezone-oauth-");
-		const authStorage = await AuthStorage.create(":memory:");
-		const sourceId = "test://retry-timezone-oauth";
-		try {
-			const credentials = { access: "access", refresh: "refresh", expires: Date.now() + 60_000 };
-			await authStorage.credentials.set("timezone-oauth", { type: "oauth", ...credentials });
-			const registry = new ModelRegistry(authStorage, path.join(dir.path(), "models.yml"));
-			registry.registerProvider(
-				"timezone-oauth",
-				{
-					baseUrl,
-					api: "openai-completions",
-					retryResetTimezoneOffset: "+08:00",
-					models: [runtimeModel],
-					oauth: {
-						name: "Timezone OAuth",
-						login: async () => credentials,
-						getApiKey: value => value.access,
-						modifyModels: models => [
-							...models.filter(model => model.provider !== "timezone-oauth"),
-							...[{ id: "synthesized" }, { id: "explicit", retryResetTimezoneOffset: "-03:30" }].map(
-								override =>
-									({
-										...runtimeModel,
-										...override,
-										provider: "timezone-oauth",
-										api: "openai-completions",
-										baseUrl,
-									}) as unknown as Model<Api>,
-							),
-						],
+	test.each(["provider", "modelOverrides"] as const)(
+		"OAuth-synthesized models apply %s offsets without losing explicit offsets",
+		async offsetSource => {
+			using dir = TempDir.createSync("@retry-timezone-oauth-");
+			const authStorage = await AuthStorage.create(":memory:");
+			const sourceId = "test://retry-timezone-oauth";
+			try {
+				const file = path.join(dir.path(), "models.yml");
+				if (offsetSource === "modelOverrides") {
+					await Bun.write(
+						file,
+						Bun.YAML.stringify({
+							providers: {
+								"timezone-oauth": { modelOverrides: { synthesized: { retryResetTimezoneOffset: "+08:00" } } },
+							},
+						}),
+					);
+				}
+				const credentials = { access: "access", refresh: "refresh", expires: Date.now() + 60_000 };
+				await authStorage.credentials.set("timezone-oauth", { type: "oauth", ...credentials });
+				const registry = new ModelRegistry(authStorage, file);
+				registry.registerProvider(
+					"timezone-oauth",
+					{
+						baseUrl,
+						api: "openai-completions",
+						retryResetTimezoneOffset: offsetSource === "provider" ? "+08:00" : undefined,
+						models: [runtimeModel],
+						oauth: {
+							name: "Timezone OAuth",
+							login: async () => credentials,
+							getApiKey: value => value.access,
+							modifyModels: models => [
+								...models.filter(model => model.provider !== "timezone-oauth"),
+								...[{ id: "synthesized" }, { id: "explicit", retryResetTimezoneOffset: "-03:30" }].map(
+									override =>
+										({
+											...runtimeModel,
+											...override,
+											provider: "timezone-oauth",
+											api: "openai-completions",
+											baseUrl,
+										}) as unknown as Model<Api>,
+								),
+							],
+						},
 					},
-				},
-				sourceId,
-			);
-			expect(retryDelay(registry, "timezone-oauth", "synthesized")).toBe(16 * 60 * 60 * 1000);
-			expect(retryDelay(registry, "timezone-oauth", "explicit")).toBe(27.5 * 60 * 60 * 1000);
-			registry.registerProvider("timezone-oauth", { retryResetTimezoneOffset: "Z" });
-			expect(retryDelay(registry, "timezone-oauth", "synthesized")).toBe(24 * 60 * 60 * 1000);
-			await registry.refresh("offline");
-			expect(retryDelay(registry, "timezone-oauth", "synthesized")).toBe(24 * 60 * 60 * 1000);
-			expect(retryDelay(registry, "timezone-oauth", "explicit")).toBe(27.5 * 60 * 60 * 1000);
-		} finally {
-			unregisterOAuthProviders(sourceId);
-			authStorage.close();
-		}
-	});
+					sourceId,
+				);
+				expect(retryDelay(registry, "timezone-oauth", "synthesized")).toBe(16 * 60 * 60 * 1000);
+				expect(retryDelay(registry, "timezone-oauth", "explicit")).toBe(27.5 * 60 * 60 * 1000);
+				registry.registerProvider("timezone-oauth", { retryResetTimezoneOffset: "Z" });
+				const inheritedDelay = (offsetSource === "provider" ? 24 : 16) * 60 * 60 * 1000;
+				expect(retryDelay(registry, "timezone-oauth", "synthesized")).toBe(inheritedDelay);
+				await registry.refresh("offline");
+				expect(retryDelay(registry, "timezone-oauth", "synthesized")).toBe(inheritedDelay);
+				expect(retryDelay(registry, "timezone-oauth", "explicit")).toBe(27.5 * 60 * 60 * 1000);
+				if (offsetSource === "modelOverrides") {
+					await Bun.write(file, Bun.YAML.stringify({ providers: {} }));
+					await registry.refresh("offline");
+					expect(retryDelay(registry, "timezone-oauth", "synthesized")).toBe(24 * 60 * 60 * 1000);
+				}
+			} finally {
+				unregisterOAuthProviders(sourceId);
+				authStorage.close();
+			}
+		},
+	);
 });
 
 describe("validateProviderConfiguration (models-config auth)", () => {

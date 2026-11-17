@@ -3204,13 +3204,41 @@ export class ModelRegistry {
 
 	/** Apply the offset after modifier-created rows exist; unprojected models never retain provider defaults. */
 	#applyProviderRetryResetTimezoneOffsets(models: Model<Api>[]): Model<Api>[] {
-		const modelKeys = new Set(models.map(model => `${model.provider}\u0000${model.id}`));
-		const hasLiveModel = (provider: string, id: string) => modelKeys.has(`${provider}\u0000${id}`);
+		if (
+			this.#providerOverrides.size === 0 &&
+			this.#runtimeProviderOverrides.size === 0 &&
+			this.#modelOverrides.size === 0
+		) {
+			return models;
+		}
+		const providerOffsets = new Map<string, string>();
+		for (const overrides of [this.#providerOverrides, this.#runtimeProviderOverrides]) {
+			for (const [provider, override] of overrides) {
+				if (override.retryResetTimezoneOffset !== undefined) {
+					providerOffsets.set(provider, override.retryResetTimezoneOffset);
+				}
+			}
+		}
+		const modelOffsetOverrides = new Map<string, Map<string, ModelOverride>>();
+		for (const [provider, overrides] of this.#modelOverrides) {
+			for (const override of overrides.values()) {
+				if (override.retryResetTimezoneOffset !== undefined) {
+					// Keep the full map: a direct override without an offset still shadows alias entries.
+					modelOffsetOverrides.set(provider, overrides);
+					break;
+				}
+			}
+		}
+		if (providerOffsets.size === 0 && modelOffsetOverrides.size === 0) return models;
+
+		let modelKeys: Set<string> | undefined;
+		const hasLiveModel = (provider: string, id: string) => {
+			modelKeys ??= new Set(models.map(model => `${model.provider}\u0000${model.id}`));
+			return modelKeys.has(`${provider}\u0000${id}`);
+		};
 		return models.map(model => {
-			const providerOffset =
-				this.#runtimeProviderOverrides.get(model.provider)?.retryResetTimezoneOffset ??
-				this.#providerOverrides.get(model.provider)?.retryResetTimezoneOffset;
-			const overrides = this.#modelOverrides.get(model.provider);
+			const providerOffset = providerOffsets.get(model.provider);
+			const overrides = modelOffsetOverrides.get(model.provider);
 			const modelOffset = overrides
 				? resolveModelOverrideWithAliases(overrides, model, hasLiveModel)?.retryResetTimezoneOffset
 				: undefined;
