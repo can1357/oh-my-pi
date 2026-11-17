@@ -273,6 +273,12 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("reads an exact long flag of a search as that flag, not as an abbreviation of a longer option", () => {
+		for (const command of ["grep --binary needle ~/.ssh/id_rsa", "rg --ignore needle ~/.ssh/id_rsa"]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "credential_read" });
+		}
+	});
+
 	it("does not count where a download, a copy or a move writes as read", () => {
 		for (const command of [
 			"mkdir -p ~/.docker/cli-plugins && curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 -o ~/.docker/cli-plugins/docker-compose",
