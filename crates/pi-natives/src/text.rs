@@ -702,48 +702,53 @@ fn hangul_compat_jamo_target_width() -> Option<usize> {
 	}
 }
 
+/// U+3164 HANGUL FILLER, an invisible placeholder inside the Compatibility Jamo
+/// block.
+const HANGUL_FILLER: char = '\u{3164}';
+
+/// Cell width of a Compatibility Jamo code point after the terminal correction.
+///
+/// Hangul Compatibility Jamo U+3131..=U+318E render as 1 cell on some
+/// terminals (Terminal.app, iTerm2) but follow UAX#11 at 2 cells on others
+/// (Ghostty, most Linux terminals). The width is resolved at runtime from the
+/// terminal identity and applied through the override; absent an override we
+/// fall back to the compile-time platform default. The filler is zero-width
+/// (`unicode-width`'s default-ignorable rule, which xutf's kitty tables widen
+/// to 2) and only the narrow correction applies to it: the target is set for
+/// *visible* jamo. packages/tui `visibleWidth` mirrors these rules.
+#[inline]
+fn hangul_compat_jamo_width(c: char) -> usize {
+	let unicode_width = if c == HANGUL_FILLER {
+		0
+	} else {
+		xutf::width_char(c)
+	};
+	match hangul_compat_jamo_target_width() {
+		Some(target) if unicode_width != 0 || target == HANGUL_COMPAT_JAMO_NARROW_WIDTH => target,
+		_ => unicode_width,
+	}
+}
+
+/// Replaces xutf's cell count for `c` inside a cluster `width` with
+/// [`hangul_compat_jamo_width`].
 #[inline]
 fn apply_hangul_compat_jamo_delta(width: usize, c: char) -> usize {
 	if !is_hangul_compat_jamo(c) {
 		return width;
 	}
-	let Some(target) = hangul_compat_jamo_target_width() else {
-		return width;
-	};
-	let unicode_width = xutf::width_char(c);
-	// The zero-width filler (U+3164 HANGUL FILLER) is an invisible placeholder.
-	// The target is set for *visible* jamo, so only the narrow correction
-	// (target 1) applies to the filler; a wide terminal renders it at its
-	// Unicode width (0), not the wide target. Never widen a
-	// zero-width jamo past the narrow correction.
-	if unicode_width == 0 && target > 1 {
-		return width;
-	}
-	if unicode_width > target {
-		width.saturating_sub(unicode_width - target)
+	let measured = xutf::width_char(c);
+	let corrected = hangul_compat_jamo_width(c);
+	if measured > corrected {
+		width.saturating_sub(measured - corrected)
 	} else {
-		width.saturating_add(target - unicode_width)
+		width + (corrected - measured)
 	}
 }
 
 #[inline]
 fn char_width_corrected(c: char) -> usize {
-	// Hangul Compatibility Jamo U+3131..=U+318E render as 1 cell on some
-	// terminals (Terminal.app, iTerm2) but follow UAX#11 at 2 cells on others
-	// (Ghostty, most Linux terminals). The width is resolved at runtime from the
-	// terminal identity and applied through the override; absent an override we
-	// fall back to the compile-time platform default.
-	if is_hangul_compat_jamo(c)
-		&& let Some(target) = hangul_compat_jamo_target_width()
-	{
-		// Zero-width filler (U+3164): only the narrow correction applies — a
-		// wide terminal renders it at its Unicode width (0), not the effective
-		// wide target set for visible jamo. See apply_hangul_compat_jamo_delta.
-		let unicode_width = xutf::width_char(c);
-		if unicode_width == 0 && target > 1 {
-			return unicode_width;
-		}
-		return target;
+	if is_hangul_compat_jamo(c) {
+		return hangul_compat_jamo_width(c);
 	}
 	xutf::width_char(c)
 }
@@ -760,11 +765,9 @@ fn grapheme_width_str(g: &str, tab_width: usize) -> usize {
 	if it.next().is_none() {
 		return char_width_corrected(c0);
 	}
-	// Multi-char grapheme: keep UnicodeWidthStr as the source of truth for
-	// sequence-level width rules (VS16 emoji presentation, keycaps, ZWJ emoji,
-	// CRLF, script ligatures). A per-char sum is not equivalent. Apply only the
-	// same local Compatibility Jamo delta that char_width_corrected applies to
-	// standalone code points; the delta is a no-op when no correction is active.
+	// Kitty's cluster widths handle presentation selectors and spacing marks;
+	// a per-char sum is not equivalent. Apply the local Compatibility Jamo
+	// correction to the cluster width as for standalone code points.
 	let mut width = xutf::width_str(g);
 	for c in g.chars() {
 		width = apply_hangul_compat_jamo_delta(width, c);
@@ -2107,6 +2110,13 @@ mod tests {
 		// Intrinsically wide emoji are unaffected.
 		assert_eq!(visible_width_u16(&to_u16("\u{2705}"), DEFAULT_TAB_WIDTH), 2); // ✅
 		assert_eq!(visible_width_u16(&to_u16("\u{274C}"), DEFAULT_TAB_WIDTH), 2); // ❌
+	}
+
+	#[test]
+	fn test_visible_width_kitty_indic_cluster() {
+		// Kitty assigns the cluster the width of its first codepoint rather
+		// than adding the widths of the joined consonants.
+		assert_eq!(visible_width_u16(&to_u16("क्ष"), DEFAULT_TAB_WIDTH), 1);
 	}
 
 	#[test]
