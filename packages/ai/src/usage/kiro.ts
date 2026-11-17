@@ -161,7 +161,6 @@ export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageR
 		});
 	}
 
-	// The account email labels the report; the login id stays its identity (see dedupeUsageReports).
 	const userEmail = isRecord(payload.userInfo) ? text(payload.userInfo.email) : undefined;
 	const email = userEmail && EMAIL.test(userEmail) ? userEmail : undefined;
 	const metadata = { ...(title ? { planType: planName } : {}), ...(email ? { email } : {}) };
@@ -190,7 +189,6 @@ export const kiroUsageProvider: UsageProvider = {
 					origin: "KIRO_CLI",
 					...(route.profileArn ? { profileArn: route.profileArn } : {}),
 					resourceType: "AGENTIC_REQUEST",
-					// Adds `userInfo.email` to the reply.
 					isEmailRequired: true,
 				},
 				fetch: ctx.fetch,

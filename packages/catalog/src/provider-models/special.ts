@@ -474,22 +474,14 @@ export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig =
 // Kiro
 // ---------------------------------------------------------------------------
 
-/** One Kiro login (or key) whose roster discovery reads. */
 export interface KiroDiscoveryAccount {
-	/** The encoded request key (`ProviderDefinition.getApiKey`). */
 	apiKey: string;
-	/** Credential identity recorded in {@link ModelSpec.accountAccess}; absent for a key that is not a stored login. */
 	accountKey?: string;
 }
 
 export interface KiroModelManagerConfig {
 	apiKey?: string;
 	fetch?: FetchImpl;
-	/**
-	 * Every login discovery reads. Plans gate the roster per login, so the union
-	 * lists each model with the logins that serve it. `null` aborts discovery
-	 * and keeps the last cache.
-	 */
 	resolveAccounts?: () => Promise<readonly KiroDiscoveryAccount[] | null>;
 }
 
@@ -511,7 +503,6 @@ export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): Mo
 						const tagAccess = accounts.every(account => account.accountKey !== undefined);
 						const catalogs: ModelSpec<"kiro-api">[][] = [];
 						for (const [i, models] of rosters.entries()) {
-							// A failed login would leave the union partial; keep the last cache.
 							if (!models) return null;
 							const accountKey = accounts[i].accountKey;
 							catalogs.push(

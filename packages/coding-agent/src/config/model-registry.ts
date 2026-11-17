@@ -2814,13 +2814,6 @@ export class ModelRegistry {
 		return projectId ? projectId : undefined;
 	}
 
-	/**
-	 * Every stored Kiro login, refreshed once, as discovery accounts. Kiro plans
-	 * gate the roster per login, so reading only the selected login hid models a
-	 * sibling login serves. The selected key is kept when it is not a stored
-	 * login (an API key), which leaves the union untagged. Returns `null` when a
-	 * login fails to resolve, so a partial union never replaces the cache.
-	 */
 	async #resolveKiroDiscoveryAccounts(selectedKey: string): Promise<KiroDiscoveryAccount[] | null> {
 		const accounts: KiroDiscoveryAccount[] = [];
 		for (const access of await this.authStorage.oauth.accessAll("kiro")) {

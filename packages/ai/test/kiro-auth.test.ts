@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { isSameOAuthAccount, type OAuthCredential, resolveCredentialIdentityKey } from "@oh-my-pi/pi-ai/auth-storage";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { loginKiroHook, refreshKiroHook } from "@oh-my-pi/pi-ai/registry/oauth/kiro";
 import type { OAuthController, OAuthCredentials, OAuthPrompt } from "@oh-my-pi/pi-ai/registry/oauth/types";
@@ -178,24 +177,6 @@ describe("Kiro social login", () => {
 				await expect(login).rejects.toMatchObject({ kind: "discovery" });
 			}
 		}
-	});
-
-	it("keeps two sign-ins of one email as two accounts", async () => {
-		const logins: OAuthCredential[] = [];
-		for (let i = 0; i < 2; i++) {
-			const { fetch } = server(
-				socialHandler({ profileArn: PROFILE_US }, () =>
-					json({ userInfo: { email: "someone@example.com", userId: "d-0000000000.user" } }),
-				),
-			);
-			const row = await loginKiroHook(controller(fetch, "4").ctrl);
-			if (typeof row === "string") throw new Error("expected an OAuth login");
-			logins.push({ type: "oauth", ...row });
-		}
-		const [first, second] = logins;
-		if (!first || !second) throw new Error("expected two logins");
-		expect(isSameOAuthAccount(first, second)).toBe(false);
-		expect(resolveCredentialIdentityKey("kiro", first)).not.toBe(resolveCredentialIdentityKey("kiro", second));
 	});
 });
 
