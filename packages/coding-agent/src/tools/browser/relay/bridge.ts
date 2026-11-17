@@ -29,6 +29,7 @@ import {
 	DOWNLOADS_PROTOCOL_VERSION,
 	EXTENSION_RELOAD_PROTOCOL_VERSION,
 	FOREIGN_FRAME_REFUSAL,
+	isHiddenFrame,
 	isOlderOmpVersion,
 	isOmpVersion,
 } from "./protocol";
@@ -1677,7 +1678,23 @@ export class RelayBridge {
 	#onFramesHidden(tabKey: string, frames: HiddenFrame[]): void {
 		const tab = this.#tabs.get(tabKey);
 		if (!tab) return;
-		tab.hiddenFrames.push(...frames);
+		// The report comes off a socket and its title is another extension's text: keep well-formed, single-line
+		// entries, once each, and only the latest few while no worker takes them.
+		for (const frame of frames) {
+			if (!isHiddenFrame(frame)) continue;
+			const clean = {
+				extensionId: singleLine(frame.extensionId, HIDDEN_FRAME_FIELD_MAX),
+				path: singleLine(frame.path, HIDDEN_FRAME_FIELD_MAX),
+				...(frame.title ? { title: singleLine(frame.title, HIDDEN_FRAME_FIELD_MAX) } : {}),
+			};
+			const held = tab.hiddenFrames.findIndex(
+				entry => entry.extensionId === clean.extensionId && entry.path === clean.path,
+			);
+			if (held !== -1) tab.hiddenFrames.splice(held, 1);
+			tab.hiddenFrames.push(clean);
+		}
+		if (tab.hiddenFrames.length > MAX_HIDDEN_FRAMES)
+			tab.hiddenFrames.splice(0, tab.hiddenFrames.length - MAX_HIDDEN_FRAMES);
 		for (const conn of this.#conns.values()) {
 			if (!conn.claims.has(tabKey)) continue;
 			for (const pageSession of conn.sessionsForTab(tabKey, "page")) {
@@ -2347,4 +2364,17 @@ export class RelayBridge {
 			throw err;
 		}
 	}
+}
+
+/** Most hidden frames a tab holds for its next worker; older reports give way to newer ones. */
+const MAX_HIDDEN_FRAMES = 16;
+/** Longest extension id, path or title a hidden-frame report keeps. */
+const HIDDEN_FRAME_FIELD_MAX = 100;
+
+/** `text` on one line, without control characters, at most `max` characters. */
+function singleLine(text: string, max: number): string {
+	return text
+		.replace(/\p{Cc}+/gu, " ")
+		.trim()
+		.slice(0, max);
 }
