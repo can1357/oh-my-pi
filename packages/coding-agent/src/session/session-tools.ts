@@ -2061,9 +2061,8 @@ export class SessionTools {
 	 * the live set), compaction (which drops old notices), and resume.
 	 */
 	takeEvalPreludeNotice(): CustomMessage<EvalPreludeNoticeDetails> | undefined {
-		const known = new Map(
-			this.#promptSurface.evalPreludes.map(definition => [definition.name, this.#baseSystemPrompt.join("\n\n")]),
-		);
+		const base = this.#baseSystemPrompt.join("\n\n");
+		const known = new Map(this.#promptSurface.evalPreludes.map(definition => [definition.name, base]));
 		for (const message of this.#host.agent.state.messages) {
 			if (message.role !== "custom" || message.customType !== EVAL_PRELUDE_NOTICE_MESSAGE_TYPE) continue;
 			const details = message.details;
