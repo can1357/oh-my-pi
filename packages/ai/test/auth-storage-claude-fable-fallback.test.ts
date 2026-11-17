@@ -453,10 +453,9 @@ describe("AuthStorage Claude Fable tier fallback", () => {
 			],
 		});
 		await storage.credentials.reload();
-		const resetsAt = Date.now() + 3 * 24 * 3_600_000;
 		const reportsByAccess: Record<string, UsageReport> = {
-			"oat-1": withFable(baseReport("a@example.com"), 0.75, { resetsAt }),
-			"oat-2": withFable(baseReport("b@example.com"), 0.5, { resetsAt }),
+			"oat-1": withFable(baseReport("a@example.com"), 0.75),
+			"oat-2": withFable(baseReport("b@example.com"), 0.5),
 		};
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async params => {
 			const access = params.credential.type === "oauth" ? params.credential.accessToken : undefined;

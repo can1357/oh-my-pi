@@ -158,6 +158,32 @@ describe("accountPolicies reclaimAbovePct", () => {
 		expect(await next(auth, A, "S1")).toBe("b");
 	});
 
+	test("does not reclaim onto an account inside a per-limit reserve above reclaimAbovePct", async () => {
+		const auth = await setup(
+			A,
+			[
+				{
+					provider: A,
+					account: { accountId: "a" },
+					priority: 10,
+					reservePct: 2,
+					reclaimAbovePct: 20,
+					reservePctByLimit: { "anthropic:7d": 30 },
+				},
+				{ provider: A, account: { accountId: "b" }, priority: 5 },
+			],
+			["a", "b"],
+		);
+		// A's weekly window (25% left) is inside its 30% limit reserve, so S1 starts on B.
+		setUsage(A, "a", 0, 0.75);
+		setUsage(A, "b", 0.1, 0.1);
+		expect(await next(auth, A, "S1")).toBe("b");
+		// B drains into its 10% reserve too; A is still above reclaimAbovePct but inside its own reserve.
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "b", 0.1, 0.95);
+		expect(await next(auth, A, "S1")).toBe("b");
+	});
+
 	test("moves once each way per recovery: no oscillation inside the band", async () => {
 		const auth = await setup(A, policies(), ["a", "b"]);
 		await pushOntoBackupThenRecover(auth, 0.55);
