@@ -80,7 +80,17 @@ const DROID_SYSTEM_PREFIX = droidIdentity.trim();
  * answers 403 `content_policy_rejected` to any request whose system channel
  * contains it, on every wire; the Droid sentence already names the agent.
  */
-const OMP_IDENTITY_SENTENCE = /You are omp's trusted coding assistant\.\n*/g;
+const OMP_IDENTITY_SENTENCE = "You are omp's trusted coding assistant.";
+
+/**
+ * A caller system block without {@link OMP_IDENTITY_SENTENCE}. Text around the
+ * sentence keeps its separators; a block that opened with it drops the blank
+ * lines that followed it.
+ */
+function withoutOmpIdentity(block: string): string {
+	const stripped = block.replaceAll(OMP_IDENTITY_SENTENCE, "");
+	return block.startsWith(OMP_IDENTITY_SENTENCE) ? stripped.replace(/^\n+/, "") : stripped;
+}
 
 /**
  * The CLI's chat-completions request builder pins `temperature: 1` on every
@@ -753,10 +763,7 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				sessionUuid,
 				context: {
 					...context,
-					systemPrompt: [
-						DROID_SYSTEM_PREFIX,
-						...systemPrompt.map(block => block.replace(OMP_IDENTITY_SENTENCE, "")).filter(Boolean),
-					],
+					systemPrompt: [DROID_SYSTEM_PREFIX, ...systemPrompt.map(withoutOmpIdentity).filter(Boolean)],
 				},
 				options,
 				forwarded: {

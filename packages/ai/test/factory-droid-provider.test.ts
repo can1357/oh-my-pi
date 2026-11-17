@@ -260,6 +260,34 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		["/o/v1/chat/completions", kimiK3, completionsChunks("OK", "kimi-k3")],
 		["/o/v1/responses", gptTerra, responsesChunks("OK")],
 		["/a/v1/messages", sonnet5, anthropicChunks("OK")],
+		["/g/v1/generate", gemini, geminiChunks("OK")],
+	] as const)(
+		"posts %s without OMP's identity sentence, which Factory's policy check rejects, keeping the caller's separators",
+		async (_path, model, chunks) => {
+			const captured: CapturedRequest[] = [];
+			await streamFactoryDroid(
+				model(),
+				{
+					systemPrompt: [
+						"You are omp's trusted coding assistant.\n\n# Engineering\nCorrectness first.",
+						"Before. You are omp's trusted coding assistant.\n\n# Tone\nConcise.",
+					],
+					messages: [{ role: "user", content: "hello", timestamp: 1 }],
+				},
+				{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, [...chunks]) },
+			).result();
+
+			const body = JSON.stringify(captured[0].body);
+			expect(body).not.toContain("You are omp's trusted coding assistant.");
+			expect(body).toContain(JSON.stringify("# Engineering\nCorrectness first.").slice(1, -1));
+			expect(body).toContain(JSON.stringify("Before. \n\n# Tone\nConcise.").slice(1, -1));
+		},
+	);
+
+	it.each([
+		["/o/v1/chat/completions", kimiK3, completionsChunks("OK", "kimi-k3")],
+		["/o/v1/responses", gptTerra, responsesChunks("OK")],
+		["/a/v1/messages", sonnet5, anthropicChunks("OK")],
 	] as const)(
 		"sends %s without SDK telemetry, an API key or Claude Code app headers",
 		async (_path, model, chunks) => {
