@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Added
 
 - `DesktopFocusReturn.keyboard` says what a macOS takeover did with the user's keyboard (`handedBack`, `leftAsChosen`, `kept`, `frontOnly`, `notSent`) ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))

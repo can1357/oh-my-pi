@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Fixed
 
 - Provider replay (`filterProviderReplayMessages`, the default `convertToLlm`) now sends a tool call stopped by a provider error as "not executed" without the provider's error text, so a refusal explanation is never fed back to the model ([#19419](https://github.com/can1357/oh-my-pi/pull/19419) by [@flosrn](https://github.com/flosrn))

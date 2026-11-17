@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Breaking Changes
 
 - The JavaScript eval `commit` helper now throws a `TypeError` for option names it does not know (e.g. `commit.draft({ cwd })`, which used to draft the session's own checkout) and for a non-object options argument, naming the expected options; scripts that passed extra keys must drop them. Committing a draft of an unchanged repository now says so instead of suggesting `take()` ([#19440](https://github.com/can1357/oh-my-pi/issues/19440))
@@ -10,7 +12,6 @@
 
 - Added the `providers.webKeyless` setting (default on): turn it off and `web_search` and URL reading use only services you configured, skipping keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines even when your `web` chain lists them; `omp q --model web/<engine>` still runs one on request ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#16336](https://github.com/can1357/oh-my-pi/issues/16336))
 - Added `live.endpoint` and `live.apiKey` settings: live voice (`/live`, RPC `live_start`/`live_connect`, extension `startLive`) can run on any OpenAI Realtime WebRTC-compatible server instead of Codex, with no ChatGPT sign-in and in offline mode; `live.voice` accepts any voice name
-
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `select()` accepts `{label}`, `{value}`, and zero-based `{index}` choices alongside strings, including mixed choices for multi-selects, on Chromium, Tern, and cmux tabs ([#19518](https://github.com/can1357/oh-my-pi/pull/19518) by [@will-bogusz](https://github.com/will-bogusz))
@@ -419,9 +420,6 @@
 - `/tan` completion notices now quote the user's request and mark the result as the user's tangent, so the main agent no longer mistakes it for its own work
 - `omp zsh` with zsh-autosuggestions' `completion` strategy no longer echoes each typed key onto new lines: `vared` inside a `zpty` command now edits on the pty instead of the shell's terminal
 - An instruction file that leaves a code fence open has it closed at its end, so the rest of the system prompt is formatted as usual ([#17971](https://github.com/can1357/oh-my-pi/pull/17971) by [@c-w-z](https://github.com/c-w-z))
-
-### Fixed
-
 - Read-only activity stays visible after snap-compaction or another mid-turn transcript rebuild instead of leaving the UI stuck on “Working…” ([#18876](https://github.com/can1357/oh-my-pi/pull/18876) by [@JustasMasiulis](https://github.com/JustasMasiulis)).
 - With the Spotlight experiment on, a session now warns when Spotlight finds no Stencil credential, once each time the credential goes missing, and says how to sign in again; the `spotlight:shape` journal entry records failed Spotlight calls by cause (`failureCauses`) ([#18850](https://github.com/can1357/oh-my-pi/pull/18850) by [@wolfiesch](https://github.com/wolfiesch))
 

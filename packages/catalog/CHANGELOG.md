@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Added
 
 - Added GPT-6.2 Astra and Sol. `openai/gpt-6.2-astra` ($8/$40, $0.40 cached) and `openai/gpt-6.2-sol` ($2/$10, $0.10 cached) are now bundled with a 1.05M window, a higher price tier above 272K input, and Ultrafast at 3x through 2027-02-28. On Codex, `gpt-6.2-astra` and `gpt-6.2-sol` show API-equivalent costs, bill Fast at 2x and Ultrafast at 6x, offer a 922K window with extended context on, and use only Plus-or-higher accounts.
