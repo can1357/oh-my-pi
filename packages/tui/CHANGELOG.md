@@ -36,7 +36,7 @@
 - Windows writes go to the console from a writer thread (16 KiB writes cut between escape sequences, UTF-8 codepages re-asserted), so a slow or paused console no longer blocks the event loop.
 - Stopping the terminal (external editor, suspend, exit) stops reading stdin first, so keys typed during teardown stay queued for the program that takes the terminal next.
 - Windows terminal writes split only between escape sequences, so a large repaint can no longer be cut inside a row.
-- The terminal no longer reads process CPU time on every frame while the event loop is running late ([#19538](https://github.com/can1357/oh-my-pi/pull/19538) by [@H4vC](https://github.com/H4vC))
+- The event-loop watchdog reads process CPU time half as often while the loop is healthy, and stall checks on input read it only after a pause long enough to be a suspend ([#19538](https://github.com/can1357/oh-my-pi/pull/19538) by [@H4vC](https://github.com/H4vC))
 
 ## [18.22.0] - 2026-11-16
 
