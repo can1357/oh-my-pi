@@ -2,7 +2,9 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { loadPuppeteer } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { navigateMainFrame } from "@oh-my-pi/pi-coding-agent/tools/browser/navigation";
+import { getBrowsersMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import type { Page, WaitForOptions } from "puppeteer-core";
@@ -377,6 +379,39 @@ return { blocked, fast: blockedMs < 2000, answered: await tab.evaluate(() => glo
 		// The read names the dialog that stops the page instead of running out its own deadline.
 		expect(outcome.blocked).toContain("Leave?");
 		expect(outcome).toMatchObject({ fast: true, answered: true });
+	}, 30_000);
+
+	test("forgets a confirm that the user or another client answered", async () => {
+		const invoke = createHost();
+		const url = `${baseUrl}/answered-elsewhere`;
+		await invoke({ action: "open", name: "answered-elsewhere", url });
+		// A second CDP client answers the dialog, as the user's click on it does.
+		const handle = [...getBrowsersMapForTest().values()].find(entry => "wsEndpoint" in entry);
+		if (!handle || !("wsEndpoint" in handle)) throw new Error("no managed Chromium");
+		const other = await (await loadPuppeteer()).connect({ browserWSEndpoint: handle.wsEndpoint });
+		try {
+			const target = other.targets().find(entry => entry.url() === url);
+			if (!target) throw new Error("tab target not found");
+			const session = await target.createCDPSession();
+			await session.send("Page.enable");
+			await invoke({
+				action: "run",
+				name: "answered-elsewhere",
+				code: 'await tab.evaluate(() => { requestAnimationFrame(() => { globalThis.confirmResult = confirm("Leave?"); }); }); return await wait(async () => (await tab.dialog()).open, { timeout: 2000, interval: 10 });',
+			});
+			await session.send("Page.handleJavaScriptDialog", { accept: false });
+			expect(
+				valueOf(
+					await invoke({
+						action: "run",
+						name: "answered-elsewhere",
+						code: "await wait(async () => !(await tab.dialog()).open, { timeout: 2000, interval: 10 }); return { dialog: await tab.dialog(), answered: await tab.evaluate(() => globalThis.confirmResult) };",
+					}),
+				),
+			).toEqual({ dialog: { open: false }, answered: false });
+		} finally {
+			await other.disconnect();
+		}
 	}, 30_000);
 
 	test("scopes helpers to iframe documents in run and direct call paths", async () => {

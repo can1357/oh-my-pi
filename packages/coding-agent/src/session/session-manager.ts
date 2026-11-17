@@ -3953,6 +3953,15 @@ export class SessionManager {
 	}
 
 	/**
+	 * All session entries (excludes header) without the defensive copy. The
+	 * array is live and owned by the manager: never mutate it, and use
+	 * `getEntries()` when you need a snapshot that survives appends.
+	 */
+	getEntriesView(): readonly SessionEntry[] {
+		return this.#entries;
+	}
+
+	/**
 	 * The active-leaf branch (same entries as `getBranch()`) without the
 	 * defensive copy. The array is the manager's memo: never mutate it. It is
 	 * live — an entry appended to the current leaf is pushed onto it — so use

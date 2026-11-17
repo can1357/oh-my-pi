@@ -6,9 +6,11 @@
 
 - Added `readBoundedJson` and `readBoundedBytes` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 
+## [18.21.0] - 2026-11-16
+
 ### Fixed
 
-- Fixed bare URLs swallowing the following word when Korean, Japanese or Chinese text follows a parenthesized URL without a space, as in `(https://example.com/pull/1)가` ([#19336](https://github.com/can1357/oh-my-pi/pull/19336) by [@nnnnoel](https://github.com/nnnnoel))
+- Fixed bare URLs swallowing the following word when Korean, Japanese, or Chinese text follows a parenthesized URL without a space.
 
 ## [18.20.3] - 2026-11-16
 

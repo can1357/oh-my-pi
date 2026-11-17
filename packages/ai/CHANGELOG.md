@@ -9,6 +9,8 @@
 - Added a Kiro usage provider: reports monthly plan credits, active bonus credits, and enabled overage from Kiro's `GetUsageLimits`, and, with several Kiro accounts, ranks them by remaining free credits, spending paid overage last. Each Kiro login has a stable identity key (`account:<login id>`) that survives refresh, so account pools and `auth.accountPolicies` can name it ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Added a `definitive` option to `OAuthError`; `isDefinitiveOAuthFailure` now takes the error object and disables a credential marked definitive without matching its message ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Kiro retries a model-capacity rejection or a response cut off mid-frame once before any output, reports token usage and context size from Kiro's metadata, surfaces content-filter refusals as refusals, and disables a login whose refresh state can no longer recover ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -18,6 +20,22 @@
 ### Fixed
 
 - OAuth accounts refreshed through an auth broker keep their stored routing metadata (such as an API endpoint) in the key built for the request, instead of losing it after the first refresh ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Fenced (```thinking) reasoning with very long unbroken lines no longer slows down as it streams ([#19493](https://github.com/can1357/oh-my-pi/pull/19493) by [@H4vC](https://github.com/H4vC))
+- Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
+- Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.0] - 2026-11-16
+
+### Fixed
+
+- Fixed slow streaming of Gemma tool calls with large arguments.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
 
 ## [18.20.3] - 2026-11-16
 
