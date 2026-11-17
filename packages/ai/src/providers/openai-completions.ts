@@ -14,7 +14,14 @@ import {
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { isReasoningSourceSignature, MISTRAL_CONTENT_PARTS_SIGNATURE } from "../utils/reasoning-source";
+import {
+	isReasoningField,
+	isReasoningSourceSignature,
+	MISTRAL_CONTENT_PARTS_SIGNATURE,
+	parseReasoningDetailsSignature,
+	type ReasoningDetailsSignature,
+	signatureReasoningField,
+} from "../utils/reasoning-source";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../env-api-key";
 import type {
@@ -250,32 +257,6 @@ function accumulateReasoningDetail(details: ReasoningDetail[], detail: Reasoning
 	}
 }
 
-// `thinkingSignature` envelope for a turn that streamed `reasoning_details`:
-// the received entries plus the reasoning field the block's text arrived in
-// (OpenRouter's `reasoning`), which the bare field-name marker records otherwise.
-type StoredReasoningDetails = {
-	reasoningDetails: ReasoningDetail[];
-	field?: OpenAICompletionsReasoningField;
-};
-
-function parseStoredReasoningDetails(thinkingSignature: string | undefined): StoredReasoningDetails | undefined {
-	const stored = parseStoredThoughtSignature(thinkingSignature);
-	if (typeof stored !== "object" || stored === null) return undefined;
-	const reasoningDetails = Reflect.get(stored, "reasoningDetails");
-	if (!Array.isArray(reasoningDetails)) return undefined;
-	const field = Reflect.get(stored, "field");
-	return isReasoningFieldName(field) ? { reasoningDetails, field } : { reasoningDetails };
-}
-
-function isReasoningFieldName(value: unknown): value is OpenAICompletionsReasoningField {
-	return value === "reasoning_content" || value === "reasoning" || value === "reasoning_text";
-}
-
-/** The reasoning field a thinking block's text arrived in, read from its marker or reasoning-details envelope. */
-function thinkingReasoningField(signature: string | undefined): OpenAICompletionsReasoningField | undefined {
-	return isReasoningFieldName(signature) ? signature : parseStoredReasoningDetails(signature)?.field;
-}
-
 // A single tool-call turn on an OpenAI-compatible Gemini wire can carry two
 // independent signatures: a per-call one (`extra_content.google|vertex` or an
 // encrypted `reasoning_details` entry) and a message-level signature
@@ -369,7 +350,7 @@ function getLiteLLMThinkingBlocksDelta(delta: object): unknown[] | undefined {
  * `reasoning_details` envelope.
  */
 export function isLiteLLMThinkingSignature(signature: string | undefined): signature is string {
-	return !!signature && !isReasoningSourceSignature(signature) && !parseStoredReasoningDetails(signature);
+	return !!signature && !isReasoningSourceSignature(signature) && !parseReasoningDetailsSignature(signature);
 }
 
 /**
@@ -1809,6 +1790,20 @@ const streamOpenAICompletionsOnce = (
 					for (const detail of reasoningDetails) {
 						if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(detail);
 						accumulateReasoningDetail(receivedReasoningDetails, detail);
+						// An encrypted entry also stays on the tool call it names (blob in
+						// OpenRouter's `data` or Bifrost's `signature`): rewriting the thinking
+						// text drops the block's envelope, and the call must keep its signature.
+						if (detail.type !== "reasoning.encrypted" || !detail.id || !(detail.data ?? detail.signature)) {
+							continue;
+						}
+						const matchingToolCall = output.content.find(
+							(block): block is ToolCall => block.type === "toolCall" && block.id === detail.id,
+						);
+						if (matchingToolCall) {
+							matchingToolCall.thoughtSignature = mergeStoredGeminiSignature(matchingToolCall.thoughtSignature, {
+								perCall: detail,
+							});
+						}
 					}
 
 					const incomingMessageThoughtSignature = getGeminiMessageThoughtSignature(choice.delta);
@@ -1876,11 +1871,11 @@ const streamOpenAICompletionsOnce = (
 				const holder = output.content.find(
 					(block): block is ThinkingContent =>
 						block.type === "thinking" &&
-						(block.thinkingSignature === undefined || isReasoningFieldName(block.thinkingSignature)),
+						(block.thinkingSignature === undefined || isReasoningField(block.thinkingSignature)),
 				);
-				const stored: StoredReasoningDetails = { reasoningDetails: receivedReasoningDetails };
+				const stored: ReasoningDetailsSignature = { reasoningDetails: receivedReasoningDetails };
 				const field = holder?.thinkingSignature;
-				if (isReasoningFieldName(field)) stored.field = field;
+				if (isReasoningField(field)) stored.field = field;
 				if (holder) holder.thinkingSignature = JSON.stringify(stored);
 				else openThinkingBlock(JSON.stringify(stored));
 			}
@@ -2729,7 +2724,7 @@ export function convertMessages(
 					// like opencode-kimi-with-thinking and DeepSeek demand the exact
 					// configured `reasoningContentField` instead, so honor that here
 					// rather than echoing the upstream field name.
-					const signatureField = thinkingReasoningField(nonEmptyThinkingBlocks[0].thinkingSignature);
+					const signatureField = signatureReasoningField(nonEmptyThinkingBlocks[0].thinkingSignature);
 					const wireField =
 						signatureField && !compat.allowsSyntheticReasoningContentForToolCalls
 							? (compat.reasoningContentField ?? "reasoning_content")
@@ -2766,7 +2761,7 @@ export function convertMessages(
 					// accept but don't validate the field — they just need it to
 					// preserve cache locality.
 					const reasoningField: OpenAICompletionsReasoningField =
-						thinkingReasoningField(nonEmptyThinkingBlocks[0].thinkingSignature) ??
+						signatureReasoningField(nonEmptyThinkingBlocks[0].thinkingSignature) ??
 						compat.reasoningContentField ??
 						"reasoning_content";
 					assistantMsg[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
@@ -2774,7 +2769,7 @@ export function convertMessages(
 			}
 
 			if (compat.requiresReasoningContentForToolCalls) {
-				const streamedReasoningField = thinkingReasoningField(nonEmptyThinkingBlocks[0]?.thinkingSignature);
+				const streamedReasoningField = signatureReasoningField(nonEmptyThinkingBlocks[0]?.thinkingSignature);
 				const reasoningField =
 					compat.allowsSyntheticReasoningContentForToolCalls && streamedReasoningField
 						? streamedReasoningField
@@ -2839,7 +2834,7 @@ export function convertMessages(
 			) {
 				const allThinkingBlocks = msg.content.filter(b => b.type === "thinking") as ThinkingContent[];
 				if (allThinkingBlocks.length > 0) {
-					if (thinkingReasoningField(allThinkingBlocks[0].thinkingSignature)) {
+					if (signatureReasoningField(allThinkingBlocks[0].thinkingSignature)) {
 						const reasoningField = compat.reasoningContentField ?? "reasoning_content";
 						assistantMsg[reasoningField] = allThinkingBlocks.map(b => b.thinking).join("\n");
 						hasReasoningField = true;
@@ -2893,11 +2888,12 @@ export function convertMessages(
 					break;
 				}
 			}
-			// Replay `reasoning_details` exactly as received. Turns persisted before the
-			// thinking block held them carry encrypted entries on their tool calls.
+			// Replay `reasoning_details` exactly as received. Once the thinking block's
+			// envelope is gone (its text was rewritten, or the turn predates it), the
+			// encrypted entries kept on the tool calls still replay.
 			const receivedReasoningDetails = msg.content.flatMap(block =>
 				block.type === "thinking"
-					? (parseStoredReasoningDetails(block.thinkingSignature)?.reasoningDetails ?? [])
+					? (parseReasoningDetailsSignature(block.thinkingSignature)?.reasoningDetails ?? [])
 					: [],
 			);
 			const reasoningDetails =

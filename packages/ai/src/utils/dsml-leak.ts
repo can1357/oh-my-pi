@@ -18,6 +18,7 @@ import {
 	findDeepSeekTemplateToken,
 } from "../dialect/deepseek";
 import type { AssistantMessage, Model } from "../types";
+import { isReasoningField, parseReasoningDetailsSignature } from "./reasoning-source";
 
 // Structural DSML tags in either pipe spelling (fullwidth `｜` U+FF5C or ASCII),
 // including doubled delimiters and the observed malformed ` calls` wrapper.
@@ -131,7 +132,9 @@ export function stripDsmlToolMarkup(text: string): string | undefined {
  * Remove leaked DSML tool-call markup from an assistant message before commit,
  * including reasoning blocks and turns with valid structured calls. Rewritten
  * thinking with an opaque signature is discarded; OpenAI-compatible reasoning
- * field names are replay markers, not signatures, and survive cleanup.
+ * field names and `reasoning_details` envelopes are replay state, not
+ * signatures, and survive cleanup. An envelope's entries carry the old text,
+ * so only its field marker is kept.
  */
 export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 	let content: AssistantMessage["content"] | undefined;
@@ -151,11 +154,15 @@ export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 			if (stripped.trim().length > 0) content.push({ ...block, text: stripped });
 		} else {
 			const signature = block.thinkingSignature;
-			const reasoningField =
-				(message.api === "openai-completions" || message.api === "openrouter") &&
-				(signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text");
-			if ((!signature || reasoningField) && stripped.trim().length > 0) {
-				content.push({ ...block, thinking: stripped });
+			const completionsTurn = message.api === "openai-completions" || message.api === "openrouter";
+			const reasoningField = completionsTurn && isReasoningField(signature);
+			const envelope = completionsTurn ? parseReasoningDetailsSignature(signature) : undefined;
+			if ((!signature || reasoningField || envelope) && stripped.trim().length > 0) {
+				content.push(
+					envelope
+						? { ...block, thinking: stripped, thinkingSignature: envelope.field }
+						: { ...block, thinking: stripped },
+				);
 			}
 		}
 	}
