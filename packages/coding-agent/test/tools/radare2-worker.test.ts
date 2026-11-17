@@ -66,7 +66,7 @@ class StubR2:
         if text.startswith("pdj"):
             return [{"addr": 4096, "opcode": "push rbp", "disasm": "push rbp"}]
         if text.startswith("axtj"):
-            return [{"from": 8192, "type": "CALL", "fcn": {"name": "caller"}}]
+            return [{"from": 8192, "type": "CALL", "fcn_name": "caller"}]
         if text.startswith("axfj"):
             return [{"to": 4096, "type": "CALL", "fcn": {"name": "callee"}}]
         return {}
@@ -299,6 +299,7 @@ describe("radare2 views and exec", () => {
 			const result = await worker.request<{ text: string }>("view", view);
 			expect(typeof result.text).toBe("string");
 			expect(result.text.length).toBeGreaterThan(0);
+			if (view.kind === "xrefs") expect(result.text).toContain("caller");
 		}
 		const lines = (await Bun.file(log).text()).split("\n").filter(Boolean);
 		for (const command of ["iij", "iEj", "izzj", "pdgj", "pdfj", "axtj"]) {

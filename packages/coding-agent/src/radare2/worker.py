@@ -250,10 +250,11 @@ def _xrefs(command, target, key):
         if not isinstance(ref, dict):
             continue
         owner = ref.get("fcn") or {}
+        func = ref.get("fcn_name") or (owner.get("name") if isinstance(owner, dict) else owner) or ""
         out.append({
             key: _addr(ref[key]) if ref.get(key) is not None else None,
             "type": str(ref.get("type") or ""),
-            "func": str(owner.get("name") or "") if isinstance(owner, dict) else str(owner),
+            "func": str(func),
         })
     return out
 
