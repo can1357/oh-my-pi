@@ -27,6 +27,16 @@ import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../src/session/session-manager.ts");
 const SIGNAL_SENDER_FIXTURE = path.join(import.meta.dir, "fixtures/signal-sender-session.ts");
 
+// Called, not type-checked: on a stale addon the missing export is a throwing stub. Signal 0 is a no-op.
+function addonCapturesSignalSenders(): boolean {
+	try {
+		natives.captureSignalSender(0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 const pendingAssistant: AssistantMessage = {
 	role: "assistant",
 	content: [
@@ -214,7 +224,7 @@ describe("session exit diagnostics", () => {
 	});
 
 	// Pull requests test against main's prebuilt addon, which may predate the capture.
-	it.skipIf(process.platform === "win32" || typeof natives.captureSignalSender !== "function")(
+	it.skipIf(process.platform === "win32" || !addonCapturesSignalSenders())(
 		"records which process sent the SIGTERM",
 		async () => {
 			tempDir = TempDir.createSync("@pi-session-exit-sender-");

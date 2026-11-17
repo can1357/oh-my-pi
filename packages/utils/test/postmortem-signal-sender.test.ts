@@ -57,28 +57,35 @@ async function stopProbe(
 	}
 }
 
+// Called, not type-checked: on a stale addon the missing export is a throwing stub. Signal 0 is a no-op.
+function addonCapturesSignalSenders(): boolean {
+	try {
+		natives.captureSignalSender(0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 // Pull requests test against main's prebuilt addon; until it carries the
 // capture, these run on main and on local builds only. The SIGTERM path, with
 // command name and parent pid, is proven end to end in coding-agent's
 // session-exit-diagnostics test.
-describe.skipIf(process.platform === "win32" || typeof natives.captureSignalSender !== "function")(
-	"postmortem signal sender",
-	() => {
-		it("names the process that sent SIGHUP", async () => {
-			const result = await stopProbe(pid => {
-				const killer = Bun.spawnSync(["sh", "-c", `echo $$; kill -HUP ${pid}`]);
-				return Number(killer.stdout.toString().trim());
-			});
-
-			expect(result.exitCode).toBe(129);
-			expect(result.recorded).toMatchObject({ pid: result.senderPid, uid: process.getuid?.() });
+describe.skipIf(process.platform === "win32" || !addonCapturesSignalSenders())("postmortem signal sender", () => {
+	it("names the process that sent SIGHUP", async () => {
+		const result = await stopProbe(pid => {
+			const killer = Bun.spawnSync(["sh", "-c", `echo $$; kill -HUP ${pid}`]);
+			return Number(killer.stdout.toString().trim());
 		});
 
-		it("records no sender for a SIGHUP the process raised itself", async () => {
-			const result = await stopProbe(() => undefined, { PROBE_SELF_HUP: "1" });
+		expect(result.exitCode).toBe(129);
+		expect(result.recorded).toMatchObject({ pid: result.senderPid, uid: process.getuid?.() });
+	});
 
-			expect(result.exitCode).toBe(129);
-			expect(result.recorded).toBeNull();
-		});
-	},
-);
+	it("records no sender for a SIGHUP the process raised itself", async () => {
+		const result = await stopProbe(() => undefined, { PROBE_SELF_HUP: "1" });
+
+		expect(result.exitCode).toBe(129);
+		expect(result.recorded).toBeNull();
+	});
+});
