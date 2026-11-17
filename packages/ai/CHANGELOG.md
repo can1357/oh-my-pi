@@ -6,6 +6,7 @@
 
 - `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -106,10 +107,6 @@
 ### Added
 
 - Added `SOFYA_API_KEY` as the env key for the `sofya` provider ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
-
-### Added
-
-- Chat Completions and Responses requests (including OpenRouter) send `audio/*` content blocks as `input_audio` parts, so models that hear audio receive it ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 

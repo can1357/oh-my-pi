@@ -5,6 +5,7 @@
 ### Added
 
 - Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
+- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -102,11 +103,6 @@
 - Added the `web/sofya` search model ([#18185](https://github.com/can1357/oh-my-pi/pull/18185) by [@yusufgurdogan](https://github.com/yusufgurdogan))
 - Added the `temperature-floor` compat axis, assigned `0.0001` on Devin so a request that pins `temperature: 0` reaches Cascade as a value it accepts ([#18423](https://github.com/can1357/oh-my-pi/issues/18423))
 - Added the keyless `web/hackernews` search engine model for Hacker News stories and comments
-- Models now declare whether they hear audio: Gemini on Google's own transports and every OpenRouter model whose listing takes audio input ([#16611](https://github.com/can1357/oh-my-pi/pull/16611) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Removed
-
-- Removed Devin's retired SWE-1.6 Fast from the models omp lists before Devin's live model list loads (first start, or when Devin is unreachable) ([#18795](https://github.com/can1357/oh-my-pi/pull/18795) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
