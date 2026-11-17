@@ -2,9 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Avoided Google Cloud Code 429 quota exhaustion and provider prompt blocklists by removing fingerprint-matched identity and tool catalog phrases ([#19570](https://github.com/can1357/oh-my-pi/pull/19570) by [@KaifKol](https://github.com/KaifKol)).
 ### Added
 
 - Added the `providers.webKeyless` setting (default on): turn it off and `web_search` and URL reading use only services you configured, skipping keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines even when your `web` chain lists them; `omp q --model web/<engine>` still runs one on request ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#16336](https://github.com/can1357/oh-my-pi/issues/16336))
@@ -25,6 +22,7 @@
 
 ### Fixed
 
+- Avoided Google Cloud Code 429 quota exhaustion and provider prompt blocklists by removing fingerprint-matched identity and tool catalog phrases ([#19570](https://github.com/can1357/oh-my-pi/pull/19570) by [@KaifKol](https://github.com/KaifKol)).
 - Fixed Exa and Firecrawl web searches silently falling back to their keyless public endpoints when a configured credential failed to resolve (for example a failing `!command`); they now report the credential error
 - Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
 - Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
