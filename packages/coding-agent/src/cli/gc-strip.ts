@@ -17,7 +17,8 @@
  *   assistant message, so a resumed turn that continues its tool loop must
  *   replay each response's reasoning unmodified.
  * - Replay state that carries context found nowhere else: reasoning source
- *   markers ({@link isReasoningSourceSignature}), text signatures (OpenAI
+ *   markers ({@link isReasoningSourceSignature}, also the one a
+ *   `reasoning_details` envelope carries), text signatures (OpenAI
  *   message phase), Anthropic message controls and native compaction blocks,
  *   OpenAI snapshot histories, and compaction entries (an OpenAI remote
  *   compaction's stored summary is a placeholder for its encrypted history).
@@ -33,7 +34,7 @@ import { createGzip } from "node:zlib";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ProviderPayload } from "@oh-my-pi/pi-ai";
 import { isReplayTurnBoundary, isSurvivingAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { isReasoningSourceSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
+import { isReasoningSourceSignature, parseReasoningDetailsSignature } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { isRecord, readLines, tryParseJson } from "@oh-my-pi/pi-utils";
 import { convertMessagesForContextView } from "../session/messages";
 import { buildSessionContext } from "../session/session-context";
@@ -105,8 +106,13 @@ function stripBlock(block: Record<string, unknown>): boolean {
 	switch (block.type) {
 		case "thinking": {
 			const signature = block.thinkingSignature;
-			const opaque = typeof signature === "string" && !isReasoningSourceSignature(signature);
-			return drop(block, opaque ? ["thinkingSignature", "itemId"] : ["itemId"]);
+			if (typeof signature !== "string" || isReasoningSourceSignature(signature)) return drop(block, ["itemId"]);
+			// A `reasoning_details` envelope reduces to the reasoning field marker it carries.
+			const field = parseReasoningDetailsSignature(signature)?.field;
+			if (field) block.thinkingSignature = field;
+			else delete block.thinkingSignature;
+			drop(block, ["itemId"]);
+			return true;
 		}
 		case "toolCall":
 			// `partialArgs`/`streamIndex`: streaming state an interrupted openai-completions stream left behind.

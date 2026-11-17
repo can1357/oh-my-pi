@@ -3279,6 +3279,46 @@ describe("runGcCommand replay data stripping", () => {
 		expect(rerun.strip).toMatchObject({ wouldStrip: 0, stripped: 0 });
 	});
 
+	test("reduces a reasoning_details envelope to its reasoning field marker", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		const completions = { api: "openai-completions", provider: "openrouter", model: "google/gemini-3-pro-preview" };
+		const envelope = (field?: string) =>
+			JSON.stringify({
+				reasoningDetails: [
+					{ type: "reasoning.text", text: "plan", signature: "text-signature", index: 0 },
+					{ type: "reasoning.encrypted", data: "encrypted-blob", id: "call_1", index: 1 },
+				],
+				...(field ? { field } : {}),
+			});
+		const lines = [
+			header(id),
+			assistant(
+				[
+					{ type: "thinking", thinking: "plan", thinkingSignature: envelope("reasoning") },
+					{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" }, thoughtSignature: "c2ln" },
+				],
+				{ ...completions, stopReason: "toolUse" },
+			),
+			toolResult("call_1"),
+			assistant([{ type: "thinking", thinking: "noted", thinkingSignature: envelope() }], completions),
+			prompt("keep going"),
+			assistant([{ type: "text", text: "done" }], completions),
+		];
+		await writeTranscript(file, lines, 40);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ wouldStrip: 1, stripped: 1, records: 2, errors: [] });
+		const after = (await Bun.file(file).text()).split("\n").slice(0, -1);
+		expect(JSON.parse(after[1]).message.content).toEqual([
+			{ type: "thinking", thinking: "plan", thinkingSignature: "reasoning" },
+			{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" } },
+		]);
+		expect(JSON.parse(after[3]).message.content).toEqual([{ type: "thinking", thinking: "noted" }]);
+		expect(after[5]).toBe(lines[5]);
+	});
+
 	test("a dry run rewrites nothing, and recent or leased sessions are never stripped", async () => {
 		const idle = await writeReplaySession(Bun.randomUUIDv7());
 		const recent = await writeReplaySession(Bun.randomUUIDv7(), 10);
