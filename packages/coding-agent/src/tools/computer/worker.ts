@@ -36,6 +36,8 @@ import { expandTilde } from "@oh-my-pi/pi-utils/path";
 import { truncate } from "@oh-my-pi/pi-utils/format";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import backgroundMoveNote from "../../prompts/tools/computer-background-move.md" with { type: "text" };
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { cloneSafe, RunOutput } from "../browser/run-output";
 import {
@@ -531,10 +533,6 @@ const MENU_CONTROL_ROUTE =
  * neither.
  */
 const backgroundMoveNoted = new WeakSet<NativeDesktopSession>();
-const BACKGROUND_MOVE_HOVER =
-	"move ran in the background, which gives the app no hover, and a takeover move's hover ends before it returns; to press a control shown only on hover, click it with { takeover: true }";
-const BACKGROUND_MOVE_HOVER_REFUSED =
-	"move ran in the background, which gives the app no hover; the user's setting refuses takeover, so press a control shown only on hover through AX or tell the user the step needs their screen";
 
 /**
  * Under `refuse`, a macOS call that opens a menu is refused before anything is
@@ -1295,9 +1293,8 @@ class Win {
 			!backgroundMoveNoted.has(this.#session)
 		) {
 			context.backgroundMoveNote = true;
-			const text =
-				context.snapshot.backgroundFallback === "refuse" ? BACKGROUND_MOVE_HOVER_REFUSED : BACKGROUND_MOVE_HOVER;
-			context.output.push({ type: "text", text });
+			const refuse = context.snapshot.backgroundFallback === "refuse";
+			context.output.push({ type: "text", text: prompt.render(backgroundMoveNote, { refuse }).trim() });
 		}
 	}
 
