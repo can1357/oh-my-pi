@@ -1055,7 +1055,8 @@ export interface ParsedShellScript {
 	 * {@link SHELL_SCRIPT_MAX_NESTED_TEXT} characters of nested script, was left unparsed, possibly
 	 * with the rest of the text after it, or when heredocs whose delimiter line never comes took
 	 * more than {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH} characters of searching, so later ones were
-	 * not read as heredocs.
+	 * not read as heredocs, or when a command had more than {@link SHELL_SCRIPT_MAX_DEPTH} `env -S`
+	 * strings, so the later ones were not split.
 	 */
 	truncated: boolean;
 }
@@ -1492,69 +1493,172 @@ function readAnsiCString(text: string, start: number): { value: string; end: num
 	return { value, end: i };
 }
 
+/** The command a wrapper chain runs ({@link unwrapShellCommand}). */
+interface UnwrappedCommand {
+	/** Its words, the program first, with the words of an `env -S` string in place of the string. */
+	argv: string[];
+	/** Per `argv` word, whether it was quoted or escaped, in the source or in an `env -S` string. */
+	quoted: boolean[];
+	/** The wrappers, outermost first. */
+	wrappers: string[];
+	/** The directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS}) moves the command to, in order. */
+	chdirs: string[];
+	/** Set when more than {@link SHELL_SCRIPT_MAX_DEPTH} `env -S` strings were found, so the later ones were not split. */
+	truncated: boolean;
+}
+
+/** env's option that splits its value into words and reads them as its arguments, with the shortest abbreviation of its long form. */
+const ENV_SPLIT_OPTION = { letter: "S", long: "--split-string", shortest: "--s" };
+
+/** The one-letter escapes of an `env -S` string that stand for a control character. */
+const ENV_STRING_ESCAPES: Record<string, string> = { f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" };
+
 /**
- * Where the command a wrapper chain runs starts in `words` (`sudo env X=1 timeout 5 rm ...` runs
- * `rm ...`), after any reserved words and a `function name` header before a function body. A long
- * option may be abbreviated, as getopt allows (`--us root`); in a bundle of short options
- * (`-nu root`), the first that takes a value takes the rest of the word, or the next word when it
- * ends the bundle. The directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS})
- * moves the command to go in `chdirs`, in order; one in the same word as its option (`-C~/x`,
- * `--chdir=~/x`) gets no tilde expansion, so a leading `~` in it is kept as a name (`./~/x`).
+ * The words GNU env splits an `env -S` string into, each with whether it was quoted or escaped:
+ * whitespace separates them; `'...'` keeps its text but for `\\` and `\'`; in `"..."` and unquoted,
+ * a backslash escapes the next character, `\f`, `\n`, `\r`, `\t` and `\v` are control characters,
+ * `\_` is a space in double quotes and ends the word outside them, and an unquoted `\c` ends the
+ * string; a `#` that starts a word starts a comment. `${NAME}` stays as written. env expands no
+ * `~` and no braces, but the words are checked as if it did. A string env rejects (an unknown
+ * escape, an unclosed quote) is split all the same.
  */
-function unwrapShellCommand(words: readonly string[], wrappers: string[], chdirs: string[]): number {
+function splitEnvString(text: string): { word: string; quoted: boolean }[] {
+	const words: { word: string; quoted: boolean }[] = [];
+	let word = "";
+	let started = false;
+	let quoted = false;
+	let quote: string | undefined;
+	const end = () => {
+		if (started) words.push({ word, quoted });
+		word = "";
+		started = false;
+		quoted = false;
+	};
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (quote === "'") {
+			if (ch === "'") quote = undefined;
+			else word += ch === "\\" && (text[i + 1] === "\\" || text[i + 1] === "'") ? text[++i] : ch;
+		} else if (ch === "\\" && i + 1 < text.length) {
+			const next = text[++i];
+			if (next === "c" && quote === undefined) break;
+			if (next === "_" && quote === undefined) {
+				end();
+				continue;
+			}
+			word += next === "_" ? " " : Object.hasOwn(ENV_STRING_ESCAPES, next) ? ENV_STRING_ESCAPES[next] : next;
+			started = true;
+			quoted = true;
+		} else if (quote === '"') {
+			if (ch === '"') quote = undefined;
+			else word += ch;
+		} else if (ch === "'" || ch === '"') {
+			quote = ch;
+			started = true;
+			quoted = true;
+		} else if (/\s/.test(ch)) {
+			end();
+		} else if (ch === "#" && !started) {
+			break;
+		} else {
+			word += ch;
+			started = true;
+		}
+	}
+	end();
+	return words;
+}
+
+/**
+ * The command a wrapper chain runs in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`), after
+ * any reserved words and a `function name` header before a function body. A long option may be
+ * abbreviated, as getopt allows (`--us root`); in a bundle of short options (`-nu root`), the first
+ * that takes a value takes the rest of the word, or the next word when it ends the bundle. A
+ * directory option's value ({@link SHELL_WRAPPER_CHDIRS}) in the same word as its option (`-C~/x`,
+ * `--chdir=~/x`) gets no tilde expansion, so a leading `~` in it is kept as a name (`./~/x`). The
+ * words of an `env -S` string ({@link splitEnvString}) are read in its place, as env reads them,
+ * options and command alike, up to {@link SHELL_SCRIPT_MAX_DEPTH} such strings: each can hold
+ * another one (`env -S'-S-S...'`), so splitting more would cost the square of the word's length.
+ */
+function unwrapShellCommand(words: readonly string[], quoted: readonly boolean[]): UnwrappedCommand {
 	const inWord = (value: string) => (value.startsWith("~") ? `./${value}` : value);
+	const wrappers: string[] = [];
+	const chdirs: string[] = [];
+	let strings = 0;
+	let truncated = false;
+	// Words of `env -S` strings not read yet, the next one last; `words[i]` comes after them.
+	const split: { word: string; quoted: boolean }[] = [];
 	let i = 0;
-	while (i < words.length) {
-		const word = words[i];
+	const peek = (ahead: number): string | undefined =>
+		ahead < split.length ? split[split.length - 1 - ahead].word : words[i + ahead - split.length];
+	const skip = (count: number) => {
+		for (; count > 0; count--) if (split.pop() === undefined) i++;
+	};
+	for (let word = peek(0); word !== undefined; word = peek(0)) {
 		if (SHELL_ASSIGNMENT.test(word) || SHELL_KEYWORDS.includes(word)) {
-			i++;
+			skip(1);
 			continue;
 		}
 		if (word === "function") {
-			i += 2;
+			skip(2);
 			continue;
 		}
 		const name = path.posix.basename(word);
 		const valued = Object.hasOwn(SHELL_WRAPPERS, name) ? SHELL_WRAPPERS[name] : undefined;
-		if (!valued || (name === "command" && (words[i + 1] === "-v" || words[i + 1] === "-V"))) break;
+		if (!valued || (name === "command" && (peek(1) === "-v" || peek(1) === "-V"))) break;
 		const chdir = Object.hasOwn(SHELL_WRAPPER_CHDIRS, name) ? SHELL_WRAPPER_CHDIRS[name] : undefined;
+		const splits = name === "env" ? ENV_SPLIT_OPTION : undefined;
 		wrappers.push(name);
-		i++;
+		skip(1);
 		let positional = name === "timeout" ? 1 : 0; // timeout's duration
-		while (i < words.length) {
-			const arg = words[i];
+		for (let arg = peek(0); arg !== undefined; arg = peek(0)) {
 			if (arg === "--") {
-				i++;
+				skip(1);
 				break;
 			}
 			let dir: string | undefined;
-			if (name === "env" && SHELL_ASSIGNMENT.test(arg)) {
-				i++;
-			} else if (name === "env" && arg === "-") {
+			let string: string | undefined;
+			if (name === "env" && (SHELL_ASSIGNMENT.test(arg) || arg === "-")) {
 				// A lone `-` is `env -i`.
-				i++;
+				skip(1);
 			} else if (arg.startsWith("--")) {
 				const eq = arg.indexOf("=");
 				const flag = eq < 0 ? arg : arg.slice(0, eq);
+				const value = eq < 0 ? peek(1) : arg.slice(eq + 1);
 				if (chdir && flag.length >= chdir.shortest.length && chdir.long.startsWith(flag)) {
-					dir = eq < 0 ? words[i + 1] : inWord(arg.slice(eq + 1));
+					dir = eq < 0 ? value : inWord(value!);
 				}
-				i += eq < 0 && valued.some(option => option.startsWith(arg)) ? 2 : 1;
+				if (splits && flag.length >= splits.shortest.length && splits.long.startsWith(flag)) string = value;
+				skip(eq < 0 && valued.some(option => option.startsWith(arg)) ? 2 : 1);
 			} else if (arg.startsWith("-") && arg.length > 1) {
 				let k = 1;
 				while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
-				if (chdir && arg[k] === chdir.letter) dir = k === arg.length - 1 ? words[i + 1] : inWord(arg.slice(k + 1));
-				i += k === arg.length - 1 ? 2 : 1;
+				const value = k === arg.length - 1 ? peek(1) : arg.slice(k + 1);
+				if (chdir && arg[k] === chdir.letter) dir = k === arg.length - 1 ? value : inWord(value!);
+				if (splits && arg[k] === splits.letter) string = value;
+				skip(k === arg.length - 1 ? 2 : 1);
 			} else if (positional > 0) {
 				positional--;
-				i++;
+				skip(1);
 			} else {
 				break;
 			}
 			if (dir !== undefined) chdirs.push(dir);
+			if (string !== undefined && ++strings > SHELL_SCRIPT_MAX_DEPTH) truncated = true;
+			else if (string !== undefined) append(split, splitEnvString(string).reverse());
 		}
 	}
-	return i;
+	const argv: string[] = [];
+	const argvQuoted: boolean[] = [];
+	for (let k = split.length - 1; k >= 0; k--) {
+		argv.push(split[k].word);
+		argvQuoted.push(split[k].quoted);
+	}
+	for (let k = i; k < words.length; k++) {
+		argv.push(words[k]);
+		argvQuoted.push(quoted[k]);
+	}
+	return { argv, quoted: argvQuoted, wrappers, chdirs, truncated };
 }
 
 /** Long shell options that take the next word as their value (`--rcfile file`). */
@@ -1775,7 +1879,8 @@ class ShellScriptParser {
 	#ambiguous = false;
 	/**
 	 * Set when something was left unparsed: nested too deep, past the nested text budget, or past
-	 * the budget for searching delimiters of heredocs that never close.
+	 * the budget for searching delimiters of heredocs that never close; or when a command had too
+	 * many `env -S` strings.
 	 */
 	truncated = false;
 	/** Characters read looking for heredoc delimiter lines that never came, against {@link SHELL_SCRIPT_MAX_HEREDOC_SEARCH}. */
@@ -2429,11 +2534,8 @@ class ShellScriptParser {
 		upstream: ShellUpstream | undefined,
 	): ShellCommand | undefined {
 		const { words, writes, reads, herestrings, heredocs } = segment;
-		const wrappers: string[] = [];
-		const chdirs: string[] = [];
-		const start = unwrapShellCommand(words, wrappers, chdirs);
-		const argv = words.slice(start);
-		const quoted = segment.quoted.slice(start);
+		const { argv, quoted, wrappers, chdirs, truncated } = unwrapShellCommand(words, segment.quoted);
+		if (truncated) this.truncated = true;
 		// `env` alone prints the environment.
 		if (argv.length === 0 && wrappers.length > 0) {
 			argv.push(wrappers.pop()!);
@@ -2511,10 +2613,10 @@ class ShellScriptParser {
  * `>( )` writes, and also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval`
  * strings and scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd`
  * (`cd -` included), `pushd` and `popd` between commands, and wrappers (`sudo`, `env`, `timeout`,
- * `xargs`, `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in). It
- * is a tokenizer, not a shell: variables other than `$HOME`/`$PWD`, aliases, calls to functions,
- * and code run by other interpreters are not followed, and after a `cd` to a directory it cannot
- * resolve, relative paths are not resolved.
+ * `xargs`, `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in, and
+ * the command an `env -S` string holds). It is a tokenizer, not a shell: variables other than
+ * `$HOME`/`$PWD`, aliases, calls to functions, and code run by other interpreters are not
+ * followed, and after a `cd` to a directory it cannot resolve, relative paths are not resolved.
  */
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);

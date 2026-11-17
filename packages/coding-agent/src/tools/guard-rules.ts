@@ -1468,7 +1468,7 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 	if (truncated) {
 		return hit(
 			"nesting_limit",
-			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, or has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, past what the guard can check`,
+			`it nests \`bash -c\`, \`eval\`, \`env -S\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, or has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, past what the guard can check`,
 		);
 	}
 	const outputs = new SecretOutputs(scope);
