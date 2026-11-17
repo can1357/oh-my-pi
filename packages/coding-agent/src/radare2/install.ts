@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { $which, getAgentDir } from "@oh-my-pi/pi-utils";
 import { DisasmUnavailableError } from "../disasm/backend";
@@ -11,18 +12,29 @@ export function radare2InstallStatus(): string | undefined {
 	return status;
 }
 
-/**
- * Whether a configured radare2 binary or one on PATH can serve the backend.
- * `configuredPath` is the radare2.r2Path value; omitting it checks PATH only.
- */
-export function radare2Available(configuredPath?: string): boolean {
-	return !!configuredPath?.trim() || $which("radare2") !== undefined;
+function isExecutableFile(p: string): boolean {
+	try {
+		if (!fs.statSync(p).isFile()) return false;
+		if (process.platform !== "win32") fs.accessSync(p, fs.constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
-/** Resolve the configured or PATH-discovered radare2 binary; undefined when absent. */
+/** Whether a configured binary or one on PATH can serve the backend. */
+export function radare2Available(configuredPath?: string): boolean {
+	const configured = configuredPath?.trim();
+	return configured ? isExecutableFile(path.resolve(configured)) : $which("radare2") !== undefined;
+}
+
+/** Resolve a validated configured or PATH-discovered radare2 binary; undefined when absent. */
 export function resolveRadare2Binary(configuredPath?: string): string | undefined {
 	const configured = configuredPath?.trim();
-	if (configured) return path.resolve(configured);
+	if (configured) {
+		const resolved = path.resolve(configured);
+		return isExecutableFile(resolved) ? resolved : undefined;
+	}
 	return $which("radare2") ?? undefined;
 }
 

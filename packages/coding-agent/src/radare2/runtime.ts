@@ -30,7 +30,11 @@ async function resolveRuntime(
 	try {
 		const binary = resolveRadare2Binary(configured);
 		if (!binary) {
-			throw new DisasmUnavailableError("radare2 unavailable: no radare2 binary on PATH (set radare2.r2Path).");
+			throw new DisasmUnavailableError(
+				configured
+					? `radare2 unavailable: radare2.r2Path is not an executable file: ${configured}`
+					: "radare2 unavailable: no radare2 binary on PATH (set radare2.r2Path).",
+			);
 		}
 		const interpreter = python ?? (await ensureR2PipeVenv());
 		const baseEnv = filterEnv((await Settings.init()).getShellConfig().env);

@@ -6,7 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { cfgDisasmBackend } from "@oh-my-pi/pi-coding-agent/disasm/active";
 import { formatDatabaseHandle, parseDatabaseHandle } from "@oh-my-pi/pi-coding-agent/disasm/protocol";
 import { ghidraHostSupported } from "@oh-my-pi/pi-coding-agent/ghidra/platform";
-import { radare2Available } from "@oh-my-pi/pi-coding-agent/radare2/install";
+import { radare2Available, resolveRadare2Binary } from "@oh-my-pi/pi-coding-agent/radare2/install";
 import { isExecutableHeader, parseFatSlices, selectSlice, splitSliceRef } from "@oh-my-pi/pi-coding-agent/disasm/store";
 import { type BinaryView, parseBinaryView } from "@oh-my-pi/pi-coding-agent/tools/read-binary";
 
@@ -119,6 +119,11 @@ describe("disassembler backend selection", () => {
 	let withoutIdalib: string;
 	let withBinja: string;
 	let withoutBinja: string;
+	const makeR2 = async (file: string): Promise<string> => {
+		await Bun.write(file, "#!/bin/sh\nexit 0\n");
+		await fs.chmod(file, 0o755);
+		return file;
+	};
 
 	beforeAll(async () => {
 		withIdalib = await fs.mkdtemp(path.join(os.tmpdir(), "ida-install-"));
@@ -204,30 +209,38 @@ describe("disassembler backend selection", () => {
 	});
 
 	it("selects radare2 explicitly when configured", async () => {
-		const r2 = path.join(withoutIdalib, "radare2");
-		await Bun.write(r2, "");
-		await fs.chmod(r2, 0o755);
+		const r2 = await makeR2(path.join(withoutIdalib, "radare2"));
 		expect(cfgDisasmBackend.get(Settings.isolated({ "disassembler.backend": "radare2", "radare2.r2Path": r2 }))).toBe(
 			"radare2",
 		);
 	});
 
 	it("auto prefers radare2 over provisioning Ghidra when available", async () => {
-		const r2 = path.join(withoutIdalib, "radare2");
-		await Bun.write(r2, "");
-		await fs.chmod(r2, 0o755);
+		const r2 = await makeR2(path.join(withoutIdalib, "radare2"));
 		expect(cfgDisasmBackend.get(Settings.isolated({ "ida.installDir": withoutIdalib, "radare2.r2Path": r2 }))).toBe(
 			"radare2",
 		);
 	});
 
 	it("auto still prefers IDA when available", async () => {
-		const r2 = path.join(withoutIdalib, "radare2");
-		await Bun.write(r2, "");
-		await fs.chmod(r2, 0o755);
+		const r2 = await makeR2(path.join(withoutIdalib, "radare2"));
 		expect(cfgDisasmBackend.get(Settings.isolated({ "ida.installDir": withIdalib, "radare2.r2Path": r2 }))).toBe(
 			"ida",
 		);
+	});
+
+	it("auto ignores a configured radare2 path that is missing or not executable", async () => {
+		const fallback = ghidraHostSupported() ? "ghidra" : undefined;
+		const missing = path.join(withoutIdalib, "missing-r2");
+		expect(cfgDisasmBackend.get(Settings.isolated({ "radare2.r2Path": missing }))).toBe(fallback);
+		expect(resolveRadare2Binary(missing)).toBeUndefined();
+		if (process.platform !== "win32") {
+			const plain = path.join(withoutIdalib, "plain-r2");
+			await Bun.write(plain, "#!/bin/sh\nexit 0\n");
+			await fs.chmod(plain, 0o644);
+			expect(cfgDisasmBackend.get(Settings.isolated({ "radare2.r2Path": plain }))).toBe(fallback);
+			expect(resolveRadare2Binary(plain)).toBeUndefined();
+		}
 	});
 });
 

@@ -12,7 +12,6 @@ import os
 import queue
 import re
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -60,6 +59,17 @@ def _json(r2, text):
             return r2.cmdj(text)
         except Exception:
             return r2.cmd(text)
+
+
+def _r2_failure(out):
+    """Recognize r2 text-mode errors; failures print instead of raising."""
+    text = str(out or "").strip()
+    if not text:
+        return None
+    low = text.lower()
+    if low.startswith("error:") or "cannot find" in low or "at line" in low or "parse error" in low:
+        return text
+    return None
 
 
 def _items(value):
@@ -363,7 +373,14 @@ def rename(t, name):
     r2 = _program()
     ea = resolve(t)
     with _nul_io():
-        r2.cmd(f"afn {name} @ {_hex(ea)}")
+        out = r2.cmd(f"afn {name} @ {_hex(ea)}")
+        funcs = r2.cmdj("aflj")
+    failure = _r2_failure(out)
+    if failure:
+        raise ValueError(f"radare2 rejected rename at {_hex(ea)}: {failure}")
+    found = next((f for f in _items(funcs) if _addr(f.get("offset", f.get("addr", 0))) == ea), None)
+    if found is None or str(found.get("name") or "") != name:
+        raise ValueError(f"radare2 did not apply rename at {_hex(ea)} to {name}")
     _DIRTY = True
     return {"ea": _hex(ea)}
 
@@ -377,8 +394,17 @@ def comment(t, text, repeatable=False):
     if repeatable:
         targets.extend(ref["from"] for ref in xrefs_to(ea) if ref["from"] is not None and ref["from"] != ea)
     with _nul_io():
-        for addr in targets:
-            r2.cmd(f"CC {text} @ {_hex(addr)}")
+        outs = [r2.cmd(f"CC {text} @ {_hex(addr)}") for addr in targets]
+        comments = r2.cmdj("CCj")
+    failure = next((f for f in map(_r2_failure, outs) if f), None)
+    if failure:
+        raise ValueError(f"radare2 rejected comment at {_hex(ea)}: {failure}")
+    written = {}
+    for item in _items(comments):
+        written.setdefault(_addr(item.get("offset", 0)), []).append(str(item.get("name") or ""))
+    missing = [addr for addr in targets if not any(text in value for value in written.get(addr, []))]
+    if missing:
+        raise ValueError("radare2 did not apply comment at " + ", ".join(_hex(addr) for addr in missing))
     _DIRTY = True
     return {"ea": _hex(ea)}
 
@@ -386,13 +412,24 @@ def comment(t, text, repeatable=False):
 def set_type(t, decl):
     """Apply a validated C function prototype with afs; returns {"ea", "type"}."""
     global _DIRTY
-    r2 = _program()
-    ea = resolve(t)
     prototype = _clean_decl(decl)
     if prototype is None:
         raise ValueError("set_type needs a C function declaration, got: " + repr(decl))
+    r2 = _program()
+    ea = resolve(t)
+    head = prototype.partition("(")[0].strip().split()
+    want_name = head[-1] if head else ""
+    want_ret = " ".join(head[:-1])
     with _nul_io():
-        r2.cmd(f"afs {prototype} @ {_hex(ea)}")
+        out = r2.cmd(f"afs {prototype} @ {_hex(ea)}")
+        sig = r2.cmdj(f"afsj @ {_hex(ea)}")
+    failure = _r2_failure(out)
+    if failure:
+        raise ValueError(f"radare2 rejected type {prototype!r} at {_hex(ea)}: {failure}")
+    if not isinstance(sig, dict) or not sig or str(sig.get("name") or "") != want_name:
+        raise ValueError(f"radare2 did not apply type {prototype!r} at {_hex(ea)}")
+    if want_ret.replace(" ", "") != " ".join(str(sig.get("ret") or "").split()).replace(" ", ""):
+        raise ValueError(f"radare2 did not apply return type {want_ret!r} at {_hex(ea)}")
     _DIRTY = True
     return {"ea": _hex(ea), "type": prototype}
 
@@ -403,7 +440,13 @@ def make_function(t):
     r2 = _program()
     ea = resolve(t)
     with _nul_io():
-        r2.cmd(f"af @ {_hex(ea)}")
+        out = r2.cmd(f"af @ {_hex(ea)}")
+        funcs = r2.cmdj("aflj")
+    failure = _r2_failure(out)
+    if failure:
+        raise ValueError(f"radare2 rejected function creation at {_hex(ea)}: {failure}")
+    if not any(_addr(f.get("offset", f.get("addr", 0))) == ea for f in _items(funcs)):
+        raise ValueError(f"radare2 did not create a function at {_hex(ea)}")
     _DIRTY = True
     return {"ea": _hex(ea)}
 
@@ -432,6 +475,7 @@ def _view_overview():
     segments = _items(_json(r2, "iSj"))
     entries = _items(_json(r2, "iej"))
     funcs = _functions()
+    func_names = {_addr(f.get("offset", f.get("addr", 0))): f.get("name") for f in funcs}
     lines = [
         f"{_MODULE or 'binary'} — {info.get('bintype') or 'unknown'}, {info.get('arch') or 'unknown'} {int(info.get('bits') or 0)}-bit",
         f"base {_hex(_addr(info.get('baddr', 0)))}",
@@ -446,7 +490,7 @@ def _view_overview():
     lines.append(f"entry points ({len(entries)}):")
     for entry in entries[:_OVERVIEW_ENTRY_LIMIT]:
         ea = _addr(entry.get("vaddr", 0))
-        lines.append(f"  {_hex(ea)} {name_of(ea)}")
+        lines.append(f"  {_hex(ea)} {func_names.get(ea) or _hex(ea)}")
     if len(entries) > _OVERVIEW_ENTRY_LIMIT:
         lines.append(f"  … {len(entries) - _OVERVIEW_ENTRY_LIMIT} more (:exports)")
     exports = len(_items(_json(r2, "iEj")))
@@ -514,6 +558,31 @@ _TARGET_VIEWS = {
 }
 
 
+def _r2_exe_home(project_dir):
+    """Pin r2pipe to the configured binary via a `radare2` symlink in a shim dir.
+
+    r2pipe only accepts a directory (radare2home) and always spawns `<dir>/radare2`,
+    so a symlink is what forces an exact executable regardless of name or PATH.
+    """
+    configured = os.environ.get("RADARE2_BIN", "").strip()
+    if not configured:
+        return None
+    target = os.path.abspath(configured)
+    shim = os.path.join(project_dir, ".omp-r2-bin")
+    link = os.path.join(shim, "radare2.exe" if _WINDOWS else "radare2")
+    try:
+        if not os.path.isdir(shim):
+            os.makedirs(shim, exist_ok=True)
+        if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(target):
+            return shim
+        if os.path.lexists(link):
+            os.unlink(link)
+        os.symlink(target, link)
+    except OSError as exc:
+        raise RuntimeError(f"cannot stage configured radare2 binary {target}: {exc}") from exc
+    return shim
+
+
 def _rpc_open(params):
     global R2, _DATABASE_PATH, _DIRTY, _MODULE
     if R2 is not None:
@@ -521,17 +590,21 @@ def _rpc_open(params):
     project_dir = os.path.abspath(params["project"])
     binary = os.path.abspath(params["binary"])
     is_new = bool(params.get("new"))
+    r2home = _r2_exe_home(project_dir)
+    kwargs = {"radare2home": r2home} if r2home else {}
     settings = [
         "scr.color=0",
         "scr.utf8=false",
         "scr.interactive=false",
-        "dir.projects=" + project_dir,
         "prj.files=false",
     ]
+    open_flags = ["-e", "dir.projects=" + project_dir]
     if is_new:
-        r2 = r2pipe.open(binary, flags=["-N"])
+        open_flags.append("-N")
+        r2 = r2pipe.open(binary, flags=open_flags, **kwargs)
     else:
-        r2 = r2pipe.open("-", flags=["-e", "dir.projects=" + project_dir, "-p", "omp"])
+        open_flags.extend(["-p", "omp"])
+        r2 = r2pipe.open("-", flags=open_flags, **kwargs)
     for setting in settings:
         r2.cmd("e " + setting)
     r2.cmd("aa")

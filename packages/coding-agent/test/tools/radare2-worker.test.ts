@@ -27,6 +27,9 @@ class StubR2:
     def __init__(self, target, flags):
         self.target = target
         self.flags = flags
+        self.functions = [{"name": "main", "offset": 4096, "size": 64}]
+        self.comments = {}
+        self.signature = {"name": "main", "ret": "int", "argc": 0, "args": []}
     def cmd(self, text):
         _record("cmd:" + text)
         if text == "__stub_fail_pdgj":
@@ -35,6 +38,27 @@ class StubR2:
             _FAIL_PDGJ["value"] = False
         elif text.startswith("?v "):
             return "0x1000" + chr(10)
+        elif text.startswith("afn "):
+            name = text[4:].split(" @ ")[0]
+            for function in self.functions:
+                if function["offset"] == 4096:
+                    function["name"] = name
+            return ""
+        elif text.startswith("af @ "):
+            self.functions.append({"name": "fcn.2000", "offset": 8192, "size": 16})
+            return ""
+        elif text.startswith("afs "):
+            decl = text[4:].split(" @ ")[0]
+            if "rejected_stub" in decl:
+                return "ERROR: at line 1: Cannot find ( in function definition"
+            head = decl.split("(")[0].strip().split()
+            self.signature = {"name": head[-1], "ret": " ".join(head[:-1]), "argc": 0, "args": []}
+            return ""
+        elif text.startswith("CC "):
+            value, _, addr_text = text[3:].rpartition(" @ ")
+            addr = int(addr_text, 16)
+            self.comments[addr] = (self.comments.get(addr, "") + " " + value).strip()
+            return ""
         return ""
     def cmdj(self, text):
         _record("cmdj:" + text)
@@ -45,7 +69,11 @@ class StubR2:
         if text == "iej":
             return [{"vaddr": 4096}]
         if text == "aflj":
-            return [{"name": "main", "offset": 4096, "size": 64}]
+            return self.functions
+        if text == "CCj":
+            return [{"offset": addr, "type": "CCu", "name": value} for addr, value in self.comments.items()]
+        if text.startswith("afsj"):
+            return dict(self.signature)
         if text == "iij":
             return [{"name": "puts", "libname": "libc.so.6"}]
         if text == "iEj":
@@ -75,8 +103,9 @@ class StubR2:
     def terminate(self):
         _record("terminate")
 
-def open(target, flags=None):
-    _record("open:" + str(target) + ":" + ",".join(flags or []))
+def open(target, flags=None, radare2home=None):
+    extra = ":" + os.path.realpath(os.path.join(radare2home, "radare2")) if radare2home else ""
+    _record("open:" + str(target) + ":" + ",".join(flags or []) + extra)
     return StubR2(target, flags)
 `;
 
@@ -176,6 +205,12 @@ describe("radare2 worker protocol from a hidden managed store", () => {
 
 		await worker.close({ save: false });
 		expect(await Bun.file(log).text()).toContain("quit");
+	});
+
+	it("spawns the configured radare2 binary instead of PATH radare2", async () => {
+		const configured = path.join(dir!, "radare2");
+		const openLine = (await Bun.file(log).text()).split("\n").find(line => line.startsWith("open:"));
+		expect(openLine).toBe(`open:${path.join(databaseDir, "stub.bin")}:-e,dir.projects=${databaseDir},-N:${configured}`);
 	});
 });
 
@@ -489,6 +524,21 @@ describe("radare2 mutations and cancellation", () => {
 		await expect(stub.worker.request("set_type", { target: "main", decl: "not a declaration" })).rejects.toThrow(/declaration/i);
 		const after = await Bun.file(stub.log).text();
 		expect(after.slice(before.length)).not.toContain("cmd:afs");
+	});
+
+	it("reports an r2-level afs rejection without flipping dirty or renaming", async () => {
+		await stub.worker.request("save", {});
+		expect(stub.worker.needsSave).toBe(false);
+		const before = await Bun.file(stub.log).text();
+		await expect(
+			stub.worker.request("set_type", { target: "main", decl: "void rejected_stub(void)" }),
+		).rejects.toThrow(/rejected/i);
+		const lines = (await Bun.file(stub.log).text()).slice(before.length).split("\n").filter(Boolean);
+		expect(lines).toContain("cmd:afs void rejected_stub(void) @ 0x1000");
+		expect(lines.some(line => line.startsWith("cmd:afn"))).toBe(false);
+		expect(stub.worker.needsSave).toBe(false);
+		const name = await stub.worker.request<ExecResult>("exec", { code: "func('main')['name']" });
+		expect(name.value).toContain("entry_main");
 	});
 
 	it("interrupt frame terminates r2 and preserves the last saved project", async () => {
