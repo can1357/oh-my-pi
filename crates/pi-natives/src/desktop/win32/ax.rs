@@ -390,6 +390,8 @@ impl AxBackend for Win32Ax {
 			height: f64::from(rect.get_bottom()) - f64::from(rect.get_top()),
 		});
 		Ok(AxProps {
+			#[cfg(test)]
+			read_as_fingerprint: None,
 			role: normalize_role_uia(&native_role),
 			native_role,
 			title: optional(element.get_name()),
@@ -405,6 +407,7 @@ impl AxBackend for Win32Ax {
 			label_complete: false,
 			selected: false,
 			role_name: None,
+			unread_children: 0,
 		})
 	}
 

@@ -1097,7 +1097,11 @@ impl PathFilters {
 		let override_match = self
 			.overrides
 			.as_ref()
-			.map(|overrides| overrides.matched(path, is_dir));
+			.map(|overrides| {
+				// Strip components so `cwd/./...` still matches cwd-anchored globs.
+				let relative = path.strip_prefix(&self.cwd).unwrap_or(path);
+				overrides.matched(relative, is_dir)
+			});
 		if override_match
 			.as_ref()
 			.is_some_and(|matched| matches!(matched, Match::Ignore(_)))
@@ -2308,6 +2312,16 @@ mod tests {
 		(code, capture.out(), capture.err())
 	}
 
+	fn anchored_glob_tree() -> tempfile::TempDir {
+		let tree = tempfile::tempdir().unwrap();
+		for file in ["docs/evidence/a.txt", "docs/c.txt", "src/b.txt"] {
+			let path = tree.path().join(file);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(path, "needle\n").unwrap();
+		}
+		tree
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn max_count_stops_after_one_match() {
 		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n").await;
@@ -2468,6 +2482,59 @@ mod tests {
 		).await;
 		assert_eq!(code, 0, "{}", capture.err());
 		assert!(capture.out().contains("UPPER.TXT:hit\n"));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn anchored_negative_glob_excludes_under_dot_operand() {
+		let tree = anchored_glob_tree();
+		let (code, capture) =
+			run_async_util::<Rg>(&["-n", "needle", "--glob", "!docs/evidence/**", "."], "", tree.path())
+				.await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "docs/c.txt:1:needle\nsrc/b.txt:1:needle\n");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn anchored_positive_glob_includes_under_dot_operand() {
+		let tree = anchored_glob_tree();
+		let (code, capture) =
+			run_async_util::<Rg>(&["-n", "needle", "-g", "src/*.txt", "."], "", tree.path()).await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "src/b.txt:1:needle\n");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn anchored_glob_uses_dot_when_no_operand() {
+		let tree = anchored_glob_tree();
+		let (code, capture) =
+			run_async_util::<Rg>(&["-n", "needle", "--glob", "!docs/evidence/**"], "", tree.path())
+				.await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "docs/c.txt:1:needle\nsrc/b.txt:1:needle\n");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn anchored_glob_is_relative_to_cwd_with_directory_operand() {
+		let tree = anchored_glob_tree();
+		let (code, capture) =
+			run_async_util::<Rg>(&["-n", "needle", "-g", "!docs/evidence/**", "docs"], "", tree.path())
+				.await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "docs/c.txt:1:needle\n");
+
+		let (code, capture) =
+			run_async_util::<Rg>(&["-n", "needle", "-g", "!evidence/**", "docs"], "", tree.path()).await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "docs/c.txt:1:needle\ndocs/evidence/a.txt:1:needle\n");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn anchored_iglob_matches_case_insensitively_under_dot_operand() {
+		let tree = anchored_glob_tree();
+		let (code, capture) =
+			run_async_util::<Rg>(&["-n", "needle", "--iglob", "SRC/*.TXT", "."], "", tree.path()).await;
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "src/b.txt:1:needle\n");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
