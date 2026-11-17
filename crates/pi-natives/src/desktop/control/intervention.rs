@@ -371,7 +371,11 @@ fn admit_takeover_with(
 	}) else {
 		return Ok(());
 	};
-	let limit = if waits { wait_limit(now(), deadline) } else { now() };
+	let limit = if waits {
+		wait_limit(now(), deadline)
+	} else {
+		now()
+	};
 	let presses = inputs.pause_before_takeover(limit, now, held, wait)?;
 	WATCH.with_borrow(|watch| {
 		if let Some(watch) = watch {
@@ -812,8 +816,8 @@ mod tests {
 		assert_eq!(waits, [Duration::from_millis(150)]);
 		// A takeover the worker did not admit, starting with the lease held,
 		// refuses at once while the user is active rather than waiting.
-		let error =
-			start_takeover_with(|| clock.get(), free, |_| panic!("no wait under the lease")).unwrap_err();
+		let error = start_takeover_with(|| clock.get(), free, |_| panic!("no wait under the lease"))
+			.unwrap_err();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		drop(watch);
 		// Outside an input call nothing waits, held or not.
