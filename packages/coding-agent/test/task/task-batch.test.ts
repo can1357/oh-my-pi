@@ -796,10 +796,9 @@ describe("task.batch spawning", () => {
 
 	it("spawns schema-less, yield-less children by default even with caller and agent schemas", async () => {
 		mockDiscovery({ ...taskAgent, output: { type: "object", properties: { agent: { type: "string" } } } });
-		let captured: { structured?: boolean; outputSchema?: unknown; outputSchemaSource?: string } | undefined;
+		let captured: { outputSchema?: unknown; outputSchemaSource?: string } | undefined;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			captured = {
-				structured: options.structured,
 				outputSchema: options.outputSchema,
 				outputSchemaSource: options.outputSchemaSource,
 			};
@@ -819,7 +818,7 @@ describe("task.batch spawning", () => {
 		} as TaskParams);
 
 		await manager.getJob(result.details!.async!.jobId)!.promise;
-		expect(captured).toEqual({ structured: false, outputSchema: undefined, outputSchemaSource: undefined });
+		expect(captured).toEqual({ outputSchema: undefined, outputSchemaSource: undefined });
 	});
 
 	it("blocks batch execution when async.enabled is false even with a job manager", async () => {

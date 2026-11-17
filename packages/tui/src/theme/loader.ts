@@ -212,7 +212,18 @@ export function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = 
 	const symbolPreset: SymbolPreset = symbolPresetOverride ?? themeJson.symbols?.preset ?? "unicode";
 	const symbolOverrides = themeJson.symbols?.overrides ?? {};
 	const spinnerFramesOverrides = normalizeSpinnerFramesOverride(themeJson.symbols?.spinnerFrames);
-	return new Theme(fgColors, bgColors, colorMode, symbolPreset, symbolOverrides, spinnerFramesOverrides, ansiPalette);
+	const terminalBackground =
+		themeJson.terminal?.background === undefined ? undefined : resolveVarRefs(themeJson.terminal.background, vars);
+	return new Theme(
+		fgColors,
+		bgColors,
+		colorMode,
+		symbolPreset,
+		symbolOverrides,
+		spinnerFramesOverrides,
+		ansiPalette,
+		terminalBackground,
+	);
 }
 
 export async function loadTheme(name: string, options: CreateThemeOptions = {}): Promise<Theme> {
