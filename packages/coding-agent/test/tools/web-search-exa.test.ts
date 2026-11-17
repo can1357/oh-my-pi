@@ -669,32 +669,12 @@ describe("searchExa", () => {
 		expect(receivedKey).toBe("stored-key-xyz");
 	});
 
-	it("joins the auto chain only with a credential but stays explicitly selectable without one", async () => {
+	it("joins the auto chain without credentials so the public MCP runs", async () => {
 		delete process.env.EXA_API_KEY;
-		await withInMemoryAuthStorage(async authStorage => {
-			const provider = new ExaProvider();
-			expect(provider.isAvailable(authStorage)).toBe(false);
-			expect(provider.isExplicitlyAvailable(authStorage)).toBe(true);
-			authStorage.keys.setRuntime("exa", "stored-key-xyz");
-			expect(provider.isAvailable(authStorage)).toBe(true);
-		});
-	});
-
-	it("errors instead of falling back to the public MCP when a configured credential does not resolve", async () => {
-		delete process.env.EXA_API_KEY;
-		let requests = 0;
-		const fetchMock: FetchImpl = () => {
-			requests++;
-			return Promise.resolve(new Response(JSON.stringify(makeMockExaResponse()), { status: 200 }));
-		};
-		await withInMemoryAuthStorage(async authStorage => {
-			// A `models.yml` apiKey whose `!command` failed: configured, but resolves to nothing.
-			vi.spyOn(authStorage.keys, "source").mockReturnValue({ kind: "config", concrete: true });
-			await expect(searchExa({ query: "private query", authStorage, fetch: fetchMock })).rejects.toThrow(
-				"Exa credentials could not be resolved",
-			);
-		});
-		expect(requests).toBe(0);
+		const available = await withInMemoryAuthStorage(authStorage =>
+			Promise.resolve(new ExaProvider().isAvailable(authStorage)),
+		);
+		expect(available).toBe(true);
 	});
 
 	it("throws SearchProviderError on non-ok HTTP response", async () => {

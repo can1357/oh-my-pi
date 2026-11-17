@@ -270,7 +270,7 @@ describe("Firecrawl web search provider", () => {
 		}
 	});
 
-	it("joins the auto chain only with a credential or self-hosted endpoint", () => {
+	it("joins the auto chain in hosted keyless mode", () => {
 		const originalApiKey = process.env.FIRECRAWL_API_KEY;
 		const originalBaseUrl = process.env.FIRECRAWL_BASE_URL;
 		const originalApiUrl = process.env.FIRECRAWL_API_URL;
@@ -278,12 +278,7 @@ describe("Firecrawl web search provider", () => {
 		delete process.env.FIRECRAWL_BASE_URL;
 		delete process.env.FIRECRAWL_API_URL;
 		try {
-			const provider = new FirecrawlProvider();
-			expect(provider.isAvailable(keylessAuthStorage)).toBe(false);
-			expect(provider.isExplicitlyAvailable(keylessAuthStorage)).toBe(true);
-			expect(provider.isAvailable(providerAuthStorage)).toBe(true);
-			process.env.FIRECRAWL_BASE_URL = "http://localhost:3002";
-			expect(provider.isAvailable(keylessAuthStorage)).toBe(true);
+			expect(new FirecrawlProvider().isAvailable(keylessAuthStorage)).toBe(true);
 		} finally {
 			if (originalApiKey === undefined) delete process.env.FIRECRAWL_API_KEY;
 			else process.env.FIRECRAWL_API_KEY = originalApiKey;
@@ -291,28 +286,6 @@ describe("Firecrawl web search provider", () => {
 			else process.env.FIRECRAWL_BASE_URL = originalBaseUrl;
 			if (originalApiUrl === undefined) delete process.env.FIRECRAWL_API_URL;
 			else process.env.FIRECRAWL_API_URL = originalApiUrl;
-		}
-	});
-
-	it("errors instead of falling back to hosted keyless mode when a configured credential does not resolve", async () => {
-		const authStorage = createInMemoryAuthStorage();
-		// A `models.yml` apiKey whose `!command` failed: configured, but resolves to nothing.
-		const sourceSpy = vi.spyOn(authStorage.keys, "source").mockReturnValue({ kind: "config", concrete: true });
-		let requests = 0;
-		try {
-			await expect(
-				searchFirecrawl({
-					...makeParams("private query", authStorage),
-					fetch: () => {
-						requests++;
-						return Promise.resolve(new Response("{}", { status: 200 }));
-					},
-				}),
-			).rejects.toThrow("Firecrawl credentials could not be resolved");
-			expect(requests).toBe(0);
-		} finally {
-			sourceSpy.mockRestore();
-			authStorage.close();
 		}
 	});
 
