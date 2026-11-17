@@ -782,7 +782,7 @@ describe("ACP agent", () => {
 		}
 	});
 
-	it("rejects mismatched primary roots without changing live or stored additional roots", async () => {
+	it("rejects mismatched primary roots when activating extra roots without changing stored state", async () => {
 		const harness = await createHarness();
 		try {
 			const created = await harness.agent.newSession({
@@ -804,7 +804,7 @@ describe("ACP agent", () => {
 							sessionId: created.sessionId,
 							cwd: harness.cwdB,
 							mcpServers: [],
-							additionalDirectories: [],
+							additionalDirectories: [path.join(harness.cwdB, "extra")],
 						}),
 					).rejects.toMatchObject({ code: -32602 });
 					expect(harness.sessions).toHaveLength(count);
@@ -816,6 +816,70 @@ describe("ACP agent", () => {
 						await reopened.close();
 					}
 				}
+			}
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	for (const method of ["loadSession", "resumeSession", "unstable_forkSession"] as const) {
+		it(`${method} reopens a moved durable conversation without extra roots`, async () => {
+			const harness = await createHarness();
+			try {
+				const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+				const session = harness.findSession(created.sessionId)!;
+				await session.newSession();
+				const durableId = session.sessionId;
+				session.sessionManager.appendMessage({ role: "user", content: "moved conversation", timestamp: 1 });
+				await session.sessionManager.addWorkspaceDirectory(path.join(harness.cwdA, "extra"));
+				await session.sessionManager.ensureOnDisk();
+				await session.sessionManager.moveTo(harness.cwdB);
+				await harness.agent.closeSession({ sessionId: created.sessionId });
+
+				await harness.agent[method]({
+					sessionId: method === "unstable_forkSession" ? durableId : created.sessionId,
+					cwd: harness.cwdA,
+					mcpServers: [],
+					...(method === "resumeSession" ? { additionalDirectories: [] } : {}),
+				});
+				const reopened = harness.sessions.at(-1)!;
+				expect(reopened.sessionManager.getCwd()).toBe(harness.cwdB);
+				expect(reopened.sessionManager.getAdditionalDirectories()).toEqual([]);
+				expect(reopened.sessionManager.buildSessionContext().messages).toContainEqual(
+					expect.objectContaining({ role: "user", content: "moved conversation" }),
+				);
+				if (method === "unstable_forkSession") expect(reopened.sessionId).not.toBe(durableId);
+				else expect(reopened.sessionId).toBe(durableId);
+			} finally {
+				await harness.agent.dispose();
+			}
+		});
+	}
+
+	it("reopens stored sessions through a symlinked cwd without extra roots", async () => {
+		const harness = await createHarness();
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			const session = harness.findSession(created.sessionId)!;
+			session.sessionManager.appendMessage({ role: "user", content: "aliased conversation", timestamp: 1 });
+			await session.sessionManager.ensureOnDisk();
+			await harness.agent.closeSession({ sessionId: created.sessionId });
+			const alias = path.join(path.dirname(harness.cwdA), "cwd-alias");
+			await fs.promises.symlink(harness.cwdA, alias, process.platform === "win32" ? "junction" : "dir");
+			for (const method of ["loadSession", "resumeSession", "unstable_forkSession"] as const) {
+				await harness.agent[method]({
+					sessionId: created.sessionId,
+					cwd: alias,
+					mcpServers: [],
+				});
+				const reopened = harness.sessions.at(-1)!;
+				expect(reopened.sessionManager.buildSessionContext().messages).toContainEqual(
+					expect.objectContaining({ role: "user", content: "aliased conversation" }),
+				);
+				expect(reopened.sessionManager.getAdditionalDirectories()).toEqual([]);
+				await harness.agent.closeSession({
+					sessionId: reopened.sessionId,
+				});
 			}
 		} finally {
 			await harness.agent.dispose();

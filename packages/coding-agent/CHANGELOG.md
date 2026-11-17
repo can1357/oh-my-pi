@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- ACP sessions now activate only client-supplied workspace roots: `--add-dir` and `workspace.additionalDirectories` no longer seed ACP sessions, including when a client omits `additionalDirectories`; clients must resend their full root list when reopening sessions ([#19535](https://github.com/can1357/oh-my-pi/pull/19535) by [@chenjiangui](https://github.com/chenjiangui)).
+
 ### Added
 
+- Added multi-root workspace support for ACP clients such as Zed across session creation, loading, resuming, and forking ([#15818](https://github.com/can1357/oh-my-pi/issues/15818), [#19535](https://github.com/can1357/oh-my-pi/pull/19535) by [@chenjiangui](https://github.com/chenjiangui)).
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 
@@ -18,7 +23,6 @@
 
 ### Fixed
 
-- Fixed ACP clients such as Zed not passing multi-root workspaces to omp; session creation, loading, resuming, and forking now use the client's additional workspace directories ([#15818](https://github.com/can1357/oh-my-pi/issues/15818), [#19535](https://github.com/can1357/oh-my-pi/pull/19535) by [@chenjiangui](https://github.com/chenjiangui)).
 - Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
 - Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
 - Fixed the shell's `stat`, `diff` and `find` builtins ignoring `TZ` when printing file times; `find -ls` now prints times in the shell's time zone instead of UTC, and `find -newermt` reads dates like `Nov 15, 2023` in the shell's time zone ([#19482](https://github.com/can1357/oh-my-pi/pull/19482) by [@alphastorm](https://github.com/alphastorm))
