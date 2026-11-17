@@ -366,6 +366,16 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("expands a brace list in a grep path as the search's glob matcher does", () => {
+		const grep = new GrepTool(createSession(cwd));
+		for (const root of ["~/.{netrc,x}", "~/{.netrc,x}", "~/.{aws/credentials,x}"]) {
+			expect({ root, rule: ruleOf(grep.approval({ pattern: "password", path: root })) }).toEqual({
+				root,
+				rule: "credential_read",
+			});
+		}
+	});
+
 	it("checks the database a `read` with a SQLite table or query selector opens", () => {
 		const read = new ReadTool(createSession(cwd));
 		const agentDb = getAgentDbPath();

@@ -295,14 +295,18 @@ function pathNames(absPath: string): string[] {
 const MAX_BRACE_WORD_LENGTH = 4096;
 const MAX_BRACE_WORDS = 1024;
 /**
- * The most characters {@link expandBraces} makes while the guard checks one command line, each word
- * counted with one for the space after it. Every rule checks each word made, so this bounds the
- * guard's work on brace lists however many of them a command has; past it no more words are made
- * and the command fails closed (`size_limit`).
+ * The most characters {@link expandBraces} makes while the guard checks one command line or one
+ * file tool call, each word counted with one for the space after it. Every rule checks each word
+ * made, so this bounds the guard's work on brace lists however many of them a call has; past it no
+ * more words are made and the call fails closed ({@link SIZE_LIMIT_HIT}).
  */
 const MAX_BRACE_TEXT = 256 * 1024;
-/** What is left of {@link MAX_BRACE_TEXT} for the command line being checked, below 0 once passed; {@link findShellGuardHit} resets it. */
+/** What is left of {@link MAX_BRACE_TEXT} for the call being checked, below 0 once passed; each entry point resets it. */
 let braceTextLeft = MAX_BRACE_TEXT;
+const SIZE_LIMIT_HIT = hit(
+	"size_limit",
+	`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
+);
 
 /** A word read for brace expansion: literal text, and braces, each the list of its alternatives. */
 type BracePart = string | BracePart[][];
@@ -1414,18 +1418,21 @@ export function findShellGuardHit(command: string, scope: GuardScope): GuardHit 
 /**
  * Applies `credential_read` to a file tool (`read`, `grep`): when any target path is in a
  * credential location, the call keeps `tier` but carries a safety override, like a critical bash
- * command. A database path with a table or query selector (`agent.db:table`, `agent.db?q=...`)
- * targets the database file. Internal and web URLs are not files and never match.
+ * command. A path's brace lists are expanded first, as a search's glob matcher expands them
+ * (`~/.{netrc,x}`), failing closed past {@link MAX_BRACE_TEXT}. A database path with a table or
+ * query selector (`agent.db:table`, `agent.db?q=...`) targets the database file. Internal and web
+ * URLs are not files and never match.
  */
 export function fileToolApproval(tier: ToolTier, rawPaths: readonly string[], cwd: string): ToolApprovalDecision {
 	const router = InternalUrlRouter.instance();
 	const home = os.homedir();
+	braceTextLeft = MAX_BRACE_TEXT;
 	for (const rawPath of rawPaths) {
 		const filePaths = [
 			splitPathAndSel(rawPath).path,
 			...parseSqlitePathCandidates(rawPath).map(candidate => candidate.sqlitePath),
 		];
-		for (const filePath of filePaths) {
+		for (const filePath of filePaths.flatMap(written => expandBraces(written))) {
 			if (filePath === "" || router.canHandle(filePath) || isReadableUrlPath(filePath)) continue;
 			let found: string | undefined;
 			try {
@@ -1441,5 +1448,5 @@ export function fileToolApproval(tier: ToolTier, rawPaths: readonly string[], cw
 				};
 		}
 	}
-	return tier;
+	return braceTextLeft < 0 ? { tier, override: true, reason: SIZE_LIMIT_HIT.reason } : tier;
 }
