@@ -25,8 +25,8 @@ use crate::desktop::{
 	},
 };
 
-/// Logical monitor geometry from the portal ScreenCast stream, paired with the
-/// physical PipeWire buffer size.
+/// Logical monitor geometry from the portal `ScreenCast` stream, paired with the
+/// physical `PipeWire` buffer size.
 ///
 /// The captured buffer is in physical pixels, while libei and AT-SPI address
 /// the monitor in the compositor's logical coordinate space. On a scaled
