@@ -114,3 +114,12 @@ The first revision was reviewed by Codex (CONCERNS: one blocker, five major). Th
 
 Replacing the extension's code at the same user-layer path while keeping the manifest byte-identical keeps the grant. Writing to `<config>/agent/extensions` already requires the operator's account, and the sandbox does not make that directory writable to extensions unless it lies under a writable root; the store checks do not cover the extension directory itself. Recorded in `TASKS.md` as OPEN (bind the code digest too).
 
+
+### Amendments after the second Codex review (approved 2026-11-17)
+
+- **Off mode.** With the exec sandbox mode `off`, `compile` builds no filesystem sandbox (`crates/envd/src/exec_sandbox.rs:357-364`), so nothing can protect the store. Admission gives **no control grants** when the session's exec sandbox mode is Off, and logs a warning saying why. Off keeps its current meaning.
+- **Extension root.** `OMP_CONFIG_DIR` can place `<config>/agent/extensions` anywhere (`crates/core/src/dirs.rs:95-98`). The store checks (not inside the workspace or an exec-writable root, not a symlink, owned by the effective user) apply to the user extension root as well as to `<data>/ext`, and the exec sandbox denies writes to both. Any failure gives no control grants. This replaces the "Residual risk" paragraph above, which was wrong.
+- **Declared set.** The path-grant digest covers the full declared capability set (`projection.capabilities`); only its control subset is granted.
+- **Exec-writable roots.** One shared function computes what the session's exec sandbox can write: the workspace, the configured writable roots, `TMPDIR` and `/tmp`. Admission and `omp ext grant` both call it.
+- **Passing paths to envd.** The driver passes the canonical `<data>/ext` and user extension root into envd's exec sandbox configuration. A path that does not exist yet is denied lexically (`deny_write_lexical`, `exec_sandbox.rs:1521-1523`). A remote envd runs commands on another machine and cannot write these local files.
+
