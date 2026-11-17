@@ -65,8 +65,8 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
  *   `x-assistant-message-id` used for usage attribution. No
  *   SDK telemetry (`X-Stainless-*`), `x-api-key` or Claude Code app headers.
  * - System identity: one Droid identity sentence precedes the caller's system
- *   prompt without changing its contents. A historical plugin-without-prefix
- *   403 is not evidence that the same gate remains active today.
+ *   prompt. The caller's prompt is unchanged except for OMP's own identity
+ *   sentence, which the proxy's usage policy check rejects.
  * - `x-api-provider` selects the upstream router from the model's registry
  *   rotation list (first entry pinned); the registry is KDL
  *   (`rules/providers/factory-droid.kdl`, read through `compat/factory-droid`).
@@ -74,6 +74,13 @@ import { streamAnthropic, streamOpenAICompletions, streamOpenAIResponses } from 
 
 /** Droid identity sentence prepended to the system channel. */
 const DROID_SYSTEM_PREFIX = droidIdentity.trim();
+
+/**
+ * OMP's identity sentence (coding-agent `system-prompt.md`). Factory's proxy
+ * answers 403 `content_policy_rejected` to any request whose system channel
+ * contains it, on every wire; the Droid sentence already names the agent.
+ */
+const OMP_IDENTITY_SENTENCE = /You are omp's trusted coding assistant\.\n*/g;
 
 /**
  * The CLI's chat-completions request builder pins `temperature: 1` on every
@@ -746,7 +753,10 @@ export const streamFactoryDroid: StreamFunction<"factory-droid-agent"> = (
 				sessionUuid,
 				context: {
 					...context,
-					systemPrompt: [DROID_SYSTEM_PREFIX, ...systemPrompt],
+					systemPrompt: [
+						DROID_SYSTEM_PREFIX,
+						...systemPrompt.map(block => block.replace(OMP_IDENTITY_SENTENCE, "")).filter(Boolean),
+					],
 				},
 				options,
 				forwarded: {

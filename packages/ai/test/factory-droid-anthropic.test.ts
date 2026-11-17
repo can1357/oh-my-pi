@@ -254,6 +254,22 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		},
 	);
 
+	it("sends the caller's system prompt without OMP's identity sentence, which Factory's policy check rejects", async () => {
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			factoryModel("claude-opus-4-6"),
+			{
+				systemPrompt: ["You are omp's trusted coding assistant.\n\n# Engineering\nCorrectness first."],
+				messages: [{ role: "user", content: "hello", timestamp: 1 }],
+			},
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, anthropicChunks("OK")) },
+		).result();
+
+		const system = JSON.stringify(captured[0]!.body.system);
+		expect(system).not.toContain("You are omp's trusted coding assistant.");
+		expect(system).toContain("# Engineering\\nCorrectness first.");
+	});
+
 	it.each([
 		["required", () => ({ type: "any" })],
 		[{ type: "function", function: { name: "Read" } }, (toolName: string) => ({ type: "tool", name: toolName })],
