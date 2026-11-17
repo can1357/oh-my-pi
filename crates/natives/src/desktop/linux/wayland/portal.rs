@@ -8,10 +8,18 @@ use std::{
 use ashpd::desktop::remote_desktop::RemoteDesktop;
 use tokio::runtime::{Builder, Runtime};
 
-use crate::desktop::error::{CoreResult, DesktopError};
+use crate::desktop::{
+	control,
+	error::{CoreResult, DesktopError},
+};
 
 /// How long the input probe waits for the portal frontend to answer.
 const INPUT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long before the run's end an unanswered permission prompt is given up:
+/// the bounded portal-session close (`CLOSE_TIMEOUT`) plus time to answer the
+/// caller, so the prompt's own error still beats the run's timeout.
+const CONSENT_MARGIN: Duration =
+	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
 
 /// Process-wide Tokio runtime shared by every xdg-desktop-portal call.
 ///
@@ -31,6 +39,25 @@ pub(super) fn portal_runtime() -> CoreResult<&'static Runtime> {
 	PORTAL_RUNTIME
 		.as_ref()
 		.map_err(|err| DesktopError::internal(format!("xdg-desktop-portal runtime: {err}")))
+}
+
+/// Bounds a wait on a portal prompt the user answers (the `RemoteDesktop`
+/// permission dialog, the `ScreenCast` share picker) by the current
+/// operation's deadline (the run's end or the caller's reply timeout), and
+/// fails with `Timeout` and `unanswered` once it passes. GNOME can open the
+/// prompt behind other windows; unbounded, only the run's own timeout ends the
+/// wait, and the run fails without saying why.
+pub(super) async fn until_deadline<T>(
+	future: impl Future<Output = T>,
+	unanswered: &'static str,
+) -> CoreResult<T> {
+	let Some(deadline) = control::current_token().and_then(|token| token.deadline()) else {
+		return Ok(future.await);
+	};
+	let give_up = deadline.checked_sub(CONSENT_MARGIN).unwrap_or(deadline);
+	tokio::time::timeout_at(give_up.into(), future)
+		.await
+		.map_err(|_| DesktopError::timeout(unanswered))
 }
 
 /// File name of the `RemoteDesktop` restore token that pre-#7884 builds wrote

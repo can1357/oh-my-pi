@@ -43,6 +43,10 @@
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
 
+### Fixed
+
+- Fixed Wayland screenshots each failing after 30 s while the screen-share picker waited for the user: the call now waits for the picker until its deadline, as input waits for the RemoteDesktop dialog, and ends with a `Timeout` naming the picker if nobody answers
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
