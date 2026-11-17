@@ -1089,6 +1089,25 @@ describe("guard rule review regressions", () => {
 		expect(ruleOf(bashApproval(cwd, "git --attr-source HEAD reset --hard"))).toBe("discard_changes");
 	});
 
+	it("credits a `git stash` only with what it saves, and not one that only prints and exits", async () => {
+		await dirtyRepo(cwd);
+		fs.writeFileSync(path.join(cwd, "u.txt"), "u\n");
+		for (const command of [
+			"git stash --help >/dev/null && git reset --hard",
+			"git stash -h && git reset --hard",
+			"git --version stash && git reset --hard",
+			"git -C . --html-path stash && git reset --hard",
+			"git --exec-path stash && git reset --hard",
+			"git stash -u --no-include-untracked && git clean -fd",
+			"git stash --all --no-all && git clean -fd",
+			"git stash -a --no-include-untracked && git clean -fd",
+		]) {
+			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: "discard_changes" });
+		}
+		// The last of `-u` and `--no-include-untracked` counts.
+		expect(ruleOf(bashApproval(cwd, "git stash --no-include-untracked -u && git clean -fd"))).toBeUndefined();
+	});
+
 	it.skipIf(process.platform !== "linux")("reads a pkill selection value stuck to its option", () => {
 		const user = os.userInfo().username;
 		for (const command of [

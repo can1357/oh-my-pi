@@ -1390,11 +1390,24 @@ const GIT_VALUE_OPTIONS: Record<string, true> = {
 	"-C": true,
 	"-c": true,
 	"--namespace": true,
-	"--exec-path": true,
 	"--config-env": true,
 	"--attr-source": true,
 };
 const MASS_PATHSPECS: Record<string, true> = { ".": true, ":/": true, "*": true, ":(top)": true, "./": true };
+/**
+ * git's own options that print something and exit before any subcommand runs (`--exec-path` only
+ * bare; `--exec-path=<dir>` sets the directory). `--list-cmds=<kind>` exits too.
+ */
+const GIT_EXITING_OPTIONS: Record<string, true> = {
+	"-h": true,
+	"--help": true,
+	"-v": true,
+	"--version": true,
+	"--html-path": true,
+	"--man-path": true,
+	"--info-path": true,
+	"--exec-path": true,
+};
 
 /**
  * Where a git command works: the directory it runs in after its `-C`s, and the repository and work
@@ -1407,13 +1420,20 @@ interface GitTarget {
 	workTree?: string;
 }
 
-/**
- * A git command's subcommand, its arguments, and where it works; no `target` when a directory it
- * names is a word the guard cannot resolve.
- */
-function gitInvocation(command: ShellCommand, home: string): { sub: string; rest: string[]; target?: GitTarget } {
+/** A git command's subcommand and its arguments. */
+interface GitInvocation {
+	sub: string;
+	rest: string[];
+	/** Where it works; none when a directory it names is a word the guard cannot resolve. */
+	target?: GitTarget;
+	/** One of git's own options ({@link GIT_EXITING_OPTIONS}) makes git exit before the subcommand runs. */
+	exits: boolean;
+}
+
+function gitInvocation(command: ShellCommand, home: string): GitInvocation {
 	const argv = args(command);
 	let where = command.cwd;
+	let exits = false;
 	const named: { gitDir?: string; workTree?: string } = {};
 	for (const assignment of command.assignments) {
 		const eq = assignment.indexOf("=");
@@ -1424,6 +1444,7 @@ function gitInvocation(command: ShellCommand, home: string): { sub: string; rest
 	let i = 0;
 	while (i < argv.length && argv[i].startsWith("-")) {
 		const arg = argv[i];
+		if (Object.hasOwn(GIT_EXITING_OPTIONS, arg) || arg.startsWith("--list-cmds=")) exits = true;
 		const eq = arg.indexOf("=");
 		const option = eq > 0 ? arg.slice(0, eq) : arg;
 		if (option === "--git-dir" || option === "--work-tree") {
@@ -1443,16 +1464,16 @@ function gitInvocation(command: ShellCommand, home: string): { sub: string; rest
 	}
 	const sub = i < argv.length ? argv[i] : "";
 	const rest = argv.slice(i + 1);
-	if (where === undefined) return { sub, rest };
+	if (where === undefined) return { sub, rest, exits };
 	const target: GitTarget = { where };
 	for (const key of ["gitDir", "workTree"] as const) {
 		const word = named[key];
 		if (word === undefined) continue;
 		const resolved = resolveCommandWordPath(command, word, where, home);
-		if (resolved === undefined) return { sub, rest };
+		if (resolved === undefined) return { sub, rest, exits };
 		target[key] = resolved;
 	}
-	return { sub, rest, target };
+	return { sub, rest, target, exits };
 }
 
 /** Whether `arg` is the long option `name` or an abbreviation git expands to it (`--har` for `--hard`). */
@@ -1651,7 +1672,9 @@ interface Stashed {
 
 /**
  * What `git stash` with these arguments saves, or `undefined` when it saves nothing or only part of
- * the tracked changes: some paths, some hunks (`-p`), or the index alone (`--staged`).
+ * the tracked changes: some paths, some hunks (`-p`), or the index alone (`--staged`), or when it
+ * only prints its usage (`-h`, `--help`). Of `-u`, `-a`, `--no-include-untracked` and `--no-all`,
+ * the last one counts.
  */
 function stashSaves(rest: readonly string[]): Stashed | undefined {
 	const save = rest[0] === "save";
@@ -1659,6 +1682,10 @@ function stashSaves(rest: readonly string[]): Stashed | undefined {
 	// `list`, `show`, `apply`, `pop`, `drop`, ... save nothing.
 	if (options === rest && rest.length > 0 && !rest[0].startsWith("-")) return undefined;
 	const saved: Stashed = { untracked: false, ignored: false };
+	const include = (untracked: boolean, ignored: boolean) => {
+		saved.untracked = untracked;
+		saved.ignored = ignored;
+	};
 	for (let i = 0; i < options.length; i++) {
 		const arg = options[i];
 		if (arg === "--") {
@@ -1667,21 +1694,24 @@ function stashSaves(rest: readonly string[]): Stashed | undefined {
 			break;
 		}
 		if (arg.startsWith("--") && arg.length > 2) {
+			if (arg === "--help" || arg === "--help-all") return undefined;
 			if (isLongOption(arg, "--message")) {
 				if (!arg.includes("=")) i++;
 			} else if (["--patch", "--staged", "--pathspec-from-file"].some(name => isLongOption(arg, name))) {
 				return undefined;
 			} else if (isLongOption(arg, "--all")) {
-				saved.untracked = saved.ignored = true;
+				include(true, true);
 			} else if (isLongOption(arg, "--include-untracked")) {
-				saved.untracked = true;
+				include(true, false);
+			} else if (isLongOption(arg, "--no-all") || isLongOption(arg, "--no-include-untracked")) {
+				include(false, false);
 			}
 		} else if (arg.startsWith("-") && arg.length > 1) {
 			for (let k = 1; k < arg.length; k++) {
 				const letter = arg[k];
-				if (letter === "p" || letter === "S") return undefined;
-				if (letter === "a") saved.untracked = saved.ignored = true;
-				else if (letter === "u") saved.untracked = true;
+				if (letter === "p" || letter === "S" || letter === "h") return undefined;
+				if (letter === "a") include(true, true);
+				else if (letter === "u") include(true, false);
 				else if (letter === "m") {
 					// `-m` takes the rest of the bundle, or the next word.
 					if (k === arg.length - 1) i++;
@@ -1727,11 +1757,14 @@ function gitRepository(target: GitTarget | undefined): string | undefined {
 	}
 }
 
-/** The `git stash` that is `link`'s command, or `undefined` when the command is no `git stash`. */
+/**
+ * The `git stash` that is `link`'s command, or `undefined` when the command is no `git stash` or
+ * one git exits before (`git --version stash`).
+ */
 function stashAt(link: SucceededLink, scope: GuardScope): StashLink | undefined {
 	if (link.command.argv[0] !== "git") return undefined;
-	const { sub, rest, target } = gitInvocation(link.command, scope.home);
-	if (sub !== "stash") return undefined;
+	const { sub, rest, target, exits } = gitInvocation(link.command, scope.home);
+	if (sub !== "stash" || exits) return undefined;
 	const release = rest.length > 0 && Object.hasOwn(STASH_RELEASES, rest[0]);
 	const saved = release ? undefined : stashSaves(rest);
 	return { link, release, repository: saved && gitRepository(target), saved };
