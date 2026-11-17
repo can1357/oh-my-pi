@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `providers.webKeyless` setting (default on): turn it off and `web_search` and URL reading use only services you configured, skipping keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines even when your `web` chain lists them; `omp q --model web/<engine>` still runs one on request ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#16336](https://github.com/can1357/oh-my-pi/issues/16336))
 - Added `live.endpoint` and `live.apiKey` settings: live voice (`/live`, RPC `live_start`/`live_connect`, extension `startLive`) can run on any OpenAI Realtime WebRTC-compatible server instead of Codex, with no ChatGPT sign-in and in offline mode; `live.voice` accepts any voice name
 
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
@@ -11,6 +12,7 @@
 
 ### Changed
 
+- Keyless Parallel web searches send only the query; they no longer include your session id or model id ([#13694](https://github.com/can1357/oh-my-pi/issues/13694))
 - On macOS the `computer` tool's takeover notice now says what it did with your keyboard ("handed the keyboard back to Notes's window", "left as the user chose") instead of "focus returned", which it could not verify ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser `tab.observe()` and `tab.ariaSnapshot()` on Chromium tabs now wait, up to 3 seconds, for the requests and page updates (including child frames) the actions since your last look started, so a cell that clicks and then observes shows the result instead of the page before it; concurrent looks share the wait even across another action, clearing the request log does not discard pending work, and requests already open before the action do not delay the look ([#19045](https://github.com/can1357/oh-my-pi/pull/19045) by [@will-bogusz](https://github.com/will-bogusz))
 - When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
@@ -20,6 +22,7 @@
 
 ### Fixed
 
+- Fixed Exa and Firecrawl web searches silently falling back to their keyless public endpoints when a configured credential failed to resolve (for example a failing `!command`); they now report the credential error
 - Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
 - Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
 - Fixed the shell's `stat`, `diff` and `find` builtins ignoring `TZ` when printing file times; `find -ls` now prints times in the shell's time zone instead of UTC, and `find -newermt` reads dates like `Nov 15, 2023` in the shell's time zone ([#19482](https://github.com/can1357/oh-my-pi/pull/19482) by [@alphastorm](https://github.com/alphastorm))
