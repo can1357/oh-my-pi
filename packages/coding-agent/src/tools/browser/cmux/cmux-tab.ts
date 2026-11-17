@@ -587,8 +587,8 @@ export class CmuxTab implements InProcessRunTab {
 		this.#runContext = context;
 	}
 
-	clearRunContext(): void {
-		this.#runContext = undefined;
+	clearRunContext(context: InProcessRunContext): void {
+		if (this.#runContext === context) this.#runContext = undefined;
 	}
 
 	async a11y(options: BrowserA11yOptions = {}): Promise<BrowserA11yResult> {

@@ -177,6 +177,10 @@ export class EcosiaProvider extends SearchProvider {
 		return true;
 	}
 
+	override isKeyless(): boolean {
+		return true;
+	}
+
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchEcosia(params);
 	}
