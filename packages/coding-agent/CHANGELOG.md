@@ -109,6 +109,14 @@
 
 ### Fixed
 
+- `/commit` now shows the subject a commit-msg hook wrote onto the commit, instead of the subject from before the hook ran ([#19448](https://github.com/can1357/oh-my-pi/pull/19448) by [@eggpeat](https://github.com/eggpeat))
+- The agent no longer reports itself idle (program status, terminal title, registry status) while a subagent or background job it is waiting on can still resume it; the run ends only once nothing can wake it, including a child agent that finishes without replying
+- Subagents and security scans no longer finish while a child agent they started is still running or a peer message is queued for them: a subagent's `yield` waits until nothing can wake its run, as it already did for its background jobs
+- `/move` and resuming a session from another project now switch task agents, project extensions, custom tools, and MCP servers to the destination project without a restart ([#19416](https://github.com/can1357/oh-my-pi/pull/19416) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed resolving a `conflict://` region to an empty side (`@ours`, `@theirs` or `@both` with no lines) leaving a stray blank line, and a chosen side whose edge lines repeat the surrounding code losing those lines ([#17839](https://github.com/can1357/oh-my-pi/pull/17839) by [@sjawhar](https://github.com/sjawhar))
+- Fixed MCP stdio servers that exit or are killed before responding being reported only as "closed stdout"; the error now names the exit code or signal ([#16482](https://github.com/can1357/oh-my-pi/pull/16482) by [@adi-IL](https://github.com/adi-IL))
+- Pasting an image while a dialog that can't hold one has focus (the `ask` form, agents hub, `/annotate`, selectors) now shows "Image paste is not supported in this prompt" instead of attaching it to the chat editor hidden behind it ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
+- Rich-text pastes during approval type-to-steer, or into a dialog opened over a draft that still holds typing, now reach the chat editor as Markdown with their images instead of as plain text ([#19374](https://github.com/can1357/oh-my-pi/pull/19374) by [@Dangerboi](https://github.com/Dangerboi))
 - Fixed status indicators incorrectly showing the agent as idle while subagents or background work could still resume the run.
 - Fixed subagents and security scans completing while child agents were still running or queued peer messages remained.
 - Fixed conflict-region resolution when a selected side is empty or shares edge lines with surrounding code.

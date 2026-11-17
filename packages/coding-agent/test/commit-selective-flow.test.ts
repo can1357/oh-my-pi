@@ -1,15 +1,18 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { commitSelection } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
+import { commitSelection, type CommitOutcome } from "@oh-my-pi/pi-coding-agent/commit/selective/apply";
 import { createDraft } from "@oh-my-pi/pi-coding-agent/commit/selective/draft";
-import { ChangeJournal } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
+import { ChangeJournal, type JournalRecord } from "@oh-my-pi/pi-coding-agent/commit/selective/journal";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
@@ -29,6 +32,39 @@ async function git(cwd: string, args: readonly string[], extraEnv: Record<string
 	]);
 	if (code !== 0) throw new Error(`git ${args.join(" ")} failed (${code}): ${err}`);
 	return out;
+}
+
+function commitIsRecorded(journalFile: string, sha: string): boolean {
+	let text: string;
+	try {
+		text = fsSync.readFileSync(journalFile, "utf8");
+	} catch {
+		return false;
+	}
+	return text.split("\n").some(line => {
+		if (!line) return false;
+		try {
+			const record: JournalRecord = JSON.parse(line);
+			return record.type === "commit" && record.sha === sha;
+		} catch {
+			return false;
+		}
+	});
+}
+
+async function installSubjectRewriteHook(root: string): Promise<void> {
+	await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+	const hook = path.join(root, ".git", "hooks", "commit-msg");
+	await Bun.write(
+		hook,
+		"#!/bin/sh\n" +
+			"cat > \"$1\" <<'EOF'\n" +
+			"fix(notes): kept the rewritten subject\n" +
+			"\n" +
+			"- Hook rewrote the body.\n" +
+			"EOF\n",
+	);
+	await fs.chmod(hook, 0o755);
 }
 
 const CHANGELOG = "# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Fixed an old bug\n";
@@ -647,5 +683,101 @@ describe("selective commit flow", () => {
 
 		expect(outcome.paths).toEqual([filename]);
 		expect(await git(root, ["show", `HEAD:${filename}`])).toBe("after\n");
+	});
+
+	it("returns the subject a commit-msg hook stored on the commit", async () => {
+		// The commit summary prints outcome.subject. A hook can replace that line;
+		// callers must see the subject on the commit, not the one they submitted.
+		const { root, journal, write } = await emptyRepo();
+		await installSubjectRewriteHook(root);
+		await write("Main", undefined, "notes.txt", "notes\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const outcome = await commitSelection(
+			draft,
+			{ subject: "chore: original subject", body: ["- Original body."] },
+			{ journal, agent: { agent: "Main" } },
+		);
+
+		const stored = (await git(root, ["log", "-1", "--format=%s"])).replace(/\n$/, "");
+		expect(stored).toBe("fix(notes): kept the rewritten subject");
+		expect(outcome.subject).toBe(stored);
+		expect(await git(root, ["log", "-1", "--format=%B"])).toContain("- Hook rewrote the body.");
+		expect(await git(root, ["log", "-1", "--format=%B"])).not.toContain("Original body");
+	});
+
+	it("remembers a saved commit when the caller stops while its subject is read", async () => {
+		// Stopping while the subject is read back used to happen before the session
+		// recorded the commit, so a later amend was refused. The record is already on
+		// disk when that read starts, the read is not cancelled, and the subject is the
+		// line the hook stored.
+		const { root, journal, write } = await emptyRepo();
+		await installSubjectRewriteHook(root);
+		await write("Main", undefined, "notes.txt", "notes\n");
+		await journal.flush();
+
+		const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+		const controller = new AbortController();
+		const requireGit = vcs.requireGit.bind(vcs);
+		const journalFile = path.join(journal.dir, "changes.jsonl");
+		let sawRead = false;
+		let recordedBeforeRead = false;
+		let readSignal: AbortSignal | undefined;
+		const spy = vi.spyOn(vcs, "requireGit").mockImplementation((dir: string) => {
+			const repo = requireGit(dir);
+			if (path.resolve(repo.info().repoRoot) !== path.resolve(draft.root)) return repo;
+			return new Proxy(repo, {
+				get(target, prop) {
+					if (prop === "commitDetails") {
+						return (rev: string, signal?: AbortSignal) => {
+							sawRead = true;
+							recordedBeforeRead = commitIsRecorded(journalFile, rev);
+							readSignal = signal;
+							controller.abort();
+							return signal === undefined ? target.commitDetails(rev) : target.commitDetails(rev, signal);
+						};
+					}
+					const value: unknown = Reflect.get(target, prop, target);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		});
+		try {
+			let outcome: CommitOutcome | undefined;
+			let failure: unknown;
+			try {
+				outcome = await commitSelection(
+					draft,
+					{ subject: "chore: original subject", body: ["- Original body."] },
+					{ journal, agent: { agent: "Main" }, signal: controller.signal },
+				);
+			} catch (error) {
+				failure = error;
+			}
+			expect(failure).toBeUndefined();
+			if (!outcome) throw new Error("commit did not return an outcome");
+			expect(sawRead).toBe(true);
+			expect(recordedBeforeRead).toBe(true);
+			expect(readSignal).toBeUndefined();
+			expect(controller.signal.aborted).toBe(true);
+			const stored = (await git(root, ["log", "-1", "--format=%s"])).replace(/\n$/, "");
+			expect(stored).toBe("fix(notes): kept the rewritten subject");
+			expect(outcome.subject).toBe(stored);
+
+			spy.mockRestore();
+			await write("Main", undefined, "notes.txt", "notes\nrevised\n");
+			await journal.flush();
+			const followUp = await createDraft({ cwd: root, journal, caller: "Main" });
+			const amended = await commitSelection(
+				followUp,
+				{ subject: "fix(notes): amended after a stop", amend: true },
+				{ journal, agent: { agent: "Main" } },
+			);
+			expect(amended.sha).not.toBe(outcome.sha);
+			expect((await git(root, ["rev-parse", "HEAD"])).trim()).toBe(amended.sha);
+		} finally {
+			spy.mockRestore();
+		}
 	});
 });
