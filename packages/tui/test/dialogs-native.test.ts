@@ -9,6 +9,7 @@ import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overla
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
 
@@ -503,6 +504,31 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
+	it("approval: native details sit in a capped scroller, compact or expanded, and Page Down scrolls it, so the choices and action bar stay on screen", () => {
+		const content = Array.from({ length: 60 }, (_, i) => `line ${i} ${"x".repeat(80)}`).join("\n");
+		const dialog = new ApprovalDialogComponent(
+			"Allow tool: write\nPath: RULES.md · Content: line 0 …",
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+			{ fullPrompt: `Allow tool: write\nPath: RULES.md\nContent:\n${content}` },
+		);
+		// Tern scrolls a `list` capped by `max.lines`; a `col` capped by `max.h` only clips.
+		const scroller = () => {
+			const list = find(
+				dialog.describe(),
+				node => node.k === "list" && find(node, child => child.p?.role === "omp.approval.details") !== undefined,
+			)!;
+			const details = find(list.node, node => node.p?.role === "omp.approval.details")!.node;
+			return { max: list.node.k === "list" ? list.node.p?.max : undefined, scroll: details.scroll };
+		};
+		const cap = { lines: PREVIEW_LIMITS.COLLAPSED_ITEMS };
+		expect(scroller().max).toEqual(cap);
+		expect(dialog.toggleDetails()).toBe(true);
+		expect(scroller().max).toEqual(cap);
+		const before = scroller().scroll?.n ?? 0;
+		dialog.handleInput("\x1b[6~");
+		expect(scroller().scroll).toEqual({ by: "page-down", n: before + 1 });
+	});
+
 	it("approval: an expired timeout denies (never approves) and reports the timeout", async () => {
 		const denied = Promise.withResolvers<void>();
 		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn(() => denied.resolve()) };
@@ -635,8 +661,7 @@ describe("dialogs under a native surface", () => {
 		});
 		try {
 			expect(harness.errors).toEqual([]);
-			const root = harness.region("dock")!.c?.find(node => node.p?.role === "omp.editor.ask.approval");
-			const details = root?.c?.find(node => node.p?.role === "omp.approval.details");
+			const details = harness.findAll(node => node.p?.role === "omp.approval.details")[0];
 			expect(details?.c?.map(node => node.p)).toEqual([
 				expect.objectContaining({ text: "Path: /tmp/out.txt", truncate: "end" }),
 			]);

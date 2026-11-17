@@ -34,7 +34,7 @@ import {
 } from "../keybinding-matchers";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { col, item, node, span } from "../native/describe";
-import { leafKey, type NativeNode, type NativeUiEvent } from "../native/node";
+import { leafKey, type NativeNode, type NativeScroll, type NativeUiEvent } from "../native/node";
 import { actionBar, actionButton } from "../native/overlay";
 import { PREVIEW_LIMITS, sanitizeDisplayLines } from "../render/render-utils";
 import { theme } from "../theme/theme";
@@ -181,6 +181,8 @@ export class ApprovalDialogComponent implements Component {
 	#native: NativeNode | undefined;
 	/** Whether a draft held the keys when {@link #native} was described: it moves the highlight. */
 	#nativeDrafting = false;
+	/** Page Up/Down forwarded to the terminal's details scroller: bumped per key press. */
+	#nativeScroll: NativeScroll = { by: "start", n: 0 };
 	readonly #armedAt = performance.now() + APPROVE_ARM_MS;
 	readonly #countdown: CountdownTimer | undefined;
 
@@ -293,8 +295,8 @@ export class ApprovalDialogComponent implements Component {
 		const page = Math.max(1, this.#bodyRows - 1);
 		if (matchesSelectUp(keyData)) this.#moveChoice(-1);
 		else if (matchesSelectDown(keyData)) this.#moveChoice(1);
-		else if (matchesSelectPageUp(keyData)) this.#scroll(-page);
-		else if (matchesSelectPageDown(keyData)) this.#scroll(page);
+		else if (matchesSelectPageUp(keyData)) this.#scroll(-page, "page-up");
+		else if (matchesSelectPageDown(keyData)) this.#scroll(page, "page-down");
 		else if (getKeybindings().matches(keyData, "tui.select.confirm")) {
 			if (performance.now() >= this.#armedAt) this.#take(this.#choices[this.#choice]!.answer);
 		}
@@ -418,14 +420,24 @@ export class ApprovalDialogComponent implements Component {
 			node("text", { text: this.#title, role: "omp.approval.title", tone: "accent" }, undefined, "title"),
 		];
 		if (this.#details.length > 0) {
-			// One clipped row per detail like the text view; expanded details wrap.
+			// One clipped row per detail like the text view; expanded details wrap. A `list` capped at the
+			// text view's row budget is the terminal's scroller (a capped `col` would only clip), so the
+			// rest scrolls by wheel or Page Up/Down while the choices and action bar stay in view.
 			const styledRows = styleApprovalDetails(this.#details);
 			const rows = this.#details.map((line, index) => {
 				const styled = styledRows[index]!;
 				const content = styled.spans ? { spans: styled.spans } : { text: line };
 				return node("text", this.#expanded ? content : { ...content, truncate: "end" }, undefined, String(index));
 			});
-			children.push(node("col", { role: "omp.approval.details" }, rows, "details"));
+			const details = node("col", { role: "omp.approval.details" }, rows, "details");
+			children.push(
+				node(
+					"list",
+					{ max: { lines: MAX_DETAIL_ROWS } },
+					[{ ...details, scroll: this.#nativeScroll }],
+					"details-scroll",
+				),
+			);
 		}
 		const choices = this.#choices.map(choice =>
 			item(choice.answer, {
@@ -486,8 +498,10 @@ export class ApprovalDialogComponent implements Component {
 		return `${choose} · ${keys}${scroll}${this.options.draft ? " · type to deny and steer" : ""}`;
 	}
 
-	#scroll(delta: number): void {
+	#scroll(delta: number, by: "page-up" | "page-down"): void {
 		this.#scrollOffset = Math.max(0, this.#scrollOffset + delta);
+		this.#nativeScroll = { by, n: this.#nativeScroll.n + 1 };
+		this.#native = undefined;
 		this.options.tui?.requestRender();
 	}
 
