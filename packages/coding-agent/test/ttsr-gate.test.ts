@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { Judge } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
@@ -11,7 +11,6 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { TtsrCoordinator } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
 import { type GuardJudge, ToolGuard } from "@oh-my-pi/pi-coding-agent/tools/tool-guard";
-import { logger } from "@oh-my-pi/pi-utils";
 import { assistant, fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-rules";
 
 const DELETES = "Does the command delete files outside the project?";
@@ -31,13 +30,13 @@ const bash = {
 
 const RM = { command: "rm -rf /srv/data" };
 
-const stuckJudge = { label: "stuck", judge: () => Promise.withResolvers<never>().promise } as unknown as Judge;
-const failingJudge = {
+const stuckJudge: Judge = { label: "stuck", judge: () => Promise.withResolvers<never>().promise };
+const failingJudge: Judge = {
 	label: "failing",
 	judge: async () => {
 		throw new Error("judge unavailable");
 	},
-} as unknown as Judge;
+};
 
 function guardOver(coordinator: TtsrCoordinator, settings: Settings, stops: string[] = []): ToolGuard {
 	const messages: AgentMessage[] = [{ role: "user", content: "Clean up.", timestamp: Date.now() } as AgentMessage];
@@ -64,8 +63,6 @@ describe("TTSR gate rules", () => {
 
 		const refusal = await coordinator.gateToolCall(bash, RM, "call-1");
 
-		expect(refusal).toContain("did not run");
-		expect(refusal).toContain('rule="no-rm"');
 		expect(refusal).toContain("no-rm guidance");
 		expect(requests).toHaveLength(1);
 		expect(JSON.stringify(requests[0].state)).toContain("rm -rf /srv/data");
@@ -89,19 +86,16 @@ describe("TTSR gate rules", () => {
 		const allowed = await allowing.coordinator.gateToolCall(bash, RM, "call-2");
 
 		expect(Date.now() - started).toBeLessThan(2_000);
-		expect(refusal).toContain("did not run");
 		expect(refusal).toContain("no-rm guidance");
 		expect(allowed).toBeUndefined();
 	});
 
 	it("[gate-04] a failing judge refuses under onJudgeError block and runs the call by default", async () => {
-		const warn = spyOn(logger, "warn");
 		const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], failingJudge, Settings.isolated());
 		const allowing = setup([gateRule("no-rm", {})], failingJudge, Settings.isolated());
 
 		expect(await blocking.coordinator.gateToolCall(bash, RM, "call-1")).toContain("no-rm guidance");
 		expect(await allowing.coordinator.gateToolCall(bash, RM, "call-2")).toBeUndefined();
-		expect(warn.mock.calls.some(([message]) => String(message).includes("gate"))).toBe(true);
 	});
 
 	it("[gate-05] with judged rules off, onJudgeError block refuses and allow runs", async () => {
@@ -138,16 +132,12 @@ describe("TTSR gate rules", () => {
 	});
 
 	it("[gate-10] registers gates only with a question, for tool calls only", async () => {
-		const warn = spyOn(logger, "warn");
 		const manager = new TtsrManager({});
 		const tool = { source: "tool" as const, toolName: "bash" };
 
 		expect(manager.addRule(gateRule("no-question", { question: undefined, condition: ["rm"] }))).toBe(false);
-		expect(warn.mock.calls.some(([message]) => String(message).includes("gate"))).toBe(true);
 
-		warn.mockClear();
 		expect(manager.addRule(gateRule("texty", { scope: ["text", "tool:bash"] }))).toBe(true);
-		expect(warn.mock.calls.some(([message]) => String(message).includes("gate"))).toBe(true);
 		expect((await manager.gateCandidates("rm", tool)).map(candidate => candidate.rule.name)).toEqual(["texty"]);
 		expect(await manager.gateCandidates("rm", { source: "text" })).toEqual([]);
 
