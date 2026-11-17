@@ -602,6 +602,31 @@ export interface OAuthAccessFailure {
 }
 
 /**
+ * Which rule moved a session off the OAuth account that served it before:
+ * - `unavailable`: that account is gone, or its token was rejected or could not be refreshed;
+ * - `blocked`: it is rate-limited or out of usage for this request;
+ * - `plan`: its plan, or the models discovered for it, do not cover the requested model;
+ * - `cold`: it sat idle past the provider's prompt-cache window, so the pool re-ranked;
+ * - `reserve`: it reached its usage reserve while a sibling has headroom outside its own;
+ * - `allowance-spent`: its included allowance is spent while a sibling has some left;
+ * - `reclaim`: a higher-priority sibling passed its `reclaimAbovePct` and took the session back;
+ * - `released`: usage-aware fallback released it and the pool re-ranked;
+ * - `pinned`: the user pinned another account.
+ *
+ * Absent when the selector cannot attribute the move to one of these rules.
+ */
+export type AccountSwitchReason =
+	| "unavailable"
+	| "blocked"
+	| "plan"
+	| "cold"
+	| "reserve"
+	| "allowance-spent"
+	| "reclaim"
+	| "released"
+	| "pinned";
+
+/**
  * Identity of the OAuth credential a session is currently routed to. Read-only
  * display/metadata shape: `accountId` is the provider's account UUID, `email`
  * the user-facing login, `projectId` the GCP-style project for providers that
