@@ -2739,6 +2739,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionGeneration: () => this.#sessionGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
+		if (config.ttsrManager?.hasGateRules() && !this.ruleJudge()) {
+			logger.warn("TTSR gate rules have no judge (ttsr.judge); each rule's onJudgeError decides its calls");
+		}
 		this.#extensionRunner?.setToolCallPreflight?.({
 			before: (toolCallId, tool, args) => this.#ttsr.beforeBridgedToolCall(toolCallId, tool, args),
 			after: (toolCallId, result, context) => this.#ttsr.afterBridgedToolCall(toolCallId, result, context),
@@ -2771,6 +2774,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				stop: reason => {
 					void this.abort({ reason });
 				},
+				gate: (tool, args, toolCallId, signal) => this.#ttsr.gateToolCall(tool, args, toolCallId, signal),
 			}),
 		);
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());
@@ -3926,6 +3930,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onUsage: journalJudgmentUsage(this.sessionManager),
 			telemetry: this.agent.telemetry,
 			cache: sharedJudgmentCache(),
+			costGate: this.#costGate,
 		});
 	}
 

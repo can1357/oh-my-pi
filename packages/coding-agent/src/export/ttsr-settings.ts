@@ -128,6 +128,20 @@ export const cfgTtsrDisabledRules = register({
 	},
 });
 
+// Read from the operator layers (Settings.grantAuthority()): a project cannot shorten it so that
+// `onJudgeError: allow` gates pass unjudged.
+export const cfgTtsrGateTimeoutMs = register({
+	id: "ttsr.gateTimeoutMs",
+	type: "number",
+	default: 10_000,
+	validate: raw => {
+		if (raw === undefined || raw === null) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) {
+			throw new Error("ttsr.gateTimeoutMs must be a positive number");
+		}
+	},
+});
+
 /** Time-traveling stream rules configuration (`ttsr.*`). */
 export const cfgTtsr = combine({
 	enabled: cfgTtsrEnabled,
@@ -138,6 +152,7 @@ export const cfgTtsr = combine({
 	repeatGap: cfgTtsrRepeatGap,
 	builtinRules: cfgTtsrBuiltinRules,
 	disabledRules: cfgTtsrDisabledRules,
+	gateTimeoutMs: cfgTtsrGateTimeoutMs,
 });
 
 /** Time-traveling stream rules configuration ({@link cfgTtsr}). */

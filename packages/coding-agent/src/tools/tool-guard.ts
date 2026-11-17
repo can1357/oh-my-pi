@@ -9,6 +9,9 @@
  * Calls that cannot do harm never reach the judge: read-tier tools, writes inside the working
  * directory, shell commands made only of reading commands, and web search. The design, wording and
  * thresholds come from nace-ai/intern's System 1 guard (`guard.py`, Apache-2.0).
+ *
+ * Before that, the session's TTSR gate rules (`gate: before`) judge every call, including one the
+ * user approved in a prompt, whether or not the guard is on.
  */
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,6 +29,7 @@ import {
 import { logger, pathIsWithin, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type HostPressure, hostStrain, readHostPressure, summarizeHostPressure } from "../async/host-pressure";
 import type { Settings } from "../config/settings";
+import type { ToolGuardCall } from "../extensibility/extensions/runner";
 import questionFile from "../prompts/judge/tool-guard.json" with { type: "json" };
 import refusedTemplate from "../prompts/tools/tool-guard-refused.md" with { type: "text" };
 import { operatorTitleText, textFromContent } from "../session/messages";
@@ -169,6 +173,8 @@ export interface ToolGuardHost {
 	 * Defaults to {@link readHostPressure} for the working directory.
 	 */
 	hostPressure?(): Promise<HostPressure | undefined>;
+	/** Judges the call against the session's TTSR gate rules: the refusal, or undefined to go on. */
+	gate?(tool: AgentTool, args: unknown, toolCallId: string, signal?: AbortSignal): Promise<string | undefined>;
 }
 
 function stringArg(args: unknown, key: string): string | undefined {
@@ -535,7 +541,8 @@ function guardEnabled(settings: Settings): boolean {
 }
 
 /**
- * One session's tool guard: screens each call approval allowed and counts what it refused. A run is
+ * One session's tool guard: runs the rule gates on every call, screens each call approval allowed on
+ * its own, and counts what both refused. A run is one request: the counts restart when a new one arrives.
  * one request: the counts restart when a new one arrives.
  */
 export class ToolGuard {
@@ -554,9 +561,27 @@ export class ToolGuard {
 	}
 
 	/** The refusal shown to the model in place of the call's result; undefined lets the call run. */
-	async check(tool: AgentTool, args: unknown, tier: ToolTier, signal?: AbortSignal): Promise<string | undefined> {
+	async check(toolCall: ToolGuardCall, signal?: AbortSignal): Promise<string | undefined> {
+		const { tool, args, tier } = toolCall;
+		const messages = this.#host.messages();
+		let runKey = 0;
+		for (const message of messages) if (userRole(message) && !message.synthetic) runKey++;
+		if (this.#runKey !== runKey) {
+			this.#runKey = runKey;
+			this.#consecutive = 0;
+			this.#total = 0;
+		}
+		// Rule gates never consult the judge breaker below: a failing judge must not open them.
+		const gated = await this.#host.gate?.(tool, args, toolCall.toolCallId, signal);
+		if (gated !== undefined) {
+			logger.warn("tool guard: a rule gate refused a call", { tool: tool.name });
+			return this.#refused(gated);
+		}
 		const settings = this.#host.settings;
-		if (!guardEnabled(settings)) return undefined;
+		if (toolCall.prompted || !guardEnabled(settings)) {
+			if (tier !== "read") this.#consecutive = 0;
+			return undefined;
+		}
 		const cwd = this.#host.cwd();
 		let targets: readonly string[] | undefined;
 		try {
@@ -571,14 +596,6 @@ export class ToolGuard {
 		} catch {
 			judged = true; // a command the scanner cannot follow is judged
 		}
-		const messages = this.#host.messages();
-		let runKey = 0;
-		for (const message of messages) if (userRole(message) && !message.synthetic) runKey++;
-		if (this.#runKey !== runKey) {
-			this.#runKey = runKey;
-			this.#consecutive = 0;
-			this.#total = 0;
-		}
 		if (!judged) {
 			if (tier !== "read") this.#consecutive = 0;
 			return undefined;
@@ -588,14 +605,28 @@ export class ToolGuard {
 			this.#consecutive = 0;
 			return undefined;
 		}
-		this.#consecutive++;
-		this.#total++;
 		logger.warn("tool guard refused a call", {
 			tool: tool.name,
 			risk: verdict.risk,
 			riskProbability: verdict.riskProbability,
 			askedProbability: verdict.askedProbability,
 		});
+		return this.#refused(
+			prompt.render(refusedTemplate, {
+				risk: verdict.risk,
+				reason: verdict.reason,
+				riskProbability: verdict.riskProbability.toFixed(2),
+				askedProbability: verdict.askedProbability.toFixed(2),
+				overloadsHost: verdict.risk === "overloads_host",
+				hostStrain: verdict.hostStrain?.join(", "),
+			}),
+		);
+	}
+
+	/** Counts one refusal, stopping the run after too many, and returns it. */
+	#refused(refusal: string): string {
+		this.#consecutive++;
+		this.#total++;
 		const exhausted =
 			this.#consecutive >= MAX_CONSECUTIVE_REFUSALS
 				? `The tool guard refused ${this.#consecutive} tool calls in a row; the run stopped.`
@@ -603,14 +634,7 @@ export class ToolGuard {
 					? `The tool guard refused ${this.#total} tool calls in this run; the run stopped.`
 					: undefined;
 		if (exhausted) this.#host.stop(exhausted);
-		return prompt.render(refusedTemplate, {
-			risk: verdict.risk,
-			reason: verdict.reason,
-			riskProbability: verdict.riskProbability.toFixed(2),
-			askedProbability: verdict.askedProbability.toFixed(2),
-			overloadsHost: verdict.risk === "overloads_host",
-			hostStrain: verdict.hostStrain?.join(", "),
-		});
+		return refusal;
 	}
 
 	async #judge(

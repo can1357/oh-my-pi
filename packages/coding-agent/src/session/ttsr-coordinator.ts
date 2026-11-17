@@ -14,16 +14,20 @@ import {
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
-import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
+import { logger, prompt, relativePathWithinRoot, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
 import {
+	JUDGED_RULE_THRESHOLD,
+	judgeRuleProbabilities,
 	judgeRules,
 	type TtsrCheckOptions,
 	type TtsrManager,
 	type TtsrMatchContext,
 	type TtsrOutput,
 } from "../export/ttsr";
+import { cfgTtsrGateTimeoutMs } from "../export/ttsr-settings";
+import ttsrGateRefusedTemplate from "../prompts/system/ttsr-gate-refused.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrProseNoticeTemplate from "../prompts/system/ttsr-prose-notice.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
@@ -622,6 +626,75 @@ export class TtsrCoordinator {
 			warning,
 			rules.map(rule => rule.name),
 		);
+	}
+
+	/**
+	 * Judges a call against `gate: before` rules before it runs: the refusal shown in place of its
+	 * result, or undefined to run it. When the judge is off, fails, outlasts `ttsr.gateTimeoutMs` or
+	 * answers no number, each rule's `onJudgeError` decides.
+	 */
+	async gateToolCall(
+		tool: AgentTool,
+		args: unknown,
+		toolCallId: string,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
+		const manager = this.#manager;
+		if (!manager?.hasGateRules()) return undefined;
+		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
+		const settings = this.#host.settings;
+		// Read from the operator layers, so a project cannot shorten it to skip judging.
+		const timeout = AbortSignal.timeout(cfgTtsrGateTimeoutMs.get(settings.grantAuthority?.() ?? settings));
+		const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
+		const verdicts = await Promise.all(
+			this.#inspector.toolCallOutputs(toolCall, 0).map(output => this.#gateOutput(manager, output, deadline)),
+		);
+		const refused = verdicts.find(verdict => verdict !== undefined);
+		if (!refused) return undefined;
+		const { rule, output, unjudged } = refused;
+		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: [rule] }).catch(() => {});
+		return prompt.render(ttsrGateRefusedTemplate, {
+			name: rule.name,
+			path: this.#displayRulePath(rule.path),
+			subject: output.subject,
+			content: rule.content,
+			unjudged,
+		});
+	}
+
+	/** The first gate rule, in rule order, that refuses `output`; `unjudged` when the judge gave no answer. */
+	async #gateOutput(
+		manager: TtsrManager,
+		output: TtsrOutput,
+		signal: AbortSignal,
+	): Promise<{ rule: Rule; output: TtsrOutput; unjudged: boolean } | undefined> {
+		const candidates = await manager.gateCandidates(output.content, output.context);
+		if (candidates.length === 0) return undefined;
+		const judge = this.#host.ruleJudge();
+		let probabilities: number[] | undefined;
+		if (judge) {
+			try {
+				probabilities = await untilAborted(signal, () =>
+					judgeRuleProbabilities(judge, output, candidates, { signal }),
+				);
+			} catch (error) {
+				logger.warn("TTSR gate judge failed; onJudgeError decides", {
+					subject: output.subject,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		for (const [index, { rule }] of candidates.entries()) {
+			const probability = probabilities?.[index];
+			if (probability !== undefined && Number.isFinite(probability)) {
+				if (probability >= JUDGED_RULE_THRESHOLD) return { rule, output, unjudged: false };
+			} else if (rule.onJudgeError === "block") {
+				return { rule, output, unjudged: true };
+			} else if (probabilities) {
+				logger.warn("TTSR gate judge gave no answer; running the call", { rule: rule.name });
+			}
+		}
+		return undefined;
 	}
 
 	#getStreamingToolCallBlock(message: AgentMessage, contentIndex: number): ToolCall | undefined {

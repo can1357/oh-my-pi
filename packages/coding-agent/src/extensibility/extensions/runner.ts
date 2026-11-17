@@ -147,12 +147,22 @@ export interface ToolCallPreflight {
 	cancel?: (toolCallId: string) => void;
 }
 
+/** A call the approval gate allowed, with the arguments that will run. */
+export interface ToolGuardCall {
+	toolCallId: string;
+	tool: AgentTool;
+	args: unknown;
+	tier: ToolTier;
+	/** The user approved this call in a prompt. */
+	prompted?: boolean;
+}
+
 /**
- * Screens a call the approval gate allowed, against the arguments that will run. Returns the
- * refusal shown to the model in place of the result, or undefined to run the call.
+ * Screens a call the approval gate allowed. Returns the refusal shown to the model in place of the
+ * result, or undefined to run the call.
  */
 export interface ToolCallGuard {
-	check(tool: AgentTool, args: unknown, tier: ToolTier, signal?: AbortSignal): Promise<string | undefined>;
+	check(call: ToolGuardCall, signal?: AbortSignal): Promise<string | undefined>;
 }
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
@@ -795,13 +805,8 @@ export class ExtensionRunner {
 	}
 
 	/** The installed tool guard's refusal for an approved call; undefined when none is installed or it allows the call. */
-	async runToolGuard(
-		tool: AgentTool,
-		args: unknown,
-		tier: ToolTier,
-		signal?: AbortSignal,
-	): Promise<string | undefined> {
-		return this.#toolGuard?.check(tool, args, tier, signal);
+	async runToolGuard(call: ToolGuardCall, signal?: AbortSignal): Promise<string | undefined> {
+		return this.#toolGuard?.check(call, signal);
 	}
 
 	async runToolCallPreflightBefore(

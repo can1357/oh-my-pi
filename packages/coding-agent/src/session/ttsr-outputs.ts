@@ -157,7 +157,7 @@ export class TtsrToolInspector {
 		for (const [index, block] of message.content.entries()) {
 			if (block.type === "text") text.push(block.text);
 			else if (block.type === "thinking") thinking.push(block.thinking);
-			else if (block.type === "toolCall") outputs.push(...this.#toolCallOutputs(block, index));
+			else if (block.type === "toolCall") outputs.push(...this.toolCallOutputs(block, index));
 		}
 		const reply = text.join("\n\n");
 		if (/\S/.test(reply)) outputs.push({ content: reply, context: { source: "text" }, subject: "reply" });
@@ -168,7 +168,8 @@ export class TtsrToolInspector {
 		return outputs;
 	}
 
-	#toolCallOutputs(toolCall: ToolCall, contentIndex: number): TtsrOutput[] {
+	/** One tool call's outputs: per file when the tool reports entries, else its digest or serialized arguments. */
+	toolCallOutputs(toolCall: ToolCall, contentIndex: number): TtsrOutput[] {
 		const context = this.matchContext(toolCall, contentIndex);
 		const entries = this.entries(toolCall);
 		if (entries) {

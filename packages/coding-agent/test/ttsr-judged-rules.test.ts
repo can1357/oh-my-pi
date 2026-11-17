@@ -1,40 +1,9 @@
-import { describe, expect, it, vi } from "bun:test";
-import type { Agent, AgentEvent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Judge, JudgmentRequest, NoulAnswer } from "@oh-my-pi/pi-ai";
-import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { JUDGED_CONTENT_MAX_TOKENS, TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
-import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TtsrCoordinator, type TtsrCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
+import { describe, expect, it } from "bun:test";
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
+import type { JudgmentRequest } from "@oh-my-pi/pi-ai";
+import { JUDGED_CONTENT_MAX_TOKENS } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
-
-function judgedRule(name: string, fields: Partial<Rule>): Rule {
-	return {
-		name,
-		path: `/rules/${name}.md`,
-		content: `${name} guidance`,
-		_source: { provider: "test", providerName: "test", path: `/rules/${name}.md`, level: "project" },
-		...fields,
-	};
-}
-
-/** Judge answering each question with the yes-probability its instructions map to (default 0). */
-function fakeJudge(verdicts: Record<string, number>, gate?: Promise<void>) {
-	const requests: JudgmentRequest[] = [];
-	const judge = {
-		label: "fake",
-		judge: async (request: JudgmentRequest) => {
-			requests.push(request);
-			await gate;
-			const answers: Record<string, NoulAnswer> = {};
-			for (const id in request.questions) {
-				answers[id] = { type: "noul", noul: verdicts[request.questions[id].instructions] ?? 0 };
-			}
-			return { api: "fake", provider: "fake", model: "fake", answers, usage: {} };
-		},
-	} as unknown as Judge;
-	return { judge, requests };
-}
+import { assistant, fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-rules";
 
 /** `content` field of a judged `{ output, content }` state. */
 function sentContent(request: JudgmentRequest): string {
@@ -44,44 +13,6 @@ function sentContent(request: JudgmentRequest): string {
 		if (typeof content === "string") return content;
 	}
 	throw new Error("judgment state has no string `content`");
-}
-
-function setup(rules: Rule[], judge: Judge) {
-	const manager = new TtsrManager({
-		enabled: true,
-		contextMode: "discard",
-		interruptMode: "always",
-		repeatMode: "once",
-		repeatGap: 0,
-	});
-	for (const rule of rules) expect(manager.addRule(rule)).toBe(true);
-	let generation = 0;
-	const abort = vi.fn();
-	const warnings: { content: string; rules: string[] }[] = [];
-	const host = {
-		agent: { state: { messages: [], tools: [] }, abort } as unknown as Agent,
-		sessionManager: { getCwd: () => "/work", appendTtsrInjection: vi.fn() } as unknown as SessionManager,
-		settings: {} as Settings,
-		emitSessionEvent: async () => {},
-		schedulePostPromptTask: vi.fn(),
-		scheduleAgentContinue: vi.fn(),
-		promptGeneration: () => 0,
-		ruleJudge: () => judge,
-		deliverRuleWarning: async (content: string, ruleNames: string[]) => {
-			warnings.push({ content, rules: ruleNames });
-		},
-		sessionGeneration: () => generation,
-	} satisfies TtsrCoordinatorHost;
-	return {
-		coordinator: new TtsrCoordinator(host, manager),
-		abort,
-		warnings,
-		replaceSession: () => generation++,
-	};
-}
-
-function assistant(content: AssistantMessage["content"], stopReason: AssistantMessage["stopReason"] = "stop") {
-	return { role: "assistant", content, stopReason, timestamp: Date.now() } as AssistantMessage;
 }
 
 const PROMISES_TESTS = "Does the reply claim tests pass without having run them?";

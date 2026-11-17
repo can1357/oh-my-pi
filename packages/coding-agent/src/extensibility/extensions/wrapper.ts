@@ -510,14 +510,21 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
-		// 3. The tool guard screens calls the approval gate let through on its own; a call the user just
-		// approved in a prompt was asked for and skips it.
-		if (!approvalCheck.required) {
-			const refusal = await this.runner.runToolGuard?.(this.tool, resolvedArgs, resolved.tier, signal);
-			if (refusal !== undefined) {
-				cancelPreflight();
-				throw new Error(refusal);
-			}
+		// 3. The tool guard: rule gates judge every call; its harm judge screens only calls the approval
+		// gate let through on its own, since a call the user just approved in a prompt was asked for.
+		const refusal = await this.runner.runToolGuard?.(
+			{
+				toolCallId,
+				tool: this.tool,
+				args: resolvedArgs,
+				tier: resolved.tier,
+				prompted: approvalCheck.required,
+			},
+			signal,
+		);
+		if (refusal !== undefined) {
+			cancelPreflight();
+			throw new Error(refusal);
 		}
 
 		// Execute the actual tool
