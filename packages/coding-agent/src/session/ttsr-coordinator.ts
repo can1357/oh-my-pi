@@ -631,7 +631,8 @@ export class TtsrCoordinator {
 	/**
 	 * Judges a call against `gate: before` rules before it runs: the refusal shown in place of its
 	 * result, or undefined to run it. When the judge is off, fails, outlasts `ttsr.gateTimeoutMs` or
-	 * answers no number, each rule's `onJudgeError` decides.
+	 * answers no number, each rule's `onJudgeError` decides. Rejects when `signal` aborts the wait: an
+	 * aborted call is neither refused nor run.
 	 */
 	async gateToolCall(
 		tool: AgentTool,
@@ -647,7 +648,9 @@ export class TtsrCoordinator {
 		const timeout = AbortSignal.timeout(cfgTtsrGateTimeoutMs.get(settings.grantAuthority?.() ?? settings));
 		const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
 		const verdicts = await Promise.all(
-			this.#inspector.toolCallOutputs(toolCall, 0).map(output => this.#gateOutput(manager, output, deadline)),
+			this.#inspector
+				.toolCallOutputs(toolCall, 0)
+				.map(output => this.#gateOutput(manager, output, signal, deadline)),
 		);
 		const refused = verdicts.find(verdict => verdict !== undefined);
 		if (!refused) return undefined;
@@ -666,7 +669,8 @@ export class TtsrCoordinator {
 	async #gateOutput(
 		manager: TtsrManager,
 		output: TtsrOutput,
-		signal: AbortSignal,
+		signal: AbortSignal | undefined,
+		deadline: AbortSignal,
 	): Promise<{ rule: Rule; output: TtsrOutput; unjudged: boolean } | undefined> {
 		const candidates = await manager.gateCandidates(output.content, output.context);
 		if (candidates.length === 0) return undefined;
@@ -674,10 +678,12 @@ export class TtsrCoordinator {
 		let probabilities: number[] | undefined;
 		if (judge) {
 			try {
-				probabilities = await untilAborted(signal, () =>
-					judgeRuleProbabilities(judge, output, candidates, { signal }),
+				probabilities = await untilAborted(deadline, () =>
+					judgeRuleProbabilities(judge, output, candidates, { signal: deadline }),
 				);
 			} catch (error) {
+				// A call the user aborted says nothing about the judge.
+				if (signal?.aborted) throw error;
 				logger.warn("TTSR gate judge failed; onJudgeError decides", {
 					subject: output.subject,
 					error: error instanceof Error ? error.message : String(error),

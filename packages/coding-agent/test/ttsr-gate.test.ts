@@ -187,6 +187,34 @@ describe("TTSR gate rules", () => {
 		expect(stops).toEqual(["The tool guard refused 3 tool calls in a row; the run stopped."]);
 	});
 
+	it("[gate-15] neither refuses, reports nor counts calls aborted while the judge is pending", async () => {
+		const settings = Settings.isolated();
+		const asked = Promise.withResolvers<void>();
+		let pending = 0;
+		const judge: Judge = {
+			label: "pending",
+			judge: () => {
+				if (++pending === 3) asked.resolve();
+				return Promise.withResolvers<never>().promise;
+			},
+		};
+		const { coordinator, events } = setup([gateRule("no-rm", { onJudgeError: "block" })], judge, settings);
+		const stops: string[] = [];
+		const guard = guardOver(coordinator, settings, stops);
+		const controller = new AbortController();
+
+		const checks = [0, 1, 2].map(i =>
+			guard.check({ toolCallId: `call-${i}`, tool: bash, args: RM, tier: "exec" }, controller.signal),
+		);
+		await asked.promise;
+		controller.abort();
+		const settled = await Promise.allSettled(checks);
+
+		expect(settled.map(result => result.status)).toEqual(["rejected", "rejected", "rejected"]);
+		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(0);
+		expect(stops).toEqual([]);
+	});
+
 	it("[gate-14] refuses through the tool wrapper without running the tool", async () => {
 		const { judge } = fakeJudge({ [DELETES]: 0.9 });
 		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });

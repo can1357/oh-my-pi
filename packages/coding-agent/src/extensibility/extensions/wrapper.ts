@@ -512,16 +512,23 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 		// 3. The tool guard: rule gates judge every call; its harm judge screens only calls the approval
 		// gate let through on its own, since a call the user just approved in a prompt was asked for.
-		const refusal = await this.runner.runToolGuard?.(
-			{
-				toolCallId,
-				tool: this.tool,
-				args: resolvedArgs,
-				tier: resolved.tier,
-				prompted: approvalCheck.required,
-			},
-			signal,
-		);
+		// An abort while a gate waits on its judge rejects: the call neither runs nor counts as refused.
+		let refusal: string | undefined;
+		try {
+			refusal = await this.runner.runToolGuard?.(
+				{
+					toolCallId,
+					tool: this.tool,
+					args: resolvedArgs,
+					tier: resolved.tier,
+					prompted: approvalCheck.required,
+				},
+				signal,
+			);
+		} catch (err) {
+			cancelPreflight();
+			throw err;
+		}
 		if (refusal !== undefined) {
 			cancelPreflight();
 			throw new Error(refusal);

@@ -357,7 +357,7 @@ Never delete files outside the working directory; ask the user first.
 
 - `TtsrCoordinator.gateToolCall()` builds the call's outputs with `TtsrToolInspector.toolCallOutputs()` (per file for `matcherEntries` tools, else the digest or JSON arguments, as in §10), and `TtsrManager.gateCandidates()` selects gate rules that pass scope, `globs`, and the `condition`/`astCondition` prefilter. There is no repeat policy: a refused call retried unchanged is judged again.
 - The judge is the same as §10 (`ttsr.judge`, `judge` role, purpose `ttsr`, cost cap). Each output with candidates gets one request; a yes-probability ≥ 0.7 refuses. The first refusing rule, in output and rule order, is reported.
-- The wait is bounded by `ttsr.gateTimeoutMs` (default 10000 ms), read from the operator layers so a project cannot shorten it, and by the call's abort signal.
+- The wait is bounded by `ttsr.gateTimeoutMs` (default 10000 ms), read from the operator layers so a project cannot shorten it, and by the call's abort signal. An abort ends the wait without a verdict: the call neither runs nor is refused, emits no `ttsr_triggered`, and does not count toward the stop rule.
 - When the judge is off, fails, times out, or returns no number, each candidate's `onJudgeError` decides: `allow` (default) logs a warning and runs the call, `block` refuses it. A session whose gate rules have no judge logs a warning at startup.
 
 ### Refusal
