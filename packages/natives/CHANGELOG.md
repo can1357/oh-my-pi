@@ -9,6 +9,7 @@
 ### Changed
 
 - macOS `scroll` now goes the same way as on Windows and Linux: a positive `dy` scrolls down and a positive `dx` right, where macOS scrolled up and left ([#19165](https://github.com/can1357/oh-my-pi/pull/19165) by [@will-bogusz](https://github.com/will-bogusz))
+- Terminal frames are prepared faster: the engine's row-reuse index hashes rows with foldhash, cutting per-frame cost by up to about 20% on tall terminals ([#19539](https://github.com/can1357/oh-my-pi/pull/19539) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 
