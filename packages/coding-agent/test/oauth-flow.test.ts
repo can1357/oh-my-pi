@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { MCPOAuthFlow, OMP_CLIENT_METADATA_URL, refreshMCPOAuthToken } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import {
+	MCPOAuthFlow,
+	matchesMetadataDocumentRedirect,
+	OMP_CLIENT_METADATA_URL,
+	refreshMCPOAuthToken,
+} from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -45,6 +51,37 @@ function mockFigmaRegistration(onRegistration: (payload: Record<string, unknown>
 	};
 }
 
+/** Authorization server at clerk.example that advertises CIMD, optionally with DCR too. */
+function mockCimdAuthorizationServer(opts: {
+	registrationEndpoint?: boolean;
+	calls?: string[];
+	tokenBodies?: string[];
+}): FetchImpl {
+	return async (input, init) => {
+		const url = String(input);
+		opts.calls?.push(url);
+		if (url === "https://clerk.example/.well-known/oauth-authorization-server") {
+			return Response.json({
+				registration_endpoint: opts.registrationEndpoint ? "https://clerk.example/oauth/register" : undefined,
+				client_id_metadata_document_supported: true,
+			});
+		}
+		if (url === "https://clerk.example/oauth/register") {
+			return Response.json({ client_id: "registered-client-id" });
+		}
+		if (url === "https://clerk.example/oauth/token") {
+			opts.tokenBodies?.push(String(init?.body));
+			return Response.json({ access_token: "access-token", refresh_token: "refresh-token" });
+		}
+		return new Response("not found", { status: 404 });
+	};
+}
+
+const clerkEndpoints = {
+	authorizationUrl: "https://clerk.example/oauth/authorize",
+	tokenUrl: "https://clerk.example/oauth/token",
+};
+
 async function completeLocalOAuthCallback(url: string): Promise<void> {
 	let lastError: unknown;
 	for (let attempt = 0; attempt < 20; attempt++) {
@@ -84,35 +121,9 @@ describe("mcp oauth flow", () => {
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
 	});
 
-	it("sends omp's client metadata document as client_id before trying dynamic registration", async () => {
-		const registrations: string[] = [];
+	it("signs in with omp's client metadata document when the server offers no registration", async () => {
 		const tokenBodies: string[] = [];
-		const fetchImpl: FetchImpl = async (input, init) => {
-			const url = String(input);
-			if (url === "https://clerk.example/.well-known/oauth-authorization-server") {
-				return Response.json({
-					registration_endpoint: "https://clerk.example/oauth/register",
-					client_id_metadata_document_supported: true,
-				});
-			}
-			if (url === "https://clerk.example/oauth/register") {
-				registrations.push(String(init?.body));
-				return Response.json({ client_id: "registered-client-id" });
-			}
-			if (url === "https://clerk.example/oauth/token") {
-				tokenBodies.push(String(init?.body));
-				return Response.json({ access_token: "access-token", refresh_token: "refresh-token" });
-			}
-			return new Response("not found", { status: 404 });
-		};
-		const flow = new MCPOAuthFlow(
-			{
-				authorizationUrl: "https://clerk.example/oauth/authorize",
-				tokenUrl: "https://clerk.example/oauth/token",
-				fetch: fetchImpl,
-			},
-			{},
-		);
+		const flow = new MCPOAuthFlow({ ...clerkEndpoints, fetch: mockCimdAuthorizationServer({ tokenBodies }) }, {});
 
 		const { url } = await flow.generateAuthUrl("state", "http://localhost:41234/callback");
 		await flow.exchangeToken("code", "state", "http://localhost:41234/callback");
@@ -120,29 +131,40 @@ describe("mcp oauth flow", () => {
 		expect(new URL(url).searchParams.get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
 		expect(new URLSearchParams(tokenBodies[0]).get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
 		expect(flow.resolvedClientId).toBe(OMP_CLIENT_METADATA_URL);
-		expect(registrations).toEqual([]);
+	});
+
+	it("prefers the client metadata document over dynamic registration", async () => {
+		const calls: string[] = [];
+		const flow = new MCPOAuthFlow(
+			{ ...clerkEndpoints, fetch: mockCimdAuthorizationServer({ registrationEndpoint: true, calls }) },
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("state", "http://127.0.0.1:41234/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
+		expect(calls).not.toContain("https://clerk.example/oauth/register");
+	});
+
+	it("uses discovered CIMD support without probing metadata again", async () => {
+		const calls: string[] = [];
+		const flow = new MCPOAuthFlow(
+			{ ...clerkEndpoints, clientIdMetadataDocumentSupported: true, fetch: mockCimdAuthorizationServer({ calls }) },
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("state", "http://localhost:41234/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
+		expect(calls).toEqual([]);
 	});
 
 	it("registers a client when the redirect is not one the metadata document lists", async () => {
-		const fetchImpl: FetchImpl = async input => {
-			const url = String(input);
-			if (url === "https://clerk.example/.well-known/oauth-authorization-server") {
-				return Response.json({
-					registration_endpoint: "https://clerk.example/oauth/register",
-					client_id_metadata_document_supported: true,
-				});
-			}
-			if (url === "https://clerk.example/oauth/register") {
-				return Response.json({ client_id: "registered-client-id" });
-			}
-			return new Response("not found", { status: 404 });
-		};
 		const flow = new MCPOAuthFlow(
 			{
-				authorizationUrl: "https://clerk.example/oauth/authorize",
-				tokenUrl: "https://clerk.example/oauth/token",
+				...clerkEndpoints,
 				callbackPath: "/oauth/done",
-				fetch: fetchImpl,
+				fetch: mockCimdAuthorizationServer({ registrationEndpoint: true }),
 			},
 			{},
 		);
@@ -150,6 +172,17 @@ describe("mcp oauth flow", () => {
 		const { url } = await flow.generateAuthUrl("state", "http://localhost:41234/oauth/done");
 
 		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
+	});
+
+	it("publishes a metadata document whose identity and redirects match the client", async () => {
+		const document = (await Bun.file(
+			path.join(import.meta.dir, "../../../assets/oauth/client-metadata.json"),
+		).json()) as { client_id: string; redirect_uris: string[] };
+
+		expect(document.client_id).toBe(OMP_CLIENT_METADATA_URL);
+		for (const redirectUri of document.redirect_uris) {
+			expect(matchesMetadataDocumentRedirect(redirectUri)).toBe(true);
+		}
 	});
 
 	it("uses the issuer rather than the authorization endpoint to discover DCR metadata", async () => {

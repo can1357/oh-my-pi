@@ -469,6 +469,7 @@ export interface McpOAuthFlowRunOptions extends McpOAuthFlowPresentation {
 	scopes: string;
 	serverUrl?: string;
 	registrationUrl?: string;
+	clientIdMetadataDocumentSupported?: boolean;
 	issuerUrl?: string;
 	resource?: string;
 	stripSameOriginResource?: boolean;
@@ -552,6 +553,7 @@ export async function runMcpOAuthFlow(opts: McpOAuthFlowRunOptions): Promise<OAu
 				authorizationUrl: opts.authUrl,
 				tokenUrl: opts.tokenUrl,
 				registrationUrl: opts.registrationUrl,
+				clientIdMetadataDocumentSupported: opts.clientIdMetadataDocumentSupported,
 				issuerUrl: opts.issuerUrl,
 				clientId: resolvedClientId,
 				clientSecret: resolvedClientSecret,
@@ -815,6 +817,7 @@ export async function reauthorizeMcpServer(
 		redirectUri: found.config.oauth?.redirectUri,
 		prompt: found.config.oauth?.prompt,
 		registrationUrl: oauth.registrationUrl,
+		clientIdMetadataDocumentSupported: oauth.clientIdMetadataDocumentSupported,
 		issuerUrl: oauth.issuerUrl,
 		serverUrl,
 		resource: oauthResource,

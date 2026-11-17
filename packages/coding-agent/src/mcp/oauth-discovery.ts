@@ -19,6 +19,8 @@ export interface OAuthEndpoints {
 	clientId?: string;
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
+	/** Set when the authorization server advertises `client_id_metadata_document_supported`. */
+	clientIdMetadataDocumentSupported?: true;
 	scopes?: string;
 	resource?: string;
 }
@@ -32,6 +34,10 @@ function readRegistrationUrl(metadata: Record<string, unknown>): string | undefi
 		metadata.registration_uri ??
 		metadata.registrationUri;
 	return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function readClientIdMetadataDocumentSupported(metadata: Record<string, unknown>): true | undefined {
+	return metadata.client_id_metadata_document_supported === true ? true : undefined;
 }
 
 function readIssuerUrl(metadata: Record<string, unknown>): string | undefined {
@@ -131,6 +137,7 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			tokenUrl,
 			issuerUrl: readIssuerUrl(obj),
 			registrationUrl: readRegistrationUrl(obj),
+			clientIdMetadataDocumentSupported: readClientIdMetadataDocumentSupported(obj),
 			clientId,
 			scopes,
 			resource,
@@ -571,6 +578,7 @@ export async function discoverOAuthEndpoints(
 				tokenUrl: String(metadata.token_endpoint),
 				issuerUrl: readIssuerUrl(metadata),
 				registrationUrl: readRegistrationUrl(metadata),
+				clientIdMetadataDocumentSupported: readClientIdMetadataDocumentSupported(metadata),
 				clientId:
 					typeof metadata.client_id === "string"
 						? metadata.client_id
