@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed auth-broker clients failing to read credentials or usage from a newer broker that adds a field or a usage unit or status; unknown fields are ignored and unknown values read as `unknown`. The broker likewise accepts observed-usage reports carrying fields from newer clients ([#19602](https://github.com/can1357/oh-my-pi/pull/19602) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
@@ -19,10 +23,6 @@
 - Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
 - Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed auth-broker clients failing to read credentials or usage from a newer broker that adds a field or a usage unit or status; unknown fields are ignored and unknown values read as `unknown`. The broker likewise accepts observed-usage reports carrying fields from newer clients
 
 ## [18.22.1] - 2026-11-17
 
