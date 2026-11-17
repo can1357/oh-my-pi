@@ -120,37 +120,33 @@ impl TextMapping {
 			return Ok(());
 		}
 		let _grab = ServerGrab::new(&self.conn)?;
-		*map = map.refresh(&self.conn)?;
-		let marks = self.marks(false)?;
+		let (fresh, other) = self.snapshots(map)?;
+		let marks = self.marks()?;
+		refuse_split(&fresh, other.as_ref(), &marks)?;
+		*map = fresh;
 		self.hide_rows(map, &marks, true);
 		Ok(())
 	}
 
 	/// Clears the rows that `marks` match in `map`, and with `own` this
-	/// mapping's rows; otherwise a row we own is kept unless a live owner
-	/// marked it too.
+	/// mapping's rows. Without `own` a row we hold stays: `bind` dropped the
+	/// rows live owners claim, so a mark on one of ours is dead or obsolete.
 	fn hide_rows(&self, map: &mut Keymap, marks: &[Mark], own: bool) {
-		let ours = |map: &Keymap, code| {
-			self
-				.bound
-				.iter()
-				.any(|binding| binding.code == code && binding.owns(map))
-		};
+		let ours: Vec<u8> = self
+			.bound
+			.iter()
+			.filter(|binding| binding.owns(map))
+			.map(|binding| binding.code)
+			.collect();
 		let mut codes: Vec<u8> = marks
 			.iter()
 			.filter(|mark| {
-				row_matches(map, mark.code, mark.symbol) && (own || mark.live || !ours(map, mark.code))
+				row_matches(map, mark.code, mark.symbol) && (own || !ours.contains(&mark.code))
 			})
 			.map(|mark| mark.code)
 			.collect();
 		if own {
-			codes.extend(
-				self
-					.bound
-					.iter()
-					.filter(|binding| binding.owns(map))
-					.map(|binding| binding.code),
-			);
+			codes.extend(ours);
 		}
 		let width = usize::from(map.keysyms_per_keycode);
 		for code in codes {
@@ -172,9 +168,8 @@ impl TextMapping {
 		Ok(self.atom.get())
 	}
 
-	/// Other mappings' marks; with `check_live`, each owner window is asked
-	/// whether it still exists, otherwise all count as live.
-	fn marks(&self, check_live: bool) -> CoreResult<Vec<Mark>> {
+	/// Other mappings' marks, each owner window asked whether it still exists.
+	fn marks(&self) -> CoreResult<Vec<Mark>> {
 		let reply = self
 			.conn
 			.get_property(false, root(&self.conn), self.atom()?, AtomEnum::CARDINAL, 0, MAX_MARKS * 3)
@@ -191,26 +186,24 @@ impl TextMapping {
 				Some(Mark { owner, code: u8::try_from(code).ok()?, symbol, live: true })
 			})
 			.collect();
-		if check_live {
-			let mut owners: Vec<u32> = marks.iter().map(|mark| mark.owner).collect();
-			owners.sort_unstable();
-			owners.dedup();
-			let cookies = owners
-				.iter()
-				.map(|&owner| self.conn.get_geometry(owner))
-				.collect::<Result<Vec<_>, _>>()
-				.map_err(failed)?;
-			let mut dead = Vec::new();
-			for (owner, cookie) in owners.into_iter().zip(cookies) {
-				match cookie.reply() {
-					Ok(_) => {},
-					Err(ReplyError::X11Error(_)) => dead.push(owner),
-					Err(error) => return Err(failed(error)),
-				}
+		let mut owners: Vec<u32> = marks.iter().map(|mark| mark.owner).collect();
+		owners.sort_unstable();
+		owners.dedup();
+		let cookies = owners
+			.iter()
+			.map(|&owner| self.conn.get_geometry(owner))
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(failed)?;
+		let mut dead = Vec::new();
+		for (owner, cookie) in owners.into_iter().zip(cookies) {
+			match cookie.reply() {
+				Ok(_) => {},
+				Err(ReplyError::X11Error(_)) => dead.push(owner),
+				Err(error) => return Err(failed(error)),
 			}
-			for mark in &mut marks {
-				mark.live = !dead.contains(&mark.owner);
-			}
+		}
+		for mark in &mut marks {
+			mark.live = !dead.contains(&mark.owner);
 		}
 		Ok(marks)
 	}
@@ -349,12 +342,15 @@ impl TextMapping {
 			let grab = ServerGrab::new(&conn)?;
 			let (fresh, other) = self.snapshots(map)?;
 			let marks = if fresh.core_mapping {
-				self.marks(true)?
+				self.marks()?
 			} else {
 				Vec::new()
 			};
+			// Only marked rows need both maps to agree: candidates must be free
+			// in both, and a row of ours either map lost is bound again.
+			refuse_split(&fresh, other.as_ref(), &marks)?;
 			// A row of ours another session marked after a reload cleared it is
-			// that session's now.
+			// that session's now, so it is neither reused nor available as ours.
 			self
 				.bound
 				.retain(|binding| !claimed(&marks, &fresh, binding.code));
@@ -435,12 +431,7 @@ impl TextMapping {
 			} else {
 				fresh.refresh(&conn)?
 			};
-			// The text types only through the layout's rows and ours; a mark on a
-			// row we just took is obsolete, as `publish` found.
-			let marks: Vec<Mark> = marks
-				.into_iter()
-				.filter(|mark| !writes.iter().any(|&(code, _)| code == mark.code))
-				.collect();
+			// The text types only through the layout's rows and ours.
 			self.hide_rows(&mut applied, &marks, false);
 			if required
 				.iter()
@@ -475,21 +466,29 @@ impl TextMapping {
 			let _grab = ServerGrab::new(&self.conn)?;
 			// A row a live owner marked is its row, even holding our keysym.
 			let marks = if self.window.is_some() {
-				self.marks(true)?
+				self.marks()?
 			} else {
 				Vec::new()
 			};
 			let mut buffer = Vec::new();
 			let mut failure = None;
+			// A core write reaches the `XTest` keyboard too, so it clears only the
+			// rows both maps show as ours; while only one does, our marks stay.
+			let mut split = false;
 			for &target in &self.targets {
-				let map = match target.device {
-					Some(device) => Keymap::device(&self.conn, device.into()),
-					None => Keymap::core(&self.conn),
+				let maps = match target.device {
+					Some(device) => Keymap::device(&self.conn, device.into()).map(|map| (map, None)),
+					None => Keymap::core(&self.conn)
+						.and_then(|core| Ok((core, Some(Keymap::xtest(&self.conn)?)))),
 				};
-				let result = map.and_then(|map| {
+				let result = maps.and_then(|(map, other)| {
 					let mut clear: Vec<_> = bound
 						.iter()
-						.filter(|binding| binding.owns(&map) && !claimed(&marks, &map, binding.code))
+						.filter(|binding| {
+							let both = other.as_ref().is_none_or(|other| binding.owns(other));
+							split |= other.is_some() && binding.owns(&map) != both;
+							both && binding.owns(&map) && !claimed(&marks, &map, binding.code)
+						})
 						.map(|binding| (binding.code, 0))
 						.collect();
 					clear.sort_unstable_by_key(|&(code, _)| code);
@@ -507,6 +506,7 @@ impl TextMapping {
 			// Rows that may still hold our keysyms stay marked until our
 			// connection closes.
 			if failure.is_none()
+				&& !split
 				&& let Some(window) = self.window
 			{
 				failure = self.publish(window, &marks, &[]).err();
@@ -635,11 +635,30 @@ fn no_rows(needed: usize, available: usize) -> DesktopError {
 	))
 }
 
-/// Whether a live owner's mark shows `code` in `map` as its row.
+/// Whether a live owner's mark shows `code` as its row in `map`: such a
+/// claim beats our having bound the row earlier.
 fn claimed(marks: &[Mark], map: &Keymap, code: u8) -> bool {
 	marks
 		.iter()
 		.any(|mark| mark.live && mark.code == code && row_matches(map, code, mark.symbol))
+}
+
+/// Refuses, with nothing sent, while the core and `XTest` maps disagree on a
+/// row another live session marked: a core write reaches both, and which one
+/// a receiver reads follows the keyboard that typed last.
+fn refuse_split(map: &Keymap, other: Option<&Keymap>, marks: &[Mark]) -> CoreResult<()> {
+	let Some(other) = other else { return Ok(()) };
+	let Some(mark) = marks.iter().find(|mark| {
+		mark.live
+			&& row_matches(map, mark.code, mark.symbol) != row_matches(other, mark.code, mark.symbol)
+	}) else {
+		return Ok(());
+	};
+	Err(DesktopError::input_failed(format!(
+		"the core and XTest keymaps disagree on keycode {}, a row another omp session's text uses; \
+		 no input was sent. Retry after the layout settles, or reload it with setxkbmap",
+		mark.code
+	)))
 }
 
 // XKB canonicalizes redundant levels to NoSymbol padding.

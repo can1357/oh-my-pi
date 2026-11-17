@@ -553,11 +553,7 @@ fn a_row_another_session_took_after_a_reload_is_left_to_it() {
 	let check = keymap::keysym_for_key(KeyName::Char('✓'));
 	let mut a_mapping = TextMapping::new(Arc::clone(&a));
 	a_mapping.bind(&mut Keymap::core(&a).unwrap(), "✓").unwrap();
-	let reload = Command::new("setxkbmap")
-		.args(["-display", &display, "us"])
-		.status()
-		.unwrap();
-	assert!(reload.success());
+	reload(&display);
 	let mut b_mapping = TextMapping::new(Arc::clone(&b));
 	let mut b_map = Keymap::core(&b).unwrap();
 	b_mapping.bind(&mut b_map, "✓").unwrap();
@@ -575,21 +571,11 @@ fn a_row_another_session_took_after_a_reload_is_left_to_it() {
 	b_mapping.finish().unwrap();
 }
 
-#[test]
-#[ignore = "starts Xvfb"]
-fn a_core_bind_leaves_a_row_only_the_xtest_keyboard_still_shows() {
+/// Writes `symbol` into row `code` of the core keyboard's master only, as a
+/// device switch can: the core map shows it, the `XTest` keyboard does not.
+fn set_master_row(conn: &x11rb::rust_connection::RustConnection, code: u8, symbol: u32) {
 	use x11rb::protocol::xinput::{ConnectionExt as _, Device, DeviceType};
-	let (_server, display) = server();
-	let session = || Arc::new(x11rb::connect(Some(&display)).unwrap().0);
-	let (a, b) = (session(), session());
-	let check = keymap::keysym_for_key(KeyName::Char('✓'));
-	let mut a_map = Keymap::xtest(&a).unwrap();
-	let mut a_mapping = TextMapping::new(Arc::clone(&a));
-	a_mapping.bind(&mut a_map, "✓").unwrap();
-	let (code, _) = a_map.lookup(check).unwrap();
-	// The core map is its master's, which a device switch can leave without
-	// A's row while the `XTest` keyboard keeps it.
-	let master = b
+	let master = conn
 		.xinput_xi_query_device(Device::ALL_MASTER)
 		.unwrap()
 		.reply()
@@ -599,27 +585,105 @@ fn a_core_bind_leaves_a_row_only_the_xtest_keyboard_still_shows() {
 		.find(|info| info.type_ == DeviceType::MASTER_KEYBOARD)
 		.unwrap()
 		.deviceid;
-	let width = Keymap::device(&b, master).unwrap().keysyms_per_keycode;
-	b.xinput_change_device_key_mapping(
-		u8::try_from(master).unwrap(),
-		code,
-		width,
-		1,
-		&vec![0; usize::from(width)],
-	)
-	.unwrap()
-	.check()
-	.unwrap();
-	assert!(Keymap::core(&b).unwrap().lookup(check).is_none(), "the core map kept A's row");
+	let width = Keymap::device(conn, master).unwrap().keysyms_per_keycode;
+	conn
+		.xinput_change_device_key_mapping(
+			u8::try_from(master).unwrap(),
+			code,
+			width,
+			1,
+			&vec![symbol; usize::from(width)],
+		)
+		.unwrap()
+		.check()
+		.unwrap();
+}
+
+/// Reloads the US layout as a user would, into the core map and every keyboard.
+fn reload(display: &str) {
+	let status = Command::new("setxkbmap")
+		.args(["-display", display, "us"])
+		.status()
+		.unwrap();
+	assert!(status.success());
+}
+
+#[test]
+#[ignore = "starts Xvfb and runs setxkbmap"]
+fn split_maps_refuse_text_on_another_sessions_row_until_a_reload() {
+	let (_server, display) = server();
+	let session = || Arc::new(x11rb::connect(Some(&display)).unwrap().0);
+	let (a, b, other) = (session(), session(), session());
+	let (check, e_acute) = (keymap::keysym_for_key(KeyName::Char('✓')), 0xe9);
+	let xtest_row = |symbol| {
+		Keymap::xtest(&other)
+			.unwrap()
+			.lookup(symbol)
+			.map(|(row, _)| row)
+	};
+	let refused = |result: crate::desktop::error::CoreResult<()>| {
+		result.is_err_and(|error| error.message.contains("disagree"))
+	};
+	let mut a_mapping = TextMapping::new(Arc::clone(&a));
+	a_mapping.bind(&mut Keymap::core(&a).unwrap(), "✓").unwrap();
+	let code = xtest_row(check).unwrap();
+	// The core map loses A's ✓; the `XTest` keyboard keeps it.
+	set_master_row(&other, code, 0);
 	let mut b_mapping = TextMapping::new(Arc::clone(&b));
+	assert!(refused(b_mapping.bind(&mut Keymap::core(&b).unwrap(), "é")), "B bound é");
+	assert_eq!(xtest_row(check), Some(code), "B's refused bind took A's XTest row");
+	// A reload clears the row in both maps and B takes it; then the core map
+	// shows A's old ✓ while the `XTest` keyboard keeps B's é.
+	reload(&display);
 	b_mapping.bind(&mut Keymap::core(&b).unwrap(), "é").unwrap();
-	assert_eq!(
-		Keymap::xtest(&a).unwrap().lookup(check).map(|(row, _)| row),
-		Some(code),
-		"B's core write took A's XTest row"
-	);
-	b_mapping.finish().unwrap();
+	assert_eq!(xtest_row(e_acute), Some(code), "B took another row");
+	set_master_row(&other, code, check);
+	assert!(refused(a_mapping.bind(&mut Keymap::core(&a).unwrap(), "✓")), "A bound ✓");
+	assert!(refused(a_mapping.hide(&mut Keymap::core(&a).unwrap())), "A planned a chord");
 	a_mapping.finish().unwrap();
+	assert_eq!(xtest_row(e_acute), Some(code), "A's restore cleared B's XTest row");
+	// Once a reload makes the two maps agree, text binds again.
+	reload(&display);
+	a_mapping.bind(&mut Keymap::core(&a).unwrap(), "✓").unwrap();
+	// A restore that leaves A's row in the `XTest` keyboard keeps it marked.
+	set_master_row(&other, xtest_row(check).unwrap(), 0);
+	a_mapping.finish().unwrap();
+	assert!(refused(b_mapping.hide(&mut Keymap::core(&b).unwrap())), "A unmarked its XTest row");
+	b_mapping.finish().unwrap();
+}
+
+#[test]
+#[ignore = "starts Xvfb"]
+fn a_dead_sessions_mark_on_a_row_we_hold_leaves_it_typeable() {
+	use x11rb::{
+		protocol::xproto::{AtomEnum, PropMode},
+		wrapper::ConnectionExt as _,
+	};
+	let (_server, display) = server();
+	let session = || Arc::new(x11rb::connect(Some(&display)).unwrap().0);
+	let (a, other) = (session(), session());
+	let check = keymap::keysym_for_key(KeyName::Char('✓'));
+	let mut map = Keymap::core(&a).unwrap();
+	let mut mapping = TextMapping::new(Arc::clone(&a));
+	mapping.bind(&mut map, "✓").unwrap();
+	let (code, _) = map.lookup(check).unwrap();
+	// A killed session's mark on the same row and keysym: its window is gone.
+	let atom = other
+		.intern_atom(false, b"_OMP_TEXT_KEYCODES")
+		.unwrap()
+		.reply()
+		.unwrap()
+		.atom;
+	let (root, dead) = (other.setup().roots[0].root, other.generate_id().unwrap());
+	let mark = [dead, code.into(), check];
+	other
+		.change_property32(PropMode::APPEND, root, atom, AtomEnum::CARDINAL, &mark)
+		.unwrap()
+		.check()
+		.unwrap();
+	mapping.bind(&mut map, "✓").unwrap();
+	assert_eq!(map.lookup(check).map(|(row, _)| row), Some(code));
+	mapping.finish().unwrap();
 }
 
 #[test]
@@ -631,11 +695,7 @@ fn a_row_a_layout_reload_cleared_is_bound_again() {
 	let mut map = Keymap::core(&conn).unwrap();
 	let mut mapping = TextMapping::new(Arc::clone(&conn));
 	mapping.bind(&mut map, "é").unwrap();
-	let reload = Command::new("setxkbmap")
-		.args(["-display", &display, "us"])
-		.status()
-		.unwrap();
-	assert!(reload.success());
+	reload(&display);
 	assert!(Keymap::core(&conn).unwrap().lookup(0xe9).is_none(), "the reload kept é");
 	mapping.bind(&mut map, "é").unwrap();
 	assert!(map.lookup(0xe9).is_some());
