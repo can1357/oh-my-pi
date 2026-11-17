@@ -1168,7 +1168,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedSystemPromptTemplate = undefined;
 		rendered = prompt.renderTracked(systemPromptTemplate, data, sourceItems);
 	}
-	const systemPrompt = [rendered.text];
+	const systemPrompt = [
+		rendered.text
+			.replace(/You are omp's trusted coding assistant\./g, "You are omp's coding assistant.")
+			.replace(
+				/Read xd:\/\/<\s*tool\s*> for full docs \+ JSON schema before first use\./g,
+				"Read `xd://<name>` for full docs + JSON schema before first use.",
+			),
+	];
 	const sources = trackedSources(rendered, 0, sourceIdentities);
 	for (const prelude of evalPreludes) {
 		const guidance = prelude.guidance?.trim();
