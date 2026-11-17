@@ -30,6 +30,12 @@ const ORIGIN_CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorizati
 /** The fetch standard's redirect statuses; any other 3xx (300, 304, …) is returned to the caller as is. */
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+/** A redirect followed here leaves the final `Response` reading `redirected: false`; say it was, as `fetch` does. */
+function markRedirected(response: Response): Response {
+	Object.defineProperty(response, "redirected", { value: true });
+	return response;
+}
+
 /**
  * Send a large string or byte body through Bun's `fetch` as a stream with an
  * explicit `Content-Length`, counting the bytes Bun pulls as the socket drains.
@@ -90,7 +96,9 @@ export async function fetchWithUploadProgress(
 			});
 		}
 		const location = response.headers.get("location");
-		if (!follow || !REDIRECT_STATUSES.has(response.status) || location === null) return response;
+		if (!follow || !REDIRECT_STATUSES.has(response.status) || location === null) {
+			return redirects > 0 ? markRedirected(response) : response;
+		}
 		await response.body?.cancel();
 		if (redirects === MAX_REDIRECTS) throw new TypeError(`Too many redirects (more than ${MAX_REDIRECTS})`);
 		const next = new URL(location, url);
@@ -102,7 +110,7 @@ export async function fetchWithUploadProgress(
 			((response.status === 301 || response.status === 302) && method === "POST")
 		) {
 			for (const name of BODY_HEADERS) headers.delete(name);
-			return fetch(url, { ...init, method: "GET", body: undefined, headers });
+			return markRedirected(await fetch(url, { ...init, method: "GET", body: undefined, headers }));
 		}
 	}
 }

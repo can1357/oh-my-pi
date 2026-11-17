@@ -190,6 +190,7 @@ describe("transportFetch connection lost before a response", () => {
 		});
 
 		expect(await response.text()).toBe("done");
+		expect(response.redirected).toBe(true);
 		expect(requests).toEqual([`POST ${BODY.length} Bearer sk-test`, "GET 0 null"]);
 	});
 
