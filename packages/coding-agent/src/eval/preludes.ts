@@ -104,16 +104,20 @@ export function findEnabledEvalPrelude(session: ToolSession, name: string): Eval
 	return definition?.enabled?.() === false ? undefined : definition;
 }
 
-const STRINGS_AND_COMMENTS = /("""|''')[\s\S]*?\1|(["'`])(?:\\.|(?!\2)[^\\])*\2|\/\/.*|\/\*[\s\S]*?\*\/|#.*/g;
+/** Strings and comments per cell language: `#` starts a comment only in Python, `//` only in JS. */
+const STRINGS_AND_COMMENTS = {
+	py: /("""|''')[\s\S]*?\1|(["'])(?:\\.|(?!\2)[^\\])*\2|#.*/g,
+	js: /(["'`])(?:\\.|(?!\1)[^\\])*\1|\/\/.*|\/\*[\s\S]*?\*\//g,
+} as const;
 
 /**
  * Notes each guide-bearing prelude whose global a cell's code names outside strings, comments, other objects'
  * members and object keys. A first cell often only probes the global (`browser.list?.()`, `Object.keys(browser)`):
  * no host call, so no guide would follow.
  */
-export function noteEvalPreludesNamed(code: string, session: ToolSession): void {
+export function noteEvalPreludesNamed(code: string, language: "py" | "js", session: ToolSession): void {
 	if (!session.noteEvalPreludeCall) return;
-	const bare = code.replace(STRINGS_AND_COMMENTS, '""');
+	const bare = code.replace(STRINGS_AND_COMMENTS[language], '""');
 	for (const definition of getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])) {
 		if (!definition.firstCallDocumentation?.trim()) continue;
 		const named =

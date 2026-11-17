@@ -169,9 +169,9 @@ describe("eval prelude host invocation", () => {
 			exports: [],
 			invoke: async () => ({ content: [] }),
 		} satisfies EvalPreludeDefinition;
-		const noted = (code: string) => {
+		const noted = (code: string, language: "py" | "js" = "js") => {
 			const note = vi.fn();
-			noteEvalPreludesNamed(code, { ...makeSession(() => [definition]), noteEvalPreludeCall: note });
+			noteEvalPreludesNamed(code, language, { ...makeSession(() => [definition]), noteEvalPreludeCall: note });
 			return note.mock.calls.length;
 		};
 		expect(noted("const tabs = await probe.list?.(); print(tabs)")).toBe(1);
@@ -182,6 +182,9 @@ describe("eval prelude host invocation", () => {
 		expect(noted("print(Object.keys(page.globalThis.probe))")).toBe(0);
 		expect(noted("const { probe: alias } = page; print(Object.keys(alias))")).toBe(0);
 		expect(noted('print("open the probe") // probe\nprint(page.probe, myprobe, Object.keys(globalThis))')).toBe(0);
-		expect(noted('# probe\nprint("""probe""")')).toBe(0);
+		expect(noted('# probe\nprint("""probe""")', "py")).toBe(0);
+		// `#` is a private name in JS and `//` floor division in Python, not comments hiding the rest of the line.
+		expect(noted("class A { #x = 1; y = this.#x + probe.ready }")).toBe(1);
+		expect(noted("half = 4 // 2; print(probe.tabs())", "py")).toBe(1);
 	});
 });
