@@ -26,6 +26,8 @@ function makeComponent(
 		provider?: string;
 		modelId?: string;
 		activeIdentity?: { accountId?: string; email?: string; projectId?: string };
+		/** Durable row id the session router is pinned to (API-key account path). */
+		stickyCredentialId?: number;
 	} = {},
 ): StatusLineComponent {
 	const component = statusLines.track(
@@ -33,6 +35,7 @@ function makeComponent(
 			{
 				state: { messages: [], model: { id: options.modelId, contextWindow: 1000, provider: options.provider } },
 				model: { id: options.modelId, contextWindow: 1000, provider: options.provider },
+				sessionId: "test-session",
 				sessionManager: {
 					getUsageStatistics: () => ({
 						input: 0,
@@ -53,6 +56,12 @@ function makeComponent(
 						oauth: {
 							identity: (provider: string) =>
 								provider === options.provider ? options.activeIdentity : undefined,
+						},
+						sessions: {
+							sticky: (provider: string) =>
+								provider === options.provider && options.stickyCredentialId !== undefined
+									? { type: "api_key", index: 0, credentialId: options.stickyCredentialId }
+									: undefined,
 						},
 					},
 				},
@@ -854,5 +863,64 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("5h");
 		expect(content).toContain("24%");
 		expect(content).not.toContain("7d");
+	});
+});
+
+describe("usage status-line segment: API-key account attribution", () => {
+	// Regression for #19456: with two stored opencode-go API-key credentials,
+	// the segment must show the account the session router serves from (the
+	// sticky credential row), not the first stored row's numbers.
+	function opencodeGoReports(): unknown[] {
+		const now = Date.now();
+		const limit = (windowId: string, fraction: number, hours: number, credentialId: number) => ({
+			scope: { provider: "opencode-go", windowId },
+			window: { resetsAt: now + hours * 3_600_000 },
+			amount: { usedFraction: fraction },
+			credentialId,
+		});
+		return [
+			{
+				provider: "opencode-go",
+				metadata: { credentialId: 2 },
+				limits: [limit("7d", 0, 161, 2), limit("monthly", 1, 262, 2)],
+			},
+			{
+				provider: "opencode-go",
+				metadata: { credentialId: 4 },
+				limits: [limit("7d", 0.04, 153, 4), limit("monthly", 0.68, 515, 4)],
+			},
+		];
+	}
+
+	it("shows the sticky credential's windows, not another account's", async () => {
+		const component = makeComponent(opencodeGoReports(), {
+			provider: "opencode-go",
+			stickyCredentialId: 4,
+		});
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("7d");
+		expect(content).toContain("4%");
+		expect(content).toContain("mo");
+		expect(content).toContain("68%");
+		expect(content).not.toContain("100%");
+	});
+
+	it("renders no usage rather than another account's when the sticky row has no report", async () => {
+		const component = makeComponent(opencodeGoReports().slice(0, 1), {
+			provider: "opencode-go",
+			stickyCredentialId: 4,
+		});
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).not.toContain("100%");
+		expect(content).not.toContain("7d");
+		expect(content).not.toContain("mo");
 	});
 });

@@ -39,7 +39,7 @@ import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
 import { cfgFetchEnabled, cfgToolsMaxTimeout } from "./settings";
-import { cfgProvidersFetch } from "../session/settings";
+import { cfgProvidersFetch, cfgProvidersWebKeyless } from "../session/settings";
 
 // =============================================================================
 // Types and Constants
@@ -654,7 +654,8 @@ const BLOCK_PAGE_MAX_CHARS = 2048;
  * Every backend's output must clear the same length and JavaScript-gate checks,
  * and a lynx dump the navigation check too ({@link isLowQualityOutput}), before
  * it is accepted, otherwise the next backend is tried. `providers` limits the
- * chain to those backends, in the same order.
+ * chain to those backends, in the same order. Without a Jina key, the Jina
+ * reader runs only while `providers.webKeyless` is on.
  *
  * The overall `timeout` budget bounds the whole call; remote backends (Parallel,
  * Firecrawl, Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
@@ -724,6 +725,7 @@ export async function renderHtmlToText(
 		},
 		jina: async () => {
 			const apiKey = findCredential(storage, getEnvApiKey("jina"), "jina");
+			if (!apiKey && !cfgProvidersWebKeyless.get(settings)) return null;
 			const headers: Record<string, string> = {
 				Accept: "text/markdown",
 				"X-No-Cache": "true",
