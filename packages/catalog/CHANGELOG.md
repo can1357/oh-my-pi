@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Bifrost (`bifrost`), a self-hosted OpenAI-compatible AI gateway: its `/models` roster is discovered live per virtual key from `BIFROST_BASE_URL` (default `http://localhost:8080/v1`), chat models run over Chat Completions, known decision models become `openai-decisions` judges on the gateway's `/decisions` route, and `/login bifrost` stores the virtual key (`BIFROST_API_KEY`) ([#19053](https://github.com/can1357/oh-my-pi/pull/19053) by [@Xytronix](https://github.com/Xytronix))
 - Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
@@ -12,6 +13,8 @@
 - Fixed GitLab Duo's Claude models (`duo-chat-opus-*`, `duo-chat-sonnet-*`, `duo-chat-haiku-*`) not being treated as Claude when quoting earlier reasoning: compaction summaries and interrupted-turn notes now leave it out for them, and a `reasoning_extraction` refusal is retried without it, as for Claude elsewhere ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Gemini CLI requests reporting a stale client version; the current `@google/gemini-cli` release is now looked up from npm ([#19254](https://github.com/can1357/oh-my-pi/pull/19254) by [@Xytronix](https://github.com/Xytronix))
 - Fixed Google Antigravity models gated on a newer client release staying hidden until restart; the release manifest is now re-checked hourly ([#19250](https://github.com/can1357/oh-my-pi/pull/19250) by [@Xytronix](https://github.com/Xytronix))
+- Fixed stale Command Code image inputs, reasoning controls, token prices, and deployment context limits ([#12542](https://github.com/can1357/oh-my-pi/issues/12542), [#19462](https://github.com/can1357/oh-my-pi/pull/19462) by [@jasonharrison](https://github.com/jasonharrison)).
+- Fixed retry-reset timezone resolution for custom providers pointing at the Zhipu Coding Plan endpoint, including trailing-slash base URLs ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.21.0] - 2026-11-16
 
