@@ -284,6 +284,8 @@ export interface TurnRecoveryHost {
 	isStreaming(): boolean;
 	isCompacting(): boolean;
 	abortInProgress(): boolean;
+	/** Resolves once a retry may run: never during a macOS dark wake the machine will sleep out of. */
+	waitForFullWake(signal: AbortSignal): Promise<void>;
 	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
 	promptSequence(): number;
@@ -3284,6 +3286,8 @@ export class TurnRecovery {
 			} else {
 				await sleepLong(delayMs, retryAbortController.signal);
 			}
+			// A request sent during a macOS dark wake stalls when the machine sleeps again.
+			await this.#host.waitForFullWake(retryAbortController.signal);
 		} catch {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;
