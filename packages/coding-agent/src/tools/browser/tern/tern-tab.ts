@@ -694,9 +694,9 @@ export class TernTab implements InProcessRunTab {
 		this.#runContext = context;
 	}
 
-	/** Forget the finished run. */
-	clearRunContext(): void {
-		this.#runContext = undefined;
+	/** Forget finished run `context`; a later run's context stays. */
+	clearRunContext(context: InProcessRunContext): void {
+		if (this.#runContext === context) this.#runContext = undefined;
 	}
 
 	/** Page facts the supervisor records for the tab. */
