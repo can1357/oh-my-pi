@@ -87,9 +87,10 @@ function resolveAgentPalette(theme: Theme): AgentPalette {
 	const distance = (hex: string) => Math.min(...[accent, error, ...subagents].map(taken => oklabDistance(hex, taken)));
 	const usable = (hex: string) => readable(hex) && distance(hex) >= MIN_DISTANCE;
 
-	for (const token of SUBAGENT_TOKENS) {
-		if (theme.hasColor(token)) subagents.push(theme.getColorHex(token));
-	}
+	// A declared `subagentN` keeps slot N; generated colours fill the slots the theme leaves unset, in order.
+	const declared = SUBAGENT_TOKENS.map(token => (theme.hasColor(token) ? theme.getColorHex(token) : undefined));
+	for (const hex of declared) if (hex) subagents.push(hex);
+	const generatedFrom = subagents.length;
 	for (const slot of ANSI_SLOTS) {
 		const hex = theme.getAnsiHex(slot);
 		if (subagents.length < SUBAGENT_TOKENS.length && hex && hexToOklch(hex).c >= MIN_CHROMA && usable(hex)) {
@@ -136,7 +137,10 @@ function resolveAgentPalette(theme: Theme): AgentPalette {
 		if (subagents.length < SUBAGENT_TOKENS.length && usable(hex)) subagents.push(hex);
 	}
 	// A theme where no colour clears contrast still needs names told apart: keep the fallback hues unfiltered.
-	return { main: accent, subagents: subagents.length > 0 ? subagents : FALLBACK_HEXES.slice(1) };
+	if (subagents.length === 0) return { main: accent, subagents: FALLBACK_HEXES.slice(1) };
+	const generated = subagents.slice(generatedFrom);
+	const ordered = declared.map(hex => hex ?? generated.shift()).filter(hex => hex !== undefined);
+	return { main: accent, subagents: ordered };
 }
 
 /** Arrival slot per subagent id; never released, so a colour lasts the agent's life. */

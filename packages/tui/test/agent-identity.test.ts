@@ -44,6 +44,14 @@ describe("agent palette", () => {
 		expect(subagents.slice(0, 2)).toEqual([dark.getAccentColorHex(), "#808080"]);
 		expect(subagents).toHaveLength(6);
 	});
+
+	it("keeps a declared subagent colour in its own slot, filling the others", () => {
+		const json = getBuiltinThemes().dark!;
+		const third = createTheme({ ...json, colors: { ...json.colors, subagent3: "#808080" } }, { mode: "truecolor" });
+		const { subagents } = agentPalette(third);
+		expect(subagents).toHaveLength(6);
+		expect(subagents.indexOf("#808080")).toBe(2);
+	});
 });
 
 describe("agent colour allocation", () => {
