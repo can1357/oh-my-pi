@@ -1886,11 +1886,27 @@ pub(crate) struct Stdin {
 	file:   OpenFile,
 	#[cfg_attr(not(unix), allow(dead_code, reason = "readiness polling is unix-only"))]
 	fd:     Option<i32>,
+	/// Whether fd 0 is a Windows pipe, decided once here rather than by a
+	/// `GetFileType` before every read.
+	#[cfg_attr(not(windows), allow(dead_code, reason = "Windows pipes have no pollable descriptor"))]
+	pipe:   bool,
 	/// The command's cancellation. A provider-backed fd 0 (`< virtual://f`) has
 	/// no descriptor to poll, and the facade that opened it is usually the
 	/// outer command's, not this command's (a `timeout` operand), so its reads
 	/// are raced against this command's token directly.
 	cancel: CommandCancel,
+}
+
+/// Whether fd 0 needs the Windows pipe readiness probe; `false` off Windows
+/// and for a provider-backed or in-process fd 0.
+#[cfg(windows)]
+fn is_pipe_file(file: &OpenFile) -> bool {
+	matches!(file, OpenFile::File(file) if crate::openfile::is_pipe(file))
+}
+
+#[cfg(not(windows))]
+const fn is_pipe_file(_file: &OpenFile) -> bool {
+	false
 }
 
 impl Stdin {
@@ -1911,7 +1927,8 @@ impl Stdin {
 	pub fn try_clone(&self) -> io::Result<Self> {
 		let file = self.file.try_clone()?;
 		let fd = pollable_fd(&file);
-		Ok(Self { file, fd, cancel: self.cancel.clone() })
+		let pipe = is_pipe_file(&file);
+		Ok(Self { file, fd, pipe, cancel: self.cancel.clone() })
 	}
 
 	/// Whether the command was cancelled, for utilities that read fd 0's
@@ -1919,54 +1936,6 @@ impl Stdin {
 	/// that fail once it is.
 	pub fn is_cancelled(&self) -> bool {
 		self.cancel.fired()
-	}
-
-	/// Anonymous and named Windows pipes have no pollable descriptor.
-	/// Peek before reading so an empty, still-open pipe remains cancellable.
-	#[cfg(windows)]
-	fn wait_pipe_readable(&self, file: &std::fs::File) -> io::Result<()> {
-		use std::os::windows::io::AsRawHandle as _;
-		use windows_sys::Win32::{
-			Foundation::ERROR_BROKEN_PIPE,
-			Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
-			System::Pipes::PeekNamedPipe,
-		};
-
-		let handle = file.as_raw_handle();
-		// SAFETY: the file owns the handle for the whole call.
-		if unsafe { GetFileType(handle) } != FILE_TYPE_PIPE {
-			return Ok(());
-		}
-		loop {
-			if self.cancel.fired() {
-				return Err(omp_vfs::cancelled());
-			}
-			let mut available = 0;
-			// SAFETY: the handle is live; only `available` is written.
-			let ready = unsafe {
-				PeekNamedPipe(
-					handle,
-					std::ptr::null_mut(),
-					0,
-					std::ptr::null_mut(),
-					&mut available,
-					std::ptr::null_mut(),
-				)
-			};
-			if ready == 0 {
-				let error = io::Error::last_os_error();
-				// Let the read below report EOF once every writer has closed.
-				return if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
-					Ok(())
-				} else {
-					Err(error)
-				};
-			}
-			if available > 0 {
-				return Ok(());
-			}
-			std::thread::sleep(Duration::from_millis(10));
-		}
 	}
 }
 
@@ -2001,10 +1970,11 @@ impl Read for Stdin {
 			omp_vfs::wait_readable(fd, || self.cancel.fired())?;
 		}
 		#[cfg(windows)]
-		if !buf.is_empty()
+		if self.pipe
+			&& !buf.is_empty()
 			&& let OpenFile::File(file) = &self.file
 		{
-			self.wait_pipe_readable(file)?;
+			omp_vfs::wait_pipe_readable(file, || self.cancel.fired())?;
 		}
 		match (&self.file, &self.cancel.token) {
 			(OpenFile::Vfs(file), Some(token)) => file.read_until_cancelled(buf, token),
@@ -2703,6 +2673,7 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 
 	Ok(Host {
 		stdin: Stdin {
+			pipe:   is_pipe_file(&stdin),
 			file:   stdin,
 			fd:     stdin_fd,
 			cancel: command_cancel,
@@ -3192,6 +3163,7 @@ mod testing {
 			};
 			let host = Self {
 				stdin:                 Stdin {
+					pipe:   false,
 					file:   OpenFile::stream(stdin),
 					fd:     None,
 					cancel: command_cancel.clone(),
