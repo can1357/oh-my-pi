@@ -547,8 +547,10 @@ export class CredentialSelector {
 				reserveMeasured: defaultReserveFraction !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				allowanceSpent: remainingFraction === 0,
+				// A per-limit reserve can sit above `reclaimAbovePct`; reclaim never targets an account inside one.
 				reclaimReady:
 					!blocked &&
+					!inReserve &&
 					policy?.reclaimAbovePct !== undefined &&
 					remainingFraction !== undefined &&
 					remainingFraction * 100 >= policy.reclaimAbovePct,
