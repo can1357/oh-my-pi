@@ -37,6 +37,8 @@
  * - A path that reaches a credential location through a symlink, hard link or bind mount is not
  *   recognized: `ln -s ~/.ssh k && cat k/id_rsa`. Nor do bare wildcards for every component of
  *   `~/Library/Keychains` name it: `cat ~/???????/?????????/login.keychain-db`.
+ * - A missing path the `read` tool finds by a unique match deeper under its directory is checked
+ *   as written: `read id_rsa` from `~` opens `~/.ssh/id_rsa`.
  *
  * The `credential_read` and `secret_send` rules are derived from `src/intern/guard.py` of
  * nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1, commit e1bbd096f9), Copyright Nace

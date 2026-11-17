@@ -366,6 +366,16 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it("checks a read path with trailing blanks as the file execution recovers by suffix match", () => {
+		const read = new ReadTool(createSession(os.homedir()));
+		for (const readPath of [".netrc ", ".npmrc\t"]) {
+			expect({ readPath, rule: ruleOf(read.approval({ path: readPath })) }).toEqual({
+				readPath,
+				rule: "credential_read",
+			});
+		}
+	});
+
 	it("expands a brace list in a grep path as the search's glob matcher does", () => {
 		const grep = new GrepTool(createSession(cwd));
 		for (const root of ["~/.{netrc,x}", "~/{.netrc,x}", "~/.{aws/credentials,x}"]) {

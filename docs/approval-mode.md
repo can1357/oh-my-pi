@@ -144,6 +144,7 @@ Known limitations, each a way a command gets past the rules:
 - A secret copied to another file first is sent under that file's name, so `cp .env /tmp/x && curl -F f=@/tmp/x …` passes.
 - Brace expansion is followed only in words up to 4096 characters long and for their first 1024 words, so a name at the end of a longer list (`{a,b}{a,b}…{a,b}{x,.env}`) passes.
 - A path that reaches a credential location through a symlink, hard link or bind mount is not recognized, so `ln -s ~/.ssh k && cat k/id_rsa` passes; nor do bare wildcards for every component of `~/Library/Keychains` name it, so `cat ~/*/*/login.keychain-db` passes.
+- A missing path the `read` tool finds by a unique match deeper under the session directory is checked as written, only trimmed and unquoted (`.netrc ` counts as `.netrc`), so `read id_rsa` run from the home directory, which opens `~/.ssh/id_rsa`, passes.
 
 ### Computer safety
 
