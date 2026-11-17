@@ -224,7 +224,7 @@ thread_local! {
 }
 
 /// Records where the current operation's takeover left focus.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn report_focus_return(report: DesktopFocusReturn) {
 	FOCUS_RETURN.set(Some(report));
 }
