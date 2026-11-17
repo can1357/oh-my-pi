@@ -24,6 +24,8 @@ const MAX_REDIRECTS = 20;
 const BODY_HEADERS = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
 /** Credentials Bun's `fetch` drops when a redirect leaves the origin. */
 const ORIGIN_CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorization"];
+/** The fetch standard's redirect statuses; any other 3xx (300, 304, …) is returned to the caller as is. */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 /**
  * Send a large string or byte body through Bun's `fetch` as a stream with an
@@ -37,7 +39,8 @@ const ORIGIN_CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorizati
  * Bun cannot replay a streamed body to follow a redirect, so when the caller
  * follows redirects they are followed here, as `fetch` would: 307/308 resend
  * the body to the new location, 303 (and 301/302 after a POST) become a GET
- * without it, and credentials are dropped when the location leaves the origin.
+ * without it, other 3xx statuses are returned unfollowed, and credentials are
+ * dropped when the location leaves the origin.
  */
 export async function fetchWithUploadProgress(
 	fetch: FetchImpl,
@@ -84,7 +87,7 @@ export async function fetchWithUploadProgress(
 			});
 		}
 		const location = response.headers.get("location");
-		if (!follow || response.status < 300 || response.status >= 400 || location === null) return response;
+		if (!follow || !REDIRECT_STATUSES.has(response.status) || location === null) return response;
 		await response.body?.cancel();
 		if (redirects === MAX_REDIRECTS) throw new TypeError(`Too many redirects (more than ${MAX_REDIRECTS})`);
 		const next = new URL(location, url);
