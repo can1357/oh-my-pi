@@ -75,14 +75,15 @@ function firstLine(source: string): string {
 }
 
 /** Plain one-line label and styling role for the turn a target opens. */
-function turnSummary(entry: TranscriptEntry): { label: string; role: string } {
+function turnSummary(target: OutlineTarget): { label: string; role: string } {
+	const entry = target.entries[0]!;
 	const message = transcriptEntryMessage(entry);
 	switch (message?.role) {
 		case "user":
 			return { label: userMessageLabel(message.content), role: "omp.user" };
 		case "assistant": {
 			const tools = message.content.filter(content => content.type === "toolCall").map(content => content.name);
-			const label = firstLine(assistantVisibleText(message)) || tools.join(", ") || "thinking";
+			const label = firstLine(turnProse(target)) || tools.join(", ") || "thinking";
 			return { label, role: "omp.assistant" };
 		}
 		case "toolResult":
@@ -119,7 +120,7 @@ function entryTime(entry: TranscriptEntry): string {
  */
 function turnItem(target: OutlineTarget, detail?: TspText): NativeNode {
 	const entry = target.entries[0]!;
-	const { label, role } = turnSummary(entry);
+	const { label, role } = turnSummary(target);
 	const time = entryTime(entry);
 	return node(
 		"item",
@@ -142,7 +143,7 @@ export function turnPreview(target: OutlineTarget, content: string): NativeNode 
 	switch (message?.role) {
 		case "assistant":
 			// A pure tool turn previews its joined commands/results, not prose.
-			return assistantVisibleText(message) ? md(content) : code(content, { wrap: true });
+			return turnProse(target) ? md(content) : code(content, { wrap: true });
 		case "user":
 		case "custom":
 		case "hookMessage":
@@ -177,7 +178,7 @@ const TIMELINE_COLUMNS: readonly TspPickerColumn[] = [{ id: "at", format: "dim",
 function timelineItem(target: OutlineTarget): TspPickerItem {
 	const entry = target.entries[0]!;
 	const id = target.turnId;
-	const summary = turnSummary(entry);
+	const summary = turnSummary(target);
 	const label = summary.label || "(empty)";
 	if (target.isUserTurn) {
 		const at = entryTime(entry);
@@ -186,7 +187,7 @@ function timelineItem(target: OutlineTarget): TspPickerItem {
 	const message = transcriptEntryMessage(entry);
 	switch (message?.role) {
 		case "assistant": {
-			const prose = assistantVisibleText(message) !== "";
+			const prose = turnProse(target) !== "";
 			const calls = message.content.filter(part => part.type === "toolCall");
 			if (prose || calls.length === 0) return { id, label, node: "assistant" };
 			return {
@@ -1050,20 +1051,52 @@ function replyWriteText(name: string, args: unknown): string | undefined {
 	return typeof text === "string" && text.trim() ? text : undefined;
 }
 
-/** Prose an assistant message shows: its text blocks and its `out://` replies, in order. */
-function assistantVisibleText(message: Extract<SessionMessageEntry["message"], { role: "assistant" }>): string {
-	const parts: string[] = [];
+/** One prose piece of a turn: message text, or a reply the transcript draws as prose of its own. */
+interface ProsePiece {
+	readonly text: string;
+	/** `out://` reply: it starts its own paragraph rather than continuing the text. */
+	readonly reply: boolean;
+}
+
+/** Prose pieces of an assistant message, in document order. */
+function assistantProsePieces(message: Extract<SessionMessageEntry["message"], { role: "assistant" }>): ProsePiece[] {
+	const pieces: ProsePiece[] = [];
 	for (const content of message.content) {
-		if (content.type === "text") parts.push(content.text);
+		if (content.type === "text") pieces.push({ text: content.text, reply: false });
 		else if (content.type === "toolCall") {
 			const reply = replyWriteText(content.name, content.arguments);
-			if (reply) parts.push(reply);
+			if (reply !== undefined) pieces.push({ text: reply, reply: true });
 		}
 	}
-	return parts
-		.filter(part => part.trim())
-		.join("\n\n")
-		.trim();
+	return pieces;
+}
+
+/** Joins prose pieces: text blocks concatenate verbatim, a reply forms its own paragraph. */
+function joinProse(pieces: readonly ProsePiece[]): string {
+	let text = "";
+	let afterReply = false;
+	for (const piece of pieces) {
+		if (!piece.text) continue;
+		if ((piece.reply || afterReply) && text !== "" && !text.endsWith("\n")) text += "\n\n";
+		text += piece.text;
+		afterReply = piece.reply;
+	}
+	return text.trim();
+}
+
+/**
+ * Prose a turn shows, in transcript order: the assistant message's text and `out://` replies, then the
+ * replies its tool results carry (`bash > out://`, an eval cell's bridged write).
+ */
+function turnProse(target: OutlineTarget): string {
+	const message = transcriptEntryMessage(target.entries[0]!);
+	const pieces = message?.role === "assistant" ? assistantProsePieces(message) : [];
+	for (const entry of target.entries) {
+		const result = transcriptEntryMessage(entry);
+		if (result?.role !== "toolResult") continue;
+		for (const reply of toolResultReplies(result.details)) pieces.push({ text: reply, reply: true });
+	}
+	return joinProse(pieces);
 }
 
 /** Joined text content of a tool result. */
@@ -1114,7 +1147,7 @@ export function collectBlocks(entries: readonly TranscriptEntry[]): CopyBlock[] 
 				pushMarkdownBlocks(blocks, rawUserText(message), entry);
 				break;
 			case "assistant": {
-				pushMarkdownBlocks(blocks, assistantVisibleText(message), entry);
+				pushMarkdownBlocks(blocks, joinProse(assistantProsePieces(message)), entry);
 				for (const content of message.content) {
 					if (content.type !== "toolCall") continue;
 					if (isReplyWrite(content.name, content.arguments) === true) {
@@ -1164,14 +1197,8 @@ export function targetCopy(target: OutlineTarget, blocks: readonly CopyBlock[]):
 		case "user":
 			return { content: rawUserText(message), label: "user message" };
 		case "assistant": {
-			const text = assistantVisibleText(message);
+			const text = turnProse(target);
 			if (text) return { content: text, label: "assistant message" };
-			// A command's `out://` reply (`bash > out://`, an eval cell's bridged write).
-			const replies = target.entries.flatMap(entry => {
-				const result = transcriptEntryMessage(entry);
-				return result?.role === "toolResult" ? toolResultReplies(result.details) : [];
-			});
-			if (replies.length > 0) return { content: replies.join("\n\n"), label: "assistant message" };
 			break;
 		}
 		case "toolResult": {

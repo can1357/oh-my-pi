@@ -10,7 +10,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CopySelectorComponent, type CopyPickSource } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { CopySelectorComponent, type CopyPickSource, turnPreview } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import type { OutlineTarget } from "@oh-my-pi/pi-tui/chat/transcript-outline";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
@@ -69,6 +70,7 @@ const GROUPED_READ_YIELD = "The write landed; here is the yield.";
 const REPLY_FENCE = "flux reconcile kustomization apps";
 const REPLY_TEXT = `DEVX-1468 status:\n\nnongprod branch created.\n\n\`\`\`sh\n${REPLY_FENCE}\n\`\`\``;
 const REPLY_PLACEHOLDER = "Shown to the user.";
+const INTRO_TEXT = "Checking the branches now.";
 const TASK_RESULT = "Spawned 2 background agents using reviewer.\n- `StandardsReview` (job `StandardsReview`)";
 
 /**
@@ -117,13 +119,19 @@ function makeReplyTurnEntries(): SessionMessageEntry[] {
 	];
 }
 
-/** user → assistant(bash call) → bash result carrying the `> out://` reply in its details. */
-function makeBashReplyEntries(): SessionMessageEntry[] {
+/**
+ * user → assistant(bash call, plus `intro` text when given) → bash result carrying the `> out://`
+ * reply in its `details.replies`.
+ */
+function makeBashReplyEntries(options: { intro?: string; replies?: readonly string[] } = {}): SessionMessageEntry[] {
 	return [
 		entry("u-b", null, { role: "user", content: "status?", timestamp: 1 } as AgentMessage),
 		entry("a-b", "u-b", {
 			role: "assistant",
-			content: [{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: `printf '%s' x > out://` } }],
+			content: [
+				...(options.intro === undefined ? [] : [{ type: "text" as const, text: options.intro }]),
+				{ type: "toolCall", id: "bash-1", name: "bash", arguments: { command: "printf '%s' x > out://" } },
+			],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
@@ -143,7 +151,7 @@ function makeBashReplyEntries(): SessionMessageEntry[] {
 			toolCallId: "bash-1",
 			toolName: "bash",
 			content: [{ type: "text", text: "12 pass" }],
-			details: { replies: [REPLY_TEXT] },
+			details: options.replies === undefined ? undefined : { replies: [...options.replies] },
 			isError: false,
 			timestamp: 3,
 		} as unknown as AgentMessage),
@@ -342,14 +350,66 @@ describe("CopySelectorComponent", () => {
 		]);
 	});
 
-	it("copies the reply a command sent through out:// in its result details", () => {
+	it("copies the reply a command sent through out:// after the turn's own text", () => {
 		const picks: Array<{ content: string; label: string }> = [];
-		const selector = makeSelector(picks, () => {}, undefined, makeBashReplyEntries());
+		const selector = makeSelector(
+			picks,
+			() => {},
+			undefined,
+			makeBashReplyEntries({ intro: INTRO_TEXT, replies: [REPLY_TEXT] }),
+		);
 		selector.render(100);
 		selector.handleInput(ENTER);
 		selector.dispose();
 
-		expect(picks).toEqual([{ content: REPLY_TEXT, label: "assistant message" }]);
+		expect(picks).toEqual([{ content: `${INTRO_TEXT}\n\n${REPLY_TEXT}`, label: "assistant message" }]);
+	});
+
+	it("keeps adjacent assistant text blocks concatenated verbatim", () => {
+		const entries = makeEntries();
+		entries[1] = entry("a1", "u1", {
+			...(entries[1]!.message as unknown as Record<string, unknown>),
+			content: [
+				{ type: "text", text: "hello " },
+				{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "bun test" } },
+				{ type: "text", text: "world" },
+			],
+		} as unknown as AgentMessage);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries);
+		selector.render(100);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: "hello world", label: "assistant message" }]);
+	});
+
+	it("separates a reply write from the text on either side of it", () => {
+		const entries = makeReplyTurnEntries();
+		entries[1] = entry("a-r", "u-r", {
+			...(entries[1]!.message as unknown as Record<string, unknown>),
+			content: [
+				{ type: "text", text: "Intro." },
+				{ type: "toolCall", id: "reply-1", name: "write", arguments: { path: "out://", content: REPLY_TEXT } },
+				{ type: "text", text: "Done." },
+			],
+		} as unknown as AgentMessage);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries);
+		selector.render(100);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([{ content: `Intro.\n\n${REPLY_TEXT}\n\nDone.`, label: "assistant message" }]);
+	});
+
+	it("previews a command reply as markdown, like the transcript draws it", () => {
+		// No assistant text at all: the reply in the result is the turn's only prose.
+		const replied = { entries: makeBashReplyEntries({ replies: [REPLY_TEXT] }).slice(1) } as unknown as OutlineTarget;
+		expect(turnPreview(replied, `${REPLY_TEXT}\n\n12 pass`).k).toBe("md");
+		// A turn with no prose at all keeps its joined commands/results as plain output.
+		const bare = { entries: makeBashReplyEntries().slice(1) } as unknown as OutlineTarget;
+		expect(turnPreview(bare, "12 pass").k).toBe("code");
 	});
 
 	it("lists the turn's links as blocks after code and commands; Enter copies the URL, o opens it", () => {
