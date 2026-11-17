@@ -503,6 +503,10 @@ _PLAIN_VIEWS = {
 # ---------------------------------------------------------------------------
 
 
+def _has_objc_metadata(program):
+    return any(str(block.getName()).startswith("__objc_") for block in program.getMemory().getBlocks())
+
+
 def _seed_objc_types(program):
     """Cache-extracted images may lack the typedefs required by the message analyzer."""
     Objc2Constants = jpype.JClass("ghidra.app.util.bin.format.objc.objc2.Objc2Constants")
@@ -539,7 +543,8 @@ def _repair_objc_retain(program):
     with pyghidra.transaction(program, "omp: Objective-C retain registers"):
         for function in _iter(program.getFunctionManager().getFunctions(True)):
             match = re.fullmatch(r"_objc_retain_x([0-9]+)", str(function.getName()))
-            if match is None or function.getCallFixup() is None:
+            if (match is None or function.getCallFixup() is None or
+                    function.getSignatureSource() == SourceType.USER_DEFINED):
                 continue
             input_register = program.getRegister("x" + match.group(1))
             if input_register is None:
@@ -548,7 +553,7 @@ def _repair_objc_retain(program):
             parameter = ParameterImpl("object", pointer, VariableStorage(program, input_register), program)
             result = ReturnParameterImpl(pointer, VariableStorage(program, output), program)
             function.updateFunction("default", result, List.of(parameter),
-                                    FunctionUpdateType.CUSTOM_STORAGE, True, SourceType.USER_DEFINED)
+                                    FunctionUpdateType.CUSTOM_STORAGE, True, SourceType.ANALYSIS)
 
 
 def _rpc_open(params):
@@ -579,7 +584,7 @@ def _rpc_open(params):
     _DATABASE_PATH = os.path.join(directory, "omp.gpr")
     with pyghidra.transaction(PROGRAM, "omp: analysis"):
         macho = str(PROGRAM.getExecutableFormat()) == "Mac OS X Mach-O"
-        seeded = _seed_objc_types(PROGRAM) if macho else False
+        seeded = _seed_objc_types(PROGRAM) if macho and _has_objc_metadata(PROGRAM) else False
         # Revisit old databases whose message analyzer skipped the missing types.
         if not GhidraProgramUtilities.isAnalyzed(PROGRAM) or seeded:
             pyghidra.analyze(PROGRAM, MONITOR)
