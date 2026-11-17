@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { humanizePlanTitle } from "@oh-my-pi/pi-coding-agent/plan-mode/approved-plan";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as titleDriftClassifier from "@oh-my-pi/pi-coding-agent/session/title-drift-classifier";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 
 let session: AgentSession | undefined;
 let authStorage: AuthStorage | undefined;
@@ -105,6 +109,236 @@ function nextTitle(target: AgentSession): Promise<void> {
 }
 
 describe("AgentSession title fork", () => {
+	it("计划批准后的合成消息也生成带卡片的正常标题", async () => {
+		const main = createMockModel({ handler: { content: ["Reading the approved plan."] } });
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side);
+		const titled = nextTitle(target);
+
+		target.seedAutoTitle(humanizePlanTitle("fix-flaky-park-tests"));
+		await target.prompt("Execute the approved plan.", { synthetic: true });
+		await titled;
+
+		expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
+		expect(side.calls[0]!.context.messages[0]).toEqual(main.calls[0]!.context.messages[0]);
+	});
+
+	it("逐条偏离检查通过首次命名的同一请求重新生成标题并复用前缀缓存", async () => {
+		const main = createMockModel({ handler: { content: ["Reading the requested files."] } });
+		const side = createMockModel({
+			responses: [
+				{ content: [CARD_REPLY] },
+				{ content: ['<title emoji="📝" code="NOTES">Draft release notes</title>'] },
+			],
+		});
+		const target = await createSession(main, side, { "title.refreshOnDrift": true });
+		const titleModel = vi.spyOn(ai, "completeSimple");
+		const drift = vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
+		let titled = nextTitle(target);
+		await target.prompt(FIRST_MESSAGE);
+		await titled;
+
+		titled = nextTitle(target);
+		await target.prompt("now draft the release notes");
+		await titled;
+
+		expect(target.sessionName).toBe("📝 NOTES: Draft release notes");
+		expect(drift).toHaveBeenCalledTimes(1);
+		expect(drift.mock.calls[0]![2].at(-1)).toEqual({ role: "user", text: "now draft the release notes" });
+		expect(titleModel).not.toHaveBeenCalled();
+		const first = side.calls[0]!;
+		const refresh = side.calls[1]!;
+		const foreground = main.calls[1]!;
+		expect(refresh.context.messages.at(-1)?.content).toEqual(first.context.messages.at(-1)?.content);
+		expect(refresh.context.systemPrompt).toEqual(foreground.context.systemPrompt);
+		expect(refresh.context.tools).toEqual(foreground.context.tools);
+		expect(refresh.context.messages.slice(0, foreground.context.messages.length)).toEqual(
+			foreground.context.messages,
+		);
+		expect(refresh.options?.promptCacheKey).toBe(foreground.options?.promptCacheKey ?? foreground.options?.sessionId);
+		expect(refresh.options?.reasoning).toBe(foreground.options?.reasoning);
+		expect(refresh.options?.sessionId).not.toBe(foreground.options?.sessionId);
+	});
+
+	it("判断进行中收到的短消息仍逐条检查，未偏离时不生成标题", async () => {
+		const main = createMockModel({ handler: { content: ["Continuing the park tests."] } });
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side, { "title.refreshOnDrift": true });
+		await target.setSessionName("🧪 FLAKY: Fix flaky park tests", "auto");
+		const firstStarted = Promise.withResolvers<void>();
+		const secondChecked = Promise.withResolvers<void>();
+		const verdict = Promise.withResolvers<boolean>();
+		const drift = vi
+			.spyOn(titleDriftClassifier, "classifyTitleDrift")
+			.mockImplementationOnce(() => {
+				firstStarted.resolve();
+				return verdict.promise;
+			})
+			.mockImplementationOnce(async () => {
+				secondChecked.resolve();
+				return false;
+			});
+
+		await target.prompt("add a regression test for the park fixture");
+		await firstStarted.promise;
+		await target.prompt("ok thanks");
+		verdict.resolve(false);
+		await secondChecked.promise;
+
+		expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
+		expect(drift.mock.calls.map(call => call[2].at(-1))).toEqual([
+			{ role: "user", text: "add a regression test for the park fixture" },
+			{ role: "user", text: "ok thanks" },
+		]);
+		expect(side.calls).toHaveLength(0);
+	});
+
+	it("用户在偏离判断期间手动命名后，不再生成或覆盖标题", async () => {
+		const main = createMockModel({ handler: { content: ["Reading the release notes."] } });
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side, { "title.refreshOnDrift": true });
+		await target.setSessionName("Fix flaky park tests", "auto");
+		const started = Promise.withResolvers<void>();
+		const verdict = Promise.withResolvers<boolean>();
+		vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockImplementation(() => {
+			started.resolve();
+			return verdict.promise;
+		});
+
+		await target.prompt("now draft the release notes");
+		await started.promise;
+		await target.setSessionName("My release", "user");
+		verdict.resolve(true);
+		await target.prompt("publish the release notes");
+
+		expect(target.sessionName).toBe("My release");
+		expect(side.calls).toHaveLength(0);
+	});
+
+	it("judge 立即返回时仍等待主回复开始，避免在主请求预热前分叉", async () => {
+		const releaseMain = Promise.withResolvers<void>();
+		const judged = Promise.withResolvers<void>();
+		const main = createMockModel({
+			handler: async () => {
+				await releaseMain.promise;
+				return { content: ["Reading the release notes."] };
+			},
+		});
+		const side = createMockModel({
+			handler: { content: ['<title emoji="📝" code="NOTES">Draft release notes</title>'] },
+		});
+		const target = await createSession(main, side, { "title.refreshOnDrift": true });
+		await target.setSessionName("Fix flaky park tests", "auto");
+		vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockImplementation(async () => {
+			judged.resolve();
+			return true;
+		});
+		const titled = nextTitle(target);
+		const run = target.prompt("now draft the release notes");
+		try {
+			await judged.promise;
+			// 让当前微任务队列耗尽；主回复仍由显式门闩阻塞，不等待墙钟时间。
+			await scheduler.yield();
+			expect(side.calls).toHaveLength(0);
+			expect(target.sessionName).toBe("Fix flaky park tests");
+		} finally {
+			releaseMain.resolve();
+			await run;
+		}
+		await titled;
+
+		expect(target.sessionName).toBe("📝 NOTES: Draft release notes");
+		expect(side.calls).toHaveLength(1);
+	});
+
+	it("主回复尚未开始时中断会释放标题刷新等待，不向下一轮遗留分叉", async () => {
+		const releaseMain = Promise.withResolvers<void>();
+		const judged = Promise.withResolvers<void>();
+		const main = createMockModel({
+			responses: [
+				async () => {
+					await releaseMain.promise;
+					return { content: ["Reading the release notes."] };
+				},
+			],
+			handler: { content: ["Continuing internally."] },
+		});
+		const side = createMockModel({ handler: { content: [CARD_REPLY] } });
+		const target = await createSession(main, side, { "title.refreshOnDrift": true });
+		await target.setSessionName("Fix flaky park tests", "auto");
+		vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockImplementation(async () => {
+			judged.resolve();
+			return true;
+		});
+		const run = target.prompt("now draft the release notes");
+		await judged.promise;
+		await scheduler.yield();
+		const aborted = target.abort();
+		releaseMain.resolve();
+		await aborted;
+		await run;
+		await target.prompt("Continue internally.", { synthetic: true });
+
+		expect(target.sessionName).toBe("Fix flaky park tests");
+		expect(side.calls).toHaveLength(0);
+	});
+
+	it("通过原生 System One 的偏离结果触发标题分叉", async () => {
+		const main = createMockModel({ handler: { content: ["Reading the release notes."] } });
+		const side = createMockModel({
+			handler: { content: ['<title emoji="📝" code="NOTES">Draft release notes</title>'] },
+		});
+		const target = await createSession(main, side, { "title.refreshOnDrift": true });
+		authStorage!.keys.setRuntime("typesafe", "judge-key");
+		const judgeModel = target.modelRegistry.getAvailable("all").find(model => model.api === "typesafe");
+		if (!judgeModel) throw new Error("Expected a bundled System One model");
+		target.settings.setModelRole("judge", `${judgeModel.provider}/${judgeModel.id}`);
+		await target.setSessionName("🧪 FLAKY: Fix flaky park tests", "auto");
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				return Response.json({
+					model: judgeModel.id,
+					answers: { fits: { type: "noul", noul: 0.1 } },
+					usage: { input_tokens: 8, output_tokens: 1 },
+				});
+			}),
+		);
+		const titled = nextTitle(target);
+
+		await target.prompt("now draft the release notes");
+		await titled;
+
+		expect(target.sessionName).toBe("📝 NOTES: Draft release notes");
+		expect(urls).toEqual([expect.stringMatching(/\/v1\/systemone$/)]);
+		expect(side.calls).toHaveLength(1);
+	});
+
+	it("中断取消偏离后的标题分叉，不覆盖旧标题也不启动 tiny 回退", async () => {
+		const main = createMockModel({ handler: { content: ["Reading the release notes."] } });
+		const started = Promise.withResolvers<void>();
+		const side = createMockModel({
+			handler: () => {
+				started.resolve();
+				return { content: ['<title emoji="📝" code="NOTES">Draft release notes</title>'], delayMs: 60_000 };
+			},
+		});
+		const target = await createSession(main, side, { "title.refreshOnDrift": true });
+		await target.setSessionName("Fix flaky park tests", "auto");
+		vi.spyOn(titleDriftClassifier, "classifyTitleDrift").mockResolvedValue(true);
+		const titleModel = vi.spyOn(ai, "completeSimple");
+
+		await target.prompt("now draft the release notes");
+		await started.promise;
+		await target.abort();
+		await target.prompt("Continue internally.", { synthetic: true });
+
+		expect(target.sessionName).toBe("Fix flaky park tests");
+		expect(side.calls).toHaveLength(1);
+		expect(titleModel).not.toHaveBeenCalled();
+	});
+
 	it("titles the session from a fork of the first reply, sharing the main request's prefix and cache key", async () => {
 		const main = createMockModel({ responses: [{ content: ["Reading the park tests first."] }] });
 		const side = createMockModel({ handler: { content: [CARD_REPLY] } });

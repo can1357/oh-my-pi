@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -2329,37 +2330,56 @@ describe("InteractiveMode plan review rendering", () => {
 	});
 
 	it.each([
-		{ noTitle: undefined, expected: "Release notes cleanup" },
+		{ noTitle: undefined, expected: "📝 NOTES: Clean up release notes" },
 		{ noTitle: "1", expected: undefined },
-	])(
-		"seeds the session name from the approved plan title only when titling is enabled (PI_NO_TITLE=$noTitle)",
-		async ({ noTitle, expected }) => {
-			const previousNoTitle = Bun.env.PI_NO_TITLE;
-			if (noTitle === undefined) delete Bun.env.PI_NO_TITLE;
-			else Bun.env.PI_NO_TITLE = noTitle;
-			try {
-				const planFilePath = "local://PLAN.md";
-				const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
-					getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-					getSessionId: () => session.sessionManager.getSessionId(),
-				});
-				await Bun.write(resolvedPlanPath, "# Plan\n\nClean up the release notes.");
+	])("计划批准后通过正常生成链路命名，PI_NO_TITLE=$noTitle", async ({ noTitle, expected }) => {
+		const previousNoTitle = Bun.env.PI_NO_TITLE;
+		if (noTitle === undefined) delete Bun.env.PI_NO_TITLE;
+		else Bun.env.PI_NO_TITLE = noTitle;
+		try {
+			mode.stop();
+			await session.dispose();
+			const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5");
+			session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+					streamFn: createMockModel({ handler: { content: ["Reading the approved release plan."] } }).stream,
+				}),
+				sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+				settings: Settings.isolated({ "title.icons": "emoji", "compaction.enabled": false }),
+				modelRegistry,
+				autoTitle: true,
+				sideStreamFn: createMockModel({
+					handler: { content: ['<title emoji="📝" code="NOTES">Clean up release notes</title>'] },
+				}).stream,
+			});
+			mode = new InteractiveMode(session, "test");
+			const planFilePath = "local://PLAN.md";
+			const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			});
+			await Bun.write(resolvedPlanPath, "# Plan\n\nClean up the release notes.");
 
-				await mode.handlePlanModeCommand();
+			await mode.handlePlanModeCommand();
 
-				vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
-				vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
-				vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+			vi.spyOn(mode, "showPlanReview").mockResolvedValue("execute");
+			vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+			const titled = Promise.withResolvers<void>();
+			const unsubscribe = session.sessionManager.onSessionNameChanged(() => titled.resolve());
 
-				await mode.handlePlanApproval({ planFilePath, planExists: true, title: "release-notes-cleanup" });
+			await mode.handlePlanApproval({ planFilePath, planExists: true, title: "release-notes-cleanup" });
+			if (expected) await titled.promise;
+			unsubscribe();
 
-				expect(session.sessionManager.getSessionName()).toBe(expected);
-			} finally {
-				if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
-				else Bun.env.PI_NO_TITLE = previousNoTitle;
-			}
-		},
-	);
+			expect(session.sessionManager.getSessionName()).toBe(expected);
+		} finally {
+			if (previousNoTitle === undefined) delete Bun.env.PI_NO_TITLE;
+			else Bun.env.PI_NO_TITLE = previousNoTitle;
+		}
+	});
 	it("autosaves the approved plan when plan.autosave is enabled", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {

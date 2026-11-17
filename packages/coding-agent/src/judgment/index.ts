@@ -115,6 +115,8 @@ export interface JudgeDeps {
 	 * with role-value syntax; a selector matching nothing is logged once and ignored.
 	 */
 	leadModel?: string;
+	/** 只允许原生 System One/Decisions 判定，不回退到聊天或本地关键词模型。 */
+	nativeOnly?: boolean;
 }
 
 /**
@@ -704,8 +706,16 @@ export class ChainJudge implements Judge {
 		const roleChain = restricted
 			? allowedJudgeCandidates(resolved.roleChain, this.#deps.settings, sessionModel)
 			: resolved.roleChain;
-		const chain = restricted ? textJudgeRoleChain(roleChain) : resolved.list;
 		const images = request?.images ?? [];
+		if (this.#deps.nativeOnly) {
+			return roleChain.filter(
+				candidate =>
+					kindOf(candidate) === "native" &&
+					(images.length === 0 || nativeTakesImages(candidate.model, images)) &&
+					(!request || !asksForBoxes(request.questions) || nativeJudgmentSupportsBoxes(candidate.model)),
+			);
+		}
+		const chain = restricted ? textJudgeRoleChain(roleChain) : resolved.list;
 		// A prompted model cannot locate anything, so no session fallback either.
 		if (request && asksForBoxes(request.questions)) {
 			return roleChain.filter(

@@ -6962,16 +6962,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			return false;
 		}
 
-		// Approved plans land in a fresh (or compacted) session whose first user-visible
-		// turn is the synthetic plan-approved prompt — that path bypasses the
-		// input-controller's title generation. Seed an auto-name from the plan title
-		// so the session is not left unnamed, unless automatic titling is disabled
-		// (`--no-title` / PI_NO_TITLE). `setSessionName("auto")` is a no-op when the
-		// user has already chosen a name (preserveContext paths).
-		const seededName = humanizePlanTitle(options.title);
-		if (!$env.PI_NO_TITLE && seededName && !this.sessionManager.getSessionName()) {
-			await this.sessionManager.setSessionName(seededName, "auto");
-		}
+		// 计划标题只作为生成输入；执行回复开始后复用正常的标题分叉和卡片格式。
+		this.session.seedAutoTitle(humanizePlanTitle(options.title));
 
 		// markPlanReferenceSent fires only on the dispatch path so the synthetic
 		// plan-approved prompt is the source of the reference injection.
@@ -6981,14 +6973,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			planContent,
 			contextPreserved: options.preserveContext === true,
 		});
-		// Close the review overlay only now — after the async title write and plan
-		// prompt are prepared, immediately before the execution turn is queued. The
-		// synthetic prompt below blocks in `session.prompt` for the whole run, so
-		// hiding here (rather than after #approvePlan returns) keeps the operator off
-		// the stale plan-review screen (issue #5688) while #5319's stale-buffer guard
-		// stays intact. Deferring the hide past the awaited `setSessionName` also
-		// prevents restored editor focus from letting operator keystrokes submit a
-		// normal turn ahead of the approved execution turn (PR #5689 review).
+		// 标题输入和执行提示准备好之后再关闭评审，避免用户输入抢先执行。
 		// The ownership-bound hide is idempotent, so the caller's trailing
 		// `closePlanReview()` — and a stale continuation after a replacement review
 		// opened — stay safe no-ops.

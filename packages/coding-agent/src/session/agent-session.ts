@@ -410,6 +410,7 @@ import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,
 	buildTitleDriftTurns,
+	type TitleDriftTurn,
 	CHECKPOINT_ACTIVE_REMINDER_TYPE,
 	type CustomMessage,
 	type CustomMessagePayload,
@@ -590,6 +591,7 @@ import {
 	cfgTitleIcons,
 	cfgTitleRefreshAfterPrompts,
 	cfgTitleRefreshOnReplan,
+	cfgTitleRefreshOnDrift,
 	type TitleIcons,
 } from "../utils/title-settings";
 import {
@@ -1219,6 +1221,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#titleInput: TitleInput | undefined;
 	/** Operator prompts since the last title check, toward `title.refreshAfterPrompts`. */
 	#titleDrift: { sessionId: string; prompts: number } | undefined;
+	/** 逐条串行判断，保留检查期间到达的消息；取消信号使旧会话队列失效。 */
+	#titlePromptChecks: Promise<void> = Promise.resolve();
+	/** 各用户消息等待主回复非思考块开始；消息失败时以 false 结束等待。 */
+	readonly #titleReplyWaiters = new Set<(started: boolean) => void>();
 	#titleProviderSessionId: string | undefined;
 	#titleProviderParentSessionId: string | undefined;
 	/** Host hook invoked when a typed user prompt is dropped before dispatch;
@@ -4751,6 +4757,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			for (const resolve of this.#titleReplyWaiters) resolve(false);
+			this.#titleReplyWaiters.clear();
 			for (const block of event.message.content) {
 				if (block.type === "toolCall") this.#runToolCallIds.add(block.id);
 			}
@@ -4771,11 +4779,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end") {
 			this.#noteTitleInput(event.message);
 			this.#noteTitleDrift(event.message);
-		} else if (event.type === "message_update" && this.#titleInput) {
+		} else if (event.type === "message_update") {
 			const kind = event.assistantMessageEvent.type;
 			if (kind === "text_start" || kind === "toolcall_start") {
-				this.#titleInput.replied = true;
-				this.#maybeStartTitle();
+				for (const resolve of this.#titleReplyWaiters) resolve(true);
+				this.#titleReplyWaiters.clear();
+				if (this.#titleInput) {
+					this.#titleInput.replied = true;
+					this.#maybeStartTitle();
+				}
 			}
 		}
 		// Expected internal transitions stamp a structural suppression flag on the
@@ -11877,11 +11889,18 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	#titleRefreshEnabled(trigger: SessionNameTrigger): boolean {
 		if (trigger === "replan") return cfgTitleRefreshOnReplan.get(this.settings);
-		return this.#autoTitle && cfgTitleRefreshAfterPrompts.get(this.settings) > 0;
+		return (
+			this.#autoTitle &&
+			(cfgTitleRefreshOnDrift.get(this.settings) || cfgTitleRefreshAfterPrompts.get(this.settings) > 0)
+		);
 	}
 
 	/** Count an operator prompt toward `title.refreshAfterPrompts`. */
 	#noteTitleDrift(message: AgentMessage): void {
+		if (cfgTitleRefreshOnDrift.get(this.settings)) {
+			this.#checkTitleAfterPrompt(message);
+			return;
+		}
 		if (!this.sessionName || !this.#titleRefreshEnabled("drift")) return;
 		const text = operatorTitleText(message);
 		if (!text || isLowSignalTitleInput(text)) return;
@@ -11890,12 +11909,60 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		else this.#titleDrift = { sessionId, prompts: 1 };
 	}
 
+	/** 每条真实用户消息保留自己的上下文快照，不等待主回复结束。 */
+	#checkTitleAfterPrompt(message: AgentMessage): void {
+		if (!operatorTitleText(message) || !this.sessionName) return;
+		const sessionId = this.sessionManager.getSessionId();
+		if ($env.PI_NO_TITLE || !this.#titleRefreshable(sessionId, "drift")) return;
+		if (this.#agentKind === "sub" && !isInteractiveHost()) return;
+		const recent = buildTitleDriftTurns(this.agent.state.messages);
+		const signal = this.#titleGenerationAbortController.signal;
+		const replyStarted = Promise.withResolvers<boolean>();
+		this.#titleReplyWaiters.add(replyStarted.resolve);
+		const check = this.#titlePromptChecks.then(async () => {
+			await this.#titleRefreshInFlight;
+			if (
+				signal.aborted ||
+				!cfgTitleRefreshOnDrift.get(this.settings) ||
+				!this.#titleRefreshable(sessionId, "drift")
+			)
+				return;
+			const refresh = this.#refreshTitle(sessionId, "drift", recent, signal, replyStarted.promise);
+			this.#titleRefreshInFlight = refresh;
+			try {
+				await refresh;
+			} finally {
+				if (this.#titleRefreshInFlight === refresh) this.#titleRefreshInFlight = undefined;
+			}
+		});
+		this.#titlePromptChecks = check
+			.catch(error => {
+				logger.debug("title-generator: per-prompt drift check failed", {
+					sessionId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			})
+			.finally(() => this.#titleReplyWaiters.delete(replyStarted.resolve));
+	}
+
 	/** At a settled run's end, check the title once `title.refreshAfterPrompts` operator prompts have counted. */
 	#maybeRefreshTitleAfterPrompts(): void {
+		if (cfgTitleRefreshOnDrift.get(this.settings)) return;
 		const drift = this.#titleDrift;
 		if (drift?.sessionId !== this.sessionManager.getSessionId()) return;
 		if (drift.prompts < cfgTitleRefreshAfterPrompts.get(this.settings)) return;
 		this.#scheduleTitleRefresh("drift");
+	}
+
+	/** 为计划批准后的合成执行消息提供标题输入，最终格式由正常生成链路决定。 */
+	seedAutoTitle(text: string): void {
+		if (!this.#autoTitle || this.sessionName || $env.PI_NO_TITLE || !text.trim()) return;
+		this.#titleInput = {
+			sessionId: this.sessionManager.getSessionId(),
+			text,
+			replied: false,
+			tried: false,
+		};
 	}
 
 	/**
@@ -11965,49 +12032,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const { sessionId } = input;
 		this.#titleGenerationInFlightFor = sessionId;
 		const signal = this.#titleGenerationAbortController.signal;
-		const started = performance.now();
-		const icons = this.#cardIcons();
-		// The fork is billed to the branch it branches from, even after the main
-		// turn moves the leaf while this request streams.
-		const usageOwner = { sessionId, parentId: this.sessionManager.getLeafId() };
-		this.runEphemeralTurn({
-			promptText: prompt.render(titleForkPrompt, {
-				card: icons !== "boring",
-				nerdFonts: icons === "nf+emoji",
-			}),
-			// Journaled where the billed message exists, so a fork that ends in a
-			// provider error still records its spend before rejecting.
-			onUsage: message => this.#reportTitleUsage(usageOwner, message),
-			signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_FORK_TIMEOUT_MS)]),
-		})
+		this.#requestTitleFork(input.text, signal)
 			.then(
-				async ({ replyText, assistantMessage }) => {
-					const title = parseCardTitleReply(replyText, icons, input.text);
-					logger.debug("title-generator: fork reply", {
-						sessionId,
-						ms: Math.round(performance.now() - started),
-						usage: assistantMessage.usage,
-						reply: replyText.slice(0, 300),
-						title,
-					});
+				async title => {
 					if (signal.aborted || !title) {
 						if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
 						this.#fallBackFromTitleFork(input, signal);
 						return;
 					}
-					// A reply that broke the card form (no code, a code over 6 letters) still
-					// names the session; the request stays in flight while it gets its card.
-					const named = await this.#cardTitle(title).finally(() => {
-						if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
-					});
+					if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
 					if (this.sessionManager.getSessionId() !== sessionId || this.sessionName) return;
-					await this.sessionManager.setSessionName(named, "auto");
+					await this.sessionManager.setSessionName(title, "auto");
 					this.#deferredTitle = undefined;
 				},
 				(err: unknown) => {
 					logger.debug("title-generator: fork failed", {
 						sessionId,
-						ms: Math.round(performance.now() - started),
+						reason: "fork-request-failed",
 						error: err instanceof Error ? err.message : String(err),
 					});
 					if (this.#titleGenerationInFlightFor === sessionId) this.#titleGenerationInFlightFor = undefined;
@@ -12020,6 +12061,51 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			});
+	}
+
+	/** 首次命名和逐条偏离刷新共用请求，保留主模型、system、工具、思考参数及缓存键。 */
+	async #requestTitleFork(text: string, signal: AbortSignal): Promise<string | null> {
+		const icons = this.#cardIcons();
+		const started = performance.now();
+		const usageOwner = {
+			sessionId: this.sessionManager.getSessionId(),
+			parentId: this.sessionManager.getLeafId(),
+		};
+		const { replyText, assistantMessage } = await this.runEphemeralTurn({
+			promptText: prompt.render(titleForkPrompt, {
+				card: icons !== "boring",
+				nerdFonts: icons === "nf+emoji",
+			}),
+			onUsage: message => this.#reportTitleUsage(usageOwner, message),
+			signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_FORK_TIMEOUT_MS)]),
+		});
+		if (signal.aborted) return null;
+		const title = parseCardTitleReply(replyText, icons, text);
+		logger.debug("title-generator: fork reply", {
+			sessionId: usageOwner.sessionId,
+			ms: Math.round(performance.now() - started),
+			usage: assistantMessage.usage,
+			reply: replyText.slice(0, 300),
+			title,
+		});
+		return title ? this.#cardTitle(title, signal) : null;
+	}
+
+	/** 与首次命名相同：先 fork，失败或拒绝后才使用标题模型。 */
+	async #regenerateAutoTitle(context: string, signal: AbortSignal): Promise<string | null> {
+		if (this.#cardsAutoTitles() && this.model) {
+			try {
+				const title = await this.#requestTitleFork(context, signal);
+				if (title) return title;
+			} catch (error) {
+				logger.debug("title-generator: refresh fork failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		if (signal.aborted) return null;
+		const title = await this.generateTitle(context, undefined, signal);
+		return title && this.#cardsAutoTitles() ? this.#cardTitle(title, signal) : title;
 	}
 
 	/**
@@ -12281,16 +12367,30 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Regenerate the title from recent conversation. A prompt-count check first
 	 * asks the judge, and regenerates only a title it finds stale.
 	 */
-	async #refreshTitle(sessionId: string, trigger: SessionNameTrigger): Promise<void> {
-		// A fitting title, one no judge could rate, or a session renamed or switched meanwhile keeps its title.
-		if (trigger === "drift" && !((await this.#titleDrifted()) && this.#titleRefreshable(sessionId, trigger))) return;
+	async #refreshTitle(
+		sessionId: string,
+		trigger: SessionNameTrigger,
+		recent?: TitleDriftTurn[],
+		signal = this.#titleGenerationAbortController.signal,
+		replyStarted?: Promise<boolean>,
+	): Promise<void> {
+		const revision = this.sessionManager.titleRevision;
+		const stale = () =>
+			signal.aborted ||
+			this.sessionManager.titleRevision !== revision ||
+			!this.#titleRefreshable(sessionId, trigger);
+		if (stale()) return;
+		if (trigger === "drift" && (!(await this.#titleDrifted(recent, signal)) || stale())) return;
+		// 判定可以抢先完成，生成必须等主回复开始，复用该请求已预热的前缀。
+		if (replyStarted && !(await untilAborted(signal, replyStarted))) return;
+		if (stale()) return;
 		const context = this.#buildReplanTitleContext();
 		if (!context) return;
-		const retitled = await this.#retitle(context);
-		if (!retitled) return;
-		// A session first named without a card (a subagent, a title-model title) gets one here.
-		const title = this.#cardsAutoTitles() ? await this.#cardTitle(retitled) : retitled;
-		if (!this.#titleRefreshable(sessionId, trigger) || title === this.sessionName) return;
+		// 逐条模式复用首次生成；原有重规划和间隔刷新保留当前卡片。
+		const retitled = recent ? await this.#regenerateAutoTitle(context, signal) : await this.#retitle(context, signal);
+		if (!retitled || stale()) return;
+		const title = !recent && this.#cardsAutoTitles() ? await this.#cardTitle(retitled, signal) : retitled;
+		if (stale() || title === this.sessionName) return;
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		await setSessionName.call(this.sessionManager, title, "auto", trigger);
 	}
@@ -12300,7 +12400,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * `judge` role; undefined when no judge answered. Interruption and disposal
 	 * cancel the judgment as they cancel title generation.
 	 */
-	async #titleDrifted(): Promise<boolean | undefined> {
+	async #titleDrifted(
+		recent = buildTitleDriftTurns(this.agent.state.messages),
+		signal = this.#titleGenerationAbortController.signal,
+	): Promise<boolean | undefined> {
 		const title = this.sessionName;
 		if (!title) return undefined;
 		const judge = resolveJudge({
@@ -12310,19 +12413,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			sessionId: this.sessionId,
 			metadataResolver: provider => this.agent.metadataForProvider(provider),
 			purpose: "title-drift",
+			nativeOnly: cfgTitleRefreshOnDrift.get(this.settings),
 			onUsage: journalJudgmentUsage(this.sessionManager),
 			telemetry: this.agent.telemetry,
 			cache: sharedJudgmentCache(),
 			costGate: this.#costGate,
 		});
-		const recent = buildTitleDriftTurns(this.agent.state.messages);
-		const signal = AbortSignal.any([
-			this.#titleGenerationAbortController.signal,
-			AbortSignal.timeout(TITLE_DRIFT_JUDGE_TIMEOUT_MS),
-		]);
+		const judgeSignal = AbortSignal.any([signal, AbortSignal.timeout(TITLE_DRIFT_JUDGE_TIMEOUT_MS)]);
 		// The judgment carries user text, so it follows this session's credential redaction policy like its title requests.
 		return withCredentialRedaction(cfgSecretsEnabled.get(this.settings), () =>
-			classifyTitleDrift(judge, title, recent, signal),
+			classifyTitleDrift(judge, title, recent, judgeSignal),
 		);
 	}
 

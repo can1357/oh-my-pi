@@ -66,6 +66,18 @@ export const cfgTitleRefreshOnReplan = register({
 	},
 });
 
+export const cfgTitleRefreshOnDrift = register({
+	id: "title.refreshOnDrift",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tasks",
+		group: "Modes",
+		label: "逐条检查标题偏离",
+		description: "每条用户消息通过原生 System One judge 判断标题是否偏离，偏离时复用首次标题生成请求；不覆盖手动标题",
+	},
+});
+
 export const cfgTitleRefreshAfterPrompts = register({
 	id: "title.refreshAfterPrompts",
 	type: "number",

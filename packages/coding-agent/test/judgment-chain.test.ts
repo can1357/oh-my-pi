@@ -117,6 +117,55 @@ function makeRegistry(models: Model<Api>[], keys: Record<string, string> = {}): 
 	return registry;
 }
 
+it("仅原生判定模式在没有 System One 时拒绝，不调用聊天回退", async () => {
+	const registry = makeRegistry([ONLINE], { anthropic: "test-key" });
+	const settings = Settings.isolated({ modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` } });
+	const chat = vi.spyOn(ai, "completeSimple");
+	const judge = new ChainJudge({ settings, registry, sessionModel: ONLINE, purpose: "title-drift", nativeOnly: true });
+
+	await expect(
+		judge.judge({
+			state: { title: "Parser", recent: [] },
+			questions: { fits: { type: "noul", instructions: "Does the title fit?" } },
+		}),
+	).rejects.toThrow("no judge model available");
+	expect(chat).not.toHaveBeenCalled();
+});
+
+it("仅原生模式跳过前置聊天候选，使用 System One 返回的判断", async () => {
+	const registry = makeRegistry([ONLINE, JEV_PREVIEW], { anthropic: "chat-key", typesafe: "judge-key" });
+	const settings = Settings.isolated({
+		modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` },
+		"retry.fallbackChains": { judge: ["typesafe/jev-preview"] },
+	});
+	const urls: string[] = [];
+	vi.spyOn(globalThis, "fetch").mockImplementation(
+		asGlobalFetch(async url => {
+			urls.push(String(url));
+			return Response.json({
+				model: "jev-preview",
+				answers: { fits: { type: "noul", noul: 0.15 } },
+				usage: { input_tokens: 8, output_tokens: 1 },
+			});
+		}),
+	);
+	const chat = vi.spyOn(ai, "completeSimple");
+	const result = await new ChainJudge({
+		settings,
+		registry,
+		sessionModel: ONLINE,
+		purpose: "title-drift",
+		nativeOnly: true,
+	}).judge({
+		state: { title: "Fix parser", recent: [{ role: "user", text: "Draft release notes" }] },
+		questions: { fits: { type: "noul", instructions: "Does the title fit?" } },
+	});
+
+	expect(result.answers.fits.noul).toBe(0.15);
+	expect(urls).toEqual(["https://judge.example.test/v1/systemone"]);
+	expect(chat).not.toHaveBeenCalled();
+});
+
 /** Native judges on a loopback server; the primary hangs until `recover()`. Attempts get a 200 ms deadline. */
 function nativeLoopback({
 	hangBody = false,
