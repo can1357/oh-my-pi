@@ -5,9 +5,13 @@
 ### Added
 
 - The bash tool now reports when `exit` or an armed `set -e` ends a call before its remaining statements ran: the result carries an `endedByExit` flag, a notice says the rest of the call did not run and that options like `set -e` stay set in the session (a call that ran in a copy of a busy session shell gets a notice without the persistence claim), and the same flag crosses the RPC wire for `bash` results; a trailing `exit` at the end of the input is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Changed
 
 - On macOS the `computer` tool's takeover notice now says what it did with your keyboard ("handed the keyboard back to Notes's window", "left as the user chose") instead of "focus returned", which it could not verify ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
+- Browser `tab.observe()` and `tab.ariaSnapshot()` on Chromium tabs now wait, up to 3 seconds, for the requests and page updates (including child frames) the actions since your last look started, so a cell that clicks and then observes shows the result instead of the page before it; concurrent looks share the wait even across another action, clearing the request log does not discard pending work, and requests already open before the action do not delay the look ([#19045](https://github.com/can1357/oh-my-pi/pull/19045) by [@will-bogusz](https://github.com/will-bogusz))
+- When another agent's computer call holds the desktop, your agent's `InputBusy` says which one: its agent id and omp process id ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -22,9 +26,12 @@
 - Fixed the browser tool reporting a JavaScript `confirm` or `prompt` as still open, and failing page calls on it, after the user clicked it away or another CDP client answered it ([#19481](https://github.com/can1357/oh-my-pi/pull/19481) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed `computer` `setValue` on a `<select>` in Chrome or an Electron app on macOS failing with an empty list of options; it now chooses the option the value names ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
 - A relay tab is no longer closed when another extension's frame, such as a password manager's autofill menu that undoes the relay clearing it, keeps Chrome refusing omp: the call fails saying what holds the tab, the tab stays open as the user left it, and the next call reattaches to it ([#19178](https://github.com/can1357/oh-my-pi/pull/19178) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the computer tool telling the model that only an X11 takeover can end with nothing sent because the user kept typing; a macOS takeover now waits for the user's pause too and reports `UserIntervened` the same way ([#19296](https://github.com/can1357/oh-my-pi/pull/19296) by [@will-bogusz](https://github.com/will-bogusz))
+- When the browser relay hides another extension's frame in a tab omp drives (a password manager's inline menu or save card), the call that ran into it, or a later one on that tab, now names the frame's page, the extension's id and the page's own title, and says the frame is hidden for the user too ([#19001](https://github.com/can1357/oh-my-pi/pull/19001) by [@will-bogusz](https://github.com/will-bogusz))
 
 - Subagents without an output schema (including eval `agent()` calls without `schema`) no longer get a `yield` tool; their final message is the result.
 - A `yield` without `data` no longer uses the subagent's last message as the result; it only finalizes incremental sections that were already submitted.
+- A `computer` key press that opens a macOS popup button's or menu button's menu in the background now fails listing the items and naming the press or click that chooses one, instead of leaving the menu open with your keyboard ([#19179](https://github.com/can1357/oh-my-pi/pull/19179) by [@will-bogusz](https://github.com/will-bogusz))
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes
