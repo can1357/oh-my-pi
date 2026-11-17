@@ -40,6 +40,7 @@
 - Fixed Wayland screenshots, and the clicks, drags and scrolls that need them, failing in released Linux builds; without PipeWire installed, `capabilities()` reports `capture: false` and the capture error says why ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a Windows crash in the native IPC transport that left every daemon-served tool hanging after another session closed its pipe mid-operation ([#16045](https://github.com/can1357/oh-my-pi/issues/16045), [#19508](https://github.com/can1357/oh-my-pi/pull/19508) by [@ve3xone](https://github.com/ve3xone))
 - Fixed macOS background actions stopping with `UserIntervened` while you typed in your own app and the target briefly took the keyboard, such as when a pop-up button's menu opened ([#19515](https://github.com/can1357/oh-my-pi/pull/19515) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Linux `find()`, `ax()` and element reads taking seconds in large apps: each element's independent accessibility questions now go out together, so `find()` takes about half as long in Kate, Dolphin and LibreOffice Writer ([#19521](https://github.com/can1357/oh-my-pi/pull/19521) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Removed
 
