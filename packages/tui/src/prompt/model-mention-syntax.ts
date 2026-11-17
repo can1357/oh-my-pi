@@ -8,6 +8,30 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 /** Whitespace-delimited token; groups are leading delimiter and selector. Reset lastIndex before reuse. */
 export const MODEL_MENTION_RE = /(^|\s)\^([^\s^]+)(?=\s|$)/g;
+
+/**
+ * Resolve a whitespace-delimited mention while preserving prose punctuation.
+ * Full selectors win, including ids that themselves end in punctuation.
+ */
+export function resolveModelMentionToken<T>(
+	token: string,
+	resolve: (selector: string) => T | undefined,
+	isKnown?: (selector: string) => boolean,
+): { value: T; suffix: string } | undefined {
+	const value = resolve(token);
+	if (value !== undefined) return { value, suffix: "" };
+	// A known exact selector whose chip label is taken must stay literal;
+	// stripping punctuation here would collapse a different model's chip.
+	if (isKnown?.(token)) return undefined;
+	let end = token.length;
+	while (end > 0 && ".,;:!?".includes(token[end - 1]!)) {
+		end--;
+		const selector = token.slice(0, end);
+		const resolved = resolve(selector);
+		if (resolved !== undefined) return { value: resolved, suffix: token.slice(end) };
+	}
+	return undefined;
+}
 /** Submitted mention; groups are agent pseudonym and display name. */
 export const MODEL_MENTION_TAG_RE = /<model agent="(m\d+)" name="([^"]*)"\/>/g;
 
