@@ -322,34 +322,50 @@ fn a_fifo_read_in_flight_survives_snapshots() {
 	}
 }
 
-/// The main vproc's slice would run the whole loop before the background
-/// job starts its external; `/bin/sh -c :` blocks it first, so the job's
-/// `sleep` is in flight at every snapshot of the loop.
-const EXTERNAL_IN_FLIGHT: &str = "/bin/sleep 0.3 & /bin/sh -c :; i=0; while [ $i -lt 100 ]; do \
-                                  i=$((i + 1)); done; wait; echo done $i";
+/// Rendezvous with the background external before running the loop, and
+/// release it only afterwards. A short foreground command need not let the
+/// background job start, and a timed sleep need not outlive the snapshots.
+/// All FIFO opens run outside obash so a restore cannot reissue one.
+fn external_in_flight(dir: &Path) -> String {
+	let ready = dir.join("ready");
+	let release = dir.join("release");
+	let (out, _) = bounded("mkfifo", &[ready.to_str().unwrap(), release.to_str().unwrap()], &[]);
+	assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+	format!(
+		"/bin/sh -c 'echo ready > \"$1\"; read release < \"$2\"' sh '{0}' '{1}' & /bin/sh -c 'read \
+		 ready < \"$1\"' sh '{0}'; i=0; while [ $i -lt 100 ]; do i=$((i + 1)); done; /bin/sh -c \
+		 'echo release > \"$1\"' sh '{1}'; wait; echo done $i",
+		ready.display(),
+		release.display()
+	)
+}
 
 /// Under the default policy a snapshot that would lose the external in
 /// flight is not restored; the run matches the plain one.
 #[test]
 fn snapshots_losing_an_external_are_skipped_by_default() {
-	let (_, line) = same_as_plain(EXTERNAL_IN_FLIGHT, "1:7", "exec", &[]);
+	let dir = tempfile::tempdir().unwrap();
+	let (_, line) = same_as_plain(&external_in_flight(dir.path()), "1:7", "exec", &[]);
 	assert!(num(&line, "skipped_ext") > 0, "{line:?}");
 	assert_eq!(num(&line, "skipped"), num(&line, "skipped_ext"), "{line:?}");
+	assert_eq!(num(&line, "snapshots"), num(&line, "restored") + num(&line, "skipped"), "{line:?}");
 	assert_eq!(num(&line, "lost"), 0, "{line:?}");
 }
 
 /// `PI_SHELL_FAULT_LOST=defer` keeps the shell while the external runs and
 /// retries at every following safepoint: the snapshot is restored as soon
-/// as the external is gone (here: after `wait`), and nothing is logged lost.
+/// as the released external is gone, and nothing is logged lost.
 #[test]
 fn the_defer_policy_restores_once_the_external_is_gone() {
-	let script = format!("{EXTERNAL_IN_FLIGHT}; echo after; echo end");
 	let dir = tempfile::tempdir().unwrap();
+	let script = format!("{}; echo after; echo end", external_in_flight(dir.path()));
 	let log = dir.path().join("lost.log");
 	let env = [("PI_SHELL_FAULT_LOST", "defer"), ("PI_SHELL_LOST_LOG", log.to_str().unwrap())];
 	let (plain, line) = same_as_plain(&script, "1:7", "exec", &env);
 	assert_eq!(plain.stdout, b"done 100\nafter\nend\n");
-	assert!(num(&line, "deferred") > 0, "{line:?}");
+	// A one-op retry budget crosses more than 100 safepoints in this loop;
+	// merely counting a deferral every seven ops is not the defer policy.
+	assert!(num(&line, "deferred") > 100, "{line:?}");
 	assert_eq!(num(&line, "skipped"), num(&line, "deferred"), "{line:?}");
 	assert_eq!(num(&line, "skipped_ext"), num(&line, "deferred"), "{line:?}");
 	assert!(num(&line, "restored") > 0, "{line:?}");
@@ -365,7 +381,8 @@ fn the_restore_policy_restores_and_logs_the_loss() {
 	let dir = tempfile::tempdir().unwrap();
 	let log = dir.path().join("lost.log");
 	let stats_path = dir.path().join("stats");
-	let (out, _) = obash(&["--fault=1:7", "--fault-mode=exec", "-c", EXTERNAL_IN_FLIGHT], &[
+	let script = external_in_flight(dir.path());
+	let (out, _) = obash(&["--fault=1:7", "--fault-mode=exec", "-c", &script], &[
 		("PI_SHELL_FAULT_LOST", "restore"),
 		("PI_SHELL_LOST_LOG", log.to_str().unwrap()),
 		("PI_SHELL_FAULT_STATS", stats_path.to_str().unwrap()),
