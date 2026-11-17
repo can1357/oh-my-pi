@@ -1494,9 +1494,10 @@ function readAnsiCString(text: string, start: number): { value: string; end: num
 
 /**
  * Where the command a wrapper chain runs starts in `words` (`sudo env X=1 timeout 5 rm ...` runs
- * `rm ...`). A long option may be abbreviated, as getopt allows (`--us root`); in a bundle of short
- * options (`-nu root`), the first that takes a value takes the rest of the word, or the next word
- * when it ends the bundle. The directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS})
+ * `rm ...`), after any reserved words and a `function name` header before a function body. A long
+ * option may be abbreviated, as getopt allows (`--us root`); in a bundle of short options
+ * (`-nu root`), the first that takes a value takes the rest of the word, or the next word when it
+ * ends the bundle. The directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS})
  * moves the command to go in `chdirs`, in order; one in the same word as its option (`-C~/x`,
  * `--chdir=~/x`) gets no tilde expansion, so a leading `~` in it is kept as a name (`./~/x`).
  */
@@ -1507,6 +1508,10 @@ function unwrapShellCommand(words: readonly string[], wrappers: string[], chdirs
 		const word = words[i];
 		if (SHELL_ASSIGNMENT.test(word) || SHELL_KEYWORDS.includes(word)) {
 			i++;
+			continue;
+		}
+		if (word === "function") {
+			i += 2;
 			continue;
 		}
 		const name = path.posix.basename(word);
@@ -1609,7 +1614,10 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 	return out;
 }
 
-/** The compound commands the reserved words at the start of a segment open and close, in order. */
+/**
+ * The compound commands the reserved words at the start of a segment open and close, in order; a
+ * `function name` header before a function body opens none.
+ */
 function* compoundKeywords(words: readonly string[], quoted: readonly boolean[]): Generator<"open" | "close"> {
 	for (let k = 0; k < words.length && !quoted[k]; k++) {
 		const word = words[k];
@@ -1619,6 +1627,8 @@ function* compoundKeywords(words: readonly string[], quoted: readonly boolean[])
 			if (word === "for" || word === "select" || word === "case") return;
 		} else if (Object.hasOwn(COMPOUND_CLOSERS, word)) {
 			yield "close";
+		} else if (word === "function") {
+			k++;
 		} else if (!COMMAND_PREFIXES.includes(word)) {
 			return;
 		}
@@ -2494,16 +2504,17 @@ class ShellScriptParser {
  * Parses a shell script into the simple commands it runs, for safety rules that must see through
  * shell syntax. Follows quotes (`$'...'` included), escapes, comments, `;`/`&&`/`||`/`|` chains
  * (continued on the next line after `|`, `&&` or `||`), `( )` groups and the other compound
- * commands (each one pipeline stage, fed by its own input redirections too), redirections,
+ * commands (each one pipeline stage, fed by its own input redirections too; a function body's
+ * commands are read where it is defined, after `f()` or `function f`), redirections,
  * heredocs (quote-aware, so a quoted `<<` opens none), `$( )`/backtick/`<( )`/`>( )` substitutions
  * (read as commands to the `)` that closes them, fed what the command they are in reads, or for
  * `>( )` writes, and also found inside `${ }` and unquoted heredoc bodies), `bash -c`/`sh -c`/`eval`
  * strings and scripts fed to a shell's stdin (up to {@link SHELL_SCRIPT_MAX_DEPTH} levels), `cd`
  * (`cd -` included), `pushd` and `popd` between commands, and wrappers (`sudo`, `env`, `timeout`,
  * `xargs`, `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in). It
- * is a tokenizer, not a shell: variables other than `$HOME`/`$PWD`, aliases, functions, and code
- * run by other interpreters are not followed, and after a `cd` to a directory it cannot resolve,
- * relative paths are not resolved.
+ * is a tokenizer, not a shell: variables other than `$HOME`/`$PWD`, aliases, calls to functions,
+ * and code run by other interpreters are not followed, and after a `cd` to a directory it cannot
+ * resolve, relative paths are not resolved.
  */
 export function parseShellScript(command: string, scope: ShellScriptScope): ParsedShellScript {
 	const parser = new ShellScriptParser(scope.home);
