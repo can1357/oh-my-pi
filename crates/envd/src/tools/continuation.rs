@@ -411,6 +411,10 @@ impl ControlAuthority for ContinuationAwareAgentsAuthority {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::BTreeSet;
+
+	use omp_core::{Principal, sf};
+
 	use super::*;
 
 	#[test]
@@ -471,4 +475,134 @@ mod tests {
 		assert_eq!(policy.on_exhausted, OnExhausted::Settle);
 		assert_eq!(policy.on_exhausted.as_str(), "settle");
 	}
+	struct NoInner;
+
+	#[async_trait::async_trait]
+	impl ControlAuthority for NoInner {
+		fn handles(&self, _operation: &str) -> bool {
+			false
+		}
+
+		fn authorize(
+			&self,
+			_context: &ControlRequestContext,
+			_operation: &str,
+			_arguments: &JsonMap<String, JsonValue>,
+		) -> Result<(), ControlProtocolError> {
+			Err(ControlProtocolError::new("Unsupported", "no inner authority in this test"))
+		}
+
+		async fn request(
+			&self,
+			_context: ControlRequestContext,
+			_operation: Str,
+			_arguments: JsonMap<String, JsonValue>,
+		) -> Result<JsonValue, ControlProtocolError> {
+			Err(ControlProtocolError::new("Unsupported", "no inner authority in this test"))
+		}
+
+		async fn effect(
+			&self,
+			_context: ControlRequestContext,
+			_effect: ControlEffect,
+		) -> Result<(), ControlProtocolError> {
+			Err(ControlProtocolError::new("Unsupported", "no inner authority in this test"))
+		}
+	}
+
+	fn identity_with(capabilities: &[&'static str]) -> Arc<ControlConnectionIdentity> {
+		Arc::new(ControlConnectionIdentity {
+			extension:          sf!("dev.example.goal"),
+			principal:          Principal::new(sf!("test"), sf!("Test")),
+			artifact_digest:    sf!("sha256:test"),
+			layer:              sf!("project"),
+			tier:               sf!("trusted"),
+			trust:              sf!("trusted"),
+			host_generation:    1,
+			session_generation: 1,
+			capabilities:       Arc::new(
+				capabilities.iter().copied().map(Str::new_static).collect::<BTreeSet<_>>(),
+			),
+		})
+	}
+
+	fn bound(
+		book: &ContinuationBook,
+		identity: &Arc<ControlConnectionIdentity>,
+	) -> Arc<dyn ControlAuthority> {
+		let inner: Arc<dyn ControlAuthorityFactory> = Arc::new(
+			|_identity: Arc<ControlConnectionIdentity>| -> Result<
+				Arc<dyn ControlAuthority>,
+				ControlCompositionError,
+			> { Ok(Arc::new(NoInner)) },
+		);
+		ContinuationAwareAgentsFactory::new(book.clone(), inner)
+			.bind(Arc::clone(identity))
+			.expect("bind continuation authority")
+	}
+
+	fn context(identity: &Arc<ControlConnectionIdentity>) -> ControlRequestContext {
+		ControlRequestContext { connection: Arc::clone(identity), request_id: 1, invocation: None }
+	}
+
+	fn policy_args() -> JsonMap<String, JsonValue> {
+		let mut args = JsonMap::new();
+		args.insert(
+			"policy".to_owned(),
+			json!({
+				"max_consecutive": 3,
+				"max_total": 10,
+				"min_interval_ms": 0,
+				"on_exhausted": "settle",
+			}),
+		);
+		args
+	}
+
+	#[tokio::test]
+	async fn set_policy_without_grant_is_policy_denied() {
+		let book = ContinuationBook::new();
+		let identity = identity_with(&["agents.continuations"]);
+		let error = bound(&book, &identity)
+			.request(
+				context(&identity),
+				Str::new_static("omp.agents.set_continuation_policy"),
+				policy_args(),
+			)
+			.await
+			.expect_err("set_continuation_policy without agents.continuation must be denied");
+		assert_eq!(error.code.as_str(), "PolicyDenied");
+		assert_eq!(error.details["code"], "capability_denied");
+		assert_eq!(error.details["decision_id"], "");
+		assert_eq!(error.details["rules"], json!([]));
+		assert!(error.details["reason"].as_str().is_some_and(|reason| reason.contains("agents.continuation")));
+		assert_eq!(book.policy_for("dev.example.goal"), ContinuationPolicy::default());
+	}
+
+	#[tokio::test]
+	async fn set_policy_with_grant_is_applied() {
+		let book = ContinuationBook::new();
+		let identity = identity_with(&["agents.continuation"]);
+		let value = bound(&book, &identity)
+			.request(
+				context(&identity),
+				Str::new_static("omp.agents.set_continuation_policy"),
+				policy_args(),
+			)
+			.await
+			.expect("granted set_continuation_policy");
+		assert_eq!(value, JsonValue::Null);
+		assert_eq!(book.policy_for("dev.example.goal").max_consecutive, 3);
+	}
+
+	#[tokio::test]
+	async fn reading_continuations_needs_no_grant() {
+		let book = ContinuationBook::new();
+		let identity = identity_with(&[]);
+		bound(&book, &identity)
+			.request(context(&identity), Str::new_static("omp.agents.continuations"), JsonMap::new())
+			.await
+			.expect("reading continuations needs no grant");
+	}
+
 }
