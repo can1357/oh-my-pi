@@ -92,6 +92,61 @@ async function bounded<T>(work: Promise<T>, signal: AbortSignal, milliseconds: n
 	}
 }
 
+const LOGIN_DIRECTORY_PREFIX = "login-";
+const LOGIN_DIRECTORY_RETENTION_MS = 24 * 60 * 60 * 1000;
+const LOGIN_TOKEN_FILE = path.join("antigravity-cli", "antigravity-oauth-token");
+
+export interface CleanupLoginOptions {
+	/** Test seam: runs after the directory is claimed and before the credential check. */
+	afterClaim?: (directory: string) => Promise<void>;
+}
+
+/**
+ * Remove abandoned login directories that never produced a credential.
+ * A directory with a credential is retained for the export-failure recovery path.
+ * Eligible directories are renamed before the check so a concurrent credential write
+ * either lands in the claimed directory and is restored, or cannot be reached by path.
+ */
+export async function cleanupAbandonedLoginDirectories(
+	root: string,
+	now = Date.now(),
+	options: CleanupLoginOptions = {},
+): Promise<number> {
+	const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+	let removed = 0;
+	for (const entry of entries) {
+		if (!entry.isDirectory() || !entry.name.startsWith(LOGIN_DIRECTORY_PREFIX)) continue;
+		const directory = path.join(root, entry.name);
+		try {
+			if (await Bun.file(path.join(directory, LOGIN_TOKEN_FILE)).exists()) continue;
+			const stat = await fs.stat(directory);
+			if (now - stat.mtimeMs < LOGIN_DIRECTORY_RETENTION_MS) continue;
+			const claimed = path.join(root, `cleanup-${crypto.randomUUID()}`);
+			await fs.rename(directory, claimed);
+			try {
+				await options.afterClaim?.(claimed);
+				if (await Bun.file(path.join(claimed, LOGIN_TOKEN_FILE)).exists()) {
+					try {
+						await fs.rename(claimed, directory);
+					} catch {
+						await fs
+							.rename(claimed, path.join(root, `${LOGIN_DIRECTORY_PREFIX}${crypto.randomUUID()}`))
+							.catch(() => {});
+					}
+					continue;
+				}
+				await fs.rm(claimed, { recursive: true, force: true });
+				removed++;
+			} catch {
+				await fs.rename(claimed, directory).catch(() => {});
+			}
+		} catch {
+			// Best effort: a directory that disappears or cannot be read is left alone.
+		}
+	}
+	return removed;
+}
+
 export async function loginAntigravityCli(ctrl: OAuthController): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt && !ctrl.onManualCodeInput) throw new AIError.OnPromptRequiredError("Antigravity CLI");
 	if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError("Antigravity CLI sign-in cancelled");
@@ -101,6 +156,7 @@ export async function loginAntigravityCli(ctrl: OAuthController): Promise<OAuthC
 	const binary = await bounded(resolveAgyBinary(ctrl.fetch ?? fetch), signal, START_TIMEOUT_MS);
 	const root = path.join(agyGeminiDir(), "logins");
 	await fs.mkdir(root, { recursive: true, mode: 0o700 });
+	await cleanupAbandonedLoginDirectories(root);
 	const directory = await fs.mkdtemp(path.join(root, "login-"));
 	let child: Subprocess<"pipe", "pipe", "pipe"> | undefined;
 	let signedIn = false;
