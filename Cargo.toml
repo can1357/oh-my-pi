@@ -473,8 +473,7 @@ split-debuginfo = "off"
 incremental = false
 codegen-units = 256
 
-# Extension artifact verification and the b3sum builtin stay hot in debug
-# builds; sha2 (Hash32) gets speed from the "*" glob below plus aarch64 asm.
+# Extension artifact verification and the b3sum builtin stay hot in dev builds.
 [profile.dev.package.blake3]
 opt-level = 3
 # Keep dependencies at the compile-first dev level. Runtime-critical hashes are
@@ -497,6 +496,12 @@ hint-mostly-unused = true
 hint-mostly-unused = true
 [profile.dev.package.gix]
 hint-mostly-unused = true
+
+# Native verification fingerprints tool/dependency bytes. Keep test hashing
+# representative without changing the homogeneous LLVM test backend. See the
+# measured Hash32 experiment in the S4 research note.
+[profile.test.package.sha2]
+opt-level = 3
 
 [profile.release]
 opt-level = 2

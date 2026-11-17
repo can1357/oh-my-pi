@@ -85,6 +85,11 @@ executed experiment; no native runtime tests were rerun here.
 15. [S3 evidence storage](15-evidence-storage-s3.md): session journal/CAS
     publication, explicit retention closure, integrity and applicability checks,
     and the remaining executable-admission boundary.
+16. [S4 native checks](16-native-checks-s4.md): explicit deterministic package
+    checks on frozen inputs, observed test coverage, strict host admission and
+    opt-in ADW gates; joined-runtime validation and remaining trust boundaries.
+17. [S4 hashing experiment](17-hash-throughput.md): reproducible Hash32
+    measurements supporting the test-only SHA-256 optimization.
 
 ## Final comparison
 
@@ -123,7 +128,8 @@ Original research validation checked local links, pinned source file/range
 targets, patch whitespace and research-only scope. The original research PR
 implemented no production engine, changed no runtime behavior and added no
 dependency or lockfile. Subsequent S1–S3 production progress and its separate
-validation are recorded in the linked implementation notes above; the original
+validation are recorded in the linked implementation notes above; S4's joined
+execution work has its own validation record. The original
 benchmark/tooling blockers are historical results, not current slice results.
 
 Publication initially encountered HTTP 403 from Git push and the connected

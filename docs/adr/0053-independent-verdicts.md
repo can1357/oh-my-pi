@@ -101,11 +101,19 @@ Status: Partially implemented.
   journaled through keyed session patches. Reads validate consumed bytes, selected
   ancestry and exact snapshot/action applicability. This establishes retained
   evidence integrity, not result truth or producer trust.
-- Not yet implemented: automatic supplemental-input closure, executable result
-  and provenance validation, structured independent verdict, required-gate
-  integration into ADW acceptance, acceptance criteria and Issue-to-PR recipe.
-  S1–S3 are not a live gate and do not complete D1–D5; S4 remains the first
-  joined verification milestone.
+- S4 connects a narrow deterministic package-check provider through explicit
+  ADW `Code` verification configuration. Captured-input materialization and
+  isolated process authority remain EnvD-owned; the driver validates observed
+  inventories and uses S1–S3 evidence for PASS-only acceptance. Confinement and
+  trusted-host input admission are required, with no unconfined fallback. See
+  [S4 implementation and validation](../research/omp2-hybrid-verification/16-native-checks-s4.md)
+  for the exact profile and pending/executed proof; source wiring alone is not
+  proof that a live gate passed.
+- Not yet implemented: general automatic supplemental-input closure, semantic
+  result truth, structured independent verdict, acceptance criteria and
+  Issue-to-PR recipe. S4 does not change existing Agent or Review acceptance
+  defaults or complete D1–D5. Native command completion does not establish test
+  merit or requirement correctness.
 - Unverified: OMP1 review prompts and aggregation, current live reviewer route
   independence, and the interaction of `ai_advisor_*` settings with judge routing.
   Slice build/test observations are recorded in the verification research's

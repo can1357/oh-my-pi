@@ -109,6 +109,37 @@ fn scoped_view_binds_loader_reads_and_writable_overrides() {
 }
 
 #[test]
+fn scoped_read_scaffolding_is_sealed_after_writable_child_binds() {
+	let root = tempdir().expect("temporary scopes");
+	let readable = root.path().join("source");
+	let writable = root.path().join("output");
+	fs::create_dir(&readable).expect("source");
+	fs::create_dir(&writable).expect("output");
+	let readable = fs::canonicalize(readable).expect("canonical source");
+	let writable = fs::canonicalize(writable).expect("canonical output");
+	for mode in [WriteMode::Deny, WriteMode::Scoped] {
+		let mut spec = SandboxSpec::new(executable());
+		spec.allow_read(&readable).expect("read scope");
+		spec.set_write(mode);
+		if mode == WriteMode::Scoped {
+			spec.allow_write(&writable).expect("write scope");
+		}
+		let plan = compile(spec);
+		let seal = plan
+			.argv()
+			.iter()
+			.position(|arg| arg == "--remount-ro")
+			.expect("sealed root");
+		assert_eq!(plan.argv()[seal + 1], "/");
+		assert!(mount_index(plan.argv(), "--ro-bind", &readable) < seal);
+		if mode == WriteMode::Scoped {
+			assert!(mount_index(plan.argv(), "--bind", &writable) < seal);
+		}
+		assert_eq!(plan.argv()[seal + 2], "--", "seal follows all mount setup");
+	}
+}
+
+#[test]
 fn write_denies_remount_subtrees_read_only_after_writable_bind() {
 	let root = tempdir().expect("writable scope");
 	let denied = root.path().join("denied");
@@ -124,6 +155,32 @@ fn write_denies_remount_subtrees_read_only_after_writable_bind() {
 	let writable_index = mount_index(plan.argv(), "--bind", &root);
 	let denied_index = mount_index(plan.argv(), "--ro-bind", &denied);
 	assert!(writable_index < denied_index, "read-only carve-out must shadow writable bind");
+	assert!(plan.enforced().contains(Capability::FsWriteDeny));
+}
+
+#[test]
+fn denied_ancestor_covers_future_descendants_without_nested_mounts() {
+	let root = tempdir().expect("writable scope");
+	let root = fs::canonicalize(root.path()).expect("canonical root");
+	let denied = root.join("source");
+	fs::create_dir(&denied).expect("denied source");
+	let future = denied.join(".agents");
+	let mut spec = SandboxSpec::new(executable());
+	spec.set_write(WriteMode::Scoped);
+	spec.allow_write(&root).expect("write scope");
+	// Reverse insertion order also proves this does not depend on callers
+	// listing a parent before its nested protection.
+	spec.deny_write(&future).expect("future protection");
+	spec.deny_write(&denied).expect("ancestor protection");
+	let plan = compile(spec);
+	assert!(has_mount(plan.argv(), "--ro-bind", &denied, &denied));
+	assert!(
+		!plan
+			.argv()
+			.windows(3)
+			.any(|args| { args[0] == "--ro-bind" && Path::new(&args[2]) == future })
+	);
+	assert!(!future.exists(), "compilation must not create the denied destination");
 	assert!(plan.enforced().contains(Capability::FsWriteDeny));
 }
 

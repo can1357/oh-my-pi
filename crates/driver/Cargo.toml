@@ -110,5 +110,9 @@ omp-tui.workspace = true
 tokio.workspace = true
 tower.workspace = true
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+ctor.workspace = true
+omp-sandbox.workspace = true
+
 [lints]
 workspace = true
