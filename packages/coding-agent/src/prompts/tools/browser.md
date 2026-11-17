@@ -52,6 +52,7 @@ selectors: CSS, or Puppeteer aria/… text/… xpath/… pierce/… label/… pl
   - After a scaled screenshot, pass values measured on the page (`box`, `evaluate`) with `css: true` instead of scaling them: `clickAt(x, y, {css: true})`, `{x, y, css: true}`.
 - `waitFor*` resolve as soon as the condition holds: after a click or navigation wait for the expected text, URL, or selector, never a fixed sleep.
 - `waitForFunction(fnOrExpression, {timeout?, polling?}, ...args)` waits for a condition in the page: it evaluates a function called with `args` (cell variables are not in scope) or a string holding an expression or a function (Python passes strings) every `polling` ms and resolves with its first truthy value. Use it instead of a loop of `evaluate` and sleeps.
+- `waitForFunction`: an expression that evaluates to a function is called with `args`, not tested for truthiness.
 - The cell's own `wait(handles)` waits for agents and completions, not time; `wait(ms | predicate)` sleeps or polls only inside `tab.run`.
 - URL patterns (`waitForUrl`, `waitForResponse`, `requests({filter})`): a string with `*` is a glob (`*` within a path segment, `**` across: `"**/cart.php"`), any other string a substring; or a RegExp. `route` strings are always globs.
 - `route` is declarative: matching requests are aborted or fulfilled from its options; it takes no handler.

@@ -44,7 +44,12 @@ import {
 	pushStateInPage,
 	reloadInPage,
 } from "../navigation";
-import { DEFAULT_STYLE_PROPERTIES, isFunctionSource } from "../queries";
+import {
+	DEFAULT_STYLE_PROPERTIES,
+	PREDICATE_ANSWER_SOURCE,
+	PREDICATE_CALL_SOURCE,
+	type PredicateAnswer,
+} from "../queries";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -1812,7 +1817,10 @@ export class CmuxTab implements InProcessRunTab {
 		return await this.pollFunction("tab.waitForFunction()", fn, opts, args);
 	}
 
-	/** Poll a page predicate until it is truthy; a string holding a function is called with `args`. */
+	/**
+	 * Poll a page predicate until it is truthy; a function, or a string holding one, is called with `args`. Truthiness
+	 * is decided in the page, so a value that cannot be copied out still ends the wait (as `true`).
+	 */
 	async pollFunction(
 		label: string,
 		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
@@ -1823,11 +1831,17 @@ export class CmuxTab implements InProcessRunTab {
 		const signal = this.#runContext?.signal;
 		const pollingMs = typeof opts?.polling === "number" ? opts.polling : 200;
 		const deadline = Date.now() + timeoutMs;
-		const script = typeof fn === "string" && isFunctionSource(fn) ? `(${fn}\n)(...${JSON.stringify(args)})` : fn;
+		const expression = `(0, eval)(${JSON.stringify(`(${String(fn)}\n)`)})`;
+		const call = `(${PREDICATE_CALL_SOURCE})(${expression}, ${JSON.stringify(args)})`;
+		// The daemon evaluates synchronously: a Promise is handed to the envelope, which reports it, not judged here.
+		const script = serializeEvalWithEnvelope(
+			`(() => { const value = ${call}; return value && typeof value.then === "function" ? value : (${PREDICATE_ANSWER_SOURCE})(value); })()`,
+			[],
+		);
 		while (Date.now() <= deadline) {
-			const value =
-				typeof script === "string" ? await this.#evalScript<unknown>(script) : await this.evaluate(script, ...args);
-			if (value) return value;
+			const result = (await this.#request("browser.eval", { script })) as CmuxEvalResult;
+			const answer = unwrapEvalEnvelope<PredicateAnswer | undefined>(result.value, label);
+			if (answer?.held) return answer.value;
 			await untilAborted(signal, () => Bun.sleep(pollingMs));
 		}
 		throw new ToolError(`${label} timed out after ${timeoutMs}ms`);

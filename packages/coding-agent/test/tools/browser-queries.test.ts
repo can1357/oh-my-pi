@@ -410,6 +410,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 			"setTimeout(() => { window.__cyclic = {}; window.__cyclic.self = window.__cyclic; }, 50), 0",
 		]);
 		expect(await call("waitForFunction", ["window.__cyclic", { timeout: 5_000 }])).toBe(true);
+		expect(await call("waitForFunction", ["Symbol('ready')", { timeout: 5_000 }])).toBe(true);
+		expect(await call("waitForFunction", ["1n", { timeout: 5_000 }])).toBe(true);
 		expect(String(await rejectionOf(call("waitForFunction", ["(() => { throw new Error('boom'); })()"])))).toContain(
 			"tab.waitForFunction() threw a JavaScript exception",
 		);
@@ -421,4 +423,8 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		expect(sleepError).toContain("tab.waitFor(1000) waits for a selector string, not a number of milliseconds");
 		expect(sleepError).toContain("tab.waitForSelector(selector)");
 	}, 60_000);
+
+	it("calls a parenthesized function expression with its predicate arguments", async () => {
+		expect(await call("waitForFunction", ["((n) => n * 2)", { timeout: 5_000 }, 21])).toBe(42);
+	});
 });
