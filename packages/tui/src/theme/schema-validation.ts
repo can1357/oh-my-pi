@@ -121,7 +121,7 @@ const themeJsonSchema = type({
 		"ansi?": "(string | number)[] == 16",
 	},
 	"symbols?": {
-		"preset?": "'unicode' | 'nerd' | 'ascii'",
+		"preset?": "'unicode' | 'unicode-noemoji' | 'nerd' | 'ascii'",
 		"overrides?": { "[string]": "string" },
 		"spinnerFrames?": spinnerFramesSchema,
 	},

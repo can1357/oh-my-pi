@@ -92,15 +92,20 @@ effect(cfgThemeLight, name => setAutoThemeMapping("light", name));
 export const cfgSymbolPreset = register({
 	id: "symbolPreset",
 	type: "enum",
-	values: ["unicode", "nerd", "ascii"] as const,
+	values: ["unicode", "unicode-noemoji", "nerd", "ascii"] as const,
 	default: "unicode",
 	ui: {
 		tab: "appearance",
 		group: "Theme",
 		label: "Symbol Preset",
-		description: "Glyph set for icons and symbols (Unicode, Nerd Font, or ASCII)",
+		description: "Glyph set for icons and symbols (Unicode, Unicode without emoji, Nerd Font, or ASCII)",
 		options: [
 			{ value: "unicode", label: "Unicode", description: "Standard symbols (default)" },
+			{
+				value: "unicode-noemoji",
+				label: "Unicode (no emoji)",
+				description: "Unicode symbols with ASCII labels instead of emoji",
+			},
 			{
 				value: "nerd",
 				label: "Nerd Font",

@@ -394,7 +394,7 @@ import {
 	theme,
 	warmHighlighter,
 } from "@oh-my-pi/pi-tui/theme";
-import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
+import { getSlashCommandIndicator } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
@@ -3286,8 +3286,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			ctx: this,
 		}).map(cmd => ({
 			...cmd,
-			icon: getSlashCommandTypeIcon(cmd.icon ?? "action"),
-			iconName: cmd.icon ?? "action",
+			...getSlashCommandIndicator(cmd.icon ?? "action"),
 		}));
 
 		const hookCommands: SlashCommand[] = (
@@ -3295,8 +3294,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		).map(cmd => ({
 			name: cmd.name,
 			description: cmd.description ?? "(hook command)",
-			icon: getSlashCommandTypeIcon("extension"),
-			iconName: "extension",
+			...getSlashCommandIndicator("extension"),
 			getArgumentCompletions: cmd.getArgumentCompletions,
 		}));
 
@@ -3306,8 +3304,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return {
 				name: loaded.command.name,
 				description: `${loaded.command.description} (${loaded.source})`,
-				icon: getSlashCommandTypeIcon(loaded.path.startsWith("mcp:") ? "mcp" : "prompt"),
-				iconName: loaded.path.startsWith("mcp:") ? "mcp" : "prompt",
+				...getSlashCommandIndicator(loaded.path.startsWith("mcp:") ? "mcp" : "prompt"),
 				getArgumentCompletions: complete && (prefix => complete(prefix, this.sessionManager.getCwd())),
 			};
 		});
@@ -3315,15 +3312,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		const skillCommandList: SlashCommand[] = [];
 		this.skillCommands.clear();
 		if (this.session.skillsSettings?.enableSkillCommands !== false) {
-			const icon = getSlashCommandTypeIcon("skill");
+			const indicator = getSlashCommandIndicator("skill");
 			for (const skill of this.session.skills) {
 				const commandName = `skill:${skill.name}`;
 				this.skillCommands.set(commandName, skill);
 				skillCommandList.push({
 					name: commandName,
 					description: skill.description,
-					icon,
-					iconName: "skill",
+					...indicator,
 				});
 			}
 		}
@@ -3361,14 +3357,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#pendingSlashCommands = this.#buildPendingSlashCommands();
 		const fileCommands = this.session.slashCommands;
 		this.fileSlashCommands = new Set(fileCommands.map(cmd => cmd.name));
-		const promptIcon = getSlashCommandTypeIcon("prompt");
+		const promptIndicator = getSlashCommandIndicator("prompt");
 		const fileSlashCommands: SlashCommand[] = fileCommands.map(cmd => {
 			const argumentHint = cmd.argumentHint ? replaceTabs(cmd.argumentHint).replace(/[\r\n]+/g, " ") : undefined;
 			return {
 				name: cmd.name,
 				description: cmd.description,
-				icon: promptIcon,
-				iconName: "prompt",
+				...promptIndicator,
 				argumentHint,
 				getInlineHint: argumentHint ? buildStaticInlineHint(argumentHint) : undefined,
 			};
@@ -3394,8 +3389,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// `PromptTemplate.description` from `loadTemplatesFromDir` already includes the
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,
-				icon: promptIcon,
-				iconName: "prompt",
+				...promptIndicator,
 			}));
 		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
 			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],

@@ -104,6 +104,13 @@
 
 - Fixed fallback model selection so roles are offered only models they can use, excluding incompatible image and speech models.
 - Fixed macOS spelling assistance, autocorrect, replacements, and word completion for shell (`!`) and Python (`$`) drafts.
+### Breaking Changes
+
+- Removed `getSlashCommandTypeIcon` in favor of `getSlashCommandIndicator`, which returns both the text glyph and the named icon, and returns neither for the `unicode-noemoji` preset ([#19340](https://github.com/can1357/oh-my-pi/pull/19340) by [@mrckndt](https://github.com/mrckndt))
+
+### Added
+
+- Added the `unicode-noemoji` symbol preset: Unicode box drawing, trees, and status glyphs with every color emoji and supplementary pictograph replaced by its ASCII label, keeping BMP text-presentation marks (`✔`, `⚠`, `⏸`) and arrows in Unicode, and a collapsed slash-command icon column. Select it with `symbolPreset` or a theme's `symbols.preset` ([#19340](https://github.com/can1357/oh-my-pi/pull/19340) by [@mrckndt](https://github.com/mrckndt))
 
 ## [18.20.1] - 2026-11-14
 

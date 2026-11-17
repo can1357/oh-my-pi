@@ -382,16 +382,32 @@ export function getSelectListTheme(): SelectListTheme {
 		hovered: (text: string) => theme.bg("selectedBg", text),
 	};
 }
+
+/** Autocomplete type indicator for a slash command: text glyph plus the named icon for TSP terminals. */
+export interface SlashCommandIndicator {
+	/** Glyph for the icon column; `undefined` when the preset renders no glyph there. */
+	readonly icon: string | undefined;
+	/** Named icon for TSP terminals; `undefined` when the preset renders no icon at all. */
+	readonly iconName: string | undefined;
+}
+
 /**
- * Resolve the autocomplete type-indicator glyph for a slash command.
- * Returns `undefined` when no theme is initialized or the active preset is
- * ASCII (shared `icon.*` glyphs have ASCII forms, but a partially lettered
- * icon column reads as noise), which collapses the column entirely.
+ * Resolve the autocomplete type indicator for a slash command.
+ * Both keys are always defined (`undefined` included) so spreading the result
+ * over a command that carries its own icon name clobbers the name instead of
+ * leaking it into the icon column. Presets that render no icons
+ * (`unicode-noemoji`) return both `undefined`, collapsing the column for the
+ * glyph path and the named-icon path alike; `ascii` keeps its named icon
+ * because a TSP terminal draws it in-band. The named icon alone is returned
+ * when the preset has no text glyph, or when no theme is initialized.
  */
-export function getSlashCommandTypeIcon(name: SlashCommandIconName): string | undefined {
-	if (typeof theme === "undefined" || theme.getSymbolPreset() === "ascii") return undefined;
+export function getSlashCommandIndicator(name: SlashCommandIconName): SlashCommandIndicator {
+	if (typeof theme === "undefined") return { icon: undefined, iconName: name };
+	const preset = theme.getSymbolPreset();
+	if (preset === "unicode-noemoji") return { icon: undefined, iconName: undefined };
+	if (preset === "ascii") return { icon: undefined, iconName: name };
 	const icon = theme.cmd[name];
-	return icon.length > 0 ? icon : undefined;
+	return icon.length > 0 ? { icon, iconName: name } : { icon: undefined, iconName: name };
 }
 
 export function getEditorTheme(): EditorTheme {

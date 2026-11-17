@@ -466,7 +466,7 @@
 			"properties": {
 				"preset": {
 					"type": "string",
-					"enum": ["unicode", "nerd", "ascii"],
+					"enum": ["unicode", "unicode-noemoji", "nerd", "ascii"],
 					"description": "Default symbol preset for this theme (can be overridden by user setting)"
 				},
 				"overrides": {

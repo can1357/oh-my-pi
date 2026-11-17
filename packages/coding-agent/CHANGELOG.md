@@ -283,6 +283,10 @@
 
 - Added `mnemopi.embeddingQueryPrefix` and `mnemopi.embeddingInputType` configuration for asymmetric and instruction-tuned embedding models, including providers that require an `input_type`.
 
+### Added
+
+- Added **Unicode (no emoji)** to the **Symbol Preset** setting in `/settings`, keeping Unicode symbols and geometry while replacing every color emoji and supplementary pictograph with an ASCII label, and no icon column in the slash-command palette ([#19340](https://github.com/can1357/oh-my-pi/pull/19340) by [@mrckndt](https://github.com/mrckndt))
+
 ### Changed
 
 - Browser screenshots are delivered to the model in CSS pixels up to the supported unscaled size, making viewport screenshot coordinates directly usable with browser actions; scaling guidance remains for scaled full-page and element captures.
