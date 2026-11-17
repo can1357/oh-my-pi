@@ -1559,45 +1559,42 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
 	});
 
-	it("decides and shows an expiring reset by the policy of the stored account its report belongs to", () => {
+	it.each([
+		{ name: "its one report", orgs: ["claude-org"], owned: true },
+		{ name: "no report when two organizations' reports fit it", orgs: ["org-a", "org-b"], owned: false },
+	])("attributes a credential stored without its organization to $name", ({ orgs, owned }) => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [
-			cedarGrant(now, "cedar", 3 * HOUR),
-		]);
-		// Stored before its organization was known, with the email case the selector names; the report lowercases it.
-		const stored = {
-			position: 0,
-			credentialId: 7,
-			accountId: "claude-account",
-			email: "Claude@Example.Test",
-			active: false,
-		};
-		const policy = {
-			provider: "anthropic",
-			account: { email: "Claude@Example.Test" },
-			autoRedeemWeekly: "no",
-		} as const;
+		const reports = orgs.map(orgId => {
+			const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [
+				cedarGrant(now, "cedar", 3 * HOUR),
+			]);
+			return { ...report, metadata: { ...report.metadata, orgId } };
+		});
+		// Stored before its organization was known, with the email case the selector names; reports lowercase it.
+		const stored = { position: 0, credentialId: 7, accountId: "claude-account", email: "Claude@Example.Test" };
+		const policy = { provider: "anthropic", account: { email: stored.email }, autoRedeemWeekly: "no" } as const;
 		const getAccountPolicy = (_provider: string, identity: { email?: string }) =>
-			identity.email === policy.account.email ? policy : undefined;
+			identity.email === stored.email ? policy : undefined;
 		const text = stripVTControlCharacters(
 			formatUsageBreakdown(
-				[report],
-				[],
+				reports,
+				[{ provider: "anthropic", type: "oauth", accountId: stored.accountId, email: stored.email }],
 				now,
 				undefined,
 				[],
-				{ globalReservePct: 10, getAccountPolicy, accounts: () => [stored] },
+				{ globalReservePct: 10, getAccountPolicy, accounts: () => [{ ...stored, active: false }] },
 				{
 					...resetExpiryOptions({ "claudeResets.autoRedeemWeekly": "yes" }),
-					accounts: () => [stored],
+					accounts: () => [{ ...stored, active: false }],
 					getAccountPolicy,
 				},
 			),
 		);
-		expect(text).toContain("auto-redeem weekly no");
-		expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost\n");
-		expect(text).toContain("→ not spent automatically  (account policy autoRedeemWeekly: no)");
-		expect(text).toContain("spend it:  /usage reset anthropic/7");
+		// The report's own policy line (the stored row's "no usage data" line always shows its policy).
+		expect(text.includes("auto-redeem weekly no · eligible")).toBe(owned);
+		expect(text.includes("→ not spent automatically  (account policy autoRedeemWeekly: no)")).toBe(owned);
+		expect(text.includes("/usage reset anthropic/7")).toBe(owned);
+		if (owned) expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost\n");
 	});
 
 	it("counts only expiring resets that the warned reset's setting decides", () => {
