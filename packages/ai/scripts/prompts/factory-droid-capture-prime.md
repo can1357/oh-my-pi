@@ -1,0 +1,1 @@
+Before using any tool, work out the sum of all prime numbers below 40. If that sum is odd, the file to read is probe.txt; if it is even, the file is even.txt. Then use the Read tool to read that file in the current directory, and reply with exactly its contents.
