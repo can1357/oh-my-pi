@@ -4,7 +4,7 @@
 
 ### Added
 
-- Sessions stopped by SIGTERM or SIGHUP on Linux and macOS now record which process sent the signal (pid, uid, and, when it can still be identified, its command name and parent pid) in the `session_exit` entry and the "Session exit recorded" log line ([#9956](https://github.com/can1357/oh-my-pi/issues/9956))
+- Sessions stopped by SIGTERM or SIGHUP on Linux and macOS now record which process sent the signal (pid, uid, and, when it can still be identified, its command name and parent pid) in the `session_exit` entry and the "Session exit recorded" log line ([#19511](https://github.com/can1357/oh-my-pi/pull/19511) by [@bse-ai](https://github.com/bse-ai))
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 
