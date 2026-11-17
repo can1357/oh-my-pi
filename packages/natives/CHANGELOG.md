@@ -66,6 +66,9 @@
 
 - Added the `PhononTts` binding for on-device Phonon text-to-speech.
 - Added `Shell.adopt(fork)` to apply variables, functions, aliases, options, and traps from a completed fork back to its parent shell. When both shells set a name, the value from the command that finished last is retained.
+- Added `PhononTts` binding for on-device Phonon text-to-speech
+- Added `Shell.adopt(fork)`, which carries the variables, functions, aliases, options and traps a `fork()` set into the shell it was forked from, at the end of that shell's running command; a name both set keeps the value of the command that ended last
+- Added `readTreeKeepingSparse()` to seed a private commit index from HEAD while keeping the shared checkout's sparse exclusions; `diffText({ cached: true })`, `commitCreate()` and `writeTree()` now preserve out-of-cone files and collapsed sparse-directory entries ([#19453](https://github.com/can1357/oh-my-pi/pull/19453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 

@@ -161,9 +161,9 @@ export async function commitSelection(
 			if (ownCommits && (head === null || !ownCommits.has(head))) {
 				throw new Error(`HEAD ${shortSha(head)} was not made by this session's commit flow; refusing to amend it.`);
 			}
-			// An unborn HEAD starts from an empty index: patches create the missing index file.
+			// Hooks see this index; preserve HEAD's sparse exclusions from the shared index.
 			if (head === null) await fs.rm(indexPath, { force: true });
-			else await repo.readTree(head, indexPath, context.signal);
+			else await repo.readTreeKeepingSparse(head, indexPath, context.signal);
 			try {
 				await repo.applyPatch(joined, { cached: true, indexPath }, context.signal);
 			} catch (error) {
