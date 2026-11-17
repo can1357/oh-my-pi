@@ -29,8 +29,10 @@ import {
 	type UsageRankingResult,
 } from "./rank";
 import { mergeRefreshedCredential, OAUTH_REFRESH_SKEW_MS, type OAuthRefresher } from "./refresh";
+import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
 import {
+	type AccountSwitchReason,
 	type ApiKeyCredential,
 	type AuthApiKeyOptions,
 	type AuthCredential,
@@ -984,6 +986,66 @@ export class CredentialSelector {
 		const lastResortCandidates = explicitPin
 			? [explicitPin, ...candidates.filter(candidate => candidate !== explicitPin)]
 			: candidates;
+		// Why the session left its pin for the `served` account. Runs only on a
+		// switch, so steady-state requests pay one id comparison.
+		const pinnedCredentialId = sessionCredential?.type === "oauth" ? sessionCredential.credentialId : undefined;
+		const explainSwitch = (served: OAuthCredential): AccountSwitchReason | undefined => {
+			// A dead grant inside tryOAuth disables its row and fails over recursively,
+			// leaving candidate indices stale: find the pin by row id and both
+			// candidates by account identity.
+			const entries = this.#deps.pool.entries(provider);
+			const pinnedIndex = entries.findIndex(entry => entry.id === pinnedCredentialId);
+			const candidateFor = (credential: AuthCredential | undefined): OAuthCandidate | undefined => {
+				const key = credential && resolveCredentialIdentityKey(provider, credential);
+				return key
+					? candidates.find(
+							candidate => resolveCredentialIdentityKey(provider, candidate.selection.credential) === key,
+						)
+					: undefined;
+			};
+			const pinned = candidateFor(entries[pinnedIndex]?.credential);
+			if (
+				pinnedIndex === -1 ||
+				pinned === undefined ||
+				!sessionPreferredCanRefreshOrUse ||
+				preflightFailures.has(pinned) ||
+				this.#deps.blocks.isScopeBlocked(provider, providerKey, pinnedIndex, AUTH_BLOCK_SCOPE)
+			) {
+				return "unavailable";
+			}
+			if (this.#deps.blocks.isBlocked(provider, providerKey, pinnedIndex, blockScopes)) return "blocked";
+			const pinnedAccountKey = oauthAccountKey(pinned.selection.credential);
+			if (
+				(enforcePlanRequirement && planGate?.(pinned.usage) !== true) ||
+				(enforceAccounts && (pinnedAccountKey === undefined || !accountIds?.has(pinnedAccountKey)))
+			) {
+				return "plan";
+			}
+			if (!sessionPreferredIsWarm) return "cold";
+			const servedCandidate = candidateFor(served);
+			if (servedCandidate === undefined) return undefined;
+			if (
+				servedCandidate.reclaimReady === true &&
+				(servedCandidate.accountPriority ?? 0) > (pinned.accountPriority ?? 0)
+			) {
+				return "reclaim";
+			}
+			if (
+				pinned.inReserve === true &&
+				servedCandidate.reserveMeasured === true &&
+				servedCandidate.inReserve === false
+			) {
+				return "reserve";
+			}
+			if (
+				pinned.allowanceSpent === true &&
+				servedCandidate.usage !== null &&
+				servedCandidate.allowanceSpent === false
+			) {
+				return "allowance-spent";
+			}
+			return undefined;
+		};
 
 		for (const pass of passes) {
 			for (const candidate of pass.allowBlocked ? lastResortCandidates : candidates) {
@@ -1004,7 +1066,18 @@ export class CredentialSelector {
 					blockScopes,
 					onTransientRefreshFailure: recordTransientRefreshFailure,
 				});
-				if (resolved) return resolved;
+				if (resolved) {
+					if (
+						sessionId &&
+						pinnedCredentialId !== undefined &&
+						resolved.credentialId !== undefined &&
+						resolved.credentialId !== pinnedCredentialId
+					) {
+						const reason = explainSwitch(resolved.credential);
+						if (reason) this.#deps.affinity.noteSwitch(provider, sessionId, resolved.credentialId, reason);
+					}
+					return resolved;
+				}
 			}
 		}
 

@@ -209,6 +209,10 @@
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
 
+### Added
+
+- When a session's OAuth account changes, the TUI shows the old and new account and the rule that moved it (reserve, reclaim, blocked, cold pin and so on), the log records it at info level, and RPC clients receive an `account_switched` event
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

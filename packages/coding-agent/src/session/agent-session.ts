@@ -5219,12 +5219,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// Persist which account served this turn so a resumed process can
 				// re-pin it and keep the provider's account-scoped prompt cache
 				// warm (broker-mode sticky routing is process-local).
-				recordCredentialPin(
+				const accountSwitch = recordCredentialPin(
 					this.#modelRegistry.authStorage,
 					this.sessionManager,
 					this.sessionId,
 					assistantMsg.provider,
 				);
+				if (accountSwitch) {
+					logger.info("Session OAuth account switched", {
+						sessionId: this.sessionId,
+						model: assistantMsg.model,
+						...accountSwitch,
+					});
+					await this.#emitSessionEvent({ type: "account_switched", model: assistantMsg.model, ...accountSwitch });
+				}
 			}
 			if (event.message.role === "toolResult") {
 				const { toolName, toolCallId, isError, content } = event.message;

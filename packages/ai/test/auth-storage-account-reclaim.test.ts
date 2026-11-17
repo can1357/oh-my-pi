@@ -40,6 +40,8 @@ let tempDir = "";
 let store: SqliteAuthCredentialStore | null = null;
 const usage = new Map<string, UsageReport>();
 const base = Date.now();
+/** Account id → error its key resolution throws. */
+const keyErrors = new Map<string, string>();
 let clock = 0;
 
 /** Report for `accountId` with its 5h window at `fiveUsed` and weekly window at `weekUsed`. */
@@ -101,10 +103,13 @@ beforeEach(async () => {
 	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-account-reclaim-"));
 	store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 	usage.clear();
+	keyErrors.clear();
 	clock = 0;
 	vi.spyOn(Date, "now").mockImplementation(() => base + clock);
 	vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async (provider, all) => {
 		const credential = all[provider] as OAuthCredentials | undefined;
+		const error = credential?.accountId ? keyErrors.get(credential.accountId) : undefined;
+		if (error) throw new Error(error);
 		return credential?.accountId ? { apiKey: `api-${credential.accountId}`, newCredentials: credential } : null;
 	});
 });
@@ -295,5 +300,107 @@ describe("accountPolicies reclaimAbovePct", () => {
 		setUsage(A, "b", 0.86, 0.1);
 		setUsage(A, "c", 0, 0.1);
 		expect(await next(auth, A, "S1")).toBe("b");
+	});
+});
+
+describe("account switch reasons", () => {
+	const A = "anthropic" as const;
+	const policies: AuthAccountPolicies = [
+		{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 15, reclaimAbovePct: 40 },
+		{ provider: A, account: { accountId: "b" }, priority: 5 },
+	];
+	const reason = (auth: AuthStorage, session: string) => auth.sessions.sticky?.(A, session)?.switchReason;
+	const credentialId = (auth: AuthStorage, accountId: string): number => {
+		const account = auth.oauth.accounts(A).find(candidate => candidate.accountId === accountId);
+		if (!account) throw new Error(`expected account ${accountId}`);
+		return account.credentialId;
+	};
+
+	test("names the eviction policy that moved a warm session", async () => {
+		const auth = await setup(A, policies, ["a", "b"]);
+		setUsage(A, "a", 0.3, 0.5);
+		setUsage(A, "b", 0.1, 0.1);
+		expect(await next(auth, A, "S1")).toBe("a");
+		expect(reason(auth, "S1")).toBeUndefined();
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "a", 0.9, 0.5);
+		expect(await next(auth, A, "S1")).toBe("b");
+		expect(reason(auth, "S1")).toBe("reserve");
+		// Staying put keeps the reason of the switch that led here.
+		await advance(auth, A, 10 * MIN);
+		expect(await next(auth, A, "S1")).toBe("b");
+		expect(reason(auth, "S1")).toBe("reserve");
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "a", 0, 0.45);
+		setUsage(A, "b", 0.2, 0.15);
+		expect(await next(auth, A, "S1")).toBe("a");
+		expect(reason(auth, "S1")).toBe("reclaim");
+	});
+
+	test("names a blocked pin and a pin gone cold", async () => {
+		const auth = await setup(A, policies, ["a", "b"]);
+		setUsage(A, "a", 0.3, 0.3);
+		setUsage(A, "b", 0.1, 0.1);
+		expect(await next(auth, A, "S1")).toBe("a");
+		await auth.limits.markReached(A, "S1", { credentialId: credentialId(auth, "a"), retryAfterMs: HOUR });
+		expect(await next(auth, A, "S1")).toBe("b");
+		expect(reason(auth, "S1")).toBe("blocked");
+
+		expect(await next(auth, A, "S2")).toBe("b");
+		// Past Anthropic's one-hour warm window the pool re-ranks, and A now has more headroom.
+		await advance(auth, A, 2 * HOUR);
+		setUsage(A, "b", 0.3, 0.8);
+		expect(await next(auth, A, "S2")).toBe("a");
+		expect(reason(auth, "S2")).toBe("cold");
+	});
+
+	test("names a user pin and a usage-aware release", async () => {
+		const auth = await setup(A, policies, ["a", "b"]);
+		setUsage(A, "a", 0.3, 0.3);
+		setUsage(A, "b", 0.1, 0.1);
+		expect(await next(auth, A, "S1")).toBe("a");
+		expect(auth.sessions.pin(A, "S1", credentialId(auth, "b"))).toBe(true);
+		expect(reason(auth, "S1")).toBe("pinned");
+		expect(auth.sessions.release(A, "S1")).toBe(true);
+		expect(await next(auth, A, "S1")).toBe("a");
+		expect(reason(auth, "S1")).toBe("released");
+	});
+
+	test("names a pin that cannot serve the request: refresh failure, model on another account", async () => {
+		const auth = await setup(A, policies, ["a", "b"]);
+		setUsage(A, "a", 0.3, 0.3);
+		setUsage(A, "b", 0.1, 0.1);
+		expect(await next(auth, A, "S1")).toBe("a");
+		expect(await auth.keys.get(A, "S1", { accountIds: ["b"] })).toBe("api-b");
+		expect(reason(auth, "S1")).toBe("plan");
+
+		expect(await next(auth, A, "S2")).toBe("a");
+		keyErrors.set("a", "fetch failed");
+		expect(await next(auth, A, "S2")).toBe("b");
+		expect(reason(auth, "S2")).toBe("unavailable");
+	});
+
+	test("names the rule that picked the account failover reached, not the one that died", async () => {
+		const auth = await setup(
+			A,
+			[
+				{ provider: A, account: { accountId: "b" }, priority: 10, reservePct: 15, reclaimAbovePct: 40 },
+				{ provider: A, account: { accountId: "a" }, priority: 5, reservePct: 15 },
+				{ provider: A, account: { accountId: "c" }, priority: 0 },
+			],
+			["a", "b", "c"],
+		);
+		// S1 starts on A while B, the top priority, is inside its reserve.
+		setUsage(A, "a", 0.3, 0.3);
+		setUsage(A, "b", 0.9, 0.1);
+		setUsage(A, "c", 0.3, 0.3);
+		expect(await next(auth, A, "S1")).toBe("a");
+		// B recovers past its reclaim line and A falls into its reserve, but B's grant is dead.
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "a", 0.9, 0.3);
+		setUsage(A, "b", 0, 0.1);
+		keyErrors.set("b", "invalid_grant");
+		expect(await next(auth, A, "S1")).toBe("c");
+		expect(reason(auth, "S1")).toBe("reserve");
 	});
 });

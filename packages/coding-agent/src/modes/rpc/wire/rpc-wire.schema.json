@@ -3865,6 +3865,20 @@
 			],
 			"type": "string"
 		},
+		"AccountSwitchReason": {
+			"enum": [
+				"unavailable",
+				"blocked",
+				"plan",
+				"cold",
+				"reserve",
+				"allowance-spent",
+				"reclaim",
+				"released",
+				"pinned"
+			],
+			"type": "string"
+		},
 		"AgentStartEvent": {
 			"type": "object",
 			"properties": {
@@ -4380,6 +4394,39 @@
 				"role"
 			]
 		},
+		"AccountSwitchedEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "account_switched"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"model": {
+					"type": "string",
+					"description": "The model that served the first turn on the new account."
+				},
+				"to": {
+					"type": "string"
+				},
+				"from": {
+					"type": "string",
+					"description": "The previous account's label; absent once that account is no longer stored."
+				},
+				"reason": {
+					"$ref": "#/$defs/AccountSwitchReason",
+					"description": "The routing rule that moved the session; absent when unknown."
+				}
+			},
+			"required": [
+				"type",
+				"provider",
+				"model",
+				"to"
+			],
+			"description": "The OAuth account serving `provider` changed since the session's last turn on it."
+		},
 		"ModelChangedEvent": {
 			"type": "object",
 			"properties": {
@@ -4663,6 +4710,9 @@
 				},
 				{
 					"$ref": "#/$defs/RetryFallbackSucceededEvent"
+				},
+				{
+					"$ref": "#/$defs/AccountSwitchedEvent"
 				},
 				{
 					"$ref": "#/$defs/ModelChangedEvent"

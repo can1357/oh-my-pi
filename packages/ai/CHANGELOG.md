@@ -63,6 +63,10 @@
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
 
+### Added
+
+- `AuthStorage.sessions.sticky()` now carries `switchReason`: which rule moved the session off its previous OAuth account (`unavailable`, `blocked`, `plan`, `cold`, `reserve`, `allowance-spent`, `reclaim`, `released` or `pinned`)
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
