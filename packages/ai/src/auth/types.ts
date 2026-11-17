@@ -65,7 +65,16 @@ export interface AuthAccountPolicy {
 	readonly reservePct?: number;
 	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
+	/** This account's saved-reset consent for 5h spends, over the provider's `autoRedeem5h` setting. */
+	readonly autoRedeem5h?: AccountResetConsent;
+	/** This account's saved-reset consent for weekly spends, over the provider's `autoRedeemWeekly` setting. */
+	readonly autoRedeemWeekly?: AccountResetConsent;
+	/** This Anthropic account's consent for Fable launch resets, over `claudeResets.autoRedeemFable`. */
+	readonly autoRedeemFable?: AccountResetConsent;
 }
+
+/** An account policy's saved-reset consent for one window: spend without asking, or never spend. */
+export type AccountResetConsent = "yes" | "no";
 
 /** Read-only set of per-account routing policies. */
 export type AuthAccountPolicies = readonly AuthAccountPolicy[];
@@ -701,7 +710,7 @@ export interface ResetCreditRedeemOutcome {
 	/**
 	 * Result code. Backend codes: `reset` (success), `already_redeemed`,
 	 * `no_credit`, `nothing_to_reset`. Locally-synthesized: `no_account`
-	 * (target not found), `account_unavailable` (token refresh failed),
+	 * (target not found, or its row now holds another account), `account_unavailable` (token refresh failed),
 	 * `credit_list_failed` (transport/auth failure while listing credits —
 	 * retryable, unlike a genuine `no_credit`), `http_<status>` (unexpected
 	 * HTTP).

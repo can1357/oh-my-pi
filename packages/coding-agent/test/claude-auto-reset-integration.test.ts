@@ -126,6 +126,7 @@ describe("Claude saved-reset trigger integration", () => {
 		for (const manager of managers.splice(0).reverse()) {
 			await manager.close();
 		}
+		authStorage.setAccountPolicies({ accountPolicies: [], defaultReservePct: 10 });
 		tempDir.removeSync();
 		vi.restoreAllMocks();
 	});
@@ -488,6 +489,55 @@ describe("Claude saved-reset trigger integration", () => {
 
 		expect(targets).toEqual([]);
 		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
+	it("does not wait out the throttled listing of an account outside the session's pool that only its policy lets spend", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			autoRedeem: "no",
+			maxDelayMs: 5_000,
+		});
+		const pool = await poolToSessionAccount(session, 3 * 24 * HOUR);
+		authStorage.setAccountPolicies({
+			accountPolicies: [
+				{ provider: "anthropic", account: { accountId: "claude-excluded" }, autoRedeemWeekly: "yes" },
+			],
+			defaultReservePct: 10,
+		});
+		const excluded = { accountId: "claude-excluded", email: "excluded@example.com", orgId: "org-excluded" };
+		vi.spyOn(authStorage.oauth, "accounts").mockReturnValue([
+			{ position: 0, credentialId: pool.pooledId, accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID, active: true },
+			{ position: 1, credentialId: pool.outsideId, ...excluded, active: false },
+		]);
+		let lists = 0;
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => {
+			lists++;
+			return [
+				{ ...claudeStatus(true), credentialId: pool.pooledId },
+				{
+					...claudeStatus(true),
+					...excluded,
+					credentialId: pool.outsideId,
+					active: false,
+					report: undefined,
+					error: "Rate limited",
+					retryAfterMs: 1_000,
+				},
+			];
+		});
+		mockSchedulerWaitWithClock();
+
+		try {
+			await session.prompt("stay inside the account pool");
+			await session.waitForIdle();
+		} finally {
+			await pool.release();
+		}
+
+		expect(targets).toEqual([]);
+		expect(lists).toBe(1);
 	});
 
 	it("drops a planned restore whose account leaves the session's pool before it is spent", async () => {

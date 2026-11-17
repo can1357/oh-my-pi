@@ -262,6 +262,22 @@ describe("accountPolicies reclaimAbovePct", () => {
 		expect(() => build({ provider: A, account: { accountId: "a" }, reclaimAbovePct: 101 })).toThrow("at most 100");
 	});
 
+	test("accepts autoRedeem keys only on providers with that saved-reset window", async () => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		const build = (policy: AuthAccountPolicies[number]) =>
+			new AuthStorage(activeStore, { accountPolicies: [policy] });
+		expect(() =>
+			build({ provider: A, account: { accountId: "a" }, autoRedeemWeekly: "yes", autoRedeemFable: "no" }),
+		).not.toThrow();
+		expect(() => build({ provider: "openai-codex", account: { accountId: "team" }, autoRedeemFable: "no" })).toThrow(
+			"auth.accountPolicies[0].autoRedeemFable applies only to anthropic saved resets",
+		);
+		expect(() => build({ provider: "zai", account: { accountId: "z" }, autoRedeem5h: "yes" })).toThrow(
+			"applies only to anthropic and openai-codex saved resets",
+		);
+	});
+
 	test("reclaims at exactly reclaimAbovePct", async () => {
 		const auth = await setup(A, policies(), ["a", "b"]);
 		await pushOntoBackupThenRecover(auth, 0.6);

@@ -1545,7 +1545,7 @@ function resetWindowSetting<const Id extends string>(id: Id, label: string, desc
 			tab: "providers",
 			group: "Services",
 			label,
-			description: `${description} unset asks before spending and never spends without a prompt; yes spends without asking; no never spends.`,
+			description: `${description} unset asks before spending and never spends without a prompt; yes spends without asking; no never spends. An auth.accountPolicies entry's key of the same name decides for its account.`,
 			options: [
 				{ value: "unset", label: "Unset", description: "Ask before spending; never spend without a prompt." },
 				{ value: "yes", label: "Yes", description: "Spend eligible saved resets without asking." },

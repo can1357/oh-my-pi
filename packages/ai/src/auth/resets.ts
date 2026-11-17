@@ -13,10 +13,12 @@ import type { AuthCredentialStore } from "./store";
 import type {
 	ListResetCreditsOptions,
 	OAuthAccess,
+	OAuthAccountIdentity,
 	OAuthAccountSummary,
 	RedeemResetCreditOptions,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
+	ResetCreditTarget,
 	ResetsApi,
 } from "./types";
 import type { UsageService } from "./usage";
@@ -30,6 +32,20 @@ export interface ResetCreditsDeps {
 	usage: UsageService;
 	usageCache: UsageCache;
 	blocks: CredentialBlocks;
+}
+
+/**
+ * Whether the stored row a target names still holds the account the target was
+ * planned for: each identity field both sides carry must agree.
+ */
+function isSameAccount(target: ResetCreditTarget, stored: OAuthAccountIdentity): boolean {
+	const differs = (left: string | undefined, right: string | undefined) =>
+		left !== undefined && right !== undefined && left.trim().toLowerCase() !== right.trim().toLowerCase();
+	return !(
+		differs(target.accountId, stored.accountId) ||
+		differs(target.email, stored.email) ||
+		differs(target.orgId, stored.orgId)
+	);
 }
 
 /** Saved rate-limit resets (Codex / Claude): list offers and redeem one per account. */
@@ -133,7 +149,8 @@ export class ResetCredits implements ResetsApi {
 		}
 		const baseUrl = options.baseUrlResolver?.(provider);
 		const match = await this.#deps.oauth.accessById(provider, target.credentialId, { signal: options.signal });
-		if (!match) return { ...identity, ok: false, code: "no_account" };
+		// A row id is unique only within one store; a replaced store may reuse it for another account.
+		if (!match || !isSameAccount(target, match)) return { ...identity, ok: false, code: "no_account" };
 		const resolvedIdentity = {
 			provider,
 			accountId: match.accountId,

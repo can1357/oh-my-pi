@@ -60,6 +60,7 @@
  * passed in so the planner itself stays deterministic.
  */
 import type {
+	AuthAccountPolicy,
 	OAuthAccountIdentity,
 	ResetCreditAccountStatus,
 	ResetCreditTarget,
@@ -94,9 +95,47 @@ export const DEBOUNCE_BUCKET_MS = 60_000;
 /** Floor between salvage sweeps; dedupe keys make sweeps idempotent, this just avoids useless re-planning. */
 export const SWEEP_MIN_INTERVAL_MS = 60_000;
 
-/** Whether any window may spend, possibly after asking; all `no` turns the planners off. */
-export function resetWindowsEnabled(modes: ResetWindowModes): boolean {
-	return Object.values(modes).some(mode => mode !== "no");
+/** Saved-reset consent for one planning pass. */
+export interface ResetConsent {
+	/** The provider's window settings. */
+	modes: ResetWindowModes;
+	/** By credential id, each stored account whose account policy sets an `autoRedeem*` key: its window consent. */
+	accountModes?: ReadonlyMap<number, ResetWindowModes>;
+}
+
+/** The `auth.accountPolicies` key that overrides each saved-reset window's provider setting. */
+export const ACCOUNT_POLICY_RESET_KEYS = {
+	"5h": "autoRedeem5h",
+	weekly: "autoRedeemWeekly",
+	fable: "autoRedeemFable",
+} as const satisfies Record<ResetWindow, keyof AuthAccountPolicy>;
+
+/**
+ * One account's window consent: `policy`'s `autoRedeem*` keys in place of the
+ * provider's settings, or `undefined` when it sets none of the provider's windows.
+ */
+export function accountResetWindowModes(
+	modes: ResetWindowModes,
+	policy: AuthAccountPolicy | undefined,
+): ResetWindowModes | undefined {
+	let accountModes: ResetWindowModes | undefined;
+	for (const window of Object.keys(modes) as ResetWindow[]) {
+		const consent = policy?.[ACCOUNT_POLICY_RESET_KEYS[window]];
+		if (consent !== undefined) accountModes = { ...(accountModes ?? modes), [window]: consent };
+	}
+	return accountModes;
+}
+
+/** The window consent of stored account `credentialId`. */
+export function credentialResetModes(consent: ResetConsent, credentialId: number): ResetWindowModes {
+	return consent.accountModes?.get(credentialId) ?? consent.modes;
+}
+
+/** Whether any account may spend, possibly after asking; all `no` turns the planners off. */
+export function resetConsentEnabled(consent: ResetConsent): boolean {
+	return [consent.modes, ...(consent.accountModes?.values() ?? [])].some(modes =>
+		Object.values(modes).some(mode => mode !== "no"),
+	);
 }
 
 const MODE_RANK: Record<ResetAutoRedeemMode, number> = { no: 0, unset: 1, yes: 2 };
@@ -114,11 +153,11 @@ export function resetWindowMode(modes: ResetWindowModes, window: ResetWindow | u
 
 /** Planner settings from a provider's `codexResets.*` or `claudeResets.*` group. */
 export function resetPlanSettings(
-	modes: ResetWindowModes,
+	consent: ResetConsent,
 	cfg: { minBlockedMinutes: number; keepCredits: number; salvageHorizonHours: number },
 ): CodexResetPlanInput["settings"] {
 	return {
-		modes,
+		...consent,
 		minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
 		keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
 		salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
@@ -158,9 +197,7 @@ export interface CodexResetPlanInput {
 	provider: string;
 	/** `this.model.id` — gates the `blocked-account` rule only. */
 	modelId: string;
-	settings: {
-		/** Per-window consent; a planned spend whose window is `no` is skipped. */
-		modes: ResetWindowModes;
+	settings: ResetConsent & {
 		/** `blocked-account`: skip when the natural unblock is closer than this. */
 		minBlockedMinutes: number;
 		/** `blocked-account`: never spend below this many remaining credits. */
@@ -341,7 +378,7 @@ function usedFractionForWindow(snapshot: AccountSnapshot, window: CodexChatWindo
 export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexResetPlan {
 	const { nowMs, settings } = input;
 	const skipped: CodexResetSkip[] = [];
-	if (!resetWindowsEnabled(settings.modes)) {
+	if (!resetConsentEnabled(settings)) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
 	}
 
@@ -513,7 +550,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			// Any weekly block governs by the weekly key; no known window needs both keys.
 			const window = blockedWindows.includes("weekly") ? "weekly" : blockedWindows[0];
-			const mode = resetWindowMode(settings.modes, window);
+			const mode = resetWindowMode(credentialResetModes(settings, snapshot.target.credentialId), window);
 			if (mode === "no") {
 				skip("window-disabled");
 				continue;
@@ -601,7 +638,9 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		// let the provider decide whether there is anything left to restore.
 		const fullestWindow = fullestChatWindow(snapshot.windows);
 		const salvageUsedFraction = fullestWindow?.usedFraction;
-		if (resetWindowMode(settings.modes, fullestWindow?.window) === "no") {
+		if (
+			resetWindowMode(credentialResetModes(settings, snapshot.target.credentialId), fullestWindow?.window) === "no"
+		) {
 			skip("window-disabled");
 			continue;
 		}

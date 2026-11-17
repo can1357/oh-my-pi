@@ -14,12 +14,14 @@ import {
 	DEBOUNCE_BUCKET_MS,
 	IMMINENT_RESET_EXPIRY_MS,
 	REPORT_FRESHNESS_MS,
+	credentialResetModes,
+	type ResetConsent,
+	resetConsentEnabled,
 	resetWindowMode,
-	resetWindowsEnabled,
 	SALVAGE_MIN_USED_FRACTION,
 	type CodexResetTrigger,
 } from "./codex-auto-reset";
-import type { ResetWindow, ResetWindowModes } from "./settings";
+import type { ResetWindow } from "./settings";
 
 const CLAUDE_PROVIDER = "anthropic";
 const JUNIPER_PROGRAM = "juniper_tide";
@@ -67,9 +69,8 @@ export interface ClaudeResetPlanInput {
 	trigger: CodexResetTrigger;
 	provider: string;
 	modelId: string;
-	settings: {
-		/** Per-window consent; a planned spend whose window is `no` is skipped. */
-		modes: ResetWindowModes;
+	/** Per-window consent; a planned spend whose window is `no` for its account is skipped. */
+	settings: ResetConsent & {
 		minBlockedMinutes: number;
 		keepCredits: number;
 		salvageHorizonMs: number;
@@ -155,6 +156,49 @@ export function reportMatchesStatus(
 	return !!email && email === reportEmail;
 }
 
+type StoredAccountIdentity = Pick<ResetCreditAccountStatus, "provider" | "orgId" | "accountId" | "email">;
+
+/**
+ * The report among `reports` that belongs to stored `account`. Discovery stamps
+ * the organization it resolves for a credential stored without one, as a live
+ * listing does on its status, so such an account adopts the one org-stamped
+ * report its identity matches; a report another stored credential's identity
+ * matches is that credential's. `orgId` is set when the report was adopted.
+ */
+function storedAccountReport(
+	account: StoredAccountIdentity,
+	stored: readonly StoredAccountIdentity[],
+	reports: readonly UsageReport[],
+): { report: UsageReport; orgId?: string } | undefined {
+	const report = reports.find(candidate => reportMatchesStatus(candidate, account));
+	if (report || account.orgId) return report && { report };
+	const adoptable: { report: UsageReport; orgId: string }[] = [];
+	for (const candidate of reports) {
+		const orgId = candidate.metadata?.orgId;
+		if (typeof orgId !== "string" || stored.some(other => reportMatchesStatus(candidate, other))) continue;
+		if (reportMatchesStatus(candidate, { ...account, orgId })) adoptable.push({ report: candidate, orgId });
+	}
+	return adoptable.length === 1 ? adoptable[0] : undefined;
+}
+
+/**
+ * The one stored account a usage report belongs to, matched as the reset
+ * planners match them (a Claude credential stored without an organization
+ * adopts its report's); `undefined` when none or several match.
+ */
+export function reportStoredAccount<T extends Omit<StoredAccountIdentity, "provider">>(
+	report: UsageReport,
+	accounts: readonly T[],
+): T | undefined {
+	const stored = accounts.map(account => ({ ...account, provider: report.provider }));
+	const owners = accounts.filter((_, index) =>
+		report.provider === CLAUDE_PROVIDER
+			? storedAccountReport(stored[index]!, stored, [report]) !== undefined
+			: reportMatchesStatus(report, stored[index]!),
+	);
+	return owners.length === 1 ? owners[0] : undefined;
+}
+
 /**
  * Each stored account's Cedar/Juniper status from the inventory on its usage
  * report, which the report fetch discovered, so a background sweep finds
@@ -173,24 +217,9 @@ export function claudeResetStatusesFromReports(
 		credits: [],
 	}));
 	return stored.map(base => {
-		let status = base;
-		let report = reports.find(candidate => reportMatchesStatus(candidate, base));
-		if (!report && !base.orgId) {
-			// Discovery stamps the organization it resolves for a credential stored
-			// without one, as a live listing does on its status. A report another
-			// stored credential's identity matches is that credential's.
-			const adoptable: ResetCreditAccountStatus[] = [];
-			for (const candidate of reports) {
-				const orgId = candidate.metadata?.orgId;
-				if (typeof orgId !== "string" || stored.some(other => reportMatchesStatus(candidate, other))) continue;
-				const adopted = { ...base, orgId, report: candidate };
-				if (reportMatchesStatus(candidate, adopted)) adoptable.push(adopted);
-			}
-			if (adoptable.length === 1) {
-				status = adoptable[0]!;
-				report = status.report;
-			}
-		}
+		const match = storedAccountReport(base, stored, reports);
+		const status = match?.orgId ? { ...base, orgId: match.orgId, report: match.report } : base;
+		const report = match?.report;
 		const inventory = report?.resetCredits;
 		if (!report || !inventory) return { ...status, error: "Usage report has no saved-reset inventory" };
 		const credits = inventory.credits?.filter((credit): credit is UsageResetCredit => typeof credit.id === "string");
@@ -298,7 +327,7 @@ function skipForEpisode(
  */
 export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeResetPlan {
 	const skipped: ClaudeResetSkip[] = [];
-	if (!resetWindowsEnabled(input.settings.modes)) {
+	if (!resetConsentEnabled(input.settings)) {
 		return { actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] };
 	}
 	if (input.trigger === "blocked" && input.provider !== CLAUDE_PROVIDER) {
@@ -455,7 +484,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 				continue;
 			}
 			const window = claudeResetWindow(snapshot.credit, blockers);
-			const mode = resetWindowMode(input.settings.modes, window);
+			const mode = resetWindowMode(credentialResetModes(input.settings, snapshot.target.credentialId), window);
 			if (mode === "no") {
 				skip("window-disabled");
 				continue;
@@ -603,7 +632,7 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			continue;
 		}
 		const window = claudeResetWindow(snapshot.credit, [fullest.limit.id]);
-		if (resetWindowMode(input.settings.modes, window) === "no") {
+		if (resetWindowMode(credentialResetModes(input.settings, snapshot.target.credentialId), window) === "no") {
 			skip("window-disabled");
 			continue;
 		}
