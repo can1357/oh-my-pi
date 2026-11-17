@@ -1706,9 +1706,10 @@ export function resolveRoleChain(role: string, settings: Settings, pool: Model<A
 /**
  * Resolve a list of override patterns to the first matching model.
  *
- * `exactOnly` matches each pattern only as a literal `provider/model-id`,
- * optionally followed by a supported `:level` and an aggregator `@upstream` pin:
- * no role aliases, globs, or fuzzy ids.
+ * `exactOnly` matches each pattern only as a literal `provider/model-id` or an
+ * OpenRouter route variant of one (`openrouter/<id>:nitro`), optionally followed
+ * by a supported `:level` and an aggregator `@upstream` pin: no role aliases,
+ * globs, or fuzzy ids. Per-call grant matching relies on this contract.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
