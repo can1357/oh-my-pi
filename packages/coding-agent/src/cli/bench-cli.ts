@@ -25,6 +25,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
+import { Settings } from "../config/settings";
+import { resolveWebsocketPreference } from "../session/settings-stream-fn";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
@@ -132,6 +134,8 @@ export interface BenchCommandArgs {
 		prompt?: string;
 		/** Service-tier setting value (`none` omits); overrides the configured `serviceTier` setting. */
 		serviceTier?: string;
+		/** One-based OAuth account position for each selected provider. */
+		account?: number;
 		json?: boolean;
 		par?: number;
 		/** Benchmark workload: a challenge kind (default `chat`), or `mix` to rotate through every kind. */
@@ -150,6 +154,8 @@ export interface BenchCommandArgs {
 
 export interface BenchRunSuccess {
 	ok: true;
+	/** Observed response transport; absent when the provider exposes no metadata. */
+	transport?: "http" | "websocket";
 	/** Challenge kind this run exercised; absent in `--cache` mode. */
 	challenge?: BenchChallengeKind;
 	/** `--detailed` phase this run belongs to. */
@@ -669,6 +675,7 @@ async function runBenchRequest(
 ): Promise<BenchRunResult> {
 	const startedAt = now();
 	let firstTokenAt: number | undefined;
+	let transport: "http" | "websocket" | undefined;
 	const providerSessionState = new Map<string, ProviderSessionState>();
 	try {
 		const context: Context = {
@@ -693,17 +700,21 @@ async function runBenchRequest(
 						return undefined;
 					}
 				: undefined,
-			onResponse: options.cacheCapture
-				? response => {
-						options.cacheCapture!.requestIdObserved = Boolean(response.requestId);
-						options.cacheCapture!.responseCacheHit = RESPONSE_CACHE_STATUS_HEADERS.some(
-							header => response.headers[header]?.trim().toLowerCase() === "hit",
-						);
-					}
-				: undefined,
+			onResponse: response => {
+				transport = response.metadata?.transport === "websocket" ? "websocket" : "http";
+				// A handshake can describe the connection, never this generation's
+				// request ID or response-cache hit. Usage remains measurable on WS.
+				if (transport === "websocket" || !options.cacheCapture) return;
+				options.cacheCapture.requestIdObserved = Boolean(response.requestId);
+				options.cacheCapture.responseCacheHit = RESPONSE_CACHE_STATUS_HEADERS.some(
+					header => response.headers[header]?.trim().toLowerCase() === "hit",
+				);
+			},
 			disableReasoning: options.disableReasoning,
 			serviceTier: options.serviceTier,
 			providerSessionState,
+			// Keep Codex bench runs on WS as before; the settings wrapper still
+			// gates standard Responses on `providers.openaiResponsesWebsockets`.
 			preferWebsockets: true,
 			// pi-ai opts every OpenRouter request into response caching (1h TTL).
 			// Bench sends a byte-identical request each run, so within the TTL
@@ -727,6 +738,9 @@ async function runBenchRequest(
 		message ??= await stream.result();
 		if (message.stopReason === "error" || message.errorMessage) {
 			return { ok: false, error: message.errorMessage ?? "request failed" };
+		}
+		if (options.serviceTier === "priority" && message.disabledFeatures?.includes("priority")) {
+			return { ok: false, error: "Provider rejected priority service; request fell back to standard speed" };
 		}
 		const rawDuration = message.duration ?? now() - startedAt;
 		const durationMs = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
@@ -756,6 +770,7 @@ async function runBenchRequest(
 		const generationMs = Math.max(0, durationMs - ttftMs);
 		return {
 			ok: true,
+			transport,
 			ttftMs,
 			generationMs,
 			durationMs,
@@ -1111,7 +1126,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		((code: number) => {
 			process.exitCode = code;
 		});
-	const streamFn = deps.streamSimple ?? streamSimple;
+	const baseStreamFn = deps.streamSimple ?? streamSimple;
 	const now = deps.now ?? (() => performance.now());
 	const interactive = deps.stdoutIsTTY ?? process.stdout.isTTY === true;
 	if (command.models.length === 0) {
@@ -1149,7 +1164,14 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		else writeStdout(`${text}\n`);
 	};
 
+	if (command.flags.account !== undefined) normalizePositiveInteger("account", command.flags.account, 1);
 	const runtime = await (deps.createRuntime ?? createDefaultBenchRuntime)();
+	const settings = runtime.settings ?? Settings.isolated({});
+	const streamFn: StreamSimpleFn = (model, context, options) =>
+		baseStreamFn(model, context, {
+			...options,
+			preferWebsockets: resolveWebsocketPreference(settings, model, options?.preferWebsockets),
+		});
 	try {
 		const targets = await resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
@@ -1186,7 +1208,32 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 			// This matches the old sequential break behavior exactly and avoids launching/printing
 			// multiple failures.
 			const testSessionId = randomSessionId();
-			const preflightKey = await runtime.modelRegistry.getApiKey(model, testSessionId);
+			let selectedResolver: ApiKeyResolver | undefined;
+			if (command.flags.account !== undefined) {
+				const oauth = runtime.oauth;
+				if (!oauth) throw new Error("OAuth account selection is unavailable");
+				const accounts = oauth.accounts(model.provider);
+				const account = accounts[command.flags.account - 1];
+				if (!account) {
+					throw new Error(
+						`Invalid --account ${command.flags.account}: provider "${model.provider}" has ${accounts.length} OAuth account(s)`,
+					);
+				}
+				selectedResolver = async ({ error, lastChance }) => {
+					if (lastChance) return undefined;
+					const result = await oauth.accessById(model.provider, account.credentialId, {
+						forceRefresh: error !== undefined,
+					});
+					if (!result?.ok)
+						throw new Error(
+							`Could not get token for account ${command.flags.account} of "${model.provider}": ${result?.error ?? "no OAuth credential available"}`,
+						);
+					return result.apiKey;
+				};
+			}
+			const preflightKey = selectedResolver
+				? await selectedResolver({ error: undefined, lastChance: false })
+				: await runtime.modelRegistry.getApiKey(model, testSessionId);
 			if (!preflightKey) {
 				const failure: BenchRunFailure = {
 					ok: false,
@@ -1221,7 +1268,8 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						// Provider-session state is still recreated by runBenchRequest and
 						// stateful Responses chaining is disabled below.
 						const credentialAffinitySessionId = pairIndex === 0 ? testSessionId : randomSessionId();
-						const credentialResolver = runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
+						const credentialResolver =
+							selectedResolver ?? runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
 						const coldResult = await runBenchRequest(
 							model,
 							{
@@ -1324,7 +1372,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						...(await runBenchRequest(
 							model,
 							{
-								apiKey: runtime.modelRegistry.resolver(model, sessionId),
+								apiKey: selectedResolver ?? runtime.modelRegistry.resolver(model, sessionId),
 								sessionId,
 								messages: challenge.messages,
 								maxTokens: challenge.maxTokens,

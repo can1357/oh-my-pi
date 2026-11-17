@@ -245,7 +245,36 @@ interface RequestOptions {
 	timeoutMs?: number;
 }
 
-export class HindsightApi {
+/** Public surface of {@link HindsightApi}; a subagent worker holds a remote implementation of main's client. */
+export interface HindsightClientApi {
+	retain(bankId: string, content: string, options?: RetainOptions): Promise<RetainResponse>;
+	retainBatch(bankId: string, items: MemoryItemInput[], options?: RetainBatchOptions): Promise<RetainResponse>;
+	recall(bankId: string, query: string, options?: RecallOptions): Promise<RecallResponse>;
+	reflect(bankId: string, query: string, options?: ReflectOptions): Promise<ReflectResponse>;
+	createBank(bankId: string, options?: CreateBankOptions): Promise<BankProfileResponse>;
+	listMemories(bankId: string, options?: ListMemoriesOptions): Promise<ListMemoriesResponse>;
+	listDocuments(bankId: string, options?: ListDocumentsOptions): Promise<ListDocumentsResponse>;
+	getDocument(bankId: string, documentId: string): Promise<DocumentResponse | null>;
+	updateDocument(bankId: string, documentId: string, options: UpdateDocumentOptions): Promise<DocumentResponse>;
+	deleteDocument(bankId: string, documentId: string): Promise<boolean>;
+	listMentalModels(bankId: string, options?: ListMentalModelsOptions): Promise<MentalModelListResponse>;
+	getMentalModel(
+		bankId: string,
+		mentalModelId: string,
+		options?: GetMentalModelOptions,
+	): Promise<MentalModelSummary | null>;
+	createMentalModel(
+		bankId: string,
+		name: string,
+		sourceQuery: string,
+		options?: CreateMentalModelOptions,
+	): Promise<CreateMentalModelResponse>;
+	refreshMentalModel(bankId: string, mentalModelId: string): Promise<RefreshMentalModelResponse>;
+	deleteMentalModel(bankId: string, mentalModelId: string): Promise<boolean>;
+	getMentalModelHistory(bankId: string, mentalModelId: string): Promise<MentalModelHistoryEntry[]>;
+}
+
+export class HindsightApi implements HindsightClientApi {
 	#baseUrl: string;
 	#headers: Record<string, string>;
 	#reflectTimeoutMs: number;

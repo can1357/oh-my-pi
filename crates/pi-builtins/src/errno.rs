@@ -7,10 +7,9 @@
 
 use std::io::Write;
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_LIST: &str = "list";
 const OPT_SEARCH: &str = "search";
@@ -239,11 +238,6 @@ fn search(host: &mut Host, words: &[String]) -> i32 {
 		}
 	}
 	0
-}
-
-/// Creates the `errno` builtin registration.
-pub(crate) fn errno_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Errno, SE>()
 }
 
 #[cfg(test)]

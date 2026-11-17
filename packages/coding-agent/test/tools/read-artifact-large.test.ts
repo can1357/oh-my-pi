@@ -138,7 +138,12 @@ describe("read tool large artifact handling", () => {
 	it("reports an oversized selected line instead of sending a looping continuation selector", async () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), oversizedSelectedLineArtifact());
 
-		const result = await tool.execute("call-oversized-selected", { path: "artifact://0:2-2" });
+		// Uncapped, so the line is charged its full size rather than its column-cut display.
+		const uncapped = new ReadTool({
+			...makeSession(testDir),
+			settings: Settings.isolated({ "tools.outputMaxColumns": 0 }),
+		});
+		const result = await uncapped.execute("call-oversized-selected", { path: "artifact://0:2-2" });
 		const output = getTextOutput(result);
 
 		expect(output).toContain("leading-context");

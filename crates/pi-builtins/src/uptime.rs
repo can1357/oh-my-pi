@@ -8,12 +8,11 @@ use std::{
 	path::Path,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, builder::ValueParser};
 use jiff::{Timestamp, tz::TimeZone};
 
 use crate::{
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser},
 	time_zone::shell_time_zone,
 };
 
@@ -477,11 +476,6 @@ fn system_boot_time(_host: &Host) -> Option<i64> {
 #[cfg(not(any(target_vendor = "apple", target_os = "linux", windows)))]
 fn system_boot_time(_host: &Host) -> Option<i64> {
 	None
-}
-
-/// Creates the `uptime` builtin registration.
-pub(crate) fn uptime_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Uptime, SE>()
 }
 
 #[cfg(test)]

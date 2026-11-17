@@ -2,6 +2,7 @@
   addDriverRunpath,
   autoPatchelfHook,
   alsa-lib,
+  apple-sdk_27 ? null,
   bun,
   bun2nix,
   callPackage,
@@ -24,10 +25,13 @@
   # btop). Note the closure cost — libcublas ~745 MB, libcurand ~136 MB,
   # cuda_cudart ~74 MB — so this stays opt-in and off by default.
   cudaSupport ? config.cudaSupport,
-  # Wayland screencast support links libpipewire, whose runtime closure adds
-  # ~750 MB (gstreamer, ffmpeg, systemd, ...). Official npm/Bazel addons ship
-  # without it, so default to the lean build; opt in via `.override`.
+  # Wayland screencast loads libpipewire at runtime; this puts it on the addon's
+  # RUNPATH, whose runtime closure adds ~750 MB (gstreamer, ffmpeg, systemd,
+  # ...). Default to the lean build; opt in via `.override`.
   withWaylandScreencast ? false,
+  # Downstream callers can opt out of the Swift/SDK dependency. The official
+  # Apple Silicon package must include the bridge by default.
+  withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
   # Release builds use fat LTO with one codegen unit, which is slow. Set this
   # to false for faster local builds with thin LTO and 16 codegen units.
   withFatLto ? true,
@@ -39,8 +43,9 @@ let
     inherit
       source
       craneLib
-      withWaylandScreencast
       withFatLto
+      withAppleFm
+      apple-sdk_27
       ;
   };
   inherit (nativeBuild) platform;
@@ -104,9 +109,7 @@ stdenv.mkDerivation {
   ++ lib.optionals stdenv.hostPlatform.isDarwin [ darwin.autoSignDarwinBinariesHook ];
 
   # libgcc_s is resolved from the compiler's lib output during autoPatchelf.
-  buildInputs =
-    lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ]
-    ++ lib.optionals withWaylandScreencast [ pipewire ];
+  buildInputs = lib.optionals stdenv.hostPlatform.isLinux [ stdenv.cc.cc.lib ];
 
   strictDeps = true;
   # Nix builders cannot reliably hardlink cache files into node_modules
@@ -143,15 +146,19 @@ stdenv.mkDerivation {
       # The loader extracts this archived addon at runtime, so fix its
       # interpreter-independent Nix RPATH before Bun embeds it.
       autoPatchelf -- "packages/natives/native/${platform.addon}"
-      # pi-voice dlopens libpulse-simple.so.0 / libpulse.so.0 / libasound.so.2
-      # by bare name; glibc resolves those through the calling object's
-      # RUNPATH, so append the client libraries here. Nothing links them, so
-      # autoPatchelf cannot discover them on its own.
+      # pi-voice dlopens libpulse-simple.so.0 / libpulse.so.0 / libasound.so.2,
+      # and Wayland capture libpipewire-0.3.so.0, by bare name; glibc resolves
+      # those through the calling object's RUNPATH, so append the client
+      # libraries here. Nothing links them, so autoPatchelf cannot discover
+      # them on its own.
       patchelf --add-rpath "${
-        lib.makeLibraryPath [
-          libpulseaudio
-          alsa-lib
-        ]
+        lib.makeLibraryPath (
+          [
+            libpulseaudio
+            alsa-lib
+          ]
+          ++ lib.optional withWaylandScreencast pipewire
+        )
       }" \
         "packages/natives/native/${platform.addon}"
     ''}
@@ -288,6 +295,38 @@ stdenv.mkDerivation {
         echo "$addonDeps" >&2
         exit 1
       fi
+      # Linking against a newer SDK (apple-sdk_27 for the Foundation Models
+      # bridge) must not raise the addon's minimum macOS above the platform
+      # floor; only the embedded bridge targets macOS 27.
+      addonLoadCommands="$(otool -l "packages/natives/native/${platform.addon}")"
+      addonMinos="$(awk '$1 == "cmd" { build = $2 == "LC_BUILD_VERSION" } build && $1 == "minos" { print $2; exit }' <<<"$addonLoadCommands")"
+      darwinFloor=${stdenv.hostPlatform.darwinMinVersion}
+      if [ -z "$addonMinos" ] || [ "$(printf '%s\n' "$addonMinos" "$darwinFloor" | sort -V | tail -n 1)" != "$darwinFloor" ]; then
+        echo "embedded addon requires macOS ''${addonMinos:-unknown}, above the platform floor $darwinFloor" >&2
+        exit 1
+      fi
+    ''}
+    ${lib.optionalString withAppleFm ''
+      # Model/device eligibility is not a build requirement. On macOS 27+,
+      # this exercises materialization/dlopen. On older macOS, unsupported_os
+      # only proves the embedded bridge is non-empty; it is not loaded.
+      HOME="$TMPDIR" bun -e '
+        const native = require("./packages/natives/native/${platform.addon}");
+        const status = JSON.parse(await native.appleFmAvailability());
+        console.log("Apple Foundation Models:", status);
+        const eligibilityReasons = [
+          "unsupported_os",
+          "device_not_eligible",
+          "apple_intelligence_not_enabled",
+          "model_not_ready",
+          "unavailable",
+        ];
+        if (
+          status?.type !== "availability" ||
+          !(status.available === true ||
+            (status.available === false && eligibilityReasons.includes(status.reason)))
+        ) process.exit(1);
+      '
     ''}
     runHook postInstallCheck
   '';

@@ -45,7 +45,7 @@ function makeSession() {
 		getGoalModeState: () => null,
 		getContextUsage: () => undefined,
 		getAsyncJobSnapshot: () => ({ running: [] }),
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingSubscription: () => false },
 		sessionManager: {
 			getSessionName: () => "footer-sanitize test",
 			getEntries: () => [],

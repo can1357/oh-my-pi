@@ -14,11 +14,13 @@ import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { adoptFactoryReplay, toGeminiTools } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
+import { declaredTools } from "../utils/tool-declarations";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 const IMAGE_OMISSION: TextContent = {
@@ -295,9 +297,10 @@ function measuredContent<T extends { type: string }>(content: readonly T[], stri
  * rather than the images. Never sent: tool-result `details` (UI-only), another provider's native payload (assistant
  * turns, compaction summaries), an assistant's Responses or Cursor history from another model, which those wires
  * replay only on the model that produced it, and inactive tool definitions anywhere but the Anthropic wire, the only
- * one that re-declares them. A same-model Responses turn goes out as its native items or as its rebuilt content, never
- * both: the larger is charged. Factory's Gemini wire is measured as it sends: tool schemas dereferenced, and replay
- * reasoning settled by {@link adoptFactoryReplay}. A computer result carries its screenshot twice and sends one copy
+ * one that re-declares them. A same-model Responses turn, or a Factory Gemini turn kept for native replay, goes out
+ * as its native content or as its rebuilt content, never both: the larger is charged. Factory's Gemini wire is
+ * measured as it sends: tool schemas dereferenced, and replay reasoning and native content settled by
+ * {@link adoptFactoryReplay}. A computer result carries its screenshot twice and sends one copy
  * (sentScreenshotBytes); where that is the metadata copy, none of its content is sent.
  */
 function otherRequestBytes(context: Context, model: Model, metadataWire: boolean): number {
@@ -305,13 +308,14 @@ function otherRequestBytes(context: Context, model: Model, metadataWire: boolean
 	const factory = model.api === "factory-droid-agent" ? (model as Model<"factory-droid-agent">) : undefined;
 	const replayApi = factory ? resolveFactoryDroidPolicy(factory)?.wire : model.api;
 	const gemini = replayApi === "google-generate" ? factory : undefined;
+	const nativeReplay = gemini !== undefined && resolveModelPolicy(gemini).request.googleNativeReplay === true;
 	const stringArguments =
 		replayApi === "openai-responses" ||
 		replayApi === "azure-openai-responses" ||
 		replayApi === "openai-codex-responses" ||
 		replayApi === "openai-completions";
 	const messages = context.messages.map(original => {
-		const message = gemini ? adoptFactoryReplay(original, gemini) : original;
+		const message = gemini ? adoptFactoryReplay(original, gemini, nativeReplay) : original;
 		if (message.role === "toolResult") {
 			const metadata = message.providerMetadata;
 			if (!metadata || sentScreenshotBytes(message, metadataWire) === undefined) {
@@ -336,16 +340,18 @@ function otherRequestBytes(context: Context, model: Model, metadataWire: boolean
 		const owner =
 			message.role === "assistant" ? message.provider : "provider" in payload ? payload.provider : undefined;
 		if (owner !== undefined && owner !== model.provider) return { ...message, content, providerPayload: undefined };
-		if (
-			message.role !== "assistant" ||
-			(payload.type !== "openaiResponsesHistory" && payload.type !== "cursorHistory")
-		) {
+		if (message.role !== "assistant") return { ...message, content };
+		if (payload.type === "openaiResponsesHistory" || payload.type === "cursorHistory") {
+			if (message.api !== replayApi || message.model !== model.id) {
+				return { ...message, content, providerPayload: undefined };
+			}
+			if (payload.type === "cursorHistory") return { ...message, content };
+		} else if (payload.type !== "geminiNativeContent") {
 			return { ...message, content };
-		}
-		if (message.api !== replayApi || message.model !== model.id) {
+		} else if (!gemini) {
+			// Only Factory's Gemini wire replays it, and adoptFactoryReplay kept it only where it does.
 			return { ...message, content, providerPayload: undefined };
 		}
-		if (payload.type !== "openaiResponsesHistory") return { ...message, content };
 		return Buffer.byteLength(JSON.stringify(payload)) > Buffer.byteLength(JSON.stringify(content))
 			? { ...message, content: [] }
 			: { ...message, content, providerPayload: undefined };
@@ -354,8 +360,8 @@ function otherRequestBytes(context: Context, model: Model, metadataWire: boolean
 		JSON.stringify({
 			...context,
 			messages,
-			tools: gemini ? toGeminiTools(context.tools) : context.tools,
-			inactiveTools: replayApi === "anthropic-messages" ? context.inactiveTools : undefined,
+			tools: gemini ? toGeminiTools(context.tools) : declaredTools(context.tools),
+			inactiveTools: replayApi === "anthropic-messages" ? declaredTools(context.inactiveTools) : undefined,
 		}),
 	);
 }

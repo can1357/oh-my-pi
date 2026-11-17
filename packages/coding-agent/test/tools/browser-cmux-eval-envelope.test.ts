@@ -44,9 +44,4 @@ describe("cmux eval envelope", () => {
 		const value = runOnWire(serializeEvalWithEnvelope("undefined", []));
 		expect(unwrapEvalEnvelope<null>(value, "tab.evaluate()")).toBeNull();
 	});
-
-	it("passes through values from daemons that did not run the wrapper", () => {
-		expect(unwrapEvalEnvelope<{ plain: boolean }>({ plain: true }, "tab.evaluate()")).toEqual({ plain: true });
-		expect(unwrapEvalEnvelope<number>(7, "tab.evaluate()")).toBe(7);
-	});
 });

@@ -6,10 +6,14 @@
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { type ChainJudge, resolveJudge, sharedJudgmentCache } from ".";
+import { type ChainJudge, type JudgeDeps, resolveJudge, sharedJudgmentCache } from ".";
 
 export interface StandaloneJudge {
 	judge: ChainJudge;
+	/** The project settings the judge was resolved from, for the command's own options. */
+	settings: Settings;
+	/** Another judge over the same registry, session, and cache that tries `leadModel` first. */
+	leadJudge(leadModel: string): ChainJudge;
 	/** Release the auth store; the judge must not be used afterwards. */
 	close(): void;
 }
@@ -26,14 +30,17 @@ export async function openStandaloneJudge(cwd: string, purpose: string): Promise
 		const registry = new ModelRegistry(authStorage);
 		await registry.refresh();
 		await loadCliExtensionProviders(registry, settings, cwd);
+		const deps: JudgeDeps = {
+			settings,
+			registry,
+			sessionId: Bun.randomUUIDv7(),
+			purpose,
+			cache: sharedJudgmentCache(),
+		};
 		return {
-			judge: resolveJudge({
-				settings,
-				registry,
-				sessionId: Bun.randomUUIDv7(),
-				purpose,
-				cache: sharedJudgmentCache(),
-			}),
+			judge: resolveJudge(deps),
+			settings,
+			leadJudge: leadModel => resolveJudge({ ...deps, leadModel }),
 			close: () => authStorage.close(),
 		};
 	} catch (error) {

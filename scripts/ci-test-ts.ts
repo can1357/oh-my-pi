@@ -361,7 +361,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 		// drives: every package the old `--workspaces` fan-out covered (the CI
 		// `all` set plus robomp-web, which CI omits), routed through
 		// this one quiet runner so the whole suite shares one progress stream and
-		// one failure report. Repo script tests remain available via `test:scripts`.
+		// one failure report.
 		case "local-ts":
 			return [
 				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8, { extraArgs: onlyFailuresArgs })),

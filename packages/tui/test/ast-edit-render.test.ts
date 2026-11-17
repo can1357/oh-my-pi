@@ -126,3 +126,75 @@ describe("AST edit collapsed preview", () => {
 		expect(body.at(-1)).toContain("… 1 more file");
 	});
 });
+
+describe("AST edit header", () => {
+	const args = { ops: [{ pat: "oldApi($$$A)", out: "newApi($$$A)" }], paths: ["src/**/*.ts"] };
+
+	it("names the scope in the header and moves the proposed state and counts into the bottom border", () => {
+		const details: AstEditToolDetails = {
+			totalReplacements: 2,
+			filesTouched: 1,
+			filesSearched: 3,
+			applied: false,
+			limitReached: false,
+			displayContent: "## src/a.ts (2 replacements)\n-1│oldApi(x)\n+1│newApi(x)",
+		};
+		const rows = astEditToolRenderer
+			.renderResult({ content: [], details }, { expanded: false, isPartial: false }, uiTheme, args)
+			.render(120)
+			.map(line => Bun.stripANSI(line));
+		expect(rows[0]).toContain("AST Edit: oldApi($$$A) in src/**/*.ts");
+		expect(rows[0]).not.toContain("proposed");
+		expect(rows[0]).not.toContain("replacements");
+		expect(rows.at(-1)).toContain("proposed · 2 replacements · 1 file · searched 3");
+	});
+
+	it("drops the proposed state from the bottom border once the rewrite is applied", () => {
+		const details: AstEditToolDetails = {
+			totalReplacements: 2,
+			filesTouched: 1,
+			filesSearched: 3,
+			applied: true,
+			limitReached: false,
+			displayContent: "## src/a.ts (2 replacements)\n-1│oldApi(x)\n+1│newApi(x)",
+		};
+		const rows = astEditToolRenderer
+			.renderResult({ content: [], details }, { expanded: false, isPartial: false }, uiTheme, args)
+			.render(120)
+			.map(line => Bun.stripANSI(line));
+		expect(rows.join("\n")).not.toContain("proposed");
+		expect(rows.at(-1)).toContain("2 replacements · 1 file · searched 3");
+	});
+
+	it("puts a framed no-match card's counts in the bottom border, not the header", () => {
+		const details: AstEditToolDetails = {
+			totalReplacements: 0,
+			filesTouched: 0,
+			filesSearched: 3,
+			applied: false,
+			limitReached: false,
+			parseErrors: ["src/a.ts: parse error"],
+		};
+		const rows = astEditToolRenderer
+			.renderResult({ content: [], details }, { expanded: false, isPartial: false }, uiTheme, args)
+			.render(120)
+			.map(line => Bun.stripANSI(line));
+		expect(rows[0]).toContain("AST Edit: oldApi($$$A) in src/**/*.ts");
+		expect(rows[0]).not.toContain("0 replacements");
+		expect(rows.at(-1)).toContain("0 replacements · searched 3");
+	});
+
+	it("keeps the subject in the framed error header", () => {
+		const rows = astEditToolRenderer
+			.renderResult(
+				{ content: [{ type: "text", text: "Pattern parse error" }], isError: true },
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				args,
+			)
+			.render(120)
+			.map(line => Bun.stripANSI(line));
+		expect(rows[0]).toContain("AST Edit: oldApi($$$A) in src/**/*.ts");
+		expect(rows[1]).toContain("Pattern parse error");
+	});
+});

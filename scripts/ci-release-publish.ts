@@ -53,7 +53,7 @@ export interface PublishPackage {
 	preBuild?: readonly (readonly string[])[];
 	/** Extra entries to splice into `files`. */
 	extraFiles?: readonly string[];
-	/** Extra tsgo invocations beyond `tsconfig.publish.json`. */
+	/** Extra compiler invocations beyond `tsconfig.publish.json`. */
 	extraTypeConfigs?: readonly string[];
 	/**
 	 * Also emit transpiled JS to `dist/js` (via `tsconfig.publish.js.json`)
@@ -93,7 +93,7 @@ const isDryRun = process.argv.includes("--dry-run");
 const MIT_LICENSE = "LICENSE";
 
 /** Selects the legal payload contract for a publishable first-party package. */
-export function legalPayloadFiles(license: string | undefined): string[] {
+function legalPayloadFiles(license: string | undefined): string[] {
 	switch (license) {
 		case "MIT":
 			return [MIT_LICENSE];
@@ -107,7 +107,7 @@ export function legalPayloadFiles(license: string | undefined): string[] {
  * Package-local license files win; missing files fall back to the
  * repository payload so generated and source packages follow one contract.
  */
-export async function stageLegalPayloads(
+async function stageLegalPayloads(
 	pkgDir: string,
 	license: string | undefined,
 	write: boolean,
@@ -144,7 +144,7 @@ const nativeLeafTag = nativeLeafTagFromArgs(process.argv.slice(2));
  * Choose npm's dist-tag from a package manifest version. Unknown prereleases
  * are rejected rather than accidentally publishing them on the stable channel.
  */
-export function npmDistTag(version: string): string {
+function npmDistTag(version: string): string {
 	if (/^\d+\.\d+\.\d+-canary\./.test(version)) return "canary";
 	if (/^\d+\.\d+\.\d+-/.test(version)) {
 		throw new Error(`Unsupported prerelease version for npm publish: ${version}`);
@@ -236,7 +236,7 @@ function rewriteExports(exports: JsonValue, publishJs: boolean): JsonValue {
 }
 
 /** Compute (and optionally write) the published manifest for a package. */
-export async function rewriteManifest(pkg: PublishPackage, write: boolean): Promise<PackageManifest> {
+async function rewriteManifest(pkg: PublishPackage, write: boolean): Promise<PackageManifest> {
 	const manifestPath = path.join(repoRoot, pkg.dir, "package.json");
 	const manifest = (await Bun.file(manifestPath).json()) as PackageManifest;
 	if (pkg.publishBin) manifest.bin = { ...pkg.publishBin };
@@ -267,12 +267,12 @@ async function preparePackage(pkg: PublishPackage): Promise<PackageManifest> {
 	for (const argv of pkg.preBuild ?? []) {
 		await $`${argv}`.cwd(pkgDir);
 	}
-	await $`bun x tsgo -p tsconfig.publish.json`.cwd(pkgDir);
+	await $`bun x tsc -p tsconfig.publish.json`.cwd(pkgDir);
 	for (const cfg of pkg.extraTypeConfigs ?? []) {
-		await $`bun x tsgo -p ${cfg}`.cwd(pkgDir);
+		await $`bun x tsc -p ${cfg}`.cwd(pkgDir);
 	}
 	if (pkg.publishJs) {
-		await $`bun x tsgo -p tsconfig.publish.js.json`.cwd(pkgDir);
+		await $`bun x tsc -p tsconfig.publish.js.json`.cwd(pkgDir);
 	}
 	const sourceManifest = (await Bun.file(path.join(pkgDir, "package.json")).json()) as PackageManifest;
 	await stageLegalPayloads(pkgDir, sourceManifest.license, !isDryRun);
@@ -332,6 +332,8 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/loader-state.d.ts",
 		"native/path.js",
 		"native/path.d.ts",
+		"native/sqlite-locks.js",
+		"native/sqlite-locks.d.ts",
 		"native/vcs.js",
 		"native/vcs.d.ts",
 		"native/embedded-addon.js",
@@ -385,7 +387,7 @@ export type PublishLog = (line: string) => void;
 /** Runs `fn` exclusively among callers sharing `key`; unkeyed callers never wait. */
 export type KeyedMutex = <T>(key: string | undefined, fn: () => Promise<T>) => Promise<T>;
 
-export function createKeyedMutex(): KeyedMutex {
+function createKeyedMutex(): KeyedMutex {
 	const tails = new Map<string, Promise<void>>();
 	return async (key, fn) => {
 		if (key === undefined) return fn();
@@ -497,7 +499,7 @@ export function isVersionAlreadyPublished(output: string): boolean {
 	);
 }
 
-export interface PublishJob {
+interface PublishJob {
 	name: string;
 	/** Names of jobs that must publish successfully first; unknown names are ignored. */
 	dependsOn?: readonly string[];
@@ -553,7 +555,7 @@ function assertAcyclic(jobs: readonly PublishJob[]): void {
  * order does not need to be topological. Each job's output is buffered and
  * written as one block when it settles. Returns failed job names in input order.
  */
-export async function runPublishJobs(
+async function runPublishJobs(
 	jobs: readonly PublishJob[],
 	concurrency: number,
 	write: (block: string) => void = block => process.stdout.write(block),

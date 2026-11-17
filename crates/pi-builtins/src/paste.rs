@@ -11,12 +11,11 @@ use std::{
 	slice::Iter,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::File;
 use uucore::{display::Quotable, i18n::charmap::mb_char_len};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, strip_errno, util};
+use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, strip_errno};
 
 mod options {
 	pub const DELIMITER: &str = "delimiters";
@@ -360,11 +359,6 @@ impl BufRead for InputSource<'_> {
 			Self::StandardInput(stdin) => stdin.borrow_mut().read_until(byte, buf),
 		}
 	}
-}
-
-/// Creates the `paste` builtin registration.
-pub(crate) fn paste_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Paste, SE>()
 }
 
 #[cfg(test)]

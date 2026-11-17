@@ -90,6 +90,12 @@ export interface SpawnedSubprocess<Outbound> {
 	 * wall-clock timers.
 	 */
 	stderrDrained: Promise<void>;
+	/**
+	 * Resolves once the IPC channel closed (the child exited, a SIGKILL included, or either side
+	 * disconnected). Bun hands every message the child sent before that to `inbound` first, so a
+	 * caller that awaits it after a kill has seen the child's last message.
+	 */
+	disconnected: Promise<void>;
 }
 
 /**
@@ -154,6 +160,17 @@ export function resolveCliEntryCmd(): string[] {
 	return [executable, path.resolve(import.meta.dir, "..", "cli.ts")];
 }
 
+/** Whether the file at `process.execPath` is no longer the image this process runs (replaced or unlinked). */
+function runningImageReplaced(): boolean {
+	try {
+		const running = fs.statSync("/proc/self/exe");
+		const onDisk = fs.statSync(process.execPath, { throwIfNoEntry: false });
+		return onDisk?.ino !== running.ino || onDisk.dev !== running.dev;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Resolve the command used to relaunch the agent CLI into worker mode. In a
  * compiled binary the entry point is the binary itself; otherwise re-enter the
@@ -164,9 +181,16 @@ export function resolveCliEntryCmd(): string[] {
  * into newly opened terminal tabs. With no declared host entry (bun test, SDK
  * embedding) fall back to a cwd-relative `src/cli.ts`, which Bun subprocess
  * IPC handles more reliably under `bun test`.
+ *
+ * `sameBuild` keeps a worker that runs host-sent code (JS eval preludes) on
+ * this process's build: after an in-place upgrade the on-disk binary is a
+ * different one, but Linux can still exec the running image.
  */
-export function resolveWorkerSpawnCmd(workerArg: string): WorkerSpawnCommand {
-	const executable = resolveExecutablePath();
+export function resolveWorkerSpawnCmd(workerArg: string, options?: { sameBuild?: boolean }): WorkerSpawnCommand {
+	const executable =
+		options?.sameBuild && process.platform === "linux" && isCompiledBinary() && runningImageReplaced()
+			? "/proc/self/exe"
+			: resolveExecutablePath();
 	if (isCompiledBinary()) return { cmd: [executable, workerArg] };
 	const hostEntry = workerHostEntry();
 	if (hostEntry) {
@@ -258,6 +282,7 @@ export function createWorkerSubprocess<Outbound>(options: {
 	const intentionalExit = { value: false };
 	const stderrTail = new StderrTail(STDERR_TAIL_LIMIT_BYTES);
 	const stderrDrained = Promise.withResolvers<void>();
+	const disconnected = Promise.withResolvers<void>();
 	const stderrCapture = createStderrCapture(options.exitLabel);
 	let stderrDrainStarted = false;
 	// Reassigned once the worker IPC fault handler is registered (after spawn);
@@ -280,6 +305,9 @@ export function createWorkerSubprocess<Outbound>(options: {
 		windowsHide: true,
 		ipc(message) {
 			for (const handler of inbound) handler(message as Outbound);
+		},
+		onDisconnect() {
+			disconnected.resolve();
 		},
 		onExit(_proc, exitCode, signalCode) {
 			unregisterFault();
@@ -325,7 +353,14 @@ export function createWorkerSubprocess<Outbound>(options: {
 	// path calls `terminate()` explicitly. Bun's test runner starves IPC for
 	// unref'd subprocesses, so keep it referenced only under tests.
 	if (!isBunTestRuntime() && options.unref !== false) proc.unref();
-	return { proc, inbound, errors, intentionalExit, stderrDrained: stderrDrained.promise };
+	return {
+		proc,
+		inbound,
+		errors,
+		intentionalExit,
+		stderrDrained: stderrDrained.promise,
+		disconnected: disconnected.promise,
+	};
 }
 
 /**

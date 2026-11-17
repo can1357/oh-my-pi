@@ -77,6 +77,9 @@ function createControllerContext() {
 		editorContainer,
 		ui,
 		hookEditor: undefined,
+		closeLinkBrowser: () => {},
+		rerenderInLinkBrowser: () => {},
+		rebuildTranscriptScrollback: () => {},
 	} as unknown as TestContext;
 
 	return { ctx, editor, editorContainer, ui };
@@ -506,6 +509,24 @@ describe("HookEditorComponent prompt-style mode", () => {
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit).toHaveBeenCalledWith("draft");
 		expect(onCancel).not.toHaveBeenCalled();
+	});
+
+	it("hands the draft and its images to onCancel on Escape (#18211)", () => {
+		const image: ImageContent = { type: "image", data: "image", mimeType: "image/png" };
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const component = new HookEditorComponent(createTui(), "Prompt", "see [Image #1]", onSubmit, onCancel, {
+			promptStyle: true,
+			acceptImages: true,
+			images: [image],
+		});
+
+		component.handleInput(" ");
+		component.handleInput("x");
+		component.handleInput("\x1b");
+
+		expect(onCancel).toHaveBeenCalledWith("see [Image #1] x", [image]);
+		expect(onSubmit).not.toHaveBeenCalled();
 	});
 
 	it("renders prompt-style editor with rounded overlay chrome", () => {

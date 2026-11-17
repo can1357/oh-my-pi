@@ -5,30 +5,29 @@
  * previous raster, which stays on screen until the next one lands.
  *
  * Sizing is natural rather than preview-capped: one terminal row spans
- * {@link UNITS_PER_ROW} SVG user units, so `font-size="14"` text lands near
+ * {@link PX_PER_ROW} SVG user units, so `font-size="14"` text lands near
  * the terminal's own glyph size and the figure takes as many columns as its
- * drawing needs — up to the full width, and a viewport-relative height. The
+ * drawing needs — up to the full width, and a viewport-relative height. A
+ * figure given a {@link SvgFigureOptions.size} is fitted to that box instead. The
  * raster is drawn at the terminal's device pixels per unit, padded to whole
  * cells, and redrawn when the room it is shown in changes, so the terminal
  * places it 1:1: any resampling, even 0.99×, blurs every glyph edge.
  */
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { hexToOklch, hueDistance, logger, oklchCusp, oklchToHex } from "@oh-my-pi/pi-utils";
-import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
+import { Image, type ImageBudget } from "../components/image";
 import { fencedCode, type Markdown } from "../components/markdown";
 import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
 import { ensureThemeSync, getThemeEpoch, type ThemeColor, theme } from "../theme";
 import type { Component } from "../tui";
+import { type FigureBox, type FigureSize, figureBox, figureRoom, isSized, PX_PER_ROW } from "./figure-size";
 import { closePartialSvg, prepareSvg } from "./svg-source";
-
-/** SVG user units per terminal row; a 1000-unit-wide drawing spans ~125 columns of 1:2 cells. */
-const UNITS_PER_ROW = 16;
 /** Least time between rasters of a fence that is still streaming. */
 const STREAM_INTERVAL_MS = 200;
 /** Longest raster edge; the native rasterizer caps the surface at 4096² pixels. */
 const MAX_EDGE_PX = 4096;
-/** Share of the terminal's rows one figure may fill, so it fits on screen whole. */
-const MAX_VIEWPORT_SHARE = 0.8;
+/** Draw scale no box reaches: a sized figure is fitted to its box alone. */
+const FIT_SCALE = MAX_EDGE_PX;
 
 /**
  * Foreground theme colors behind the figure tokens (`var(--name)`); `surface`
@@ -114,18 +113,19 @@ export interface SvgFigureOptions {
 	/** Shared inline-image budget; superseded rasters are released from it. */
 	budget?: ImageBudget;
 	/**
+	 * Also release a re-raster's previous image (a cell size, theme or room change), for an
+	 * owner with no scrollback copy that could still show it, such as a form.
+	 */
+	releaseSuperseded?: boolean;
+	/**
 	 * Rows the figure may fill, fallback code included, read on every render;
 	 * zero hides it. Unset or `undefined` takes a share of the terminal viewport.
 	 */
 	maxRows?: () => number | undefined;
+	/** A stated size (an `<img width>`): the drawing is fitted to it, aspect ratio kept, instead of drawn at its natural scale. */
+	size?: FigureSize;
 	/** The figure's rows changed outside a text update: a raster landed or rendering fell back to code. */
 	onChange: () => void;
-}
-
-/** Cells a figure may fill. */
-interface Limits {
-	columns: number;
-	rows: number;
 }
 
 /** One rasterized revision and the inputs that produced it. */
@@ -133,7 +133,7 @@ interface Raster {
 	source: string;
 	/** Cell size the raster was padded to; its pixels are whole cells of it. */
 	cell: CellDimensions;
-	limits: Limits;
+	limits: FigureBox;
 	themeEpoch: number;
 	/** Base64 PNG. */
 	data: string;
@@ -147,22 +147,19 @@ interface Raster {
 interface Attempt {
 	source: string;
 	cell: CellDimensions;
-	limits: Limits;
+	limits: FigureBox;
 	themeEpoch: number;
 	final: boolean;
 }
 
 let nextFigureId = 0;
 
-/** Cells a figure rendered at `width` may fill: the image's width, the caller's row ceiling (or a share of the viewport), and the raster edge cap. */
-function limitsFor(
-	width: number,
-	cell: CellDimensions,
-	maxRows = Math.floor((process.stdout.rows || 24) * MAX_VIEWPORT_SHARE),
-): Limits {
+/** Cells a figure rendered at `width` may fill: its stated size, else the room (see {@link figureRoom}), within the raster edge cap. */
+function limitsFor(width: number, cell: CellDimensions, maxRows: number | undefined, size: FigureSize = {}): FigureBox {
+	const box = figureBox(size, { room: figureRoom(width, maxRows), cell });
 	return {
-		columns: Math.min(imageMaxColumns(width), Math.floor(MAX_EDGE_PX / cell.widthPx)),
-		rows: Math.max(1, Math.min(maxRows, Math.floor(MAX_EDGE_PX / cell.heightPx))),
+		columns: Math.min(box.columns, Math.floor(MAX_EDGE_PX / cell.widthPx)),
+		rows: Math.min(box.rows, Math.floor(MAX_EDGE_PX / cell.heightPx)),
 	};
 }
 
@@ -255,10 +252,22 @@ export class SvgFigure implements Component {
 		this.#fallback = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#placeholder = undefined;
+		this.#image?.component.releaseRenderCaches();
+		this.#fallback?.md.releaseRenderCaches();
+		if (this.#fallback) this.#fallback.clip = undefined;
+	}
+
 	dispose(): void {
 		this.#disposed = true;
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
+	}
+
+	/** Retire the drawn raster as soon as no frame shows it: for an owner that is closing for good. */
+	release(): void {
+		this.#image?.component.release();
 	}
 
 	debugState(): Record<string, unknown> {
@@ -275,7 +284,7 @@ export class SvgFigure implements Component {
 		const attempt = this.#attempt;
 		if (this.#failed === this.#source) return false;
 		const cell = getCellDimensions();
-		const limits = limitsFor(width, cell, this.#maxRows());
+		const limits = limitsFor(width, cell, this.#maxRows(), this.#options.size);
 		return (
 			attempt === undefined ||
 			attempt.source !== this.#source ||
@@ -293,7 +302,7 @@ export class SvgFigure implements Component {
 	 * below both of its limits drew at its natural size and redraws only once
 	 * it no longer fits; one that filled a limit redraws whenever they change.
 	 */
-	#outgrown(limits: Limits): boolean {
+	#outgrown(limits: FigureBox): boolean {
 		const raster = this.#raster;
 		if (raster?.source !== this.#source) return false;
 		const columns = raster.widthPx / raster.cell.widthPx;
@@ -331,7 +340,7 @@ export class SvgFigure implements Component {
 		const attempt: Attempt = {
 			source: this.#source,
 			cell,
-			limits: limitsFor(width, cell, this.#maxRows()),
+			limits: limitsFor(width, cell, this.#maxRows(), this.#options.size),
 			themeEpoch: getThemeEpoch(),
 			final: this.#final,
 		};
@@ -347,7 +356,7 @@ export class SvgFigure implements Component {
 					new TextEncoder().encode(prepared),
 					attempt.limits.columns * cell.widthPx,
 					attempt.limits.rows * cell.heightPx,
-					cell.heightPx / UNITS_PER_ROW,
+					isSized(this.#options.size) ? FIT_SCALE : cell.heightPx / PX_PER_ROW,
 					cell,
 				);
 			} catch (error) {
@@ -387,6 +396,8 @@ export class SvgFigure implements Component {
 		// re-raster of the same source (cell size, theme or room change) may still be
 		// standing in scrollback, so the residency sweep keeps deciding for it.
 		if (previous && previous.source !== attempt.source) this.#options.budget?.release(previous.key);
+		else if (previous && this.#options.releaseSuperseded && this.#image?.raster === previous)
+			this.#image.component.release();
 		this.#options.onChange();
 	}
 

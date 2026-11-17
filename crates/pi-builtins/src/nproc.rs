@@ -4,11 +4,10 @@
 
 use std::{io::Write, thread};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 static OPT_ALL: &str = "all";
 static OPT_IGNORE: &str = "ignore";
@@ -122,11 +121,6 @@ fn num_cpus_all() -> usize {
 /// Returns the available parallelism, falling back to one like GNU `nproc`.
 fn available_parallelism() -> usize {
 	thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-}
-
-/// Creates the `nproc` builtin registration.
-pub(crate) fn nproc_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Nproc, SE>()
 }
 
 #[cfg(test)]

@@ -252,6 +252,22 @@ describe("Factory Droid OAuth", () => {
 		expect(credentials.region).toBe("eu");
 	});
 
+	it("asks whoami for the extended identity response", async () => {
+		const access = makeJwt({ sub: "user_1", external_org_id: "org-1", exp: Math.floor(Date.now() / 1000) + 3600 });
+		const extended = new Map<string, string | null>();
+		const fetchImpl: FetchImpl = async (url, init) => {
+			const path = new URL(String(url)).pathname;
+			extended.set(path, new Headers(init?.headers).get("x-factory-whoami-extended"));
+			if (path.endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (path === "/api/cli/whoami") return jsonResponse(200, { orgId: "org-1", region: "global" });
+			return jsonResponse(200, { access_token: access, refresh_token: "refresh-1" });
+		};
+
+		await loginViaRegistry({ fetch: fetchImpl });
+
+		expect(extended.get("/api/cli/whoami")).toBe("true");
+	});
+
 	it("rejects a fresh org-less login when Factory refuses the bearer", async () => {
 		const access = makeJwt({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + 3600 });
 		const fetchImpl: FetchImpl = async url => {

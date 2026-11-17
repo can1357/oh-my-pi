@@ -10,6 +10,7 @@ import { getAppleFoundationModelsAvailability } from "@oh-my-pi/pi-ai/providers/
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { AmbiguousIdentityError } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -34,7 +35,7 @@ import {
 } from "@oh-my-pi/pi-catalog/types";
 import { Effort, THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { parseServiceTierIds } from "@oh-my-pi/pi-catalog/utils";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
 // Default cap on `max_tokens` for auto-discovered models that do not advertise
@@ -220,7 +221,7 @@ export interface DiscoveryContext {
 }
 
 type OllamaDiscoveredModelMetadata = {
-	reasoning: boolean;
+	reasoning?: boolean;
 	input: ("text" | "image")[];
 	contextWindow?: number;
 };
@@ -486,7 +487,7 @@ async function discoverAppleFoundationModels(providerConfig: DiscoveryProviderCo
 			api: providerConfig.api,
 			provider: providerConfig.provider,
 			baseUrl: providerConfig.baseUrl ?? "local://apple-foundation-models",
-			reasoning: availability.reasoningCapable ?? false,
+			reasoning: availability.reasoningCapable,
 			input: availability.vision ? ["text", "image"] : ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow,
@@ -535,14 +536,13 @@ async function discoverOllamaModelMetadata(
 		}
 		if (!isRecord(capabilities)) {
 			return {
-				reasoning: false,
 				input: ["text"],
 				contextWindow,
 			};
 		}
 		const supportsVision = capabilities.vision === true || capabilities.image === true;
 		return {
-			reasoning: capabilities.thinking === true,
+			reasoning: typeof capabilities.thinking === "boolean" ? capabilities.thinking : undefined,
 			input: supportsVision ? ["text", "image"] : ["text"],
 			contextWindow,
 		};
@@ -592,7 +592,7 @@ export async function discoverOllamaModels(
 			api: providerConfig.api,
 			provider: providerConfig.provider,
 			baseUrl: `${endpoint}/v1`,
-			reasoning: metadata?.reasoning ?? false,
+			reasoning: metadata?.reasoning,
 			input: metadata?.input ?? ["text"],
 			imageInputDecoder: "stb",
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -710,7 +710,6 @@ async function discoverLlamaCppModelsAt(
 					api: providerConfig.api,
 					provider: providerConfig.provider,
 					baseUrl: ensureLlamaCppV1BaseUrl(baseUrl),
-					reasoning: false,
 					input: item.input ?? serverMetadata?.input ?? ["text"],
 					imageInputDecoder: "stb",
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -958,6 +957,8 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
+	/** The row confirms reasoning without advertising a controllable ladder. */
+	| { kind: "native" }
 	/** The row advertises an effort ladder, whether it accepts `none`, its aliases, and whether thinking can be off. */
 	| {
 			kind: "ladder";
@@ -998,7 +999,9 @@ function extractAdvertisedReasoning(item: {
 	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
 	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
 	const efforts = extractReasoningLevels(raw);
-	if (efforts === undefined) return undefined;
+	if (efforts === undefined) {
+		return (metadata?.reasoning ?? item.reasoning) === true ? { kind: "native" } : undefined;
+	}
 	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
@@ -1065,6 +1068,7 @@ function withAdvertisedEfforts(
 ): ModelSpec<Api> {
 	if (advertised === undefined) return spec;
 	if (advertised.kind === "none") return withoutReasoning(spec, isAnthropic);
+	if (advertised.kind === "native") return { ...spec, reasoning: true };
 	// `defaultLevel` is not decoration: `pickInitialThinkingLevel` (sdk.ts) and
 	// the model switcher read it ahead of the user's `defaultThinkingLevel`
 	// setting, so pinning it to the ladder's first tier would start every gateway
@@ -1321,7 +1325,7 @@ export async function discoverOpenAIModelsList(
 			kind: runnerApiKind(api),
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning === true,
+			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input,
 			...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
@@ -1342,19 +1346,50 @@ export async function discoverOpenAIModelsList(
 			compat: {
 				supportsStore: false,
 				supportsDeveloperRole: false,
-				supportsReasoningEffort: referenceCompat?.supportsReasoningEffort ?? false,
+				...(referenceCompat?.supportsReasoningEffort !== undefined
+					? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
+					: {}),
 				...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
 				...(referenceCompat?.omitReasoningEffort !== undefined
 					? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 					: {}),
 			},
 		} as ModelSpec<Api>;
-		specs.push(withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"));
+		const prepared = skipAmbiguousModel(providerConfig.provider, id, () =>
+			withAdvertisedEfforts(spec, advertisedReasoning, api === "anthropic-messages"),
+		);
+		if (prepared) specs.push(prepared);
 	}
 	// `discovery.type: "litellm"` keeps LiteLLM provider policy under any alias.
-	return providerConfig.discovery.type === "litellm"
-		? specs.map(spec => buildDiscoveredModel(spec, "litellm"))
-		: specs.map(spec => buildModel(spec));
+	const build =
+		providerConfig.discovery.type === "litellm"
+			? (spec: ModelSpec<Api>) => buildDiscoveredModel(spec, "litellm")
+			: (spec: ModelSpec<Api>) => buildModel(spec);
+	const built: Model<Api>[] = [];
+	for (const spec of specs) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () => build(spec));
+		if (model) built.push(model);
+	}
+	return built;
+}
+
+/**
+ * Runs one discovered model's catalog classification. Classification stays
+ * strict, so an upstream id that names two vendors (`amazon/openai.gpt-...`)
+ * throws; skip that one model rather than losing the provider's whole list.
+ */
+function skipAmbiguousModel<T>(provider: string, id: string, classify: () => T): T | undefined {
+	try {
+		return classify();
+	} catch (error) {
+		if (!(error instanceof AmbiguousIdentityError)) throw error;
+		logger.warn("Skipping discovered model with an ambiguous identity", {
+			provider,
+			model: id,
+			error: error.message,
+		});
+		return undefined;
+	}
 }
 
 export async function discoverLiteLLMModels(
@@ -1409,7 +1444,14 @@ export async function discoverLiteLLMModels(
 	if (richModels === null) {
 		return discoverOpenAIModelsList({ ...providerConfig, baseUrl }, ctx);
 	}
-	return richModels.map(spec => buildDiscoveredModel({ ...spec, headers: baseHeaders }, "litellm"));
+	const built: Model<Api>[] = [];
+	for (const spec of richModels) {
+		const model = skipAmbiguousModel(providerConfig.provider, spec.id, () =>
+			buildDiscoveredModel({ ...spec, headers: baseHeaders }, "litellm"),
+		);
+		if (model) built.push(model);
+	}
+	return built;
 }
 
 /**
@@ -1478,6 +1520,10 @@ export async function discoverProxyModels(
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
+		const referenceEffortSupport =
+			reference?.compat && "supportsReasoningEffort" in reference.compat
+				? reference.compat.supportsReasoningEffort
+				: undefined;
 		// A proxy that dispatches with its own catalog advertises the ladder it
 		// accepts for each row. That ladder is authoritative over the reference
 		// guess: cross-provider references carry no thinking at all, so rows whose
@@ -1496,7 +1542,7 @@ export async function discoverProxyModels(
 			api,
 			provider: providerConfig.provider,
 			baseUrl,
-			reasoning: reference?.reasoning ?? false,
+			reasoning: reference?.reasoning,
 			thinking: inheritReferenceThinking(undefined, reference, providerConfig.provider),
 			input: reference?.input ?? ["text"],
 			// Proxy pricing is provider-specific and usually does not match
@@ -1521,10 +1567,13 @@ export async function discoverProxyModels(
 				: {
 						supportsStore: false,
 						supportsDeveloperRole: false,
-						supportsReasoningEffort: false,
+						...(referenceEffortSupport !== undefined ? { supportsReasoningEffort: referenceEffortSupport } : {}),
 					},
 		} as ModelSpec<Api>;
-		discovered.push(buildModel(withAdvertisedEfforts(spec, advertised, isAnthropic)));
+		const model = skipAmbiguousModel(providerConfig.provider, id, () =>
+			buildModel(withAdvertisedEfforts(spec, advertised, isAnthropic)),
+		);
+		if (model) discovered.push(model);
 	}
 	return discovered;
 }

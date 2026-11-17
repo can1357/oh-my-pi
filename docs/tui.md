@@ -22,9 +22,10 @@ If your extension/tool can run headless, guard with `ctx.hasUI` / `pi.hasUI`. RP
 ## Project-local TUI debug tool
 
 `.omp/tools/tui.ts` provides the repository's `tui` debug tool. `start` accepts
-either a TypeScript/JavaScript `file` (run with Bun) or an executable `bin` with
-separate `args`. Windows uses native ConPTY without requiring a POSIX shell;
-macOS/Linux use Bun's PTY.
+either a TypeScript/JavaScript `file` (run with Bun; under the compiled `omp`
+binary, the `bun` on `PATH`) or an executable `bin` with separate `args`.
+Windows uses native ConPTY without requiring a POSIX shell; macOS/Linux use
+Bun's PTY.
 The debug connection uses a Windows named pipe or a POSIX Unix socket.
 On Windows, `start` and `resize` use the native `normalizePtyDimensions(cols, rows)`
 helper, which returns integer dimensions clamped to 20–400 columns and 5–200 rows.

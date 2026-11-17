@@ -32,6 +32,16 @@ exec hosts. Replaces cargo-xwin.
   Without this the `.node` imports `VCRUNTIME140.dll` from the Visual C++
   Redistributable, which is absent on a clean Windows install and makes the
   loader's dlopen fail with error 126 (issue #8439).
+  CMake also gets `OPUS_STATIC_RUNTIME=ON`: Opus otherwise overwrites
+  `CMAKE_MSVC_RUNTIME_LIBRARY` to the DLL CRT after `project()`, causing
+  LNK4217 imports for `malloc`/`free` despite the toolchain's initial `/MT`.
+- **Static Wasmtime headers**: tree-sitter's Windows build-script CFLAGS define
+  `LIBWASM_STATIC`, matching the statically linked Rust Wasmtime C API.
+  Without it, `wasm.h` marks API declarations `dllimport`, producing LNK4217.
+- **Keep the CRT's matching PDBs**: xwin's `splat --include-debug-symbols`
+  retains Microsoft's release CRT PDBs alongside the libraries. Static CRT
+  objects reference these files even when the shipped addon is stripped;
+  omitting them causes LNK4099. Debug CRT libraries remain excluded.
 - **SSE floor in the wrapper, not annotations**: `-msse4.1 -msse4.2` live in the
   clang-cl wrapper, which only ever targets win32-x64 (baseline = x86-64-v2 ⊇
   SSE4.2). This is the old build-native.ts CFLAGS hack, windows-only by
@@ -128,6 +138,9 @@ exec hosts. Replaces cargo-xwin.
   the newest release with archives for all four host tuples.
 - xwin version + manifest channel: `sysroot.bzl` (`_XWIN_VERSION` 0.6.5 — last
   release with darwin binaries; `_XWIN_MANIFEST_VERSION` "17").
+- Windows SDK: both splats pin `sdk_version = "10.0.22621"` in `MODULE.bazel`.
+  xwin's default (the manifest's latest, 10.0.26100) fails x86_64 with "unable
+  to find x86_64 headers" and arm64 with cab-less MSIs.
 - Compile/link flags, include/libpath set, CRT choice: wrapper templates and
   `cc_toolchain_config` attrs in `cc.bzl`.
 - Static CRT if ever needed: build with the standard `static_link_msvcrt`

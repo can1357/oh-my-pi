@@ -85,13 +85,18 @@ async function editTextSource(
 	}
 }
 
-async function editReviewedFile(tui: TUI, ctx: AnnotationOverlayContext, overlay: AnnotationOverlay): Promise<void> {
+async function editReviewedFile(
+	tui: TUI,
+	ctx: AnnotationOverlayContext,
+	overlay: AnnotationOverlay,
+	repository: string | undefined,
+): Promise<void> {
 	const relative = overlay.reviewFilePath();
 	if (!relative) throw new Error("No file to open.");
 	const editor = requireEditor();
 	// Diff paths are repository-relative and exact, so resolve them from the repo root, not the session cwd.
 	const cwd = ctx.sessionManager.getCwd?.() ?? ctx.cwd;
-	const absolute = path.resolve(vcs.repo(cwd)?.root() ?? cwd, relative);
+	const absolute = path.resolve(repository ?? vcs.repo(cwd)?.root() ?? cwd, relative);
 	if (!(await Bun.file(absolute).exists())) {
 		throw new Error(`${relative} is not on disk. The review still uses the frozen diff.`);
 	}
@@ -132,7 +137,7 @@ export async function showCodeReviewOverlay(
 					onExternalEditor:
 						target.kind === "pr" || target.kind === "patch"
 							? undefined
-							: () => editReviewedFile(tui, ctx, overlay),
+							: () => editReviewedFile(tui, ctx, overlay, target.repository),
 				},
 			);
 			draft.restore(overlay);

@@ -369,6 +369,13 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		for (const warning of modelRegistry.drainConfigWarnings()) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
 		}
+		// A failed fetch otherwise looks identical to a provider with no models.
+		for (const { provider, status, error } of modelRegistry.getRuntimeDiscoveryFailures()) {
+			const detail = error?.replace(/\s+/g, " ").trim();
+			process.stderr.write(
+				`${chalk.yellow(`Warning: ${provider} model discovery failed (${status}): ${detail}`)}\n`,
+			);
+		}
 		renderProviderModels(modelRegistry, action, pattern, json, kind);
 	} finally {
 		await emitSessionShutdownEvent(extensionRunner);

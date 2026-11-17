@@ -239,6 +239,23 @@ describe("auth-broker public wire schemas", () => {
 		reject(wireSchemas.credentialUploadRequestSchema, { provider: "", credential: REAL_OAUTH });
 	});
 
+	test("rejects invalid routing metadata in real and remote OAuth credentials", () => {
+		for (const { schema, credential } of [
+			{ schema: wireSchemas.oauthCredentialSchema, credential: REAL_OAUTH },
+			{ schema: wireSchemas.remoteOauthCredentialSchema, credential: REMOTE_OAUTH },
+		]) {
+			accept(schema, {
+				...credential,
+				region: "eu",
+				inferenceRegion: "global",
+				activeOrganizationId: "org-test",
+			});
+			reject(schema, { ...credential, region: 42 });
+			reject(schema, { ...credential, inferenceRegion: "apac" });
+			reject(schema, { ...credential, activeOrganizationId: 42 });
+		}
+	});
+
 	test("preserves fixed envelopes, integer fields, discriminators, and block alias identity", () => {
 		expect(wireSchemas.credentialBlockRequestSchema).toBe(wireSchemas.credentialBlockSnapshotSchema);
 		accept(wireSchemas.credentialBlockRequestSchema, {

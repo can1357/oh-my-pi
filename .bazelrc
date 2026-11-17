@@ -18,7 +18,7 @@ build --incompatible_strict_action_env
 #      splice re-clones the entire crates.io index (~1 GiB, minutes on cold DNS).
 #   2. CARGO_BAZEL_TIMEOUT=1800 — cargo-bazel honors this to raise Bazel's
 #      default `repository_ctx.execute` 600s cap. Fresh machines / ephemeral
-#      runners with git-hosted forks (brush, uutils) blow past 600s and abort
+#      runners with git-hosted forks (uutils) blow past 600s and abort
 #      with `Timed out` (rules_rust common_utils.bzl:61) before we can help.
 common --repo_env=CARGO_BAZEL_ISOLATED=0
 common --repo_env=CARGO_BAZEL_TIMEOUT=1800
@@ -56,12 +56,15 @@ build:macos --@rules_rust//rust/settings:extra_exec_rustc_flag=-Clink-arg=-Wl,-S
 # policy
 # (clippy-strict; bazel/clippy.bazelrc is generated from Cargo.toml); everything
 # else gets default clippy + -Dwarnings (clippy). pi-builtins allows every
-# clippy group in its manifest (ported brush/uutils/jaq code) while keeping
+# clippy group in its manifest (ported uutils/jaq code) while keeping
 # rustc warnings at zero; the aspect ignores Cargo `[lints]`, so clippy-ported
 # re-states those allows on top of -Dwarnings.
 build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
 build:clippy --output_groups=+clippy_checks
 build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+# CI passes `bazelisk query` results as explicit targets; platform-only ones
+# (the macOS input_release_helper on Linux) are skipped instead of failing.
+build:clippy --skip_incompatible_explicit_targets
 build:clippy-strict --config=clippy
 build:clippy-ported --config=clippy
 build:clippy-ported --@rules_rust//rust/settings:clippy_flag=-Aclippy::all

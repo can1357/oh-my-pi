@@ -321,13 +321,15 @@ describe("RPC goal command", () => {
 	test("an extension session change aborts the detached run's prompt; the command's own result is unaffected", async () => {
 		const rpc = await start({ continuation: false, script: "slow" });
 		const { results, statusOf, unsubscribe } = watchPromptResults(rpc);
-		const started = Promise.withResolvers<void>();
+		// The loop emits a turn's input as its model call starts. A run aborted before then ends
+		// without calling the model, which would leave the script's stall to the new session's run.
+		const stalled = Promise.withResolvers<void>();
 		const unsubscribeEvents = rpc.onEvent(event => {
-			if (event.type === "agent_start") started.resolve();
+			if (event.type === "message_end" && event.message.role === "user") stalled.resolve();
 		});
 		try {
 			const first = await rpc.prompt("first, stalls");
-			await withTimeout(started.promise, 10_000, "First run never started");
+			await withTimeout(stalled.promise, 10_000, "First run's model call never started");
 			// The command then starts a run of its own in the new session.
 			await rpc.promptAndWait("/goaltest-new-session hello from the new session");
 			// The detached run never yields; its prompt must still be closed, as aborted.
@@ -411,7 +413,7 @@ describe("RPC goal command", () => {
 });
 
 describe("RpcGoalController continuation gate", () => {
-	const agentEnd = { type: "agent_end", messages: [], isTerminal: true } as unknown as AgentSessionEvent;
+	const agentEnd = { type: "agent_end", messages: [] } as unknown as AgentSessionEvent;
 	const hostInput = { type: "message_start", message: { role: "user", content: [] } } as unknown as AgentSessionEvent;
 
 	function fakeSession(admit: (customType: string) => Promise<boolean>) {
@@ -469,8 +471,7 @@ describe("RpcGoalController continuation gate", () => {
 			isStreaming: false,
 			hasAdmittedSubmission: false,
 			queuedMessageCount: 0,
-			hasPendingAsyncWork: () => false,
-			settleAsyncWork: async () => {},
+			isRunActive: false,
 			getPlanModeState: () => undefined,
 			getGoalModeState: () => goalState,
 			setGoalModeState: (state: GoalModeState | undefined) => {
@@ -572,7 +573,6 @@ describe("RpcGoalController continuation gate", () => {
 		});
 		const toolTurnEnd = {
 			type: "agent_end",
-			isTerminal: true,
 			messages: [
 				{ role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "a" } }] },
 				{ role: "toolResult", toolName: "read", content: [{ type: "text", text: "x" }], isError: false },
@@ -870,7 +870,7 @@ describe("RpcGoalController continuation gate", () => {
 		await nextMacrotask();
 		expect(admitted).toEqual(["goal-continuation"]);
 
-		// A reload reopens the same transcript and detaches that turn: its terminal agent_end never comes.
+		// A reload reopens the same transcript and detaches that turn: its agent_end never comes.
 		await controller.beginSessionChange();
 		await controller.endSessionChange({ detachedRun: true });
 		await nextMacrotask();

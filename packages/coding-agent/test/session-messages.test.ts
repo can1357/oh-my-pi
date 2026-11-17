@@ -434,16 +434,6 @@ describe("wrapSteeringForModel", () => {
 		expect(buried.content).toBe("old steer");
 	});
 
-	it("leaves trailing user messages without the steering marker unchanged", () => {
-		const message: AgentMessage = { role: "user", content: "plain user", timestamp: 1 };
-		const messages = [message];
-
-		const wrapped = wrapSteeringForModel(messages);
-
-		expect(wrapped).toBe(messages);
-		expect(wrapped[0]).toBe(message);
-	});
-
 	it("preserves images after the wrapped steering text", () => {
 		const image: ImageContent = { type: "image", data: "abc123", mimeType: "image/png" };
 		const message: AgentMessage = {

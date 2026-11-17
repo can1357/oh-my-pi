@@ -1,7 +1,7 @@
 use std::{
 	cell::Cell,
 	ffi::c_void,
-	ptr,
+	mem, ptr,
 	sync::{
 		LazyLock,
 		atomic::{AtomicBool, AtomicU32, Ordering},
@@ -10,24 +10,24 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use core_graphics::{
-	event::{CGEvent, CGEventType},
-	event_source::{CGEventSource, CGEventSourceStateID},
-	geometry::CGPoint,
-};
-use foreign_types::ForeignType;
 use libc::pid_t;
 use objc2_app_kit::NSRunningApplication;
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType};
+use objc2_core_foundation::{
+	CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint,
+};
+use objc2_core_graphics::{
+	CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventType,
+};
 use parking_lot::Mutex;
 
 use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError, ErrorCode},
-		types::DesktopFocusReturn,
+		types::{DesktopFocusReturn, DesktopKeyboardReturn},
 	},
 	ax, capture,
+	clicks::{Apps, ClickJournal, Reading},
 	key_reroute::KeyReroute,
 	permission, process,
 	release::Route,
@@ -37,10 +37,7 @@ use super::{
 
 const EVENT_RECORD_LENGTH: usize = 248;
 const EVENT_RECORD_LENGTH_BYTE: u8 = 0xf8;
-const EVENT_RECORD_KIND: u8 = 0x0d;
 const WINDOW_ID_OFFSET: usize = 0x3c;
-const FOCUS_MARKER_OFFSET: usize = 0x8a;
-const FOCUS_MARKER: u8 = 0x01;
 /// `kCPSUserGenerated`: lets `AppKit` install the requested native key window.
 const CPS_USER_GENERATED: u32 = 0x200;
 /// `kCPSNoWindows`: changes the front process without raising its windows.
@@ -74,6 +71,7 @@ const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
 const EXPIRED_FRONT_REQUEST: i32 = -13066;
 
 unsafe extern "C" {
+	fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
 	fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
 	fn CGEventSourceFlagsState(state: i32) -> u64;
 	fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
@@ -250,8 +248,8 @@ fn resolve_conditional_front() -> Option<ConditionalFront> {
 	Some(ConditionalFront { set_front: symbol(c"SLSSetFrontProcessWithInfo")?, timestamp_key })
 }
 
-fn event_ptr(event: &CGEvent) -> *mut c_void {
-	event.as_ptr().cast()
+const fn event_ptr(event: &CGEvent) -> *mut c_void {
+	std::ptr::from_ref(event).cast_mut().cast()
 }
 
 /// Stamps raw `SkyLight` integer event fields onto `event`.
@@ -330,8 +328,9 @@ fn post_to_pid(
 	post: impl FnOnce(&Routes, *mut c_void) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	control::check()?;
-	event.set_integer_value_field(
-		core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
+	CGEvent::set_integer_value_field(
+		Some(event),
+		CGEventField::EventSourceUserData,
 		control::SYNTHETIC_EVENT_TAG,
 	);
 	let routes = required()?.routes;
@@ -383,16 +382,6 @@ pub(super) fn sender_connection() -> CoreResult<i64> {
 	// SAFETY: The no-argument connection query was resolved with its exact
 	// signature.
 	Ok(i64::from(unsafe { (spi.main_connection)() }))
-}
-
-/// The 248-byte focus event record addressed to window `wid`.
-fn focus_record(wid: u32) -> [u8; EVENT_RECORD_LENGTH] {
-	let mut record = [0u8; EVENT_RECORD_LENGTH];
-	record[0x04] = EVENT_RECORD_LENGTH_BYTE;
-	record[0x08] = EVENT_RECORD_KIND;
-	record[WINDOW_ID_OFFSET..WINDOW_ID_OFFSET + 4].copy_from_slice(&wid.to_le_bytes());
-	record[FOCUS_MARKER_OFFSET] = FOCUS_MARKER;
-	record
 }
 
 /// One of the paired records (`kind` 0x01, then 0x02) that make window `wid`
@@ -527,24 +516,44 @@ fn monitor_settled(baseline: MonitorProgress) -> bool {
 	}
 }
 
-/// Whether the user picked something since takeover began: a click or a
-/// shortcut the monitor classified as a choice. With Input Monitoring the
-/// monitor sees every key and press, and its count is complete once it has
-/// caught up with all `WindowServer` counted (`settled`), whichever of omp's
-/// own presses are still on their way; until then the user may have chosen.
-/// Without it the tap sees nothing, which leaves the HID press counters net
-/// of omp's own presses (`counters_show_press`); keys are then known only to
-/// `WindowServer`, which refuses the hand-back for those after its timestamp.
-fn takeover_user_chose(
+/// What the user picked during a stretch of takeover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserChoice {
+	/// No click or shortcut of theirs.
+	None,
+	/// A click or a shortcut the monitor classified as a choice.
+	Made,
+	/// The monitor has not caught up with all `WindowServer` counted, so one
+	/// may still be on its way.
+	Pending,
+}
+
+/// Whether the user picked something since the baselines were read: a click
+/// or a shortcut the monitor classified as a choice. With Input Monitoring
+/// the monitor sees every key and press, and its count is complete once it
+/// has caught up with all `WindowServer` counted (`settled`), whichever of
+/// omp's own presses are still on their way. Without it the tap sees nothing,
+/// which leaves the HID press counters net of omp's own presses
+/// (`counters_show_press`); keys are then known only to `WindowServer`, which
+/// refuses the hand-back for those after its timestamp.
+fn takeover_user_choice(
 	monitor_sees_input: bool,
 	settled: impl FnOnce() -> bool,
 	choices_changed: impl FnOnce() -> bool,
 	counters_show_press: impl FnOnce() -> bool,
-) -> bool {
-	if monitor_sees_input {
-		!settled() || choices_changed()
+) -> UserChoice {
+	let made = if monitor_sees_input {
+		if !settled() {
+			return UserChoice::Pending;
+		}
+		choices_changed()
 	} else {
 		counters_show_press()
+	};
+	if made {
+		UserChoice::Made
+	} else {
+		UserChoice::None
 	}
 }
 
@@ -555,7 +564,7 @@ static OWN_POINTER_PRESSES: AtomicU32 = AtomicU32::new(0);
 /// before the event is posted to the HID event tap, so a reader never sees
 /// the HID counter move ahead of this count.
 pub(super) fn note_hid_post(event_type: CGEventType) {
-	if control::is_pointer_press(event_type as u32) {
+	if control::is_pointer_press(event_type.0) {
 		OWN_POINTER_PRESSES.fetch_add(1, Ordering::AcqRel);
 	}
 }
@@ -590,7 +599,7 @@ impl PointerPresses {
 /// pid, as background input is, leave it unchanged.
 const HID_SYSTEM_STATE: i32 = 1;
 /// Left, right and other mouse button down and up (`CGEventType`).
-const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
+pub(super) const MOUSE_BUTTON_EVENTS: [u32; 6] = [1, 2, 3, 4, 25, 26];
 /// Indices of the button-down counters in `MOUSE_BUTTON_EVENTS`.
 const PRESS_COUNTERS: [usize; 3] = [0, 2, 4];
 /// ⌘ and ⌃ (`kCGEventFlagMaskCommand | Control`). ⌥ is left out: it types
@@ -599,9 +608,47 @@ const PRESS_COUNTERS: [usize; 3] = [0, 2, 4];
 const SWITCH_MODIFIERS: u64 = 0x0010_0000 | 0x0004_0000;
 /// How soon after a click [`ClickPlacer`] still places it where the pointer is.
 const CLICK_PLACE: Duration = Duration::from_millis(30);
+/// ⌥ (`kCGEventFlagMaskAlternate`). It types characters on many layouts, so it
+/// only keeps an app from being taken for the browser: launchers open on
+/// ⌥-Space.
+const OPTION_MODIFIER: u64 = 0x0008_0000;
+/// How long after [`front_app`] reads the user's app the [`PickLog`] keeps
+/// watching for the user picking an app: the relay holds the app in front
+/// only for a window that omp's input opens within a second.
+const PICK_WATCH: Duration = Duration::from_secs(1);
+/// How often [`FrontApp::keep_in_front`] checks the front app; a keystroke
+/// typed between an activation and the next check goes to the activated app.
+const HOLD_POLL: Duration = Duration::from_millis(2);
+
+/// The flags a held modifier shows in the HID state: ⇧, ⌃, ⌥, ⌘ and fn
+/// (`kCGEventFlagMaskShift | Control | Alternate | Command | SecondaryFn`).
+/// Caps Lock's alpha-shift flag is left out: it is a lock, set from the press
+/// that turns it on to the one that turns it off.
+const HELD_MODIFIERS: u64 = 0x0002_0000 | SWITCH_MODIFIERS | OPTION_MODIFIER | 0x0080_0000;
+
+/// Whether the user holds a modifier or a mouse button in the HID system
+/// state. Holding one makes no new presses, so a takeover's pause waits for it
+/// to be let go ([`control::intervention::admit_takeover`]). Any other key
+/// repeats while it is held, and the repeats keep that pause waiting already;
+/// read as held instead, a key a program posts down and never releases would
+/// hold every takeover off, since nothing the user types releases it.
+pub(crate) fn input_held() -> bool {
+	held(
+		// SAFETY: a read-only query of the HID system state.
+		unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) },
+		// SAFETY: as above, with a mouse button number in the range
+		// CGEventSource.h defines.
+		|button| unsafe { CGEventSourceButtonState(HID_SYSTEM_STATE, button) },
+	)
+}
+
+/// [`input_held`] over the given HID flags and button state.
+fn held(flags: u64, button_down: impl Fn(u32) -> bool) -> bool {
+	flags & HELD_MODIFIERS != 0 || (0..32u32).any(button_down)
+}
 
 /// The HID counters of `MOUSE_BUTTON_EVENTS`.
-fn hid_buttons() -> [u32; 6] {
+pub(super) fn hid_buttons() -> [u32; 6] {
 	MOUSE_BUTTON_EVENTS.map(|event_type| {
 		// SAFETY: HIDSystemState and these public CGEventType values are
 		// defined by CGEventSource.h / CGEventTypes.h; a read-only query.
@@ -610,7 +657,7 @@ fn hid_buttons() -> [u32; 6] {
 }
 
 /// How long ago a mouse button last went down or up.
-fn since_last_click() -> Option<Duration> {
+pub(super) fn since_last_click() -> Option<Duration> {
 	MOUSE_BUTTON_EVENTS
 		.into_iter()
 		// SAFETY: as in `hid_buttons`.
@@ -625,7 +672,8 @@ fn since_last_click() -> Option<Duration> {
 /// Shift and Caps Lock pick no app, so none of them appear here.
 #[derive(Clone, Copy)]
 struct SwitchSignals {
-	/// HID counters of `MOUSE_BUTTON_EVENTS`.
+	/// HID counters of `MOUSE_BUTTON_EVENTS`, plus the user's button events
+	/// they skipped that the session's tap delivered.
 	buttons:     [u32; 6],
 	/// When a mouse button last went down or up.
 	last_click:  Option<Instant>,
@@ -635,10 +683,13 @@ struct SwitchSignals {
 	key_focus:   Option<ProcessSerialNumber>,
 	/// When the action last acted on its target ([`note_send`]).
 	last_send:   Option<Instant>,
-	/// The latest click landed on the user's own app, as [`ClickPlacer`]
+	/// The latest click landed on the user's own app, as the [`Placement`]
 	/// placed it: menus and Dock tiles over a window count as theirs, not the
 	/// window's.
 	in_user_app: bool,
+	/// The latest click landed outside the user's app, so it cannot turn out
+	/// to be theirs later; one the tap has not delivered yet is neither.
+	elsewhere:   bool,
 }
 
 impl SwitchSignals {
@@ -655,6 +706,7 @@ impl SwitchSignals {
 			key_focus,
 			last_send: None,
 			in_user_app: false,
+			elsewhere: false,
 		}
 	}
 
@@ -669,11 +721,39 @@ impl SwitchSignals {
 		Self { in_user_app: true, ..self }
 	}
 
-	/// Reads the signals at `now`, with whether `placer` has placed the latest
-	/// click in the user's own app. Nothing here waits on an AX probe.
-	fn read(spi: &ForegroundSpi, now: Instant, placer: &ClickPlacer) -> Self {
-		let buttons = hid_buttons();
-		let last_click = since_last_click().and_then(|since| now.checked_sub(since));
+	/// These signals with their latest click placed outside the user's app.
+	#[cfg(test)]
+	const fn placed_elsewhere(self) -> Self {
+		Self { elsewhere: true, ..self }
+	}
+
+	/// The signals of `reading`, with `hid_click` when the HID state last saw a
+	/// mouse button go down or up. A click the HID counters skipped, such as
+	/// a remote tool's post to the session tap, is dated by its delivery.
+	fn of(
+		reading: Reading,
+		hid_click: Option<Instant>,
+		flags: u64,
+		key_focus: Option<ProcessSerialNumber>,
+	) -> Self {
+		let mut signals =
+			Self::new(reading.buttons, hid_click.max(reading.skipped), flags, key_focus);
+		signals.in_user_app = reading.placed == Some(true);
+		signals.elsewhere = reading.placed == Some(false);
+		signals
+	}
+
+	/// Reads the signals at `now`, with where `placement` has the latest click
+	/// land. Nothing here waits on another app.
+	fn read(spi: &ForegroundSpi, now: Instant, placement: Placement<'_>) -> Self {
+		let reading = match placement {
+			Placement::Tap(clicks, apps) => clicks.place(apps),
+			Placement::HitTest(placer) => {
+				let buttons = hid_buttons();
+				Reading { buttons, placed: placer.in_user_app(buttons).then_some(true), skipped: None }
+			},
+		};
+		let hid_click = since_last_click().and_then(|since| now.checked_sub(since));
 		// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only
 		// query.
 		let flags = unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) };
@@ -684,8 +764,7 @@ impl SwitchSignals {
 			// which writes the 8-byte PSN and one status byte.
 			(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
 		});
-		let mut signals = Self::new(buttons, last_click, flags, key_focus);
-		signals.in_user_app = placer.in_user_app(buttons);
+		let signals = Self::of(reading, hid_click, flags, key_focus);
 		let last_send = *LAST_SEND.lock();
 		match last_send {
 			Some(at) => signals.sent_at(at),
@@ -764,6 +843,17 @@ impl ClickPlacer {
 	}
 }
 
+/// Where a reading learns whether the latest click landed on the user's app.
+#[derive(Clone, Copy)]
+enum Placement<'a> {
+	/// The tap of the session the input belongs to, which names the process
+	/// `WindowServer` routed each click to as it delivers it; with the user's
+	/// app and the target.
+	Tap(&'a ClickJournal, Apps),
+	/// [`ClickPlacer`]'s hit-test, without a tap that sees input.
+	HitTest(&'a ClickPlacer),
+}
+
 /// How the user, rather than an app, changed the front app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserSwitch {
@@ -779,11 +869,12 @@ enum UserSwitch {
 }
 
 /// Whether [`UserSwitchWatch`]'s latest button change, counted as a click
-/// outside the user's app, may still be placed in their app.
+/// outside the user's app, may still be placed in their app: not once the
+/// [`Placement`] has placed it elsewhere.
 #[derive(Clone, Copy)]
 enum ClickPlacement {
 	Settled,
-	/// [`ClickPlacer`] may place the change in the user's app only some
+	/// The [`Placement`] may place the change in the user's app only some
 	/// readings later; `previous` is the click to put back then, and `press`
 	/// when the change pressed a button, the user's own-app click it becomes.
 	Pending {
@@ -796,8 +887,8 @@ enum ClickPlacement {
 /// action between the user's app and the `target`, whose own focus grabs are
 /// not the user's doing. It sees every reading of the switch sampler, which
 /// no AX probe blocks, so a whole ⌘-Tab or launcher pick between two of the
-/// observer's polls is still seen when it happened. Clicks are timed exactly
-/// from the HID state.
+/// observer's polls is still seen when it happened. Clicks are timed from the
+/// HID state, or by their delivery when the HID counters skipped them.
 struct UserSwitchWatch {
 	user:      ProcessSerialNumber,
 	target:    ProcessSerialNumber,
@@ -832,7 +923,7 @@ impl UserSwitchWatch {
 			click: signals
 				.last_click
 				.filter(|at| !signals.in_user_app && now.saturating_duration_since(*at) <= lookback),
-			placement: if signals.in_user_app {
+			placement: if signals.in_user_app || signals.elsewhere {
 				ClickPlacement::Settled
 			} else {
 				ClickPlacement::Pending {
@@ -868,9 +959,13 @@ impl UserSwitchWatch {
 			if signals.in_user_app {
 				if pressed {
 					self.own_click = Some(signals.last_click.unwrap_or(now));
+				} else {
+					// The release came with its press's placement.
+					self.settle_in_user_app(pending);
 				}
 			} else {
 				self.placement = match pending {
+					_ if signals.elsewhere => ClickPlacement::Settled,
 					// A release while its press still waits for placement is part
 					// of that click.
 					ClickPlacement::Pending { previous, press } if !pressed => {
@@ -883,17 +978,28 @@ impl UserSwitchWatch {
 				};
 				self.click = Some(signals.last_click.unwrap_or(now));
 			}
-		} else if signals.in_user_app
-			&& let ClickPlacement::Pending { previous, press } = self.placement
-		{
+		} else if signals.in_user_app {
 			// Placed in the user's app after a reading had counted it.
+			let pending = self.placement;
 			self.placement = ClickPlacement::Settled;
+			self.settle_in_user_app(pending);
+		} else if signals.elsewhere {
+			// Placed outside it: no later placement takes it back.
+			self.placement = ClickPlacement::Settled;
+		}
+		self.observe_held(signals, front, now);
+	}
+
+	/// Takes back the click `pending` counted outside the user's app, now
+	/// placed in it: the click before it counts again, and its press is the
+	/// user's own-app click.
+	const fn settle_in_user_app(&mut self, pending: ClickPlacement) {
+		if let ClickPlacement::Pending { previous, press } = pending {
 			self.click = previous;
 			if press.is_some() {
 				self.own_click = press;
 			}
 		}
-		self.observe_held(signals, front, now);
 	}
 
 	/// Whether a click in the user's own app, seen up to
@@ -1112,14 +1218,14 @@ impl BackgroundFocusLease {
 /// is not the target, while the pointer sprite and transparent overlays that
 /// let clicks through do not count.
 fn pointer_over(pid: pid_t) -> bool {
-	let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
+	let Some(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) else {
 		return false;
 	};
-	let Ok(event) = CGEvent::new(source) else {
+	let Some(event) = CGEvent::new(Some(&source)) else {
 		return false;
 	};
-	let point = event.location();
-	ax::point_owner(point.x, point.y).is_some_and(|owner| owner.pid == pid)
+	let point = CGEvent::location(Some(&event));
+	ax::point_owner(point.x, point.y).is_some_and(|(owner, _)| owner.pid == pid)
 }
 
 /// Whether the user has come to the background target since its guard
@@ -1194,16 +1300,28 @@ pub(super) fn with_background_watch<T>(
 		|| previous.pid.and_then(restoration_key),
 		|| front_process(spi.get_front),
 	)?;
-	// A click just before the action is placed before the guard starts; later
-	// ones on the placer's own thread.
+	// The tap of the session this input belongs to places each click as it
+	// delivers it, and a click it has not delivered counts as outside the
+	// user's app. Without one that sees input, as when Input Monitoring is
+	// off for the app that launched omp, a click just before the action is
+	// placed before the guard starts, and later ones on the placer's thread.
+	let clicks = control::intervention::clicks();
 	let placer = ClickPlacer::new(previous.pid);
-	placer.place();
+	let placement = match (clicks.as_deref(), previous.pid) {
+		(Some(clicks), Some(user)) if permission::listen_events() => {
+			Placement::Tap(clicks, Apps::new(user, pid))
+		},
+		_ => {
+			placer.place();
+			Placement::HitTest(&placer)
+		},
+	};
 	let now = Instant::now();
 	let lease = Mutex::new(BackgroundFocusLease::new(
 		previous.psn,
 		target,
 		previous_key,
-		SwitchSignals::read(spi, now, &placer),
+		SwitchSignals::read(spi, now, placement),
 		now,
 	));
 	// Sends the user's keys back to their app while the target holds the
@@ -1219,9 +1337,8 @@ pub(super) fn with_background_watch<T>(
 	thread::scope(|scope| {
 		let visit = &visited;
 		let lease = &lease;
-		let placer = &placer;
 		let desktop =
-			WindowServerDesktop { spi, previous, key: previous_key, placer, stopped: &stopped };
+			WindowServerDesktop { spi, previous, key: previous_key, placement, stopped: &stopped };
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || guard_focus(lease, &desktop, visit))
@@ -1249,7 +1366,7 @@ pub(super) fn with_background_watch<T>(
 					if let Some(front) = front_process(spi.get_front) {
 						// The placement taken after the front app: one that has
 						// arrived meanwhile is used already.
-						let signals = SwitchSignals::read(spi, now, placer);
+						let signals = SwitchSignals::read(spi, now, placement);
 						sample_switches(lease, front.psn, signals, now, visit);
 					}
 					thread::sleep(SWITCH_SAMPLE);
@@ -1258,15 +1375,17 @@ pub(super) fn with_background_watch<T>(
 			.map_err(start_failed)?;
 		// Places each click for the readings, apart from the sampler, which
 		// its AX hit-test must never hold up.
-		thread::Builder::new()
-			.name("desktop-click-placer".to_string())
-			.spawn_scoped(scope, move || {
-				while !stopped.load(Ordering::Acquire) {
-					placer.place();
-					thread::sleep(SWITCH_SAMPLE);
-				}
-			})
-			.map_err(start_failed)?;
+		if let Placement::HitTest(placer) = placement {
+			thread::Builder::new()
+				.name("desktop-click-placer".to_string())
+				.spawn_scoped(scope, move || {
+					while !stopped.load(Ordering::Acquire) {
+						placer.place();
+						thread::sleep(SWITCH_SAMPLE);
+					}
+				})
+				.map_err(start_failed)?;
+		}
 		let result = run_then_settle(
 			|| {
 				let result = action(TargetVisit(&visited));
@@ -1298,9 +1417,12 @@ trait GuardedDesktop {
 	/// Puts the user's app back in front unless they pressed a key or clicked
 	/// after `since` ([`set_front_unless_user_acted`]).
 	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest>;
-	/// Makes `key` the user's key window again; false if `WindowServer` rejected
-	/// it.
-	fn restore_key(&self, key: u32) -> bool;
+	/// Makes `key` the user's key window again unless they pressed a key or
+	/// clicked after `since` ([`make_window_key_unless_user_acted`]). Their
+	/// app's hand-back (`kCPSNoWindows`) leaves it with no key window, which
+	/// nothing outside the app can see, so this always sends the make-key
+	/// records when it is not refused.
+	fn restore_key(&self, key: u32, since: u64) -> CoreResult<FrontRequest>;
 	/// The name and pid of the app `psn`, for an error message.
 	fn describe(&self, psn: ProcessSerialNumber) -> String;
 	/// Whether the action and its settle are over.
@@ -1310,13 +1432,13 @@ trait GuardedDesktop {
 }
 
 struct WindowServerDesktop<'a> {
-	spi:      &'a ForegroundSpi,
+	spi:       &'a ForegroundSpi,
 	/// The user's app.
-	previous: FrontProcess,
+	previous:  FrontProcess,
 	/// Its key window; `None` when it showed no window.
-	key:      Option<u32>,
-	placer:   &'a ClickPlacer,
-	stopped:  &'a AtomicBool,
+	key:       Option<u32>,
+	placement: Placement<'a>,
+	stopped:   &'a AtomicBool,
 }
 
 impl GuardedDesktop for WindowServerDesktop<'_> {
@@ -1333,7 +1455,7 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 	}
 
 	fn signals(&self, now: Instant) -> SwitchSignals {
-		SwitchSignals::read(self.spi, now, self.placer)
+		SwitchSignals::read(self.spi, now, self.placement)
 	}
 
 	fn event_clock(&self) -> u64 {
@@ -1344,8 +1466,8 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 		set_front_unless_user_acted(self.spi, self.previous.psn, self.key.unwrap_or(0), since)
 	}
 
-	fn restore_key(&self, key: u32) -> bool {
-		post_record(self.spi.post_record, self.previous.psn, &focus_record(key))
+	fn restore_key(&self, key: u32, since: u64) -> CoreResult<FrontRequest> {
+		make_window_key_unless_user_acted(self.spi, self.previous.psn, key, since)
 	}
 
 	fn describe(&self, psn: ProcessSerialNumber) -> String {
@@ -1392,6 +1514,19 @@ fn guard_focus(
 		let signals = desktop.signals(now);
 		lease.lock().observe(front, key, signals, now)
 	};
+	// The make-key records carry a front request for the user's app, made
+	// conditional like the hand-back's and asked only while their app is
+	// still in front, so a switch of theirs that races it wins.
+	let restore = |key| {
+		request_after_check(
+			|| desktop.event_clock(),
+			|| desktop.front() == Some(previous),
+			|since| desktop.restore_key(key, since),
+		)
+		.map(|request| request == Some(FrontRequest::Done))
+	};
+	// A key window still to put back after `WindowServer` refused it.
+	let mut owed = None;
 	loop {
 		// Once disarmed, nothing is sent back any more, but the lease keeps
 		// watching for the user coming to the target.
@@ -1437,32 +1572,47 @@ fn guard_focus(
 					// in their app it is the one their app reports now that it is in
 					// front again: that click may have picked another of its
 					// windows, which is then the one the lease keeps. That read can
-					// block, so the window is put back only while their app is still
-					// in front and the lease armed, and the click is used up only
-					// then. Otherwise the re-check observed instead (a disarm it
-					// recorded stops the hand-backs from the next poll), or
-					// `WindowServer` refused.
+					// block, so the window is put back only while the lease is still
+					// armed, and the click is used up only then. Otherwise the
+					// re-check observed instead (a disarm it recorded stops the
+					// hand-backs from the next poll), or `WindowServer` refused.
 					if handed_back == Some(FrontRequest::Done) {
 						let (kept, own_click) = {
 							let lease = lease.lock();
 							(lease.key, lease.user.own_click_since(desktop.now()))
 						};
 						let fresh = if own_click { desktop.user_key() } else { None };
-						let current =
-							!own_click || (!lease.lock().disarmed && desktop.front() == Some(previous));
-						if current && let Some(key) = fresh.or(kept) {
-							if !desktop.restore_key(key) {
-								return Err(DesktopError::input_failed(
-									"background key-window restoration was rejected",
-								));
-							}
-							let mut lease = lease.lock();
-							lease.key = Some(key);
-							if own_click {
-								lease.user.own_click = None;
+						if (!own_click || !lease.lock().disarmed)
+							&& let Some(key) = fresh.or(kept)
+						{
+							owed = (!restore(key)?).then_some(key);
+							if owed.is_none() {
+								let mut lease = lease.lock();
+								lease.key = Some(key);
+								if own_click {
+									lease.user.own_click = None;
+								}
 							}
 						}
 					}
+				} else if let Some(key) = owed
+					&& front == previous
+				{
+					// A refused key window is asked for again while the user's app
+					// stays in front and the lease armed. Typing refuses it only
+					// for that instant; a click in their app picked a window,
+					// which is then key, and a switch away has disarmed the lease.
+					let chose = {
+						let lease = lease.lock();
+						lease.disarmed
+							|| lease.key != Some(key)
+							|| lease.user.own_click_since(desktop.now())
+					};
+					owed = if chose {
+						None
+					} else {
+						(!restore(key)?).then_some(key)
+					};
 				}
 			},
 		}
@@ -1512,6 +1662,448 @@ fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreRes
 		));
 	}
 	Ok(())
+}
+
+/// The app the user had in front when [`front_app`] read it.
+#[derive(Clone, Copy)]
+pub(in super::super) struct FrontApp {
+	psn:     ProcessSerialNumber,
+	read_at: Instant,
+}
+
+/// The app `WindowServer` has in front now; `None` without the focus SPI.
+/// Starts the [`PickLog`] watching what the user does from now on.
+pub(in super::super) fn front_app() -> Option<FrontApp> {
+	let spi = FOREGROUND.as_ref()?;
+	let read_at = Instant::now();
+	let picks = Picks::read(spi);
+	let psn = picks.front?;
+	watch_picks(spi, picks, read_at);
+	Some(FrontApp { psn, read_at })
+}
+
+impl FrontApp {
+	/// Extend only an unbroken watch, before the blocking worker is queued.
+	pub(in super::super) fn extend_pick_watch(&self, deadline: Instant) {
+		PICK_LOG
+			.lock()
+			.extend(self.read_at, Instant::now(), deadline);
+	}
+
+	/// Until `deadline`, puts this app back in front without raising its
+	/// windows each time the app that took the front from it takes it again,
+	/// as [`FrontHold`] decides, and returns how many times it did. Typing does
+	/// not end it. Holds nothing once the [`PickLog`] has not watched without a
+	/// break since the read (from [`PICK_WATCH`] after the latest read): a pick
+	/// the user made in the gap would go unseen. Owns desktop input/focus
+	/// control only while it asks for the front back, and is busy then if
+	/// another operation owns it.
+	pub(in super::super) fn keep_in_front(&self, deadline: Instant) -> CoreResult<u32> {
+		let spi = FOREGROUND.as_ref().ok_or_else(|| {
+			DesktopError::background_unavailable("the front-process SPI is unavailable")
+		})?;
+		let Some(before) = PICK_LOG.lock().since(self.read_at, Instant::now()) else {
+			return Ok(0);
+		};
+		let mut hold = FrontHold::new(self.psn, before);
+		let desktop = WindowServerHold { spi, user: self.psn, read_at: self.read_at, deadline };
+		hold_front(&mut hold, &desktop)
+	}
+}
+
+/// One reading of what can show the user picking an app.
+#[derive(Clone, Copy)]
+struct Picks {
+	/// The modifier keys held (`CGEventFlags`).
+	flags:     u64,
+	front:     Option<ProcessSerialNumber>,
+	/// The process holding the keyboard.
+	key_focus: Option<ProcessSerialNumber>,
+}
+
+impl Picks {
+	fn read(spi: &ForegroundSpi) -> Self {
+		Self {
+			// SAFETY: HIDSystemState is defined by CGEventSource.h; a read-only
+			// query.
+			flags:     unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) },
+			front:     front_process(spi.get_front).map(|front| front.psn),
+			key_focus: spi.get_key_focus.and_then(|get_key_focus| {
+				let mut psn = ProcessSerialNumber::default();
+				let mut status = 0u8;
+				// SAFETY: Both out-pointers are writable for the synchronous call,
+				// which writes the 8-byte PSN and one status byte.
+				(unsafe { get_key_focus(&mut psn, &mut status) } == 0).then_some(psn)
+			}),
+		}
+	}
+
+	/// A process other than the front app holding the keyboard: a launcher's
+	/// or Spotlight's panel, or an app taking the keyboard a moment before
+	/// `WindowServer` lists it in front.
+	fn panel(self) -> Option<ProcessSerialNumber> {
+		self.key_focus.filter(|focus| Some(*focus) != self.front)
+	}
+}
+
+/// What the user did that can pick an app, sampled every [`SWITCH_SAMPLE`]
+/// from each [`front_app`] read until [`PICK_WATCH`] after the latest one, so
+/// a hold that starts later still sees a ⌘-Tab or launcher pick made before
+/// it. Each signal keeps when it was last seen.
+struct PickLog {
+	/// When the running sampler started, so its watch has had no break since.
+	watch_from:  Option<Instant>,
+	watch_until: Option<Instant>,
+	/// Latest completed reading; a requested deadline is not evidence of
+	/// progress.
+	sampled_at:  Option<Instant>,
+	sampling:    bool,
+	/// A ⌘ or ⌃ key held.
+	chord:       Option<Instant>,
+	/// ⌥ held.
+	option:      Option<Instant>,
+	/// The processes last seen holding the keyboard while not in front (see
+	/// [`Picks::panel`]), latest first.
+	panels:      [Option<(ProcessSerialNumber, Instant)>; 2],
+}
+
+static PICK_LOG: Mutex<PickLog> = Mutex::new(PickLog {
+	watch_from:  None,
+	watch_until: None,
+	sampled_at:  None,
+	sampling:    false,
+	chord:       None,
+	option:      None,
+	panels:      [None; 2],
+});
+
+impl PickLog {
+	fn record(&mut self, picks: Picks, now: Instant) {
+		// Progress and each signal are monotonic even when concurrent reads
+		// finish out of order. Older positive evidence must not be discarded.
+		if self
+			.sampled_at
+			.is_some_and(|last| now.saturating_duration_since(last) > SWITCH_SAMPLE * 2)
+		{
+			self.watch_from = Some(now);
+		}
+		self.sampled_at = self.sampled_at.max(Some(now));
+		if picks.flags & SWITCH_MODIFIERS != 0 {
+			self.chord = self.chord.max(Some(now));
+		}
+		if picks.flags & OPTION_MODIFIER != 0 {
+			self.option = self.option.max(Some(now));
+		}
+		if let Some(panel) = picks.panel() {
+			let mut panels = [self.panels[0], self.panels[1], Some((panel, now))];
+			panels.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.map(|(_, at)| at)));
+			self.panels[0] = panels[0];
+			self.panels[1] = panels
+				.into_iter()
+				.flatten()
+				.find(|(psn, _)| self.panels[0].is_none_or(|(first, _)| first != *psn));
+		}
+	}
+
+	/// What was seen from `at` on; `None` unless the log has watched without a
+	/// break from `at` to `now`.
+	fn since(&self, at: Instant, now: Instant) -> Option<PickEvidence> {
+		let watched = self.watch_from.is_some_and(|from| from <= at)
+			&& self.watch_until.is_some_and(|until| until >= now)
+			&& self
+				.sampled_at
+				.is_some_and(|last| now.saturating_duration_since(last) <= SWITCH_SAMPLE * 2);
+		if !watched {
+			return None;
+		}
+		let seen = |when: Option<Instant>| when.filter(|when| *when >= at);
+		Some(PickEvidence {
+			chord:  seen(self.chord),
+			option: seen(self.option).is_some(),
+			panels: self
+				.panels
+				.map(|panel| panel.filter(|(_, when)| *when >= at).map(|(psn, _)| psn)),
+		})
+	}
+
+	fn extend(&mut self, at: Instant, now: Instant, deadline: Instant) {
+		if self.since(at, now).is_some() {
+			self.watch_until = Some(
+				self
+					.watch_until
+					.map_or(deadline, |until| until.max(deadline)),
+			);
+		}
+	}
+
+	/// The sampler could not start: what follows the latest read goes unseen,
+	/// so the watch vouches for nothing ([`Self::since`]).
+	const fn lose_sampler(&mut self) {
+		self.sampling = false;
+		self.watch_from = None;
+	}
+}
+
+/// Records `picks`, read at `now`, and keeps the [`PickLog`] sampling until
+/// [`PICK_WATCH`] after it, starting its sampler unless one runs.
+fn watch_picks(spi: &'static ForegroundSpi, picks: Picks, now: Instant) {
+	let mut log = PICK_LOG.lock();
+	log.record(picks, now);
+	log.watch_until = Some(now + PICK_WATCH);
+	if mem::replace(&mut log.sampling, true) {
+		return;
+	}
+	log.watch_from = Some(now);
+	drop(log);
+	let sampler = thread::Builder::new()
+		.name("desktop-pick-log".to_string())
+		.spawn(move || {
+			loop {
+				thread::sleep(SWITCH_SAMPLE);
+				let now = Instant::now();
+				let picks = Picks::read(spi);
+				let mut log = PICK_LOG.lock();
+				log.record(picks, now);
+				if log.watch_until.is_none_or(|until| now >= until) {
+					log.sampling = false;
+					return;
+				}
+			}
+		});
+	// Without a sampler nothing vouches for the time until the hold.
+	if sampler.is_err() {
+		PICK_LOG.lock().lose_sampler();
+	}
+}
+
+/// What the [`PickLog`] saw between the read of the user's app and the start
+/// of its hold.
+#[derive(Clone, Copy, Default)]
+struct PickEvidence {
+	/// When a ⌘ or ⌃ key was last seen held.
+	chord:  Option<Instant>,
+	option: bool,
+	panels: [Option<ProcessSerialNumber>; 2],
+}
+
+/// One reading during a hold.
+#[derive(Clone, Copy)]
+struct HoldInput {
+	at:      Instant,
+	/// A hardware mouse button went down or up since the user's app was read.
+	clicked: bool,
+	picks:   Picks,
+	/// Fresh sampler evidence since the original read; absent after a watch gap.
+	logged:  Option<PickEvidence>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HoldStep {
+	Wait,
+	HandBack,
+	Stop,
+}
+
+/// Decides, reading by reading, whether the app that took the front from the
+/// user's app goes back behind it. A click anywhere or a held ⌘/⌃ is the user
+/// picking an app and ends the hold. Only the first app to take the front is
+/// sent back, as Chrome takes it again to show a popup window; any other app
+/// coming forward ends the hold. No app goes back, the first taker again
+/// included, once ⌥ was held (a launcher may be opening) or another process
+/// held the keyboard while not in front (a launcher's or Spotlight's panel the
+/// user may have picked it from), nor when it comes forward within
+/// [`USER_SWITCH_WINDOW`] of a ⌘/⌃ key held since the read, or was already in
+/// front at the first reading after one (a ⌘-Tab done before the hold began,
+/// however late its app is listed in front). Typing, Shift included, picks no
+/// app.
+struct FrontHold {
+	user:   ProcessSerialNumber,
+	taker:  Option<ProcessSerialNumber>,
+	first:  bool,
+	option: bool,
+	/// When a ⌘ or ⌃ key was last seen held between the read and the hold.
+	chord:  Option<Instant>,
+	/// Processes other than the user's app seen holding the keyboard while not
+	/// in front, since the read.
+	panels: Vec<ProcessSerialNumber>,
+}
+
+impl FrontHold {
+	fn new(user: ProcessSerialNumber, before: PickEvidence) -> Self {
+		let mut hold = Self {
+			user,
+			taker: None,
+			first: true,
+			option: before.option,
+			chord: before.chord,
+			panels: Vec::new(),
+		};
+		for panel in before.panels.into_iter().flatten() {
+			hold.note_panel(panel);
+		}
+		hold
+	}
+
+	fn note_panel(&mut self, panel: ProcessSerialNumber) {
+		if panel != self.user && !self.panels.contains(&panel) {
+			self.panels.push(panel);
+		}
+	}
+
+	fn observe(&mut self, front: ProcessSerialNumber, input: &HoldInput) -> HoldStep {
+		let Some(logged) = input.logged else {
+			return HoldStep::Stop;
+		};
+		// Do not snapshot the log at hold creation: a worker can stall while a
+		// complete modifier chord or launcher choice is sampled and released.
+		if logged.chord > self.chord && !self.first {
+			return HoldStep::Stop;
+		}
+		self.chord = self.chord.max(logged.chord);
+		self.option |= logged.option;
+		for panel in logged.panels.into_iter().flatten() {
+			self.note_panel(panel);
+		}
+		let first = mem::replace(&mut self.first, false);
+		self.option |= input.picks.flags & OPTION_MODIFIER != 0;
+		if let Some(panel) = input.picks.panel() {
+			self.note_panel(panel);
+		}
+		if input.clicked || input.picks.flags & SWITCH_MODIFIERS != 0 {
+			return HoldStep::Stop;
+		}
+		if front == self.user {
+			return HoldStep::Wait;
+		}
+		let switched = self.chord.is_some_and(|chord| {
+			first || input.at.saturating_duration_since(chord) <= USER_SWITCH_WINDOW
+		});
+		// A process that held the keyboard before coming forward is that app
+		// taking focus a moment early, not a panel it was picked from.
+		let picked = self.panels.iter().any(|panel| *panel != front) || switched;
+		if self.option || picked {
+			return HoldStep::Stop;
+		}
+		match self.taker {
+			Some(taker) if taker == front => HoldStep::HandBack,
+			Some(_) => HoldStep::Stop,
+			None => {
+				self.taker = Some(front);
+				HoldStep::HandBack
+			},
+		}
+	}
+}
+
+/// What a hold reads from `WindowServer` and asks of it.
+trait HoldDesktop {
+	/// The front process; `None` when `WindowServer` cannot tell.
+	fn front(&self) -> Option<ProcessSerialNumber>;
+	fn input(&self) -> HoldInput;
+	/// [`control::uptime_ns`].
+	fn event_clock(&self) -> u64;
+	/// Puts the user's app back in front unless they pressed a key or clicked
+	/// after `since` ([`set_front_unless_user_acted`]).
+	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest>;
+	/// Whether the hold's time is up.
+	fn over(&self) -> bool;
+	/// Waits one poll.
+	fn wait(&self);
+}
+
+/// Runs `hold` until it stops or its time is up; returns how many times it
+/// put the user's app back. It owns desktop input/focus control only around
+/// each request, so a computer task can start while it waits; one running
+/// then makes the request busy.
+fn hold_front(hold: &mut FrontHold, desktop: &impl HoldDesktop) -> CoreResult<u32> {
+	let mut handed_back = 0;
+	while !desktop.over() {
+		if let Some(front) = desktop.front() {
+			match hold.observe(front, &desktop.input()) {
+				HoldStep::Wait => {},
+				HoldStep::Stop => break,
+				HoldStep::HandBack => {
+					let _owner = control::own_focus()?;
+					// Re-check right before the request: `WindowServer` refuses it
+					// if the user pressed a key or clicked after the
+					// re-check began. The refusal does not say which,
+					// and typing picks no app, so the next
+					// reading decides again; a click or ⌘/⌃ there ends the hold.
+					// A stop the re-check finds ends it now, as a ⌘/⌃ released
+					// before the next reading leaves no trace, and time spent
+					// getting here counts against the deadline.
+					let mut recheck = HoldStep::Wait;
+					let handed = request_after_check(
+						|| desktop.event_clock(),
+						|| {
+							if desktop.over() || desktop.front() != Some(front) {
+								return false;
+							}
+							recheck = hold.observe(front, &desktop.input());
+							recheck == HoldStep::HandBack
+						},
+						|since| desktop.hand_back(since),
+					)?;
+					if handed == Some(FrontRequest::Done) {
+						handed_back += 1;
+					}
+					if recheck == HoldStep::Stop {
+						break;
+					}
+				},
+			}
+		}
+		desktop.wait();
+	}
+	Ok(handed_back)
+}
+
+struct WindowServerHold {
+	spi:      &'static ForegroundSpi,
+	/// The user's app.
+	user:     ProcessSerialNumber,
+	/// When the user's app was read.
+	read_at:  Instant,
+	deadline: Instant,
+}
+
+impl HoldDesktop for WindowServerHold {
+	fn front(&self) -> Option<ProcessSerialNumber> {
+		front_process(self.spi.get_front).map(|front| front.psn)
+	}
+
+	fn input(&self) -> HoldInput {
+		let at = Instant::now();
+		let elapsed = at.saturating_duration_since(self.read_at).as_secs_f64();
+		HoldInput {
+			at,
+			clicked: MOUSE_BUTTON_EVENTS.into_iter().any(|event_type| {
+				// SAFETY: HIDSystemState and these public CGEventType values are
+				// defined by CGEventSource.h / CGEventTypes.h; a read-only query.
+				let since =
+					unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, event_type) };
+				since < elapsed
+			}),
+			picks: Picks::read(self.spi),
+			logged: PICK_LOG.lock().since(self.read_at, Instant::now()),
+		}
+	}
+
+	fn event_clock(&self) -> u64 {
+		control::uptime_ns()
+	}
+
+	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest> {
+		set_front_unless_user_acted(self.spi, self.user, 0, since)
+	}
+
+	fn over(&self) -> bool {
+		Instant::now() >= self.deadline
+	}
+
+	fn wait(&self) {
+		thread::sleep(HOLD_POLL);
+	}
 }
 
 /// What a front-process request through [`set_front_unless_user_acted`] did.
@@ -1624,17 +2216,20 @@ fn front_request(status: i32) -> CoreResult<FrontRequest> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserKey {
 	Window(u32),
-	/// It provably shows no window, as Finder after a click on the desktop or
-	/// an app that just closed its last window: only the front process is
-	/// restored.
+	/// It provably shows no window, as an app that just closed its last
+	/// window: only the front process is restored.
 	Windowless,
+	/// Its keyboard focus sits outside every window, as Finder's does on the
+	/// desktop after a click on it while its windows stay open: only the front
+	/// process is restored, which leaves that focus where it was.
+	OutsideWindows,
 }
 
 impl UserKey {
 	const fn window(self) -> Option<u32> {
 		match self {
 			Self::Window(id) => Some(id),
-			Self::Windowless => None,
+			Self::Windowless | Self::OutsideWindows => None,
 		}
 	}
 }
@@ -1642,8 +2237,10 @@ impl UserKey {
 /// The front application `pid`'s [`UserKey`]; `None` when neither its key
 /// window nor its windowlessness can be established.
 fn restoration_key(pid: pid_t) -> Option<UserKey> {
+	let (key, outside_windows) = ax::restoration_window(pid);
 	restorable_key(
-		ax::key_window_id(pid),
+		key,
+		|| outside_windows,
 		|| ax::window_records(pid).map(|records| records.iter().any(|record| record.id.is_some())),
 		|| capture::has_onscreen_window(pid),
 	)
@@ -1680,17 +2277,50 @@ fn restoration_key_in_front(
 /// [`restoration_key`]'s decision: an app with no key window counts as
 /// windowless only when both its accessibility windows (Finder's unmappable
 /// desktop entry aside) and `WindowServer`'s on-screen list show none of its
-/// windows. An unreadable answer from either refuses.
+/// windows. An unreadable answer from either refuses. An app whose focused
+/// window is no window at all (`focus_outside_windows`), as Finder's desktop
+/// after a click on it is, keeps that focus whether or not it shows windows.
 fn restorable_key(
 	key: Option<u32>,
+	focus_outside_windows: impl FnOnce() -> bool,
 	ax_lists_window: impl FnOnce() -> Option<bool>,
 	shows_window: impl FnOnce() -> Option<bool>,
 ) -> Option<UserKey> {
 	if let Some(key) = key {
 		return Some(UserKey::Window(key));
 	}
+	if focus_outside_windows() {
+		return Some(UserKey::OutsideWindows);
+	}
 	(ax_lists_window() == Some(false) && shows_window() == Some(false))
 		.then_some(UserKey::Windowless)
+}
+
+/// The window id a takeover gives the user's key back to, `None` for the
+/// front process alone, or why it cannot put the user's focus back. Takeover
+/// of a window of the user's own app (`same_app`) makes that window key, and
+/// focus outside every window, such as Finder's desktop, has no window to
+/// make key again afterwards.
+const fn takeover_key(key: Option<UserKey>, same_app: bool) -> Result<Option<u32>, &'static str> {
+	match key {
+		None => {
+			Err("cannot identify the previous key window for takeover restoration; no input was sent")
+		},
+		Some(UserKey::OutsideWindows) if same_app => Err(
+			"the user's focus sits outside every window of this window's application (as on Finder's \
+			 desktop), and taking over one of its windows could not put that focus back; no input \
+			 was sent",
+		),
+		Some(key) => Ok(key.window()),
+	}
+}
+
+/// The input a takeover brings `wid` forward for: only a pointer refusal names
+/// the background route to a window attached under the focused one.
+#[derive(Clone, Copy)]
+pub(super) enum ForegroundInput {
+	Keys,
+	Pointer,
 }
 
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
@@ -1702,14 +2332,20 @@ fn restorable_key(
 /// re-activating it can clear Chromium's renderer focus. The window is made
 /// key without being raised; callers that need it unobstructed raise it.
 /// `return_focus` restores even after user input during the action; see
-/// [`hands_focus_back`].
+/// [`hands_focus_back`]. It starts from the worker's admission, which waited
+/// for the user to pause in every app, and fails without sending anything if
+/// they pressed a key or clicked since
+/// ([`control::intervention::start_takeover`]): a key they type once the target
+/// is in front lands in it.
 pub(super) fn with_foreground<T>(
 	pid: pid_t,
 	wid: u32,
 	return_focus: bool,
+	input: ForegroundInput,
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
+	control::intervention::start_takeover()?;
 	let choices = control::user_choices();
 	// Read with `choices`, before takeover posts anything: a click of the
 	// user's at any later point is then a choice the monitor counts once it has
@@ -1731,7 +2367,7 @@ pub(super) fn with_foreground<T>(
 	let focused = ax::focused_window_id(pid);
 	if preserves_exact_existing_focus(Some(previous.psn), target, focused, wid) {
 		let result = run_then_settle(|| action(false), FOREGROUND_SETTLE);
-		report_focus_return(false, previous.pid);
+		report_focus_return(false, None, previous.pid);
 		return result;
 	}
 	let previous_pid = previous.pid.ok_or_else(|| {
@@ -1739,20 +2375,21 @@ pub(super) fn with_foreground<T>(
 			"cannot identify the previous application for takeover restoration; no input was sent",
 		)
 	})?;
-	let previous_key = restoration_key(previous_pid)
-		.ok_or_else(|| {
-			DesktopError::input_failed(
-				"cannot identify the previous key window for takeover restoration; no input was sent",
-			)
-		})?
-		.window();
+	let previous_key = takeover_key(restoration_key(previous_pid), previous_pid == pid)
+		.map_err(DesktopError::input_failed)?;
+	// The reads above can take a while in a busy app; a press or hold of the
+	// user's meanwhile refuses here, before the target comes forward.
+	control::intervention::start_takeover()?;
 	let handed_back = Cell::new(false);
+	let keyboard = Cell::new(None);
 	let restore = || {
 		// Keys the user types while takeover holds the front land in the target
 		// without them choosing it, so only a click or a shortcut of theirs, or
-		// a switch elsewhere, leaves the front application alone.
-		let user_chose = || {
-			takeover_user_chose(
+		// a switch elsewhere, leaves the front application alone. Whether the
+		// monitor has caught up is always judged from entry: a backlog from
+		// before a later baseline could otherwise cover a click after it.
+		let user_choice = |choices, presses| {
+			takeover_user_choice(
 				monitor_sees_input,
 				|| monitor_settled(progress),
 				|| control::user_choices() != choices,
@@ -1765,11 +2402,19 @@ pub(super) fn with_foreground<T>(
 			} else {
 				FocusAfterTakeover::Elsewhere
 			};
-			hands_focus_back(return_focus, user_chose(), now)
+			let user_chose = user_choice(choices, presses) != UserChoice::None;
+			hands_focus_back(return_focus, user_chose, now)
 		};
+		// Nothing went to the user's window: say why when it was theirs.
+		let left = || keyboard.set(left_alone(user_choice(choices, presses)));
 		if !still_ours() {
+			left();
 			return Ok(());
 		}
+		let same_app = previous_pid == pid;
+		let since = choice_baseline(same_app, (choices, presses), || {
+			(control::user_choices(), PointerPresses::now())
+		});
 		// The action and its settle are over, so takeover's own keys and
 		// clicks, which `WindowServer` counts like the user's, came before this
 		// timestamp; user input after it refuses the hand-back, and the
@@ -1781,50 +2426,70 @@ pub(super) fn with_foreground<T>(
 			|| monitor_settled(progress),
 			|since| set_front_unless_user_acted(spi, previous.psn, previous_key.unwrap_or(0), since),
 		)?;
-		if request != Some(FrontRequest::Done) {
-			return Ok(());
+		match request {
+			Some(FrontRequest::Done) => {},
+			// `WindowServer` refused: the user clicked, or kept typing, after the
+			// request's timestamp.
+			Some(FrontRequest::UserActed) => {
+				let left = left_alone(user_choice(choices, presses));
+				keyboard.set(Some(left.unwrap_or(DesktopKeyboardReturn::NotSent)));
+				return Ok(());
+			},
+			None => {
+				left();
+				return Ok(());
+			},
 		}
-		// A previous app that showed no window gets only its front status back.
-		let Some(previous_key) = previous_key else {
-			handed_back.set(true);
-			return Ok(());
-		};
-		if !rekey_unless_user_chose(
-			|| ax::focused_window_id(previous_pid),
-			previous_key,
-			user_chose,
-			|| make_exact_window_key(spi, previous.psn, previous_key),
-		)? {
-			// The user picked another window of their own app, which is front.
-			handed_back.set(true);
-			return Ok(());
-		}
-		await_window_focused(spi, previous_pid, previous_key, previous.psn)?;
 		handed_back.set(true);
+		keyboard.set(Some(give_key_back(
+			previous_key,
+			same_app,
+			|| ax::focused_window_id(previous_pid),
+			|| user_choice(since.0, since.1),
+			|key| make_exact_window_key(spi, previous.psn, key),
+			// The user's own key window gets no route to it in the refusal.
+			|key| await_window_focused(spi, previous_pid, key, previous.psn, ForegroundInput::Keys),
+		)?));
 		Ok(())
 	};
 	let prepare = set_front(spi, target, wid)
 		.and_then(|()| make_exact_window_key(spi, target, wid))
-		.and_then(|()| await_window_focused(spi, pid, wid, target));
+		.and_then(|()| await_window_focused(spi, pid, wid, target, input));
 	let result = if let Err(error) = prepare {
 		after_cleanup(Err(error), control::cleanup(restore))
 	} else {
 		let result = run_then_settle(|| action(true), FOREGROUND_SETTLE);
 		after_cleanup(result, control::cleanup(restore))
 	};
-	report_focus_return(handed_back.get(), previous.pid);
+	report_focus_return(handed_back.get(), keyboard.get(), previous.pid);
 	result
 }
 
 /// Records for the host where a takeover left focus, read from `WindowServer`
-/// after restoration.
-fn report_focus_return(handed_back: bool, previous: Option<pid_t>) {
+/// after restoration, and what it did with the user's keyboard.
+fn report_focus_return(
+	handed_back: bool,
+	keyboard: Option<DesktopKeyboardReturn>,
+	previous: Option<pid_t>,
+) {
 	let pid = |pid: pid_t| u32::try_from(pid).ok();
 	control::report_focus_return(DesktopFocusReturn {
 		handed_back,
 		previous_pid: previous.and_then(pid),
 		front_pid: front_pid().and_then(pid),
+		keyboard,
 	});
+}
+
+/// Why a takeover that did not hand the front back sent nothing to the user's
+/// window: their own choice, a choice the monitor may not have counted yet,
+/// or neither (another app came forward by itself).
+const fn left_alone(choice: UserChoice) -> Option<DesktopKeyboardReturn> {
+	match choice {
+		UserChoice::Made => Some(DesktopKeyboardReturn::LeftAsChosen),
+		UserChoice::Pending => Some(DesktopKeyboardReturn::NotSent),
+		UserChoice::None => None,
+	}
 }
 
 /// Where focus sits when a takeover ends.
@@ -1855,26 +2520,54 @@ const fn hands_focus_back(return_focus: bool, user_chose: bool, now: FocusAfterT
 	}
 }
 
-/// Makes `previous_key` key again after takeover handed the front back,
-/// unless it already is or the user chose something meanwhile; `false` when
-/// the user did. Returning to an app often reinstates its original key window
-/// by itself, and re-making an already-key Chromium window can clear the
-/// user's renderer focus, just as reactivating an already-key input target
-/// can. `user_chose` is read after the key-window probe, right before the
-/// records: a window the user clicked while the probe ran stays theirs.
-fn rekey_unless_user_chose(
+/// Gives the user's previous key window back once takeover's front request
+/// handed their app the front, and says what it did.
+///
+/// That request (`kCPSNoWindows`) activates an app that was behind the target
+/// without installing any key window, so its window comes back inactive until
+/// the make-key records follow (measured on macOS 26.5). Nothing outside the
+/// app can tell: its `AXFocusedWindow` still names the window, and
+/// `WindowServer`'s front and key-focus process are the app's either way, so
+/// no reading skips the records there, and there they do not land on an
+/// already-key window, which in Chromium can clear the renderer's focus. Only
+/// an app that never left the front (`same_app`: the target was one of its own
+/// windows) kept a key window that its `AXFocusedWindow` reports truthfully,
+/// and one already key there is left alone. A click or shortcut of the user's
+/// is their choice and keeps the records back (`choice`, counted from
+/// [`choice_baseline`]); while the monitor has not caught up, whether they made
+/// one is unknown, and nothing is sent either. A previous app that showed no
+/// window gets only its front status back.
+fn give_key_back(
+	previous_key: Option<u32>,
+	same_app: bool,
 	key_window: impl FnOnce() -> Option<u32>,
-	previous_key: u32,
-	user_chose: impl FnOnce() -> bool,
-	make_key: impl FnOnce() -> CoreResult<()>,
-) -> CoreResult<bool> {
-	if key_window() == Some(previous_key) {
-		return Ok(true);
+	choice: impl FnOnce() -> UserChoice,
+	make_key: impl FnOnce(u32) -> CoreResult<()>,
+	confirm: impl FnOnce(u32) -> CoreResult<()>,
+) -> CoreResult<DesktopKeyboardReturn> {
+	let Some(key) = previous_key else {
+		return Ok(DesktopKeyboardReturn::FrontOnly);
+	};
+	if same_app && key_window() == Some(key) {
+		confirm(key)?;
+		return Ok(DesktopKeyboardReturn::Kept);
 	}
-	if user_chose() {
-		return Ok(false);
+	match choice() {
+		UserChoice::Made => return Ok(DesktopKeyboardReturn::LeftAsChosen),
+		UserChoice::Pending => return Ok(DesktopKeyboardReturn::NotSent),
+		UserChoice::None => make_key(key)?,
 	}
-	make_key().map(|()| true)
+	confirm(key)?;
+	Ok(DesktopKeyboardReturn::HandedBack)
+}
+
+/// From when a choice of the user's keeps [`give_key_back`]'s records back:
+/// where their app never left the front, any choice during the call, as
+/// before; after bringing it forward from behind the target, which
+/// `return_focus` does over an earlier choice, only one made after the
+/// hand-back `request`, or their app would be left with no key window.
+fn choice_baseline<T>(same_app: bool, entry: T, request: impl FnOnce() -> T) -> T {
+	if same_app { entry } else { request() }
 }
 
 pub(super) fn require_front_window(pid: pid_t, wid: u32) -> CoreResult<()> {
@@ -2028,6 +2721,51 @@ fn make_exact_window_key(
 			"window {wid} rejected exact key-window activation"
 		)));
 	}
+	post_make_key_records(spi, target, wid)
+}
+
+/// [`make_exact_window_key`] with its front request made conditional, as
+/// [`set_front_unless_user_acted`] makes the hand-back's: `WindowServer`
+/// refuses it when the user pressed a key or clicked after `since`, and then
+/// no records are sent, so a switch of theirs that raced the request keeps
+/// the app they chose in front. Where the conditional request is unavailable,
+/// the window is made key unconditionally.
+fn make_window_key_unless_user_acted(
+	spi: &ForegroundSpi,
+	target: ProcessSerialNumber,
+	wid: u32,
+	since: u64,
+) -> CoreResult<FrontRequest> {
+	let Some(conditional) = spi.conditional else {
+		return make_exact_window_key(spi, target, wid).map(|()| FrontRequest::Done);
+	};
+	control::check()?;
+	let timestamp = CFNumber::new_i64(i64::try_from(since).unwrap_or(i64::MAX));
+	// SAFETY: `timestamp_key` is SkyLight's process-lived CFString constant.
+	let key = unsafe { &*conditional.timestamp_key };
+	let info = CFDictionary::<CFString, CFNumber>::from_slices(&[key], &[&*timestamp]);
+	// SAFETY: The PSN was resolved from WindowServer and `info` stays alive
+	// for the synchronous call. kCPSUserGenerated only changes how the request
+	// is attributed.
+	let status = unsafe {
+		(conditional.set_front)(&target, wid, CPS_USER_GENERATED, ptr::from_ref(&*info).cast())
+	};
+	match status {
+		0 => post_make_key_records(spi, target, wid).map(|()| FrontRequest::Done),
+		EXPIRED_FRONT_REQUEST => Ok(FrontRequest::UserActed),
+		_ => Err(DesktopError::input_failed(format!(
+			"window {wid} rejected exact key-window activation"
+		))),
+	}
+}
+
+/// The paired make-key records (`0x01`, then `0x02`) that make `wid` the
+/// native key window of its process once that process is in front.
+fn post_make_key_records(
+	spi: &ForegroundSpi,
+	target: ProcessSerialNumber,
+	wid: u32,
+) -> CoreResult<()> {
 	for kind in [0x01, 0x02] {
 		if !post_record(spi.post_record, target, &make_key_record(wid, kind)) {
 			return Err(DesktopError::input_failed(format!(
@@ -2049,6 +2787,7 @@ fn await_window_focused(
 	pid: pid_t,
 	wid: u32,
 	target: ProcessSerialNumber,
+	input: ForegroundInput,
 ) -> CoreResult<()> {
 	let deadline = Instant::now() + ACTIVATION_TIMEOUT;
 	loop {
@@ -2065,7 +2804,12 @@ fn await_window_focused(
 				let pid = front.and_then(|front| front.pid);
 				KeyWindowSeen::Front { pid, name: pid.and_then(process::application_name) }
 			};
-			return Err(DesktopError::input_failed(unconfirmed_key_window(wid, &seen)));
+			return Err(DesktopError::input_failed(unconfirmed_key_window(
+				wid,
+				&seen,
+				input,
+				window_parent,
+			)));
 		}
 		control::wait(ACTIVATION_POLL)?;
 	}
@@ -2081,7 +2825,15 @@ enum KeyWindowSeen {
 	Focused(Option<ax::WindowLabel>),
 }
 
-fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
+/// The refusal for `wid`, never confirmed key. A window attached to the
+/// focused window, as a suggestion list is to the window it drops from, does
+/// not become key, so the refusal names the route that reaches it.
+fn unconfirmed_key_window(
+	wid: u32,
+	seen: &KeyWindowSeen,
+	input: ForegroundInput,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> String {
 	let held = match seen {
 		KeyWindowSeen::Front { pid: Some(pid), name: Some(name) } => {
 			format!("{name} (pid {pid}) stayed the front application")
@@ -2103,7 +2855,22 @@ fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
 			}
 		},
 	};
-	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}")
+	let attached = match (input, seen) {
+		(
+			ForegroundInput::Pointer,
+			KeyWindowSeen::Focused(Some(ax::WindowLabel { id: Some(focused), .. })),
+		) => super::input::attached_under(wid, parent_of, |parent| parent == *focused),
+		_ => false,
+	};
+	let route = if attached {
+		format!(
+			"; window {wid} is attached to that window and does not become key, as a suggestion list \
+			 does not: a click without takeover reaches it in the background"
+		)
+	} else {
+		String::new()
+	};
+	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}{route}")
 }
 
 fn process_psn(lookup: PsnLookup, pid: pid_t, wid: u32) -> Option<ProcessSerialNumber> {
@@ -2195,6 +2962,20 @@ mod tests {
 			sample_switches(lease, front, signals, at, &visit);
 		}
 		visit.load(Ordering::Acquire)
+	}
+
+	#[test]
+	fn a_held_modifier_or_button_counts_and_a_lock_or_other_key_does_not() {
+		let no_button = |_| false;
+		// Nothing held; Caps Lock on; a key a program posted down and never
+		// released (flags as the HID state read on a VM).
+		for flags in [NO_MODIFIERS, CAPS_LOCK, 0x2000_0000] {
+			assert!(!held(flags, no_button), "{flags:#x}");
+		}
+		for flags in [SHIFT, CONTROL, OPTION, COMMAND, FN, SHIFT | CAPS_LOCK] {
+			assert!(held(flags, no_button), "{flags:#x}");
+		}
+		assert!(held(NO_MODIFIERS, |button| button == 0));
 	}
 
 	#[test]
@@ -2731,18 +3512,35 @@ mod tests {
 	}
 
 	#[test]
-	fn only_a_provably_windowless_front_app_is_restored_without_a_key_window() {
+	fn a_front_app_without_a_key_window_is_restored_only_when_nothing_is_lost() {
 		let unread = || -> Option<bool> { panic!("a known key window needs no window scan") };
-		assert_eq!(restorable_key(Some(42), unread, unread), Some(UserKey::Window(42)));
-		// TextEdit after closing its last document; Finder after a desktop click
-		// lists only its unmappable desktop, which counts as no window.
-		assert_eq!(restorable_key(None, || Some(false), || Some(false)), Some(UserKey::Windowless));
+		let unasked = || -> bool { panic!("a known key window needs no focus read") };
+		assert_eq!(restorable_key(Some(42), unasked, unread, unread), Some(UserKey::Window(42)));
+		// Finder after a click on its desktop, with its windows still open: its
+		// focused window is the desktop, which is no window, and keeps focus.
+		assert_eq!(restorable_key(None, || true, unread, unread), Some(UserKey::OutsideWindows));
+		// TextEdit after closing its last document.
+		let inside = || false;
+		assert_eq!(
+			restorable_key(None, inside, || Some(false), || Some(false)),
+			Some(UserKey::Windowless)
+		);
 		// Windows that AX or WindowServer reports, or an unreadable answer,
 		// refuse.
-		assert_eq!(restorable_key(None, || Some(true), || Some(false)), None);
-		assert_eq!(restorable_key(None, || Some(false), || Some(true)), None);
-		assert_eq!(restorable_key(None, || None, || Some(false)), None);
-		assert_eq!(restorable_key(None, || Some(false), || None), None);
+		assert_eq!(restorable_key(None, inside, || Some(true), || Some(false)), None);
+		assert_eq!(restorable_key(None, inside, || Some(false), || Some(true)), None);
+		assert_eq!(restorable_key(None, inside, || None, || Some(false)), None);
+		assert_eq!(restorable_key(None, inside, || Some(false), || None), None);
+	}
+
+	#[test]
+	fn takeover_in_the_users_own_app_refuses_focus_it_cannot_put_back() {
+		let outside = Some(UserKey::OutsideWindows);
+		assert_eq!(takeover_key(outside, false), Ok(None));
+		assert!(takeover_key(outside, true).is_err_and(|why| why.contains("outside every window")));
+		assert_eq!(takeover_key(Some(UserKey::Window(42)), true), Ok(Some(42)));
+		assert_eq!(takeover_key(Some(UserKey::Windowless), true), Ok(None));
+		assert!(takeover_key(None, false).is_err_and(|why| why.contains("previous key window")));
 	}
 
 	#[test]
@@ -2793,6 +3591,7 @@ mod tests {
 		arrives:            Cell<Option<(Instant, ProcessSerialNumber)>>,
 		signals:            Cell<SwitchSignals>,
 		refused_for:        Cell<Option<SwitchSignals>>,
+		after_hand_back:    Option<ProcessSerialNumber>,
 		hand_backs:         Cell<usize>,
 		keys:               std::cell::RefCell<Vec<u32>>,
 		/// The key window the user's app reports.
@@ -2802,6 +3601,9 @@ mod tests {
 		switch_on_key_read: Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
 		/// How long that report takes to read.
 		key_read_takes:     Duration,
+		/// Refuses the next key-window request for the user's input after its
+		/// timestamp: the app then in front, and what the next reading sees.
+		refused_key_for:    Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
 	}
 
 	impl GuardedDesktop for FakeDesktop {
@@ -2836,13 +3638,18 @@ mod tests {
 				self.signals.set(after);
 				return Ok(FrontRequest::UserActed);
 			}
-			self.front.set(PREVIOUS);
+			self.front.set(self.after_hand_back.unwrap_or(PREVIOUS));
 			Ok(FrontRequest::Done)
 		}
 
-		fn restore_key(&self, key: u32) -> bool {
+		fn restore_key(&self, key: u32, _since: u64) -> CoreResult<FrontRequest> {
+			if let Some((front, after)) = self.refused_key_for.take() {
+				self.front.set(front);
+				self.signals.set(after);
+				return Ok(FrontRequest::UserActed);
+			}
 			self.keys.borrow_mut().push(key);
-			true
+			Ok(FrontRequest::Done)
 		}
 
 		fn describe(&self, psn: ProcessSerialNumber) -> String {
@@ -2866,6 +3673,31 @@ mod tests {
 	}
 
 	#[test]
+	fn the_guard_skips_make_key_when_front_moves_after_hand_back() {
+		let t0 = Instant::now();
+		let desktop = FakeDesktop {
+			clock:              Cell::new(t0 + ms(20)),
+			end:                t0 + ms(20),
+			front:              Cell::new(TARGET),
+			arrives:            Cell::new(None),
+			signals:            Cell::new(input(0, NO_MODIFIERS)),
+			refused_for:        Cell::new(None),
+			after_hand_back:    Some(THIRD),
+			hand_backs:         Cell::new(0),
+			keys:               std::cell::RefCell::default(),
+			user_window:        42,
+			switch_on_key_read: Cell::new(None),
+			key_read_takes:     Duration::ZERO,
+			refused_key_for:    Cell::new(None),
+		};
+		let lease = Mutex::new(lease_at(t0, None));
+		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_err());
+		assert_eq!(desktop.hand_backs.get(), 1);
+		assert!(desktop.front.get() == THIRD);
+		assert!(desktop.keys.into_inner().is_empty());
+	}
+
+	#[test]
 	fn the_guard_asks_again_after_a_refusal_for_typing_but_not_for_a_switch() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
@@ -2880,11 +3712,13 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(idle),
 				refused_for:        Cell::new(Some(input)),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        42,
 				switch_on_key_read: Cell::new(None),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let visit = AtomicBool::new(false);
@@ -3008,6 +3842,36 @@ mod tests {
 	}
 
 	#[test]
+	fn a_release_placed_with_its_press_takes_the_press_back_and_a_press_elsewhere_stays() {
+		let t0 = Instant::now();
+		let down = SwitchSignals::new([1, 0, 0, 0, 0, 0], Some(t0 + ms(5)), NO_MODIFIERS, None);
+		let up = SwitchSignals::new([1, 1, 0, 0, 0, 0], Some(t0 + ms(60)), NO_MODIFIERS, None);
+		// A reading counts the user's press before the tap delivers it; their
+		// release comes with the click placed in their app: the target
+		// activating itself is sent back.
+		let mut guard = lease_at(t0, None);
+		assert_eq!(guard.observe(PREVIOUS, Some(42), down, t0 + ms(6)), FocusDecision::Observe);
+		let placed = up.in_user_app();
+		assert_eq!(guard.observe(PREVIOUS, Some(42), placed, t0 + ms(61)), FocusDecision::Observe);
+		assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(100)), FocusDecision::Restore);
+		// A press the tap placed elsewhere stays the user's pick, whatever a
+		// later reading says, whether a reading saw it unplaced first or not:
+		// dragged out of the target and dropped in the user's app, say.
+		let elsewhere = down.placed_elsewhere();
+		for readings in [&[down, elsewhere][..], &[elsewhere]] {
+			let mut guard = lease_at(t0, None);
+			for (i, &reading) in readings.iter().enumerate() {
+				let at = t0 + ms(6 + i as u64);
+				assert_eq!(guard.observe(PREVIOUS, Some(42), reading, at), FocusDecision::Observe);
+			}
+			let own = down.in_user_app();
+			assert_eq!(guard.observe(PREVIOUS, Some(42), own, t0 + ms(10)), FocusDecision::Observe);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), placed, t0 + ms(61)), FocusDecision::Observe);
+			assert_eq!(guard.observe(TARGET, None, placed, t0 + ms(100)), FocusDecision::Disarm);
+		}
+	}
+
+	#[test]
 	fn a_hand_back_restores_the_window_the_user_clicked_as_the_target_came_forward() {
 		// The user's app, whose key window was 42 when the action began,
 		// reports 43 once handed back, and the target came forward in the same
@@ -3021,11 +3885,13 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(signals),
 				refused_for:        Cell::new(None),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        43,
 				switch_on_key_read: Cell::new(switch),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3049,6 +3915,40 @@ mod tests {
 	}
 
 	#[test]
+	fn a_switch_that_races_the_key_window_request_keeps_the_app_the_user_chose() {
+		// The guard handed the user's app back; `WindowServer` then refuses its
+		// key-window request for input of theirs after the request's timestamp.
+		let t0 = Instant::now();
+		let run = |refusal: (ProcessSerialNumber, SwitchSignals)| {
+			let desktop = FakeDesktop {
+				clock:              Cell::new(t0 + ms(20)),
+				end:                t0 + ms(60),
+				front:              Cell::new(TARGET),
+				arrives:            Cell::new(None),
+				signals:            Cell::new(input(0, NO_MODIFIERS)),
+				refused_for:        Cell::new(None),
+				hand_backs:         Cell::new(0),
+				keys:               std::cell::RefCell::default(),
+				user_window:        42,
+				switch_on_key_read: Cell::new(None),
+				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(Some(refusal)),
+				after_hand_back:    None,
+			};
+			let lease = Mutex::new(lease_at(t0, None));
+			assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
+			let lease = lease.into_inner();
+			(desktop.front.get().low, desktop.keys.into_inner(), lease.disarmed)
+		};
+		// A ⌘-Tab to a third app: no make-key records, and the app they chose
+		// stays in front.
+		assert_eq!(run((THIRD, input(1, COMMAND))), (THIRD.low, vec![], true));
+		// Typing in their own app refuses only that instant: the window is put
+		// back on the next poll.
+		assert_eq!(run((PREVIOUS, input(0, NO_MODIFIERS))), (PREVIOUS.low, vec![42], false));
+	}
+
+	#[test]
 	fn a_users_click_does_not_age_while_their_key_window_is_read() {
 		// Reading the user's key window takes the accessibility timeout; it
 		// reports window 43, which their click just before the read picked.
@@ -3060,11 +3960,13 @@ mod tests {
 			arrives:            Cell::new(None),
 			signals:            Cell::new(clicked_at(t0 + ms(15)).in_user_app()),
 			refused_for:        Cell::new(None),
+			after_hand_back:    None,
 			hand_backs:         Cell::new(0),
 			keys:               std::cell::RefCell::default(),
 			user_window:        43,
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     ms(600),
+			refused_key_for:    Cell::new(None),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
@@ -3102,11 +4004,13 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(input(0, NO_MODIFIERS)),
 				refused_for:        Cell::new(Some(input(0, SHIFT))),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        42,
 				switch_on_key_read: Cell::new(None),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3133,11 +4037,13 @@ mod tests {
 			arrives:            Cell::new(Some((sent + ACTION_REFLEX - ms(10), THIRD))),
 			signals:            Cell::new(input(0, NO_MODIFIERS).sent_at(sent)),
 			refused_for:        Cell::new(None),
+			after_hand_back:    None,
 			hand_backs:         Cell::new(0),
 			keys:               std::cell::RefCell::default(),
 			user_window:        42,
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     Duration::ZERO,
+			refused_key_for:    Cell::new(None),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3416,46 +4322,100 @@ mod tests {
 		// With Input Monitoring, the monitor's count decides only once it has
 		// seen all `WindowServer` counted: a queued click or Control-Up counts
 		// as the user's choice, before any hand-back timestamp is taken.
-		assert!(takeover_user_chose(true, || false, || panic!(), || panic!()));
-		assert!(takeover_user_chose(true, || true, || true, || panic!()));
-		assert!(!takeover_user_chose(true, || true, || false, || panic!()));
+		use UserChoice::{Made, None, Pending};
+		assert_eq!(takeover_user_choice(true, || false, || panic!(), || panic!()), Pending);
+		assert_eq!(takeover_user_choice(true, || true, || true, || panic!()), Made);
+		assert_eq!(takeover_user_choice(true, || true, || false, || panic!()), None);
 		// Without it the tap sees nothing; the HID counters net of omp's own
 		// presses are all there is.
-		assert!(!takeover_user_chose(false, || panic!(), || panic!(), || false));
-		assert!(takeover_user_chose(false, || panic!(), || panic!(), || true));
+		assert_eq!(takeover_user_choice(false, || panic!(), || panic!(), || false), None);
+		assert_eq!(takeover_user_choice(false, || panic!(), || panic!(), || true), Made);
 	}
 
 	#[test]
-	fn the_key_window_is_restored_only_if_the_user_chose_nothing_during_the_probe() {
-		use std::cell::Cell;
-		let (previous_key, clicked) = (7, 9);
-		// The user clicks another window of their app while the probe runs.
-		let chose = Cell::new(false);
-		let made = Cell::new(false);
-		let rekeyed = rekey_unless_user_chose(
-			|| {
-				chose.set(true);
-				Some(clicked)
-			},
-			previous_key,
-			|| chose.get(),
-			|| {
-				made.set(true);
-				Ok(())
-			},
-		);
-		assert_eq!(rekeyed.ok(), Some(false));
-		assert!(!made.get(), "no make-key records over the user's click");
+	fn the_hand_back_makes_the_previous_window_key_whatever_its_app_reports() {
+		use std::cell::RefCell;
 
-		let rekeyed = rekey_unless_user_chose(|| Some(clicked), previous_key, || false, || Ok(()));
-		assert_eq!(rekeyed.ok(), Some(true));
-		let rekeyed = rekey_unless_user_chose(
-			|| Some(previous_key),
-			previous_key,
-			|| panic!("an already-key window needs no check"),
-			|| panic!("nor records"),
+		use DesktopKeyboardReturn::{FrontOnly, HandedBack, Kept, LeftAsChosen, NotSent};
+		let (previous, other) = (7, 9);
+		// What the hand-back sent, in order, and what it says it did.
+		let run = |previous_key, same_app, reported, since| {
+			let acts = RefCell::new(Vec::new());
+			let returned = give_key_back(
+				previous_key,
+				same_app,
+				|| reported,
+				|| since,
+				|key| {
+					acts.borrow_mut().push(("make key", key));
+					Ok(())
+				},
+				|key| {
+					acts.borrow_mut().push(("confirm", key));
+					Ok(())
+				},
+			);
+			(returned.ok(), acts.into_inner())
+		};
+		let rekeyed = (Some(HandedBack), vec![("make key", previous), ("confirm", previous)]);
+		// An app brought back from behind the target has no key window, though
+		// its AX answer names the previous one: the records always go out.
+		assert_eq!(run(Some(previous), false, Some(previous), UserChoice::None), rekeyed);
+		assert_eq!(run(Some(previous), false, Some(other), UserChoice::None), rekeyed);
+		// An app that kept the front reports its key window truthfully; one
+		// already key gets no records, which can clear Chromium's focus.
+		assert_eq!(
+			run(Some(previous), true, Some(previous), UserChoice::None),
+			(Some(Kept), vec![("confirm", previous)])
 		);
-		assert_eq!(rekeyed.ok(), Some(true));
+		assert_eq!(run(Some(previous), true, Some(other), UserChoice::None), rekeyed);
+		// A click or shortcut after the request is the user's choice; with one
+		// the monitor may not have counted yet, nothing is sent either.
+		assert_eq!(
+			run(Some(previous), false, Some(previous), UserChoice::Made),
+			(Some(LeftAsChosen), vec![])
+		);
+		assert_eq!(
+			run(Some(previous), false, Some(previous), UserChoice::Pending),
+			(Some(NotSent), vec![])
+		);
+		// A previous app with no window gets only its front back.
+		assert_eq!(run(None, false, Some(previous), UserChoice::None), (Some(FrontOnly), vec![]));
+		// Without a hand-back, the user's own switch is named as theirs; an app
+		// that came forward by itself is not.
+		assert_eq!(left_alone(UserChoice::Made), Some(LeftAsChosen));
+		assert_eq!(left_alone(UserChoice::Pending), Some(NotSent));
+		assert_eq!(left_alone(UserChoice::None), None);
+		// A rejected record or an unconfirmed window fails the hand-back.
+		let rejected = give_key_back(
+			Some(previous),
+			false,
+			|| Some(previous),
+			|| UserChoice::None,
+			|_| Err(DesktopError::input_failed("window 7 rejected its make-key record")),
+			|_| panic!("nothing to confirm after a rejected record"),
+		);
+		assert!(rejected.is_err());
+		let unconfirmed = give_key_back(
+			Some(previous),
+			false,
+			|| Some(previous),
+			|| UserChoice::None,
+			|_| Ok(()),
+			|_| Err(DesktopError::input_failed("window 7 could not be confirmed")),
+		);
+		assert!(unconfirmed.is_err());
+	}
+
+	#[test]
+	fn a_choice_during_the_call_keeps_the_records_back_only_where_the_app_never_left_the_front() {
+		// Same app: a window the user picked at any point in the call stays
+		// theirs, so the hand-back counts choices from entry and never reads
+		// a later baseline.
+		assert_eq!(choice_baseline(true, "entry", || panic!("no later baseline")), "entry");
+		// Brought forward from behind the target: only choices after the
+		// hand-back request count.
+		assert_eq!(choice_baseline(false, "entry", || "request"), "request");
 	}
 
 	#[test]
@@ -3467,7 +4427,7 @@ mod tests {
 				kind: Some(kind.to_owned()),
 			}))
 		};
-		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen);
+		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen, ForegroundInput::Keys, |_| None);
 		let prefix = "could not be confirmed as the exact frontmost key window: ";
 		// Calendar's untitled recurring-event alert held key over its window 66.
 		assert_eq!(
@@ -3507,6 +4467,36 @@ mod tests {
 	}
 
 	#[test]
+	fn a_suggestion_list_attached_to_the_focused_window_names_the_background_route() {
+		// Safari's autofill list, window 62, hangs off its page window 46,
+		// which keeps key.
+		let seen = KeyWindowSeen::Focused(Some(ax::WindowLabel {
+			id:    Some(46),
+			title: Some("Probe login".to_owned()),
+			kind:  None,
+		}));
+		let parents = |wid| (wid == 62).then_some(46);
+		assert_eq!(
+			unconfirmed_key_window(62, &seen, ForegroundInput::Pointer, parents),
+			"window 62 could not be confirmed as the exact frontmost key window: its application's \
+			 focused window is window 46 \"Probe login\"; window 62 is attached to that window and \
+			 does not become key, as a suggestion list does not: a click without takeover reaches it \
+			 in the background"
+		);
+		// A window attached elsewhere gets no route.
+		assert!(
+			!unconfirmed_key_window(70, &seen, ForegroundInput::Pointer, |_| Some(50))
+				.contains("without takeover")
+		);
+		// Key takeover must not suggest a pointer route for the same attached
+		// target.
+		assert!(
+			!unconfirmed_key_window(62, &seen, ForegroundInput::Keys, parents)
+				.contains("without takeover")
+		);
+	}
+
+	#[test]
 	fn a_returning_takeover_hands_focus_back_after_typing_but_not_over_a_third_app() {
 		use FocusAfterTakeover::{Elsewhere, Target};
 		// The user clicked or pressed a shortcut while the target was front: a
@@ -3521,5 +4511,494 @@ mod tests {
 		for (return_focus, user_chose) in [(true, true), (true, false), (false, false)] {
 			assert!(!hands_focus_back(return_focus, user_chose, Elsewhere));
 		}
+	}
+
+	const HOLD_USER: ProcessSerialNumber = ProcessSerialNumber { high: 0, low: 7 };
+	const HOLD_BROWSER: ProcessSerialNumber = ProcessSerialNumber { high: 0, low: 8 };
+	const HOLD_THIRD: ProcessSerialNumber = ProcessSerialNumber { high: 0, low: 9 };
+
+	/// A hold reading with `front` in front and holding the keyboard.
+	fn reading(front: ProcessSerialNumber, flags: u64) -> HoldInput {
+		reading_at(front, flags, Instant::now())
+	}
+
+	fn reading_at(front: ProcessSerialNumber, flags: u64, at: Instant) -> HoldInput {
+		HoldInput {
+			at,
+			clicked: false,
+			picks: Picks { flags, front: Some(front), key_focus: Some(front) },
+			logged: Some(PickEvidence::default()),
+		}
+	}
+
+	fn hold() -> FrontHold {
+		FrontHold::new(HOLD_USER, PickEvidence::default())
+	}
+
+	#[test]
+	fn a_hold_sends_back_only_the_app_that_took_the_front_while_the_user_types() {
+		let mut hold = hold();
+		assert_eq!(hold.observe(HOLD_USER, &reading(HOLD_USER, SHIFT)), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+		assert_eq!(hold.observe(HOLD_USER, &reading(HOLD_USER, SHIFT)), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+		assert_eq!(hold.observe(HOLD_THIRD, &reading(HOLD_THIRD, 0)), HoldStep::Stop);
+	}
+
+	#[test]
+	fn a_click_a_held_command_or_control_key_or_a_launcher_ends_a_hold() {
+		let clicked = HoldInput { clicked: true, ..reading(HOLD_USER, 0) };
+		for picking in [clicked, reading(HOLD_USER, COMMAND), reading(HOLD_USER, CONTROL)] {
+			assert_eq!(hold().observe(HOLD_USER, &picking), HoldStep::Stop);
+		}
+		let mut hold = hold();
+		assert_eq!(hold.observe(HOLD_USER, &reading(HOLD_USER, OPTION_MODIFIER)), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_THIRD, &reading(HOLD_THIRD, 0)), HoldStep::Stop);
+	}
+
+	#[test]
+	fn an_app_picked_from_a_launcher_panel_stays_in_front() {
+		// Spotlight held the keyboard over the user's app when omp's input read
+		// it; the user picks the browser from it with Return.
+		let before = PickEvidence { panels: [Some(HOLD_THIRD), None], ..PickEvidence::default() };
+		let mut hold = FrontHold::new(HOLD_USER, before);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::Stop);
+		// The panel opens during the hold.
+		let mut hold = self::hold();
+		let panel = HoldInput {
+			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			..reading(HOLD_USER, 0)
+		};
+		assert_eq!(hold.observe(HOLD_USER, &panel), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::Stop);
+		// The browser itself taking the keyboard a moment before it is listed in
+		// front is no panel.
+		let mut hold = self::hold();
+		let early = HoldInput {
+			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_BROWSER) },
+			..reading(HOLD_USER, 0)
+		};
+		assert_eq!(hold.observe(HOLD_USER, &early), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+	}
+
+	#[test]
+	fn an_app_in_front_before_the_hold_began_goes_back_unless_a_command_or_control_key_was_held() {
+		// Shift typed since the read, however long ago: still the browser's
+		// doing.
+		assert_eq!(hold().observe(HOLD_BROWSER, &reading(HOLD_BROWSER, SHIFT)), HoldStep::HandBack);
+		// ⌘ held between the read and the hold: a ⌘-Tab finished before it began.
+		let read = Instant::now();
+		let chord = PickEvidence { chord: Some(read), ..PickEvidence::default() };
+		let late = read + USER_SWITCH_WINDOW * 2;
+		assert_eq!(
+			FrontHold::new(HOLD_USER, chord).observe(HOLD_BROWSER, &reading_at(HOLD_BROWSER, 0, late)),
+			HoldStep::Stop
+		);
+		// A chord typed in the user's own app before the browser came forward
+		// later does not keep the browser in front.
+		let mut hold = FrontHold::new(HOLD_USER, chord);
+		assert_eq!(hold.observe(HOLD_USER, &reading_at(HOLD_USER, 0, late)), HoldStep::Wait);
+		assert_eq!(
+			hold.observe(HOLD_BROWSER, &reading_at(HOLD_BROWSER, 0, late + HOLD_POLL)),
+			HoldStep::HandBack
+		);
+	}
+
+	#[test]
+	fn an_app_a_command_tab_picked_before_the_hold_stays_in_front_however_late_it_is_listed() {
+		// ⌘ released just before the hold; its first reading still shows the
+		// user's app, and the chosen app is listed in front a poll later.
+		let released = Instant::now();
+		let chord = PickEvidence { chord: Some(released), ..PickEvidence::default() };
+		let mut hold = FrontHold::new(HOLD_USER, chord);
+		let first = released + SWITCH_SAMPLE;
+		assert_eq!(hold.observe(HOLD_USER, &reading_at(HOLD_USER, 0, first)), HoldStep::Wait);
+		assert_eq!(
+			hold.observe(HOLD_THIRD, &reading_at(HOLD_THIRD, 0, first + HOLD_POLL)),
+			HoldStep::Stop
+		);
+	}
+
+	fn pick_log(watch: Option<(Instant, Instant)>) -> PickLog {
+		PickLog {
+			watch_from:  watch.map(|(from, _)| from),
+			watch_until: watch.map(|(_, until)| until),
+			sampled_at:  watch.map(|(_, until)| until),
+			sampling:    false,
+			chord:       None,
+			option:      None,
+			panels:      [None; 2],
+		}
+	}
+
+	#[test]
+	fn the_pick_log_reports_only_what_came_after_the_read() {
+		let start = Instant::now();
+		let later = start + SWITCH_SAMPLE;
+		let mut log = pick_log(Some((start, start + PICK_WATCH)));
+		log.record(
+			Picks { flags: COMMAND, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			start,
+		);
+		log.record(
+			Picks { flags: SHIFT, front: Some(HOLD_USER), key_focus: Some(HOLD_BROWSER) },
+			later,
+		);
+		let all = log.since(start, later).expect("watched since the read");
+		assert!(all.chord == Some(start) && !all.option);
+		assert!(all.panels == [Some(HOLD_BROWSER), Some(HOLD_THIRD)]);
+		let after = log.since(later, later).expect("watched since the read");
+		assert!(after.chord.is_none());
+		assert!(after.panels == [Some(HOLD_BROWSER), None]);
+	}
+
+	#[test]
+	fn the_pick_log_vouches_for_nothing_it_did_not_watch_without_a_break() {
+		let read = Instant::now();
+		// The watch ended before the hold asked: a ⌘-Tab after it went unseen.
+		let ended = pick_log(Some((read, read + PICK_WATCH)));
+		assert!(ended.since(read, read + PICK_WATCH + HOLD_POLL).is_none());
+		// A later read restarted the sampler after a gap.
+		let restarted = pick_log(Some((read + PICK_WATCH * 2, read + PICK_WATCH * 3)));
+		assert!(
+			restarted
+				.since(read, read + PICK_WATCH * 2 + HOLD_POLL)
+				.is_none()
+		);
+		assert!(pick_log(None).since(read, read).is_none());
+		assert!(ended.since(read, read + PICK_WATCH).is_some());
+		// The sampler could not start.
+		let mut lost = pick_log(Some((read, read + PICK_WATCH)));
+		lost.lose_sampler();
+		assert!(lost.since(read, read).is_none());
+	}
+
+	#[test]
+	fn the_pick_watch_is_extended_before_the_worker_can_be_delayed() {
+		let read = Instant::now();
+		let queued = (read + PICK_WATCH).checked_sub(SWITCH_SAMPLE).unwrap();
+		let mut log = pick_log(Some((read, read + PICK_WATCH)));
+		log.sampled_at = Some(queued);
+		log.extend(read, queued, queued + Duration::from_millis(500));
+		let started = read + PICK_WATCH + SWITCH_SAMPLE;
+		// The sampler kept running while the worker was queued.
+		log.sampled_at = Some(started);
+		assert!(log.since(read, started).is_some());
+	}
+
+	#[test]
+	fn the_pick_log_requires_recent_completed_samples_and_rejects_gaps() {
+		let read = Instant::now();
+		let mut log = pick_log(Some((read, read + PICK_WATCH)));
+		log.sampled_at = Some(read);
+		let stalled = read + SWITCH_SAMPLE * 3;
+		assert!(log.since(read, stalled).is_none());
+		log.record(reading(HOLD_USER, 0).picks, stalled);
+		assert!(log.since(read, stalled).is_none());
+		assert!(log.since(stalled, stalled).is_some());
+	}
+
+	#[test]
+	fn the_pick_log_never_moves_modifier_or_panel_evidence_backwards() {
+		let read = Instant::now();
+		let newer = read + SWITCH_SAMPLE;
+		let mut log = pick_log(Some((read, read + PICK_WATCH)));
+		let picks = Picks {
+			flags:     COMMAND | OPTION_MODIFIER,
+			front:     Some(HOLD_USER),
+			key_focus: Some(HOLD_THIRD),
+		};
+		log.record(picks, newer);
+		log.record(picks, read);
+		let evidence = log.since(newer, newer).unwrap();
+		assert_eq!(evidence.chord, Some(newer));
+		assert!(evidence.option);
+		assert!(evidence.panels.contains(&Some(HOLD_THIRD)));
+	}
+
+	#[test]
+	fn a_completed_chord_sampled_during_the_hold_stops_the_hand_back() {
+		let mut hold = hold();
+		let at = Instant::now();
+		assert_eq!(hold.observe(HOLD_USER, &reading_at(HOLD_USER, 0, at)), HoldStep::Wait);
+		let mut input = reading_at(HOLD_BROWSER, 0, at + SWITCH_SAMPLE);
+		input.logged = Some(PickEvidence { chord: Some(at), ..PickEvidence::default() });
+		assert_eq!(hold.observe(HOLD_BROWSER, &input), HoldStep::Stop);
+		input.logged = None;
+		assert_eq!(self::hold().observe(HOLD_BROWSER, &input), HoldStep::Stop);
+	}
+
+	#[test]
+	fn a_launcher_used_after_a_hand_back_keeps_the_taker_it_picks_in_front() {
+		// ⌥ held over the user's app (a launcher opening), then the browser
+		// comes forward again.
+		let mut hold = hold();
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+		assert_eq!(hold.observe(HOLD_USER, &reading(HOLD_USER, OPTION_MODIFIER)), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::Stop);
+		// A launcher's panel holds the keyboard over the user's app, and the
+		// user picks the browser from it.
+		let mut hold = self::hold();
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::HandBack);
+		let panel = HoldInput {
+			picks: Picks { flags: 0, front: Some(HOLD_USER), key_focus: Some(HOLD_THIRD) },
+			..reading(HOLD_USER, 0)
+		};
+		assert_eq!(hold.observe(HOLD_USER, &panel), HoldStep::Wait);
+		assert_eq!(hold.observe(HOLD_BROWSER, &reading(HOLD_BROWSER, 0)), HoldStep::Stop);
+	}
+
+	/// A desktop where the browser is in front and each hand-back answers in
+	/// turn: `(click_before_it, answer)`. It notes whether desktop control was
+	/// free at every wait and owned at every hand-back; tests running it hold
+	/// `OWNERSHIP_TEST`. `chord_at` holds ⌘ for that one reading (counted from
+	/// 1), and from reading `over_at` on the hold's time is up.
+	struct FakeHold {
+		front:            Cell<ProcessSerialNumber>,
+		clicked:          Cell<bool>,
+		answers:          std::cell::RefCell<std::collections::VecDeque<(bool, FrontRequest)>>,
+		polls:            Cell<u32>,
+		free_at_waits:    Cell<bool>,
+		owned_at_answers: Cell<bool>,
+		inputs:           Cell<u32>,
+		chord_at:         Option<u32>,
+		over_at:          Option<u32>,
+	}
+
+	impl FakeHold {
+		fn new(answers: &[(bool, FrontRequest)]) -> Self {
+			Self {
+				front:            Cell::new(HOLD_BROWSER),
+				clicked:          Cell::new(false),
+				answers:          std::cell::RefCell::new(answers.iter().copied().collect()),
+				polls:            Cell::new(0),
+				free_at_waits:    Cell::new(true),
+				owned_at_answers: Cell::new(true),
+				inputs:           Cell::new(0),
+				chord_at:         None,
+				over_at:          None,
+			}
+		}
+	}
+
+	impl HoldDesktop for FakeHold {
+		fn front(&self) -> Option<ProcessSerialNumber> {
+			Some(self.front.get())
+		}
+
+		fn input(&self) -> HoldInput {
+			let n = self.inputs.get() + 1;
+			self.inputs.set(n);
+			let flags = if self.chord_at == Some(n) { COMMAND } else { 0 };
+			HoldInput { clicked: self.clicked.get(), ..reading(self.front.get(), flags) }
+		}
+
+		fn event_clock(&self) -> u64 {
+			u64::from(self.polls.get())
+		}
+
+		fn hand_back(&self, _since: u64) -> CoreResult<FrontRequest> {
+			self
+				.owned_at_answers
+				.set(self.owned_at_answers.get() && control::own_focus().is_err());
+			let (click, answer) = self
+				.answers
+				.borrow_mut()
+				.pop_front()
+				.expect("an expected hand-back");
+			self.clicked.set(self.clicked.get() || click);
+			if answer == FrontRequest::Done {
+				self.front.set(HOLD_USER);
+			}
+			Ok(answer)
+		}
+
+		fn over(&self) -> bool {
+			self.polls.get() >= 10 || self.over_at.is_some_and(|at| self.inputs.get() >= at)
+		}
+
+		fn wait(&self) {
+			self
+				.free_at_waits
+				.set(self.free_at_waits.get() && control::own_focus().is_ok());
+			self.polls.set(self.polls.get() + 1);
+		}
+	}
+
+	#[test]
+	fn a_click_between_the_last_check_and_the_hand_back_keeps_the_browser_in_front() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		// WindowServer refuses the hand-back the click overtook; the next reading
+		// sees the click and ends the hold.
+		let desktop = FakeHold::new(&[(true, FrontRequest::UserActed)]);
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
+		assert!(desktop.front.get() == HOLD_BROWSER);
+		assert_eq!(desktop.polls.get(), 1, "the hold ended at the reading after the refusal");
+	}
+
+	#[test]
+	fn a_hand_back_refused_for_typing_is_asked_again() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let desktop = FakeHold::new(&[(false, FrontRequest::UserActed), (false, FrontRequest::Done)]);
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 1);
+		assert!(desktop.front.get() == HOLD_USER);
+	}
+
+	#[test]
+	fn a_hold_owns_desktop_control_only_while_it_asks_for_the_front_back() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let desktop = FakeHold::new(&[(false, FrontRequest::Done)]);
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 1);
+		assert_eq!(desktop.polls.get(), 10, "the hold waited out its time");
+		assert!(desktop.owned_at_answers.get(), "control is owned for the request");
+		assert!(desktop.free_at_waits.get(), "a computer task can start while the hold waits");
+	}
+
+	#[test]
+	fn a_hold_asks_nothing_while_a_computer_task_owns_desktop_control() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		let source = control::CancellationSource::default();
+		control::grant_for_test(&source);
+		// No answers: a hand-back would panic.
+		let desktop = FakeHold::new(&[]);
+		let busy = hold_front(&mut hold(), &desktop).unwrap_err();
+		source.release_control();
+		assert_eq!(busy.code, ErrorCode::InputBusy);
+		assert!(desktop.front.get() == HOLD_BROWSER);
+	}
+
+	#[test]
+	fn a_command_key_only_the_hand_back_recheck_sees_ends_the_hold() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		// ⌘ is held at the recheck (reading 2) and released before the next
+		// poll; no hand-back may follow (none is answered).
+		let desktop = FakeHold { chord_at: Some(2), ..FakeHold::new(&[]) };
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
+		assert!(desktop.front.get() == HOLD_BROWSER);
+		assert_eq!(desktop.polls.get(), 0, "the hold ended at the recheck");
+	}
+
+	#[test]
+	fn no_hand_back_goes_out_once_the_hold_time_is_up_before_the_request() {
+		let _serial = control::OWNERSHIP_TEST.lock();
+		// The browser takes the front at the last reading in time; the time is
+		// up by the recheck (none is answered).
+		let desktop = FakeHold { over_at: Some(1), ..FakeHold::new(&[]) };
+		assert_eq!(hold_front(&mut hold(), &desktop).unwrap(), 0);
+		assert!(desktop.front.get() == HOLD_BROWSER);
+	}
+
+	#[test]
+	fn a_target_pick_the_hid_counters_skip_still_picks_it() {
+		// A remote tool posts the user's click on the target to the session
+		// tap: the tap delivers it, the HID counters never count it, and the
+		// target comes forward because of it. The HID state dates the user's
+		// last click of their own seconds before.
+		let t0 = Instant::now();
+		let signals =
+			|reading| SwitchSignals::of(reading, t0.checked_sub(ms(5000)), NO_MODIFIERS, None);
+		let idle = signals(Reading { buttons: [0; 6], placed: Some(true), skipped: None });
+		let pressed = signals(Reading {
+			buttons: [1, 0, 0, 0, 0, 0],
+			placed:  Some(false),
+			skipped: Some(t0 + ms(10)),
+		});
+		let pick = |came: Duration| {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
+			assert_eq!(
+				guard.observe(PREVIOUS, Some(42), pressed, t0 + ms(10)),
+				FocusDecision::Observe
+			);
+			guard.observe(TARGET, None, pressed, t0 + ms(10) + came)
+		};
+		assert_eq!(pick(ms(40)), FocusDecision::Disarm);
+		// The target coming forward on its own once that click is past the
+		// switch window is still sent back.
+		assert_eq!(pick(ms(300)), FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_press_read_once_after_a_reading_gave_up_on_it_leaves_the_target_sent_back() {
+		// The user's press at 10 ms, which `WindowServer` counts and a reading
+		// gives up on at 70 ms before the tap delivers it: the journal reads
+		// it once, whatever the tap delivers next.
+		let t0 = Instant::now();
+		let reading = |buttons, placed| Reading { buttons, placed, skipped: None };
+		let idle = SwitchSignals::of(
+			reading([0; 6], Some(true)),
+			t0.checked_sub(ms(5000)),
+			NO_MODIFIERS,
+			None,
+		);
+		let pressed = |placed| {
+			SwitchSignals::of(
+				reading([1, 0, 0, 0, 0, 0], placed),
+				Some(t0 + ms(10)),
+				NO_MODIFIERS,
+				None,
+			)
+		};
+		let lease_after = |readings: &[(Option<bool>, Duration)]| {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
+			for &(placed, at) in [(None, ms(20)), (None, ms(70))].iter().chain(readings) {
+				let decision = guard.observe(PREVIOUS, Some(42), pressed(placed), t0 + at);
+				assert_eq!(decision, FocusDecision::Observe);
+			}
+			guard
+		};
+		// The tap delivers it in the user's app at 100 ms: the target coming
+		// forward on its own right after is sent back.
+		let mut guard = lease_after(&[(Some(true), ms(100))]);
+		let decision = guard.observe(TARGET, None, pressed(Some(true)), t0 + ms(140));
+		assert_eq!(decision, FocusDecision::Restore);
+		// The trade-off: a remapping tool swallowed it, so it stays owed, and a
+		// remote tool's press on the target at 1 s, posted to the session tap,
+		// pays it off and adds no click; the target coming forward because of
+		// it is sent back too, leaving the user's app in front.
+		let mut guard = lease_after(&[(Some(true), ms(80)), (Some(false), ms(1000))]);
+		let decision = guard.observe(TARGET, None, pressed(Some(false)), t0 + ms(1040));
+		assert_eq!(decision, FocusDecision::Restore);
+	}
+
+	#[test]
+	fn a_swallowed_press_given_up_with_the_target_in_front_leaves_it_sent_back() {
+		// The user's press at 10 ms, which `WindowServer` counts and a remapping
+		// tool swallows, while the target comes forward on its own. The reading
+		// that gives up on the press at 70 ms places it in the user's app.
+		let t0 = Instant::now();
+		let idle = SwitchSignals::of(
+			Reading { buttons: [0; 6], placed: Some(true), skipped: None },
+			t0.checked_sub(ms(5000)),
+			NO_MODIFIERS,
+			None,
+		);
+		let pressed = |placed| {
+			SwitchSignals::of(
+				Reading { buttons: [1, 0, 0, 0, 0, 0], placed, skipped: None },
+				Some(t0 + ms(10)),
+				NO_MODIFIERS,
+				None,
+			)
+		};
+		let target_at = |placed, at| {
+			let mut guard = lease_at(t0, None);
+			assert_eq!(guard.observe(PREVIOUS, Some(42), idle, t0 + ms(1)), FocusDecision::Observe);
+			let decision = guard.observe(PREVIOUS, Some(42), pressed(None), t0 + ms(20));
+			assert_eq!(decision, FocusDecision::Observe);
+			(guard.observe(TARGET, None, pressed(placed), t0 + at), guard)
+		};
+		// The target in front on that reading is sent back, and the guard
+		// stays armed for the rest of the action.
+		let (decision, guard) = target_at(Some(true), ms(70));
+		assert_eq!(decision, FocusDecision::Restore);
+		assert!(!guard.disarmed && !guard.visited);
+		// The limit: while the press is undelivered it may be the user's click
+		// on the target, so the target coming forward then is left in front.
+		let (decision, guard) = target_at(None, ms(60));
+		assert_eq!(decision, FocusDecision::Disarm);
+		assert!(guard.disarmed && guard.visited);
 	}
 }

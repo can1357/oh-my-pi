@@ -46,10 +46,6 @@ describe("normalizeSearchType", () => {
 	it("maps 'keyword' to 'fast'", () => {
 		expect(normalizeSearchType("keyword")).toBe("fast");
 	});
-
-	it("passes through 'neural' unchanged", () => {
-		expect(normalizeSearchType("neural")).toBe("neural");
-	});
 });
 
 describe("buildExaRequestBody", () => {

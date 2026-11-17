@@ -15,7 +15,7 @@ use std::{
 	time::{Duration, Instant},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use crate::openfile::OpenFile;
 use clap::{Arg, ArgMatches, Command};
 use pi_vfs::{File, OpenOptions};
 use uucore::{
@@ -25,7 +25,7 @@ use uucore::{
 };
 
 use self::human::human_readable;
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 /// Default `ibs`/`obs`.
 const DEFAULT_BLOCKSIZE: usize = 512;
@@ -251,11 +251,6 @@ fn app() -> Command {
 		.after_help(AFTER_HELP)
 		.infer_long_args(true)
 		.arg(Arg::new(OPERANDS).num_args(1..).value_parser(clap::value_parser!(OsString)))
-}
-
-/// Creates the `dd` builtin registration.
-pub(crate) fn dd_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Dd, SE>()
 }
 
 // ---------------------------------------------------------------------------
@@ -1983,7 +1978,7 @@ mod tests {
 		sync::{Arc, Mutex},
 	};
 
-	use brush_core::openfiles;
+	use crate::openfile as openfiles;
 	use clap::Parser;
 
 	use super::*;
@@ -2025,21 +2020,7 @@ mod tests {
 		}
 	}
 
-	impl openfiles::Stream for Chunked {
-		fn clone_box(&self) -> Box<dyn openfiles::Stream> {
-			Box::new(self.clone())
-		}
-
-		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-
-		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-	}
+	impl openfiles::Stream for Chunked {}
 
 	struct Outcome {
 		code: i32,

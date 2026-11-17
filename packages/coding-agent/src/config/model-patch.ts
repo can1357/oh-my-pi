@@ -259,7 +259,7 @@ export interface ModelPatch {
 	maxContextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
-	/** Whether Codex requests should prefer WebSocket transport. */
+	/** WebSocket preference within catalog policy; explicit false disables transport selection. */
 	preferWebsockets?: boolean;
 	headers?: Record<string, string>;
 	resolveHeaders?: Model<Api>["resolveHeaders"];

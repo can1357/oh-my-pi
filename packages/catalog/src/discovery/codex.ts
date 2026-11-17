@@ -205,7 +205,6 @@ function buildCodexHeaders(options: CodexModelDiscoveryOptions, clientVersion: s
 	if (options.accountId && options.accountId.trim().length > 0) {
 		headers.set(OPENAI_HEADERS.ACCOUNT_ID, options.accountId);
 	}
-	headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, clientVersion);
 	headers.set("accept", "application/json");

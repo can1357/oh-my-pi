@@ -6,7 +6,6 @@
 
 use std::{fmt::NumBuffer, io::Write};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use libc::{gid_t, uid_t};
 use uucore::{
@@ -15,7 +14,7 @@ use uucore::{
 	process::{getegid, geteuid, getgid, getuid},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 mod options {
 	pub const OPT_IGNORE: &str = "ignore";
@@ -332,11 +331,6 @@ fn app() -> Command {
 				.value_name(options::ARG_USERS)
 				.value_hint(clap::ValueHint::Username),
 		)
-}
-
-/// Creates the `id` builtin registration.
-pub(crate) fn id_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Id, SE>()
 }
 
 #[cfg(test)]

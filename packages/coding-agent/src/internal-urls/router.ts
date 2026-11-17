@@ -272,11 +272,17 @@ export class InternalUrlRouter {
 	 * A mutating tool's URL target ({@link normalize}d) with a whole-file display selector
 	 * (`:raw`/`:conflicts`) peeled, so it names the file `read` does. Any other selector — a line
 	 * range, `raw:1-20`, a malformed `:-10` — throws ToolError: the tool addresses a whole file, and
-	 * dropping the selector would mutate a file the caller never named. Non-URLs pass through.
+	 * dropping the selector would mutate a file the caller never named. Device URLs (xd://) refuse
+	 * every selector: write approval judges the unpeeled URL, so peeling `xd://ast_edit:raw` would
+	 * dispatch a device the gate never judged. Non-URLs pass through.
 	 */
 	peelWriteSelector(input: string, tool: string): string {
 		const { path, sel } = this.split(input);
-		if (sel === undefined || WHOLE_FILE_SELECTOR_RE.test(sel)) return path;
+		if (sel === undefined) return path;
+		if (this.#registered(path)?.handler.spec.backing === "device") {
+			throw new ToolError(`${tool} does not accept the trailing selector ":${sel}" on a device URL. Remove it.`);
+		}
+		if (WHOLE_FILE_SELECTOR_RE.test(sel)) return path;
 		throw new ToolError(
 			`${tool} does not accept the trailing selector ":${sel}" — it addresses a whole file. ` +
 				`Remove ":${sel}", or if the filename truly ends with it, percent-encode the ":" as %3A.`,
@@ -432,6 +438,16 @@ export class InternalUrlRouter {
 		const lines: string[] = [];
 		for (const handler of this.#handlers.values()) {
 			const line = handler.promptDoc?.(host);
+			if (line !== undefined) lines.push(line);
+		}
+		return lines;
+	}
+
+	/** Rendered promptReference entries, registration order: the body of `xd://read/urls`. */
+	reference(): string[] {
+		const lines: string[] = [];
+		for (const handler of this.#handlers.values()) {
+			const line = handler.promptReference?.();
 			if (line !== undefined) lines.push(line);
 		}
 		return lines;

@@ -1,1 +1,1 @@
-`local://<name>.md`: shared artifact.
+local://<name>.md: shared artifact.

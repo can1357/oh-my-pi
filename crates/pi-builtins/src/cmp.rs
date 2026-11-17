@@ -11,11 +11,10 @@ use std::{
 	},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{BlockingFs, File};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Stdin, Utility, format_usage, matches_parser};
 
 const OPT_PRINT_BYTES: &str = "print-bytes";
 const OPT_IGNORE_INITIAL: &str = "ignore-initial";
@@ -567,11 +566,6 @@ fn input_error(name: &OsStr, err: &io::Error) -> String {
 
 fn io_message(err: io::Error) -> String {
 	err.to_string()
-}
-
-/// Creates the `cmp` builtin registration.
-pub(crate) fn cmp_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Cmp, SE>()
 }
 
 #[cfg(test)]

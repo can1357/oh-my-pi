@@ -9,7 +9,6 @@ use std::{
 	io::{BufWriter, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
@@ -19,7 +18,7 @@ use uucore::{
 	format::{Format, num_format, num_format::FloatVariant},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 mod number {
 use num_traits::Zero;
@@ -838,10 +837,6 @@ fn print_seq(
 	}
 	stdout.flush()?;
 	Ok(())
-}
-/// Creates the `seq` builtin registration.
-pub(crate) fn seq_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Seq, SE>()
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
 mod ax;
 mod capture;
+mod clicks;
 mod date;
 mod input;
 mod key_reroute;
@@ -9,6 +10,7 @@ mod process;
 #[allow(dead_code, reason = "shared with the input-release helper, which uses the rest")]
 mod release;
 mod release_guard;
+mod roster;
 mod route;
 mod session;
 mod skylight;
@@ -16,13 +18,18 @@ mod spaces;
 
 #[cfg(test)]
 pub(super) use ax::application_handle;
-pub(super) use ax::{ax_window_ids, has_open_window, menus};
-pub(super) use capture::{application_windows, has_onscreen_window};
+pub(super) use ax::{ax_window_ids, has_open_window, is_standard_window, menus};
+pub(super) use capture::{application_windows, has_onscreen_window, window_titles};
+pub(super) use clicks::ClickJournal;
 use image::RgbaImage;
+#[cfg(test)]
+pub(super) use input::entry_front_pinned;
+pub(super) use input::pin_entry_front;
 use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
 pub(super) use process::started as process_started;
+pub(super) use roster::window_roster;
 pub(super) use session::screen_state;
-pub(super) use skylight::front_pid;
+pub(super) use skylight::{FrontApp, front_app, front_pid, input_held};
 pub(super) use spaces::window_on_another_space;
 
 use self::{
@@ -37,13 +44,13 @@ use super::{
 		AxBackend, Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery,
 		ElementInput, PointerEvent, locate_element_click,
 	},
-	control::OperationToken,
+	control::{self, OperationToken},
 	error::{CoreResult, DesktopError},
 	frame::FrameGeometry,
 	keys::KeyName,
 	types::{
-		CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow, DisplaySelector,
-		ScreenState, Target,
+		AxTextSelection, CaptureCaps, DesktopCapabilities, DesktopDisplay, DesktopWindow,
+		DisplaySelector, ScreenState, Target,
 	},
 };
 
@@ -80,6 +87,7 @@ impl Backend for MacosBackend {
 			0
 		};
 		let screen = session::screen_state(self.capture.selector());
+		let (secure_input, secure_input_app) = session::secure_input();
 		DesktopCapabilities {
 			backend: "quartz".to_string(),
 			display_server: Some("Quartz WindowServer".to_string()),
@@ -92,7 +100,10 @@ impl Backend for MacosBackend {
 			menus: ax_trusted,
 			held_input: ax_trusted,
 			spaces: spaces::supported(),
-			global_escape: permission::listen_events(),
+			// The Escape monitor sees no key at all while secure input holds.
+			global_escape: permission::listen_events() && !secure_input,
+			secure_input,
+			secure_input_app,
 			capture_permission: permission_label(capture_permission),
 			input_permission: permission_label(permission::post_events()),
 			ax_permission: permission_label(ax_trusted),
@@ -146,6 +157,14 @@ impl Backend for MacosBackend {
 		session::hold_display_awake().map(|hold| Box::new(hold) as DisplayAwakeHold)
 	}
 
+	fn admit_takeover(&mut self) -> CoreResult<()> {
+		control::intervention::admit_takeover()
+	}
+
+	fn takeover_admitted(&mut self) -> CoreResult<bool> {
+		Ok(control::intervention::takeover_admitted())
+	}
+
 	fn capture(
 		&mut self,
 		target: &Target,
@@ -170,6 +189,18 @@ impl Backend for MacosBackend {
 				.input
 				.pointer(target, event, None, mode, EntryFront::now(), &self.capture)
 		})
+	}
+
+	fn drag_selection(
+		&mut self,
+		target: &Target,
+		event: &PointerEvent,
+		mode: DeliveryMode,
+		token: &OperationToken,
+	) -> CoreResult<Option<AxTextSelection>> {
+		token.check()?;
+		Self::require_input_permission()?;
+		input::drag_selection(target, event, mode, &self.capture)
 	}
 
 	fn pointer_menu(
@@ -235,6 +266,7 @@ impl Backend for MacosBackend {
 		// is busy; the user's front app is read before it
 		// ([`EntryFront::before`]).
 		let (entry_front, id) = EntryFront::before(skylight::front_pid, || {
+			ax::require_element_read_as(ax::mac_handle(element)?)?;
 			let windows = self.capture.windows()?;
 			self.ax.window_id(element, &windows)
 		})?;
@@ -260,8 +292,18 @@ impl Backend for MacosBackend {
 		Self::require_input_permission()?;
 		// The element's bounds and window are read from its application, which
 		// blocks while it is busy; the user's front app is read before them.
-		let (entry_front, (target, event)) =
-			EntryFront::before(skylight::front_pid, || locate_element_click(self, element, click))?;
+		let mac = ax::mac_handle(element)?;
+		let (entry_front, (target, event, _aimed)) = EntryFront::before(skylight::front_pid, || {
+			ax::require_element_read_as(mac)?;
+			if ax::click_judges_placement(click.mode) {
+				ax::require_shown(mac)?;
+			}
+			let (target, event) = locate_element_click(self, element, click)?;
+			// The click goes to the element's frame as read just now; no press
+			// is posted once the app has sorted another row into that place.
+			let aimed = input::aim_at_element(mac)?;
+			Ok((target, event, aimed))
+		})?;
 		if click.checks_menu_press() {
 			self.refuse_menu_press(&target, &event)?;
 		}

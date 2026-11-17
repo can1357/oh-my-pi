@@ -77,6 +77,16 @@ history remainder, prepares `remainder || finalViewport`, and performs one
 synchronous `terminal.write`. No block-at-a-time replay frames are observable.
 Ordinary renders never audit or rewrite terminal history.
 
+Without synchronized output (Terminal.app ignores DEC 2026) the terminal may
+present any prefix of a frame's write, so those frames never repaint through
+rows that only moved. Rows about to leave the screen first show their history
+line, line feeds on the bottom row push them into scrollback, surviving rows
+shift into place with DL/IL (never deleting on the top row, which Terminal.app
+archives into scrollback), and only rows that still differ are rewritten. Every
+intermediate screen is the previous frame scrolled or shifted, never a row
+beside its stale copy or an erased band awaiting repaint. Frames with images or
+OSC 66 text keep the plain row-rewrite path.
+
 Visible overlays are screen-coordinate content. They composite over the
 viewport and never become history. Showing, updating, or closing an overlay
 only repaints the viewport.

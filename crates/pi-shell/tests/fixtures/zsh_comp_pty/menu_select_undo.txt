@@ -1,0 +1,18 @@
+### ": \t"
+% :
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,4
+### "\t"
+% : dir1/
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\u{1b}[C"
+% : dir2/
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\u{1f}"
+% :
+@ 0,4
+### "\u{1f}"
+% :
+@ 0,3

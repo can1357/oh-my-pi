@@ -795,6 +795,21 @@ describe("browser settle — lifecycle freeze via CDP", () => {
 			expect(second.tab.persist).toBe(true);
 		}, 120_000);
 
+		it("closes a persist tab in omp's own Chromium when its session ends", async () => {
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+			const name = `settle-persist-end-${process.pid}`;
+			const url = `data:text/html,<title>${name}</title>`;
+			await acquireTab(name, browser, {
+				url,
+				timeoutMs: 30_000,
+				ownerSessionId: "session-persist-end",
+				persist: true,
+			});
+			expect(await releaseTabsForOwner("session-persist-end", { kill: true })).toBe(1);
+			expect((await browser.browser.pages()).some(page => page.url() === url)).toBe(false);
+		}, 120_000);
+
 		it("recreates a tab reused after eviction instead of resurrecting state", async () => {
 			// Worker-tab release→recreate cannot run in this environment
 			// (Bun worker re-spawn fails even on the clean tree); the

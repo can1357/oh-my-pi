@@ -25,7 +25,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import type { AsyncJob, AsyncJobManager, AsyncJobRunResult } from "../async/job-manager";
+import type { AsyncJob, AsyncJobManagerApi, AsyncJobRunResult } from "../async/job-manager";
 import { validateAgentAccountPools } from "../config/account-pools";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
@@ -102,7 +102,7 @@ export interface VibeParentSession {
 		Partial<
 			Pick<SessionManager, "appendModeChange" | "appendEntriesAtomically" | "recoverPersistenceFromCurrentState">
 		>;
-	asyncJobManager?: AsyncJobManager;
+	asyncJobManager?: AsyncJobManagerApi;
 	settings: ToolSession["settings"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
@@ -486,7 +486,7 @@ export class VibeSessionRegistry {
 		for (const record of pending) record.terminalPersisted = true;
 	}
 
-	#manager(session: ToolSession): AsyncJobManager {
+	#manager(session: ToolSession): AsyncJobManagerApi {
 		const manager = session.asyncJobManager;
 		if (!manager) {
 			throw new ToolError("Vibe sessions require async execution (no background job manager is available).");
@@ -1017,7 +1017,7 @@ export class VibeSessionRegistry {
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */
-	async suspendScope(scope: VibeOwnerScope, manager?: AsyncJobManager): Promise<number> {
+	async suspendScope(scope: VibeOwnerScope, manager?: AsyncJobManagerApi): Promise<number> {
 		const records = [...this.#records.values()].filter(record => matchesScope(record, scope));
 		const teardown = records.map(record => ({
 			record,
@@ -1140,7 +1140,7 @@ export class VibeSessionRegistry {
 
 	async #killRecord(
 		record: VibeRecord,
-		manager: AsyncJobManager | undefined,
+		manager: AsyncJobManagerApi | undefined,
 		session: VibeParentSession,
 		reason: VibeTombstoneReason,
 		persistTerminal = true,
@@ -1312,6 +1312,7 @@ export class VibeSessionRegistry {
 			asyncJobManager: session.asyncJobManager,
 			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
+			mcpToolScope: session.mcpToolScope,
 			contextFiles: session.contextFiles,
 			noContextFiles: session.noContextFiles,
 			skills: [...(session.skills ?? [])],
@@ -1339,7 +1340,7 @@ export class VibeSessionRegistry {
 	/** Register one background job that runs a single worker turn and self-delivers its result. */
 	#registerTurnJob(
 		session: ToolSession,
-		manager: AsyncJobManager,
+		manager: AsyncJobManagerApi,
 		record: VibeRecord,
 		message: string,
 		options: { first: boolean },
@@ -1423,7 +1424,7 @@ export class VibeSessionRegistry {
 	/** Post-turn bookkeeping shared by success and failure paths: clear the in-flight turn, flush the queue. */
 	async #finishTurn(
 		session: ToolSession,
-		manager: AsyncJobManager,
+		manager: AsyncJobManagerApi,
 		record: VibeRecord,
 		settledJobId: string,
 	): Promise<void> {
@@ -1472,7 +1473,7 @@ export class VibeSessionRegistry {
 	/** Format a settled turn into the self-delivering result text (activity trace + response). */
 	async #settleTurn(
 		session: ToolSession,
-		manager: AsyncJobManager,
+		manager: AsyncJobManagerApi,
 		record: VibeRecord,
 		turn: VibeTurn,
 		settledJobId: string,
@@ -1564,7 +1565,7 @@ export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | nu
 	for (const id of ids) {
 		const workerSession = registry.get(id)?.session;
 		if (!workerSession?.isStreaming) continue;
-		const rate = calculateTokensPerSecond(workerSession.state.messages, true);
+		const rate = calculateTokensPerSecond(workerSession.messages, true);
 		if (rate !== null) {
 			total += rate;
 			any = true;

@@ -31,10 +31,9 @@ use std::{
 	sync::Arc,
 };
 
-use brush_core::openfiles::OpenFile;
 use parking_lot::Mutex;
 
-use crate::host::OutputGate;
+use crate::{host::OutputGate, openfile::OpenFile};
 
 /// Pending bytes at which a regular-file destination is drained before the
 /// utility ends.
@@ -154,7 +153,7 @@ impl Native {
 
 impl AsyncOut {
 	/// Output delivered to a provider file through its async API.
-	pub fn provider(file: pi_vfs::File, gate: OutputGate) -> Self {
+	pub fn provider(file: Arc<pi_vfs::File>, gate: OutputGate) -> Self {
 		Self::new(Sink::Provider(tokio::sync::Mutex::new(())), OpenFile::Vfs(file), false, gate)
 	}
 
@@ -183,6 +182,11 @@ impl AsyncOut {
 	/// Whether the destination is a terminal.
 	pub fn is_terminal(&self) -> bool {
 		self.shared.handle.is_terminal()
+	}
+
+	/// Bytes written and not yet delivered.
+	pub fn pending_len(&self) -> usize {
+		self.shared.pending.lock().len()
 	}
 
 	/// Delivers the pending bytes: all of them when `full` or when the
@@ -488,6 +492,20 @@ impl Source {
 	/// Size and type reported at open, when known.
 	pub fn metadata(&self) -> Option<&pi_vfs::Metadata> {
 		self.metadata.as_ref()
+	}
+
+	/// The identity of the file behind the opened handle, read from the handle
+	/// rather than from the path it was opened by.
+	///
+	/// [`Source::metadata`] is the stat taken before the open, which a name
+	/// replaced in between makes stale; this one names the file that was
+	/// actually opened. A descriptor or an in-process stream has no identity
+	/// beyond the one recorded at open, and is reported from that.
+	pub async fn handle_metadata(&self) -> Option<pi_vfs::Metadata> {
+		match &self.repr {
+			Repr::File(file) => file.metadata_async().await.ok(),
+			_ => self.metadata.clone(),
+		}
 	}
 }
 

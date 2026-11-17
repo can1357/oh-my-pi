@@ -1,15 +1,13 @@
 import * as fsp from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import type { ProgressInfo } from "@huggingface/transformers";
 import {
 	ensureRuntimeInstalled,
 	getTinyModelsCacheDir,
 	installRuntimeModuleResolver,
-	isCompiledBinary,
 	resolveRuntimeModule,
 } from "@oh-my-pi/pi-utils";
-import packageJson from "../../package.json" with { type: "json" };
+import type { ProgressInfo } from "./transformers-types";
 
 /**
  * Child-side scaffolding shared by the ONNX inference worker bodies
@@ -27,7 +25,8 @@ import packageJson from "../../package.json" with { type: "json" };
  */
 
 export const TRANSFORMERS_PACKAGE = "@huggingface/transformers";
-const COMPILED_TRANSFORMERS_VERSION = process.env.PI_TINY_TRANSFORMERS_VERSION;
+/** Exact Transformers.js version installed on first use by the speech and tiny workers. */
+export const TRANSFORMERS_VERSION = "4.3.0";
 const ONNX_RUNTIME_NODE_PACKAGE = "onnxruntime-node";
 const ONNX_RUNTIME_CUDA_INSTALL = "cuda12";
 const ONNX_RUNTIME_CUDA_PROVIDER_FILES = [
@@ -36,8 +35,6 @@ const ONNX_RUNTIME_CUDA_PROVIDER_FILES = [
 	"libonnxruntime_providers_tensorrt.so",
 ] as const;
 const LINUX_X64_ONNX_RUNTIME_CUDA_PROVIDER_DIR = path.join("bin", "napi-v6", "linux", "x64");
-
-const sourceRequire = createRequire(import.meta.url);
 
 // ── Error serialization ─────────────────────────────────────────────
 
@@ -254,44 +251,14 @@ export async function ensureOnnxRuntimeCudaProviders(
 }
 
 /**
- * Prepare a freshly-installed compiled runtime for loading and return the
+ * Prepare a runtime installation for loading and return the
  * absolute entrypoint of `packageName` to `require`.
  */
-async function prepareCompiledRuntime(runtimeDir: string, packageName: string): Promise<string> {
+async function prepareInstalledRuntime(runtimeDir: string, packageName: string): Promise<string> {
 	const nodeModules = await installSharpStubResolver(runtimeDir);
 	const entry = resolveRuntimeModule(nodeModules, packageName);
-	if (!entry) throw new Error(`Unable to resolve ${packageName} in compiled runtime at ${nodeModules}`);
+	if (!entry) throw new Error(`Unable to resolve ${packageName} in runtime at ${nodeModules}`);
 	return entry;
-}
-
-// ── Transformers version resolution ─────────────────────────────────
-
-function resolveTransformersVersionSpec(): string {
-	const manifest = packageJson as {
-		optionalDependencies?: Record<string, string>;
-		dependencies?: Record<string, string>;
-	};
-	const versionSpec =
-		manifest.optionalDependencies?.[TRANSFORMERS_PACKAGE] ?? manifest.dependencies?.[TRANSFORMERS_PACKAGE];
-	if (!versionSpec) throw new Error(`${TRANSFORMERS_PACKAGE} is missing from package.json optionalDependencies`);
-	if (!versionSpec.startsWith("catalog:")) return versionSpec;
-	if (COMPILED_TRANSFORMERS_VERSION) return COMPILED_TRANSFORMERS_VERSION;
-	const installed = sourceRequire(`${TRANSFORMERS_PACKAGE}/package.json`) as { version: string };
-	return installed.version;
-}
-
-let cachedTransformersVersionSpec: string | undefined;
-
-/**
- * Lazily resolve (and memoize) the transformers version spec. In the `catalog:`
- * case {@link resolveTransformersVersionSpec} `require`s the installed
- * `@huggingface/transformers/package.json`, so it is only ever touched on the
- * compiled-binary runtime-install path — loading a worker (smoke-test ping,
- * online path) never triggers the transformers resolve/install dance.
- */
-export function getTransformersVersionSpec(): string {
-	cachedTransformersVersionSpec ??= resolveTransformersVersionSpec();
-	return cachedTransformersVersionSpec;
 }
 
 // ── Transformers runtime loader ─────────────────────────────────────
@@ -437,9 +404,8 @@ export class MemoizedRuntime<T> {
 }
 
 /**
- * Load the `@huggingface/transformers` runtime into `holder` (memoized): from
- * the ambient install when running from source, or from a version-keyed side
- * runtime (resolved lazily at `runtimeDir()`) when running as a compiled binary.
+ * Install and load the pinned Transformers.js runtime into `holder` on first
+ * use, from a version-keyed cache resolved lazily at `runtimeDir()`.
  * The result is cast to the caller's concrete runtime type `T`.
  */
 export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
@@ -449,46 +415,47 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 	modelKey: K,
 	runtimeDir: () => string,
 ): Promise<T> {
-	return holder.load(async () => {
-		if (!isCompiledBinary()) {
-			const entry = sourceRequire.resolve(TRANSFORMERS_PACKAGE);
-			return attachTransformersRuntimeMetadata(configureTransformers(sourceRequire(entry) as T), {
-				__ompTransformersEntry: entry,
+	return holder
+		.load(async () => {
+			const installedDir = await ensureRuntimeInstalled({
+				runtimeDir: runtimeDir(),
+				install: {
+					dependencies: { [TRANSFORMERS_PACKAGE]: TRANSFORMERS_VERSION },
+					trustedDependencies: ["onnxruntime-node"],
+				},
+				probePackage: TRANSFORMERS_PACKAGE,
+				onPhase: phase =>
+					transport.send({
+						type: "progress",
+						id: requestId,
+						event: {
+							modelKey,
+							status: phase,
+							name: `${TRANSFORMERS_PACKAGE}@${TRANSFORMERS_VERSION}`,
+						},
+					}),
 			});
-		}
-		const installedDir = await ensureRuntimeInstalled({
-			runtimeDir: runtimeDir(),
-			install: {
-				dependencies: { [TRANSFORMERS_PACKAGE]: getTransformersVersionSpec() },
-				trustedDependencies: ["onnxruntime-node"],
-			},
-			probePackage: TRANSFORMERS_PACKAGE,
-			onPhase: phase =>
-				transport.send({
-					type: "progress",
-					id: requestId,
-					event: {
-						modelKey,
-						status: phase,
-						name: `${TRANSFORMERS_PACKAGE}@${getTransformersVersionSpec()}`,
-					},
-				}),
+			let cudaRepairError: string | undefined;
+			try {
+				await ensureOnnxRuntimeCudaProviders(installedDir);
+			} catch (repairError) {
+				// Deferred failure: keep loading Transformers so `loadPipelineWithDeviceFallback`
+				// still gets its CUDA→CPU retry. The error is surfaced through the CUDA
+				// diagnostics attached to the runtime metadata.
+				cudaRepairError = errorMessage(repairError);
+			}
+			const entry = await prepareInstalledRuntime(installedDir, TRANSFORMERS_PACKAGE);
+			const require_ = createRequire(entry);
+			return attachTransformersRuntimeMetadata(configureTransformers(require_(entry) as T), {
+				__ompRuntimeNodeModules: path.join(installedDir, "node_modules"),
+				__ompTransformersEntry: entry,
+				__ompCudaRepairError: cudaRepairError,
+			});
+		})
+		.catch(error => {
+			throw new Error(
+				`Unable to install or load ${TRANSFORMERS_PACKAGE}@${TRANSFORMERS_VERSION}: ${errorMessage(error)}`,
+				{ cause: error },
+			);
 		});
-		let cudaRepairError: string | undefined;
-		try {
-			await ensureOnnxRuntimeCudaProviders(installedDir);
-		} catch (repairError) {
-			// Deferred failure: keep loading Transformers so `loadPipelineWithDeviceFallback`
-			// still gets its CUDA→CPU retry. The error is surfaced through the CUDA
-			// diagnostics attached to the runtime metadata.
-			cudaRepairError = errorMessage(repairError);
-		}
-		const entry = await prepareCompiledRuntime(installedDir, TRANSFORMERS_PACKAGE);
-		const require_ = createRequire(entry);
-		return attachTransformersRuntimeMetadata(configureTransformers(require_(entry) as T), {
-			__ompRuntimeNodeModules: path.join(installedDir, "node_modules"),
-			__ompTransformersEntry: entry,
-			__ompCudaRepairError: cudaRepairError,
-		});
-	});
 }

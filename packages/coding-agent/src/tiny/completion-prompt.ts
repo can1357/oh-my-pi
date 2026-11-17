@@ -1,4 +1,4 @@
-import type { TextGenerationPipeline } from "@huggingface/transformers";
+import type { TextGenerationPipeline } from "../subprocess/transformers-types";
 
 const GENERATION_STATEMENT = /{%-?\s*(?:endgeneration|generation)\s*-?%}/g;
 

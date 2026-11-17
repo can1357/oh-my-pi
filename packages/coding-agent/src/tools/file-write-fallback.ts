@@ -129,6 +129,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, isFsError, logger } from "@oh-my-pi/pi-utils";
+import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import type { BunFile } from "bun";
 import type { ExtensionContext } from "../extensibility/extensions/types";
 import { resolveSyscallTarget } from "./path-utils";
@@ -400,6 +401,8 @@ async function classifyWriteFailure(dst: string, error: unknown): Promise<WriteF
 }
 
 export async function writeFileWithFallback(dst: string, content: string, file?: BunFile): Promise<void> {
+	// Overwriting a live SQLite database or `-shm` destroys it (issue #15586).
+	assertNotHeldOpen(dst);
 	// Attempt 0 is the plain write. The single retry is reachable only when the
 	// first failure turned out to be a parent-directory race this call repaired,
 	// which bounds the loop at two writes.

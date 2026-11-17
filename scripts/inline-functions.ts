@@ -114,7 +114,7 @@ interface Edit {
 	text: string;
 }
 
-export interface Options {
+interface Options {
 	maxStatements: number;
 	nameFilter: RegExp | undefined;
 	verbose: boolean;
@@ -946,7 +946,7 @@ function inlineCandidate(candidate: Candidate, strict: boolean): void {
 }
 
 /** Inline every qualifying function, re-collecting after each so chained helpers resolve. */
-export function inlineFile(sourceFile: SourceFile, opts: Options): string[] {
+function inlineFile(sourceFile: SourceFile, opts: Options): string[] {
 	const inlined: string[] = [];
 	for (let round = 0; round < 100_000; round++) {
 		const candidates = collectCandidates(sourceFile, opts);

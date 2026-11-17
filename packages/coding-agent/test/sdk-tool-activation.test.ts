@@ -1778,7 +1778,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(keptWithinRun.content).toEqual([{ type: "text", text: "Result submitted." }]);
 
 			resetYieldTurnState(yieldTool);
-			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/no text \(thinking only\)/);
+			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/none were submitted/);
 		} finally {
 			await session.dispose();
 		}
@@ -2615,6 +2615,63 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(result?.isError).toBeFalsy();
 				expect(JSON.stringify(result?.content)).toContain("bank contents");
 				expect(executed).toBe(1);
+			} finally {
+				await session.dispose();
+			}
+		});
+	});
+
+	it.each([
+		// Anthropic tool names cannot carry `://`, so Claude substitutes one
+		// underscore per dropped character, or fewer.
+		["xd_probe_only", "probe_only"],
+		["xd__probe", "probe"],
+		["xd___probe", "probe"],
+		// A device whose real name starts with `xd_` keeps its exact dispatch
+		// instead of being read as the alias of `probe`.
+		["xd_probe", "xd_probe"],
+	])("dispatches a %s call to the mounted %s device", async (callName, device) => {
+		const tempDir = makeTempDir();
+		const executed: string[] = [];
+		const devices: ExtensionFactory = pi => {
+			for (const name of ["probe", "probe_only", "xd_probe"]) {
+				pi.registerTool({
+					name,
+					label: name,
+					description: `Device ${name}`,
+					parameters: type({}),
+					async execute() {
+						executed.push(name);
+						return { content: [{ type: "text", text: name }] };
+					},
+				});
+			}
+		};
+
+		await withProviderAuth(["openai"], async () => {
+			const { session } = await createAgentSession({ ...baseOptions(tempDir), extensions: [devices] });
+			try {
+				expect(session.getMountedXdevToolNames()).toEqual(
+					expect.arrayContaining(["probe", "probe_only", "xd_probe"]),
+				);
+
+				const toolCallId = "xd-underscore-spelling-1";
+				const mock = createMockModel({
+					responses: [
+						{ content: [{ type: "toolCall", id: toolCallId, name: callName, arguments: {} }] },
+						{ content: [{ type: "text", text: "done" }] },
+					],
+				});
+				vi.spyOn(session.agent, "streamFn").mockImplementation(mock.stream);
+
+				await session.prompt("hi");
+
+				const result = session.messages.find(
+					(message): message is ToolResultMessage =>
+						message.role === "toolResult" && message.toolCallId === toolCallId,
+				);
+				expect(result?.isError).toBeFalsy();
+				expect(executed).toEqual([device]);
 			} finally {
 				await session.dispose();
 			}

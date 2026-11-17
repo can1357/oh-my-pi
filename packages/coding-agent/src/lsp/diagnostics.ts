@@ -32,6 +32,7 @@ import {
 	formatDiagnostic,
 	formatDiagnosticsSummary,
 	formatLocation,
+	mergeDiagnosticLists,
 	readLocationContext,
 	sortDiagnostics,
 	uriToFile,
@@ -239,11 +240,13 @@ interface WaitForDiagnosticsOptions {
  * Distinguishes a usable report from a failed request so a timeout or RPC error
  * is never mistaken for a clean file. `diagnostics` holds the report's items (an
  * empty array means the server reported the file clean); `failed` carries the
- * error when the pull could not complete.
+ * error when the pull could not complete; `declined` marks an answer that carries
+ * no report at all.
  */
 interface PullDiagnosticsOutcome {
 	diagnostics?: Diagnostic[];
 	failed?: unknown;
+	declined?: boolean;
 }
 
 function requestDocumentDiagnostics(
@@ -254,7 +257,10 @@ function requestDocumentDiagnostics(
 ): Promise<PullDiagnosticsOutcome> {
 	return sendRequest(client, "textDocument/diagnostic", { textDocument: { uri } }, signal, timeoutMs)
 		.then(report => {
-			if (!report || typeof report !== "object" || !("kind" in report) || report.kind !== "full") {
+			// LSP requires a report, but ruby-lsp answers `null` for a document it does not
+			// diagnose (ERB, or outside its workspace) and when its own diagnostics fail.
+			if (report === null || report === undefined) return { declined: true };
+			if (typeof report !== "object" || !("kind" in report) || report.kind !== "full") {
 				return {};
 			}
 			if (!("items" in report) || !Array.isArray(report.items)) return {};
@@ -319,7 +325,8 @@ function isProvisionalColdPublish(
 /**
  * Wait for a fresh diagnostics report for `uri`: a pull answer, or a publish that
  * passes the freshness checks. Resolves `undefined` when none arrives within the
- * budget, which callers MUST NOT read as a clean file; `[]` is a clean report.
+ * budget, or within one settle window of the server answering the pull without a
+ * report, which callers MUST NOT read as a clean file; `[]` is a clean report.
  */
 export async function waitForDiagnostics(
 	client: LspClient,
@@ -360,7 +367,7 @@ export async function waitForDiagnostics(
 
 		const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 		const published = client.diagnostics.get(uri);
-		if (published && versionOk) {
+		if (published && versionOk && !supportsDocumentDiagnostics(client)) {
 			// Server honored our exact document version → authoritative, accept now.
 			if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 				return published.diagnostics;
@@ -393,6 +400,11 @@ export async function waitForDiagnostics(
 				pulled = pullResult.diagnostics;
 				break;
 			}
+			if (pullResult.declined) {
+				// A pull answered without a report is the server's answer for this document, not a
+				// failed attempt: give a publish already on its way one settle window, not the budget.
+				deadline = Math.min(deadline, Date.now() + settleMs);
+			}
 			if (pullResult.failed !== undefined) {
 				if (shouldRetriggerPull(pullResult.failed)) {
 					// The server asked to be asked again.
@@ -408,7 +420,7 @@ export async function waitForDiagnostics(
 
 	const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
 	const published = client.diagnostics.get(uri);
-	if (published && versionOk) {
+	if (published && versionOk && !supportsDocumentDiagnostics(client)) {
 		if (expectedDocumentVersion !== undefined && published.version === expectedDocumentVersion) {
 			return published.diagnostics;
 		}
@@ -428,6 +440,31 @@ export async function waitForDiagnostics(
 	}
 	throwIfAborted(signal);
 	if (pulled === undefined) {
+		// The push fallback stands in for the pull only when a publish arrived after the
+		// caller's `minVersion`; an older push never vouches for the current document.
+		if (versionOk && supportsDocumentDiagnostics(client)) {
+			const publishedRecord = client.publishedDiagnostics.get(uri);
+			if (publishedRecord !== undefined) {
+				const now = Date.now();
+				const docVersion = client.openFiles.get(uri)?.version;
+				const isFresh =
+					publishedRecord.version === null
+						? !isProvisionalColdPublish(client, uri, publishedRecord, expectedDocumentVersion, now)
+						: docVersion === undefined || publishedRecord.version >= docVersion;
+				if (isFresh) {
+					const pulledRecord = client.pulledDiagnostics.get(uri);
+					const merged = pulledRecord
+						? mergeDiagnosticLists(pulledRecord.diagnostics, publishedRecord.diagnostics)
+						: publishedRecord.diagnostics;
+					client.diagnostics.set(uri, {
+						diagnostics: merged,
+						version: expectedDocumentVersion ?? docVersion ?? null,
+					});
+					client.diagnosticsVersion += 1;
+					return merged;
+				}
+			}
+		}
 		// A pull the server failed leaves the file's state unknown; never let it
 		// collapse into a clean empty result the caller renders as "OK".
 		if (pullFailure !== undefined) {
@@ -435,12 +472,25 @@ export async function waitForDiagnostics(
 		}
 		return undefined;
 	}
-	client.diagnostics.set(uri, {
+	client.pulledDiagnostics.set(uri, {
 		diagnostics: pulled,
 		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
 	});
+	const publishedRecord = client.publishedDiagnostics.get(uri);
+	const docVersion = client.openFiles.get(uri)?.version;
+	// Skip pushed records whose numeric version is older than the open document's version;
+	// unversioned flycheck publishes (version === null) still merge. Stale rustc warnings
+	// survive edits until the next flycheck publish (bounded by didSave), possibly with shifted ranges.
+	const canMergePush =
+		publishedRecord !== undefined &&
+		(publishedRecord.version === null || docVersion === undefined || publishedRecord.version >= docVersion);
+	const combined = canMergePush ? mergeDiagnosticLists(pulled, publishedRecord.diagnostics) : pulled;
+	client.diagnostics.set(uri, {
+		diagnostics: combined,
+		version: expectedDocumentVersion ?? client.openFiles.get(uri)?.version ?? null,
+	});
 	client.diagnosticsVersion += 1;
-	return pulled;
+	return combined;
 }
 
 interface WaitForRebuiltDiagnosticsOptions {

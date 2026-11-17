@@ -1,1 +1,1 @@
-`omp://`: harness docs, AVOID unless asked.
+omp://: harness docs, AVOID unless asked.

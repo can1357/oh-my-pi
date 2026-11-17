@@ -1,8 +1,20 @@
-import type { DataType } from "@huggingface/transformers";
 import { $env } from "@oh-my-pi/pi-utils";
 
 /** ONNX quantization / precision for local tiny models (transformers.js `dtype`). */
-export type TinyModelDtype = DataType;
+export type TinyModelDtype =
+	| "auto"
+	| "fp32"
+	| "fp16"
+	| "q8"
+	| "int8"
+	| "uint8"
+	| "q4"
+	| "bnb4"
+	| "q4f16"
+	| "q2"
+	| "q2f16"
+	| "q1"
+	| "q1f16";
 
 const DTYPE_VALUES: Record<TinyModelDtype, true> = {
 	auto: true,

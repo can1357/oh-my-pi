@@ -24,9 +24,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { parseArgs } from "node:util";
+import { diffLines } from "@oh-my-pi/pi-natives";
 import { prompt, TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import { diffLines } from "diff";
 import { formatContent } from "./formatter";
 import {
 	commonPrefixLength,

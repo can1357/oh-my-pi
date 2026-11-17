@@ -60,6 +60,7 @@ function createCloneStub(overrides?: {
 	lastAssistantText?: string;
 	activeToolNames?: string[];
 	enabledToolNames?: string[];
+	mountedToolNames?: string[];
 }) {
 	const messages: AgentMessage[] = [];
 	const appendMessage = vi.fn((message: AgentMessage) => {
@@ -72,6 +73,7 @@ function createCloneStub(overrides?: {
 		setTodoPhases: vi.fn(),
 		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
 		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
+		getMountedXdevToolNames: vi.fn(() => overrides?.mountedToolNames ?? []),
 		setActiveToolPresentation: vi.fn(async () => {}),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
@@ -81,8 +83,8 @@ function createCloneStub(overrides?: {
 		}),
 		prompt: vi.fn(overrides?.prompt ?? (async () => {})),
 		waitForIdle: vi.fn(async () => {}),
-		hasPendingAsyncWork: vi.fn(() => false),
-		settleAsyncWork: vi.fn(async () => {}),
+		isRunActive: false,
+		waitForRunEnd: vi.fn(async () => {}),
 		getLastAssistantMessage: vi.fn(() => assistantText(overrides?.lastAssistantText ?? "done")),
 		abort: vi.fn(overrides?.abort ?? (() => {})),
 		dispose: vi.fn(async () => {}),
@@ -97,6 +99,9 @@ function createCloneStub(overrides?: {
 	};
 }
 
+/** Harness directories outlive `createContext`, so the `afterEach` below removes them. */
+const harnessTempDirs: TempDir[] = [];
+
 function createContext(overrides?: {
 	isStreaming?: boolean;
 	model?: Model;
@@ -110,6 +115,7 @@ function createContext(overrides?: {
 	extensionPaths?: unknown;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
+	harnessTempDirs.push(tempDir);
 	const parentFile = path.join(tempDir.path(), "parent.jsonl");
 	// The clone nests inside the parent's artifact directory, like a subagent.
 	const cloneFile = path.join(parentFile.slice(0, -6), "clone.jsonl");
@@ -190,11 +196,12 @@ function createContext(overrides?: {
 	};
 }
 
-describe("TanCommandController", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
+afterEach(() => {
+	vi.restoreAllMocks();
+	for (const dir of harnessTempDirs.splice(0)) dir[Symbol.dispose]();
+});
 
+describe("TanCommandController", () => {
 	it("rejects empty work before forking", async () => {
 		const harness = createContext();
 		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
@@ -248,6 +255,7 @@ describe("TanCommandController", () => {
 		expect(harness.register).toHaveBeenCalledWith("task", "/tan write the release note", expect.any(Function), {
 			ownerId: MAIN_AGENT_ID,
 			agentId: expect.stringMatching(/^Tan-/) as unknown as string,
+			request: "write the release note",
 		});
 		expect(harness.capturedOptions?.ownerId).toBe(MAIN_AGENT_ID);
 		expect(harness.sequence).toEqual(["register", "sendCustomMessage"]);
@@ -292,28 +300,17 @@ describe("TanCommandController", () => {
 		expect(opts.getSessionId?.()).toBe("parent-local-session");
 	});
 
-	it("keeps the tangent alive until successive descendant results produce the final answer", async () => {
+	it("keeps the tangent alive until its run ends with the final answer", async () => {
 		const harness = createContext();
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const { clone } = createCloneStub();
-		const firstEntered = Promise.withResolvers<void>();
-		const secondEntered = Promise.withResolvers<void>();
-		const firstResult = Promise.withResolvers<void>();
-		const secondResult = Promise.withResolvers<void>();
-		let generation = 0;
-		let answer = "preliminary answer";
-		clone.hasPendingAsyncWork.mockImplementation(() => generation < 2);
-		clone.settleAsyncWork.mockImplementation(async () => {
-			if (generation === 0) {
-				firstEntered.resolve();
-				await firstResult.promise;
-				answer = "first descendant result; another descendant is pending";
-			} else {
-				secondEntered.resolve();
-				await secondResult.promise;
-				answer = "final answer incorporating both descendant results";
-			}
-			generation++;
+		const waiting = Promise.withResolvers<void>();
+		const runEnded = Promise.withResolvers<void>();
+		let answer = "preliminary answer; descendant work is pending";
+		clone.isRunActive = true;
+		clone.waitForRunEnd.mockImplementation(async () => {
+			waiting.resolve();
+			await runEnded.promise;
 		});
 		clone.getLastAssistantMessage.mockImplementation(() => assistantText(answer));
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
@@ -322,46 +319,38 @@ describe("TanCommandController", () => {
 		await new TanCommandController(harness.ctx).start("integrate descendant results");
 		const run = harness.capturedRun;
 		if (!run) throw new Error("run function was not captured");
-		let returned = false;
 		const result = run({
 			jobId: "job-123",
 			signal: new AbortController().signal,
 			reportProgress: async () => {},
-		}).then(value => {
-			returned = true;
-			return value;
 		});
 		try {
-			// Racing the first wait against completion makes the old premature return
-			// fail immediately rather than waiting for a test timeout.
-			expect(await Promise.race([firstEntered.promise.then(() => "waiting"), result.then(() => "returned")])).toBe(
+			// Racing the wait against completion makes a premature return fail
+			// immediately rather than waiting for a test timeout.
+			expect(await Promise.race([waiting.promise.then(() => "waiting"), result.then(() => "returned")])).toBe(
 				"waiting",
 			);
 			expect(clone.dispose).not.toHaveBeenCalled();
-			firstResult.resolve();
-			await secondEntered.promise;
-			expect(returned).toBe(false);
-			expect(clone.dispose).not.toHaveBeenCalled();
-			secondResult.resolve();
-			expect(await result).toBe("final answer incorporating both descendant results");
+			answer = "final answer incorporating the descendant results";
+			runEnded.resolve();
+			expect(await result).toBe("final answer incorporating the descendant results");
 			expect(clone.dispose).toHaveBeenCalledTimes(1);
 		} finally {
-			firstResult.resolve();
-			secondResult.resolve();
+			runEnded.resolve();
 			await result;
 		}
 	});
 
-	it("cancels a tangent while descendant settlement is pending and disposes its clone", async () => {
+	it("cancels a tangent while its run awaits descendant work and disposes its clone", async () => {
 		const harness = createContext();
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const { clone } = createCloneStub();
-		const settling = Promise.withResolvers<void>();
-		const settled = Promise.withResolvers<void>();
-		clone.hasPendingAsyncWork.mockReturnValue(true);
-		clone.settleAsyncWork.mockImplementation(async () => {
-			settling.resolve();
-			await settled.promise;
+		const waiting = Promise.withResolvers<void>();
+		const runEnded = Promise.withResolvers<void>();
+		clone.isRunActive = true;
+		clone.waitForRunEnd.mockImplementation(async () => {
+			waiting.resolve();
+			await runEnded.promise;
 		});
 		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
 			session: clone,
@@ -372,15 +361,14 @@ describe("TanCommandController", () => {
 		const abort = new AbortController();
 		const result = run({ jobId: "job-123", signal: abort.signal, reportProgress: async () => {} });
 		try {
-			await settling.promise;
+			await waiting.promise;
 			abort.abort();
 			await expect(result).rejects.toThrow();
 			expect(clone.abort).toHaveBeenCalledTimes(1);
 			expect(clone.dispose).toHaveBeenCalledTimes(1);
 			expect(clone.getLastAssistantMessage).not.toHaveBeenCalled();
 		} finally {
-			clone.hasPendingAsyncWork.mockReturnValue(false);
-			settled.resolve();
+			runEnded.resolve();
 			await result.catch(() => {});
 		}
 	});
@@ -571,6 +559,7 @@ describe("TanCommandController", () => {
 			systemPrompt: ["system prompt"],
 			task: "park me",
 			tools: ["read", "bash"],
+			mountedTools: [],
 		});
 		// Parked (not unregistered) before dispose, then the disposed session is nulled
 		// out — the hub keeps the ref and reads its transcript from the session file.
@@ -580,8 +569,8 @@ describe("TanCommandController", () => {
 		expect(unregister).not.toHaveBeenCalled();
 	});
 
-	it("copies and persists the full enabled tool set", async () => {
-		const enabledToolNames = ["eval", "read", "bash"];
+	it("copies and persists the full enabled tool set and its xd:// devices", async () => {
+		const enabledToolNames = ["eval", "read", "bash", "ast_grep"];
 		const harness = createContext({ activeToolNames: ["eval"], enabledToolNames });
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const appendSessionInit = vi.fn();
@@ -589,6 +578,7 @@ describe("TanCommandController", () => {
 			sessionManager: { appendSessionInit },
 			activeToolNames: ["eval"],
 			enabledToolNames,
+			mountedToolNames: ["ast_grep"],
 		});
 		const createAgentSessionSpy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
 			session: clone,
@@ -601,7 +591,9 @@ describe("TanCommandController", () => {
 		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
 
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.toolNames).toEqual(enabledToolNames);
-		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: enabledToolNames }));
+		expect(appendSessionInit).toHaveBeenCalledWith(
+			expect.objectContaining({ tools: enabledToolNames, mountedTools: ["ast_grep"] }),
+		);
 	});
 
 	it("restores the request when compaction summarizes an already-dispatched turn", async () => {

@@ -4,7 +4,6 @@
 
 use std::{ffi::OsString, io::ErrorKind};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{Metadata, OpenOptions};
 use uucore::{
@@ -12,7 +11,7 @@ use uucore::{
 	parser::parse_size::{ParseSizeError, Parser, allow_list_with_all_suffixes},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum TruncateMode {
@@ -361,11 +360,6 @@ fn parse_mode_and_size(size_string: &str) -> Result<TruncateMode, ParseSizeError
 	} else {
 		Err(ParseSizeError::ParseFailure(size_string.to_string()))
 	}
-}
-
-/// Creates the `truncate` builtin registration.
-pub(crate) fn truncate_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Truncate, SE>()
 }
 
 #[cfg(test)]

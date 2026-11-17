@@ -71,6 +71,7 @@ import {
 export type { EditorBorderStyle, EditorTopBorder };
 
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list";
+import { editorKey } from "../chrome/keybinding-hints";
 
 /** The TSP root an {@link Editor.describeLayout} hook builds around the `editor` node. */
 export interface NativeEditorLayout {
@@ -102,7 +103,7 @@ function sameDecorations(a: readonly TspEditorDecoration[], b: readonly TspEdito
 	for (let i = 0; i < a.length; i++) {
 		const x = a[i]!;
 		const y = b[i]!;
-		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx) return false;
+		if (x.from !== y.from || x.to !== y.to || x.s !== y.s || x.fx !== y.fx || x.blob !== y.blob) return false;
 	}
 	return true;
 }
@@ -818,8 +819,9 @@ export class Editor implements Component, Focusable {
 	// Line measurement + word-wrap cache shared by #layoutText,
 	// #buildVisualLineMap, and key handlers within a frame. Line text is a
 	// sound key (strings are immutable); cleared on layout-width or
-	// width-config (Hangul jamo setting) change and size-bounded so stale
-	// lines don't accumulate.
+	// width-config (Hangul jamo setting) change, and bounded relative to the
+	// buffer's line count so every current line stays cached across frames
+	// while stale edited-away lines can't accumulate unboundedly.
 	#wrapCache = new Map<string, WrapEntry>();
 	#wrapCacheWidth = -1;
 	#wrapCacheEpoch = -1;
@@ -866,9 +868,19 @@ export class Editor implements Component, Focusable {
 	#autocompleteList?: SelectList;
 	#autocompleteState: "regular" | "force" | "assist" | null = null;
 	#textAssistReplacement:
-		| { line: number; startCol: number; endCol: number; original: string; cursorOffset: number }
+		| {
+				line: number;
+				startCol: number;
+				endCol: number;
+				original: string;
+				cursorOffset: number;
+				/** The list offers {@link predictions} for the whole line rather than spelling replacements. */
+				prediction?: boolean;
+		  }
 		| undefined;
 	#autocompletePrefix: string = "";
+	/** The line a prediction insert (Tab, Right, or the alternatives list) left in the buffer; any later edit clears it. */
+	#insertedPrediction: string | undefined;
 	/** False while the popup's untouched top row is a description-only slash hit ({@link AutocompleteItem.descriptionMatch}): Enter then submits the typed text. */
 	#enterAcceptsSelection = true;
 	#autocompleteRequestId: number = 0;
@@ -876,6 +888,8 @@ export class Editor implements Component, Focusable {
 	#autocompleteRequestRunning = false;
 	#autocompleteAbortController: AbortController | undefined;
 	#autocompleteWaiters: Array<() => void> = [];
+	/** Discovery pass the shown `^` list rebuilds after (see {@link ModelMentionCompletion.pending}). */
+	#awaitedMentionDiscovery: Promise<void> | undefined;
 	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
 	/** Called after an async text-assist result mutates the document outside an input event, so hosts can schedule a repaint. */
@@ -945,15 +959,19 @@ export class Editor implements Component, Focusable {
 	 *  cursor. The host styles it (ANSI allowed). Re-evaluated on every render, so hosts can derive
 	 *  it from live state. */
 	placeholder?: () => string | undefined;
-	/** Whole-message prediction for the next prompt, painted as ghost text after the cursor while
-	 *  the single-line buffer is a strict prefix of it, the cursor sits at its end, and no
-	 *  autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or Right inserts
-	 *  the rest without submitting. Must be a single line. Re-evaluated on every render, so hosts can
-	 *  derive it from live state. */
-	prediction?: () => string | undefined;
-	/** Called after Tab or Right inserts the rest of the shown {@link prediction}. */
-	onPredictionAccepted?: () => void;
-	/** Called for each frame that paints {@link prediction} as ghost text: a terminal frame that draws at
+	/** Whole-message predictions for the next prompt, most likely first. The first one the single-line
+	 *  buffer is a strict prefix of is painted as ghost text after the cursor while the cursor sits at
+	 *  its end and no autocomplete is open. A shown prediction replaces the {@link placeholder}; Tab or
+	 *  Right inserts the rest without submitting. A buffer the user typed keeps the ghost even when it
+	 *  equals a shorter prediction; once Tab, Right, or the list has inserted one of two or more
+	 *  predictions, no ghost extends it to a longer one, and Tab instead opens a list of all of them
+	 *  that swaps the whole line, also without submitting. Each must be a single line. Re-evaluated on
+	 *  every render, so hosts can derive them from live state. */
+	predictions?: () => readonly string[] | undefined;
+	/** Called with the prediction's index in {@link predictions} after Tab or Right inserts the rest of
+	 *  a shown prediction, or the alternatives list swaps a different one into the buffer. */
+	onPredictionAccepted?: (index: number) => void;
+	/** Called for each frame that paints a prediction as ghost text: a terminal frame that draws at
 	 *  least one cell of it, or a native frame that carries it as the editor's ghost. */
 	onPredictionShown?: () => void;
 
@@ -1246,15 +1264,41 @@ export class Editor implements Component, Focusable {
 	}
 
 	#isOnFirstVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
-		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
-		return currentVisualLine === 0;
+		const segment = this.#cursorSegmentInLine(this.#caretRowWidth);
+		if (segment.index === -1) return this.#state.lines.length === 1 && segment.count === 1;
+		return this.#state.cursorLine === 0 && segment.index === 0;
 	}
 
 	#isOnLastVisualLine(): boolean {
-		const visualLines = this.#buildVisualLineMap(this.#caretRowWidth);
-		const currentVisualLine = this.#findCurrentVisualLine(visualLines);
-		return currentVisualLine === visualLines.length - 1;
+		const segment = this.#cursorSegmentInLine(this.#caretRowWidth);
+		if (segment.index === -1) return true;
+		return this.#state.cursorLine === this.#state.lines.length - 1 && segment.index === segment.count - 1;
+	}
+
+	/**
+	 * The cursor's wrapped row within its own logical line, using the same segment
+	 * ownership rules as {@link #findCurrentVisualLine}; `index` is -1 when no row owns
+	 * the cursor (that lookup then falls back to the last visual line).
+	 */
+	#cursorSegmentInLine(width: number): { index: number; count: number } {
+		const line = this.#state.lines[this.#state.cursorLine] || "";
+		const cursorCol = this.#state.cursorCol;
+		if (line.length === 0 || this.#lineEntry(line, width).width <= width) {
+			return { index: cursorCol <= line.length ? 0 : -1, count: 1 };
+		}
+		const chunks = this.#wrapLine(line, width);
+		for (let j = 0; j < chunks.length; j++) {
+			const chunk = chunks[j];
+			const colInSegment = cursorCol - chunk.startIndex;
+			const length = chunk.endIndex - chunk.startIndex;
+			if (
+				(colInSegment >= 0 || j === 0) &&
+				(colInSegment < length || (j === chunks.length - 1 && colInSegment <= length))
+			) {
+				return { index: j, count: chunks.length };
+			}
+		}
+		return { index: -1, count: chunks.length };
 	}
 
 	#navigateHistory(direction: 1 | -1): void {
@@ -2144,7 +2188,7 @@ export class Editor implements Component, Focusable {
 					kb.matchesCanonical(canonical, "tui.input.tab") ||
 					rightArrowAccepts)
 			) {
-				this.#applySpellingSuggestion();
+				this.#applyAssistReplacement();
 				return;
 			}
 			// Let the autocomplete list handle navigation and selection
@@ -3127,7 +3171,7 @@ export class Editor implements Component, Focusable {
 		}
 		let entry = this.#wrapCache.get(line);
 		if (entry === undefined) {
-			if (this.#wrapCache.size >= 256) {
+			if (this.#wrapCache.size >= Math.max(256, this.#state.lines.length * 2)) {
 				this.#wrapCache.clear();
 			}
 			entry = { width: visibleWidth(line), chunks: null };
@@ -3144,6 +3188,8 @@ export class Editor implements Component, Focusable {
 
 	#layoutText(contentWidth: number): LayoutLine[] {
 		const layoutLines: LayoutLine[] = [];
+		// A shrunk buffer (submit, clear, deletion) must not keep the old draft's lines cached.
+		if (this.#wrapCache.size > Math.max(256, this.#state.lines.length * 2)) this.#wrapCache.clear();
 
 		if (this.#state.lines.length === 0 || (this.#state.lines.length === 1 && this.#state.lines[0] === "")) {
 			// Empty editor
@@ -3274,6 +3320,7 @@ export class Editor implements Component, Focusable {
 
 	#notifyChange(text?: string): void {
 		this.#textRevision++;
+		this.#insertedPrediction = undefined;
 		this.onChange?.(text ?? this.getText());
 	}
 
@@ -3455,10 +3502,11 @@ export class Editor implements Component, Focusable {
 		this.#applyUndo();
 	}
 
-	setText(text: string): void {
+	/** Replace the buffer; the caret lands at the end unless `cursor: "start"` (multi-row text only). */
+	setText(text: string, options: { cursor?: "start" | "end" } = {}): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
-		this.#setTextInternal(text);
+		this.#setTextInternal(text, options.cursor);
 	}
 	submit(): void {
 		if (this.disableSubmit) return;
@@ -3769,6 +3817,11 @@ export class Editor implements Component, Focusable {
 			}
 			// Auto-trigger for "#" prompt actions anywhere in the current token
 			else if (char === "#") {
+				this.#tryTriggerAutocomplete();
+			} else if (
+				char === ":" &&
+				MENTION_CONTEXT_RE.test((this.#state.lines[this.#state.cursorLine] || "").slice(0, this.#state.cursorCol))
+			) {
 				this.#tryTriggerAutocomplete();
 			}
 			// Argument providers may expose candidates only after a separator.
@@ -5091,7 +5144,7 @@ export class Editor implements Component, Focusable {
 		// A pointer pick on the popup (TSP `select`/`activate`) accepts it like Tab.
 		list.onSelect = item => {
 			if (this.#autocompleteList !== list) return;
-			if (this.#autocompleteState === "assist") this.#applySpellingSuggestion();
+			if (this.#autocompleteState === "assist") this.#applyAssistReplacement();
 			else this.#acceptAutocompleteSelection(item);
 		};
 		return list;
@@ -5099,6 +5152,7 @@ export class Editor implements Component, Focusable {
 
 	async #handleTabCompletion(): Promise<void> {
 		if (this.#acceptPrediction()) return;
+		if (this.#showPredictionAlternatives()) return;
 		if (this.#acceptWordCompletion({ space: true })) return;
 		if (!this.#autocompleteProvider) return;
 
@@ -5136,12 +5190,37 @@ export class Editor implements Component, Focusable {
 		if (space) this.#lastAction = "accept-word";
 		return true;
 	}
-	/** Insert the rest of the shown {@link prediction}, if any. Never submits. */
+	/** Insert the rest of the shown prediction, if any. Never submits. */
 	#acceptPrediction(): boolean {
-		const suffix = this.#getPredictionSuffix();
-		if (!suffix) return false;
-		this.#insertTextAtCursor(suffix);
-		this.onPredictionAccepted?.();
+		const shown = this.#getShownPrediction();
+		if (!shown) return false;
+		this.#insertTextAtCursor(shown.suffix);
+		this.#insertedPrediction = this.#state.lines[0];
+		this.onPredictionAccepted?.(shown.index);
+		return true;
+	}
+
+	/** Open the list of every prediction over a buffer that equals one of them, that one selected. */
+	#showPredictionAlternatives(): boolean {
+		const alternatives = this.#getPredictionAlternatives();
+		if (!alternatives) return false;
+		const original = this.#state.lines[0] ?? "";
+		this.#autocompletePrefix = original;
+		this.#autocompleteList = this.#createAutocompleteList(
+			"",
+			alternatives.choices.map(value => ({ value, label: value })),
+		);
+		this.#autocompleteList.setSelectedIndex(alternatives.index);
+		this.#autocompleteState = "assist";
+		this.#textAssistReplacement = {
+			line: 0,
+			startCol: 0,
+			endCol: original.length,
+			original,
+			cursorOffset: 0,
+			prediction: true,
+		};
+		this.onAutocompleteUpdate?.();
 		return true;
 	}
 
@@ -5184,7 +5263,7 @@ export class Editor implements Component, Focusable {
 		this.onAutocompleteUpdate?.();
 	}
 
-	#applySpellingSuggestion(): void {
+	#applyAssistReplacement(): void {
 		const replacement = this.#textAssistReplacement;
 		const selected = this.#autocompleteList?.getSelectedItem();
 		if (!replacement || !selected) {
@@ -5192,8 +5271,13 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 		const line = this.#state.lines[replacement.line] ?? "";
-		if (line.slice(replacement.startCol, replacement.endCol) !== replacement.original) {
+		// A mismatch means the list went stale; picking the prediction already in the buffer changes nothing.
+		if (
+			line.slice(replacement.startCol, replacement.endCol) !== replacement.original ||
+			(replacement.prediction && selected.value === replacement.original)
+		) {
 			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
 			return;
 		}
 		this.#recordUndoState();
@@ -5205,6 +5289,11 @@ export class Editor implements Component, Focusable {
 		this.#cancelAutocomplete();
 		this.onAutocompleteUpdate?.();
 		this.#notifyChange();
+		if (replacement.prediction) {
+			this.#insertedPrediction = selected.value;
+			const index = this.predictions?.()?.indexOf(selected.value) ?? -1;
+			if (index >= 0) this.onPredictionAccepted?.(index);
+		}
 	}
 	async #handleSlashCommandCompletion(): Promise<void> {
 		await this.#tryTriggerAutocomplete();
@@ -5374,7 +5463,7 @@ export class Editor implements Component, Focusable {
 	 */
 	#refreshAutocomplete(): void {
 		if (this.#autocompleteState === "assist") return;
-		if (this.#refreshSlashCommandListSync()) return;
+		if (this.#refreshSlashCommandListSync() || this.#refreshModelMentionListSync()) return;
 		this.#narrowAtFileList();
 		void this.#updateAutocomplete();
 	}
@@ -5408,9 +5497,41 @@ export class Editor implements Component, Focusable {
 		return true;
 	}
 
+	#refreshModelMentionListSync(): boolean {
+		const provider = this.#autocompleteProvider;
+		if (this.#autocompleteState !== "regular" || !provider?.trySyncModelMentionCompletion) return false;
+		const completion = provider.trySyncModelMentionCompletion(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+		);
+		if (completion.kind === "unhandled") return false;
+		this.#invalidateAutocompleteRequests();
+		if (completion.kind === "matched") {
+			this.#showAutocompleteSuggestions(completion.suggestions, "regular");
+			if (completion.pending) this.#refreshModelMentionsAfter(completion.pending);
+		} else {
+			this.#cancelAutocomplete();
+			this.onAutocompleteUpdate?.();
+		}
+		return true;
+	}
+
+	/** Rebuild the shown `^` list from the live token once `pending` discovery settles; one rebuild per pass. */
+	#refreshModelMentionsAfter(pending: Promise<void>): void {
+		if (this.#awaitedMentionDiscovery === pending) return;
+		this.#awaitedMentionDiscovery = pending;
+		void pending.then(() => {
+			if (this.#awaitedMentionDiscovery !== pending) return;
+			this.#awaitedMentionDiscovery = undefined;
+			this.#refreshModelMentionListSync();
+		});
+	}
+
 	/**
 	 * Get inline hint text to show as dim ghost text after the cursor.
-	 * Checks the selected autocomplete item's hint first, then the prediction, then the provider.
+	 * Checks the selected autocomplete item's hint first, then the prediction and its alternatives,
+	 * then the provider.
 	 */
 	#getInlineHint(): string | null {
 		// Check selected autocomplete item for a hint
@@ -5421,7 +5542,12 @@ export class Editor implements Component, Focusable {
 
 		const prediction = this.#getPredictionSuffix();
 		if (prediction) return prediction;
-
+		const alternatives = this.#getPredictionAlternatives();
+		if (alternatives) {
+			// Tab opens the alternatives list from here; without a bound key there is nothing to hint.
+			const tab = editorKey("tui.input.tab");
+			if (tab) return ` ${tab} ${alternatives.choices.length - 1} more`;
+		}
 		// Fall back to provider's getInlineHint
 		if (this.#autocompleteProvider?.getInlineHint) {
 			const hint = this.#autocompleteProvider.getInlineHint(
@@ -5438,18 +5564,44 @@ export class Editor implements Component, Focusable {
 		if (this.#autocompleteState || !this.#isEditorEmpty() || this.#getPredictionSuffix()) return undefined;
 		return this.placeholder?.() || undefined;
 	}
-	/** The part of {@link prediction} not yet typed, or `null` when no prediction is shown. */
+	/** The part of the shown prediction not yet typed, or `null` when no prediction is shown. */
 	#getPredictionSuffix(): string | null {
+		return this.#getShownPrediction()?.suffix ?? null;
+	}
+	/**
+	 * The prediction painted as ghost text: the first one the single-line buffer is a strict prefix of,
+	 * with the cursor at its end and no autocomplete open. None while the buffer is a prediction insert
+	 * that equals one of two or more predictions, so Tab opens their list rather than extending to a
+	 * longer one; a buffer the user typed keeps its ghost.
+	 */
+	#getShownPrediction(): { index: number; suffix: string } | null {
 		if (this.#autocompleteState) return null;
-		const prediction = this.prediction?.();
-		if (!prediction) return null;
+		const predictions = this.predictions?.();
+		if (!predictions?.length) return null;
 		const { lines, cursorCol } = this.#state;
 		if (lines.length !== 1) return null;
 		const typed = lines[0] ?? "";
-		if (cursorCol !== typed.length || typed.length >= prediction.length || !prediction.startsWith(typed)) {
-			return null;
-		}
-		return prediction.slice(typed.length);
+		if (cursorCol !== typed.length) return null;
+		if (predictions.length > 1 && typed === this.#insertedPrediction && predictions.includes(typed)) return null;
+		const index = predictions.findIndex(
+			prediction => typed.length < prediction.length && prediction.startsWith(typed),
+		);
+		return index < 0 ? null : { index, suffix: predictions[index]!.slice(typed.length) };
+	}
+	/**
+	 * Two or more predictions, and which one the single-line buffer equals with the cursor at its end:
+	 * Tab then opens the list of all of them.
+	 */
+	#getPredictionAlternatives(): { choices: readonly string[]; index: number } | null {
+		if (this.#autocompleteState) return null;
+		const choices = this.predictions?.();
+		if (!choices || choices.length < 2) return null;
+		const { lines, cursorCol } = this.#state;
+		if (lines.length !== 1) return null;
+		const typed = lines[0] ?? "";
+		if (cursorCol !== typed.length) return null;
+		const index = choices.indexOf(typed);
+		return index < 0 ? null : { choices, index };
 	}
 	/** Typing `typed` where it diverges from the shown ghost completion rejects that ghost. */
 	#reportTypedPastWordCompletion(typed: string): void {

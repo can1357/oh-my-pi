@@ -406,7 +406,7 @@ Portable Agent Plugins use different secret semantics: only `${PLUGIN_ROOT}` and
 
 Before OMP launches a stdio server or makes an HTTP/SSE request, it resolves stdio `env` values and HTTP/SSE `headers` values like this:
 
-1. If a value starts with `!`, OMP runs the rest as a shell command in the project directory with a 10s timeout and uses trimmed stdout. Successful results are process-cached until invalidated; concurrent resolutions share the same command execution.
+1. If a value starts with `!`, OMP runs the rest as a shell command in the project directory with a 10s timeout and uses trimmed stdout. Successful results are process-cached; concurrent resolutions share the same command execution. A server's commands run again when it reconnects (`/mcp reconnect`, an automatic reconnect, `/mcp reload`) and, for HTTP/SSE `headers`, when the server answers 401/403 — the request is then retried once with the new values. This keeps commands that mint short-lived tokens working past expiry.
 2. If the command fails, times out, or prints only whitespace, that `env`/`headers` entry is omitted. Failed commands are retried on a later resolution after a 30s backoff.
 3. Otherwise OMP checks whether the whole value names an environment variable.
 4. If that environment variable is set to a non-empty value, OMP uses the environment value; otherwise it uses the string literally.

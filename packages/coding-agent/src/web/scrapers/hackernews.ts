@@ -39,7 +39,8 @@ async function fetchItems(ids: number[], timeout: number, limit = 20, signal?: A
 	return results.filter((item): item is HNItem => item !== null && !item.deleted && !item.dead);
 }
 
-function decodeHNText(html: string): string {
+/** Markdown-flavored text of an HN HTML body (story text, comment); shared with the HN search provider's snippets. */
+export function decodeHNText(html: string): string {
 	return decodeHtmlEntities(
 		html
 			.replace(/<p>/g, "\n\n")

@@ -1779,6 +1779,9 @@ class _RecordingSandbox:
         default_branch: str,
         existing_branch=None,
         pr_head: int | None = None,
+        pr_head_ref: str | None = None,
+        pr_head_sha: str | None = None,
+        pr_head_same_repo: bool = False,
         author_name: str = "",
         author_email: str = "",
         slot_uid: int | None = None,
@@ -1791,6 +1794,9 @@ class _RecordingSandbox:
                 "default_branch": default_branch,
                 "existing_branch": existing_branch,
                 "pr_head": pr_head,
+                "pr_head_ref": pr_head_ref,
+                "pr_head_sha": pr_head_sha,
+                "pr_head_same_repo": pr_head_same_repo,
                 "slot_uid": slot_uid,
             }
         )
@@ -2108,8 +2114,9 @@ async def test_handle_pr_conversation_skips_review_workspace_rows(
     close_database()
 
 
+@pytest.mark.parametrize("head_repo", ["octo/widget", "alice/widget"])
 async def test_review_pr_retries_when_ranked_but_not_submitted(
-    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch, head_repo: str
 ) -> None:
     from robomp import tasks
     from robomp.github_client import GitHubClient, IssueInfo, PullRequestInfo, RepoInfo
@@ -2137,7 +2144,8 @@ async def test_review_pr_retries_when_ranked_but_not_submitted(
         base_ref="main",
         state="open",
         author="alice",
-        head_repo="alice/widget",
+        head_repo=head_repo,
+        head_sha="abc123",
     )
 
     async def _get_repo(self, repo_full: str):
@@ -2171,6 +2179,9 @@ async def test_review_pr_retries_when_ranked_but_not_submitted(
     assert len(stub_run_task) == 1
     assert stub_run_task[0]["task_kind"] == "review_pr"
     assert sandbox.ensure_calls[0]["pr_head"] == 900
+    assert sandbox.ensure_calls[0]["pr_head_ref"] == "alice/fix-parser"
+    assert sandbox.ensure_calls[0]["pr_head_sha"] == "abc123"
+    assert sandbox.ensure_calls[0]["pr_head_same_repo"] is (head_repo == "octo/widget")
     close_database()
 
 

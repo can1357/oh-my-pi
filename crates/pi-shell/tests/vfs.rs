@@ -4,23 +4,23 @@
 use std::os::unix::fs::symlink;
 use std::{
 	fs,
-	io::{self, Read, Seek, SeekFrom},
+	io::{self, SeekFrom},
 	path::{Path, PathBuf},
 	sync::Arc,
 	time::Duration,
 };
 
 use async_trait::async_trait;
-use brush_core::{
-	ExecutionParameters, ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo,
-	openfiles::{self, OpenFile, OpenFiles},
+use bytes::Bytes;
+use pi_shell::{
+	ShellExecuteOptions, StreamSinks,
+	cancel::{AbortReason, CancelToken},
+	execute_shell_streams,
 };
-use pi_builtins::{BuiltinSet, default_builtins, utility_builtins};
 use pi_vfs::{
 	DirEntry, File, FileHandle, FileSystem, FileTime, Fs, Metadata, OpenOptions, Permissions,
 	ReadDir, join_path,
 };
-use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 struct DelayedFilesystem {
@@ -82,8 +82,13 @@ impl FileSystem for DelayedFilesystem {
 			.await
 	}
 
+	/// Opening `virtual://stalled` stands in for a stalled provider: the file
+	/// it returns never completes a read.
 	async fn open(&self, path: &Path, options: &OpenOptions) -> io::Result<File> {
 		delay().await;
+		if path.to_str() == Some("virtual://stalled") {
+			return Ok(File::from_handle(StalledFile));
+		}
 		let file = Fs::native().open_with(self.path(path)?, options).await?;
 		Ok(File::from_handle(DelayedFile { file, seekable: self.seekable }))
 	}
@@ -250,52 +255,73 @@ impl FileHandle for DelayedFile {
 	}
 }
 
-async fn virtual_shell(root: &Path) -> Shell {
-	let mut shell = Shell::builder()
-		.do_not_inherit_env(true)
-		.profile(ProfileLoadBehavior::Skip)
-		.rc(RcLoadBehavior::Skip)
-		.builtins(default_builtins(BuiltinSet::BashMode))
-		.build()
-		.await
-		.expect("shell");
-	for (name, builtin) in utility_builtins() {
-		shell.register_builtin(name, builtin);
+/// `virtual://` served from `root` by a [`DelayedFilesystem`].
+fn provider(root: &Path, seekable: bool) -> Fs {
+	Fs::new(Arc::new(DelayedFilesystem { root: root.to_path_buf(), seekable }))
+}
+
+/// Options running `script` over `filesystem`, from the host directory `cwd`
+/// when given.
+fn script_options(filesystem: Fs, cwd: Option<&Path>, script: &str) -> ShellExecuteOptions {
+	ShellExecuteOptions {
+		command: script.to_owned(),
+		cwd: cwd.map(|cwd| cwd.to_str().expect("UTF-8 working directory").to_owned()),
+		filesystem,
+		..Default::default()
 	}
-	shell.set_filesystem(Fs::new(Arc::new(DelayedFilesystem {
-		root:     root.to_path_buf(),
-		seekable: true,
-	})));
-	shell
 }
 
-fn capture_parameters(shell: &Shell, output: &fs::File, error: &fs::File) -> ExecutionParameters {
-	let mut parameters = shell.default_exec_params();
-	parameters.set_fd(OpenFiles::STDIN_FD, openfiles::null().expect("null stdin"));
-	parameters
-		.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(output.try_clone().expect("stdout descriptor")));
-	parameters
-		.set_fd(OpenFiles::STDERR_FD, OpenFile::from(error.try_clone().expect("stderr descriptor")));
-	parameters
+/// Raw stdout and stderr sinks, with the receivers that collect them.
+fn stream_sinks() -> (StreamSinks, flume::Receiver<Bytes>, flume::Receiver<Bytes>) {
+	let (stdout, stdout_chunks) = flume::unbounded();
+	let (stderr, stderr_chunks) = flume::unbounded();
+	(StreamSinks { stdout: Some(stdout), stderr: Some(stderr) }, stdout_chunks, stderr_chunks)
 }
 
-fn captured_text(mut file: &fs::File) -> String {
-	file.rewind().expect("rewind capture");
-	let mut text = String::new();
-	file.read_to_string(&mut text).expect("read capture");
-	text
+/// The text of every chunk received so far.
+fn received_text(chunks: &flume::Receiver<Bytes>) -> String {
+	let mut bytes = Vec::new();
+	for chunk in chunks.try_iter() {
+		bytes.extend_from_slice(&chunk);
+	}
+	String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// A finished run: its exit status and what it wrote to each stream.
+#[derive(Debug)]
+struct Captured {
+	status: Option<i32>,
+	stdout: String,
+	stderr: String,
+}
+
+/// Runs `script` in a fresh session over `filesystem`, from the host
+/// directory `cwd` when given.
+async fn run_script(filesystem: Fs, cwd: Option<&Path>, script: &str) -> Captured {
+	let (sinks, stdout, stderr) = stream_sinks();
+	let result =
+		execute_shell_streams(script_options(filesystem, cwd, script), sinks, CancelToken::default())
+			.await
+			.expect("filesystem-backed shell execution");
+	Captured {
+		status: result.exit_code,
+		stdout: received_text(&stdout),
+		stderr: received_text(&stderr),
+	}
+}
+
+/// Runs `script` with `virtual://` backed by `root` from the shell's default
+/// working directory.
+async fn run_virtual(root: &Path, script: &str) -> Captured {
+	run_script(provider(root, true), None, script).await
 }
 
 #[tokio::test]
 async fn expanded_urls_redirect_and_edit_without_blocking_the_provider_runtime() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	let parameters = capture_parameters(&shell, &output, &error);
-	let result = shell
-		.run_string(
-			r#"scheme=virtual
+	let run = run_virtual(
+		directory.path(),
+		r#"scheme=virtual
 p="${scheme}://input"
 printf 'b\na\n' > "$p" &&
 printf 'a\n' >> "$p" &&
@@ -306,15 +332,10 @@ mv virtual://sorted virtual://dir/result.txt &&
 test -f virtual://dir/result.txt &&
 cd virtual://dir &&
 cat ./*.txt"#,
-			&SourceInfo::from("vfs-regression"),
-			&parameters,
-		)
-		.await
-		.expect("filesystem-backed shell execution");
-	let stdout = captured_text(&output);
-	let stderr = captured_text(&error);
-	assert_eq!(u8::from(result.exit_code), 0, "{stderr}");
-	assert_eq!(stdout, "A\nb\n");
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert_eq!(run.stdout, "A\nb\n");
 	assert_eq!(fs::read(directory.path().join("input")).expect("appended source"), b"b\na\na\n");
 	assert!(!directory.path().join("sorted").exists());
 }
@@ -328,51 +349,39 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 	fs::create_dir(directory.path().join("docs")).expect("provider directory");
 	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("first document");
 	fs::write(directory.path().join("docs/b.txt"), b"beta\n").expect("second document");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	let parameters = capture_parameters(&shell, &output, &error);
-	let result = shell
-		.run_string(
-			"printf 'virtual://docs/a.txt\\n' | xargs cat && echo go | ifne cat virtual://docs/b.txt \
-			 && find virtual://docs -name b.txt -exec cat {} ';' && find virtual://docs -name a.txt \
-			 -execdir cat {} ';'",
-			&SourceInfo::from("vfs-command-runners"),
-			&parameters,
-		)
-		.await
-		.expect("command-running utilities");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
-	assert_eq!(captured_text(&output), "alpha\nbeta\nbeta\nalpha\n");
+	let run = run_virtual(
+		directory.path(),
+		"printf 'virtual://docs/a.txt\\n' | xargs cat && echo go | ifne cat virtual://docs/b.txt && \
+		 find virtual://docs -name b.txt -exec cat {} ';' && find virtual://docs -name a.txt \
+		 -execdir cat {} ';'",
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert_eq!(run.stdout, "alpha\nbeta\nbeta\nalpha\n");
 }
 
 /// An external program cannot open a provider URL, so one it is handed must
 /// name the file that URL aliases, in the bare spelling and in the
 /// attached-value spelling a tool's own flags use. A scheme the filesystem
 /// does not route is not a path and must reach the child as written, as must a
-/// bare scheme root, which is far likelier a search pattern than a directory.
+/// bare scheme root or one followed by words, which are far likelier a search
+/// pattern than a directory.
 #[tokio::test]
 async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	fs::create_dir(directory.path().join("docs")).expect("provider directory");
 	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("document");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	let parameters = capture_parameters(&shell, &output, &error);
 	#[cfg(unix)]
-	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3" "$4" "$5"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs' virtual:// --root=virtual://"#;
+	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3" "$4" "$5" "$6" "$7"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs' virtual:// --root=virtual:// 'virtual:// external command' '--search=virtual:// words'"#;
 	#[cfg(windows)]
 	let script = "cmd.exe /c echo virtual://docs/a.txt && cmd.exe /c echo \
 	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt && \
 	              cmd.exe /c echo 'https://example.com/?next=virtual://docs' && cmd.exe /c \
-	              echo virtual:// && cmd.exe /c echo --root=virtual://";
-	let result = shell
-		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
-		.await
-		.expect("external command with url arguments");
-	let stdout = captured_text(&output);
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	              echo virtual:// && cmd.exe /c echo --root=virtual:// && cmd.exe /c echo \
+	              'virtual:// external command' && cmd.exe /c echo '--search=virtual:// words'";
+	let run = run_virtual(directory.path(), script).await;
+	let stdout = run.stdout;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
 	// The provider aliases `virtual://x` to `root/x`, keeping the URL's own
 	// separators, so the expectation is built the same way.
 	let docs = directory.path().join("docs");
@@ -397,6 +406,11 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 		lines.contains(&"virtual://") && lines.contains(&"--root=virtual://"),
 		"a bare scheme root was rewritten: {stdout}"
 	);
+	assert!(
+		stdout.contains("virtual:// external command")
+			&& stdout.contains("--search=virtual:// words"),
+		"a scheme root followed by words was rewritten: {stdout}"
+	);
 }
 
 /// A URL the provider cannot resolve fails the command with the provider's
@@ -405,25 +419,14 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 #[tokio::test]
 async fn external_commands_refuse_url_arguments_the_provider_rejects() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	let parameters = capture_parameters(&shell, &output, &error);
 	#[cfg(unix)]
 	let script = "/bin/sh -c 'printf ran' virtual://../escape";
 	#[cfg(windows)]
 	let script = "cmd.exe /c echo ran virtual://../escape";
-	let result = shell
-		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
-		.await
-		.expect("external command with a rejected url argument");
-	assert_ne!(u8::from(result.exit_code), 0, "a rejected url reached the child");
-	assert!(!captured_text(&output).contains("ran"), "the child ran: {}", captured_text(&output));
-	assert!(
-		captured_text(&error).contains("outside mount"),
-		"the provider's reason was lost: {}",
-		captured_text(&error)
-	);
+	let run = run_virtual(directory.path(), script).await;
+	assert_ne!(run.status, Some(0), "a rejected url reached the child");
+	assert!(!run.stdout.contains("ran"), "the child ran: {}", run.stdout);
+	assert!(run.stderr.contains("outside mount"), "the provider's reason was lost: {}", run.stderr);
 }
 
 /// A provider directory that aliases a real one is a usable working directory
@@ -436,62 +439,41 @@ async fn external_commands_start_in_backed_working_directories_only() {
 	fs::create_dir(directory.path().join("docs")).expect("provider directory");
 	fs::create_dir(directory.path().join("rendered")).expect("unbacked directory");
 	fs::create_dir(directory.path().join("frozen")).expect("read-only directory");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	let parameters = capture_parameters(&shell, &output, &error);
 	// `printenv` and `cmd /c echo` report the inherited variable; a shell would
 	// re-derive `PWD` from `getcwd()` and hide a wrong value.
 	#[cfg(unix)]
 	let script = "cd virtual://docs && /bin/sh -c 'printf %s \"$PWD\"' && /usr/bin/printenv PWD";
 	#[cfg(windows)]
 	let script = "cd virtual://docs && cmd.exe /c cd && cmd.exe /c echo %PWD%";
-	let result = shell
-		.run_string(script, &SourceInfo::from("vfs-external-cwd"), &parameters)
-		.await
-		.expect("external command in a backed working directory");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	let run = run_virtual(directory.path(), script).await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
 	let docs = directory.path().join("docs").display().to_string();
 	assert!(
-		captured_text(&output).matches(docs.as_str()).count() >= 2,
+		run.stdout.matches(docs.as_str()).count() >= 2,
 		"child saw the wrong working directory or inherited PWD: {}",
-		captured_text(&output)
+		run.stdout
 	);
 
-	let error = tempfile::tempfile().expect("captured stderr");
-	let parameters = capture_parameters(&shell, &output, &error);
 	#[cfg(unix)]
 	let unbacked = "cd virtual://rendered && /bin/sh -c 'exit 0'";
 	#[cfg(windows)]
 	let unbacked = "cd virtual://rendered && cmd.exe /c exit 0";
-	let result = shell
-		.run_string(unbacked, &SourceInfo::from("vfs-external-cwd"), &parameters)
-		.await
-		.expect("external command in an unbacked working directory");
-	assert_ne!(u8::from(result.exit_code), 0, "an unbacked directory hosted a child process");
-	assert!(
-		captured_text(&error).contains("virtual working directory"),
-		"unexpected failure: {}",
-		captured_text(&error)
-	);
+	let run = run_virtual(directory.path(), unbacked).await;
+	assert_ne!(run.status, Some(0), "an unbacked directory hosted a child process");
+	assert!(run.stderr.contains("virtual working directory"), "unexpected failure: {}", run.stderr);
 
 	// A child may write anywhere under its working directory, so a directory
 	// the shell refuses to mutate is no working directory for one either.
-	let error = tempfile::tempfile().expect("captured stderr");
-	let parameters = capture_parameters(&shell, &output, &error);
 	#[cfg(unix)]
 	let frozen = "cd virtual://frozen && /bin/sh -c 'exit 0'";
 	#[cfg(windows)]
 	let frozen = "cd virtual://frozen && cmd.exe /c exit 0";
-	let result = shell
-		.run_string(frozen, &SourceInfo::from("vfs-external-cwd"), &parameters)
-		.await
-		.expect("external command in a read-only working directory");
-	assert_ne!(u8::from(result.exit_code), 0, "a read-only directory hosted a child process");
+	let run = run_virtual(directory.path(), frozen).await;
+	assert_ne!(run.status, Some(0), "a read-only directory hosted a child process");
 	assert!(
-		captured_text(&error).contains("read-only working directory"),
+		run.stderr.contains("read-only working directory"),
 		"unexpected failure: {}",
-		captured_text(&error)
+		run.stderr
 	);
 }
 
@@ -506,16 +488,9 @@ async fn an_executable_url_runs_as_the_file_it_aliases() {
 	let tool = directory.path().join("tool");
 	fs::write(&tool, b"#!/bin/sh\nprintf tool-ran\n").expect("provider script");
 	fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).expect("executable script");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	let parameters = capture_parameters(&shell, &output, &error);
-	let result = shell
-		.run_string("virtual://tool", &SourceInfo::from("vfs-external-program"), &parameters)
-		.await
-		.expect("executable provider url");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
-	assert_eq!(captured_text(&output), "tool-ran");
+	let run = run_virtual(directory.path(), "virtual://tool").await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert_eq!(run.stdout, "tool-ran");
 }
 
 /// The same contract on Windows, where an executable is recognized by its
@@ -525,26 +500,26 @@ async fn an_executable_url_runs_as_the_file_it_aliases() {
 async fn an_executable_url_runs_as_the_file_it_aliases() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	fs::write(directory.path().join("tool.cmd"), b"@echo tool-ran\r\n").expect("provider script");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	let parameters = capture_parameters(&shell, &output, &error);
-	let result = shell
-		.run_string("virtual://tool.cmd", &SourceInfo::from("vfs-external-program"), &parameters)
-		.await
-		.expect("executable provider url");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
-	assert!(captured_text(&output).contains("tool-ran"), "{}", captured_text(&output));
+	let run = run_virtual(directory.path(), "virtual://tool.cmd").await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert!(run.stdout.contains("tool-ran"), "{}", run.stdout);
 }
 
-async fn wait_for_output(path: &Path, suffix: &str) -> io::Result<()> {
+/// Appends streamed stdout `chunks` to `output` until it ends with `suffix`.
+async fn wait_for_output(
+	chunks: &flume::Receiver<Bytes>,
+	output: &mut Vec<u8>,
+	suffix: &str,
+) -> io::Result<()> {
 	tokio::time::timeout(Duration::from_secs(5), async {
-		loop {
-			if tokio::fs::read_to_string(path).await?.ends_with(suffix) {
-				return Ok(());
-			}
-			tokio::time::sleep(Duration::from_millis(5)).await;
+		while !output.ends_with(suffix.as_bytes()) {
+			let chunk = chunks
+				.recv_async()
+				.await
+				.map_err(|error| io::Error::new(io::ErrorKind::UnexpectedEof, error))?;
+			output.extend_from_slice(&chunk);
 		}
+		Ok(())
 	})
 	.await
 	.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
@@ -553,50 +528,48 @@ async fn wait_for_output(path: &Path, suffix: &str) -> io::Result<()> {
 #[tokio::test]
 async fn virtual_follow_observes_append_same_size_rotation_and_truncation() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
-	let output = tempfile::NamedTempFile::new().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
 	let file = directory.path().join("follow");
 	fs::write(&file, b"initial\n").expect("initial content");
-	let mut shell = virtual_shell(directory.path()).await;
-	let mut parameters = capture_parameters(&shell, output.as_file(), &error);
-	let cancel = CancellationToken::new();
-	parameters.set_cancel_token(cancel.clone());
-	let runner = tokio::spawn(async move {
-		shell
-			.run_string(
-				"tail -n 1 --sleep-interval=.01 --max-unchanged-stats=0 -F virtual://follow",
-				&SourceInfo::from("vfs-follow"),
-				&parameters,
-			)
-			.await
-	});
+	let (sinks, stdout, stderr) = stream_sinks();
+	let mut cancel = CancelToken::default();
+	let abort = cancel.emplace_abort_token();
+	let runner = tokio::spawn(execute_shell_streams(
+		script_options(
+			provider(directory.path(), true),
+			None,
+			"tail -n 1 --sleep-interval=.01 --max-unchanged-stats=0 -F virtual://follow",
+		),
+		sinks,
+		cancel,
+	));
+	let mut output = Vec::new();
 	let updates: io::Result<()> = async {
-		wait_for_output(output.path(), "initial\n").await?;
+		wait_for_output(&stdout, &mut output, "initial\n").await?;
 		let mut append = fs::OpenOptions::new().append(true).open(&file)?;
 		io::Write::write_all(&mut append, b"appended\n")?;
-		wait_for_output(output.path(), "appended\n").await?;
+		wait_for_output(&stdout, &mut output, "appended\n").await?;
 		let replacement = directory.path().join("replacement");
 		fs::write(&replacement, b"rotation-content\n")?;
 		fs::rename(&replacement, &file)?;
-		wait_for_output(output.path(), "rotation-content\n").await?;
+		wait_for_output(&stdout, &mut output, "rotation-content\n").await?;
 		fs::write(&file, b"x\n")?;
-		wait_for_output(output.path(), "x\n").await
+		wait_for_output(&stdout, &mut output, "x\n").await
 	}
 	.await;
-	cancel.cancel();
+	abort.abort(AbortReason::Signal);
 	tokio::time::timeout(Duration::from_secs(5), runner)
 		.await
 		.expect("cancelled tail exits")
 		.expect("tail worker")
 		.expect("tail command");
 	updates.expect("each provider transition reaches stdout");
-	let diagnostics = captured_text(&error);
+	let diagnostics = received_text(&stderr);
 	assert!(diagnostics.contains("has been replaced"), "{diagnostics}");
 	assert!(diagnostics.contains("file truncated"), "{diagnostics}");
-	assert_eq!(
-		fs::read_to_string(output.path()).expect("captured output"),
-		"initial\nappended\nrotation-content\nx\n"
-	);
+	for chunk in stdout.try_iter() {
+		output.extend_from_slice(&chunk);
+	}
+	assert_eq!(String::from_utf8_lossy(&output), "initial\nappended\nrotation-content\nx\n");
 }
 
 /// A provider path has no kernel watcher, so `tail -f` polls it; that idle
@@ -607,41 +580,28 @@ async fn virtual_follow_observes_append_same_size_rotation_and_truncation() {
 async fn virtual_follow_stops_once_stdout_reader_is_gone() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	fs::write(directory.path().join("log"), b"line\n").expect("followed log");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let (mut reader, writer) = io::pipe().expect("stdout pipe");
-	let mut shell = virtual_shell(directory.path()).await;
-	let mut parameters = shell.default_exec_params();
-	parameters.set_fd(OpenFiles::STDIN_FD, openfiles::null().expect("null stdin"));
-	parameters.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(writer));
-	parameters
-		.set_fd(OpenFiles::STDERR_FD, OpenFile::from(error.try_clone().expect("stderr descriptor")));
-	let cancel = CancellationToken::new();
-	parameters.set_cancel_token(cancel.clone());
-	let runner = tokio::spawn(async move {
-		shell
-			.run_string(
-				"tail -f --sleep-interval=.01 virtual://log",
-				&SourceInfo::from("vfs-follow-reader-gone"),
-				&parameters,
-			)
-			.await
-	});
-	// Consume the first line like `grep -m1 line`, then close the read end.
-	let first = tokio::task::spawn_blocking(move || {
-		let mut first = [0; 5];
-		reader.read_exact(&mut first).map(|()| first)
-	})
-	.await
-	.expect("reader thread")
-	.expect("initial output");
-	assert_eq!(&first, b"line\n");
+	let (sinks, stdout, stderr) = stream_sinks();
+	let mut cancel = CancelToken::default();
+	let abort = cancel.emplace_abort_token();
+	// `grep -m1` consumes the first line, then exits and closes the read end;
+	// the pipeline ends only once `tail -f` stops too.
+	let runner = tokio::spawn(execute_shell_streams(
+		script_options(
+			provider(directory.path(), true),
+			None,
+			"tail -f --sleep-interval=.01 virtual://log | grep -m1 line",
+		),
+		sinks,
+		cancel,
+	));
 	let stopped = tokio::time::timeout(Duration::from_secs(5), runner).await;
-	cancel.cancel();
+	abort.abort(AbortReason::Signal);
 	let result = stopped
 		.expect("tail -f kept following after its reader exited")
 		.expect("tail worker")
 		.expect("tail command");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert_eq!(received_text(&stdout), "line\n");
+	assert_eq!(result.exit_code, Some(0), "{}", received_text(&stderr));
 }
 
 #[cfg(unix)]
@@ -650,28 +610,18 @@ async fn backed_urls_expose_physical_paths_without_changing_native_readlink() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	fs::write(directory.path().join("target"), b"content").expect("backing file");
 	symlink("target", directory.path().join("alias")).expect("native relative link");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	shell
-		.set_working_dir(directory.path())
-		.await
-		.expect("native working directory");
-	let parameters = capture_parameters(&shell, &output, &error);
-	let result = shell
-		.run_string(
-			"realpath virtual://alias && readlink virtual://alias && readlink alias && realpath -m \
-			 virtual://missing/leaf && realpath --relative-to=virtual:// virtual://alias",
-			&SourceInfo::from("vfs-backing-path"),
-			&parameters,
-		)
-		.await
-		.expect("backing path commands");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	let run = run_script(
+		provider(directory.path(), true),
+		Some(directory.path()),
+		"realpath virtual://alias && readlink virtual://alias && readlink alias && realpath -m \
+		 virtual://missing/leaf && realpath --relative-to=virtual:// virtual://alias",
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
 	let root = fs::canonicalize(directory.path()).expect("physical backing root");
 	let target = root.join("target");
 	assert_eq!(
-		captured_text(&output),
+		run.stdout,
 		format!(
 			"{}\n{}\ntarget\n{}\ntarget\n",
 			target.display(),
@@ -721,43 +671,22 @@ async fn cmp_compares_nonseekable_files_and_discards_requested_prefixes() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	fs::write(directory.path().join("left"), b"aa-shared\n").expect("left stream");
 	fs::write(directory.path().join("right"), b"bb-shared\n").expect("right stream");
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(directory.path()).await;
-	shell.set_filesystem(Fs::new(Arc::new(DelayedFilesystem {
-		root:     directory.path().to_path_buf(),
-		seekable: false,
-	})));
-	let parameters = capture_parameters(&shell, &output, &error);
-	let result = shell
-		.run_string(
-			"cmp -s virtual://left virtual://left && { cmp -s virtual://left virtual://right; test \
-			 \"$?\" -eq 1; } && cmp -i 2 virtual://left virtual://right",
-			&SourceInfo::from("vfs-nonseekable-cmp"),
-			&parameters,
-		)
-		.await
-		.expect("stream comparison");
-	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	let run = run_script(
+		provider(directory.path(), false),
+		None,
+		"cmp -s virtual://left virtual://left && { cmp -s virtual://left virtual://right; test \
+		 \"$?\" -eq 1; } && cmp -i 2 virtual://left virtual://right",
+	)
+	.await;
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
 }
 
 /// Runs `script` from the host directory `cwd` with `virtual://` backed by
 /// `provider_root`, returning the exit status and stderr.
 #[cfg(any(unix, windows))]
-async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u8, String) {
-	let output = tempfile::tempfile().expect("captured stdout");
-	let error = tempfile::tempfile().expect("captured stderr");
-	let mut shell = virtual_shell(provider_root).await;
-	shell
-		.set_working_dir(cwd)
-		.await
-		.expect("host working directory");
-	let parameters = capture_parameters(&shell, &output, &error);
-	let result = shell
-		.run_string(script, &SourceInfo::from("vfs-cross-device-mv"), &parameters)
-		.await
-		.expect("mv between host and provider");
-	(u8::from(result.exit_code), captured_text(&error))
+async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (i32, String) {
+	let run = run_script(provider(provider_root, true), Some(cwd), script).await;
+	(run.status.expect("exit status"), run.stderr)
 }
 
 /// A directory `rm` cannot list may still be removable; if another process
@@ -932,19 +861,11 @@ fn timeout_stops_a_utility_reading_stalled_provider_stdin() {
 			.expect("test runtime");
 		let ran = runtime.block_on(async {
 			let directory = tempfile::tempdir().expect("isolated provider filesystem");
-			let output = tempfile::tempfile().expect("captured stdout");
-			let error = tempfile::tempfile().expect("captured stderr");
-			let mut shell = virtual_shell(directory.path()).await;
-			for (name, builtin) in pi_builtins::process_builtins() {
-				shell.register_builtin(name, builtin);
-			}
-			let mut parameters = capture_parameters(&shell, &output, &error);
-			parameters.set_fd(OpenFiles::STDIN_FD, OpenFile::from(File::from_handle(StalledFile)));
-			let result = shell
-				.run_string("timeout 0.2 cat", &SourceInfo::from("stalled-stdin"), &parameters)
-				.await
-				.expect("run the command");
-			(u8::from(result.exit_code), captured_text(&error))
+			// The provider opens `virtual://stalled` as a `StalledFile`, so the
+			// redirect hands `cat` provider-backed stdin whose read never
+			// completes.
+			let run = run_virtual(directory.path(), "timeout 0.2 cat < virtual://stalled").await;
+			(run.status, run.stderr)
 		});
 		let _ = sender.send(ran);
 		runtime.shutdown_background();
@@ -953,5 +874,27 @@ fn timeout_stops_a_utility_reading_stalled_provider_stdin() {
 	let (status, stderr) = result
 		.recv_timeout(Duration::from_secs(5))
 		.expect("`timeout` waited for the stalled read");
-	assert_eq!(status, 124, "{stderr}");
+	assert_eq!(status, Some(124), "{stderr}");
+}
+
+/// Resolving a URL argument awaits the provider and the spawned child's
+/// output is pumped by the same runtime: on a current-thread runtime both
+/// must progress cooperatively, and a delayed writer must still reach the
+/// pipeline's reader.
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn url_spawn_and_output_pumps_run_on_a_current_thread_runtime() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(directory.path().join("a.txt"), b"alpha\n").expect("document");
+	let run = tokio::time::timeout(
+		Duration::from_secs(5),
+		run_virtual(
+			directory.path(),
+			"/bin/sh -c 'printf \"%s\\n\" \"$0\"; sleep 0.05; echo late' virtual://a.txt | /bin/cat",
+		),
+	)
+	.await
+	.expect("a URL spawn and its output pump progress on the only runtime thread");
+	assert_eq!(run.status, Some(0), "{}", run.stderr);
+	assert!(run.stdout.ends_with("a.txt\nlate\n"), "{}", run.stdout);
 }

@@ -2,10 +2,11 @@
  * Cascade search: semantic passage maps before full-source reading.
  *
  * 1. Lexical scan ranks every eligible file by query keywords.
- * 2. Filename ranking judges the top candidates by name and place in the tree.
+ * 2. Filename ranking judges the top candidates by name and place in the tree,
+ *    or Spotlight scores them all in one request (the `spotlight` ranker).
  * 3. Passage scoring reads the strongest files, cuts them into byte-bounded
  *    windows, and judges a budgeted verbatim sketch of each window.
- * 4. Verification judges the complete text of the sketches that survived.
+ * 4. Verification judges the complete text of the sketches that survived, through `verifyJudge` when one is given.
  *
  * Sketch judgments are only routing signals: a reported heat range always
  * comes from a complete passage. Each judged phase runs its requests through
@@ -14,13 +15,26 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgmentResult, NoulQuestion } from "@oh-my-pi/pi-ai";
-import type { FindCoverage, FindHit, FindStats } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindCoverage, FindHit, FindLexicalMatch, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
+import { type SpotlightClient, SpotlightError } from "../../spotlight/client";
+import type { SpotlightThinking } from "../../spotlight/types";
 import { throwIfAborted } from "../tool-errors";
 import { fileScore, grepIndex, idf } from "./lexical";
 import { keywords as deriveKeywords } from "./keywords";
 import { type HeatRange, mergeHeat, type Passage, plainContent, selectWindows, sketch, windows } from "./passages";
-import { nameBatch, passageBatch, passageKey, entryKey, type Request, type SketchCard, sketchBatch } from "./questions";
+import {
+	entryKey,
+	nameBatch,
+	passageBatch,
+	passageKey,
+	type Request,
+	SPOTLIGHT_FILES,
+	type SketchCard,
+	sketchBatch,
+	spotlightNames,
+} from "./questions";
 import { lines, readText, ReadTextError, takeChars } from "./text";
 import { type FileEntry, listFiles, type SearchRoot } from "./tree";
 
@@ -42,10 +56,15 @@ const SKETCH_BYTES = 384;
 const FULL_LIMIT = 40;
 /** Sketch probability below which a passage is not verified. */
 const CUTOFF = 0.45;
-/** Verified-passage probability at or above which a file is a hit. */
+/** Verified-passage probability at or above which a file is a hit, unless {@link CascadeOptions.threshold} sets one. */
 const THRESHOLD = 0.2;
 /** Bytes of a file read for windowing. */
 const READ_LIMIT = 4 * 1024 * 1024;
+
+/** Unranked literal rows listed when every judge request failed. */
+const LEXICAL_FALLBACK_ROWS = 20;
+/** Longest fallback snippet, in characters. */
+const LEXICAL_FALLBACK_SNIPPET = 160;
 /** Sketch state budget per request; sized so cards stay well inside the judge's context. */
 const SKETCH_STATE_BYTES = 18_000;
 /** Hard cap on sketch cards per request. */
@@ -56,6 +75,31 @@ const VERIFY_STATE_BYTES = 24 * 1024;
 const SCAN_TIMEOUT_MS = 30_000;
 /** Distinct failure messages retained for the report. */
 const FAILURES_KEPT = 5;
+/**
+ * Budget of the Spotlight ranking request; past it the judge ranks instead,
+ * while the call's own budget still has room for it.
+ */
+const SPOTLIGHT_TIMEOUT_MS = 6_000;
+
+/** Ranks the filename shortlist with Spotlight instead of the judge's name batches. */
+export interface CascadeSpotlight {
+	client: Pick<SpotlightClient, "rank">;
+	thinking: SpotlightThinking;
+}
+
+/** How the filename shortlist was ranked, for the experiment journal. */
+export interface CascadeRanking {
+	/** The ranker whose scores chose the read set: `judge` also when Spotlight failed and the judge took over. */
+	ranker: "judge" | "spotlight";
+	/** Files on the shortlist. */
+	candidates: number;
+	/** Root-relative paths whose content was read, in selection order. */
+	read: string[];
+	/** The Spotlight request, when one was sent. */
+	spotlight?: { ms: number; inputTokens: number; costUsd: number; error?: string };
+	/** Filename batches the judge did not have to answer. */
+	judgeRequestsSaved: number;
+}
 
 export interface CascadeOptions {
 	root: SearchRoot;
@@ -65,19 +109,36 @@ export interface CascadeOptions {
 	/** Caller-supplied lexical keywords, added to those derived from the query. */
 	extraKeywords: readonly string[];
 	judge: Judge;
+	/** Answers verification (wave 3); `judge` when absent. Requests, failures, and spend fold into the same stats. */
+	verifyJudge?: Judge;
+	/** Rank filenames with Spotlight; the judge ranks them when absent or when Spotlight fails. */
+	spotlight?: CascadeSpotlight;
 	includeHidden: boolean;
 	signal?: AbortSignal;
+	/**
+	 * The call's wall-clock budget. Firing during verification ends the search
+	 * with the hits verified so far and {@link CascadeResult.timeout}; firing
+	 * earlier, or a `signal` abort, rejects.
+	 */
+	deadline?: AbortSignal;
+	/** Verified-passage probability at or above which a file is a hit and a range is listed; defaults to 0.2. */
+	threshold?: number;
 	onProgress?: (message: string) => void;
 }
 
 export interface CascadeResult {
 	/** Files whose verified passages cleared the threshold, strongest first. */
 	hits: FindHit[];
+	/** Literal keyword lines from the already-read files; non-empty only when `coverage` is `unavailable`. */
+	lexicalFallback: FindLexicalMatch[];
 	/** Whether the judge answered; an empty `hits` proves nothing when `unavailable`. */
 	coverage: FindCoverage;
 	threshold: number;
 	keywords: string[];
 	stats: FindStats;
+	ranking: CascadeRanking;
+	/** Set when the deadline cut verification short. */
+	timeout?: FindTimeout;
 }
 
 interface FilePlan {
@@ -107,8 +168,54 @@ function compareRel(a: FileEntry, b: FileEntry): number {
 	return a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0;
 }
 
+/**
+ * Literal keyword lines from the already-read windows, in selection order.
+ * Only windows that matched lexically (`score > 0`) contribute; each matching
+ * line becomes one `rel:line` row. Rows are dealt round-robin across files,
+ * capped at {@link LEXICAL_FALLBACK_ROWS}, so one keyword-dense file cannot
+ * crowd out every other file that was read.
+ */
+function fallbackMatches(
+	files: readonly FilePlan[],
+	entries: readonly FileEntry[],
+	keywords: readonly string[],
+): FindLexicalMatch[] {
+	if (keywords.length === 0) return [];
+	const perFile: FindLexicalMatch[][] = [];
+	for (const plan of files) {
+		const rows: FindLexicalMatch[] = [];
+		for (const passage of plan.passages) {
+			if (passage.score <= 0 || rows.length >= LEXICAL_FALLBACK_ROWS) continue;
+			const stripped = lines(plainContent(passage));
+			for (let i = 0; i < stripped.length && rows.length < LEXICAL_FALLBACK_ROWS; i++) {
+				const snippet = stripped[i]!;
+				const lower = snippet.toLowerCase();
+				if (!keywords.some(keyword => lower.includes(keyword))) continue;
+				rows.push({
+					rel: entries[plan.node]!.rel,
+					line: passage.start + i,
+					snippet: takeChars(snippet.trim(), LEXICAL_FALLBACK_SNIPPET),
+				});
+			}
+		}
+		if (rows.length > 0) perFile.push(rows);
+	}
+	const out: FindLexicalMatch[] = [];
+	for (let i = 0; ; i++) {
+		let added = false;
+		for (const rows of perFile) {
+			if (i >= rows.length || out.length >= LEXICAL_FALLBACK_ROWS) continue;
+			out.push(rows[i]!);
+			added = true;
+		}
+		if (!added || out.length >= LEXICAL_FALLBACK_ROWS) return out;
+	}
+}
+
 class Cascade {
 	readonly #options: CascadeOptions;
+	/** Caller cancellation and the deadline: every request and scan stops on either. */
+	readonly #signal: AbortSignal | undefined;
 	readonly stats: FindStats = {
 		listed: 0,
 		requests: 0,
@@ -129,6 +236,8 @@ class Cascade {
 
 	constructor(options: CascadeOptions) {
 		this.#options = options;
+		const { signal, deadline } = options;
+		this.#signal = signal && deadline ? AbortSignal.any([signal, deadline]) : (signal ?? deadline);
 	}
 
 	#fail(phase: string, error: unknown): void {
@@ -137,11 +246,12 @@ class Cascade {
 		if (failures.length < FAILURES_KEPT && !failures.includes(message)) failures.push(message);
 	}
 
-	async #ask(request: Request): Promise<Outcome> {
-		const { judge, signal } = this.#options;
+	async #ask(judge: Judge, request: Request): Promise<Outcome> {
+		const signal = this.#signal;
 		const started = performance.now();
 		try {
-			const result = await judge.judge(request, { signal });
+			// A judge that settles after the abort is not waited for, so nothing reaches the stats once the call ended.
+			const result = await untilAborted(signal, () => judge.judge(request, { signal }));
 			this.stats.requests++;
 			this.stats.apiMs += performance.now() - started;
 			this.stats.inputTokens += result.usage.input;
@@ -158,23 +268,31 @@ class Cascade {
 	}
 
 	/**
-	 * Run every job with at most {@link PARALLEL} requests in flight, handing each
-	 * outcome to `settle` in completion order. Resolves once the queue drains.
+	 * Run every job through `judge`, with at most {@link PARALLEL} requests in flight, handing each
+	 * outcome to `settle` in completion order. Resolves once the queue drains;
+	 * on an abort, rejects once every worker has stopped.
 	 */
-	async #dispatch<J extends { request: Request }>(jobs: readonly J[], settle: (job: J, outcome: Outcome) => void) {
+	async #dispatch<J extends { request: Request }>(
+		judge: Judge,
+		jobs: readonly J[],
+		settle: (job: J, outcome: Outcome) => void,
+	) {
 		let next = 0;
 		const worker = async () => {
 			while (next < jobs.length) {
-				throwIfAborted(this.#options.signal);
+				throwIfAborted(this.#signal);
 				const job = jobs[next++]!;
-				settle(job, await this.#ask(job.request));
+				settle(job, await this.#ask(judge, job.request));
 			}
 		};
-		await Promise.all(Array.from({ length: Math.min(PARALLEL, jobs.length) }, worker));
+		const settled = await Promise.allSettled(Array.from({ length: Math.min(PARALLEL, jobs.length) }, worker));
+		const stopped = settled.find(result => result.status === "rejected");
+		if (stopped) throw stopped.reason;
 	}
 
 	async run(): Promise<CascadeResult> {
-		const { root, filesystem, query, includeHidden, signal, onProgress } = this.#options;
+		const { root, filesystem, query, includeHidden, onProgress } = this.#options;
+		const signal = this.#signal;
 		const keywords = deriveKeywords(query, this.#options.extraKeywords);
 
 		onProgress?.("lexical scan");
@@ -208,22 +326,42 @@ class Cascade {
 				batch.map(node => entries[node]!),
 			),
 		}));
-		let named = 0;
-		onProgress?.(`filename ranking 0/${ranked.length}`);
-		await this.#dispatch(nameJobs, (job, outcome) => {
-			named += job.batch.length;
-			if (!outcome.ok) this.#fail("filenames", outcome.error);
-			job.batch.forEach((node, k) => {
-				const p = noul(outcome, entryKey(k));
-				nameScore[node] = p;
-				if (p === undefined) {
-					if (outcome.ok) this.stats.unanswered++;
-				} else {
-					this.stats.judged++;
-				}
+		const ranking: CascadeRanking = {
+			ranker: "judge",
+			candidates: ranked.length,
+			read: [],
+			judgeRequestsSaved: 0,
+		};
+		if (this.#options.spotlight && ranked.length > 0) {
+			ranking.spotlight = await this.#spotlightNames(
+				this.#options.spotlight,
+				ranked.map(candidate => candidate.node),
+				entries,
+				nameScore,
+			);
+			if (ranking.spotlight.error === undefined) {
+				ranking.ranker = "spotlight";
+				ranking.judgeRequestsSaved = nameJobs.length;
+			}
+		}
+		if (ranking.ranker === "judge") {
+			let named = 0;
+			onProgress?.(`filename ranking 0/${ranked.length}`);
+			await this.#dispatch(this.#options.judge, nameJobs, (job, outcome) => {
+				named += job.batch.length;
+				if (!outcome.ok) this.#fail("filenames", outcome.error);
+				job.batch.forEach((node, k) => {
+					const p = noul(outcome, entryKey(k));
+					nameScore[node] = p;
+					if (p === undefined) {
+						if (outcome.ok) this.stats.unanswered++;
+					} else {
+						this.stats.judged++;
+					}
+				});
+				onProgress?.(`filename ranking ${named}/${ranked.length}`);
 			});
-			onProgress?.(`filename ranking ${named}/${ranked.length}`);
-		});
+		}
 
 		// The two strongest lexical candidates are read regardless of the name
 		// judgment; the rest of the budget follows name score, then lexical rank.
@@ -233,6 +371,7 @@ class Cascade {
 			if (selected.length >= FILES) break;
 			if (!selected.includes(candidate.node)) selected.push(candidate.node);
 		}
+		ranking.read = selected.map(node => entries[node]!.rel);
 		onProgress?.(`reading ${selected.length} files`);
 		const plans = await Promise.all(
 			selected.map(async (node): Promise<FilePlan | undefined> => {
@@ -269,7 +408,7 @@ class Cascade {
 		this.stats.mapCards += cards.length;
 		onProgress?.(`scoring ${cards.length} passage sketches across ${files.length} files`);
 		const candidates: { f: number; p: number; score: number }[] = [];
-		await this.#dispatch(sketchJobs, (job, outcome) => {
+		await this.#dispatch(this.#options.judge, sketchJobs, (job, outcome) => {
 			if (!outcome.ok) this.#fail("sketches", outcome.error);
 			job.batch.forEach(({ f, p }, k) => {
 				const score = noul(outcome, passageKey(k));
@@ -306,7 +445,9 @@ class Cascade {
 		}
 		onProgress?.(`verifying ${survivors.length} passages in ${chosen.size} files`);
 		const results = new Map<number, { score: number; heat: HeatRange[]; lines: number; bytes: number }>();
-		await this.#dispatch(verifyJobs, (job, outcome) => {
+		let timeout: FindTimeout | undefined;
+		const verifier = this.#options.verifyJudge ?? this.#options.judge;
+		const verification = this.#dispatch(verifier, verifyJobs, (job, outcome) => {
 			if (!outcome.ok) {
 				this.#fail("verification", outcome.error);
 				return;
@@ -335,18 +476,25 @@ class Cascade {
 				this.stats.windowsJudged++;
 			});
 		});
+		try {
+			await verification;
+		} catch (error) {
+			if (!this.#options.deadline?.aborted || this.#options.signal?.aborted) throw error;
+			timeout = { verified: this.stats.windowsJudged, passages: survivors.length };
+		}
 
+		const threshold = this.#options.threshold ?? THRESHOLD;
 		const hits: FindHit[] = [];
 		for (const [f, entry] of results) {
 			const plan = files[f]!;
 			this.stats.filesRead++;
 			this.stats.fileBytes += entry.bytes;
-			if (entry.score < THRESHOLD) continue;
+			if (entry.score < threshold) continue;
 			hits.push({
 				rel: entries[plan.node]!.rel,
 				nameScore: nameScore[plan.node],
 				contentScore: entry.score,
-				ranges: mergeHeat(entry.heat, THRESHOLD),
+				ranges: mergeHeat(entry.heat, threshold),
 				linesSeen: entry.lines,
 				truncated: plan.truncated || entry.lines < plan.total,
 			});
@@ -355,8 +503,58 @@ class Cascade {
 		this.stats.filesRead += files.length - results.size;
 		hits.sort((a, b) => b.contentScore - a.contentScore);
 		const { requests, failed } = this.stats;
-		const coverage: FindCoverage = failed === 0 ? "complete" : failed === requests ? "unavailable" : "partial";
-		return { hits, coverage, threshold: THRESHOLD, keywords, stats: this.stats };
+		const coverage: FindCoverage =
+			failed > 0 && failed === requests ? "unavailable" : failed > 0 || timeout ? "partial" : "complete";
+		// Every judge request failed, but the lexical pass already read the
+		// strongest files and cut keyword windows: surface those literal matches
+		// so the caller need not re-run the search with grep.
+		const lexicalFallback = coverage === "unavailable" ? fallbackMatches(files, entries, keywords) : [];
+		return { hits, coverage, threshold, keywords, stats: this.stats, ranking, timeout, lexicalFallback };
+	}
+
+	/**
+	 * Scores every shortlisted path in one Spotlight request into `nameScore`,
+	 * listed sorted as `git ls-files` prints them. A failure leaves the scores
+	 * unset, is reported in `stats.failures`, and is returned so the judge ranks
+	 * instead.
+	 */
+	async #spotlightNames(
+		spotlight: CascadeSpotlight,
+		nodes: readonly number[],
+		entries: readonly FileEntry[],
+		nameScore: (number | undefined)[],
+	): Promise<NonNullable<CascadeRanking["spotlight"]>> {
+		const { query, onProgress } = this.#options;
+		const signal = this.#signal;
+		const order = [...nodes].sort((a, b) => compareRel(entries[a]!, entries[b]!));
+		onProgress?.(`spotlight ranking ${order.length} files`);
+		const started = performance.now();
+		try {
+			const reply = await spotlight.client.rank(
+				spotlightNames(
+					query,
+					order.map(node => entries[node]!.rel),
+					spotlight.thinking,
+				),
+				signal,
+				SPOTLIGHT_TIMEOUT_MS,
+			);
+			const scores = reply.scores[SPOTLIGHT_FILES]!;
+			order.forEach((node, k) => {
+				nameScore[node] = scores[k];
+			});
+			this.stats.judged += order.length;
+			// Spend shows in the report's totals; `requests` stays the judge's, since it decides coverage.
+			this.stats.inputTokens += reply.inputTokens;
+			this.stats.cost += reply.costUsd;
+			this.stats.apiMs += reply.ms;
+			return { ms: reply.ms, inputTokens: reply.inputTokens, costUsd: reply.costUsd };
+		} catch (error) {
+			throwIfAborted(signal);
+			if (!(error instanceof SpotlightError)) throw error;
+			this.#fail("filenames", error);
+			return { ms: Math.round(performance.now() - started), inputTokens: 0, costUsd: 0, error: error.message };
+		}
 	}
 }
 

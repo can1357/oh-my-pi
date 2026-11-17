@@ -17,13 +17,14 @@
 //! generator, and receiver lines interleave differently, and its byte totals
 //! (`Total bytes sent/received`, the `sent … received …` summary) depend on
 //! how many multiplexed frames each run happened to flush. Rather than mask
-//! those values, the comparison stays exact and samples the reference: when
-//! ours differs from the reference in any way, the reference is rerun on a
-//! fresh fixture up to [`REFERENCE_RETRIES`] times, and the scenario passes if
-//! ours exactly equals (exit code, normalized stdout and stderr, tree) any
-//! one reference outcome. A real bug still fails because ours matches none of
-//! them; the failure report names how many distinct reference outcomes were
-//! seen and diffs ours against the first.
+//! those values, the comparison stays exact and samples both clients: ours
+//! races the same way (its sender, generator, and receiver are threads), so
+//! when the outcomes differ in any way, each client is rerun on a fresh
+//! fixture up to [`RETRIES`] times, and the scenario passes once some outcome
+//! of ours exactly equals (exit code, normalized stdout and stderr, tree) some
+//! reference outcome. A real bug still fails because no outcome of ours
+//! matches; the failure report names how many distinct outcomes each client
+//! produced and diffs the first of each.
 //!
 //! The reference runs with an empty environment (plus `TZ` when set, so
 //! local-time output uses one zone on both sides), matching the test host's
@@ -55,8 +56,8 @@ use self::snapshot::Snapshot;
 use crate::host::run_util;
 use crate::rsync::Rsync;
 
-/// How many extra reference runs a mismatch gets.
-const REFERENCE_RETRIES: usize = 8;
+/// How many extra runs of each client a mismatch gets.
+const RETRIES: usize = 8;
 
 /// One scenario: see [`cases`] for the field conventions.
 struct Case {
@@ -224,27 +225,38 @@ fn check(reference: &Path, mode: Mode, case: &Case) -> Result<(), String> {
 	// reports to the reference (macOS: /var → /private/var).
 	let base = fs::canonicalize(dir.path()).unwrap();
 	let bench = Bench::new(&base, reference, mode);
-	let ours = bench.run(case, "ours", Client::Ours);
-	// Distinct reference outcomes seen so far, first run first.
+	// Distinct outcomes per client so far, first run first.
+	let mut mine: Vec<Outcome> = Vec::new();
 	let mut seen: Vec<Outcome> = Vec::new();
-	for attempt in 0..=REFERENCE_RETRIES {
-		let outcome = bench.run(case, &format!("theirs{attempt}"), Client::Reference);
-		if outcome == ours {
-			if ours.code == case.exit {
-				return Ok(());
+	let mut matched = None;
+	for attempt in 0..=RETRIES {
+		for (client, side, outcomes) in [
+			(Client::Ours, format!("ours{attempt}"), &mut mine),
+			(Client::Reference, format!("theirs{attempt}"), &mut seen),
+		] {
+			let outcome = bench.run(case, &side, client);
+			if !outcomes.contains(&outcome) {
+				outcomes.push(outcome);
 			}
-			seen.insert(0, outcome);
+		}
+		matched = mine.iter().find(|outcome| seen.contains(outcome));
+		if matched.is_some() {
 			break;
 		}
-		if !seen.contains(&outcome) {
-			seen.push(outcome);
-		}
 	}
-	let theirs = &seen[0];
-	let verdict = if ours == *theirs {
+	let (ours, theirs) = match matched {
+		Some(outcome) if outcome.code == case.exit => return Ok(()),
+		Some(outcome) => (outcome, outcome),
+		None => (&mine[0], &seen[0]),
+	};
+	let verdict = if matched.is_some() {
 		format!("ours matched one of {} distinct reference outcome(s)", seen.len())
 	} else {
-		format!("ours matched none of {} distinct reference outcome(s); diff against the first", seen.len())
+		format!(
+			"none of {} distinct outcome(s) of ours matched any of {} distinct reference outcome(s); diff of the first of each",
+			mine.len(),
+			seen.len()
+		)
 	};
 	let mut report = format!("{} {:?}\n  {verdict}\n", case.name, bench.argv(case, 0));
 	if theirs.code != case.exit {

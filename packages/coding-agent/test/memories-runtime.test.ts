@@ -509,6 +509,18 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings)).toBeUndefined();
 	});
 
+	test("renders learned lessons without summary guidance", async () => {
+		const agentDir = await makeTempDir("memories-runtime-instructions");
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const memoryRoot = getMemoryRoot(agentDir, settings.getCwd());
+		await fs.mkdir(memoryRoot, { recursive: true });
+		await fs.writeFile(path.join(memoryRoot, "learned.md"), "- Check the project memory root.\n");
+
+		const payload = await buildMemoryToolDeveloperInstructions(agentDir, settings.getCwd(), settings);
+		expect(payload).toContain("Learned lessons");
+		expect(payload).not.toContain("memory_summary.md");
+	});
+
 	test("renders payload with truncation for non-empty summary", async () => {
 		const agentDir = await makeTempDir("memories-runtime-instructions");
 		const settings = Settings.isolated({

@@ -4,6 +4,7 @@ mod backend;
 mod control;
 mod error;
 mod frame;
+mod front_app;
 mod keys;
 #[cfg(target_os = "linux")]
 mod linux;
@@ -12,6 +13,7 @@ mod macos;
 mod menus;
 #[cfg(target_os = "macos")]
 mod native_helper;
+mod roster;
 mod text_range;
 mod types;
 #[cfg(any(target_os = "windows", test))]
@@ -19,6 +21,7 @@ mod win32;
 
 use std::{
 	collections::HashMap,
+	fmt::Write as _,
 	panic::AssertUnwindSafe,
 	sync::{
 		Arc,
@@ -29,12 +32,12 @@ use std::{
 };
 
 pub use applications::{Application, ApplicationOpenOptions, ApplicationQuery, OpenedApplication};
-use ax::{AxRegistry, register_node};
+use ax::{AppFocus, AxRegistry, register_node};
 use backend::{
 	Backend, ClickOptions, DeliveryMode, DisplayAwakeHold, ElementDelivery, ElementInput,
 	KeyboardFocus, MouseButton, PointerEvent, is_raise_action,
 };
-use control::{CancellationSource, InputLease, OperationToken};
+use control::{Admit, CancellationSource, InputLease, OperationToken};
 use error::{CoreResult, DesktopError, ErrorCode};
 use frame::{FrameGeometry, apply_capture_caps, encode_png};
 use keys::{parse_keys, parse_modifiers};
@@ -163,10 +166,20 @@ enum Response {
 	/// An input call's takeover focus report; see
 	/// [`control::take_focus_return`].
 	Input(Option<DesktopFocusReturn>),
+	/// A typing call's result; see [`control::take_text_unconfirmed`].
+	Typed(DesktopTypeResult),
 	Nodes(Vec<AxNode>),
 	Node(Option<AxNode>),
 	Attributes(Vec<(String, String)>),
 	TextSelection(AxTextSelection),
+}
+
+/// The result of the typing call that just ran on this thread.
+fn typed() -> Response {
+	Response::Typed(DesktopTypeResult {
+		unconfirmed:  control::take_text_unconfirmed(),
+		focus_return: control::take_focus_return(),
+	})
 }
 
 type Reply = flume::Sender<CoreResult<Response>>;
@@ -483,6 +496,20 @@ impl Request {
 			|| takeover.mode() != DeliveryMode::Background
 	}
 
+	/// A takeover of a window or an element, which activates it and hands it
+	/// the user's keyboard; the backend admits it before the input lease is
+	/// taken ([`Backend::admit_takeover`]).
+	fn takes_over_a_window(&self) -> bool {
+		self.takes_over()
+			&& !matches!(
+				self,
+				Self::RaiseWindow { .. } | Self::OpenApplication { .. } | Self::AxPerform { .. }
+			)
+			&& self
+				.target()
+				.is_none_or(|target| matches!(target, Target::Window(_)))
+	}
+
 	const fn frame_target(&self) -> Option<&Target> {
 		match self {
 			Self::Capture { target, .. } | Self::Observe { target, .. } => Some(target),
@@ -728,6 +755,10 @@ fn hold_duration(seconds: f64) -> CoreResult<Duration> {
 struct Worker {
 	backend:       CoreResult<Box<dyn Backend>>,
 	registry:      AxRegistry,
+	/// The whole-window read of the request being served, from a row follow
+	/// that found no row: a `StaleRef` search runs on it instead of walking
+	/// the window again ([`ax::refind_in`]).
+	row_read:      Option<ax::WindowRead>,
 	frames:        HashMap<String, FrameGeometry>,
 	/// Latest capabilities the worker computed, shared with the session so the
 	/// getter can answer while an operation holds the worker.
@@ -756,6 +787,7 @@ impl Worker {
 		Self {
 			backend,
 			registry: AxRegistry::default(),
+			row_read: None,
 			frames: HashMap::new(),
 			capabilities,
 			display_awake,
@@ -773,26 +805,47 @@ impl Worker {
 	}
 
 	fn window(&mut self, target: &Target) -> CoreResult<DesktopWindow> {
-		let windows = self.backend()?.windows()?;
-		match target {
-			Target::Window(id) => windows
-				.into_iter()
-				.find(|window| window.id == *id)
-				.ok_or_else(|| DesktopError::window_not_found(format!("window '{id}' was not found"))),
-			Target::Desktop | Target::Display(_) => windows
-				.into_iter()
-				.find(|window| window.focused)
-				.ok_or_else(|| DesktopError::window_not_found("no focused window was found")),
-		}
+		let backend = self.backend()?;
+		let windows = backend.windows()?;
+		let found = match target {
+			Target::Window(id) => windows.into_iter().find(|window| window.id == *id),
+			Target::Desktop | Target::Display(_) => windows.into_iter().find(|window| window.focused),
+		};
+		found.ok_or_else(|| {
+			backend
+				.missing_window(target)
+				.unwrap_or_else(|| match target {
+					Target::Window(id) => {
+						DesktopError::window_not_found(format!("window '{id}' was not found"))
+					},
+					Target::Desktop | Target::Display(_) => {
+						DesktopError::window_not_found("no focused window was found")
+					},
+				})
+		})
 	}
 
+	/// The frame of `target`'s last capture. On macOS the refusal without one
+	/// names the element click first: agents send coordinates read off an
+	/// element's `bounds()`, desktop points there, and the element's own click
+	/// needs no capture. Elsewhere it does not: Wayland bounds can be
+	/// window-relative and its window input is refused.
 	fn frame(&self, target: &Target) -> CoreResult<FrameGeometry> {
 		self.frames.get(target.key()).cloned().ok_or_else(|| {
-			DesktopError::invalid_coordinate_frame(format!(
-				"no capture of '{}' yet — take a screenshot of this target first; coordinate input is \
-				 in pixels of that screenshot",
-				target.key()
-			))
+			let key = target.key();
+			DesktopError::invalid_coordinate_frame(if cfg!(target_os = "macos") {
+				format!(
+					"no capture of '{key}' yet. Coordinate input is in pixels of a screenshot of this \
+					 target, not the desktop coordinates an element's bounds() gives: to click an \
+					 element, call its own click() (`await el.click()`), which needs no screenshot; \
+					 for a pixel click, take a screenshot of this target first"
+				)
+			} else {
+				format!(
+					"no capture of '{key}' yet — take a screenshot of this target first; coordinate \
+					 input is in pixels of that screenshot"
+				)
+			})
 		})
 	}
 
@@ -1048,6 +1101,19 @@ impl Worker {
 		}
 		token.check()?;
 		let _scope = token.enter();
+		// A ref whose row the app rebuilt names the row's copy before the
+		// request reads its element or its app. That probe asks the element's
+		// app, so on macOS the user's front app is read before it, for the
+		// whole request (`EntryFront` in `macos::input`).
+		#[cfg(target_os = "macos")]
+		let _front = request
+			.reference()
+			.filter(|reference| self.registry.has_row(reference))
+			.map(|_| macos::pin_entry_front());
+		self.row_read = None;
+		if let Some(reference) = request.reference() {
+			self.follow_row(reference);
+		}
 		// Input the user's recent activity holds back fails here, before it
 		// takes the input lease.
 		#[cfg(target_os = "macos")]
@@ -1059,16 +1125,27 @@ impl Worker {
 				// names its match like one from the request itself.
 				Err(error) => {
 					return Err(match request.reference() {
-						Some(reference) => self.name_match(reference, error, token),
+						Some(reference) => self.name_match(reference, error, false, token),
 						None => error,
 					});
 				},
 			}
 		};
-		let lease = request
-			.is_mutation()
-			.then(|| InputLease::acquire(token, request.takes_over()))
-			.transpose()?;
+		let lease = if !request.is_mutation() {
+			None
+		} else if request.takes_over_a_window() {
+			// The admission waits without the lease, so another session's input
+			// is not kept out while the user types.
+			Some(InputLease::acquire_admitted(token, |step| {
+				let backend = self.backend()?;
+				match step {
+					Admit::Wait => backend.admit_takeover().map(|()| true),
+					Admit::Recheck => backend.takeover_admitted(),
+				}
+			})?)
+		} else {
+			Some(InputLease::acquire(token, request.takes_over())?)
+		};
 		token.check()?;
 		// A full capture replaces coordinates only if it completes in its
 		// original generation. Keep the previous frame by move, not by
@@ -1077,6 +1154,13 @@ impl Worker {
 			.frame_target()
 			.and_then(|target| self.frames.remove(target.key()));
 		control::take_focus_return();
+		// An element action goes only to an element that still reads with the
+		// role and label its ref was read with ([`ax::require_read_as`]).
+		#[cfg(any(target_os = "macos", test))]
+		let read_as = request
+			.reference()
+			.filter(|_| request.is_mutation())
+			.and_then(|reference| self.registry.expect_read_as(reference));
 		// A read cancelled while it ran is discarded, a menu read included.
 		// Input's result stands, since it may have gone out: a cancel arriving
 		// after it stops the next call instead.
@@ -1106,27 +1190,72 @@ impl Worker {
 		// A `StaleRef` search reads the whole window, which can take long
 		// enough to keep other sessions from input: it runs once the call has
 		// released it.
+		#[cfg(any(target_os = "macos", test))]
+		let relabelled = read_as.is_some_and(|read_as| read_as.finish());
+		#[cfg(not(any(target_os = "macos", test)))]
+		let relabelled = false;
 		drop(lease);
-		match (result, request.reference()) {
-			(Err(error), Some(reference)) => Err(self.name_match(reference, error, token)),
+		let result = match (result, request.reference()) {
+			(Err(error), Some(reference)) => Err(self.name_match(reference, error, relabelled, token)),
 			(result, _) => result,
+		};
+		// The follow's read of the window serves only this request.
+		self.row_read = None;
+		result
+	}
+
+	/// Points `reference` at its element's place in the one rebuilt copy of
+	/// the row it was read in ([`ax::follow_row`]), once its own element is
+	/// provably destroyed. Only a ref read in a row no other row matched pays
+	/// the probe of its element. Anything that fails leaves the ref as it
+	/// was, for the request's own `StaleRef` to report.
+	fn follow_row(&mut self, reference: &str) {
+		if !self.registry.has_row(reference) {
+			return;
+		}
+		let (Ok(handle), Ok(target)) =
+			(self.registry.resolve(reference), self.registry.target(reference))
+		else {
+			return;
+		};
+		let destroyed = self
+			.backend
+			.as_mut()
+			.ok()
+			.and_then(|backend| backend.ax())
+			.is_some_and(|ax| ax.destroyed(&handle));
+		if !destroyed {
+			return;
+		}
+		let Ok(window) = self.window(&Target::Window(target)) else {
+			return;
+		};
+		let (backend, registry) = (&mut self.backend, &mut self.registry);
+		if let Some(ax) = backend.as_mut().ok().and_then(|backend| backend.ax()) {
+			self.row_read = ax::follow_row(ax, registry, &window, reference)
+				.ok()
+				.flatten();
 		}
 	}
 
 	/// Names, in a `StaleRef` from `reference`'s element, the one element of
 	/// its window with the fields the ref was read with ([`ax::refind`]),
-	/// registered as a new ref. Nothing is sent to that element: equal fields
-	/// do not prove it is the same control, so the caller decides. Searches
-	/// only for a ref read with such fields, and only once its element is
-	/// provably destroyed.
+	/// registered as a new ref, and for a ref read in a row what its row read
+	/// then and the match's row reads now. Nothing is sent to that element:
+	/// equal fields do not prove it is the same control, so the caller
+	/// decides. Searches only for a ref read with such fields, and only once
+	/// its element is provably destroyed or, `relabelled`, reads as another
+	/// control; that one gets a ref of its own in the error too.
 	fn name_match(
 		&mut self,
 		reference: &str,
 		error: DesktopError,
+		relabelled: bool,
 		token: &OperationToken,
 	) -> DesktopError {
+		let read = self.row_read.take();
 		if error.code != ErrorCode::StaleRef
-			|| !self.registry.has_proof(reference)
+			|| !(relabelled || self.registry.has_proof(reference))
 			|| token.check().is_err()
 		{
 			return error;
@@ -1137,24 +1266,93 @@ impl Worker {
 		let Ok(target) = self.registry.target(reference) else {
 			return error;
 		};
-		let Ok(window) = self.window(&Target::Window(target)) else {
-			return error;
+		let window = match Target::parse(&target) {
+			target @ Target::Window(_) => {
+				let Ok(window) = self.window(&target) else {
+					return error;
+				};
+				window
+			},
+			Target::Desktop | Target::Display(_) => {
+				let found = self
+					.backend()
+					.and_then(|backend| backend.windows())
+					.and_then(|windows| {
+						let id = self.ax()?.window_id(&handle, &windows)?;
+						windows
+							.into_iter()
+							.find(|window| window.id == id)
+							.ok_or_else(|| {
+								DesktopError::window_not_found("the element's window is unavailable")
+							})
+					});
+				let Ok(window) = found else {
+					return error;
+				};
+				window
+			},
 		};
 		let (backend, registry) = (&mut self.backend, &mut self.registry);
 		let Some(ax) = backend.as_mut().ok().and_then(|backend| backend.ax()) else {
 			return error;
 		};
-		if !ax.destroyed(&handle) {
+		let mut message = if relabelled {
+			// The element still answers, as another control: give it a ref.
+			match ax::element_line(ax, registry, &target, handle) {
+				Ok(line) => format!(
+					"{reference} now reads as {}, not with the role and label it was read with; \
+					 nothing was sent.",
+					line.trim_start_matches("- ")
+				),
+				Err(_) => format!("{}.", error.message),
+			}
+		} else if ax.destroyed(&handle) {
+			format!("{reference} destroyed;")
+		} else {
 			return error;
+		};
+		// A relabelled element only needs the role-and-label candidate. Do
+		// not first walk for its old value-bearing proof and then walk again
+		// when that proof misses: neither candidate authorizes retargeting.
+		let candidate = if relabelled {
+			ax::find_read_as(ax, registry, &window, reference)
+				.map(|found| (found, "this read of the window found with the role and label"))
+		} else {
+			ax::refind_in(ax, registry, &window, reference, read)
+				.map(|found| (found, "in the window with the role, labels and value"))
+		};
+		let Ok((Some(found), fields)) = candidate else {
+			if !relabelled {
+				return error;
+			}
+			message.push_str(" Re-run ax()/find()");
+			return DesktopError::stale_ref(message);
+		};
+		let _ = write!(message, " {found} is the one element {fields} {reference} was read with.");
+		match registry.rows_read(reference, &found) {
+			Some((then, now, false)) => {
+				let _ = write!(
+					message,
+					" {reference}'s row read {then}; {found}'s row reads {now}, and no row reads as \
+					 {reference}'s did."
+				);
+			},
+			// The row was rebuilt after this request looked for its copy.
+			Some((then, _, true)) => {
+				let _ = write!(
+					message,
+					" {reference}'s row read {then}, and {found}'s row reads the same: acting on \
+					 {reference} again can follow it there."
+				);
+			},
+			None => {},
 		}
-		match ax::refind(ax, registry, &window, reference) {
-			Ok(Some(found)) => DesktopError::stale_ref(format!(
-				"{reference} destroyed; {found} is the one element in the window with the role, \
-				 labels and value {reference} was read with. Equal fields do not prove it is the same \
-				 control: check {found} before acting on it, or re-run ax()/find()"
-			)),
-			_ => error,
-		}
+		let _ = write!(
+			message,
+			" Equal fields do not prove it is the same control: check {found} before acting on it, \
+			 or re-run ax()/find()"
+		);
+		DesktopError::stale_ref(message)
 	}
 
 	/// Watches the user's own input into the app `request` reads or acts on,
@@ -1438,6 +1636,14 @@ impl Worker {
 				};
 				let mode = options.mode();
 				let backend = self.backend()?;
+				// The selection comes first: it reads the front app before any
+				// probe of the target, so a target the user brings forward while
+				// the menu preflight's probes block is not taken as their front
+				// app. A press on text opens no menu; any other drag still meets
+				// the preflight before it is posted.
+				if let Some(selection) = backend.drag_selection(target, &event, mode, token)? {
+					return Ok(Response::TextSelection(selection));
+				}
 				refuse_menu_press(backend.as_mut(), options.refuse_menu, mode, target, &event)?;
 				backend.pointer(target, event, &frame, mode, token)?;
 				Ok(Response::Input(control::take_focus_return()))
@@ -1455,10 +1661,11 @@ impl Worker {
 			},
 			Request::TypeText { target, text, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
+				control::take_text_unconfirmed();
 				self
 					.backend()?
 					.type_text(target, text, takeover.mode(), token)?;
-				Ok(Response::Input(control::take_focus_return()))
+				Ok(typed())
 			},
 			Request::KeyChord { target, keys, takeover, .. } => {
 				self.validate_keyboard_target(target)?;
@@ -1503,7 +1710,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, "desktop", h)?)
+						Some(register_node(ax, registry, "desktop", h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -1511,7 +1718,7 @@ impl Worker {
 			},
 			Request::AxNode { reference, .. } => {
 				let h = self.registry.resolve(reference)?;
-				let props = self.ax()?.props(&h)?;
+				let props = ax::node_props(self.ax()?, &h, &mut AppFocus::default())?;
 				Ok(Response::Node(Some(ax::node_to_napi(reference.clone(), props))))
 			},
 			Request::AxAttributes { reference, .. } => {
@@ -1533,6 +1740,7 @@ impl Worker {
 				let target = self.registry.target(reference)?;
 				let handles = self.ax()?.children(&h)?;
 				let mut nodes = Vec::with_capacity(handles.len());
+				let mut focus = AppFocus::default();
 				for h in handles {
 					let (backend, registry) = (&mut self.backend, &mut self.registry);
 					let ax = backend
@@ -1540,7 +1748,7 @@ impl Worker {
 						.map_err(|error| error.clone())?
 						.ax()
 						.ok_or_else(DesktopError::ax_unsupported)?;
-					nodes.push(register_node(ax, registry, &target, h)?);
+					nodes.push(register_node(ax, registry, &target, h, &mut focus)?);
 				}
 				Ok(Response::Nodes(nodes))
 			},
@@ -1556,7 +1764,7 @@ impl Worker {
 							.map_err(|error| error.clone())?
 							.ax()
 							.ok_or_else(DesktopError::ax_unsupported)?;
-						Some(register_node(ax, registry, &target, h)?)
+						Some(register_node(ax, registry, &target, h, &mut AppFocus::default())?)
 					},
 					None => None,
 				};
@@ -1564,12 +1772,17 @@ impl Worker {
 			},
 			Request::AxPerform { reference, action, menu, .. } => {
 				let h = self.registry.resolve(reference)?;
-				match menu {
-					Some(path) => self.ax()?.perform_menu(&h, action, path)?,
-					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h)?,
-					None => self.ax()?.perform(&h, action)?,
+				let performed = match menu {
+					Some(path) => self.ax()?.perform_menu(&h, action, path),
+					None if action.eq_ignore_ascii_case("press") => ax::ax_press(self.ax()?, &h),
+					None => self.ax()?.perform(&h, action),
+				};
+				match performed {
+					Err(error) if error.code == ErrorCode::AxUnconfirmed => {
+						Err(self.name_unconfirmed_target(reference, &h, error))
+					},
+					performed => performed.map(|()| Response::Unit),
 				}
-				Ok(Response::Unit)
 			},
 			Request::AxSetValue { reference, value, .. } => {
 				let h = self.registry.resolve(reference)?;
@@ -1605,7 +1818,9 @@ impl Worker {
 			Request::AxInput { reference, input, takeover, .. } => {
 				let h = self.registry.resolve(reference)?;
 				let mode = takeover.mode();
+				control::take_text_unconfirmed();
 				match self.backend()?.element_input(&h, input, mode, token)? {
+					ElementDelivery::Delivered if matches!(input, ElementInput::Text(_)) => Ok(typed()),
 					ElementDelivery::Delivered => Ok(Response::Input(control::take_focus_return())),
 					ElementDelivery::Unfocused(focus) => {
 						Err(self.element_focus_refusal(reference, focus, mode))
@@ -1618,6 +1833,38 @@ impl Worker {
 }
 
 impl Worker {
+	/// `error`, an action on `reference` whose outcome is unconfirmed, naming
+	/// the window and app the element is in now, so the caller knows which one
+	/// to inspect. Only reads: nothing is sent again.
+	fn name_unconfirmed_target(
+		&mut self,
+		reference: &str,
+		handle: &ax::AxHandle,
+		error: DesktopError,
+	) -> DesktopError {
+		let windows = self
+			.backend()
+			.and_then(|backend| backend.windows())
+			.unwrap_or_default();
+		let window = self
+			.ax()
+			.and_then(|ax| ax.window_id(handle, &windows))
+			.ok()
+			.and_then(|id| windows.into_iter().find(|window| window.id == id));
+		let target = match window {
+			Some(window) => {
+				let mut target = format!("{reference} is in window {} of ", window.id);
+				ax::push_quoted_label(&mut target, &window.app);
+				target.push_str(" (");
+				ax::push_quoted_label(&mut target, &window.title);
+				target.push(')');
+				target
+			},
+			None => format!("{reference}'s window could not be identified"),
+		};
+		DesktopError::new(error.code, format!("{} ({target})", error.message))
+	}
+
 	/// The error for keys addressed to `reference` that were never sent
 	/// because the element did not take keyboard focus: where focus is now,
 	/// with the focused element's `ax()` line and a ref for it.
@@ -1693,7 +1940,9 @@ fn create_backend(_: DisplaySelector) -> CoreResult<Box<dyn Backend>> {
 /// thread rather than through the session worker.
 #[cfg(target_os = "macos")]
 use macos::screen_state as read_screen_state;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+use win32::screen_state as read_screen_state;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const fn read_screen_state(_: &DisplaySelector) -> ScreenState {
 	ScreenState { locked: false, display_asleep: false }
 }
@@ -1716,13 +1965,18 @@ struct SessionCore {
 	operation_timeout: Duration,
 }
 impl SessionCore {
-	fn new(selector: DisplaySelector, escape_stops: Arc<AtomicU32>) -> Arc<Self> {
-		Self::with_operation_timeout(selector, escape_stops, OPERATION_TIMEOUT)
+	fn new(
+		selector: DisplaySelector,
+		escape_stops: Arc<AtomicU32>,
+		agent: Option<Arc<str>>,
+	) -> Arc<Self> {
+		Self::with_operation_timeout(selector, escape_stops, agent, OPERATION_TIMEOUT)
 	}
 
 	fn with_operation_timeout(
 		selector: DisplaySelector,
 		escape_stops: Arc<AtomicU32>,
+		agent: Option<Arc<str>>,
 		operation_timeout: Duration,
 	) -> Arc<Self> {
 		Arc::new(Self {
@@ -1736,7 +1990,7 @@ impl SessionCore {
 			capabilities: Arc::default(),
 			display_awake: Arc::default(),
 			in_flight: AtomicUsize::new(0),
-			cancellation: CancellationSource::counting_escapes(escape_stops),
+			cancellation: CancellationSource::counting_escapes(escape_stops, agent),
 			operation_timeout,
 		})
 	}
@@ -1781,8 +2035,9 @@ impl SessionCore {
 		let tx = self.ensure_started()?;
 		self.in_flight.fetch_add(1, Ordering::AcqRel);
 		let reply_by = Instant::now() + self.operation_timeout;
-		// Input waiting for the user to pause gives up before this caller does.
-		#[cfg(target_os = "macos")]
+		// Input waiting for the user (to pause on macOS, to answer a Wayland
+		// permission prompt) or for another session's input lock gives up
+		// before this caller does.
 		let token = token.replying_by(reply_by);
 		let response = tx
 			.send(QueuedRequest { request: make(txr), token })
@@ -1891,7 +2146,10 @@ impl DesktopSession {
 	pub fn new(options: Option<DesktopSessionOptions>) -> Result<Self> {
 		let options = options.unwrap_or_default();
 		let escape_stops = control::escape_stop_counter(options.escape_stop_key.as_deref());
-		Ok(Self { core: SessionCore::new(DisplaySelector::parse(options.display), escape_stops) })
+		let agent = options.agent_id.map(Arc::from);
+		Ok(Self {
+			core: SessionCore::new(DisplaySelector::parse(options.display), escape_stops, agent),
+		})
 	}
 
 	/// Asks the worker when it is idle, so permissions are read live. While
@@ -2163,17 +2421,15 @@ impl DesktopSession {
 	}
 
 	/// Sets when the current run ends, `remaining_ms` from now; each run sets
-	/// it before its first call. On macOS, input waiting for the user to pause
-	/// in its app gives up shortly before it.
+	/// it before its first call. Input waiting for the user to pause in its app
+	/// (macOS), for a Wayland permission prompt or for another session's input
+	/// lock gives up shortly before it.
 	#[napi]
 	pub fn set_run_deadline(&self, remaining_ms: f64) {
 		let deadline = Duration::try_from_secs_f64(remaining_ms.max(0.0) / 1000.0)
 			.ok()
 			.and_then(|remaining| Instant::now().checked_add(remaining));
-		#[cfg(target_os = "macos")]
 		self.core.cancellation.set_deadline(deadline);
-		#[cfg(not(target_os = "macos"))]
-		let _ = deadline;
 	}
 
 	#[napi]
@@ -2262,13 +2518,17 @@ impl DesktopSession {
 		}))
 	}
 
+	/// Drags along `path`. A macOS background left drag across the text of one
+	/// native text element is made as that element's selection through
+	/// accessibility, with no mouse event, and resolves to the selection read
+	/// back; a drag posted as input resolves to where a takeover left focus.
 	#[napi]
 	pub fn drag(
 		&self,
 		target: String,
 		path: Vec<DesktopPoint>,
 		opts: Option<PointerOptions>,
-	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
+	) -> Result<task::Promise<DesktopDragResult>> {
 		let o = ParsedPointerOptions::parse(opts).map_err(napi::Error::from)?;
 		if o.menu.is_some() {
 			return Err(
@@ -2279,11 +2539,20 @@ impl DesktopSession {
 			);
 		}
 		let path = path.into_iter().map(|p| (p.x, p.y)).collect();
-		Ok(self.input("desktop.drag", move |reply| Request::Drag {
-			target: Target::parse(&target),
-			path,
-			options: o,
-			reply,
+		let target = Target::parse(&target);
+		let c = Arc::clone(&self.core);
+		let token = c.cancellation.token();
+		Ok(task::blocking("desktop.drag", (), move |_| {
+			match c.call(token, |reply| Request::Drag { target, path, options: o, reply })? {
+				Response::TextSelection(v) => {
+					Ok(DesktopDragResult { selection: Some(v), focus_return: None })
+				},
+				Response::Input(report) => {
+					Ok(DesktopDragResult { selection: None, focus_return: report })
+				},
+				_ => Err(DesktopError::internal("unexpected desktop worker response")),
+			}
+			.map_err(Into::into)
 		}))
 	}
 
@@ -2317,11 +2586,11 @@ impl DesktopSession {
 		target: String,
 		text: String,
 		opts: Option<PointerOptions>,
-	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
+	) -> Result<task::Promise<DesktopTypeResult>> {
 		let takeover = ParsedPointerOptions::parse(opts)
 			.map_err(napi::Error::from)?
 			.takeover;
-		Ok(self.input("desktop.typeText", move |reply| Request::TypeText {
+		Ok(self.typing("desktop.typeText", move |reply| Request::TypeText {
 			target: Target::parse(&target),
 			text,
 			takeover,
@@ -2525,11 +2794,11 @@ impl DesktopSession {
 		reference: String,
 		text: String,
 		opts: Option<PointerOptions>,
-	) -> Result<task::Promise<Option<DesktopFocusReturn>>> {
+	) -> Result<task::Promise<DesktopTypeResult>> {
 		let takeover = ParsedPointerOptions::parse(opts)
 			.map_err(napi::Error::from)?
 			.takeover;
-		Ok(self.input("desktop.axType", move |reply| Request::AxInput {
+		Ok(self.typing("desktop.axType", move |reply| Request::AxInput {
 			reference,
 			input: ElementInput::Text(text),
 			takeover,
@@ -2604,6 +2873,24 @@ impl DesktopSession {
 		})
 	}
 
+	/// A typing call, resolving to whether its text was confirmed and where
+	/// its takeover left focus.
+	fn typing(
+		&self,
+		label: &'static str,
+		make: impl FnOnce(Reply) -> Request + Send + 'static,
+	) -> task::Promise<DesktopTypeResult> {
+		let c = Arc::clone(&self.core);
+		let token = c.cancellation.token();
+		task::blocking(label, (), move |_| {
+			match c.call(token, make)? {
+				Response::Typed(result) => Ok(result),
+				_ => Err(DesktopError::internal("unexpected desktop worker response")),
+			}
+			.map_err(Into::into)
+		})
+	}
+
 	fn nodes(
 		&self,
 		label: &'static str,
@@ -2663,8 +2950,23 @@ mod capture_tests {
 	struct FakeTree {
 		titles:            HashMap<u64, &'static str>,
 		children:          Vec<u64>,
+		/// Children of elements below the window, which have none otherwise.
+		kids:              HashMap<u64, Vec<u64>>,
+		/// Roles of elements below the window that are not buttons.
+		roles:             HashMap<u64, &'static str>,
+		/// Values of elements below the window, which have none otherwise.
+		values:            HashMap<u64, &'static str>,
+		/// Elements the app is too busy to answer in full: they read without
+		/// a title or identity, marked partial.
+		partial:           HashSet<u64>,
+		/// Window roots looked up, one per walk of the window after `ax()`.
+		roots:             u32,
 		destroyed:         HashSet<u64>,
 		pressed:           Vec<u64>,
+		/// Values written with `setValue`, by element.
+		written:           Vec<(u64, String)>,
+		/// Runs on the tree once a value is written to the element.
+		after_write:       Option<fn(&mut Self, u64)>,
 		/// A press is delivered, then the app replaces the pressed element with
 		/// an identical one under this id and the press answers as stale.
 		press_rebuilds_as: Option<u64>,
@@ -2677,6 +2979,8 @@ mod capture_tests {
 		reads:             u32,
 		/// Runs as each press is delivered and as each probe asks.
 		on_call:           Option<Box<dyn Fn(Call) + Send>>,
+		/// A press is delivered and the app answers with an unrelated error.
+		unconfirmed:       bool,
 	}
 
 	#[derive(Clone, Copy, PartialEq, Eq)]
@@ -2746,9 +3050,62 @@ mod capture_tests {
 		input_lookups:          Arc<Mutex<u32>>,
 		/// Every click lands on a control whose menu would take the keyboard.
 		menu_control:           bool,
+		/// What a drag is made as instead of input; `None` posts it.
+		drag_selection:         Option<AxTextSelection>,
 	}
 
 	impl FakeWaylandBackend {
+		/// An element's props as `props` reads them, without counting the
+		/// read: what a backend checks the element reads as before acting.
+		fn read_as(&self, h: &AxHandle) -> CoreResult<AxProps> {
+			let (role, title, value, partial) = match &self.tree {
+				Some(tree) => {
+					let tree = tree.lock();
+					let id = tree.element(h)?;
+					if id == 1 {
+						("window", tree.titles.get(&1).map(|title| (*title).to_string()), None, false)
+					} else {
+						let partial = tree.partial.contains(&id);
+						(
+							tree.roles.get(&id).copied().unwrap_or("button"),
+							tree
+								.titles
+								.get(&id)
+								.filter(|_| !partial)
+								.map(|title| (*title).to_string()),
+							tree.values.get(&id).map(|value| (*value).to_string()),
+							partial,
+						)
+					}
+				},
+				None => ("button", None, None, false),
+			};
+			Ok(AxProps {
+				read_as_fingerprint: None,
+				role: role.to_string(),
+				native_role: role.to_string(),
+				identity: (!partial).then(|| ax::test_identity((role, &title))),
+				partial,
+				label_complete: !partial,
+				title,
+				value,
+				description: None,
+				enabled: true,
+				focused: false,
+				bounds: (!self.no_bounds).then_some(AxBounds {
+					x:      10.0,
+					y:      10.0,
+					width:  20.0,
+					height: 20.0,
+				}),
+				actions: Vec::new(),
+				child_count: 0,
+				selected: false,
+				role_name: None,
+				unread_children: 0,
+			})
+		}
+
 		fn new() -> Self {
 			Self {
 				window: DesktopWindow {
@@ -2803,6 +3160,7 @@ mod capture_tests {
 				name_lookups: Arc::new(Mutex::new(0)),
 				#[cfg(target_os = "macos")]
 				input_lookups: Arc::new(Mutex::new(0)),
+				drag_selection: None,
 			}
 		}
 	}
@@ -2816,6 +3174,9 @@ mod capture_tests {
 			if *self.snapshot_error.lock() {
 				return Err(DesktopError::ax_failed("snapshot root unavailable"));
 			}
+			if let Some(tree) = &self.tree {
+				tree.lock().roots += 1;
+			}
 			Ok(AxHandle::Test(1))
 		}
 
@@ -2828,38 +3189,10 @@ mod capture_tests {
 		}
 
 		fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
-			let (role, title) = match &self.tree {
-				Some(tree) => {
-					let mut tree = tree.lock();
-					tree.reads += 1;
-					let id = tree.element(h)?;
-					if id == 1 {
-						("window", None)
-					} else {
-						("button", tree.titles.get(&id).map(|title| (*title).to_string()))
-					}
-				},
-				None => ("button", None),
-			};
-			Ok(AxProps {
-				role: role.to_string(),
-				native_role: role.to_string(),
-				identity: Some(ax::test_identity((role, &title))),
-				partial: false,
-				title,
-				value: None,
-				description: None,
-				enabled: true,
-				focused: false,
-				bounds: (!self.no_bounds).then_some(AxBounds {
-					x:      10.0,
-					y:      10.0,
-					width:  20.0,
-					height: 20.0,
-				}),
-				actions: Vec::new(),
-				child_count: 0,
-			})
+			if let Some(tree) = &self.tree {
+				tree.lock().reads += 1;
+			}
+			self.read_as(h)
 		}
 
 		fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
@@ -2867,10 +3200,14 @@ mod capture_tests {
 				return Ok(Vec::new());
 			};
 			let tree = tree.lock();
-			Ok(if tree.element(h)? == 1 {
+			let id = tree.element(h)?;
+			Ok(if id == 1 {
 				tree.children.iter().map(|id| AxHandle::Test(*id)).collect()
 			} else {
-				Vec::new()
+				tree
+					.kids
+					.get(&id)
+					.map_or_default(|kids| kids.iter().map(|id| AxHandle::Test(*id)).collect())
 			})
 		}
 
@@ -2886,6 +3223,7 @@ mod capture_tests {
 				self.clicks.lock().push(format!("perform {action}"));
 				return Ok(());
 			};
+			ax::require_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))?;
 			let mut tree = tree.lock();
 			let id = tree.element(h)?;
 			if action != "press" {
@@ -2897,6 +3235,13 @@ mod capture_tests {
 			tree.pressed.push(id);
 			if tree.stale_presses {
 				return Err(DesktopError::stale_ref("the element no longer exists"));
+			}
+			if tree.unconfirmed {
+				return Err(DesktopError::new(
+					ErrorCode::AxUnconfirmed,
+					"AX action 'AXPress' was requested, but its outcome could not be confirmed. It may \
+					 already have taken effect: observe the window before retrying",
+				));
 			}
 			let Some(copy) = tree.press_rebuilds_as else {
 				return Ok(());
@@ -2931,11 +3276,20 @@ mod capture_tests {
 			Ok(())
 		}
 
-		fn set_value(&mut self, h: &AxHandle, _: &str) -> CoreResult<()> {
-			if let Some(tree) = &self.tree {
-				tree.lock().element(h)?;
+		fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
+			let Some(tree) = &self.tree else {
+				unreachable!("text input not exercised")
+			};
+			ax::require_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))?;
+			{
+				let mut tree = tree.lock();
+				let id = tree.element(h)?;
+				tree.written.push((id, value.to_owned()));
+				if let Some(after_write) = tree.after_write {
+					after_write(&mut tree, id);
+				}
 			}
-			unreachable!("text input not exercised")
+			ax::confirm_read_as("the text", || self.read_as(h).map(ax::AxReadAs::from_props))
 		}
 
 		fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
@@ -3098,6 +3452,16 @@ mod capture_tests {
 			Ok(())
 		}
 
+		fn drag_selection(
+			&mut self,
+			_: &Target,
+			_: &PointerEvent,
+			_: DeliveryMode,
+			_: &OperationToken,
+		) -> CoreResult<Option<AxTextSelection>> {
+			Ok(self.drag_selection.clone())
+		}
+
 		fn pointer_menu(
 			&mut self,
 			target: &Target,
@@ -3174,6 +3538,7 @@ mod capture_tests {
 				.queries_at_input
 				.lock()
 				.push(*self.window_queries.lock());
+			ax::require_read_as(|| self.read_as(h).map(ax::AxReadAs::from_props))?;
 			if let Some(tree) = &self.tree {
 				tree.lock().element(h)?;
 			}
@@ -3193,6 +3558,7 @@ mod capture_tests {
 				.queries_at_input
 				.lock()
 				.push(*self.window_queries.lock());
+			ax::require_read_as(|| self.read_as(element).map(ax::AxReadAs::from_props))?;
 			let (target, event) = backend::locate_element_click(self, element, click)?;
 			click.send(self, &target, event, &FrameGeometry::identity_global(), token)
 		}
@@ -3261,6 +3627,7 @@ mod capture_tests {
 		Worker {
 			backend: Ok(Box::new(backend)),
 			registry: AxRegistry::default(),
+			row_read: None,
 			frames: HashMap::new(),
 			capabilities: Arc::default(),
 			display_awake: Arc::default(),
@@ -3287,7 +3654,8 @@ mod capture_tests {
 			.map_err(|error| error.clone())?
 			.ax()
 			.ok_or_else(DesktopError::ax_unsupported)?;
-		let reference = register_node(ax, registry, origin, AxHandle::Test(1))?.ref_;
+		let reference =
+			register_node(ax, registry, origin, AxHandle::Test(1), &mut AppFocus::default())?.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		worker.process(
 			&Request::AxClick { reference, options: ParsedPointerOptions::parse(None)?, reply },
@@ -3484,6 +3852,7 @@ mod capture_tests {
 		let core = SessionCore::with_operation_timeout(
 			DisplaySelector::Active,
 			Arc::default(),
+			None,
 			HUNG_CALL_TIMEOUT,
 		);
 		let display_awake = Arc::clone(&core.display_awake);
@@ -3763,11 +4132,16 @@ mod capture_tests {
 	/// A worker whose window holds one button per `(id, title)`, read once by
 	/// `ax()`: the window is `e1` and the buttons `e2`, `e3`, … in order.
 	fn read_buttons(buttons: &[(u64, &'static str)]) -> (TestWorker, Arc<Mutex<FakeTree>>) {
-		let tree = Arc::new(Mutex::new(FakeTree {
+		read_tree(FakeTree {
 			titles: buttons.iter().copied().collect(),
 			children: buttons.iter().map(|(id, _)| *id).collect(),
 			..FakeTree::default()
-		}));
+		})
+	}
+
+	/// A worker whose window holds `tree`, read once by `ax()`.
+	fn read_tree(tree: FakeTree) -> (TestWorker, Arc<Mutex<FakeTree>>) {
+		let tree = Arc::new(Mutex::new(tree));
 		let mut backend = FakeWaylandBackend::new();
 		backend.tree = Some(Arc::clone(&tree));
 		let mut worker = worker_with(backend);
@@ -3830,6 +4204,308 @@ mod capture_tests {
 		rest.split_whitespace().next().map(str::to_string)
 	}
 
+	/// Contacts answers the element read as an address's "City" field as its
+	/// "Street" field once typing the street adds a button at the head of the
+	/// row: each element now reads as the control before it.
+	fn shift_address_row(tree: &Mutex<FakeTree>) {
+		let mut tree = tree.lock();
+		tree
+			.titles
+			.extend([(2, "Remove Address"), (3, "Street"), (4, "City")]);
+		tree.children = vec![2, 3, 4];
+	}
+
+	#[test]
+	fn an_action_on_a_ref_whose_element_reads_as_another_control_is_refused_naming_both() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		shift_address_row(&tree);
+		let error = press(&mut worker, "e3").unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef, "{}", error.message);
+		assert!(
+			tree.lock().pressed.is_empty(),
+			"the press reached the element now reading \"Street\""
+		);
+		let now = error
+			.message
+			.strip_prefix("e3 now reads as button \"Street\" [ref=")
+			.and_then(|rest| rest.split(']').next())
+			.unwrap_or_else(|| panic!("{}", error.message));
+		let found = error
+			.message
+			.split(". ")
+			.find_map(|sentence| {
+				sentence.strip_suffix(
+					" is the one element this read of the window found with the role and label e3 was \
+					 read with",
+				)
+			})
+			.unwrap_or_else(|| panic!("{}", error.message));
+		// Each named ref acts on the element it names now.
+		press(&mut worker, found).unwrap();
+		press(&mut worker, now).unwrap();
+		assert_eq!(tree.lock().pressed, [4, 3]);
+	}
+
+	#[test]
+	fn a_relabelled_non_window_ref_names_its_current_control_and_window_candidate() {
+		for target in ["desktop", "display:active"] {
+			let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+			let (backend, registry) = (&mut worker.worker.backend, &mut worker.worker.registry);
+			let node = register_node(
+				backend.as_mut().unwrap().ax().unwrap(),
+				registry,
+				target,
+				AxHandle::Test(3),
+				&mut AppFocus::default(),
+			)
+			.unwrap();
+			shift_address_row(&tree);
+			let error = press(&mut worker, &node.ref_).unwrap_err();
+			assert_eq!(error.code, ErrorCode::StaleRef);
+			assert!(
+				error
+					.message
+					.contains("now reads as button \"Street\" [ref="),
+				"{target}: {}",
+				error.message
+			);
+			assert!(
+				error.message.contains("this read of the window found"),
+				"{target}: {}",
+				error.message
+			);
+			assert!(tree.lock().pressed.is_empty());
+		}
+	}
+
+	#[test]
+	fn a_relabelled_ref_searches_its_window_only_once_when_its_proof_misses() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		shift_address_row(&tree);
+		{
+			let mut tree = tree.lock();
+			tree.titles.insert(5, "City");
+			tree.children.push(5);
+			tree.reads = 0;
+		}
+		let error = press(&mut worker, "e3").unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef);
+		assert!(error.message.contains("Re-run ax()/find()"), "{}", error.message);
+		// One read for the element's new ref, then root + four children.
+		assert_eq!(tree.lock().reads, 6);
+		assert!(tree.lock().pressed.is_empty());
+	}
+
+	#[test]
+	fn a_write_whose_element_reads_as_another_control_afterwards_is_unconfirmed() {
+		let set = |worker: &mut TestWorker, reference: &str| {
+			let reference = reference.to_owned();
+			call(
+				worker,
+				move |reply| Request::AxSetValue { reference, value: "Cupertino".to_owned(), reply },
+				&granted(),
+			)
+			.map(drop)
+		};
+		{
+			// The app hands the field's element to the field before it as the
+			// text lands: the write may have gone there.
+			let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+			tree.lock().after_write = Some(|tree, id| {
+				tree.titles.insert(id, "Street");
+			});
+			let error = set(&mut worker, "e3").expect_err("a relabelled write");
+			assert_eq!(error.code, ErrorCode::AxUnconfirmed, "{}", error.message);
+			assert_eq!(tree.lock().written, [(3, "Cupertino".to_owned())]);
+		}
+		// The app rebuilds the element once the text lands: the read after the
+		// write cannot tell, so the write's own read-back stands.
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+		tree.lock().after_write = Some(|tree, id| {
+			tree.destroyed.insert(id);
+		});
+		set(&mut worker, "e3").unwrap();
+		assert_eq!(tree.lock().written, [(3, "Cupertino".to_owned())]);
+	}
+
+	#[test]
+	fn a_retitled_window_keeps_taking_its_refs_actions() {
+		// A window's title names its document and changes as it is used.
+		let (mut worker, tree) = read_tree(FakeTree {
+			titles: [(1, "Untitled"), (2, "Go")].into(),
+			children: vec![2],
+			..FakeTree::default()
+		});
+		tree.lock().titles.insert(1, "Report.txt");
+		press(&mut worker, "e1").unwrap();
+		assert_eq!(tree.lock().pressed, [1]);
+	}
+
+	#[test]
+	fn a_relabelled_ref_without_a_proof_names_the_one_element_read_as_it_was() {
+		// Two "City" buttons when read: neither ref's fields tell it apart, so
+		// only the role and label lead to the field once the row shifts.
+		let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City"), (5, "City")]);
+		{
+			let mut tree = tree.lock();
+			tree.titles.extend([(2, "Remove Address"), (3, "Street")]);
+		}
+		let error = press(&mut worker, "e3").unwrap_err();
+		let found = error
+			.message
+			.split(". ")
+			.find_map(|sentence| {
+				sentence.strip_suffix(
+					" is the one element this read of the window found with the role and label e3 was \
+					 read with",
+				)
+			})
+			.unwrap_or_else(|| panic!("{}", error.message));
+		assert!(tree.lock().pressed.is_empty());
+		press(&mut worker, found).unwrap();
+		assert_eq!(tree.lock().pressed, [5]);
+	}
+
+	#[test]
+	fn an_element_whose_value_changed_keeps_taking_its_refs_actions() {
+		let (mut worker, tree) = read_buttons(&[(2, "Street")]);
+		tree.lock().values.insert(2, "10600 North Tantau Avenue");
+		press(&mut worker, "e2").unwrap();
+		assert_eq!(tree.lock().pressed, [2]);
+	}
+
+	#[test]
+	fn an_element_too_busy_to_answer_its_label_is_not_read_as_another_control() {
+		{
+			// Checked partial: the app leaves the title unanswered as the press
+			// checks the element, which cannot tell, so it acts as before.
+			let (mut worker, tree) = read_buttons(&[(2, "Street"), (3, "City")]);
+			tree.lock().partial.insert(3);
+			press(&mut worker, "e3").unwrap();
+			assert_eq!(tree.lock().pressed, [3]);
+		}
+		// Registered partial: the label the ref was read with may lack the
+		// title, so a full read later is not held to it.
+		let (mut worker, tree) = read_tree(FakeTree {
+			titles: [(2, "Street"), (3, "City")].into(),
+			children: vec![2, 3],
+			partial: [3].into(),
+			..FakeTree::default()
+		});
+		tree.lock().partial.clear();
+		press(&mut worker, "e3").unwrap();
+		assert_eq!(tree.lock().pressed, [3]);
+	}
+
+	#[test]
+	fn a_control_whose_title_flipped_takes_its_new_ref_from_the_refusal() {
+		// A Play button reads "Pause" once pressed: pressing its ref again
+		// sends nothing, and the error names the element's ref as it reads now.
+		let (mut worker, tree) = read_buttons(&[(2, "Play")]);
+		press(&mut worker, "e2").unwrap();
+		tree.lock().titles.insert(2, "Pause");
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(error.code, ErrorCode::StaleRef, "{}", error.message);
+		assert_eq!(tree.lock().pressed, [2]);
+		let now = error
+			.message
+			.strip_prefix("e2 now reads as button \"Pause\" [ref=")
+			.and_then(|rest| rest.split(']').next())
+			.unwrap_or_else(|| panic!("{}", error.message));
+		press(&mut worker, now).unwrap();
+		assert_eq!(tree.lock().pressed, [2, 2]);
+	}
+
+	/// A table row as its id and its elements, each a statictext.
+	type Row = (u64, &'static [(u64, &'static str)]);
+
+	const DOCK: Row = (10, &[(11, " Dock"), (12, "0.0"), (13, "375")]);
+	const EXTRA: Row = (20, &[(21, " Dock Extra"), (22, "0.0"), (23, "463")]);
+
+	/// The app shows `rows` in the window in place of what it showed.
+	fn show_rows(tree: &mut FakeTree, rows: &[Row]) {
+		tree.children = rows.iter().map(|(row, _)| *row).collect();
+		for &(row, cells) in rows {
+			tree.roles.insert(row, "row");
+			tree
+				.kids
+				.insert(row, cells.iter().map(|(id, _)| *id).collect());
+			for &(id, text) in cells {
+				tree.roles.insert(id, "statictext");
+				tree.titles.insert(id, text);
+			}
+		}
+	}
+
+	/// A worker whose window holds a table of `rows`, read once by `ax()`: the
+	/// window is `e1`, then each row and its elements are `e2`, `e3`, … in
+	/// order.
+	fn read_table(rows: &[Row]) -> (TestWorker, Arc<Mutex<FakeTree>>) {
+		let mut tree = FakeTree::default();
+		show_rows(&mut tree, rows);
+		read_tree(tree)
+	}
+
+	/// The app rebuilds its table, as Activity Monitor does as it refreshes:
+	/// every row and element shown is destroyed and `rows` shown instead.
+	fn rebuild_rows(tree: &Mutex<FakeTree>, rows: &[Row]) {
+		let mut tree = tree.lock();
+		let shown: Vec<u64> = tree
+			.children
+			.iter()
+			.flat_map(|row| std::iter::once(*row).chain(tree.kids[row].iter().copied()))
+			.collect();
+		tree.destroyed.extend(shown);
+		show_rows(&mut tree, rows);
+	}
+
+	#[test]
+	fn a_press_on_a_rebuilt_row_lands_in_the_same_place_of_its_one_copy() {
+		let (mut worker, tree) = read_table(&[DOCK, EXTRA]);
+		// The refresh also reorders the table.
+		rebuild_rows(&tree, &[
+			(30, &[(31, " Dock Extra"), (32, "0.0"), (33, "463")]),
+			(40, &[(41, " Dock"), (42, "0.0"), (43, "375")]),
+		]);
+		press(&mut worker, "e3").unwrap();
+		// An element other rows share follows its own row too, as does the row.
+		press(&mut worker, "e4").unwrap();
+		press(&mut worker, "e2").unwrap();
+		assert_eq!(tree.lock().pressed, [41, 42, 40]);
+		// The next read shows the copy under the ref that followed it.
+		let read = worker
+			.snapshot(&Target::Window(WAYLAND_ID.to_string()), &AxSnapshotOptions::default())
+			.unwrap();
+		assert!(read.text.contains("statictext \"Dock\" [ref=e3]"), "{}", read.text);
+	}
+
+	#[test]
+	fn only_a_ref_read_in_a_row_probes_its_element_before_the_request() {
+		{
+			let (mut worker, tree) = read_table(&[DOCK, EXTRA]);
+			// On macOS the user's front app is read before that probe asks the
+			// element's app anything ([`macos::pin_entry_front`]).
+			#[cfg(target_os = "macos")]
+			let pinned = {
+				let pinned = Arc::new(Mutex::new(Vec::new()));
+				let seen = Arc::clone(&pinned);
+				tree.lock().on_call = Some(Box::new(move |call| {
+					if matches!(call, Call::Probe) {
+						seen.lock().push(macos::entry_front_pinned());
+					}
+				}));
+				pinned
+			};
+			press(&mut worker, "e3").unwrap();
+			assert_eq!(tree.lock().probes, 1);
+			#[cfg(target_os = "macos")]
+			assert_eq!(*pinned.lock(), [true]);
+		}
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		press(&mut worker, "e2").unwrap();
+		assert_eq!(tree.lock().probes, 0);
+	}
+
 	#[test]
 	fn a_press_on_a_rebuilt_element_names_its_one_copy_and_presses_nothing() {
 		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
@@ -3842,6 +4518,46 @@ mod capture_tests {
 		let error = press(&mut worker, "e2").unwrap_err();
 		assert_eq!(named(&error, "e2").as_deref(), Some("e4"));
 		assert_eq!(tree.lock().pressed, [4]);
+	}
+
+	#[test]
+	fn an_unconfirmed_action_names_the_window_and_app_to_inspect_and_is_sent_once() {
+		let (mut worker, tree) = read_buttons(&[(2, "Go"), (3, "Stop")]);
+		tree.lock().unconfirmed = true;
+		let error = press(&mut worker, "e2").unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("before retrying"), "{}", error.message);
+		assert!(
+			error
+				.message
+				.contains(&format!("e2 is in window {WAYLAND_ID} of \"obsidian\" (\"Obsidian\")")),
+			"{}",
+			error.message
+		);
+		assert_eq!(tree.lock().pressed, [2]);
+	}
+
+	#[test]
+	fn unconfirmed_action_metadata_is_escaped_and_bounded() {
+		let mut backend = FakeWaylandBackend::new();
+		let prefix = "A\t\n\r\u{1b}\"\\🦀";
+		backend.window.app = format!("{prefix}{}APP_END", "é".repeat(400));
+		backend.window.title = format!("{prefix}{}TITLE_END", "界".repeat(400));
+		let mut worker = worker_with(backend);
+		let error = worker.name_unconfirmed_target(
+			"e2",
+			&ax::AxHandle::Test(1),
+			DesktopError::new(ErrorCode::AxUnconfirmed, "inspect before retrying"),
+		);
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		let escaped = "A\\t\\n\\r\\u001b\\\"\\\\🦀";
+		assert!(error.message.contains(&format!("of \"{escaped}")), "{}", error.message);
+		assert!(error.message.contains(&format!("(\"{escaped}")), "{}", error.message);
+		assert!(!error.message.chars().any(char::is_control), "{}", error.message);
+		assert!(!error.message.contains("APP_END"), "{}", error.message);
+		assert!(!error.message.contains("TITLE_END"), "{}", error.message);
+		assert_eq!(error.message.matches("\"…").count(), 2, "{}", error.message);
+		assert!(error.message.chars().count() < 550, "{}", error.message);
 	}
 
 	#[test]
@@ -4055,9 +4771,10 @@ mod capture_tests {
 				.ok()
 				.and_then(|backend| backend.ax())
 				.unwrap();
-			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-				.unwrap()
-				.ref_;
+			let reference =
+				register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+					.unwrap()
+					.ref_;
 			let (reply, _rx) = flume::bounded(1);
 			let request = make(reference, reply);
 			let before = *queries.lock();
@@ -4078,9 +4795,10 @@ mod capture_tests {
 			.ok()
 			.and_then(|backend| backend.ax())
 			.unwrap();
-		let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-			.unwrap()
-			.ref_;
+		let reference =
+			register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+				.unwrap()
+				.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		let request = Request::AxClick {
 			reference: reference.clone(),
@@ -4107,9 +4825,10 @@ mod capture_tests {
 				.ok()
 				.and_then(|backend| backend.ax())
 				.unwrap();
-			let reference = register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1))
-				.unwrap()
-				.ref_;
+			let reference =
+				register_node(ax, registry, WAYLAND_ID, AxHandle::Test(1), &mut AppFocus::default())
+					.unwrap()
+					.ref_;
 			let (reply, _rx) = flume::bounded(1);
 			let request = Request::AxInput {
 				reference: reference.clone(),
@@ -4249,7 +4968,7 @@ mod capture_tests {
 
 	#[test]
 	fn capture_refreshes_the_nonblocking_capabilities_snapshot() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		let mut worker = worker_with(FakeWaylandBackend::new());
 		worker.capabilities = Arc::clone(&core.capabilities);
 		worker
@@ -4268,7 +4987,7 @@ mod capture_tests {
 
 	#[test]
 	fn screen_state_never_queues_behind_a_stuck_request() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		// A worker that never serves its queue, with a request outstanding and
 		// no capabilities snapshot: a queued read would wait out its timeout.
 		let (tx, stuck) = flume::unbounded();
@@ -4281,7 +5000,7 @@ mod capture_tests {
 
 	#[test]
 	fn cancelled_calls_never_start_the_worker_or_count_as_in_flight() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		let token = core.cancellation.token();
 		core.cancellation.cancel();
 		assert_eq!(
@@ -4298,7 +5017,7 @@ mod capture_tests {
 
 	#[test]
 	fn failed_queue_delivery_releases_the_in_flight_count() {
-		let core = SessionCore::new(DisplaySelector::Active, Arc::default());
+		let core = SessionCore::new(DisplaySelector::Active, Arc::default(), None);
 		let (tx, rx) = flume::unbounded();
 		core.lifecycle.lock().tx = Some(tx);
 		drop(rx);
@@ -4361,9 +5080,17 @@ mod capture_tests {
 		let target = Target::Window(WAYLAND_ID.to_string());
 		let region = CaptureRegion { x: 0.0, y: 0.0, width: 8.0, height: 6.0 };
 		let request = zoom_request(target.clone(), region, CaptureCaps::default());
+		let missing = worker.process(&request, &token).err().unwrap();
+		assert_eq!(missing.code, ErrorCode::InvalidCoordinateFrame);
+		// On macOS, where agents send coordinates read off an element's bounds()
+		// before any capture, the refusal names the element's own click.
+		let names_click = missing.message.contains("`await el.click()`");
+		assert_eq!(names_click, cfg!(target_os = "macos"), "{}", missing.message);
 		assert_eq!(
-			worker.process(&request, &token).err().unwrap().code,
-			ErrorCode::InvalidCoordinateFrame
+			missing.message.contains("element's bounds()"),
+			cfg!(target_os = "macos"),
+			"{}",
+			missing.message
 		);
 		assert_eq!(*captures.lock(), 0);
 		worker
@@ -4614,6 +5341,81 @@ mod capture_tests {
 		let error = worker.execute(&typed, &source.token()).err().unwrap();
 		assert_eq!(error.code, ErrorCode::UserIntervened);
 		assert!(error.message.contains("still using"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_drag_made_as_a_text_selection_posts_no_pointer_input() {
+		let drag = |worker: &mut TestWorker| {
+			let token = CancellationSource::default().token();
+			let target = Target::Window(WAYLAND_ID.to_string());
+			worker
+				.process(&capture_request(target.clone()), &token)
+				.unwrap();
+			let (reply, _rx) = flume::bounded(1);
+			let request = Request::Drag {
+				target,
+				path: vec![(4.0, 10.0), (30.0, 10.0)],
+				options: ParsedPointerOptions::parse(None).unwrap(),
+				reply,
+			};
+			worker.process(&request, &token).unwrap()
+		};
+		let mut backend = FakeWaylandBackend::new();
+		backend.drag_selection = Some(AxTextSelection {
+			start:   4,
+			length:  5,
+			text:    "quick".to_string(),
+			focused: false,
+		});
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let Response::TextSelection(selection) = drag(&mut worker) else {
+			panic!("expected the selection the drag was made as")
+		};
+		assert_eq!((selection.start, selection.length, selection.text.as_str()), (4, 5, "quick"));
+		assert!(clicks.lock().is_empty(), "no pointer input was posted");
+		// Any other drag is posted.
+		drop(worker);
+		let backend = FakeWaylandBackend::new();
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		assert!(matches!(drag(&mut worker), Response::Input(None)));
+		assert_eq!(*clicks.lock(), [WAYLAND_ID]);
+	}
+
+	#[test]
+	fn a_drag_selection_reads_the_target_before_the_menu_preflight_probes_it() {
+		// The menu preflight probes the target, which can block; the selection
+		// reads the front app before any probe, so it runs first. A press on
+		// text opens no menu, so the refusing preflight never sees this drag.
+		let mut backend = FakeWaylandBackend::new();
+		backend.menu_control = true;
+		backend.drag_selection = Some(AxTextSelection {
+			start:   4,
+			length:  5,
+			text:    "quick".to_string(),
+			focused: false,
+		});
+		let clicks = Arc::clone(&backend.clicks);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let target = Target::Window(WAYLAND_ID.to_string());
+		worker
+			.process(&capture_request(target.clone()), &token)
+			.unwrap();
+		let (reply, _rx) = flume::bounded(1);
+		let request = Request::Drag {
+			target,
+			path: vec![(4.0, 10.0), (30.0, 10.0)],
+			options: ParsedPointerOptions::parse(Some(PointerOptions {
+				refuse_menu: Some(true),
+				..PointerOptions::default()
+			}))
+			.unwrap(),
+			reply,
+		};
+		assert!(matches!(worker.process(&request, &token).unwrap(), Response::TextSelection(_)));
+		assert!(clicks.lock().is_empty(), "no pointer input was posted");
 	}
 
 	#[test]
@@ -4922,7 +5724,7 @@ mod capture_tests {
 				reply,
 			}
 		};
-		for action in ["press", "AXPress", "axraise"] {
+		for action in ["press", "AXPress"] {
 			let source = CancellationSource::default();
 			let result = call(&mut worker, perform(action), &source);
 			assert!(
@@ -4937,7 +5739,8 @@ mod capture_tests {
 			assert!(token.check().is_ok(), "the user's Escape leaves {action} running");
 		}
 		assert_eq!(tree.lock().pressed, [2], "the fake tree runs only `press`");
-		for action in ["raise", " Raise ", "AXRaise"] {
+		// macOS runs any spelling of AXRaise, `axraise` included.
+		for action in ["raise", " Raise ", "AXRaise", "axraise", "AxRaise"] {
 			let source = CancellationSource::default();
 			let error = call(&mut worker, perform(action), &source)
 				.err()
@@ -5051,6 +5854,36 @@ mod capture_tests {
 			let token = source.token();
 			assert_eq!(control::press_escape_for_test(), 1, "takeover input arms the Escape stop");
 			assert!(token.check().is_err(), "physical Escape stops takeover input");
+		}
+	}
+
+	/// Only these wait for the backend's admission without the input lease
+	/// ([`InputLease::acquire_admitted`]).
+	#[test]
+	fn window_and_element_takeovers_are_admitted_before_the_input_lease() {
+		let window = Target::Window("42".to_string());
+		let reply = || flume::unbounded().0;
+		let typing = |target: &Target, takeover| Request::TypeText {
+			target:   target.clone(),
+			text:     "abc".to_string(),
+			takeover: Takeover::new(takeover, None),
+			reply:    reply(),
+		};
+		let element = |takeover| Request::AxInput {
+			reference: "e1".to_string(),
+			input:     ElementInput::Text("hi".to_string()),
+			takeover:  Takeover::new(takeover, None),
+			reply:     reply(),
+		};
+		assert!(typing(&window, Some(true)).takes_over_a_window());
+		assert!(element(Some(true)).takes_over_a_window());
+		for other in [
+			typing(&window, None),
+			element(None),
+			typing(&Target::parse("display:screen-1"), None),
+			Request::RaiseWindow { id: "42".to_string(), reply: reply() },
+		] {
+			assert!(!other.takes_over_a_window());
 		}
 	}
 

@@ -54,6 +54,8 @@ async function readWhoami(
 				Authorization: `Bearer ${identity.access}`,
 				Accept: "application/json",
 				...(identity.orgId ? { "X-Factory-Org-Id": identity.orgId } : {}),
+				// droid sends it on every whoami; Factory adds newer identity fields only for it.
+				"X-Factory-Whoami-Extended": "true",
 			},
 			signal,
 		});

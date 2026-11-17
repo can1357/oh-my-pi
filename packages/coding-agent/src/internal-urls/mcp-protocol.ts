@@ -1,5 +1,5 @@
 import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
-import { MCPManager } from "../mcp/manager";
+import { MCPManager, type MCPManagerApi } from "../mcp/manager";
 import type { MCPResourceReadResult } from "../mcp/types";
 import mcpDoc from "../prompts/internal-urls/mcp.md" with { type: "text" };
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, SchemeSpec } from "./types";
@@ -49,7 +49,7 @@ function extractResourceUri(url: InternalUrl): string {
 	return uri;
 }
 
-function resolveTargetServer(mcpManager: MCPManager, uri: string, exact: boolean): string | undefined {
+function resolveTargetServer(mcpManager: MCPManagerApi, uri: string, exact: boolean): string | undefined {
 	const servers = mcpManager.getConnectedServers();
 	for (const name of servers) {
 		const serverResources = mcpManager.getServerResources(name);
@@ -102,7 +102,7 @@ function resolveTargetServer(mcpManager: MCPManager, uri: string, exact: boolean
 	return bestTemplateMatch?.serverName;
 }
 
-function formatAvailableResources(mcpManager: MCPManager): string {
+function formatAvailableResources(mcpManager: MCPManagerApi): string {
 	const available = mcpManager
 		.getConnectedServers()
 		.flatMap(name => {
@@ -117,7 +117,7 @@ function formatAvailableResources(mcpManager: MCPManager): string {
 }
 
 /** Load connected catalogs before waiting on unrelated servers; check again after pending connects settle. */
-async function settleCatalogs(mcpManager: MCPManager, uri: string, exact: boolean): Promise<void> {
+async function settleCatalogs(mcpManager: MCPManagerApi, uri: string, exact: boolean): Promise<void> {
 	await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
 	if (resolveTargetServer(mcpManager, uri, exact)) return;
 	await mcpManager.waitForPendingConnections();
@@ -132,7 +132,7 @@ async function settleCatalogs(mcpManager: MCPManager, uri: string, exact: boolea
  * (the work itself stays in flight for the manager).
  */
 export async function readMcpResource(
-	mcpManager: MCPManager,
+	mcpManager: MCPManagerApi,
 	url: InternalUrl,
 	options?: McpResourceReadOptions,
 ): Promise<InternalResource | undefined> {

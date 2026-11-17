@@ -483,7 +483,7 @@ fn run_pty_sync(
 	if let Some(pgid) = master.process_group_leader().filter(|pgid| *pgid > 0) {
 		targets.add_pgid(pgid);
 	}
-	let pinned_child = child_pid.and_then(pi_shell::process::Process::from_pid);
+	let pinned_child = child_pid.and_then(pi_shell::proctree::Process::from_pid);
 	if let Some(process) = &pinned_child {
 		targets.add_process(process.clone());
 	}

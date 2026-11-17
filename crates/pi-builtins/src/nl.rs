@@ -13,14 +13,13 @@ use std::{
 	sync::atomic::{AtomicBool, Ordering},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use fancy_regex::Regex;
 use uucore::{display::Quotable, i18n::charmap::mb_char_len};
 
 use crate::{
 	bre,
-	host::{Host, Utility, format_usage, matches_parser, os_bytes, strip_errno, util},
+	host::{Host, Utility, format_usage, matches_parser, os_bytes, strip_errno},
 };
 
 mod options {
@@ -672,11 +671,6 @@ fn number_files(host: &mut Host, settings: &Settings, files: &[&OsString]) -> i3
 		host.error(format_args!("write error: {}", strip_errno(&error)), 1);
 	}
 	host.exit_code()
-}
-
-/// Creates the `nl` builtin registration.
-pub(crate) fn nl_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Nl, SE>()
 }
 
 #[cfg(test)]

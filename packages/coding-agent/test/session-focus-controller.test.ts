@@ -17,6 +17,8 @@ interface SessionStub {
 	emit: (event: unknown) => Promise<void>;
 	unsubscribeCalls: () => number;
 	setStreaming: (streaming: boolean) => void;
+	/** Open (a start time) or close (`undefined`) the session's run. */
+	setRunStartedAt: (startedAt: number | undefined) => void;
 	/** Seed the steering/follow-up queue that getQueuedMessages() returns. */
 	setQueue: (queue: { steering?: string[]; followUp?: string[] }) => void;
 }
@@ -27,6 +29,7 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const stub = {
 		isStreaming: opts.isStreaming ?? false,
+		runStartedAt: undefined as number | undefined,
 		agent: { state: { streamMessage: null } },
 		subscribe(fn: (event: AgentSessionEvent) => Promise<void> | void) {
 			listener = fn;
@@ -49,6 +52,9 @@ function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
 		setStreaming: streaming => {
 			stub.isStreaming = streaming;
 		},
+		setRunStartedAt: startedAt => {
+			stub.runStartedAt = startedAt;
+		},
 		setQueue: next => {
 			queue = { steering: next.steering ?? [], followUp: next.followUp ?? [] };
 		},
@@ -61,6 +67,8 @@ interface Harness {
 	registry: AgentRegistry;
 	main: SessionStub;
 	handledEvents: unknown[];
+	/** Views the awaiting row was offered for, by `showAsyncWait()`. */
+	asyncWaitShows: () => number;
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
 	reloadTodoSessions: AgentSession[];
 	pendingMessagesContainer: Container;
@@ -82,6 +90,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
 	let mainUnsubscribe = 0;
+	let asyncWaitShows = 0;
 
 	const ctx = {
 		session: main.session,
@@ -102,7 +111,11 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 				resetTranscriptAnchors++;
 			},
 			restorePendingToolResults() {},
+			runSerialized: (run: () => Promise<void>) => run(),
 			markViewIdle() {},
+			showAsyncWait() {
+				asyncWaitShows++;
+			},
 		},
 		statusLine: {
 			setSession: (session: AgentSession, focusedAgentId?: string) => {
@@ -141,6 +154,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		registry,
 		main,
 		handledEvents,
+		asyncWaitShows: () => asyncWaitShows,
 		setSessionCalls,
 		reloadTodoSessions,
 		pendingMessagesContainer,
@@ -187,6 +201,22 @@ describe("SessionFocusController", () => {
 		const event = { type: "message_start", message: { role: "user" } };
 		await worker.emit(event);
 		expect(h.handledEvents).toEqual([event]);
+	});
+
+	it("returning to a main session whose run awaits outside work keeps it running, not idle", async () => {
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		await h.controller.focusAgent("Worker");
+		h.handledEvents.length = 0;
+
+		// Main's loop stopped but its run waits on a background job or child agent.
+		h.main.setRunStartedAt(1);
+		h.main.setStreaming(false);
+		await h.controller.unfocus();
+
+		expect(h.handledEvents).toContainEqual({ type: "agent_start" });
+		expect(h.asyncWaitShows()).toBe(1);
 	});
 
 	it("re-attaching the main session refreshes the todo HUD so it can't freeze at the pre-focus snapshot (#9571)", async () => {
@@ -803,6 +833,7 @@ describe("pickRecentFocusableAgentId", () => {
 			status: "running",
 			session: null,
 			sessionFile: `${id}.jsonl`,
+			generation: 0,
 			createdAt: 1000,
 			lastActivity: 1000,
 			...overrides,

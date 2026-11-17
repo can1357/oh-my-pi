@@ -68,7 +68,7 @@ describe("InteractiveMode startup header after the terminal reports a light back
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test", startupChangelog);
+		mode = new InteractiveMode(session, "test");
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 	});
 
@@ -105,6 +105,7 @@ describe("InteractiveMode startup header after the terminal reports a light back
 
 	it("recolors the What's New heading", async () => {
 		await mode.init();
+		mode.showStartupChangelog(startupChangelog);
 		const darkAccent = fgPrefix("accent");
 		expect(renderedLine("What's New")).toContain(darkAccent);
 

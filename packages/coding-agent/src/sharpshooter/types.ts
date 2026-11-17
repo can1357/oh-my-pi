@@ -76,9 +76,11 @@ export interface SharpshooterState {
 		deltas: number;
 		model: string;
 	};
-	/** Last consolidation failure, for `/memory diagnose`. */
+	/** Last consolidation failure, for `/memory diagnose` and retry backoff. */
 	lastError?: {
 		at: number;
 		message: string;
+		/** Consecutive failed passes since the last completed one; absent counts as one. */
+		failures?: number;
 	};
 }

@@ -408,6 +408,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		const mcpManager = {
 			getTools: () => [{ name: "mcp__private_read", label: "private/read" }],
 			addToolsChangedListener: () => () => {},
+			openToolScope: () => {},
 		} as unknown as MCPManager;
 
 		const result = await runSubprocess({ ...baseOptions, id: "normal-child", mcpManager });

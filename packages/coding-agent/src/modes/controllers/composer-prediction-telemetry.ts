@@ -1,8 +1,9 @@
 /**
  * OpenTelemetry metrics for composer next-message predictions.
  *
- * Attributes are low-cardinality and content-free: the outcome and the
- * `provider/model` that served the request, never prompt or prediction text.
+ * Attributes are low-cardinality and content-free: the outcome, the
+ * `provider/model` that served the request, how many alternatives were offered
+ * (1-4), and which one the user kept, never prompt or prediction text.
  * Every call is a no-op until OTLP metric export registers a global meter
  * provider (`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`). Instruments bind lazily to
  * the current global provider because the metrics API has no proxy provider: a
@@ -25,13 +26,15 @@ import { type Attributes, type Counter, type Histogram, type MeterProvider, metr
  * - `error`: the side turn failed
  */
 export type PredictionOutcome = "offered" | "skipped" | "stale" | "cancelled" | "timeout" | "error";
-/** What became of a shown prediction: inserted with Tab/Right, or retired without that. */
-export type PredictionResolution = "accepted" | "ignored";
+/** What became of a shown prediction: one of its alternatives inserted with Tab/Right, or retired without that. */
+export type PredictionResolution = { result: "accepted"; rank: number } | { result: "ignored" };
 
 const METER_NAME = "@oh-my-pi/pi-coding-agent/composer-prediction";
 const OUTCOME = "omp.composer.prediction.outcome";
 const RESULT = "omp.composer.prediction.result";
 const MODEL = "omp.composer.prediction.model";
+const CHOICES = "omp.composer.prediction.choices";
+const RANK = "omp.composer.prediction.rank";
 
 class PredictionInstruments {
 	readonly requests: Counter<Attributes>;
@@ -78,32 +81,50 @@ function instruments(provider: MeterProvider): PredictionInstruments {
 	return instruments;
 }
 
-/** Count one settled prediction request and record how long it took, by outcome and serving `provider/model`. */
+/**
+ * Count one settled prediction request and record how long it took, by outcome and serving `provider/model`;
+ * an offered request also carries how many alternatives it offered.
+ */
 export function recordPredictionRequest(
 	outcome: PredictionOutcome,
 	model: string,
 	durationMs: number,
+	choices: number | undefined,
 	provider: MeterProvider = metrics.getMeterProvider(),
 ): void {
-	const attributes = { [OUTCOME]: outcome, [MODEL]: model };
+	const attributes: Attributes = { [OUTCOME]: outcome, [MODEL]: model };
+	if (choices !== undefined) attributes[CHOICES] = choices;
 	const { requests, duration } = instruments(provider);
 	requests.add(1, attributes);
 	duration.record(durationMs, attributes);
 }
 
-/** Count one offered prediction on its first painted frame. */
-export function recordPredictionShown(model: string, provider: MeterProvider = metrics.getMeterProvider()): void {
-	instruments(provider).shown.add(1, { [MODEL]: model });
+/** Count one offered prediction, with how many alternatives it carries, on its first painted frame. */
+export function recordPredictionShown(
+	model: string,
+	choices: number,
+	provider: MeterProvider = metrics.getMeterProvider(),
+): void {
+	instruments(provider).shown.add(1, { [MODEL]: model, [CHOICES]: choices });
 }
 
-/** Count one shown prediction as accepted or ignored; an accepted one also records how long it was displayed. */
+/**
+ * Count one shown prediction as accepted or ignored. An accepted one carries the rank (0 is most likely) of
+ * the alternative the user inserted last, and records how long the prediction was displayed before the
+ * first insert.
+ */
 export function recordPredictionResolved(
-	result: PredictionResolution,
+	resolution: PredictionResolution,
 	model: string,
+	choices: number,
 	shownForMs: number,
 	provider: MeterProvider = metrics.getMeterProvider(),
 ): void {
 	const { resolved, acceptDelay } = instruments(provider);
-	resolved.add(1, { [RESULT]: result, [MODEL]: model });
-	if (result === "accepted") acceptDelay.record(shownForMs, { [MODEL]: model });
+	const attributes: Attributes = { [RESULT]: resolution.result, [MODEL]: model, [CHOICES]: choices };
+	if (resolution.result === "accepted") {
+		attributes[RANK] = resolution.rank;
+		acceptDelay.record(shownForMs, { [MODEL]: model, [CHOICES]: choices });
+	}
+	resolved.add(1, attributes);
 }

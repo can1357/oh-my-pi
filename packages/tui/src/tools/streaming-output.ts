@@ -1612,17 +1612,27 @@ export class OutputSink {
 		const effectiveTotalBytes = Math.max(0, this.#totalBytes - this.#columnDroppedBytes);
 
 		if (headBytes > 0 && effectiveTotalBytes > headBytes + tailBytes) {
-			// Middle was elided. Emit head + marker + tail.
-			const elidedBytes = Math.max(0, effectiveTotalBytes - headBytes - tailBytes);
-			const elidedLines = Math.max(0, totalLines - headLines - tailLines);
+			// Middle was elided. Emit head + marker + tail, each window cut back to whole lines (a window that is one
+			// line fragment stays as is): a line split at the marker reads as two lines, and the counts below would
+			// no longer name the source lines shown.
+			const headCut = this.#head.endsWith("\n") ? -1 : this.#head.lastIndexOf("\n");
+			const head = headCut >= 0 ? this.#head.slice(0, headCut + 1) : this.#head;
+			const tailCut = tailBuf.indexOf("\n");
+			const tail = tailCut >= 0 && tailCut < tailBuf.length - 1 ? tailBuf.slice(tailCut + 1) : tailBuf;
+			const keptHeadBytes = head === this.#head ? headBytes : Buffer.byteLength(head, "utf-8");
+			const keptTailBytes = tail === tailBuf ? tailBytes : Buffer.byteLength(tail, "utf-8");
+			const keptHeadLines = head === this.#head ? headLines : countNewlines(head);
+			const keptTailLines = tail === tailBuf ? tailLines : countNewlines(tail) + 1;
+			const elidedBytes = Math.max(0, effectiveTotalBytes - keptHeadBytes - keptTailBytes);
+			const elidedLines = Math.max(0, totalLines - keptHeadLines - keptTailLines);
 			const marker = formatMiddleElisionMarker(elidedLines, elidedBytes);
 			const markerBytes = Buffer.byteLength(marker, "utf-8");
-			const headSep = this.#head.endsWith("\n") ? "" : "\n";
-			const tailSep = tailBuf.startsWith("\n") ? "" : "\n";
+			const headSep = head.endsWith("\n") ? "" : "\n";
+			const tailSep = tail.startsWith("\n") ? "" : "\n";
 			return {
-				body: `${this.#head}${headSep}${marker}${tailSep}${tailBuf}`,
-				outputBytes: headBytes + markerBytes + tailBytes + headSep.length + tailSep.length,
-				outputLines: headLines + 1 + tailLines,
+				body: `${head}${headSep}${marker}${tailSep}${tail}`,
+				outputBytes: keptHeadBytes + markerBytes + keptTailBytes + headSep.length + tailSep.length,
+				outputLines: keptHeadLines + 1 + keptTailLines,
 				elidedBytes,
 				elidedLines,
 			};

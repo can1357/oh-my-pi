@@ -121,6 +121,21 @@ Filter order is:
 
 The `agents` provider (`.agent[s]/skills`) has its own `enableAgentsUser`/`enableAgentsProject` toggles — disabling Claude/Codex/Pi does **not** turn it off. Foreign user-level providers are opt-in through `enabledProviders`; their project roots still load by default. Native OMP sources and marketplace plugins registered under `~/.omp/plugins` also load by default. For `claude-plugins`, the opt-in controls only plugins from Claude Code's own user registry.
 
+### Manual-only skills
+
+`skills.manualSkills` (glob patterns, default `[]`) keeps matching skills loaded but removes them from the model's skill catalog, the same as frontmatter `hide: true`, without editing their `SKILL.md`. Use it for third-party skills whose files an update would overwrite:
+
+```yaml
+skills:
+  manualSkills: ["third-party-*", "pdf"]
+```
+
+- Matches stay reachable through `/skill:<name>` (when skill commands are enabled) and `skill://<name>`, and report `hide: true` in `omp skill list --json`.
+- Each pattern is tested against the raw frontmatter name and the final name. Matching the raw name covers every collision alias: `calendar` also hides `second/calendar` and `second/calendar~2`. A `<namespace>/*` pattern matches only collision aliases, because a skill gets a namespace only when its name collides; it does not select every skill of a plugin.
+- `*` does not cross `/`; use `**` to match namespaced names as well.
+- `manualSkills` only adds hiding: frontmatter-hidden skills stay hidden, and `ignoredSkills` still removes a skill entirely.
+- Like other array settings, a project `manualSkills` replaces the global list; project `manualSkills: []` clears it.
+
 ### Collision and duplicate handling
 
 - Capability dedup keeps the first skill per name (highest-precedence provider) for the deduped `items` view; `loadSkills()` works from the pre-dedup superset so lower-precedence copies can still be examined.
@@ -207,6 +222,7 @@ Resolution details:
 - Agent Plugins and Skillshare skills also realpath-check containment within their package root, preventing symlink escapes; symlinks to another location inside that package are allowed
 - directories return directory listings
 - missing files return an explicit `File not found` error
+- a name no loaded skill owns rediscovers the main session's skills before failing, so a skill created or installed after the session started resolves (and joins the session's skill list and system prompt); such misses start at most one rediscovery every 2 seconds, and a subagent's inherited list gains no new skills
 
 Content type:
 

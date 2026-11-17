@@ -1,8 +1,9 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import {
 	SessionSelectorComponent,
-	type SessionSelectorEntry,
 	type SessionHistoryMatcher,
+	type SessionListing,
+	type SessionSelectorEntry,
 } from "../overlays/session-selector";
 import { runStandaloneTui } from "./standalone-picker";
 
@@ -14,12 +15,14 @@ export interface SessionPickerHost<T extends SessionSelectorEntry = SessionSelec
 	/** Rename the session and resolve with the title as stored, or null when it did not happen. */
 	renameSession?(session: T, title: string): Promise<string | null>;
 	setSessionPinned?(session: T, pinned: boolean): Promise<void>;
-	loadAllSessions?(): Promise<T[]>;
+	loadAllSessions?(): Promise<SessionListing<T>>;
 }
 
 /** Presentation and capability controls for the standalone session picker. */
 export interface SessionPickerOptions<T extends SessionSelectorEntry = SessionSelectorEntry> {
-	allSessions?: T[];
+	/** Complete listing replacing the preliminary `sessions` once it settles. */
+	completeSessions?: Promise<T[]>;
+	allSessions?: SessionListing<T>;
 	title?: string;
 	scopeLabel?: string | false;
 	showCwd?: boolean;
@@ -71,6 +74,7 @@ export async function selectSession<T extends SessionSelectorEntry>(
 					onRename: options.onRename ?? host.renameSession,
 					onSetPinned: host.setSessionPinned,
 					historyMatcher,
+					completeSessions: options.completeSessions,
 					loadAllSessions: options.allowGlobalScope === false ? undefined : host.loadAllSessions,
 					allSessions: options.allSessions,
 					getTerminalRows: () => ui.terminal.rows,

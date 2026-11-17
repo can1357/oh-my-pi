@@ -1523,6 +1523,34 @@ export const DevinPlanInfoSchema: MessageCodec<DevinPlanInfo> = pb<DevinPlanInfo
 	{ no: 8, name: "accountDisplayName", kind: "string" },
 ]);
 
+/** Devin message exa.seat_management_pb.ExchangePKCEAuthorizationCodeRequest. */
+export interface ExchangePKCEAuthorizationCodeRequest extends ProtoMessage {
+	authorizationCode: string;
+	codeVerifier: string;
+}
+
+export const ExchangePKCEAuthorizationCodeRequestSchema: MessageCodec<ExchangePKCEAuthorizationCodeRequest> = pb<ExchangePKCEAuthorizationCodeRequest>("exa.seat_management_pb.ExchangePKCEAuthorizationCodeRequest", [
+	{ no: 1, name: "authorizationCode", kind: "string" },
+	{ no: 2, name: "codeVerifier", kind: "string" },
+]);
+
+/** Devin message exa.seat_management_pb.ExchangePKCEAuthorizationCodeResponse. */
+export interface ExchangePKCEAuthorizationCodeResponse extends ProtoMessage {
+	apiKey: string;
+	name: string;
+	apiServerUrl: string;
+	devinWebappHost: string;
+	devinApiUrl: string;
+}
+
+export const ExchangePKCEAuthorizationCodeResponseSchema: MessageCodec<ExchangePKCEAuthorizationCodeResponse> = pb<ExchangePKCEAuthorizationCodeResponse>("exa.seat_management_pb.ExchangePKCEAuthorizationCodeResponse", [
+	{ no: 1, name: "apiKey", kind: "string" },
+	{ no: 2, name: "name", kind: "string" },
+	{ no: 3, name: "apiServerUrl", kind: "string" },
+	{ no: 4, name: "devinWebappHost", kind: "string" },
+	{ no: 5, name: "devinApiUrl", kind: "string" },
+]);
+
 /** Devin message exa.codeium_common_pb.ExperimentConfig. */
 export interface ExperimentConfig extends ProtoMessage {
 	experiments: ExperimentWithVariant[];

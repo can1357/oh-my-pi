@@ -1,0 +1,3 @@
+bindkey -M command "^G" send-break
+bindkey -M command "^J" accept-line
+bindkey -M command "^M" accept-line

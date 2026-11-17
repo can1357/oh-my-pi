@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
-import { extractMarkdownLinks } from "../index";
+import type { Token, Tokens } from "@oh-my-pi/pi-utils/marked";
+import { extractMarkdownLinks, lexDocument } from "../index";
 
 /** A fenced code block extracted from assistant markdown. */
 export interface CodeBlock {
@@ -10,9 +11,9 @@ export interface CodeBlock {
 	code: string;
 }
 
-/** A blockquote block: a maximal run of `>`-prefixed lines from markdown. */
+/** A blockquote block, as the renderer draws it. */
 export interface QuoteBlock {
-	/** Block body with each line's `>` marker (and one optional space) removed. */
+	/** Block body with the `>` markers removed. */
 	text: string;
 }
 
@@ -27,56 +28,34 @@ export interface LastCommand {
 	language: string;
 }
 
-const OPEN_FENCE_RE = /^```([^\n]*)$/;
-const CLOSE_FENCE_RE = /^```/;
-const QUOTE_LINE_RE = /^>(.*)$/;
-
 /**
- * Split assistant markdown into drillable blocks — fenced code and `>`-quoted
- * runs — in document order. Fences mask their bodies, so a `>` line inside a
- * code block is never mistaken for a quote. An unclosed fence is treated as
- * ordinary text, matching the fenced-block grammar.
+ * Split assistant markdown into drillable blocks — fenced code and
+ * blockquotes — in document order. Tokenization is the renderer's own
+ * ({@link lexDocument}), so fences nested in list items, fence closing rules,
+ * list boundaries and lazy quote continuations agree with the screen. Code
+ * inside a quote stays part of the quote; indented (non-fenced) code blocks
+ * are not offered.
  */
 export function extractBlocks(text: string): MessageBlock[] {
 	const blocks: MessageBlock[] = [];
-	const lines = text.split("\n");
-	let quote: string[] | undefined;
-	const flushQuote = () => {
-		if (quote) {
-			blocks.push({ kind: "quote", text: quote.join("\n") });
-			quote = undefined;
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "code") {
+				const code = token as Tokens.Code;
+				if (code.codeBlockStyle !== "indented") {
+					blocks.push({ kind: "code", lang: (code.lang ?? "").trim(), code: code.text });
+				}
+			} else if (token.type === "blockquote") {
+				blocks.push({ kind: "quote", text: (token as Tokens.Blockquote).text.replace(/\n+$/, "") });
+			} else if (token.type === "list") {
+				walk((token as Tokens.List).items);
+			} else if (token.type === "list_item") {
+				walk((token as Tokens.ListItem).tokens);
+			}
 		}
 	};
-
-	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i]!;
-		const open = OPEN_FENCE_RE.exec(line);
-		if (open) {
-			let close = -1;
-			for (let k = i + 1; k < lines.length; k++) {
-				if (CLOSE_FENCE_RE.test(lines[k]!)) {
-					close = k;
-					break;
-				}
-			}
-			if (close !== -1) {
-				flushQuote();
-				blocks.push({ kind: "code", lang: open[1].trim(), code: lines.slice(i + 1, close).join("\n") });
-				i = close;
-				continue;
-			}
-		}
-
-		const quoted = QUOTE_LINE_RE.exec(line);
-		if (quoted) {
-			// Strip the `>` marker plus one optional following space.
-			quote ??= [];
-			quote.push(quoted[1].startsWith(" ") ? quoted[1].slice(1) : quoted[1]);
-		} else {
-			flushQuote();
-		}
-	}
-	flushQuote();
+	walk(lexDocument(text));
 	return blocks;
 }
 

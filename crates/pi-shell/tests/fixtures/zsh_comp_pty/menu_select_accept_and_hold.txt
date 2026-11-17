@@ -1,0 +1,19 @@
+### ": \t"
+% :
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,4
+### "\t"
+% : dir1/
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,9
+### "\u{1b}a"
+% : dir1 dir2/
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,14
+### "\u{1b}a"
+% : dir1 dir2 file1
+dir1/  dir2/  file1  file2  foo.c  foo.h
+@ 0,19
+### "\r"
+% : dir1 dir2 file1
+@ 0,20

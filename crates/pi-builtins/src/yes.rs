@@ -7,10 +7,9 @@ use std::{
 	io::{self, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 // It's possible that using a smaller or larger buffer might provide better
 // performance on some systems, but honestly this is good enough.
@@ -151,11 +150,6 @@ fn exec(bytes: &[u8], host: &mut Host) -> ExecStop {
 	}
 }
 
-/// Creates the `yes` builtin registration.
-pub(crate) fn yes_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Yes, SE>()
-}
-
 #[cfg(test)]
 mod tests {
 	use std::{
@@ -164,7 +158,7 @@ mod tests {
 		sync::Arc,
 	};
 
-	use brush_core::openfiles::{OpenFile, Stream};
+	use crate::openfile::{OpenFile, Stream};
 	use clap::Parser;
 	use parking_lot::Mutex;
 
@@ -205,21 +199,7 @@ mod tests {
 		}
 	}
 
-	impl Stream for FailingWriter {
-		fn clone_box(&self) -> Box<dyn Stream> {
-			Box::new(self.clone())
-		}
-
-		#[cfg(unix)]
-		fn try_clone_to_owned(&self) -> Result<std::os::fd::OwnedFd, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-
-		#[cfg(unix)]
-		fn try_borrow_as_fd(&self) -> Result<std::os::fd::BorrowedFd<'_>, brush_core::Error> {
-			Err(brush_core::error::ErrorKind::CannotConvertToNativeFd.into())
-		}
-	}
+	impl Stream for FailingWriter {}
 
 	fn run_with(
 		arguments: &[&str],
@@ -234,7 +214,7 @@ mod tests {
 		let parsed = Yes::try_parse_from(argv).expect("test arguments should parse");
 		let (mut host, capture) = Host::for_test("yes", Vec::new(), Path::new("/"));
 		let state = Arc::new(Mutex::new(WriterState { bytes: Vec::new(), remaining: budget }));
-		host.set_test_stdout(OpenFile::Stream(Box::new(FailingWriter {
+		host.set_test_stdout(OpenFile::stream(Box::new(FailingWriter {
 			state: Arc::clone(&state),
 			fail_kind,
 		})));

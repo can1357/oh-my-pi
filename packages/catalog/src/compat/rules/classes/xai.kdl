@@ -13,6 +13,24 @@ class "xai" {
 			}
 		}
 	}
+	// stencil.so prices the grok-4.20 `-beta-latest` aliases at the retired
+	// 4.5-generation card ($2 input / $6 output) instead of the 4.20-0309
+	// generation they resolve to; docs.x.ai/developers/pricing lists every 0309
+	// variant at $1.25 input / $0.20 cached / $2.50 output below 200K prompt
+	// tokens. The `grok-4.20-multi-agent-0309` entry is SuperGrok's id for the
+	// paid `grok-4.20-multi-agent-beta-latest` row its pricing peer mirrors, so
+	// both surfaces carry the same card (#18404).
+	on "xai" "xai-oauth" {
+		models "grok-4.20-beta-latest-reasoning" "grok-4.20-beta-latest-non-reasoning" \
+			"grok-4.20-multi-agent-beta-latest" "grok-4.20-multi-agent-0309" {
+			cost-patch {
+				input 1.25
+				output 2.5
+				cache-read 0.2
+				cache-write 0
+			}
+		}
+	}
 	on "aimlapi" "kilo" "nanogpt" "opencode-go" "opencode-zen" "venice" "vercel-ai-gateway" \
 		"zenmux" {
 		family "grok" {

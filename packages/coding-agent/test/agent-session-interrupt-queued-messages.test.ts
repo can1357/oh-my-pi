@@ -343,7 +343,9 @@ describe("AgentSession editor-restoring interrupt", () => {
 			"custom/peer-card: withdrawn peer card",
 		]);
 		expect(ends.flat().filter(message => JSON.stringify(message).includes("withdrawn peer card"))).toEqual([]);
-		expect(mock.calls).toHaveLength(2);
+		// The abort lands while the second call is still being prepared, so the loop ends there
+		// instead of sending the card to the model.
+		expect(mock.calls).toHaveLength(1);
 	});
 
 	it("discards hidden queued context instead of recording it", async () => {

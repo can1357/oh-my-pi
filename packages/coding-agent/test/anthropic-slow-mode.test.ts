@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import type { AnthropicSlowModeFailure, AnthropicSlowModeHooks, AnthropicSlowModeSignal, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "../src/config/settings";
 import {
-	type AnthropicSlowModeController,
+	type AnthropicSlowModeLane,
 	AnthropicSlowModeLanes,
 	formatUsageLimitLabel,
 } from "../src/session/anthropic-slow-mode";
@@ -34,7 +34,7 @@ function slowFailure(overrides: Partial<AnthropicSlowModeFailure>): AnthropicSlo
 
 describe("AnthropicSlowModeController", () => {
 	let lanes: AnthropicSlowModeLanes;
-	let controller: AnthropicSlowModeController;
+	let controller: AnthropicSlowModeLane;
 	let notices: string[];
 	beforeEach(() => {
 		lanes = new AnthropicSlowModeLanes();

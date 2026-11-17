@@ -1,18 +1,21 @@
 /**
  * Contract: the `.`/`c` continue shortcut (`AgentSession.resume`) re-runs a
- * prompt the model has not answered yet without adding any message, and only
- * injects the hidden manual-continue directive after an answered turn.
+ * prompt the model has not answered yet without adding any message, injects
+ * the hidden manual-continue directive after an answered turn (typed or
+ * `/skill:` prompt or compacted history), and refuses to continue an empty
+ * conversation.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { createMockModel, type MockHandler, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
@@ -58,7 +61,13 @@ describe("AgentSession.resume", () => {
 		tempDir.removeSync();
 	});
 
-	function createSession(responses: MockHandler[]): { session: AgentSession; mock: MockModel } {
+	function createSession(
+		responses: MockHandler[],
+		{
+			registry = modelRegistry,
+			settings = {},
+		}: { registry?: ModelRegistry; settings?: Record<string, unknown> } = {},
+	): { session: AgentSession; mock: MockModel } {
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -69,8 +78,8 @@ describe("AgentSession.resume", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false, ...settings }),
+			modelRegistry: registry,
 		});
 		return { session, mock };
 	}
@@ -114,6 +123,31 @@ describe("AgentSession.resume", () => {
 		expect(observed).toEqual([["do the thing"]]);
 	});
 
+	it("returns an uncredentialed prompt for retry and refuses context-free resume", async () => {
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+		const getApiKey = spyOn(registry, "getApiKey").mockResolvedValue(undefined);
+		try {
+			const { session, mock } = createSession([{ content: ["answer"] }], { registry });
+			const dropped: string[] = [];
+			session.setPromptDropped(prompt => dropped.push(prompt.text));
+
+			await expect(session.prompt("finish this request")).rejects.toThrow("No API key found for anthropic");
+			expect(dropped).toEqual(["finish this request"]);
+			await expect(session.resume()).rejects.toThrow("Nothing to resume");
+			expect(mock.calls).toHaveLength(0);
+			expect(session.agent.state.messages).toEqual([]);
+			getApiKey.mockResolvedValue("test-key");
+			await session.prompt(dropped[0]);
+			await session.waitForIdle();
+			expect(session.agent.state.messages.map(message => [message.role, textOf(message)])).toEqual([
+				["user", "finish this request"],
+				["assistant", "answer"],
+			]);
+		} finally {
+			getApiKey.mockRestore();
+		}
+	});
+
 	it("injects the continue directive after an answered turn", async () => {
 		const { session } = createSession([{ content: ["done"] }, { content: ["more"] }]);
 		await session.prompt("do the thing");
@@ -127,6 +161,56 @@ describe("AgentSession.resume", () => {
 			["developer", manualContinuePrompt],
 			["assistant", "more"],
 		]);
+	});
+
+	it("continues a conversation a `/skill:` prompt started", async () => {
+		const { session } = createSession([{ content: ["done"] }, { content: ["more"] }]);
+		await session.promptCustomMessage({
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: "follow the skill",
+			display: true,
+			details: { name: "disk-cleanup", path: "/skills/disk-cleanup/SKILL.md", lineCount: 1 },
+			attribution: "user",
+		});
+		await session.waitForIdle();
+
+		await session.resume();
+		await session.waitForIdle();
+
+		expect(session.agent.state.messages.map(message => [message.role, textOf(message)])).toEqual([
+			["custom", "follow the skill"],
+			["assistant", "done"],
+			["developer", manualContinuePrompt],
+			["assistant", "more"],
+		]);
+	});
+
+	it("continues a conversation a handoff compacted into a summary", async () => {
+		// Keep only the trailing answer: the user prompt survives only in the summary.
+		const { session, mock } = createSession([{ content: ["done"] }, { content: ["more"] }], {
+			settings: { "compaction.keepRecentTokens": 1 },
+		});
+		await session.prompt("do the thing");
+		const generateHandoff = spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(
+			"## Goal\nFinish the thing",
+		);
+		try {
+			await session.handoff();
+		} finally {
+			generateHandoff.mockRestore();
+		}
+
+		await session.resume();
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(session.agent.state.messages.map(message => message.role)).toEqual([
+			"compactionSummary",
+			"assistant",
+			"developer",
+			"assistant",
+		]);
+		expect(textOf(session.agent.state.messages[2])).toBe(manualContinuePrompt);
 	});
 
 	it("re-runs an interrupted continue directive instead of stacking another", async () => {

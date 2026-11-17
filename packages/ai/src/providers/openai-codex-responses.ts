@@ -73,10 +73,9 @@ import {
 } from "../utils/idle-iterator";
 import { getProxyForUrl } from "../utils/proxy";
 import { wrapFetchForRequestCompression } from "../utils/request-compression";
-import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "../utils/retry-after";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
-import { notifyRawSseEvent } from "../utils/sse-debug";
+import { toWebSocketHeaders, toWebSocketUrl } from "../utils/websocket";
 import { compactGrammarDefinition } from "./grammar";
 import {
 	type CodexLiteShapedBody,
@@ -148,18 +147,24 @@ import {
 	finalizeCustomToolCallInputDone,
 	finalizeMessageText,
 	finalizePendingResponsesToolCalls,
+	isOpenAIResponsesStalePreviousResponseError,
 	finalizeReasoningThinking,
 	finalizeToolCallArgumentsDone,
 	getOpenAIPromptCacheKey,
 	hasExecutableIncompleteResponsesToolCalls,
-	isOpenAIResponsesProgressEvent,
 	mapOpenAIResponsesStopReason,
 	normalizeOpenAIPromptCacheKey,
+	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
 	type SequentialCutoffSummaryState,
 } from "./openai-shared";
+import {
+	isResponsesWebSocketProgressEvent,
+	ResponsesWebSocketConnection,
+	ResponsesWebSocketTransportError,
+} from "./responses-websocket-connection";
 import { normalizeToolCallId, redactSensitiveInObject, transformMessages } from "./transform-messages";
 
 export interface OpenAICodexResponsesOptions extends StreamOptions {
@@ -313,7 +318,6 @@ const CODEX_MODERATION_METADATA_KEY = "openai_chatgpt_moderation_metadata";
 const CODEX_WEBSOCKET_FATAL_PATTERNS = ["websocket error:", "websocket closed before open", "connection timeout"];
 /** Max total time to spend retrying 429s with server-provided delays (5 minutes). */
 const CODEX_RATE_LIMIT_BUDGET_MS = 5 * 60 * 1000;
-const CODEX_ADDITIONAL_PROGRESS_EVENT_TYPES = new Set(["response.done", "response.incomplete"]);
 // Provider/model failure mode: Codex can keep a response alive by streaming
 // whitespace-only function-call argument deltas forever. Those frames count as
 // transport activity, so idle timers never fire; cap the run before raw debug
@@ -322,42 +326,6 @@ const CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_EVENT_LIMIT = 256;
 const CODEX_WHITESPACE_TOOL_CALL_ARGUMENT_DELTA_CHAR_LIMIT = 16 * 1024;
 const CODEX_WHITESPACE_LOOP_RETRY_LIMIT = 2;
 const CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS = 250;
-
-function isCodexStreamProgressEvent(event: unknown): boolean {
-	if (isOpenAIResponsesProgressEvent(event)) return true;
-	if (!event || typeof event !== "object") return false;
-	const type = (event as { type?: unknown }).type;
-	return typeof type === "string" && CODEX_ADDITIONAL_PROGRESS_EVENT_TYPES.has(type);
-}
-
-function extractCodexFrameResponseId(frame: Record<string, unknown>): string | undefined {
-	const response = (frame as { response?: { id?: unknown } }).response;
-	const id = response?.id;
-	return typeof id === "string" && id.length > 0 ? id : undefined;
-}
-
-function extractCodexFrameSequenceNumber(frame: Record<string, unknown>): number | undefined {
-	const raw = (frame as { sequence_number?: unknown }).sequence_number;
-	return typeof raw === "number" && Number.isFinite(raw) ? Math.trunc(raw) : undefined;
-}
-
-type CodexWebSocketTimeoutDetails = {
-	lastEventAt: number;
-	lastEventType?: string;
-	lastProgressAt: number;
-	lastProgressEventType?: string;
-};
-
-function createCodexWebSocketTimeoutMessage(reason: string, details: CodexWebSocketTimeoutDetails): string {
-	const now = Date.now();
-	const lastEvent = details.lastEventType
-		? `${details.lastEventType} ${Math.max(0, now - details.lastEventAt)}ms ago`
-		: "none";
-	const lastProgress = details.lastProgressEventType
-		? `${details.lastProgressEventType} ${Math.max(0, now - details.lastProgressAt)}ms ago`
-		: "none";
-	return `${reason} (last event: ${lastEvent}; last progress: ${lastProgress})`;
-}
 
 export type CodexTransport = "sse" | "websocket";
 type CodexEventItem =
@@ -1054,35 +1022,6 @@ function isCodexWebSocketRetryableStreamError(error: unknown): boolean {
 		message.includes("json")
 	);
 }
-function toCodexHeaderRecord(value: unknown): Record<string, string> | null {
-	if (!value || typeof value !== "object") return null;
-	const headers: Record<string, string> = {};
-	for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-		if (typeof entry === "string") {
-			headers[key] = entry;
-		} else if (Array.isArray(entry) && entry.every(item => typeof item === "string")) {
-			headers[key] = entry.join(",");
-		} else if (typeof entry === "number" || typeof entry === "boolean") {
-			headers[key] = String(entry);
-		}
-	}
-	return Object.keys(headers).length > 0 ? headers : null;
-}
-
-function toCodexHeaders(value: unknown): Headers | undefined {
-	if (!value) return undefined;
-	if (value instanceof Headers) return value;
-	if (Array.isArray(value)) {
-		try {
-			return new Headers(value as Array<[string, string]>);
-		} catch {
-			return undefined;
-		}
-	}
-	const record = toCodexHeaderRecord(value);
-	if (!record) return undefined;
-	return new Headers(record);
-}
 
 function updateCodexSessionMetadataFromHeaders(
 	turnState: CodexTurnStateCell | undefined,
@@ -1099,69 +1038,6 @@ function updateCodexSessionMetadataFromHeaders(
 	if (state && modelsEtag && modelsEtag.length > 0) {
 		state.modelsEtag = modelsEtag;
 	}
-}
-
-function extractCodexWebSocketHandshakeHeaders(socket: Bun.WebSocket, openEvent?: Event): Headers | undefined {
-	const eventRecord = openEvent as Record<string, unknown> | undefined;
-	const eventResponse = eventRecord?.response as Record<string, unknown> | undefined;
-	const socketRecord = socket as unknown as Record<string, unknown>;
-	const socketResponse = socketRecord.response as Record<string, unknown> | undefined;
-	const socketHandshake = socketRecord.handshake as Record<string, unknown> | undefined;
-	return (
-		toCodexHeaders(eventRecord?.responseHeaders) ??
-		toCodexHeaders(eventRecord?.headers) ??
-		toCodexHeaders(eventResponse?.headers) ??
-		toCodexHeaders(socketRecord.responseHeaders) ??
-		toCodexHeaders(socketRecord.handshakeHeaders) ??
-		toCodexHeaders(socketResponse?.headers) ??
-		toCodexHeaders(socketHandshake?.headers)
-	);
-}
-
-// Synthesizes a `RawSseEvent` for a Codex WebSocket frame so the same debug
-// pipeline used for HTTP SSE (`onSseEvent` → `RawSseDebugBuffer.recordEvent`)
-// also captures WebSocket traffic. The `raw` array mirrors SSE wire format
-// (one line per field) so the existing TUI viewer renders it identically:
-//   : ws ← <type>
-//   event: <type>
-//   data: <json>
-// Outbound (client → server) uses `: ws → <type>`. The viewer pretty-prints
-// `data:` JSON lines, so we keep the wire JSON single-line here and let the
-// renderer expand it.
-function notifyCodexWebSocketInbound(
-	observer: ((event: RawSseEvent) => void) | undefined,
-	parsed: Record<string, unknown>,
-	text: string,
-): void {
-	const type = typeof parsed.type === "string" ? parsed.type : null;
-	const raw: string[] = [`: ws ← ${type ?? "(untyped)"}`];
-	if (type) raw.push(`event: ${type}`);
-	raw.push(`data: ${text}`);
-	notifyRawSseEvent(observer, { event: type, data: text, raw });
-}
-
-function notifyCodexWebSocketOutbound(
-	observer: ((event: RawSseEvent) => void) | undefined,
-	request: Record<string, unknown>,
-	payload: string,
-): void {
-	const type = typeof request.type === "string" ? request.type : null;
-	const raw: string[] = [`: ws → ${type ?? "(untyped)"}`];
-	if (type) raw.push(`event: ${type}`);
-	raw.push(`data: ${payload}`);
-	notifyRawSseEvent(observer, { event: type, data: payload, raw });
-}
-
-function notifyCodexWebSocketMalformed(
-	observer: ((event: RawSseEvent) => void) | undefined,
-	data: unknown,
-	error: unknown,
-): void {
-	const text = typeof data === "string" ? data : "";
-	const reason = error instanceof Error ? error.message : String(error);
-	const raw: string[] = [`: ws ← (parse-error: ${reason})`];
-	if (text) raw.push(`data: ${text}`);
-	notifyRawSseEvent(observer, { event: "parse_error", data: text, raw });
 }
 
 /** @internal Exported for tests. */
@@ -1355,7 +1231,7 @@ function createRequestSetup(options: OpenAICodexResponsesOptions | undefined): C
 			onIdle: () => requestAbortController.abort(),
 			onFirstItemTimeout: () => requestAbortController.abort(),
 			abortSignal: options?.signal,
-			isProgressItem: isCodexStreamProgressEvent,
+			isProgressItem: isResponsesWebSocketProgressEvent,
 		});
 	return {
 		requestAbortController,
@@ -1522,14 +1398,17 @@ export async function buildTransformedCodexRequestBody(
 	// everything from `StreamOptions` rather than forwarding any of them.
 	// (#3117 — codex-rs sends none of these either.)
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
-	if (context.tools && context.tools.length > 0) {
-		params.tools = convertOpenAICodexResponsesTools(context.tools, model);
-		if (options?.toolChoice) {
-			const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools, model);
-			if (toolChoice) {
-				params.tool_choice = toolChoice;
-			}
-		}
+	const hasDeclaredTools = (context.tools?.length ?? 0) > 0;
+	if (hasDeclaredTools) {
+		params.tools = convertOpenAICodexResponsesTools(context.tools ?? [], model);
+	}
+	// Native `additional_tools` items never land in `context.tools`, but they still
+	// reach the upstream. A caller constraint has to travel with them.
+	const hasNativeAdditionalTools =
+		Array.isArray(params.input) && params.input.some(item => item.type === "additional_tools");
+	if (options?.toolChoice && (hasDeclaredTools || hasNativeAdditionalTools)) {
+		const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools ?? [], model);
+		if (toolChoice) params.tool_choice = toolChoice;
 	}
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
@@ -1773,7 +1652,7 @@ function applyCodexCompactionResponseMetadata(
 	updateCodexSessionMetadataFromHeaders(
 		requestContext.turnState,
 		requestContext.websocketState,
-		toCodexHeaders(event.headers),
+		toWebSocketHeaders(event.headers),
 	);
 }
 
@@ -1799,7 +1678,7 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
-	const canAppendBeforeRequest = websocketState.canAppend === true;
+	let canAppendBeforeRequest = websocketState.canAppend === true;
 	let chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
@@ -1835,114 +1714,148 @@ async function openCodexWebSocketTransport(
 		model.provider,
 		requestSetup.requestSignal,
 	);
-	const timeouts: CodexWebSocketRequestTimeouts = {
-		idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
-		firstEventTimeoutMs: requestSetup.websocketFirstEventTimeoutMs,
-	};
-	// Steering accepted for the previous response lives only on the socket that
-	// accepted it; a replaced socket lost it, so the input is plain history.
-	const steers = steered?.connection === websocketConnection ? steered.steers : [];
-	const liveSteers = steers.filter(steer => !websocketConnection.hasFailedSteer([steer.id]));
-	if (liveSteers.length > 0) {
-		const plan = planSteeredRequest(
-			chainedBody.previous_response_id ? chainedBody.input : undefined,
-			liveSteers.flatMap(steer => steer.items),
-		);
-		if (plan.kind === "attach") {
-			recordCodexTurnRequestDiagnostics(websocketState, chainedBody, "websocket", canAppendBeforeRequest);
-			requestContext.rawRequestDump.body = chainedBody;
-			return {
-				eventStream: websocketConnection.streamRequest(
-					{ attachSteerIds: liveSteers.map(steer => steer.id) },
-					timeouts,
-					requestSetup.requestSignal,
-					onSseEvent,
-					onOwned,
-				),
-				requestBodyForState: cloneJsonTree(requestContext.transformedBody),
-				transport: "websocket",
-			};
-		}
-		if (plan.kind === "create") {
-			chainedBody = { ...chainedBody, input: plan.input };
-		} else {
-			// The server continues from input this request cannot line up with; a
-			// fresh socket drops its queue and the full transcript carries the input.
-			websocketConnection.close("steering-discard");
-			websocketState.connection = undefined;
-			resetCodexWebSocketAppendState(websocketState);
+	let releaseReservation = websocketConnection.reserveForRequest();
+	try {
+		// Reconnecting (closed socket, idle eviction, token refresh, or routing-hint
+		// change) resets `canAppend`; discard any delta built against the old socket.
+		if (!websocketState.canAppend) {
+			canAppendBeforeRequest = false;
 			chainedBody = requestContext.transformedBody;
-			websocketConnection = await getOrCreateCodexWebSocketConnection(
-				websocketState,
-				requestContext.turnState,
-				toWebSocketUrl(requestContext.url),
-				websocketHeaders,
-				model.provider,
-				requestSetup.requestSignal,
-			);
 		}
+		// Input the server already holds for a chained request (everything before
+		// the delta); a hook that drops `previous_response_id` must resend it.
+		const fullInput = requestContext.transformedBody.input ?? [];
+		let chainCarriedInput: InputItem[] = chainedBody.previous_response_id
+			? fullInput.slice(0, fullInput.length - (chainedBody.input?.length ?? 0))
+			: [];
+		const timeouts: CodexWebSocketRequestTimeouts = {
+			idleTimeoutMs: requestSetup.websocketIdleTimeoutMs,
+			firstEventTimeoutMs: requestSetup.websocketFirstEventTimeoutMs,
+		};
+		// Steering accepted for the previous response lives only on the socket that
+		// accepted it; a replaced socket lost it, so the input is plain history.
+		const steers = steered?.connection === websocketConnection ? steered.steers : [];
+		const liveSteers = steers.filter(steer => !websocketConnection.hasFailedSteer([steer.id]));
+		if (liveSteers.length > 0) {
+			const plan = planSteeredRequest(
+				chainedBody.previous_response_id ? chainedBody.input : undefined,
+				liveSteers.flatMap(steer => steer.items),
+			);
+			if (plan.kind === "attach") {
+				recordCodexTurnRequestDiagnostics(websocketState, chainedBody, "websocket", canAppendBeforeRequest);
+				requestContext.rawRequestDump.body = chainedBody;
+				return {
+					eventStream: websocketConnection.streamRequest(
+						{ attachSteerIds: liveSteers.map(steer => steer.id) },
+						timeouts,
+						requestSetup.requestSignal,
+						onSseEvent,
+						onOwned,
+						releaseReservation,
+					),
+					requestBodyForState: cloneJsonTree(requestContext.transformedBody),
+					transport: "websocket",
+				};
+			}
+			if (plan.kind === "create") {
+				// The server prepends the accepted steering itself; it is carried too.
+				const delta = chainedBody.input ?? [];
+				chainCarriedInput = [...chainCarriedInput, ...delta.filter(item => !plan.input.includes(item))];
+				chainedBody = { ...chainedBody, input: plan.input };
+			} else {
+				// The server continues from input this request cannot line up with; a
+				// fresh socket drops its queue and the full transcript carries the input.
+				releaseReservation();
+				websocketConnection.close("steering-discard");
+				websocketState.connection = undefined;
+				resetCodexWebSocketAppendState(websocketState);
+				canAppendBeforeRequest = false;
+				chainedBody = requestContext.transformedBody;
+				websocketConnection = await getOrCreateCodexWebSocketConnection(
+					websocketState,
+					requestContext.turnState,
+					toWebSocketUrl(requestContext.url),
+					websocketHeaders,
+					model.provider,
+					requestSetup.requestSignal,
+				);
+				releaseReservation = websocketConnection.reserveForRequest();
+			}
+		}
+		// WebSocket frames cannot carry per-request HTTP headers. Canonical Codex
+		// request identity is already in `client_metadata`; connection-scoped
+		// compatibility values that can change after the upgrade ride alongside it
+		// on every `response.create`.
+		const websocketClientMetadata = { ...chainedBody.client_metadata };
+		if (requestContext.responsesLite) {
+			websocketClientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY] = "true";
+		}
+		if (requestContext.turnState.value) {
+			websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
+		}
+		let websocketRequest: RequestBody = {
+			type: "response.create",
+			...chainedBody,
+			client_metadata: websocketClientMetadata,
+		};
+		const replacementWebsocketRequest = await options?.onPayload?.(websocketRequest, model);
+		if (replacementWebsocketRequest !== undefined) {
+			websocketRequest = replacementWebsocketRequest as RequestBody;
+		}
+		// The hook dropped the chain: the server no longer holds the chained
+		// prefix, so the frame must carry it. An untouched delta becomes the full
+		// transcript; a rewritten one keeps the hook's edits after that prefix.
+		if (chainedBody.previous_response_id && !websocketRequest.previous_response_id) {
+			websocketRequest.input = Bun.deepEquals(websocketRequest.input, chainedBody.input)
+				? requestContext.transformedBody.input
+				: [...chainCarriedInput, ...(websocketRequest.input ?? [])];
+		}
+		recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
+		const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
+		// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options` or
+		// change `service_tier`); recorded state must reflect what was actually
+		// sent — the sequential-cutoff summary decoder and the served-tier
+		// fallback key off it.
+		if (websocketRequest.stream_options === undefined) {
+			delete requestBodyForState.stream_options;
+		} else {
+			requestBodyForState.stream_options = websocketRequest.stream_options;
+		}
+		if (websocketRequest.service_tier === undefined) {
+			delete requestBodyForState.service_tier;
+		} else {
+			requestBodyForState.service_tier = websocketRequest.service_tier;
+		}
+		requestContext.rawRequestDump.body = websocketRequest;
+		CODEX_DEBUG &&
+			logger.debug("[codex] codex websocket request", {
+				url: toWebSocketUrl(requestContext.url),
+				model: requestContext.transformedBody.model,
+				reasoningEffort: requestContext.transformedBody.reasoning?.effort ?? null,
+				headers: redactHeaders(websocketHeaders),
+				sentTurnStateHeader: websocketHeaders.has(X_CODEX_TURN_STATE_HEADER),
+				sentModelsEtagHeader: websocketHeaders.has(X_MODELS_ETAG_HEADER),
+				requestType: websocketRequest.type,
+				retry,
+				retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
+			});
+		const eventStream = websocketConnection.streamRequest(
+			{ send: websocketRequest },
+			timeouts,
+			requestSetup.requestSignal,
+			onSseEvent,
+			onOwned,
+			releaseReservation,
+		);
+		return {
+			eventStream,
+			requestBodyForState,
+			transport: "websocket",
+		};
+	} catch (error) {
+		releaseReservation();
+		throw error;
 	}
-	// WebSocket frames cannot carry per-request HTTP headers. Canonical Codex
-	// request identity is already in `client_metadata`; connection-scoped
-	// compatibility values that can change after the upgrade ride alongside it
-	// on every `response.create`.
-	const websocketClientMetadata = { ...chainedBody.client_metadata };
-	if (requestContext.responsesLite) {
-		websocketClientMetadata[CODEX_WS_RESPONSES_LITE_CLIENT_METADATA_KEY] = "true";
-	}
-	if (requestContext.turnState.value) {
-		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
-	}
-	let websocketRequest = {
-		type: "response.create",
-		...chainedBody,
-		client_metadata: websocketClientMetadata,
-	};
-	const replacementWebsocketRequest = await options?.onPayload?.(websocketRequest, model);
-	if (replacementWebsocketRequest !== undefined) {
-		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
-	}
-	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
-	const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
-	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options` or
-	// change `service_tier`); recorded state must reflect what was actually
-	// sent — the sequential-cutoff summary decoder and the served-tier
-	// fallback key off it.
-	if (websocketRequest.stream_options === undefined) {
-		delete requestBodyForState.stream_options;
-	} else {
-		requestBodyForState.stream_options = websocketRequest.stream_options;
-	}
-	if (websocketRequest.service_tier === undefined) {
-		delete requestBodyForState.service_tier;
-	} else {
-		requestBodyForState.service_tier = websocketRequest.service_tier;
-	}
-	requestContext.rawRequestDump.body = websocketRequest;
-	CODEX_DEBUG &&
-		logger.debug("[codex] codex websocket request", {
-			url: toWebSocketUrl(requestContext.url),
-			model: requestContext.transformedBody.model,
-			reasoningEffort: requestContext.transformedBody.reasoning?.effort ?? null,
-			headers: redactHeaders(websocketHeaders),
-			sentTurnStateHeader: websocketHeaders.has(X_CODEX_TURN_STATE_HEADER),
-			sentModelsEtagHeader: websocketHeaders.has(X_MODELS_ETAG_HEADER),
-			requestType: websocketRequest.type,
-			retry,
-			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
-		});
-	const eventStream = websocketConnection.streamRequest(
-		{ send: websocketRequest },
-		timeouts,
-		requestSetup.requestSignal,
-		onSseEvent,
-		onOwned,
-	);
-	return {
-		eventStream,
-		requestBodyForState,
-		transport: "websocket",
-	};
 }
 
 function getCodexTurnStartedAtUnixMs(context: Context): number {
@@ -2047,6 +1960,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			id: encodeResponsesToolCallId(item.call_id, item.id),
 			name: item.name,
 			arguments: {},
+			...(item.namespace ? { namespace: item.namespace } : {}),
 			[kStreamingPartialJson]: item.arguments || "",
 		};
 	}
@@ -2070,6 +1984,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			name: item.name,
 			arguments: { input: item.input ?? "" },
 			customWireName: item.name,
+			...(item.namespace ? { namespace: item.namespace } : {}),
 			[kStreamingPartialJson]: item.input ?? "",
 		};
 	}
@@ -2082,38 +1997,15 @@ function getOutputBlockStartEventType(block: CodexOutputBlock): "thinking_start"
 	return "toolcall_start";
 }
 
-const CODEX_STALE_PREVIOUS_RESPONSE_CODES: Record<string, true> = {
-	// OpenAI-standard code for an expired/missing `previous_response_id` chain.
-	previous_response_not_found: true,
-	// Proxy-specific: upstream response anchor expired. Same recovery class —
-	// retry the turn with full context and no `previous_response_id`.
-	codex_previous_response_stale: true,
-};
-
 const CODEX_APPEND_PRESERVING_REJECTION_CODES: Record<string, true> = {
 	rate_limit_exceeded: true,
 	slow_down: true,
 };
 
 function isCodexStalePreviousResponseError(error: unknown): boolean {
-	if (!(error instanceof Error)) return false;
-	if (
-		"code" in error &&
-		typeof error.code === "string" &&
-		Object.hasOwn(CODEX_STALE_PREVIOUS_RESPONSE_CODES, error.code)
-	) {
-		return true;
-	}
-	// Message-based fallback for providers/proxies that report the condition
-	// without a canonical code. Also covers "unsupported": the backend
-	// intermittently rejects the parameter outright with
-	// `{"detail":"Unsupported parameter: previous_response_id"}` (no
-	// `error.code`); treat it like a stale chain so the turn replays with full
-	// context instead of surfacing the 400.
-	return (
-		/previous[ _]?response/i.test(error.message) &&
-		/not[ _]?found|invalid|expired|stale|unsupported/i.test(error.message)
-	);
+	if (isOpenAIResponsesStalePreviousResponseError(error)) return true;
+	// Some Codex proxies report their own code for an expired response anchor.
+	return error instanceof Error && "code" in error && error.code === "codex_previous_response_stale";
 }
 
 function shouldPreserveCodexWebSocketAppendState(context: CodexStreamFailureContext, error: unknown): boolean {
@@ -2447,7 +2339,7 @@ class CodexStreamProcessor {
 			updateCodexSessionMetadataFromHeaders(
 				this.requestContext.turnState,
 				this.requestContext.websocketState,
-				toCodexHeaders(rawEvent.headers),
+				toWebSocketHeaders(rawEvent.headers),
 			);
 			const moderation = asRecord(rawEvent.metadata)?.[CODEX_MODERATION_METADATA_KEY];
 			if (moderation !== undefined) {
@@ -2622,12 +2514,14 @@ class CodexStreamProcessor {
 					: block?.type === "toolCall" && !partial
 						? block.arguments
 						: parseToolCallArguments(partial),
+				...(item.namespace ? { namespace: item.namespace } : {}),
 			};
 			item.arguments = replayableToolCallArguments(item.arguments, toolCall.arguments);
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
 				// delta parser may have left block.arguments stale (often `{}`).
 				block.arguments = toolCall.arguments;
+				if (item.namespace) block.namespace = item.namespace;
 				clearStreamingPartialJson(block);
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
@@ -2670,9 +2564,11 @@ class CodexStreamProcessor {
 				name: item.name,
 				arguments: { input: rawInput },
 				customWireName: item.name,
+				...(item.namespace ? { namespace: item.namespace } : {}),
 			};
 			if (block?.type === "toolCall") {
 				block.arguments = { input: rawInput };
+				if (item.namespace) block.namespace = item.namespace;
 				clearStreamingPartialJson(block);
 			}
 			runtime.closeOpenItem(entry);
@@ -3447,16 +3343,39 @@ export async function prewarmOpenAICodexResponses(
 		attestation,
 		routedRequest,
 	);
-	await logger.time(
-		"prewarmCodex:establishWs",
-		getOrCreateCodexWebSocketConnection,
-		state,
-		turnState,
-		toWebSocketUrl(url),
-		headers,
-		model.provider,
-		options?.signal,
-	);
+	const existing = state.connection;
+	if (
+		existing?.isReserved() ||
+		(state.acceptedSteering !== undefined && state.acceptedSteering.connection === existing)
+	) {
+		return;
+	}
+	if (existing?.isConnecting()) {
+		// Another caller owns this handshake: join it rather than racing it with a
+		// routing-change close once it opens.
+		try {
+			await existing.connect(options?.signal);
+		} catch {
+			return;
+		}
+		if (state.connection === existing && existing.isOpen()) state.prewarmed = true;
+		return;
+	}
+	try {
+		await logger.time(
+			"prewarmCodex:establishWs",
+			getOrCreateCodexWebSocketConnection,
+			state,
+			turnState,
+			toWebSocketUrl(url),
+			headers,
+			model.provider,
+			options?.signal,
+		);
+	} catch (error) {
+		if (error instanceof CodexWebSocketBusyError) return;
+		throw error;
+	}
 	state.prewarmed = true;
 }
 
@@ -3793,7 +3712,7 @@ function buildCodexChainedRequestBody(
 	if (appendInput && appendInput.length > 0 && state?.lastResponseId) {
 		return { ...requestBody, previous_response_id: state.lastResponseId, input: appendInput };
 	}
-	if (chainable && state) {
+	if (state?.canAppend) {
 		// Chaining was eligible but the prefix/options check failed: history
 		// mutated or options changed — break the chain.
 		CODEX_DEBUG &&
@@ -3804,16 +3723,6 @@ function buildCodexChainedRequestBody(
 		state.modelsEtag = undefined;
 	}
 	return requestBody;
-}
-
-function toWebSocketUrl(url: string): string {
-	const parsed = new URL(url);
-	if (parsed.protocol === "https:") {
-		parsed.protocol = "wss:";
-	} else if (parsed.protocol === "http:") {
-		parsed.protocol = "ws:";
-	}
-	return parsed.toString();
 }
 
 function headersToRecord(headers: Headers): Record<string, string> {
@@ -3846,246 +3755,125 @@ interface CodexWebSocketConnectionOptions {
 	proxy?: string;
 }
 
+/** Codex steering and legacy error boundary around the shared physical channel. */
 class CodexWebSocketConnection {
-	#url: string;
+	#channel: ResponsesWebSocketConnection;
 	#headers: Record<string, string>;
-	#proxy?: string;
-	#onHandshakeHeaders?: (headers: Headers) => void;
-	#socket: Bun.WebSocket | null = null;
-	#queue: Array<Record<string, unknown> | Error | null> = [];
-	#waiters: Array<() => void> = [];
-	#connectPromise?: Promise<void>;
-	#activeRequest = false;
-	#streamObserver?: (event: RawSseEvent) => void;
-	#heartbeatInterval: NodeJS.Timeout | undefined;
-	#removePongListener?: () => void;
-	#handshakeHeaders?: Headers;
-	#debugResponseLog?: RequestDebugResponseLog;
-	/**
-	 * Wall-clock of the most recent inbound activity on this socket — any
-	 * decoded message, any pong, or the moment the handshake completed. Used
-	 * by {@link isHealthyForReuse} so we don't write a continuation frame into
-	 * a TCP-open-but-server-evicted socket whose `readyState` still says OPEN.
-	 */
-	#lastInboundAt = 0;
-	/** Wall-clock of the last heartbeat ping we issued; 0 if none yet. */
-	#lastPingAt = 0;
-	/**
-	 * Most recent `response.id` accepted on this socket, retained across
-	 * requests. Lets the next request drop a trailing/duplicate frame from the
-	 * previous (cleanly-completed) response that outlived the queue drain.
-	 */
-	#lastSeenResponseId?: string;
-	/** `response.steer` submissions awaiting acknowledgement, oldest first. */
+	#pendingRequests = 0;
 	#steerWaiters: CodexSteerWaiter[] = [];
-	/** Steering ids the server accepted on this socket. */
 	#acceptedSteers = new Set<string>();
-	/** Accepted steering the server later failed to commit to a successor. */
 	#failedSteers = new Set<string>();
-	/** Steering whose automatic successor the active attach request is reading. */
 	#attachSteerIds?: ReadonlySet<string>;
 
 	constructor(url: string, headers: Record<string, string>, options: CodexWebSocketConnectionOptions) {
-		this.#url = url;
 		this.#headers = headers;
-		this.#proxy = options.proxy;
-		this.#onHandshakeHeaders = options.onHandshakeHeaders;
+		this.#channel = new ResponsesWebSocketConnection({
+			url,
+			headers,
+			proxy: options.proxy,
+			connectTimeoutMs: CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS,
+			maxIdleReuseMs: CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS,
+			messageQueueCapacity: CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY,
+			heartbeat: {
+				intervalMs: CODEX_WEBSOCKET_PING_INTERVAL_MS,
+				pongTimeoutMs: CODEX_WEBSOCKET_PONG_TIMEOUT_MS,
+			},
+			onHandshakeHeaders: options.onHandshakeHeaders,
+			controlFrames: {
+				consume: frame => {
+					if (typeof frame.type === "string" && frame.type.startsWith("response.steer.")) {
+						return this.#handleSteerEvent(frame) ?? true;
+					}
+					// The native lane refuses the submission and ends the response.
+					if (frame.type === "error" && frame.code === AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
+						this.#refuseSteerWaiters(frame.code, typeof frame.message === "string" ? frame.message : undefined);
+					}
+					return false;
+				},
+				closed: error => {
+					if (error instanceof ResponsesWebSocketTransportError) {
+						const reason = error.reason;
+						if (
+							reason === "aborted" ||
+							reason === "ping-failed" ||
+							reason === "pong-timeout" ||
+							reason === "queue-overflow"
+						) {
+							this.#rejectSteerWaiters(`websocket closed (${reason})`);
+							return;
+						}
+					}
+					this.#rejectSteerWaiters(error.message);
+				},
+			},
+		});
 	}
 
 	isOpen(): boolean {
-		return this.#socket?.readyState === WebSocket.OPEN;
+		return this.#channel.isOpen();
 	}
 
-	/** True while a handshake (possibly started by another caller) is still in flight. */
 	isConnecting(): boolean {
-		return this.#connectPromise !== undefined;
+		return this.#channel.isConnecting();
 	}
 
-	/** True while a handshake or a request stream is in flight on this socket. */
+	/** True while a handshake is in flight or a request owns or has reserved this socket. */
 	isBusy(): boolean {
-		return this.#activeRequest || this.#connectPromise !== undefined;
+		return this.isReserved() || this.#channel.isConnecting();
 	}
 
-	/** True while a request stream owns this socket. */
 	hasActiveRequest(): boolean {
-		return this.#activeRequest;
+		return this.#channel.hasActiveRequest();
+	}
+
+	/** True while a request stream owns this socket or a request has reserved it. */
+	isReserved(): boolean {
+		return this.#channel.hasActiveRequest() || this.#pendingRequests > 0;
 	}
 
 	/**
-	 * Stricter variant of {@link isOpen} for the connection-pool reuse gate.
-	 * Refuses sockets that have been silent past {@link CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS}.
-	 *
-	 * Bun's `WebSocket` does not always surface server-side eviction (no
-	 * `onclose`, no `onerror`), so a socket can sit in readyState OPEN long
-	 * after the upstream has dropped it. Reusing such a socket sends the next
-	 * `response.create` into a half-open write buffer and parks the reader
-	 * until the first-event / idle timeout fires (issue #1450). Forcing a
-	 * reconnect on any suspect socket trades a sub-second handshake for a
-	 * 60–300 s stall.
+	 * Reserve the socket for a request that selected it but has not started
+	 * streaming yet (e.g. while `onPayload` runs). The reservation only keeps
+	 * prewarm and routing-hint reconnects off the socket; concurrent turns still
+	 * race for it, and the first to start streaming wins (the other falls back to
+	 * SSE). Pass the returned release to {@link streamRequest}, which drops the
+	 * reservation once it owns the socket; callers that never iterate that stream
+	 * MUST call the release themselves, or the socket stays reserved until
+	 * {@link close}.
 	 */
+	reserveForRequest(): () => void {
+		this.#pendingRequests += 1;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.#pendingRequests = Math.max(0, this.#pendingRequests - 1);
+		};
+	}
+
 	isHealthyForReuse(): boolean {
-		if (!this.isOpen()) return false;
-		const maxIdleMs = CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS;
-		if (maxIdleMs <= 0) return true;
-		// Initial connect sets #lastInboundAt; any later message or pong refreshes
-		// it. A zero value means the field was never initialized, which itself is
-		// a desync — treat as unhealthy.
-		if (this.#lastInboundAt === 0) return false;
-		return Date.now() - this.#lastInboundAt <= maxIdleMs;
+		return this.#channel.isHealthyForReuse();
 	}
 
 	matchesAuth(headers: Record<string, string>): boolean {
 		return this.#headers.authorization === headers.authorization;
 	}
 
+	matchesRoutingHint(headers: Record<string, string>): boolean {
+		return this.#headers[OPENAI_HEADERS.ROUTING_HINT] === headers[OPENAI_HEADERS.ROUTING_HINT];
+	}
+
 	close(reason = "done"): void {
-		const socket = this.#socket;
-		this.#socket = null;
-		this.#stopHeartbeat();
-		this.#rejectSteerWaiters(`websocket closed (${reason})`);
-		if (!socket || (socket.readyState !== WebSocket.OPEN && socket.readyState !== WebSocket.CONNECTING)) return;
-		try {
-			socket.close(1000, reason);
-		} catch (error) {
-			CODEX_DEBUG &&
-				logger.debug("[codex] codex websocket close failed", {
-					error: error instanceof Error ? error.message : String(error),
-					reason,
-				});
-		}
+		this.#pendingRequests = 0;
+		this.#channel.close(reason);
 	}
 
 	async connect(signal?: AbortSignal): Promise<void> {
-		if (this.isOpen()) return;
-		if (this.#connectPromise) {
-			logger.time("codexWs:awaitSharedHandshake");
-			await this.#connectPromise;
-			return;
-		}
-		const { promise, resolve, reject } = Promise.withResolvers<void>();
-		this.#connectPromise = promise;
-		const socket = new (WebSocket as unknown as new (url: string, opts: Bun.WebSocketOptions) => Bun.WebSocket)(
-			this.#url,
-			{ headers: this.#headers, proxy: this.#proxy },
-		);
-		socket.binaryType = "nodebuffer";
-		this.#socket = socket;
-		let settled = false;
-		let timeout: NodeJS.Timeout | undefined;
-		const clearPending = () => {
-			if (timeout !== undefined) {
-				clearTimeout(timeout);
-				timeout = undefined;
-			}
-			if (signal) signal.removeEventListener("abort", onAbort);
-		};
-		const onAbort = () => {
-			if (!settled) {
-				settled = true;
-				clearPending();
-				reject(new CodexWebSocketTransportError(`request was aborted`, { cause: signal?.reason }));
-			}
-			this.close("aborted");
-		};
-		if (signal) {
-			if (signal.aborted) {
-				onAbort();
-			} else {
-				signal.addEventListener("abort", onAbort, { once: true });
-			}
-		}
-		if (!settled) {
-			timeout = setTimeout(() => {
-				this.close("connect-timeout");
-				if (!settled) {
-					settled = true;
-					clearPending();
-					reject(new CodexWebSocketTransportError(`connection timeout`));
-				}
-			}, CODEX_WEBSOCKET_CONNECT_TIMEOUT_MS);
-		}
-
-		socket.onopen = event => {
-			if (!settled) {
-				settled = true;
-				clearPending();
-				this.#lastInboundAt = Date.now();
-				this.#captureHandshakeHeaders(socket, event);
-				this.#startHeartbeat(socket);
-				resolve();
-			}
-		};
-		socket.onerror = event => {
-			const eventRecord = event as unknown as Record<string, unknown>;
-			const detail =
-				(typeof eventRecord.message === "string" && eventRecord.message) ||
-				(eventRecord.error instanceof Error && eventRecord.error.message) ||
-				String(event.type);
-			const error = new CodexWebSocketTransportError(`websocket error: ${detail}`);
-			if (!settled) {
-				settled = true;
-				clearPending();
-				reject(error);
-				return;
-			}
-			this.#push(error);
-		};
-		socket.onclose = event => {
-			this.#socket = null;
-			this.#stopHeartbeat();
-			this.#rejectSteerWaiters(`websocket closed (${event.code})`);
-			if (!settled) {
-				settled = true;
-				clearPending();
-				reject(new CodexWebSocketTransportError(`websocket closed before open (${event.code})`));
-				return;
-			}
-			this.#push(new CodexWebSocketTransportError(`websocket closed (${event.code})`));
-			this.#push(null);
-		};
-		socket.onmessage = event => {
-			// Stamp inbound activity before parsing so even malformed frames refresh
-			// the liveness clock — what matters for reuse health is that the upstream
-			// is still talking to us, not that every frame is well-formed.
-			this.#lastInboundAt = Date.now();
-			this.#writeDebugWebSocketFrame(event.data);
-			try {
-				const text = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString("utf-8");
-				if (!text) return;
-				const parsed = JSON.parse(text) as Record<string, unknown>;
-				if (parsed.type === "error" && typeof parsed.error === "object" && parsed.error) {
-					const inner = parsed.error as Record<string, unknown>;
-					if (typeof parsed.code !== "string" && typeof inner.code === "string") {
-						parsed.code = inner.code;
-					}
-					if (typeof parsed.message !== "string" && typeof inner.message === "string") {
-						parsed.message = inner.message;
-					}
-				}
-				notifyCodexWebSocketInbound(this.#streamObserver, parsed, text);
-				// Steering acknowledgements belong to the submitter, not to the
-				// response stream they interleave with.
-				if (typeof parsed.type === "string" && parsed.type.startsWith("response.steer.")) {
-					this.#handleSteerEvent(parsed);
-					return;
-				}
-				// The native lane answers `response.steer` with a plain `error` that
-				// also ends the response: refuse the submission, then fail the stream.
-				if (parsed.type === "error" && parsed.code === AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
-					this.#refuseSteerWaiters(parsed.code, typeof parsed.message === "string" ? parsed.message : undefined);
-				}
-				this.#push(parsed);
-			} catch (error) {
-				notifyCodexWebSocketMalformed(this.#streamObserver, event.data, error);
-				this.#push(new CodexWebSocketTransportError(`${String(error)}`));
-			}
-		};
-
-		logger.time("codexWs:awaitTcpHandshake");
+		logger.time(this.#channel.isConnecting() ? "codexWs:awaitSharedHandshake" : "codexWs:awaitTcpHandshake");
 		try {
-			await promise;
-		} finally {
-			this.#connectPromise = undefined;
+			await this.#channel.connect(signal);
+		} catch (error) {
+			throw translateCodexWebSocketError(error);
 		}
 	}
 
@@ -4095,244 +3883,61 @@ class CodexWebSocketConnection {
 		signal?: AbortSignal,
 		onSseEvent?: (event: RawSseEvent) => void,
 		onOwned?: () => void,
+		releaseReservation?: () => void,
 	): AsyncGenerator<Record<string, unknown>> {
-		if (!this.#socket || this.#socket.readyState !== WebSocket.OPEN) {
-			throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
-		}
-		if (this.#activeRequest) {
-			throw new CodexWebSocketBusyError(`websocket request already in progress`);
-		}
-		if (signal?.aborted) {
-			throw new CodexWebSocketTransportError(`request was aborted`, { cause: signal.reason });
-		}
-		this.#activeRequest = true;
-		onOwned?.();
-		this.#streamObserver = onSseEvent;
-		// Drain any non-error frames left over from a prior request before sending.
-		// An attach reads exactly those frames: the successor the server started
-		// from accepted steering while no request was reading.
-		// `CodexStreamProcessor.process` breaks its `for-await` on the terminal event,
-		// which interrupts our generator at `yield next` (the post-yield `break`
-		// never runs). Any frame that landed between the consumer's break and the
-		// generator's `finally` lingers in `#queue` and would otherwise become the
-		// first frame of THIS request — a stale `response.completed` would end the
-		// turn immediately with empty output, and a stale non-progress frame would
-		// flip `sawFirstEvent` and silently downgrade the first-event timeout to
-		// the longer idle timeout. Transport errors are preserved so we surface
-		// the death signal instead of writing into a dead socket.
-		if ("send" in exchange) {
-			this.#dropStaleFrames();
-		} else {
-			this.#attachSteerIds = new Set(exchange.attachSteerIds);
-		}
-		const onAbort = () => {
-			this.#push(new CodexWebSocketTransportError(`request was aborted`, { cause: signal?.reason }));
-			// Closing can synchronously enqueue a generic onclose error.
-			this.close("aborted");
-		};
-		if (signal) signal.addEventListener("abort", onAbort, { once: true });
-
+		releaseReservation?.();
+		let owned = false;
 		try {
-			if ("send" in exchange) {
-				const request = exchange.send;
-				const debugSession = isRequestDebugEnabled()
-					? await createRequestDebugSession({
-							protocol: "websocket",
-							method: "POST",
-							url: this.#url,
-							headers: this.#headers,
-							body: request,
-						})
-					: undefined;
-				this.#debugResponseLog = debugSession
-					? await debugSession.openResponseLog("WebSocket 101 Switching Protocols", this.#handshakeHeaders)
-					: undefined;
-
-				const requestPayload = JSON.stringify(request);
-				notifyCodexWebSocketOutbound(onSseEvent, request, requestPayload);
-				// Re-check liveness: the debug-session await above can outlive the socket.
-				// Preserve the abort cause: onAbort already queued a caused error, but this
-				// throw would otherwise mask it before #nextMessage() drains the queue.
-				const socket = this.#socket;
-				if (!socket || socket.readyState !== WebSocket.OPEN) {
-					if (signal?.aborted) {
-						throw new CodexWebSocketTransportError(`websocket connection is unavailable`, {
-							cause: signal.reason,
-						});
-					}
-					throw new CodexWebSocketTransportError(`websocket connection is unavailable`);
-				}
-				try {
-					socket.send(requestPayload);
-				} catch (error) {
-					throw new CodexWebSocketTransportError(
-						`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
-			} else if (this.hasFailedSteer(exchange.attachSteerIds)) {
-				throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
-			}
-			let sawFirstEvent = false;
-			const { idleTimeoutMs, firstEventTimeoutMs } = timeouts;
-			let lastProgressAt = Date.now();
-			let lastProgressEventType: string | undefined;
-			let lastEventAt = lastProgressAt;
-			let lastEventType: string | undefined;
-			// Cross-request frame guard: lock onto this response's id and reject
-			// frames belonging to another response interleaved on the reused socket.
-			let activeResponseId: string | undefined;
-			let lastSequence: number | undefined;
-			const priorResponseId = this.#lastSeenResponseId;
-			while (true) {
-				let timeoutMs: number | undefined;
-				let timeoutReason: string;
-				if (sawFirstEvent) {
-					timeoutReason = createCodexWebSocketTimeoutMessage("idle timeout waiting for websocket", {
-						lastEventAt,
-						lastEventType,
-						lastProgressAt,
-						lastProgressEventType,
-					});
-					if (idleTimeoutMs !== undefined && idleTimeoutMs > 0) {
-						timeoutMs = idleTimeoutMs - (Date.now() - lastProgressAt);
-						if (timeoutMs <= 0) {
-							CODEX_DEBUG &&
-								logger.debug("[codex] codex websocket idle timeout", {
-									lastEventType,
-									lastProgressEventType,
-									msSinceLastEvent: Date.now() - lastEventAt,
-									msSinceLastProgress: Date.now() - lastProgressAt,
-								});
-							throw new CodexWebSocketTransportError(`${timeoutReason}`);
+			yield* this.#channel.streamRequest(
+				"send" in exchange ? exchange : { receive: true },
+				timeouts,
+				signal,
+				onSseEvent,
+				() => {
+					owned = true;
+					onOwned?.();
+					if ("attachSteerIds" in exchange) {
+						this.#attachSteerIds = new Set(exchange.attachSteerIds);
+						if (this.hasFailedSteer(exchange.attachSteerIds)) {
+							throw new CodexSteerCommitError("accepted steering was not committed to a successor response");
 						}
 					}
-				} else {
-					timeoutReason = createCodexWebSocketTimeoutMessage("timeout waiting for first websocket event", {
-						lastEventAt,
-						lastEventType,
-						lastProgressAt,
-						lastProgressEventType,
-					});
-					if (firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0) {
-						timeoutMs = firstEventTimeoutMs;
-					}
-				}
-				const next = await this.#nextMessage(timeoutMs, timeoutReason);
-				if (next instanceof Error) {
-					throw next;
-				}
-				if (next === null) {
-					throw new CodexWebSocketTransportError(`websocket closed before response completion`);
-				}
-				const eventType = typeof next.type === "string" ? next.type : "";
-				// Cross-request frame guard. The socket is reused across turns. Upstream
-				// codex-rs leans on the protocol guarantee that nothing follows a
-				// response's terminal event, but our queue can still surface a trailing
-				// or duplicate frame from a cleanly-completed prior response after
-				// #dropStaleFrames() drained the queue at send time. Attaching such a
-				// frame to THIS turn misattributes an earlier turn's output (a stale
-				// `response.completed` ends the turn early; a stale item makes the model
-				// see an unrelated call). Only lifecycle events (created/completed/
-				// failed/incomplete) carry a `response.id` — exactly the harmful ones —
-				// so key the guard on it and let idless frames (deltas, the rate-limit/
-				// metadata preamble, created-less streams) pass through, matching
-				// upstream rather than gating on `response.created`.
-				const frameResponseId = extractCodexFrameResponseId(next);
-				const frameSequence = extractCodexFrameSequenceNumber(next);
-				if (frameResponseId !== undefined) {
-					if (activeResponseId === undefined) {
-						if (priorResponseId !== undefined && frameResponseId === priorResponseId) {
-							// Trailing/duplicate frame of the previous response that
-							// outlived the drain. Drop without locking or advancing the
-							// first-event clocks so our own response can still start.
-							continue;
-						}
-						activeResponseId = frameResponseId;
-					} else if (frameResponseId !== activeResponseId) {
-						// A different response is interleaving on the socket; the idless
-						// deltas that follow are indistinguishable, so fail closed
-						// (retryable) instead of risking misattribution.
-						this.close("stale-frame");
-						throw new CodexWebSocketTransportError(
-							`websocket frame for response ${frameResponseId} interleaved into active response ${activeResponseId}`,
-						);
-					}
-					this.#lastSeenResponseId = frameResponseId;
-				}
-				if (frameSequence !== undefined) {
-					if (activeResponseId !== undefined && lastSequence !== undefined && frameSequence < lastSequence) {
-						this.close("stale-frame");
-						throw new CodexWebSocketTransportError(
-							`websocket sequence_number ${frameSequence} regressed below ${lastSequence} within response ${activeResponseId}`,
-						);
-					}
-					lastSequence = frameSequence;
-				}
-				sawFirstEvent = true;
-				lastEventAt = Date.now();
-				lastEventType = eventType || undefined;
-				if (isCodexStreamProgressEvent(next)) {
-					lastProgressAt = lastEventAt;
-					lastProgressEventType = lastEventType;
-				}
-				yield next;
-				if (
-					eventType === "response.completed" ||
-					eventType === "response.done" ||
-					eventType === "response.incomplete" ||
-					eventType === "response.failed" ||
-					eventType === "error"
-				) {
-					break;
-				}
-			}
+				},
+			);
+		} catch (error) {
+			CODEX_DEBUG &&
+				logger.debug("[codex] codex websocket transport failure", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			throw translateCodexWebSocketError(error);
 		} finally {
-			this.#activeRequest = false;
-			this.#streamObserver = undefined;
-			this.#attachSteerIds = undefined;
-			if (signal) {
-				signal.removeEventListener("abort", onAbort);
-			}
-			const debugResponseLog = this.#debugResponseLog;
-			this.#debugResponseLog = undefined;
-			await debugResponseLog?.close();
+			if (owned) this.#attachSteerIds = undefined;
 		}
 	}
 
-	/**
-	 * Submit `response.steer` for `previousResponseId`, which must be streaming
-	 * on this socket. Resolves on the server's acknowledgement.
-	 */
+	/** Submit steering on the current socket, even between response readers. */
 	steer(previousResponseId: string, input: InputItem[]): Promise<CodexSteerAck> {
-		const socket = this.#socket;
-		if (!socket || socket.readyState !== WebSocket.OPEN) {
-			return Promise.reject(new CodexWebSocketTransportError(`websocket connection is unavailable`));
+		if (!this.#channel.isOpen()) {
+			return Promise.reject(new CodexWebSocketTransportError("websocket connection is unavailable"));
 		}
-		const event = { type: "response.steer", previous_response_id: previousResponseId, input };
-		const payload = JSON.stringify(event);
 		const { promise, resolve, reject } = Promise.withResolvers<CodexSteerAck>();
 		const waiter: CodexSteerWaiter = { previousResponseId, resolve, reject };
 		this.#steerWaiters.push(waiter);
-		notifyCodexWebSocketOutbound(this.#streamObserver, event, payload);
 		try {
-			socket.send(payload);
+			this.#channel.sendControl({ type: "response.steer", previous_response_id: previousResponseId, input });
 		} catch (error) {
-			this.#steerWaiters.splice(this.#steerWaiters.indexOf(waiter), 1);
-			reject(
-				new CodexWebSocketTransportError(
-					`websocket send failed: ${error instanceof Error ? error.message : String(error)}`,
-				),
-			);
+			const index = this.#steerWaiters.indexOf(waiter);
+			if (index >= 0) this.#steerWaiters.splice(index, 1);
+			reject(translateCodexWebSocketError(error));
 		}
 		return promise;
 	}
 
-	/** True when the server failed to commit any of the accepted steering `ids`. */
 	hasFailedSteer(ids: readonly string[]): boolean {
 		return ids.some(id => this.#failedSteers.has(id));
 	}
 
-	#handleSteerEvent(event: Record<string, unknown>): void {
+	#handleSteerEvent(event: Record<string, unknown>): Error | undefined {
 		const steer = asRecord(event.steer);
 		const id = typeof steer?.id === "string" ? steer.id : undefined;
 		const previousResponseId = typeof steer?.previous_response_id === "string" ? steer.previous_response_id : "";
@@ -4347,20 +3952,15 @@ class CodexWebSocketConnection {
 			const code = typeof error?.code === "string" ? error.code : undefined;
 			const message = typeof error?.message === "string" ? error.message : undefined;
 			if (id && this.#acceptedSteers.has(id)) {
-				// Accepted input that never reached a successor response.
 				this.#failedSteers.add(id);
 				if (this.#attachSteerIds?.has(id)) {
-					this.#push(
-						new CodexSteerCommitError(`steering ${id} was not committed: ${code ?? message ?? "unknown"}`),
-					);
+					return new CodexSteerCommitError(`steering ${id} was not committed: ${code ?? message ?? "unknown"}`);
 				}
 				return;
 			}
 			this.#takeSteerWaiter(previousResponseId)?.resolve({ accepted: false, code, message });
 			return;
 		}
-		// `response.steer.pending` restates that accepted input awaits tool output;
-		// the request planner already derives that from the transcript.
 		CODEX_DEBUG && logger.debug("[codex] codex steering event", { type: event.type, id, previousResponseId });
 	}
 
@@ -4377,197 +3977,15 @@ class CodexWebSocketConnection {
 
 	#rejectSteerWaiters(reason: string): void {
 		const waiters = this.#steerWaiters;
-		if (waiters.length === 0) return;
 		this.#steerWaiters = [];
 		for (const waiter of waiters) waiter.reject(new CodexWebSocketTransportError(reason));
 	}
+}
 
-	#captureHandshakeHeaders(socket: Bun.WebSocket, openEvent?: Event): void {
-		const headers = extractCodexWebSocketHandshakeHeaders(socket, openEvent);
-		if (!headers) return;
-		this.#handshakeHeaders = headers;
-		this.#onHandshakeHeaders?.(headers);
-	}
-
-	#writeDebugWebSocketFrame(data: unknown): void {
-		const log = this.#debugResponseLog;
-		if (!log) return;
-		if (typeof data === "string") {
-			log.write(data);
-			return;
-		}
-		if (data instanceof Uint8Array) {
-			log.write(data);
-			return;
-		}
-		if (data instanceof ArrayBuffer) {
-			log.write(new Uint8Array(data));
-			return;
-		}
-		log.write(String(data));
-	}
-
-	#startHeartbeat(socket: Bun.WebSocket): void {
-		this.#stopHeartbeat();
-		const intervalMs = CODEX_WEBSOCKET_PING_INTERVAL_MS;
-		if (intervalMs <= 0) return;
-
-		this.#lastPingAt = 0;
-		const socketEventTarget = socket as EventTarget;
-		const onPong = () => {
-			// Pongs are inbound activity — refresh the reuse-health clock so a quiet
-			// but ping-responsive socket stays trustworthy across requests.
-			this.#lastInboundAt = Date.now();
-		};
-		if (
-			typeof socketEventTarget.addEventListener === "function" &&
-			typeof socketEventTarget.removeEventListener === "function"
-		) {
-			socketEventTarget.addEventListener("pong", onPong);
-			this.#removePongListener = () => socketEventTarget.removeEventListener("pong", onPong);
-		}
-
-		this.#heartbeatInterval = setInterval(() => {
-			if (this.#socket !== socket || socket.readyState !== WebSocket.OPEN) {
-				this.#stopHeartbeat();
-				return;
-			}
-			// Fail-closed on missing pongs even when no pong has ever been observed.
-			// The previous `#observedPong &&` guard disabled the timeout entirely on
-			// runtimes where Bun does not surface a `pong` event for our outgoing
-			// pings (issue #1450) — letting truly dead sockets sail through the
-			// pool until the per-request first-event / idle timeout (60–300 s)
-			// finally fired. Instead, trigger on inbound silence: if we sent a
-			// ping at least `pongTimeoutMs` ago and have received no traffic of
-			// any kind (data frame or pong) since, the socket is unhealthy.
-			const pongTimeoutMs = CODEX_WEBSOCKET_PONG_TIMEOUT_MS;
-			if (
-				pongTimeoutMs > 0 &&
-				this.#lastPingAt > 0 &&
-				this.#lastPingAt > this.#lastInboundAt &&
-				Date.now() - this.#lastPingAt > pongTimeoutMs
-			) {
-				this.#failQueue(new CodexWebSocketTransportError(`websocket pong timeout`), "pong-timeout");
-				return;
-			}
-			if (typeof socket.ping !== "function") {
-				this.#stopHeartbeat();
-				return;
-			}
-			try {
-				socket.ping();
-				this.#lastPingAt = Date.now();
-			} catch (error) {
-				this.#failQueue(
-					new CodexWebSocketTransportError(
-						`websocket ping failed: ${error instanceof Error ? error.message : String(error)}`,
-					),
-					"ping-failed",
-				);
-			}
-		}, intervalMs);
-		this.#heartbeatInterval.unref();
-	}
-
-	#stopHeartbeat(): void {
-		if (this.#heartbeatInterval) {
-			clearInterval(this.#heartbeatInterval);
-			this.#heartbeatInterval = undefined;
-		}
-		if (this.#removePongListener) {
-			this.#removePongListener();
-			this.#removePongListener = undefined;
-		}
-		this.#lastPingAt = 0;
-	}
-
-	#failQueue(error: Error, closeReason: string): void {
-		CODEX_DEBUG && logger.debug("[codex] codex websocket transport failure", { error: error.message, closeReason });
-		this.#queue.length = 0;
-		this.#queue.push(error);
-		this.close(closeReason);
-		this.#wakeWaiters();
-	}
-
-	/**
-	 * Discard data frames from a previous request that remained in `#queue`
-	 * after the consumer broke out on the terminal event. Preserves any queued
-	 * transport error (from `onerror` / `onclose` / `#failQueue`) so the next
-	 * `#nextMessage` surfaces the death signal instead of waiting it out.
-	 *
-	 * Returns the number of frames dropped (test/debug visibility only).
-	 */
-	#dropStaleFrames(): number {
-		if (this.#queue.length === 0) return 0;
-		const surviving = this.#queue.filter(item => item instanceof Error);
-		const dropped = this.#queue.length - surviving.length;
-		if (dropped === 0) return 0;
-		this.#queue.length = 0;
-		for (const item of surviving) this.#queue.push(item);
-		CODEX_DEBUG && logger.debug("[codex] codex websocket dropped stale frames before request", { dropped });
-		return dropped;
-	}
-
-	#wakeWaiters(): void {
-		for (;;) {
-			const waiter = this.#waiters.shift();
-			if (!waiter) break;
-			waiter();
-		}
-	}
-
-	#push(item: Record<string, unknown> | Error | null): void {
-		if (item instanceof Error) {
-			// Append after frames already received instead of wiping them: a queued
-			// terminal event (e.g. `response.completed` followed by an eager server
-			// close) must still reach the consumer rather than morph into a spurious
-			// transport failure. `#dropStaleFrames` keeps errors across requests, so
-			// the death signal still surfaces if the data frames go unconsumed.
-			this.#queue.push(item);
-			this.#wakeWaiters();
-			return;
-		}
-		if (item !== null && this.#queue.length >= CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY) {
-			this.#failQueue(
-				new CodexWebSocketTransportError(
-					`websocket message queue exceeded ${CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY} items`,
-				),
-				"queue-overflow",
-			);
-			return;
-		}
-		this.#queue.push(item);
-		const waiter = this.#waiters.shift();
-		if (waiter) waiter();
-	}
-
-	async #nextMessage(
-		timeoutMs: number | undefined,
-		timeoutReason: string,
-	): Promise<Record<string, unknown> | Error | null> {
-		while (this.#queue.length === 0) {
-			const { promise, resolve } = Promise.withResolvers<void>();
-			this.#waiters.push(resolve);
-			let timedOut = false;
-			let timeout: NodeJS.Timeout | undefined;
-			if (timeoutMs !== undefined && timeoutMs > 0) {
-				timeout = setTimeout(() => {
-					timedOut = true;
-					const waiterIndex = this.#waiters.indexOf(resolve);
-					if (waiterIndex >= 0) {
-						this.#waiters.splice(waiterIndex, 1);
-					}
-					resolve();
-				}, timeoutMs);
-			}
-			await promise;
-			if (timeout) clearTimeout(timeout);
-			if (timedOut && this.#queue.length === 0) {
-				return new CodexWebSocketTransportError(`${timeoutReason}`);
-			}
-		}
-		return this.#queue.shift() ?? null;
-	}
+function translateCodexWebSocketError(error: unknown): unknown {
+	if (!(error instanceof ResponsesWebSocketTransportError)) return error;
+	if (error.reason === "busy") return new CodexWebSocketBusyError(error.message, { cause: error });
+	return new CodexWebSocketTransportError(error.message, { cause: error.cause ?? error });
 }
 
 async function getOrCreateCodexWebSocketConnection(
@@ -4590,15 +4008,21 @@ async function getOrCreateCodexWebSocketConnection(
 		const pending = state.connection;
 		if (!pending || pending.isOpen() || !pending.isConnecting()) break;
 		try {
-			await pending.connect(signal);
+			await pending.connect();
 		} catch {
 			// The handshake owner surfaces its own failure; re-evaluate below
 			// (state.connection may have been replaced or cleared).
 		}
 	}
+	if (state.connection?.hasActiveRequest()) {
+		throw new CodexWebSocketBusyError("websocket request already in progress");
+	}
 	if (state.connection?.isOpen()) {
 		if (!state.connection.matchesAuth(headerRecord)) {
 			state.connection.close("token-refresh");
+			resetCodexWebSocketAppendState(state);
+		} else if (!state.canAppend && !state.connection.isBusy() && !state.connection.matchesRoutingHint(headerRecord)) {
+			state.connection.close("routing-change");
 			resetCodexWebSocketAppendState(state);
 		} else if (state.connection.isHealthyForReuse()) {
 			logger.time("codexWs:reuseOpenSocket");
@@ -4788,13 +4212,11 @@ function createCodexHeaders(
 	} else {
 		headers.delete(OPENAI_HEADERS.ATTESTATION);
 	}
-	const betaHeader =
-		transport === "websocket"
-			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
-			: OPENAI_HEADER_VALUES.BETA_RESPONSES;
+	// codex-rs sends `OpenAI-Beta` only on the WebSocket handshake; HTTP carries none.
 	headers.delete(OPENAI_HEADERS.BETA);
-	headers.delete("openai-beta");
-	headers.set(OPENAI_HEADERS.BETA, betaHeader);
+	if (transport === "websocket") {
+		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2);
+	}
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, codexClientVersion);
 	headers.set("User-Agent", USER_AGENT);
@@ -4965,6 +4387,22 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 						model.supportsComputerUse === true
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
+					const missingCalls = pickUnrecordedResponsesToolCalls(assistantMsg, historyItems);
+					if (missingCalls.length > 0) {
+						const rebuilt = convertResponsesAssistantMessage(
+							{ ...assistantMsg, content: missingCalls },
+							model,
+							msgIndex,
+							knownCallIds,
+							false,
+							customCallIds,
+							false,
+							true,
+							undefined,
+							computerCallIds,
+						);
+						rawReplayItems.push(...rebuilt);
+					}
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
 					for (const item of replayItems) {
 						if (item.type === "custom_tool_call") {

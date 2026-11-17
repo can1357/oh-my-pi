@@ -7,11 +7,10 @@ use std::{
 	io::{self, Read, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 mod options {
 	pub static BYTES: &str = "bytes";
@@ -402,11 +401,6 @@ fn app() -> Command {
 				.value_parser(clap::value_parser!(OsString))
 				.value_hint(clap::ValueHint::FilePath),
 		)
-}
-
-/// Creates the `fold` builtin registration.
-pub(crate) fn fold_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Fold, SE>()
 }
 
 #[cfg(test)]

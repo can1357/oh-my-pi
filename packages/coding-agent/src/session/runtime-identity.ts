@@ -3,8 +3,8 @@
  * transcript records which code produced each entry.
  *
  * Installed builds (compiled binary, package install) record only their version. A source
- * checkout records the commit, branch, and a hash of its uncommitted diff, because its
- * version string stays the same across every unreleased commit and local edit.
+ * checkout also records its commit and branch, because its version string stays the same
+ * across unreleased commits.
  */
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -18,22 +18,17 @@ export interface RuntimeIdentity {
 	commit?: string;
 	/** Source checkout branch; absent on a detached HEAD. */
 	branch?: string;
-	/**
-	 * Hash of the checkout's uncommitted tracked changes (`git diff HEAD`); absent when clean,
-	 * `unknown` when the diff could not be read (too large) or has not been read yet.
-	 */
+	/** Historical uncommitted-diff hash from older session entries; new entries omit it. */
 	diff?: string;
 	/** Free-form name from `OMP_BUILD_LABEL`. */
 	label?: string;
 }
 
 const MAX_LABEL_LENGTH = 80;
-const MAX_DIFF_BYTES = 64 * 1024 * 1024;
 const SOURCE_PACKAGE_PREFIX = "packages/coding-agent/";
 const UNKNOWN_DIFF = "unknown";
 
 let current: RuntimeIdentity | undefined;
-let ready: Promise<void> = Promise.resolve();
 
 /** Git handle of the checkout this module runs from; null for compiled binaries and package installs. */
 function findSourceCheckout(): VcsGitRepo | null {
@@ -43,24 +38,7 @@ function findSourceCheckout(): VcsGitRepo | null {
 	return repo?.prefixOf(import.meta.dir)?.startsWith(SOURCE_PACKAGE_PREFIX) ? repo : null;
 }
 
-async function readUncommittedDiff(repo: VcsGitRepo, identity: RuntimeIdentity): Promise<void> {
-	let patch: string | null;
-	try {
-		patch = await repo.diffText({ base: "HEAD", binary: true, maxBytes: MAX_DIFF_BYTES });
-	} catch (error) {
-		logger.debug("Could not read the source checkout diff", { error: String(error) });
-		patch = null;
-	}
-	current = {
-		...identity,
-		diff: patch === null ? UNKNOWN_DIFF : patch ? Bun.hash(patch).toString(16).padStart(16, "0") : undefined,
-	};
-}
-
-/**
- * Resolves the identity on first use, not at import, so commands that never write a session skip
- * the VCS reads. Commit and branch resolve synchronously; only the diff hash is asynchronous.
- */
+/** Resolve the build stamp on first use so commands that write no session skip VCS reads. */
 function resolveRuntimeIdentity(): RuntimeIdentity {
 	if (current) return current;
 	const label = $env.OMP_BUILD_LABEL?.replace(/\s+/g, " ").trim().slice(0, MAX_LABEL_LENGTH);
@@ -69,8 +47,7 @@ function resolveRuntimeIdentity(): RuntimeIdentity {
 		const repo = findSourceCheckout();
 		const head = repo?.headSync();
 		if (repo && head?.commit) {
-			current = { ...current, commit: head.commit, branch: head.branch ?? undefined, diff: UNKNOWN_DIFF };
-			ready = readUncommittedDiff(repo, current);
+			current = { ...current, commit: head.commit, branch: head.branch ?? undefined };
 		}
 	} catch (error) {
 		logger.debug("Could not resolve source checkout identity", { error: String(error) });
@@ -78,13 +55,12 @@ function resolveRuntimeIdentity(): RuntimeIdentity {
 	return current;
 }
 
-/** Starts resolution if needed and settles once the source checkout's diff is read; session entry points await it before writing. */
-export function loadRuntimeIdentity(): Promise<void> {
-	resolveRuntimeIdentity();
-	return ready;
+/** Adopt the main thread's build stamp for subagent workers. */
+export function adoptRuntimeIdentity(identity: RuntimeIdentity): void {
+	current = identity;
 }
 
-/** Build identity of this process; a source checkout's `diff` is `unknown` until {@link loadRuntimeIdentity} settles. */
+/** Build identity of this process, resolved when first needed. */
 export function currentRuntimeIdentity(): RuntimeIdentity {
 	return resolveRuntimeIdentity();
 }

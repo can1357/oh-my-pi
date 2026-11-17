@@ -14,7 +14,7 @@ const shebang = "#!/usr/bin/env bun\n";
 const obsoleteHtmlExportAssetPattern =
 	/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/;
 
-// Native / optional / platform-specific deps are loaded from installed files.
+// Native/platform dependencies and on-demand model runtimes stay outside the bundle.
 const ALWAYS_EXTERNAL = ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
 
 /**

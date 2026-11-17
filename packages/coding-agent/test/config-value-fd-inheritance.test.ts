@@ -5,15 +5,15 @@
  * A launcher can legitimately hand omp an open descriptor (for example a
  * credential bundle) that is meant to stay single-consumer. The child spawned
  * for `auth.broker.url` / header `!command` resolution used to run through the
- * natives brush shell (executeShell), whose children inherit every inheritable
+ * natives embedded shell (executeShell), whose children inherit every inheritable
  * descriptor; the models.yml apiKey resolver (execSync) already spawned with
  * stdio pipes only. The fix converges the config-value path on ptree, which
  * keeps piped-only stdio while preserving executeShell's process-tree
  * termination on timeout.
  *
  * Oracle notes: the fd oracle must be an external helper script whose body is
- * `cat <&3` — brush rejects inline `<&3` in the command string while still
- * passing inherited fds to external children. A positive control runs first so
+ * `cat <&3`, so it observes the descriptors an external child inherits rather
+ * than the embedded shell's own redirection handling. A positive control runs first so
  * the fd assertion cannot pass vacuously (e.g. if the resolver stopped
  * executing commands at all). No /proc dependency, so the oracle
  * discriminates on every non-Windows platform.

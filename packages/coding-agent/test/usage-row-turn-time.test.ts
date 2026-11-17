@@ -285,7 +285,11 @@ describe("UiHelpers.renderSessionContext turn elapsed", () => {
 			session: {
 				retryAttempt: 0,
 				getToolByName: () => undefined,
-				sessionManager: { getCwd: () => process.cwd(), putBlobSync: () => undefined },
+				sessionManager: {
+					getCwd: () => process.cwd(),
+					getConversationTip: () => undefined,
+					putBlobSync: () => undefined,
+				},
 			},
 			get viewSession() {
 				return (this as typeof ctx).session;
@@ -384,7 +388,7 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 		>);
 		await driveAssistantTurn(controller, assistantMessage());
 		expect(renderedText(chatContainer)).toContain(TURN_ELAPSED_LABEL);
-		await controller.handleEvent({ type: "agent_end", isTerminal: true, messages: [] } as Extract<
+		await controller.handleEvent({ type: "agent_end", messages: [] } as Extract<
 			AgentSessionEvent,
 			{ type: "agent_end" }
 		>);

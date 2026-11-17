@@ -13,7 +13,7 @@ import {
 	unknownWeight,
 } from "../../config";
 import { hasCjk, matchesWordForm } from "../../util/regex";
-import { embedQuery } from "../embeddings";
+import { currentEmbeddingModel, embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
 import { type OrchestratedRecallResult, orchestrateRecall } from "../orchestrator";
 import { POLYPHONIC_MAX_COMBINED_SCORE } from "../polyphonic-recall";
@@ -604,12 +604,15 @@ function vectorSimilarities(
 	) {
 		return out;
 	}
+	// Only vectors stamped with the active embedding model are comparable to the
+	// query embedding; stale-model rows stay on disk for the rebuild but must not score.
+	const model = currentEmbeddingModel();
 	for (let offset = 0; offset < memoryIds.length; offset += 500) {
 		const chunk = memoryIds.slice(offset, offset + 500);
 		const rows = queryAll(
 			beam,
-			`SELECT memory_id, embedding_json FROM memory_embeddings WHERE memory_id IN (${placeholders(chunk.length)})`,
-			chunk,
+			`SELECT memory_id, embedding_json FROM memory_embeddings WHERE model IS ? AND memory_id IN (${placeholders(chunk.length)})`,
+			[model, ...chunk],
 		);
 		for (const row of rows) {
 			const vector = parseEmbedding(row.embedding_json);

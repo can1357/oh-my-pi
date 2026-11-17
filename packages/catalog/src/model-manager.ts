@@ -127,6 +127,8 @@ export interface ModelResolutionResult<TApi extends Api = Api> {
 	stale: boolean;
 	source: ModelResolutionSource;
 	updatedAt?: number;
+	/** Why the provider's endpoint fetcher threw this call; the models then come from cache, models.dev or bundled data. */
+	fetchError?: string;
 }
 
 /**
@@ -337,9 +339,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		};
 	}
 
-	const [fetchedModelsDevModels, fetchedDynamicModels] = shouldFetchFromNetwork
-		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : null])
-		: [null, null];
+	const [fetchedModelsDevModels, dynamicFetch] = shouldFetchFromNetwork
+		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : undefined])
+		: [null, undefined];
+	const fetchedDynamicModels = dynamicFetch?.models ?? null;
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
 	const normalizedModelsDevModels = fetchedModelsDevModels?.models ?? [];
 	const modelsDevModels = modelsDevAdditiveStaticModelIds
@@ -429,7 +432,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// non-authoritative row reads back as a fresh catalog and suppresses
 			// refetch for NON_AUTHORITATIVE_RETRY_MS, hiding every discovery-only
 			// model until it ages out. Writing nothing lets the next launch retry
-			// immediately (#10964).
+			// immediately (#10964). Likewise keep a prior row whose header-bearing
+			// models cannot be restored offline: rewriting it would drop them and
+			// mark the remainder fresh, while the untouched row keeps forcing a
+			// refetch that recovers them (#18227).
 			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
 			const latestRestoredCache = restoreCachedModelHeaders(
 				latestCache?.models ?? cache?.models ?? [],
@@ -465,7 +471,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					? retainModelIds(mergedFallbackModels, latestUsableCacheModels)
 					: mergedFallbackModels,
 			);
-			if (fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null) {
+			if (
+				latestRestoredCache.unresolvedModelIds.size === 0 &&
+				(fallbackSnapshotModels.length > 0 || latestCache !== null || cache !== null)
+			) {
 				writeModelCache(
 					cacheProviderId,
 					now(),
@@ -496,6 +505,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			: cacheContributed && cache
 				? { updatedAt: cache.updatedAt }
 				: {}),
+		...(dynamicFetch?.error !== undefined ? { fetchError: dynamicFetch.error } : {}),
 	};
 }
 
@@ -520,17 +530,15 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 	}
 }
 
+/** The endpoint's catalog (`models: null` when it answered none), and why it threw, if it did. */
 async function fetchDynamicModels<TApi extends Api>(
 	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
-): Promise<DiscoveredModelSet<TApi> | null> {
+): Promise<{ models: DiscoveredModelSet<TApi> | null; error?: string }> {
 	try {
 		const models = await fetcher();
-		if (models === null) {
-			return null;
-		}
-		return buildDiscoveredModelSpecs<TApi>(models);
-	} catch {
-		return null;
+		return { models: models === null ? null : buildDiscoveredModelSpecs<TApi>(models) };
+	} catch (error) {
+		return { models: null, error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
@@ -709,7 +717,15 @@ function mergeDynamicModel<TApi extends Api>(
 	// Providers with authoritative reasoning metadata must not regain a
 	// stale bundled dial after explicitly reporting no reasoning. Others
 	// retain the additive fallback for discovery that omits capabilities.
-	const reasoning = authority.reasoning ? dynamicModel.reasoning : existingModel.reasoning || dynamicModel.reasoning;
+	// A provisional ladder's derived `reasoning: true` is missing evidence,
+	// not capability, so it neither overrides nor joins the other side.
+	const liveReasoning = dynamicModel.thinking?.unverified ? undefined : dynamicModel.reasoning;
+	const fallbackReasoning = existingModel.thinking?.unverified ? undefined : existingModel.reasoning;
+	const reasoning = authority.reasoning
+		? (liveReasoning ?? fallbackReasoning)
+		: liveReasoning === true || fallbackReasoning === true
+			? true
+			: (liveReasoning ?? fallbackReasoning);
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
@@ -738,6 +754,7 @@ function mergeDynamicModel<TApi extends Api>(
 		liveCompat !== undefined &&
 		"trustExplicitThinkingOnly" in liveCompat &&
 		liveCompat.trustExplicitThinkingOnly === true;
+	const thinking = trustsOwnThinking || "thinking" in dynamicModel ? dynamicModel.thinking : existingModel.thinking;
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
@@ -745,7 +762,9 @@ function mergeDynamicModel<TApi extends Api>(
 			authority.staticNames?.get(dynamicModel.id) ??
 			preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
-		...(trustsOwnThinking ? { thinking: dynamicModel.thinking } : {}),
+		// `buildModel` re-derives a provisional ladder from the merged evidence;
+		// carried over, it would erase that evidence (see `resolveModelPolicy`).
+		thinking: thinking?.unverified ? undefined : thinking,
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input, authority.cost),
@@ -848,8 +867,9 @@ const ModelSpecShape = type({
 	name: "string > 0",
 	api: "string > 0",
 	provider: "string > 0",
-	baseUrl: "string > 0",
-	reasoning: "boolean",
+	// Providers such as Azure resolve the deployment endpoint at request time.
+	baseUrl: "string",
+	"reasoning?": "boolean | undefined",
 	input: "('text' | 'image')[] > 0",
 	cost: FiniteTokenCost.and({
 		"timeBased?": TimeBasedCostShape.or("undefined"),

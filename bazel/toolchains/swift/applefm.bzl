@@ -16,7 +16,7 @@ re-runs when the selection env vars (tracked through `getenv`) or the watched
 compiler/SDK files change, and on `bazel fetch --configure`.
 """
 
-_ENV = ["OMP_APPLEFM_SWIFTC", "SDKROOT", "DEVELOPER_DIR"]
+_ENV = ["OMP_APPLEFM_SWIFTC", "OMP_APPLEFM_DISABLE", "SDKROOT", "DEVELOPER_DIR"]
 
 _CANDIDATE_SDK_SETTINGS = [
     "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/SDKSettings.plist",
@@ -36,8 +36,9 @@ def _applefm_swift_repository_impl(rctx):
                 environment[name] = value
         script = rctx.path(Label("//crates/pi-natives:src/applefm/build-bridge.sh"))
         result = rctx.execute(["/bin/sh", str(script), "detect"], environment = environment)
-        if result.return_code == 0:
-            line = result.stdout.strip()
+        if result.return_code != 0:
+            fail(result.stderr.strip())
+        line = result.stdout.strip()
         selected = rctx.execute(["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"])
         for settings in _CANDIDATE_SDK_SETTINGS + [selected.stdout.strip() + "/SDKSettings.plist"]:
             _watch_if_exists(rctx, settings)

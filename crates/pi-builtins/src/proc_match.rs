@@ -14,20 +14,15 @@
 use std::{
 	collections::{HashMap, HashSet},
 	future::Future,
-	io::{self, BufRead, Write},
+	io::{self, Write},
 	time::Duration,
 };
 
-use brush_core::{ExecutionContext, ExecutionExitCode, ExecutionResult};
-#[cfg(unix)]
-use brush_core::openfiles::OpenFiles;
-use tokio_util::sync::CancellationToken;
-
 use crate::{
-	host::ShellPaths,
-	kill::signal_number,
+	host::{INTERRUPTED_EXIT_CODE, ProcContext, ShellPaths},
 	proc_select::{parse_group_list, parse_i32_list, parse_terminal_list, parse_user_list},
 	proc_snapshot,
+	stdio::Source,
 };
 
 /// What a process-matching command does with the processes it selects.
@@ -77,67 +72,59 @@ struct ProcMatchOptions {
 /// Runs the process-matching body for `mode`.
 ///
 /// `pgrep`, `pkill`, and `pidwait` each call this with their own mode; the
-/// invoked name still comes from the execution context, so diagnostics and help
-/// name the command the user actually typed.
-pub(crate) fn run<SE: brush_core::ShellExtensions>(
+/// invoked name still comes from the context, so diagnostics and help name the
+/// command the user actually typed. The context must carry its paths
+/// ([`crate::host::Process::USES_PATHS`]).
+pub(crate) fn run<'a>(
 	mode: ProcMatchMode,
-	argv: Vec<String>,
-	context: ExecutionContext<'_, SE>,
-) -> impl Future<Output = std::result::Result<ExecutionResult, brush_core::Error>> + Send {
+	argv: &[String],
+	context: &'a ProcContext,
+) -> impl Future<Output = io::Result<i32>> + Send + 'a {
 	{
 		let command_name = context.command_name.clone();
-		let paths = ShellPaths::new(&context);
+		let argv = argv.to_vec();
 		async move {
-			#[cfg(unix)]
-			let stdin_watcher = context.try_fd(OpenFiles::STDIN_FD).and_then(|stdin| {
-				let fd = stdin.try_borrow_as_fd().ok()?.try_clone_to_owned().ok()?;
-				tokio::io::unix::AsyncFd::new(fd).ok()
-			});
-			let mut stdin = io::BufReader::new(context.stdin());
-			let (parsed, mut stdin) = tokio::task::spawn_blocking(move || {
-				let parsed = parse_proc_match_args(mode, &argv, &paths, &mut stdin);
-				(parsed, stdin)
-			})
-			.await
-			.map_err(|error| io::Error::other(format!("process argument reader failed: {error}")))?;
+			let mut stdin = ProcStdin::default();
+			let parsed = parse_proc_match(mode, &argv, context, &mut stdin).await;
 			let mut options = match parsed {
 				Ok(ParseProcResult::Options(options)) => *options,
 				Ok(ParseProcResult::Help) => {
 					write_proc_match_help(context.stdout(), &command_name, mode)?;
-					return Ok(ExecutionResult::success());
+					return Ok(0);
 				},
 				Ok(ParseProcResult::Version) => {
 					writeln!(context.stdout(), "{command_name} {}", env!("CARGO_PKG_VERSION"))?;
-					return Ok(ExecutionResult::success());
+					return Ok(0);
 				},
+				Ok(ParseProcResult::Cancelled) => return Ok(INTERRUPTED_EXIT_CODE),
 				Err((code, message)) => {
 					writeln!(context.stderr(), "{command_name}: {message}")?;
-					return Ok(ExecutionResult::new(code));
+					return Ok(code.into());
 				},
 			};
 
 			if context.is_cancelled() {
-				return Ok(ExecutionExitCode::Interrupted.into());
+				return Ok(INTERRUPTED_EXIT_CODE);
 			}
 
 			let (processes, host) = match select_processes(&mut options) {
 				Ok(selected) => selected,
 				Err(message) => {
 					writeln!(context.stderr(), "{command_name}: {message}")?;
-					return Ok(ExecutionResult::new(2));
+					return Ok(2);
 				},
 			};
 			if processes.is_empty() {
 				if options.count && !options.quiet {
 					writeln!(context.stdout(), "0")?;
 				}
-				return Ok(ExecutionResult::new(1));
+				return Ok(1);
 			}
 
 			match mode {
 				ProcMatchMode::Grep => {
 					if options.quiet {
-						return Ok(ExecutionResult::success());
+						return Ok(0);
 					}
 					if options.count {
 						writeln!(context.stdout(), "{}", processes.len())?;
@@ -165,7 +152,7 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 					let mut succeeded = false;
 					for process in &processes {
 						if context.is_cancelled() {
-							return Ok(ExecutionExitCode::Interrupted.into());
+							return Ok(INTERRUPTED_EXIT_CODE);
 						}
 						if options.interactive {
 							{
@@ -173,30 +160,23 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 								write!(stderr, "kill process {}? ", process.pid())?;
 								stderr.flush()?;
 							}
-							#[cfg(unix)]
-							let response = read_proc_confirmation(
-								&mut stdin,
-								context.cancel_token(),
-								stdin_watcher.as_ref(),
-							)
-							.await?;
-							#[cfg(not(unix))]
-							let response = read_proc_confirmation(&mut stdin, context.cancel_token()).await?;
+							context.flush_output().await?;
+							let response = stdin.read_confirmation(context).await?;
 							let Some(response) = response else {
-								return Ok(ExecutionExitCode::Interrupted.into());
+								return Ok(INTERRUPTED_EXIT_CODE);
 							};
 							if !matches!(response.trim(), "y" | "Y" | "yes" | "YES") {
 								continue;
 							}
 						}
 						if context.is_cancelled() {
-							return Ok(ExecutionExitCode::Interrupted.into());
+							return Ok(INTERRUPTED_EXIT_CODE);
 						}
 						// Selection may legitimately include an ancestor — `pgrep`
 						// should still list the terminal — but signalling one would
 						// tear down the session this shell runs in. Refuse late, at
 						// delivery, so only the destructive mode is affected.
-						if host.pids.contains(&process.pid()) {
+						if host.blocks(process.pid()) {
 							if !options.quiet {
 								writeln!(
 									context.stderr(),
@@ -230,7 +210,7 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 						}
 					}
 					if !succeeded {
-						return Ok(ExecutionResult::new(1));
+						return Ok(1);
 					}
 				},
 				ProcMatchMode::Wait => {
@@ -247,6 +227,7 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 							)?;
 						}
 					}
+					context.flush_output().await?;
 					// `biased` keeps the old precedence: processes that are already gone
 					// report success even if cancellation is also pending.
 					if let Some(cancel_token) = context.cancel_token() {
@@ -254,7 +235,7 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 							biased;
 							() = wait_for_exits(&processes) => {},
 							() = cancel_token.cancelled() => {
-								return Ok(ExecutionExitCode::Interrupted.into());
+								return Ok(INTERRUPTED_EXIT_CODE);
 							},
 						}
 					} else {
@@ -262,9 +243,112 @@ pub(crate) fn run<SE: brush_core::ShellExtensions>(
 					}
 				},
 			}
-			Ok(ExecutionResult::success())
+			Ok(0)
 		}
 	}
+}
+
+/// The signal a `pkill` operand names: a number (`9`; `0` probes for
+/// existence), or a name in any case with or without `SIG` (`TERM`, `sigterm`).
+pub(crate) fn signal_number(operand: &str) -> Option<i32> {
+	let upper = operand.to_ascii_uppercase();
+	let name = upper.strip_prefix("SIG").unwrap_or(&upper);
+	if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
+		let number: i32 = name.parse().ok()?;
+		let known = number == 0 || SIGNALS.iter().any(|&(_, signal)| signal == number);
+		return (known || is_realtime(number)).then_some(number);
+	}
+	if name == "EXIT" {
+		return Some(0);
+	}
+	SIGNALS.iter().find(|&&(known, _)| known == name).map(|&(_, number)| number)
+}
+
+/// Signal names (without `SIG`) and numbers on this platform.
+#[cfg(unix)]
+const SIGNALS: &[(&str, i32)] = &[
+	("HUP", libc::SIGHUP),
+	("INT", libc::SIGINT),
+	("QUIT", libc::SIGQUIT),
+	("ILL", libc::SIGILL),
+	("TRAP", libc::SIGTRAP),
+	("ABRT", libc::SIGABRT),
+	("IOT", libc::SIGABRT),
+	("BUS", libc::SIGBUS),
+	("FPE", libc::SIGFPE),
+	("KILL", libc::SIGKILL),
+	("USR1", libc::SIGUSR1),
+	("SEGV", libc::SIGSEGV),
+	("USR2", libc::SIGUSR2),
+	("PIPE", libc::SIGPIPE),
+	("ALRM", libc::SIGALRM),
+	("TERM", libc::SIGTERM),
+	("CHLD", libc::SIGCHLD),
+	("CONT", libc::SIGCONT),
+	("STOP", libc::SIGSTOP),
+	("TSTP", libc::SIGTSTP),
+	("TTIN", libc::SIGTTIN),
+	("TTOU", libc::SIGTTOU),
+	("URG", libc::SIGURG),
+	("XCPU", libc::SIGXCPU),
+	("XFSZ", libc::SIGXFSZ),
+	("VTALRM", libc::SIGVTALRM),
+	("PROF", libc::SIGPROF),
+	("WINCH", libc::SIGWINCH),
+	("IO", libc::SIGIO),
+	("SYS", libc::SIGSYS),
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	("STKFLT", libc::SIGSTKFLT),
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	("PWR", libc::SIGPWR),
+	#[cfg(any(target_os = "linux", target_os = "android"))]
+	("POLL", libc::SIGPOLL),
+	#[cfg(any(
+		target_vendor = "apple",
+		target_os = "freebsd",
+		target_os = "openbsd",
+		target_os = "netbsd",
+		target_os = "dragonfly"
+	))]
+	("EMT", libc::SIGEMT),
+	#[cfg(any(
+		target_vendor = "apple",
+		target_os = "freebsd",
+		target_os = "openbsd",
+		target_os = "netbsd",
+		target_os = "dragonfly"
+	))]
+	("INFO", libc::SIGINFO),
+];
+
+/// The signals every POSIX platform numbers alike, which Windows scripts can
+/// still name.
+#[cfg(not(unix))]
+const SIGNALS: &[(&str, i32)] = &[
+	("HUP", 1),
+	("INT", 2),
+	("QUIT", 3),
+	("ILL", 4),
+	("TRAP", 5),
+	("ABRT", 6),
+	("FPE", 8),
+	("KILL", 9),
+	("SEGV", 11),
+	("PIPE", 13),
+	("ALRM", 14),
+	("TERM", 15),
+];
+
+/// Whether `number` is a real-time signal (Linux), which has no name here.
+#[cfg(target_os = "linux")]
+fn is_realtime(number: i32) -> bool {
+	(libc::SIGRTMIN()..=libc::SIGRTMAX()).contains(&number)
+}
+
+/// Whether `number` is a real-time signal; none are recognized here.
+#[cfg(not(target_os = "linux"))]
+const fn is_realtime(_number: i32) -> bool {
+	false
 }
 
 /// Resolves once every process in `processes` has exited.
@@ -342,61 +426,113 @@ async fn wait_for_watchable_exits(
 	processes.iter().collect()
 }
 
-#[cfg(unix)]
-async fn read_proc_confirmation<R: io::Read>(
-	stdin: &mut io::BufReader<R>,
-	cancel_token: Option<CancellationToken>,
-	watcher: Option<&tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
-) -> io::Result<Option<String>> {
-	if cancel_token
-		.as_ref()
-		.is_some_and(CancellationToken::is_cancelled)
-	{
-		return Ok(None);
-	}
-	if let Some(watcher) = watcher {
-		if let Some(cancel_token) = cancel_token {
-			let ready = tokio::select! {
-				ready = watcher.readable() => ready,
-				() = cancel_token.cancelled() => return Ok(None),
-			};
-			drop(ready?);
-		} else {
-			drop(watcher.readable().await?);
-		}
-	}
-	let mut response = String::new();
-	stdin.read_line(&mut response)?;
-	Ok(Some(response))
+/// Standard input of one invocation, opened on first use and kept so bytes
+/// read ahead of a line survive into the next confirmation.
+#[derive(Default)]
+struct ProcStdin {
+	reader: Option<LineReader>,
 }
 
-#[cfg(not(unix))]
-async fn read_proc_confirmation<R: io::Read>(
-	stdin: &mut io::BufReader<R>,
-	cancel_token: Option<CancellationToken>,
-) -> io::Result<Option<String>> {
-	if cancel_token
-		.as_ref()
-		.is_some_and(CancellationToken::is_cancelled)
-	{
-		return Ok(None);
+struct LineReader {
+	source:  Source,
+	pending: Vec<u8>,
+}
+
+impl ProcStdin {
+	fn reader(&mut self, context: &ProcContext) -> io::Result<&mut LineReader> {
+		if self.reader.is_none() {
+			self.reader = Some(LineReader { source: context.stdin_source()?, pending: Vec::new() });
+		}
+		Ok(self.reader.as_mut().expect("reader was just opened"))
 	}
-	let mut response = String::new();
-	stdin.read_line(&mut response)?;
-	Ok(Some(response))
+
+	/// Reads the rest of standard input as text.
+	async fn read_all(&mut self, context: &ProcContext) -> io::Result<String> {
+		let reader = self.reader(context)?;
+		let mut bytes = std::mem::take(&mut reader.pending);
+		reader.source.read_to_end(&mut bytes, usize::MAX).await?;
+		utf8(bytes)
+	}
+
+	/// Reads one confirmation line; `None` when cancelled first.
+	async fn read_confirmation(&mut self, context: &ProcContext) -> io::Result<Option<String>> {
+		if context.is_cancelled() {
+			return Ok(None);
+		}
+		let reader = self.reader(context)?;
+		if let Some(cancel_token) = context.cancel_token() {
+			tokio::select! {
+				line = reader.read_line() => line.map(Some),
+				() = cancel_token.cancelled() => Ok(None),
+			}
+		} else {
+			reader.read_line().await.map(Some)
+		}
+	}
+}
+
+impl LineReader {
+	/// Reads through the next newline, or to end of input.
+	async fn read_line(&mut self) -> io::Result<String> {
+		let mut searched = 0;
+		loop {
+			if let Some(offset) = self.pending[searched..].iter().position(|byte| *byte == b'\n') {
+				let line: Vec<u8> = self.pending.drain(..=searched + offset).collect();
+				return utf8(line);
+			}
+			searched = self.pending.len();
+			let mut chunk = [0u8; 8192];
+			let count = self.source.read(&mut chunk).await?;
+			if count == 0 {
+				return utf8(std::mem::take(&mut self.pending));
+			}
+			self.pending.extend_from_slice(&chunk[..count]);
+		}
+	}
+}
+
+fn utf8(bytes: Vec<u8>) -> io::Result<String> {
+	String::from_utf8(bytes)
+		.map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))
 }
 
 enum ParseProcResult {
 	Options(Box<ProcMatchOptions>),
 	Help,
 	Version,
+	Cancelled,
+}
+
+/// Parses `argv`, resolves `-F` pidfiles (reading standard input only for
+/// `-F -`), and validates the result.
+async fn parse_proc_match(
+	mode: ProcMatchMode,
+	argv: &[String],
+	context: &ProcContext,
+	stdin: &mut ProcStdin,
+) -> std::result::Result<ParseProcResult, (u8, String)> {
+	let mut options = match parse_proc_match_args(mode, argv, context.paths())? {
+		ParseProcResult::Options(options) => *options,
+		other => return Ok(other),
+	};
+	// Resolution is raced against cancellation; a cancelled one is not a diagnostic.
+	if let Some(cancel_token) = context.cancel_token() {
+		tokio::select! {
+			biased;
+			resolved = resolve_pid_files(&mut options, context, stdin) => resolved?,
+			() = cancel_token.cancelled() => return Ok(ParseProcResult::Cancelled),
+		}
+	} else {
+		resolve_pid_files(&mut options, context, stdin).await?;
+	}
+	validate_proc_match_options(mode, &options)?;
+	Ok(ParseProcResult::Options(Box::new(options)))
 }
 
 fn parse_proc_match_args(
 	mode: ProcMatchMode,
 	argv: &[String],
 	paths: &ShellPaths,
-	stdin: &mut impl BufRead,
 ) -> std::result::Result<ParseProcResult, (u8, String)> {
 	let mut options =
 		ProcMatchOptions { delimiter: "\n".to_string(), signal: 15, ..Default::default() };
@@ -632,27 +768,43 @@ fn parse_proc_match_args(
 	if options.require_lock && options.pid_files.is_empty() {
 		return Err((2, "-L requires -F".to_string()));
 	}
-	for file in &options.pid_files {
+	Ok(ParseProcResult::Options(Box::new(options)))
+}
+
+async fn resolve_pid_files(
+	options: &mut ProcMatchOptions,
+	context: &ProcContext,
+	stdin: &mut ProcStdin,
+) -> std::result::Result<(), (u8, String)> {
+	let paths = context.paths();
+	let fs = context.vfs();
+	let files = std::mem::take(&mut options.pid_files);
+	for file in &files {
 		let contents = if file == "-" {
 			if options.require_lock {
 				return Err((2, "-L cannot be used with '-F -'".to_string()));
 			}
-			let mut contents = String::new();
 			stdin
-				.read_to_string(&mut contents)
-				.map_err(|err| (3, format!("cannot read pidfile from standard input: {err}")))?;
-			contents
+				.read_all(context)
+				.await
+				.map_err(|err| (3, format!("cannot read pidfile from standard input: {err}")))?
 		} else {
-			let mut pidfile = paths.fs().open(paths.resolve(file))
+			let pidfile = fs
+				.open(paths.resolve(file))
+				.await
 				.map_err(|err| (3, format!("cannot read pidfile '{file}': {err}")))?;
 			if options.require_lock
-				&& !pidfile.is_locked()
+				&& !pidfile
+					.is_locked_async()
+					.await
 					.map_err(|err| (3, format!("cannot inspect pidfile '{file}': {err}")))?
 			{
 				return Err((3, format!("pidfile '{file}' is not locked")));
 			}
 			let mut contents = String::new();
-			io::Read::read_to_string(&mut pidfile, &mut contents)
+			pidfile
+				.read_to_string_async(&mut contents)
+				.await
 				.map_err(|err| (3, format!("cannot read pidfile '{file}': {err}")))?;
 			contents
 		};
@@ -664,10 +816,17 @@ fn parse_proc_match_args(
 			.ok_or_else(|| (3, format!("invalid pidfile '{file}'")))?;
 		options.pids.push(pid);
 	}
+	Ok(())
+}
+
+fn validate_proc_match_options(
+	mode: ProcMatchMode,
+	options: &ProcMatchOptions,
+) -> std::result::Result<(), (u8, String)> {
 	if !cfg!(target_os = "macos") && options.patterns.len() > 1 {
 		return Err((2, "only one pattern can be provided".to_string()));
 	}
-	if options.patterns.is_empty() && !has_proc_selectors(&options) {
+	if options.patterns.is_empty() && !has_proc_selectors(options) {
 		return Err((2, "no matching criteria specified".to_string()));
 	}
 	if options.invert && (options.newest || options.oldest) {
@@ -681,7 +840,7 @@ fn parse_proc_match_args(
 	{
 		return Err((2, "unsupported output-format option for this command".to_string()));
 	}
-	Ok(ParseProcResult::Options(Box::new(options)))
+	Ok(())
 }
 
 fn has_proc_selectors(options: &ProcMatchOptions) -> bool {

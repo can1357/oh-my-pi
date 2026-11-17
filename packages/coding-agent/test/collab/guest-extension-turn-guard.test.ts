@@ -106,7 +106,7 @@ describe("collab guest extension turn guard", () => {
 		const mirror = new GuestLifecycleEmitter();
 		const mirrorHostRun = async (): Promise<void> => {
 			mirror.emit(runner, { type: "agent_start" });
-			mirror.emit(runner, { type: "agent_end", messages: [], isTerminal: true });
+			mirror.emit(runner, { type: "agent_end", messages: [] });
 			await handled.promise;
 			// Every turn-starting action is admitted synchronously; wait for any
 			// admitted one to dispatch and its turn to finish.
@@ -133,7 +133,7 @@ describe("collab guest extension turn guard", () => {
 		for (const status of statuses) expect(status).toContain("host-only during a collab session");
 
 		// Left the session: the same reaction now owns a real local turn.
-		ctx.collabGuest = undefined;
+		Object.assign(ctx, { collabGuest: undefined });
 		handled = Promise.withResolvers<void>();
 		onAgentEnd = pi => {
 			pi.sendMessage({ customType: "plan-execute", content: "EXECUTE_PLAN", display: true }, { triggerTurn: true });

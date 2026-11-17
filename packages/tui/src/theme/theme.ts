@@ -2,12 +2,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { detectMacOSAppearance, MacAppearanceObserver } from "@oh-my-pi/pi-natives";
 import type { Terminal, TerminalAppearance } from "../terminal";
-import { colorLuma } from "@oh-my-pi/pi-utils/color";
 import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { isTerminalBackgroundQueryTrusted } from "../terminal-multiplexer";
 import { setActiveSymbolTheme } from "./active-symbols";
-import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
+import { ansi256ToHex, isLightSurface, resolveThemeColors, resolveVarRefs } from "./color";
 import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
 import { type ThemeColor, type ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
@@ -33,6 +32,7 @@ export {
 	getSymbolTheme,
 	highlightCode,
 	isHighlightLanguage,
+	setMarkdownColorful,
 	setMarkdownMermaidRendering,
 	warmHighlighter,
 } from "./tui-adapters";
@@ -99,8 +99,6 @@ function getDefaultTheme(): string {
 /** Active theme; imports remain live across initialization, previews, and theme switches. */
 export var theme: Theme;
 var currentThemeName: string | undefined;
-/** Theme shown by `previewTheme` until the next non-preview assignment. */
-var previewThemeName: string | undefined;
 
 type ThemeBinding = (value: Theme) => void;
 var themeBindings: Set<ThemeBinding> | undefined;
@@ -115,10 +113,8 @@ export function bindTheme(binding: ThemeBinding): () => void {
 	};
 }
 
-/** `previewName` marks a theme-selector preview; any other assignment ends it. */
-function assignTheme(value: Theme, previewName?: string): void {
+function assignTheme(value: Theme): void {
 	theme = value;
-	previewThemeName = previewName;
 	setActiveSymbolTheme(value);
 	if (themeBindings) {
 		for (const binding of themeBindings) binding(value);
@@ -282,8 +278,7 @@ export async function previewTheme(
 		if (requestId !== themeLoadRequestId) {
 			return { success: false, error: "Theme preview superseded by a newer request" };
 		}
-		// Previewing the active theme again (selector cancel) ends the preview.
-		assignTheme(loadedTheme, name === currentThemeName ? undefined : name);
+		assignTheme(loadedTheme);
 		notifyThemeChange(event);
 		return { success: true };
 	} catch (error) {
@@ -763,17 +758,14 @@ export function stopThemeWatcher(): void {
  */
 function isLightThemeJson(themeJson: ThemeJson): boolean {
 	try {
-		const resolved = resolveVarRefs(themeJson.colors.statusLineBg, themeJson.vars ?? {});
-		const luminance = colorLuma(resolved);
-		return luminance !== undefined && luminance > 0.5;
+		return isLightSurface(resolveVarRefs(themeJson.colors.statusLineBg, themeJson.vars ?? {}));
 	} catch {
 		return false;
 	}
 }
 
 function getHtmlDefaultTextForSurface(surface: string | number | undefined): string {
-	const luminance = surface === undefined ? undefined : colorLuma(surface);
-	return luminance !== undefined && luminance > 0.5 ? "#000000" : "#e5e5e7";
+	return isLightSurface(surface) ? "#000000" : "#e5e5e7";
 }
 
 function resolveThemeExportColors(themeJson: ThemeJson): {

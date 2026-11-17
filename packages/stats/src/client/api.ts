@@ -14,6 +14,9 @@ import type {
 	RequestDetails,
 	SessionSummary,
 	SessionTrace,
+	SpotlightAgentScope,
+	SpotlightDashboardStats,
+	SpotlightSessionContext,
 	TimeRange,
 	ToolDashboardStats,
 } from "./types";
@@ -182,6 +185,24 @@ export async function getGainDashboardStats(
 	const params = new URLSearchParams({ range });
 	if (project) params.set("project", project);
 	return fetchJson<GainDashboardStats>(`${API_BASE}/stats/gain?${params}`, { signal });
+}
+
+export async function getSpotlightDashboardStats(
+	range: TimeRange = "24h",
+	agent: SpotlightAgentScope = "all",
+	signal?: AbortSignal,
+): Promise<SpotlightDashboardStats> {
+	return fetchJson<SpotlightDashboardStats>(
+		`${API_BASE}/stats/spotlight?range=${encodeURIComponent(range)}&agent=${encodeURIComponent(agent)}`,
+		{ signal },
+	);
+}
+
+/** One experiment session's context per request, with and without shaping. */
+export async function getSpotlightSessionContext(file: string, signal?: AbortSignal): Promise<SpotlightSessionContext> {
+	return fetchJson<SpotlightSessionContext>(`${API_BASE}/stats/spotlight/session?file=${encodeURIComponent(file)}`, {
+		signal,
+	});
 }
 
 export async function getToolDashboardStats(

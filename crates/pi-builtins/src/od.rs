@@ -12,7 +12,6 @@ use std::{
 	io::{self, Read, Seek, Write},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValueSource};
 use pi_vfs::File;
 use uucore::{
@@ -23,7 +22,7 @@ use uucore::{
 	},
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno};
 
 mod options {
 	pub const HELP: &str = "help";
@@ -252,11 +251,6 @@ impl Utility for Od {
 		}
 		code
 	}
-}
-
-/// Creates the `od` builtin registration.
-pub(crate) fn od_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Od, SE>()
 }
 
 // ── Numbers ────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
  * transcript components. Built-in renderers live beside this file; the
  * coding-agent tools implement the matching `*Details` payloads.
  */
-import type { TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
+import type { ShellTrace, ShellVizPresentation, TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
 import type { NativeChild } from "../native/node";
 import type { Component } from "../tui";
 import type { Theme } from "../theme/theme";
@@ -39,6 +39,14 @@ export interface RenderResultOptions {
 	media?: boolean;
 	/** The native host draws raw JSON values (`cx.supports("json")`). Native describe hooks only. */
 	json?: boolean;
+	/** The native host draws a live shell trace (`cx.supports("shell")`). Native describe hooks only. */
+	shell?: boolean;
+	/** Native semantic presentation, decoded and cached by the tool component. */
+	shellPresentation?: ShellVizPresentation;
+	/** Validated immutable trace associated with shellPresentation. */
+	shellTrace?: ShellTrace;
+	/** Explicit seeks/resets change this epoch; ordinary playback ticks do not. */
+	shellReplayEpoch?: number;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */

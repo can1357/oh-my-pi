@@ -1,1 +1,1 @@
-`security://scans`: read-only scans/findings/reports.
+security://scans: read-only scans/findings/reports.

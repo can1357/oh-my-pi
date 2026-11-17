@@ -10,7 +10,6 @@ use std::{
 	path::PathBuf,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use pi_vfs::File;
 use uucore::{
@@ -20,7 +19,7 @@ use uucore::{
 };
 
 use crate::{
-	host::{Host, StreamWriter, Utility, format_usage, matches_parser, strip_errno, util},
+	host::{Host, StreamWriter, Utility, format_usage, matches_parser, strip_errno},
 	locale::shell_locale,
 };
 
@@ -991,11 +990,6 @@ fn get_delimiter(matches: &ArgMatches) -> Delimiters {
 	} else {
 		Delimiters::None
 	}
-}
-
-/// Creates the `uniq` builtin registration.
-pub(crate) fn uniq_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Uniq, SE>()
 }
 
 

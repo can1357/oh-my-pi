@@ -20,19 +20,17 @@ describe("fromJsonSchema", () => {
 		expect(imported(2.5)).toBeInstanceOf(OmpErrors);
 	});
 
-	it("rejects malformed URI fragments and non-local references", () => {
-		for (const ref of ["#/$defs/%E0%A4%A", "https://example.com/schema#/$defs/value"]) {
-			expect(() =>
-				fromJsonSchema({
-					$defs: {
-						"%": { type: "string" },
-						"%E0%A4%A": { type: "string" },
-						value: { type: "string" },
-					},
-					$ref: ref,
-				}),
-			).toThrow(`unsupported $ref: ${ref}`);
-		}
+	it("rejects malformed fragments and references to documents it was not given", () => {
+		const defs = { "%": { type: "string" }, "%E0%A4%A": { type: "string" }, value: { type: "string" } };
+		expect(() => fromJsonSchema({ $defs: defs, $ref: "#/$defs/%E0%A4%A" })).toThrow("invalid $ref: #/$defs/%E0%A4%A");
+		const remote = "https://example.com/schema#/$defs/value";
+		expect(() => fromJsonSchema({ $defs: defs, $ref: remote })).toThrow(`unresolved $ref: ${remote}`);
+		const imported = fromJsonSchema(
+			{ $ref: remote },
+			{ schemas: { "https://example.com/schema": { $defs: { value: { type: "string" } } } } },
+		);
+		expect(imported("x")).toBe("x");
+		expect(imported(1)).toBeInstanceOf(OmpErrors);
 	});
 
 	it("round-trips schemas emitted by toJsonSchema", () => {
@@ -78,10 +76,13 @@ describe("fromJsonSchema", () => {
 		expect(fromJsonSchema(false)("anything")).toBeInstanceOf(OmpErrors);
 	});
 
-	it("validates string formats and patterns", () => {
-		const email = fromJsonSchema({ type: "string", format: "email" });
+	it("asserts formats only when given a check, and always validates patterns", () => {
+		const schema = { type: "string", format: "email" };
+		expect(fromJsonSchema(schema)("nope")).toBe("nope");
+		const email = fromJsonSchema(schema, { formats: { email: value => value.includes("@") } });
 		expect(email("a@omp.sh")).toBe("a@omp.sh");
 		expect(email("nope")).toBeInstanceOf(OmpErrors);
+		expect(fromJsonSchema({ format: "email" }, { formats: { email: () => false } })(42)).toBe(42);
 		const patterned = fromJsonSchema({ type: "string", pattern: "^G-[A-Z0-9]+$", minLength: 3 });
 		expect(patterned("G-X1")).toBe("G-X1");
 		expect(patterned("bad")).toBeInstanceOf(OmpErrors);

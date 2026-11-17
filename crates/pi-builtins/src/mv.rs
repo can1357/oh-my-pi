@@ -9,7 +9,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use pi_vfs::{
@@ -30,7 +29,7 @@ use uucore::{
 use crate::{
 	cp::{CpError, MoveCopier},
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser},
 	progress::stderr_draw_target,
 };
 
@@ -1075,11 +1074,6 @@ fn can_delete_file(_host: &Host, _: &Path) -> bool {
 	// rename failing with errors other than EXDEV means the operation cannot
 	// succeed even with a copy+delete approach (e.g. permission errors).
 	false
-}
-
-/// Creates the `mv` builtin registration.
-pub(crate) fn mv_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Mv, SE>()
 }
 
 #[cfg(test)]

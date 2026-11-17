@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [18.20.0] - 2026-11-12
+
+### Added
+
+- `resolveShapeAndScan()` returns the auto-picked shape together with its `scanRenderability()` verdict, reusing the scan auto resolution already runs; exported `ShapeScan` and `RenderabilityScan` types ([#15689](https://github.com/can1357/oh-my-pi/issues/15689), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
+
+### Changed
+
+- `compact()` splits its synchronous work into two `compaction.snapcompact` loop phases (building the archive source, then planning the layout) with an event-loop turn between them, shortening the longest main-thread block on long histories ([#15689](https://github.com/can1357/oh-my-pi/issues/15689), [#18867](https://github.com/can1357/oh-my-pi/pull/18867) by [@wolfiesch](https://github.com/wolfiesch))
+
+## [18.17.0] - 2026-11-06
+
+### Fixed
+
+- `compact()` now keeps image content from pre-16.1.0 archived histories in the dropped-history summary.
+
+## [18.16.0] - 2026-11-02
+
+### Added
+
+- Added `archiveIncludesThinking()`, whether a compaction may replay reasoning from its summary's legend or its archive's text, and `viewSummary()`, which keeps a summary the template did not write in its own words, followed by the template's guide to the view's text ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed `viewWithoutFrames` and `viewWithoutThinking` keeping an archive's reasoning for a reader without it when the summary (say, one an extension wrote) declares no `¶think:` scope, and replacing such a summary with the template's ([#17745](https://github.com/can1357/oh-my-pi/pull/17745) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.15.0] - 2026-11-01
 
 ### Added

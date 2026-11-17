@@ -4,10 +4,9 @@
 
 use std::io::Write;
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgMatches, Command};
 
-use crate::host::{Host, Utility, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, matches_parser, os_bytes};
 
 mod platform {
 	#[cfg(unix)]
@@ -92,11 +91,6 @@ fn app() -> Command {
 		.about("Print the current username.")
 		.override_usage("whoami")
 		.infer_long_args(true)
-}
-
-/// Creates the `whoami` builtin registration.
-pub(crate) fn whoami_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Whoami, SE>()
 }
 
 #[cfg(test)]

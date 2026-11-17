@@ -4,11 +4,10 @@
 
 use std::io::Write;
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use uucore::line_ending::LineEnding;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 const OPT_NULL: &str = "null";
 const ARG_VARIABLES: &str = "variables";
@@ -103,11 +102,6 @@ fn app() -> Command {
 		)
 }
 
-/// Creates the `printenv` builtin registration.
-pub(crate) fn printenv_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Printenv, SE>()
-}
-
 #[cfg(test)]
 mod tests {
 	use std::ffi::OsString;
@@ -141,7 +135,7 @@ mod tests {
 
 	#[test]
 	fn shell_export_absent_from_process_environment_is_printed() {
-		const NAME: &str = "__BRUSH_PRINTENV_TEST_ONLY_EXPORTED_VARIABLE__";
+		const NAME: &str = "__PI_PRINTENV_TEST_ONLY_EXPORTED_VARIABLE__";
 		assert!(std::env::var_os(NAME).is_none());
 		let (code, stdout, stderr) = run_with_env(&[(NAME, "shell-value")], &[NAME]);
 		assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "shell-value\n", ""));

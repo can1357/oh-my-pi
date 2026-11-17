@@ -167,7 +167,7 @@ describe("tools.approvalMode setting", () => {
 				settings,
 			} as AgentToolContext,
 		);
-		expect(textOf(result)).toContain("(no output)");
+		expect(textOf(result)).toContain("(no output, exit code 0)");
 	});
 
 	it("attributes bash pattern denies to tool policy", async () => {
@@ -203,7 +203,7 @@ describe("tools.approvalMode setting", () => {
 				autoApprove: true,
 			} as AgentToolContext,
 		);
-		expect(textOf(result)).toContain("(no output)");
+		expect(textOf(result)).toContain("(no output, exit code 0)");
 	});
 
 	it("xd:// dispatch approval (xdevPolicyKey) suppresses the tier-only re-prompt", async () => {
@@ -271,7 +271,7 @@ describe("tools.approvalMode setting", () => {
 				acpApprovedArgs: { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
 			} as AgentToolContext,
 		);
-		expect(textOf(overrideResult)).toContain("(no output)");
+		expect(textOf(overrideResult)).toContain("(no output, exit code 0)");
 	});
 
 	it("ACP-approved arguments do not bypass deny policies", async () => {

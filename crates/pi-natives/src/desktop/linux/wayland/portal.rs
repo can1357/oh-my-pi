@@ -2,11 +2,16 @@ use std::{
 	fs,
 	path::{Path, PathBuf},
 	sync::LazyLock,
+	time::Duration,
 };
 
+use ashpd::desktop::remote_desktop::RemoteDesktop;
 use tokio::runtime::{Builder, Runtime};
 
 use crate::desktop::error::{CoreResult, DesktopError};
+
+/// How long the input probe waits for the portal frontend to answer.
+const INPUT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Process-wide Tokio runtime shared by every xdg-desktop-portal call.
 ///
@@ -55,12 +60,10 @@ pub(super) fn remove_orphaned_remote_desktop_token() {
 	}
 }
 
-#[cfg(feature = "wayland-pipewire")]
 fn token_path(name: &str) -> Option<PathBuf> {
 	Some(omp_state_dir()?.join(name))
 }
 
-#[cfg(feature = "wayland-pipewire")]
 pub(super) fn read_token(name: &str) -> Option<String> {
 	fs::read_to_string(token_path(name)?)
 		.ok()
@@ -68,7 +71,6 @@ pub(super) fn read_token(name: &str) -> Option<String> {
 		.filter(|token| !token.is_empty())
 }
 
-#[cfg(feature = "wayland-pipewire")]
 pub(super) fn store_token(name: &str, token: Option<&str>) {
 	let (Some(path), Some(token)) = (token_path(name), token) else {
 		return;
@@ -79,6 +81,40 @@ pub(super) fn store_token(name: &str, token: Option<&str>) {
 	if fs::create_dir_all(parent).is_ok() {
 		let _ = fs::write(path, token);
 	}
+}
+
+/// Why native input can never reach this desktop, or `None` when it may.
+/// `LIBEI_SOCKET` reaches an EIS server directly; otherwise input needs a
+/// `RemoteDesktop` portal backend, which wlroots compositors such as sway lack.
+/// Only builds the frontend proxy, which reads its properties: no session, no
+/// prompt. A frontend that fails to answer counts as reachable, so only a
+/// definite absence turns input off.
+pub(super) fn input_unavailable_reason() -> Option<String> {
+	let direct_eis = std::env::var_os("LIBEI_SOCKET").is_some();
+	unavailable_reason(direct_eis, portal_runtime().ok()?, RemoteDesktop::new)
+}
+
+fn unavailable_reason<T, F: Future<Output = Result<T, ashpd::Error>>>(
+	direct_eis: bool,
+	runtime: &Runtime,
+	probe: impl FnOnce() -> F,
+) -> Option<String> {
+	if direct_eis {
+		return None;
+	}
+	// The timeout is built inside the runtime: its timer needs the reactor.
+	let answer =
+		runtime.block_on(async { tokio::time::timeout(INPUT_PROBE_TIMEOUT, probe()).await });
+	answer.ok()?.err().as_ref().and_then(missing_remote_desktop)
+}
+
+fn missing_remote_desktop(error: &ashpd::Error) -> Option<String> {
+	matches!(error, ashpd::Error::PortalNotFound(_)).then(|| {
+		format!(
+			"Wayland input is unavailable: no xdg-desktop-portal backend implements RemoteDesktop on \
+			 this desktop ({error}), and LIBEI_SOCKET is unset; use AX actions instead"
+		)
+	})
 }
 
 #[cfg(test)]
@@ -110,5 +146,49 @@ mod tests {
 		assert!(!token.exists(), "orphaned token must be removed");
 		remove_token_in(&dir);
 		let _ = fs::remove_dir_all(&dir);
+	}
+
+	fn portal_not_found() -> ashpd::Error {
+		ashpd::Error::PortalNotFound(
+			zbus::names::OwnedInterfaceName::try_from("org.freedesktop.portal.RemoteDesktop").unwrap(),
+		)
+	}
+
+	/// Only a portal frontend that reports the interface missing turns input
+	/// off; any other answer leaves the lazy `RemoteDesktop` request to decide.
+	/// The probe runs from the desktop session thread, outside any runtime,
+	/// where a timer built outside `block_on` panics with "no reactor running".
+	#[test]
+	fn only_a_missing_remote_desktop_portal_makes_input_unavailable() {
+		let runtime = portal_runtime().expect("portal runtime builds");
+		let answers = std::thread::spawn(move || {
+			(
+				unavailable_reason(false, runtime, || {
+					std::future::ready(Err::<(), _>(portal_not_found()))
+				}),
+				unavailable_reason(false, runtime, || {
+					std::future::ready(Err::<(), _>(ashpd::Error::NoResponse))
+				}),
+				unavailable_reason(false, runtime, || std::future::ready(Ok(()))),
+			)
+		})
+		.join()
+		.expect("the input probe must not panic");
+		let reason = answers.0.expect("a missing portal is reported");
+		assert!(reason.contains("RemoteDesktop"), "{reason}");
+		assert_eq!(answers.1, None);
+		assert_eq!(answers.2, None);
+	}
+
+	/// `LIBEI_SOCKET` reaches EIS without the portal, so the portal is never
+	/// asked.
+	#[test]
+	fn a_direct_eis_socket_skips_the_portal_probe() {
+		let runtime = portal_runtime().expect("portal runtime builds");
+		let reason =
+			unavailable_reason(true, runtime, || -> std::future::Ready<Result<(), ashpd::Error>> {
+				panic!("the portal must not be probed when LIBEI_SOCKET is set")
+			});
+		assert_eq!(reason, None);
 	}
 }

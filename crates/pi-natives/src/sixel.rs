@@ -8,8 +8,9 @@
 
 use std::io::Cursor;
 
-use icy_sixel::{EncodeOptions, SixelImage, sixel_encode};
-use image::{DynamicImage, ImageFormat, ImageReader, RgbaImage, imageops::FilterType};
+#[path = "sixel_codec.rs"]
+mod codec;
+use image::{DynamicImage, ImageFormat, ImageReader, imageops::FilterType};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -22,10 +23,8 @@ const MAX_PNG_BYTES: usize = 20 * 1024 * 1024;
 
 /// Decode one complete SIXEL control string into a PNG on the calling thread.
 ///
-/// The decoder is deliberately bounded before handing the stream to
-/// `icy_sixel`: raster declarations, repeats, and row advances are scanned
-/// first so hostile dimensions cannot make the dependency allocate its much
-/// larger internal maximum.
+/// Raster declarations, repeats, and row advances are bounded before allocating
+/// the decoded RGBA buffer.
 #[napi]
 pub fn decode_sixel_to_png(bytes: Uint8Array) -> Result<Uint8Array> {
 	if bytes.len() > MAX_SIXEL_BYTES {
@@ -50,16 +49,7 @@ pub fn decode_sixel_to_png_async(bytes: Uint8Array) -> task::Promise<Uint8Array>
 fn decode_sixel(bytes: &[u8]) -> Result<Vec<u8>> {
 	preflight_sixel_dimensions(bytes)?;
 
-	let decoded = SixelImage::decode(bytes)
-		.map_err(|err| Error::from_reason(format!("Failed to decode SIXEL: {err}")))?;
-	guard_dimensions(decoded.width, decoded.height)?;
-
-	let width =
-		u32::try_from(decoded.width).map_err(|_| Error::from_reason("SIXEL width is too large"))?;
-	let height =
-		u32::try_from(decoded.height).map_err(|_| Error::from_reason("SIXEL height is too large"))?;
-	let rgba = RgbaImage::from_raw(width, height, decoded.pixels)
-		.ok_or_else(|| Error::from_reason("Decoded SIXEL pixel buffer has invalid dimensions"))?;
+	let rgba = codec::decode(bytes)?;
 	let mut png = Vec::with_capacity(rgba.len().min(MAX_PNG_BYTES));
 	DynamicImage::ImageRgba8(rgba)
 		.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
@@ -284,9 +274,7 @@ fn encode_image(
 		}
 		pixel[3] = 255;
 	}
-	let options = EncodeOptions::default();
-	sixel_encode(&rgba.as_raw()[..width * rows * 4], width, rows, &options)
-		.map_err(|err| Error::from_reason(format!("Failed to encode SIXEL: {err}")))
+	Ok(codec::encode(&rgba.as_raw()[..width * rows * 4], width, rows))
 }
 
 /// Pixel rows of a `height_px` image that SIXEL can show without growing it.
@@ -316,7 +304,7 @@ fn decode_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage> {
 
 #[cfg(test)]
 mod tests {
-	use image::Rgba;
+	use image::{Rgba, RgbaImage};
 
 	use super::*;
 
@@ -339,6 +327,76 @@ mod tests {
 		image::load_from_memory(&decoded)
 			.expect("decoded SIXEL should be PNG")
 			.to_rgba8()
+	}
+
+	#[test]
+	fn multicolor_and_transparency_survive_roundtrip() {
+		let colors = [
+			Rgba([238, 17, 31, 255]),
+			Rgba([24, 213, 71, 255]),
+			Rgba([43, 61, 229, 255]),
+			Rgba([173, 92, 48, 255]),
+			Rgba([255, 0, 255, 0]),
+		];
+		let source = RgbaImage::from_fn(10, 12, |x, y| colors[((x + y) % 5) as usize]);
+		let mut png = Vec::new();
+		DynamicImage::ImageRgba8(source.clone())
+			.write_to(&mut Cursor::new(&mut png), ImageFormat::Png)
+			.unwrap();
+		let encoded = encode_image(&png, 10, 12, 0x000000).unwrap();
+		assert!(encoded.starts_with("\x1bP9;1;0q\"1;1;10;12#0;2;"));
+		assert!(encoded.ends_with("\x1b\\"));
+		let decoded_png = decode_sixel(encoded.as_bytes()).unwrap();
+		let decoded = image::load_from_memory(&decoded_png).unwrap().into_rgba8();
+		assert_eq!(decoded.dimensions(), source.dimensions());
+		for (actual, expected) in decoded.pixels().zip(source.pixels()) {
+			assert_eq!(actual[3], expected[3]);
+			if expected[3] != 0 {
+				for channel in 0..3 {
+					assert!(actual[channel].abs_diff(expected[channel]) <= 2);
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn quantizes_more_than_256_colors_and_preserves_transparent_holes() {
+		let source = RgbaImage::from_fn(64, 12, |x, y| {
+			Rgba([
+				(x * 4) as u8,
+				(y * 23) as u8,
+				((x * 13 + y * 7) % 256) as u8,
+				if x == 0 { 0 } else { 255 },
+			])
+		});
+		let encoded = codec::encode(source.as_raw(), 64, 12);
+		assert_eq!(encoded.matches(";2;").count(), 256);
+		let decoded_png = decode_sixel(encoded.as_bytes()).unwrap();
+		let decoded = image::load_from_memory(&decoded_png).unwrap().into_rgba8();
+		assert_eq!(decoded.dimensions(), source.dimensions());
+		let mut squared_error = 0_u64;
+		let mut channels = 0;
+		for (actual, expected) in decoded.pixels().zip(source.pixels()) {
+			assert_eq!(actual[3], expected[3]);
+			if expected[3] != 0 {
+				for channel in 0..3 {
+					let error = i32::from(actual[channel]) - i32::from(expected[channel]);
+					squared_error += (error * error) as u64;
+					channels += 1;
+				}
+			}
+		}
+		assert!(squared_error / channels < 32 * 32, "palette error exceeded tolerance");
+	}
+
+	#[test]
+	fn decodes_c1_hls_palette_changes_repeats_and_transparency() {
+		let png = decode_sixel(b"\x90;1q\"1;1;4;6#3;1;120;50;100!3~?-$#3;2;0;100;0!4~\x9c").unwrap();
+		let decoded = image::load_from_memory(&png).unwrap().into_rgba8();
+		assert_eq!(decoded.dimensions(), (4, 12));
+		assert_eq!(decoded.get_pixel(0, 0), &Rgba([255, 0, 0, 255]));
+		assert_eq!(decoded.get_pixel(3, 0), &Rgba([0, 0, 0, 0]));
+		assert_eq!(decoded.get_pixel(3, 11), &Rgba([0, 255, 0, 255]));
 	}
 
 	#[test]

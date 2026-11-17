@@ -18,13 +18,21 @@ use xutf::graphemes_str;
 use super::xkb::{KeyStroke, KeyboardLayout};
 use crate::desktop::{
 	backend::{Modifiers, MouseButton, PointerEvent},
-	control,
+	control::{self, cancellable},
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
+	linux::pace_clicks,
 };
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
+/// How long before the run's end an unanswered permission prompt is given up:
+/// the bounded portal-session close (`CLOSE_TIMEOUT`) plus time to answer the
+/// caller, so the dialog's own error still beats the run's timeout.
+const CONSENT_MARGIN: Duration =
+	crate::desktop::CLOSE_TIMEOUT.saturating_add(Duration::from_millis(500));
+/// `ei_text.utf8` carries at most 254 bytes (255 with the terminating NUL).
+const EI_TEXT_UTF8_MAX: usize = 254;
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -97,22 +105,24 @@ fn close_session(runtime: &tokio::runtime::Runtime, session: &RemoteDesktopSessi
 	});
 }
 
-/// Waits for the original request or a generation-revocation wake. Cancellation
-/// drops that request, never polls on a timer or starts it again.
-pub(super) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResult<T> {
-	control::check()?;
-	let Some(token) = control::current_token() else {
+/// Bounds a wait on the `RemoteDesktop` permission dialog by the current
+/// operation's deadline (the run's end or the caller's reply timeout). GNOME
+/// can open the dialog behind other windows; unbounded, only the run's own
+/// timeout ends the wait, and the run fails without saying why.
+async fn until_deadline<T>(future: impl Future<Output = T>) -> CoreResult<T> {
+	let Some(deadline) = control::current_token().and_then(|token| token.deadline()) else {
 		return Ok(future.await);
 	};
-	let future = std::pin::pin!(future);
-	let cancelled = std::pin::pin!(token.cancelled());
-	match futures::future::select(cancelled, future).await {
-		futures::future::Either::Left((error, _)) => Err(error),
-		futures::future::Either::Right((result, _)) => {
-			token.check()?;
-			Ok(result)
-		},
-	}
+	let give_up = deadline.checked_sub(CONSENT_MARGIN).unwrap_or(deadline);
+	tokio::time::timeout_at(give_up.into(), future)
+		.await
+		.map_err(|_| {
+			DesktopError::timeout(
+				"the RemoteDesktop permission dialog was not answered before the call's deadline, so \
+				 nothing was sent and its portal session is being closed; the dialog can open behind \
+				 other windows. Retry and ask the user to answer the new dialog",
+			)
+		})
 }
 
 fn pace_drag(
@@ -199,13 +209,20 @@ impl Libei {
 						PersistMode::DoNot,
 					)
 					.await
-					.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
-				let response = portal
-					.start(&session, None)
-					.await
-					.map_err(|err| format!("RemoteDesktop Start: {err}"))?
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop SelectDevices: {err}"))
+					})?;
+				// Only `Start` waits on the user; the steps around it are not
+				// the dialog and keep `main`'s cancel-only bound.
+				let response = until_deadline(portal.start(&session, None))
+					.await?
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop Start: {err}"))
+					})?
 					.response()
-					.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop permission: {err}"))
+					})?;
 				let devices = response.devices();
 				let targets = DiscoveryTargets {
 					pointer:  devices.contains(DeviceType::Pointer),
@@ -215,10 +232,12 @@ impl Libei {
 					.connect_to_eis(&session)
 					.await
 					.map(|fd| (fd, targets))
-					.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
+					.map_err(|err| {
+						DesktopError::permission_denied(format!("RemoteDesktop ConnectToEIS: {err}"))
+					})
 			})
 			.await
-			.and_then(|result| result.map_err(DesktopError::permission_denied));
+			.and_then(|result| result);
 			match fd {
 				Ok((fd, targets)) => Ok((fd, session, targets)),
 				Err(err) => {
@@ -299,15 +318,21 @@ impl Libei {
 	fn handle_event(&mut self, event: EiEvent) -> CoreResult<()> {
 		match event {
 			EiEvent::SeatAdded(event) => {
-				event.seat.bind_capabilities(&[
-					DeviceCapability::PointerAbsolute,
-					DeviceCapability::Pointer,
-					DeviceCapability::Button,
-					DeviceCapability::Scroll,
-					DeviceCapability::Keyboard,
-				]);
+				event.seat.bind_capabilities(
+					DeviceCapability::PointerAbsolute
+						| DeviceCapability::Pointer
+						| DeviceCapability::Button
+						| DeviceCapability::Scroll
+						| DeviceCapability::Keyboard
+						| DeviceCapability::Text,
+				);
 			},
 			EiEvent::DeviceAdded(event) => {
+				// reis 0.7 negotiates ei_device v3, which holds the device back
+				// until the client acknowledges its configuration.
+				if event.device.device().version() >= 3 {
+					event.device.device().ready();
+				}
 				let layout = event.device.keymap().and_then(read_keymap);
 				self
 					.devices
@@ -361,7 +386,7 @@ impl Libei {
 				self.disconnected = true;
 				return Err(DesktopError::input_failed(format!(
 					"libei disconnected: {}",
-					event.explanation
+					event.explanation.as_deref().unwrap_or("no reason given")
 				)));
 			},
 			_ => {},
@@ -600,21 +625,27 @@ impl Libei {
 				PointerEvent::Click { x, y, count, .. } => {
 					move_to(x, y, &mut time)?;
 					if let (Some(code), Some(interface)) = (button, &button_interface) {
-						for _ in 0..count.max(1) {
-							control::check()?;
-							button_held = true;
-							interface.button(code, ei::button::ButtonState::Press);
+						pace_clicks(count, |pressed| {
+							time = Self::timestamp()?.max(time);
+							if pressed {
+								button_held = true;
+							}
+							interface.button(
+								code,
+								if pressed {
+									ei::button::ButtonState::Press
+								} else {
+									ei::button::ButtonState::Released
+								},
+							);
 							device.device.device().frame(serial, time);
 							time = time.saturating_add(1);
 							self.flush()?;
-							// A press is always released: a cancel stops the
-							// next press.
-							interface.button(code, ei::button::ButtonState::Released);
-							device.device.device().frame(serial, time);
-							time = time.saturating_add(1);
-							self.flush()?;
-							button_held = false;
-						}
+							if !pressed {
+								button_held = false;
+							}
+							Ok(())
+						})?;
 					}
 				},
 				PointerEvent::Hold { x, y, duration, .. } => {
@@ -726,29 +757,50 @@ impl Libei {
 
 	pub(super) fn type_text(&mut self, text: &str) -> CoreResult<()> {
 		self.refresh_devices()?;
-		let device = self
+		let keyboard_index = self
 			.devices
-			.iter_mut()
-			.find(|device| device.resumed && device.device.has_capability(DeviceCapability::Keyboard))
+			.iter()
+			.position(|device| {
+				device.resumed && device.device.has_capability(DeviceCapability::Keyboard)
+			})
 			.ok_or_else(|| {
 				DesktopError::permission_denied("no resumed libei keyboard is available")
 			})?;
-		let strokes = graphemes_str(text)
-			.flat_map(str::chars)
-			.map(|character| {
-				control::check()?;
-				char_stroke(device.layout.as_mut(), character)
-			})
-			.collect::<CoreResult<Vec<_>>>()?;
-		let interface = device
-			.device
-			.interface::<ei::Keyboard>()
-			.ok_or_else(|| DesktopError::input_failed("libei keyboard interface is unavailable"))?;
+		// KWin announces ei_text on a device of its own; Mutter offers none.
+		let text_index = self.devices.iter().position(|device| {
+			device.resumed
+				&& device.device.seat() == self.devices[keyboard_index].device.seat()
+				&& device.device.has_capability(DeviceCapability::Text)
+		});
+		let plan = plan_typing(self.devices[keyboard_index].layout.as_mut(), text, text_index)?;
 		let serial = self
 			.connection
 			.as_ref()
 			.map_or(0, reis::event::Connection::serial);
 		let mut time = Self::timestamp()?;
+		let strokes = match plan {
+			TypingPlan::Keys(strokes) => strokes,
+			TypingPlan::Text { device, runs } => {
+				let device = &self.devices[device];
+				let interface = device
+					.device
+					.interface::<ei::Text>()
+					.ok_or_else(|| DesktopError::input_failed("libei text interface is unavailable"))?;
+				for run in runs {
+					control::check()?;
+					interface.utf8(&run);
+					device.device.device().frame(serial, time);
+					time = time.saturating_add(1);
+					flush_context(&self.context)?;
+				}
+				return Ok(());
+			},
+		};
+		let device = &self.devices[keyboard_index];
+		let interface = device
+			.device
+			.interface::<ei::Keyboard>()
+			.ok_or_else(|| DesktopError::input_failed("libei keyboard interface is unavailable"))?;
 		for stroke in strokes {
 			let mut held = 0;
 			let mut key_held = false;
@@ -787,6 +839,81 @@ fn flush_context(context: &ei::Context) -> CoreResult<()> {
 			"libei transport failed: {err}; delivery may be partial, do not retry blindly"
 		))
 	})
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TypingPlan {
+	Keys(Vec<KeyStroke>),
+	/// `ei_text.utf8` payloads for the text device at `device`, each within the
+	/// per-request limit.
+	Text {
+		device: usize,
+		runs:   Vec<String>,
+	},
+}
+
+/// Text the active XKB group can type stays keystrokes. Text with a printable
+/// character it cannot produce goes out whole as `ei_text` UTF-8 when the EIS
+/// server offers a text device, and is refused before anything is sent when it
+/// does not. Whole, because the two routes are not ordered against each other:
+/// on KDE Plasma 6.8 with its input method running, Kate received every text
+/// commit of a mixed call before the keystrokes sent ahead of them.
+fn plan_typing(
+	mut layout: Option<&mut KeyboardLayout>,
+	text: &str,
+	text_device: Option<usize>,
+) -> CoreResult<TypingPlan> {
+	let mut strokes = Vec::new();
+	for character in graphemes_str(text).flat_map(str::chars) {
+		control::check()?;
+		let mut error = match char_stroke(layout.as_deref_mut(), character) {
+			Ok(stroke) => {
+				strokes.push(stroke);
+				continue;
+			},
+			Err(error) => error,
+		};
+		if character.is_control() {
+			return Err(error);
+		}
+		if let Some(device) = text_device {
+			return Ok(TypingPlan::Text { device, runs: text_runs(text)? });
+		}
+		error
+			.message
+			.push_str("; the EIS server offers no ei_text device to send it as text");
+		return Err(error);
+	}
+	Ok(TypingPlan::Keys(strokes))
+}
+
+/// Packs whole graphemes into `ei_text.utf8` payloads, splitting a grapheme at
+/// character boundaries only when it exceeds the per-request limit.
+/// Control characters are refused: committed text is no key press, so a line
+/// break never submits and a tab never moves focus, and Kate dropped a commit
+/// that began with a line break.
+fn text_runs(text: &str) -> CoreResult<Vec<String>> {
+	let mut runs: Vec<String> = Vec::new();
+	let mut append = |part: &str| match runs.last_mut() {
+		Some(run) if run.len() + part.len() <= EI_TEXT_UTF8_MAX => run.push_str(part),
+		_ => runs.push(part.to_owned()),
+	};
+	for grapheme in graphemes_str(text) {
+		if let Some(character) = grapheme.chars().find(|character| character.is_control()) {
+			return Err(DesktopError::input_failed(format!(
+				"libei sends text the keyboard layout cannot type as ei_text, which cannot carry \
+				 {character:?}; press Enter or Tab between type() calls instead"
+			)));
+		}
+		if grapheme.len() <= EI_TEXT_UTF8_MAX {
+			append(grapheme);
+		} else {
+			for (offset, character) in grapheme.char_indices() {
+				append(&grapheme[offset..offset + character.len_utf8()]);
+			}
+		}
+	}
+	Ok(runs)
 }
 
 fn plan_keys(device: &mut EiDevice, keys: &[KeyName]) -> CoreResult<Vec<u32>> {
@@ -991,6 +1118,8 @@ fn evdev_char(character: char) -> Option<(u32, bool)> {
 
 #[cfg(test)]
 mod tests {
+	use futures::FutureExt;
+
 	use super::*;
 
 	#[test]
@@ -1033,6 +1162,37 @@ mod tests {
 	}
 
 	#[test]
+	fn an_unanswered_permission_dialog_is_given_up_before_the_run_ends() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap();
+		// The run leaves only the session-close budget, so the dialog wait must
+		// give up on its first poll; an unbounded wait would still be pending,
+		// and a margin shorter than the close would wait for the run to end.
+		let ending = control::CancellationSource::default();
+		ending.set_deadline(Some(std::time::Instant::now() + crate::desktop::CLOSE_TIMEOUT));
+		let error = control::with_token_for_test(&ending.token(), || {
+			runtime.block_on(async { until_deadline(std::future::pending::<()>()).now_or_never() })
+		})
+		.expect("the wait must end at once")
+		.unwrap_err();
+		assert_eq!(error.code.as_str(), "Timeout");
+		assert!(error.message.contains("RemoteDesktop permission dialog"), "{}", error.message);
+
+		// A run with time left lets a dialog answered later through.
+		let running = control::CancellationSource::default();
+		running.set_deadline(Some(std::time::Instant::now() + Duration::from_secs(3600)));
+		let answered = control::with_token_for_test(&running.token(), || {
+			runtime.block_on(until_deadline(async {
+				tokio::task::yield_now().await;
+				7
+			}))
+		});
+		assert_eq!(answered.unwrap(), 7);
+	}
+
+	#[test]
 	fn cancellation_stops_drag_before_the_next_motion() {
 		let source = control::CancellationSource::default();
 		let token = source.token();
@@ -1069,6 +1229,46 @@ mod tests {
 		let mut layout = KeyboardLayout::compile(include_str!("testdata/fr.xkb"))
 			.expect("French fixture must compile");
 		assert_eq!(char_stroke(Some(&mut layout), '\n').unwrap().keycode, 28);
+	}
+
+	#[test]
+	fn text_the_active_group_cannot_type_goes_out_whole_as_ei_text() {
+		let mut layout = KeyboardLayout::compile(include_str!("testdata/us-fr.xkb"))
+			.expect("US/French fixture must compile");
+		let key = |keycode| KeyStroke { keycode, modifiers: Vec::new() };
+
+		assert_eq!(
+			plan_typing(Some(&mut layout), "a b\n", Some(1)).unwrap(),
+			TypingPlan::Keys(vec![key(30), key(57), key(48), key(28)])
+		);
+		assert_eq!(
+			plan_typing(Some(&mut layout), "a ä日😀", Some(1)).unwrap(),
+			TypingPlan::Text { device: 1, runs: vec!["a ä日😀".into()] }
+		);
+		let refused = plan_typing(Some(&mut layout), "aä", None).unwrap_err();
+		assert!(refused.message.contains("'ä'"), "{}", refused.message);
+		for control in ["ä\n", "\tä", "ä\u{7}"] {
+			assert!(plan_typing(Some(&mut layout), control, Some(1)).is_err(), "{control:?}");
+		}
+	}
+
+	#[test]
+	fn ei_text_runs_stay_within_the_utf8_request_limit() {
+		assert_eq!(plan_typing(None, &"日".repeat(100), Some(0)).unwrap(), TypingPlan::Text {
+			device: 0,
+			runs:   vec!["日".repeat(84), "日".repeat(16)],
+		});
+		for grapheme in ["e\u{301}", "👩‍💻", "🇫🇷"] {
+			let prefix = "a".repeat(EI_TEXT_UTF8_MAX - grapheme.chars().next().unwrap().len_utf8());
+			assert_eq!(text_runs(&format!("{prefix}{grapheme}")).unwrap(), vec![
+				prefix,
+				grapheme.to_owned()
+			]);
+		}
+		let oversized = format!("e{}", "\u{301}".repeat(EI_TEXT_UTF8_MAX));
+		let runs = text_runs(&oversized).unwrap();
+		assert_eq!(runs.concat(), oversized);
+		assert!(runs.iter().all(|run| run.len() <= EI_TEXT_UTF8_MAX));
 	}
 
 	#[test]

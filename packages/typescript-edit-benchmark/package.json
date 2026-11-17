@@ -21,7 +21,7 @@
   },
   "scripts": {
     "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
-    "check:types": "tsgo -p tsconfig.json --noEmit",
+    "check:types": "bun check --no-script -p tsconfig.json",
     "lint": "oxlint .",
     "test": "bun test --parallel",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
@@ -37,7 +37,6 @@
     "@oh-my-pi/pi-agent-core": "catalog:",
     "@oh-my-pi/pi-coding-agent": "catalog:",
     "@oh-my-pi/pi-utils": "catalog:",
-    "diff": "catalog:",
     "@oh-my-pi/pi-natives": "catalog:",
     "prettier": "catalog:",
     "regexp-tree": "catalog:",

@@ -6,6 +6,7 @@
  * to bind a model to the account serving it.
  */
 import { isRecord, once } from "@oh-my-pi/pi-utils";
+import { type DatedCostCard, parseDatedCostCards } from "../pricing";
 import type { Api, ModelSpec } from "../types";
 import { FACTORY_DROID_WIRES, type FactoryDroidRegion, type FactoryDroidWire } from "../wire/factory-droid";
 import { apiRouteFor } from "./behavior";
@@ -20,11 +21,16 @@ export interface FactoryDroidLimits {
 	maxTokens: number | null;
 }
 
-/** Standard Credits rates: `input` is the per-token weight; `output` and `cacheRead` multiply it. */
+/**
+ * Standard Credits rates: `input` is the per-token weight; `output` and
+ * `cacheRead` multiply it. `effectiveRates` are dated cards (ascending) that
+ * overwrite those legs from their date, as on `cost-patch`.
+ */
 export interface FactoryDroidCreditRates {
 	input: number;
 	output?: number;
 	cacheRead?: number;
+	effectiveRates?: readonly DatedCostCard[];
 }
 
 /** Account gates on one registry model (the `entitlement` axis). */
@@ -95,6 +101,7 @@ function readPolicy(spec: ModelSpec<"factory-droid-agent">): FactoryDroidModelPo
 	const euMaxTokens = numberField(euLimits, "maxTokens");
 	const creditOutput = numberField(credits, "output");
 	const creditCacheRead = numberField(credits, "cacheRead");
+	const creditCards = parseDatedCostCards(credits, "credit-rates");
 	const featureFlag = stringField(entitlement, "featureFlag");
 	const deprecationFlag = stringField(entitlement, "deprecationFlag");
 	const baseVariant = stringField(entitlement, "baseVariant");
@@ -116,6 +123,7 @@ function readPolicy(spec: ModelSpec<"factory-droid-agent">): FactoryDroidModelPo
 				input: creditInput,
 				...(creditOutput !== undefined && { output: creditOutput }),
 				...(creditCacheRead !== undefined && { cacheRead: creditCacheRead }),
+				...(creditCards.length > 0 && { effectiveRates: creditCards }),
 			},
 		}),
 		...(priceProvider !== undefined && {

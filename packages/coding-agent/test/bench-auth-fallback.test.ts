@@ -6,18 +6,21 @@ import type {
 	ApiKeyResolver,
 	AssistantMessage,
 	AssistantMessageEvent,
-	AssistantMessageEventStream,
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
 import { type BenchModelRegistry, resolveBenchTargets } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getModelDbPath, TempDir } from "@oh-my-pi/pi-utils";
+import { endpoint as responsesEndpoint } from "../../ai/test/fixtures/openai-responses-server";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 function fakeModel(provider: string, id: string): Model<Api> {
 	return buildModel({
@@ -66,6 +69,21 @@ function emptyStream(): AssistantMessageEventStream {
 		for (const event of events) yield event;
 	})();
 	return Object.assign(iterator, { result: async () => message }) as unknown as AssistantMessageEventStream;
+}
+
+/** A stream that records the key its request resolves before replaying {@link fakeStream}. */
+function keyRecordingStream(options: SimpleStreamOptions | undefined, keys: unknown[]): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			if (typeof options?.apiKey !== "function") throw new Error("Missing resolver");
+			keys.push(await options.apiKey({ error: undefined, lastChance: false }));
+			for await (const event of fakeStream()) stream.push(event);
+		} catch (error) {
+			stream.fail(error);
+		}
+	})();
+	return stream;
 }
 
 interface FakeRegistryOptions {
@@ -307,6 +325,79 @@ describe("default bench runtime", () => {
 	});
 });
 
+describe("bench OAuth account selection", () => {
+	it("uses the selected account for every request instead of rotating", async () => {
+		const auth = createInMemoryAuthStorage();
+		try {
+			await auth.credentials.set(
+				"anthropic",
+				["a", "b"].map(suffix => ({
+					type: "oauth" as const,
+					access: `access-${suffix}`,
+					refresh: `refresh-${suffix}`,
+					expires: Date.now() + 3_600_000,
+					accountId: suffix,
+					email: `${suffix}@example.com`,
+					orgId: suffix,
+				})),
+			);
+			const model = fakeModel("anthropic", "test-model");
+			const registry = fakeRegistry({ models: [model], authedProviders: ["anthropic"] });
+			const keys: unknown[] = [];
+			const summary = await runBenchCommand(
+				{ models: ["anthropic/test-model"], flags: { account: 2, runs: 2, json: true } },
+				{
+					createRuntime: async () => ({ modelRegistry: registry, oauth: auth.oauth }),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					streamSimple: (_model, _context, options) => keyRecordingStream(options, keys),
+				},
+			);
+			expect(summary.failures).toBe(0);
+			expect(keys).toEqual(["access-b", "access-b"]);
+		} finally {
+			auth.close();
+		}
+	});
+
+	it("sends a structured-credential provider's encoded key for the selected account", async () => {
+		const auth = createInMemoryAuthStorage();
+		try {
+			await auth.credentials.set(
+				"google-gemini-cli",
+				["a", "b"].map(suffix => ({
+					type: "oauth" as const,
+					access: `access-${suffix}`,
+					refresh: `refresh-${suffix}`,
+					expires: Date.now() + 3_600_000,
+					projectId: `project-${suffix}`,
+					email: `${suffix}@example.com`,
+				})),
+			);
+			const model = fakeModel("google-gemini-cli", "test-model");
+			const registry = fakeRegistry({ models: [model], authedProviders: ["google-gemini-cli"] });
+			const keys: unknown[] = [];
+			const summary = await runBenchCommand(
+				{ models: ["google-gemini-cli/test-model"], flags: { account: 2, runs: 1, json: true } },
+				{
+					createRuntime: async () => ({ modelRegistry: registry, oauth: auth.oauth }),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					streamSimple: (_model, _context, options) => keyRecordingStream(options, keys),
+				},
+			);
+			expect(summary.failures).toBe(0);
+			expect(keys.map(key => JSON.parse(String(key)))).toEqual([
+				expect.objectContaining({ token: "access-b", projectId: "project-b", refreshToken: "refresh-b" }),
+			]);
+		} finally {
+			auth.close();
+		}
+	});
+});
+
 describe("bench credential-aware provider selection", () => {
 	it("redirects an ambiguous shared-id selector to an authenticated provider", async () => {
 		// Built-in provider priority makes the unauthenticated `groq` win the default resolution.
@@ -436,40 +527,186 @@ async function captureServiceTier(opts: {
 	return { wire: captured?.serviceTier, summary: summary.serviceTierByFamily };
 }
 
-describe("bench provider session state and websocket preference", () => {
-	it("sends providerSessionState and preferWebsockets to the stream", async () => {
-		const registry = fakeRegistry({
-			models: [fakeModel("openai-codex", "gpt-5.5")],
-			authedProviders: ["openai-codex"],
-		});
-		let captured: SimpleStreamOptions | undefined;
-		await runBenchCommand(
-			{ models: ["openai-codex/gpt-5.5"], flags: { runs: 1, maxTokens: 64, json: true } },
+describe("bench Codex provider state", () => {
+	it("closes request-owned Codex state after each run", async () => {
+		const model = { ...fakeModel("openai-codex", "gpt-5.5"), api: "openai-codex-responses" } as Model;
+		const registry = fakeRegistry({ models: [model], authedProviders: ["openai-codex"] });
+		const captured: SimpleStreamOptions[] = [];
+		let closed = 0;
+		const summary = await runBenchCommand(
+			{ models: ["openai-codex/gpt-5.5"], flags: { runs: 2, maxTokens: 64, json: true } },
 			{
-				createRuntime: async () => ({
-					modelRegistry: registry,
-					settings: undefined,
-					close: () => {},
-				}),
+				createRuntime: async () => ({ modelRegistry: registry }),
 				randomSessionId: () => "sess-1",
 				writeStdout: () => {},
 				writeStderr: () => {},
 				setExitCode: () => {},
 				streamSimple: (_model, _context, options) => {
-					captured = options;
+					if (!options?.providerSessionState) throw new Error("Missing request-owned provider state");
+					captured.push(options);
+					options.providerSessionState.set("codex-test", { close: () => closed++ });
 					return fakeStream();
 				},
 				now: () => 0,
 				stdoutIsTTY: false,
 			},
 		);
-		expect(captured?.providerSessionState).toBeInstanceOf(Map);
-		expect(captured?.providerSessionState?.size).toBe(0);
-		expect(captured?.preferWebsockets).toBe(true);
+		expect(summary.failures).toBe(0);
+		expect(captured).toHaveLength(2);
+		expect(captured[0]?.providerSessionState).not.toBe(captured[1]?.providerSessionState);
+		expect(captured.every(options => options.providerSessionState?.size === 0)).toBe(true);
+		expect(closed).toBe(2);
+	});
+});
+
+describe("bench standard Responses transport", () => {
+	it.each([false, true])(
+		"uses the standard Responses setting %s before falling back to HTTP on an HTTP-only gateway",
+		async enabled => {
+			let posts = 0;
+			let upgrades = 0;
+			const item = {
+				type: "message",
+				id: "msg_bench",
+				role: "assistant",
+				status: "completed",
+				content: [{ type: "output_text", text: "OK" }],
+			};
+			const sse = [
+				{ type: "response.created", response: { id: "resp_bench" } },
+				{ type: "response.output_item.added", output_index: 0, item: { ...item, content: [] } },
+				{ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "OK" },
+				{ type: "response.output_item.done", output_index: 0, item },
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_bench",
+						status: "completed",
+						usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+					},
+				},
+			]
+				.map(event => `data: ${JSON.stringify(event)}\n\n`)
+				.join("");
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request) {
+					if (request.headers.get("upgrade")) {
+						upgrades++;
+						return new Response("HTTP only", { status: 426 });
+					}
+					if (request.method !== "POST") return new Response("Unexpected request", { status: 404 });
+					posts++;
+					return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+				},
+			});
+			try {
+				const model = buildModel({
+					provider: "openai",
+					id: "gpt-5.4",
+					name: "OpenAI gateway",
+					api: "openai-responses",
+					baseUrl: `http://127.0.0.1:${server.port}/v1`,
+					preferWebsockets: true,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 64,
+				});
+				const registry = fakeRegistry({ models: [model], authedProviders: ["openai"] });
+				const summary = await runBenchCommand(
+					{ models: ["openai/gpt-5.4"], flags: { runs: 1, maxTokens: 8, json: true } },
+					{
+						createRuntime: async () => ({
+							modelRegistry: registry,
+							settings: Settings.isolated({ "providers.openaiResponsesWebsockets": enabled }),
+						}),
+						writeStdout: () => {},
+						writeStderr: () => {},
+						setExitCode: () => {},
+						stdoutIsTTY: false,
+					},
+				);
+				expect(summary.failures).toBe(0);
+				expect(summary.models[0]?.stats?.outputTokens).toBe(2);
+				expect(posts).toBe(1);
+				expect(upgrades).toBe(enabled ? 1 : 0);
+			} finally {
+				await server.stop(true);
+			}
+		},
+	);
+
+	it("does not report a WebSocket handshake as per-generation response-cache evidence", async () => {
+		const fixture = responsesEndpoint(undefined, {
+			upgradeHeaders: { "cf-aig-cache-status": "HIT", "x-request-id": "handshake-not-generation" },
+		});
+		try {
+			const model = {
+				...getBundledModel("openai", "gpt-5-mini"),
+				baseUrl: `${fixture.server.url.origin}/v1`,
+			};
+			const registry = fakeRegistry({ models: [model], authedProviders: ["openai"] });
+			const summary = await runBenchCommand(
+				{ models: ["openai/gpt-5-mini"], flags: { cache: true, json: true } },
+				{
+					createRuntime: async () => ({
+						modelRegistry: registry,
+						settings: Settings.isolated({ "providers.openaiResponsesWebsockets": true }),
+					}),
+					writeStdout: () => {},
+					writeStderr: () => {},
+					setExitCode: () => {},
+					stdoutIsTTY: false,
+				},
+			);
+			expect(summary.failures).toBe(0);
+			expect(summary.models[0]?.stats?.outputTokens).toBe(3);
+			const pair = summary.models[0]?.cachePairs?.[0];
+			expect(pair?.cold.result).toMatchObject({ ok: true, transport: "websocket" });
+			expect(pair?.cold.requestIdObserved).toBe(false);
+			expect(pair?.cold.observations).not.toContain("response_cache_hit_observed");
+			expect(fixture.requests).toHaveLength(2);
+		} finally {
+			await fixture.server.stop(true);
+		}
 	});
 });
 
 describe("bench service tier", () => {
+	it("rejects a priority run that fell back to standard speed", async () => {
+		const model = getBundledModel("anthropic", "claude-opus-4-5");
+		if (!model) throw new Error("Missing Anthropic model");
+		const registry = fakeRegistry({ models: [model], authedProviders: ["anthropic"] });
+		const summary = await runBenchCommand(
+			{ models: ["anthropic/claude-opus-4-5"], flags: { runs: 1, serviceTier: "priority", json: true } },
+			{
+				createRuntime: async () => ({ modelRegistry: registry }),
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				streamSimple: () => {
+					const stream = new AssistantMessageEventStream();
+					void (async () => {
+						try {
+							for await (const event of fakeStream()) {
+								if (event.type === "done") event.message.disabledFeatures = ["priority"];
+								stream.push(event);
+							}
+						} catch (error) {
+							stream.fail(error);
+						}
+					})();
+					return stream;
+				},
+			},
+		);
+		expect(summary.failures).toBe(1);
+		expect(summary.models[0]?.results[0]).toMatchObject({ ok: false, error: expect.stringContaining("fell back") });
+	});
+
 	it("sends the configured serviceTier setting when no flag is passed", async () => {
 		const { wire, summary } = await captureServiceTier({ setting: "flex" });
 		expect(wire).toBe("flex");

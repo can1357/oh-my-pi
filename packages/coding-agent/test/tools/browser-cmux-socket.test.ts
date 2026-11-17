@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { CmuxTab } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
+import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 type RequestLine = {
@@ -89,9 +91,168 @@ async function withTcpRelayServer(
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.useRealTimers();
 });
 
 describe("CmuxSocketClient", () => {
+	it("unblocks queued requests on a fresh socket when an active long request aborts", async () => {
+		const received = Promise.withResolvers<net.Socket>();
+		let activeSocket: net.Socket | undefined;
+		const methods: unknown[] = [];
+		await withSocketServer(
+			(line, socket) => {
+				const request = JSON.parse(line) as RequestLine;
+				methods.push(request.method);
+				if (request.method === "blocking") received.resolve(socket);
+				else socket.write(`${JSON.stringify({ ok: true, result: { fresh: socket !== activeSocket } })}\n`);
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const controller = new AbortController();
+				try {
+					const cancelled = client
+						.request("blocking", {}, { timeoutMs: 300_000, signal: controller.signal })
+						.catch(error => error);
+					activeSocket = await received.promise;
+					const sentinel = client.request("sentinel", {}, { signal: AbortSignal.timeout(1_000) });
+					controller.abort(new Error("run aborted"));
+					expect(String(await cancelled)).toContain("run aborted");
+					expect(await sentinel).toEqual({ fresh: true });
+					expect(methods).toEqual(["blocking", "sentinel"]);
+				} finally {
+					client.close();
+				}
+			},
+		);
+	});
+
+	it("drops a mutating helper queued behind another request when its run aborts", async () => {
+		const received = Promise.withResolvers<net.Socket>();
+		const methods: unknown[] = [];
+		await withSocketServer(
+			(line, socket) => {
+				const request = JSON.parse(line) as RequestLine;
+				methods.push(request.method);
+				if (request.method === "blocking") received.resolve(socket);
+				else socket.write(`${JSON.stringify({ ok: true, result: {} })}\n`);
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const tab = new CmuxTab({ client, surfaceId: "queued" });
+				try {
+					const blocking = client.request("blocking", {});
+					const socket = await received.promise;
+					const controller = new AbortController();
+					tab.setRunContext({
+						session: { cwd: process.cwd() },
+						output: new RunOutput(),
+						screenshots: [],
+						signal: controller.signal,
+						timeoutMs: 40_000,
+						deadline: Number.POSITIVE_INFINITY,
+					});
+					const cancelled = tab.goto("https://late.example").catch(error => error);
+					controller.abort(new Error("run aborted"));
+					expect(String(await cancelled)).toContain("run aborted");
+					socket.write(`${JSON.stringify({ ok: true, result: {} })}\n`);
+					await blocking;
+					await client.request("sentinel", {});
+					expect(methods).toEqual(["blocking", "sentinel"]);
+				} finally {
+					tab.clearRunContext();
+					client.close();
+				}
+			},
+		);
+	});
+
+	it("lets an evaluate RPC finish beyond the socket default within the active run budget", async () => {
+		const received = Promise.withResolvers<net.Socket>();
+		await withSocketServer(
+			(_line, socket) => {
+				socket.on("error", () => undefined);
+				received.resolve(socket);
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const tab = new CmuxTab({ client, surfaceId: "budget" });
+				try {
+					await client.connect();
+					vi.useFakeTimers();
+					spyOn(Date, "now").mockReturnValue(0);
+					tab.setRunContext({
+						session: { cwd: process.cwd() },
+						output: new RunOutput(),
+						screenshots: [],
+						signal: new AbortController().signal,
+						timeoutMs: 40_000,
+						deadline: 40_000,
+					});
+					const pending = tab.evaluate(() => 42);
+					const outcome = pending.then(
+						value => ({ value }),
+						error => ({ error }),
+					);
+					const socket = await received.promise;
+					vi.advanceTimersByTime(35_000);
+					socket.write(`${JSON.stringify({ ok: true, result: { value: { __ompOk: 42 } } })}\n`);
+					expect(await outcome).toEqual({ value: 42 });
+				} finally {
+					tab.clearRunContext();
+					client.close();
+					vi.useRealTimers();
+				}
+			},
+		);
+	});
+
+	it("bounds a late helper by the run's remaining time", async () => {
+		const received = Promise.withResolvers<void>();
+		await withSocketServer(
+			(_line, socket) => {
+				socket.on("error", () => undefined);
+				received.resolve();
+			},
+			async socketPath => {
+				const client = new CmuxSocketClient({ socketPath });
+				const tab = new CmuxTab({ client, surfaceId: "late-budget" });
+				try {
+					await client.connect();
+					vi.useFakeTimers();
+					const now = spyOn(Date, "now").mockReturnValue(0);
+					tab.setRunContext({
+						session: { cwd: process.cwd() },
+						output: new RunOutput(),
+						screenshots: [],
+						signal: new AbortController().signal,
+						timeoutMs: 40_000,
+						deadline: 40_000,
+					});
+					vi.advanceTimersByTime(35_000);
+					now.mockReturnValue(35_000);
+					let error: unknown;
+					const pending = tab
+						.evaluate(() => 42)
+						.catch(cause => {
+							error = cause;
+						});
+					await received.promise;
+					vi.advanceTimersByTime(4_999);
+					await Promise.resolve();
+					expect(error).toBeUndefined();
+					vi.advanceTimersByTime(1);
+					await pending;
+					expect(error).toBeInstanceOf(ToolError);
+					expect(String(error)).toContain("Timed out waiting for cmux socket response");
+				} finally {
+					tab.clearRunContext();
+					client.close();
+					vi.useRealTimers();
+				}
+			},
+		);
+	});
+
 	it("authenticates, frames JSON requests, and returns the result", async () => {
 		const lines: string[] = [];
 		const requests: RequestLine[] = [];

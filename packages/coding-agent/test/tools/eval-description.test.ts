@@ -199,7 +199,7 @@ describe("eval tool description", () => {
 			},
 		};
 		const tool = new EvalTool(makeSession({ preludes: () => [prelude] }));
-		expect(tool.description).toContain("`fixture`: Fixture summary line. → `xd://eval/fixture`");
+		expect(tool.description).toContain("`fixture`: Fixture summary line. → xd://eval/fixture");
 		expect(tool.description).not.toContain("CURRENT PRELUDE DOCUMENTATION");
 		expect(tool.docTopics().fixture).toContain("CURRENT PRELUDE DOCUMENTATION");
 		enabled = false;
@@ -228,6 +228,24 @@ describe("eval tool description", () => {
 		expect(withoutRead.description.split("INLINE PRELUDE DOCUMENTATION")).toHaveLength(2);
 		expect(withoutRead.description).not.toContain("<fixture>");
 		expect(withoutRead.description).not.toContain("xd://eval/fixture");
+	});
+
+	it("keeps first-call guides out of a session without a guide delivery channel", () => {
+		const prelude: EvalPreludeDefinition = {
+			name: "fixture",
+			documentation: "Fixture summary line.\n\nFULL PRELUDE DOCUMENTATION",
+			firstCallDocumentation: "FIRST CALL GUIDE",
+			javascript: "",
+			python: "",
+			exports: [],
+			async invoke() {
+				return { content: [] };
+			},
+		};
+		const session = makeSession({ preludes: () => [prelude] });
+		expect(new EvalTool(session).description).not.toContain("No `read` needed");
+		session.noteEvalPreludeCall = () => {};
+		expect(new EvalTool(session).description).toContain("No `read` needed");
 	});
 });
 
@@ -333,6 +351,7 @@ describe("eval tool description await markers", () => {
 						output: () => output("probe"),
 						wait: () => wait([]),
 						"tool.<name>": () => tool.read({ path: dir + "/in.txt" }),
+						sh: () => sh("true"),
 					};
 					const probe = name => {
 						if (!(name in probes)) return "no probe for " + name;
@@ -378,6 +397,7 @@ describe("eval tool description await markers", () => {
 					'    "output": lambda: output("probe"),',
 					'    "wait": lambda: wait([]),',
 					'    "tool.<name>": lambda: tool.read({"path": os.path.join(dir, "in.txt")}),',
+					'    "sh": lambda: sh("true", cwd=dir),',
 					"}",
 					"def probe(name):",
 					"    if name not in probes:",

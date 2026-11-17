@@ -160,9 +160,7 @@ mod count_fast {
 	
 	/// A [`BUF_SIZE`] read buffer aligned to a 32-byte boundary.
 	///
-	/// This is useful as bytecount uses 256-bit wide vector operations that run
-	/// much faster on aligned data (at least on x86 with AVX2 support). One
-	/// serves every input of an invocation: zero-filling 256 KiB per file
+	/// One buffer serves every input of an invocation: zero-filling 256 KiB per file
 	/// dwarfs counting a small one.
 	#[repr(align(32))]
 	pub(crate) struct AlignedBuffer {
@@ -196,6 +194,7 @@ mod count_fast {
 		let buf: &mut [u8] = &mut buffer.data;
 		let policy = SimdPolicy::detect();
 		let simd_allowed = wc_simd_allowed(policy);
+		const CONTINUATIONS: xutf::UnitSet = xutf::UnitSet::from_ranges(&[0x80..=0xbf]);
 		loop {
 			match handle.read(buf) {
 				Ok(0) => return (total, None),
@@ -204,17 +203,18 @@ mod count_fast {
 						total.bytes += n;
 					}
 					if COUNT_CHARS {
-						total.chars += if simd_allowed {
-							bytecount::num_chars(&buf[..n])
+						// Count leading bytes so UTF-8 sequences split across reads count once.
+						total.chars += if simd_allowed && n >= 64 {
+							n - CONTINUATIONS.count::<xutf::Utf8>(&buf[..n])
 						} else {
-							bytecount::naive_num_chars(&buf[..n])
+							buf[..n].iter().filter(|&&byte| byte & 0xc0 != 0x80).count()
 						};
 					}
 					if COUNT_LINES {
 						total.lines += if simd_allowed {
-							bytecount::count(&buf[..n], b'\n')
+							memchr::memchr_iter(b'\n', &buf[..n]).count()
 						} else {
-							bytecount::naive_count(&buf[..n], b'\n')
+							buf[..n].iter().filter(|&&byte| byte == b'\n').count()
 						};
 					}
 				},
@@ -567,7 +567,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 use thiserror::Error;
 use utf8::{BufReadDecoder, BufReadDecoderError};
@@ -583,7 +582,7 @@ use self::{
 	countable::WordCountable,
 	word_count::WordCount,
 };
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy};
 
 /// The minimum character width for formatting counts when reading from stdin.
 const MINIMUM_WIDTH: usize = 7;
@@ -1605,11 +1604,6 @@ fn print_stats(
 	stdout.write_all(&line)
 }
 
-/// Creates the `wc` builtin registration.
-pub(crate) fn wc_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Wc, SE>()
-}
-
 #[cfg(test)]
 mod tests {
 	use std::io::{Seek, SeekFrom};
@@ -1618,7 +1612,7 @@ mod tests {
 
 	use super::{
 		Wc,
-		count_fast::{AlignedBuffer, count_bytes_fast},
+		count_fast::{AlignedBuffer, count_bytes_chars_and_lines_fast, count_bytes_fast},
 		word_count::WordCount,
 	};
 	use crate::host::run_util;
@@ -1662,6 +1656,20 @@ mod tests {
 		let (code, capture) = run_util::<Wc>(&["-l", "--files0-from", "names"], "", cwd);
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "1 first\n");
+	}
+
+	#[test]
+	fn fast_counts_raw_bytes_and_newlines() {
+		let mut input = vec![b'a'; 130];
+		input.extend_from_slice(&[0x80, 0xbf, 0xc0, b'\n', 0xff, b'\n']);
+		let (counts, error) = count_bytes_chars_and_lines_fast::<_, true, true, true>(
+			&mut input.as_slice(),
+			&mut AlignedBuffer::boxed(),
+		);
+		assert!(error.is_none());
+		assert_eq!(counts.bytes, 136);
+		assert_eq!(counts.chars, 134);
+		assert_eq!(counts.lines, 2);
 	}
 
 	#[test]

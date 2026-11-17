@@ -1,0 +1,17 @@
+auth "scaleway" {
+	name "Scaleway"
+	login "api-key" {
+		auth-url "https://console.scaleway.com/iam/api-keys"
+		instructions "Create an API key on the Scaleway console and paste its Secret Key (SCW_SECRET_KEY)"
+		// Scaleway secret keys are UUID-shaped opaque strings with no `sk-`
+		// prefix, so the placeholder must not teach a credential shape the
+		// console never issues.
+		prompt "Paste your Scaleway secret key" placeholder="..."
+		normalize "strip-bearer"
+		// `/v1/models` is key-protected: it answers 401 without a bearer key
+		// and 403 to a rejected one (verified 2026-10-21), so login validates
+		// the pasted key there. The probe bills nothing, unlike a
+		// chat-completions round-trip against a prepaid balance.
+		validate "models-endpoint" label="Scaleway" url="https://api.scaleway.ai/v1/models"
+	}
+}

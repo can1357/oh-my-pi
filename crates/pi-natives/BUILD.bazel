@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_shared_library", "rust_test")
 load("//bazel/toolchains/swift:defs.bzl", "applefm_bridge")
@@ -6,6 +7,14 @@ load(":darwin_helper.bzl", "darwin_helper")
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
+
+# Only Darwin links need an SDK. The env file is empty on mac hosts so rustc
+# keeps native Xcode discovery; Linux cross links get an absolute SDKROOT
+# before rustc could fall back to the unavailable xcrun.
+_DARWIN_RUSTC_ENV_FILES = select({
+    "@platforms//os:macos": ["//bazel/toolchains/darwin:rustc_sdk_env"],
+    "//conditions:default": [],
+})
 
 rust_binary(
     name = "generate_syntax_set",
@@ -16,6 +25,7 @@ rust_binary(
     compile_data = glob(["src/syntaxes/*.sublime-syntax"]),
     crate_root = "src/syntaxes/generate.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     deps = ["@crates//:syntect"],
 )
 
@@ -67,6 +77,7 @@ rust_binary(
     ],
     crate_root = "src/oauth_callback/relay.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = [
         "-Ccodegen-units=1",
         "-Copt-level=z",
@@ -97,6 +108,7 @@ rust_binary(
     ],
     crate_root = "src/desktop/macos/release_helper.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = [
         "-Ccodegen-units=1",
         "-Copt-level=z",
@@ -105,6 +117,17 @@ rust_binary(
         "-Clink-arg=-Wl,-adhoc_codesign",
     ],
     target_compatible_with = ["@platforms//os:macos"],
+)
+
+# The Linux addon's only export: the N-API entry point. Linked in place of
+# rustc's version script, which lists every #[no_mangle] function in the crate
+# graph (wasmtime's C API for tree-sitter, src/bundled_libc.rs). Generated
+# rather than checked in: next to the generated :syntax_set, rules_rust moves
+# source compile_data, so a source file's $(execpath) misses the action input.
+write_file(
+    name = "exports_map",
+    out = "exports.map",
+    content = ["{ global: napi_register_module_v1; local: *; };"],
 )
 
 # The NAPI cdylib. build.rs is intentionally not wired in: napi_build::setup()
@@ -117,7 +140,10 @@ rust_shared_library(
     name = "pi_natives",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
-    compile_data = [":syntax_set"] + glob([
+    compile_data = [
+        ":exports_map",
+        ":syntax_set",
+    ] + glob([
         "src/syntaxes/*.sublime-syntax",
         "src/fonts/*",
         "data/*.bin.zst",
@@ -152,6 +178,7 @@ rust_shared_library(
             "OMP_SYNTAX_SET": "$(execpath :syntax_set)",
         },
     }),
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
     rustc_flags = select({
         "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
         "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
@@ -164,11 +191,20 @@ rust_shared_library(
         # nothing — napi-sys v3 imports node.exe via raw-dylib.
         # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
         # x86_64; every shipped darwin addon carries a signature.
+        # -install_name: otherwise the addon's id is its sandbox output path.
+        # --version-script (linux): export only the N-API entry point. zig cc
+        # keeps the last version script it is given, so :exports_map replaces
+        # the one rustc writes; every other symbol (src/bundled_libc.rs, the
+        # wasm C API) becomes local and binds within the addon.
         "@platforms//os:macos": [
             "-Clink-arg=-Wl,-undefined,dynamic_lookup",
             "-Clink-arg=-Wl,-adhoc_codesign",
+            "-Clink-arg=-Wl,-install_name,@rpath/libpi_natives.dylib",
         ],
-        "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
+        "@platforms//os:linux": [
+            "-Clink-arg=-Wl,-z,nodelete",
+            "-Clink-arg=-Wl,--version-script=$(execpath :exports_map)",
+        ],
         "//conditions:default": [],
     }) + select({
         # musl defaults to +crt-static, under which rustc silently emits no
@@ -210,6 +246,7 @@ rust_test(
     ],
     crate_root = "src/oauth_callback/relay.rs",
     edition = "2024",
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
 )
 
 rust_test(

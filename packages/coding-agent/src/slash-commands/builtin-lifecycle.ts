@@ -1,18 +1,16 @@
-import { SEANCE_SLASH_COMMAND } from "./seance";
 import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
-import { rebindMemoryBackendForCwd } from "../hindsight/backend";
+import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
-import { toggleSessionPin } from "../session/session-pins";
+import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
 	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
@@ -21,7 +19,6 @@ import {
 	type SessionWorktree,
 } from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -131,6 +128,22 @@ async function relocateHeadlessSession(
 	await runtime.notifyConfigChanged?.();
 	await runtime.notifyTitleChanged?.();
 	return undefined;
+}
+
+/** Session id `/pin` and `/unpin` act on (the argument's match, else the active session), or the usage result. */
+async function resolvePinTarget(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+	verb: "pin" | "unpin",
+): Promise<string | SlashCommandResult> {
+	const sessionArg = command.args.trim();
+	if (sessionArg) {
+		const match = await resolveResumableSession(sessionArg, runtime.cwd, runtime.sessionManager.getSessionDir(), {
+			allowGlobalFallback: true,
+		});
+		return match ? match.session.id : usage(`Session "${sessionArg}" not found.`, runtime);
+	}
+	return runtime.sessionManager.getSessionId() || usage(`No active session to ${verb}.`, runtime);
 }
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -404,7 +417,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			await runtime.ctx.handleHandoffCommand(customInstructions);
 		},
 	},
-	SEANCE_SLASH_COMMAND,
 	{
 		name: "resume",
 		icon: "history",
@@ -448,27 +460,26 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[session id]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const sessionArg = command.args.trim();
-			let sessionId: string | undefined;
-			if (sessionArg) {
-				const match = await resolveResumableSession(
-					sessionArg,
-					runtime.cwd,
-					runtime.sessionManager.getSessionDir(),
-					{ allowGlobalFallback: true },
-				);
-				if (!match) {
-					return usage(`Session "${sessionArg}" not found.`, runtime);
-				}
-				sessionId = match.session.id;
-			} else {
-				sessionId = runtime.sessionManager.getSessionId();
-				if (!sessionId) {
-					return usage("No active session to pin.", runtime);
-				}
-			}
+			const sessionId = await resolvePinTarget(command, runtime, "pin");
+			if (typeof sessionId !== "string") return sessionId;
 			const pinned = await toggleSessionPin(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, pinned);
 			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
+			return commandConsumed();
+		},
+	},
+	{
+		name: "unpin",
+		icon: "pin",
+		description: "Unpin a session from the top of the resume list",
+		inlineHint: "[session id]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const sessionId = await resolvePinTarget(command, runtime, "unpin");
+			if (typeof sessionId !== "string") return sessionId;
+			const wasPinned = await unpinSession(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, false);
+			await runtime.output(wasPinned ? "Session unpinned." : "Session is not pinned.");
 			return commandConsumed();
 		},
 	},
@@ -882,7 +893,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "restart",
 		icon: "restart",
-		description: "Restart omp with the same launch flags, resuming this session",
+		description: "Restart omp with the same launch flags, resuming this session and its running subagents",
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.restart();
@@ -891,13 +902,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 ];
 async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);
-	await runtime.settings.reloadForCwd(cwd);
-	await rebindMemoryBackendForCwd(runtime.session);
-	clearClaudePluginRootsCache();
-	const src = discoverTitleSystemPromptFile(cwd);
-	const p = await resolvePromptInput(src, "title system prompt");
-	runtime.session.setTitleSystemPrompt(p);
-	await runtime.session.refreshSkillsAndCommands();
+	await rescopeSessionToCwd(runtime.session, runtime.settings, cwd);
 	await runtime.refreshCommands?.();
-	await runtime.reloadPlugins();
 }

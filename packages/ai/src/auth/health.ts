@@ -1,3 +1,4 @@
+import { providerPauseReason } from "../registry/oauth";
 import type { Provider } from "../types";
 import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
 import type {
@@ -128,7 +129,7 @@ export class CredentialHealth implements HealthApi {
 		const planGate = strategy?.planGate?.(rankingContext);
 		const planEligibilityByCredential = new Map<number, boolean | undefined>();
 		const blockScope = strategy?.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const reserveFraction = Number.isFinite(options.reserveFraction)
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: this.#deps.policies.defaultReservePct / 100;
@@ -283,7 +284,8 @@ export class CredentialHealth implements HealthApi {
 		const results: CredentialHealthResult[] = [];
 		for (const row of stored) {
 			options?.signal?.throwIfAborted();
-			if (options?.excludeProviders?.has(row.provider)) continue;
+			// Excluded by the caller, or turned off in the auth rules: never probed.
+			if (options?.excludeProviders?.has(row.provider) || providerPauseReason(row.provider) !== undefined) continue;
 			const base: CredentialHealthResult = {
 				id: row.id,
 				provider: row.provider,

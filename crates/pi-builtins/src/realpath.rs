@@ -8,7 +8,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{
 	Arg, ArgAction, ArgMatches, Command,
 	builder::{TypedValueParser, ValueParserFactory},
@@ -16,7 +15,7 @@ use clap::{
 use pi_vfs::{BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode, relative_path};
 use uucore::{display::Quotable, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, strip_errno, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, strip_errno};
 
 const OPT_QUIET: &str = "quiet";
 const OPT_STRIP: &str = "strip";
@@ -361,11 +360,6 @@ fn process_relative(
 /// Whether `path` is `base` or lies beneath it, under the same root.
 fn is_within(path: &Path, base: &Path) -> bool {
 	relative_path(path, base).is_some_and(|relative| !relative.starts_with(".."))
-}
-
-/// Creates the `realpath` builtin registration.
-pub(crate) fn realpath_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Realpath, SE>()
 }
 
 #[cfg(test)]

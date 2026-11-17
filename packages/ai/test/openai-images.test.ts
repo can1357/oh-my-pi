@@ -89,6 +89,32 @@ describe("OpenAI-compatible image response_format", () => {
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
 
+	test("OpenAI multipart edits send multiple input images as an image[] array", async () => {
+		const model = imageModel("openai", "gpt-image-1");
+		let form: FormData | undefined;
+		const fetch: FetchImpl = async (_input, init) => {
+			if (!(init?.body instanceof FormData)) throw new Error("Expected multipart image edit");
+			form = init.body;
+			if (form.getAll("image").length > 1) {
+				return new Response(
+					JSON.stringify({ error: { message: "Duplicate parameter: 'image'.", code: "duplicate_parameter" } }),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			}
+			return imageResponse();
+		};
+
+		const result = await generateOpenAIImage(
+			model,
+			{ prompt: "combine these", inputImages: [INPUT_IMAGE, INPUT_IMAGE] },
+			{ apiKey: "test", fetch },
+		);
+
+		expect(form?.has("image")).toBe(false);
+		expect(form?.getAll("image[]")).toHaveLength(2);
+		expect(result.images[0]?.data).toBe(IMAGE_DATA);
+	});
+
 	test("non-GPT image generation and JSON edits retain response_format", async () => {
 		const model = imageModel("gateway", "flux-1");
 		const bodies: Array<Record<string, unknown>> = [];

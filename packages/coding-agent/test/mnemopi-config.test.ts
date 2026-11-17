@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadMnemopiConfig, type MnemopiBackendConfig } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
@@ -83,6 +84,31 @@ describe("loadMnemopiConfig embedding variant resolution", () => {
 	});
 });
 
+// The setting's `false` default must not mask the documented env fallback: NIM users who set only
+// the env var would otherwise get an HTTP 400 on every embedding request.
+describe("loadMnemopiConfig embedding input type", () => {
+	function inputTypeFor(overrides: Record<string, unknown>, env: string | undefined): boolean | undefined {
+		const previous = Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE;
+		if (env === undefined) delete Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE;
+		else Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE = env;
+		try {
+			const embeddings = mnemopiConfigFor(overrides).providerOptions.embeddings;
+			return embeddings === false ? undefined : embeddings?.inputType;
+		} finally {
+			if (previous === undefined) delete Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE;
+			else Bun.env.MNEMOPI_EMBEDDING_INPUT_TYPE = previous;
+		}
+	}
+
+	it("enables input_type from MNEMOPI_EMBEDDING_INPUT_TYPE when the setting is unset", () => {
+		expect(inputTypeFor({}, "1")).toBe(true);
+	});
+
+	it("lets an explicit setting win over the env var", () => {
+		expect(inputTypeFor({ "mnemopi.embeddingInputType": false }, "1")).toBe(false);
+	});
+});
+
 describe("loadMnemopiConfig database path resolution", () => {
 	it("resolves a blank dbPath to persistent agent storage", () => {
 		const agentDir = "/tmp/mnemopi-blank-db-path-test";
@@ -90,5 +116,19 @@ describe("loadMnemopiConfig database path resolution", () => {
 
 		expect(mnemopiConfigFor({ "mnemopi.dbPath": "" }, agentDir).dbPath).toBe(defaultPath);
 		expect(mnemopiConfigFor({ "mnemopi.dbPath": " \t " }, agentDir).dbPath).toBe(defaultPath);
+	});
+
+	it("expands a leading ~ in dbPath to the home directory", () => {
+		expect(mnemopiConfigFor({ "mnemopi.dbPath": "~/mnemopi/custom.db" }).dbPath).toBe(
+			path.join(os.homedir(), "mnemopi", "custom.db"),
+		);
+		expect(mnemopiConfigFor({ "mnemopi.dbPath": "  ~/custom.db  " }).dbPath).toBe(
+			path.join(os.homedir(), "custom.db"),
+		);
+	});
+
+	it("keeps .. in a configured dbPath, which may follow a symlink", () => {
+		const viaLink = ["", "home", "me", "link", "..", "mnemopi.db"].join(path.sep);
+		expect(mnemopiConfigFor({ "mnemopi.dbPath": viaLink }).dbPath).toBe(viaLink);
 	});
 });

@@ -228,14 +228,19 @@ async function probeSharedWorker(endpoint: string, tag: string): Promise<ProbeRe
 	return { kind: "absent" };
 }
 
-/** Detach a worker so it outlives this omp process; its output goes to `logPath`. */
+/**
+ * Detach a worker so it outlives this omp process; its output goes to
+ * `logPath`, truncated first unless `append` (for a worker that may lose a
+ * start race to a live one writing the same log).
+ */
 export function spawnDetached(
 	cmd: string[],
 	cwd: string | undefined,
 	env: Record<string, string>,
 	logPath: string,
+	options: { append?: boolean } = {},
 ): SpawnedWorker {
-	const log = fs.openSync(logPath, "w");
+	const log = fs.openSync(logPath, options.append ? "a" : "w");
 	try {
 		const proc = Bun.spawn({
 			cmd,

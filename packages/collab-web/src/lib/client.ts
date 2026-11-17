@@ -25,6 +25,7 @@ import type {
 	SubagentLifecyclePayload,
 	SubagentProgressPayload,
 } from "@oh-my-pi/pi-wire";
+import { takeAutoRejoin } from "@oh-my-pi/pi-wire";
 import { importRoomKey } from "./codec";
 import { COLLAB_PROTO, encodeBase64Url, parseCollabLink } from "./link";
 import { CollabSocket } from "./socket";
@@ -125,6 +126,7 @@ export class GuestClient {
 	#noticeSeq = 0;
 	#everConnected = false;
 	#welcomed = false;
+	#autoRejoins: number[] = [];
 	#welcomeTimer: Timer | null = null;
 	#snapshotProgressTimer: Timer | null = null;
 
@@ -262,15 +264,48 @@ export class GuestClient {
 
 	#handleOpen(): void {
 		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		// Before the first welcome, connect()'s timer already covers this hello.
+		if (this.#welcomed) this.#armRejoinTimer();
 		this.#phase = this.#everConnected ? "reconnecting" : "waiting";
 		this.#everConnected = true;
 		this.#commit();
+	}
+
+	/**
+	 * Say hello again after the host dropped this guest, within the auto-rejoin
+	 * budget. A welcome that does not follow retries through the same budget. Once
+	 * the budget is spent the session ends, leaving the rejoin to the user.
+	 */
+	#rejoin(message: string): void {
+		if (!takeAutoRejoin(this.#autoRejoins)) {
+			this.#end(message);
+			return;
+		}
+		this.#clearSnapshotProgressTimer();
+		this.#pendingSnapshot = null;
+		this.#clearUiRequests();
+		this.#phase = "reconnecting";
+		this.#socket.send({ t: "hello", proto: COLLAB_PROTO, name: this.#name, writeToken: this.#writeToken });
+		this.#armRejoinTimer();
+		this.#commit();
+	}
+
+	/** A post-join hello the host never welcomes retries through the rejoin budget. */
+	#armRejoinTimer(): void {
+		this.#clearWelcomeTimer();
+		this.#welcomeTimer = setTimeout(() => {
+			this.#welcomeTimer = null;
+			if (this.#phase === "live" || this.#phase === "ended") return;
+			this.#rejoin("timed out waiting for the host's welcome");
+		}, WELCOME_TIMEOUT_MS);
 	}
 
 	#handleClose(reason: string, willReconnect: boolean): void {
 		this.#clearSnapshotProgressTimer();
 		if (this.#phase === "ended") return;
 		if (willReconnect) {
+			// The reopened socket's hello arms its own timer.
+			if (this.#welcomed) this.#clearWelcomeTimer();
 			this.#phase = "reconnecting";
 			// The next welcome restarts the snapshot; drop the partial one.
 			this.#pendingSnapshot = null;
@@ -325,8 +360,13 @@ export class GuestClient {
 			this.#applyFrame(frame);
 		} catch (err) {
 			console.warn("collab: failed to apply frame", frame.t, err);
-			if (frame.t === "welcome" && !this.#welcomed) {
-				this.#end(`failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`);
+			if (frame.t === "welcome") {
+				const reason = `failed to apply session snapshot: ${err instanceof Error ? err.message : String(err)}`;
+				// A failed welcome must never go live through its snapshot chunks. A
+				// guest already in the session says hello again instead, which also
+				// drops any earlier welcome's snapshot and timer.
+				if (this.#welcomed) this.#rejoin(reason);
+				else this.#end(reason);
 				return;
 			}
 			this.#pushNotice("error", `failed to apply ${frame.t} frame`);
@@ -336,7 +376,11 @@ export class GuestClient {
 
 	#applyFrame(frame: HostFrame): void {
 		switch (frame.t) {
-			case "welcome":
+			case "welcome": {
+				// Read every field that can throw on a malformed frame before any
+				// state changes, so a failed welcome leaves the guest as it was.
+				const agents = [...frame.agents];
+				const working = frame.state.isStreaming;
 				// A fresh welcome (first join or reconnect) restarts the snapshot.
 				// Entries already on screen stay until the new snapshot replaces
 				// them once complete, so a resync never blanks the transcript.
@@ -349,14 +393,14 @@ export class GuestClient {
 					this.#pendingSnapshot = { entries: [], live: [], total: frame.entryCount };
 				}
 				this.#state = frame.state;
-				this.#agents = [...frame.agents];
+				this.#agents = agents;
 				this.#stream = null;
 				this.#streamDone = false;
 				this.#activeTools = new Map();
 				this.#progress = new Map();
 				this.#lifecycle = new Map();
 				this.#unlistedBusIds.clear();
-				this.#working = frame.state.isStreaming;
+				this.#working = working;
 				this.#readOnly = frame.readOnly === true;
 				this.#clearUiRequests();
 				this.#welcomed = true;
@@ -369,6 +413,7 @@ export class GuestClient {
 				}
 				this.#endedReason = null;
 				break;
+			}
 			case "snapshot-chunk": {
 				// Buffer fragments and publish the transcript once, when the
 				// snapshot completes (as the TUI guest does). Intermediate chunks
@@ -463,6 +508,13 @@ export class GuestClient {
 				this.#end(frame.reason);
 				return; // #end already committed
 			case "error":
+				if (frame.resync) {
+					// The host dropped this guest but the relay link is intact. A hello
+					// still awaiting its welcome is retried by the welcome timer.
+					if (this.#phase === "ended" || this.#welcomeTimer !== null) break;
+					this.#rejoin(frame.message);
+					return; // #rejoin or #end already committed
+				}
 				if (!this.#welcomed) {
 					// Pre-welcome errors are the host's targeted reply to our
 					// hello (e.g. protocol mismatch): no welcome will follow.

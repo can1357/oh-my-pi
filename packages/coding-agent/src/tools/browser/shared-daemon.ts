@@ -59,6 +59,8 @@ const PROBE_STALLED = "Shared browser probe did not settle";
 /** Broker-owned browser endpoint one omp process can attach to. */
 export interface SharedBrowserEndpoint {
 	wsEndpoint: string;
+	/** The broker-launched Chrome's process, which owns its windows on screen. */
+	pid?: number;
 	daemonName: string;
 	/** Canonical project directory owning the broker (used to address later stop requests). */
 	projectDir: string;
@@ -109,8 +111,8 @@ async function probeEndpoint(wsEndpoint: string): Promise<boolean> {
  * reachable); callers fall back to a process-local launch.
  *
  * Per-open process flags are intentionally absent: a running shared Chromium
- * cannot be relaunched for one tab. `allow_file_access` is rejected before this
- * boundary; invalid-certificate handling remains page-scoped through CDP.
+ * cannot be relaunched for one tab, so invalid-certificate handling stays
+ * page-scoped through CDP.
  */
 export async function ensureSharedBrowser(opts: {
 	projectDir: string;
@@ -225,7 +227,7 @@ async function adoptOrStart(
 			existing.readyAt !== undefined ? existing : await waitReady(client, name, "Shared browser", signal);
 		const wsEndpoint = wsEndpointOf(settled);
 		if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
-			return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
+			return { wsEndpoint, pid: settled?.pid, daemonName: name, projectDir: client.projectDir };
 		}
 		// Live record but unreachable Chrome (wedged, or readiness never
 		// matched): replace it rather than handing out a dead endpoint.
@@ -259,7 +261,7 @@ async function adoptOrStart(
 		if (started.op !== "start") return undefined;
 		const wsEndpoint = started.readyTimedOut ? undefined : wsEndpointOf(started.daemon);
 		if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
-			return { wsEndpoint, daemonName: name, projectDir: client.projectDir };
+			return { wsEndpoint, pid: started.daemon.pid, daemonName: name, projectDir: client.projectDir };
 		}
 		await stopQuietly(client, name, "Shared browser", signal);
 	} catch (error) {

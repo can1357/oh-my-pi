@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use xutf::{Text, UnitSet, Utf8};
+
 use crate::{
 	error::EditError,
 	text::{
@@ -457,16 +459,9 @@ fn format_preview_window(lines: &[&str], center_index: usize) -> String {
 		.enumerate()
 		.map(|(offset, line)| {
 			let truncated = if utf16_len(line) > OCCURRENCE_PREVIEW_MAX_LEN {
-				let mut units = 0;
-				let mut text = String::new();
-				for ch in line.chars() {
-					let width = ch.len_utf16();
-					if units + width > OCCURRENCE_PREVIEW_MAX_LEN - 1 {
-						break;
-					}
-					text.push(ch);
-					units += width;
-				}
+				let end = line.unit_offset::<u16>(OCCURRENCE_PREVIEW_MAX_LEN - 1);
+				let mut text = String::with_capacity(end + '…'.len_utf8());
+				text.push_str(&line[..end]);
 				text.push('…');
 				text
 			} else {
@@ -492,21 +487,26 @@ fn find_exact_match_outcome(
 	let mut first_index = None;
 	let mut occurrences = 0;
 	let mut recorded_indices = Vec::new();
-	let mut search_start = 0;
-	while search_start <= content.len().saturating_sub(target.len()) {
-		let Some(relative) = content[search_start..].find(target) else {
-			break;
+	{
+		let mut record = |index| {
+			let end_index = index + target.len();
+			if !overlaps_excluded(index, end_index, excluded_ranges) {
+				first_index.get_or_insert(index);
+				occurrences += 1;
+				if recorded_indices.len() < MAX_RECORDED_MATCHES {
+					recorded_indices.push(index);
+				}
+			}
 		};
-		let index = search_start + relative;
-		let end_index = index + target.len();
-		if !overlaps_excluded(index, end_index, excluded_ranges) {
-			first_index.get_or_insert(index);
-			occurrences += 1;
-			if recorded_indices.len() < MAX_RECORDED_MATCHES {
-				recorded_indices.push(index);
+		if content.len() < 64 {
+			for (index, _) in content.match_indices(target) {
+				record(index);
+			}
+		} else {
+			for index in xutf::find_iter::<Utf8>(content.as_bytes(), target.as_bytes()) {
+				record(index);
 			}
 		}
-		search_start = end_index;
 	}
 	let first_index = first_index?;
 	if occurrences > 1 {
@@ -514,11 +514,7 @@ fn find_exact_match_outcome(
 		let mut occurrence_lines = Vec::with_capacity(recorded_indices.len());
 		let mut occurrence_previews = Vec::with_capacity(recorded_indices.len());
 		for index in recorded_indices {
-			let line_number = content[..index]
-				.bytes()
-				.filter(|byte| *byte == b'\n')
-				.count()
-				+ 1;
+			let line_number = UnitSet::new(b"\n").count::<Utf8>(&content.as_bytes()[..index]) + 1;
 			occurrence_lines.push(line_number as u32);
 			occurrence_previews.push(format_preview_window(&content_lines, line_number - 1));
 		}
@@ -529,11 +525,8 @@ fn find_exact_match_outcome(
 			..MatchOutcome::default()
 		});
 	}
-	let start_line = content[..first_index]
-		.bytes()
-		.filter(|byte| *byte == b'\n')
-		.count() as u32
-		+ 1;
+	let start_line =
+		UnitSet::new(b"\n").count::<Utf8>(&content.as_bytes()[..first_index]) as u32 + 1;
 	Some(MatchOutcome {
 		matched: Some(FuzzyMatch {
 			actual_text: target.to_owned(),
@@ -1455,6 +1448,14 @@ mod tests {
 
 	fn options(allow_fuzzy: bool) -> FindMatchOptions<'static> {
 		FindMatchOptions { allow_fuzzy, threshold: None, excluded_ranges: &[] }
+	}
+
+	#[test]
+	fn preview_truncation_uses_utf16_units_without_splitting_surrogates() {
+		let line = format!("{}😀xx", "a".repeat(78));
+		assert_eq!(format_preview_window(&[&line], 0), format!("  1 | {}…", "a".repeat(78)));
+		let line = format!("{}😀", "a".repeat(78));
+		assert_eq!(format_preview_window(&[&line], 0), format!("  1 | {line}"));
 	}
 
 	#[test]

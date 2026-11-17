@@ -8,12 +8,11 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::{BlockingFs, CanonicalizeOptions, MissingHandling, ResolveMode};
 use uucore::{display::Quotable, libc::EINVAL, line_ending::LineEnding};
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes};
 
 const OPT_CANONICALIZE: &str = "canonicalize";
 const OPT_CANONICALIZE_MISSING: &str = "canonicalize-missing";
@@ -240,11 +239,6 @@ fn show(out: &mut impl Write, path: &Path, line_ending: Option<LineEnding>) -> s
 		write!(out, "{line_ending}")?;
 	}
 	out.flush()
-}
-
-/// Creates the `readlink` builtin registration.
-pub(crate) fn readlink_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Readlink, SE>()
 }
 
 #[cfg(test)]

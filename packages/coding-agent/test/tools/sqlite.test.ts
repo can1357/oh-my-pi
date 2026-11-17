@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -262,6 +263,52 @@ describe("SQLite tool support", () => {
 
 		expect(getText(result)).toContain("| 1");
 	});
+
+	// Issue #15586: any in-process close of a live database or its `-shm` released the
+	// connection's POSIX locks. The CLI moves SQLite onto OFD locks before its first store.
+	it.skipIf(process.platform !== "linux")(
+		"keeps a held WAL database's locks through raw reads and refuses overwriting it",
+		async () => {
+			expect(installSqliteLockShim()).toBe(true);
+			const dbPath = path.join(tmpDir, "held.db");
+			const held = new Database(dbPath);
+			try {
+				held.run("PRAGMA journal_mode = WAL");
+				held.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+				held.prepare("INSERT INTO entries (value) VALUES (?)").run("live");
+				const ownLocks = async () => {
+					const inodes = await Promise.all(
+						[dbPath, `${dbPath}-shm`].map(async file => `:${(await fs.stat(file)).ino}`),
+					);
+					return (
+						(await fs.readFile("/proc/locks", "utf8"))
+							.split("\n")
+							.map(line => line.replace("->", "").trim().split(/\s+/))
+							// OFD locks carry no pid; on this test-owned file they are this process's.
+							.filter(
+								fields =>
+									(fields[4] === String(process.pid) || fields[1] === "OFDLCK") &&
+									inodes.some(ino => fields[5]?.endsWith(ino)),
+							).length
+					);
+				};
+				expect(await ownLocks()).toBe(2);
+
+				expect(getText(await readTool.execute("sqlite-held", { path: dbPath }))).toContain("entries (1 rows)");
+				// A raw read of the live `-shm` opens and closes it through Bun.
+				await readTool.execute("sqlite-held-shm", { path: `${dbPath}-shm:raw` });
+				expect(await ownLocks()).toBe(2);
+				const shmSize = (await fs.stat(`${dbPath}-shm`)).size;
+				await expect(
+					writeTool.execute("sqlite-held-write", { path: `${dbPath}-shm`, content: "overwritten" }),
+				).rejects.toThrow("held open by a SQLite connection");
+				expect((await fs.stat(`${dbPath}-shm`)).size).toBe(shmSize);
+				expect(await ownLocks()).toBe(2);
+			} finally {
+				held.close();
+			}
+		},
+	);
 
 	it("lists tables for a .db database when the magic bytes match SQLite", async () => {
 		const result = await readTool.execute("sqlite-db-list", { path: sqliteDbPath });

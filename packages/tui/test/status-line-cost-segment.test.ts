@@ -44,7 +44,7 @@ function costCtx(options: CostCtxOptions): SegmentContext {
 				options.onAdvisorSubscriptionProbe();
 				return false;
 			},
-			modelRegistry: { isUsingOAuth: () => options.usingSubscription ?? false },
+			modelRegistry: { isUsingSubscription: () => options.usingSubscription ?? false },
 		},
 	} as unknown as SegmentContext;
 }

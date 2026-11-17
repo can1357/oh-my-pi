@@ -256,7 +256,12 @@ fn count_lines(source: &str) -> u32 {
 	if source.is_empty() {
 		0
 	} else {
-		source.lines().count().max(1).min(u32::MAX as usize) as u32
+		let count = if source.len() < 64 {
+			source.lines().count()
+		} else {
+			xutf::lines_str(source, xutf::LineEnds::Lf).count()
+		};
+		count.max(1).min(u32::MAX as usize) as u32
 	}
 }
 
@@ -909,6 +914,15 @@ fn join_line_range(source_lines: &[&str], start_line: u32, end_line: u32) -> Str
 mod tests {
 	use super::*;
 
+	#[test]
+	fn count_lines_matches_str_lines_for_long_sources() {
+		for suffix in ["", "\n", "\r\n", "\n\n", "\r", "\u{2028}"] {
+			let source = format!("{}\r\nlast{suffix}", "é".repeat(40));
+			assert_eq!(count_lines(&source) as usize, source.lines().count(), "{suffix:?}");
+		}
+		assert_eq!(count_lines(""), 0);
+	}
+
 	fn summarize(code: &str, path: &str) -> SummaryResult {
 		summarize_code(SummaryOptions {
 			code:               code.to_string(),
@@ -1019,6 +1033,18 @@ mod tests {
 
 		assert!(result.parsed);
 		assert_eq!(result.language.as_deref(), Some("go"));
+	}
+
+	#[test]
+	fn parses_markdown_nested_past_scanner_state_buffer() {
+		// 355 nested `- ` list items open more blocks than tree-sitter-md's
+		// scanner state fits in tree-sitter's 1024-byte serialization buffer;
+		// tree-sitter-md 0.5.3 overran it (abort in debug, SEGV in release).
+		let code = format!("{}**Total**: 4100\nTARGET_MARKER_XYZ\n", "- ".repeat(355));
+
+		let language = parse_code_status(&code, None, Some("notes.md")).unwrap();
+
+		assert_eq!(language, Some(SupportLang::Markdown));
 	}
 
 	#[test]

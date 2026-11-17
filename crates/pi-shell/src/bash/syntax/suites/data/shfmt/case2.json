@@ -1,0 +1,408 @@
+{
+	"Type": "File",
+	"Pos": {
+		"Offset": 0,
+		"Line": 1,
+		"Col": 1
+	},
+	"End": {
+		"Offset": 23,
+		"Line": 1,
+		"Col": 24
+	},
+	"Stmts": [
+		{
+			"Pos": {
+				"Offset": 0,
+				"Line": 1,
+				"Col": 1
+			},
+			"End": {
+				"Offset": 23,
+				"Line": 1,
+				"Col": 24
+			},
+			"Cmd": {
+				"Type": "CallExpr",
+				"Pos": {
+					"Offset": 0,
+					"Line": 1,
+					"Col": 1
+				},
+				"End": {
+					"Offset": 13,
+					"Line": 1,
+					"Col": 14
+				},
+				"Assigns": [
+					{
+						"Pos": {
+							"Offset": 0,
+							"Line": 1,
+							"Col": 1
+						},
+						"End": {
+							"Offset": 3,
+							"Line": 1,
+							"Col": 4
+						},
+						"Name": {
+							"Pos": {
+								"Offset": 0,
+								"Line": 1,
+								"Col": 1
+							},
+							"End": {
+								"Offset": 1,
+								"Line": 1,
+								"Col": 2
+							},
+							"ValuePos": {
+								"Offset": 0,
+								"Line": 1,
+								"Col": 1
+							},
+							"ValueEnd": {
+								"Offset": 1,
+								"Line": 1,
+								"Col": 2
+							},
+							"Value": "a"
+						},
+						"Value": {
+							"Pos": {
+								"Offset": 2,
+								"Line": 1,
+								"Col": 3
+							},
+							"End": {
+								"Offset": 3,
+								"Line": 1,
+								"Col": 4
+							},
+							"Parts": [
+								{
+									"Type": "Lit",
+									"Pos": {
+										"Offset": 2,
+										"Line": 1,
+										"Col": 3
+									},
+									"End": {
+										"Offset": 3,
+										"Line": 1,
+										"Col": 4
+									},
+									"ValuePos": {
+										"Offset": 2,
+										"Line": 1,
+										"Col": 3
+									},
+									"ValueEnd": {
+										"Offset": 3,
+										"Line": 1,
+										"Col": 4
+									},
+									"Value": "1"
+								}
+							]
+						}
+					},
+					{
+						"Pos": {
+							"Offset": 4,
+							"Line": 1,
+							"Col": 5
+						},
+						"End": {
+							"Offset": 7,
+							"Line": 1,
+							"Col": 8
+						},
+						"Name": {
+							"Pos": {
+								"Offset": 4,
+								"Line": 1,
+								"Col": 5
+							},
+							"End": {
+								"Offset": 5,
+								"Line": 1,
+								"Col": 6
+							},
+							"ValuePos": {
+								"Offset": 4,
+								"Line": 1,
+								"Col": 5
+							},
+							"ValueEnd": {
+								"Offset": 5,
+								"Line": 1,
+								"Col": 6
+							},
+							"Value": "b"
+						},
+						"Value": {
+							"Pos": {
+								"Offset": 6,
+								"Line": 1,
+								"Col": 7
+							},
+							"End": {
+								"Offset": 7,
+								"Line": 1,
+								"Col": 8
+							},
+							"Parts": [
+								{
+									"Type": "Lit",
+									"Pos": {
+										"Offset": 6,
+										"Line": 1,
+										"Col": 7
+									},
+									"End": {
+										"Offset": 7,
+										"Line": 1,
+										"Col": 8
+									},
+									"ValuePos": {
+										"Offset": 6,
+										"Line": 1,
+										"Col": 7
+									},
+									"ValueEnd": {
+										"Offset": 7,
+										"Line": 1,
+										"Col": 8
+									},
+									"Value": "2"
+								}
+							]
+						}
+					}
+				],
+				"Args": [
+					{
+						"Pos": {
+							"Offset": 8,
+							"Line": 1,
+							"Col": 9
+						},
+						"End": {
+							"Offset": 11,
+							"Line": 1,
+							"Col": 12
+						},
+						"Parts": [
+							{
+								"Type": "Lit",
+								"Pos": {
+									"Offset": 8,
+									"Line": 1,
+									"Col": 9
+								},
+								"End": {
+									"Offset": 11,
+									"Line": 1,
+									"Col": 12
+								},
+								"ValuePos": {
+									"Offset": 8,
+									"Line": 1,
+									"Col": 9
+								},
+								"ValueEnd": {
+									"Offset": 11,
+									"Line": 1,
+									"Col": 12
+								},
+								"Value": "cmd"
+							}
+						]
+					},
+					{
+						"Pos": {
+							"Offset": 12,
+							"Line": 1,
+							"Col": 13
+						},
+						"End": {
+							"Offset": 13,
+							"Line": 1,
+							"Col": 14
+						},
+						"Parts": [
+							{
+								"Type": "Lit",
+								"Pos": {
+									"Offset": 12,
+									"Line": 1,
+									"Col": 13
+								},
+								"End": {
+									"Offset": 13,
+									"Line": 1,
+									"Col": 14
+								},
+								"ValuePos": {
+									"Offset": 12,
+									"Line": 1,
+									"Col": 13
+								},
+								"ValueEnd": {
+									"Offset": 13,
+									"Line": 1,
+									"Col": 14
+								},
+								"Value": "x"
+							}
+						]
+					}
+				]
+			},
+			"Position": {
+				"Offset": 0,
+				"Line": 1,
+				"Col": 1
+			},
+			"Redirs": [
+				{
+					"Pos": {
+						"Offset": 14,
+						"Line": 1,
+						"Col": 15
+					},
+					"End": {
+						"Offset": 18,
+						"Line": 1,
+						"Col": 19
+					},
+					"OpPos": {
+						"Offset": 14,
+						"Line": 1,
+						"Col": 15
+					},
+					"Op": ">",
+					"Word": {
+						"Pos": {
+							"Offset": 15,
+							"Line": 1,
+							"Col": 16
+						},
+						"End": {
+							"Offset": 18,
+							"Line": 1,
+							"Col": 19
+						},
+						"Parts": [
+							{
+								"Type": "Lit",
+								"Pos": {
+									"Offset": 15,
+									"Line": 1,
+									"Col": 16
+								},
+								"End": {
+									"Offset": 18,
+									"Line": 1,
+									"Col": 19
+								},
+								"ValuePos": {
+									"Offset": 15,
+									"Line": 1,
+									"Col": 16
+								},
+								"ValueEnd": {
+									"Offset": 18,
+									"Line": 1,
+									"Col": 19
+								},
+								"Value": "out"
+							}
+						]
+					}
+				},
+				{
+					"Pos": {
+						"Offset": 19,
+						"Line": 1,
+						"Col": 20
+					},
+					"End": {
+						"Offset": 23,
+						"Line": 1,
+						"Col": 24
+					},
+					"OpPos": {
+						"Offset": 20,
+						"Line": 1,
+						"Col": 21
+					},
+					"Op": ">&",
+					"N": {
+						"Pos": {
+							"Offset": 19,
+							"Line": 1,
+							"Col": 20
+						},
+						"End": {
+							"Offset": 20,
+							"Line": 1,
+							"Col": 21
+						},
+						"ValuePos": {
+							"Offset": 19,
+							"Line": 1,
+							"Col": 20
+						},
+						"ValueEnd": {
+							"Offset": 20,
+							"Line": 1,
+							"Col": 21
+						},
+						"Value": "2"
+					},
+					"Word": {
+						"Pos": {
+							"Offset": 22,
+							"Line": 1,
+							"Col": 23
+						},
+						"End": {
+							"Offset": 23,
+							"Line": 1,
+							"Col": 24
+						},
+						"Parts": [
+							{
+								"Type": "Lit",
+								"Pos": {
+									"Offset": 22,
+									"Line": 1,
+									"Col": 23
+								},
+								"End": {
+									"Offset": 23,
+									"Line": 1,
+									"Col": 24
+								},
+								"ValuePos": {
+									"Offset": 22,
+									"Line": 1,
+									"Col": 23
+								},
+								"ValueEnd": {
+									"Offset": 23,
+									"Line": 1,
+									"Col": 24
+								},
+								"Value": "1"
+							}
+						]
+					}
+				}
+			]
+		}
+	]
+}

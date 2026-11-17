@@ -26,11 +26,13 @@ const TRUNKS = ["upstream/main", "origin/main"] as const satisfies readonly stri
 // warnings like everything else.
 const VENDORED_FORK_EXCLUDES = [
 	"--exclude",
-	"brush-core",
-	"--exclude",
-	"brush-parser",
-	"--exclude",
 	"cfg_aliases",
+	"--exclude",
+	"jaq-core",
+	"--exclude",
+	"jaq-json",
+	"--exclude",
+	"jaq-std",
 	"--exclude",
 	"napi",
 ] as const satisfies readonly string[];

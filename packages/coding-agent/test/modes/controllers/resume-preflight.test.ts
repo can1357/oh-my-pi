@@ -43,6 +43,7 @@ function createResumeContext(opts: { flushFails?: boolean; sourceCwd?: string; p
 		session: { switchSession },
 		sessionManager: {
 			getCwd: () => state.cwd,
+			getRecordedCwd: () => state.cwd,
 			getSessionDir: () => "/tmp",
 			getSessionFile: () => opts.previousSessionFile,
 			moveTo,
@@ -223,7 +224,11 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
+		const listed = [session];
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+			sessions: listed,
+			complete: Promise.resolve(listed),
+		});
 		const OriginalSelector = SessionSelector.SessionSelectorComponent;
 		const selectionPromises: Promise<void>[] = [];
 		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(
@@ -279,7 +284,11 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
+		const listed = [session];
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue({
+			sessions: listed,
+			complete: Promise.resolve(listed),
+		});
 		const OriginalSelector = SessionSelector.SessionSelectorComponent;
 		let selectionPromise: Promise<void> | undefined;
 		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(

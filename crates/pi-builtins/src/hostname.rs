@@ -6,12 +6,11 @@
 use std::net::ToSocketAddrs;
 use std::{collections::hash_set::HashSet, ffi::OsString, io::Write};
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
 #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
 use dns_lookup::lookup_host;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser};
 
 static OPT_DOMAIN: &str = "domain";
 static OPT_IP_ADDRESS: &str = "ip-address";
@@ -66,8 +65,7 @@ impl Utility for Hostname {
 		};
 
 		if self.matches.get_one::<OsString>(OPT_HOST).is_some() {
-			// The shared `hostname` dependency does not enable its process-global
-			// `set` feature, so an operand must fail explicitly rather than no-op.
+			// Changing the process host's name is not supported by this builtin.
 			host.error("setting the hostname is not supported by the in-process builtin", 1);
 			return 1;
 		}
@@ -128,8 +126,58 @@ fn app() -> Command {
 		)
 }
 
+#[cfg(unix)]
+fn get_hostname() -> std::io::Result<OsString> {
+	use std::os::unix::ffi::OsStringExt;
+
+	let limit = unsafe { uucore::libc::sysconf(uucore::libc::_SC_HOST_NAME_MAX) }.max(255);
+	let mut buffer = vec![0; limit as usize + 1];
+	if unsafe {
+		uucore::libc::gethostname(buffer.as_mut_ptr().cast(), limit as usize)
+	} != 0
+	{
+		return Err(std::io::Error::last_os_error());
+	}
+	buffer.truncate(buffer.iter().position(|&byte| byte == 0).unwrap_or(buffer.len()));
+	Ok(OsString::from_vec(buffer))
+}
+
+#[cfg(windows)]
+fn get_hostname() -> std::io::Result<OsString> {
+	use std::os::windows::ffi::OsStringExt;
+	use windows_sys::Win32::System::SystemInformation::{
+		ComputerNamePhysicalDnsHostname, GetComputerNameExW,
+	};
+
+	let mut size = 0;
+	unsafe {
+		GetComputerNameExW(ComputerNamePhysicalDnsHostname, std::ptr::null_mut(), &mut size);
+	}
+	if size == 0 {
+		return Err(std::io::Error::last_os_error());
+	}
+	let mut buffer = Vec::with_capacity(size as usize);
+	if unsafe {
+		GetComputerNameExW(ComputerNamePhysicalDnsHostname, buffer.as_mut_ptr(), &mut size)
+	} == 0
+	{
+		return Err(std::io::Error::last_os_error());
+	}
+	// The API initializes exactly `size` UTF-16 code units, excluding the terminator.
+	unsafe { buffer.set_len(size as usize) };
+	Ok(OsString::from_wide(&buffer))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn get_hostname() -> std::io::Result<OsString> {
+	Err(std::io::Error::new(
+		std::io::ErrorKind::Unsupported,
+		"hostname lookup is not supported on this platform",
+	))
+}
+
 fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String> {
-	let hostname = hostname::get()
+	let hostname = get_hostname()
 		.map_err(|err| format!("failed to get hostname: {err}"))?
 		.to_string_lossy()
 		.into_owned();
@@ -195,11 +243,6 @@ fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String>
 		writeln!(host.stdout, "{hostname}").map_err(|err| err.to_string())?;
 		Ok(())
 	}
-}
-
-/// Creates the `hostname` builtin registration.
-pub(crate) fn hostname_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Hostname, SE>()
 }
 
 #[cfg(test)]

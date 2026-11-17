@@ -1,4 +1,4 @@
-//! `diff` builtin: compare files line by line using the `similar` library.
+//! `diff` builtin: compare files line by line using shared Myers primitives.
 //!
 //! Ported from `pi-uu-diff` 0.8.0, extended toward GNU diff: normal output by
 //! default, unified (`-u`/`-U`) and context (`-c`/`-C`) formats, whitespace and
@@ -14,11 +14,14 @@ use std::{
 	time::SystemTime,
 };
 
-use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgAction, Parser};
-use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices};
+use jiff::{Timestamp, tz::TimeZone};
+use pi_diff::{Run, diff_line_tokens};
 
-use crate::host::{Host, Utility, forward_slash_display, strip_errno, util};
+use crate::{
+	host::{Host, Utility, forward_slash_display, strip_errno},
+	time_zone::shell_time_zone,
+};
 
 /// Parsed `diff` invocation.
 #[derive(Parser)]
@@ -134,6 +137,7 @@ struct Options<'a> {
 	strip_trailing_cr:   bool,
 	labels:              &'a [OsString],
 	excludes:            &'a [glob::Pattern],
+	time_zone:           &'a TimeZone,
 }
 
 /// A classified operand and its resolved filesystem path.
@@ -201,6 +205,7 @@ impl Utility for Diff {
 		} else {
 			Format::Normal
 		};
+		let time_zone = shell_time_zone(host);
 		let opts = Options {
 			format,
 			brief: self.brief,
@@ -214,6 +219,7 @@ impl Utility for Diff {
 			strip_trailing_cr: self.strip_trailing_cr,
 			labels: &self.labels,
 			excludes: &excludes,
+			time_zone: &time_zone,
 		};
 		match diff_main(&self.files, opts, host) {
 			Ok(code) => code,
@@ -403,18 +409,68 @@ fn normalize_lines<'a>(file: &FileLines<'a>, opts: Options<'_>) -> Vec<Cow<'a, s
 	norm
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineChange {
+	Equal,
+	Delete,
+	Insert,
+	Replace,
+}
+
+struct LineEdit {
+	kind: LineChange,
+	old:  Range<usize>,
+	new:  Range<usize>,
+}
+
+/// Project token runs onto original line positions, joining adjacent removals
+/// and additions into one replacement for normal/context output and `-B`.
+fn line_edits(runs: &[Run]) -> Vec<LineEdit> {
+	let mut edits: Vec<LineEdit> = Vec::with_capacity(runs.len());
+	let (mut old, mut new) = (0, 0);
+	for run in runs {
+		let old_end = old + if run.added { 0 } else { run.count as usize };
+		let new_end = new + if run.removed { 0 } else { run.count as usize };
+		let kind = if run.added {
+			LineChange::Insert
+		} else if run.removed {
+			LineChange::Delete
+		} else {
+			LineChange::Equal
+		};
+		if let Some(last) = edits.last_mut().filter(|last| {
+			last.kind != LineChange::Equal && kind != LineChange::Equal
+		}) {
+			last.old.end = old_end;
+			last.new.end = new_end;
+			last.kind = if last.old.is_empty() {
+				LineChange::Insert
+			} else if last.new.is_empty() {
+				LineChange::Delete
+			} else {
+				LineChange::Replace
+			};
+		} else {
+			edits.push(LineEdit { kind, old: old..old_end, new: new..new_end });
+		}
+		old = old_end;
+		new = new_end;
+	}
+	edits
+}
+
 /// `-B`: a change is suppressed when every line it touches is blank.
 fn is_suppressed(
-	op: &DiffOp,
+	op: &LineEdit,
 	norm_a: &[Cow<'_, str>],
 	norm_b: &[Cow<'_, str>],
 	opts: Options<'_>,
 ) -> bool {
-	if !opts.ignore_blank_lines || op.tag() == DiffTag::Equal {
+	if !opts.ignore_blank_lines || op.kind == LineChange::Equal {
 		return false;
 	}
 	let blank = |line: &Cow<'_, str>| line.trim().is_empty();
-	norm_a[op.old_range()].iter().all(blank) && norm_b[op.new_range()].iter().all(blank)
+	norm_a[op.old.clone()].iter().all(blank) && norm_b[op.new.clone()].iter().all(blank)
 }
 
 /// Writes one line to the builtin's stdout writer, mapping I/O failures like
@@ -459,12 +515,12 @@ fn diff_pair(
 	let new = FileLines::split(&text_b);
 	let norm_a = normalize_lines(&old, opts);
 	let norm_b = normalize_lines(&new, opts);
-	let ops = capture_diff_slices(Algorithm::Myers, &norm_a, &norm_b);
+	let ops = line_edits(&diff_line_tokens(&norm_a, &norm_b));
 	let suppressed: Vec<bool> =
 		ops.iter().map(|op| is_suppressed(op, &norm_a, &norm_b, opts)).collect();
 	// Bytes differed, but every change is ignorable (-w/-b/-i/-B/CR): the
 	// files count as identical, exit 0.
-	if !ops.iter().zip(&suppressed).any(|(op, &sup)| op.tag() != DiffTag::Equal && !sup) {
+	if !ops.iter().zip(&suppressed).any(|(op, &sup)| op.kind != LineChange::Equal && !sup) {
 		if opts.report_identical {
 			wline(out, format_args!("Files {label_a} and {label_b} are identical"))?;
 		}
@@ -480,13 +536,13 @@ fn diff_pair(
 	match opts.format {
 		Format::Normal => write_normal(out, &ops, &suppressed, &old, &new)?,
 		Format::Unified(context) => {
-			wline(out, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(out, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			wline(out, format_args!("--- {}", header(opts.labels.first(), name_a, mtime_a, opts.time_zone)))?;
+			wline(out, format_args!("+++ {}", header(opts.labels.get(1), name_b, mtime_b, opts.time_zone)))?;
 			write_unified(out, &ops, &suppressed, &old, &new, context)?;
 		},
 		Format::Context(context) => {
-			wline(out, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a)))?;
-			wline(out, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b)))?;
+			wline(out, format_args!("*** {}", header(opts.labels.first(), name_a, mtime_a, opts.time_zone)))?;
+			wline(out, format_args!("--- {}", header(opts.labels.get(1), name_b, mtime_b, opts.time_zone)))?;
 			write_context_format(out, &ops, &suppressed, &old, &new, context)?;
 		},
 	}
@@ -499,20 +555,24 @@ fn display_label(label: Option<&OsString>, name: &Path) -> String {
 
 /// Unified/context header field: the label verbatim when given, otherwise
 /// `NAME<TAB>TIMESTAMP` with the GNU timestamp format.
-fn header(label: Option<&OsString>, name: &Path, mtime: Option<SystemTime>) -> String {
+fn header(label: Option<&OsString>, name: &Path, mtime: Option<SystemTime>, time_zone: &TimeZone) -> String {
 	match label {
 		Some(label) => label.to_string_lossy().into_owned(),
-		None => format!("{}\t{}", name.display(), timestamp(mtime)),
+		None => format!("{}\t{}", name.display(), timestamp(mtime, time_zone)),
 	}
 }
 
-/// GNU header timestamp: `%Y-%m-%d %H:%M:%S.%N %z` in local time. Stdin has
-/// no mtime and uses the current time, like GNU.
-fn timestamp(mtime: Option<SystemTime>) -> String {
+/// GNU header timestamp: `%Y-%m-%d %H:%M:%S.%N %z` in the shell's time zone.
+/// Stdin has no mtime and uses the current time, like GNU. Outside jiff's
+/// range, retain chrono's calendar format and nanoseconds in UTC.
+fn timestamp(mtime: Option<SystemTime>, time_zone: &TimeZone) -> String {
 	let time = mtime.unwrap_or_else(SystemTime::now);
-	chrono::DateTime::<chrono::Local>::from(time)
-		.format("%Y-%m-%d %H:%M:%S%.9f %z")
-		.to_string()
+	match Timestamp::try_from(time) {
+		Ok(timestamp) => timestamp.to_zoned(time_zone.clone()).strftime("%Y-%m-%d %H:%M:%S.%N %z").to_string(),
+		Err(_) => chrono::DateTime::<chrono::Utc>::from(time)
+			.format("%Y-%m-%d %H:%M:%S%.9f %z")
+			.to_string(),
+	}
 }
 
 /// Writes `range` lines of `file` prefixed with `marker`, emitting the GNU
@@ -544,28 +604,28 @@ fn normal_range(range: &Range<usize>) -> String {
 /// Default diff output: `3c3` / `<` / `---` / `>` change commands.
 fn write_normal(
 	out: &mut impl Write,
-	ops: &[DiffOp],
+	ops: &[LineEdit],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
 	new: &FileLines<'_>,
 ) -> Result<(), String> {
 	for (op, &sup) in ops.iter().zip(suppressed) {
-		if sup || op.tag() == DiffTag::Equal {
+		if sup || op.kind == LineChange::Equal {
 			continue;
 		}
-		let (old_range, new_range) = (op.old_range(), op.new_range());
-		match op.tag() {
-			DiffTag::Delete => {
+		let (old_range, new_range) = (op.old.clone(), op.new.clone());
+		match op.kind {
+			LineChange::Delete => {
 				// `5d4`: the trailing number is the new-file line *after which*
 				// the deleted lines would have appeared (0 for a leading delete).
 				wline(out, format_args!("{}d{}", normal_range(&old_range), new_range.start))?;
 				write_marked(out, "< ", old_range, old)?;
 			},
-			DiffTag::Insert => {
+			LineChange::Insert => {
 				wline(out, format_args!("{}a{}", old_range.start, normal_range(&new_range)))?;
 				write_marked(out, "> ", new_range, new)?;
 			},
-			DiffTag::Replace => {
+			LineChange::Replace => {
 				wline(
 					out,
 					format_args!("{}c{}", normal_range(&old_range), normal_range(&new_range)),
@@ -574,7 +634,7 @@ fn write_normal(
 				wline(out, format_args!("---"))?;
 				write_marked(out, "> ", new_range, new)?;
 			},
-			DiffTag::Equal => unreachable!(),
+			LineChange::Equal => unreachable!(),
 		}
 	}
 	Ok(())
@@ -583,14 +643,14 @@ fn write_normal(
 /// Groups changed ops into hunks: two changes share a hunk when the equal run
 /// between them is at most `2 * context` lines. Hunks whose every change is
 /// `-B`-suppressed are dropped.
-fn group_ops(ops: &[DiffOp], suppressed: &[bool], context: usize) -> Vec<(usize, usize)> {
+fn group_ops(ops: &[LineEdit], suppressed: &[bool], context: usize) -> Vec<(usize, usize)> {
 	let mut groups: Vec<(usize, usize)> = Vec::new();
 	for (idx, op) in ops.iter().enumerate() {
-		if op.tag() == DiffTag::Equal {
+		if op.kind == LineChange::Equal {
 			continue;
 		}
 		if let Some(last) = groups.last_mut() {
-			let gap = op.old_range().start - ops[last.1].old_range().end;
+			let gap = op.old.start - ops[last.1].old.end;
 			if gap <= 2 * context {
 				last.1 = idx;
 				continue;
@@ -602,15 +662,15 @@ fn group_ops(ops: &[DiffOp], suppressed: &[bool], context: usize) -> Vec<(usize,
 		ops[first..=last]
 			.iter()
 			.zip(&suppressed[first..=last])
-			.any(|(op, &sup)| op.tag() != DiffTag::Equal && !sup)
+			.any(|(op, &sup)| op.kind != LineChange::Equal && !sup)
 	});
 	groups
 }
 
 /// Equal-line context available before and after a hunk, clipped to `context`.
-fn group_padding(ops: &[DiffOp], first: usize, last: usize, context: usize) -> (usize, usize) {
-	let lead = if first > 0 { context.min(ops[first - 1].old_range().len()) } else { 0 };
-	let trail = ops.get(last + 1).map_or(0, |op| context.min(op.old_range().len()));
+fn group_padding(ops: &[LineEdit], first: usize, last: usize, context: usize) -> (usize, usize) {
+	let lead = if first > 0 { context.min(ops[first - 1].old.len()) } else { 0 };
+	let trail = ops.get(last + 1).map_or(0, |op| context.min(op.old.len()));
 	(lead, trail)
 }
 
@@ -626,7 +686,7 @@ fn unified_range(start: usize, count: usize) -> String {
 
 fn write_unified(
 	out: &mut impl Write,
-	ops: &[DiffOp],
+	ops: &[LineEdit],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
 	new: &FileLines<'_>,
@@ -634,10 +694,10 @@ fn write_unified(
 ) -> Result<(), String> {
 	for (first, last) in group_ops(ops, suppressed, context) {
 		let (lead, trail) = group_padding(ops, first, last, context);
-		let old_start = ops[first].old_range().start - lead;
-		let new_start = ops[first].new_range().start - lead;
-		let old_count = ops[last].old_range().end + trail - old_start;
-		let new_count = ops[last].new_range().end + trail - new_start;
+		let old_start = ops[first].old.start - lead;
+		let new_start = ops[first].new.start - lead;
+		let old_count = ops[last].old.end + trail - old_start;
+		let new_count = ops[last].new.end + trail - new_start;
 		wline(
 			out,
 			format_args!(
@@ -646,19 +706,19 @@ fn write_unified(
 				unified_range(new_start, new_count)
 			),
 		)?;
-		write_marked(out, " ", old_start..ops[first].old_range().start, old)?;
+		write_marked(out, " ", old_start..ops[first].old.start, old)?;
 		for op in &ops[first..=last] {
-			match op.tag() {
-				DiffTag::Equal => write_marked(out, " ", op.old_range(), old)?,
-				DiffTag::Delete => write_marked(out, "-", op.old_range(), old)?,
-				DiffTag::Insert => write_marked(out, "+", op.new_range(), new)?,
-				DiffTag::Replace => {
-					write_marked(out, "-", op.old_range(), old)?;
-					write_marked(out, "+", op.new_range(), new)?;
+			match op.kind {
+				LineChange::Equal => write_marked(out, " ", op.old.clone(), old)?,
+				LineChange::Delete => write_marked(out, "-", op.old.clone(), old)?,
+				LineChange::Insert => write_marked(out, "+", op.new.clone(), new)?,
+				LineChange::Replace => {
+					write_marked(out, "-", op.old.clone(), old)?;
+					write_marked(out, "+", op.new.clone(), new)?;
 				},
 			}
 		}
-		let tail = ops[last].old_range().end;
+		let tail = ops[last].old.end;
 		write_marked(out, " ", tail..tail + trail, old)?;
 	}
 	Ok(())
@@ -675,7 +735,7 @@ fn context_range(start: usize, count: usize) -> String {
 
 fn write_context_format(
 	out: &mut impl Write,
-	ops: &[DiffOp],
+	ops: &[LineEdit],
 	suppressed: &[bool],
 	old: &FileLines<'_>,
 	new: &FileLines<'_>,
@@ -683,39 +743,39 @@ fn write_context_format(
 ) -> Result<(), String> {
 	for (first, last) in group_ops(ops, suppressed, context) {
 		let (lead, trail) = group_padding(ops, first, last, context);
-		let old_start = ops[first].old_range().start - lead;
-		let new_start = ops[first].new_range().start - lead;
-		let old_count = ops[last].old_range().end + trail - old_start;
-		let new_count = ops[last].new_range().end + trail - new_start;
+		let old_start = ops[first].old.start - lead;
+		let new_start = ops[first].new.start - lead;
+		let old_count = ops[last].old.end + trail - old_start;
+		let new_count = ops[last].new.end + trail - new_start;
 		let group = &ops[first..=last];
 		wline(out, format_args!("***************"))?;
 		wline(out, format_args!("*** {} ****", context_range(old_start, old_count)))?;
 		// GNU omits a side's body entirely when it has no changes.
-		if group.iter().any(|op| matches!(op.tag(), DiffTag::Delete | DiffTag::Replace)) {
-			write_marked(out, "  ", old_start..ops[first].old_range().start, old)?;
+		if group.iter().any(|op| matches!(op.kind, LineChange::Delete | LineChange::Replace)) {
+			write_marked(out, "  ", old_start..ops[first].old.start, old)?;
 			for op in group {
-				match op.tag() {
-					DiffTag::Equal => write_marked(out, "  ", op.old_range(), old)?,
-					DiffTag::Delete => write_marked(out, "- ", op.old_range(), old)?,
-					DiffTag::Replace => write_marked(out, "! ", op.old_range(), old)?,
-					DiffTag::Insert => {},
+				match op.kind {
+					LineChange::Equal => write_marked(out, "  ", op.old.clone(), old)?,
+					LineChange::Delete => write_marked(out, "- ", op.old.clone(), old)?,
+					LineChange::Replace => write_marked(out, "! ", op.old.clone(), old)?,
+					LineChange::Insert => {},
 				}
 			}
-			let tail = ops[last].old_range().end;
+			let tail = ops[last].old.end;
 			write_marked(out, "  ", tail..tail + trail, old)?;
 		}
 		wline(out, format_args!("--- {} ----", context_range(new_start, new_count)))?;
-		if group.iter().any(|op| matches!(op.tag(), DiffTag::Insert | DiffTag::Replace)) {
-			write_marked(out, "  ", new_start..ops[first].new_range().start, new)?;
+		if group.iter().any(|op| matches!(op.kind, LineChange::Insert | LineChange::Replace)) {
+			write_marked(out, "  ", new_start..ops[first].new.start, new)?;
 			for op in group {
-				match op.tag() {
-					DiffTag::Equal => write_marked(out, "  ", op.new_range(), new)?,
-					DiffTag::Insert => write_marked(out, "+ ", op.new_range(), new)?,
-					DiffTag::Replace => write_marked(out, "! ", op.new_range(), new)?,
-					DiffTag::Delete => {},
+				match op.kind {
+					LineChange::Equal => write_marked(out, "  ", op.new.clone(), new)?,
+					LineChange::Insert => write_marked(out, "+ ", op.new.clone(), new)?,
+					LineChange::Replace => write_marked(out, "! ", op.new.clone(), new)?,
+					LineChange::Delete => {},
 				}
 			}
-			let tail = ops[last].new_range().end;
+			let tail = ops[last].new.end;
 			write_marked(out, "  ", tail..tail + trail, new)?;
 		}
 	}
@@ -901,17 +961,15 @@ fn child_display(dir: &Path, name: &OsStr) -> PathBuf {
 	forward_slash_display(&joined).unwrap_or(joined)
 }
 
-/// Creates the `diff` builtin registration.
-pub(crate) fn diff_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Diff, SE>()
-}
-
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::Path};
+	use std::{ffi::OsString, fs, path::Path, time::Duration};
 
-	use super::Diff;
-	use crate::host::run_util;
+	use chrono::TimeZone as _;
+	use clap::Parser as _;
+
+	use super::{Diff, Format, Options, diff_pair};
+	use crate::host::{Host, Utility, run_caught, run_util};
 
 	fn run_in(cwd: &Path, stdin: &str, args: &[&str]) -> (i32, String, String) {
 		let (code, capture) = run_util::<Diff>(args, stdin, cwd);
@@ -982,6 +1040,104 @@ mod tests {
 		assert_eq!((stamp.as_bytes()[4], stamp.as_bytes()[7]), (b'-', b'-'), "got: {stamp}");
 		assert!(stamp.contains('.') && (stamp.contains(" +") || stamp.contains(" -")));
 		assert!(stdout.contains("@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"), "got: {stdout}");
+	}
+
+	fn assert_headers_use_the_shell_time_zone(flag: &str, markers: [&str; 2]) {
+		let dir = tempfile::tempdir().unwrap();
+		write_pair(dir.path(), "old\n", "new\n");
+		let time = std::time::UNIX_EPOCH + Duration::new(1_700_000_000, 123_456_700);
+		for name in ["a.txt", "b.txt"] {
+			fs::File::options()
+				.write(true)
+				.open(dir.path().join(name))
+				.unwrap()
+				.set_times(fs::FileTimes::new().set_modified(time))
+				.unwrap();
+		}
+		let (mut host, capture) = Host::for_test("diff", "", dir.path());
+		host.set_test_var("TZ", "Asia/Tokyo");
+		let argv: Vec<OsString> = ["diff", flag, "a.txt", "b.txt"].into_iter().map(OsString::from).collect();
+		let parsed = Diff::try_parse_from(Diff::rewrite_argv(argv).unwrap()).unwrap();
+		assert_eq!(run_caught::<Diff>(parsed, &mut host), 1, "{}", capture.err());
+		assert_eq!(capture.err(), "");
+		let stdout = capture.out();
+		let mut lines = stdout.lines();
+		for (marker, name) in markers.into_iter().zip(["a.txt", "b.txt"]) {
+			assert_eq!(lines.next().unwrap(), format!("{marker} {name}\t2023-11-15 07:13:20.123456700 +0900"));
+		}
+	}
+
+	#[test]
+	fn unified_headers_use_the_shell_time_zone() {
+		assert_headers_use_the_shell_time_zone("-u", ["---", "+++"]);
+	}
+
+	#[test]
+	fn context_headers_use_the_shell_time_zone() {
+		assert_headers_use_the_shell_time_zone("-c", ["***", "---"]);
+	}
+
+	fn assert_out_of_range_headers(flag: &str, format: Format, markers: [&str; 2]) {
+		for (year, stamp) in [
+			(10000, "+10000-01-01 00:00:00.123456700 +0000"),
+			(-10000, "-10000-01-01 00:00:00.123456700 +0000"),
+		] {
+			let dir = tempfile::tempdir().unwrap();
+			write_pair(dir.path(), "old\n", "new\n");
+			let Some(time) = crate::time_zone::system_time_at(
+				chrono::Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap(),
+				123_456_700,
+			) else {
+				eprintln!("year {year}: SystemTime cannot represent it on this platform; skipping");
+				continue;
+			};
+			let mut stored = true;
+			for name in ["a.txt", "b.txt"] {
+				let file = fs::File::options().write(true).open(dir.path().join(name)).unwrap();
+				if let Err(error) = file.set_times(fs::FileTimes::new().set_modified(time)) {
+					eprintln!("year {year}: File::set_times failed ({error}); checking supplied SystemTime");
+					stored = false;
+				} else if file.metadata().unwrap().modified().unwrap() != time {
+					eprintln!("year {year}: filesystem clamped mtime; checking supplied SystemTime");
+					stored = false;
+				}
+			}
+			let time_zone = jiff::tz::TimeZone::get("Asia/Tokyo").unwrap();
+			let stdout = if stored {
+				let (mut host, capture) = Host::for_test("diff", "", dir.path());
+				host.set_test_var("TZ", "Asia/Tokyo");
+				let parsed = Diff::try_parse_from(["diff", flag, "a.txt", "b.txt"]).unwrap();
+				assert_eq!(run_caught::<Diff>(parsed, &mut host), 1, "{}", capture.err());
+				assert_eq!(capture.err(), "");
+				capture.out()
+			} else {
+				let opts = Options {
+					format, brief: false, report_identical: false, recursive: false, new_file: false,
+					ignore_case: false, ignore_all_space: false, ignore_space_change: false,
+					ignore_blank_lines: false, strip_trailing_cr: false, labels: &[], excludes: &[],
+					time_zone: &time_zone,
+				};
+				let mut output = Vec::new();
+				assert!(diff_pair(Path::new("a.txt"), b"old\n", Some(time), Path::new("b.txt"),
+					b"new\n", Some(time), opts, None, &mut output).unwrap());
+				String::from_utf8(output).unwrap()
+			};
+			let mut lines = stdout.lines();
+			for (marker, name) in markers.into_iter().zip(["a.txt", "b.txt"]) {
+				assert_eq!(lines.next().unwrap(), format!("{marker} {name}\t{stamp}"));
+			}
+			assert!(stdout.contains("old\n") && stdout.contains("new\n"), "got: {stdout}");
+		}
+	}
+
+	#[test]
+	fn unified_headers_keep_out_of_range_timestamps() {
+		assert_out_of_range_headers("-u", Format::Unified(3), ["---", "+++"]);
+	}
+
+	#[test]
+	fn context_headers_keep_out_of_range_timestamps() {
+		assert_out_of_range_headers("-c", Format::Context(3), ["***", "---"]);
 	}
 
 	// Defends: -L/--label (twice) replaces name *and* timestamp in headers.
@@ -1119,6 +1275,46 @@ mod tests {
 		);
 		let (code, stdout, _) = run_in(dir.path(), "", &["-B", "a.txt", "b.txt"]);
 		assert_eq!((code, stdout.as_str()), (1, "10c11\n< j\n---\n> J\n"));
+	}
+
+	#[test]
+	fn blank_replacements_stay_attached_to_nonblank_changes() {
+		let dir = tempfile::tempdir().unwrap();
+		write_pair(dir.path(), "α\n\nω\n", "α\nβ\nω\n");
+		assert_eq!(
+			run_in(dir.path(), "", &["-B", "a.txt", "b.txt"]),
+			(1, "2c2\n< \n---\n> β\n".to_string(), String::new())
+		);
+	}
+
+	#[test]
+	fn blank_hunk_suppression_respects_context_boundary() {
+		let dir = tempfile::tempdir().unwrap();
+		// Two equal lines join the blank change to the real change at -U1.
+		write_pair(dir.path(), "a\nb\nold\n", "\na\nb\nnew\n");
+		let (code, stdout, stderr) = run_in(dir.path(), "", &["-B", "-U1", "a.txt", "b.txt"]);
+		assert_eq!((code, stderr.as_str()), (1, ""));
+		assert!(stdout.ends_with("@@ -1,3 +1,4 @@\n+\n a\n b\n-old\n+new\n"), "{stdout}");
+
+		// One extra equal line separates the blank-only hunk, which is dropped.
+		write_pair(dir.path(), "a\nb\nc\nold\n", "\na\nb\nc\nnew\n");
+		let (code, stdout, stderr) = run_in(dir.path(), "", &["-B", "-U1", "a.txt", "b.txt"]);
+		assert_eq!((code, stderr.as_str()), (1, ""));
+		assert!(stdout.ends_with("@@ -3,2 +4,2 @@\n c\n-old\n+new\n"), "{stdout}");
+		assert_eq!(stdout.matches("@@ -").count(), 1);
+	}
+
+	#[test]
+	fn normalized_keys_render_original_unicode_and_eof() {
+		let dir = tempfile::tempdir().unwrap();
+		write_pair(dir.path(), " É \n古\n", "é\n新");
+		let (code, stdout, stderr) =
+			run_in(dir.path(), "", &["-iw", "-U1", "a.txt", "b.txt"]);
+		assert_eq!((code, stderr.as_str()), (1, ""));
+		assert!(
+			stdout.ends_with("@@ -1,2 +1,2 @@\n  É \n-古\n+新\n\\ No newline at end of file\n"),
+			"{stdout}"
+		);
 	}
 
 	// Defends: --strip-trailing-cr equates CRLF and LF inputs.

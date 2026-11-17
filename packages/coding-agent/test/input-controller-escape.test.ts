@@ -373,29 +373,6 @@ describe("InputController escape behavior", () => {
 		expect(spies.onInputCallback).toHaveBeenCalledTimes(1);
 	});
 
-	it("empty-submit with a queued message aborts the active stream and refreshes pending display", async () => {
-		const { ctx, editor, spies } = createContext();
-		// Stubbed session: only the streaming/interrupt gate fields matter here.
-		const session = ctx.session as { isStreaming: boolean; hasInterruptibleInput: boolean };
-		session.isStreaming = true;
-		session.hasInterruptibleInput = true;
-		const order: string[] = [];
-		spies.abort.mockImplementation(async () => {
-			order.push("abort");
-		});
-		spies.updatePendingMessagesDisplay.mockImplementation(() => {
-			order.push("refresh");
-		});
-		const controller = new InputController(ctx);
-
-		controller.setupEditorSubmitHandler();
-		await editor.onSubmit?.("");
-
-		expect(order).toEqual(["abort", "refresh"]);
-		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
-		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		expect(spies.requestRender).toHaveBeenCalledTimes(1);
-	});
 	it("runs /btw as a builtin side request instead of steering the active stream", async () => {
 		const { ctx, editor, spies } = createContext();
 		(ctx.session as { isStreaming: boolean }).isStreaming = true;

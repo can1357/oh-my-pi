@@ -3,6 +3,10 @@
 provider "openrouter" {
 	default-model "openai/gpt-5.5"
 	env "OPENROUTER_API_KEY"
+	// A keyed `/models` call is filtered by workspace guardrails (model and
+	// provider allow-lists); an anonymous call returns the public roster. A
+	// successful fetch therefore replaces bundled chat rows.
+	dynamic-models-authoritative #true
 	discovery label="OpenRouter" allow-unauthenticated=#true
 	kind-apis {
 		embedding "openai-embeddings"

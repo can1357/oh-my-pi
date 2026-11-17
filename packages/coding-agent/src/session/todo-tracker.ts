@@ -1,4 +1,5 @@
 import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import { getAnthropicCompactionPayload } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
@@ -6,6 +7,7 @@ import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
 import postCompactionTodoPrompt from "../prompts/system/post-compaction-todo.md" with { type: "text" };
+import { toolWireName } from "../tools/builtin-names";
 import { getLatestTodoPhasesFromEntries, getLatestTodoSnapshotIdentity, isTodoPhase } from "../tools/todo";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "../session/session-entries";
@@ -15,10 +17,24 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
 import { cfgTaskBatch, cfgTaskEager } from "../task/settings";
-import { cfgTodoEager, cfgTodoEnabled, cfgTodoReminders, cfgTodoRemindersMax } from "../tools/settings";
+import {
+	cfgTodoEager,
+	cfgTodoEnabled,
+	cfgTodoMidRunNudges,
+	cfgTodoReminders,
+	cfgTodoRemindersMax,
+} from "../tools/settings";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
+/** `todo.midRunNudges: capped` — unanswered nudges allowed before going silent until the next reset. */
 const MID_RUN_NUDGE_MAX_PER_CYCLE = 2;
+/**
+ * `todo.midRunNudges: backoff` — how many times the threshold may double while
+ * nudges go unanswered. A model that keeps working without touching `todo`
+ * still gets reminded — at 12, 24, 48, 96, then every 192 mutating results —
+ * instead of falling silent after the second reminder for the rest of the turn.
+ */
+const MID_RUN_NUDGE_BACKOFF_DOUBLINGS = 4;
 const MUTATING_TOOLS: Record<string, true> = {
 	bash: true,
 	eval: true,
@@ -105,23 +121,42 @@ function snapshotKeptAfterCompaction(
 	}
 	const snapshotEntry = entries[snapshotIndex];
 	if (snapshotEntry?.type !== "message" || snapshotEntry.message.role !== "toolResult") return false;
+	// Native todo operations render the list; Cursor's canonical sync results have
+	// no operation metadata and render only counts. Their details are not sent to
+	// the model, so retaining the result does not make the tasks visible. Legacy
+	// blocked statuses also need reassertion after canonical loading makes them pending.
+	const details = snapshotEntry.message.details;
+	if (
+		!isRecord(details) ||
+		typeof details.op !== "string" ||
+		!Array.isArray(details.phases) ||
+		!details.phases.every(isTodoPhase)
+	) {
+		return false;
+	}
 	// Pruning preserves details.phases for tracker rehydration but replaces the
 	// model-visible result with a placeholder, so it is not a visible todo list.
 	if (snapshotEntry.message.prunedAt !== undefined) return false;
+	// Every compaction lane emits the raw suffix after the compaction itself,
+	// independently of whether its kept/replay boundary can be resolved.
+	if (compactionIndex >= 0 && snapshotIndex > compactionIndex) return true;
 	// OpenAI replacement history does not guarantee the original todo toolResult
 	// survives (V2 retains selected user items plus opaque compaction state). Only
 	// the raw suffix after a prefix-replay boundary or entries after compaction
 	// prove the snapshot is still model-visible without a separate reassertion.
 	if (getOpenAiRemoteCompactionPayload(compaction) !== undefined) {
-		if (compactionIndex >= 0 && snapshotIndex > compactionIndex) return true;
 		if (compaction.providerReplayThroughEntryId) {
 			return replayThroughIndex >= 0 && snapshotIndex > replayThroughIndex;
 		}
 		return false;
 	}
-	// Native compaction can cover only the prefix through providerReplayThroughEntryId;
-	// buildSessionContext then emits later entries even with an empty firstKeptEntryId.
-	if (compaction.firstKeptEntryId === "" && compaction.providerReplayThroughEntryId) {
+	// Only an actual native payload makes an empty keep boundary's replay suffix
+	// visible; a bare replay id on a local summary does not (buildSessionContext).
+	if (
+		getAnthropicCompactionPayload(compaction.preserveData) !== undefined &&
+		compaction.firstKeptEntryId === "" &&
+		compaction.providerReplayThroughEntryId
+	) {
 		return replayThroughIndex >= 0 && snapshotIndex > replayThroughIndex;
 	}
 	return boundaryIndex >= 0 && snapshotIndex >= boundaryIndex;
@@ -138,16 +173,14 @@ function formatCanonicalTaskMarker(task: TodoItem): string {
 			return " [completed]";
 		case "abandoned":
 			return " [abandoned]";
-		case "blocked":
-			return task.blocker !== undefined ? ` [blocked: ${task.blocker}]` : " [blocked]";
 	}
 }
 
 /**
  * Renders the full canonical todo list for the post-compaction reassertion: every
  * real status keeps its marker (abandoned included, so deliberately dropped work is
- * not presented as open) and blocked tasks carry their blocker note when present,
- * so the resumed turn has the complete state and does not re-`init` from a subset.
+ * not presented as open), so the resumed turn has the complete state and does not
+ * re-`init` from a subset.
  */
 function formatCanonicalTodoList(phases: TodoPhase[]): string {
 	return phases
@@ -168,7 +201,8 @@ export interface TodoTrackerHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: { source: string; generation?: number }): void;
 	promptGeneration(): number;
-	hasPendingAsyncWake(): boolean;
+	/** Something outside the model (a background job, child agent or queued peer message) will resume the run. */
+	hasWakeSources(): boolean;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
 	toolRegistry(): Map<string, AgentTool>;
@@ -330,9 +364,11 @@ export class TodoTracker {
 	 * (gated on `todo.eager`, and deliberately silent once a list exists), this
 	 * nudge fires exactly then: compaction summarized away the `todo` tool results
 	 * that created the list, so the resumed turn no longer sees it (#16738). It
-	 * skips retained todo tool results and renders the full list, including
-	 * blocked and abandoned tasks. Data-only user edits are reasserted even if a
-	 * separate manual-edit reminder may also have survived.
+	 * skips retained native results that still render current task statuses and
+	 * renders the full list, including abandoned tasks. Data-only user edits are reasserted even if a
+	 * separate manual-edit reminder may also have survived. Snapshots saved
+	 * before the `blocked` status was removed already read those tasks back
+	 * as `pending`, so previously blocked work still counts as surviving.
 	 */
 	buildPostCompactionTodoReassertion(): AgentMessage | undefined {
 		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) {
@@ -347,12 +383,8 @@ export class TodoTracker {
 		if (compaction && snapshot && snapshotKeptAfterCompaction(branch, compaction, snapshot.sourceEntryId)) {
 			return undefined;
 		}
-		// Blocked work is not actionable for stop-time reminders, but it is still
-		// surviving canonical state that the model must not lose after compaction.
 		const hasSurvivingWork = this.#phases.some(phase =>
-			phase.tasks.some(
-				task => task.status === "pending" || task.status === "in_progress" || task.status === "blocked",
-			),
+			phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
 		);
 		if (!hasSurvivingWork) return undefined;
 		const { toolRefs } = this.#buildEagerPreludeContext();
@@ -412,8 +444,8 @@ export class TodoTracker {
 			});
 			return false;
 		}
-		if (this.#host.hasPendingAsyncWake()) {
-			logger.debug("Todo completion: async jobs in flight will re-wake the loop; skipping reminder", {
+		if (this.#host.hasWakeSources()) {
+			logger.debug("Todo completion: background work or child agents will resume the run; skipping reminder", {
 				incomplete: incomplete.length,
 			});
 			return false;
@@ -455,8 +487,16 @@ export class TodoTracker {
 
 	/** Takes the next hidden mid-run reconciliation nudge, if its budget and guards allow. */
 	takeMidRunNudge(): AgentMessage | null {
-		if (this.#mutationsSinceLastTouch < MID_RUN_NUDGE_MUTATION_THRESHOLD) return null;
-		if (this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		const mode = cfgTodoMidRunNudges.get(this.#host.settings);
+		if (mode === "off") return null;
+		if (mode === "capped" && this.#midRunNudgeCount >= MID_RUN_NUDGE_MAX_PER_CYCLE) return null;
+		// Backoff: an ignored nudge doubles the runway before the next one, capped
+		// so a long turn still gets a reminder without nudging on every threshold.
+		const threshold =
+			mode === "backoff"
+				? MID_RUN_NUDGE_MUTATION_THRESHOLD * 2 ** Math.min(this.#midRunNudgeCount, MID_RUN_NUDGE_BACKOFF_DOUBLINGS)
+				: MID_RUN_NUDGE_MUTATION_THRESHOLD;
+		if (this.#mutationsSinceLastTouch < threshold) return null;
 		if (!cfgTodoEnabled.get(this.#host.settings) || !cfgTodoReminders.get(this.#host.settings)) return null;
 		if (this.#host.planModeEnabled() || !this.#host.getActiveToolNames().includes("todo")) return null;
 		const incomplete = this.#phases
@@ -501,12 +541,9 @@ export class TodoTracker {
 	}
 
 	#buildEagerPreludeContext(): { toolRefs: Record<string, string>; taskBatch: boolean } {
-		const wireName = (name: string): string => {
-			const tool = this.#host.toolRegistry().get(name);
-			return typeof tool?.customWireName === "string" ? tool.customWireName : name;
-		};
+		const registry = this.#host.toolRegistry();
 		return {
-			toolRefs: { task: wireName("task"), todo: wireName("todo") },
+			toolRefs: { task: toolWireName(registry, "task"), todo: toolWireName(registry, "todo") },
 			taskBatch: cfgTaskBatch.get(this.#host.settings),
 		};
 	}
@@ -514,11 +551,7 @@ export class TodoTracker {
 	#clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
-			tasks: phase.tasks.map(task =>
-				task.blocker !== undefined
-					? { content: task.content, status: task.status, blocker: task.blocker }
-					: { content: task.content, status: task.status },
-			),
+			tasks: phase.tasks.map(task => ({ content: task.content, status: task.status })),
 		}));
 	}
 }

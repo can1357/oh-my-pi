@@ -52,6 +52,17 @@ export interface SessionSelectorEntry {
 	/** Path to the parent session when this one was forked. */
 	parentSessionPath?: string;
 }
+
+/**
+ * One picker scope's rows, possibly in two passes: `sessions` show at once
+ * (e.g. rows built from a title index), and `complete` settles with the full
+ * listing that replaces them, keeping the query, the selected session, and
+ * deletes/renames made meanwhile.
+ */
+export interface SessionListing<T extends SessionSelectorEntry = SessionSelectorEntry> {
+	sessions: T[];
+	complete?: Promise<T[]>;
+}
 import { shortenPath } from "../render/render-utils";
 import { formTheme } from "../chrome/form-theme";
 import { HookSelectorComponent } from "./hook-selector";
@@ -131,6 +142,12 @@ const PREVIEW_EXCERPT_CHARS = 1200;
 const PREVIEW_SETTLE_MS = 60;
 const DAY_MS = 86_400_000;
 const PINNED_GROUP = { id: "pinned", label: "Pinned" };
+/** Search Input actions that delete backward: on a typed query they edit it even when bound to `app.session.delete`. */
+const SEARCH_BACKWARD_DELETE = [
+	"tui.editor.deleteCharBackward",
+	"tui.editor.deleteWordBackward",
+	"tui.editor.deleteToLineStart",
+] as const;
 
 /** Day group of a session's last modification, relative to local midnight today. */
 function sessionDayGroup(modified: Date, startOfToday: number): { id: string; label: string } {
@@ -183,6 +200,20 @@ function sessionPreview(session: SessionSelectorEntry, forkedFrom: string | unde
 	]);
 }
 
+/** BCP 47 tag from the POSIX locale variables (`LC_ALL`, then `LC_TIME`, then `LANG`), or `undefined` to use the runtime default. */
+export function systemDateLocale(env: Readonly<Record<string, string | undefined>>): string | undefined {
+	const raw = env.LC_ALL || env.LC_TIME || env.LANG;
+	const tag = raw?.replace(/[.@].*$/, "").replace(/_/g, "-");
+	if (!tag || tag === "C" || tag === "POSIX") return undefined;
+	try {
+		return Intl.DateTimeFormat.supportedLocalesOf(tag)[0];
+	} catch {
+		return undefined;
+	}
+}
+
+const dateLocale = systemDateLocale(process.env);
+
 /** Absolute dates of week-old sessions; `toLocaleDateString` goes through Intl on every call. */
 const localeDateCache = new WeakMap<Date, { time: number; text: string }>();
 
@@ -202,7 +233,7 @@ function formatSessionDate(date: Date): string {
 
 	const cached = localeDateCache.get(date);
 	if (cached?.time === time) return cached.text;
-	const text = date.toLocaleDateString();
+	const text = date.toLocaleDateString(dateLocale);
 	localeDateCache.set(date, { time, text });
 	return text;
 }
@@ -307,6 +338,17 @@ function sessionTextLower(session: SessionSelectorEntry): string {
 		tagged[kSearchTextLower] = textLower;
 	}
 	return textLower;
+}
+
+/**
+ * Set a session's title and drop the caches built from the old one: the
+ * native row embeds it and the search haystack holds it, so the next describe
+ * rebuilds the row and search matches the new title.
+ */
+function retitle(session: SessionSelectorEntry, title: string): void {
+	session.title = title;
+	delete (session as NativeSessionInfo)[kNativeItem];
+	delete (session as SearchableSessionInfo)[kSearchTextLower];
 }
 
 function tokenizeSessionQuery(query: string): string[] {
@@ -559,6 +601,8 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	#lastFilterQuery = "";
 	/** Bumped whenever the visible session set may have changed (native memo key). */
 	#itemsVersion = 0;
+	/** Window start index retained across renders for edge-triggered scrolling. Unset until first render to seed centered. */
+	#scrollStartIndex: number | undefined = undefined;
 	/** Per-row line heights of the visible list for the ANSI window, reused until the set changes. */
 	#rowHeights: { items: readonly T[]; length: number; version: number; heights: readonly number[] } | undefined;
 	#itemsNative:
@@ -638,6 +682,22 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		if (index >= 0) this.#menu.setSelectedIndex(index);
 	}
 
+	/**
+	 * Swap in the complete listing of the shown scope (a scan that finished
+	 * after the picker opened), keeping the query and the selected session:
+	 * rows arriving above the cursor never move it onto another session.
+	 */
+	refreshSessions(sessions: T[], showCwd: boolean): void {
+		const selected = this.#menu.selectedItem?.path;
+		const moved = this.#selectionMoved;
+		this.#datasetVersion++;
+		this.#allSessions = sessions;
+		this.#showCwd = showCwd;
+		this.#filterSessions(this.#searchInput.getValue());
+		if (selected !== undefined) this.#menu.setSelectedKey(selected);
+		this.#selectionMoved = moved;
+	}
+
 	/** Replace the visible dataset, e.g. when toggling folder/all-projects scope. */
 	setSessions(sessions: T[], showCwd: boolean, pinnedIds?: ReadonlySet<string>): void {
 		this.#datasetVersion++;
@@ -645,6 +705,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		this.#showCwd = showCwd;
 		if (pinnedIds !== undefined) this.#pinnedIds = pinnedIds;
 		this.#menu.setSelectedIndex(0);
+		this.#scrollStartIndex = undefined;
 		this.#filterSessions(this.#searchInput.getValue());
 		this.#selectCurrentSession();
 	}
@@ -666,6 +727,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		const queryChanged = query !== this.#lastFilterQuery;
 		this.#hadFilterQuery = tokens.length > 0;
 		this.#lastFilterQuery = query;
+		if (queryChanged) this.#scrollStartIndex = undefined;
 		if (tokens.length === 0) {
 			const items = this.#pinnedFirst(this.#allSessions);
 			const keepIndex = Math.min(this.#menu.selectedIndex, Math.max(0, items.length - 1));
@@ -837,14 +899,9 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		const entry = this.#allSessions.find(s => s.path === sessionPath);
 		if (!entry) return;
 		this.#datasetVersion++;
-		entry.title = title;
-		// The cached native item embeds the old title, and the search haystack
-		// caches it too: drop both so the next describe rebuilds the row and
-		// the literal/fuzzy search paths match the new title. Selection is
-		// path-keyed, so the same-query refilter keeps the cursor on the
-		// renamed session.
-		delete (entry as NativeSessionInfo)[kNativeItem];
-		delete (entry as SearchableSessionInfo)[kSearchTextLower];
+		// Selection is path-keyed, so the same-query refilter keeps the cursor
+		// on the renamed session.
+		retitle(entry, title);
 		this.#filterSessions(this.#searchInput.getValue());
 	}
 
@@ -885,7 +942,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		if (selected) this.onSelect?.(selected);
 	}
 
-	/** Delete / Backspace on an empty query: ask the parent to confirm deleting the selected session. */
+	/** `app.session.delete`: ask the parent to confirm deleting the selected session. */
 	requestDelete(): void {
 		const selected = this.#menu.selectedItem;
 		if (selected) this.onDeleteRequest?.(selected);
@@ -1226,12 +1283,17 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		// fill-height).
 		const filtered = this.#menu.visibleItems;
 		const budget = this.#lineBudget();
+		const alignment = this.#scrollStartIndex === undefined ? "center" : "nearest";
 		const {
 			startIndex,
 			endIndex,
 			rowOffset: offsetRows,
 			totalRows: rawTotalRows,
-		} = getMenuWindow(this.#visibleRowHeights(filtered), this.#menu.selectedIndex, budget);
+		} = getMenuWindow(this.#visibleRowHeights(filtered), this.#menu.selectedIndex, budget, {
+			alignment,
+			currentStartIndex: this.#scrollStartIndex,
+		});
+		this.#scrollStartIndex = startIndex;
 
 		// Each session block is built into sessionLines, then wrapped by ScrollView
 		// so the right-edge scrollbar is proportional at the physical-line level.
@@ -1338,16 +1400,20 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	}
 
 	handleInput(keyData: string): void {
-		// Delete key — or Backspace on an empty search query — request delete
+		const keybindings = getKeybindings();
+		// `app.session.delete` (Backspace or Delete by default) requests delete
 		// confirmation from the parent. macOS laptops have no dedicated Forward
 		// Delete key: Fn+Backspace is the only way to send \e[3~, and many macOS
 		// terminals (Terminal.app, some iTerm2 profiles) deliver \x7f for that
-		// combo instead. Regular Backspace on an empty query means "delete
-		// session"; with a typed query it stays bound to the search Input so users
-		// can still edit their filter text.
+		// combo instead, hence Backspace. A bound key that also deletes backward
+		// in the search Input (Backspace, Ctrl+W, Ctrl+U by default) keeps editing
+		// a typed query; it deletes the session only once the query is empty.
+		// Checked before the Input so a binding such as Ctrl+D wins over its
+		// forward delete.
 		if (
-			matchesKey(keyData, "delete") ||
-			(matchesKey(keyData, "backspace") && this.#searchInput.getValue().length === 0)
+			keybindings.matches(keyData, "app.session.delete") &&
+			(this.#searchInput.getValue().length === 0 ||
+				!SEARCH_BACKWARD_DELETE.some(action => keybindings.matches(keyData, action)))
 		) {
 			this.requestDelete();
 			return;
@@ -1358,7 +1424,6 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 			this.requestRename();
 			return;
 		}
-		const keybindings = getKeybindings();
 		if (keybindings.matches(keyData, "app.session.pin")) {
 			this.requestPin(true);
 			return;
@@ -1430,14 +1495,17 @@ export interface SessionSelectorOptions<T extends SessionSelectorEntry = Session
 	/** Persist the selected session's pin state (pin keys / the picker's Pin action). */
 	onSetPinned?: (session: T, pinned: boolean) => Promise<void>;
 	historyMatcher?: SessionHistoryMatcher;
+	/**
+	 * Complete folder listing when the constructor's `sessions` are a
+	 * preliminary subset; replaces them once it settles (see {@link SessionListing}).
+	 */
+	completeSessions?: Promise<T[]>;
 	/** Loads sessions across all projects for the all-projects scope toggle (Tab). */
-	loadAllSessions?: () => Promise<T[]>;
-	/** Preloaded all-projects list; cached so the first Tab toggle is instant. */
-	allSessions?: T[];
+	loadAllSessions?: () => Promise<SessionListing<T>>;
+	/** Preloaded all-projects listing; cached so the first Tab toggle is instant. */
+	allSessions?: SessionListing<T>;
 	/** Picker heading; defaults to "Resume Session". */
 	title?: string;
-	/** Primary action label; defaults to "Resume" (ANSI footer defaults to "select"). */
-	actionLabel?: string;
 	/** Fixed scope label, or false to omit the scope suffix. */
 	scopeLabel?: string | false;
 	/**
@@ -1492,10 +1560,18 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	#onRename?: (session: T, title: string) => Promise<string | null>;
 	#onSetPinned?: (session: T, pinned: boolean) => Promise<void>;
 	#onRequestRender?: () => void;
-	readonly #loadAllSessions?: () => Promise<T[]>;
+	readonly #loadAllSessions?: () => Promise<SessionListing<T>>;
 	#folderSessions: T[];
-	readonly #folderShowCwd: boolean;
+	readonly #showCwdOption: boolean | undefined;
 	#globalSessions: T[] | null = null;
+	/** Paths deleted in this picker: a listing scanned before the delete must not bring them back. */
+	readonly #deletedPaths = new Set<string>();
+	/** Titles renamed in this picker, by path: a listing scanned before the rename must not revert them. */
+	readonly #renamedTitles = new Map<string, string>();
+	/** The picker resolved (select, cancel, exit) or was disposed; {@link unlockInput} reopens it after a failed resume. */
+	#closed = false;
+	/** The shown scope's complete listing landed while closed; {@link unlockInput} shows it. */
+	#refreshPending = false;
 	#scope: "folder" | "all" = "folder";
 	#toggling = false;
 	#inputLocked = false;
@@ -1511,7 +1587,6 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	readonly #getTerminalRows: () => number;
 	readonly #fillHeight: boolean;
 	readonly #title: string;
-	readonly #actionLabel: string;
 	readonly #scopeLabel: string | false | undefined;
 	/** What `#messageContainer` shows, for the native description. */
 	#message: SessionPickerMessage | undefined;
@@ -1565,14 +1640,11 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#onSetPinned = options.onSetPinned;
 		this.#loadAllSessions = options.loadAllSessions;
 		this.#folderSessions = sessions;
-		// Storage directory, not recorded cwd: one folder's sessions may record
-		// symlink aliases of the same path, which must not turn the column on.
-		this.#folderShowCwd = options.showCwd ?? new Set(sessions.map(session => path.dirname(session.path))).size > 1;
-		this.#globalSessions = options.allSessions ?? null;
+		this.#showCwdOption = options.showCwd;
+		this.#globalSessions = options.allSessions?.sessions ?? null;
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
 		this.#title = options.title ?? "Resume Session";
-		this.#actionLabel = options.actionLabel ?? "Resume";
 		this.#pickerTitle = options.title;
 		this.#standalone = options.standalone ?? false;
 		this.#scopeLabel = options.scopeLabel;
@@ -1586,7 +1658,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		// projects' history (issue #3099).
 		this.#sessionList = new SessionList(
 			sessions,
-			this.#folderShowCwd,
+			this.#folderShowCwd(),
 			options.historyMatcher,
 			options.getTerminalRows,
 			options.pinnedIds,
@@ -1595,14 +1667,17 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		// Every exit path cancels the list's pending history merge, so a stale
 		// debounce timer can never run its SQLite lookup after the picker closed.
 		this.#sessionList.onSelect = session => {
+			this.#closed = true;
 			this.#sessionList.dispose();
 			onSelect(session);
 		};
 		this.#sessionList.onCancel = () => {
+			this.#closed = true;
 			this.#sessionList.dispose();
 			onCancel();
 		};
 		this.#sessionList.onExit = () => {
+			this.#closed = true;
 			this.#sessionList.dispose();
 			onExit();
 		};
@@ -1630,6 +1705,60 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#contentSlot = new Container();
 		this.#contentSlot.addChild(this.#sessionList);
 		this.addChild(this.#contentSlot);
+		this.#awaitComplete("folder", { sessions, complete: options.completeSessions });
+		if (options.allSessions) this.#awaitComplete("all", options.allSessions);
+	}
+
+	/**
+	 * Whether folder rows show their directory: when the caller did not say,
+	 * when they span storage directories (e.g. merged worktrees). Storage
+	 * directory, not recorded cwd: one folder's sessions may record symlink
+	 * aliases of the same path, which must not turn the column on.
+	 */
+	#folderShowCwd(): boolean {
+		return this.#showCwdOption ?? new Set(this.#folderSessions.map(session => path.dirname(session.path))).size > 1;
+	}
+
+	/**
+	 * Replace `scope`'s preliminary rows with `listing.complete` once it
+	 * settles. A failed scan keeps the preliminary rows and reports the error.
+	 */
+	#awaitComplete(scope: "folder" | "all", listing: SessionListing<T>): void {
+		void listing.complete?.then(
+			sessions => {
+				// Settled to the preliminary rows themselves: nothing new to show.
+				if (sessions === listing.sessions) return;
+				const next = this.#withEdits(sessions);
+				if (scope === "folder") this.#folderSessions = next;
+				else this.#globalSessions = next;
+				if (scope !== this.#scope) return;
+				if (this.#closed) this.#refreshPending = true;
+				else this.#refreshShownScope();
+			},
+			(err: unknown) => {
+				if (this.#closed) return;
+				this.#showError(err instanceof Error ? err.message : String(err));
+				this.#onRequestRender?.();
+			},
+		);
+	}
+
+	#refreshShownScope(): void {
+		this.#refreshPending = false;
+		if (this.#scope === "folder") this.#sessionList.refreshSessions(this.#folderSessions, this.#folderShowCwd());
+		else if (this.#globalSessions) this.#sessionList.refreshSessions(this.#globalSessions, true);
+		this.#onRequestRender?.();
+	}
+
+	/** `sessions` with this picker's deletes and renames applied. */
+	#withEdits(sessions: T[]): T[] {
+		if (this.#deletedPaths.size === 0 && this.#renamedTitles.size === 0) return sessions;
+		const kept = sessions.filter(session => !this.#deletedPaths.has(session.path));
+		for (const session of kept) {
+			const title = this.#renamedTitles.get(session.path);
+			if (title !== undefined) retitle(session, title);
+		}
+		return kept;
 	}
 
 	#headerLabel(): string {
@@ -1654,15 +1783,18 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				this.#messageContainer.addChild(new Text(theme.fg("muted", "Loading all projects…"), 0, 0));
 				this.#message = { kind: "loading", text: "Loading all projects…" };
 				this.#onRequestRender?.();
+				let listing: SessionListing<T>;
 				try {
-					global = await this.#loadAllSessions();
+					listing = await this.#loadAllSessions();
 				} catch (err) {
 					this.#showError(err instanceof Error ? err.message : String(err));
 					this.#toggling = false;
 					this.#onRequestRender?.();
 					return;
 				}
+				global = this.#withEdits(listing.sessions);
 				this.#globalSessions = global;
+				this.#awaitComplete("all", listing);
 				this.#messageContainer.clear();
 				this.#message = undefined;
 				this.#toggling = false;
@@ -1671,7 +1803,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			this.#sessionList.setSessions(global, true);
 		} else {
 			this.#scope = "folder";
-			this.#sessionList.setSessions(this.#folderSessions, this.#folderShowCwd);
+			this.#sessionList.setSessions(this.#folderSessions, this.#folderShowCwd());
 		}
 		this.title = this.#headerLabel();
 		this.#onRequestRender?.();
@@ -1687,6 +1819,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/** Re-enable input after a failed resume so the user can pick again. */
 	unlockInput(): void {
 		this.#inputLocked = false;
+		this.#closed = false;
+		if (this.#refreshPending) this.#refreshShownScope();
 	}
 
 	/**
@@ -1695,6 +1829,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	 * child-walking dispose would miss its pending history-merge timer.
 	 */
 	override dispose(): void {
+		this.#closed = true;
 		this.#sessionList.dispose();
 		clearTimeout(this.#previewTimer);
 		super.dispose();
@@ -1731,6 +1866,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				try {
 					const deleted = await this.#onDelete(session);
 					if (deleted) {
+						this.#deletedPaths.add(session.path);
 						this.#sessionList.removeSession(session.path);
 						this.#folderSessions = this.#folderSessions.filter(s => s.path !== session.path);
 						if (this.#globalSessions) {
@@ -1775,13 +1911,10 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	 * them or a scope switch shows the old title again.
 	 */
 	#syncScopeTitles(sessionPath: string, title: string): void {
+		this.#renamedTitles.set(sessionPath, title);
 		for (const cache of [this.#folderSessions, this.#globalSessions]) {
-			if (!cache) continue;
-			const entry = cache.find(s => s.path === sessionPath);
-			if (!entry) continue;
-			entry.title = title;
-			delete (entry as NativeSessionInfo)[kNativeItem];
-			delete (entry as SearchableSessionInfo)[kSearchTextLower];
+			const entry = cache?.find(s => s.path === sessionPath);
+			if (entry) retitle(entry, title);
 		}
 	}
 
@@ -1921,9 +2054,10 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		const cancel = interruptKey();
 		const pin = this.#pinAction();
 		const pinKey = pin && getKeybindings().getKeys(pin.binding)[0];
+		const deleteKeys = this.#onDelete ? getKeybindings().getKeys("app.session.delete") : [];
 		const hint = theme.fg(
 			"muted",
-			`[${this.#onDelete ? `${formatKeyHints(["delete", "backspace"])} delete · ` : ""}${this.#onRename ? `${formatKeyHint("f2")} rename · ` : ""}${pinKey ? `${formatKeyHint(pinKey)} ${pin.label} · ` : ""}${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
+			`[${deleteKeys.length > 0 ? `${formatKeyHints(deleteKeys)} delete · ` : ""}${this.#onRename ? `${formatKeyHint("f2")} rename · ` : ""}${pinKey ? `${formatKeyHint(pinKey)} ${pin.label} · ` : ""}${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
 		);
 		return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
 	}
@@ -1980,7 +2114,10 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			children.push(this.#sessionList.searchInput, list);
 		}
 		const hints: (NativeHint | undefined)[] = [];
-		if (this.#onDelete) hints.push({ keys: ["delete", "backspace"], label: "delete" });
+		if (this.#onDelete) {
+			const keys = getKeybindings().getKeys("app.session.delete");
+			if (keys.length > 0) hints.push({ keys, label: "delete" });
+		}
 		if (this.#onRename) hints.push({ keys: ["f2"], label: "rename" });
 		const pin = this.#pinAction();
 		if (pin) hints.push(actionHint(pin.binding, pin.label));
@@ -2007,7 +2144,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/**
 	 * `lg` cards sheet (`screen` for the standalone app): sessions grouped by
 	 * day (ranked flat while searching), the selected session's preview, the
-	 * delete confirm strip, and the actions of the keys Enter, Delete/Backspace,
+	 * delete confirm strip, and the actions of the keys Enter, `app.session.delete`,
 	 * F2 (rename), the pin keys (Pin / Unpin, whichever applies to the selected
 	 * session), Tab (the scope toggle, labelled with the scope it switches
 	 * to) and Esc. Untitled unless the caller named it; the placeholder says the scope.
@@ -2034,8 +2171,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		}
 		const loading = message?.kind === "loading";
 		const toggle = list.onToggleScope !== undefined;
-		const actions = [pickerAction("resume", this.#actionLabel, "enter", { primary: true })];
-		if (this.#onDelete) actions.push(pickerAction("delete", "Delete", "backspace"));
+		const actions = [pickerAction("resume", "Resume", "enter", { primary: true })];
+		if (this.#onDelete) actions.push(pickerAction("delete", "Delete", bindingKeys("app.session.delete")));
 		if (this.#onRename) actions.push(pickerAction("rename", "Rename", "f2"));
 		const pin = this.#pinAction();
 		if (pin) actions.push(pickerAction("pin", pin.label === "pin" ? "Pin" : "Unpin", bindingKeys(pin.binding)));
@@ -2125,7 +2262,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 
 	/**
 	 * Picker pointer events run the keys' paths: a row click selects (arrows),
-	 * a second click or `Resume` resumes (Enter), `Delete` asks (Delete),
+	 * a second click or `Resume` resumes (Enter), `Delete` asks (`app.session.delete`),
 	 * `Rename` renames (F2), `Pin` / `Unpin` flips the pin, the tab or `All projects` toggles scope (Tab),
 	 * `Close` cancels (Esc), and the confirm strip answers the delete dialog (Yes / Esc).
 	 */

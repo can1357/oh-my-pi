@@ -35,6 +35,35 @@ export function safeLine(value: string): string {
 	return safeText(value).replace(/\n/g, " ");
 }
 
+/**
+ * Sanitized entry body up to `limit` characters, end-trimmed; source markers keep their
+ * category color and shorten embedded paths. Segments are sanitized separately so marker
+ * offsets stay on the raw text.
+ */
+export function entryBodyText(entry: ContextViewEntry, limit = Number.POSITIVE_INFINITY): string {
+	// Providers often end thinking and tool output with newlines; they render as empty rows.
+	const body = entry.text.trimEnd();
+	const end = Math.min(body.length, limit);
+	if (!entry.sourceMarkers?.length) return safeContent(body.slice(0, end));
+	const parts: string[] = [];
+	let cursor = 0;
+	for (const marker of entry.sourceMarkers) {
+		if (marker.start >= end) break;
+		parts.push(safeContent(body.slice(cursor, marker.start)));
+		cursor = Math.min(marker.end, end);
+		const color = CONTEXT_PRESENTATION[marker.category].color;
+		// Color each line: wrapping re-opens styles per row, not across newlines.
+		parts.push(
+			safeText(body.slice(marker.start, cursor))
+				.split("\n")
+				.map(line => (line ? theme.fg(color, line) : line))
+				.join("\n"),
+		);
+	}
+	parts.push(safeContent(body.slice(cursor, end)));
+	return parts.join("");
+}
+
 /** Token label of an entry or group: `—` for a grouped entry, `N/A · Interrupted`, else `N token(s)` (unscaled estimate). */
 export function tokenEstimate(item: ContextViewEntry | ContextThinkingGroup): string {
 	// A grouped entry shares its group's estimate, which the group heading shows.
@@ -119,7 +148,6 @@ export function entryPreview(
 	const maxChars = Math.max(1, options.sourceWidth) * rows * 2;
 	const metadata = entryMetadata(entry, { hour12: options.hour12, withGroup: false }).join("\n");
 	const metadataLength = Math.min(metadata.length, maxChars);
-	// Providers often end thinking and tool output with newlines; they render as empty rows.
 	const body = entry.text.trimEnd();
 	const bodyLength = Math.min(body.length, Math.max(0, maxChars - metadataLength - (metadataLength ? 1 : 0)));
 	const parts = [
@@ -128,7 +156,7 @@ export function entryPreview(
 			prefix: "",
 			style: (line: string) => theme.fg("dim", line),
 		},
-		{ value: safeContent(body.slice(0, bodyLength)), prefix: "  ", style: (line: string) => line },
+		{ value: entryBodyText(entry, bodyLength), prefix: "  ", style: (line: string) => line },
 	];
 	const lines: string[] = [];
 	for (const { value, prefix, style } of parts) {

@@ -1,7 +1,10 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { TspText } from "@oh-my-pi/pi-wire";
 import type { Component, TUI } from "../tui";
 import type { Theme } from "../theme/theme";
-import type { CustomMessage, HookMessage } from "./messages";
+import type { TodoItem } from "../tools/todo";
+import type { BashExecutionMessage, CustomMessage, HookMessage, PythonExecutionMessage } from "./messages";
+import type { NotificationRule } from "./ttsr-notification";
 
 export type ExtensionUiComponent = Component & { dispose?(): void };
 
@@ -63,6 +66,76 @@ export interface AssistantTextRendering {
 	/** Index in the full reply's `content` of this component's first block; a segment after a tool call starts past it. */
 	contentOffset: number;
 }
+
+/**
+ * One transcript block a {@link TranscriptPresenter} decides the display of. Later omp versions
+ * add block types; answer `undefined` for a `type` you do not know.
+ *
+ * - `toolCall`: a model tool call, `id` its `toolCallId`. `result` arrives with the call's first
+ *   result frame; `isPartial` stays true while the call still streams progress.
+ * - `message`: a session message drawn as its own block, `id` the decimal `message.timestamp`
+ *   (shared by messages recorded in the same millisecond).
+ *   `custom` messages with `customType` `"advisor"`, `"skill-prompt"`, `"lsp-late-diagnostic"`,
+ *   `"async-result"` or `"launch-completion"`, and `!`/`$` runs (`bashExecution`,
+ *   `pythonExecution`). A `!`/`$` run still going has a provisional message and id; it is asked
+ *   again with the recorded message once the session records the run. In Tern, late diagnostics
+ *   an edit/write card takes are drawn with that card instead, so an `"lsp-late-diagnostic"`
+ *   block appears only for the files no card took.
+ * - `event`: a TTSR rule hit or an incomplete-todo reminder, shaped like the extension event of
+ *   the same `type`. These exist only in the session that raised them; `id` is unique per process.
+ *
+ * Read-only, and not a copy: `args`, `result`'s `content` and `details`, `message` and `event`
+ * are the live objects omp draws the block from, often the session's own message data. Never
+ * mutate them: the change would reach the block and possibly the session.
+ */
+export type TranscriptBlock =
+	| {
+			readonly type: "toolCall";
+			readonly id: string;
+			readonly toolName: string;
+			readonly args: unknown;
+			readonly result?: { readonly content: readonly unknown[]; readonly details?: unknown };
+			readonly isError: boolean;
+			readonly isPartial: boolean;
+	  }
+	| {
+			readonly type: "message";
+			readonly id: string;
+			readonly message: CustomMessage | BashExecutionMessage | PythonExecutionMessage;
+	  }
+	| {
+			readonly type: "event";
+			readonly id: string;
+			readonly event:
+				| { readonly type: "ttsr_triggered"; readonly rules: readonly NotificationRule[] }
+				| {
+						readonly type: "todo_reminder";
+						readonly todos: readonly TodoItem[];
+						readonly attempt: number;
+						readonly maxAttempts: number;
+				  };
+	  };
+
+/**
+ * How a transcript block is drawn: `undefined` defers to the next presenter (and, after the
+ * last, to `"full"`); `"full"` is omp's own card; `"hidden"` draws nothing, as hidden tool
+ * activity does; `"compact"` is one row from omp's own summary. `{ compact: { label, rows } }`
+ * replaces that row's text with `label` and adds one row per `rows` entry below it. Spans use the
+ * semantic tokens and theme colour names of {@link TspText}.
+ */
+export type TranscriptPresentation =
+	| undefined
+	| "full"
+	| "hidden"
+	| "compact"
+	| { readonly compact: { readonly label?: TspText; readonly rows?: readonly TspText[] } };
+
+/**
+ * Display-only choice of how one transcript block is drawn. Presenters are asked in extension
+ * load order; the first answer other than `undefined` wins. A block the user expanded is always
+ * drawn in full.
+ */
+export type TranscriptPresenter = (block: TranscriptBlock) => TranscriptPresentation;
 
 export interface HookMessageRenderOptions {
 	/** Whether the view is expanded */

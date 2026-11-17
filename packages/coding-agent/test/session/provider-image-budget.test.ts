@@ -899,6 +899,71 @@ describe("provider context image budgets", () => {
 		expect(imageData(clampProviderContextImageBytes(context, claude))).toEqual([]);
 	});
 
+	it("sends Factory images when live tools carry large runtime state outside their declarations", async () => {
+		const fresh = "C".repeat(100_000);
+		const liveTool: Tool = {
+			name: "bash",
+			description: "Run a command.",
+			parameters: { type: "object", properties: {} },
+		};
+		Object.assign(liveTool, { session: { history: "S".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT) } });
+		const inactiveTool: Tool = {
+			name: "withdrawn",
+			description: "Formerly available.",
+			parameters: { type: "object", properties: {} },
+		};
+		Object.assign(inactiveTool, { runner: { history: "R".repeat(FACTORY_DROID_ROUTE_BODY_LIMIT) } });
+		const context: Context = {
+			systemPrompt: [],
+			tools: [liveTool],
+			inactiveTools: [inactiveTool],
+			messages: [{ role: "user", content: [text("look"), image(fresh)], timestamp: 0 }],
+		};
+		expect(imageData(clampProviderContextImageBytes(context, factoryModel("claude-haiku-5-5")))).toEqual([fresh]);
+		const gpt = factoryGptModel();
+		const clamped = clampProviderContextImageBytes(context, gpt);
+		expect(imageData(clamped)).toEqual([fresh]);
+		const body = await factoryRequestBody(gpt, clamped);
+		expect(body).toContain(fresh);
+		expect(Buffer.byteLength(body)).toBeLessThan(FACTORY_DROID_ROUTE_BODY_LIMIT);
+	});
+
+	it("charges a Factory Gemini turn kept for native replay at the native content it sends", async () => {
+		const argon = factoryModel("gemini-4-argon");
+		const fresh = "C".repeat(3_400_000);
+		// An unsigned thought: the rebuilt turn drops it, the native content Argon replays keeps it.
+		const chunk = {
+			candidates: [
+				{
+					content: { role: "model", parts: [{ text: "t".repeat(1_200_000), thought: true }, { text: "done" }] },
+					finishReason: "STOP",
+				},
+			],
+		};
+		const fetch = async (_url: string | URL | Request, _init?: RequestInit) =>
+			new Response(`data: ${JSON.stringify(chunk)}\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+		const [header, claims] = [{ alg: "none" }, { external_org_id: "org-1" }].map(part =>
+			Buffer.from(JSON.stringify(part)).toString("base64url"),
+		);
+		const ask: Message = { role: "user", content: [text("think")], timestamp: 0 };
+		const turn = await streamFactoryDroid(
+			argon,
+			{ systemPrompt: [], messages: [ask] },
+			{ apiKey: `${header}.${claims}.sig`, fetch: fetch as typeof globalThis.fetch },
+		).result();
+		expect(turn.providerPayload?.type).toBe("geminiNativeContent");
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [ask, turn, { role: "user", content: [text("look"), image(fresh)], timestamp: 2 }],
+		};
+		expect(imageData(clampProviderContextImageBytes(context, argon))).toEqual([]);
+		// Kept, the image would have pushed the body past the route limit.
+		expect(Buffer.byteLength(await factoryRequestBody(argon, context))).toBeGreaterThan(
+			FACTORY_DROID_ROUTE_BODY_LIMIT,
+		);
+	});
+
 	it("charges inactive tool definitions only on the Anthropic wire that re-declares them", () => {
 		const fresh = "C".repeat(3_400_000);
 		const context: Context = {
