@@ -1234,9 +1234,9 @@ pub fn snapshot(
 		}
 		let _ = write!(text, "… truncated ({} nodes)", state.visited);
 		if state.unread == UNKNOWN_UNREAD_CHILDREN {
-			text.push_str("; children of long lists and tables not read");
+			text.push_str("; some children not read");
 		} else if state.unread > 0 {
-			let _ = write!(text, "; {} children of long lists and tables not read", state.unread);
+			let _ = write!(text, "; {} children not read", state.unread);
 		}
 	}
 	if state.skipped > 0 {
@@ -3307,7 +3307,7 @@ mod tests {
 		assert_eq!(s.text.matches("- cell").count(), 2, "{}", s.text);
 		assert!(
 			s.text
-				.ends_with("… truncated (4 nodes); 999998 children of long lists and tables not read"),
+				.ends_with("… truncated (4 nodes); 999998 children not read"),
 			"{}",
 			s.text
 		);
@@ -3325,12 +3325,7 @@ mod tests {
 		};
 		let s = snapshot(&mut m, &mut AxRegistry::default(), &window(), &Default::default()).unwrap();
 		assert!(s.truncated);
-		assert!(
-			s.text
-				.ends_with("; children of long lists and tables not read"),
-			"{}",
-			s.text
-		);
+		assert!(s.text.ends_with("; some children not read"), "{}", s.text);
 	}
 	#[test]
 	fn unreadable_subtree_is_skipped_with_trailer() {
