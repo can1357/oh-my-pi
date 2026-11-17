@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Devin models seeing only the newest 5 images of a conversation: Devin's own host now takes up to 60 (20 for Claude models) within 24 MB of image data and a custom Devin base URL up to 40, and snapcompact plans Gemini 4 Carbon and Gemini 3.7 Flash archive frames at the 1,089 tokens Devin bills instead of about 5,000
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
