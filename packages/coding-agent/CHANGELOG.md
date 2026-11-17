@@ -4,7 +4,7 @@
 
 ### Added
 
-- 新增默认关闭的 `title.refreshOnDrift`：逐条用户消息通过 System One 判断标题偏离，确认偏离后复用首次标题生成及前缀缓存。
+- 新增默认关闭的 `title.refreshOnDrift`：逐条用户消息通过 System One 判断标题偏离，确认偏离后复用首次标题生成及前缀缓存（[#19522](https://github.com/can1357/oh-my-pi/pull/19522) by [@Lynricsy](https://github.com/Lynricsy)）。
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 
@@ -19,7 +19,7 @@
 
 ### Fixed
 
-- 计划批准后的执行会话现在使用与普通会话一致的标题和卡片格式。
+- 计划批准后的执行会话现在使用与普通会话一致的标题和卡片格式（[#19522](https://github.com/can1357/oh-my-pi/pull/19522) by [@Lynricsy](https://github.com/Lynricsy)）。
 - Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
 - Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
 - Fixed the shell's `stat`, `diff` and `find` builtins ignoring `TZ` when printing file times; `find -ls` now prints times in the shell's time zone instead of UTC, and `find -newermt` reads dates like `Nov 15, 2023` in the shell's time zone ([#19482](https://github.com/can1357/oh-my-pi/pull/19482) by [@alphastorm](https://github.com/alphastorm))
