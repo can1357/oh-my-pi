@@ -52,6 +52,7 @@ export const TSP_KINDS = [
 	"math",
 	"image",
 	"media",
+	"web",
 	"kv",
 	"table",
 	"tree",
@@ -70,6 +71,9 @@ export const TSP_KINDS = [
 	"editor",
 	"input",
 	"button",
+	"buttons",
+	"menu",
+	"doc",
 	"status",
 	"seg",
 	"overlay",
@@ -131,6 +135,23 @@ export type TspText = string | readonly TspSpan[];
  */
 export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
 
+/**
+ * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
+ * `{ header }`, or a row running action `id`, with its `label`, `icon` and `detail` (the hold menu shows it dim
+ * at the row's end).
+ */
+export type TspMenuEntry =
+	| TspAction
+	| { header: string }
+	| {
+			id: TspAction;
+			label?: string;
+			icon?: string;
+			detail?: string;
+			disabled?: boolean | string;
+			danger?: boolean;
+	  };
+
 /** Props every node accepts. */
 export interface TspCommonProps {
 	role?: string;
@@ -142,7 +163,16 @@ export interface TspCommonProps {
 	basis?: "auto" | "content" | number;
 	min?: { w?: TspExtent; h?: TspExtent };
 	max?: { w?: TspExtent; h?: TspExtent };
-	actions?: { click?: TspAction; dblclick?: TspAction; menu?: readonly TspAction[] };
+	/**
+	 * What a pointer does: `menu` lists what a right-click offers; `hold` what a long press on a touch screen
+	 * offers (a phone's hold menu over the lifted node), which a desktop ignores.
+	 */
+	actions?: {
+		click?: TspAction;
+		dblclick?: TspAction;
+		menu?: readonly TspMenuEntry[];
+		hold?: readonly TspMenuEntry[];
+	};
 	title?: string;
 	/** Accessible name for icon-only or visual-only nodes. */
 	aria?: string;
@@ -226,6 +256,31 @@ export interface TspMarkdownProps {
 	/** Literal runs drawn as these spans wherever they occur in prose (a sent prompt's chip tokens). */
 	marks?: readonly TspSpan[];
 }
+/** A comment drawn on a {@link TspDocProps} document, anchored to a quote of its source. */
+export interface TspDocComment {
+	/** The program's comment id; `comment`/`uncomment` events name it. */
+	id: string;
+	/** The commented source text. */
+	quote: string;
+	/** UTF-16 offset of the quote's first char in `text`; the first occurrence of `quote` when it doesn't match there. */
+	at?: number;
+	note: string;
+}
+/**
+ * A rich Markdown document the user reads, selects, edits in place (double-click, `edit`) and comments on
+ * (`comment`): edits arrive as `change` events with the full source, comments as `comment`/`uncomment`.
+ */
+export interface TspDocProps {
+	/** Markdown source in omp's dialect; the document's own current source is a no-op. */
+	text?: string;
+	/** Double-click enters in-place editing; Esc or a press outside leaves it. */
+	edit?: boolean;
+	/** A still, non-empty selection offers a Comment bubble. */
+	comment?: boolean;
+	comments?: readonly TspDocComment[];
+	/** Scroll heading number `heading` (0-based, document order, all levels) to the top; each new `n` scrolls again. */
+	jump?: { heading: number; n: number };
+}
 /** One marked line of a {@link TspCodeProps.marks}. */
 export interface TspCodeMark {
 	line: number;
@@ -301,6 +356,8 @@ export interface TspDiffProps {
 	/** A language overriding the one `path` gives. */
 	lang?: string;
 	mode?: "unified" | "split" | "auto";
+	/** Long lines wrap inside their rows (absent: `true`); `false` keeps a line per row, scrolled sideways together. */
+	wrap?: boolean;
 }
 export interface TspAnsiProps {
 	/** Raw terminal output (SGR, OSC 8, `\r`, `\b` allowed). */
@@ -340,6 +397,21 @@ export interface TspMediaProps {
 	link?: string;
 	/** Size cap; the node otherwise fills its container. */
 	max?: { w?: TspExtent; h?: TspExtent };
+}
+/**
+ * A live web page shown inline (an `<iframe>` of a reply): passive until clicked, focused by a
+ * click, left with Escape, and replaced by a still of itself once idle. Programs check
+ * `cx.supports("web")` first.
+ */
+export interface TspWebProps {
+	/** The page: an `http(s)` or `file://` URL. */
+	url: string;
+	/** What the page is, until it reports its own title. */
+	title?: string;
+	/** Width as a CSS length (`"50%"`, `"400px"`, `"60vw"`, `"80ch"`, `"30em"`); default: the column's. */
+	w?: string;
+	/** Height as a CSS length; default: a 16:10 box of the width. */
+	h?: string;
 }
 export interface TspKvProps {
 	items: readonly { k: TspText; v: TspText }[];
@@ -432,6 +504,63 @@ export interface TspItemProps {
 	disabled?: boolean;
 	value?: TspText;
 }
+/**
+ * One row of a {@link TspMenuProps} menu: `"-"` a separator, `{ header }` a dim section title, an action id
+ * (labeled from it), or an item sending its `id` as an `action` event's `act`.
+ */
+export type TspMenuItem =
+	| string
+	| { header: string }
+	| {
+			id: string;
+			label?: string;
+			icon?: string;
+			/** Shortcut keys drawn at the row's right (display only). */
+			keys?: string | readonly string[];
+			/** A second line under the label (a rich row). */
+			detail?: string;
+			/** A check row, checked while true. */
+			checked?: boolean;
+			/** A radio row of this group. */
+			radio?: string;
+			/** Dimmed, not choosable; a string is the reason. */
+			disabled?: boolean | string;
+			danger?: boolean;
+			/** A submenu; the row itself sends nothing. */
+			items?: readonly TspMenuItem[];
+	  };
+/**
+ * A button opening a dropdown of commands. Choosing a row sends `action` (`act` = the row's id, `checked` for
+ * check/radio rows); opening or closing it sends `toggle` with `open`. As the last child of a split
+ * {@link TspButtonsProps} group it draws as the split's menu part. Pointer-only: it never takes focus.
+ */
+export interface TspMenuProps {
+	items?: readonly TspMenuItem[];
+	/** The trigger's label; without `text` and `icon` the trigger is a square … button. */
+	text?: string;
+	icon?: string;
+	trigger?: "default" | "quiet" | "primary";
+	/** A chevron after the label. */
+	caret?: boolean;
+	size?: "sm" | "md";
+	variant?: "default" | "dense";
+	/** Whether the menu shows; a change wins over the user's local open/close. */
+	open?: boolean;
+	/** The highlighted row's id (the program's keyboard cursor). */
+	active?: string;
+	/** Which trigger edge the menu lines up with. */
+	align?: "start" | "end";
+	/** The trigger is dimmed and does not open; a string is the reason. */
+	disabled?: boolean | string;
+}
+/** `button` children drawn as one control: joined, an action with its menu part (`split`), or a toolbar well. */
+export interface TspButtonsProps {
+	variant?: "joined" | "split" | "toolbar";
+	/** The children's size, winning over their own. */
+	size?: "sm" | "md";
+	/** Accessible name of the group. */
+	label?: string;
+}
 export interface TspTabsProps {
 	items: readonly { id: string; label: TspText }[];
 	active?: string;
@@ -464,6 +593,8 @@ export interface TspEditorDecoration {
 	to: number;
 	s: string;
 	fx?: TspEffect;
+	/** An image blob the range stands for (an attachment token): copying the range copies the image. */
+	blob?: string;
 }
 export interface TspEditorProps {
 	text?: string;
@@ -519,6 +650,10 @@ export interface TspToastProps {
 	text: string;
 	sub?: string;
 	ttl?: number;
+	/** A button after the text (Undo): clicking it takes the toast down and sends this action for the node. */
+	action?: TspAction;
+	/** The button's text; defaults to the action's name labeled (`undo` → Undo). */
+	label?: string;
 }
 export interface TspRowsProps {
 	/** Width the rows were rendered at. */
@@ -610,6 +745,28 @@ export interface TspPickerAction {
 	end?: boolean;
 	/** A toggle's state (`Task model ⌥P`): drawn pressed when true. */
 	on?: boolean;
+	/** Drawn in the head as an icon-only button before its esc keycap (`icon`, else the label's initial), its label and keys as tooltip; `on` tints it. */
+	head?: boolean;
+	/** A head action's icon name. */
+	icon?: string;
+	disabled?: string | true;
+}
+
+/** A picker's stepped slider. */
+export interface TspPickerLevel {
+	/** What it sets ("Thinking"): shown, or with `icon` its tooltip and accessible name. */
+	label: string;
+	/** An icon drawn in place of the label. */
+	icon?: string;
+	/** A dim note after the value in its chip (the model switcher: the highlighted model's provider). */
+	detail?: string;
+	/** Its steps, low to high: the terminal heats the track up the ladder (color, then motion). */
+	steps: readonly { id: string; label: string }[];
+	/** The current step's id. */
+	value: string;
+	/** The keys the program binds to step it, shown in its tooltip (`["alt", "left", "right"]`). */
+	keys?: readonly string[];
+	/** Drawn but frozen, the reason as its tooltip. */
 	disabled?: string | true;
 }
 
@@ -635,6 +792,19 @@ export interface TspPickerProps {
 	/** Plural noun for counts and empty copy ("models", "sessions"). */
 	noun?: string;
 	size?: "md" | "lg" | "screen";
+	/**
+	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
+	 * (its `composerPart: "composer"` column), left edges aligned — a drop-up for a picker acting on the draft, such as
+	 * the model switcher. Placed as if absent while no composer is drawn, and on a phone.
+	 */
+	anchor?: "composer";
+	/**
+	 * Where the search sits: the head (default), or `"list"`: no head row, the query leading the column heads' row
+	 * (count and esc gone), head actions atop a `rail`. Ignored on a phone.
+	 */
+	search?: "head" | "list";
+	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
+	density?: "regular" | "snug";
 	layout?: "rows" | "cards" | "timeline" | "tree";
 	/** The program's search text (keys stay the program's); `null` hides the field. */
 	query?: string | null;
@@ -643,6 +813,8 @@ export interface TspPickerProps {
 	placeholder?: string;
 	scopes?: readonly TspPickerScope[];
 	scope?: string;
+	/** How `scopes` draw: a labeled column (default), or `"rail"`: icons only, label and count as the tooltip, kept on narrow sheets. A `group` change draws a separator. */
+	scopeStyle?: "column" | "rail";
 	tabs?: readonly { id: string; label: TspText; count?: number }[];
 	tab?: string;
 	columns?: readonly TspPickerColumn[];
@@ -669,6 +841,8 @@ export interface TspPickerProps {
 		items: readonly { id: string; label: TspText; on?: boolean; dot?: string }[];
 		selected?: string;
 	} | null;
+	/** A stepped slider docked above the action bar (the model switcher's thinking effort). A press or drag ending on another step sends `action {act:"level", value: <step id>}`. */
+	level?: TspPickerLevel | null;
 	state?: "ready" | "loading" | "error";
 	message?: TspText;
 	empty?: TspText;
@@ -949,12 +1123,15 @@ export interface TspShellProps {
 	replayEpoch?: number;
 	/** This mounted call received a real execution-start event, not a settled historical load. */
 	liveOrigin?: boolean;
+	/** The command text is still streaming in: the host marks its write head and the preview follows it. */
+	stream?: boolean;
 	/** Working directory shown ahead of the script when it differs from the project's. */
 	cwd?: string;
 	lang?: "bash" | "zsh";
 	/**
-	 * Clamp the command to its first `lines` drawn lines under a "N more lines" button; gives way inside an open
-	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first line.
+	 * Clamp the command to `lines` drawn lines under an Expand button, the window following the write head
+	 * (`stream`), then the playhead, with the enclosing scope heads pinned; gives way inside an open
+	 * disclosure, and never applies in the inspector. The Raw/Pseudo switch and menu stay on the first visible line.
 	 */
 	preview?: { lines: number };
 }
@@ -975,6 +1152,7 @@ export interface TspPropsByKind {
 	math: TspMathProps;
 	image: TspImageProps;
 	media: TspMediaProps;
+	web: TspWebProps;
 	kv: TspKvProps;
 	table: TspTableProps;
 	tree: TspTreeProps;
@@ -993,6 +1171,9 @@ export interface TspPropsByKind {
 	editor: TspEditorProps;
 	input: TspInputProps;
 	button: TspButtonProps;
+	buttons: TspButtonsProps;
+	menu: TspMenuProps;
+	doc: TspDocProps;
 	status: TspStatusProps;
 	seg: TspSegProps;
 	overlay: TspOverlayProps;
@@ -1027,7 +1208,7 @@ export type TspPropNode = {
 }[TspKind];
 
 /** Kinds whose primary text the `text` and `splice` ops address (the `text` prop). */
-export const TSP_TEXT_KINDS = ["text", "md", "code", "ansi", "math", "editor", "input", "shimmer"] as const;
+export const TSP_TEXT_KINDS = ["text", "md", "code", "ansi", "math", "editor", "input", "shimmer", "doc"] as const;
 
 /** A node on the wire. */
 export type TspNode = {
@@ -1122,7 +1303,16 @@ export type TspEvent =
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
 	| { ev: "select"; sf: string; id: string; item: string }
 	| { ev: "activate"; sf: string; id: string; item: string }
-	| { ev: "action"; sf: string; id: string; act: string; value?: string; mods?: readonly string[] }
+	/** A click action; a `menu` check or radio row adds its new `checked` state. */
+	| {
+			ev: "action";
+			sf: string;
+			id: string;
+			act: string;
+			value?: string;
+			mods?: readonly string[];
+			checked?: boolean;
+	  }
 	/** A typed value changed by pointer (prefs rows, picker toggles); `null` resets to the default. */
 	| {
 			ev: "change";
@@ -1131,6 +1321,18 @@ export type TspEvent =
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
 	  }
+	/** The user edited a `doc` (~300 ms after typing pauses, and when editing ends): `text` is its full new source. */
+	| { ev: "change"; sf: string; id: string; text: string }
+	/**
+	 * A comment on a `doc`: a new one on `quote` (`at` its UTF-16 offset in the source the user saw), or the
+	 * edited `note` of existing comment `comment`.
+	 */
+	| { ev: "comment"; sf: string; id: string; quote: string; at: number; note: string }
+	| { ev: "comment"; sf: string; id: string; comment: string; note: string }
+	/** Comment `comment` of a `doc` deleted. */
+	| { ev: "uncomment"; sf: string; id: string; comment: string }
+	/** In-place editing of a `doc` started (`on`) or ended. */
+	| { ev: "editing"; sf: string; id: string; on: boolean }
 	/**
 	 * An edit over the terminal's selection in an `editor`/`input` node: replace
 	 * `[from, to)` with `text`, caret to `cursor` (UTF-16 offsets; `len` is the

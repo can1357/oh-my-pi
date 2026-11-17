@@ -23,6 +23,11 @@
 //! command redirected them with `exec`. Higher-numbered descriptors persist;
 //! duplicates of standard streams follow the current command's streams.
 //!
+//! **Forks.** Between engine calls the store holds the whole root state, so
+//! the driver publishes a copy of it at each command boundary
+//! ([`Session::latest_image`]); [`Session::restore`] starts a second session
+//! from that copy while the first one keeps running its command.
+//!
 //! **`exit`.** A root run is a `bash -c` script: `exit N` (or `set -e`)
 //! unwinds the run with status `N`, runs the `EXIT` trap at the run boundary,
 //! and the shell stays usable for the next command with its state intact
@@ -38,7 +43,9 @@
 //! The cancel request reaches the engine only from the driver, while the run
 //! it targets is still in flight, so a late cancel never leaks into the next
 //! command. What `nohup` started ([`crate::tools`]) is detached: neither a
-//! cancel nor closing the session ends it.
+//! cancel nor closing the session ends it. Background jobs an earlier command
+//! left running are not part of the cancelled one: a cancel spares them, but
+//! closing the session ends them.
 //!
 //! **Subshell jobs.** Unlike bash, a subshell's background jobs that run
 //! in-engine work (builtins, loops) end when the subshell exits
@@ -68,9 +75,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	bash::{
-		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, MemStore, PipeTap,
-		Profile, RunId, Script, Shell, ShellError, ShellInit, Signal, Step, ToolCall, VprocSel,
-		store::{Key, MiscKey, Record},
+		Budget, CallId, Cx, Engine, EngineConfig, EventMask, EventSink, Fs, ImageDiff, MemStore,
+		PipeTap, Profile, RestoreError, RestoreOpts, RunId, Script, Shell, ShellError, ShellInit,
+		Signal, StateStore, Step, ToolCall, UnitId, VprocSel,
+		store::{BlobSlot, Key, MiscKey, Record, Table},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
 	sys::OutputDecoding,
@@ -212,6 +220,9 @@ pub enum SessionError {
 	/// The engine refused the initial state.
 	#[error("could not create the shell")]
 	Create(#[source] ShellError),
+	/// The engine refused the [`Image`] of [`Session::restore`].
+	#[error("could not restore the shell")]
+	Restore(#[source] RestoreError),
 	/// The driver task is gone (it panicked, or its runtime shut down), or
 	/// an earlier run became
 	/// [`SessionError::Unresponsive`].
@@ -273,6 +284,220 @@ impl SpawnObserver for Children {
 	}
 }
 
+/// The root state of a [`Session`] between two commands.
+///
+/// Variables, functions, aliases, options, traps, the working directory and
+/// the job table; [`Session::restore`] starts a new session from it. Cheap to
+/// clone; clones share the state.
+#[derive(Clone)]
+pub struct Image(Arc<MemStore>);
+
+impl Image {
+	/// The shell's working directory in this state.
+	pub fn cwd(&self) -> BString {
+		store_cwd(&self.0)
+	}
+}
+
+/// The [`Image`] a [`Session`] published at its last command boundary, with
+/// the fork changes adopted since ([`LatestImage::adopt`]).
+///
+/// Boundaries are its creation and the end of each command. Readable while a
+/// command runs: pi forks a busy session from it. Cheap to clone; clones share
+/// the slot.
+#[derive(Clone)]
+pub struct LatestImage {
+	slot:  Arc<Mutex<Latest>>,
+	/// Rings the session's driver, which writes adopted changes into the
+	/// session between commands.
+	waker: Waker,
+}
+
+/// The state behind a [`LatestImage`].
+struct Latest {
+	/// The published state with the queued merges applied.
+	image:  Image,
+	/// Adopted fork changes the driver has yet to write into the session.
+	merges: Vec<Merge>,
+}
+
+impl LatestImage {
+	/// The state as of the last command boundary, with the fork changes
+	/// adopted since: while a command runs, the state it started from.
+	pub fn get(&self) -> Image {
+		self.slot.lock().image.clone()
+	}
+
+	/// Carry what a fork of this session changed, from `base` (the image it
+	/// started from) to `state` (its image now), into the session: the state
+	/// a command sets up for the commands after it ([`carried`]). The session
+	/// takes it at its next command boundary (at once between commands);
+	/// [`Self::get`] shows it now. A key the session's running command
+	/// changes too keeps the command's value: that command ends after the
+	/// fork, and the later write wins.
+	pub fn adopt(&self, base: &Image, state: &Image) {
+		let mut changes = state.0.image().diff(base.0.image());
+		changes.retain(carried);
+		if changes.is_empty() {
+			return;
+		}
+		let units = changes
+			.records()
+			.filter_map(|record| match record {
+				Record::Func { unit, .. } => {
+					let blob = state.0.blob(BlobSlot::Unit(*unit))?;
+					Some((*unit, blob.to_vec()))
+				},
+				_ => None,
+			})
+			.collect();
+		let mut latest = self.slot.lock();
+		let merge = Merge { changes, units, reference: latest.image.clone() };
+		let mut view = MemStore::clone(&merge.reference.0);
+		merge.apply(&mut view);
+		latest.image = Image(Arc::new(view));
+		latest.merges.push(merge);
+		drop(latest);
+		self.waker.wake_by_ref();
+	}
+
+	fn new(store: &MemStore, waker: Waker) -> Self {
+		let latest = Latest { image: Image(Arc::new(store.clone())), merges: Vec::new() };
+		Self { slot: Arc::new(Mutex::new(latest)), waker }
+	}
+
+	/// Write the adopted changes into `store` and publish it: a command
+	/// boundary.
+	fn publish(&self, store: &mut MemStore) {
+		self.slot.lock().publish(store);
+	}
+
+	/// [`Self::publish`] when changes were adopted since the last boundary
+	/// (the driver between commands).
+	fn publish_adopted(&self, store: &mut MemStore) {
+		let mut latest = self.slot.lock();
+		if !latest.merges.is_empty() {
+			latest.publish(store);
+		}
+	}
+}
+
+impl Latest {
+	fn publish(&mut self, store: &mut MemStore) {
+		for merge in self.merges.drain(..) {
+			merge.apply(store);
+		}
+		self.image = Image(Arc::new(store.clone()));
+	}
+}
+
+/// Fork changes adopted into a session ([`LatestImage::adopt`]).
+struct Merge {
+	/// What the fork changed of the state a session carries ([`carried`]).
+	changes:   ImageDiff,
+	/// The compiled bodies of the functions among them, so the session keeps
+	/// their line numbers.
+	units:     Vec<(UnitId, Vec<u8>)>,
+	/// The session's state ([`LatestImage::get`]) when the fork ended.
+	reference: Image,
+}
+
+impl Merge {
+	/// Write the changes into `store`, out of band, where it still holds the
+	/// reference's record: a key changed since was changed by a command that
+	/// ended after the fork, and keeps that command's value.
+	fn apply(&self, store: &mut MemStore) {
+		let mut path_set = false;
+		for (key, record) in self.changes.changes() {
+			if store.record(key) != self.reference.0.record(key) {
+				continue;
+			}
+			match record {
+				// The record came from a store under this key, so it fits.
+				Some(record) => drop(store.put_out_of_band(key, record.clone())),
+				None => store.del_out_of_band(key),
+			}
+			path_set |= matches!(key, Key::Var(name) if resets_hash(name));
+		}
+		for (unit, blob) in &self.units {
+			// A memory store's blob writes cannot fail.
+			drop(store.put_blob(BlobSlot::Unit(*unit), blob));
+		}
+		if path_set {
+			flush_hash(store);
+		}
+	}
+}
+
+/// Whether a fork's change to `key` carries into the session it was forked
+/// from ([`LatestImage::adopt`]): what a command sets up for the commands
+/// after it (variables, functions, aliases, options, traps, `umask`, `set
+/// --`). Not carried: the working directory and what follows it (`PWD`,
+/// `OLDPWD`, the directory stack), which pi sets for every command; the
+/// command hash table, a cache ([`flush_hash`] empties it when `PATH`
+/// carries); the shell's bookkeeping (`$_`, history, counters); and the
+/// process state a fork does not copy (jobs, scopes).
+fn carried(key: Key<'_>) -> bool {
+	match key {
+		Key::Var(name) => !matches!(name.as_bytes(), b"PWD" | b"OLDPWD"),
+		Key::Func(_)
+		| Key::Alias(_)
+		| Key::Opt(_)
+		| Key::Trap(_)
+		| Key::ZshOpt(_)
+		| Key::ZshAlias { .. } => true,
+		Key::Misc(misc) => matches!(
+			misc,
+			MiscKey::Umask
+				| MiscKey::Positional
+				| MiscKey::DisabledBuiltins
+				| MiscKey::LoadedBuiltins
+				| MiscKey::ZshTies
+				| MiscKey::ZshDisabledAliases
+				| MiscKey::ZshDisabledSuffixAliases
+				| MiscKey::ZshDisabledFuncs
+				| MiscKey::ZshDisabledReswords
+				| MiscKey::ZshPatDisables
+				| MiscKey::ZshNamedDirs
+				| MiscKey::ZshModules
+				| MiscKey::ZshStyles
+				| MiscKey::ZshMathFuncs
+		),
+		Key::DirStack
+		| Key::CmdHash(_)
+		| Key::Job(_)
+		| Key::Proc(_)
+		| Key::Scope(_)
+		| Key::Local { .. } => false,
+	}
+}
+
+/// Whether writing variable `name` empties the command hash table, as the
+/// engine's `resets_hash` decides for the host platform.
+fn resets_hash(name: &[u8]) -> bool {
+	name == b"PATH" || (cfg!(windows) && name == b"PATHEXT")
+}
+
+/// Empty `store`'s command hash table out of band, as the engine's
+/// `flush_hash` does when `PATH` is assigned.
+fn flush_hash(store: &mut MemStore) {
+	let mut hashed = Vec::new();
+	// A memory store's scans cannot fail.
+	drop(store.scan(Table::CmdHash, &mut |key, _| hashed.push(key.to_buf())));
+	for key in hashed {
+		store.del_out_of_band(key.as_key());
+	}
+	store.del_out_of_band(Key::Misc(MiscKey::ZshPathChecked));
+}
+
+/// The shell's working directory as `store` records it.
+fn store_cwd(store: &MemStore) -> BString {
+	match store.record(Key::Misc(MiscKey::Cwd)) {
+		Some(Record::Misc(cwd)) => cwd.clone(),
+		_ => BString::default(),
+	}
+}
+
 /// The wake bell of a driver task: its waker (handed to worker threads and
 /// held by the [`Session`]) stores a permit the driver awaits; it never
 /// blocks.
@@ -297,6 +522,7 @@ pub struct Session {
 	/// Rings the driver's bell.
 	waker:    Waker,
 	children: Children,
+	image:    LatestImage,
 }
 
 impl Session {
@@ -310,6 +536,24 @@ impl Session {
 	///
 	/// [`SessionError::Create`] when the engine refuses the initial state.
 	pub fn new(config: SessionConfig) -> Result<Self, SessionError> {
+		Self::start(config, None)
+	}
+
+	/// Start a shell from `image` (a fork of the session it came from): its
+	/// variables, functions, options and working directory are the image's,
+	/// so [`SessionConfig::env`] only configures pi's commands and
+	/// [`SessionConfig::cwd`] is unused. Background jobs the image lists as
+	/// running belong to the source session; here they are done (status
+	/// 137). `$RANDOM` is reseeded.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Restore`] when the engine refuses the image.
+	pub fn restore(config: SessionConfig, image: &Image) -> Result<Self, SessionError> {
+		Self::start(config, Some(image))
+	}
+
+	fn start(config: SessionConfig, image: Option<&Image>) -> Result<Self, SessionError> {
 		let SessionConfig { env, cwd, fs, vfs, runtime, output_decoding } = config;
 		let (jobs, rx) = flume::unbounded();
 		let children = Children::default();
@@ -327,16 +571,46 @@ impl Session {
 		// A subshell's background in-engine work ends with it: nothing
 		// (no process for `pkill`, no job for `kill %N`) could reach it.
 		let engine = Engine::new(EngineConfig { end_orphan_jobs: true, ..EngineConfig::default() });
-		let mut store = MemStore::new();
-		// A program's shell: no history, line editor or completion system.
-		let init = ShellInit { env, cwd, profile: Profile::Tool, ..ShellInit::default() };
-		let mut shell = Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
-			.map_err(SessionError::Create)?;
+		let (mut shell, store) = match image {
+			None => {
+				let mut store = MemStore::new();
+				// A program's shell: no history, line editor or completion system.
+				let init = ShellInit { env, cwd, profile: Profile::Tool, ..ShellInit::default() };
+				let shell =
+					Shell::create(&engine, &mut Cx { host: &mut host, store: &mut store }, init)
+						.map_err(SessionError::Create)?;
+				(shell, store)
+			},
+			Some(image) => {
+				let mut store = MemStore::clone(&image.0);
+				let opts = RestoreOpts { reseed_random: true, ..RestoreOpts::default() };
+				let (shell, _) =
+					Shell::restore(&engine, &mut Cx { host: &mut host, store: &mut store }, opts)
+						.map_err(SessionError::Restore)?;
+				(shell, store)
+			},
+		};
 		// Nothing observes events: skip building them.
 		shell.set_event_mask(EventMask::NONE);
-		let driver = Driver { shell, store, host, bell, jobs: rx, children: children.clone(), tools };
+		let image = LatestImage::new(&store, waker.clone());
+		let driver = Driver {
+			shell,
+			store,
+			host,
+			bell,
+			jobs: rx,
+			children: children.clone(),
+			tools,
+			image: image.clone(),
+		};
 		runtime.spawn(driver.serve());
-		Ok(Self { jobs: Some(jobs), waker, children })
+		Ok(Self { jobs: Some(jobs), waker, children, image })
+	}
+
+	/// The session's state as of its last command boundary; see
+	/// [`LatestImage`].
+	pub fn latest_image(&self) -> LatestImage {
+		self.image.clone()
 	}
 
 	/// The live externals of the run in flight; usable while
@@ -532,6 +806,8 @@ struct Driver {
 	children: Children,
 	/// The host callouts in flight (`timeout`, `nohup`, `git`).
 	tools:    ToolCalls,
+	/// Updated at the end of each command.
+	image:    LatestImage,
 }
 
 impl Driver {
@@ -539,6 +815,8 @@ impl Driver {
 	/// them.
 	async fn serve(mut self) {
 		loop {
+			// Adopted fork changes land before any request that follows them.
+			self.image.publish_adopted(&mut self.store);
 			match self.jobs.try_recv() {
 				Ok(Request::Run(job)) => self.run(job).await,
 				Ok(Request::LiveJobs(reply)) => {
@@ -626,8 +904,8 @@ impl Driver {
 		};
 		if applied > 0 {
 			// A cancel that raced the run's natural end is still pending:
-			// apply it now (it ends background work too, as pi's cancel
-			// does), not at the start of the next command.
+			// apply it now (it ends the background jobs this run started
+			// too), not at the start of the next command.
 			match self.step(Budget { max_ops: 1, max_ns: u64::MAX }) {
 				Step::Done { run, status } => self.on_done(run, status),
 				Step::Call { id, call } => self.on_call(id, call),
@@ -643,10 +921,8 @@ impl Driver {
 		self.shell.set_event_mask(EventMask::NONE);
 		self.host.set_reported_error(None);
 		self.restore_overlay(saved);
-		let cwd = match self.store.record(Key::Misc(MiscKey::Cwd)) {
-			Some(Record::Misc(cwd)) => cwd.clone(),
-			_ => BString::default(),
-		};
+		self.image.publish(&mut self.store);
+		let cwd = store_cwd(&self.store);
 		// The caller may have stopped waiting (dropped future).
 		let _ = reply.send(RunOutcome { status, cancelled: applied > 0, exited, cwd });
 	}

@@ -72,7 +72,7 @@ function startupSession(data: StatusLineStartupData): StatusLineSession {
 			getSessionId: () => "",
 			getUsageStatistics: () => NO_USAGE,
 		},
-		modelRegistry: { isUsingOAuth: () => data.usingSubscription },
+		modelRegistry: { isUsingSubscription: () => data.usingSubscription },
 		getContextUsage: () =>
 			data.model?.contextWindow ? { tokens: 0, contextWindow: data.model.contextWindow, percent: null } : undefined,
 		autoResolvedThinkingLevel: () => undefined,

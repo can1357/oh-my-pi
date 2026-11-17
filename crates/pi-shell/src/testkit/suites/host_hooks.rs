@@ -162,7 +162,7 @@ fn live_external_jobs_counts_background_jobs_running_an_external() {
 	}));
 	let mut r = Rig::new(host, skeleton_init(&[]));
 	assert_eq!(r.shell().live_external_jobs(), 0);
-	assert_eq!(run(&mut r, "/x/sleeper &"), (0, false));
+	assert_eq!(run(&mut r, "/fake/sleeper &"), (0, false));
 	// Let the job reach its external.
 	let (shell, host, store) = r.parts();
 	while let Step::Yield | Step::Done { .. } =
@@ -341,7 +341,7 @@ fn pending_spawn_does_not_block_the_shell_and_resumes_when_answered() {
 	let gate = Arc::new(Mutex::new(Gate::default()));
 	let mut r = Rig::new(gated_host(&gate), skeleton_init(&[]));
 	let (shell, ..) = r.parts();
-	shell.submit(Script::command(b"{ echo bg; } & /x/prog; echo \"status $?\"".as_slice()));
+	shell.submit(Script::command(b"{ echo bg; } & /fake/prog; echo \"status $?\"".as_slice()));
 	until_blocked(&mut r);
 	// The spawn is pending: no process, and the background job ran meanwhile.
 	assert_eq!(tally(&gate), (1, 0, 0));
@@ -360,7 +360,7 @@ fn cancel_drops_a_pending_spawn_before_any_process_exists() {
 	let gate = Arc::new(Mutex::new(Gate::default()));
 	let mut r = Rig::new(gated_host(&gate), skeleton_init(&[]));
 	let (shell, ..) = r.parts();
-	shell.submit(Script::command(b"/x/prog; echo after".as_slice()));
+	shell.submit(Script::command(b"/fake/prog; echo after".as_slice()));
 	until_blocked(&mut r);
 	r.shell().control().cancel(Signal::Term);
 	assert_eq!(until_done(&mut r), 143);
@@ -379,7 +379,7 @@ fn snapshot_of_a_pending_spawn_reissues_it_without_duplicating_the_process() {
 	let gate = Arc::new(Mutex::new(Gate::default()));
 	let mut r = Rig::new(gated_host(&gate), skeleton_init(&[]));
 	let (shell, ..) = r.parts();
-	shell.submit(Script::command(b"/x/prog; echo \"status $?\"".as_slice()));
+	shell.submit(Script::command(b"/fake/prog; echo \"status $?\"".as_slice()));
 	until_blocked(&mut r);
 	r.snapshot();
 	// The pending future was dropped by the suspend; nothing started.

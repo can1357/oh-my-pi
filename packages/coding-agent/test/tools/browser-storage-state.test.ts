@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import { type BrowserCookie, normalizeCookieArguments } from "@oh-my-pi/pi-coding-agent/tools/browser/storage-state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -18,6 +19,8 @@ const session: ToolSession = {
 	getSessionFile: () => null,
 	getSessionSpawns: () => "*",
 	settings: Settings.isolated({
+		// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+		"browser.webkit": false,
 		"browser.enabled": true,
 		"browser.headless": true,
 		"browser.cmux": false,
@@ -62,6 +65,66 @@ afterAll(async () => {
 	await releaseAllTabs({ kill: true });
 	await disposeAllVmContexts();
 	await fs.rm(root, { recursive: true, force: true });
+});
+
+describe("tab.setCookies() arguments", () => {
+	const exported: BrowserCookie[] = [
+		{
+			name: "sid",
+			value: "s3cret",
+			domain: ".example.com",
+			path: "/",
+			expires: -1,
+			httpOnly: true,
+			secure: true,
+			sameSite: "Lax",
+		},
+		{
+			name: "pref",
+			value: "dark",
+			domain: "www.example.com",
+			path: "/",
+			expires: 1900000000,
+			httpOnly: false,
+			secure: false,
+			sameSite: "None",
+		},
+	];
+
+	it("takes the array tab.cookies() returns as one argument, keeping each cookie's metadata", () => {
+		expect(normalizeCookieArguments([exported])).toEqual(exported);
+	});
+
+	it("applies a trailing scope to every cookie of an array argument", () => {
+		const cookies = normalizeCookieArguments([
+			[
+				{ name: "a", value: "1" },
+				{ name: "b", value: "2" },
+			],
+			{ url: "https://example.com/" },
+		]);
+		expect(cookies).toEqual([
+			{ url: "https://example.com/", name: "a", value: "1" },
+			{ url: "https://example.com/", name: "b", value: "2" },
+		]);
+	});
+
+	it("names the malformed item and field without echoing any cookie value", () => {
+		const secret = "cookie-secret-must-not-leak";
+		let message = "";
+		try {
+			normalizeCookieArguments([
+				[
+					{ name: "ok", value: secret },
+					{ name: "bad name", value: secret },
+				],
+			]);
+		} catch (error) {
+			message = error instanceof Error ? error.message : String(error);
+		}
+		expect(message).toContain("item 1 has an invalid or missing name");
+		expect(message).not.toContain(secret);
+	});
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser cookie and storage state helpers", () => {

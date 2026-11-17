@@ -15,6 +15,7 @@ import { AgentAwaits, type AgentAwaitsApi } from "./agent-awaits";
 import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
 import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import { noteAgentArrival } from "@oh-my-pi/pi-tui/overlays/agent-identity";
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
@@ -169,7 +170,7 @@ export interface AgentRegistryApi {
 	list(): AgentRef[];
 	/** Every alive non-advisor agent except `id`. */
 	listVisibleTo(id: string): AgentRef[];
-	/** Whether a ref's claimed running state is corroborated by its attached live session. */
+	/** Whether a ref's claimed running state is corroborated by its attached live session's open run. */
 	isRunning(ref: AgentRef): boolean;
 	/** Mirror a session's run-state notifications into ref `id`; returns the unsubscribe function. */
 	syncSessionStatus(id: string, session: AgentSessionHandle): () => void;
@@ -233,6 +234,8 @@ export class AgentRegistry implements AgentRegistryApi {
 		};
 		Object.defineProperty(ref, kMintedRef, { value: true });
 		this.#refs.set(ref.id, ref);
+		// Name colours follow arrival order; a re-registered or restored ref keeps its original `createdAt`.
+		if (ref.kind === "sub") noteAgentArrival(ref.id, ref.createdAt);
 		this.#emit({ type: "registered", ref });
 		return ref;
 	}
@@ -333,12 +336,13 @@ export class AgentRegistry implements AgentRegistryApi {
 
 	/**
 	 * Record that this agent's run produced and handed over its final result,
-	 * and terminalize the ref when no turn is in flight. Acceptance is the
-	 * executor's run boundary: the result is settled, so a ref still `running`
-	 * with nothing streaming is a missed terminal transition the parent's
-	 * `wait` would otherwise keep blocking on. A ref with a genuinely
-	 * streaming session (a wake turn started at the boundary) stays `running`
-	 * and is surfaced by {@link staleAcceptedRuns} instead.
+	 * and terminalize the ref when its session's run is closed. Acceptance is
+	 * the executor's run boundary: the result is settled, so a ref still
+	 * `running` with no open run is a missed terminal transition the parent's
+	 * `wait` would otherwise keep blocking on. A ref whose session still has a
+	 * run open (a wake turn started at the boundary, or the run is paused on
+	 * background work) stays `running`; the run's own end reports `idle`, and
+	 * {@link staleAcceptedRuns} surfaces it if that never comes.
 	 *
 	 * Milestones are run-scoped: `responseAt` is the CURRENT call's response
 	 * time (never a previous run's, which {@link setStatus} cleared when the
@@ -356,7 +360,7 @@ export class AgentRegistry implements AgentRegistryApi {
 			responseAt: responseAt ?? now,
 			acceptedAt: now,
 		};
-		if (ref.status === "running" && ref.session?.isStreaming !== true) {
+		if (ref.status === "running" && !this.isRunning(ref)) {
 			this.setStatus(id, "idle", ref);
 		} else {
 			this.#emit({ type: "metadata_changed", ref });
@@ -366,7 +370,7 @@ export class AgentRegistry implements AgentRegistryApi {
 
 	/**
 	 * Accepted-but-running refs: the run's final result was handed over but the
-	 * ref never left `running`, and no turn is in flight. This is the lifecycle
+	 * ref never left `running`, and its session has no run open. This is the lifecycle
 	 * leak the `proc://` running-agents roster reports so the parent can cancel it
 	 * instead of waiting on a run that already finished.
 	 */
@@ -457,10 +461,13 @@ export class AgentRegistry implements AgentRegistryApi {
 		);
 	}
 
-	/** Whether a ref's claimed running state is corroborated by its attached live session. */
+	/**
+	 * Whether a ref's claimed running state is corroborated by its attached live session:
+	 * its run is open, streaming or paused until a job, child or peer message resumes it.
+	 */
 	isRunning(ref: AgentRef): boolean {
 		if (ref.status !== "running") return false;
-		return ref.session?.isStreaming === true;
+		return ref.session?.runStartedAt !== undefined;
 	}
 
 	/** Mirror a session's authoritative run-state notifications into its owned registry ref. */

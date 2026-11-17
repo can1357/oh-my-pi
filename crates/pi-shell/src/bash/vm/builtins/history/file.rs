@@ -420,7 +420,7 @@ pub fn readhistfile(
 	readflags: u32,
 	r: &mut Report,
 ) -> Result<(), Pending> {
-	let Some(fn_) = fn_.or(o.histfile.as_ref().map(|f| f.as_slice())) else {
+	let Some(fn_) = fn_.or_else(|| o.histfile.as_ref().map(|f| f.as_slice())) else {
 		return Ok(());
 	};
 	let fn_ = BString::from(fn_);
@@ -527,7 +527,7 @@ fn parse_file(h: &mut Hist, o: &FileOpts, data: &[u8], readflags: u32, tim: i64)
 			let text = if raw.starts_with(b"\\:") {
 				raw[1..].to_vec()
 			} else {
-				raw.clone()
+				raw
 			};
 			(0, 0, text)
 		};
@@ -631,7 +631,7 @@ pub fn savehistfile(
 	if !o.interactive || h.st.savehistsiz <= 0 || h.entries.is_empty() {
 		return Ok(());
 	}
-	let Some(fn_) = fn_.or(o.histfile.as_ref().map(|f| f.as_slice())) else {
+	let Some(fn_) = fn_.or_else(|| o.histfile.as_ref().map(|f| f.as_slice())) else {
 		return Ok(());
 	};
 	let fn_ = BString::from(fn_);
@@ -772,7 +772,7 @@ pub fn savehistfile(
 					&& writeflags & HFILE_USE_OPTIONS != 0
 				{
 					if let Ok(HistOut::Stat(st)) =
-						steps.ask(HistOp::Stat { path: target.clone(), follow: true })?
+						steps.ask(HistOp::Stat { path: target, follow: true })?
 					{
 						h.st.last.fsiz = st.size;
 						h.st.last.mtim = st.mtime_ns.div_euclid(1_000_000_000);
@@ -786,20 +786,20 @@ pub fn savehistfile(
 			},
 		}
 		if ok && let Some(tmp) = &tmpfile {
-			match steps.ask(HistOp::Rename { from: tmp.clone(), to: fn_.clone() })? {
-				Ok(_) => {
-					// The fcntl lock was on the file renamed over.
-					if l.flock {
-						// Unlock only drops the held handle; it cannot fail.
-						let _ = steps.ask(HistOp::Unlock)?;
-						l.flock = false;
-					}
-				},
-				Err(_) => {
-					r.err(format!("can't rename {}.new to $HISTFILE", fn_.to_str_lossy()));
-					ok = false;
-					err = false;
-				},
+			if steps
+				.ask(HistOp::Rename { from: tmp.clone(), to: fn_.clone() })?
+				.is_ok()
+			{
+				// The fcntl lock was on the file renamed over.
+				if l.flock {
+					// Unlock only drops the held handle; it cannot fail.
+					let _ = steps.ask(HistOp::Unlock)?;
+					l.flock = false;
+				}
+			} else {
+				r.err(format!("can't rename {}.new to $HISTFILE", fn_.to_str_lossy()));
+				ok = false;
+				err = false;
 			}
 		}
 		if ok && writeflags & HFILE_SKIPOLD != 0 && writeflags & (HFILE_FAST | HFILE_NO_REWRITE) == 0

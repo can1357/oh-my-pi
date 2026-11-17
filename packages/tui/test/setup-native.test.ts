@@ -191,6 +191,33 @@ describe("setup surfaces under native rendering", () => {
 		}
 	});
 
+	it("does not repaint an idle ANSI scene while keeping timed phases animated", async () => {
+		setNativeRendering(false);
+		const ui = fakeUi();
+		const scene = probeScene("idle");
+		const wizard = new SetupWizardComponent(fakeSetupHost(ui.host), [scene]);
+		const done = wizard.run();
+		try {
+			advance(33);
+			expect(ui.renders()).toBeGreaterThan(1);
+			wizard.handleInput("\r");
+			advance(453);
+			expect(wizard.render(80).some(line => line.includes("idle title"))).toBe(true);
+			const atScene = ui.renders();
+			advance(1000);
+			expect(ui.renders()).toBe(atScene);
+
+			wizard.handleInput("\x03");
+			const atOutro = ui.renders();
+			advance(33);
+			expect(ui.renders()).toBeGreaterThan(atOutro);
+			advance(SETUP_OUTRO_MS);
+			await done;
+		} finally {
+			wizard.dispose();
+		}
+	});
+
 	it("completes without a splash when no scene applies to the native surface", async () => {
 		const ui = fakeUi();
 		const scene = probeScene("ansi", true);

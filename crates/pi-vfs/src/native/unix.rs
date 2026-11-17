@@ -64,7 +64,7 @@ fn timespec(time: FileTime) -> libc::timespec {
 					}
 				},
 			};
-			spec.tv_sec = secs as libc::time_t;
+			spec.tv_sec = secs as _;
 			spec.tv_nsec = nanos as _;
 		},
 	}

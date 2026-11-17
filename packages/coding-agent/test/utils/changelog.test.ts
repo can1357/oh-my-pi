@@ -294,7 +294,7 @@ describe("renderChangelogEntries", () => {
 			release(1, 0, 0, `### Added\n\n- First ${largeBody}\nEND-FIRST`),
 		]);
 
-		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("1.0.0");
+		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("3.0.0");
 		expect(rendered.truncated).toBe(false);
 		expect(rendered.markdown).toContain("END-FIRST");
 		expect(rendered.markdown).toContain("END-SECOND");

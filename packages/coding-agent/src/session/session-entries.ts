@@ -67,11 +67,6 @@ export interface SessionHeader {
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
-	/**
-	 * Source session file of a read-only seance fork. Its artifacts stay in the
-	 * source: `history://`, `artifact://`, and `agent://` read them from there.
-	 */
-	seanceSource?: string;
 }
 
 export interface NewSessionOptions {
@@ -423,21 +418,4 @@ export interface UsageStatistics {
 	cost: number;
 	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
 	subagentCost: number;
-}
-/**
- * True when a raw JSONL line is a complete `message` record carrying an
- * assistant role. Parses the line, so valid JSON whitespace (`"role" :
- * "assistant"`, tabs, newlines-in-string excluded by line framing) classifies
- * correctly — unlike substring checks for exact serializations. Malformed or
- * partial lines (mid-write truncation) return false.
- */
-export function isAssistantMessageLine(line: string): boolean {
-	if (line.length === 0 || line.charCodeAt(0) !== 123) return false;
-	let record: { type?: unknown; message?: { role?: unknown } };
-	try {
-		record = JSON.parse(line) as { type?: unknown; message?: { role?: unknown } };
-	} catch {
-		return false;
-	}
-	return record.type === "message" && record.message?.role === "assistant";
 }

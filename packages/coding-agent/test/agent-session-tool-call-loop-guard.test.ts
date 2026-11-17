@@ -118,4 +118,139 @@ describe("AgentSession tool-call loop guard", () => {
 		expect(redirects).toHaveLength(1);
 		expect(redirects[0]!.display).toBe(false);
 	});
+
+	it.each([
+		{
+			scenario: "exempt device",
+			name: "write",
+			args: { path: "xd://mcp__peers_wait" },
+			exempt: "mcp__peers_wait",
+			redirects: 0,
+		},
+		{
+			scenario: "other device",
+			name: "write",
+			args: { path: "xd://mcp__other_tool" },
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+		{
+			scenario: "ordinary file",
+			name: "write",
+			args: { path: "mcp__peers_wait" },
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+		{
+			scenario: "device read",
+			name: "read",
+			args: { path: "xd://mcp__peers_wait" },
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+		{
+			scenario: "write exemption for devices",
+			name: "write",
+			args: { path: "xd://mcp__peers_wait" },
+			exempt: "write",
+			redirects: 0,
+		},
+		{
+			scenario: "write exemption for files",
+			name: "write",
+			args: { path: "output.txt" },
+			exempt: "write",
+			redirects: 0,
+		},
+		{
+			scenario: "legacy file_path",
+			name: "write",
+			args: { file_path: "xd://mcp__peers_wait" },
+			exempt: "mcp__peers_wait",
+			redirects: 0,
+		},
+		{
+			scenario: "normalized URL prefix",
+			name: "write",
+			args: { path: "XD://mcp__peers_wait" },
+			exempt: "mcp__peers_wait",
+			redirects: 0,
+		},
+		{
+			scenario: "leading whitespace is not a device dispatch",
+			name: "write",
+			args: { path: " xd://mcp__peers_wait" },
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+		{
+			scenario: "hashline-wrapped device",
+			name: "write",
+			args: { path: "[xd://mcp__peers_wait#ABCD]" },
+			exempt: "mcp__peers_wait",
+			redirects: 0,
+		},
+		{
+			scenario: "device topic URL",
+			name: "write",
+			args: { path: "xd://mcp__peers_wait/docs" },
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+		{ scenario: "device root", name: "write", args: { path: "xd://" }, exempt: "mcp__peers_wait", redirects: 1 },
+		{
+			scenario: "path takes precedence",
+			name: "write",
+			args: { path: "output.txt", file_path: "xd://mcp__peers_wait" },
+			exempt: "mcp__peers_wait",
+			redirects: 1,
+		},
+	])("applies loop exemptions to $scenario", async ({ name, args, exempt, redirects }) => {
+		const tool: AgentTool = {
+			name,
+			label: name,
+			description: "Mock device transport",
+			parameters: type({ "path?": "string", "file_path?": "string", "content?": "string" }),
+			execute: async () => ({ content: [{ type: "text", text: "No new results" }] }),
+		};
+		const mock = createMockModel({
+			provider: "openai",
+			responses: [
+				{ content: [{ type: "toolCall", name, arguments: { ...args, content: "{}" } }] },
+				{ content: [{ type: "toolCall", name, arguments: { ...args, content: "{}" } }] },
+				{ content: ["Finished waiting."] },
+			],
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.exemptTools": [exempt],
+		});
+		settings.setModelRole("default", `${mock.provider}/${mock.id}`);
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock, systemPrompt: ["Test"], tools: [tool], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+			toolRegistry: new Map([[name, tool]]),
+		});
+
+		await session.prompt("wait for results");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(session.agent.state.messages.filter(message => message.role === "toolResult")).toHaveLength(2);
+		expect(
+			session.agent.state.messages.filter(
+				message => message.role === "custom" && message.customType === "tool-call-loop-redirect",
+			),
+		).toHaveLength(redirects);
+	});
 });

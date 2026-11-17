@@ -31,6 +31,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { fixedAdvisorTools } from "./helpers/agent-session-setup";
 
 interface MockYieldDetails {
 	status: "success";
@@ -66,6 +67,7 @@ interface AdvisorTestExtensionRunner {
 	hasHandlers(eventType: string): boolean;
 	emitBeforeAgentStart(): Promise<undefined>;
 	emit(event: { type: string; message?: AgentMessage }): Promise<void>;
+	emitSessionStop?(): Promise<undefined>;
 }
 
 describe("AgentSession advisor auto-resume suppression", () => {
@@ -236,7 +238,6 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 			extensionRunner: extensionRunner as never,
 		});
@@ -324,7 +325,6 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -736,7 +736,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [parkTool],
+			advisorTools: fixedAdvisorTools(parkTool),
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -981,7 +981,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	});
 
 	it("keeps background wakes after an interrupt that lands while the finished turn still settles", async () => {
-		// The session reports streaming for the whole post-turn unwind — extension hooks,
+		// The session reports streaming for the whole post-turn unwind — stop hooks,
 		// compaction, the advisor drain — long after the turn reached its own end. An Esc
 		// there stops nothing a background completion could restart, and no later turn end
 		// would lift the suppression again, so the wake must survive it.
@@ -990,10 +990,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const extensionRunner: AdvisorTestExtensionRunner = {
 			hasHandlers: () => true,
 			emitBeforeAgentStart: async () => undefined,
-			emit: async event => {
-				if (event.type !== "agent_end") return;
+			emit: async () => {},
+			emitSessionStop: async () => {
 				settling.resolve();
 				await releaseSettle.promise;
+				return undefined;
 			},
 		};
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;

@@ -239,7 +239,7 @@ fn ctrl_char(c: u32) -> u32 {
 }
 
 /// zsh `ztrlen`: characters of metafied `s` (a `Meta` pair is one).
-fn ztrlen(s: &[u8]) -> i32 {
+const fn ztrlen(s: &[u8]) -> i32 {
 	let mut n = 0;
 	let mut i = 0;
 	while i < s.len() {
@@ -505,7 +505,7 @@ impl Display {
 	/// display was trashed, the point where zsh calls `reexpandprompt()`:
 	/// the caller re-expands [`Editor::lprompt`]/[`Editor::rprompt`] (and
 	/// the prompt attributes) before refreshing when this is true.
-	pub fn needs_reexpand(&self, term: &TermCaps) -> bool {
+	pub const fn needs_reexpand(&self, term: &TermCaps) -> bool {
 		let (resetneeded, clearflag) =
 			if self.clearlist && self.listshown > 0 && !term.tccan(Cap::ClearEod) {
 				(true, false)
@@ -518,7 +518,7 @@ impl Display {
 	/// The end of zsh's `zrefresh` after it listed completions
 	/// ([`RefreshOut::list`]): a list just shown keeps the lines the
 	/// buffer takes.
-	pub fn list_done(&mut self) {
+	pub const fn list_done(&mut self) {
 		if self.showinglist == -1 {
 			self.showinglist = self.nlnct;
 		}
@@ -1151,7 +1151,7 @@ impl R<'_, '_> {
 
 	/// zsh's `all_atr_on`/`all_atr_off` for special characters given
 	/// `base_atr_on`.
-	fn all_atr(&self, base_on: Zattr) -> (Zattr, Zattr) {
+	const fn all_atr(&self, base_on: Zattr) -> (Zattr, Zattr) {
 		let sp = self.d.special_atr_on;
 		let on = if sp & (TXTFGCOLOUR | TXTBGCOLOUR) != 0 {
 			// Keep the colours of the special attributes.
@@ -1208,11 +1208,11 @@ impl R<'_, '_> {
 		let (w, h) = zp::countprompt(&i.ed.rprompt, cols, 0);
 		self.d.rpromptw = i32::try_from(w).unwrap_or(i32::MAX);
 		self.d.rprompth = i32::try_from(h).unwrap_or(i32::MAX);
-		if self.d.lpromptwof != self.d.winw {
-			self.d.lpromptw = self.d.lpromptwof;
-		} else {
+		if self.d.lpromptwof == self.d.winw {
 			self.d.lpromptw = 0;
 			self.d.lprompth += 1;
+		} else {
+			self.d.lpromptw = self.d.lpromptwof;
 		}
 		let lpw = self.d.lpromptw;
 		if lpw != 0 {
@@ -1240,7 +1240,8 @@ impl R<'_, '_> {
 		if t < h && h <= self.d.nbuf.len() {
 			self.d.nbuf[t..h].rotate_left(1);
 		} else if h > 0 && t < self.d.nbuf.len() {
-			self.d.nbuf[h - 1] = self.d.nbuf[t].clone();
+			let (lo, hi) = self.d.nbuf.split_at_mut(t);
+			lo[h - 1].clone_from(&hi[0]);
 		}
 		if tline == 0 {
 			self.d.more_start = true;
@@ -1253,9 +1254,7 @@ impl R<'_, '_> {
 		let (winw, winh) = (self.d.winw, self.d.winh);
 		self.nset(rp.ln, winw + 1, if wrapped { ZR_NL } else { ZR_ZR });
 		self.nset(rp.ln, rp.s, ZR_ZR);
-		if rp.ln != winh - 1 {
-			rp.ln += 1;
-		} else {
+		if rp.ln == winh - 1 {
 			if rp.canscroll == 0 {
 				if rp.nvln != -1
 					&& rp.nvln != winh - 1
@@ -1271,6 +1270,8 @@ impl R<'_, '_> {
 			if rp.nvln != -1 {
 				rp.nvln -= 1;
 			}
+		} else {
+			rp.ln += 1;
 		}
 		self.ensure_nline(rp.ln);
 		rp.s = 0;
@@ -1755,25 +1756,7 @@ impl R<'_, '_> {
 
 		// Does the right prompt exist and fit on the screen?
 		let mut rprompt_off = 1;
-		if !self.d.more_start {
-			if self.d.trashedzle && self.i.transientrprompt {
-				self.d.put_rpmpt = false;
-			} else {
-				let rp_buf = &ed.rprompt;
-				self.d.put_rpmpt =
-					self.d.rprompth == 1 && !rp_buf.is_empty() && !rp_buf.contains(&b'\t');
-				if self.d.put_rpmpt {
-					rprompt_off = self.i.rprompt_indent.max(0);
-					let len0 = self
-						.d
-						.nbuf
-						.first()
-						.and_then(|l| l.as_deref())
-						.map_or(0, |l| zr_strlen(l, 0));
-					self.d.put_rpmpt = len0 + self.d.rpromptw < winw - rprompt_off;
-				}
-			}
-		} else {
+		if self.d.more_start {
 			// `>....` on the first line: there is text before the start of
 			// the screen.
 			let lpw = self.d.lpromptw;
@@ -1789,6 +1772,21 @@ impl R<'_, '_> {
 			}
 			self.nset(0, winw, ZR_ZR);
 			self.nset(0, winw + 1, ZR_ZR);
+		} else if self.d.trashedzle && self.i.transientrprompt {
+			self.d.put_rpmpt = false;
+		} else {
+			let rp_buf = &ed.rprompt;
+			self.d.put_rpmpt = self.d.rprompth == 1 && !rp_buf.is_empty() && !rp_buf.contains(&b'\t');
+			if self.d.put_rpmpt {
+				rprompt_off = self.i.rprompt_indent.max(0);
+				let len0 = self
+					.d
+					.nbuf
+					.first()
+					.and_then(|l| l.as_deref())
+					.map_or(0, |l| zr_strlen(l, 0));
+				self.d.put_rpmpt = len0 + self.d.rpromptw < winw - rprompt_off;
+			}
 		}
 
 		let mut iln = 0;

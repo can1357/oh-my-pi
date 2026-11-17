@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import type { TspText } from "@oh-my-pi/pi-wire";
+import { CONTEXT_PRESENTATION } from "../src/chrome/context-presentation";
 import type {
 	ContextThinkingGroup,
 	ContextViewCategory,
@@ -198,7 +199,7 @@ describe("ContextViewer keybindings", () => {
 				h.viewer.handleInput(key);
 				// Down skips the empty Custom Tools row, which has nothing to open.
 				expect(selected(h.viewer.describe(cx))).toBe(
-					key === up ? "system-prompt" : key === down ? "user-messages" : "built-in-tools",
+					key === up ? "skills" : key === down ? "user-messages" : "built-in-tools",
 				);
 			}
 		});
@@ -261,37 +262,6 @@ describe("ContextViewer keybindings", () => {
 });
 
 describe("ContextViewer navigation", () => {
-	it("keeps Skills token totals visible while native and keyboard navigation cannot focus or open them", () => {
-		const h = harness();
-		expect(
-			h
-				.render()
-				.find(line => /\sSkills\s+\d/.test(line))
-				?.match(/\d+K|\d+\.\d%/g),
-		).toEqual(["11K", "5.3%"]);
-		for (const context of [cx, meterCx]) {
-			const root = h.viewer.describe(context);
-			const skills = nodes(root).find(node => node.key === "skills");
-			expect(usageColumns(skills)).toEqual(["11K", "5.3%"]);
-			for (const activate of [false, true]) {
-				select(h.viewer, "skills", activate);
-				const unchanged = h.viewer.describe(context);
-				expect(selected(unchanged)).toBe("system-prompt");
-				expect(nodes(unchanged).some(node => node.key === "overview")).toBe(true);
-				expect(nodes(unchanged).some(node => node.key === "entry-skill/0")).toBe(false);
-			}
-		}
-		h.viewer.handleInput("\x1b[B");
-		expect(selected(h.viewer.describe(cx))).toBe("built-in-tools");
-		h.viewer.handleInput("\r");
-		expect(nodes(h.viewer.describe(cx)).some(node => node.key === "entry-tool/0")).toBe(true);
-		h.viewer.handleInput("\x1b");
-		h.viewer.handleInput("\x1b[A");
-		expect(selected(h.viewer.describe(cx))).toBe("system-prompt");
-		h.viewer.handleInput("\r");
-		expect(nodes(h.viewer.describe(cx)).some(node => node.key === "entry-system/0")).toBe(true);
-	});
-
 	it("opens a single-entry category directly and returns to its overview selection", () => {
 		const h = harness();
 		select(h.viewer, "system-prompt");
@@ -393,7 +363,7 @@ describe("ContextViewer preview and scrolling", () => {
 				.map(op => op[2]);
 		edgeReveals();
 		h.viewer.handleInput("\x1b[B");
-		expect(selected(h.viewer.describe(cx))).toBe("built-in-tools");
+		expect(selected(h.viewer.describe(cx))).toBe("skills");
 		expect(edgeReveals()).toEqual([]);
 		select(h.viewer, "tool-output/bash", false);
 		edgeReveals();
@@ -688,6 +658,42 @@ describe("ContextViewer entry content", () => {
 			.join("\n");
 		expect(body).toContain(`Source: ${path}`);
 		expect(body).not.toContain("\x1b");
+	});
+
+	it("colors source markers by category in previews and full content without shifting surrounding text", () => {
+		const data = fixture();
+		const marker = "[Shown in Skills: fixture]";
+		const text = `before\t${marker}\nafter`;
+		const start = text.indexOf(marker);
+		data.categories[0]!.entries = [
+			{
+				id: "system/0",
+				label: "System Block 1",
+				tokens: 2,
+				text,
+				sourceMarkers: [{ start, end: start + marker.length, category: "skills" }],
+			},
+			{ id: "system/1", label: "System Block 2", tokens: 1, text: "second block" },
+		];
+		const colored = theme.fg(CONTEXT_PRESENTATION.skills.color, marker);
+		const markerSpan = (root: NativeNode) =>
+			nodes(root)
+				.flatMap(node => (node.k === "text" && Array.isArray(node.p?.spans) ? node.p.spans : []))
+				.find(span => span.t.includes(marker));
+		const h = harness(data);
+		h.render(160);
+		select(h.viewer, "system-prompt");
+		const preview = h.viewer.render(160).join("\n");
+		expect(preview).toContain(colored);
+		expect(Bun.stripANSI(preview)).toMatch(/before +\[Shown in Skills: fixture\]/);
+		const previewSpan = markerSpan(h.viewer.describe({ ...cx, cols: 160 }));
+		expect(previewSpan?.t).toBe(marker);
+		expect(previewSpan?.s).toBeDefined();
+		h.viewer.handleInput("\r");
+		const full = h.viewer.render(160).join("\n");
+		expect(full).toContain(colored);
+		expect(Bun.stripANSI(full)).toContain("after");
+		expect(markerSpan(h.viewer.describe({ ...cx, cols: 160 }))?.t).toBe(marker);
 	});
 
 	it("refreshes cached preview and full-content timestamps when the clock format changes at the same width", () => {

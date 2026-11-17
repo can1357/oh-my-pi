@@ -38,6 +38,8 @@ export function formatUsageResetWindow(windowId: string): string {
 			return "Claude Opus weekly";
 		case "anthropic:7d:sonnet":
 			return "Claude Sonnet weekly";
+		case "anthropic:7d:fable":
+			return "Claude Fable weekly";
 		default:
 			return windowId;
 	}

@@ -198,6 +198,7 @@ const session = {
 	settings,
 	modelRegistry: {
 		getAvailable: () => [SMOL],
+		find: (provider, id) => (provider === SMOL.provider && id === SMOL.id ? SMOL : undefined),
 		getApiKey: async () => "test-key",
 		resolver: () => async () => "test-key",
 	},
@@ -1121,6 +1122,23 @@ describe("completion() through eval runtimes", () => {
 		const result = await executeJs("print((await wait(handles))[0]);", options);
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("hello from the next cell");
+	});
+
+	it("refuses a number passed to wait() instead of returning at once as if it had slept", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-wait-number-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: `js-wait-number:${crypto.randomUUID()}`,
+			session: makeSession({ cwd: tempDir.path() }),
+			sessionFile: path.join(tempDir.path(), "session.jsonl"),
+		};
+		const result = await executeJs(
+			"try { await wait(1800); print('returned'); } catch (error) { print(error.message); }",
+			options,
+		);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).not.toContain("returned");
+		expect(result.output).toContain("not a sleep");
 	});
 
 	it("times out waiting on a running completion started in an earlier JavaScript cell", async () => {

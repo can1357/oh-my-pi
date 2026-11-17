@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { validateAgentToolArguments } from "./tool-arguments";
 import type {
 	AgentContext,
@@ -617,9 +618,15 @@ export class SpeculativeOperationCoordinator {
 		tool: AgentTool | undefined,
 		toolCall: AgentToolCall,
 		args: Record<string, unknown>,
+		earlierEffectsSettled?: Promise<void>,
+		signal?: AbortSignal,
 	): Promise<SpeculativeRawOutcome | undefined> {
 		const candidate = this.#candidates.get(toolCall.id);
 		if (candidate?.source !== "direct") return undefined;
+		// Final assistant order can differ from admission order. Validate only
+		// after the earlier shared writers have exposed their final effects.
+		if (earlierEffectsSettled) await untilAborted(signal, earlierEffectsSettled);
+		signal?.throwIfAborted();
 		return this.#commitCandidate(candidate, tool, toolCall, args);
 	}
 

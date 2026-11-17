@@ -176,9 +176,19 @@ fn build_runs(arena: &ComponentArena, last: u32) -> Vec<Run> {
 /// (non-`oneChangePerToken`, no timeout / `maxEditLength`) execution path so
 /// the resulting run structure is identical.
 pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
+	myers_diff_within(old, new, old.len() + new.len())
+		.expect("Myers diff terminates within oldLen + newLen edits")
+}
+
+/// [`myers_diff`] bounded to `max_edits` added or removed tokens.
+///
+/// Returns `None` once the edit script needs more (jsdiff's `maxEditLength`).
+/// Bounds both time, `O((N + M) · max_edits)`, and frontier memory, for
+/// callers that can do without a diff of a wholesale rewrite.
+pub fn myers_diff_within(old: &[u32], new: &[u32], max_edits: usize) -> Option<Vec<Run>> {
 	let old_len = old.len() as isize;
 	let new_len = new.len() as isize;
-	let max_edit = old_len + new_len;
+	let max_edit = max_edits.min(old.len() + new.len()) as isize;
 	let offset = max_edit + 1;
 	let mut best: Vec<Option<PathState>> = vec![None; (2 * max_edit + 3) as usize];
 	let mut arena = ComponentArena::with_capacity((old.len() + new.len()).clamp(16, 4096));
@@ -187,7 +197,7 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 	let mut seed = PathState { old_pos: -1, last: NO_COMPONENT };
 	let seed_new_pos = extract_common(&mut arena, &mut seed, new, old, 0);
 	if seed.old_pos + 1 >= old_len && seed_new_pos + 1 >= new_len {
-		return build_runs(&arena, seed.last);
+		return Some(build_runs(&arena, seed.last));
 	}
 	best[offset as usize] = Some(seed);
 
@@ -241,7 +251,7 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 			};
 			let new_pos = extract_common(&mut arena, &mut base_path, new, old, diagonal);
 			if base_path.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
-				return build_runs(&arena, base_path.last);
+				return Some(build_runs(&arena, base_path.last));
 			}
 			if base_path.old_pos + 1 >= old_len {
 				max_diagonal = max_diagonal.min(diagonal - 1);
@@ -256,7 +266,7 @@ pub fn myers_diff(old: &[u32], new: &[u32]) -> Vec<Run> {
 		}
 		edit_length += 1;
 	}
-	unreachable!("Myers diff terminates within oldLen + newLen edits")
+	None
 }
 
 /// Intern tokens as dense ids under exact equality.
@@ -316,12 +326,22 @@ pub fn build_changes<'a, T: ?Sized, V>(
 
 /// jsdiff line tokenization over UTF-16 code units.
 pub fn line_tokens_u16(text: &[u16]) -> Vec<&[u16]> {
-	text.split_inclusive(|&unit| unit == LF).collect()
+	if text.len() < 64 {
+		return text.split_inclusive(|&unit| unit == LF).collect();
+	}
+	xutf::lines::<xutf::Utf16>(text, xutf::LineEnds::Lf)
+		.map(|line| line.with_end())
+		.collect()
 }
 
 /// jsdiff line tokenization over UTF-8 text.
 pub fn line_tokens_str(text: &str) -> Vec<&str> {
-	text.split_inclusive('\n').collect()
+	if text.len() < 64 {
+		return text.split_inclusive('\n').collect();
+	}
+	xutf::lines_str(text, xutf::LineEnds::Lf)
+		.map(|line| line.with_end())
+		.collect()
 }
 
 /// Myers runs over pre-split line tokens, so callers that also need the token
@@ -990,6 +1010,20 @@ mod tests {
 			.into_iter()
 			.map(|change| (String::from_utf16(&change.value).unwrap(), change.added, change.removed))
 			.collect()
+	}
+
+	#[test]
+	fn line_tokens_keep_terminators_and_unpaired_surrogates() {
+		let mut text = vec![b'a' as u16; 64];
+		text.extend([0xd800, b'\r' as u16, LF, LF, b'z' as u16]);
+		assert_eq!(
+			line_tokens_u16(&text),
+			text.split_inclusive(|&unit| unit == LF).collect::<Vec<_>>()
+		);
+		let text = format!("{}\r\n\nz", "a".repeat(64));
+		assert_eq!(line_tokens_str(&text), text.split_inclusive('\n').collect::<Vec<_>>());
+		assert!(line_tokens_u16(&[]).is_empty());
+		assert!(line_tokens_str("").is_empty());
 	}
 
 	#[test]

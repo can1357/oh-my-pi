@@ -324,7 +324,7 @@ describe("always-ask-cached wrapper cycle", () => {
 		runner.initialize(
 			{
 				sendMessage: () => {},
-				sendUserMessage: () => {},
+				sendUserMessage: async () => {},
 				appendEntry: () => {},
 				setLabel: () => {},
 				getActiveTools: () => [],

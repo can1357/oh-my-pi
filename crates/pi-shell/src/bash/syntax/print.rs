@@ -18,7 +18,12 @@
 use alloc::vec::Vec;
 
 use crate::bash::syntax::{
-	ast::*,
+	ast::{AndOrOp, CaseMode, CaseTerm, ComsubKind, RedirOp, ReplaceMode, Sep, Special},
+	tree::{
+		AndOr, ArrayElem, Assign, AssignValue, Case, Command, CommandKind, Cond, CondExpr, For,
+		FuncDef, HereDoc, If, List, ListItem, Param, ParamName, ParamOp, Part, Pipeline, Redir,
+		RedirFd, RedirTarget, Seq, Simple, Subscript, While, Word, WordPart,
+	},
 	util::{ansi_decode, push_u32, sh_single_quote},
 	zsh::tok,
 };
@@ -40,14 +45,14 @@ pub enum PrintStyle {
 /// For a function definition with [`PrintStyle::DeclareF`] this is exactly
 /// what `declare -f name` prints for it (without the final newline). Other
 /// commands print as they would inside a function body at indentation 0.
-pub fn print(cmd: &Command, style: PrintStyle) -> Vec<u8> {
+pub fn print(cmd: Command<'_>, style: PrintStyle) -> Vec<u8> {
 	match style {
 		PrintStyle::DeclareF => {
 			let mut p = Bp::new(false);
-			let source_len = (cmd.span.hi - cmd.span.lo) as usize;
+			let source_len = (cmd.span().hi - cmd.span().lo) as usize;
 			p.out.reserve(source_len * 2);
-			if let CommandKind::FuncDef(f) = &cmd.kind {
-				p.named_function(f);
+			if let CommandKind::FuncDef(f) = cmd.kind() {
+				p.named_function(f, f.name(), true);
 			} else {
 				p.inside_function_def = 1;
 				let node = Node::Cmd { cmd, fl: Fl::default() };
@@ -62,10 +67,40 @@ pub fn print(cmd: &Command, style: PrintStyle) -> Vec<u8> {
 			c.flush_docs();
 			c.out
 		},
-		PrintStyle::Zsh => match &cmd.kind {
-			CommandKind::FuncDef(f) => crate::bash::syntax::zsh::function_text(&f.name, f),
+		PrintStyle::Zsh => match cmd.kind() {
+			CommandKind::FuncDef(f) => crate::bash::syntax::zsh::function_text(f.name(), f),
 			_ => crate::bash::syntax::zsh::command_text(cmd),
 		},
+	}
+}
+
+/// What `declare -f name` prints for function definition `cmd` defining
+/// `name` alone (a zsh definition of several names prints each name by
+/// itself).
+pub fn print_function_as(cmd: Command<'_>, name: &[u8]) -> Vec<u8> {
+	let CommandKind::FuncDef(f) = cmd.kind() else {
+		return print(cmd, PrintStyle::DeclareF);
+	};
+	let mut p = Bp::new(false);
+	p.named_function(f, name, false);
+	p.out
+}
+
+/// The lone function definition `list` holds (one item, one plain stage).
+pub(crate) fn lone_funcdef(list: List<'_>) -> Option<(Command<'_>, FuncDef<'_>)> {
+	let item = list.items().one()?;
+	let ao = item.and_or();
+	if ao.rest().len() != 0 || matches!(item.sep(), Sep::Amp | Sep::Disown) {
+		return None;
+	}
+	let p = ao.first();
+	let cmd = p.stages().one()?;
+	if p.bang() || p.time().is_some() {
+		return None;
+	}
+	match cmd.kind() {
+		CommandKind::FuncDef(f) => Some((cmd, f)),
+		_ => None,
 	}
 }
 
@@ -73,21 +108,11 @@ pub fn print(cmd: &Command, style: PrintStyle) -> Vec<u8> {
 ///
 /// With [`PrintStyle::DeclareF`], a list that is one function definition
 /// prints as `declare -f` prints it.
-pub fn print_list(list: &List, style: PrintStyle) -> Vec<u8> {
+pub fn print_list(list: List<'_>, style: PrintStyle) -> Vec<u8> {
 	match style {
 		PrintStyle::DeclareF => {
-			if let [item] = &list.items[..]
-				&& item.and_or.rest.is_empty()
-				&& !matches!(item.sep, Sep::Amp | Sep::Disown)
-			{
-				let p = &item.and_or.first;
-				if let [stage] = &p.stages[..]
-					&& !p.bang
-					&& p.time.is_none()
-					&& matches!(stage.cmd.kind, CommandKind::FuncDef(_))
-				{
-					return print(&stage.cmd, PrintStyle::DeclareF);
-				}
+			if let Some((cmd, _)) = lone_funcdef(list) {
+				return print(cmd, PrintStyle::DeclareF);
 			}
 			let mut p = Bp::new(false);
 			p.inside_function_def = 1;
@@ -103,15 +128,8 @@ pub fn print_list(list: &List, style: PrintStyle) -> Vec<u8> {
 			c.out
 		},
 		PrintStyle::Zsh => {
-			if let [item] = &list.items[..]
-				&& item.and_or.rest.is_empty()
-				&& !matches!(item.sep, Sep::Amp | Sep::Disown)
-				&& let [stage] = &item.and_or.first.stages[..]
-				&& !item.and_or.first.bang
-				&& item.and_or.first.time.is_none()
-				&& let CommandKind::FuncDef(f) = &stage.cmd.kind
-			{
-				return crate::bash::syntax::zsh::function_text(&f.name, f);
+			if let Some((_, f)) = lone_funcdef(list) {
+				return crate::bash::syntax::zsh::function_text(f.name(), f);
 			}
 			crate::bash::syntax::zsh::getpermtext(list, 0)
 		},
@@ -121,7 +139,7 @@ pub fn print_list(list: &List, style: PrintStyle) -> Vec<u8> {
 /// bash `make_command_string` of a command read at top level, as `bash
 /// --pretty-print` prints it (obash's `--pretty-print`): a `;` list stays on
 /// one line, compound bodies are indented as in `declare -f`.
-pub fn command_string(list: &List) -> Vec<u8> {
+pub fn command_string(list: List<'_>) -> Vec<u8> {
 	let mut p = Bp::new(false);
 	let node = list_node(list, false);
 	p.mcsi(node.as_ref());
@@ -131,7 +149,7 @@ pub fn command_string(list: &List) -> Vec<u8> {
 
 /// bash `print_comsub`: the text bash stores for a command substitution
 /// body.
-pub fn comsub_text(list: &List) -> Vec<u8> {
+pub fn comsub_text(list: List<'_>) -> Vec<u8> {
 	let mut p = Bp::new(true);
 	let node = list_node(list, true);
 	p.mcsi(node.as_ref());
@@ -167,15 +185,17 @@ enum Conn {
 #[derive(Clone, Copy)]
 enum Node<'a> {
 	Cmd {
-		cmd: &'a Command,
+		cmd: Command<'a>,
 		fl:  Fl,
 	},
+	/// The `if` arms from `from` on, then the `else` body (an `elif` chain
+	/// prints as nested `if`s).
 	IfTail {
-		arms:      &'a [IfArm],
-		else_body: Option<&'a List>,
+		if_:  If<'a>,
+		from: usize,
 	},
 	List {
-		items: &'a [ListItem],
+		items: Seq<'a, ListItem<'a>>,
 		split: usize,
 		nl:    bool,
 		tail:  bool,
@@ -183,17 +203,17 @@ enum Node<'a> {
 	/// A left-leaning asynchronous chain after its last non-asynchronous
 	/// connection.
 	Async {
-		items: &'a [ListItem],
+		items: Seq<'a, ListItem<'a>>,
 		base:  usize,
 		nl:    bool,
 		tail:  bool,
 	},
 	AndOr {
-		ao:  &'a AndOr,
+		ao:  AndOr<'a>,
 		end: usize,
 	},
 	Pipe {
-		pipeline: &'a Pipeline,
+		pipeline: Pipeline<'a>,
 		start:    usize,
 		fl:       Fl,
 	},
@@ -210,24 +230,26 @@ impl Node<'_> {
 
 /// A list as bash connects it; newlines remain connections inside command
 /// substitutions.
-fn list_node(list: &List, nl: bool) -> Option<Node<'_>> {
-	list_items(&list.items, nl, true)
+fn list_node(list: List<'_>, nl: bool) -> Option<Node<'_>> {
+	list_items(list.items(), nl, true)
 }
 
-fn list_items(items: &[ListItem], nl: bool, tail: bool) -> Option<Node<'_>> {
+fn list_items<'a>(items: Seq<'a, ListItem<'a>>, nl: bool, tail: bool) -> Option<Node<'a>> {
 	let last = items.last()?;
-	let tail = tail && matches!(last.sep, Sep::Amp | Sep::Disown);
+	let tail = tail && matches!(last.sep(), Sep::Amp | Sep::Disown);
 	if items.len() == 1 && !tail {
-		return Some(and_or_node(&last.and_or, last.and_or.rest.len()));
+		return Some(and_or_node(last.and_or(), last.and_or().rest().len()));
 	}
-	if let Some(at) = items[..items.len() - 1]
+	if let Some(at) = items
+		.take(items.len() - 1)
 		.iter()
-		.rposition(|item| !matches!(item.sep, Sep::Amp | Sep::Disown))
+		.rposition(|item| !matches!(item.sep(), Sep::Amp | Sep::Disown))
 	{
 		// `connect_async_list` absorbs a background command into the right
 		// side of `;`, but not into a newline connection in command
 		// substitutions.
-		if !(nl && items[at].sep == Sep::Newline) || (!tail && at + 2 == items.len()) {
+		let at_sep = items.get(at).map(ListItem::sep);
+		if !(nl && at_sep == Some(Sep::Newline)) || (!tail && at + 2 == items.len()) {
 			return Some(Node::List { items, split: at + 1, nl, tail });
 		}
 		return Some(Node::Async { items, base: at + 2, nl, tail });
@@ -235,24 +257,24 @@ fn list_items(items: &[ListItem], nl: bool, tail: bool) -> Option<Node<'_>> {
 	Some(Node::Async { items, base: 1, nl, tail })
 }
 
-fn and_or_node(ao: &AndOr, end: usize) -> Node<'_> {
+fn and_or_node(ao: AndOr<'_>, end: usize) -> Node<'_> {
 	if end == 0 {
-		pipeline_node(&ao.first, 0)
+		pipeline_node(ao.first(), 0)
 	} else {
 		Node::AndOr { ao, end }
 	}
 }
 
-fn pipeline_node(pipeline: &Pipeline, start: usize) -> Node<'_> {
-	let stage = &pipeline.stages[start];
+fn pipeline_node(pipeline: Pipeline<'_>, start: usize) -> Node<'_> {
+	let stage = pipeline.stages().get(start).expect("pipeline stage");
 	let fl = Fl {
-		time:   start == 0 && pipeline.time.is_some(),
-		posix:  start == 0 && pipeline.time.is_some_and(|t| t.posix),
-		invert: start == 0 && pipeline.bang,
-		stderr: stage.pipe_stderr,
+		time:   start == 0 && pipeline.time().is_some(),
+		posix:  start == 0 && pipeline.time().is_some_and(|t| t.posix),
+		invert: start == 0 && pipeline.bang(),
+		stderr: stage.pipe_stderr(),
 	};
-	if start + 1 == pipeline.stages.len() {
-		Node::Cmd { cmd: &stage.cmd, fl }
+	if start + 1 == pipeline.stages().len() {
+		Node::Cmd { cmd: stage, fl }
 	} else {
 		Node::Pipe { pipeline, start, fl: Fl { stderr: false, ..fl } }
 	}
@@ -273,7 +295,7 @@ const INDENT_AMOUNT: usize = 4;
 /// One redirection to print: a real one or the `2>&1` of `|&`.
 #[derive(Clone, Copy)]
 enum R<'a> {
-	Real(&'a Redir),
+	Real(Redir<'a>),
 	StderrDup,
 }
 
@@ -286,7 +308,7 @@ struct Bp<'a> {
 	was_heredoc:         bool,
 	printing_connection: u32,
 	printing_comsub:     bool,
-	deferred:            Vec<&'a Redir>,
+	deferred:            Vec<Redir<'a>>,
 }
 
 impl<'a> Bp<'a> {
@@ -350,12 +372,12 @@ impl<'a> Bp<'a> {
 		}
 	}
 
-	fn heredoc_bodies(&mut self, docs: &[&Redir]) {
+	fn heredoc_bodies(&mut self, docs: &[Redir<'_>]) {
 		self.put(b"\n");
 		for r in docs {
-			if let RedirTarget::HereDoc(d) = &r.target {
-				self.put(&d.text);
-				self.put(&d.delim);
+			if let RedirTarget::HereDoc(d) = r.target() {
+				self.put(d.text());
+				self.put(d.delim());
 			}
 			self.put(b"\n");
 		}
@@ -380,11 +402,15 @@ impl<'a> Bp<'a> {
 		if fl.invert {
 			self.put(b"! ");
 		}
-		match node {
+		match *node {
 			Node::List { items, split, nl, tail } => {
-				let first = list_items(&items[..*split], *nl, false).expect("nonempty prefix");
-				let second = list_items(&items[*split..], *nl, *tail);
-				let conn = if *nl && items[*split - 1].sep == Sep::Newline {
+				let first = list_items(items.take(split), nl, false).expect("nonempty prefix");
+				let second = list_items(items.skip(split), nl, tail);
+				let conn = if nl
+					&& items
+						.get(split - 1)
+						.is_some_and(|i| i.sep() == Sep::Newline)
+				{
 					Conn::Nl
 				} else {
 					Conn::Semi
@@ -392,34 +418,34 @@ impl<'a> Bp<'a> {
 				self.connection(&first, second.as_ref(), conn);
 			},
 			Node::Async { items, base, nl, tail } => {
-				if *tail {
-					let first = if items.len() == *base {
-						list_items(items, *nl, false).expect("nonempty chain")
+				if tail {
+					let first = if items.len() == base {
+						list_items(items, nl, false).expect("nonempty chain")
 					} else {
-						Node::Async { items, base: *base, nl: *nl, tail: false }
+						Node::Async { items, base, nl, tail: false }
 					};
-					self.connection(&first, None, async_conn(items.last().expect("chain").sep));
+					self.connection(&first, None, async_conn(items.last().expect("chain").sep()));
 				} else {
-					let prefix = &items[..items.len() - 1];
-					let first = if prefix.len() == *base {
-						list_items(prefix, *nl, false).expect("nonempty prefix")
+					let prefix = items.take(items.len() - 1);
+					let first = if prefix.len() == base {
+						list_items(prefix, nl, false).expect("nonempty prefix")
 					} else {
-						Node::Async { items: prefix, base: *base, nl: *nl, tail: false }
+						Node::Async { items: prefix, base, nl, tail: false }
 					};
-					let last = &items.last().expect("chain").and_or;
-					let second = and_or_node(last, last.rest.len());
+					let last = items.last().expect("chain").and_or();
+					let second = and_or_node(last, last.rest().len());
 					self.connection(
 						&first,
 						Some(&second),
-						async_conn(prefix.last().expect("prefix").sep),
+						async_conn(prefix.last().expect("prefix").sep()),
 					);
 				}
 			},
 			Node::AndOr { ao, end } => {
-				let first = and_or_node(ao, *end - 1);
-				let (op, pipeline) = &ao.rest[*end - 1];
+				let first = and_or_node(ao, end - 1);
+				let (op, pipeline) = ao.rest().nth(end - 1).expect("and-or connection");
 				let second = pipeline_node(pipeline, 0);
-				let conn = if *op == AndOrOp::And {
+				let conn = if op == AndOrOp::And {
 					Conn::And
 				} else {
 					Conn::Or
@@ -427,16 +453,14 @@ impl<'a> Bp<'a> {
 				self.connection(&first, Some(&second), conn);
 			},
 			Node::Pipe { pipeline, start, .. } => {
-				let stage = &pipeline.stages[*start];
-				let first = Node::Cmd {
-					cmd: &stage.cmd,
-					fl:  Fl { stderr: stage.pipe_stderr, ..Fl::default() },
-				};
-				let second = pipeline_node(pipeline, *start + 1);
+				let stage = pipeline.stages().get(start).expect("pipeline stage");
+				let first =
+					Node::Cmd { cmd: stage, fl: Fl { stderr: stage.pipe_stderr(), ..Fl::default() } };
+				let second = pipeline_node(pipeline, start + 1);
 				self.connection(&first, Some(&second), Conn::Pipe);
 			},
-			Node::IfTail { arms, else_body } => self.if_cmd(arms, *else_body),
-			Node::Cmd { cmd, fl } => self.command(cmd, *fl),
+			Node::IfTail { if_, from } => self.if_cmd(if_, from),
+			Node::Cmd { cmd, fl } => self.command(cmd, fl),
 		}
 	}
 
@@ -504,30 +528,30 @@ impl<'a> Bp<'a> {
 		self.printing_connection -= 1;
 	}
 
-	fn command(&mut self, cmd: &'a Command, fl: Fl) {
-		match &cmd.kind {
+	fn command(&mut self, cmd: Command<'a>, fl: Fl) {
+		match cmd.kind() {
 			CommandKind::Simple(s) => {
-				self.simple(s, &cmd.redirs, fl.stderr);
+				self.simple(s, cmd.redirs(), fl.stderr);
 				return;
 			},
 			CommandKind::For(f) => self.for_like(b"for ", f),
 			CommandKind::Select(f) => self.for_like(b"select ", f),
 			CommandKind::ArithFor(f) => {
 				self.put(b"for ((");
-				self.arith_part(&f.init.src);
+				self.arith_part(f.init().src());
 				self.put(b"; ");
-				self.arith_part(&f.cond.src);
+				self.arith_part(f.cond().src());
 				self.put(b"; ");
-				self.arith_part(&f.step.src);
+				self.arith_part(f.step().src());
 				self.put(b"))");
-				self.loop_body(&f.body);
+				self.loop_body(f.body());
 			},
 			CommandKind::Case(c) => self.case(c),
 			CommandKind::While(w) => self.while_cmd(w),
-			CommandKind::If(i) => self.if_cmd(&i.arms, i.else_body.as_ref()),
+			CommandKind::If(i) => self.if_cmd(i, 0),
 			CommandKind::Arith(a) => {
 				self.put(b"((");
-				self.put(&a.src);
+				self.put(a.src());
 				self.put(b"))");
 			},
 			CommandKind::Cond(e) => {
@@ -548,39 +572,39 @@ impl<'a> Bp<'a> {
 			},
 			CommandKind::Coproc(c) => {
 				self.put(b"coproc ");
-				if !matches!(c.body.kind, CommandKind::Simple(_)) {
-					self.put(c.name.as_deref().unwrap_or(b"COPROC"));
+				if !matches!(c.body().kind(), CommandKind::Simple(_)) {
+					self.put(c.name().unwrap_or(b"COPROC"));
 					self.put(b" ");
 				}
 				self.skip_this_indent += 1;
-				let node = Node::Cmd { cmd: &c.body, fl: Fl::default() };
+				let node = Node::Cmd { cmd: c.body(), fl: Fl::default() };
 				self.mcsi(Some(&node));
 			},
 			CommandKind::Repeat(r) => {
 				self.put(b"repeat ");
-				word_text(&r.count, &mut self.out);
+				word_text(r.count(), &mut self.out);
 				self.put(b";");
-				self.loop_body(&r.body);
+				self.loop_body(r.body());
 			},
 			CommandKind::Try(t) => {
-				self.group(&t.body);
+				self.group(t.body());
 				self.put(b" always ");
-				self.group(&t.always);
+				self.group(t.always());
 			},
 			CommandKind::AnonFunc(a) => {
 				self.put(b"() ");
 				self.skip_this_indent += 1;
-				let node = Node::Cmd { cmd: &a.body, fl: Fl::default() };
+				let node = Node::Cmd { cmd: a.body(), fl: Fl::default() };
 				self.mcsi(Some(&node));
-				for w in &a.args {
+				for w in a.args() {
 					self.put(b" ");
 					word_text(w, &mut self.out);
 				}
 			},
 		}
-		if !cmd.redirs.is_empty() || fl.stderr {
+		if !cmd.redirs().is_empty() || fl.stderr {
 			self.put(b" ");
-			self.redirection_list(&cmd.redirs, fl.stderr);
+			self.redirection_list(cmd.redirs(), fl.stderr);
 		}
 	}
 
@@ -588,15 +612,15 @@ impl<'a> Bp<'a> {
 		self.put(if src.is_empty() { b"1" } else { src });
 	}
 
-	fn for_like(&mut self, kw: &[u8], f: &'a For) {
+	fn for_like(&mut self, kw: &[u8], f: For<'a>) {
 		self.put(kw);
-		self.put(&f.var);
-		for v in &f.extra_vars {
+		self.put(f.var());
+		for v in f.extra_vars() {
 			self.put(b" ");
 			self.put(v);
 		}
 		self.put(b" in ");
-		match &f.words {
+		match f.words() {
 			Some(words) => {
 				for (i, w) in words.iter().enumerate() {
 					if i > 0 {
@@ -608,11 +632,11 @@ impl<'a> Bp<'a> {
 			None => self.put(b"\"$@\""),
 		}
 		self.put(b";");
-		self.loop_body(&f.body);
+		self.loop_body(f.body());
 	}
 
 	/// `newline("do\n")` … `newline("done")` of `for` and `select`.
-	fn loop_body(&mut self, body: &'a List) {
+	fn loop_body(&mut self, body: List<'a>) {
 		self.newline(b"do\n");
 		self.indentation += INDENT_AMOUNT;
 		let node = list_node(body, self.printing_comsub);
@@ -623,7 +647,7 @@ impl<'a> Bp<'a> {
 		self.newline(b"done");
 	}
 
-	fn group(&mut self, body: &'a List) {
+	fn group(&mut self, body: List<'a>) {
 		self.put(b"{ ");
 		if self.inside_function_def == 0 {
 			self.skip_this_indent += 1;
@@ -646,20 +670,20 @@ impl<'a> Bp<'a> {
 		self.was_heredoc = false;
 	}
 
-	fn case(&mut self, c: &'a Case) {
+	fn case(&mut self, c: Case<'a>) {
 		self.put(b"case ");
-		word_text(&c.word, &mut self.out);
+		word_text(c.word(), &mut self.out);
 		self.put(b" in ");
-		if !c.arms.is_empty() {
+		if !c.arms().is_empty() {
 			self.indentation += INDENT_AMOUNT;
-			for (i, arm) in c.arms.iter().enumerate() {
+			for (i, arm) in c.arms().iter().enumerate() {
 				if !self.printing_comsub || i > 0 {
 					self.newline(b"");
 				}
-				if arm.patterns.first().is_some_and(|p| is_lit(p, b"esac")) {
+				if arm.patterns().first().is_some_and(|p| is_lit(p, b"esac")) {
 					self.put(b"(");
 				}
-				for (j, p) in arm.patterns.iter().enumerate() {
+				for (j, p) in arm.patterns().iter().enumerate() {
 					if j > 0 {
 						self.put(b" | ");
 					}
@@ -667,11 +691,11 @@ impl<'a> Bp<'a> {
 				}
 				self.put(b")\n");
 				self.indentation += INDENT_AMOUNT;
-				let node = list_node(&arm.body, self.printing_comsub);
+				let node = list_node(arm.body(), self.printing_comsub);
 				self.mcsi(node.as_ref());
 				self.indentation -= INDENT_AMOUNT;
 				self.print_deferred_macro(b"");
-				self.newline(match arm.term {
+				self.newline(match arm.term() {
 					CaseTerm::Break => b";;",
 					CaseTerm::FallThrough => b";&",
 					CaseTerm::Continue => b";;&",
@@ -682,10 +706,10 @@ impl<'a> Bp<'a> {
 		self.newline(b"esac");
 	}
 
-	fn while_cmd(&mut self, w: &'a While) {
-		self.put(if w.until { b"until " } else { b"while " });
+	fn while_cmd(&mut self, w: While<'a>) {
+		self.put(if w.until() { b"until " } else { b"while " });
 		self.skip_this_indent += 1;
-		let node = list_node(&w.cond, self.printing_comsub);
+		let node = list_node(w.cond(), self.printing_comsub);
 		self.mcsi(node.as_ref());
 		self.print_deferred_macro(b"");
 		self.semicolon();
@@ -697,7 +721,7 @@ impl<'a> Bp<'a> {
 			self.put(b" do\n");
 		}
 		self.indentation += INDENT_AMOUNT;
-		let node = list_node(&w.body, self.printing_comsub);
+		let node = list_node(w.body(), self.printing_comsub);
 		self.mcsi(node.as_ref());
 		self.print_deferred_macro(b"");
 		self.indentation -= INDENT_AMOUNT;
@@ -705,13 +729,15 @@ impl<'a> Bp<'a> {
 		self.newline(b"done");
 	}
 
-	fn if_cmd(&mut self, arms: &'a [IfArm], else_body: Option<&'a List>) {
-		let Some((arm, rest)) = arms.split_first() else {
+	fn if_cmd(&mut self, if_: If<'a>, from: usize) {
+		let mut arms = if_.arms().skip(from);
+		let Some(arm) = arms.next() else {
 			return;
 		};
+		let more = arms.len() > 0;
 		self.put(b"if ");
 		self.skip_this_indent += 1;
-		let node = list_node(&arm.cond, self.printing_comsub);
+		let node = list_node(arm.cond, self.printing_comsub);
 		self.mcsi(node.as_ref());
 		self.print_deferred_macro(b"");
 		self.semicolon();
@@ -723,14 +749,15 @@ impl<'a> Bp<'a> {
 			self.put(b" then\n");
 		}
 		self.indentation += INDENT_AMOUNT;
-		let node = list_node(&arm.body, self.printing_comsub);
+		let node = list_node(arm.body, self.printing_comsub);
 		self.mcsi(node.as_ref());
 		self.print_deferred_macro(b"");
 		self.indentation -= INDENT_AMOUNT;
-		let false_case = if rest.is_empty() {
-			else_body.and_then(|e| list_node(e, self.printing_comsub))
+		let false_case = if more {
+			Some(Node::IfTail { if_, from: from + 1 })
 		} else {
-			Some(Node::IfTail { arms: rest, else_body })
+			if_.else_body()
+				.and_then(|e| list_node(e, self.printing_comsub))
 		};
 		if let Some(fc) = false_case {
 			self.semicolon();
@@ -744,62 +771,62 @@ impl<'a> Bp<'a> {
 		self.newline(b"fi");
 	}
 
-	fn cond(&mut self, e: &CondExpr) {
-		let mut e = e;
+	fn cond(&mut self, e: CondExpr<'_>) {
+		let mut e = e.get();
 		let mut invert = false;
-		while let CondExpr::Not(inner) = e {
+		while let Cond::Not(inner) = e {
 			invert = !invert;
-			e = inner;
+			e = inner.get();
 		}
 		if invert {
 			self.put(b"! ");
 		}
 		match e {
-			CondExpr::Group(inner) => {
+			Cond::Group(inner) => {
 				self.put(b"( ");
 				self.cond(inner);
 				self.put(b" )");
 			},
-			CondExpr::And(a, b) => {
+			Cond::And(a, b) => {
 				self.cond(a);
 				self.put(b" && ");
 				self.cond(b);
 			},
-			CondExpr::Or(a, b) => {
+			Cond::Or(a, b) => {
 				self.cond(a);
 				self.put(b" || ");
 				self.cond(b);
 			},
-			CondExpr::Unary { op, arg } => {
+			Cond::Unary { op, arg } => {
 				self.put(op);
 				self.put(b" ");
 				word_text(arg, &mut self.out);
 			},
-			CondExpr::Binary { op, lhs, rhs } => {
+			Cond::Binary { op, lhs, rhs } => {
 				word_text(lhs, &mut self.out);
 				self.put(b" ");
 				self.put(op);
 				self.put(b" ");
 				word_text(rhs, &mut self.out);
 			},
-			CondExpr::Word(w) => {
+			Cond::Word(w) => {
 				self.put(b"-n ");
 				word_text(w, &mut self.out);
 			},
-			CondExpr::Not(_) => {},
+			Cond::Not(_) => {},
 		}
 	}
 
-	fn simple(&mut self, s: &'a Simple, redirs: &'a [Redir], stderr: bool) {
+	fn simple(&mut self, s: Simple<'a>, redirs: Seq<'a, Redir<'a>>, stderr: bool) {
 		let mut any = false;
-		for a in &s.assigns {
+		for a in s.assigns() {
 			if any {
 				self.put(b" ");
 			}
 			any = true;
 			assign_text(a, &mut self.out);
 		}
-		for w in &s.words {
+		for w in s.words() {
 			if any {
 				self.put(b" ");
 			}
@@ -814,8 +841,8 @@ impl<'a> Bp<'a> {
 		}
 	}
 
-	fn redirection_list(&mut self, redirs: &'a [Redir], stderr: bool) {
-		let mut heredocs: Vec<&'a Redir> = Vec::new();
+	fn redirection_list(&mut self, redirs: Seq<'a, Redir<'a>>, stderr: bool) {
+		let mut heredocs: Vec<Redir<'a>> = Vec::new();
 		self.was_heredoc = false;
 		let mut all: Vec<R<'a>> = redirs.iter().map(R::Real).collect();
 		if stderr {
@@ -824,7 +851,7 @@ impl<'a> Bp<'a> {
 		let n = all.len();
 		for (i, r) in all.into_iter().enumerate() {
 			match r {
-				R::Real(r) if matches!(r.op, RedirOp::HereDoc { .. }) => {
+				R::Real(r) if matches!(r.op(), RedirOp::HereDoc { .. }) => {
 					self.heredoc_header(r);
 					heredocs.push(r);
 				},
@@ -842,41 +869,41 @@ impl<'a> Bp<'a> {
 		}
 	}
 
-	fn heredoc_header(&mut self, r: &Redir) {
-		let RedirTarget::HereDoc(d) = &r.target else {
+	fn heredoc_header(&mut self, r: Redir<'_>) {
+		let RedirTarget::HereDoc(d) = r.target() else {
 			return;
 		};
-		match &r.fd {
+		match r.fd() {
 			Some(RedirFd::Var(v)) => {
 				self.put(b"{");
 				self.put(v);
 				self.put(b"}");
 			},
-			Some(RedirFd::Num(n)) if *n != 0 => push_u32(&mut self.out, *n),
+			Some(RedirFd::Num(n)) if n != 0 => push_u32(&mut self.out, n),
 			_ => {},
 		}
 		self.put(b"<<");
-		if matches!(r.op, RedirOp::HereDoc { strip_tabs: true }) {
+		if matches!(r.op(), RedirOp::HereDoc { strip_tabs: true }) {
 			self.put(b"-");
 		}
-		if d.quoted {
-			sh_single_quote(&mut self.out, &d.delim);
+		if d.quoted() {
+			sh_single_quote(&mut self.out, d.delim());
 		} else {
-			self.put(&d.delim);
+			self.put(d.delim());
 		}
 	}
 
 	/// `print_function_def`: a definition nested in a function body.
-	fn function_def(&mut self, f: &'a FuncDef) {
+	fn function_def(&mut self, f: FuncDef<'a>) {
 		self.put(b"function ");
-		self.put(&f.name);
+		self.put(f.name());
 		self.extra_names(f);
 		self.put(b" () \n");
 		self.indent(self.indentation);
 		self.put(b"{ \n");
 		self.inside_function_def += 1;
 		self.indentation += INDENT_AMOUNT;
-		let redirs = self.function_body(&f.body);
+		let redirs = self.function_body(f.body());
 		self.print_deferred_macro(b"");
 		self.indentation -= INDENT_AMOUNT;
 		self.inside_function_def -= 1;
@@ -885,48 +912,53 @@ impl<'a> Bp<'a> {
 
 	/// Body of a function: a group prints its contents (its redirections
 	/// are returned for after the `}`).
-	fn function_body(&mut self, body: &'a Command) -> &'a [Redir] {
-		if let CommandKind::Brace(list) = &body.kind {
+	fn function_body(&mut self, body: Command<'a>) -> Option<Seq<'a, Redir<'a>>> {
+		if let CommandKind::Brace(list) = body.kind() {
 			let node = list_node(list, self.printing_comsub);
 			self.mcsi(node.as_ref());
-			&body.redirs
+			Some(body.redirs())
 		} else {
 			let node = Node::Cmd { cmd: body, fl: Fl::default() };
 			self.mcsi(Some(&node));
-			&[]
+			None
 		}
 	}
 
 	/// zsh `f g h () …`: the names after the first.
-	fn extra_names(&mut self, f: &FuncDef) {
-		for n in &f.extra_names {
+	fn extra_names(&mut self, f: FuncDef<'_>) {
+		for n in f.extra_names() {
 			self.put(b" ");
 			self.put(n);
 		}
 	}
 
-	fn function_close(&mut self, redirs: &'a [Redir]) {
-		if redirs.is_empty() {
-			self.newline(b"}");
-			self.was_heredoc = false;
-		} else {
-			self.newline(b"} ");
-			self.redirection_list(redirs, false);
+	fn function_close(&mut self, redirs: Option<Seq<'a, Redir<'a>>>) {
+		match redirs {
+			Some(redirs) if !redirs.is_empty() => {
+				self.newline(b"} ");
+				self.redirection_list(redirs, false);
+			},
+			_ => {
+				self.newline(b"}");
+				self.was_heredoc = false;
+			},
 		}
 	}
 
 	/// `named_function_string` with `FUNC_MULTILINE`: `declare -f`.
-	fn named_function(&mut self, f: &'a FuncDef) {
-		if crate::bash::syntax::parser::looks_like_assignment(&f.name) {
+	fn named_function(&mut self, f: FuncDef<'a>, name: &[u8], extra: bool) {
+		if crate::bash::syntax::parser::looks_like_assignment(name) {
 			self.put(b"function ");
 		}
-		self.put(&f.name);
-		self.extra_names(f);
+		self.put(name);
+		if extra {
+			self.extra_names(f);
+		}
 		self.put(b" () \n");
 		self.indentation += INDENT_AMOUNT;
 		self.inside_function_def += 1;
 		self.put(b"{ \n");
-		let redirs = self.function_body(&f.body);
+		let redirs = self.function_body(f.body());
 		self.print_deferred_macro(b"");
 		self.indentation = 0;
 		self.inside_function_def -= 1;
@@ -934,14 +966,16 @@ impl<'a> Bp<'a> {
 	}
 }
 
-fn is_lit(w: &Word, s: &[u8]) -> bool {
-	matches!(&w.parts[..], [WordPart::Lit(l)] if l == s)
+fn is_lit(w: Word<'_>, s: &[u8]) -> bool {
+	w.parts()
+		.one()
+		.is_some_and(|p| matches!(p.get(), Part::Lit(l) if l == s))
 }
 
 /// A redirection other than a here-document (`print_redirection`).
-fn redirection_text(r: &Redir, out: &mut Vec<u8>) {
+fn redirection_text(r: Redir<'_>, out: &mut Vec<u8>) {
 	let var = |out: &mut Vec<u8>| {
-		if let Some(RedirFd::Var(v)) = &r.fd {
+		if let Some(RedirFd::Var(v)) = r.fd() {
 			out.push(b'{');
 			out.extend_from_slice(v);
 			out.push(b'}');
@@ -950,11 +984,11 @@ fn redirection_text(r: &Redir, out: &mut Vec<u8>) {
 			false
 		}
 	};
-	let fd = match r.fd {
+	let fd = match r.fd() {
 		Some(RedirFd::Num(n)) => Some(n),
 		_ => None,
 	};
-	let target = match &r.target {
+	let target = match r.target() {
 		RedirTarget::Word(w) => w,
 		RedirTarget::HereDoc(_) => return,
 	};
@@ -968,7 +1002,7 @@ fn redirection_text(r: &Redir, out: &mut Vec<u8>) {
 		out.extend_from_slice(op);
 		word_text(target, out);
 	};
-	match r.op {
+	match r.op() {
 		RedirOp::In => simple(out, 0, b"< "),
 		RedirOp::Out => simple(out, 1, b"> "),
 		RedirOp::Clobber => simple(out, 1, b">| "),
@@ -993,7 +1027,7 @@ fn redirection_text(r: &Redir, out: &mut Vec<u8>) {
 			word_text(target, out);
 		},
 		RedirOp::DupIn | RedirOp::DupOut => {
-			let input = r.op == RedirOp::DupIn;
+			let input = r.op() == RedirOp::DupIn;
 			let default = u32::from(!input);
 			let op: &[u8] = if input { b"<&" } else { b">&" };
 			if is_lit(target, b"-") {
@@ -1028,9 +1062,9 @@ fn redirection_text(r: &Redir, out: &mut Vec<u8>) {
 }
 
 /// A dup target bash lexed as a number.
-fn is_fd_number(w: &Word) -> bool {
-	match &w.parts[..] {
-		[WordPart::Lit(s)] if !s.is_empty() && s.len() <= 10 && s.iter().all(u8::is_ascii_digit) => {
+fn is_fd_number(w: Word<'_>) -> bool {
+	match w.parts().one().map(WordPart::get) {
+		Some(Part::Lit(s)) if !s.is_empty() && s.len() <= 10 && s.iter().all(u8::is_ascii_digit) => {
 			i32::try_from(s.iter().fold(0u64, |n, &d| n * 10 + u64::from(d - b'0'))).is_ok()
 		},
 		_ => false,
@@ -1052,70 +1086,76 @@ enum Ctx {
 }
 
 /// The text bash stores for `w`.
-pub fn word_text(w: &Word, out: &mut Vec<u8>) {
-	parts_ctx(&w.parts, out, Ctx::Plain);
+pub fn word_text(w: Word<'_>, out: &mut Vec<u8>) {
+	parts_ctx(w.parts(), out, Ctx::Plain);
 }
 
 /// The text bash stores for a sequence of parts in an unquoted word.
-pub fn parts_text(parts: &[WordPart], out: &mut Vec<u8>) {
+pub fn parts_text(parts: Seq<'_, WordPart<'_>>, out: &mut Vec<u8>) {
 	parts_ctx(parts, out, Ctx::Plain);
 }
 
+/// The text bash stores for one part of an unquoted word.
+pub fn one_part_text(p: WordPart<'_>, out: &mut Vec<u8>) {
+	part_text(p, out, Ctx::Plain);
+}
+
 /// The text bash stores for an assignment.
-pub fn assign_text(a: &Assign, out: &mut Vec<u8>) {
-	out.extend_from_slice(&a.name);
-	if let Some(i) = &a.index {
+pub fn assign_text(a: Assign<'_>, out: &mut Vec<u8>) {
+	out.extend_from_slice(a.name());
+	if let Some(i) = a.index() {
 		out.push(b'[');
 		word_text(i, out);
 		out.push(b']');
 	}
-	out.extend_from_slice(if a.append { b"+=" } else { b"=" });
-	match &a.value {
+	out.extend_from_slice(if a.append() { b"+=" } else { b"=" });
+	match a.value() {
 		AssignValue::Scalar(w) => word_text(w, out),
 		AssignValue::Array(elems) => elems_text(elems, out),
 	}
 }
 
-fn elems_text(elems: &[ArrayElem], out: &mut Vec<u8>) {
+/// The text bash stores for `(…)` array elements.
+pub fn elems_text(elems: Seq<'_, ArrayElem<'_>>, out: &mut Vec<u8>) {
 	out.push(b'(');
 	for (i, e) in elems.iter().enumerate() {
 		if i > 0 {
 			out.push(b' ');
 		}
-		if let Some(k) = &e.key {
+		if let Some(k) = e.key() {
 			out.push(b'[');
 			word_text(k, out);
-			out.extend_from_slice(if e.append { b"]+=" } else { b"]=" });
+			out.extend_from_slice(if e.append() { b"]+=" } else { b"]=" });
 		}
-		word_text(&e.value, out);
+		word_text(e.value(), out);
 	}
 	out.push(b')');
 }
 
-fn parts_ctx(parts: &[WordPart], out: &mut Vec<u8>, ctx: Ctx) {
+fn parts_ctx(parts: Seq<'_, WordPart<'_>>, out: &mut Vec<u8>, ctx: Ctx) {
 	for p in parts {
 		part_text(p, out, ctx);
 	}
 }
 
-fn part_text(p: &WordPart, out: &mut Vec<u8>, ctx: Ctx) {
-	match p {
-		WordPart::Lit(s) => out.extend_from_slice(s),
-		WordPart::Escaped(s) => {
+fn part_text(p: WordPart<'_>, out: &mut Vec<u8>, ctx: Ctx) {
+	match p.get() {
+		Part::Lit(s) => out.extend_from_slice(s),
+		Part::Escaped(s) => {
 			out.push(b'\\');
 			out.extend_from_slice(s);
 		},
-		WordPart::SQuote(s) => {
+		Part::SQuote(s) => {
 			out.push(b'\'');
 			out.extend_from_slice(s);
 			out.push(b'\'');
 		},
-		WordPart::DQuote(inner) => {
+		Part::DQuote(inner) => {
 			out.push(b'"');
 			parts_ctx(inner, out, Ctx::Dq);
 			out.push(b'"');
 		},
-		WordPart::AnsiC(raw) => match ctx {
+		Part::AnsiC(raw) => match ctx {
 			Ctx::Dq => {
 				out.extend_from_slice(b"$'");
 				out.extend_from_slice(raw);
@@ -1124,53 +1164,53 @@ fn part_text(p: &WordPart, out: &mut Vec<u8>, ctx: Ctx) {
 			Ctx::DqParam { quote: false } => out.extend_from_slice(&ansi_decode(raw)),
 			Ctx::Plain | Ctx::DqParam { quote: true } => sh_single_quote(out, &ansi_decode(raw)),
 		},
-		WordPart::Locale(inner) => {
+		Part::Locale(inner) => {
 			out.push(b'"');
 			parts_ctx(inner, out, Ctx::Dq);
 			out.push(b'"');
 		},
-		WordPart::Param(p) => param_text(p, out, ctx),
-		WordPart::Comsub(c) => match c.kind {
+		Part::Param(p) => param_text(p, out, ctx),
+		Part::Comsub(c) => match c.kind() {
 			ComsubKind::Dollar => {
 				out.extend_from_slice(b"$(");
-				out.extend_from_slice(&c.text);
+				out.extend_from_slice(c.text());
 				out.push(b')');
 			},
 			ComsubKind::Backtick => {
 				out.push(b'`');
-				out.extend_from_slice(&c.text);
+				out.extend_from_slice(c.text());
 				out.push(b'`');
 			},
 			ComsubKind::NoFork | ComsubKind::ValueSub => {
 				out.extend_from_slice(b"${");
-				out.extend_from_slice(&c.text);
+				out.extend_from_slice(c.text());
 				out.push(b'}');
 			},
 		},
-		WordPart::Arith(a) if a.bracket => {
+		Part::Arith(a) if a.bracket() => {
 			out.extend_from_slice(b"$[");
-			out.extend_from_slice(&a.src);
+			out.extend_from_slice(a.src());
 			out.push(b']');
 		},
-		WordPart::Arith(a) => {
+		Part::Arith(a) => {
 			out.extend_from_slice(b"$((");
-			out.extend_from_slice(&a.src);
+			out.extend_from_slice(a.src());
 			out.extend_from_slice(b"))");
 		},
-		WordPart::ProcSub(p) => {
-			out.extend_from_slice(if p.output { b">(" } else { b"<(" });
-			let text = comsub_text(&p.body);
+		Part::ProcSub(p) => {
+			out.extend_from_slice(if p.output() { b">(" } else { b"<(" });
+			let text = comsub_text(p.body());
 			if text.first() == Some(&b'(') {
 				out.push(b' ');
 			}
 			out.extend_from_slice(&text);
 			out.push(b')');
 		},
-		WordPart::Compound(elems) => elems_text(elems, out),
-		WordPart::BadSubst(text) => out.extend_from_slice(text),
-		WordPart::BadComsub(b) => out.extend_from_slice(&b.text),
-		WordPart::DroppedQuote => out.push(b'"'),
-		WordPart::Zsh(raw) => zsh_text(raw, out),
+		Part::Compound(elems) => elems_text(elems, out),
+		Part::BadSubst(text) => out.extend_from_slice(text),
+		Part::BadComsub(b) => out.extend_from_slice(b.text()),
+		Part::DroppedQuote => out.push(b'"'),
+		Part::Zsh(raw) => zsh_text(raw, out),
 	}
 }
 
@@ -1195,10 +1235,10 @@ pub fn zsh_text(raw: &[u8], out: &mut Vec<u8>) {
 	}
 }
 
-fn param_name_text(name: &ParamName, out: &mut Vec<u8>) {
+fn param_name_text(name: ParamName<'_>, out: &mut Vec<u8>) {
 	match name {
 		ParamName::Var(v) => out.extend_from_slice(v),
-		ParamName::Positional(n) => push_u32(out, *n),
+		ParamName::Positional(n) => push_u32(out, n),
 		ParamName::Special(s) => out.push(match s {
 			Special::At => b'@',
 			Special::Star => b'*',
@@ -1211,10 +1251,10 @@ fn param_name_text(name: &ParamName, out: &mut Vec<u8>) {
 	}
 }
 
-fn param_text(p: &Param, out: &mut Vec<u8>, ctx: Ctx) {
-	if !p.braced {
+fn param_text(p: Param<'_>, out: &mut Vec<u8>, ctx: Ctx) {
+	if !p.braced() {
 		out.push(b'$');
-		param_name_text(&p.name, out);
+		param_name_text(p.name(), out);
 		return;
 	}
 	let dq = ctx != Ctx::Plain;
@@ -1226,54 +1266,54 @@ fn param_text(p: &Param, out: &mut Vec<u8>, ctx: Ctx) {
 		}
 	};
 	out.extend_from_slice(b"${");
-	match &p.op {
+	match p.op() {
 		ParamOp::Length => out.push(b'#'),
 		ParamOp::Indirect | ParamOp::PrefixNames { .. } => out.push(b'!'),
-		_ if p.indirect => out.push(b'!'),
+		_ if p.indirect() => out.push(b'!'),
 		_ => {},
 	}
-	param_name_text(&p.name, out);
-	match &p.index {
+	param_name_text(p.name(), out);
+	match p.index() {
 		Some(Subscript::At) => out.extend_from_slice(b"[@]"),
 		Some(Subscript::Star) => out.extend_from_slice(b"[*]"),
 		Some(Subscript::Expr(w)) => {
 			out.push(b'[');
-			parts_ctx(&w.parts, out, word_ctx(false));
+			parts_ctx(w.parts(), out, word_ctx(false));
 			out.push(b']');
 		},
 		None => {},
 	}
-	let op_word = |out: &mut Vec<u8>, colon: bool, op: u8, w: Option<&Word>| {
+	let op_word = |out: &mut Vec<u8>, colon: bool, op: u8, w: Option<Word<'_>>| {
 		if colon {
 			out.push(b':');
 		}
 		out.push(op);
 		if let Some(w) = w {
-			parts_ctx(&w.parts, out, word_ctx(false));
+			parts_ctx(w.parts(), out, word_ctx(false));
 		}
 	};
-	match &p.op {
+	match p.op() {
 		ParamOp::None | ParamOp::Length | ParamOp::Indirect => {},
-		ParamOp::PrefixNames { star } => out.push(if *star { b'*' } else { b'@' }),
-		ParamOp::Default { colon, word } => op_word(out, *colon, b'-', Some(word)),
-		ParamOp::Assign { colon, word } => op_word(out, *colon, b'=', Some(word)),
-		ParamOp::Error { colon, word } => op_word(out, *colon, b'?', word.as_ref()),
-		ParamOp::Alt { colon, word } => op_word(out, *colon, b'+', Some(word)),
+		ParamOp::PrefixNames { star } => out.push(if star { b'*' } else { b'@' }),
+		ParamOp::Default { colon, word } => op_word(out, colon, b'-', Some(word)),
+		ParamOp::Assign { colon, word } => op_word(out, colon, b'=', Some(word)),
+		ParamOp::Error { colon, word } => op_word(out, colon, b'?', word),
+		ParamOp::Alt { colon, word } => op_word(out, colon, b'+', Some(word)),
 		ParamOp::Substr { offset, len } => {
 			out.push(b':');
-			out.extend_from_slice(&offset.src);
+			out.extend_from_slice(offset.src());
 			if let Some(len) = len {
 				out.push(b':');
-				out.extend_from_slice(&len.src);
+				out.extend_from_slice(len.src());
 			}
 		},
 		ParamOp::Trim { suffix, longest, pat } => {
-			let c = if *suffix { b'%' } else { b'#' };
+			let c = if suffix { b'%' } else { b'#' };
 			out.push(c);
-			if *longest {
+			if longest {
 				out.push(c);
 			}
-			parts_ctx(&pat.parts, out, word_ctx(true));
+			parts_ctx(pat.parts(), out, word_ctx(true));
 		},
 		ParamOp::Replace { mode, pat, rep } => {
 			out.extend_from_slice(match mode {
@@ -1282,10 +1322,10 @@ fn param_text(p: &Param, out: &mut Vec<u8>, ctx: Ctx) {
 				ReplaceMode::Prefix => b"/#",
 				ReplaceMode::Suffix => b"/%",
 			});
-			parts_ctx(&pat.parts, out, word_ctx(true));
+			parts_ctx(pat.parts(), out, word_ctx(true));
 			if let Some(rep) = rep {
 				out.push(b'/');
-				parts_ctx(&rep.parts, out, word_ctx(true));
+				parts_ctx(rep.parts(), out, word_ctx(true));
 			}
 		},
 		ParamOp::Case { mode, all, pat } => {
@@ -1295,16 +1335,16 @@ fn param_text(p: &Param, out: &mut Vec<u8>, ctx: Ctx) {
 				CaseMode::Toggle => b'~',
 			};
 			out.push(c);
-			if *all {
+			if all {
 				out.push(c);
 			}
 			if let Some(pat) = pat {
-				parts_ctx(&pat.parts, out, word_ctx(*mode != CaseMode::Toggle));
+				parts_ctx(pat.parts(), out, word_ctx(mode != CaseMode::Toggle));
 			}
 		},
 		ParamOp::Transform(op) => {
 			out.push(b'@');
-			out.push(*op);
+			out.push(op);
 		},
 	}
 	out.push(b'}');
@@ -1316,7 +1356,7 @@ fn param_text(p: &Param, out: &mut Vec<u8>, ctx: Ctx) {
 #[derive(Default)]
 struct Compact<'a> {
 	out:  Vec<u8>,
-	docs: Vec<&'a HereDoc>,
+	docs: Vec<HereDoc<'a>>,
 }
 
 impl<'a> Compact<'a> {
@@ -1328,17 +1368,17 @@ impl<'a> Compact<'a> {
 	fn flush_docs(&mut self) {
 		for d in core::mem::take(&mut self.docs) {
 			self.put(b"\n");
-			self.put(&d.text);
-			self.put(&d.delim);
+			self.put(d.text());
+			self.put(d.delim());
 		}
 	}
 
-	fn list(&mut self, list: &'a List) {
-		let n = list.items.len();
-		for (i, item) in list.items.iter().enumerate() {
-			self.and_or(&item.and_or);
+	fn list(&mut self, list: List<'a>) {
+		let n = list.items().len();
+		for (i, item) in list.items().iter().enumerate() {
+			self.and_or(item.and_or());
 			let last = i + 1 == n;
-			match item.sep {
+			match item.sep() {
 				Sep::Amp if last => self.put(b" &"),
 				Sep::Amp => self.put(b" & "),
 				Sep::Disown if last => self.put(b" &|"),
@@ -1351,12 +1391,12 @@ impl<'a> Compact<'a> {
 
 	/// A body inside a one-line compound: `a; b; ` (a trailing `&` needs no
 	/// `;`).
-	fn body(&mut self, list: &'a List) {
+	fn body(&mut self, list: List<'a>) {
 		self.list(list);
 		if list
-			.items
+			.items()
 			.last()
-			.is_some_and(|it| matches!(it.sep, Sep::Amp | Sep::Disown))
+			.is_some_and(|it| matches!(it.sep(), Sep::Amp | Sep::Disown))
 		{
 			self.put(b" ");
 		} else {
@@ -1364,55 +1404,51 @@ impl<'a> Compact<'a> {
 		}
 	}
 
-	fn and_or(&mut self, ao: &'a AndOr) {
-		self.pipeline(&ao.first);
-		for (op, p) in &ao.rest {
-			self.put(if *op == AndOrOp::And {
-				b" && "
-			} else {
-				b" || "
-			});
+	fn and_or(&mut self, ao: AndOr<'a>) {
+		self.pipeline(ao.first());
+		for (op, p) in ao.rest() {
+			self.put(if op == AndOrOp::And { b" && " } else { b" || " });
 			self.pipeline(p);
 		}
 	}
 
-	fn pipeline(&mut self, p: &'a Pipeline) {
-		if let Some(t) = p.time {
+	fn pipeline(&mut self, p: Pipeline<'a>) {
+		if let Some(t) = p.time() {
 			self.put(if t.posix { b"time -p " } else { b"time " });
 		}
-		if p.bang {
+		if p.bang() {
 			self.put(b"! ");
 		}
-		for (i, st) in p.stages.iter().enumerate() {
+		for (i, st) in p.stages().iter().enumerate() {
 			if i > 0 {
 				self.put(b" | ");
 			}
-			self.command(&st.cmd);
-			if st.pipe_stderr {
+			self.command(st);
+			if st.pipe_stderr() {
 				self.put(b" 2>&1");
 			}
 		}
 	}
 
-	fn command(&mut self, cmd: &'a Command) {
-		match &cmd.kind {
+	fn command(&mut self, cmd: Command<'a>) {
+		match cmd.kind() {
 			CommandKind::Simple(s) => {
 				let mut any = false;
-				for a in &s.assigns {
+				for a in s.assigns() {
 					if any {
 						self.put(b" ");
 					}
 					any = true;
 					assign_text(a, &mut self.out);
 				}
-				for w in &s.words {
+				for w in s.words() {
 					if any {
 						self.put(b" ");
 					}
 					any = true;
 					word_text(w, &mut self.out);
 				}
-				for r in &cmd.redirs {
+				for r in cmd.redirs() {
 					if any {
 						self.put(b" ");
 					}
@@ -1432,38 +1468,38 @@ impl<'a> Compact<'a> {
 				self.put(b" )");
 			},
 			CommandKind::If(i) => {
-				for (n, arm) in i.arms.iter().enumerate() {
+				for (n, arm) in i.arms().enumerate() {
 					self.put(if n == 0 { b"if " } else { b"elif " });
-					self.list(&arm.cond);
+					self.list(arm.cond);
 					self.put(b"; then ");
-					self.body(&arm.body);
+					self.body(arm.body);
 				}
-				if let Some(e) = &i.else_body {
+				if let Some(e) = i.else_body() {
 					self.put(b"else ");
 					self.body(e);
 				}
 				self.put(b"fi");
 			},
 			CommandKind::While(w) => {
-				self.put(if w.until { b"until " } else { b"while " });
-				self.list(&w.cond);
+				self.put(if w.until() { b"until " } else { b"while " });
+				self.list(w.cond());
 				self.put(b"; do ");
-				self.body(&w.body);
+				self.body(w.body());
 				self.put(b"done");
 			},
 			CommandKind::For(f) | CommandKind::Select(f) => {
-				let kw: &[u8] = if matches!(cmd.kind, CommandKind::For(_)) {
+				let kw: &[u8] = if matches!(cmd.kind(), CommandKind::For(_)) {
 					b"for "
 				} else {
 					b"select "
 				};
 				self.put(kw);
-				self.put(&f.var);
-				for v in &f.extra_vars {
+				self.put(f.var());
+				for v in f.extra_vars() {
 					self.put(b" ");
 					self.put(v);
 				}
-				if let Some(words) = &f.words {
+				if let Some(words) = f.words() {
 					self.put(b" in");
 					for w in words {
 						self.put(b" ");
@@ -1471,38 +1507,38 @@ impl<'a> Compact<'a> {
 					}
 				}
 				self.put(b"; do ");
-				self.body(&f.body);
+				self.body(f.body());
 				self.put(b"done");
 			},
 			CommandKind::ArithFor(f) => {
 				self.put(b"for ((");
-				self.put(&f.init.src);
+				self.put(f.init().src());
 				self.put(b"; ");
-				self.put(&f.cond.src);
+				self.put(f.cond().src());
 				self.put(b"; ");
-				self.put(&f.step.src);
+				self.put(f.step().src());
 				self.put(b")); do ");
-				self.body(&f.body);
+				self.body(f.body());
 				self.put(b"done");
 			},
 			CommandKind::Case(c) => {
 				self.put(b"case ");
-				word_text(&c.word, &mut self.out);
+				word_text(c.word(), &mut self.out);
 				self.put(b" in ");
-				for arm in &c.arms {
+				for arm in c.arms() {
 					self.put(b"(");
-					for (j, p) in arm.patterns.iter().enumerate() {
+					for (j, p) in arm.patterns().iter().enumerate() {
 						if j > 0 {
 							self.put(b" | ");
 						}
 						word_text(p, &mut self.out);
 					}
 					self.put(b") ");
-					if !arm.body.items.is_empty() {
-						self.list(&arm.body);
+					if !arm.body().items().is_empty() {
+						self.list(arm.body());
 						self.put(b" ");
 					}
-					self.put(match arm.term {
+					self.put(match arm.term() {
 						CaseTerm::Break => b";; ",
 						CaseTerm::FallThrough => b";& ",
 						CaseTerm::Continue => b";;& ",
@@ -1512,7 +1548,7 @@ impl<'a> Compact<'a> {
 			},
 			CommandKind::Arith(a) => {
 				self.put(b"((");
-				self.put(&a.src);
+				self.put(a.src());
 				self.put(b"))");
 			},
 			CommandKind::Cond(e) => {
@@ -1523,56 +1559,56 @@ impl<'a> Compact<'a> {
 				self.put(b" ]]");
 			},
 			CommandKind::FuncDef(f) => {
-				if f.keyword {
+				if f.keyword() {
 					self.put(b"function ");
 				}
-				self.put(&f.name);
-				for n in &f.extra_names {
+				self.put(f.name());
+				for n in f.extra_names() {
 					self.put(b" ");
 					self.put(n);
 				}
 				self.put(b" () ");
-				self.command(&f.body);
+				self.command(f.body());
 			},
 			CommandKind::Coproc(c) => {
 				self.put(b"coproc ");
-				if let Some(name) = &c.name {
+				if let Some(name) = c.name() {
 					self.put(name);
 					self.put(b" ");
 				}
-				self.command(&c.body);
+				self.command(c.body());
 			},
 			CommandKind::Repeat(r) => {
 				self.put(b"repeat ");
-				word_text(&r.count, &mut self.out);
+				word_text(r.count(), &mut self.out);
 				self.put(b"; do ");
-				self.body(&r.body);
+				self.body(r.body());
 				self.put(b"done");
 			},
 			CommandKind::Try(t) => {
 				self.put(b"{ ");
-				self.body(&t.body);
+				self.body(t.body());
 				self.put(b"} always { ");
-				self.body(&t.always);
+				self.body(t.always());
 				self.put(b"}");
 			},
 			CommandKind::AnonFunc(a) => {
 				self.put(b"() ");
-				self.command(&a.body);
-				for w in &a.args {
+				self.command(a.body());
+				for w in a.args() {
 					self.put(b" ");
 					word_text(w, &mut self.out);
 				}
 			},
 		}
-		for r in &cmd.redirs {
+		for r in cmd.redirs() {
 			self.put(b" ");
 			self.redir(r);
 		}
 	}
 
-	fn redir(&mut self, r: &'a Redir) {
-		match &r.target {
+	fn redir(&mut self, r: Redir<'a>) {
+		match r.target() {
 			RedirTarget::HereDoc(d) => {
 				let mut bp = Bp::new(false);
 				bp.heredoc_header(r);
@@ -1606,8 +1642,17 @@ mod tests {
 				.next_command()
 				.unwrap()
 				.unwrap();
-			let actual =
-				print(&command.list.items[0].and_or.first.stages[0].cmd, PrintStyle::DeclareF);
+			let list = command.list();
+			let cmd = list
+				.items()
+				.first()
+				.unwrap()
+				.and_or()
+				.first()
+				.stages()
+				.first()
+				.unwrap();
+			let actual = print(cmd, PrintStyle::DeclareF);
 			assert_eq!(actual, expected, "{}", String::from_utf8_lossy(source));
 		}
 	}

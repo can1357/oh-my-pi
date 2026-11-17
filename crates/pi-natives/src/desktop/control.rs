@@ -19,7 +19,7 @@ use std::{
 use parking_lot::{Condvar, Mutex};
 
 use super::{
-	error::{CoreResult, DesktopError},
+	error::{CoreResult, DesktopError, ErrorCode},
 	types::DesktopFocusReturn,
 };
 
@@ -37,6 +37,26 @@ pub(crate) use macos::{
 	is_pointer_press, monitor_seen, uptime_ns,
 };
 
+/// Time left before the run's deadline for a refusal to reach the caller.
+pub(crate) const DEADLINE_MARGIN: Duration = Duration::from_millis(250);
+
+/// How long the user leaves the keyboard and pointer alone before a takeover
+/// brings its target in front of them (X11 and macOS), and leaves an app alone
+/// before a read of it shows what they left there (macOS).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) const USER_QUIET: Duration = Duration::from_secs(5);
+
+/// The refusal of a takeover whose user was still active shortly before the
+/// run's deadline, their last press `idle` ago.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn still_active_refusal(idle: Duration) -> DesktopError {
+	DesktopError::user_intervened(format!(
+		"the user is still typing, clicking or holding input (last activity {:.1} s ago), so no \
+		 takeover started; nothing was sent; try again once they pause",
+		idle.as_secs_f64(),
+	))
+}
+
 #[derive(Default)]
 struct CancellationState {
 	generation:   AtomicU64,
@@ -47,9 +67,12 @@ struct CancellationState {
 	/// stop from its own. Shared with every session under the same key.
 	escape_stops: Arc<AtomicU32>,
 	/// When the current computer run ends. Input waiting for the user to pause
-	/// (macOS) or for a Wayland permission prompt stops shortly before it.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
+	/// (macOS), for a Wayland permission prompt or for another session's input
+	/// lock stops shortly before it.
 	deadline:     Mutex<Option<Instant>>,
+	/// The agent this session acts for, named to sessions that wait for its
+	/// input control.
+	agent:        Option<Arc<str>>,
 	#[cfg(target_os = "linux")]
 	async_wake:   tokio::sync::Notify,
 }
@@ -58,17 +81,21 @@ struct CancellationState {
 pub(crate) struct CancellationSource(Arc<CancellationState>);
 
 impl CancellationSource {
-	/// A source whose physical-Escape stops count into `stops`.
-	pub(crate) fn counting_escapes(stops: Arc<AtomicU32>) -> Self {
-		Self(Arc::new(CancellationState { escape_stops: stops, ..CancellationState::default() }))
+	/// A source acting for `agent`, whose physical-Escape stops count into
+	/// `stops`.
+	pub(crate) fn counting_escapes(stops: Arc<AtomicU32>, agent: Option<Arc<str>>) -> Self {
+		Self(Arc::new(CancellationState {
+			escape_stops: stops,
+			agent,
+			..CancellationState::default()
+		}))
 	}
 
 	pub(crate) fn token(&self) -> OperationToken {
 		OperationToken {
-			source: self.clone(),
+			source:     self.clone(),
 			generation: self.0.generation.load(Ordering::Acquire),
-			#[cfg(any(target_os = "macos", target_os = "linux"))]
-			reply_by: None,
+			reply_by:   None,
 		}
 	}
 
@@ -124,7 +151,6 @@ impl CancellationSource {
 
 	/// Sets when the current computer run ends, `None` for no deadline. Each
 	/// run sets it before its first call.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
 		*self.0.deadline.lock() = deadline;
 	}
@@ -156,14 +182,12 @@ pub(crate) struct OperationToken {
 	source:     CancellationSource,
 	generation: u64,
 	/// When the caller stops waiting for this request's reply.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	reply_by:   Option<Instant>,
 }
 
 impl OperationToken {
 	/// When this operation must have answered: the run's end or the caller's
 	/// reply timeout, whichever comes first.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn deadline(&self) -> Option<Instant> {
 		let run = *self.source.0.deadline.lock();
 		match (run, self.reply_by) {
@@ -173,7 +197,6 @@ impl OperationToken {
 	}
 
 	/// This token for a request whose caller waits for its reply until `at`.
-	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	pub(crate) fn replying_by(self, at: Instant) -> Self {
 		Self { reply_by: Some(at), ..self }
 	}
@@ -222,10 +245,11 @@ thread_local! {
 	static CURRENT: RefCell<Option<OperationToken>> = const { RefCell::new(None) };
 	static CLEANUP: Cell<bool> = const { Cell::new(false) };
 	static FOCUS_RETURN: Cell<Option<DesktopFocusReturn>> = const { Cell::new(None) };
+	static TEXT_UNCONFIRMED: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Records where the current operation's takeover left focus.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn report_focus_return(report: DesktopFocusReturn) {
 	FOCUS_RETURN.set(Some(report));
 }
@@ -234,6 +258,19 @@ pub(crate) fn report_focus_return(report: DesktopFocusReturn) {
 /// none for the next.
 pub(crate) fn take_focus_return() -> Option<DesktopFocusReturn> {
 	FOCUS_RETURN.take()
+}
+
+/// Records why the current operation could not see the target read the text
+/// it typed.
+#[cfg(target_os = "windows")]
+pub(crate) fn report_text_unconfirmed(reason: String) {
+	TEXT_UNCONFIRMED.set(Some(reason));
+}
+
+/// Takes the unconfirmed-text reason of the operation running on this
+/// thread, leaving none for the next.
+pub(crate) fn take_text_unconfirmed() -> Option<String> {
+	TEXT_UNCONFIRMED.take()
 }
 
 pub(crate) struct OperationScope {
@@ -258,6 +295,25 @@ pub(crate) fn current_token() -> Option<OperationToken> {
 		None
 	} else {
 		CURRENT.with_borrow(Clone::clone)
+	}
+}
+
+/// Waits for the original request or a generation-revocation wake. Cancellation
+/// drops that request, never polls on a timer or starts it again.
+#[cfg(target_os = "linux")]
+pub(crate) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResult<T> {
+	check()?;
+	let Some(token) = current_token() else {
+		return Ok(future.await);
+	};
+	let future = std::pin::pin!(future);
+	let cancelled = std::pin::pin!(token.cancelled());
+	match futures::future::select(cancelled, future).await {
+		futures::future::Either::Left((error, _)) => Err(error),
+		futures::future::Either::Right((result, _)) => {
+			token.check()?;
+			Ok(result)
+		},
 	}
 }
 
@@ -343,6 +399,7 @@ pub(crate) fn bounded_hold(
 	}
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn key_modifiers(keys: &[super::keys::KeyName]) -> super::backend::Modifiers {
 	use super::keys::KeyName;
 	super::backend::Modifiers {
@@ -441,23 +498,48 @@ static OWNED: AtomicBool = AtomicBool::new(false);
 #[cfg(test)]
 pub(crate) static OWNERSHIP_TEST: Mutex<()> = Mutex::new(());
 
+/// The agent whose session holds this process's lease, named to the others.
+static HOLDER: Mutex<Option<Arc<str>>> = Mutex::new(None);
+
 struct ProcessLease;
 impl ProcessLease {
 	fn acquire() -> CoreResult<Self> {
-		OWNED
+		if OWNED
 			.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-			.map_err(|_| busy())?;
+			.is_err()
+		{
+			return Err(
+				HOLDER
+					.lock()
+					.as_deref()
+					.map_or_else(busy, |holder| held_by(holder, std::process::id())),
+			);
+		}
 		Ok(Self)
+	}
+
+	/// Names `agent` to this process's other sessions; called once both the
+	/// process and the kernel lease are held, and cleared when the lease drops.
+	fn name_holder(agent: Arc<str>) {
+		*HOLDER.lock() = Some(agent);
 	}
 }
 impl Drop for ProcessLease {
 	fn drop(&mut self) {
+		HOLDER.lock().take();
 		OWNED.store(false, Ordering::Release);
 	}
 }
 
 fn busy() -> DesktopError {
 	DesktopError::input_busy("another desktop operation owns input/focus control; no input was sent")
+}
+
+/// `InputBusy` naming the agent whose session in omp `pid` owns control.
+fn held_by(agent: &str, pid: u32) -> DesktopError {
+	DesktopError::input_busy(format!(
+		"agent {agent:?} (omp pid {pid}) owns input/focus control; no input was sent"
+	))
 }
 
 /// Owns input/focus control, without the emergency-stop monitor, for a focus
@@ -470,8 +552,15 @@ pub(crate) struct FocusOwner {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn own_focus() -> CoreResult<FocusOwner> {
-	KernelOwner::acquire().map(|owner| FocusOwner { _owner: owner })
+	KernelOwner::acquire(None).map(|owner| FocusOwner { _owner: owner })
 }
+
+#[cfg(target_os = "macos")]
+type EscapeMonitor = macos::EscapeMonitor;
+#[cfg(target_os = "linux")]
+type EscapeMonitor = linux::EscapeMonitor;
+#[cfg(windows)]
+type EscapeMonitor = windows::EscapeMonitor;
 
 /// The kernel owner lives on its own thread: Windows mutex release must happen
 /// on the same thread that acquired it, even when the session is disposed from
@@ -512,9 +601,9 @@ impl ControlLease {
 		start: impl FnOnce(EmergencyStop) -> CoreResult<macos::EscapeMonitor>,
 	) -> CoreResult<Self> {
 		if !takeover {
-			return Self::background();
+			return Self::background(source);
 		}
-		let kernel = KernelOwner::acquire()?;
+		let kernel = KernelOwner::acquire(source.0.agent.clone())?;
 		let escape = start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		Ok(Self { _escape: Some(escape), _kernel: kernel, running: AtomicBool::new(false) })
 	}
@@ -524,17 +613,21 @@ impl ControlLease {
 		if takeover {
 			Self::acquire_takeover(source)
 		} else {
-			Self::background()
+			Self::background(source)
 		}
 	}
 
-	fn background() -> CoreResult<Self> {
-		Ok(Self { _escape: None, _kernel: KernelOwner::acquire()?, running: AtomicBool::new(false) })
+	fn background(source: &CancellationSource) -> CoreResult<Self> {
+		Ok(Self {
+			_escape: None,
+			_kernel: KernelOwner::acquire(source.0.agent.clone())?,
+			running: AtomicBool::new(false),
+		})
 	}
 
 	#[cfg(not(target_os = "macos"))]
 	fn acquire_takeover(source: &CancellationSource) -> CoreResult<Self> {
-		let kernel = KernelOwner::acquire()?;
+		let kernel = KernelOwner::acquire(source.0.agent.clone())?;
 		#[cfg(windows)]
 		let escape = windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
 		#[cfg(target_os = "linux")]
@@ -548,6 +641,27 @@ impl ControlLease {
 			running: AtomicBool::new(false),
 		})
 	}
+
+	/// The physical-Escape stop a takeover operation arms, armed for `source`
+	/// alone while that operation still waits for control.
+	#[cfg(target_os = "macos")]
+	fn escape_monitor(source: &CancellationSource) -> CoreResult<Option<EscapeMonitor>> {
+		#[cfg(not(test))]
+		let start = macos::EscapeMonitor::start;
+		#[cfg(test)]
+		let start = test_escape::start;
+		start(EmergencyStop(Arc::downgrade(&source.0))).map(Some)
+	}
+
+	#[cfg(windows)]
+	fn escape_monitor(source: &CancellationSource) -> CoreResult<Option<EscapeMonitor>> {
+		windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0))).map(Some)
+	}
+
+	#[cfg(target_os = "linux")]
+	fn escape_monitor(source: &CancellationSource) -> CoreResult<Option<EscapeMonitor>> {
+		linux::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))
+	}
 }
 
 struct KernelOwner {
@@ -556,7 +670,7 @@ struct KernelOwner {
 }
 
 impl KernelOwner {
-	fn acquire() -> CoreResult<Self> {
+	fn acquire(agent: Option<Arc<str>>) -> CoreResult<Self> {
 		let (ready, receive) = flume::bounded(1);
 		let (stop, stopped) = flume::bounded(1);
 		let thread = thread::Builder::new()
@@ -566,6 +680,11 @@ impl KernelOwner {
 					.and_then(|process| KernelLease::acquire().map(|kernel| (kernel, process)));
 				match leases {
 					Ok((kernel, process)) => {
+						if let Some(agent) = agent {
+							#[cfg(unix)]
+							kernel.record(&agent);
+							ProcessLease::name_holder(agent);
+						}
 						// Withdrawn from release helpers before the lock is released.
 						#[cfg(target_os = "macos")]
 						let kernel = SharedOwnership::publish(kernel);
@@ -698,18 +817,163 @@ pub(crate) struct InputLease {
 	_thread: PhantomData<Rc<()>>,
 }
 
+/// How long input waits for another session's operation to release control
+/// before it fails `InputBusy`. The longest routine holder is a macOS
+/// `apps.open`, which keeps control through the launch and up to three seconds
+/// of waiting for the app's first window.
+const LEASE_WAIT: Duration = Duration::from_secs(5);
+/// How often input waiting for control tries again.
+const LEASE_POLL: Duration = Duration::from_millis(50);
+
+/// A step of a takeover's admission ([`InputLease::acquire_admitted`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Admit {
+	/// Wait, without the lease, until the backend lets the takeover start (on
+	/// X11, once the user has paused); the answer is not read.
+	Wait,
+	/// With the lease held: whether that admission still holds.
+	Recheck,
+}
+
+enum WaitingStop {
+	Unarmed,
+	Unsupported,
+	Watching(EscapeMonitor),
+}
+
+impl WaitingStop {
+	fn armed(monitor: Option<EscapeMonitor>) -> Self {
+		monitor.map_or(Self::Unsupported, Self::Watching)
+	}
+}
+
 impl InputLease {
 	/// `takeover` arms the physical-Escape stop for this operation; held control
-	/// keeps the stop it armed when it was granted.
+	/// keeps the stop it armed when it was granted. Control another session
+	/// owns is waited for up to [`LEASE_WAIT`], ending shortly before the
+	/// operation's deadline; cancelling the operation ends the wait, and so does
+	/// a physical Escape when it waits to take over.
 	pub(crate) fn acquire(token: &OperationToken, takeover: bool) -> CoreResult<Self> {
-		token.check()?;
-		let owner = {
-			let state = token.source.0.state.lock();
-			token.check()?;
-			match state.as_ref() {
-				Some(owner) => owner.clone(),
-				None => Arc::new(ControlLease::acquire(&token.source, takeover)?),
+		Self::acquire_within(
+			token,
+			takeover,
+			Instant::now,
+			|duration| token.wait(duration),
+			|| ControlLease::escape_monitor(&token.source),
+			WaitingStop::Unarmed,
+		)
+	}
+
+	/// [`Self::acquire`] for a takeover its backend admits first. `admit`
+	/// waits ([`Admit::Wait`]) without the lease, so other sessions' input
+	/// is not kept out meanwhile, while the physical-Escape stop is armed;
+	/// once the lease is held it rechecks ([`Admit::Recheck`]), and when the
+	/// admission no longer holds it lets the lease go and waits again.
+	pub(crate) fn acquire_admitted(
+		token: &OperationToken,
+		admit: impl FnMut(Admit) -> CoreResult<bool>,
+	) -> CoreResult<Self> {
+		Self::admit_within(
+			token,
+			admit,
+			|| ControlLease::escape_monitor(&token.source),
+			|armed| {
+				Self::acquire_within(
+					token,
+					true,
+					Instant::now,
+					|duration| token.wait(duration),
+					|| ControlLease::escape_monitor(&token.source),
+					armed,
+				)
+			},
+		)
+	}
+
+	/// [`Self::acquire_admitted`], arming the stop with `arm` and taking the
+	/// lease with `acquire`.
+	fn admit_within(
+		token: &OperationToken,
+		mut admit: impl FnMut(Admit) -> CoreResult<bool>,
+		mut arm: impl FnMut() -> CoreResult<Option<EscapeMonitor>>,
+		mut acquire: impl FnMut(WaitingStop) -> CoreResult<Self>,
+	) -> CoreResult<Self> {
+		loop {
+			// Held control armed its stop when it was granted.
+			let stop = if token.source.control_active() {
+				WaitingStop::Unarmed
+			} else {
+				WaitingStop::armed(arm()?)
+			};
+			admit(Admit::Wait)?;
+			let lease = acquire(stop)?;
+			if admit(Admit::Recheck)? {
+				return Ok(lease);
 			}
+		}
+	}
+
+	/// [`Self::acquire`] on the clock `now`, sleeping through `wait`; a takeover
+	/// operation transfers the stop armed while waiting, or the one `armed`
+	/// before it asked, into its acquired lease.
+	#[expect(clippy::used_underscore_binding, reason = "transfer the RAII monitor into the lease")]
+	fn acquire_within(
+		token: &OperationToken,
+		takeover: bool,
+		now: impl Fn() -> Instant,
+		mut wait: impl FnMut(Duration) -> CoreResult<()>,
+		mut arm: impl FnMut() -> CoreResult<Option<EscapeMonitor>>,
+		armed: WaitingStop,
+	) -> CoreResult<Self> {
+		token.check()?;
+		let limit = now() + LEASE_WAIT;
+		let limit = token.deadline().map_or(limit, |deadline| {
+			limit.min(deadline.checked_sub(DEADLINE_MARGIN).unwrap_or(deadline))
+		});
+		let mut waiting_stop = armed;
+		let mut last_refusal = None;
+		let owner = loop {
+			token.check()?;
+			if now() >= limit
+				&& let Some(refused) = last_refusal.take()
+			{
+				return Err(refused);
+			}
+			let refused = {
+				let state = token.source.0.state.lock();
+				token.check()?;
+				match state.as_ref() {
+					Some(owner) => break owner.clone(),
+					None => {
+						match ControlLease::acquire(
+							&token.source,
+							takeover && matches!(waiting_stop, WaitingStop::Unarmed),
+						) {
+							Ok(mut owner) => {
+								match waiting_stop {
+									WaitingStop::Unarmed => {},
+									WaitingStop::Unsupported => owner._escape = None,
+									WaitingStop::Watching(stop) => owner._escape = Some(stop),
+								}
+								break Arc::new(owner);
+							},
+							Err(error) if error.code == ErrorCode::InputBusy => error,
+							Err(error) => return Err(error),
+						}
+					},
+				}
+			};
+			let left = limit.saturating_duration_since(now());
+			if left.is_zero() {
+				return Err(refused);
+			}
+			// A takeover operation takes the user's input once control frees up,
+			// so an Escape they press while it waits stops it too.
+			if takeover && matches!(waiting_stop, WaitingStop::Unarmed) {
+				waiting_stop = WaitingStop::armed(arm()?);
+			}
+			last_refusal = Some(refused);
+			wait(left.min(LEASE_POLL))?;
 		};
 		owner
 			.running
@@ -793,18 +1057,62 @@ impl KernelLease {
 			));
 		}
 		match file.try_lock() {
-			Ok(()) => Ok(Self { file, shared: false }),
-			Err(std::fs::TryLockError::WouldBlock) => Err(busy()),
+			Ok(()) => {
+				// A host that died holding the lock left its record behind; this
+				// lease names its own agent or none.
+				let _ = file.set_len(0);
+				Ok(Self { file, shared: false })
+			},
+			Err(std::fs::TryLockError::WouldBlock) => {
+				Err(Self::holder(&file).map_or_else(busy, |(pid, agent)| held_by(&agent, pid)))
+			},
 			Err(std::fs::TryLockError::Error(error)) => {
 				Err(DesktopError::input_failed(format!("cannot lock desktop ownership: {error}")))
 			},
 		}
+	}
+
+	/// Names `agent` and this process in the lock file for hosts that find it
+	/// locked. Best effort: input never waits on the record.
+	fn record(&self, agent: &str) {
+		use std::os::unix::fs::FileExt;
+		// Dotted ids put the most specific name last; bound the record before
+		// writing so even a long parent chain leaves that suffix readable.
+		let start = agent
+			.char_indices()
+			.rev()
+			.nth(63)
+			.map_or(0, |(index, _)| index);
+		let agent = &agent[start..];
+		let _ = self
+			.file
+			.write_all_at(format!("{}\n{agent}", std::process::id()).as_bytes(), 0);
+	}
+
+	/// The omp pid and agent a live host recorded in the locked `file`; `None`
+	/// for no record, an unreadable one or one whose process is gone.
+	fn holder(file: &std::fs::File) -> Option<(u32, String)> {
+		use std::os::unix::fs::FileExt;
+		let mut buffer = [0u8; 10 + 1 + 64 * 4];
+		let length = file.read_at(&mut buffer, 0).ok()?;
+		let record = String::from_utf8_lossy(&buffer[..length]);
+		let (pid, agent) = record.split_once('\n')?;
+		// Signal 0 to pid 0 would ask about the whole process group.
+		let pid: u32 = pid.parse().ok().filter(|&pid| pid != 0)?;
+		// SAFETY: signal 0 delivers nothing; it only asks whether `pid` exists.
+		if unsafe { libc::kill(libc::pid_t::try_from(pid).ok()?, 0) } != 0 {
+			return None;
+		}
+		let agent: String = agent.chars().filter(|c| !c.is_control()).take(64).collect();
+		(!agent.is_empty()).then_some((pid, agent))
 	}
 }
 
 #[cfg(unix)]
 impl Drop for KernelLease {
 	fn drop(&mut self) {
+		// The agent named in the file no longer holds control.
+		let _ = self.file.set_len(0);
 		// Unlocked rather than closed when nothing else should hold it: a
 		// process another thread is spawning keeps a copy of the descriptor
 		// until it execs.
@@ -884,7 +1192,7 @@ impl Drop for KernelLease {
 pub(crate) fn grant_for_test(source: &CancellationSource) {
 	let deadline = std::time::Instant::now() + Duration::from_secs(10);
 	let kernel = loop {
-		match KernelOwner::acquire() {
+		match KernelOwner::acquire(None) {
 			Ok(kernel) => break kernel,
 			Err(error)
 				if error.code == crate::desktop::error::ErrorCode::InputBusy
@@ -935,7 +1243,7 @@ pub(crate) fn press_escape_for_test() -> usize {
 /// takes and drops it.
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) fn own_for_test() -> CoreResult<impl Sized> {
-	KernelOwner::acquire()
+	KernelOwner::acquire(None)
 }
 
 /// Whether this is the child test process that runs `test` alone. Otherwise
@@ -971,6 +1279,32 @@ mod tests {
 		let _ = std::fs::remove_file(KernelLease::path());
 	}
 
+	/// [`InputLease::acquire_within`] on a clock that starts at `start` and
+	/// moves only while it waits; `during(n)` runs in the `n`th wait. Returns
+	/// the outcome and the time waited.
+	fn acquire_on_test_clock(
+		token: &OperationToken,
+		start: Instant,
+		mut during: impl FnMut(u32),
+	) -> (CoreResult<InputLease>, Duration) {
+		let clock = Cell::new(start);
+		let mut waits = 0;
+		let lease = InputLease::acquire_within(
+			token,
+			false,
+			|| clock.get(),
+			|duration| {
+				waits += 1;
+				during(waits);
+				clock.set(clock.get() + duration);
+				Ok(())
+			},
+			|| panic!("background input arms no Escape stop"),
+			WaitingStop::Unarmed,
+		);
+		(lease, clock.get() - start)
+	}
+
 	#[test]
 	fn task_lease_survives_retirement_but_abort_and_release_revoke_it() {
 		let _serial = OWNERSHIP_TEST.lock();
@@ -982,8 +1316,13 @@ mod tests {
 		let old = source.token();
 		{
 			let _operation = InputLease::acquire(&old, false).expect("reuse task ownership");
-			assert!(InputLease::acquire(&source.token(), false).is_err());
-			assert!(InputLease::acquire(&CancellationSource::default().token(), false).is_err());
+			// This session's own running operation refuses at once.
+			let (running, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |_| {});
+			assert_eq!(running.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+			assert_eq!(waited, Duration::ZERO);
+			let (other, _) =
+				acquire_on_test_clock(&CancellationSource::default().token(), Instant::now(), |_| {});
+			assert!(other.is_err());
 		}
 		source.retire();
 		assert!(source.control_active());
@@ -993,9 +1332,9 @@ mod tests {
 		source.cancel();
 		assert!(!source.control_active());
 		assert!(fresh.check().is_err());
-		assert!(KernelOwner::acquire().is_err(), "cleanup still owns the kernel");
+		assert!(KernelOwner::acquire(None).is_err(), "cleanup still owns the kernel");
 		drop(running);
-		drop(KernelOwner::acquire().expect("cleanup releases ownership"));
+		drop(KernelOwner::acquire(None).expect("cleanup releases ownership"));
 		grant_for_test(&source);
 		let queued = source.token();
 		source.release_control();
@@ -1007,7 +1346,7 @@ mod tests {
 		assert!(queued.check().is_err(), "reacquiring cannot revive queued input");
 		drop((old, fresh, queued));
 		drop(source);
-		drop(KernelOwner::acquire().expect("session destruction releases ownership"));
+		drop(KernelOwner::acquire(None).expect("session destruction releases ownership"));
 		remove_test_lock();
 	}
 
@@ -1022,7 +1361,7 @@ mod tests {
 		emergency.cancel();
 		assert!(!source.control_active());
 		assert!(fresh.check().is_err());
-		drop(KernelOwner::acquire().expect("idle Escape releases kernel ownership"));
+		drop(KernelOwner::acquire(None).expect("idle Escape releases kernel ownership"));
 		remove_test_lock();
 	}
 
@@ -1046,13 +1385,13 @@ mod tests {
 	#[test]
 	fn escape_stops_outlive_the_session_under_its_key() {
 		let key = format!("escape-key-test-{}", std::process::id());
-		let first = CancellationSource::counting_escapes(escape_stop_counter(Some(&key)));
+		let first = CancellationSource::counting_escapes(escape_stop_counter(Some(&key)), None);
 		EmergencyStop(Arc::downgrade(&first.0)).escape();
 		drop(first);
 		assert_eq!(escape_stops(&key), 1, "the host reads a stop after its session is gone");
-		let replacement = CancellationSource::counting_escapes(escape_stop_counter(Some(&key)));
+		let replacement = CancellationSource::counting_escapes(escape_stop_counter(Some(&key)), None);
 		assert_eq!(replacement.escape_stops(), 1, "a replacement session keeps the count");
-		let keyless = CancellationSource::counting_escapes(escape_stop_counter(None));
+		let keyless = CancellationSource::counting_escapes(escape_stop_counter(None), None);
 		EmergencyStop(Arc::downgrade(&keyless.0)).escape();
 		assert_eq!(escape_stops(&key), 1, "a session without the key counts alone");
 		forget_escape_stops(&key);
@@ -1069,7 +1408,251 @@ mod tests {
 		source.cancel();
 		assert!(token.check().is_err(), "the host interrupt still cancels background input");
 		drop(lease);
-		drop(KernelOwner::acquire().expect("background input releases kernel ownership"));
+		drop(KernelOwner::acquire(None).expect("background input releases kernel ownership"));
+		remove_test_lock();
+	}
+
+	#[test]
+	fn input_waits_for_another_hosts_control_up_to_its_bound() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		// Another host's lock, released during the second wait.
+		let mut other = Some(KernelLease::acquire().expect("another host's lease"));
+		let (lease, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |wait| {
+			if wait == 2 {
+				drop(other.take());
+			}
+		});
+		drop(lease.expect("input once the other host releases control"));
+		assert_eq!(waited, 2 * LEASE_POLL);
+
+		let other = KernelLease::acquire().expect("another host's lease");
+		let (refused, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |_| {});
+		assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		assert_eq!(waited, LEASE_WAIT);
+		// A run ending sooner ends the wait shortly before its deadline.
+		let start = Instant::now();
+		source.set_deadline(Some(start + Duration::from_secs(2)));
+		let (refused, waited) = acquire_on_test_clock(&source.token(), start, |_| {});
+		assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		assert_eq!(waited + DEADLINE_MARGIN, Duration::from_secs(2));
+		drop(other);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn input_refused_by_another_sessions_control_names_its_agent() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let holder = CancellationSource::counting_escapes(
+			Arc::default(),
+			Some(Arc::from("CursorChecks.Scout")),
+		);
+		let held = InputLease::acquire(&holder.token(), false).expect("the holder takes control");
+		let named = format!("agent \"CursorChecks.Scout\" (omp pid {})", std::process::id());
+		// Another session of this omp.
+		let waiter = CancellationSource::default();
+		let (refused, _) = acquire_on_test_clock(&waiter.token(), Instant::now(), |_| {});
+		let Err(refused) = refused else {
+			panic!("busy while held")
+		};
+		assert!(refused.message.contains(&named), "{}", refused.message);
+		// Another omp, through the lock file.
+		#[cfg(unix)]
+		{
+			let Err(other) = KernelLease::at(&KernelLease::path()) else {
+				panic!("busy while held")
+			};
+			assert!(other.message.contains(&named), "{}", other.message);
+		}
+		drop(held);
+		// Its name goes with its control.
+		let unnamed = InputLease::acquire(&waiter.token(), false).expect("control once released");
+		let (refused, _) = acquire_on_test_clock(&holder.token(), Instant::now(), |_| {});
+		let Err(refused) = refused else {
+			panic!("busy while held")
+		};
+		assert_eq!(refused.message, busy().message, "a holder without an agent is not named");
+		drop(unnamed);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn input_refuses_control_released_during_the_final_poll() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		for bound in [LEASE_WAIT, Duration::from_secs(2).checked_sub(DEADLINE_MARGIN).unwrap()] {
+			let start = Instant::now();
+			source.set_deadline(Some(start + bound + DEADLINE_MARGIN));
+			let mut other = Some(KernelLease::acquire().expect("another host's lease"));
+			let final_poll = bound.as_millis() / LEASE_POLL.as_millis();
+			let (refused, waited) = acquire_on_test_clock(&source.token(), start, |poll| {
+				if u128::from(poll) == final_poll {
+					drop(other.take());
+				}
+			});
+			assert!(other.is_none(), "released in the final poll");
+			assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+			assert_eq!(waited, bound);
+		}
+		remove_test_lock();
+	}
+
+	#[test]
+	fn takeover_reuses_the_escape_stop_armed_while_waiting() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let token = source.token();
+		let clock = Cell::new(Instant::now());
+		let mut other = Some(KernelLease::acquire().expect("another host's lease"));
+		let mut arms = 0;
+		let lease = InputLease::acquire_within(
+			&token,
+			true,
+			|| clock.get(),
+			|duration| {
+				drop(other.take());
+				clock.set(clock.get() + duration);
+				Ok(())
+			},
+			|| {
+				arms += 1;
+				// Like a Linux backend with no physical Escape monitor available.
+				Ok(None)
+			},
+			WaitingStop::Unarmed,
+		)
+		.expect("retry reuses the waiting monitor instead of starting another");
+		assert_eq!(arms, 1);
+		drop(lease);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn cancelling_input_that_waits_for_control_ends_the_wait() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let other = KernelLease::acquire().expect("another host's lease");
+		let token = source.token();
+		// The clock never moves: only the cancel can end the wait.
+		let start = Instant::now();
+		let mut waits = 0;
+		let cancelled = InputLease::acquire_within(
+			&token,
+			false,
+			|| start,
+			|duration| {
+				waits += 1;
+				source.cancel();
+				token.wait(duration)
+			},
+			|| panic!("background input arms no Escape stop"),
+			WaitingStop::Unarmed,
+		);
+		assert_eq!(cancelled.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
+		assert_eq!(waits, 1);
+		drop(other);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn physical_escape_stops_takeover_input_waiting_for_control() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let other = KernelLease::acquire().expect("another host's lease");
+		let token = source.token();
+		let clock = Cell::new(Instant::now());
+		let armed = RefCell::new(Vec::new());
+		let mut waits = 0;
+		let stopped = InputLease::acquire_within(
+			&token,
+			true,
+			|| clock.get(),
+			|duration| {
+				waits += 1;
+				// The user presses Escape in their own app during the first wait.
+				for stop in armed.borrow().iter() {
+					EmergencyStop::escape(stop);
+				}
+				clock.set(clock.get() + duration);
+				token.wait(duration)
+			},
+			|| {
+				armed
+					.borrow_mut()
+					.push(EmergencyStop(Arc::downgrade(&source.0)));
+				Ok(None)
+			},
+			WaitingStop::Unarmed,
+		);
+		assert_eq!(stopped.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
+		assert_eq!((waits, armed.borrow().len(), source.escape_stops()), (1, 1, 1));
+		drop(other);
+		remove_test_lock();
+	}
+
+	#[test]
+	fn a_takeover_waits_for_its_admission_without_the_lease_and_escape_stops_it() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let token = source.token();
+		let armed = RefCell::new(Vec::new());
+		let mut steps = Vec::new();
+		let stopped = InputLease::admit_within(
+			&token,
+			|step| {
+				steps.push(step);
+				// Another session's input gets the lease while this one waits.
+				drop(KernelLease::acquire().expect("the lease is free during the wait"));
+				// The user presses Escape in their own app.
+				for stop in armed.borrow().iter() {
+					EmergencyStop::escape(stop);
+				}
+				token.check().map(|()| true)
+			},
+			|| {
+				armed
+					.borrow_mut()
+					.push(EmergencyStop(Arc::downgrade(&source.0)));
+				Ok(None)
+			},
+			|_| panic!("a stopped takeover never takes the lease"),
+		);
+		assert_eq!(stopped.map(drop).map_err(|error| error.code), Err(ErrorCode::Cancelled));
+		assert_eq!(steps, [Admit::Wait]);
+		assert_eq!((armed.borrow().len(), source.escape_stops()), (1, 1));
+		remove_test_lock();
+	}
+
+	#[test]
+	fn a_takeover_interrupted_while_it_took_the_lease_lets_it_go_and_waits_again() {
+		let _serial = OWNERSHIP_TEST.lock();
+		let source = CancellationSource::default();
+		let token = source.token();
+		let mut steps = Vec::new();
+		let mut arms = 0;
+		let lease = InputLease::admit_within(
+			&token,
+			|step| {
+				steps.push(step);
+				if step == Admit::Wait {
+					drop(KernelLease::acquire().expect("no lease is held while waiting"));
+				}
+				// The user pressed a key while the first admission took the lease.
+				Ok(step == Admit::Wait || steps.len() > 2)
+			},
+			|| {
+				arms += 1;
+				Ok(None)
+			},
+			|armed| {
+				assert!(!matches!(armed, WaitingStop::Unarmed), "the waiting stop goes into the lease");
+				InputLease::acquire(&token, false)
+			},
+		)
+		.expect("admitted on the second try");
+		assert_eq!(steps, [Admit::Wait, Admit::Recheck, Admit::Wait, Admit::Recheck]);
+		assert_eq!(arms, 2);
+		drop(lease);
 		remove_test_lock();
 	}
 
@@ -1090,7 +1673,7 @@ mod tests {
 		);
 		assert_eq!(press_escape_for_test(), 1);
 		assert!(takeover.check().is_err(), "physical Escape stops takeover input");
-		drop(KernelOwner::acquire().expect("takeover input releases kernel ownership"));
+		drop(KernelOwner::acquire(None).expect("takeover input releases kernel ownership"));
 		remove_test_lock();
 	}
 
@@ -1259,9 +1842,49 @@ mod tests {
 	fn independent_kernel_handles_contend_and_release() {
 		let path = std::env::temp_dir().join(format!("pi-control-test-{}.lock", std::process::id()));
 		let first = KernelLease::at(&path).expect("first kernel lease");
-		assert!(KernelLease::at(&path).is_err());
+		let Err(unnamed) = KernelLease::at(&path) else {
+			panic!("busy while held")
+		};
+		assert_eq!(unnamed.message, busy().message, "a holder without a record is not named");
+		// A record naming a process that has exited, as a host killed while a
+		// release helper still holds its lock leaves, names nobody.
+		let mut gone = std::process::Command::new("true")
+			.spawn()
+			.expect("short-lived process");
+		let gone_pid = gone.id();
+		assert!(gone.wait().expect("process exits").success());
+		{
+			use std::os::unix::fs::FileExt;
+			first
+				.file
+				.write_all_at(format!("{gone_pid}\nGhost").as_bytes(), 0)
+				.expect("stale record");
+		}
+		let Err(stale) = KernelLease::at(&path) else {
+			panic!("busy while held")
+		};
+		assert_eq!(stale.message, busy().message, "a stale record is not named");
+		let agent = format!("{}.Scout", "Parent.".repeat(50));
+		first.record(&agent);
+		let Err(named) = KernelLease::at(&path) else {
+			panic!("busy while held")
+		};
+		assert!(named.message.contains(&agent[agent.len() - 64..]));
+		assert!(named.message.contains("Scout"));
 		drop(first);
-		let second = KernelLease::at(&path).expect("lease after release");
+		assert_eq!(
+			std::fs::metadata(&path).expect("lock file").len(),
+			0,
+			"release clears the record"
+		);
+		// A host that died holding the lock left its record, and its pid now
+		// belongs to a live process: the next lease clears it.
+		std::fs::write(&path, format!("{}\nGhost", std::process::id())).expect("dead host's record");
+		let second = KernelLease::at(&path).expect("lease after the dead host");
+		let Err(cleared) = KernelLease::at(&path) else {
+			panic!("busy while held")
+		};
+		assert_eq!(cleared.message, busy().message, "the next holder never inherits a name");
 		drop(second);
 		std::fs::remove_file(path).expect("remove test lock");
 	}
@@ -1295,7 +1918,7 @@ mod tests {
 			return;
 		}
 		assert!(shared_ownership().is_none());
-		let owner = KernelOwner::acquire().expect("test kernel owner");
+		let owner = KernelOwner::acquire(None).expect("test kernel owner");
 		let (ownership, _handed) = shared_ownership().expect("held lock is shared");
 		// Started as the release helper is: the shared lock is its standard
 		// output, and it exits when its standard input ends.
@@ -1321,7 +1944,7 @@ mod tests {
 		) {
 			return;
 		}
-		let owner = KernelOwner::acquire().expect("test kernel owner");
+		let owner = KernelOwner::acquire(None).expect("test kernel owner");
 		let (ownership, handed) = shared_ownership().expect("held lock is shared");
 		let mut helper = std::process::Command::new("/bin/cat")
 			.stdin(std::process::Stdio::piped())
@@ -1367,8 +1990,9 @@ mod tests {
 		// An earlier operation stopped waiting for its helper, which still holds
 		// its share of ownership.
 		let (_descriptor, handed) = shared_ownership().expect("held lock is shared");
-		let refused = InputLease::acquire(&source.token(), false).map(drop);
-		assert_eq!(refused.map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		let (refused, waited) = acquire_on_test_clock(&source.token(), Instant::now(), |_| {});
+		assert_eq!(refused.map(drop).map_err(|error| error.code), Err(ErrorCode::InputBusy));
+		assert_eq!(waited, Duration::ZERO, "this session's helper is not waited for");
 		drop(handed);
 		drop(InputLease::acquire(&source.token(), false).expect("input once the helper is reaped"));
 		source.release_control();

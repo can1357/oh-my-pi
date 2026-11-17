@@ -90,7 +90,7 @@ impl ScrollKey {
 	/// zsh `asklistscroll`'s classification of the widget `cmd` bound to
 	/// the key read in the `listscroll` keymap; the bool says the key is
 	/// to be read again (zsh `ungetkeycmd`).
-	pub fn of(cmd: Option<&[u8]>) -> (Self, bool) {
+	pub const fn of(cmd: Option<&[u8]>) -> (Self, bool) {
 		match cmd {
 			None | Some(b"send-break") => (Self::Stop, false),
 			Some(
@@ -364,26 +364,23 @@ fn nice_next(
 		return (s, w, wp, 1);
 	}
 	let (ch, n) = bstr::decode_utf8(&u[i..]);
-	match ch {
-		Some(ch) => {
-			let (s, w, wp) = wcs_nicechar(ch, print_eight);
-			(s, w, wp, n)
-		},
-		None => {
-			// An incomplete sequence at the end: every byte left is shown
-			// as invalid.
-			let rest = &u[i..];
-			let lead = match b {
-				0xc2..=0xdf => 2,
-				0xe0..=0xef => 3,
-				0xf0..=0xf4 => 4,
-				_ => 0,
-			};
-			if lead > rest.len() && rest.iter().skip(1).all(|&c| (0x80..0xc0).contains(&c)) {
-				*eol = true;
-			}
-			invalid(b)
-		},
+	if let Some(ch) = ch {
+		let (s, w, wp) = wcs_nicechar(ch, print_eight);
+		(s, w, wp, n)
+	} else {
+		// An incomplete sequence at the end: every byte left is shown
+		// as invalid.
+		let rest = &u[i..];
+		let lead = match b {
+			0xc2..=0xdf => 2,
+			0xe0..=0xef => 3,
+			0xf0..=0xf4 => 4,
+			_ => 0,
+		};
+		if lead > rest.len() && rest.iter().skip(1).all(|&c| (0x80..0xc0).contains(&c)) {
+			*eol = true;
+		}
+		invalid(b)
 	}
 }
 
@@ -416,22 +413,22 @@ pub struct P<'a> {
 }
 
 impl P<'_> {
-	fn l(&mut self) -> &mut State {
+	const fn l(&mut self) -> &mut State {
 		&mut self.c.list
 	}
 
 	/// zsh `dolist(X)`.
-	fn dolist(&self, x: i32) -> bool {
+	const fn dolist(&self, x: i32) -> bool {
 		x >= self.c.list.mlbeg && x < self.c.list.mlend
 	}
 
 	/// zsh `dolistcl(X)`.
-	fn dolistcl(&self, x: i32) -> bool {
+	const fn dolistcl(&self, x: i32) -> bool {
 		x >= self.c.list.mlbeg && x < self.c.list.mlend + 1
 	}
 
 	/// zsh `dolistnl(X)`.
-	fn dolistnl(&self, x: i32) -> bool {
+	const fn dolistnl(&self, x: i32) -> bool {
 		x >= self.c.list.mlbeg && x < self.c.list.mlend - 1
 	}
 
@@ -553,9 +550,7 @@ impl P<'_> {
 		self.e.curisbeg = 0;
 		self.e.curissend = 0;
 		let nrefs = self.e.nrefs.min(MAX_POS);
-		for i in 0..nrefs {
-			self.e.sendpos[i] = NOPOS;
-		}
+		self.e.sendpos[..nrefs].fill(NOPOS);
 		for i in nrefs..MAX_POS {
 			self.e.begpos[i] = NOPOS;
 			self.e.endpos[i] = NOPOS;
@@ -693,12 +688,11 @@ impl P<'_> {
 					self.l().mlprinted = ml - oml;
 					return Ok(0);
 				}
+				self.e.out.push(nc);
 				if k < wptr {
-					self.e.out.push(nc);
 					col += 1;
 					width = width.saturating_sub(1);
 				} else {
-					self.e.out.push(nc);
 					if k + 1 < sp.len() {
 						continue;
 					}
@@ -751,15 +745,12 @@ impl P<'_> {
 			self.e.nrefs = npar;
 			if let Some(gr) = groups {
 				for i in 0..npar.min(MAX_POS - 1) {
-					match gr.get(i) {
-						Some(sp) => {
-							self.e.begpos[i] = i32::try_from(sp.begin).unwrap_or(NOPOS);
-							self.e.endpos[i] = i32::try_from(sp.end).unwrap_or(NOPOS) - 1;
-						},
-						None => {
-							self.e.begpos[i] = -1;
-							self.e.endpos[i] = -1;
-						},
+					if let Some(sp) = gr.get(i) {
+						self.e.begpos[i] = i32::try_from(sp.begin).unwrap_or(NOPOS);
+						self.e.endpos[i] = i32::try_from(sp.end).unwrap_or(NOPOS) - 1;
+					} else {
+						self.e.begpos[i] = -1;
+						self.e.endpos[i] = -1;
 					}
 				}
 			}
@@ -953,13 +944,7 @@ impl P<'_> {
 					s.into()
 				},
 			},
-			None => self
-				.c
-				.list
-				.mlistp
-				.clone()
-				.map(Vec::from)
-				.unwrap_or_default(),
+			None => self.c.list.mlistp.clone().map_or_default(Vec::from),
 		};
 		let (mut l, mut b, mut s, mut u) = (0i32, false, false, false);
 		let mut nc: Vec<u8> = Vec::new();
@@ -982,17 +967,18 @@ impl P<'_> {
 				if p >= fmt.len() {
 					break;
 				}
-				let mut arg = 0i32;
-				if fmt[p].is_ascii_digit() {
+				let arg: i32 = if fmt[p].is_ascii_digit() {
 					let st = p;
 					while p < fmt.len() && fmt[p].is_ascii_digit() {
 						p += 1;
 					}
-					arg = std::str::from_utf8(&fmt[st..p])
+					std::str::from_utf8(&fmt[st..p])
 						.ok()
 						.and_then(|x| x.parse().ok())
-						.unwrap_or(i32::MAX);
-				}
+						.unwrap_or(i32::MAX)
+				} else {
+					0
+				};
 				let (l2, c2) = metachar(&fmt, p, self.e.multibyte);
 				len = l2;
 				cchar = c2.unwrap_or_else(|| {
@@ -1108,58 +1094,52 @@ impl P<'_> {
 							p += 2;
 						}
 					},
-					c @ ('m' | 'M') => {
-						if stat {
-							let v = if n != 0 {
-								self.c.list.mlastm
-							} else {
-								self.c.list.mselect
-							};
-							let t = format!("{v}/{}", self.c.core.listdat.nlist);
-							nc = if c == 'M' {
-								format!("{t:<9}").into_bytes()
-							} else {
-								t.into_bytes()
-							};
-							m = 2;
-						}
+					c @ ('m' | 'M') if stat => {
+						let v = if n != 0 {
+							self.c.list.mlastm
+						} else {
+							self.c.list.mselect
+						};
+						let t = format!("{v}/{}", self.c.core.listdat.nlist);
+						nc = if c == 'M' {
+							format!("{t:<9}").into_bytes()
+						} else {
+							t.into_bytes()
+						};
+						m = 2;
 					},
-					c @ ('l' | 'L') => {
-						if stat {
-							let t = format!("{}/{}", ml + 1, self.c.core.listdat.nlines);
-							nc = if c == 'L' {
-								format!("{t:<9}").into_bytes()
-							} else {
-								t.into_bytes()
-							};
-							m = 2;
-						}
+					c @ ('l' | 'L') if stat => {
+						let t = format!("{}/{}", ml + 1, self.c.core.listdat.nlines);
+						nc = if c == 'L' {
+							format!("{t:<9}").into_bytes()
+						} else {
+							t.into_bytes()
+						};
+						m = 2;
 					},
-					c @ ('p' | 'P') => {
-						if stat {
-							let nlines = self.c.core.listdat.nlines;
-							let lst = &self.c.list;
-							let pct = if n != 0 {
-								lst.mfirstl != 0
+					c @ ('p' | 'P') if stat => {
+						let nlines = self.c.core.listdat.nlines;
+						let lst = &self.c.list;
+						let pct = if n != 0 {
+							lst.mfirstl != 0
+						} else {
+							lst.mlbeg > 0 || ml != lst.mfirstl
+						};
+						nc = if ml == nlines - 1 {
+							b"Bottom".to_vec()
+						} else if pct {
+							let v = ((ml + 1) * 100) / nlines.max(1);
+							if c == 'P' {
+								format!("{v:2}%   ").into_bytes()
 							} else {
-								lst.mlbeg > 0 || ml != lst.mfirstl
-							};
-							nc = if ml == nlines - 1 {
-								b"Bottom".to_vec()
-							} else if pct {
-								let v = ((ml + 1) * 100) / nlines.max(1);
-								if c == 'P' {
-									format!("{v:2}%   ").into_bytes()
-								} else {
-									format!("{v}%").into_bytes()
-								}
-							} else if c == 'P' {
-								b"Top   ".to_vec()
-							} else {
-								b"Top".to_vec()
-							};
-							m = 2;
-						}
+								format!("{v}%").into_bytes()
+							}
+						} else if c == 'P' {
+							b"Top   ".to_vec()
+						} else {
+							b"Top".to_vec()
+						};
+						m = 2;
 					},
 					_ => {},
 				}
@@ -1207,11 +1187,10 @@ impl P<'_> {
 							left = left.saturating_sub(1);
 							p += 1;
 							self.e.out.push(at(&fmt, p) ^ 32);
-							p += 1;
 						} else {
 							self.e.out.push(fmt[p]);
-							p += 1;
 						}
+						p += 1;
 					}
 					let beg = cc % cols == 0;
 					if beg && !stat {

@@ -30,6 +30,12 @@ export const cfgGcCompress = register({ id: "gc.compress", type: "boolean", defa
 
 export const cfgGcCompressAfterDays = register({ id: "gc.compressAfterDays", type: "number", default: 7 });
 
+// Opt-in: rewrites idle transcripts without the provider replay data a resumed
+// turn would replay natively (signatures, encrypted reasoning, cached responses).
+export const cfgGcStrip = register({ id: "gc.strip", type: "boolean", default: false });
+
+export const cfgGcStripAfterDays = register({ id: "gc.stripAfterDays", type: "number", default: 30 });
+
 // Opt-in: an interactive launch starts a detached `omp gc --compress --apply`
 // at most once a day, so idle sessions get compressed without anyone asking.
 export const cfgGcAutoCompress = register({ id: "gc.autoCompress", type: "boolean", default: false });

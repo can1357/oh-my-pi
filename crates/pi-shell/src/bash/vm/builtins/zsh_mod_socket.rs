@@ -173,7 +173,7 @@ pub fn zsocket(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 /// zsh `-t`'s `poll(lfd, POLLIN, 0)`: whether a connection waits on the
 /// listener at `lfd` (a bad fd counts as ready: the accept then reports
 /// it, as zsh's `POLLNVAL` does).
-pub(super) fn pending_connection(ctx: &mut Ctx<'_, '_>, lfd: i32) -> Result<bool, super::Need> {
+pub(super) fn pending_connection(ctx: &Ctx<'_, '_>, lfd: i32) -> Result<bool, super::Need> {
 	let sets = [vec![lfd], Vec::new(), Vec::new()];
 	Ok(match fd_probe(ctx, FdProbe::Select { sets, timeout_ns: Some(0) })? {
 		FdAnswer::Ready(ready) => !ready[0].is_empty(),

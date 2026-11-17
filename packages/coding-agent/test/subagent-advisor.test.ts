@@ -13,7 +13,11 @@ import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
-import { cfgTaskAgentAdvisor, cfgTaskAgentPrewalk } from "@oh-my-pi/pi-coding-agent/task/settings";
+import {
+	cfgTaskAgentAdvisor,
+	cfgTaskAgentPrewalk,
+	cfgTaskAgentPrewalkAuto,
+} from "@oh-my-pi/pi-coding-agent/task/settings";
 
 describe("per-agent settings migrations", () => {
 	let agentDir = "";
@@ -49,11 +53,12 @@ describe("per-agent settings migrations", () => {
 		expect(cfgTaskAgentAdvisor.get(settings)).toEqual({ task: "off" });
 	});
 
-	it("normalizes boolean per-agent prewalk and advisor overrides", async () => {
+	it("normalizes boolean per-agent prewalk, prewalk-auto and advisor overrides", async () => {
 		const settings = await load(
-			"task:\n  agentPrewalk:\n    reviewer: true\n    task: false\n  agentAdvisor:\n    reviewer: false\n    task: true\n",
+			"task:\n  agentPrewalk:\n    reviewer: true\n    task: false\n  agentPrewalkAuto:\n    reviewer: true\n    task: false\n  agentAdvisor:\n    reviewer: false\n    task: true\n",
 		);
 		expect(cfgTaskAgentPrewalk.get(settings)).toEqual({ reviewer: "on", task: "off" });
+		expect(cfgTaskAgentPrewalkAuto.get(settings)).toEqual({ reviewer: "on", task: "off" });
 		expect(cfgTaskAgentAdvisor.get(settings)).toEqual({ reviewer: "off", task: "on" });
 	});
 });

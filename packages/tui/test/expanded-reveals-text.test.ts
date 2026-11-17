@@ -158,6 +158,40 @@ describe("lsp expand hint", () => {
 	});
 });
 
+describe("debug call rows sanitize raw model args", () => {
+	const cases = [
+		{ args: { program: "bin\tary" }, fragments: ["bin", "ary"] },
+		{ args: { command: "run\ttests" }, fragments: ["run", "tests"] },
+	];
+
+	it("keeps a tab in program or command out of the rendered card row and native head", () => {
+		for (const { args, fragments } of cases) {
+			const row = plain(debugToolRenderer.renderCall(args, { expanded: false, isPartial: true }, theme));
+			expect(row).not.toContain("\t");
+			for (const fragment of fragments) expect(row).toContain(fragment);
+			expect(JSON.stringify(debugToolRenderer.describeCall(args))).not.toContain("\t");
+		}
+	});
+});
+
+describe("debug result header sanitizes the raw action", () => {
+	it("keeps a tab and an OSC title sequence out of the rendered card header", () => {
+		const rendered = debugToolRenderer
+			.renderResult({ content: [{ type: "text", text: "ok" }] }, { expanded: false, isPartial: false }, theme, {
+				action: "launch\t\x1b]0;pwned\x07X",
+			})
+			.render(width)
+			.join("\n");
+		const row = Bun.stripANSI(rendered);
+		expect(row).not.toContain("\t");
+		// Pre-strip: the raw OSC bytes must not survive into the header row.
+		expect(rendered).not.toContain("\x1b]0;pwned");
+		// The tab expands to `TAB_SPACES`; both halves of the action must remain.
+		expect(row).toContain("Debug launch");
+		expect(row).toContain("X");
+	});
+});
+
 describe("expanded lsp detail rows", () => {
 	it("keep the active preset's tree rail on wrapped continuation rows", async () => {
 		const ascii = await loadTheme("dark", { symbolPresetOverride: "ascii" });

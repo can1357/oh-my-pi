@@ -36,6 +36,8 @@ export interface InProcessRunContext {
 	signal: AbortSignal;
 	/** The run's budget. */
 	timeoutMs: number;
+	/** The run's absolute deadline in milliseconds since the epoch. */
+	deadline: number;
 }
 
 /** A backend tab whose `run` code executes in this process. */
@@ -130,6 +132,7 @@ postmortem.interceptUnhandledRejections(consumeRunRejection);
 
 /** Run `opts.code` against `tab`'s facades in this process. */
 export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOptions): Promise<RunResultOk> {
+	const deadline = Date.now() + opts.timeoutMs;
 	const runAc = new AbortController();
 	const timeoutSignal = AbortSignal.timeout(opts.timeoutMs);
 	const signal = AbortSignal.any(
@@ -142,7 +145,7 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 	const filename = `${tab.runLabel}-${runId}.js`;
 	const activeRun: ActiveRun = { filename, floatingRejections: [] };
 	activeRuns.set(filename, activeRun);
-	tab.setRunContext({ session: opts.snapshot, output, screenshots, signal, timeoutMs: opts.timeoutMs });
+	tab.setRunContext({ session: opts.snapshot, output, screenshots, signal, timeoutMs: opts.timeoutMs, deadline });
 
 	const { promise: cancelRejection, reject } = Promise.withResolvers<never>();
 	// If the synchronous setup below throws (same-realm ownership conflict)

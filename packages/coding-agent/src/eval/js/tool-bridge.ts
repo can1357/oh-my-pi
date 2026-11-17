@@ -24,6 +24,7 @@ import {
 	runEvalJudgmentBatch,
 } from "../judgment-batch-bridge";
 import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } from "../judgment-bridge";
+import { EVAL_SHELL_BRIDGE_NAME, type EvalShellResult, runEvalShell } from "../shell-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
 	type EvalHandleSnapshot,
@@ -35,7 +36,7 @@ import {
 } from "../handle-bridge";
 import type { EvalShadowCellSession } from "../speculation/cell-session";
 import { getActiveEvalShadowCell } from "../speculation/runtime-context";
-import { isEvalBridgeToolCallable } from "../tool-bridge-policy";
+import { isEvalBridgeToolCallable, withEvalBridgeToolCall } from "../tool-bridge-policy";
 import { EVAL_WORKPOOL_BRIDGE_NAME, type EvalWorkpoolResult, runEvalWorkpool } from "../workpool-bridge";
 import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
@@ -51,6 +52,8 @@ export type { JsStatusEvent } from "./shared/types";
 export interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
+	/** The cell's `timeout` in ms, the budget of a prelude call that sets none (`EvalPreludeContext.cellTimeoutMs`). */
+	cellTimeoutMs?: number;
 	emitStatus?: (event: JsStatusEvent) => void;
 	identity?: RuntimeCallIdentity;
 	shadowCell?: EvalShadowCellSession;
@@ -65,6 +68,7 @@ export interface ToolBridgeOptions {
 type ToolValue =
 	| string
 	| EvalBudgetResult
+	| EvalShellResult
 	| EvalAgentHandleResult
 	| EvalCompletionHandleResult
 	| EvalJudgmentResult
@@ -220,7 +224,11 @@ function waitForSpeculativeClaim<T>(claim: Promise<T>, signal?: AbortSignal): Pr
 	return promise;
 }
 
-export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+export function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
+	return withEvalBridgeToolCall(options.session.xdev, () => dispatchSessionTool(name, args, options));
+}
+
+async function dispatchSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
 		const toolCallId = `prelude-${request.name}-${crypto.randomUUID()}`;
@@ -234,6 +242,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 					session: options.session,
 					toolCallId,
 					signal: options.signal,
+					cellTimeoutMs: options.cellTimeoutMs,
 					context: options.session.getToolContext?.(),
 				}),
 			);
@@ -267,6 +276,9 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (name === EVAL_BUDGET_BRIDGE_NAME) {
 		return await runEvalBudget(args, options);
 	}
+	if (name === EVAL_SHELL_BRIDGE_NAME) {
+		return await runEvalShell(args, options);
+	}
 	if (name === EVAL_WAIT_BRIDGE_NAME) {
 		return await runEvalWait(args, options);
 	}
@@ -283,8 +295,6 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	// Wire aliases share every guard, status and bookkeeping path with the canonical tool.
 	name = tool.name;
 	if (!isEvalBridgeToolCallable(tool)) {
-		// The session recognizes checkpoint/rewind only as direct toolResult
-		// messages; a bridged call would report success without taking effect.
 		throw new ToolError(`\`${name}\` cannot run through the eval bridge; call the direct \`${name}\` tool.`);
 	}
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;

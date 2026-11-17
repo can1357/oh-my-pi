@@ -190,11 +190,11 @@ export interface UserMessageStats {
 }
 
 /**
- * Pair emitted by the parser when it sees an assistant message whose
- * `parentId` points to a user message that wasn't parsed in the same pass
- * (e.g. user prompt landed in an earlier incremental sync). The aggregator
- * applies the link to the persisted `user_messages` row so it stops showing
- * up in the "unknown" model bucket.
+ * Pair emitted by the parser for each assistant message that answers a user
+ * message: the first assistant message descending from it through non-message
+ * entries, whether the user message was parsed in this pass or an earlier one.
+ * The aggregator applies the link to the persisted `user_messages` row so it
+ * stops showing up in the "unknown" model bucket.
  */
 export interface UserMessageLink {
 	sessionFile: string;
@@ -249,4 +249,17 @@ export interface ToolResultLink {
 	/** Text characters fed back into context */
 	resultChars: number;
 	isError: boolean;
+}
+
+/** One snapcompact compaction entry: the context size the session's estimate measured before and after it. */
+export interface SnapcompactCompactionStats {
+	sessionFile: string;
+	/** Compaction entry ID */
+	entryId: string;
+	/** Folder/project path (extracted from session filename) */
+	folder: string;
+	/** Compaction timestamp (Unix ms) */
+	timestamp: number;
+	tokensBefore: number;
+	tokensAfter: number;
 }

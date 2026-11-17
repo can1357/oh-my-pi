@@ -22,7 +22,6 @@ import { MessagePort, parentPort } from "node:worker_threads";
 import { installGlobalProxyFetch } from "@oh-my-pi/pi-ai/utils/proxy";
 import { logger } from "@oh-my-pi/pi-utils";
 import { consumeWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
-import { loadedModulesChangedSince } from "./code-skew";
 import { isThreadId, setCurrentThreadId } from "./identity";
 import type { SubagentWorkerInit, SubagentWorkerReady, WorkerThreadLink } from "./protocol";
 import { type RpcFrame, RpcLink } from "./rpc";
@@ -41,8 +40,7 @@ function isInit(value: unknown): value is SubagentWorkerInit {
 		Reflect.get(value, "type") === "subagent-worker-init" &&
 		isThreadId(Reflect.get(value, "threadId")) &&
 		Reflect.get(value, "replyPort") instanceof MessagePort &&
-		Reflect.get(value, "counter") instanceof SharedArrayBuffer &&
-		typeof Reflect.get(value, "mainStartedAt") === "number"
+		Reflect.get(value, "counter") instanceof SharedArrayBuffer
 	);
 }
 
@@ -84,11 +82,7 @@ function start(init: SubagentWorkerInit): void {
 	});
 	link.handle("ping", nonce => link.callSync("ping", nonce));
 	link.handle("warmUp", options => warmUpSubagentWorker(options));
-	// Every module the link and its services use is loaded by now, so this covers the thread protocol.
-	const ready: SubagentWorkerReady = {
-		type: "subagent-worker-ready",
-		changedModules: loadedModulesChangedSince(init.mainStartedAt),
-	};
+	const ready: SubagentWorkerReady = { type: "subagent-worker-ready" };
 	port.postMessage(ready);
 }
 

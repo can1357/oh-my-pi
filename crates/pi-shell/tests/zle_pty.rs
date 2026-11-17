@@ -30,7 +30,7 @@ fn spawn(real: bool, rc: &str) -> Spawn {
 	s.args(["-f", "-i"])
 		.env("PS1", "%~ %# ")
 		.env("RPS1", "[%?]")
-		.rc_file(".zshrc", rc)
+		.rc_file(".zshrc", format!("{rc}\nprint -r -- RCDONE\n"))
 		.size(24, 80)
 }
 
@@ -47,9 +47,11 @@ fn screens(
 	drive: impl Fn(&mut Pty) -> io::Result<()>,
 ) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
-		pty.settle(QUIET, TIMEOUT)?;
+		pty.wait_raw(TIMEOUT)?;
 		if !rc.is_empty() {
-			keys(pty, ". ~/.zshrc\r")?;
+			pty.type_keys(". ~/.zshrc\r", KEY)?;
+			pty.read_until("RCDONE", TIMEOUT)?;
+			pty.wait_raw(TIMEOUT)?;
 			// A clean screen for the case itself.
 			keys(pty, "\x0c")?;
 		}
@@ -161,6 +163,19 @@ fn vared_edits_a_parameter() {
 	});
 }
 
+/// `vared` in a `zpty` command edits on the pty, not on the shell's
+/// terminal (zsh-autosuggestions' completion strategy fetches every
+/// suggestion this way while the shell's own editor is active), and its
+/// terminal mode changes do not wait for the shell to read the pty: the
+/// shell sleeps meanwhile.
+#[test]
+fn vared_in_a_zpty_command_edits_on_the_pty() {
+	let rc = "zmodload zsh/zpty\ncap() { zpty v 'vared -c x; print -r -- \"got:$x:end\"'; zpty -w \
+	          v $'typed\\r'; sleep 0.5; zpty -r -m v out '*:end*'; print -r -- st=$? \
+	          ${${out##*got:}%%:end*}; zpty -d v }\n";
+	same(rc, |pty| keys(pty, "cap\r"));
+}
+
 /// A byte read past a key sequence (`^X` bound, `^Xe` not) is pushed back
 /// and starts the next line (zsh's `kungetbuf` outlives the line).
 #[test]
@@ -190,7 +205,10 @@ fn eof_on_an_empty_line_exits() {
 		Ok(p) => p,
 		Err(e) => panic!("spawn failed: {e}"),
 	};
-	let r = keys(&mut pty, "\x04").and_then(|()| pty.wait(TIMEOUT));
+	let r = pty
+		.wait_raw(TIMEOUT)
+		.and_then(|()| keys(&mut pty, "\x04"))
+		.and_then(|()| pty.wait(TIMEOUT));
 	match r {
 		Ok(status) => assert_eq!(status.code(), Some(0)),
 		Err(e) => panic!("shell did not exit on ^D: {e}"),

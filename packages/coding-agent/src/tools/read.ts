@@ -29,20 +29,16 @@ import {
 	parseImageMetadata,
 	prompt,
 	readImageMetadata,
+	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
-import {
-	cfgIdaAvailable,
-	EXECUTABLE_SNIFF_BYTES,
-	isExecutableFile,
-	isExecutableHeader,
-	isIdaDatabasePath,
-} from "../ida";
+import { cfgDisasmBackend, DISASM_BACKENDS, isExecutableFile } from "../disasm";
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore, recordFullySeenRows } from "../edit/store";
 import { extractUriScheme, InternalUrlRouter, type SchemeSpec, sessionResolveContext } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
+import readSourcesDoc from "../prompts/tools/read-sources.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { McpResourceNotFoundError } from "../internal-urls/mcp-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -169,7 +165,14 @@ import {
 } from "./read-selector";
 import { splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { formatSingleLine } from "@oh-my-pi/pi-tui/tools/read";
-import { nativeShapingOff, shapesOutput, shapeToolResult, shapingExperiment } from "../spotlight";
+import {
+	nativeShapingOff,
+	type ShapePart,
+	shapesOutput,
+	shapeToolParts,
+	shapeToolResult,
+	shapingExperiment,
+} from "../spotlight";
 import type { ShapeInput } from "../spotlight/types";
 import { readBinary, resolveBinaryViewPath } from "./read-binary";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
@@ -186,6 +189,7 @@ import {
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import { formatBytes, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { getToolConversationState, ToolConversationState } from "./tool-state";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -908,9 +912,89 @@ const kSpotlightWindow = Symbol("read.spotlightWindow");
  */
 const kSpotlightWide = Symbol("read.spotlightWide");
 
+/**
+ * A `;`/`,` path list's structure, on its joined result: {@link ReadTool.execute} shapes its parts as blocks of one
+ * call and joins them again ({@link joinReadList}).
+ */
+const kReadList = Symbol("read.list");
+
 interface ReadDetailsWithWindow extends ReadToolDetails {
 	[kSpotlightWindow]?: ShapeInput["read"];
 	[kSpotlightWide]?: true;
+	[kReadList]?: ReadList;
+}
+
+/** A `;`/`,` path list as read: its note, then in order each part read, a nested list, or a part that failed. */
+interface ReadList {
+	notice: string;
+	entries: ({ part: ShapePart<ReadToolDetails> } | { list: ReadList } | { error: string })[];
+}
+
+/**
+ * The content of `list` with each part's result as `resultOf` gives it, and the layout of its joined text: the
+ * list's notes, the blank lines between entries and each part's repeat-read hint (`hints`, after its text) are
+ * literal text, each part with text is a slot (its index in `parts`). Entries' texts join with a blank line into one
+ * text block until an image ends it; a nested list's entries join as the outer list's. A part's text is placed whole
+ * where its first text block was, its images after it.
+ */
+function joinReadList(
+	list: ReadList,
+	resultOf: (part: ShapePart<ReadToolDetails>) => AgentToolResult<ReadToolDetails>,
+	hints?: ReadonlyMap<ShapePart<ReadToolDetails>, string>,
+): { content: Array<TextContent | ImageContent>; layout: (string | number)[]; parts: ShapePart<ReadToolDetails>[] } {
+	const content: Array<TextContent | ImageContent> = [];
+	const layout: (string | number)[] = [];
+	const parts: ShapePart<ReadToolDetails>[] = [];
+	let block: (string | number)[] = [];
+	let pendingText = "";
+	let wroteText = false;
+	const append = (piece: string | number, text: string) => {
+		if (pendingText.length > 0) {
+			pendingText += "\n\n";
+			block.push("\n\n");
+		}
+		pendingText += text;
+		block.push(piece);
+	};
+	const flush = () => {
+		if (pendingText.length > 0) {
+			// The joined text of a result's text blocks puts a newline between blocks.
+			if (wroteText) layout.push("\n");
+			content.push({ type: "text", text: pendingText });
+			layout.push(...block);
+			wroteText = true;
+		}
+		block = [];
+		pendingText = "";
+	};
+	const walk = (current: ReadList) => {
+		append(current.notice, current.notice);
+		for (const entry of current.entries) {
+			if ("error" in entry) append(`[${entry.error}]`, `[${entry.error}]`);
+			else if ("list" in entry) walk(entry.list);
+			else {
+				const result = resultOf(entry.part);
+				const texts = result.content.filter((item): item is TextContent => item.type === "text");
+				if (texts.length) {
+					parts.push(entry.part);
+					append(parts.length - 1, texts.map(item => item.text).join("\n"));
+					const hint = hints?.get(entry.part);
+					if (hint) {
+						pendingText += `\n\n${hint}`;
+						block.push(`\n\n${hint}`);
+					}
+				}
+				for (const item of result.content) {
+					if (item.type === "text") continue;
+					flush();
+					content.push(item);
+				}
+			}
+		}
+	};
+	walk(list);
+	flush();
+	return { content, layout, parts };
 }
 
 /**
@@ -930,12 +1014,6 @@ const REPEAT_READ_HINT_THRESHOLD = 3;
 /** Per-session cap on tracked read keys; the map resets when exceeded. */
 const REPEAT_READ_TRACKER_CAP = 64;
 
-const kRepeatReadTracker = Symbol("read.repeatTracker");
-
-interface SessionWithRepeatReadTracker extends ToolSession {
-	[kRepeatReadTracker]?: Map<string, { hash: bigint; count: number }>;
-}
-
 /**
  * Append a loop-breaking hint when the same read selector returns
  * byte-identical output repeatedly. Weak models re-issue an unchanged read
@@ -944,12 +1022,23 @@ interface SessionWithRepeatReadTracker extends ToolSession {
  * does. Tracking is per session and resets whenever the output changes.
  */
 function appendRepeatReadHint(session: ToolSession, path: string, result: AgentToolResult<ReadToolDetails>): void {
+	const notice = repeatReadNotice(session, path, result);
+	const block = result.content.find(entry => entry.type === "text");
+	if (notice && block) block.text = appendReadNotice(block.text, notice, (result.details ??= {}), "\n\n");
+}
+
+/** Counts `result` as a read of `path`; the loop-breaking hint when it repeats identical output often enough. */
+function repeatReadNotice(
+	session: ToolSession,
+	path: string,
+	result: AgentToolResult<ReadToolDetails>,
+): string | undefined {
 	const block = result.content?.find(entry => entry.type === "text");
 	if (!block || typeof block.text !== "string" || block.text.length === 0 || result.isError) return;
 
-	const holder = session as SessionWithRepeatReadTracker;
-	holder[kRepeatReadTracker] ??= new Map();
-	const tracker = holder[kRepeatReadTracker];
+	const state = getToolConversationState(session);
+	state.repeatReads ??= new Map();
+	const tracker = state.repeatReads;
 	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
 
 	let hash = BigInt(result.content.length);
@@ -970,14 +1059,13 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	entry.count++;
 	if (entry.count < REPEAT_READ_HINT_THRESHOLD) return;
 	const next = acceptsLineSelector(path) ? "use a narrower selector (path:A-B), or proceed" : "proceed";
-	const notice = `[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — ${next} with the edit.]`;
-	block.text = appendReadNotice(block.text, notice, (result.details ??= {}), "\n\n");
+	return `[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — ${next} with the edit.]`;
 }
 
 /**
  * Whether `path` takes a trailing `:A-B` line selector: filesystem paths, web
- * URLs and `lines` schemes do; selector-free devices (`xd://`), opaque MCP
- * resources and unregistered schemes would read the tail as part of the URL.
+ * URLs and `lines` schemes do; selector-free schemes (`out://`, `attachment://`),
+ * opaque MCP resources and unregistered schemes would read the tail as part of the URL.
  */
 function acceptsLineSelector(path: string): boolean {
 	const router = InternalUrlRouter.instance();
@@ -1093,6 +1181,17 @@ async function assessLocalReadSpeculation(
 	};
 }
 
+/** Whether `readPath` is one web URL, whose fetch reads nothing an earlier call could have changed. */
+function isSingleWebUrl(readPath: string): boolean {
+	if (readPath.includes(";")) return false;
+	try {
+		return parseReadUrlTarget(readPath) !== null;
+	} catch {
+		// A malformed URL selector: the read reports it.
+		return false;
+	}
+}
+
 /**
  * Read tool implementation.
  *
@@ -1152,8 +1251,23 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	get description(): string {
 		return prompt.render(readDescription, {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
-			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
+			BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
 		});
+	}
+	/**
+	 * `xd://read/sources`: selector reference for the sources the description only names.
+	 * `xd://read/urls`: internal-URL grammar the system prompt's one-line entries leave out.
+	 */
+	docTopics(): Record<string, string> {
+		return {
+			sources: prompt.render(readSourcesDoc, {
+				BINARY_VIEWS: cfgDisasmBackend.get(this.session.settings) !== undefined,
+			}),
+			urls: InternalUrlRouter.instance()
+				.reference()
+				.map(line => `- ${line}`)
+				.join("\n"),
+		};
 	}
 	readonly parameters = readSchema;
 	readonly strict = true;
@@ -1207,14 +1321,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const absolutePath = target.resolved;
 		let snapshotDigest: string | undefined;
 		try {
+			// A fresh conversation state: snapshots this read stages land in their own
+			// store and only reach the session's when the read commits.
 			const speculativeSession = Object.create(this.session) as ToolSession;
-			Object.defineProperty(speculativeSession, "editStore", {
-				value: undefined,
-				writable: true,
-				configurable: true,
-			});
-			Object.defineProperty(speculativeSession, "conflictHistory", {
-				value: undefined,
+			Object.defineProperty(speculativeSession, "state", {
+				value: new ToolConversationState(),
 				writable: true,
 				configurable: true,
 			});
@@ -1332,7 +1443,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return parts ? this.#readDelimitedParts(parts, signal, toolContext) : null;
 	}
 
-	/** Read each part as its own call; `toolContext` carries flags such as `rawImages` into every part. */
+	/**
+	 * Read each part as its own read, unshaped: {@link execute} shapes the parts as blocks of the list's one call.
+	 * `toolContext` carries flags such as `rawImages` into every part.
+	 */
 	async #readDelimitedParts(
 		parts: string[],
 		signal: AbortSignal | undefined,
@@ -1340,22 +1454,38 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
-		const content: Array<TextContent | ImageContent> = [];
+		const list: ReadList = { notice, entries: [] };
 		const displayReadTargets: string[] = [];
 		const displayReadTargetLinks: Array<string | null> = [];
-		let pendingText = notice;
-		const flushText = () => {
-			if (pendingText.length === 0) return;
-			content.push({ type: "text", text: pendingText });
-			pendingText = "";
-		};
-		const appendText = (text: string) => {
-			pendingText = pendingText.length > 0 ? `${pendingText}\n\n${text}` : text;
-		};
+		const readPart = (part: string, plainWindow?: boolean) =>
+			this.#executeInner(
+				"read-delimited-part",
+				{ path: part },
+				signal,
+				undefined,
+				toolContext,
+				undefined,
+				undefined,
+				undefined,
+				plainWindow,
+			);
 
 		for (const part of parts) {
 			try {
-				const result = await this.execute("read-delimited-part", { path: part }, signal, undefined, toolContext);
+				const result = await readPart(part);
+				const partDetails: ReadDetailsWithWindow | undefined = result.details;
+				const nested = partDetails?.[kReadList];
+				list.entries.push(
+					nested
+						? { list: nested }
+						: {
+								part: {
+									request: { path: part, raw: partDetails?.raw, read: partDetails?.[kSpotlightWindow] },
+									result,
+									plain: partDetails?.[kSpotlightWide] ? () => readPart(part, true) : undefined,
+								},
+							},
+				);
 				const nestedTargets = result.details?.displayReadTargets;
 				if (nestedTargets?.length) {
 					const nestedLinks = result.details?.displayReadTargetLinks;
@@ -1367,14 +1497,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					displayReadTargets.push(result.details?.suffixResolution?.to ?? part);
 					displayReadTargetLinks.push(readDetailsLinkPath(result.details));
 				}
-				for (const block of result.content) {
-					if (block.type === "text") {
-						appendText(block.text);
-						continue;
-					}
-					flushText();
-					content.push(block);
-				}
 			} catch (error) {
 				if (error instanceof ToolAbortError || signal?.aborted) throw error;
 				const message = error instanceof Error ? error.message : String(error);
@@ -1382,12 +1504,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				notes.push(errorNote);
 				displayReadTargets.push(part);
 				displayReadTargetLinks.push(null);
-				appendText(`[${errorNote}]`);
+				list.entries.push({ error: errorNote });
 			}
 		}
-		flushText();
 
-		return toolResult<ReadToolDetails>({ notes, displayReadTargets, displayReadTargetLinks }).content(content).done();
+		const details: ReadDetailsWithWindow = { notes, displayReadTargets, displayReadTargetLinks, [kReadList]: list };
+		return toolResult<ReadToolDetails>(details)
+			.content(joinReadList(list, part => part.result).content)
+			.done();
 	}
 
 	/**
@@ -1863,35 +1987,87 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		// Running beside an earlier call that may write (a `bash` before this read
+		// in the same message), the read could finish before that write lands. The
+		// model sees the batch's results only after every call ends, so waiting for
+		// those calls costs no turn latency. A single web fetch reads nothing on disk.
+		const earlierEffects = isSingleWebUrl(params.path) ? undefined : toolContext?.toolCall?.earlierEffectsSettled;
+		if (earlierEffects) await untilAborted(signal, earlierEffects);
 		const inner = await this.#executeInner(toolCallId, params, signal, onUpdate, toolContext);
 		const innerDetails: ReadDetailsWithWindow | undefined = inner.details;
-		const result = await shapeToolResult(
-			this.session,
-			toolCallId,
-			{ tool: "read", source: `read ${params.path}`, path: params.path, read: innerDetails?.[kSpotlightWindow] },
-			inner,
-			signal,
-			{
-				plain: innerDetails?.[kSpotlightWide]
-					? () =>
-							this.#executeInner(
-								toolCallId,
-								params,
-								signal,
-								undefined,
-								toolContext,
-								undefined,
-								undefined,
-								undefined,
-								true,
-							)
-					: undefined,
-			},
-		);
+		const list = innerDetails?.[kReadList];
+		const result = list
+			? await this.#shapeList(toolCallId, params, inner, list, signal)
+			: await shapeToolResult(
+					this.session,
+					toolCallId,
+					{
+						tool: "read",
+						source: `read ${params.path}`,
+						path: params.path,
+						raw: innerDetails?.raw,
+						read: innerDetails?.[kSpotlightWindow],
+					},
+					inner,
+					signal,
+					{
+						plain: innerDetails?.[kSpotlightWide]
+							? () =>
+									this.#executeInner(
+										toolCallId,
+										params,
+										signal,
+										undefined,
+										toolContext,
+										undefined,
+										undefined,
+										undefined,
+										true,
+									)
+							: undefined,
+					},
+				);
 		const displayTarget = InternalUrlRouter.instance().locateSync(params.path);
 		if (displayTarget && result.details) result.details.displayTarget = displayTarget;
 		appendRepeatReadHint(this.session, params.path, result);
 		return result;
+	}
+
+	/**
+	 * A `;`/`,` path list's parts shaped as blocks of one call (each part file-aware: its window, `:raw` or bounded
+	 * range decides for it), joined again with each part's repeat-read hint after it; the list carries the call's one
+	 * trace. A hint is literal text of the list, outside the part it follows, so the trace's map counts its lines.
+	 */
+	async #shapeList(
+		toolCallId: string,
+		params: ReadParams,
+		inner: AgentToolResult<ReadToolDetails>,
+		list: ReadList,
+		signal: AbortSignal | undefined,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		const read = joinReadList(list, part => part.result);
+		const hints = new Map<ShapePart<ReadToolDetails>, string>();
+		for (const part of read.parts) {
+			const notice = repeatReadNotice(this.session, part.request.path ?? "", part.result);
+			// A raw part's notice goes to notes, not its bytes (`appendReadNotice`); a list keeps no part's notes.
+			if (notice && !part.request.raw) hints.set(part, notice);
+		}
+		const layout = read.layout.flatMap(piece => {
+			const hint = typeof piece === "number" ? hints.get(read.parts[piece]) : undefined;
+			return hint ? [piece, `\n\n${hint}`] : [piece];
+		});
+		const shaped = await shapeToolParts(
+			this.session,
+			toolCallId,
+			{ tool: "read", source: `read ${params.path}` },
+			layout,
+			read.parts,
+			signal,
+		);
+		const results = new Map(read.parts.map((part, i) => [part, shaped.results[i]]));
+		const { content } = joinReadList(list, part => results.get(part) ?? part.result, hints);
+		const details = shaped.spotlight ? { ...inner.details, spotlight: shaped.spotlight } : inner.details;
+		return { ...inner, content, details };
 	}
 
 	async #executeInner(
@@ -2116,11 +2292,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const archiveSubPath = located
 					? { path: archivePath.archiveSubPath, sel: located.sel }
 					: splitPathAndSel(archivePath.archiveSubPath);
-				const archiveParsed = parseSel(archiveSubPath.sel);
 				return readArchive(
 					this.session,
 					located?.url ?? readPath,
-					archiveParsed,
+					archiveSubPath.sel,
 					{ ...archivePath, archiveSubPath: archiveSubPath.path },
 					options => this.#readPdfPageScreenshot(options),
 					signal,
@@ -2163,7 +2338,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 
 			// `bin:main`, `bin:imports`, `bin:main:10-40`: an executable/IDB prefix
-			// routes to an IDA view; `:raw` keeps the byte-verbatim escape hatch.
+			// routes to a disassembler view; `:raw` keeps the byte-verbatim escape hatch.
 			if (question === undefined) {
 				const binaryParsed = parseSel(literalSplit.sel);
 				if (!isRawSelector(binaryParsed)) {
@@ -2324,6 +2499,19 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			media.path = absolutePath;
 		}
 
+		// Metadata inspection precedes whole-file snapshots and never starts analysis.
+		// Raw/image and speculative reads retain their existing safety/fallback routes.
+		if (
+			question === undefined &&
+			!isRawSelector(parsed) &&
+			parsed.kind !== "image" &&
+			lexicalAbsolutePath === undefined &&
+			(DISASM_BACKENDS.ida.isDatabasePath(absolutePath) || (await isExecutableFile(absolutePath)))
+		) {
+			const backend = cfgDisasmBackend.get(this.session.settings);
+			return readBinary(this.session, { backend, absolutePath, view: "" }, parsed, signal);
+		}
+
 		const ext = path.extname(renderAbsolutePath).toLowerCase();
 		// Buffer once for every consumer below: the image sniff, the binary sniff,
 		// the structural summary, the rendered window, bracket context, and the
@@ -2476,20 +2664,6 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				(wholeFileBytes
 					? isProbablyBinaryHeader(wholeFileBytes.subarray(0, BINARY_SNIFF_BYTES))
 					: await isProbablyBinary(absolutePath));
-			// Executables and IDBs open in IDA instead of being refused. Speculative
-			// reads (lexicalAbsolutePath set) never launch IDA; they fall back to an
-			// ordinary execution that does.
-			if (
-				looksBinary &&
-				lexicalAbsolutePath === undefined &&
-				cfgIdaAvailable.get(this.session.settings) &&
-				(isIdaDatabasePath(absolutePath) ||
-					(wholeFileBytes
-						? isExecutableHeader(wholeFileBytes.subarray(0, EXECUTABLE_SNIFF_BYTES))
-						: await isExecutableFile(absolutePath)))
-			) {
-				return readBinary(this.session, { absolutePath, view: "" }, parsed, signal);
-			}
 			if (looksBinary) {
 				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath, suffixResolution })
 					.text(

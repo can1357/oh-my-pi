@@ -341,12 +341,11 @@ impl<T: Send + 'static> Threaded<T> {
 impl<T: Send + 'static> FsPending<T> for Threaded<T> {
 	fn poll(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<T>> {
 		let mut s = self.0.lock();
-		match s.result.take() {
-			Some(r) => Poll::Ready(r),
-			None => {
-				s.waker = Some(cx.waker().clone());
-				Poll::Pending
-			},
+		if let Some(r) = s.result.take() {
+			Poll::Ready(r)
+		} else {
+			s.waker = Some(cx.waker().clone());
+			Poll::Pending
 		}
 	}
 }

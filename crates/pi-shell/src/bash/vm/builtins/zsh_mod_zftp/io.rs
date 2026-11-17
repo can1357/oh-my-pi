@@ -323,7 +323,7 @@ fn eio() -> io::Error {
 	io::Error::other("Input/output error")
 }
 
-fn inet(a: &SockAddr) -> Option<SocketAddr> {
+const fn inet(a: &SockAddr) -> Option<SocketAddr> {
 	match a {
 		SockAddr::Inet(s) => Some(*s),
 		SockAddr::Unix(_) => None,
@@ -468,7 +468,7 @@ pub fn perform(
 		ZftpOp::Write { fd, data, timeout } => {
 			let deadline = after(cx, *timeout);
 			let l = live(sc);
-			if let Step::Idle = l.step {
+			if matches!(l.step, Step::Idle) {
 				l.step = Step::Out(0);
 				if let Some(at) = deadline {
 					l.timer = Some(cx.host.timer(Deadline(at)));
@@ -505,7 +505,7 @@ pub fn perform(
 		ZftpOp::Line { fd, timeout } => {
 			let deadline = after(cx, *timeout);
 			let l = live(sc);
-			if let Step::Idle = l.step {
+			if matches!(l.step, Step::Idle) {
 				l.step = Step::Line(LineState::default());
 				if let Some(at) = deadline {
 					l.timer = Some(cx.host.timer(Deadline(at)));
@@ -682,9 +682,9 @@ pub fn perform(
 			let Step::Xfer(x) = &mut l.step else {
 				unreachable!("set above");
 			};
-			match x.run(tcx, cx, vp, spec) {
-				Ok(out) => ZftpAns::Xfer(out),
-				Err(key) => return Err(key),
+			{
+				let out = x.run(tcx, cx, vp, spec)?;
+				ZftpAns::Xfer(out)
 			}
 		},
 	})
@@ -706,9 +706,18 @@ struct Xfer {
 	/// zsh's `ascbuf`.
 	asc:   Vec<u8>,
 	at:    XferAt,
-	/// The timer of the read or write in flight (`None` before it starts).
-	timer: Option<Option<Box<dyn Timer>>>,
+	/// The timer of the read or write in flight.
+	timer: XferTimer,
 	out:   XferOut,
+}
+
+/// The timeout of the call in flight.
+enum XferTimer {
+	/// Not armed yet (no call started).
+	Unarmed,
+	/// Armed without a timeout.
+	Never,
+	Armed(Box<dyn Timer>),
 }
 
 /// The call in flight.
@@ -729,7 +738,7 @@ impl Xfer {
 			buf:   vec![0; BUFSIZE],
 			asc:   vec![0; ASCSIZE],
 			at:    XferAt::Read,
-			timer: None,
+			timer: XferTimer::Unarmed,
 			out:   XferOut { eof: spec.eof, ..XferOut::default() },
 		}
 	}
@@ -737,10 +746,14 @@ impl Xfer {
 	/// Arm the timeout of a call once (zftp's `alarm` per `read`/`write`);
 	/// whether it has passed.
 	fn timed_out(&mut self, tcx: &mut Context<'_>, cx: &mut Cx<'_>, tmout: u32) -> bool {
-		let timer = self
-			.timer
-			.get_or_insert_with(|| after(cx, tmout).map(|at| cx.host.timer(Deadline(at))));
-		timer.as_mut().is_some_and(|t| t.poll(tcx).is_ready())
+		if matches!(self.timer, XferTimer::Unarmed) {
+			self.timer = after(cx, tmout)
+				.map_or(XferTimer::Never, |at| XferTimer::Armed(cx.host.timer(Deadline(at))));
+		}
+		match &mut self.timer {
+			XferTimer::Armed(t) => t.poll(tcx).is_ready(),
+			XferTimer::Unarmed | XferTimer::Never => false,
+		}
 	}
 
 	/// One poll of a call: its result, or `Pending` (then waiting).
@@ -761,7 +774,7 @@ impl Xfer {
 				Err(None)
 			},
 		};
-		self.timer = None;
+		self.timer = XferTimer::Unarmed;
 		Poll::Ready(r)
 	}
 
@@ -1000,7 +1013,7 @@ impl Xfer {
 				}
 			}
 			self.out.n += n as i64;
-			self.at = XferAt::Write { off: 0, end: n, hdr: !(spec.block && !spec.recv) };
+			self.at = XferAt::Write { off: 0, end: n, hdr: !spec.block || spec.recv };
 			return;
 		}
 		if n < 0 {
@@ -1037,7 +1050,7 @@ impl Xfer {
 	}
 
 	/// The chunk is written: the next read, unless the file ended.
-	fn wrote_chunk(&mut self, _spec: &XferSpec) {
+	const fn wrote_chunk(&mut self, _spec: &XferSpec) {
 		self.at = XferAt::Read;
 		if self.out.eof {
 			self.out.done = true;

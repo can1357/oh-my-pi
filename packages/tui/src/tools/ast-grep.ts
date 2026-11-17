@@ -7,7 +7,6 @@ import {
 	createCachedComponent,
 	fitHeaderedRows,
 	formatCount,
-	formatEmptyMessage,
 	formatErrorDetail,
 	formatParseErrorsCountLabel,
 	PREVIEW_LIMITS,
@@ -110,10 +109,10 @@ export const astGrepToolRenderer = {
 		const limitReached = details?.limitReached ?? false;
 
 		if (matchCount === 0) {
-			const meta = ["0 matches"];
+			const meta = [uiTheme.fg("warning", "0 matches")];
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
 			const header = renderStatusLine({ icon: "warning", title: "AST Grep", description, meta }, uiTheme);
-			const lines = [header, formatEmptyMessage("No matches found", uiTheme)];
+			const lines = [header];
 			if (details?.parseErrors?.length) {
 				lines.push(uiTheme.fg("warning", "Query may be mis-scoped; narrow `path` before concluding absence"));
 				appendParseErrorsBulletList(lines, details.parseErrors, uiTheme, details.parseErrorsTotal);
@@ -230,7 +229,6 @@ export const astGrepToolRenderer = {
 				head: toolHead("AST Grep", pattern, ...meta),
 				tone: "warning",
 				body: compact<NativeChild>([
-					noteText("No matches found"),
 					parseErrors.length > 0 &&
 						noteText("Query may be mis-scoped; narrow `path` before concluding absence", "warning"),
 					parseNote,

@@ -35,8 +35,13 @@ fn echoti_xterm_values() {
 	);
 	assert_eq!(
 		out,
-		"256\n\x1b[6;11H\x1b[1m\x1b(B\x1b[myes\nno\n\x1b]52;;\x07\x1b[38;5;196m\x1b[?5h\x1b[?5lyes\\
-		 n\x1b[1;5A"
+		concat!(
+			"256\n",
+			"\x1b[6;11H\x1b[1m\x1b(B\x1b[myes\n",
+			"no\n",
+			"\x1b]52;;\x07\x1b[38;5;196m\x1b[?5h\x1b[?5lyes\n",
+			"\x1b[1;5A",
+		)
 	);
 	assert_eq!(err, "");
 	assert_eq!(status, 0);
@@ -111,6 +116,7 @@ fn modules_autoload_on_use() {
 /// `${(k)terminfo}` lists the terminal ncurses holds (none before `$TERM` was
 /// first set up; the old one after a bad `TERM`), in ncurses' order.
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "expects macOS's terminfo database")]
 fn scans_list_the_held_terminal() {
 	let (out, err, status) = zsh(
 		"TERM=xterm-256color; print -r -- ${#terminfo} ${(k)termcap}; echoti cols >/dev/null; print \
@@ -217,6 +223,7 @@ fn zsh_term(src: &str, term: &str) -> (String, String, i32) {
 /// show the raw `sgr0` as `me` until `tgetent` (here `echotc`) trims it; a
 /// failed `tgetent` clears the trim again.
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "expects macOS's terminfo database")]
 fn held_terminal_from_boot_is_set_up_without_tgetent() {
 	let (out, err, status) = zsh_term(
 		"for k v in ${(kv)termcap}; do [[ $k == (me|bc|bs|le) ]] && print -r -- \"$k=${(q)v}\"; \
@@ -239,6 +246,7 @@ fn held_terminal_from_boot_is_set_up_without_tgetent() {
 
 /// `tgetent` turns `cub1` into `OTbs`/`OTbc` (`bs`, `bc`) of the held terminal.
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "expects macOS's terminfo database")]
 fn tgetent_adjusts_the_held_terminal() {
 	let (out, err, status) = zsh_term(
 		"for k v in ${(kv)termcap}; do [[ $k == (me|bc|bs|le) ]] && print -r -- \"$k=${(q)v}\"; \
@@ -258,6 +266,7 @@ fn tgetent_adjusts_the_held_terminal() {
 
 /// zsh/termcap booting first sets the terminal up the same way.
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "expects macOS's terminfo database")]
 fn termcap_module_boots_first() {
 	let (out, err, status) = zsh_term(
 		"print -r -- ${#termcap}; for k v in ${(kv)termcap}; do [[ $k == (me|bc|bs|le) ]] && print \
@@ -279,6 +288,7 @@ fn termcap_module_boots_first() {
 /// The exported `TERM` at boot is the one set up; a later `tgetent` of the same
 /// name adjusts it.
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "expects macOS's terminfo database")]
 fn another_term_replaces_the_boot_one() {
 	let (out, err, status) = zsh_term(
 		"TERM=vt52; for k v in ${(kv)termcap}; do [[ $k == (me|bc|bs|le) ]] && print -r -- \
@@ -299,6 +309,7 @@ fn another_term_replaces_the_boot_one() {
 /// `tgetent`'s obsolete defaults move `is3` to `OTi2` and a lone `rs2` to
 /// `OTrs`.
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "expects macOS's terminfo database")]
 fn tgetent_moves_obsolete_defaults() {
 	let (out, err, status) = zsh_term(
 		"print -r -- \"<\"${(M)${(k)terminfo}:#(is3|OTi2|rs2|OTrs)}\">\"; print -r -- \

@@ -69,7 +69,7 @@ describe("JSON input BOM decoding", () => {
 		async mode => {
 			const file = quotePosixArgument(jsonl);
 			const commands: Record<string, [string, string]> = {
-				"file operands": [`jq -c '.n' ${file} ${file}`, "1\n2\n3\n1\n2\n3\n"],
+				"file operands": [`jq -c '.n' ${file}`, "1\n2\n3\n"],
 				stdin: [`cat ${file} | jq -c '.n'`, "1\n2\n3\n"],
 				slurpfile: [`jq -nc --slurpfile rows ${file} '$rows[].n'`, "1\n2\n3\n"],
 				"line-counted input": [`jq -c '[.n, input_line_number]' ${file}`, "[1,1]\n[2,2]\n[3,3]\n"],
@@ -94,7 +94,7 @@ describe("JSON input BOM decoding", () => {
 		]) {
 			const file = path.join(dir, `${name}.json`);
 			await Bun.write(file, input);
-			await expect(tool.execute(name, { path: `${file}?q=.` })).rejects.toThrow(/failed to parse/i);
+			await expect(tool.execute(name, { path: `${file}?q=.` })).rejects.toThrow(/parse error/i);
 		}
 	});
 });

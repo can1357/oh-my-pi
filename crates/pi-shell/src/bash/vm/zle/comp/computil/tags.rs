@@ -267,9 +267,8 @@ pub fn comptry(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 					j += 1;
 				}
 				tokenize(&mut qq);
-				let popts = match px(ctx, &mut failed, |ex| zpattern::opts(ex))? {
-					Some(o) => o,
-					None => return fin(1, failed),
+				let Some(popts) = px(ctx, &mut failed, zpattern::opts)? else {
+					return fin(1, failed);
 				};
 				if haswilds(&mut qq, &popts) || brace::hasbraces(&mut qq, braceccl) {
 					let mut blist = vec![qq];

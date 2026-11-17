@@ -115,8 +115,6 @@ export function createSessionStub(
 		effectiveExtensionRoots: { explicit: [], mode: "merge", configured: [], configuredLevel: "user" },
 		modelRegistry: {},
 		getToolByName: () => undefined,
-		hasSessionApproval: () => false,
-		getApprovalGrants: () => ({ present: () => new Set<string>() }),
 		hasBuiltInTool: () => true,
 		getLastAssistantMessage: () => undefined,
 		agent: {
@@ -133,9 +131,10 @@ export function createSessionStub(
 		setActiveToolsByName: vi.fn(async () => {}),
 		runIdleCompaction: vi.fn(async () => {}),
 		waitForIdle: async () => {},
-		hasPendingAsyncWork: () => false,
+		isRunActive: false,
+		wakeSources: undefined,
+		waitForRunEnd: async () => {},
 		getAsyncJobSnapshot: () => null,
-		settleAsyncWork: async () => {},
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);

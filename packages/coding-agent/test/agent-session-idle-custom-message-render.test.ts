@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -102,6 +102,30 @@ describe("AgentSession idle custom message render", () => {
 			.buildDisplaySessionContext()
 			.messages.filter(m => m.role === "custom" && m.customType === "idle-status");
 		expect(rebuilt.length).toBe(1);
+	});
+
+	it("persists an idle display message under the timestamp it was emitted with", async () => {
+		const created = createSession();
+		session = created.session;
+		// A focus switch rebuilding the view while this message's events are queued matches the
+		// rebuilt copy to them by timestamp; otherwise it is drawn twice.
+		let emitted: number | undefined;
+		session.subscribe(event => {
+			if (event.type === "message_end" && event.message.role === "custom") emitted = event.message.timestamp;
+		});
+		// The message reads `Date.now`, the entry `new Date()`: an old `Date.now` tells them apart.
+		const clock = spyOn(Date, "now").mockReturnValue(1_000);
+		try {
+			await session.sendCustomMessage(
+				{ customType: "idle-status", content: "IDLE_DISPLAY_BODY", display: true, attribution: "agent" },
+				{ triggerTurn: false },
+			);
+		} finally {
+			clock.mockRestore();
+		}
+		const rebuilt = session.buildTranscriptSessionContext().messages.find(m => m.role === "custom");
+		expect(emitted).toBe(1_000);
+		expect(rebuilt?.timestamp).toBe(emitted);
 	});
 
 	it("idle display:false no-trigger append stays silent", async () => {

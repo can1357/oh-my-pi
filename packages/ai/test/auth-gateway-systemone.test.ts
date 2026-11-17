@@ -594,13 +594,13 @@ describe("auth-gateway POST /v1/systemone", () => {
 		expect(recorded[0].usage).toMatchObject({ input: 20, output: 2 });
 	});
 
-	it("invalidates the bearer each chunk sent, not the one a sibling rotated to", async () => {
+	it("rotates away from the bearer each chunk sent, not the one a sibling rotated to", async () => {
 		harness = await boot(() => Response.json(UPSTREAM_ANSWER));
 		const storage = harness.storage;
-		const invalidated: string[] = [];
-		vi.spyOn(storage.limits, "invalidateMatching").mockImplementation(async (_provider, apiKey) => {
-			invalidated.push(apiKey);
-			return true;
+		const rotatedFrom: (string | undefined)[] = [];
+		vi.spyOn(storage.limits, "rotate").mockImplementation(async (_provider, _sessionId, options) => {
+			rotatedFrom.push(options?.apiKey);
+			return { switched: true };
 		});
 		vi.spyOn(storage.keys, "getWithCredential").mockImplementation(async () => ({ apiKey: "key-b" }));
 		const model = getBundledModel("typesafe", "jev-latest");
@@ -621,7 +621,7 @@ describe("auth-gateway POST /v1/systemone", () => {
 		});
 		// Chunk 2's 403 arrives later, but it too was sent with key-a.
 		await resolve({ lastChance: true, error: forbidden, previousKey: "key-a" });
-		expect(invalidated).toEqual(["key-a", "key-a"]);
+		expect(rotatedFrom).toEqual(["key-a", "key-a"]);
 	});
 
 	it("maps upstream failures onto TypeSafe's status codes", async () => {

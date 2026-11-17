@@ -63,7 +63,8 @@ pub use options::{
 };
 pub use path::{
 	absolute_path, child_path, decode_segment, encode_segment, file_name, is_virtual_path,
-	join_path, normalize_lexically, parent_path, relative_path, url_scheme, with_file_name,
+	join_path, msys_drive, normalize_lexically, parent_path, relative_path, url_scheme,
+	with_file_name,
 };
 pub use provider::FileSystem;
 pub use types::{FileId, FileKind, FileTime, FileType, NodeKind, Permissions, StatFs, SymlinkKind};

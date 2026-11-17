@@ -215,7 +215,6 @@ describe("AgentSession plan-mode convergence", () => {
 			setPendingFullWriteDescription: enabled => {
 				pendingFullWriteDescription = enabled;
 			},
-			advisorTools: [],
 			advisorStreamFn,
 			sideStreamFn,
 			planYolo: options?.planYolo ? { target: model } : undefined,
@@ -335,9 +334,7 @@ describe("AgentSession plan-mode convergence", () => {
 						type: "toolCall",
 						name: "ask",
 						arguments: {
-							questions: [
-								{ id: "q", question: "which?", options: [{ label: "a" }, { label: "b" }], recommended: 0 },
-							],
+							html: '<form><p>which?</p><label><input type="radio" name="q" value="a" checked> a</label><label><input type="radio" name="q" value="b"> b</label></form>',
 						},
 					},
 				],

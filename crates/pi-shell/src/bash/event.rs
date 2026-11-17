@@ -30,6 +30,14 @@ use crate::bash::{
 	vm::{Run, Vproc},
 };
 
+/// Most value bytes an [`EventData::Assign`] carries.
+pub(crate) const ASSIGN_PREVIEW_BYTES: usize = 256;
+
+/// `value` as an [`EventData::Assign`] carries it.
+pub(crate) fn assign_preview(value: &[u8]) -> &[u8] {
+	text::cut(value, ASSIGN_PREVIEW_BYTES)
+}
+
 /// One event.
 ///
 /// Built in place at every emission and handed to
@@ -801,7 +809,7 @@ pub enum EventData<'a> {
 		/// Name.
 		#[serde(serialize_with = "text::bytes")]
 		name:     &'a BStr,
-		/// Value, truncated to 256 bytes.
+		/// Value, cut to [`ASSIGN_PREVIEW_BYTES`] on a character boundary.
 		#[serde(serialize_with = "text::bytes")]
 		value:    &'a BStr,
 		/// Full value length.

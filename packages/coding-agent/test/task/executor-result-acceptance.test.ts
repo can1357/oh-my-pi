@@ -163,9 +163,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 		prepareForHeadlessAdvisorDrain: () => {},
 		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => messages[messages.length - 1],
-		hasPendingAsyncWork: () => false,
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
-		settleAsyncWork: async () => {},
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: (
@@ -174,6 +172,7 @@ function createHarness(options?: { hangPrompt?: boolean; asyncJobManager?: Async
 			wakeObserver = observer;
 		},
 		trackIrcReply: () => {},
+		hasIrcInterrupts: () => false,
 		holdIrcWakes: () => () => {},
 		subscribeRunState: () => () => {},
 		isParentIrcSteer: () => false,
@@ -406,7 +405,6 @@ describe("runSubprocess result acceptance", () => {
 		attachIrcWakeTurnMonitor(harness.session, {
 			id: AGENT_ID,
 			agent: baseAgent,
-			structured: false,
 			artifactsDir,
 		});
 		const observer = harness.wakeObserver();
@@ -469,7 +467,7 @@ describe("runSubprocess result acceptance", () => {
 			session: harness.session,
 			status: "idle",
 		});
-		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: false, artifactsDir });
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, artifactsDir });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
 		const accepted = '{"report":"accepted verdict"}';
@@ -518,7 +516,7 @@ describe("runSubprocess result acceptance", () => {
 			session: harness.session,
 			status: "idle",
 		});
-		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: false, artifactsDir });
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, artifactsDir });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
 
@@ -567,7 +565,7 @@ describe("runSubprocess result acceptance", () => {
 			session: harness.session,
 			status: "idle",
 		});
-		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: false, artifactsDir });
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, artifactsDir });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
 		const accepted = '{"report":"accepted verdict"}';
@@ -611,7 +609,7 @@ describe("runSubprocess result acceptance", () => {
 			session: harness.session,
 			status: "idle",
 		});
-		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, structured: false, artifactsDir });
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent, artifactsDir });
 		const observer = harness.wakeObserver();
 		if (!observer) throw new Error("wake-turn observer was not registered");
 
@@ -662,7 +660,6 @@ describe("runSubprocess result acceptance", () => {
 				id: AGENT_ID,
 				agent: baseAgent,
 				message: "continue",
-				structured: false,
 				artifactsDir,
 				signal: AbortSignal.abort("cancelled"),
 			});

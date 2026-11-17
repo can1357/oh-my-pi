@@ -91,7 +91,11 @@ describe("completion probe cost persistence", () => {
 				replyText: string;
 				assistantMessage: AssistantMessage;
 			}>();
-			const probeRequest = vi.spyOn(session, "runEphemeralTurn").mockReturnValue(pendingProbe.promise);
+			const probeRequest = vi.spyOn(session, "runEphemeralTurn").mockImplementation(async options => {
+				const result = await pendingProbe.promise;
+				options.onUsage?.(result.assistantMessage);
+				return result;
+			});
 
 			startCompletionProbe({
 				session: () => session ?? null,
@@ -187,6 +191,62 @@ describe("completion probe cost persistence", () => {
 			await restoredSession?.close();
 			await session?.dispose();
 			if (!sessionManagerClosed) await sessionManager.close();
+		}
+	});
+
+	it("journals the provider error even when the probe turn rejects", async () => {
+		const target = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!target) throw new Error("Expected a bundled model with a context window");
+
+		const sessionManager = SessionManager.inMemory();
+		const parentId = sessionManager.appendMessage({ role: "user", content: "Check task", timestamp: 1 });
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model: target, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		const controller = new AbortController();
+		session.agent.state.isStreaming = true;
+		const failedMessage: AssistantMessage = {
+			...assistant(target, 0.3, ""),
+			content: [],
+			stopReason: "error",
+			errorMessage: "529 overloaded_error",
+		};
+		const probeRequest = vi.spyOn(session, "runEphemeralTurn").mockImplementation(async options => {
+			options.onUsage?.(failedMessage);
+			throw new Error(failedMessage.errorMessage);
+		});
+		vi.useFakeTimers();
+		try {
+			startCompletionProbe({
+				session: () => session,
+				signal: controller.signal,
+				onEstimate: () => {
+					throw new Error("Failed probes cannot produce estimates");
+				},
+			});
+			vi.advanceTimersByTime(2 * 60_000);
+			await flushMicrotasks();
+
+			expect(probeRequest).toHaveBeenCalledTimes(1);
+			const entries = sessionManager.getEntries().filter(entry => entry.type === "model_usage");
+			expect(entries).toHaveLength(1);
+			expect(entries[0]).toMatchObject({
+				purpose: "task-completion-probe",
+				parentId,
+				stopReason: "error",
+				errorMessage: "529 overloaded_error",
+				usage: { cost: { total: 0.3 } },
+			});
+		} finally {
+			controller.abort();
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+			session.agent.state.isStreaming = false;
+			await session.dispose();
+			await sessionManager.close();
 		}
 	});
 

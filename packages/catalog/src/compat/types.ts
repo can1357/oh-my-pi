@@ -400,6 +400,8 @@ export type CompiledAuthValidation =
 			url: string;
 			/** Env var holding an alternate base URL; `baseUrlPath` is appended to it. */
 			baseUrlEnv?: string;
+			/** Path segment ensured on the `baseUrlEnv` value (appended when absent) before `baseUrlPath` is applied — e.g. `/v1` for bases that may be bare origins. */
+			baseUrlAppend?: string;
 			/** Path appended to the `baseUrlEnv` value (default `/models`), for bases that exclude the API version. */
 			baseUrlPath?: string;
 			/** Hook returning extra request headers (may throw a configuration error). */
@@ -572,6 +574,8 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** Login-sourced API keys use the provider's subscription quota rather than metered billing. */
+	loginSubscription?: boolean;
 	/** Qualify credential and usage-report identity by org when an email may have multiple subscriptions. */
 	orgScopedIdentity?: boolean;
 	/** Environment variables carrying this provider's own OAuth bearer, excluding borrowed API-key aliases. */
@@ -580,6 +584,10 @@ export interface CompiledAuthProvider {
 	nativeAuthApis?: string[];
 	available?: boolean;
 	showInLoginList?: boolean;
+	/** Why the provider is turned off: no login, and no credential of any source reaches it. */
+	disabled?: string;
+	/** Account risk a user must accept (by typing "yes") before a new login starts. */
+	loginWarning?: string;
 	storeAs?: string;
 	callbackPort?: number;
 	pasteCode?: boolean;

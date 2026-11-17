@@ -35,7 +35,7 @@ export function renderAttachmentSourceNotice(
 		content: prompt.render(isVideo ? videoAttachmentPrompt : imageAttachmentPrompt, {
 			index: String(index),
 			path: source.path,
-			askAnswer: options?.askAnswer,
+			askAnswer: options?.askAnswer === true,
 		}),
 		details: { index, path: source.path },
 	};

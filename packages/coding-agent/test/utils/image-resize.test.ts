@@ -1,162 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
-import * as os from "node:os";
-import * as path from "node:path";
 import * as zlib from "node:zlib";
 import { decodePng } from "@oh-my-pi/pi-coding-agent/tools/browser/screenshot";
-import {
-	fitImage,
-	formatDimensionNote,
-	formatScreenshot,
-	type ResizedImage,
-	resizeImage,
-	type ScreenshotArea,
-} from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import { fitImage, formatDimensionNote, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
-
-describe("formatScreenshot", () => {
-	function fakeResized(
-		overrides?: Partial<{
-			width: number;
-			height: number;
-			originalWidth: number;
-			originalHeight: number;
-			wasResized: boolean;
-			buffer: Uint8Array;
-			mimeType: string;
-			decodeFailed: boolean;
-		}>,
-	): {
-		buffer: Uint8Array;
-		mimeType: string;
-		originalWidth: number;
-		originalHeight: number;
-		width: number;
-		height: number;
-		wasResized: boolean;
-		decodeFailed?: boolean;
-		get data(): string;
-	} {
-		const buf = overrides?.buffer ?? new Uint8Array(2048);
-		return {
-			buffer: buf,
-			mimeType: overrides?.mimeType ?? "image/webp",
-			originalWidth: overrides?.originalWidth ?? 800,
-			originalHeight: overrides?.originalHeight ?? 600,
-			width: overrides?.width ?? 800,
-			height: overrides?.height ?? 600,
-			wasResized: overrides?.wasResized ?? false,
-			decodeFailed: overrides?.decodeFailed,
-			get data() {
-				return Buffer.from(buf).toString("base64");
-			},
-		};
-	}
-
-	it("formats full-res save with home-relative path", () => {
-		const filePath = path.join(os.homedir(), "screenshots", "capture.png");
-		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });
-
-		expect(
-			formatScreenshot({
-				saveFullRes: true,
-				savedMimeType: "image/png",
-				savedByteLength: 2048,
-				dest: filePath,
-				resized,
-				capture: { area: "viewport", scale: 1 },
-			}),
-		).toEqual([
-			"Screenshot captured",
-			"Saved: image/png (2.00 KB) to ~/screenshots/capture.png",
-			"Model: image/webp (1.00 KB, 800x600)",
-		]);
-	});
-
-	it("formats non-home path without tilde", () => {
-		const filePath = path.join(path.parse(os.homedir()).root, "omp-render-utils", "capture.png");
-		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(1024) });
-
-		expect(
-			formatScreenshot({
-				saveFullRes: true,
-				savedMimeType: "image/png",
-				savedByteLength: 2048,
-				dest: filePath,
-				resized,
-				capture: { area: "viewport", scale: 1 },
-			}),
-		).toEqual([
-			"Screenshot captured",
-			`Saved: image/png (2.00 KB) to ${filePath}`,
-			"Model: image/webp (1.00 KB, 800x600)",
-		]);
-	});
-
-	it("formats temp-only screenshot without save line", () => {
-		const resized = fakeResized({ mimeType: "image/webp", buffer: new Uint8Array(3072) });
-
-		expect(
-			formatScreenshot({
-				saveFullRes: false,
-				savedMimeType: "image/webp",
-				savedByteLength: 3072,
-				dest: path.join(os.tmpdir(), "omp-sshots-123.png"),
-				resized,
-				capture: { area: "viewport", scale: 1 },
-			}),
-		).toEqual(["Screenshot captured", "Format: image/webp (3.00 KB)", "Dimensions: 800x600"]);
-	});
-
-	it("surfaces screenshots that could not be resized", () => {
-		const resized = fakeResized({ decodeFailed: true, mimeType: "image/png", buffer: new Uint8Array(4096) });
-
-		expect(
-			formatScreenshot({
-				saveFullRes: false,
-				savedMimeType: "image/png",
-				savedByteLength: 4096,
-				dest: path.join(os.tmpdir(), "omp-sshots-123.png"),
-				resized,
-				capture: { area: "viewport", scale: 1 },
-			}),
-		).toContain("Resize: image decoder failed; using original image bytes");
-	});
-
-	function coordinateNote(resized: ResizedImage, capture: { area: ScreenshotArea; scale: number | undefined }) {
-		const lines = formatScreenshot({
-			saveFullRes: false,
-			savedMimeType: "image/webp",
-			savedByteLength: 2048,
-			dest: path.join(os.tmpdir(), "shot.png"),
-			resized,
-			capture,
-		});
-		return lines.find(line => line.startsWith("[Image:"));
-	}
-
-	it("maps a resized capture to viewport CSS pixels through the capture scale", () => {
-		const note = coordinateNote(
-			fakeResized({ wasResized: true, originalWidth: 1706, originalHeight: 960, width: 1024, height: 576 }),
-			{ area: "viewport", scale: 1.25 },
-		);
-		expect(note).toContain("capture scale 1.25");
-		expect(note).toContain("by 1.33 to get viewport CSS pixels for tab.clickAt");
-	});
-
-	it("maps an unresized high-density capture down to CSS pixels", () => {
-		const note = coordinateNote(fakeResized(), { area: "element", scale: 2 });
-		expect(note).toContain("by 0.50 to get CSS pixels from the element's top-left corner");
-	});
-
-	it("says the mapping is unknown instead of guessing one", () => {
-		const note = coordinateNote(
-			fakeResized({ wasResized: true, originalWidth: 2000, originalHeight: 1000, width: 1024, height: 512 }),
-			{ area: "viewport", scale: undefined },
-		);
-		expect(note).toContain("scale to CSS pixels could not be read");
-		expect(note).not.toContain("Multiply");
-	});
-});
 
 // 1x1 red PNG (69 bytes) — used as a Bun.Image seed to synthesize larger fixtures
 // without checking binary blobs into the repo.
@@ -223,15 +69,6 @@ describe("resizeImage defaults", () => {
 		const center = (100 * decoded.width + 800) * 4;
 		expect([...decoded.pixels.subarray(center, center + 4)]).toEqual([255, 0, 0, 255]);
 		expect(formatDimensionNote(result)).toContain("Subtract padding offset (0, 80)");
-		const screenshot = formatScreenshot({
-			saveFullRes: false,
-			savedMimeType: result.mimeType,
-			savedByteLength: result.buffer.length,
-			dest: path.join(os.tmpdir(), "thin-strip.png"),
-			resized: result,
-			capture: { area: "viewport", scale: 2 },
-		});
-		expect(screenshot.find(line => line.startsWith("[Image:"))).toContain("multiply x by 0.10 and y by 0.10");
 	});
 
 	it("preserves inputs already within budget and dimensions (fast path)", async () => {
@@ -493,6 +330,16 @@ describe("fitImage", () => {
 		expect(image.mimeType).toBe("image/jpeg");
 		expect(Buffer.byteLength(image.data, "base64")).toBeLessThanOrEqual(maxBytes);
 		expect(await size(image.data)).toEqual([400, 400]);
+	});
+
+	it("trims a size within the patch area to whole 32x32 patches", async () => {
+		// 321x319 is under 100 patches of area but covers 11x10 patches; trimming the width to 320 covers 10x10.
+		const { image } = await fitImage(
+			{ type: "image", data: await makeRedPng(321, 319), mimeType: "image/png" },
+			{ maxPatches: 100 },
+		);
+
+		expect(await size(image.data)).toEqual([320, 319]);
 	});
 
 	it("throws when no encoding fits the byte cap", async () => {

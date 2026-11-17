@@ -102,10 +102,15 @@ export type BaseUrlTable = Record<string, string>;
 /** Provider → `[include when not explicit, include when explicit]`: a worker's `sessions.inherit` filter, evaluated before the call. */
 export type InheritTable = Record<string, readonly [boolean, boolean]>;
 
-/** One provider's answers to `keys.source` with the default `env` mode (absent = no auth) and `keys.keyless`. */
+/**
+ * One provider's answers to `keys.source` with the default `env` mode (absent = no auth),
+ * `keys.keyless` and `credentials.hasOAuth`.
+ */
 export interface ProviderAuthAvailability {
 	readonly source?: AuthSource;
 	readonly keyless: boolean;
+	/** Without a stored OAuth credential no session has an OAuth account (`oauth.identity`, `usage.ingestHeaders`). */
+	readonly oauth: boolean;
 }
 
 /** Provider → {@link ProviderAuthAvailability}, for every provider main reports at once. */
@@ -151,6 +156,7 @@ export type AuthStorageProtocol = {
 	"credentials.list": RpcMethod<[provider?: string], StoredAuthCredential[]>;
 	"credentials.has": RpcMethod<[provider: string], boolean>;
 	"credentials.hasOAuth": RpcMethod<[provider: string], boolean>;
+	"credentials.hasSubscription": RpcMethod<[provider: string], boolean>;
 	"credentials.getOAuth": RpcMethod<[provider: string], OAuthCredential | undefined>;
 	"credentials.set": RpcMethod<[provider: string, credential: AuthCredentialEntry], void>;
 	"credentials.upsert": RpcMethod<[provider: string, credential: AuthCredential], AuthCredentialSnapshotEntry[]>;
@@ -174,6 +180,8 @@ export type AuthStorageProtocol = {
 	 * provider with stored credentials, and `providers`, in one call (a worker caches it).
 	 */
 	"keys.availability": RpcMethod<[providers: readonly string[]], AuthAvailabilityTable>;
+	/** {@link ProviderAuthAvailability} of one provider the cached table lacks. */
+	"keys.availabilityOf": RpcMethod<[provider: string], ProviderAuthAvailability>;
 	"keys.describe": RpcMethod<[provider: string, sessionId?: string], string | undefined>;
 	"keys.setRuntime": RpcMethod<[provider: string, apiKey: string], void>;
 	"keys.removeRuntime": RpcMethod<[provider: string], void>;
@@ -240,6 +248,7 @@ export type AuthStorageProtocol = {
 	>;
 	"usage.setProvider": RpcMethod<[provider: Provider, usageProvider: UsageProvider, apiKey?: string], void>;
 	"usage.removeProvider": RpcMethod<[provider: Provider], void>;
+	"usage.replaceConfiguredProviders": RpcMethod<[providers: [Provider, UsageProvider][]], void>;
 
 	"health.model": RpcMethod<[provider: Provider, options: ModelUsageHealthOptions], ModelUsageHealth>;
 	"health.check": RpcMethod<[options?: WireCheckCredentialsOptions], CredentialHealthResult[]>;

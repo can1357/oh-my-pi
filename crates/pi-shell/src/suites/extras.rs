@@ -328,6 +328,28 @@ async fn find_exec_runs_commands() {
 	assert_eq!(out(&mut s, "find . -name x -exec cat {} +").await, "hello\n");
 }
 
+/// awk's command strings are command lines of the shell itself, so pi's
+/// builtins run in them; a missing command is the shell's 127.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn awk_runs_command_lines_in_the_shell() {
+	let mut s = session();
+	assert_eq!(
+		out(&mut s, "awk 'BEGIN { system(\"type sort\") }'").await,
+		"sort is a shell builtin\n"
+	);
+	assert_eq!(
+		out(&mut s, "printf 'b\\na\\n' | awk '{ print | \"sort\" } END { close(\"sort\") }'").await,
+		"a\nb\n"
+	);
+	assert_eq!(
+		out(&mut s, "awk 'BEGIN { while ((\"echo hi\" | getline line) > 0) print \"got \" line }'")
+			.await,
+		"got hi\n"
+	);
+	let ran = run(&mut s, "awk 'BEGIN { print system(\"no-such-command-here\") }'").await;
+	assert_eq!(ran.stdout, "127\n", "stderr: {:?}", ran.stderr);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ifne_runs_its_command_on_input() {
 	let mut s = session();

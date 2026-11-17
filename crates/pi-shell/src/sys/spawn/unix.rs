@@ -59,7 +59,7 @@ use super::{Dir, Leftover, Sessions, Shared, child_end};
 use crate::{
 	bash::{
 		ChildRedir, ChildRedirs, EnvView, ExitStatus, ExtProc, OpenFlags, OsHandle, PgroupSpec,
-		Platform, ProcEvent, Rlimit, SigSet, Signal, SpawnSpec,
+		Platform, ProcEvent, Rlimit, SigSet, Signal, SpawnSpec, StdioSpec,
 	},
 	sys::{
 		lifecycle::{Abandon, Tracker},
@@ -547,6 +547,9 @@ struct Program<'a> {
 	/// A foreground job's terminal: the child makes its group the
 	/// terminal's foreground before it execs ([`attach_tty`]).
 	tty:     Option<RawFd>,
+	/// Targets the child gets closed ([`StdioSpec::Closed`]): each is
+	/// installed from a null-device placeholder, then closed.
+	closed:  &'a [i32],
 }
 
 /// A possible shell text file needs the engine's ENOEXEC retry. The child
@@ -619,13 +622,21 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	let mut pumps = Vec::new();
 	let mut feeds = Vec::new();
 	let mut fds = Vec::with_capacity(3 + extra_fds.len());
+	let mut closed = Vec::new();
 	let [stdin, stdout, stderr] = stdio;
-	fds.push((0, child_fd(shared, stdin, Dir::In, &mut pumps, &mut feeds)?));
-	fds.push((1, child_fd(shared, stdout, Dir::Out, &mut pumps, &mut feeds)?));
-	fds.push((2, child_fd(shared, stderr, Dir::Out, &mut pumps, &mut feeds)?));
+	for (target, spec, dir) in [(0, stdin, Dir::In), (1, stdout, Dir::Out), (2, stderr, Dir::Out)] {
+		if matches!(spec, StdioSpec::Closed) {
+			closed.push(target);
+		}
+		fds.push((target, child_fd(shared, spec, dir, &mut pumps, &mut feeds)?));
+	}
 	for (fd, s) in extra_fds {
 		if fd < 3 {
 			return Err(invalid(format!("extra fd {fd} overlaps stdio")));
+		}
+		if matches!(s, StdioSpec::Closed) {
+			// Not passed: the child has no such descriptor.
+			continue;
 		}
 		fds.push((fd, child_fd(shared, s, Dir::Probe, &mut pumps, &mut feeds)?));
 	}
@@ -634,7 +645,8 @@ pub(super) fn spawn(shared: &Arc<Shared>, spec: SpawnSpec<'_>) -> io::Result<Box
 	// Polled by the `ExtProc`; dropped (stopping every pump) on any failure
 	// below.
 	let pumps = Pumps::new(pumps, feeds, &tracker);
-	let program = Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, tty };
+	let program =
+		Program { path, argv, env, cwd, umask, ign: sigmask_ign, rlimits, tty, closed: &closed };
 	let launched = match &redirs {
 		Some(redirs) => fork_redirs(&program, &fds, place, redirs),
 		None => launch(&shared.state, &program, &fds, place),
@@ -713,7 +725,7 @@ fn launch(
 		&& let Some(add_chdir) = state.add_chdir
 	{
 		let exec = Exec::new(prog)?;
-		return retry_join(place, |p| posix::spawn(&exec, fds, p, prog.ign, add_chdir));
+		return retry_join(place, |p| posix::spawn(&exec, fds, prog.closed, p, prog.ign, add_chdir));
 	}
 	#[cfg(not(any(target_os = "macos", all(target_os = "linux", target_env = "gnu"))))]
 	let _ = state;
@@ -860,6 +872,7 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 		.filter(|(t, _)| *t > 2)
 		.map(|(t, fd)| (*t, fd.as_raw_fd()))
 		.collect();
+	let closed = prog.closed.to_vec();
 	let ignore = ignored(prog.ign);
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
@@ -869,8 +882,8 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 		cmd.process_group(pgid);
 	}
 	// SAFETY: the hook runs in the forked child before exec and calls only
-	// async-signal-safe functions (umask, dup2, signal, setsid, execve) on
-	// data prepared before the fork, without allocating.
+	// async-signal-safe functions (umask, dup2, close, signal, setsid,
+	// execve) on data prepared before the fork, without allocating.
 	unsafe {
 		cmd.pre_exec(move || {
 			// Use the whole value: a closure naming only `exec.argv` would
@@ -887,6 +900,9 @@ fn fork_exec(prog: &Program<'_>, fds: &[(i32, Source)], place: Place) -> io::Res
 				if libc::dup2(src, target) < 0 {
 					return Err(io::Error::last_os_error());
 				}
+			}
+			for &target in &closed {
+				libc::close(target);
 			}
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
 				let n = n as i32;
@@ -1030,6 +1046,7 @@ fn fork_redirs(
 	let mask = prog.umask as libc::mode_t;
 	let limits = limits(prog);
 	let raw: Vec<(i32, RawFd)> = fds.iter().map(|(t, fd)| (*t, fd.as_raw_fd())).collect();
+	let closed = prog.closed;
 	// Every signal stays blocked across the fork: the child runs with the
 	// host's handlers until it resets them, and a signal delivered then (a
 	// `kill $!` right after the spawn) would run host code and be lost
@@ -1079,6 +1096,9 @@ fn fork_redirs(
 				if libc::dup2(src, target) < 0 {
 					child_fail(&exec_diag, errno(), 126, texts);
 				}
+			}
+			for &target in closed {
+				libc::close(target);
 			}
 			libc::umask(mask);
 			for (n, &ign) in ignore.iter().enumerate().skip(1) {
@@ -1164,14 +1184,16 @@ mod posix {
 
 	/// The cached action list and the inputs that completely describe it.
 	struct Actions {
-		raw: FileActions,
-		fds: Vec<(i32, i32)>,
-		cwd: Vec<u8>,
+		raw:    FileActions,
+		fds:    Vec<(i32, i32)>,
+		closed: Vec<i32>,
+		cwd:    Vec<u8>,
 	}
 
 	impl Actions {
-		fn matches(&self, exec: &Exec, fds: &[(i32, Source)]) -> bool {
+		fn matches(&self, exec: &Exec, fds: &[(i32, Source)], closed: &[i32]) -> bool {
 			self.cwd == exec.buf[exec.cwd..]
+				&& self.closed == closed
 				&& self.fds.len() == fds.len()
 				&& self
 					.fds
@@ -1180,13 +1202,22 @@ mod posix {
 					.all(|(&(target, source), (want, fd))| target == *want && source == fd.as_raw_fd())
 		}
 
-		fn new(exec: &Exec, fds: &[(i32, Source)], add_chdir: AddChdir) -> io::Result<Self> {
+		fn new(
+			exec: &Exec,
+			fds: &[(i32, Source)],
+			closed: &[i32],
+			add_chdir: AddChdir,
+		) -> io::Result<Self> {
 			let mut raw = FileActions::new()?;
 			for (target, fd) in fds {
 				// SAFETY: initialized actions; descriptors are plain integers.
 				check(unsafe {
 					libc::posix_spawn_file_actions_adddup2(raw.ptr(), fd.as_raw_fd(), *target)
 				})?;
+			}
+			for &target in closed {
+				// SAFETY: initialized actions; `target` is a plain integer.
+				check(unsafe { libc::posix_spawn_file_actions_addclose(raw.ptr(), target) })?;
 			}
 			// SAFETY: initialized actions; libc copies the NUL-terminated cwd.
 			check(unsafe { add_chdir(raw.ptr(), exec.cwd()) })?;
@@ -1196,6 +1227,7 @@ mod posix {
 					.iter()
 					.map(|(target, fd)| (*target, fd.as_raw_fd()))
 					.collect(),
+				closed: closed.to_vec(),
 				cwd: exec.buf[exec.cwd..].to_vec(),
 			})
 		}
@@ -1252,13 +1284,16 @@ mod posix {
 		}
 	}
 
-	/// `posix_spawn` `exec` with `fds` installed, at `place`, with every
-	/// signal not in `ign` at its default: the ones the host ignores are
-	/// reset (`exec` resets caught ones; glibc's child spends a
-	/// `sigaction` on each signal of the set).
+	/// `posix_spawn` `exec` with `fds` installed and the targets `closed`
+	/// closed after, at `place`, with every signal not in `ign` at its
+	/// default: the ones the host ignores are reset (`exec` resets caught
+	/// ones; glibc's child spends a `sigaction` on each signal of the set).
+	/// `add_chdir` is the resolved libc entry point, one value for the
+	/// process, so the cached action list does not key on it.
 	pub fn spawn(
 		exec: &Exec,
 		fds: &[(i32, Source)],
+		closed: &[i32],
 		place: Place,
 		ign: SigSet,
 		add_chdir: AddChdir,
@@ -1266,9 +1301,9 @@ mod posix {
 		ACTIONS.with_borrow_mut(|cached| {
 			if !cached
 				.as_ref()
-				.is_some_and(|actions| actions.matches(exec, fds))
+				.is_some_and(|actions| actions.matches(exec, fds, closed))
 			{
-				*cached = Some(Actions::new(exec, fds, add_chdir)?);
+				*cached = Some(Actions::new(exec, fds, closed, add_chdir)?);
 			}
 			let actions = &mut cached.as_mut().expect("initialized actions").raw;
 			ATTRS.with_borrow_mut(|cached| {

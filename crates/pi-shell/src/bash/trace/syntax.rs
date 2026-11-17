@@ -5,9 +5,13 @@ use std::sync::{Arc, OnceLock};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::bash::{ids::ModeId, ir, syntax as syn};
+use crate::bash::{
+	ids::ModeId,
+	ir,
+	syntax::{self as syn, tree as st},
+};
 
-const ARCHIVE_VERSION: u8 = 1;
+const ARCHIVE_VERSION: u8 = 3;
 
 /// Exact originating region, when the engine supplies one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,12 +22,49 @@ pub struct SourceParent {
 	pub hi:   u32,
 }
 
-/// A root of the existing bash syntax, not a visualization grammar.
+/// What a syntax root is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RootKind {
+	List,
+	Command,
+	Word,
+}
+
+/// A root of the existing bash syntax, not a visualization grammar: node
+/// `root` of a shared flat tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SyntaxTree {
-	List(Arc<syn::List>),
-	Command(Arc<syn::Command>),
-	Word(Arc<syn::Word>),
+pub struct SyntaxTree {
+	pub tree: Arc<st::Tree>,
+	pub root: u32,
+	pub kind: RootKind,
+}
+
+/// A view of a [`SyntaxTree`]'s root.
+#[derive(Clone, Copy, Debug)]
+pub enum Root<'t> {
+	List(st::List<'t>),
+	Command(st::Command<'t>),
+	Word(st::Word<'t>),
+}
+
+impl SyntaxTree {
+	pub fn new(tree: st::Tree, root: u32, kind: RootKind) -> Self {
+		Self { tree: Arc::new(tree), root, kind }
+	}
+
+	/// The tree of a run-time parsed word.
+	pub fn from_word(tree: st::Tree, root: u32) -> Self {
+		Self::new(tree, root, RootKind::Word)
+	}
+
+	/// The root as a view.
+	pub fn view(&self) -> Root<'_> {
+		match self.kind {
+			RootKind::List => Root::List(st::List::at(&self.tree, self.root)),
+			RootKind::Command => Root::Command(st::Command::at(&self.tree, self.root)),
+			RootKind::Word => Root::Word(st::Word::at(&self.tree, self.root)),
+		}
+	}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,34 +99,34 @@ impl PartialEq for UnitSyntax {
 }
 impl Eq for UnitSyntax {}
 
-#[derive(Serialize, Deserialize)]
-enum ArchiveTree {
-	List(syn::List),
-	Command(syn::Command),
-	Word(syn::Word),
-}
-
 #[derive(Serialize)]
-enum TreeRef<'a> {
-	List(&'a syn::List),
-	Command(&'a syn::Command),
-	Word(&'a syn::Word),
-}
-
-#[derive(Serialize, Deserialize)]
-struct Archive {
+struct ArchiveRef<'a> {
 	version: u8,
 	offset:  u32,
 	parent:  Option<SourceParent>,
+	context: &'a SyntaxContext,
+	kind:    RootKind,
+	root:    u32,
+	tree:    &'a st::Tree,
+}
+
+/// [`ArchiveRef`] after its version byte.
+#[derive(Deserialize)]
+struct Archive {
+	offset:  u32,
+	parent:  Option<SourceParent>,
 	context: SyntaxContext,
-	tree:    ArchiveTree,
+	kind:    RootKind,
+	root:    u32,
+	tree:    st::Tree,
 }
 
 impl UnitSyntax {
 	/// Retain a parsed command list and its aliases without cloning the
 	/// canonical tree.
 	pub fn list(cc: syn::CompleteCommand) -> Self {
-		let mut syntax = Self::new(cc.span.lo, SyntaxTree::List(Arc::new(cc.list)));
+		let mut syntax =
+			Self::new(cc.span.lo, SyntaxTree::new(cc.tree, cc.root.index(), RootKind::List));
 		Arc::make_mut(&mut syntax.context).aliases = cc
 			.aliases
 			.into_iter()
@@ -122,12 +163,8 @@ impl UnitSyntax {
 	pub(crate) fn shares_tree(&self, other: &Self) -> bool {
 		self.offset == other.offset
 			&& self.parent == other.parent
-			&& match (&self.tree, &other.tree) {
-				(SyntaxTree::List(a), SyntaxTree::List(b)) => Arc::ptr_eq(a, b),
-				(SyntaxTree::Command(a), SyntaxTree::Command(b)) => Arc::ptr_eq(a, b),
-				(SyntaxTree::Word(a), SyntaxTree::Word(b)) => Arc::ptr_eq(a, b),
-				_ => false,
-			}
+			&& self.tree.root == other.tree.root
+			&& Arc::ptr_eq(&self.tree.tree, &other.tree.tree)
 	}
 
 	pub(crate) fn with_parent(&self, parent: SourceParent) -> Self {
@@ -144,9 +181,9 @@ impl UnitSyntax {
 	/// context.
 	pub(crate) fn restore(unit: &ir::Unit) -> Option<Self> {
 		if let Some(bytes) = unit.deferred.as_ref().filter(|bytes| !bytes.is_empty()) {
-			let (offset, command): (u32, syn::Command) = postcard::from_bytes(bytes).ok()?;
+			let (offset, tree, root): (u32, st::Tree, u32) = postcard::from_bytes(bytes).ok()?;
 			return Some(
-				Self::new(offset, SyntaxTree::Command(Arc::new(command)))
+				Self::new(offset, SyntaxTree::new(tree, root, RootKind::Command))
 					.with_context(unit.mode, unit.features)
 					.with_aliases(&unit.aliases),
 			);
@@ -184,19 +221,16 @@ impl UnitSyntax {
 impl Serialize for UnitSyntax {
 	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
 		let bytes = self.archive.get_or_init(|| {
-			let tree = match &self.tree {
-				SyntaxTree::List(tree) => TreeRef::List(tree),
-				SyntaxTree::Command(tree) => TreeRef::Command(tree),
-				SyntaxTree::Word(tree) => TreeRef::Word(tree),
-			};
 			STANDARD.encode(
-				postcard::to_allocvec(&(
-					ARCHIVE_VERSION,
-					self.offset,
-					self.parent,
-					self.context.as_ref(),
-					tree,
-				))
+				postcard::to_allocvec(&ArchiveRef {
+					version: ARCHIVE_VERSION,
+					offset:  self.offset,
+					parent:  self.parent,
+					context: self.context.as_ref(),
+					kind:    self.tree.kind,
+					root:    self.tree.root,
+					tree:    &self.tree.tree,
+				})
 				.expect("canonical syntax serializes"),
 			)
 		});
@@ -217,13 +251,12 @@ impl<'de> Deserialize<'de> for UnitSyntax {
 			},
 			None => return Err(serde::de::Error::custom("empty native syntax archive")),
 		}
-		let Archive { version: _, offset, parent, context, tree } =
-			postcard::from_bytes(&bytes).map_err(serde::de::Error::custom)?;
-		let tree = match tree {
-			ArchiveTree::List(tree) => SyntaxTree::List(Arc::new(tree)),
-			ArchiveTree::Command(tree) => SyntaxTree::Command(Arc::new(tree)),
-			ArchiveTree::Word(tree) => SyntaxTree::Word(Arc::new(tree)),
-		};
+		let Archive { offset, parent, context, kind, root, tree } =
+			postcard::from_bytes(&bytes[1..]).map_err(serde::de::Error::custom)?;
+		if root as usize >= tree.nodes.len() {
+			return Err(serde::de::Error::custom("native syntax archive root out of range"));
+		}
+		let tree = SyntaxTree::new(tree, root, kind);
 		Ok(Self {
 			offset,
 			parent,
@@ -231,6 +264,27 @@ impl<'de> Deserialize<'de> for UnitSyntax {
 			context: Arc::new(context),
 			archive: OnceLock::from(encoded),
 		})
+	}
+}
+
+impl UnitSyntax {
+	/// The root kind of an archive in any version, this build's or not:
+	/// every version starts with the same header (version, offset, parent,
+	/// context) and then the root's kind, in this order of kinds. `None`
+	/// when not even that decodes.
+	pub(crate) fn archived_kind(encoded: &str) -> Option<RootKind> {
+		#[derive(Deserialize)]
+		struct Header {
+			_version: u8,
+			_offset:  u32,
+			_parent:  Option<SourceParent>,
+			_context: SyntaxContext,
+			kind:     RootKind,
+		}
+		let bytes = STANDARD.decode(encoded).ok()?;
+		postcard::take_from_bytes::<Header>(&bytes)
+			.ok()
+			.map(|(header, _)| header.kind)
 	}
 }
 

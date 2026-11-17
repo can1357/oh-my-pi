@@ -83,7 +83,7 @@ pub const fn neg_argument(ed: &mut Editor) -> i32 {
 }
 
 /// Widget `neg-argument`.
-pub fn negargument(zw: &mut Zw<'_, '_>) -> WResult {
+pub const fn negargument(zw: &mut Zw<'_, '_>) -> WResult {
 	WResult::Done(neg_argument(zw.ed))
 }
 

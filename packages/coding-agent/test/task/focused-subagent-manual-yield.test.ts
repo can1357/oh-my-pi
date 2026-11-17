@@ -143,7 +143,7 @@ async function spawnKeptAliveChild(options?: { handler?: MockHandler; structured
 			id: AGENT_ID,
 			parentAgentId: PARENT_ID,
 			asyncJobManager: manager,
-			structured: options?.structured,
+			outputSchema: options?.structured === false ? undefined : {},
 			modelOverride: "mock/mock-model",
 			authStorage,
 			modelRegistry,
@@ -323,8 +323,7 @@ for (const source of ["queued steering", "async completion"] as const) {
 			expect(parent.outcome).toBe("injected");
 			expect(await Bun.file(child.artifact).text()).toContain("INITIAL_FINAL");
 			releaseContinuation.resolve();
-			await child.session.waitForIdle();
-			await child.session.settleAsyncWork();
+			await child.session.waitForRunEnd();
 			await child.session.waitForIrcReplies();
 			await manager.waitForOwnerJobs(PARENT_ID);
 			await manager.drainDeliveries({ filter: { ownerId: PARENT_ID } });

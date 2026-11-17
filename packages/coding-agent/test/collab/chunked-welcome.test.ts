@@ -205,8 +205,11 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-	uninstallInMemoryRelay();
-	await host.stop("test done");
+	try {
+		await host.stop("test done");
+	} finally {
+		uninstallInMemoryRelay();
+	}
 });
 
 const guestCleanups: (() => void)[] = [];

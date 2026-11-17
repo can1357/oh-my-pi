@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import type { LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
+import type { CredentialRotation, LimitsApi, OAuthAccess, OAuthApi, OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { isAuthRetryableError, isInvalidatedOAuthTokenError } from "./error/auth-classify";
 import { isAccountPolicyError, isUsageLimit } from "./error/flags";
@@ -69,13 +69,37 @@ export function resolvedApiKeyBearer(resolved: ApiKeyResolution): string | undef
 }
 
 /**
- * Mark a post-rotation resolution as following a sibling-unblock wait so the
- * retry driver may resend a bearer it already tried. Used by the rotating
- * resolvers (`KeyCascade.resolver`, coding-agent `createApiKeyResolver`).
+ * Step (c) after {@link LimitsApi.rotate}: re-resolve the session credential,
+ * or return `undefined` when quota exhaustion found no sibling, so the outer
+ * retry layer honours the recorded backoff instead of resending a blocked
+ * fallback. Other declines re-resolve: a peer may have refreshed the failed
+ * bearer. A resolution after a sibling-unblock wait is marked so the retry
+ * driver may resend a bearer it already tried. Shared by every rotating
+ * resolver (`KeyCascade.resolver`, the auth gateway, coding-agent
+ * `createApiKeyResolver`).
  */
-export function markAfterSiblingWait(resolved: ApiKeyResolution): ApiKeyResolution {
+export function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ResolvedApiKey | undefined>,
+): Promise<ResolvedApiKey | undefined>;
+export function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ApiKeyResolution>,
+): Promise<ApiKeyResolution>;
+export async function resolveAfterRotation(
+	rotation: CredentialRotation,
+	error: unknown,
+	resolve: () => Promise<ApiKeyResolution>,
+): Promise<ApiKeyResolution> {
+	if (!rotation.switched) {
+		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		if (isUsageLimit(error) || isUsageLimitOutcome(AIError.status(error), message)) return undefined;
+	}
+	const resolved = await resolve();
 	const apiKey = resolvedApiKeyBearer(resolved);
-	if (apiKey === undefined) return resolved;
+	if (!rotation.afterSiblingWait || apiKey === undefined) return resolved;
 	return typeof resolved === "string"
 		? { apiKey, afterSiblingWait: true }
 		: { ...resolved, apiKey, afterSiblingWait: true };
@@ -189,6 +213,15 @@ function isDirectCredentialRotationError(error: unknown): boolean {
 		(status === undefined && message !== undefined && extractHttpStatusFromError({ message }) === 403);
 	if (isForbidden && !isConcurrencyCapExclusion(status, message)) return true;
 	return isUsageLimitOutcome(status, message);
+}
+
+/** Keep a quota reset actionable when a rotated sibling fails authentication. */
+export function preferAuthRetryError(reported: unknown, next: unknown): unknown {
+	const message = reported instanceof Error ? reported.message : typeof reported === "string" ? reported : undefined;
+	return (isUsageLimit(reported) || isUsageLimitOutcome(AIError.status(reported), message)) &&
+		AIError.status(next) === 401
+		? reported
+		: next;
 }
 
 /** Resolve a single retry step, swallowing resolver failures into `undefined`. */
@@ -358,11 +391,13 @@ export async function withAuth<T>(
 
 	const state = createAuthRetryKeyState(initialKey);
 	let lastError: unknown;
+	let reportedError: unknown;
 	try {
 		return await attempt(initialKey);
 	} catch (error) {
 		if (!isAuthError(error)) throw error;
 		lastError = error;
+		reportedError = error;
 	}
 
 	while (true) {
@@ -373,10 +408,11 @@ export async function withAuth<T>(
 		} catch (error) {
 			if (!isAuthError(error)) throw error;
 			lastError = error;
+			reportedError = preferAuthRetryError(reportedError, error);
 		}
 	}
 
-	throw lastError;
+	throw reportedError;
 }
 
 /**
@@ -451,6 +487,7 @@ export async function withOAuthAccess<T>(
 	if (attemptResult.ok) return attemptResult.result;
 
 	let lastError = attemptResult.error;
+	let reportedError: unknown = lastError;
 	while (true) {
 		let next: OAuthAccess | undefined;
 		if (signal?.aborted || attemptCount >= AUTH_RETRY_MAX_ATTEMPTS) break;
@@ -478,6 +515,7 @@ export async function withOAuthAccess<T>(
 			attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 			if (attemptResult.ok) return attemptResult.result;
 			lastError = attemptResult.error;
+			reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 			continue;
 		}
 
@@ -506,6 +544,7 @@ export async function withOAuthAccess<T>(
 						attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 						if (attemptResult.ok) return attemptResult.result;
 						lastError = attemptResult.error;
+						reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 						continue;
 					}
 				}
@@ -544,7 +583,8 @@ export async function withOAuthAccess<T>(
 		attemptResult = await runOAuthAttempt(next, attempt, isAuthError);
 		if (attemptResult.ok) return attemptResult.result;
 		lastError = attemptResult.error;
+		reportedError = preferAuthRetryError(reportedError, attemptResult.error);
 	}
 
-	throw lastError;
+	throw reportedError;
 }

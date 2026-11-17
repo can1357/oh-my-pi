@@ -92,12 +92,16 @@ export async function remoteHomeDirectory(
 	return home;
 }
 
+/** Remote exit status `readRemoteFile` reserves for "nothing at the path" (sysexits `EX_NOINPUT`). */
+const REMOTE_MISSING_EXIT = 66;
+
 /**
  * Read a remote file's raw bytes. Fetches `maxBytes + 1` so the caller can
  * distinguish an exactly-`maxBytes` file from a larger (truncated) one.
  *
- * Throws `ptree.NonZeroExitError` (carrying the remote stderr tail) when the
- * file is missing/unreadable or the host is unreachable.
+ * Throws an `ENOENT`-coded error when nothing exists at the path (the exit status
+ * says so, which login-shell stdout noise cannot fake), and `ptree.NonZeroExitError`
+ * (carrying the remote stderr tail) when the file is unreadable or the host is unreachable.
  */
 export async function readRemoteFile(
 	target: SSHConnectionTarget,
@@ -105,14 +109,26 @@ export async function readRemoteFile(
 	opts: RemoteFileReadOptions,
 ): Promise<RemoteFileReadResult> {
 	const shell = await ensurePosixRemote(target);
-	const command = `head -c ${opts.maxBytes + 1} ${quotePosixArgument(remotePath)}`;
+	const p = quotePosixArgument(remotePath);
+	// On a failed read, nothing at the path (not even a dangling symlink) exits with the reserved status;
+	// `head`'s own stderr stays the message either way.
+	const command =
+		`head -c ${opts.maxBytes + 1} ${p} || { s=$?; ` +
+		`if [ ! -e ${p} ] && [ ! -L ${p} ]; then exit ${REMOTE_MISSING_EXIT}; fi; exit $s; }`;
 	const args = await buildRemoteCommand(target, wrapInPosixShell(shell, command));
 	using child = ptree.spawn(["ssh", ...args], {
 		signal: ptree.combineSignals(opts.signal, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
 	});
 	// Drain stdout before awaiting exit so a full pipe can't deadlock the child.
 	const raw = await child.bytes();
-	await child.exitedCleanly;
+	try {
+		await child.exitedCleanly;
+	} catch (error) {
+		if (error instanceof ptree.NonZeroExitError && error.exitCode === REMOTE_MISSING_EXIT) {
+			throw Object.assign(new Error(error.message, { cause: error }), { code: "ENOENT" });
+		}
+		throw error;
+	}
 	const truncated = raw.length > opts.maxBytes;
 	return { bytes: truncated ? raw.subarray(0, opts.maxBytes) : raw, truncated };
 }

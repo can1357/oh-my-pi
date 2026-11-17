@@ -176,11 +176,12 @@ pub(super) fn target(
 		.ok_or(TargetError::NotAnId)?;
 	let base = ctx.k.engine.config().vpid_base;
 	// A job's (or `$!`'s) program OS pid names the job's vproc: the signal
-	// reaches the program through it, and the job's state follows.
+	// reaches the program through it, and the job's state follows. A
+	// pipeline's `$!` names its last program, run by that stage's vproc.
 	let named = u32::try_from(pid)
 		.ok()
 		.filter(|&p| p > 0)
-		.map(|p| ctx.vp.vpid_of(p));
+		.map(|p| ctx.k.pid_owner(p).unwrap_or_else(|| ctx.vp.vpid_of(p)));
 	let live = named.filter(|&v| {
 		let st = ctx.k.proc_state(ctx.cx.store, v);
 		// `$!` of a job disowned before the scheduler adopted it is known

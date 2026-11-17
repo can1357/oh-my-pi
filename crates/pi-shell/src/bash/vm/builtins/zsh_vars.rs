@@ -3,8 +3,9 @@
 //! `bin_getopts`, `bin_let` and `options.c` `printoptionstates`, over the
 //! zsh parameter code.
 //!
-//! `read -k`/`-q` without `-u` read standard input (zsh opens the
-//! terminal); in a widget they take their keys through the editor.
+//! `read -k`/`-q` without `-u`/`-p` read the terminal in cbreak mode, as
+//! zsh does (`SHTTY`, opened when the shell has none); in a widget they
+//! take their keys through the editor.
 //! `read -z` takes the line off the buffer stack;
 //! `-l` and `-c` (compctl) fail loudly.
 //!
@@ -14,6 +15,7 @@
 use bstr::{BString, ByteSlice};
 
 use super::{
+	super::jobctl,
 	Control, Ctx, Need, Outcome, R, done, options,
 	zsh_args::{Func, Ops, isset, pattern_arg, zerr, zx},
 	zsh_print::charset,
@@ -260,7 +262,9 @@ pub fn unset(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString], func: Func) -> 
 			if sub.is_none() && params::unset_stub(ex, &base)? {
 				return Ok(None);
 			}
-			let Some(p) = params::getparam(ex, &base)? else {
+			// Only the type is checked here: reading the value would copy a
+			// whole association to drop one key.
+			let Some(p) = params::getparam_type(ex, &base)? else {
 				return Ok(None);
 			};
 			if sub.is_some()
@@ -751,6 +755,10 @@ pub fn assign_zsh_loop_var(
 	}
 }
 
+/// `read_zle`'s answer: the bytes, then two status flags; `Err` is the
+/// outcome to return while the editor runs a frame.
+type ZleRead = Result<(Vec<u8>, bool, bool), Outcome>;
+
 /// `read -k`/`-q` through the active editor (zsh `bin_read`'s `izle`:
 /// `ZLE_CMD_GET_KEY` per byte): `nchars` characters (UTF-8 ones when
 /// `utf8`). The prompt goes out first. `Err` is the outcome to return
@@ -761,7 +769,7 @@ fn read_zle(
 	utf8: bool,
 	timeout_ns: Option<u64>,
 	prompt: Option<&[u8]>,
-) -> Result<Result<(Vec<u8>, bool, bool), Outcome>, Need> {
+) -> Result<ZleRead, Need> {
 	use crate::bash::vm::zle::builtin::{ReadBytes, read_bytes, reading_bytes};
 	if !reading_bytes(ctx.vp)
 		&& let Some(p) = prompt
@@ -908,6 +916,39 @@ pub fn read(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 				Ok(r) => r,
 				Err(o) => return Ok(o),
 			}
+		} else if !ops.isset(b'u') && !ops.isset(b'p') {
+			// zsh `bin_read`: keys come from the terminal (`SHTTY`, opened
+			// when the shell has none), in cbreak mode, not from stdin.
+			let Some(tty) = jobctl::key_terminal(ctx.k, ctx.cx, ctx.vp) else {
+				ctx.vp.out.push_back(PendingWrite {
+					fd:    2,
+					bytes: b"not interactive and can't open terminal\n"
+						.as_slice()
+						.into(),
+					off:   0,
+				});
+				return done(1);
+			};
+			let tty_fd = Probe::TERMINAL_FD;
+			let started = ctx
+				.answered()
+				.iter()
+				.any(|(p, _)| matches!(p, Probe::Input { fd, .. } if *fd == tty_fd));
+			if !started {
+				jobctl::set_cbreak(ctx.k, ctx.cx, &tty);
+			}
+			let r = read_input(
+				ctx,
+				tty_fd,
+				None,
+				Some(nchars),
+				cs.utf8,
+				true,
+				timeout_ns,
+				prompt.as_deref(),
+			)?;
+			jobctl::end_cbreak(ctx.k, ctx.cx);
+			r
 		} else {
 			read_input(ctx, fd, None, Some(nchars), cs.utf8, true, timeout_ns, prompt.as_deref())?
 		};

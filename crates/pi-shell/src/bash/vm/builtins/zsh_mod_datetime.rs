@@ -35,7 +35,7 @@ const MONTHS: [&str; 12] = [
 ];
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (`m` 1–12).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 	let y = if m <= 2 { y - 1 } else { y };
 	let era = y.div_euclid(400);
 	let yoe = y - era * 400;
@@ -172,7 +172,7 @@ fn yconv(out: &mut Vec<u8>, year: i64, top: bool, yy: bool, pad: Pad) {
 }
 
 /// BSD `iso8601wknum`: the ISO 8601 week-based year and week.
-fn iso_week(tm: &Tm) -> (i64, i64) {
+const fn iso_week(tm: &Tm) -> (i64, i64) {
 	let mut year = tm.year + 1900;
 	let mut yday = tm.yday;
 	let wday = tm.wday;
@@ -287,7 +287,7 @@ fn bsd_strftime(fmt: &[u8], tm: &Tm, out: &mut Vec<u8>) {
 	}
 }
 
-/// The C library's `strftime` of `spec` in LC_TIME locale `locale`: the
+/// The C library's `strftime` of `spec` in `LC_TIME` locale `locale`: the
 /// BSD port for `C`/`POSIX`, the system's own for any other locale.
 fn libc_strftime(locale: &[u8], spec: &[u8], tm: &Tm, out: &mut Vec<u8>) {
 	// `%z`, `%Z`, `%s` and `%+` (zone and epoch) are no locale's business,
@@ -316,7 +316,7 @@ fn libc_strftime(locale: &[u8], spec: &[u8], tm: &Tm, out: &mut Vec<u8>) {
 
 /// zsh `ztrftime`: `fmt` with zsh's own conversions (`%f`, `%K`, `%L`,
 /// `%N`, `%.`, and the unpadded `%-x` forms) and the C library's (in the
-/// LC_TIME locale `locale`) for the rest.
+/// `LC_TIME` locale `locale`) for the rest.
 fn ztrftime(fmt: &[u8], tm: &Tm, nsec: i64, locale: &[u8]) -> Vec<u8> {
 	let mut out = Vec::with_capacity(fmt.len() * 2);
 	let mut i = 0;
@@ -515,7 +515,7 @@ fn zstrtol(s: &[u8]) -> (i64, bool, Option<usize>) {
 
 /// The value of `TZ` while `strftime` runs (zsh exports a non-empty one
 /// to it), as the host's zone lookup takes it.
-fn local_zone(ctx: &mut Ctx<'_, '_>, tz: Option<&BStr>, secs: i64) -> (i32, BString) {
+fn local_zone(ctx: &Ctx<'_, '_>, tz: Option<&BStr>, secs: i64) -> (i32, BString) {
 	ctx.cx.host.tz_offset(tz, secs)
 }
 
@@ -565,8 +565,7 @@ pub fn strftime(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 				},
 				Strtoul::Ok(v, false) => v as i64,
 			};
-			let mut nsec = 0;
-			if let Some(n) = args.get(2) {
+			let nsec = if let Some(n) = args.get(2) {
 				let (v, rest, trunc) = zstrtol(n);
 				if let Some(d) = trunc {
 					let digits = n.trim_start_with(|c| c == ' ' || c == '\t');
@@ -589,8 +588,10 @@ pub fn strftime(ctx: &mut Ctx<'_, '_>, ops: &Ops, args: &[BString]) -> R {
 					ctx.usage(format!("{}: invalid nanosecond value", n.as_bstr()));
 					return done(1);
 				}
-				nsec = v;
-			}
+				v
+			} else {
+				0
+			};
 			(secs, nsec)
 		},
 	};
@@ -654,8 +655,8 @@ fn reverse(
 				});
 				return done(1);
 			},
-			Some(None) => None,
-			Some(Some((t, used))) => {
+			Some(crate::sys::langinfo::Parse::NoMatch) => None,
+			Some(crate::sys::langinfo::Parse::Matched(t, used)) => {
 				let tm = Fields {
 					year:     i64::from(t.year),
 					mon:      i64::from(t.mon),
@@ -730,18 +731,19 @@ impl Fields {
 	fn fixup(&mut self) -> bool {
 		let start =
 			|y: i64, m: i64| days_from_civil(y + 1900, m + 1, 1) - days_from_civil(y + 1900, 1, 1);
-		if self.yday.is_none() && self.has_year && !(self.has_mon && self.mday.is_some()) {
-			if let Some((day_offset, week)) = self.week {
-				let y = self.year + 1900;
-				let fwo = (days_from_civil(y, 1, 1) + 4).rem_euclid(7);
-				let tmpwday = self.wday.unwrap_or(day_offset);
-				let tmpyday =
-					(7 - fwo + day_offset) % 7 + (week - 1) * 7 + (tmpwday - day_offset + 7) % 7;
-				if tmpyday < 0 {
-					return false;
-				}
-				self.yday = Some(tmpyday);
+		if self.yday.is_none()
+			&& self.has_year
+			&& !(self.has_mon && self.mday.is_some())
+			&& let Some((day_offset, week)) = self.week
+		{
+			let y = self.year + 1900;
+			let fwo = (days_from_civil(y, 1, 1) + 4).rem_euclid(7);
+			let tmpwday = self.wday.unwrap_or(day_offset);
+			let tmpyday = (7 - fwo + day_offset) % 7 + (week - 1) * 7 + (tmpwday - day_offset + 7) % 7;
+			if tmpyday < 0 {
+				return false;
 			}
+			self.yday = Some(tmpyday);
 		}
 		if self.has_year
 			&& let Some(yday) = self.yday

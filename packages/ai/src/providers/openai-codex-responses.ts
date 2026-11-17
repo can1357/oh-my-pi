@@ -154,6 +154,7 @@ import {
 	hasExecutableIncompleteResponsesToolCalls,
 	mapOpenAIResponsesStopReason,
 	normalizeOpenAIPromptCacheKey,
+	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
@@ -1397,14 +1398,17 @@ export async function buildTransformedCodexRequestBody(
 	// everything from `StreamOptions` rather than forwarding any of them.
 	// (#3117 — codex-rs sends none of these either.)
 	applyOpenAIServiceTier(params, options?.serviceTier, model);
-	if (context.tools && context.tools.length > 0) {
-		params.tools = convertOpenAICodexResponsesTools(context.tools, model);
-		if (options?.toolChoice) {
-			const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools, model);
-			if (toolChoice) {
-				params.tool_choice = toolChoice;
-			}
-		}
+	const hasDeclaredTools = (context.tools?.length ?? 0) > 0;
+	if (hasDeclaredTools) {
+		params.tools = convertOpenAICodexResponsesTools(context.tools ?? [], model);
+	}
+	// Native `additional_tools` items never land in `context.tools`, but they still
+	// reach the upstream. A caller constraint has to travel with them.
+	const hasNativeAdditionalTools =
+		Array.isArray(params.input) && params.input.some(item => item.type === "additional_tools");
+	if (options?.toolChoice && (hasDeclaredTools || hasNativeAdditionalTools)) {
+		const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools ?? [], model);
+		if (toolChoice) params.tool_choice = toolChoice;
 	}
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
@@ -1956,6 +1960,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			id: encodeResponsesToolCallId(item.call_id, item.id),
 			name: item.name,
 			arguments: {},
+			...(item.namespace ? { namespace: item.namespace } : {}),
 			[kStreamingPartialJson]: item.arguments || "",
 		};
 	}
@@ -1979,6 +1984,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 			name: item.name,
 			arguments: { input: item.input ?? "" },
 			customWireName: item.name,
+			...(item.namespace ? { namespace: item.namespace } : {}),
 			[kStreamingPartialJson]: item.input ?? "",
 		};
 	}
@@ -2508,12 +2514,14 @@ class CodexStreamProcessor {
 					: block?.type === "toolCall" && !partial
 						? block.arguments
 						: parseToolCallArguments(partial),
+				...(item.namespace ? { namespace: item.namespace } : {}),
 			};
 			item.arguments = replayableToolCallArguments(item.arguments, toolCall.arguments);
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
 				// delta parser may have left block.arguments stale (often `{}`).
 				block.arguments = toolCall.arguments;
+				if (item.namespace) block.namespace = item.namespace;
 				clearStreamingPartialJson(block);
 			}
 			// Detach so a late/duplicate arguments.delta cannot append to the
@@ -2556,9 +2564,11 @@ class CodexStreamProcessor {
 				name: item.name,
 				arguments: { input: rawInput },
 				customWireName: item.name,
+				...(item.namespace ? { namespace: item.namespace } : {}),
 			};
 			if (block?.type === "toolCall") {
 				block.arguments = { input: rawInput };
+				if (item.namespace) block.namespace = item.namespace;
 				clearStreamingPartialJson(block);
 			}
 			runtime.closeOpenItem(entry);
@@ -4202,13 +4212,11 @@ function createCodexHeaders(
 	} else {
 		headers.delete(OPENAI_HEADERS.ATTESTATION);
 	}
-	const betaHeader =
-		transport === "websocket"
-			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
-			: OPENAI_HEADER_VALUES.BETA_RESPONSES;
+	// codex-rs sends `OpenAI-Beta` only on the WebSocket handshake; HTTP carries none.
 	headers.delete(OPENAI_HEADERS.BETA);
-	headers.delete("openai-beta");
-	headers.set(OPENAI_HEADERS.BETA, betaHeader);
+	if (transport === "websocket") {
+		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2);
+	}
 	headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
 	headers.set(OPENAI_HEADERS.VERSION, codexClientVersion);
 	headers.set("User-Agent", USER_AGENT);
@@ -4379,6 +4387,22 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 						model.supportsComputerUse === true
 							? sanitizedHistoryItems
 							: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
+					const missingCalls = pickUnrecordedResponsesToolCalls(assistantMsg, historyItems);
+					if (missingCalls.length > 0) {
+						const rebuilt = convertResponsesAssistantMessage(
+							{ ...assistantMsg, content: missingCalls },
+							model,
+							msgIndex,
+							knownCallIds,
+							false,
+							customCallIds,
+							false,
+							true,
+							undefined,
+							computerCallIds,
+						);
+						rawReplayItems.push(...rebuilt);
+					}
 					const replayItems = escapeControlTokens ? escapeReplayedControlTokens(rawReplayItems) : rawReplayItems;
 					for (const item of replayItems) {
 						if (item.type === "custom_tool_call") {

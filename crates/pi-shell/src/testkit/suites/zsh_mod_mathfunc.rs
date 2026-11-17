@@ -19,6 +19,7 @@ fn zsh(src: &str) -> (String, String, i32) {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "last-digit results are macOS libm's")]
 fn every_function_on_sample_arguments() {
 	let (out, err, st) = zsh(
 		"zmodload zsh/mathfunc; print $(( abs(-3) )) $(( abs(-2.5) )) $(( acos(0.5) )) $(( \
@@ -43,6 +44,7 @@ fn every_function_on_sample_arguments() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "macos"), ignore = "last-digit results are macOS libm's")]
 fn lgamma_sets_signgam_and_common_values() {
 	let (out, ..) = zsh(
 		"zmodload zsh/mathfunc; print $(( lgamma(-0.5) )) $((signgam())); print $(( sin(1) )) $(( \

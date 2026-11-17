@@ -216,9 +216,10 @@ class _RunnerState:
         self.last_install_marker: int = 0
         self.loop: asyncio.AbstractEventLoop | None = None
         self.active_executions: int = 0
-        # Cell tasks by request id, the ids the host asked to interrupt, and
-        # the tasks cancelled while parked on an ``await``.
-        self.executing_tasks: dict[str, asyncio.Task] = {}
+        # In-flight cells by request id (``None`` while queued on the control
+        # channel, then the running ``asyncio.Task``), the ids the host asked
+        # to interrupt, and the tasks cancelled while parked on an ``await``.
+        self.executing_tasks: dict[str, asyncio.Task | None] = {}
         self.interrupt_ids: set[str] = set()
         self.interrupted_tasks: set[asyncio.Task] = set()
         # POSIX reads interrupt requests while cells run, so a SIGINT acts only
@@ -1711,8 +1712,13 @@ def _resolve_bash() -> str:
 
 
 @cell_magic("bash")
-def _magic_cell_bash(args: str, body: str) -> int:
-    return _run_shell_body(body, shell_arg=_resolve_bash())
+def _magic_cell_bash(args: str, body: str) -> None:
+    # Like IPython's %%bash the cell has no value: a returned status would be
+    # displayed as the cell's result, a stray `0` after every run. A failure
+    # is still reported, since a command can fail without printing anything.
+    code = _run_shell_body(body, shell_arg=_resolve_bash())
+    if code != 0:
+        sys.stderr.write(f"%%bash: exit status {code}\n")
 
 
 @cell_magic("capture")
@@ -2565,14 +2571,15 @@ def _prepare_file_source(
     if display_source and (not lines or not lines[-1].endswith(("\n", "\r"))):
         lines[-1] += "\n"
     linecache.cache[filename] = (len(display_source), None, lines, filename)
-    ns["__file__"] = filename
-    script_dir = os.path.dirname(filename)
-    if script_dir:
-        try:
-            sys.path.remove(script_dir)
-        except ValueError:
-            pass
-        sys.path.insert(0, script_dir)
+    if not (filename.startswith("<") and filename.endswith(">")):
+        ns["__file__"] = filename
+        script_dir = os.path.dirname(filename)
+        if script_dir:
+            try:
+                sys.path.remove(script_dir)
+            except ValueError:
+                pass
+            sys.path.insert(0, script_dir)
 
 
 def _exec_source(source: str, ns: dict) -> None:
@@ -2601,8 +2608,7 @@ async def _exec_source_async(
     regions yield to other requests in the runner's persistent event loop."""
     _restore_call_site_helper(ns)
     body_code, expr_code, has_expr = _compile_source(source, filename)
-    if filename != "<cell>":
-        _prepare_file_source(source, ns, filename, linecache_source)
+    _prepare_file_source(source, ns, filename, linecache_source)
     if body_code is None:
         return
     await _run_compiled_async(body_code, ns, want_value=False)
@@ -2633,7 +2639,11 @@ def _exec_sigint_handler(signum: int, frame: Any) -> None:
     if loop is None:
         raise KeyboardInterrupt
     current = asyncio.current_task(loop)
-    running = next((rid for rid, task in _STATE.executing_tasks.items() if task is current), None)
+    running = (
+        next((rid for rid, task in _STATE.executing_tasks.items() if task is current), None)
+        if current is not None
+        else None
+    )
     if running is not None and (not _STATE.targeted_interrupts or running in _STATE.interrupt_ids):
         _STATE.interrupt_ids.discard(running)
         raise KeyboardInterrupt
@@ -2642,6 +2652,8 @@ def _exec_sigint_handler(signum: int, frame: Any) -> None:
 
 def _cancel_parked_cells() -> None:
     for rid, task in list(_STATE.executing_tasks.items()):
+        if task is None:
+            continue
         if _STATE.targeted_interrupts and rid not in _STATE.interrupt_ids:
             continue
         _STATE.interrupt_ids.discard(rid)
@@ -2652,11 +2664,17 @@ def _cancel_parked_cells() -> None:
 def _request_interrupt(loop: asyncio.AbstractEventLoop, rid: str) -> None:
     """Interrupt cell ``rid`` from the stdin reader thread. The signal reaches it
     in sync code; the queued cancel reaches it if a sibling's sync code holds
-    the main thread. Each interrupt is delivered once."""
+    the main thread; a pending interrupt is held until the named cell registers.
+    Each interrupt is delivered once."""
+    if rid not in _STATE.executing_tasks:
+        return
+    _STATE.interrupt_ids.add(rid)
+    if rid not in _STATE.executing_tasks:
+        _STATE.interrupt_ids.discard(rid)
+        return
     task = _STATE.executing_tasks.get(rid)
     if task is None:
         return
-    _STATE.interrupt_ids.add(rid)
     loop.call_soon_threadsafe(_cancel_parked_cells)
     signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
 
@@ -2898,15 +2916,15 @@ async def _handle_request_async(req: dict) -> None:
         try:
             _apply_request_runtime(req)
             source = req.get("code", "")
-            transformed = transform_cell(source)
             requested_filename = req.get("filename")
             filename = (
                 requested_filename
                 if isinstance(requested_filename, str) and requested_filename
-                else "<cell>"
+                else f"<cell-{execution_count}>"
             )
+            transformed = transform_cell(source)
         except SyntaxError as exc:
-            _emit_error(rid, exc)
+            _emit_error(rid, exc, source_filename=filename)
             _emit(
                 {
                     "type": "done",
@@ -2938,6 +2956,9 @@ async def _handle_request_async(req: dict) -> None:
         task = asyncio.current_task()
         _STATE.executing_tasks[rid] = task
         try:
+            if rid in _STATE.interrupt_ids:
+                _STATE.interrupt_ids.discard(rid)
+                raise KeyboardInterrupt
             await _exec_source_async(
                 transformed,
                 _STATE.user_ns,
@@ -2986,6 +3007,8 @@ async def _handle_request_async(req: dict) -> None:
             }
         )
     finally:
+        _STATE.executing_tasks.pop(rid, None)
+        _STATE.interrupt_ids.discard(rid)
         if _STATE.capture_rid == rid:
             _STATE.capture_rid = None
         _flush_stream_proxies(rid)
@@ -2995,8 +3018,8 @@ async def _handle_request_async(req: dict) -> None:
             _end_exec_sigint()
 
 
-def _emit_error(rid: str, exc: BaseException, source_filename: str = "<cell>") -> None:
-    if isinstance(exc, SyntaxError) and exc.filename in ("<cell>", source_filename):
+def _emit_error(rid: str, exc: BaseException, source_filename: str | None = None) -> None:
+    if isinstance(exc, SyntaxError) and source_filename is not None and exc.filename == source_filename:
         # Syntax error in the executed source itself: every stack frame is
         # runner machinery, so emit only the caret display, like a REPL.
         tb_lines = traceback.format_exception_only(type(exc), exc)
@@ -3037,10 +3060,13 @@ def _admit_shadow_run(req: dict) -> bool:
             and expected_digest == _shadow_snapshot_digest(values)
         )
         if not eligible:
+            rid = str(req.get("id"))
+            _STATE.executing_tasks.pop(rid, None)
+            _STATE.interrupt_ids.discard(rid)
             _emit(
                 {
                     "type": "done",
-                    "id": str(req.get("id")),
+                    "id": rid,
                     "status": "ok",
                     "executionCount": _STATE.execution_count,
                     "cancelled": False,
@@ -3100,6 +3126,8 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
         if req.get("type") == "interrupt":
             _request_interrupt(loop, str(req.get("id")))
             continue
+        if req.get("type") not in ("exit", "shadow_snapshot", "shadow_plan"):
+            _STATE.executing_tasks[str(req.get("id"))] = None
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
 
@@ -3157,6 +3185,8 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        _STATE.executing_tasks.clear()
+        _STATE.interrupt_ids.clear()
 
 
 async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:

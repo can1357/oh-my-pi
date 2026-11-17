@@ -8,6 +8,8 @@
 #   & ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Source -Ref main
 #   & ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Binary -Ref v18.8.9
 #
+# The prebuilt binary is the default, since it updates itself with delta
+# patches; -Source installs the package via bun and is implied by a bare -Ref.
 # -Ref takes any tag/commit/branch with -Source; binary installs take a release
 # tag (v<version>). Prebuilt binaries come from the build service
 # ($env:PI_BUILD_URL, default https://build.stencil.so) and are checked against
@@ -344,6 +346,13 @@ function Install-Binary {
 
     Configure-BashShell
 
+    # An omp earlier on PATH (a previous `bun install -g`, Scoop, ...) keeps
+    # winning over this install: $InstallDir is appended to PATH, not prepended.
+    $Active = Get-Command omp -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($Active -and $Active.Source -ne [System.IO.Path]::GetFullPath($OutPath)) {
+        Write-Host "[WARN] 'omp' still resolves to $($Active.Source); remove that install or move $InstallDir ahead of it on PATH." -ForegroundColor Yellow
+    }
+
     if ($needsRestart) {
         Write-Host "Restart your terminal, then run 'omp' to get started!"
     } else {
@@ -351,8 +360,9 @@ function Install-Binary {
     }
 }
 
-# Main logic
-if ($Ref -and -not $Source -and -not $Binary) {
+# Main logic. A ref can name a branch or commit, which only a source install
+# can build, so a bare -Ref selects source.
+if ($Ref -and -not $Binary) {
     $Source = $true
 }
 
@@ -362,14 +372,6 @@ if ($Source) {
     }
     Assert-BunVersion $MinimumBunVersion
     Install-ViaBun
-} elseif ($Binary) {
-    Install-Binary
 } else {
-    # Default: use bun if available, otherwise binary
-    if (Test-BunInstalled) {
-        Assert-BunVersion $MinimumBunVersion
-        Install-ViaBun
-    } else {
-        Install-Binary
-    }
+    Install-Binary
 }

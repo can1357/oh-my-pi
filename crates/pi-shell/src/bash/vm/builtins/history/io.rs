@@ -428,19 +428,18 @@ fn write(
 				let known = input
 					.get(..8)
 					.map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])));
-				let start = match known {
-					Some(s) => s,
-					None => {
-						let at = if how == WriteHow::Append {
-							f.seek(SeekFrom::End(0))
-						} else {
-							f.seek(SeekFrom::Current(0))
-						};
-						let at = at.unwrap_or(0);
-						input.clear();
-						input.extend_from_slice(&at.to_le_bytes());
-						at
-					},
+				let start = if let Some(s) = known {
+					s
+				} else {
+					let at = if how == WriteHow::Append {
+						f.seek(SeekFrom::End(0))
+					} else {
+						f.seek(SeekFrom::Current(0))
+					};
+					let at = at.unwrap_or(0);
+					input.clear();
+					input.extend_from_slice(&at.to_le_bytes());
+					at
 				};
 				let done = f
 					.seek(SeekFrom::Current(0))

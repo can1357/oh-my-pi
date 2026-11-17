@@ -39,6 +39,7 @@ import "./mcp-json";
 import "./omp-plugins";
 import "./skillshare";
 import "./ssh";
+import "./ssh-config";
 import "./vscode";
 import "./windsurf";
 

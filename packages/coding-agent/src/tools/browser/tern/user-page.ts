@@ -26,9 +26,9 @@ export class TernPage {
 	readonly #socketPath: string;
 	#client: TernSocketClient;
 
-	constructor(client: TernSocketClient, block: number) {
+	constructor(client: TernSocketClient, socketPath: string, block: number) {
 		this.#client = client;
-		this.#socketPath = client.socketPath;
+		this.#socketPath = socketPath;
 		this.block = block;
 	}
 
@@ -101,7 +101,7 @@ export async function openTernPage(url: string, how: TernPagePlacement): Promise
 		await client.request({ op: "release", block }, { timeoutMs: OP_TIMEOUT_MS }).catch(error => {
 			logger.debug("Tern kept driving the page omp opened", { block, error: String(error) });
 		});
-		return new TernPage(client, block);
+		return new TernPage(client, pane.socketPath, block);
 	} catch (error) {
 		logger.debug("Tern could not open the page; using the system browser", { url, how, error: String(error) });
 		client.close();

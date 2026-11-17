@@ -88,7 +88,8 @@ export declare class DesktopSession {
   /**
    * Sets when the current run ends, `remaining_ms` from now; each run sets
    * it before its first call. Input waiting for the user to pause in its app
-   * (macOS) or for a Wayland permission prompt gives up shortly before it.
+   * (macOS), for a Wayland permission prompt or for another session's input
+   * lock gives up shortly before it.
    */
   setRunDeadline(remainingMs: number): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
@@ -99,9 +100,15 @@ export declare class DesktopSession {
   captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
-  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  /**
+   * Drags along `path`. A macOS background left drag across the text of one
+   * native text element is made as that element's selection through
+   * accessibility, with no mouse event, and resolves to the selection read
+   * back; a drag posted as input resolves to where a takeover left focus.
+   */
+  drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<DesktopDragResult>
   scroll(target: string, x: number, y: number, dx: number, dy: number, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
-  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  typeText(target: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
   keyChord(target: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   raiseWindow(windowId: string): Promise<undefined>
   axSnapshot(target: string, opts?: AxSnapshotOptions | undefined | null): Promise<AxSnapshot>
@@ -133,7 +140,7 @@ export declare class DesktopSession {
    * Types `text` into the element: native text fields take it by AX
    * insertion, other elements as keystrokes once they hold keyboard focus.
    */
-  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
+  axType(reference: string, text: string, opts?: PointerOptions | undefined | null): Promise<DesktopTypeResult>
   /** Presses a key chord in the element once it holds keyboard focus. */
   axKeyChord(reference: string, keys: Array<string>, opts?: PointerOptions | undefined | null): Promise<DesktopFocusReturn | undefined | null>
   /**
@@ -179,6 +186,25 @@ export declare class DiffStream {
   openFile(side: DiffSide, path: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<DiffStreamProgress>
   /** Compute exact Myers runs and unified hunks off the JavaScript thread. */
   finish(context?: number | undefined | null): Promise<DiffStreamResult>
+}
+
+/** Watches one directory for changes until closed. */
+export declare class DirectoryWatcher {
+  /**
+   * Start watching `dir`, its whole subtree when `recursive`. Changes that
+   * happen once the promise resolves are reported. Opening the directory and
+   * arming the first read run off the JS thread (each is a round trip on a
+   * network share). Rejects when the directory cannot be opened or watched;
+   * on platforms other than Windows, always.
+   */
+  static start(dir: string, recursive: boolean, callback: (err: null | Error, changes: DirectoryChanges) => void): Promise<DirectoryWatcher>
+  /**
+   * Stop watching without waiting: the reader thread cancels its pending
+   * reads (a round trip on a network share) and exits on its own. Batches or
+   * an error it queued before stopping may still reach the callback
+   * afterwards; ignore them.
+   */
+  close(): void
 }
 
 /** One edit tool call's streaming session. */
@@ -463,6 +489,32 @@ export declare class NativeOAuthCallback {
   dispose(): Promise<undefined>
 }
 
+/** One loaded Phonon checkpoint, English normalization, CPU inference. */
+export declare class PhononTts {
+  /**
+   * Load the checkpoint in `modelDir`: `config.json`, `tokenizer.json`,
+   * `model.q8.gguf`, and voice embeddings under `voices/` (registered by
+   * file stem) plus `default-voice.safetensors` (registered as `default`).
+   *
+   * # Errors
+   * Rejects when a required file is missing or the weights fail to load.
+   */
+  static load(modelDir: string): Promise<PhononTts>
+  /** PCM sample rate of every synthesized buffer, in Hz. */
+  get sampleRate(): number
+  /** Registered voice names, sorted. */
+  get voices(): Array<string>
+  /**
+   * Synthesize `text` as mono `f32` PCM at [`Self::sample_rate`].
+   * Requests run one at a time; a concurrent call waits for the previous one.
+   *
+   * # Errors
+   * Rejects for an unregistered voice, a `durationDelta` the conditioner
+   * rejects, or a generation failure.
+   */
+  synthesize(text: string, options?: PhononSpeechOptions | undefined | null): Promise<Float32Array>
+}
+
 /**
  * The bytes crossing one shell run's pipeline pipes, during and after the run.
  *
@@ -595,7 +647,7 @@ export declare class RunTrace {
    * instead of an invented primary producer. Decoding ends at capture EOF.
    * Segmented minimizer submissions share one epoch and final status;
    * their history carries `segment`, with `logicalEnd`/`logicalStatus`
-   * finalizing the last actual root RunEnd after output draining.
+   * finalizing the last actual root `RunEnd` after output draining.
    * Serialization borrows the locked model rather than cloning its history.
    */
   snapshot(): string
@@ -614,6 +666,26 @@ export declare class Shell {
    * The options set session-scoped environment variables and a snapshot path.
    */
   constructor(options?: ShellOptions | undefined | null)
+  /**
+   * A new shell with this one's options whose session starts from this
+   * session's state (variables, functions, aliases, options, working
+   * directory) as of its last command boundary: while a command runs, the
+   * state that command started from. What the fork sets stays in the
+   * fork until `adopt()` carries it back. Never waits for the running
+   * command.
+   */
+  fork(): Shell
+  /**
+   * Carry what `fork` (a `fork()` of this shell whose `run` settled)
+   * changed, its variables, functions, aliases, options and traps, into
+   * this shell's session: at the end of the command it runs now, or at
+   * once between commands, and into every fork taken from here on. A name
+   * both changed keeps the value of the command that ended last. Returns
+   * `false` when there is nothing to carry from or into: the fork did not
+   * start from a session's state or lost its session, or this shell has
+   * none.
+   */
+  adopt(fork: Shell): boolean
   /**
    * Run a shell command using the provided options.
    *
@@ -703,43 +775,31 @@ export declare class TextPredictor {
 }
 
 /**
- * Dedicated writer thread for one terminal fd.
- *
- * `dup(2)`'d at construction and closed on drop. The duplicate keeps the
- * pump's fd alive if the original is closed or replaced; file-status flags
- * such as `O_NONBLOCK` are shared and handled by polling for `POLLOUT`.
+ * Dedicated, cancellable terminal writer. The destination must be a TTY that
+ * can be independently reopened; pipes and files are deliberately rejected.
  */
 export declare class TtyWriter {
   /**
-   * Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
-   * when the descriptor cannot be duplicated.
+   * Start an independently opened terminal writer. onDrain runs when the
+   * pending bound crosses from above drainThreshold to at/below it, and on
+   * fatal writes even below the threshold. It does not retain the event loop.
    */
-  constructor(fd: number)
+  constructor(fd: number, drainThreshold: number, onDrain: () => void)
   /**
-   * Enqueue terminal output; never blocks. Returns the total bytes now
-   * pending (including this chunk).
-   *
-   * Reads the JS string as UTF-16 through the thread's scratch arena and
-   * transcodes it with `xutf` straight into the shared back buffer, so a
-   * warm writer costs no per-call heap allocation.
+   * Copy UTF-16 into pooled storage without UTF-8 sizing or transcoding on
+   * JS's thread. Returns a conservative pending UTF-8 byte upper bound.
    */
   write(data: string): number
-  /** Bytes accepted but not yet written to the terminal. */
+  /** Conservative UTF-8 bytes not yet written (tightened by the worker). */
   pending(): number
-  /** True once a write failed (dead PTY); queued output has been dropped. */
+  /** True after a terminal write failed; all pending output is dropped. */
   get dead(): boolean
-  /**
-   * Block the calling thread until the queue drains, the writer dies, or
-   * `timeout_ms` elapses. Returns true when fully drained. Exit paths only.
-   */
+  /** Wait for queued output until the deadline. False on timeout or failure. */
   flushSync(timeoutMs: number): boolean
   /**
-   * Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
-   *
-   * A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
-   * cannot be joined without freezing the caller: when the bounded flush
-   * times out the thread is detached instead and its dup'd fd is leaked —
-   * closing it under a blocked write would race kernel fd reuse.
+   * Drain until the deadline, then cancel and join. Never detaches a writer
+   * or leaves old output running after return. Already queued JS callbacks
+   * may still run; callers must ignore callbacks from a stopped writer.
    */
   stop(flushTimeoutMs: number): void
 }
@@ -777,6 +837,11 @@ export declare class VcsGitRepo {
    * change.
    */
   isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /**
+   * Operation underway, including unresolved index conflicts without state
+   * files.
+   */
+  operationKind(signal?: unknown | undefined | null): Promise<"merge" | "cherry-pick" | "revert" | "rebase" | "am" | "unmerged-index" | null>
   /** Porcelain status. */
   statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
   /** Status counts. */
@@ -813,8 +878,8 @@ export declare class VcsGitRepo {
   commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
   /** List index or untracked paths. */
   lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
-  /** List tree paths. */
-  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List a tree's blobs and symlinks recursively with their modes. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<VcsTreeEntry>>
   /** List submodule paths. */
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
@@ -1521,16 +1586,25 @@ export interface DesktopCapabilities {
    * Native global Escape cancellation of takeover input (`takeover: true`,
    * held control, desktop/display-level input, raises, activating launches).
    * Without held control, background window input never watches the user's
-   * keys; it and Wayland stop only through the host interrupt.
+   * keys; it and Wayland stop only through the host interrupt. False on
+   * macOS while `secureInput` holds: the Escape monitor then sees no keys.
    */
   globalEscape: boolean
+  /**
+   * Secure Event Input is on (a focused password field, or a terminal's
+   * secure keyboard entry): macOS hides every key from event monitors, so
+   * the user's Escape and typing go unseen. Only macOS detects this.
+   */
+  secureInput: boolean
+  /** The app holding secure input, when macOS names its process. */
+  secureInputApp?: string
   capturePermission: string
   inputPermission: string
   axPermission: string
   displayCount: number
   /**
-   * The user session is locked (lock screen up). Only macOS detects this;
-   * other backends report `false`.
+   * The session is locked, or on Windows disconnected or on a secure
+   * desktop. Linux reports `false`.
    */
   screenLocked: boolean
   /**
@@ -1564,9 +1638,9 @@ export interface DesktopCapture {
   backend: string
   displayServer?: string
   /**
-   * The user session was locked when this frame was taken: a display
-   * capture shows the lock screen, and a window capture shows the window's
-   * last frame behind it. Only macOS detects this; others report `false`.
+   * The user session was unavailable when this frame was taken. On macOS,
+   * a display capture shows the lock screen and a window capture its last
+   * frame. Windows also detects disconnected sessions and secure desktops.
    */
   screenLocked: boolean
 }
@@ -1594,6 +1668,21 @@ export interface DesktopDisplay {
   isPrimary: boolean
 }
 
+/** What a drag call did: made a text selection, or posted input. */
+export interface DesktopDragResult {
+  /**
+   * The selection a macOS background left drag across the text of one
+   * native text element made through accessibility, read back; absent when
+   * the drag was posted as input.
+   */
+  selection?: AxTextSelection
+  /**
+   * Where focus ended when the drag ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
+}
+
 /**
  * Physical-Escape stops counted under `key` by every desktop session created
  * with it, including closed ones, until the key is forgotten.
@@ -1606,12 +1695,44 @@ export declare function desktopEscapeStops(key: string): number
  * backends and background delivery resolve to `null`.
  */
 export interface DesktopFocusReturn {
-  /** Whether the takeover handed focus back to the app front before it. */
+  /** Whether the takeover handed the front back to the app front before it. */
   handedBack: boolean
   /** The process front before the takeover. */
   previousPid?: number
   /** The process front once the takeover ended; absent when unreadable. */
   frontPid?: number
+  /**
+   * What a macOS takeover did with the user's keyboard; absent elsewhere and
+   * when it did not reach the hand-back.
+   */
+  keyboard?: DesktopKeyboardReturn
+}
+
+/**
+ * What a macOS takeover did to give the user back their keyboard. Nothing
+ * outside an app can see which of its windows is key, so these name what was
+ * sent, not a key state that was observed.
+ */
+export declare enum DesktopKeyboardReturn {
+  /** The window that was key when the takeover began was made key again. */
+  HandedBack = 'handedBack',
+  /**
+   * The user clicked, used a shortcut or switched during the takeover, so
+   * nothing was sent over their choice.
+   */
+  LeftAsChosen = 'leftAsChosen',
+  /**
+   * The user's app never left the front (the target was another of its
+   * windows) and still reported its key window, so nothing was sent.
+   */
+  Kept = 'kept',
+  /** The user's app showed no window: only its front status came back. */
+  FrontOnly = 'frontOnly',
+  /**
+   * macOS refused the hand-back or the user's last input was still being
+   * read, so their window was not made key.
+   */
+  NotSent = 'notSent'
 }
 
 /**
@@ -1639,7 +1760,7 @@ export interface DesktopPoint {
 
 /**
  * Lock and display-sleep state of the user session, read live per call.
- * Only macOS detects either; other platforms report both as `false`.
+ * macOS detects both; Windows detects lock state; Linux reports both false.
  */
 export interface DesktopScreenState {
   screenLocked: boolean
@@ -1653,6 +1774,26 @@ export interface DesktopSessionOptions {
    * count, which `desktopEscapeStops` reads after they close.
    */
   escapeStopKey?: string
+  /**
+   * The registry id of the agent this session acts for, named to other
+   * sessions that wait for its input/focus control.
+   */
+  agentId?: string
+}
+
+/** What a typing call did. */
+export interface DesktopTypeResult {
+  /**
+   * Why the text was sent but the target was not seen reading it before
+   * focus went back; absent when it was, or the backend does not wait for
+   * it (only Windows takeover typing does).
+   */
+  unconfirmed?: string
+  /**
+   * Where focus ended when typing ran in takeover; see
+   * [`DesktopFocusReturn`].
+   */
+  focusReturn?: DesktopFocusReturn
 }
 
 /** One capturable top-level window in global logical desktop coordinates. */
@@ -1795,6 +1936,36 @@ export interface DiffStreamResult {
  * post-pass dedupes whitespace across change boundaries.
  */
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
+
+/** One change below the watched directory. */
+export interface DirectoryChange {
+  /** Path relative to the watched directory, with the platform's separators. */
+  path: string
+  action: DirectoryChangeAction
+  /**
+   * The entry is a directory. Always false for `modified`, which may also
+   * name a directory whose entries changed.
+   */
+  directory: boolean
+}
+
+/** What happened to an entry, as reported by the file system. */
+export declare enum DirectoryChangeAction {
+  Added = 'added',
+  Removed = 'removed',
+  Modified = 'modified',
+  /** The entry's old name in a rename. */
+  RenamedFrom = 'renamedFrom',
+  /** The entry's new name in a rename. */
+  RenamedTo = 'renamedTo'
+}
+
+/** Changes gathered by one read, in the order they happened. */
+export interface DirectoryChanges {
+  changes: Array<DirectoryChange>
+  /** Changes were lost (the change buffer overflowed); rescan the directory. */
+  overflow: boolean
+}
 
 /**
  * Whole-call apply outcome. `is_error` carries the model-facing failure in
@@ -2398,6 +2569,11 @@ export interface GrepResult {
   limitReached?: boolean
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
+  /**
+   * Paths, relative to the search root, of files skipped as binary although
+   * their content matches; search one as an explicit path to read it as text.
+   */
+  binaryMatches?: Array<string>
 }
 
 /**
@@ -3151,6 +3327,20 @@ export interface PdfMarkdownResult {
  */
 export declare function pdfToMarkdown(input: Uint8Array): Promise<PdfMarkdownResult>
 
+/** Request options for [`PhononTts::synthesize`]. */
+export interface PhononSpeechOptions {
+  /**
+   * Registered voice name (a `voices/<name>.safetensors` stem); omit for the
+   * checkpoint's default voice.
+   */
+  voice?: string
+  /**
+   * `duration_delta` conditioner: negative speaks faster, positive slower.
+   * Omit for the model's natural rate (0).
+   */
+  durationDelta?: number
+}
+
 /** Retained bytes of a stream, as stream offsets `start..end`. */
 export interface PipeStreamChunk {
   /**
@@ -3412,7 +3602,9 @@ export declare function renderSnapcompactPng(text: string, options: SnapcompactR
 
 /**
  * Run the pi-shell engine as a process shell in this process (`omp zsh`,
- * `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+ * `omp bash`, `omp sh`).
+ *
+ * `argv` is the shell's whole command line,
  * `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
  * shell gets it. Synchronous: blocks the calling thread until the shell
  * exits and returns the status the process should exit with (0–255; 101
@@ -3473,6 +3665,15 @@ export interface SearchResult {
 }
 
 export declare function setHangulCompatJamoWidthOverride(value: number): void
+
+/**
+ * The commands the embedded shell adds to bash's own builtins, sorted.
+ *
+ * For a session started with `sessionEnv` over this process's environment,
+ * whose `PI_DISABLE_*` switches gate them. omp's bash tool lists them to the
+ * model.
+ */
+export declare function shellBuiltins(sessionEnv?: Record<string, string>): Array<string>
 
 /**
  * Options for executing a shell command via the embedded bash engine
@@ -3890,6 +4091,11 @@ export interface ShellVizOptions {
   speed: number
   selectedNode?: string
   expandedNodes: Array<string>
+  /**
+   * The script is a command still streaming in, not yet run: its
+   * unfinished end is drawn as it will most likely continue.
+   */
+  streaming?: boolean
 }
 
 /**
@@ -4120,6 +4326,12 @@ export interface VcsCommitOptions {
   allowEmpty?: boolean
   amend?: boolean
   files?: Array<string>
+  /** Build the commit from this index file instead of the repository's. */
+  indexPath?: string
+  /** Fail with `HeadMoved` unless HEAD resolves to this revision. */
+  expectedHead?: string
+  /** Skip the `pre-commit` and `commit-msg` hooks (`git commit --no-verify`). */
+  noVerify?: boolean
 }
 
 /** Detach copied Git metadata. */
@@ -4248,6 +4460,16 @@ export interface VcsStatusSummary {
   staged: number
   unstaged: number
   untracked: number
+}
+
+/** One blob or symlink of a tree listing. */
+export interface VcsTreeEntry {
+  path: string
+  /**
+   * Octal git mode as `git ls-tree` prints it: `100644`, `100755`, or
+   * `120000`.
+   */
+  mode: string
 }
 
 /** Validate hunk selections. */

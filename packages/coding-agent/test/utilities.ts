@@ -81,6 +81,8 @@ export function assistantMsg(text: string) {
  */
 export async function createTestSession(options: TestSessionOptions = {}): Promise<TestSessionContext> {
 	const tempDir = path.join(os.tmpdir(), `omp-test-${Snowflake.next()}`);
+	// Interactive editor input must not contact the developer's global text-predict daemon.
+	const settingsOverrides = { "spelling.autocomplete": "off", ...options.settingsOverrides };
 	fs.mkdirSync(tempDir, { recursive: true });
 
 	const toolSession: ToolSession = {
@@ -88,7 +90,7 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		settings: Settings.isolated(options.settingsOverrides),
+		settings: Settings.isolated(settingsOverrides),
 	};
 	const tools = await createTools(toolSession);
 
@@ -107,7 +109,7 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 	const sessionManager = options.inMemory
 		? SessionManager.inMemory()
 		: SessionManager.create(tempDir, SessionManager.getDefaultSessionDir(tempDir, path.join(tempDir, "agent")));
-	const settings = Settings.isolated(options.settingsOverrides);
+	const settings = Settings.isolated(settingsOverrides);
 
 	const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));

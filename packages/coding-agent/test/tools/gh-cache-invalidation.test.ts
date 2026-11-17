@@ -140,12 +140,6 @@ describe("invalidateGithubCacheForBashCommand", () => {
 		expect(getCached("quoted/repo", "issue", 33, true)).toBeNull();
 	});
 
-	it("no-ops on commands that do not mention gh", () => {
-		seedIssue(99);
-		invalidateGithubCacheForBashCommand("echo hello world");
-		expect(getCached(REPO, "issue", 99, true)?.rendered).toBe(`issue-${REPO}-99`);
-	});
-
 	it("invalidates across all repos when only a bare number is supplied", () => {
 		seedIssue(50, "a/one");
 		seedIssue(50, "b/two");

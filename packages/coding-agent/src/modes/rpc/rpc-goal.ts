@@ -13,7 +13,6 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../../goals/settings";
 import { type GoalModeState, goalContinuationActivity, goalFromModeData } from "../../goals/state";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
-import { nextActionableTask } from "../../tools/todo";
 
 /** `goal.continuationModes` value that enables automatic continuation for RPC hosts. */
 export const RPC_GOAL_CONTINUATION_MODE = "rpc";
@@ -56,7 +55,7 @@ export class RpcGoalController {
 	readonly #session: RpcGoalSession;
 	/** Active tool set before goal mode added `goal`; restored when the goal ends. */
 	#previousTools: string[] | undefined;
-	/** Continuation turns submitted whose terminal `agent_end` has not arrived. */
+	/** Continuation turns submitted whose run has not reached its `agent_end`. */
 	#pendingContinuationTurns = 0;
 	#previousContinuationActivity: string | undefined;
 	/** A continuation turn made no new progress; wait for the host before continuing. */
@@ -167,7 +166,7 @@ export class RpcGoalController {
 	 * running goal untouched and resumes continuation.
 	 *
 	 * `detachedRun`: the change stopped the running agent (new, switch, reload). A
-	 * detached continuation turn never reaches its terminal `agent_end`, so it no
+	 * detached continuation turn never reaches its `agent_end`, so it no
 	 * longer counts as pending. Never throws; settlement is re-checked afterwards.
 	 */
 	async endSessionChange(options?: { detachedRun?: boolean }): Promise<void> {
@@ -375,7 +374,7 @@ export class RpcGoalController {
 			}
 			return;
 		}
-		if (event.type !== "agent_end" || event.isTerminal === false) return;
+		if (event.type !== "agent_end") return;
 		if (this.#pendingContinuationTurns > 0) {
 			this.#pendingContinuationTurns--;
 			const activity = goalContinuationActivity(event.messages);
@@ -409,10 +408,7 @@ export class RpcGoalController {
 		if (session.getPlanModeState()?.enabled) return false;
 		const state = session.getGoalModeState();
 		if (!state?.enabled || state.goal.status !== "active") return false;
-		const phases = session.getTodoPhases();
-		return !(
-			!nextActionableTask(phases) && phases.some(phase => phase.tasks.some(task => task.status === "blocked"))
-		);
+		return true;
 	}
 
 	/**

@@ -14,7 +14,7 @@ use super::{
 use crate::{
 	error::{Error, Result},
 	types::{
-		CommitAuthor, CommitDetails, HeadState, ShowResult, StatusOptions, StatusSummary,
+		CommitAuthor, CommitDetails, HeadState, ShowResult, StatusOptions, StatusSummary, TreeEntry,
 		UntrackedMode, WorktreeEntry,
 	},
 };
@@ -227,23 +227,44 @@ impl GitRepo {
 	/// is underway while its state directory exists; git leaves `REBASE_HEAD`
 	/// behind after one finishes.
 	pub fn operation_in_progress(&self) -> Result<bool> {
-		const STATE: [&str; 5] =
-			["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"];
-		if STATE
-			.iter()
-			.any(|name| self.info.git_dir.join(name).exists())
+		Ok(self.operation_kind()?.is_some())
+	}
+
+	/// Name the operation underway in this checkout, or `unmerged-index` for
+	/// unresolved index entries without an operation's state files.
+	///
+	/// Rebase state takes precedence over individual replayed commits. The
+	/// `applying` marker distinguishes `git am` from the apply rebase backend.
+	pub fn operation_kind(&self) -> Result<Option<&'static str>> {
+		let git_dir = &self.info.git_dir;
+		if git_dir.join("rebase-merge").exists() {
+			return Ok(Some("rebase"));
+		}
+		if git_dir.join("rebase-apply").exists() {
+			return Ok(Some(if git_dir.join("rebase-apply/applying").exists() {
+				"am"
+			} else {
+				"rebase"
+			}));
+		}
+		for (marker, kind) in
+			[("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")]
 		{
-			return Ok(true);
+			if git_dir.join(marker).exists() {
+				return Ok(Some(kind));
+			}
 		}
 		if self.is_reftable() {
-			return Ok(!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty());
+			return Ok((!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty())
+				.then_some("unmerged-index"));
 		}
 		let repo = self.gix()?;
 		let index = load_index_or_empty(&repo, "git ls-files")?;
 		Ok(index
 			.entries()
 			.iter()
-			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted))
+			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+			.then_some("unmerged-index"))
 	}
 
 	/// Render git status in porcelain-v1 form.
@@ -434,6 +455,19 @@ impl GitRepo {
 			}
 		}
 		Ok(summary)
+	}
+
+	/// Whether the repository's own config file contains `key`, without
+	/// includes, global configuration, or environment overrides. Never invokes
+	/// git.
+	pub fn config_has_local(&self, key: &str) -> Result<bool> {
+		let path = self.info().common_dir.join("config");
+		if !path.exists() {
+			return Ok(false);
+		}
+		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+			.map_err(|e| Error::backend("git config", e))?;
+		Ok(config.string(key).is_some())
 	}
 
 	/// Read a scalar git config value.
@@ -860,25 +894,26 @@ impl GitRepo {
 		Ok(out)
 	}
 
-	/// List recursive blob paths in a tree, optionally filtered by pathspec-like
-	/// prefixes.
-	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<String>> {
+	/// List the blobs and symlinks of a tree recursively with their modes,
+	/// sorted by path, optionally filtered by pathspec-like prefixes.
+	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<TreeEntry>> {
 		if self.is_reftable() {
-			let mut owned = vec![
-				"ls-tree".to_owned(),
-				"--name-only".to_owned(),
-				"-r".to_owned(),
-				"-z".to_owned(),
-				rev.to_owned(),
-			];
+			let mut owned =
+				vec!["ls-tree".to_owned(), "-r".to_owned(), "-z".to_owned(), rev.to_owned()];
 			if !paths.is_empty() {
 				owned.push("--".to_owned());
 				owned.extend(paths.iter().cloned());
 			}
+			// Records are `<mode> SP <type> SP <id> TAB <path>`; gitlinks have
+			// type `commit`.
 			return Ok(cli_text_owned(self.root(), &owned, super::cli::SYNC_TIMEOUT)?
 				.split('\0')
-				.filter(|s| !s.is_empty())
-				.map(str::to_owned)
+				.filter_map(|record| {
+					let (meta, path) = record.split_once('\t')?;
+					let mut fields = meta.split(' ');
+					let mode = u32::from_str_radix(fields.next()?, 8).ok()?;
+					(fields.next()? == "blob").then(|| TreeEntry { path: path.to_owned(), mode })
+				})
 				.collect());
 		}
 		let repo = self.gix()?;
@@ -896,10 +931,13 @@ impl GitRepo {
 			.map_err(|e| Error::backend("git ls-tree", e))?
 			.into_iter()
 			.filter(|e| e.mode.is_blob() || e.mode.is_link())
-			.map(|e| bytes_to_path(e.filepath.as_bstr()))
-			.filter(|p| paths.is_empty() || paths.iter().any(|wanted| path_matches(p, wanted)))
+			.map(|e| TreeEntry {
+				path: bytes_to_path(e.filepath.as_bstr()),
+				mode: u32::from(e.mode.value()),
+			})
+			.filter(|e| paths.is_empty() || paths.iter().any(|wanted| path_matches(&e.path, wanted)))
 			.collect();
-		out.sort();
+		out.sort_by(|a, b| a.path.cmp(&b.path));
 		Ok(out)
 	}
 
@@ -1380,6 +1418,62 @@ mod tests {
 	}
 
 	#[test]
+	fn operation_kind_names_state_files_and_distinguishes_am_from_rebase() -> TestResult {
+		let (_dir, repo) = repo()?;
+		let git_dir = &repo.info().git_dir;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		for (marker, kind) in
+			[("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")]
+		{
+			fs::write(git_dir.join(marker), "")?;
+			assert_eq!(repo.operation_kind()?, Some(kind));
+			assert!(repo.operation_in_progress()?);
+			fs::remove_file(git_dir.join(marker))?;
+		}
+		fs::create_dir(git_dir.join("rebase-merge"))?;
+		assert_eq!(repo.operation_kind()?, Some("rebase"));
+		assert!(repo.operation_in_progress()?);
+		fs::remove_dir(git_dir.join("rebase-merge"))?;
+		fs::create_dir(git_dir.join("rebase-apply"))?;
+		assert_eq!(repo.operation_kind()?, Some("rebase"));
+		assert!(repo.operation_in_progress()?);
+		fs::write(git_dir.join("rebase-apply/applying"), "")?;
+		assert_eq!(repo.operation_kind()?, Some("am"));
+		assert!(repo.operation_in_progress()?);
+		fs::remove_dir_all(git_dir.join("rebase-apply"))?;
+		// Git can retain REBASE_HEAD after the rebase has finished.
+		fs::write(git_dir.join("REBASE_HEAD"), "")?;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		Ok(())
+	}
+
+	#[test]
+	fn operation_kind_detects_unmerged_index_without_state_files() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "conflict.txt", "base\n", "base")?;
+		fs::write(root.join("conflict.txt"), "stashed\n")?;
+		git(root, &["stash", "push", "-m", "stashed"])?;
+		commit(root, "conflict.txt", "main\n", "main")?;
+		assert!(git(root, &["stash", "pop"]).is_err());
+		assert!(!git(root, &["ls-files", "--unmerged"])?.is_empty());
+		for marker in
+			["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"]
+		{
+			assert!(!repo.info().git_dir.join(marker).exists());
+		}
+		assert_eq!(repo.operation_kind()?, Some("unmerged-index"));
+		assert!(repo.operation_in_progress()?);
+		fs::write(root.join("conflict.txt"), "resolved\n")?;
+		git(root, &["add", "conflict.txt"])?;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		Ok(())
+	}
+
+	#[test]
 	fn bounded_logs_read_only_the_requested_prefix_like_git_log() -> TestResult {
 		let (dir, repo) = repo()?;
 		commit(dir.path(), "one", "one\n", "first")?;
@@ -1706,7 +1800,10 @@ mod tests {
 				.collect();
 		assert_eq!(repo.log_onelines(2)?, expected_onelines);
 		assert_eq!(repo.rev_list_touching("HEAD", "two", 10)?, vec![second.clone()]);
-		assert_eq!(repo.ls_tree("HEAD", &[])?, vec!["one", "two"]);
+		assert_eq!(repo.ls_tree("HEAD", &[])?, vec![
+			TreeEntry { path: "one".to_owned(), mode: 0o100644 },
+			TreeEntry { path: "two".to_owned(), mode: 0o100644 },
+		]);
 		let shown = repo.show_blob("HEAD:two", Some(3))?;
 		assert_eq!(shown.bytes, b"two");
 		assert!(shown.truncated);

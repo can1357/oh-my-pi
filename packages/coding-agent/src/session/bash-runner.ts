@@ -5,6 +5,7 @@ import type { Settings } from "../config/settings";
 import {
 	type BashPtyOptions,
 	type BashResult,
+	drainAbortedShells,
 	executeBash as executeBashCommand,
 	releaseShellSessions,
 } from "../exec/bash-executor";
@@ -68,6 +69,8 @@ export interface BashRunnerHost {
 export class BashRunner {
 	readonly #host: BashRunnerHost;
 	#abortControllers = new Set<AbortController>();
+	/** Session ids of cancelled commands; a command keeps the id it started under across transitions. */
+	#cancelledSessionIds = new Set<string>();
 	#pendingMessages: PendingBashMessage[] = [];
 	#sessionTarget: BashSessionTarget;
 
@@ -143,6 +146,7 @@ export class BashRunner {
 			} finally {
 				this.#abortControllers.delete(abortController);
 			}
+			if (result.cancelled) this.#cancelledSessionIds.add(target.sessionId);
 			targetTransferred = true;
 			await this.#recordResultForTarget(target, command, result, options);
 			return result;
@@ -175,6 +179,11 @@ export class BashRunner {
 	/** Cancels every running bash command. */
 	abort(): void {
 		for (const abortController of this.#abortControllers) abortController.abort();
+	}
+
+	/** Waits for every cancelled command's native TERM→KILL cleanup, whichever session it started under. */
+	async drainCancelled(): Promise<void> {
+		await Promise.all([...this.#cancelledSessionIds].map(drainAbortedShells));
 	}
 
 	/** Whether a bash command is currently running. */

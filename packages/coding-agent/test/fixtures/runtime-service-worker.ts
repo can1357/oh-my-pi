@@ -5,6 +5,8 @@ import {
 	type AsyncJobRunResult,
 } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
+import { runEvalWait } from "../../src/eval/handle-bridge";
+import type { JsStatusEvent } from "../../src/eval/js/shared/types";
 import { TextTap } from "../../src/job-widgets/text-tap";
 import type { ArtifactManagerApi } from "../../src/session/artifacts";
 import { CostCapError, type CostGateApi } from "../../src/session/cost-gate";
@@ -15,6 +17,7 @@ import { RemoteAsyncJob, RemoteAsyncJobManager } from "../../src/thread/services
 import { runtimeThreadService } from "../../src/thread/services/runtime";
 import { RemoteArtifactManager, RemoteCostGate, RemoteEventBus } from "../../src/thread/services/runtime-remote";
 import { settingsThreadService } from "../../src/thread/services/settings";
+import type { ToolSession } from "../../src/tools";
 import { EventBus, emitSubagentFrame } from "../../src/utils/event-bus";
 
 /** Worker-side probe the test calls through the function it registers at boot. */
@@ -26,13 +29,23 @@ if (!port) throw new Error("fixture must run in a worker");
 interface Body {
 	finish: PromiseWithResolvers<string | AsyncJobRunResult>;
 	signal?: AbortSignal;
-	report?: (text: string) => Promise<void>;
+	report?: (text: string, assignment?: string) => Promise<void>;
 	tap?: TextTap;
 }
 
 const bodies = new Map<string, Body>();
 const deliveries: unknown[] = [];
 const events: unknown[] = [];
+const waitStarts = new Map<string, PromiseWithResolvers<void>>();
+
+function waitStart(id: string): PromiseWithResolvers<void> {
+	let started = waitStarts.get(id);
+	if (!started) {
+		started = Promise.withResolvers<void>();
+		waitStarts.set(id, started);
+	}
+	return started;
+}
 
 function manager(value: unknown): AsyncJobManagerApi {
 	if (!(value instanceof RemoteAsyncJobManager)) throw new Error("expected a remote job manager");
@@ -60,7 +73,8 @@ function registerBody(jobs: AsyncJobManagerApi, ownerId: string, withInputs: boo
 		"fixture job",
 		async ({ signal, reportProgress, markRunning }) => {
 			entry.signal = signal;
-			entry.report = text => reportProgress(text);
+			entry.report = (text, assignment) =>
+				reportProgress(text, assignment ? { progress: [{ assignment }] } : undefined);
 			markRunning();
 			const aborted = Promise.withResolvers<never>();
 			signal.addEventListener("abort", () => aborted.reject(new Error("aborted")), { once: true });
@@ -94,7 +108,7 @@ const probe: RuntimeProbe = async (op, ...args) => {
 		case "register":
 			return registerBody(manager(args[0]), String(args[1]), args[2] === true);
 		case "progress":
-			await body(args[0]).report?.(String(args[1]));
+			await body(args[0]).report?.(String(args[1]), typeof args[2] === "string" ? args[2] : undefined);
 			return true;
 		case "finish":
 			body(args[0]).finish.resolve(String(args[1]));
@@ -123,6 +137,34 @@ const probe: RuntimeProbe = async (op, ...args) => {
 				status: settled?.status,
 				resultText: settled?.resultText,
 			};
+		}
+		case "awaitWaitStart": {
+			await waitStart(String(args[0])).promise;
+			return true;
+		}
+		case "evalWait":
+		case "evalWaitProgress": {
+			const jobs = manager(args[0]);
+			const session: ToolSession = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+				getSessionSpawns: () => null,
+				getAgentId: () => String(args[1]),
+				asyncJobManager: jobs,
+			};
+			const items = args.slice(2).map(id => ({ kind: "agent", id: String(id) }));
+			const statusEvents: JsStatusEvent[] = [];
+			const pending = runEvalWait(
+				{ items, timeoutMs: 5_000 },
+				{ session, emitStatus: op === "evalWaitProgress" ? event => statusEvents.push(event) : undefined },
+			);
+			for (const item of items) waitStart(item.id).resolve();
+			const result = await pending;
+			return op === "evalWaitProgress"
+				? { result, progress: statusEvents.filter(event => event.op === "agent") }
+				: result;
 		}
 		case "localInputs": {
 			const job = manager(args[0]).getJob(String(args[1]));

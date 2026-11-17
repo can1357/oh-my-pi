@@ -1447,24 +1447,27 @@ describe("formatUsageBreakdown", () => {
 		},
 		{ mode: "unset", verdict: "→ an open interactive omp session asks before spending it", lost: false },
 		{ mode: "no", verdict: "→ not spent automatically", lost: true },
-	])("says what codexResets.autoRedeem=$mode does with an expiring reset", ({ mode, verdict, lost }) => {
-		const now = Date.parse("2026-01-01T00:00:00.000Z");
-		const report = codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] });
-		const text = stripVTControlCharacters(
-			formatUsageBreakdown(
-				[report],
-				[],
-				now,
-				undefined,
-				[],
-				undefined,
-				resetExpiryOptions({ "codexResets.autoRedeem": mode }),
-			),
-		);
-		expect(text).toContain(`${verdict}  (codexResets.autoRedeem: ${mode})\n`);
-		expect(text.includes("within 24h and will be lost")).toBe(lost);
-		expect(text).toContain(lost ? "spend it:  /usage reset" : "or now:  /usage reset");
-	});
+	])(
+		"says what codexResets.autoRedeemWeekly=$mode does with a weekly-governed expiring reset",
+		({ mode, verdict, lost }) => {
+			const now = Date.parse("2026-01-01T00:00:00.000Z");
+			const report = codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] });
+			const text = stripVTControlCharacters(
+				formatUsageBreakdown(
+					[report],
+					[],
+					now,
+					undefined,
+					[],
+					undefined,
+					resetExpiryOptions({ "codexResets.autoRedeemWeekly": mode }),
+				),
+			);
+			expect(text).toContain(`${verdict}  (codexResets.autoRedeemWeekly: ${mode})\n`);
+			expect(text.includes("within 24h and will be lost")).toBe(lost);
+			expect(text).toContain(lost ? "spend it:  /usage reset" : "or now:  /usage reset");
+		},
+	);
 
 	it("decides each provider's expiring reset by its own setting", () => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
@@ -1472,11 +1475,31 @@ describe("formatUsageBreakdown", () => {
 			codexResetReport({ nowMs: now, accountId: "ws-team", weeklyUsed: 1, expiresInMs: [6 * HOUR] }),
 			claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.6 }, [cedarGrant(now, "cedar", 3 * HOUR)]),
 		];
-		const options = resetExpiryOptions({ "codexResets.autoRedeem": "yes", "claudeResets.autoRedeem": "no" });
+		const options = resetExpiryOptions({
+			"codexResets.autoRedeemWeekly": "yes",
+			"claudeResets.autoRedeemWeekly": "no",
+		});
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now, undefined, [], undefined, options));
 		expect(text).toContain("▲ 2 saved resets expire within 24h\n");
-		expect(text).toContain("(codexResets.autoRedeem: yes)");
-		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeem: no)");
+		expect(text).toContain("(codexResets.autoRedeemWeekly: yes)");
+		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
+	});
+
+	it("counts only expiring resets that the warned reset's setting decides", () => {
+		const now = Date.parse("2026-01-01T00:00:00.000Z");
+		const fable = cedarGrant(now, "fable", 12 * HOUR, { clears: ["anthropic:5h", "anthropic:7d:fable"] });
+		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.8, "anthropic:7d:fable": 0.6 }, [
+			cedarGrant(now, "cedar", 6 * HOUR),
+			fable,
+		]);
+		const options = resetExpiryOptions({
+			"claudeResets.autoRedeemWeekly": "no",
+			"claudeResets.autoRedeemFable": "yes",
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
+		// The Fable reset follows its own key, so the weekly verdict covers the Cedar reset alone.
+		expect(text).toContain("▲ 1 saved reset expires within 24h and will be lost\n");
+		expect(text).toContain("→ not spent automatically  (claudeResets.autoRedeemWeekly: no)");
 	});
 
 	it.each([
@@ -1511,12 +1534,12 @@ describe("formatUsageBreakdown", () => {
 	])("counts $name among the expiring Claude resets", ({ grants, header, title, eligibleNow }) => {
 		const now = Date.parse("2026-01-01T00:00:00.000Z");
 		const report = claudeResetReport(now, { "anthropic:5h": 0.1, "anthropic:7d": 0.5 }, grants(now));
-		const options = resetExpiryOptions({ "claudeResets.autoRedeem": "yes" });
+		const options = resetExpiryOptions({ "claudeResets.autoRedeemWeekly": "yes" });
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
 		expect(text).toContain(header);
 		expect(text).toContain(title);
 		expect(text).toContain(
-			`→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)${eligibleNow ? "" : " · not eligible now"}\n`,
+			`→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeemWeekly: yes)${eligibleNow ? "" : " · not eligible now"}\n`,
 		);
 		// Only a reset the provider lets omp spend now gets a command that spends it.
 		expect(text.includes("/usage reset")).toBe(eligibleNow);
@@ -1557,13 +1580,15 @@ describe("formatUsageBreakdown", () => {
 			fetchedAt: now - fetchedAgoMs,
 		};
 		const options = resetExpiryOptions({
-			"claudeResets.autoRedeem": "yes",
+			"claudeResets.autoRedeem5h": "yes",
+			"claudeResets.autoRedeemWeekly": "yes",
 			"claudeResets.salvageHorizonHours": 0,
 		});
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], now, undefined, [], undefined, options));
-		const verdict =
-			"→ an open interactive omp session spends it by its last 5 min if eligible then  (claudeResets.autoRedeem: yes)";
-		expect(text).toContain(eligibleNow ? `${verdict}\n` : `${verdict} · not eligible now\n`);
+		const verdict = text.match(
+			/→ an open interactive omp session spends it by its last 5 min if eligible then {2}\(claudeResets\.autoRedeem\w+: yes\)(.*)\n/,
+		);
+		expect(verdict?.[1]).toBe(eligibleNow ? "" : " · not eligible now");
 		expect(text).not.toContain("will be lost");
 		expect(text).toContain("or now:  /usage reset");
 	});

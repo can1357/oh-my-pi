@@ -280,7 +280,9 @@ describe("Factory Droid anthropic wire (Claude)", () => {
 		["claude-sonnet-5-5", "azure_anthropic", true],
 		// Haiku 5.5 is the third prefix-bound model droid serves on Azure.
 		["claude-haiku-5-5", "azure_anthropic", true],
-		["claude-opus-5-5", "anthropic", false],
+		["claude-opus-5-5", "anthropic", true],
+		["claude-haiku-5-5", "anthropic", true],
+		["claude-fable-5.1", "anthropic", true],
 		["claude-sonnet-5-5", "vertex_anthropic", false],
 		["claude-opus-4-8", "azure_anthropic", false],
 	] as const)("%s via %s binds thinking to drop stale blocks: %p", async (id, upstream, bound) => {

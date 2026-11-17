@@ -16,6 +16,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import * as sessionContext from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { FileSessionStorage, sessionStagingPath } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import {
 	getAgentDir,
@@ -2904,5 +2905,424 @@ describe("runGcCommand session compression", () => {
 		expect(await scheduleGcAutoCompress(root)).toBeUndefined();
 		expect(await Bun.file(path.join(root, GC_AUTO_COMPRESS_LOG)).text()).toContain("compress skipped: unsupported");
 		expect(await snapshot(file)).toEqual(before);
+	});
+});
+
+describe("runGcCommand replay data stripping", () => {
+	const header = (id: string) =>
+		JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z", cwd: "/tmp" });
+	const assistant = (content: unknown[], extra: Record<string, unknown> = {}) =>
+		JSON.stringify({
+			type: "message",
+			message: {
+				role: "assistant",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-opus-4-5",
+				stopReason: "stop",
+				content,
+				...extra,
+			},
+		});
+	const toolResult = (toolCallId: string, content: unknown[] = [{ type: "text", text: "ok" }]) =>
+		JSON.stringify({
+			type: "message",
+			message: { role: "toolResult", toolCallId, toolName: "read", isError: false, content },
+		});
+	const prompt = (text: string) =>
+		JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } });
+
+	/**
+	 * Two turns carrying replay data. The first is eligible. The second is the
+	 * issue's latest turn — two signed tool-call responses joined by their tool
+	 * results, which a provider replays as one assistant message and validates as
+	 * a unit — followed by an aborted thinking-only response no replay sends.
+	 */
+	function replayLines(id: string): string[] {
+		return [
+			header(id),
+			assistant(
+				[
+					{ type: "thinking", thinking: "earlier", thinkingSignature: "EqQBearly", itemId: "rs_0" },
+					{ type: "toolCall", id: "call_0", name: "read", arguments: { path: "p" }, thoughtSignature: "c2ln" },
+				],
+				{ stopReason: "toolUse" },
+			),
+			toolResult("call_0", [
+				{
+					type: "image",
+					data: "",
+					mimeType: "application/octet-stream",
+					providerFile: { provider: "openai", id: "file_ref" },
+				},
+			]),
+			// Replay state with no copy elsewhere: a reasoning source field, a text phase, a snapshot history.
+			assistant(
+				[
+					{ type: "thinking", thinking: "field", thinkingSignature: "reasoning_content" },
+					{ type: "text", text: "noted", textSignature: '{"v":1,"id":"msg_1","phase":"commentary"}' },
+				],
+				{ providerPayload: { type: "openaiResponsesHistory", provider: "openai-codex", items: [] } },
+			),
+			prompt("keep going"),
+			assistant(
+				[
+					{ type: "thinking", thinking: "plan", thinkingSignature: "EqQBsigned", itemId: "rs_1" },
+					{ type: "redactedThinking", data: "EmwKencrypted" },
+					{
+						type: "toolCall",
+						id: "call_1",
+						name: "read",
+						arguments: { path: "a" },
+						thoughtSignature: "c2ln",
+						partialArgs: '{"path":"a"}',
+						streamIndex: 0,
+					},
+				],
+				{
+					stopReason: "toolUse",
+					requestControls: { messageIndex: 1 },
+					providerPayload: {
+						type: "openaiResponsesHistory",
+						provider: "openai-codex",
+						dt: true,
+						items: [{ type: "reasoning", encrypted_content: "gAAAA" }],
+					},
+				},
+			),
+			toolResult("call_1", [
+				{
+					type: "image",
+					data: "aGk=",
+					mimeType: "image/png",
+					providerFile: { provider: "openai", id: "file_1" },
+				},
+			]),
+			assistant(
+				[
+					{ type: "thinking", thinking: "second", thinkingSignature: "EqQBsecond", itemId: "rs_2" },
+					{ type: "toolCall", id: "call_2", name: "read", arguments: { path: "b" }, thoughtSignature: "c2ln" },
+				],
+				{ stopReason: "toolUse" },
+			),
+			toolResult("call_2"),
+			assistant([{ type: "thinking", thinking: "", thinkingSignature: "EqQBcut" }], { stopReason: "aborted" }),
+		];
+	}
+
+	async function writeTranscript(file: string, lines: string[], ageDays: number): Promise<void> {
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await Bun.write(file, `${lines.join("\n")}\n`);
+		await agePath(file, ageDays);
+	}
+
+	async function writeReplaySession(id: string, ageDays = 40): Promise<string> {
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		await writeTranscript(file, replayLines(id), ageDays);
+		return file;
+	}
+
+	function expectStripped(lines: string[], original: string[]): void {
+		expect(lines).toHaveLength(original.length);
+		expect(lines[0]).toBe(original[0]);
+		// The earlier turn loses every piece of replay data it carried.
+		expect(JSON.parse(lines[1]).message.content).toEqual([
+			{ type: "thinking", thinking: "earlier" },
+			{ type: "toolCall", id: "call_0", name: "read", arguments: { path: "p" } },
+		]);
+		// Reference-only images and state with no copy elsewhere stay intact outside the kept turn.
+		expect(lines[2]).toBe(original[2]);
+		expect(lines[3]).toBe(original[3]);
+		expect(lines[4]).toBe(original[4]);
+		// The latest turn replays natively, so both of its signed responses keep
+		// their blocks, its tool result keeps its uploaded-file reference, and its
+		// request controls and cached history stay as they were.
+		for (const index of [5, 6, 7, 8]) expect(lines[index]).toBe(original[index]);
+		// The aborted response after it never reaches a replay, so it is not kept.
+		expect(JSON.parse(lines[9]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
+	}
+
+	test("a trailing turn dropped on resume leaves the earlier turn latest", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		const lines = [
+			header(id),
+			assistant(
+				[
+					{ type: "thinking", thinking: "step 1", thinkingSignature: "EqQBstep1" },
+					{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" }, thoughtSignature: "c2ln" },
+				],
+				{ stopReason: "toolUse" },
+			),
+			toolResult("call_1"),
+			assistant([
+				{ type: "thinking", thinking: "kept", thinkingSignature: "EqQBkept" },
+				{ type: "text", text: "answer" },
+			]),
+			prompt("one more"),
+			// Failed with partial text: session-context drops it on resume, so it
+			// must neither keep its signature nor displace the earlier turn.
+			assistant(
+				[
+					{ type: "thinking", thinking: "failed", thinkingSignature: "EqQBfail" },
+					{ type: "text", text: "partial output" },
+				],
+				{ stopReason: "error" },
+			),
+			// Cut off before any content: dropped on replay too.
+			assistant([{ type: "thinking", thinking: "", thinkingSignature: "EqQBcut" }], { stopReason: "aborted" }),
+		];
+		await writeTranscript(file, lines, 40);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ wouldStrip: 1, stripped: 1, records: 2 });
+		const after = (await Bun.file(file).text()).split("\n").slice(0, -1);
+		expect(after[1]).toBe(lines[1]);
+		expect(after[2]).toBe(lines[2]);
+		expect(after[3]).toBe(lines[3]);
+		expect(JSON.parse(after[5]).message.content).toEqual([
+			{ type: "thinking", thinking: "failed" },
+			{ type: "text", text: "partial output" },
+		]);
+		expect(JSON.parse(after[6]).message.content).toEqual([{ type: "thinking", thinking: "" }]);
+	});
+
+	test("resume rules keep the latest turn across excluded commands, mid-loop compaction, branching, and key order", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = path.join(getSessionsDir(root), "project", `${id}.jsonl`);
+		const lines = [
+			header(id),
+			// Summarized away before firstKeptEntryId: stripped.
+			JSON.stringify({
+				type: "message",
+				id: "pre_compact",
+				parentId: null,
+				message: {
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "stop",
+					content: [
+						{ type: "thinking", thinking: "old", thinkingSignature: "EqQBold" },
+						{ type: "text", text: "old answer" },
+					],
+				},
+			}),
+			// Retained by compaction (firstKeptEntryId = "turn_a"), with `message`
+			// before `type` and `content` before `role`.
+			JSON.stringify({
+				id: "turn_a",
+				parentId: "pre_compact",
+				message: {
+					content: [
+						{ type: "thinking", thinking: "step A", thinkingSignature: "EqQBsignedA" },
+						{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a" }, thoughtSignature: "c2lnA" },
+					],
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "toolUse",
+				},
+				type: "message",
+			}),
+			JSON.stringify({
+				type: "message",
+				id: "tr_a",
+				parentId: "turn_a",
+				message: {
+					role: "toolResult",
+					toolCallId: "call_a",
+					toolName: "read",
+					isError: false,
+					content: [{ type: "text", text: "ok" }],
+				},
+			}),
+			// Hidden `!!` command excluded from provider input: does not split the turn.
+			JSON.stringify({
+				type: "message",
+				id: "hidden_bash",
+				parentId: "tr_a",
+				message: {
+					role: "bashExecution",
+					command: "pwd",
+					output: "/tmp",
+					cancelled: false,
+					excludeFromContext: true,
+				},
+			}),
+			// Mid-loop compaction retaining `turn_a`: summary is placed before `turn_a` on resume.
+			JSON.stringify({
+				type: "compaction",
+				id: "compact_1",
+				parentId: "hidden_bash",
+				summary: "compacted prefix",
+				firstKeptEntryId: "turn_a",
+				tokensBefore: 1000,
+			}),
+			// Abandoned user prompt on a sibling branch in file order: not on the active path.
+			JSON.stringify({
+				type: "message",
+				id: "abandoned_user",
+				parentId: "pre_compact",
+				message: { role: "user", content: [{ type: "text", text: "abandoned branch" }] },
+			}),
+			// Continues from `compact_1`, with `content` before `role`.
+			JSON.stringify({
+				id: "turn_b",
+				parentId: "compact_1",
+				message: {
+					content: [
+						{ type: "thinking", thinking: "step B", thinkingSignature: "EqQBsignedB" },
+						{ type: "text", text: "final answer" },
+					],
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "stop",
+				},
+				type: "message",
+			}),
+			// Off-branch response at the tail that preserves `activeLeafId: "turn_b"`: stripped.
+			JSON.stringify({
+				type: "message",
+				id: "off_branch",
+				parentId: "abandoned_user",
+				activeLeafId: "turn_b",
+				message: {
+					role: "assistant",
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-opus-4-5",
+					stopReason: "stop",
+					content: [
+						{ type: "thinking", thinking: "abandoned", thinkingSignature: "EqQBabandoned" },
+						{ type: "text", text: "unused" },
+					],
+				},
+			}),
+		];
+		await writeTranscript(file, lines, 40);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ wouldStrip: 1, stripped: 1, records: 2 });
+		const after = (await Bun.file(file).text()).split("\n").slice(0, -1);
+		expect(JSON.parse(after[1]).message.content).toEqual([
+			{ type: "thinking", thinking: "old" },
+			{ type: "text", text: "old answer" },
+		]);
+		expect(after[2]).toBe(lines[2]);
+		expect(after[3]).toBe(lines[3]);
+		expect(after[7]).toBe(lines[7]);
+		expect(JSON.parse(after[8]).message.content).toEqual([
+			{ type: "thinking", thinking: "abandoned" },
+			{ type: "text", text: "unused" },
+		]);
+	});
+
+	test("skips a transcript when a protected message loses its line index", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = await writeReplaySession(id);
+		const before = await Bun.file(file).text();
+		const realBuild = sessionContext.buildSessionContext;
+		const spy = spyOn(sessionContext, "buildSessionContext").mockImplementation((...args) => {
+			const built = realBuild(...args);
+			return { ...built, messages: built.messages.map(message => structuredClone(message)) };
+		});
+		try {
+			const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+			expect(result.strip).toMatchObject({ scanned: 1, wouldStrip: 0, stripped: 0, records: 0, errors: [] });
+		} finally {
+			spy.mockRestore();
+		}
+		expect(await Bun.file(file).text()).toBe(before);
+	});
+
+	test("--apply strips idle transcripts except their latest replay turn, keeping mtimes and permissions", async () => {
+		const id = Bun.randomUUIDv7();
+		const file = await writeReplaySession(id);
+		const subagentId = Bun.randomUUIDv7();
+		const subagent = path.join(file.slice(0, -".jsonl".length), "0-Explore.jsonl");
+		const subagentLines = [
+			header(subagentId),
+			assistant([{ type: "thinking", thinking: "look", thinkingSignature: "EqQBsub" }], { stopReason: "toolUse" }),
+			toolResult("call_9"),
+			prompt("and?"),
+			assistant([{ type: "text", text: "found" }], { requestControls: { messageIndex: 3 } }),
+		];
+		await writeTranscript(subagent, subagentLines, 40);
+		await fs.chmod(file, 0o600);
+		await fs.chmod(subagent, 0o600);
+		// Windows maps 0o600 to its own read/write bits; the contract is "unchanged by the rewrite".
+		const before = await Promise.all([file, subagent].map(target => fs.stat(target)));
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ scanned: 1, skippedLive: 0, wouldStrip: 2, stripped: 2, records: 3 });
+		expect(result.strip?.errors).toEqual([]);
+		expectStripped((await Bun.file(file).text()).split("\n").slice(0, -1), replayLines(id));
+		const subagentAfter = (await Bun.file(subagent).text()).split("\n");
+		expect(JSON.parse(subagentAfter[1]).message.content).toEqual([{ type: "thinking", thinking: "look" }]);
+		// The subagent's own latest turn replays natively too.
+		expect(subagentAfter[4]).toBe(subagentLines[4]);
+		for (const [index, target] of [file, subagent].entries()) {
+			const stat = await fs.stat(target);
+			expect(stat.mtimeMs).toBeCloseTo(before[index].mtimeMs, 0);
+			expect(stat.mode).toBe(before[index].mode);
+		}
+
+		const rerun = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+		expect(rerun.strip).toMatchObject({ wouldStrip: 0, stripped: 0 });
+	});
+
+	test("a dry run rewrites nothing, and recent or leased sessions are never stripped", async () => {
+		const idle = await writeReplaySession(Bun.randomUUIDv7());
+		const recent = await writeReplaySession(Bun.randomUUIDv7(), 10);
+		// Unique per run: the lease is machine-wide.
+		const heldId = Bun.randomUUIDv7();
+		const held = await writeReplaySession(heldId);
+		const release = new FileSessionStorage().claimSession(heldId, held);
+		if (!release) throw new Error("Expected to claim the session lease");
+		const targets = [idle, recent, held];
+		const before = await Promise.all(targets.map(target => Bun.file(target).text()));
+		let dryRun: GcResult;
+		let applied: GcResult;
+		try {
+			dryRun = await runGcCommand({ flags: { agentDir: root, strip: true } });
+			expect(await Promise.all(targets.map(target => Bun.file(target).text()))).toEqual(before);
+			applied = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+		} finally {
+			release();
+		}
+
+		expect(dryRun.strip).toMatchObject({ scanned: 3, skippedLive: 1, wouldStrip: 1, stripped: 0, records: 2 });
+		expect(dryRun.strip?.bytes).toBeGreaterThan(0);
+		expect(applied.strip).toMatchObject({ skippedLive: 1, wouldStrip: 1, stripped: 1 });
+		expect(await Bun.file(recent).text()).toBe(before[1]);
+		expect(await Bun.file(held).text()).toBe(before[2]);
+	});
+
+	test("archived sessions are stripped inside their gzip archive", async () => {
+		const id = Bun.randomUUIDv7();
+		const archive = path.join(root, "archive", "sessions", "project", `${id}.jsonl.gz`);
+		await fs.mkdir(path.dirname(archive), { recursive: true });
+		await Bun.write(archive, gzipSync(`${replayLines(id).join("\n")}\n`));
+		await fs.chmod(archive, 0o600);
+		await agePath(archive, 40);
+		const { mode } = await fs.stat(archive);
+
+		const result = await runGcCommand({ flags: { agentDir: root, strip: true, apply: true } });
+
+		expect(result.strip).toMatchObject({ scanned: 0, wouldStrip: 1, stripped: 1, errors: [] });
+		expect((await fs.stat(archive)).mode).toBe(mode);
+		const lines = gunzipSync(await Bun.file(archive).bytes())
+			.toString()
+			.split("\n")
+			.slice(0, -1);
+		expectStripped(lines, replayLines(id));
 	});
 });

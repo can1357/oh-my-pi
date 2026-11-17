@@ -95,12 +95,26 @@ pub const KILL_EXIT_CODE: u32 = 137;
 pub const CONTROL_C_EXIT: u32 = 0xc000_013a;
 
 /// Classify a Windows exit code: our own job kill reads as
-/// `Signaled(KILL)`, the console-control exit as the signal we mapped to
-/// `CTRL_BREAK` (`console`, else INT), anything else as a plain exit.
+/// `Signaled(KILL)`, the console-control exit as the signal we mapped to a
+/// console control event (`console`, else INT), anything else as a plain
+/// exit. An MSYS or Cygwin program killed by signal S exits with `S << 8`
+/// (its runtime hands a parent it did not start the Unix wait status
+/// byte-swapped): that reads as `Signaled(S)`, in the runtime's BSD
+/// numbering.
 pub fn exit_status(code: u32, killed: bool, console: Option<Signal>) -> ExitStatus {
+	let msys_signal = || {
+		let n = u8::try_from(code >> 8).ok()? & 0x7f;
+		Signal::from_number(n, crate::bash::Platform::MacOs)
+	};
 	match code {
 		KILL_EXIT_CODE if killed => ExitStatus::Signaled(Signal::Kill),
 		CONTROL_C_EXIT => ExitStatus::Signaled(console.unwrap_or(Signal::Int)),
+		0x100..=0xffff
+			if code & 0xff == 0
+				&& let Some(sig) = msys_signal() =>
+		{
+			ExitStatus::Signaled(sig)
+		},
 		code => ExitStatus::Exited(code as i32),
 	}
 }
@@ -192,5 +206,10 @@ mod tests {
 		);
 		assert_eq!(exit_status(CONTROL_C_EXIT, false, None), ExitStatus::Signaled(Signal::Int));
 		assert_eq!(exit_status(3, true, None), ExitStatus::Exited(3));
+		// An MSYS program's SIGINT and SIGTERM (`S << 8`); a code with a low
+		// byte is a plain exit.
+		assert_eq!(exit_status(2 << 8, false, None), ExitStatus::Signaled(Signal::Int));
+		assert_eq!(exit_status(15 << 8, false, None), ExitStatus::Signaled(Signal::Term));
+		assert_eq!(exit_status(0x201, false, None), ExitStatus::Exited(0x201));
 	}
 }

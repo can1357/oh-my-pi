@@ -339,13 +339,6 @@ describe("Factory Droid offline seed", () => {
 		expect(ids).toContain(PLAIN);
 	});
 
-	it("names Opus 5.5's refusal fallback offline, where every unblocked model is available", () => {
-		const models = factoryDroidModelManagerOptions().staticModels ?? [];
-		expect(models.find(model => model.id === "claude-opus-5-5")?.factoryDroidRefusalFallbacks).toEqual([
-			"claude-opus-5",
-		]);
-	});
-
 	it("keeps offline EU models on the EU host with EU rotations", () => {
 		const models = factoryDroidModelManagerOptions({ region: "eu" }).staticModels ?? [];
 		expect(models.some(model => model.id === "kimi-k3")).toBe(false);
@@ -586,7 +579,7 @@ describe("Factory Droid discovery gates", () => {
 		expect(ids).toContain("deepseek-v4.1-flash");
 	});
 
-	it("lists models whose flags droid 1.1.0 retired with those flags off", async () => {
+	it("lists models whose flags droid 1.1.0 and 1.7.0 retired with those flags off", async () => {
 		const ids = await discoverIds({
 			flags: {
 				claude_opus_5_5_fast: false,
@@ -594,6 +587,7 @@ describe("Factory Droid discovery gates", () => {
 				minimax_m3: false,
 				gpt_6_fast_modes: false,
 				muse_spark_1_2: false,
+				muse_spark_1_3: false,
 			},
 		});
 		const retired = [
@@ -603,12 +597,22 @@ describe("Factory Droid discovery gates", () => {
 			"gpt-6-sol-fast",
 			"gpt-6-luna-fast",
 			"muse-spark-1.2",
+			"muse-spark-1.3",
 		];
 		for (const id of retired) expect(ids).toContain(id);
 	});
 
-	it("gates droid 1.1.0's new models on their live flags and Ultra Fast on the high-cost opt-in", async () => {
-		const gated = ["gpt-6.1-terra", "nemotron-3.5-super", "muse-spark-open", "beam-1.0", "gpt-6-astra-ultrafast"];
+	it("gates droid 1.1.0's and 1.7's new models on their live flags and Ultra Fast on the high-cost opt-in", async () => {
+		const gated = [
+			"gpt-6.1-terra",
+			"nemotron-3.5-super",
+			"muse-spark-open",
+			"beam-1.0",
+			"gpt-6-astra-ultrafast",
+			"claude-fable-5.2",
+			"gemini-4-carbon",
+			"kimi-k3.1-pro",
+		];
 		const ultraFast = ["gpt-6-astra-ultrafast", "gpt-6.1-sol-ultrafast"];
 		const flagsOff = await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } });
 		for (const id of gated) expect(flagsOff).not.toContain(id);
@@ -621,7 +625,7 @@ describe("Factory Droid discovery gates", () => {
 		for (const id of [...gated, ...ultraFast]) expect(consented).toContain(id);
 	});
 
-	it("serves Muse Spark 1.3 from Vertex, Global only, behind its flag, on its own effort ladder", async () => {
+	it("serves Muse Spark 1.3 from Vertex, Global only, with images, on its own effort ladder", async () => {
 		const muse = registryModel("muse-spark-1.3");
 		expect(buildFactoryDroidModel(muse).thinking).toMatchObject({
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
@@ -630,10 +634,7 @@ describe("Factory Droid discovery gates", () => {
 		});
 		const global = (await discover())?.find(model => model.id === "muse-spark-1.3");
 		expect(global?.factoryDroidApiProviders).toEqual(["google"]);
-		expect(global?.input).toEqual(["text"]);
-		expect(await discoverIds({ flags: {}, modelPolicy: { allowAllFactoryModels: true } })).not.toContain(
-			"muse-spark-1.3",
-		);
+		expect(global?.input).toEqual(["text", "image"]);
 		for (const inferenceRegion of ["us", "eu"] as const) {
 			const regional = await discover({}, { inferenceRegion });
 			expect(regional?.map(model => model.id)).not.toContain("muse-spark-1.3");

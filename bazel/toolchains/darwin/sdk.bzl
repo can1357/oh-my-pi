@@ -95,3 +95,41 @@ macos_sdk_repository = repository_rule(
 )
 
 MACOS_SDK_DIR = _SDK
+
+def _rustc_sdk_env_file_impl(ctx):
+    settings = ctx.file.sdk_settings
+    out = ctx.actions.declare_file(ctx.label.name + ".env")
+    # rules_rust's process_wrapper expands ${pwd} immediately before spawning
+    # rustc, yielding an absolute path in the current action's execroot (not a
+    # repository-cache or sandbox path captured while generating this file).
+    # rustc queries the SDK before invoking clang, so clang's -isysroot cannot
+    # prevent its fallback to xcrun on Linux.
+    content = "SDKROOT=${{pwd}}/{}\n".format(settings.dirname) if settings else ""
+    ctx.actions.write(out, content)
+    return [DefaultInfo(files = depset([out]))]
+
+rustc_sdk_env_file = rule(
+    implementation = _rustc_sdk_env_file_impl,
+    doc = "Generates the SDK environment in the execution configuration.",
+    attrs = {
+        "sdk_settings": attr.label(
+            allow_single_file = True,
+            cfg = "exec",
+            doc = "SDKSettings.json on Linux; unset to retain native Xcode discovery.",
+        ),
+    },
+)
+
+def _rustc_sdk_env_impl(ctx):
+    return [ctx.attr._env[DefaultInfo]]
+
+rustc_sdk_env = rule(
+    implementation = _rustc_sdk_env_impl,
+    doc = "Supplies Rust link actions with the Linux cross SDK root while retaining native Xcode discovery.",
+    attrs = {
+        "_env": attr.label(
+            default = Label("//bazel/toolchains/darwin:rustc_sdk_env_file"),
+            cfg = "exec",
+        ),
+    },
+)

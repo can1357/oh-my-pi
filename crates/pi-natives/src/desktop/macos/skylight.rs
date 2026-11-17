@@ -24,7 +24,7 @@ use super::{
 	super::{
 		control,
 		error::{CoreResult, DesktopError, ErrorCode},
-		types::DesktopFocusReturn,
+		types::{DesktopFocusReturn, DesktopKeyboardReturn},
 	},
 	ax, capture,
 	key_reroute::KeyReroute,
@@ -36,10 +36,7 @@ use super::{
 
 const EVENT_RECORD_LENGTH: usize = 248;
 const EVENT_RECORD_LENGTH_BYTE: u8 = 0xf8;
-const EVENT_RECORD_KIND: u8 = 0x0d;
 const WINDOW_ID_OFFSET: usize = 0x3c;
-const FOCUS_MARKER_OFFSET: usize = 0x8a;
-const FOCUS_MARKER: u8 = 0x01;
 /// `kCPSUserGenerated`: lets `AppKit` install the requested native key window.
 const CPS_USER_GENERATED: u32 = 0x200;
 /// `kCPSNoWindows`: changes the front process without raising its windows.
@@ -73,6 +70,7 @@ const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
 const EXPIRED_FRONT_REQUEST: i32 = -13066;
 
 unsafe extern "C" {
+	fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
 	fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
 	fn CGEventSourceFlagsState(state: i32) -> u64;
 	fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
@@ -249,7 +247,7 @@ fn resolve_conditional_front() -> Option<ConditionalFront> {
 	Some(ConditionalFront { set_front: symbol(c"SLSSetFrontProcessWithInfo")?, timestamp_key })
 }
 
-fn event_ptr(event: &CGEvent) -> *mut c_void {
+const fn event_ptr(event: &CGEvent) -> *mut c_void {
 	std::ptr::from_ref(event).cast_mut().cast()
 }
 
@@ -385,16 +383,6 @@ pub(super) fn sender_connection() -> CoreResult<i64> {
 	Ok(i64::from(unsafe { (spi.main_connection)() }))
 }
 
-/// The 248-byte focus event record addressed to window `wid`.
-fn focus_record(wid: u32) -> [u8; EVENT_RECORD_LENGTH] {
-	let mut record = [0u8; EVENT_RECORD_LENGTH];
-	record[0x04] = EVENT_RECORD_LENGTH_BYTE;
-	record[0x08] = EVENT_RECORD_KIND;
-	record[WINDOW_ID_OFFSET..WINDOW_ID_OFFSET + 4].copy_from_slice(&wid.to_le_bytes());
-	record[FOCUS_MARKER_OFFSET] = FOCUS_MARKER;
-	record
-}
-
 /// One of the paired records (`kind` 0x01, then 0x02) that make window `wid`
 /// the native key window of its process.
 fn make_key_record(wid: u32, kind: u8) -> [u8; EVENT_RECORD_LENGTH] {
@@ -527,24 +515,44 @@ fn monitor_settled(baseline: MonitorProgress) -> bool {
 	}
 }
 
-/// Whether the user picked something since takeover began: a click or a
-/// shortcut the monitor classified as a choice. With Input Monitoring the
-/// monitor sees every key and press, and its count is complete once it has
-/// caught up with all `WindowServer` counted (`settled`), whichever of omp's
-/// own presses are still on their way; until then the user may have chosen.
-/// Without it the tap sees nothing, which leaves the HID press counters net
-/// of omp's own presses (`counters_show_press`); keys are then known only to
-/// `WindowServer`, which refuses the hand-back for those after its timestamp.
-fn takeover_user_chose(
+/// What the user picked during a stretch of takeover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UserChoice {
+	/// No click or shortcut of theirs.
+	None,
+	/// A click or a shortcut the monitor classified as a choice.
+	Made,
+	/// The monitor has not caught up with all `WindowServer` counted, so one
+	/// may still be on its way.
+	Pending,
+}
+
+/// Whether the user picked something since the baselines were read: a click
+/// or a shortcut the monitor classified as a choice. With Input Monitoring
+/// the monitor sees every key and press, and its count is complete once it
+/// has caught up with all `WindowServer` counted (`settled`), whichever of
+/// omp's own presses are still on their way. Without it the tap sees nothing,
+/// which leaves the HID press counters net of omp's own presses
+/// (`counters_show_press`); keys are then known only to `WindowServer`, which
+/// refuses the hand-back for those after its timestamp.
+fn takeover_user_choice(
 	monitor_sees_input: bool,
 	settled: impl FnOnce() -> bool,
 	choices_changed: impl FnOnce() -> bool,
 	counters_show_press: impl FnOnce() -> bool,
-) -> bool {
-	if monitor_sees_input {
-		!settled() || choices_changed()
+) -> UserChoice {
+	let made = if monitor_sees_input {
+		if !settled() {
+			return UserChoice::Pending;
+		}
+		choices_changed()
 	} else {
 		counters_show_press()
+	};
+	if made {
+		UserChoice::Made
+	} else {
+		UserChoice::None
 	}
 }
 
@@ -610,6 +618,33 @@ const PICK_WATCH: Duration = Duration::from_secs(1);
 /// How often [`FrontApp::keep_in_front`] checks the front app; a keystroke
 /// typed between an activation and the next check goes to the activated app.
 const HOLD_POLL: Duration = Duration::from_millis(2);
+
+/// The flags a held modifier shows in the HID state: ⇧, ⌃, ⌥, ⌘ and fn
+/// (`kCGEventFlagMaskShift | Control | Alternate | Command | SecondaryFn`).
+/// Caps Lock's alpha-shift flag is left out: it is a lock, set from the press
+/// that turns it on to the one that turns it off.
+const HELD_MODIFIERS: u64 = 0x0002_0000 | SWITCH_MODIFIERS | OPTION_MODIFIER | 0x0080_0000;
+
+/// Whether the user holds a modifier or a mouse button in the HID system
+/// state. Holding one makes no new presses, so a takeover's pause waits for it
+/// to be let go ([`control::intervention::admit_takeover`]). Any other key
+/// repeats while it is held, and the repeats keep that pause waiting already;
+/// read as held instead, a key a program posts down and never releases would
+/// hold every takeover off, since nothing the user types releases it.
+pub(crate) fn input_held() -> bool {
+	held(
+		// SAFETY: a read-only query of the HID system state.
+		unsafe { CGEventSourceFlagsState(HID_SYSTEM_STATE) },
+		// SAFETY: as above, with a mouse button number in the range
+		// CGEventSource.h defines.
+		|button| unsafe { CGEventSourceButtonState(HID_SYSTEM_STATE, button) },
+	)
+}
+
+/// [`input_held`] over the given HID flags and button state.
+fn held(flags: u64, button_down: impl Fn(u32) -> bool) -> bool {
+	flags & HELD_MODIFIERS != 0 || (0..32u32).any(button_down)
+}
 
 /// The HID counters of `MOUSE_BUTTON_EVENTS`.
 fn hid_buttons() -> [u32; 6] {
@@ -1130,7 +1165,7 @@ fn pointer_over(pid: pid_t) -> bool {
 		return false;
 	};
 	let point = CGEvent::location(Some(&event));
-	ax::point_owner(point.x, point.y).is_some_and(|owner| owner.pid == pid)
+	ax::point_owner(point.x, point.y).is_some_and(|(owner, _)| owner.pid == pid)
 }
 
 /// Whether the user has come to the background target since its guard
@@ -1309,9 +1344,12 @@ trait GuardedDesktop {
 	/// Puts the user's app back in front unless they pressed a key or clicked
 	/// after `since` ([`set_front_unless_user_acted`]).
 	fn hand_back(&self, since: u64) -> CoreResult<FrontRequest>;
-	/// Makes `key` the user's key window again; false if `WindowServer` rejected
-	/// it.
-	fn restore_key(&self, key: u32) -> bool;
+	/// Makes `key` the user's key window again unless they pressed a key or
+	/// clicked after `since` ([`make_window_key_unless_user_acted`]). Their
+	/// app's hand-back (`kCPSNoWindows`) leaves it with no key window, which
+	/// nothing outside the app can see, so this always sends the make-key
+	/// records when it is not refused.
+	fn restore_key(&self, key: u32, since: u64) -> CoreResult<FrontRequest>;
 	/// The name and pid of the app `psn`, for an error message.
 	fn describe(&self, psn: ProcessSerialNumber) -> String;
 	/// Whether the action and its settle are over.
@@ -1355,8 +1393,8 @@ impl GuardedDesktop for WindowServerDesktop<'_> {
 		set_front_unless_user_acted(self.spi, self.previous.psn, self.key.unwrap_or(0), since)
 	}
 
-	fn restore_key(&self, key: u32) -> bool {
-		post_record(self.spi.post_record, self.previous.psn, &focus_record(key))
+	fn restore_key(&self, key: u32, since: u64) -> CoreResult<FrontRequest> {
+		make_window_key_unless_user_acted(self.spi, self.previous.psn, key, since)
 	}
 
 	fn describe(&self, psn: ProcessSerialNumber) -> String {
@@ -1403,6 +1441,19 @@ fn guard_focus(
 		let signals = desktop.signals(now);
 		lease.lock().observe(front, key, signals, now)
 	};
+	// The make-key records carry a front request for the user's app, made
+	// conditional like the hand-back's and asked only while their app is
+	// still in front, so a switch of theirs that races it wins.
+	let restore = |key| {
+		request_after_check(
+			|| desktop.event_clock(),
+			|| desktop.front() == Some(previous),
+			|since| desktop.restore_key(key, since),
+		)
+		.map(|request| request == Some(FrontRequest::Done))
+	};
+	// A key window still to put back after `WindowServer` refused it.
+	let mut owed = None;
 	loop {
 		// Once disarmed, nothing is sent back any more, but the lease keeps
 		// watching for the user coming to the target.
@@ -1448,32 +1499,47 @@ fn guard_focus(
 					// in their app it is the one their app reports now that it is in
 					// front again: that click may have picked another of its
 					// windows, which is then the one the lease keeps. That read can
-					// block, so the window is put back only while their app is still
-					// in front and the lease armed, and the click is used up only
-					// then. Otherwise the re-check observed instead (a disarm it
-					// recorded stops the hand-backs from the next poll), or
-					// `WindowServer` refused.
+					// block, so the window is put back only while the lease is still
+					// armed, and the click is used up only then. Otherwise the
+					// re-check observed instead (a disarm it recorded stops the
+					// hand-backs from the next poll), or `WindowServer` refused.
 					if handed_back == Some(FrontRequest::Done) {
 						let (kept, own_click) = {
 							let lease = lease.lock();
 							(lease.key, lease.user.own_click_since(desktop.now()))
 						};
 						let fresh = if own_click { desktop.user_key() } else { None };
-						let current =
-							!own_click || (!lease.lock().disarmed && desktop.front() == Some(previous));
-						if current && let Some(key) = fresh.or(kept) {
-							if !desktop.restore_key(key) {
-								return Err(DesktopError::input_failed(
-									"background key-window restoration was rejected",
-								));
-							}
-							let mut lease = lease.lock();
-							lease.key = Some(key);
-							if own_click {
-								lease.user.own_click = None;
+						if (!own_click || !lease.lock().disarmed)
+							&& let Some(key) = fresh.or(kept)
+						{
+							owed = (!restore(key)?).then_some(key);
+							if owed.is_none() {
+								let mut lease = lease.lock();
+								lease.key = Some(key);
+								if own_click {
+									lease.user.own_click = None;
+								}
 							}
 						}
 					}
+				} else if let Some(key) = owed
+					&& front == previous
+				{
+					// A refused key window is asked for again while the user's app
+					// stays in front and the lease armed. Typing refuses it only
+					// for that instant; a click in their app picked a window,
+					// which is then key, and a switch away has disarmed the lease.
+					let chose = {
+						let lease = lease.lock();
+						lease.disarmed
+							|| lease.key != Some(key)
+							|| lease.user.own_click_since(desktop.now())
+					};
+					owed = if chose {
+						None
+					} else {
+						(!restore(key)?).then_some(key)
+					};
 				}
 			},
 		}
@@ -2077,17 +2143,20 @@ fn front_request(status: i32) -> CoreResult<FrontRequest> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserKey {
 	Window(u32),
-	/// It provably shows no window, as Finder after a click on the desktop or
-	/// an app that just closed its last window: only the front process is
-	/// restored.
+	/// It provably shows no window, as an app that just closed its last
+	/// window: only the front process is restored.
 	Windowless,
+	/// Its keyboard focus sits outside every window, as Finder's does on the
+	/// desktop after a click on it while its windows stay open: only the front
+	/// process is restored, which leaves that focus where it was.
+	OutsideWindows,
 }
 
 impl UserKey {
 	const fn window(self) -> Option<u32> {
 		match self {
 			Self::Window(id) => Some(id),
-			Self::Windowless => None,
+			Self::Windowless | Self::OutsideWindows => None,
 		}
 	}
 }
@@ -2095,8 +2164,10 @@ impl UserKey {
 /// The front application `pid`'s [`UserKey`]; `None` when neither its key
 /// window nor its windowlessness can be established.
 fn restoration_key(pid: pid_t) -> Option<UserKey> {
+	let (key, outside_windows) = ax::restoration_window(pid);
 	restorable_key(
-		ax::key_window_id(pid),
+		key,
+		|| outside_windows,
 		|| ax::window_records(pid).map(|records| records.iter().any(|record| record.id.is_some())),
 		|| capture::has_onscreen_window(pid),
 	)
@@ -2133,17 +2204,50 @@ fn restoration_key_in_front(
 /// [`restoration_key`]'s decision: an app with no key window counts as
 /// windowless only when both its accessibility windows (Finder's unmappable
 /// desktop entry aside) and `WindowServer`'s on-screen list show none of its
-/// windows. An unreadable answer from either refuses.
+/// windows. An unreadable answer from either refuses. An app whose focused
+/// window is no window at all (`focus_outside_windows`), as Finder's desktop
+/// after a click on it is, keeps that focus whether or not it shows windows.
 fn restorable_key(
 	key: Option<u32>,
+	focus_outside_windows: impl FnOnce() -> bool,
 	ax_lists_window: impl FnOnce() -> Option<bool>,
 	shows_window: impl FnOnce() -> Option<bool>,
 ) -> Option<UserKey> {
 	if let Some(key) = key {
 		return Some(UserKey::Window(key));
 	}
+	if focus_outside_windows() {
+		return Some(UserKey::OutsideWindows);
+	}
 	(ax_lists_window() == Some(false) && shows_window() == Some(false))
 		.then_some(UserKey::Windowless)
+}
+
+/// The window id a takeover gives the user's key back to, `None` for the
+/// front process alone, or why it cannot put the user's focus back. Takeover
+/// of a window of the user's own app (`same_app`) makes that window key, and
+/// focus outside every window, such as Finder's desktop, has no window to
+/// make key again afterwards.
+const fn takeover_key(key: Option<UserKey>, same_app: bool) -> Result<Option<u32>, &'static str> {
+	match key {
+		None => {
+			Err("cannot identify the previous key window for takeover restoration; no input was sent")
+		},
+		Some(UserKey::OutsideWindows) if same_app => Err(
+			"the user's focus sits outside every window of this window's application (as on Finder's \
+			 desktop), and taking over one of its windows could not put that focus back; no input \
+			 was sent",
+		),
+		Some(key) => Ok(key.window()),
+	}
+}
+
+/// The input a takeover brings `wid` forward for: only a pointer refusal names
+/// the background route to a window attached under the focused one.
+#[derive(Clone, Copy)]
+pub(super) enum ForegroundInput {
+	Keys,
+	Pointer,
 }
 
 /// Makes `wid` the frontmost key window, runs `action`, then restores the
@@ -2155,14 +2259,20 @@ fn restorable_key(
 /// re-activating it can clear Chromium's renderer focus. The window is made
 /// key without being raised; callers that need it unobstructed raise it.
 /// `return_focus` restores even after user input during the action; see
-/// [`hands_focus_back`].
+/// [`hands_focus_back`]. It starts from the worker's admission, which waited
+/// for the user to pause in every app, and fails without sending anything if
+/// they pressed a key or clicked since
+/// ([`control::intervention::start_takeover`]): a key they type once the target
+/// is in front lands in it.
 pub(super) fn with_foreground<T>(
 	pid: pid_t,
 	wid: u32,
 	return_focus: bool,
+	input: ForegroundInput,
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
 	control::check()?;
+	control::intervention::start_takeover()?;
 	let choices = control::user_choices();
 	// Read with `choices`, before takeover posts anything: a click of the
 	// user's at any later point is then a choice the monitor counts once it has
@@ -2184,7 +2294,7 @@ pub(super) fn with_foreground<T>(
 	let focused = ax::focused_window_id(pid);
 	if preserves_exact_existing_focus(Some(previous.psn), target, focused, wid) {
 		let result = run_then_settle(|| action(false), FOREGROUND_SETTLE);
-		report_focus_return(false, previous.pid);
+		report_focus_return(false, None, previous.pid);
 		return result;
 	}
 	let previous_pid = previous.pid.ok_or_else(|| {
@@ -2192,20 +2302,21 @@ pub(super) fn with_foreground<T>(
 			"cannot identify the previous application for takeover restoration; no input was sent",
 		)
 	})?;
-	let previous_key = restoration_key(previous_pid)
-		.ok_or_else(|| {
-			DesktopError::input_failed(
-				"cannot identify the previous key window for takeover restoration; no input was sent",
-			)
-		})?
-		.window();
+	let previous_key = takeover_key(restoration_key(previous_pid), previous_pid == pid)
+		.map_err(DesktopError::input_failed)?;
+	// The reads above can take a while in a busy app; a press or hold of the
+	// user's meanwhile refuses here, before the target comes forward.
+	control::intervention::start_takeover()?;
 	let handed_back = Cell::new(false);
+	let keyboard = Cell::new(None);
 	let restore = || {
 		// Keys the user types while takeover holds the front land in the target
 		// without them choosing it, so only a click or a shortcut of theirs, or
-		// a switch elsewhere, leaves the front application alone.
-		let user_chose = || {
-			takeover_user_chose(
+		// a switch elsewhere, leaves the front application alone. Whether the
+		// monitor has caught up is always judged from entry: a backlog from
+		// before a later baseline could otherwise cover a click after it.
+		let user_choice = |choices, presses| {
+			takeover_user_choice(
 				monitor_sees_input,
 				|| monitor_settled(progress),
 				|| control::user_choices() != choices,
@@ -2218,11 +2329,19 @@ pub(super) fn with_foreground<T>(
 			} else {
 				FocusAfterTakeover::Elsewhere
 			};
-			hands_focus_back(return_focus, user_chose(), now)
+			let user_chose = user_choice(choices, presses) != UserChoice::None;
+			hands_focus_back(return_focus, user_chose, now)
 		};
+		// Nothing went to the user's window: say why when it was theirs.
+		let left = || keyboard.set(left_alone(user_choice(choices, presses)));
 		if !still_ours() {
+			left();
 			return Ok(());
 		}
+		let same_app = previous_pid == pid;
+		let since = choice_baseline(same_app, (choices, presses), || {
+			(control::user_choices(), PointerPresses::now())
+		});
 		// The action and its settle are over, so takeover's own keys and
 		// clicks, which `WindowServer` counts like the user's, came before this
 		// timestamp; user input after it refuses the hand-back, and the
@@ -2234,50 +2353,70 @@ pub(super) fn with_foreground<T>(
 			|| monitor_settled(progress),
 			|since| set_front_unless_user_acted(spi, previous.psn, previous_key.unwrap_or(0), since),
 		)?;
-		if request != Some(FrontRequest::Done) {
-			return Ok(());
+		match request {
+			Some(FrontRequest::Done) => {},
+			// `WindowServer` refused: the user clicked, or kept typing, after the
+			// request's timestamp.
+			Some(FrontRequest::UserActed) => {
+				let left = left_alone(user_choice(choices, presses));
+				keyboard.set(Some(left.unwrap_or(DesktopKeyboardReturn::NotSent)));
+				return Ok(());
+			},
+			None => {
+				left();
+				return Ok(());
+			},
 		}
-		// A previous app that showed no window gets only its front status back.
-		let Some(previous_key) = previous_key else {
-			handed_back.set(true);
-			return Ok(());
-		};
-		if !rekey_unless_user_chose(
-			|| ax::focused_window_id(previous_pid),
-			previous_key,
-			user_chose,
-			|| make_exact_window_key(spi, previous.psn, previous_key),
-		)? {
-			// The user picked another window of their own app, which is front.
-			handed_back.set(true);
-			return Ok(());
-		}
-		await_window_focused(spi, previous_pid, previous_key, previous.psn)?;
 		handed_back.set(true);
+		keyboard.set(Some(give_key_back(
+			previous_key,
+			same_app,
+			|| ax::focused_window_id(previous_pid),
+			|| user_choice(since.0, since.1),
+			|key| make_exact_window_key(spi, previous.psn, key),
+			// The user's own key window gets no route to it in the refusal.
+			|key| await_window_focused(spi, previous_pid, key, previous.psn, ForegroundInput::Keys),
+		)?));
 		Ok(())
 	};
 	let prepare = set_front(spi, target, wid)
 		.and_then(|()| make_exact_window_key(spi, target, wid))
-		.and_then(|()| await_window_focused(spi, pid, wid, target));
+		.and_then(|()| await_window_focused(spi, pid, wid, target, input));
 	let result = if let Err(error) = prepare {
 		after_cleanup(Err(error), control::cleanup(restore))
 	} else {
 		let result = run_then_settle(|| action(true), FOREGROUND_SETTLE);
 		after_cleanup(result, control::cleanup(restore))
 	};
-	report_focus_return(handed_back.get(), previous.pid);
+	report_focus_return(handed_back.get(), keyboard.get(), previous.pid);
 	result
 }
 
 /// Records for the host where a takeover left focus, read from `WindowServer`
-/// after restoration.
-fn report_focus_return(handed_back: bool, previous: Option<pid_t>) {
+/// after restoration, and what it did with the user's keyboard.
+fn report_focus_return(
+	handed_back: bool,
+	keyboard: Option<DesktopKeyboardReturn>,
+	previous: Option<pid_t>,
+) {
 	let pid = |pid: pid_t| u32::try_from(pid).ok();
 	control::report_focus_return(DesktopFocusReturn {
 		handed_back,
 		previous_pid: previous.and_then(pid),
 		front_pid: front_pid().and_then(pid),
+		keyboard,
 	});
+}
+
+/// Why a takeover that did not hand the front back sent nothing to the user's
+/// window: their own choice, a choice the monitor may not have counted yet,
+/// or neither (another app came forward by itself).
+const fn left_alone(choice: UserChoice) -> Option<DesktopKeyboardReturn> {
+	match choice {
+		UserChoice::Made => Some(DesktopKeyboardReturn::LeftAsChosen),
+		UserChoice::Pending => Some(DesktopKeyboardReturn::NotSent),
+		UserChoice::None => None,
+	}
 }
 
 /// Where focus sits when a takeover ends.
@@ -2308,26 +2447,54 @@ const fn hands_focus_back(return_focus: bool, user_chose: bool, now: FocusAfterT
 	}
 }
 
-/// Makes `previous_key` key again after takeover handed the front back,
-/// unless it already is or the user chose something meanwhile; `false` when
-/// the user did. Returning to an app often reinstates its original key window
-/// by itself, and re-making an already-key Chromium window can clear the
-/// user's renderer focus, just as reactivating an already-key input target
-/// can. `user_chose` is read after the key-window probe, right before the
-/// records: a window the user clicked while the probe ran stays theirs.
-fn rekey_unless_user_chose(
+/// Gives the user's previous key window back once takeover's front request
+/// handed their app the front, and says what it did.
+///
+/// That request (`kCPSNoWindows`) activates an app that was behind the target
+/// without installing any key window, so its window comes back inactive until
+/// the make-key records follow (measured on macOS 26.5). Nothing outside the
+/// app can tell: its `AXFocusedWindow` still names the window, and
+/// `WindowServer`'s front and key-focus process are the app's either way, so
+/// no reading skips the records there, and there they do not land on an
+/// already-key window, which in Chromium can clear the renderer's focus. Only
+/// an app that never left the front (`same_app`: the target was one of its own
+/// windows) kept a key window that its `AXFocusedWindow` reports truthfully,
+/// and one already key there is left alone. A click or shortcut of the user's
+/// is their choice and keeps the records back (`choice`, counted from
+/// [`choice_baseline`]); while the monitor has not caught up, whether they made
+/// one is unknown, and nothing is sent either. A previous app that showed no
+/// window gets only its front status back.
+fn give_key_back(
+	previous_key: Option<u32>,
+	same_app: bool,
 	key_window: impl FnOnce() -> Option<u32>,
-	previous_key: u32,
-	user_chose: impl FnOnce() -> bool,
-	make_key: impl FnOnce() -> CoreResult<()>,
-) -> CoreResult<bool> {
-	if key_window() == Some(previous_key) {
-		return Ok(true);
+	choice: impl FnOnce() -> UserChoice,
+	make_key: impl FnOnce(u32) -> CoreResult<()>,
+	confirm: impl FnOnce(u32) -> CoreResult<()>,
+) -> CoreResult<DesktopKeyboardReturn> {
+	let Some(key) = previous_key else {
+		return Ok(DesktopKeyboardReturn::FrontOnly);
+	};
+	if same_app && key_window() == Some(key) {
+		confirm(key)?;
+		return Ok(DesktopKeyboardReturn::Kept);
 	}
-	if user_chose() {
-		return Ok(false);
+	match choice() {
+		UserChoice::Made => return Ok(DesktopKeyboardReturn::LeftAsChosen),
+		UserChoice::Pending => return Ok(DesktopKeyboardReturn::NotSent),
+		UserChoice::None => make_key(key)?,
 	}
-	make_key().map(|()| true)
+	confirm(key)?;
+	Ok(DesktopKeyboardReturn::HandedBack)
+}
+
+/// From when a choice of the user's keeps [`give_key_back`]'s records back:
+/// where their app never left the front, any choice during the call, as
+/// before; after bringing it forward from behind the target, which
+/// `return_focus` does over an earlier choice, only one made after the
+/// hand-back `request`, or their app would be left with no key window.
+fn choice_baseline<T>(same_app: bool, entry: T, request: impl FnOnce() -> T) -> T {
+	if same_app { entry } else { request() }
 }
 
 pub(super) fn require_front_window(pid: pid_t, wid: u32) -> CoreResult<()> {
@@ -2481,6 +2648,51 @@ fn make_exact_window_key(
 			"window {wid} rejected exact key-window activation"
 		)));
 	}
+	post_make_key_records(spi, target, wid)
+}
+
+/// [`make_exact_window_key`] with its front request made conditional, as
+/// [`set_front_unless_user_acted`] makes the hand-back's: `WindowServer`
+/// refuses it when the user pressed a key or clicked after `since`, and then
+/// no records are sent, so a switch of theirs that raced the request keeps
+/// the app they chose in front. Where the conditional request is unavailable,
+/// the window is made key unconditionally.
+fn make_window_key_unless_user_acted(
+	spi: &ForegroundSpi,
+	target: ProcessSerialNumber,
+	wid: u32,
+	since: u64,
+) -> CoreResult<FrontRequest> {
+	let Some(conditional) = spi.conditional else {
+		return make_exact_window_key(spi, target, wid).map(|()| FrontRequest::Done);
+	};
+	control::check()?;
+	let timestamp = CFNumber::new_i64(i64::try_from(since).unwrap_or(i64::MAX));
+	// SAFETY: `timestamp_key` is SkyLight's process-lived CFString constant.
+	let key = unsafe { &*conditional.timestamp_key };
+	let info = CFDictionary::<CFString, CFNumber>::from_slices(&[key], &[&*timestamp]);
+	// SAFETY: The PSN was resolved from WindowServer and `info` stays alive
+	// for the synchronous call. kCPSUserGenerated only changes how the request
+	// is attributed.
+	let status = unsafe {
+		(conditional.set_front)(&target, wid, CPS_USER_GENERATED, ptr::from_ref(&*info).cast())
+	};
+	match status {
+		0 => post_make_key_records(spi, target, wid).map(|()| FrontRequest::Done),
+		EXPIRED_FRONT_REQUEST => Ok(FrontRequest::UserActed),
+		_ => Err(DesktopError::input_failed(format!(
+			"window {wid} rejected exact key-window activation"
+		))),
+	}
+}
+
+/// The paired make-key records (`0x01`, then `0x02`) that make `wid` the
+/// native key window of its process once that process is in front.
+fn post_make_key_records(
+	spi: &ForegroundSpi,
+	target: ProcessSerialNumber,
+	wid: u32,
+) -> CoreResult<()> {
 	for kind in [0x01, 0x02] {
 		if !post_record(spi.post_record, target, &make_key_record(wid, kind)) {
 			return Err(DesktopError::input_failed(format!(
@@ -2502,6 +2714,7 @@ fn await_window_focused(
 	pid: pid_t,
 	wid: u32,
 	target: ProcessSerialNumber,
+	input: ForegroundInput,
 ) -> CoreResult<()> {
 	let deadline = Instant::now() + ACTIVATION_TIMEOUT;
 	loop {
@@ -2518,7 +2731,12 @@ fn await_window_focused(
 				let pid = front.and_then(|front| front.pid);
 				KeyWindowSeen::Front { pid, name: pid.and_then(process::application_name) }
 			};
-			return Err(DesktopError::input_failed(unconfirmed_key_window(wid, &seen)));
+			return Err(DesktopError::input_failed(unconfirmed_key_window(
+				wid,
+				&seen,
+				input,
+				window_parent,
+			)));
 		}
 		control::wait(ACTIVATION_POLL)?;
 	}
@@ -2534,7 +2752,15 @@ enum KeyWindowSeen {
 	Focused(Option<ax::WindowLabel>),
 }
 
-fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
+/// The refusal for `wid`, never confirmed key. A window attached to the
+/// focused window, as a suggestion list is to the window it drops from, does
+/// not become key, so the refusal names the route that reaches it.
+fn unconfirmed_key_window(
+	wid: u32,
+	seen: &KeyWindowSeen,
+	input: ForegroundInput,
+	parent_of: impl Fn(u32) -> Option<u32>,
+) -> String {
 	let held = match seen {
 		KeyWindowSeen::Front { pid: Some(pid), name: Some(name) } => {
 			format!("{name} (pid {pid}) stayed the front application")
@@ -2556,7 +2782,22 @@ fn unconfirmed_key_window(wid: u32, seen: &KeyWindowSeen) -> String {
 			}
 		},
 	};
-	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}")
+	let attached = match (input, seen) {
+		(
+			ForegroundInput::Pointer,
+			KeyWindowSeen::Focused(Some(ax::WindowLabel { id: Some(focused), .. })),
+		) => super::input::attached_under(wid, parent_of, |parent| parent == *focused),
+		_ => false,
+	};
+	let route = if attached {
+		format!(
+			"; window {wid} is attached to that window and does not become key, as a suggestion list \
+			 does not: a click without takeover reaches it in the background"
+		)
+	} else {
+		String::new()
+	};
+	format!("window {wid} could not be confirmed as the exact frontmost key window: {held}{route}")
 }
 
 fn process_psn(lookup: PsnLookup, pid: pid_t, wid: u32) -> Option<ProcessSerialNumber> {
@@ -2648,6 +2889,20 @@ mod tests {
 			sample_switches(lease, front, signals, at, &visit);
 		}
 		visit.load(Ordering::Acquire)
+	}
+
+	#[test]
+	fn a_held_modifier_or_button_counts_and_a_lock_or_other_key_does_not() {
+		let no_button = |_| false;
+		// Nothing held; Caps Lock on; a key a program posted down and never
+		// released (flags as the HID state read on a VM).
+		for flags in [NO_MODIFIERS, CAPS_LOCK, 0x2000_0000] {
+			assert!(!held(flags, no_button), "{flags:#x}");
+		}
+		for flags in [SHIFT, CONTROL, OPTION, COMMAND, FN, SHIFT | CAPS_LOCK] {
+			assert!(held(flags, no_button), "{flags:#x}");
+		}
+		assert!(held(NO_MODIFIERS, |button| button == 0));
 	}
 
 	#[test]
@@ -3184,18 +3439,35 @@ mod tests {
 	}
 
 	#[test]
-	fn only_a_provably_windowless_front_app_is_restored_without_a_key_window() {
+	fn a_front_app_without_a_key_window_is_restored_only_when_nothing_is_lost() {
 		let unread = || -> Option<bool> { panic!("a known key window needs no window scan") };
-		assert_eq!(restorable_key(Some(42), unread, unread), Some(UserKey::Window(42)));
-		// TextEdit after closing its last document; Finder after a desktop click
-		// lists only its unmappable desktop, which counts as no window.
-		assert_eq!(restorable_key(None, || Some(false), || Some(false)), Some(UserKey::Windowless));
+		let unasked = || -> bool { panic!("a known key window needs no focus read") };
+		assert_eq!(restorable_key(Some(42), unasked, unread, unread), Some(UserKey::Window(42)));
+		// Finder after a click on its desktop, with its windows still open: its
+		// focused window is the desktop, which is no window, and keeps focus.
+		assert_eq!(restorable_key(None, || true, unread, unread), Some(UserKey::OutsideWindows));
+		// TextEdit after closing its last document.
+		let inside = || false;
+		assert_eq!(
+			restorable_key(None, inside, || Some(false), || Some(false)),
+			Some(UserKey::Windowless)
+		);
 		// Windows that AX or WindowServer reports, or an unreadable answer,
 		// refuse.
-		assert_eq!(restorable_key(None, || Some(true), || Some(false)), None);
-		assert_eq!(restorable_key(None, || Some(false), || Some(true)), None);
-		assert_eq!(restorable_key(None, || None, || Some(false)), None);
-		assert_eq!(restorable_key(None, || Some(false), || None), None);
+		assert_eq!(restorable_key(None, inside, || Some(true), || Some(false)), None);
+		assert_eq!(restorable_key(None, inside, || Some(false), || Some(true)), None);
+		assert_eq!(restorable_key(None, inside, || None, || Some(false)), None);
+		assert_eq!(restorable_key(None, inside, || Some(false), || None), None);
+	}
+
+	#[test]
+	fn takeover_in_the_users_own_app_refuses_focus_it_cannot_put_back() {
+		let outside = Some(UserKey::OutsideWindows);
+		assert_eq!(takeover_key(outside, false), Ok(None));
+		assert!(takeover_key(outside, true).is_err_and(|why| why.contains("outside every window")));
+		assert_eq!(takeover_key(Some(UserKey::Window(42)), true), Ok(Some(42)));
+		assert_eq!(takeover_key(Some(UserKey::Windowless), true), Ok(None));
+		assert!(takeover_key(None, false).is_err_and(|why| why.contains("previous key window")));
 	}
 
 	#[test]
@@ -3246,6 +3518,7 @@ mod tests {
 		arrives:            Cell<Option<(Instant, ProcessSerialNumber)>>,
 		signals:            Cell<SwitchSignals>,
 		refused_for:        Cell<Option<SwitchSignals>>,
+		after_hand_back:    Option<ProcessSerialNumber>,
 		hand_backs:         Cell<usize>,
 		keys:               std::cell::RefCell<Vec<u32>>,
 		/// The key window the user's app reports.
@@ -3255,6 +3528,9 @@ mod tests {
 		switch_on_key_read: Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
 		/// How long that report takes to read.
 		key_read_takes:     Duration,
+		/// Refuses the next key-window request for the user's input after its
+		/// timestamp: the app then in front, and what the next reading sees.
+		refused_key_for:    Cell<Option<(ProcessSerialNumber, SwitchSignals)>>,
 	}
 
 	impl GuardedDesktop for FakeDesktop {
@@ -3289,13 +3565,18 @@ mod tests {
 				self.signals.set(after);
 				return Ok(FrontRequest::UserActed);
 			}
-			self.front.set(PREVIOUS);
+			self.front.set(self.after_hand_back.unwrap_or(PREVIOUS));
 			Ok(FrontRequest::Done)
 		}
 
-		fn restore_key(&self, key: u32) -> bool {
+		fn restore_key(&self, key: u32, _since: u64) -> CoreResult<FrontRequest> {
+			if let Some((front, after)) = self.refused_key_for.take() {
+				self.front.set(front);
+				self.signals.set(after);
+				return Ok(FrontRequest::UserActed);
+			}
 			self.keys.borrow_mut().push(key);
-			true
+			Ok(FrontRequest::Done)
 		}
 
 		fn describe(&self, psn: ProcessSerialNumber) -> String {
@@ -3319,6 +3600,31 @@ mod tests {
 	}
 
 	#[test]
+	fn the_guard_skips_make_key_when_front_moves_after_hand_back() {
+		let t0 = Instant::now();
+		let desktop = FakeDesktop {
+			clock:              Cell::new(t0 + ms(20)),
+			end:                t0 + ms(20),
+			front:              Cell::new(TARGET),
+			arrives:            Cell::new(None),
+			signals:            Cell::new(input(0, NO_MODIFIERS)),
+			refused_for:        Cell::new(None),
+			after_hand_back:    Some(THIRD),
+			hand_backs:         Cell::new(0),
+			keys:               std::cell::RefCell::default(),
+			user_window:        42,
+			switch_on_key_read: Cell::new(None),
+			key_read_takes:     Duration::ZERO,
+			refused_key_for:    Cell::new(None),
+		};
+		let lease = Mutex::new(lease_at(t0, None));
+		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_err());
+		assert_eq!(desktop.hand_backs.get(), 1);
+		assert!(desktop.front.get() == THIRD);
+		assert!(desktop.keys.into_inner().is_empty());
+	}
+
+	#[test]
 	fn the_guard_asks_again_after_a_refusal_for_typing_but_not_for_a_switch() {
 		let t0 = Instant::now();
 		let idle = input(0, NO_MODIFIERS);
@@ -3333,11 +3639,13 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(idle),
 				refused_for:        Cell::new(Some(input)),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        42,
 				switch_on_key_read: Cell::new(None),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let visit = AtomicBool::new(false);
@@ -3474,11 +3782,13 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(signals),
 				refused_for:        Cell::new(None),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        43,
 				switch_on_key_read: Cell::new(switch),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3502,6 +3812,40 @@ mod tests {
 	}
 
 	#[test]
+	fn a_switch_that_races_the_key_window_request_keeps_the_app_the_user_chose() {
+		// The guard handed the user's app back; `WindowServer` then refuses its
+		// key-window request for input of theirs after the request's timestamp.
+		let t0 = Instant::now();
+		let run = |refusal: (ProcessSerialNumber, SwitchSignals)| {
+			let desktop = FakeDesktop {
+				clock:              Cell::new(t0 + ms(20)),
+				end:                t0 + ms(60),
+				front:              Cell::new(TARGET),
+				arrives:            Cell::new(None),
+				signals:            Cell::new(input(0, NO_MODIFIERS)),
+				refused_for:        Cell::new(None),
+				hand_backs:         Cell::new(0),
+				keys:               std::cell::RefCell::default(),
+				user_window:        42,
+				switch_on_key_read: Cell::new(None),
+				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(Some(refusal)),
+				after_hand_back:    None,
+			};
+			let lease = Mutex::new(lease_at(t0, None));
+			assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
+			let lease = lease.into_inner();
+			(desktop.front.get().low, desktop.keys.into_inner(), lease.disarmed)
+		};
+		// A ⌘-Tab to a third app: no make-key records, and the app they chose
+		// stays in front.
+		assert_eq!(run((THIRD, input(1, COMMAND))), (THIRD.low, vec![], true));
+		// Typing in their own app refuses only that instant: the window is put
+		// back on the next poll.
+		assert_eq!(run((PREVIOUS, input(0, NO_MODIFIERS))), (PREVIOUS.low, vec![42], false));
+	}
+
+	#[test]
 	fn a_users_click_does_not_age_while_their_key_window_is_read() {
 		// Reading the user's key window takes the accessibility timeout; it
 		// reports window 43, which their click just before the read picked.
@@ -3513,11 +3857,13 @@ mod tests {
 			arrives:            Cell::new(None),
 			signals:            Cell::new(clicked_at(t0 + ms(15)).in_user_app()),
 			refused_for:        Cell::new(None),
+			after_hand_back:    None,
 			hand_backs:         Cell::new(0),
 			keys:               std::cell::RefCell::default(),
 			user_window:        43,
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     ms(600),
+			refused_key_for:    Cell::new(None),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		assert!(guard_focus(&lease, &desktop, &AtomicBool::new(false)).is_ok());
@@ -3555,11 +3901,13 @@ mod tests {
 				arrives:            Cell::new(None),
 				signals:            Cell::new(input(0, NO_MODIFIERS)),
 				refused_for:        Cell::new(Some(input(0, SHIFT))),
+				after_hand_back:    None,
 				hand_backs:         Cell::new(0),
 				keys:               std::cell::RefCell::default(),
 				user_window:        42,
 				switch_on_key_read: Cell::new(None),
 				key_read_takes:     Duration::ZERO,
+				refused_key_for:    Cell::new(None),
 			};
 			let lease = Mutex::new(lease_at(t0, None));
 			let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3586,11 +3934,13 @@ mod tests {
 			arrives:            Cell::new(Some((sent + ACTION_REFLEX - ms(10), THIRD))),
 			signals:            Cell::new(input(0, NO_MODIFIERS).sent_at(sent)),
 			refused_for:        Cell::new(None),
+			after_hand_back:    None,
 			hand_backs:         Cell::new(0),
 			keys:               std::cell::RefCell::default(),
 			user_window:        42,
 			switch_on_key_read: Cell::new(None),
 			key_read_takes:     Duration::ZERO,
+			refused_key_for:    Cell::new(None),
 		};
 		let lease = Mutex::new(lease_at(t0, None));
 		let result = guard_focus(&lease, &desktop, &AtomicBool::new(false));
@@ -3869,46 +4219,100 @@ mod tests {
 		// With Input Monitoring, the monitor's count decides only once it has
 		// seen all `WindowServer` counted: a queued click or Control-Up counts
 		// as the user's choice, before any hand-back timestamp is taken.
-		assert!(takeover_user_chose(true, || false, || panic!(), || panic!()));
-		assert!(takeover_user_chose(true, || true, || true, || panic!()));
-		assert!(!takeover_user_chose(true, || true, || false, || panic!()));
+		use UserChoice::{Made, None, Pending};
+		assert_eq!(takeover_user_choice(true, || false, || panic!(), || panic!()), Pending);
+		assert_eq!(takeover_user_choice(true, || true, || true, || panic!()), Made);
+		assert_eq!(takeover_user_choice(true, || true, || false, || panic!()), None);
 		// Without it the tap sees nothing; the HID counters net of omp's own
 		// presses are all there is.
-		assert!(!takeover_user_chose(false, || panic!(), || panic!(), || false));
-		assert!(takeover_user_chose(false, || panic!(), || panic!(), || true));
+		assert_eq!(takeover_user_choice(false, || panic!(), || panic!(), || false), None);
+		assert_eq!(takeover_user_choice(false, || panic!(), || panic!(), || true), Made);
 	}
 
 	#[test]
-	fn the_key_window_is_restored_only_if_the_user_chose_nothing_during_the_probe() {
-		use std::cell::Cell;
-		let (previous_key, clicked) = (7, 9);
-		// The user clicks another window of their app while the probe runs.
-		let chose = Cell::new(false);
-		let made = Cell::new(false);
-		let rekeyed = rekey_unless_user_chose(
-			|| {
-				chose.set(true);
-				Some(clicked)
-			},
-			previous_key,
-			|| chose.get(),
-			|| {
-				made.set(true);
-				Ok(())
-			},
-		);
-		assert_eq!(rekeyed.ok(), Some(false));
-		assert!(!made.get(), "no make-key records over the user's click");
+	fn the_hand_back_makes_the_previous_window_key_whatever_its_app_reports() {
+		use std::cell::RefCell;
 
-		let rekeyed = rekey_unless_user_chose(|| Some(clicked), previous_key, || false, || Ok(()));
-		assert_eq!(rekeyed.ok(), Some(true));
-		let rekeyed = rekey_unless_user_chose(
-			|| Some(previous_key),
-			previous_key,
-			|| panic!("an already-key window needs no check"),
-			|| panic!("nor records"),
+		use DesktopKeyboardReturn::{FrontOnly, HandedBack, Kept, LeftAsChosen, NotSent};
+		let (previous, other) = (7, 9);
+		// What the hand-back sent, in order, and what it says it did.
+		let run = |previous_key, same_app, reported, since| {
+			let acts = RefCell::new(Vec::new());
+			let returned = give_key_back(
+				previous_key,
+				same_app,
+				|| reported,
+				|| since,
+				|key| {
+					acts.borrow_mut().push(("make key", key));
+					Ok(())
+				},
+				|key| {
+					acts.borrow_mut().push(("confirm", key));
+					Ok(())
+				},
+			);
+			(returned.ok(), acts.into_inner())
+		};
+		let rekeyed = (Some(HandedBack), vec![("make key", previous), ("confirm", previous)]);
+		// An app brought back from behind the target has no key window, though
+		// its AX answer names the previous one: the records always go out.
+		assert_eq!(run(Some(previous), false, Some(previous), UserChoice::None), rekeyed);
+		assert_eq!(run(Some(previous), false, Some(other), UserChoice::None), rekeyed);
+		// An app that kept the front reports its key window truthfully; one
+		// already key gets no records, which can clear Chromium's focus.
+		assert_eq!(
+			run(Some(previous), true, Some(previous), UserChoice::None),
+			(Some(Kept), vec![("confirm", previous)])
 		);
-		assert_eq!(rekeyed.ok(), Some(true));
+		assert_eq!(run(Some(previous), true, Some(other), UserChoice::None), rekeyed);
+		// A click or shortcut after the request is the user's choice; with one
+		// the monitor may not have counted yet, nothing is sent either.
+		assert_eq!(
+			run(Some(previous), false, Some(previous), UserChoice::Made),
+			(Some(LeftAsChosen), vec![])
+		);
+		assert_eq!(
+			run(Some(previous), false, Some(previous), UserChoice::Pending),
+			(Some(NotSent), vec![])
+		);
+		// A previous app with no window gets only its front back.
+		assert_eq!(run(None, false, Some(previous), UserChoice::None), (Some(FrontOnly), vec![]));
+		// Without a hand-back, the user's own switch is named as theirs; an app
+		// that came forward by itself is not.
+		assert_eq!(left_alone(UserChoice::Made), Some(LeftAsChosen));
+		assert_eq!(left_alone(UserChoice::Pending), Some(NotSent));
+		assert_eq!(left_alone(UserChoice::None), None);
+		// A rejected record or an unconfirmed window fails the hand-back.
+		let rejected = give_key_back(
+			Some(previous),
+			false,
+			|| Some(previous),
+			|| UserChoice::None,
+			|_| Err(DesktopError::input_failed("window 7 rejected its make-key record")),
+			|_| panic!("nothing to confirm after a rejected record"),
+		);
+		assert!(rejected.is_err());
+		let unconfirmed = give_key_back(
+			Some(previous),
+			false,
+			|| Some(previous),
+			|| UserChoice::None,
+			|_| Ok(()),
+			|_| Err(DesktopError::input_failed("window 7 could not be confirmed")),
+		);
+		assert!(unconfirmed.is_err());
+	}
+
+	#[test]
+	fn a_choice_during_the_call_keeps_the_records_back_only_where_the_app_never_left_the_front() {
+		// Same app: a window the user picked at any point in the call stays
+		// theirs, so the hand-back counts choices from entry and never reads
+		// a later baseline.
+		assert_eq!(choice_baseline(true, "entry", || panic!("no later baseline")), "entry");
+		// Brought forward from behind the target: only choices after the
+		// hand-back request count.
+		assert_eq!(choice_baseline(false, "entry", || "request"), "request");
 	}
 
 	#[test]
@@ -3920,7 +4324,7 @@ mod tests {
 				kind: Some(kind.to_owned()),
 			}))
 		};
-		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen);
+		let refusal = |wid, seen| unconfirmed_key_window(wid, &seen, ForegroundInput::Keys, |_| None);
 		let prefix = "could not be confirmed as the exact frontmost key window: ";
 		// Calendar's untitled recurring-event alert held key over its window 66.
 		assert_eq!(
@@ -3956,6 +4360,36 @@ mod tests {
 		assert_eq!(
 			refusal(66, KeyWindowSeen::Front { pid: None, name: None }),
 			format!("window 66 {prefix}the front application could not be identified")
+		);
+	}
+
+	#[test]
+	fn a_suggestion_list_attached_to_the_focused_window_names_the_background_route() {
+		// Safari's autofill list, window 62, hangs off its page window 46,
+		// which keeps key.
+		let seen = KeyWindowSeen::Focused(Some(ax::WindowLabel {
+			id:    Some(46),
+			title: Some("Probe login".to_owned()),
+			kind:  None,
+		}));
+		let parents = |wid| (wid == 62).then_some(46);
+		assert_eq!(
+			unconfirmed_key_window(62, &seen, ForegroundInput::Pointer, parents),
+			"window 62 could not be confirmed as the exact frontmost key window: its application's \
+			 focused window is window 46 \"Probe login\"; window 62 is attached to that window and \
+			 does not become key, as a suggestion list does not: a click without takeover reaches it \
+			 in the background"
+		);
+		// A window attached elsewhere gets no route.
+		assert!(
+			!unconfirmed_key_window(70, &seen, ForegroundInput::Pointer, |_| Some(50))
+				.contains("without takeover")
+		);
+		// Key takeover must not suggest a pointer route for the same attached
+		// target.
+		assert!(
+			!unconfirmed_key_window(62, &seen, ForegroundInput::Keys, parents)
+				.contains("without takeover")
 		);
 	}
 

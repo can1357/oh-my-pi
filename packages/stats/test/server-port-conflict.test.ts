@@ -172,6 +172,7 @@ describe("startServer port conflicts", () => {
 		try {
 			const server = await startServer(existing.port);
 			expect(server.port).toBe(existing.port);
+			expect(server.reused).toBe(true);
 			server.stop();
 
 			// The existing dashboard is untouched: it still answers on the port.

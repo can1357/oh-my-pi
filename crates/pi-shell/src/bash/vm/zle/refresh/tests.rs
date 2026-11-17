@@ -242,8 +242,10 @@ fn region_highlight_entries_and_trashed_display() {
 	s.d.clearflag = true;
 	assert_eq!(
 		s.refresh(),
-		"\x1b[0m\x1b[27m\x1b[24m\r\x1b[2C\x1b[1m\x1b[31ma\x1b[1m\x1b[4m\x1b[31mb\x1b[0m\x1b[39m\\
-		 x1b[4mcd\x1b[24m\x1b[K"
+		concat!(
+			"\x1b[0m\x1b[27m\x1b[24m\r\x1b[2C\x1b[1m\x1b[31ma\x1b[1m",
+			"\x1b[4m\x1b[31mb\x1b[0m\x1b[39m\x1b[4mcd\x1b[24m\x1b[K",
+		)
 	);
 	s.ed.region_highlights[1].end = 5;
 	assert_eq!(s.show("abcde", 5), "\x08\x1b[4md\x1b[4me\x1b[24m");

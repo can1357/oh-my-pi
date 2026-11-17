@@ -410,14 +410,22 @@ auth "anthropic" {
     native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
     show-in-login-list #false
+    disabled "Why it is paused, shown to users"  // turns the provider off: no login, no credential reaches it
+    login-warning "Account risk to accept"       // a new login asks the user to type "yes" first
 }
 ```
 
 `org-scoped-identity #true` keeps credentials and usage reports for different organizations separate even when they share an email; absent or `#false` uses ordinary account identity. `oauth-token-env` takes one or more ordered, non-empty env names carrying this provider's own OAuth bearer. When present, availability ignores other provider-env aliases, and usage probes accept only stored OAuth credentials or the first set bearer from that list; absent providers keep the ordinary API-key env behavior.
 
+`login-subscription #true` marks login-sourced API keys as subscription billing, leaving pasted and environment keys metered; absent or `#false` keeps all API keys metered.
+
+`disabled "<reason>"` turns a provider off without removing its code or anyone's stored credentials: it leaves the built-in login roster, `login` and token refresh refuse it, usage probes skip it, and no key source (runtime, `models.yml`, stored, broker, env) resolves for it, so nothing calls the provider; a request names the reason. An extension that registers its own OAuth login under the paused id takes the id back, since that is the end user's choice, as does listing the id in the coding agent's `auth.unpausedProviders` setting (`setUnpausedProviders` in `@oh-my-pi/pi-ai/oauth`). Delete the line to turn it back on for everyone — stored logins come back as they were.
+
+`login-warning "<text>"` keeps a provider usable but makes every new login accept a risk first: the login list marks it "(at your own risk)", and `login` shows the text and starts the flow only after the user types `yes`; any other answer or a cancel stores nothing. Stored logins, token refresh and requests are not asked again. An extension that registers its own OAuth login under the id owns that prompt instead.
+
 Login kinds:
 
-- `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).
+- `login "api-key" { auth-url "…"; instructions "…"; prompt "…" placeholder="…"; empty-fallback "…"; normalize "strip-bearer"; validate … }` — `validate "chat-completions" base-url= model= tolerate-model-denied= max-tokens-field= max-tokens=`, `validate "anthropic-messages" base-url= model=`, or `validate "models-endpoint" url= base-url-env= base-url-path= base-url-append= headers-hook=` (`base-url-path`, default `/models`, is appended to the `base-url-env` value and needs it; `base-url-append` ensures a path segment on that value first, e.g. `/v1` for bases that may be bare origins); all accept `label=` (error-message label, defaults to `name`), `optional=#true` (only auth failures reject), and `trust-forbidden=#true` (requires `optional=#true`; a 403 no longer rejects, so only a 401 does).
 - `login "oauth-code" { … }` as above; `token`/`refresh` `params` values may use `{code}`, `{state}`, `{redirect_uri}`, `{code_verifier}`, `{client_id}`, `{client_secret}`, `{refresh_token}`, `{scope}`; the standard grant parameters are sent unless `standard=#false`.
 - `login "device-code" { client-id …; base-url "…"; scopes …; headers-hook "…"; device url="{base}/…" body="form" { params {…} headers {…} }; token url="…" url-hook="…"; response user-code= device-code= verification-uri= verification-uri-complete= interval= expires-in=; instructions "Enter code: {user_code}"; credential {…}; userinfo …; after-exchange hook=… }`.
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).

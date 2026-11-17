@@ -1,5 +1,6 @@
 //! Session-level contracts: streamed previews converge on the applied diff,
-//! multi-file payloads stage atomically, and apply never trusts preview reads.
+//! sloppy multi-file payloads fail only when no file changes, and apply never
+//! trusts preview reads.
 
 mod common;
 
@@ -55,23 +56,25 @@ async fn streamed_sloppy_previews_grow_and_match_apply() {
 }
 
 #[tokio::test]
-async fn multi_file_failure_stages_nothing() {
+async fn multi_file_failure_names_every_file_when_none_changes() {
 	let ws = Workspace::new(EditMode::Sloppy);
 	ws.write("a.rs", SOURCE);
 	ws.write("b.rs", "fn other() {}\n");
-	let input = format!(
-		"{}*** Edit File: b.rs\n*** Find\nfn missing() {{}}\n*** Replace\nfn present() {{}}\n",
-		sloppy_payload("a.rs")
-	);
+	let miss = |path: &str| {
+		format!(
+			"*** Edit File: {path}\n*** Find\nfn missing() {{}}\n*** Replace\nfn present() {{}}\n"
+		)
+	};
 	let writer = DiskWriter::default();
 	let err = ws
-		.apply_json(&serde_json::json!({ "input": input }), &writer)
+		.apply_raw(&format!("{}{}", miss("a.rs"), miss("b.rs")), &writer)
 		.await
-		.expect_err("second section fails");
+		.expect_err("no section changes anything");
 	let message = err.to_string();
-	assert!(message.starts_with("[b.rs]: "), "{message}");
-	assert!(message.ends_with("No files were modified — sections apply atomically."), "{message}");
-	assert_eq!(writer.requests.lock().len(), 0);
+	assert_eq!(err.kind(), "no_match", "{message}");
+	assert!(message.starts_with("[a.rs]: "), "{message}");
+	assert!(message.contains("\n\n[b.rs]: "), "{message}");
+	assert!(writer.requests.lock().is_empty());
 	assert_eq!(ws.read("a.rs").unwrap(), SOURCE);
 }
 

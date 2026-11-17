@@ -81,16 +81,64 @@ describe("resolvePluginSource", () => {
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/marketplaceClonePath/);
 	});
 
-	it("prepends catalogMetadata.pluginRoot to the relative source path", async () => {
-		// pluginRoot "plugins" + source "./hello-plugin" → ./plugins/hello-plugin
-		const entry = makeEntry("./hello-plugin");
-		const resolved = await resolvePluginSource(entry, {
-			marketplaceClonePath: FIXTURE_DIR,
-			catalogMetadata: { pluginRoot: "plugins" },
-			tmpDir,
+	it("resolves bare names under catalogMetadata.pluginRoot and ./ sources from the marketplace root", async () => {
+		const expected = path.resolve(FIXTURE_DIR, "plugins/hello-plugin");
+		const resolve = (source: string, pluginRoot: string) =>
+			resolvePluginSource(makeEntry(source), {
+				marketplaceClonePath: FIXTURE_DIR,
+				catalogMetadata: { pluginRoot },
+				tmpDir,
+			});
+		expect((await resolve("hello-plugin", "./plugins")).dir).toBe(expected);
+		expect((await resolve("./plugins/hello-plugin", "./plugins")).dir).toBe(expected);
+		const legacy = await resolve("./hello-plugin", "plugins");
+		expect(legacy.dir).toBe(expected);
+	});
+
+	it("prefers a ./ source that exists from the marketplace root over the same path under pluginRoot", async () => {
+		const root = path.join(tmpDir, "marketplace");
+		fs.mkdirSync(path.join(root, "tools"), { recursive: true });
+		fs.mkdirSync(path.join(root, "plugins", "tools"), { recursive: true });
+		const resolved = await validatePluginSource(makeEntry("./tools"), {
+			marketplaceClonePath: root,
+			catalogMetadata: { pluginRoot: "./plugins" },
 		});
-		expect(resolved.dir).toBe(path.resolve(FIXTURE_DIR, "plugins/hello-plugin"));
-		expect(resolved.tempCloneRoot).toBeUndefined();
+		expect(resolved).toBe(path.join(root, "tools"));
+	});
+
+	it("falls back to pluginRoot when a file shadows the ./ path's first segment", async () => {
+		const root = path.join(tmpDir, "marketplace");
+		fs.mkdirSync(path.join(root, "plugins", "team", "plugin"), { recursive: true });
+		fs.writeFileSync(path.join(root, "team"), "");
+		const resolved = await validatePluginSource(makeEntry("./team/plugin"), {
+			marketplaceClonePath: root,
+			catalogMetadata: { pluginRoot: "plugins" },
+		});
+		expect(resolved).toBe(path.join(root, "plugins", "team", "plugin"));
+	});
+
+	it("does not fall back to pluginRoot when the primary probe fails with a filesystem error", async () => {
+		const root = path.join(tmpDir, "marketplace");
+		fs.mkdirSync(path.join(root, "plugins", "loop"), { recursive: true });
+		fs.symlinkSync("loop", path.join(root, "loop"), "dir");
+		await expect(
+			validatePluginSource(makeEntry("./loop"), {
+				marketplaceClonePath: root,
+				catalogMetadata: { pluginRoot: "plugins" },
+			}),
+		).rejects.toMatchObject({ code: "ELOOP" });
+	});
+
+	it("falls back to pluginRoot when the marketplace is reached through a symlink", async () => {
+		const real = path.join(tmpDir, "real");
+		fs.mkdirSync(path.join(real, "plugins", "foo"), { recursive: true });
+		const link = path.join(tmpDir, "link");
+		fs.symlinkSync(real, link, "dir");
+		const resolved = await validatePluginSource(makeEntry("./foo"), {
+			marketplaceClonePath: link,
+			catalogMetadata: { pluginRoot: "plugins" },
+		});
+		expect(resolved).toBe(path.join(link, "plugins", "foo"));
 	});
 
 	it("throws when resolved directory does not exist", async () => {

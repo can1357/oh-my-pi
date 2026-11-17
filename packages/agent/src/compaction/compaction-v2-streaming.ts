@@ -472,7 +472,6 @@ function buildCompactionV2Headers(
 			headers[OPENAI_HEADERS.SESSION_ID] = routingSessionId;
 			headers["x-client-request-id"] = routingSessionId;
 		}
-		headers[OPENAI_HEADERS.BETA] = OPENAI_HEADER_VALUES.BETA_RESPONSES;
 		headers[OPENAI_HEADERS.ORIGINATOR] = OPENAI_HEADER_VALUES.ORIGINATOR_CODEX;
 		headers[OPENAI_HEADERS.CODEX_BETA_FEATURES] = OPENAI_HEADER_VALUES.REMOTE_COMPACTION_V2;
 		headers[OPENAI_HEADERS.ROUTING_HINT] = codexRoutingHint(request.body.model, undefined);

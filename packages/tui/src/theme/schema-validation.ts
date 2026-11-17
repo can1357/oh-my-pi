@@ -28,6 +28,7 @@ const themeColorsSchema = type({
 	toolOutput: "string | number",
 	mdHeading: "string | number",
 	mdLink: "string | number",
+	"mdExtensionLink?": "string | number",
 	mdLinkUrl: "string | number",
 	mdCode: "string | number",
 	mdCodeBlock: "string | number",
@@ -71,6 +72,12 @@ const themeColorsSchema = type({
 	statusLineOutput: "string | number",
 	statusLineCost: "string | number",
 	statusLineSubagents: "string | number",
+	"subagent1?": "string | number",
+	"subagent2?": "string | number",
+	"subagent3?": "string | number",
+	"subagent4?": "string | number",
+	"subagent5?": "string | number",
+	"subagent6?": "string | number",
 });
 
 const spinnerFramesSchema = type("unknown").narrow((value): value is SpinnerFramesOverride => {

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core/memory";
-import type { MnemopiLlmCompletion } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { withMnemopiRuntimeOptions, type MnemopiLlmCompletion } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
+import { embed } from "../src/core/embeddings";
+import { callRemoteLlm } from "../src/core/local-llm";
 
 const instances: Mnemopi[] = [];
 
@@ -104,6 +106,65 @@ describe("remember(extract) wires the LLM fact extractor", () => {
 		expect(
 			memory.conn.query("SELECT subject, predicate, object FROM facts WHERE object = ?").get("Always use tabs"),
 		).toEqual({ subject: "fact", predicate: "entity", object: "Always use tabs" });
+	});
+
+	it("blocks remote embeddings until the active endpoint is permitted", async () => {
+		let allowed = false;
+		const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json({ data: [{ embedding: [0.25, 0.75] }] }),
+		);
+		try {
+			await withMnemopiRuntimeOptions(
+				{
+					embeddings: {
+						model: "openai/text-embedding-test",
+						apiUrl: "https://embedding.test/v1",
+						allowRemote: () => allowed,
+					},
+				},
+				async () => {
+					expect(await embed(["first"])).toBeNull();
+					expect(fetchSpy).not.toHaveBeenCalled();
+					allowed = true;
+					expect(await embed(["second"])).toEqual([new Float32Array([0.25, 0.75])]);
+					expect(fetchSpy).toHaveBeenCalledTimes(1);
+					allowed = false;
+					expect(await embed(["third"])).toBeNull();
+					expect(fetchSpy).toHaveBeenCalledTimes(1);
+				},
+			);
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+
+	it("checks the remote policy for every request", async () => {
+		let allowed = false;
+		let calls = 0;
+		const fetchMock: typeof fetch = Object.assign(
+			() => {
+				calls++;
+				return Promise.resolve(
+					new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 }),
+				);
+			},
+			{ preconnect: () => {} },
+		);
+		await withMnemopiRuntimeOptions(
+			{
+				llm: { enabled: true, baseUrl: "http://remote.test/v1", model: "remote-model", allowRemote: () => allowed },
+			},
+			async () => {
+				expect(await callRemoteLlm("first", 0, { fetch: fetchMock })).toBeNull();
+				expect(calls).toBe(0);
+				allowed = true;
+				expect(await callRemoteLlm("second", 0, { fetch: fetchMock })).toBe("ok");
+				expect(calls).toBe(1);
+				allowed = false;
+				expect(await callRemoteLlm("third", 0, { fetch: fetchMock })).toBeNull();
+				expect(calls).toBe(1);
+			},
+		);
 	});
 
 	it("uses a runtime-configured remote LLM in background extraction", async () => {

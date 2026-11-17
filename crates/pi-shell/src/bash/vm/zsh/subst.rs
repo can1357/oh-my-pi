@@ -1795,7 +1795,7 @@ pub fn strmetasort(
 		.iter()
 		.map(|s| {
 			let k = key(s);
-			let c = coll.map(|c| c.key(&k)).unwrap_or_default();
+			let c = coll.map_or_default(|c| c.key(&k));
 			(k, c, s.clone())
 		})
 		.collect();
@@ -2438,13 +2438,15 @@ fn paramsubst(
 		} else {
 			-1
 		};
+		// Only the text of a subscripted element is read here: a stored
+		// array need not be read whole for it.
 		let fv = if subexp {
 			let ov = metafy(&unmetafy(&ps.val));
 			let mut pos = 0;
-			params::fetchvalue(ex, &ov, &mut pos, bracks, scanflags)?
+			params::fetchvalue(ex, &ov, &mut pos, bracks, scanflags | params::SCANPM_WINDOW)?
 		} else {
 			let mut pos = sp;
-			let r = params::fetchvalue(ex, src, &mut pos, bracks, scanflags)?;
+			let r = params::fetchvalue(ex, src, &mut pos, bracks, scanflags | params::SCANPM_WINDOW)?;
 			if idbeg.is_empty() {
 				idbeg = span(src, sp, pos).to_vec();
 			}
@@ -2879,8 +2881,10 @@ fn paramsubst(
 						ps.isarr = 1;
 						arrasg = 0;
 					} else {
-						let mut val = ps.val.clone();
-						untokenize(&mut val);
+						// zsh untokenizes the word in place: the expansion is
+						// the assigned text, not a pattern (`${x=*}` is `*`).
+						untokenize(&mut ps.val);
+						let val = ps.val.clone();
 						let mut name = idbeg;
 						untokenize(&mut name);
 						redo(ex, &name, |ex| {
@@ -2907,26 +2911,24 @@ fn paramsubst(
 				}
 			},
 			b'?' | QUEST => {
-				if ps.vunset != 0 {
-					if opt(ex, ZshOpt::Exec)? {
-						let msg = if sbody.is_empty() {
-							BString::from("parameter not set")
-						} else {
-							let mut m = singsub(ex, sbody)?;
-							untokenize(&mut m);
-							BString::from(unmetafy(&m))
-						};
-						// zsh: an interactive shell goes back to its prompt;
-						// any other shell exits.
-						if opt(ex, ZshOpt::Interactive)? {
-							return Err(Stop::Fail(Diag::ParamUnset { name: idname, msg }));
-						}
-						return Err(Stop::Fatal(Diag::ParamUnset { name: idname, msg }));
+				if ps.vunset != 0 && opt(ex, ZshOpt::Exec)? {
+					let msg = if sbody.is_empty() {
+						BString::from("parameter not set")
+					} else {
+						let mut m = singsub(ex, sbody)?;
+						untokenize(&mut m);
+						BString::from(unmetafy(&m))
+					};
+					// zsh: an interactive shell goes back to its prompt;
+					// any other shell exits.
+					if opt(ex, ZshOpt::Interactive)? {
+						return Err(Stop::Fail(Diag::ParamUnset { name: idname, msg }));
 					}
-					// `NO_EXEC`: zsh's `paramsubst` gives up on the word
-					// without an error; nothing runs it, so the (empty)
-					// value goes on unreported.
+					return Err(Stop::Fatal(Diag::ParamUnset { name: idname, msg }));
 				}
+				// `NO_EXEC`: zsh's `paramsubst` gives up on the word
+				// without an error; nothing runs it, so the (empty)
+				// value goes on unreported.
 			},
 			_ => {
 				// `%`, `#`, `/`: pattern operations.
@@ -4097,6 +4099,10 @@ fn assign_target(unit: &crate::bash::ir::Unit, a: &crate::bash::ir::AssignOp) ->
 	name
 }
 
+/// A `GLOB_ASSIGN` value waiting for filename generation: the value and
+/// its glob (see [`assign_scalar`]).
+pub type GlobAssign = (Vec<BString>, Vec<(u32, BString)>);
+
 /// A zsh scalar assignment statement `name=word` / `name[sub]=word` /
 /// `name+=word` (zsh `addvars` with `PREFORK_SINGLE|PREFORK_ASSIGN`, then
 /// `assignsparam`). Under `GLOB_ASSIGN` a value with wildcards goes
@@ -4111,14 +4117,19 @@ pub fn assign_scalar(
 	unit: &crate::bash::ir::Unit,
 	a: &crate::bash::ir::AssignOp,
 	shown: Option<&mut BString>,
-) -> X<Option<(Vec<BString>, Vec<(u32, BString)>)>> {
+) -> X<Option<GlobAssign>> {
 	let crate::bash::ir::AssignVal::Scalar(w) = a.value else {
 		return Ok(None);
 	};
 	let word = zsh_word(unit, w).map_or_default(<[u8]>::to_vec);
-	let mut list = List::one(word);
-	let mut rf = 0;
-	prefork(ex, &mut list, PREFORK_SINGLE | PREFORK_ASSIGN, &mut rf)?;
+	let list = if let Some(val) = simple_value(ex, &word)? {
+		List::one(val)
+	} else {
+		let mut list = List::one(word);
+		let mut rf = 0;
+		prefork(ex, &mut list, PREFORK_SINGLE | PREFORK_ASSIGN, &mut rf)?;
+		list
+	};
 	if opt(ex, ZshOpt::Globassign)? {
 		let popts = zpattern::opts(ex)?;
 		let mut probe = list.nodes.first().cloned().unwrap_or_default();
@@ -4137,6 +4148,64 @@ pub fn assign_scalar(
 	let target = assign_target(unit, a);
 	let flags = params::ASSPM_WARN | if a.append { params::ASSPM_AUGMENT } else { 0 };
 	effect(ex, |ex| params::assignsparam_meta(ex, &target, val, flags)).map(|()| None)
+}
+
+/// The value of assignment word `word` (tokenized, metafied) when it is
+/// only literal text and plain `$name` references to direct scalars or
+/// integers ([`params::direct_text`]), as `prefork` would leave it; `None`
+/// for any other word (quoting, braces, subscripts, `$name:mods`, tilde
+/// and `=` expansion, other substitutions), or when `GLOB_SUBST` or
+/// `GLOB_ASSIGN` could make the substituted text a pattern.
+///
+/// # Errors
+/// A store failure.
+fn simple_value(ex: &mut Expander<'_, '_>, word: &[u8]) -> X<Option<Vec<u8>>> {
+	if !word.contains(&STRING) {
+		return Ok(None);
+	}
+	let mut out = Vec::with_capacity(word.len() + 16);
+	let mut i = 0;
+	while i < word.len() {
+		match word[i] {
+			META => {
+				out.extend_from_slice(span(word, i, i + 2));
+				i += 2;
+			},
+			STRING => {
+				let start = i + 1;
+				let mut end = start;
+				while word
+					.get(end)
+					.is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_')
+				{
+					end += 1;
+				}
+				// A subscript, modifiers or a multibyte name continue it.
+				if end == start
+					|| word[start].is_ascii_digit()
+					|| word
+						.get(end)
+						.is_some_and(|&c| matches!(c, b'[' | b':') || c >= 0x80)
+				{
+					return Ok(None);
+				}
+				let Some(text) = params::direct_text(ex, &word[start..end])? else {
+					return Ok(None);
+				};
+				out.extend_from_slice(&text);
+				i = end;
+			},
+			c if c >= META => return Ok(None),
+			c => {
+				out.push(c);
+				i += 1;
+			},
+		}
+	}
+	if opt(ex, ZshOpt::Globsubst)? || opt(ex, ZshOpt::Globassign)? {
+		return Ok(None);
+	}
+	Ok(Some(out))
 }
 
 /// A `GLOB_ASSIGN` scalar assignment after filename generation (zsh

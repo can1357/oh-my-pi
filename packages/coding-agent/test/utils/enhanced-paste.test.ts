@@ -9,6 +9,14 @@ function packet(metadata: string, payload?: string): string {
 	return `${OSC}${metadata}${payload === undefined ? "" : `;${payload}`}${ST}`;
 }
 
+function unexpectedNativePaste(): never {
+	throw new Error("unexpected native clipboard paste");
+}
+
+function unexpectedHtmlPaste(): never {
+	throw new Error("unexpected HTML paste");
+}
+
 describe("EnhancedPasteController", () => {
 	it("requests image data from an OSC 5522 paste event and preserves chunk boundaries", () => {
 		const writes: string[] = [];
@@ -20,7 +28,10 @@ describe("EnhancedPasteController", () => {
 			pasteImage: image => {
 				pastedImages.push({ data: image.data, mimeType: image.mimeType });
 			},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => statuses.push(message),
+			pasteNative: unexpectedNativePaste,
 		});
 
 		controller.enable();
@@ -64,7 +75,10 @@ describe("EnhancedPasteController", () => {
 			pasteImage: () => {
 				throw new Error("unexpected image paste");
 			},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => pastedText.push(`status:${message}`),
+			pasteNative: unexpectedNativePaste,
 		});
 
 		const textMime = Buffer.from("text/plain", "utf8").toString("base64");
@@ -91,19 +105,62 @@ describe("EnhancedPasteController", () => {
 		expect(pastedText).toEqual(["hello world"]);
 	});
 
-	it("reports unsupported paste events instead of leaking OSC packets to the editor", () => {
+	it("falls back to the native clipboard reader when the listing has no supported MIME type", () => {
+		const writes: string[] = [];
+		const statuses: string[] = [];
+		let nativeAvailable = true;
+		let nativePastes = 0;
+		const controller = new EnhancedPasteController({
+			write: data => writes.push(data),
+			pasteText: () => {},
+			pasteImage: () => {},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
+			showStatus: message => statuses.push(message),
+			pasteNative: () => {
+				nativePastes++;
+				return nativeAvailable;
+			},
+		});
+
+		// macOS screenshots copied straight to the clipboard list only `image/tiff` (#17696).
+		const tiffMime = Buffer.from("image/tiff", "utf8").toString("base64");
+		expect(controller.handleInput(packet("type=read:status=OK"))).toBe(true);
+		expect(controller.handleInput(packet(`type=read:status=DATA:mime=${tiffMime}`))).toBe(true);
+		expect(controller.handleInput(packet("type=read:status=DONE"))).toBe(true);
+
+		expect(nativePastes).toBe(1);
+		expect(writes).toEqual([]);
+		expect(statuses).toEqual([]);
+
+		// Remote session: the native clipboard is not the user's, so report the unsupported listing.
+		nativeAvailable = false;
+		const htmlMime = Buffer.from("text/html", "utf8").toString("base64");
+		controller.handleInput(packet("type=read:status=OK"));
+		controller.handleInput(packet(`type=read:status=DATA:mime=${htmlMime}`));
+		controller.handleInput(packet("type=read:status=DONE"));
+
+		expect(nativePastes).toBe(2);
+		expect(writes).toEqual([]);
+		expect(statuses).toEqual(["Clipboard paste has no supported text or image data"]);
+	});
+
+	it("does not paste the regular clipboard for an unsupported primary-selection listing", () => {
 		const statuses: string[] = [];
 		const controller = new EnhancedPasteController({
 			write: () => {},
 			pasteText: () => {},
 			pasteImage: () => {},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => statuses.push(message),
+			pasteNative: unexpectedNativePaste,
 		});
 
-		const htmlMime = Buffer.from("text/html", "utf8").toString("base64");
-		expect(controller.handleInput(packet("type=read:status=OK"))).toBe(true);
-		expect(controller.handleInput(packet(`type=read:status=DATA:mime=${htmlMime}`))).toBe(true);
-		expect(controller.handleInput(packet("type=read:status=DONE"))).toBe(true);
+		const tiffMime = Buffer.from("image/tiff", "utf8").toString("base64");
+		controller.handleInput(packet("type=read:status=OK:loc=primary"));
+		controller.handleInput(packet(`type=read:status=DATA:mime=${tiffMime}`));
+		controller.handleInput(packet("type=read:status=DONE"));
 
 		expect(statuses).toEqual(["Clipboard paste has no supported text or image data"]);
 	});
@@ -117,7 +174,10 @@ describe("EnhancedPasteController", () => {
 			pasteImage: () => {
 				throw new Error("unexpected image paste");
 			},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: message => pastedText.push(`status:${message}`),
+			pasteNative: unexpectedNativePaste,
 		});
 
 		const dot = Buffer.from(".", "utf8").toString("base64");
@@ -159,7 +219,10 @@ describe("EnhancedPasteController", () => {
 				throw new Error("unexpected text paste");
 			},
 			pasteImage: () => {},
+			acceptsHtml: () => false,
+			pasteHtml: unexpectedHtmlPaste,
 			showStatus: () => {},
+			pasteNative: unexpectedNativePaste,
 		});
 
 		const dot = Buffer.from(".", "utf8").toString("base64");
@@ -175,5 +238,42 @@ describe("EnhancedPasteController", () => {
 		controller.handleInput(packet("type=read:status=DONE"));
 
 		expect(writes.at(-1)).toBe(`${OSC}type=read;${imageMime}${BEL}`);
+	});
+
+	it("reads HTML over plain text only where styled text goes", () => {
+		const htmlMime = Buffer.from("text/html", "utf8").toString("base64");
+		const textMime = Buffer.from("text/plain", "utf8").toString("base64");
+		const listing = Buffer.from("text/plain text/html", "utf8").toString("base64");
+		const dot = Buffer.from(".", "utf8").toString("base64");
+		for (const composer of [true, false]) {
+			const writes: string[] = [];
+			const pasted: string[] = [];
+			const controller = new EnhancedPasteController({
+				write: data => writes.push(data),
+				pasteText: text => pasted.push(`text:${text}`),
+				pasteImage: () => {
+					throw new Error("unexpected image paste");
+				},
+				acceptsHtml: () => composer,
+				pasteHtml: html => {
+					pasted.push(`html:${html}`);
+				},
+				showStatus: message => pasted.push(`status:${message}`),
+				pasteNative: unexpectedNativePaste,
+			});
+			controller.handleInput(packet("type=read:status=OK"));
+			controller.handleInput(packet(`type=read:status=DATA:mime=${dot}`, listing));
+			controller.handleInput(packet("type=read:status=DONE"));
+			const mime = composer ? htmlMime : textMime;
+			expect(writes.at(-1)).toBe(`${OSC}type=read;${mime}${BEL}`);
+
+			const body = composer ? "<b>hi</b>" : "hi";
+			controller.handleInput(packet("type=read:status=OK"));
+			controller.handleInput(
+				packet(`type=read:status=DATA:mime=${mime}`, Buffer.from(body, "utf8").toString("base64")),
+			);
+			controller.handleInput(packet("type=read:status=DONE"));
+			expect(pasted).toEqual([composer ? "html:<b>hi</b>" : "text:hi"]);
+		}
 	});
 });

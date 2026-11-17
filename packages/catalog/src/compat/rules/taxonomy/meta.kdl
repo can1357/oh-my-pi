@@ -1,6 +1,7 @@
 class "meta" {
 	bounded "muse-spark"
 	bounded "muse-wonder"
+	bounded "muse-ember"
 	bounded "llama"
 	// SambaNova serves the bare `Meta-Llama-*` spelling with no namespace
 	// segment, which `bounded "llama"` never sees (prefix-anchored) and
@@ -11,7 +12,9 @@ class "meta" {
 	family "llama" glob="*llama*"
 	family "muse-spark" glob="*muse-spark*"
 	family "muse-wonder" glob="*muse-wonder*"
+	family "muse-ember" glob="*muse-ember*"
 
 	revision prefix="muse-spark-"
 	revision prefix="muse-wonder-"
+	revision prefix="muse-ember-"
 }

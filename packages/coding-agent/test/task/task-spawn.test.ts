@@ -182,7 +182,7 @@ describe("task spawn routing", () => {
 			id: "Main",
 			displayName: "Main",
 			kind: "main",
-			session: { isStreaming: true } as never,
+			session: { isStreaming: true, hasIrcInterrupts: () => false } as never,
 			status: "running",
 		});
 		const tool = await TaskTool.create(parent);

@@ -1,6 +1,9 @@
 //! Identifiers shared by the engine, its hosts and its events.
 
-use std::fmt;
+use std::{
+	fmt,
+	hash::{BuildHasherDefault, Hash, Hasher},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -45,8 +48,44 @@ pub struct JobId(pub u32);
 ///
 /// Serialized as 64 lowercase hex digits in human-readable formats (JSON
 /// events) and as 32 raw bytes otherwise (frames).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct UnitId(pub [u8; 32]);
+
+impl Hash for UnitId {
+	/// The id is a uniform digest, so its leading 8 bytes already spread
+	/// keys; hashing all 32 again only costs time (equality still compares
+	/// the whole id).
+	fn hash<H: Hasher>(&self, h: &mut H) {
+		let [a, b, c, d, e, f, g, i, ..] = self.0;
+		h.write_u64(u64::from_le_bytes([a, b, c, d, e, f, g, i]));
+	}
+}
+
+/// Hasher for maps keyed by [`UnitId`]: the hash is the id's own leading
+/// bytes ([`UnitId`]'s `Hash`), not a second hash of them.
+#[derive(Default)]
+pub struct UnitIdHasher(u64);
+
+impl Hasher for UnitIdHasher {
+	fn finish(&self) -> u64 {
+		self.0
+	}
+
+	fn write_u64(&mut self, v: u64) {
+		self.0 = v;
+	}
+
+	fn write(&mut self, bytes: &[u8]) {
+		// Only `UnitId` keys these maps; fold anything else rather than lose
+		// it.
+		for &b in bytes {
+			self.0 = (self.0.rotate_left(5) ^ u64::from(b)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+		}
+	}
+}
+
+/// [`std::hash::BuildHasher`] of [`UnitIdHasher`].
+pub type UnitIdState = BuildHasherDefault<UnitIdHasher>;
 
 impl Serialize for UnitId {
 	fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {

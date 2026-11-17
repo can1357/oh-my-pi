@@ -22,10 +22,12 @@ import {
 import { sanitizeRemoteName } from "@oh-my-pi/pi-coding-agent/tools/gh-pr-checkout";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import { withRepoLock } from "@oh-my-pi/pi-coding-agent/utils/repo-lock";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getAgentDir, hashPath, normalizePathForComparison, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "../helpers/mock-scheduler-clock";
 
 const TINY_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
@@ -1475,6 +1477,201 @@ echo ok
 			await removeWithRetries(artifactsDir);
 		}
 	});
+
+	for (const mode of ["run", "commit"] as const) {
+		it(`streams normalized GitHub Actions step progress in ${mode} watch details`, async () => {
+			mockSchedulerWaitWithClock();
+			const observedAt = Date.parse("2026-11-11T12:00:30Z");
+			vi.spyOn(Date, "now").mockReturnValue(observedAt);
+
+			const sentinelTimestamp = "0001-01-01T00:00:00Z";
+			const liveSteps = [
+				{
+					number: 1,
+					name: "Checkout",
+					status: "completed",
+					conclusion: "success",
+					started_at: "2026-11-11T12:00:20Z",
+					completed_at: "2026-11-11T12:00:22Z",
+				},
+				{
+					number: 2,
+					name: "Run tests",
+					status: "in_progress",
+					started_at: "2026-11-11T12:00:25Z",
+					completed_at: sentinelTimestamp,
+				},
+				{
+					number: 3,
+					name: "Wait for deployment",
+					status: "queued",
+					started_at: sentinelTimestamp,
+					completed_at: sentinelTimestamp,
+				},
+				{ number: 4, status: "queued", started_at: sentinelTimestamp },
+				{ name: "No GitHub step number", status: "completed" },
+				{ number: 0, name: "Invalid zero step number", status: "completed" },
+				{ number: "5", name: "Invalid string step number", status: "completed" },
+			];
+			const completedSteps = [
+				liveSteps[0],
+				{
+					number: 2,
+					name: "Run tests",
+					status: "completed",
+					conclusion: "success",
+					started_at: "2026-11-11T12:00:25Z",
+					completed_at: "2026-11-11T12:00:34Z",
+				},
+				{
+					number: 3,
+					name: "Wait for deployment",
+					status: "queued",
+					started_at: sentinelTimestamp,
+					completed_at: sentinelTimestamp,
+				},
+				{ number: 4, status: "queued", started_at: sentinelTimestamp },
+				...liveSteps.slice(4),
+			];
+			const runSnapshots = [
+				{
+					id: 77,
+					name: "CI",
+					display_title: "Step progress",
+					status: "in_progress",
+					head_branch: "main",
+					head_sha: "0123456789abcdef",
+					html_url: "https://github.com/owner/repo/actions/runs/77",
+				},
+				{
+					id: 77,
+					name: "CI",
+					display_title: "Step progress",
+					status: "completed",
+					conclusion: "success",
+					head_branch: "main",
+					head_sha: "0123456789abcdef",
+					html_url: "https://github.com/owner/repo/actions/runs/77",
+				},
+			];
+			const jobSnapshots = [
+				[
+					{
+						id: 201,
+						name: "build",
+						status: "in_progress",
+						started_at: "2026-11-11T12:00:20Z",
+						steps: liveSteps,
+					},
+					{ id: 202, name: "legacy-job", status: "completed", conclusion: "success" },
+					{ id: 203, name: "empty-job", status: "completed", conclusion: "success", steps: [] },
+				],
+				[
+					{
+						id: 201,
+						name: "build",
+						status: "completed",
+						conclusion: "success",
+						started_at: "2026-11-11T12:00:20Z",
+						completed_at: "2026-11-11T12:00:35Z",
+						steps: completedSteps,
+					},
+					{ id: 202, name: "legacy-job", status: "completed", conclusion: "success" },
+					{ id: 203, name: "empty-job", status: "completed", conclusion: "success", steps: [] },
+				],
+			];
+			let runPoll = 0;
+			let jobsPoll = 0;
+			const runSpy = vi.spyOn(github, "run").mockImplementation(async (_cwd, args) => {
+				const endpoint = args.find(arg => arg.startsWith("/repos/"));
+				if (!endpoint) throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+
+				let response: unknown;
+				if (endpoint === "/repos/owner/repo/branches/main") {
+					response = { commit: { sha: "0123456789abcdef" } };
+				} else if (endpoint === "/repos/owner/repo/actions/runs/77") {
+					response = runSnapshots[Math.min(runPoll++, runSnapshots.length - 1)];
+				} else if (endpoint === "/repos/owner/repo/actions/runs") {
+					response = { workflow_runs: [runSnapshots[Math.min(runPoll++, runSnapshots.length - 1)]] };
+				} else if (endpoint === "/repos/owner/repo/actions/runs/77/jobs") {
+					response = {
+						total_count: jobSnapshots[Math.min(jobsPoll, jobSnapshots.length - 1)].length,
+						jobs: jobSnapshots[Math.min(jobsPoll++, jobSnapshots.length - 1)],
+					};
+				} else {
+					throw new Error(`Unexpected gh command: ${args.join(" ")}`);
+				}
+
+				return { exitCode: 0, stdout: JSON.stringify(response), stderr: "" };
+			});
+
+			const updates: GhToolDetails[] = [];
+			const tool = new GithubTool(createSession("/tmp/gh-run-watch-steps"));
+			const result = await tool.execute(
+				"watch-steps",
+				{
+					op: "run_watch",
+					repo: "owner/repo",
+					...(mode === "run" ? { run: "77" } : { branch: "main" }),
+				},
+				undefined,
+				update => {
+					if (update.details) updates.push(update.details);
+				},
+			);
+			const getRun = (details: GhToolDetails | undefined) => {
+				const watch = details?.watch;
+				return watch?.mode === "run" ? watch.run : watch?.runs?.[0];
+			};
+			const liveDetails = updates.find(update => update.watch?.pollCount === 1);
+			expect(liveDetails?.watch?.state).toBe("watching");
+			const liveJob = getRun(liveDetails)?.jobs[0];
+			expect(liveJob?.steps?.map(step => step.number)).toEqual([1, 2, 3, 4]);
+			expect(liveJob?.steps).toMatchObject([
+				{ number: 1, name: "Checkout", status: "completed", conclusion: "success", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "in_progress", durationSeconds: 5 },
+				{ number: 3, name: "Wait for deployment", status: "queued" },
+				{ number: 4, name: "step-4", status: "queued" },
+			]);
+			expect(liveJob?.steps?.[2]?.durationSeconds).toBeUndefined();
+			expect(liveJob?.steps?.[3]?.durationSeconds).toBeUndefined();
+			expect(getRun(liveDetails)?.jobs[1]?.steps).toBeUndefined();
+			expect(getRun(liveDetails)?.jobs[2]?.steps).toEqual([]);
+			const finalPollDetails = updates.find(
+				update => update.watch?.pollCount === 2 && update.watch.note === undefined,
+			);
+			expect(finalPollDetails?.watch?.state).toBe("watching");
+			expect(getRun(finalPollDetails)?.jobs[0]?.steps?.slice(0, 2)).toMatchObject([
+				{ number: 1, name: "Checkout", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "completed", conclusion: "success", durationSeconds: 9 },
+			]);
+
+			expect(result.details?.watch?.mode).toBe(mode);
+			expect(result.details?.watch?.state).toBe("completed");
+			const finalJob = getRun(result.details)?.jobs[0];
+			expect(finalJob?.steps?.map(step => step.number)).toEqual([1, 2, 3, 4]);
+			expect(finalJob?.steps).toMatchObject([
+				{ number: 1, name: "Checkout", durationSeconds: 2 },
+				{ number: 2, name: "Run tests", status: "completed", conclusion: "success", durationSeconds: 9 },
+				{ number: 3, name: "Wait for deployment", status: "queued" },
+				{ number: 4, name: "step-4", status: "queued" },
+			]);
+			expect(finalJob?.steps?.[2]?.durationSeconds).toBeUndefined();
+			expect(finalJob?.steps?.[3]?.durationSeconds).toBeUndefined();
+			expect(getRun(result.details)?.jobs[1]?.steps).toBeUndefined();
+			expect(getRun(result.details)?.jobs[2]?.steps).toEqual([]);
+			// Steps are display data: a passing run's text result lists jobs only.
+			const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+			expect(text).toContain("- [success] build");
+			expect(text).not.toContain("Checkout");
+			expect(text).not.toContain("0001-01-01");
+
+			const jobsCalls = runSpy.mock.calls.filter(([, args]) =>
+				args.includes("/repos/owner/repo/actions/runs/77/jobs"),
+			);
+			expect(jobsCalls).toHaveLength(2);
+		});
+	}
 
 	it("honors the explicit `repo` argument and does not fall back to the cwd repo (issue #1949)", async () => {
 		// Reporter's scenario: cwd lives in repo A (`cagedbird043/cagedbird-ecosystem`),

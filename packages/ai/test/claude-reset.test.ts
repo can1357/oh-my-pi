@@ -108,6 +108,14 @@ describe("listClaudeResetCredits", () => {
 		});
 	});
 
+	it("maps a Fable launch grant onto the Fable weekly limit it clears", async () => {
+		const payload = cedarPayload();
+		payload.cedar_ember.grants[0].clears = ["five_hour", "seven_day_overage_included"];
+		const { fetch } = recordingFetch(() => json(200, payload));
+		const result = await listClaudeResetCredits({ accessToken: "token", orgId: "org_1", fetch });
+		expect(result?.credits[0]?.clears).toEqual(["anthropic:5h", "anthropic:7d:fable"]);
+	});
+
 	it("parses discovery quota evidence with the same normalized model windows as ordinary usage", async () => {
 		const { fetch, calls } = recordingFetch(() =>
 			json(200, {

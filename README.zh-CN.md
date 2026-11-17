@@ -41,7 +41,7 @@
 curl -fsSL https://omp.sh/install | sh
 ```
 
-如果没有可用的 bun（或指定了 `--binary`），安装脚本会从 `build.stencil.so` 下载预编译二进制，并在安装前校验其 SHA-256。可通过 `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` 固定某个版本（PowerShell：`-Binary -Ref v<version>`）。
+安装脚本会从 `build.stencil.so` 下载预编译二进制，并在安装前校验其 SHA-256；如需改用 bun 安装软件包，请传入 `--source`（PowerShell：`-Source`）。可通过 `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` 固定某个版本（PowerShell：`-Binary -Ref v<version>`）。
 
 > **Alpine / musl：** 预编译的 musl 二进制动态链接 `libstdc++`/`libgcc`，而原生 Alpine 并不自带。请先安装：`apk add libstdc++ libgcc`。
 
@@ -191,7 +191,7 @@ _[观看录屏 ↗](https://omp.sh/clips/collab.mp4)_
 
 ### 08 · 读一篇 arXiv 上的 PDF？有何不可。
 
-web_search 串联了二十三个按优先级排列的搜索提供商，并把找到的 URL 直接交给 read。arXiv PDF、GitHub 页面、Stack Overflow 帖子都会以结构化 Markdown 返回，锚点完整保留——与处理本地文件使用同一套工具。引用、跟进、摘录，永远不会丢失出处。
+web_search 串联了二十五个按优先级排列的搜索提供商，并把找到的 URL 直接交给 read。arXiv PDF、GitHub 页面、Stack Overflow 帖子都会以结构化 Markdown 返回，锚点完整保留——与处理本地文件使用同一套工具。引用、跟进、摘录，永远不会丢失出处。
 
 ![omp TUI：web_search 针对推理时计算扩展返回 10 个按排名排列的 Perplexity 来源，智能体挑选了一篇 arXiv 论文，调用 read https://arxiv.org/pdf/2604.10739v1，并用真实数据总结论文的核心结论。](https://omp.sh/clips/web-poster.webp)
 
@@ -203,7 +203,7 @@ _[观看录屏 ↗](https://omp.sh/clips/web.mp4)_
 
 ### 10 · 带优先级和结论的代码评审
 
-明确告诉你这次改动能否发布，每个问题按 P0 到 P3 排序并给出置信度评分。/review 会派生专门的评审子智能体，并行审查分支、单个提交或未提交的修改。你先处理阻碍发布的问题；重要内容不会淹没在大段文字里。
+明确告诉你这次改动能否发布，每个问题按 P0 到 P3 排序并给出置信度评分。[/review](docs/slash-command-internals.md#15-bundled-command-note-review) 会派生专门的评审子智能体，并行审查分支、单个提交或未提交的修改。你先处理阻碍发布的问题；重要内容不会淹没在大段文字里。
 
 想自己主导评审？`/annotate code-review` 会打开 diff，让你在评审者运行前把批注钉在具体行上。`/annotate` 还可以针对最新回复、某条会话消息、某个文件或引用文本，把你的批注粘贴进提示词。参见 [`/annotate`](docs/slash-command-internals.md#12-bundled-command-note-annotate)。
 
@@ -289,7 +289,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 - `task` — 并行扇出子智能体，可选工作区隔离。
 - `wait` — 阻塞直到下一个后台结果、同伴消息或引导中断；通过 `agent://` 和 `proc://` 给同伴发消息、控制任务。
 - `todo` — 对会话待办列表进行有序修改，支持阶段跟踪。
-- `ask` — 交互式运行中的结构化追问。
+- `ask` — 交互式运行中的 HTML 表单追问（单选框、复选框、下拉选择、文本）。
 
 **桌面与网络**
 
@@ -343,7 +343,7 @@ Eval 的 `computer` 辅助方法——`computer.window(...)`、`win.screenshot()
 
 直连 API 和网关。可按角色混用不同提供商。
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · SambaNova · Fireworks · Together · Modular · Baseten · DeepInfra · Hugging Face · NVIDIA · Meta · Inception · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · Command Code · Charm Hyper · StepFun · Helmcode · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Scaleway · Otari
 
 ### 编程套餐
 
@@ -392,13 +392,13 @@ modelRoles:
 
 完整的提供商与路由参考见 [omp.sh/docs/providers](https://omp.sh/docs/providers)。
 
-## 二十三个后端。_智能体早已用惯的一个工具_。
+## 二十五个后端。_智能体早已用惯的一个工具_。
 
-`web_search` 是内置的，而不是外挂的。`auto` 会依次尝试二十三个提供商；如果你已经付费订阅了某一个，也可以按名称固定使用。每个搜索结果背后，站点感知的提取器会把 GitHub、包注册表、arXiv、Stack Overflow 和文档站点转换为结构化 Markdown——锚点和链接目标都会保留。
+`web_search` 是内置的，而不是外挂的。`auto` 会依次尝试二十五个提供商；如果你已经付费订阅了某一个，也可以按名称固定使用。每个搜索结果背后，站点感知的提取器会把 GitHub、包注册表、arXiv、Stack Overflow 和文档站点转换为结构化 Markdown——锚点和链接目标都会保留。
 
 ### 搜索提供商
 
-二十三个后端。固定使用其中之一，或让 `auto` 按顺序依次尝试。
+二十五个后端。固定使用其中之一，或让 `auto` 按顺序依次尝试。
 
 | 提供商       | 认证方式                                  |
 | ------------ | ----------------------------------------- |
@@ -411,6 +411,8 @@ modelRoles:
 | `zai`        | `ZAI_API_KEY`                             |
 | `exa`        | `EXA_API_KEY`（或 mcp）                   |
 | `tinyfish`   | `TINYFISH_API_KEY`                        |
+| `keenable`   | `KEENABLE_API_KEY`（可无密钥回退）        |
+| `sofya`      | `SOFYA_API_KEY`                           |
 | `jina`       | `JINA_API_KEY`                            |
 | `kagi`       | `KAGI_API_KEY`                            |
 | `tavily`     | `TAVILY_API_KEY`                          |
@@ -503,11 +505,11 @@ Exa 也可以通过 `/login exa` 存储 API 密钥；显式选择无密钥模式
 
 ### 交互式——拿不准时，智能体会问你
 
-TUI 是默认界面。工具调用渲染为卡片，编辑在写入磁盘前可预览，遇到歧义时则通过 `ask` 工具处理——这是一个智能体可以在回合中途调用的结构化选项选择器。其余操作都可以用键盘完成。
+TUI 是默认界面。工具调用渲染为卡片，编辑在写入磁盘前可预览，遇到歧义时则通过 `ask` 工具处理——这是智能体可以在回合中途弹出的表单，并预先选中它推荐的选项。其余操作都可以用键盘完成。
 
-同样的提示卡片也会通过 ACP 呈现，编辑器无需自己实现选择器。
+同样的表单也会以 elicitation 的形式通过 ACP 呈现，编辑器无需自己编写对话框。
 
-![omp TUI 显示来自 ask 工具的多选问题。](assets/ask.webp)
+![omp TUI 显示 ask 表单中的一个多选字段。](assets/ask.webp)
 
 ### SDK——嵌入 Node
 
@@ -634,6 +636,10 @@ bun run gen:nix
 ```sh
 bun dev -- --version
 ```
+
+#### Apple Silicon 上的 Nix 构建
+
+在 Apple Silicon 上，`nix build .#omp` 会使用 nixpkgs 的 Swift 编译器和 `apple-sdk_27` 编译 Apple Foundation Models bridge。构建过程不会使用宿主机的 Xcode 或 Command Line Tools。如果无法编译该 bridge，构建会直接失败，而不是发布一个缺少 bridge 的版本。这两者都只是构建期依赖。要使用这些模型，仍需要 macOS 27+、受支持的设备，并开启 Apple Intelligence。如需在不包含该 bridge 的情况下构建，请使用 `omp.override { withAppleFm = false; }`。
 
 ### 调试命令
 

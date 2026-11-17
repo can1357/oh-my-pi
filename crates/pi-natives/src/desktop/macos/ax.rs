@@ -1,6 +1,7 @@
 mod enablement;
 pub(crate) mod menus;
 pub(super) mod open_menu;
+mod placement;
 mod popup;
 mod selection;
 
@@ -12,23 +13,29 @@ use std::{
 	ops::Range,
 	ptr::{self, NonNull},
 	sync::LazyLock,
-	time::Duration,
+	time::{Duration, Instant},
 };
 
+use objc2_app_kit::NSRunningApplication;
 use objc2_application_services::{
 	AXCopyMultipleAttributeOptions, AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType,
 };
 use objc2_core_foundation::{
-	CFArray, CFBoolean, CFDate, CFIndex, CFNull, CFNumber, CFRange, CFRetained, CFString,
-	CFTimeZone, CFType, CFURL, CGPoint, CGSize, Type,
+	CFArray, CFBoolean, CFDate, CFIndex, CFNull, CFNumber, CFNumberType, CFRange, CFRetained,
+	CFString, CFTimeZone, CFType, CFURL, CGPoint, CGSize, Type,
 };
+use objc2_foundation::ns_string;
+pub(super) use selection::select_dragged;
 
 use super::{
 	super::{
-		ax::{AxBounds, AxHandle, AxProps, WalkBounds, normalize_role_macos},
-		backend::{AxBackend, KeyboardFocus, is_raise_action},
+		ax::{
+			AxBounds, AxHandle, AxProps, AxReadAs, WalkBounds, confirm_read_as, normalize_role_macos,
+			performable_names, require_read_as, text_readback, truncate_chars,
+		},
+		backend::{AxBackend, DeliveryMode, KeyboardFocus, is_raise_action, native_action_name},
 		control,
-		error::{CoreResult, DesktopError},
+		error::{CoreResult, DesktopError, ErrorCode},
 		text_range::{TextSelectRequest, Utf16Range, utf16_byte_range, utf16_slice},
 		types::{AxTextSelection, DesktopWindow},
 	},
@@ -56,7 +63,7 @@ const MAX_ATTACHED_SEARCH_DEPTH: usize = 24;
 /// that skips bounds drops the last two, and `props` drops `AXChildren`,
 /// whose count `AXUIElementGetAttributeValueCount` reads without copying the
 /// array.
-const NODE_ATTRIBUTES: [&str; 16] = [
+const NODE_ATTRIBUTES: [&str; 18] = [
 	"AXChildren",
 	"AXRole",
 	"AXTitle",
@@ -64,6 +71,7 @@ const NODE_ATTRIBUTES: [&str; 16] = [
 	"AXDescription",
 	"AXEnabled",
 	"AXFocused",
+	"AXSelected",
 	"AXSubrole",
 	"AXRoleDescription",
 	"AXValueDescription",
@@ -71,6 +79,7 @@ const NODE_ATTRIBUTES: [&str; 16] = [
 	"AXIdentifier",
 	"AXURL",
 	"AXPlaceholderValue",
+	"AXTitleUIElement",
 	"AXPosition",
 	"AXSize",
 ];
@@ -81,21 +90,24 @@ const VALUE: usize = 3;
 const DESCRIPTION: usize = 4;
 const ENABLED: usize = 5;
 const FOCUSED: usize = 6;
-const SUBROLE: usize = 7;
-const ROLE_DESCRIPTION: usize = 8;
-const VALUE_DESCRIPTION: usize = 9;
-const HELP: usize = 10;
-const IDENTIFIER: usize = 11;
-const URL: usize = 12;
-const PLACEHOLDER: usize = 13;
-const POSITION: usize = 14;
-const SIZE: usize = 15;
+const SELECTED: usize = 7;
+const SUBROLE: usize = 8;
+const ROLE_DESCRIPTION: usize = 9;
+const VALUE_DESCRIPTION: usize = 10;
+const HELP: usize = 11;
+const IDENTIFIER: usize = 12;
+const URL: usize = 13;
+const PLACEHOLDER: usize = 14;
+const TITLE_ELEMENT: usize = 15;
+const POSITION: usize = 16;
+const SIZE: usize = 17;
 
 /// The [`NODE_ATTRIBUTES`] read only to tell an element apart in its window
-/// ([`read_identity`]) or to name a field by its placeholder. A batch that
-/// fails as a whole skips them, so a hung app costs no more lone reads, each
-/// with its own timeout, than the element's role, labels, state and children;
-/// the element then has no identity, and a field without a label no name.
+/// ([`read_identity`]) or to name an element by its placeholder or linked
+/// label. A batch that fails as a whole skips them, so a hung app costs no
+/// more lone reads, each with its own timeout, than the element's role,
+/// labels, state and children; the element then has no identity, and an
+/// element without a label of its own no name.
 const IDENTITY_ONLY: Range<usize> = SUBROLE..POSITION;
 
 /// Which slice of [`NODE_ATTRIBUTES`] one element read requests.
@@ -148,6 +160,13 @@ enum NodeBatch {
 
 impl NodeValues {
 	fn read(element: &AXUIElement, read: NodeRead) -> Self {
+		Self::from_batch(Self::batch(element, read), read.attributes(), |index| {
+			copy_attribute_result(element, NODE_ATTRIBUTES[index])
+		})
+	}
+
+	/// `read`'s attributes from `element` in one batched read.
+	fn batch(element: &AXUIElement, read: NodeRead) -> Result<CFRetained<CFArray<CFType>>, AXError> {
 		let mut output: *const CFArray = ptr::null();
 		let error = NODE_REQUESTS.with(|requests| {
 			// SAFETY: The request is a CFArray of CFString attribute names and
@@ -160,7 +179,7 @@ impl NodeValues {
 				)
 			}
 		});
-		let batch = if error == AXError::Success {
+		if error == AXError::Success {
 			NonNull::new(output.cast_mut())
 				.ok_or(AXError::Failure)
 				.map(|pointer| {
@@ -172,10 +191,7 @@ impl NodeValues {
 				})
 		} else {
 			Err(error)
-		};
-		Self::from_batch(batch, read.attributes(), |index| {
-			copy_attribute_result(element, NODE_ATTRIBUTES[index])
-		})
+		}
 	}
 
 	/// The batch's values, or `lone` reads of each attribute outside
@@ -307,10 +323,37 @@ pub(super) struct PointOwner {
 	pub(super) window: Option<u32>,
 }
 
+/// Whether AX identifies this as a document window, rather than a dialog.
+/// `None` when AX cannot read the application, window, or subrole.
+pub(in crate::desktop) fn is_standard_window(window: &DesktopWindow) -> Option<bool> {
+	let app = window
+		.pid
+		.and_then(|pid| libc::pid_t::try_from(pid).ok())
+		.and_then(probe_application)?;
+	let element = find_window(&app, window).ok()?;
+	standard_window_subrole(&element)
+}
+
+fn standard_window_subrole(element: &AXUIElement) -> Option<bool> {
+	copy_string(element, "AXSubrole").map(|subrole| subrole == "AXStandardWindow")
+}
+
 /// `WindowServer` id of `pid`'s `AXFocusedWindow`.
 pub(super) fn focused_window_id(pid: libc::pid_t) -> Option<u32> {
 	let app = probe_application(pid)?;
 	let window = copy_element(&app, "AXFocusedWindow")?;
+	window_id(&window)
+}
+
+/// `WindowServer` id of `pid`'s `AXFocusedWindow` when it is a sheet
+/// (`AXSheet`), such as an Open panel or Go to Folder on a document window;
+/// `None` for any other window.
+pub(super) fn focused_sheet_id(pid: libc::pid_t) -> Option<u32> {
+	let app = probe_application(pid)?;
+	let window = copy_element(&app, "AXFocusedWindow")?;
+	if copy_string(&window, "AXRole").as_deref() != Some("AXSheet") {
+		return None;
+	}
 	window_id(&window)
 }
 
@@ -479,7 +522,7 @@ fn read_key_focus(app: &AXUIElement) -> (KeyFocus, Option<CFRetained<AXUIElement
 /// The first window id `_AXUIElementGetWindow` maps on `element` or, through
 /// a bounded `AXParent` ascent, its nearest ancestor, and whether it is the
 /// element's own.
-fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
+pub(super) fn innermost_window_id(element: &AXUIElement) -> Option<(u32, bool)> {
 	let mut current = element.retain();
 	for depth in 0..MAX_ANCESTRY_DEPTH {
 		if let Some(id) = window_id(&current) {
@@ -606,6 +649,36 @@ pub(super) fn key_window_id(pid: libc::pid_t) -> Option<u32> {
 		})
 }
 
+/// The key window and outside-window focus from one application probe and
+/// one `AXFocusedWindow` read. The main window still takes precedence over
+/// an unmapped focused element, as it does in [`key_window_id`].
+pub(super) fn restoration_window(pid: libc::pid_t) -> (Option<u32>, bool) {
+	let Some(app) = probe_application(pid) else {
+		return (None, false);
+	};
+	let focused = copy_element(&app, "AXFocusedWindow");
+	let key = focused
+		.as_ref()
+		.and_then(|window| window_id(window))
+		.or_else(|| copy_element(&app, "AXMainWindow").and_then(|window| window_id(&window)));
+	if key.is_some() || GET_WINDOW_ID.is_none() {
+		return (key, false);
+	}
+	let finder = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+		.and_then(|app| app.bundleIdentifier())
+		.is_some_and(|bundle| bundle.isEqualToString(ns_string!("com.apple.finder")));
+	let outside = focused.as_ref().is_some_and(|focused| {
+		is_outside_windows(finder, false, copy_string(focused, "AXRole").as_deref())
+	});
+	(key, outside)
+}
+
+/// [`restoration_window`]'s desktop decision: a generic scroll area in any
+/// other app proves nothing, even when its window id cannot be mapped.
+fn is_outside_windows(finder: bool, mapped: bool, role: Option<&str>) -> bool {
+	finder && !mapped && role == Some("AXScrollArea")
+}
+
 /// `AXFrontmost` as `pid`'s application reports it. `AppKit` answers from the
 /// application's own active state, which an `AppKit`-defined activation event
 /// sets while `WindowServer`'s front process stays the user's app.
@@ -682,8 +755,15 @@ pub(in crate::desktop) fn ax_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
 }
 
 /// Hit-tests the global point `(x, y)` the way the pointer would, returning
-/// the process and window that own the frontmost surface there.
-pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
+/// the surface and its owner together so refusal lookups use the same hit.
+pub(super) fn point_owner(x: f64, y: f64) -> Option<(PointOwner, CFRetained<AXUIElement>)> {
+	let (pid, element) = element_at_point(x, y)?;
+	let window = element_window(&element);
+	Some((PointOwner { pid, window: window.as_deref().and_then(window_id) }, element))
+}
+
+/// The frontmost element at the global point `(x, y)`, and its process.
+fn element_at_point(x: f64, y: f64) -> Option<(libc::pid_t, CFRetained<AXUIElement>)> {
 	if !x.is_finite() || !y.is_finite() {
 		return None;
 	}
@@ -703,8 +783,7 @@ pub(super) fn point_owner(x: f64, y: f64) -> Option<PointOwner> {
 	if unsafe { element.pid(NonNull::from(&mut pid)) } != AXError::Success {
 		return None;
 	}
-	let window = element_window(&element);
-	Some(PointOwner { pid, window: window.as_deref().and_then(window_id) })
+	Some((pid, element))
 }
 
 /// Raises a known window for explicit takeover or restoration.
@@ -754,17 +833,40 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 	None
 }
 
-/// The window id of `element` when it is itself one of `pid`'s `AXWindows`
-/// though not an `AXWindow`, as Finder's inline rename field is: such an
-/// element has no window above it and stands for its own.
-fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
+/// The window id of the nearest of `element` and its ancestors that is one of
+/// `pid`'s `AXWindows`, whatever its role. Finder's inline rename field
+/// is such an element itself and stands for its own window. A suggestion list
+/// that pops up under a text field is a window whose listed element is a
+/// scroll area with the application as its parent, so its rows reach no
+/// `AXWindow` and sit below that element. [`find_window`] resolves the same
+/// window id to the same listed element, so an element is owned by the window
+/// whose `ax()` shows it.
+pub(super) fn listed_window_id(pid: libc::pid_t, element: &AXUIElement) -> Option<u32> {
 	let app = probe_application(pid)?;
 	let windows = copy_elements(&app, "AXWindows").ok()?;
-	windows
-		.iter()
-		.any(|window| **window == *element)
-		.then(|| window_id(element))
-		.flatten()
+	let listed = nearest_matching(
+		element.retain(),
+		|current| windows.iter().any(|window| **window == **current),
+		|current| copy_element(current, "AXParent"),
+	)?;
+	window_id(&listed)
+}
+
+/// The first of `element` and its ancestors, read with `parent` for at most
+/// [`MAX_ANCESTRY_DEPTH`] levels, that `is_match` accepts.
+fn nearest_matching<E>(
+	element: E,
+	is_match: impl Fn(&E) -> bool,
+	parent: impl Fn(&E) -> Option<E>,
+) -> Option<E> {
+	let mut current = element;
+	for _ in 0..MAX_ANCESTRY_DEPTH {
+		if is_match(&current) {
+			return Some(current);
+		}
+		current = parent(&current)?;
+	}
+	None
 }
 
 /// An element that stands for its own `WindowServer` window but is absent
@@ -1014,13 +1116,16 @@ impl AxBackend for MacAx {
 		} else {
 			0
 		};
-		element_props(element, &values, child_count, WalkBounds::Read)
+		let mut props = element_props(&values, child_count, WalkBounds::Read)?;
+		props.actions = copy_strings_from_action_names(element).unwrap_or_default();
+		Ok(props)
 	}
 
 	fn walk_node(
 		&mut self,
 		h: &AxHandle,
 		read_bounds: WalkBounds,
+		_max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 		let element = mac_handle(h)?;
 		let read = match read_bounds {
@@ -1035,7 +1140,8 @@ impl AxBackend for MacAx {
 			.flatten()
 			.and_then(element_array)
 			.unwrap_or_default();
-		let mut props = element_props(element, &values, children.len(), read_bounds)?;
+		let mut props = element_props(&values, children.len(), read_bounds)?;
+		props.actions = copy_strings_from_action_names(element).unwrap_or_default();
 		props.partial |= !children_read;
 		Ok((props, children.into_iter().map(AxHandle::Mac).collect()))
 	}
@@ -1071,36 +1177,48 @@ impl AxBackend for MacAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
-		// A popup's value is chosen from its menu, not written. This runs before
-		// the text-target refusals: nothing is typed or written, and the verdict
-		// is the popup's own read-back after a real menu press.
-		let role = copy_held_attribute(element, "AXRole")?
-			.and_then(|value| value.downcast::<CFString>().ok());
-		if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
-			// Choosing opens the popup's menu, so the release helper starts
-			// up front.
-			return release_guard::scope(Presses::Process, || {
-				skylight::with_background_guard(element_pid(element)?, || popup::choose(element, value))
-			});
-		}
-		// Web AXValue can echo a write without the renderer accepting it. The
-		// API has no "unverified" outcome, so refuse before mutating that
-		// surface.
-		ensure_native_text_target(element)?;
-		if !attribute_settable(element, "AXValue") {
-			return Err(DesktopError::ax_failed(
-				"AXValue is not settable; no typing fallback was attempted",
-			));
-		}
-		if let Some(current) = copy_date(element, "AXValue") {
-			return set_date_value(element, value, current);
-		}
+		let entry_front = input::EntryFront::now();
 		let pid = element_pid(element)?;
-		// Focus is borrowed only from an app already in the background as the
-		// call starts: only then does the guard below watch for the user
-		// and restore the front app.
-		let started_in_background = may_borrow_focus(skylight::front_pid(), pid);
+		// Arm the front-app guard before any synchronous AX probe, including
+		// the ref fingerprint: the user can pick this app while it blocks.
+		let started_in_background = entry_front.known_behind(pid);
 		skylight::with_background_guard(pid, || {
+			require_element_read_as(element)?;
+			let wid = element_window(element)
+				.as_deref()
+				.and_then(window_id)
+				.unwrap_or_default();
+			entry_front.require_behind(skylight::front_pid, pid, || wid)?;
+			// A popup's value is chosen from its menu, not written. This runs
+			// before the text-target refusals: nothing is typed or written, and
+			// the verdict is the popup's own read-back after a real menu press.
+			let role = copy_held_attribute(element, "AXRole")?
+				.and_then(|value| value.downcast::<CFString>().ok());
+			if role.is_some_and(|role| role.to_string() == "AXPopUpButton") {
+				// Choosing opens the popup's menu, so the release helper starts
+				// up front.
+				return release_guard::scope(Presses::Process, || popup::choose(element, value));
+			}
+			// Web AXValue can echo a write without the renderer accepting it. The
+			// API has no "unverified" outcome, so refuse before mutating that
+			// surface.
+			ensure_native_text_target(element)?;
+			let current = value_kind(copy_attribute(element, "AXValue"));
+			if !attribute_settable(element, "AXValue") {
+				let number = match &current {
+					ValueKind::Number(number) => Some(&**number),
+					_ => None,
+				};
+				return Err(not_settable(
+					number,
+					&copy_strings_from_action_names(element).unwrap_or_default(),
+				));
+			}
+			match current {
+				ValueKind::Date(at) => return set_date_value(element, value, at),
+				ValueKind::Number(number) => return set_number_value(element, value, &number),
+				ValueKind::Text => {},
+			}
 			// Apps commit what reaches their field editor; several (Contacts,
 			// Font Book, System Settings search) echo an AXValue write without
 			// ever taking it, so replace the text the way `typeText` inserts it.
@@ -1113,13 +1231,16 @@ impl AxBackend for MacAx {
 			control::check()?;
 			control::intervention::check_press()?;
 			set_string_value(element, "AXValue", value)?;
-			verify_text_value(element, value, value)
+			verify_text_value(element, value, value)?;
+			confirm_read_as("the text", || read_as(element))
 		})
 	}
 
 	fn focus(&mut self, h: &AxHandle) -> CoreResult<()> {
 		let element = mac_handle(h)?;
+		// The guard reads the user's front app before the element is read.
 		skylight::with_background_guard(element_pid(element)?, || {
+			require_element_read_as(element)?;
 			control::intervention::check_press()?;
 			set_focused(element)
 		})
@@ -1193,58 +1314,236 @@ impl AxBackend for MacAx {
 			copy_attribute_result(element, "AXRole").err() == Some(AXError::InvalidUIElement)
 		})
 	}
+
+	fn focused_within(&mut self, h: &AxHandle) -> Option<AxHandle> {
+		let app = probe_application(element_pid(mac_handle(h).ok()?).ok()?)?;
+		copy_element(&app, "AXFocusedUIElement").map(AxHandle::Mac)
+	}
+
+	fn value_settable(&mut self, h: &AxHandle) -> Option<bool> {
+		attribute_settable_answer(mac_handle(h).ok()?, "AXValue")
+	}
 }
 
 fn element_props(
-	element: &AXUIElement,
 	values: &NodeValues,
 	child_count: usize,
 	read_bounds: WalkBounds,
 ) -> CoreResult<AxProps> {
+	labelled_props(values, child_count, read_bounds, copy_attribute_result)
+}
+
+/// [`element_props`], reading a linked label with `read_label`.
+fn labelled_props(
+	values: &NodeValues,
+	child_count: usize,
+	read_bounds: WalkBounds,
+	read_label: impl FnMut(&AXUIElement, &str) -> Result<Option<CFRetained<CFType>>, AXError>,
+) -> CoreResult<AxProps> {
+	let (mut props, has_own_label) = own_props(values, child_count, read_bounds)?;
+	if has_own_label {
+		return Ok(props);
+	}
+	let linked = values.get(TITLE_ELEMENT);
+	// `AppKit` fails some attributes on every read; as `read_identity` counts
+	// that as an answer, a failed link is no link, not an unanswered one.
+	let label = if linked.as_ref().err() == Some(&AXError::Failure) {
+		Ok(None)
+	} else if answered(&linked) {
+		linked_label(linked.ok().flatten().as_deref(), read_label)
+	} else {
+		Err(AXError::CannotComplete)
+	};
+	match label {
+		Ok(Some(title)) => {
+			props.read_as_fingerprint = Some(super::super::ax::fingerprint(&props));
+			props.title = Some(title);
+			props.description = None;
+			props.role_name = None;
+			props.identity = read_identity(values, &props.native_role, [
+				&props.title,
+				&props.value,
+				&props.description,
+			]);
+		},
+		Ok(None) => {},
+		Err(_) => props.identity = None,
+	}
+	props.partial = props.identity.is_none();
+	Ok(props)
+}
+
+struct ElementLabels {
+	native_role:   String,
+	title:         Option<String>,
+	description:   Option<String>,
+	role_name:     Option<String>,
+	complete:      bool,
+	has_own_label: bool,
+}
+
+/// Decodes only labels already in the batch. In particular, an `AXValue` can
+/// itself be an AX element whose display value needs more synchronous reads.
+fn element_labels(values: &NodeValues) -> CoreResult<ElementLabels> {
 	let native_role = required_string(values.get(ROLE), "AXRole")?;
-	let actions = copy_strings_from_action_names(element).unwrap_or_default();
-	let read = |index| values.get(index).ok().flatten();
 	let string = |index| {
-		read(index)
+		values
+			.get(index)
+			.ok()
+			.flatten()
 			.and_then(|value| value.downcast::<CFString>().ok())
 			.map(|value| value.to_string())
 	};
+	let title = nonempty(string(TITLE));
+	let description = nonempty(string(DESCRIPTION));
+	let has_own_label = title.is_some() || description.is_some();
+	let uses_placeholder = title.is_none() && description.is_none();
+	let description = description.or_else(|| {
+		if title.is_none() {
+			nonempty(string(PLACEHOLDER))
+		} else {
+			None
+		}
+	});
+	let complete = label_answered(values, TITLE)
+		&& (title.is_some()
+			|| (label_answered(values, DESCRIPTION)
+				&& (!uses_placeholder || label_answered(values, PLACEHOLDER))
+				&& (description.is_some()
+					|| native_role != "AXButton"
+					|| label_answered(values, SUBROLE))));
+	let role_name =
+		window_control_name(&native_role, [&title, &description], string(SUBROLE)).map(str::to_owned);
+	Ok(ElementLabels { native_role, title, description, role_name, complete, has_own_label })
+}
+
+fn own_props(
+	values: &NodeValues,
+	child_count: usize,
+	read_bounds: WalkBounds,
+) -> CoreResult<(AxProps, bool)> {
+	let ElementLabels {
+		native_role,
+		title,
+		description,
+		role_name,
+		complete: label_complete,
+		has_own_label,
+	} = element_labels(values)?;
+	let read = |index| values.get(index).ok().flatten();
 	let boolean = |index| {
 		read(index)
 			.and_then(|value| value.downcast::<CFBoolean>().ok())
 			.map(|value| value.as_bool())
 	};
-	let title = nonempty(string(TITLE));
 	let value = nonempty(read(VALUE).map(|value| stringify_value(&value)));
-	// A field with no label of its own is named by its placeholder ("Add
-	// Date"), as an accessible name falls back to it.
-	let description = nonempty(string(DESCRIPTION))
-		.or_else(|| nonempty(string(PLACEHOLDER)).filter(|_| title.is_none()));
 	let identity = read_identity(values, &native_role, [&title, &value, &description]);
-	Ok(AxProps {
-		role: normalize_role_macos(&native_role),
-		native_role,
-		title,
-		value,
-		description,
-		enabled: boolean(ENABLED).unwrap_or(true),
-		focused: boolean(FOCUSED).unwrap_or(false),
-		bounds: match read_bounds {
-			WalkBounds::Read => read(POSITION)
-				.zip(read(SIZE))
-				.and_then(|(position, size)| frame(&position, &size)),
-			WalkBounds::Skip => None,
+	let selected = selected(values, &native_role);
+	Ok((
+		AxProps {
+			read_as_fingerprint: None,
+			role: normalize_role_macos(&native_role),
+			native_role,
+			title,
+			value,
+			description,
+			enabled: boolean(ENABLED).unwrap_or(true),
+			focused: boolean(FOCUSED).unwrap_or(false),
+			bounds: match read_bounds {
+				WalkBounds::Read => read(POSITION)
+					.zip(read(SIZE))
+					.and_then(|(position, size)| frame(&position, &size)),
+				WalkBounds::Skip => None,
+			},
+			actions: Vec::new(),
+			child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
+			partial: identity.is_none(),
+			label_complete,
+			identity,
+			selected,
+			role_name,
+			unread_children: 0,
 		},
-		actions,
-		child_count: u32::try_from(child_count).unwrap_or(u32::MAX),
-		partial: identity.is_none(),
-		identity,
-	})
+		has_own_label,
+	))
+}
+
+/// An absent string is an answer; an error or a value of another type is
+/// not. Only fields that can choose the displayed label use this verdict.
+fn label_answered(values: &NodeValues, index: usize) -> bool {
+	match values.get(index) {
+		Ok(Some(value)) => value.downcast::<CFString>().is_ok(),
+		Ok(None) | Err(AXError::NoValue | AXError::AttributeUnsupported) => true,
+		Err(_) => false,
+	}
+}
+
+/// The text of the element an `AXTitleUIElement` value links to, read with
+/// `read`: its `AXValue`, as static text carries it, else its `AXTitle`.
+/// `Err` is a read the app did not answer.
+fn linked_label(
+	linked: Option<&CFType>,
+	mut read: impl FnMut(&AXUIElement, &str) -> Result<Option<CFRetained<CFType>>, AXError>,
+) -> Result<Option<String>, AXError> {
+	let Some(label) = linked.and_then(|linked| linked.downcast_ref::<AXUIElement>()) else {
+		return Ok(None);
+	};
+	for attribute in ["AXValue", "AXTitle"] {
+		let text = read(label, attribute);
+		if !answered(&text) {
+			return text.map(|_| None);
+		}
+		let text = text
+			.ok()
+			.flatten()
+			.and_then(|text| text.downcast::<CFString>().ok())
+			.map(|text| text.to_string());
+		if let Some(text) = nonempty(text) {
+			return Ok(Some(text));
+		}
+	}
+	Ok(None)
+}
+/// Whether the element reports itself selected. Only list and table rows and
+/// cells, buttons, and the file icons of Finder's icon view count: Finder's
+/// icon list reports a section rather than the icons as its selected
+/// children.
+fn selected(values: &NodeValues, native_role: &str) -> bool {
+	matches!(native_role, "AXRow" | "AXCell" | "AXButton" | "AXImage")
+		&& values
+			.get(SELECTED)
+			.ok()
+			.flatten()
+			.and_then(|value| value.downcast::<CFBoolean>().ok())
+			.is_some_and(|value| value.as_bool())
+}
+
+/// The name a window's own button, which has no title or description, takes
+/// from its subrole.
+fn window_control_name(
+	native_role: &str,
+	labels: [&Option<String>; 2],
+	subrole: Option<String>,
+) -> Option<&'static str> {
+	let unlabeled = labels
+		.into_iter()
+		.flatten()
+		.all(|label| label.trim().is_empty());
+	if !unlabeled || native_role != "AXButton" {
+		return None;
+	}
+	match subrole?.as_str() {
+		"AXCloseButton" => Some("close"),
+		"AXMinimizeButton" => Some("minimize"),
+		"AXZoomButton" => Some("zoom"),
+		"AXFullScreenButton" => Some("full screen"),
+		_ => None,
+	}
 }
 
 /// The [`NODE_ATTRIBUTES`] that, with `AXRole`, tell an element apart in its
 /// window.
-const IDENTIFYING: [usize; 10] = [
+const IDENTIFYING: [usize; 11] = [
 	SUBROLE,
 	ROLE_DESCRIPTION,
 	TITLE,
@@ -1255,6 +1554,7 @@ const IDENTIFYING: [usize; 10] = [
 	IDENTIFIER,
 	URL,
 	PLACEHOLDER,
+	TITLE_ELEMENT,
 ];
 
 /// The element's [`AxProps::identity`], hashed from its role and
@@ -1318,89 +1618,156 @@ fn perform_choosing(
 	// Read before any probe of the target, as for background input
 	// ([`input::EntryFront`]).
 	let entry_front = input::EntryFront::now();
-	let native = action_name(action);
+	let raise = is_raise_action(action);
+	if raise {
+		// Raising explicitly changes the front window; only its ref's
+		// identity, not the background-input boundary, constrains it.
+		require_read_as(|| read_as(element))?;
+	} else {
+		require_element_read_as(element)?;
+	}
 	let actions = copy_strings_from_action_names(element)?;
-	if !actions.contains(&native) {
-		return Err(unsupported_action(&native, &actions));
-	}
-	// AXRaise is an explicit request to change stacking, including the
-	// takeover preparation path. Other semantic actions must stay background.
-	if is_raise_action(action) {
-		if path.is_some() {
-			return Err(DesktopError::invalid_target("AXRaise opens no menu to choose an item from"));
-		}
-		return element_action_result(&native, send_action(element, &native));
-	}
-	let pid = element_pid(element)?;
-	let scroll_first = scrolls_before_press(&native, &actions, || process::is_uikit(pid));
-	let perform = || press_into_view(&native, scroll_first, |action| send_action(element, action));
-	// A menu that a background application opens takes the keyboard from the
-	// user's app, so it is closed before the action returns; a frontmost
-	// application's menu stays open for the next call unless an item is asked
-	// for.
-	let background = entry_front.behind(pid);
-	let watch = path.is_some()
-		|| (background && open_menu::may_open(&native, || copy_string(element, "AXRole")));
-	skylight::with_background_watch(pid, |visit| {
-		// A popup in a system Open or Save panel opens its menu in the
-		// process that draws the panel.
-		let drawn = if watch {
-			innermost_window_id(element).map(|(id, _)| id)
-		} else {
-			None
-		};
-		let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
-		let before = if watch {
-			let before = capture::menu_windows(menu_pid).ok_or_else(|| {
-				DesktopError::ax_failed(format!(
-					"cannot list the open menus of process {menu_pid}, so a menu that {native} opens \
-					 could not be closed; nothing was performed"
-				))
-			})?;
-			if background {
-				activate_for_menu(element, pid, entry_front, visit)?;
+	choose_action(
+		&actions,
+		action,
+		|| copy_bool(element, "AXEnabled"),
+		|native| {
+			// AXRaise is an explicit request to change stacking, including the
+			// takeover preparation path. Other semantic actions must stay
+			// background.
+			if raise {
+				if path.is_some() {
+					return Err(DesktopError::invalid_target(
+						"AXRaise opens no menu to choose an item from",
+					));
+				}
+				return element_action_result(native, send_action(element, native));
 			}
-			Some(before)
-		} else {
-			None
-		};
-		open_menu::guard(
-			open_menu::Press::Action(&native),
-			before.as_deref(),
-			path,
-			perform,
-			|before, path| {
-				// The user may have brought the target forward while its menu
-				// appeared.
-				let holds = || {
-					input::recheck_background(
-						background,
-						pid,
-						drawn.unwrap_or_default(),
-						skylight::front_pid,
-						|| visit.happened(),
-						|| Ok(()),
-					)
+			let pid = element_pid(element)?;
+			let scroll = scroll_before_press(native, &actions, || process::is_uikit(pid));
+			if judges_placement(native) {
+				// A Mac Catalyst press scrolls its row into view first, so where
+				// the row is now does not decide it.
+				require_shown_in(pid, element, scroll.is_none())?;
+			}
+			let perform = || {
+				entry_front.require_behind(skylight::front_pid, pid, || {
+					window_id(element).unwrap_or_default()
+				})?;
+				press_into_view(native, scroll, |action| send_action(element, action))
+			};
+			// A menu that a background application opens takes the keyboard from
+			// the user's app, so it is closed before the action returns; a
+			// frontmost application's menu stays open for the next call unless an
+			// item is asked for.
+			let background = entry_front.behind(pid);
+			let watch = path.is_some()
+				|| (background && open_menu::may_open(native, || copy_string(element, "AXRole")));
+			skylight::with_background_watch(pid, |visit| {
+				// A popup in a system Open or Save panel opens its menu in the
+				// process that draws the panel.
+				let drawn = if watch {
+					innermost_window_id(element).map(|(id, _)| id)
+				} else {
+					None
 				};
-				open_menu::settle(menu_pid, pid, before, path, open_menu::CONTROL_MENU_TIMEOUT, holds)
-			},
-		)
-	})
+				let menu_pid = open_menu::menu_process(pid, drawn, skylight::window_owner_pid);
+				let before = if watch {
+					let before = capture::menu_windows(menu_pid).ok_or_else(|| {
+						DesktopError::ax_failed(format!(
+							"cannot list the open menus of process {menu_pid}, so a menu that {native} \
+							 opens could not be closed; nothing was performed"
+						))
+					})?;
+					if background {
+						activate_for_menu(element, pid, entry_front, visit)?;
+					}
+					Some(before)
+				} else {
+					None
+				};
+				open_menu::guard(
+					open_menu::Press::Action(native),
+					before.as_deref(),
+					path,
+					perform,
+					|before, path| {
+						// The user may have brought the target forward while its menu
+						// appeared.
+						let holds = || {
+							input::recheck_background(
+								background,
+								pid,
+								drawn.unwrap_or_default(),
+								skylight::front_pid,
+								|| visit.happened(),
+								|| Ok(()),
+							)
+						};
+						open_menu::settle(
+							menu_pid,
+							pid,
+							before,
+							path,
+							open_menu::CONTROL_MENU_TIMEOUT,
+							holds,
+						)
+					},
+				)
+			})
+		},
+	)
+}
+
+/// Chooses the element's spelling of `action` and dispatches it through
+/// `perform`. A press of an element that reports itself disabled (`enabled`
+/// reads its `AXEnabled`, `None` when it reports none) is refused before
+/// anything is sent: a disabled `AppKit` button still lists `AXPress` and
+/// answers it with success while its action never runs. Other actions, such as
+/// a scroll into view or a raise, still act on a disabled element.
+fn choose_action(
+	actions: &[String],
+	action: &str,
+	enabled: impl FnOnce() -> Option<bool>,
+	perform: impl FnOnce(&String) -> CoreResult<()>,
+) -> CoreResult<()> {
+	let Some(native) = supported_action(actions, action) else {
+		return Err(unsupported_action(&native_action_name(action), actions));
+	};
+	if native.eq_ignore_ascii_case("AXPress") && enabled() == Some(false) {
+		return Err(DesktopError::ax_failed(
+			"the element reports itself disabled, so nothing was sent: wait for it to become \
+			 enabled, or do what enables it first",
+		));
+	}
+	perform(native)
 }
 
 /// The refusal of `native`, an action the element does not list among
-/// `actions`; nothing was sent. A control without a press action still takes
-/// a click, `menu` path included.
+/// `actions`; nothing was sent. The actions it does list are named as
+/// `perform()` takes them, app-defined custom ones left out. A control
+/// without a press action still takes its own click, `menu` path included,
+/// and the refusal names that call: the element's `bounds()` are desktop
+/// coordinates, which a window click, taking screenshot pixels, refuses
+/// before any screenshot and misses after one.
 fn unsupported_action(native: &str, actions: &[String]) -> DesktopError {
+	let offered = performable_names(actions);
+	let offered = if offered.is_empty() {
+		"none".to_owned()
+	} else {
+		offered.join(", ")
+	};
 	let instead = if native == "AXPress" {
-		"; nothing was sent: if this is the control you meant, click() it instead, passing the same \
-		 menu option if you gave one"
+		". Nothing was sent. If this is the control you meant, call click() on this element itself \
+		 (`await el.click()` on the handle you pressed, with the same `menu` option if you gave \
+		 one): it aims at the element and needs no screenshot. Its bounds() are desktop coordinates, \
+		 not pixels for a window click"
 	} else {
 		""
 	};
 	DesktopError::ax_failed(format!(
-		"AX action '{native}' is not supported by this element; available actions: {}{instead}",
-		actions.join(", "),
+		"AX action '{native}' is not supported by this element; available actions: \
+		 {offered}{instead}",
 	))
 }
 
@@ -1473,6 +1840,148 @@ fn menu_window(
 		.unwrap_or(attached_to)
 }
 
+/// Whether `native` stands for a click a person could make on the element,
+/// which [`placement::require_shown`] judges: a scroll into view acts on the
+/// view instead.
+const fn judges_placement(native: &str) -> bool {
+	!native.eq_ignore_ascii_case(SCROLL_TO_VISIBLE)
+}
+
+/// Whether a click in `mode` is judged by [`placement::require_shown`]
+/// first: a takeover click brings the real pointer there before it clicks,
+/// which shows a control drawn only while the pointer is over it, while a
+/// background click reaches whatever the window shows at that moment.
+pub(super) const fn click_judges_placement(mode: DeliveryMode) -> bool {
+	matches!(mode, DeliveryMode::Background)
+}
+
+/// Refuses an element action that a person could not make
+/// ([`placement::require_shown`]).
+pub(super) fn require_shown(element: &AXUIElement) -> CoreResult<()> {
+	require_shown_in(element_pid(element)?, element, true)
+}
+
+fn require_shown_in(pid: libc::pid_t, element: &AXUIElement, hit_test: bool) -> CoreResult<()> {
+	let Some(app) = probe_application(pid) else {
+		return Ok(());
+	};
+	placement::require_shown(&AppPlacement { app, pid }, &Node(element.retain()), hit_test)
+}
+
+/// An element compared by `CFEqual`.
+struct Node(CFRetained<AXUIElement>);
+
+impl PartialEq for Node {
+	fn eq(&self, other: &Self) -> bool {
+		*self.0 == *other.0
+	}
+}
+
+/// Children a parent may have for [`AppPlacement`] to read them all to see
+/// whether it lists one; past it the child counts as listed.
+const PLACEMENT_LIST_SCAN_MAX: CFIndex = 1_000;
+
+/// [`placement::Placement`] read from a live application.
+struct AppPlacement {
+	app: CFRetained<AXUIElement>,
+	pid: libc::pid_t,
+}
+
+impl placement::Placement for AppPlacement {
+	type Element = Node;
+
+	fn bounds(&self, element: &Node) -> Option<AxBounds> {
+		bounds(&element.0)
+	}
+
+	fn parent(&self, element: &Node) -> Option<Node> {
+		copy_element(&element.0, "AXParent").map(Node)
+	}
+
+	fn children(&self, element: &Node) -> Vec<Node> {
+		copy_elements_optional(&element.0, "AXChildren")
+			.map_or_else(Vec::new, |children| children.into_iter().map(Node).collect())
+	}
+
+	fn lists(&self, parent: &Node, child: &Node) -> bool {
+		// A hidden `AppKit` view sits in a small container; a table's thousands
+		// of rows are not copied on every press to find one of them.
+		let mut count: CFIndex = 0;
+		// SAFETY: `count` is writable and the retained element outlives the
+		// query.
+		let counted = unsafe {
+			parent.0.attribute_value_count(
+				&CFString::from_static_str("AXChildren"),
+				NonNull::from(&mut count),
+			)
+		};
+		if counted == AXError::Success && count > PLACEMENT_LIST_SCAN_MAX {
+			return true;
+		}
+		self.children(parent).iter().any(|listed| listed == child)
+	}
+
+	fn role(&self, element: &Node) -> Option<String> {
+		copy_string(&element.0, "AXRole")
+	}
+
+	fn subrole(&self, element: &Node) -> Option<String> {
+		copy_string(&element.0, "AXSubrole")
+	}
+
+	fn window(&self, element: &Node) -> Option<Node> {
+		element_window(&element.0).map(Node)
+	}
+
+	fn drawn_in(&self, element: &Node, window: &Node) -> bool {
+		innermost_window_id(&element.0)
+			.zip(window_id(&window.0))
+			.is_some_and(|((drawn, _), own)| drawn == own)
+	}
+
+	fn hit(&self, x: f64, y: f64) -> Option<Node> {
+		if !x.is_finite() || !y.is_finite() {
+			return None;
+		}
+		let mut output: *const AXUIElement = ptr::null();
+		let slot = NonNull::from(&mut output);
+		// SAFETY: `slot` is writable and the application element remains
+		// retained through the synchronous hit-test.
+		if unsafe { self.app.copy_element_at_position(x as f32, y as f32, slot) } != AXError::Success
+		{
+			return None;
+		}
+		retained_element(output).ok().map(Node)
+	}
+
+	fn label(&self, element: &Node) -> Option<String> {
+		["AXTitle", "AXDescription", "AXValue"]
+			.into_iter()
+			.find_map(|name| copy_string(&element.0, name).filter(|text| !text.trim().is_empty()))
+			.map(|text| truncate_chars(text, 60))
+	}
+
+	fn web_content(&self, element: &Node) -> bool {
+		process::is_chromium(self.pid) || text_surface(&element.0) == TextSurface::Web
+	}
+
+	fn actions(&self, element: &Node) -> Vec<String> {
+		copy_strings_from_action_names(&element.0).unwrap_or_default()
+	}
+
+	fn column_index(&self, element: &Node) -> Option<i64> {
+		copy_attribute(&element.0, "AXIndex")?
+			.downcast::<CFNumber>()
+			.ok()?
+			.as_i64()
+	}
+
+	fn column_span(&self, element: &Node) -> Option<(i64, i64)> {
+		copy_range(&element.0, "AXColumnIndexRange")
+			.map(|range| (range.location as i64, range.length as i64))
+	}
+}
+
 fn element_pid(element: &AXUIElement) -> CoreResult<libc::pid_t> {
 	let mut pid = 0;
 	// SAFETY: `pid` is writable and the retained element outlives the query.
@@ -1507,10 +2016,28 @@ fn text_surface(element: &AXUIElement) -> TextSurface {
 	TextSurface::Unknown
 }
 
+/// Whether `pid` takes an AX text write into one of its native fields as the
+/// field's input. A Chromium-family app does not: its own fields (Chrome's
+/// address bar, find bar) show an `AXSelectedText` or `AXValue` write while the
+/// browser keeps the text it had. The address bar then suggests for, and
+/// Return opens, the page's own URL, so Return reloaded the page instead of
+/// going to the written address. Keys reach those fields as typing.
+fn takes_ax_text_writes(pid: libc::pid_t) -> bool {
+	!process::is_chromium(pid)
+}
+
 fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
-	if process::is_terminal(element_pid(element)?) {
+	let pid = element_pid(element)?;
+	if process::is_terminal(pid) {
 		return Err(DesktopError::ax_failed(
 			"terminal AX text represents its rendered grid, not terminal input; use win.type instead",
+		));
+	}
+	if !takes_ax_text_writes(pid) {
+		return Err(DesktopError::ax_failed(
+			"a Chromium-based app shows an AX text write in its own fields, such as the address bar, \
+			 without taking it, so Return would still act on the old text; nothing was written; use \
+			 el.type(text) instead, which types into the field",
 		));
 	}
 	if text_surface(element) != TextSurface::Native {
@@ -1523,13 +2050,18 @@ fn ensure_native_text_target(element: &AXUIElement) -> CoreResult<()> {
 }
 
 fn attribute_settable(element: &AXUIElement, name: &str) -> bool {
+	attribute_settable_answer(element, name) == Some(true)
+}
+
+/// `AXUIElementIsAttributeSettable`'s answer; `None` when the query failed.
+fn attribute_settable_answer(element: &AXUIElement, name: &str) -> Option<bool> {
 	let attribute = CFString::from_str(name);
 	let mut settable = 0;
 	// SAFETY: The Boolean out parameter is writable and all CF objects outlive
 	// the synchronous AX query.
 	(unsafe { element.is_attribute_settable(&attribute, NonNull::from(&mut settable)) }
 		== AXError::Success)
-		&& settable != 0
+		.then_some(settable != 0)
 }
 
 fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult<()> {
@@ -1544,6 +2076,140 @@ fn set_string_value(element: &AXUIElement, name: &str, text: &str) -> CoreResult
 
 fn verify_text_value(element: &AXUIElement, sent: &str, expected: &str) -> CoreResult<()> {
 	text_readback(sent, expected, copy_string(element, "AXValue").as_deref(), is_secure(element))
+}
+
+/// Every pre-action fingerprint probe must preserve the front-app boundary,
+/// even on paths whose longer-lived background guard starts after the probe.
+pub(super) fn require_element_read_as(element: &AXUIElement) -> CoreResult<()> {
+	require_read_as(|| {
+		checked_ref_read(skylight::front_pid, || Ok((element_pid(element)?, read_as(element)?)))
+	})
+}
+
+fn checked_ref_read(
+	front: impl Fn() -> Option<libc::pid_t>,
+	probe: impl FnOnce() -> CoreResult<(libc::pid_t, Option<AxReadAs>)>,
+) -> CoreResult<Option<AxReadAs>> {
+	let (entry, (pid, props)) = input::EntryFront::before(&front, probe)?;
+	if entry.behind(pid) && front() == Some(pid) {
+		return Err(DesktopError::user_intervened(
+			"the element's application came to the front while its reference was checked, so nothing \
+			 was sent",
+		));
+	}
+	Ok(props)
+}
+
+/// What `element` reads as now, for [`require_read_as`]: its role and labels
+/// from one batched read. `None` when the app does not answer the batch or
+/// the role, as when it is too busy: that cannot tell, and it costs none of
+/// the lone reads a walk falls back on, each with its own timeout. A
+/// destroyed element is `StaleRef`, as from the action itself.
+pub(super) fn read_as(element: &AXUIElement) -> CoreResult<Option<AxReadAs>> {
+	let read = NodeRead::Props;
+	let batch = NodeValues::batch(element, read);
+	if batch
+		.as_ref()
+		.is_err_and(|error| *error != AXError::InvalidUIElement)
+	{
+		return Ok(None);
+	}
+	let values = NodeValues::from_batch(batch, read.attributes(), |_| Err(AXError::CannotComplete));
+	read_as_values(&values)
+}
+
+fn read_as_values(values: &NodeValues) -> CoreResult<Option<AxReadAs>> {
+	match element_labels(values) {
+		Ok(labels) => Ok(labels.complete.then(|| {
+			AxReadAs::from_labels(normalize_role_macos(&labels.native_role), [
+				labels.title,
+				labels.description,
+				labels.role_name,
+			])
+		})),
+		Err(error) if error.code == ErrorCode::StaleRef => Err(error),
+		Err(_) => Ok(None),
+	}
+}
+
+/// The nearest table row above an element, stopping at its window or the
+/// bounded ancestry limit. Descendants may be deeper than a cell's text.
+pub(super) fn aimed_row(
+	element: &AXUIElement,
+) -> CoreResult<Option<(CFRetained<AXUIElement>, libc::pid_t)>> {
+	let row = ancestor_row(
+		element.retain(),
+		|current| {
+			Ok(copy_held_attribute(current, "AXRole")?
+				.and_then(|value| value.downcast::<CFString>().ok())
+				.map(|role| role.to_string()))
+		},
+		|current| {
+			Ok(copy_held_attribute(current, "AXParent")?
+				.and_then(|value| value.downcast::<AXUIElement>().ok()))
+		},
+	)?;
+	row.map(|row| element_pid(&row).map(|pid| (row, pid)))
+		.transpose()
+}
+
+fn ancestor_row<E>(
+	mut current: E,
+	role: impl Fn(&E) -> CoreResult<Option<String>>,
+	parent: impl Fn(&E) -> CoreResult<Option<E>>,
+) -> CoreResult<Option<E>> {
+	for _ in 0..MAX_ANCESTRY_DEPTH {
+		match role(&current)?.as_deref() {
+			Some("AXRow") => return Ok(Some(current)),
+			Some("AXWindow" | "AXApplication") => return Ok(None),
+			_ => {},
+		}
+		let Some(next) = parent(&current)? else {
+			return Ok(None);
+		};
+		current = next;
+	}
+	Ok(None)
+}
+
+/// Whether a click whose point hit the first element of `ancestry` (then
+/// its parents, each marked when it is a table row) lands in `row`: it does
+/// unless another row comes first on the way up. A point outside any row
+/// lands where it would without the check.
+pub(super) fn lands_in_row<T: PartialEq>(
+	row: &T,
+	ancestry: impl IntoIterator<Item = (T, bool)>,
+) -> bool {
+	for (node, is_row) in ancestry {
+		if node == *row {
+			return true;
+		}
+		if is_row {
+			return false;
+		}
+	}
+	true
+}
+
+/// Whether a click at `(x, y)` lands in `row` of process `pid`, as that
+/// process's own hit test answers right before the press: a background click
+/// goes to the target app however its window is covered. An app that sorts
+/// its rows as it refreshes, as Activity Monitor does, can move another row
+/// into the place the clicked element's frame was read at. A hit test the app
+/// does not answer passes.
+pub(super) fn row_at(row: &AXUIElement, pid: libc::pid_t, x: f64, y: f64) -> bool {
+	let Some(hit) = probe_application(pid).and_then(|app| open_menu::hit_test(&app, x, y)) else {
+		return true;
+	};
+	let mut next = Some(hit);
+	let ancestry = std::iter::from_fn(|| {
+		let node = next.take()?;
+		next = copy_element(&node, "AXParent");
+		let is_row = copy_string(&node, "AXRole").as_deref() == Some("AXRow");
+		Some((node, is_row))
+	})
+	.take(MAX_ANCESTRY_DEPTH);
+	lands_in_row(&row.retain(), ancestry)
 }
 
 fn is_secure(element: &AXUIElement) -> bool {
@@ -1576,51 +2242,18 @@ fn secure_subrole(read: Result<Subrole, AXError>) -> bool {
 	}
 }
 
-/// Exact equality is the verdict: a field that shows a rewritten value has
-/// not been shown to hold what was sent (Contacts regroups a phone number in
-/// the field and stores none of it). The error names what the field reads so
-/// the next step needs no extra read, except in a secure field, whose text
-/// never enters an error.
-fn text_readback(sent: &str, expected: &str, actual: Option<&str>, secure: bool) -> CoreResult<()> {
-	const SHOWN: usize = 200;
-	if actual == Some(expected) {
-		return Ok(());
-	}
-	if secure {
-		return Err(DesktopError::ax_failed(
-			"the secure text field's value could not be confirmed after the write; inspect the \
-			 target before writing again",
-		));
-	}
-	let quote = |text: &str| format!("{:?}", truncate_chars(text.to_owned(), SHOWN));
-	let Some(actual) = actual else {
-		return Err(DesktopError::ax_failed(format!(
-			"wrote {}, but the field's value could not be read back; inspect the target before \
-			 writing again",
-			quote(sent),
-		)));
-	};
-	let whole = if sent == expected {
-		String::new()
-	} else {
-		format!(" instead of {}", quote(expected))
-	};
-	Err(DesktopError::ax_failed(format!(
-		"wrote {}; the field now reads {}{whole}. The app may have reformatted it or not taken it: \
-		 inspect the target before writing again",
-		quote(sent),
-		quote(actual),
-	)))
+/// The system time zone, re-read each call: CF caches it per process, and the
+/// target app follows changes to it.
+fn system_zone() -> Option<CFRetained<CFTimeZone>> {
+	CFTimeZone::reset_system();
+	CFTimeZone::system()
 }
 
 /// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
 /// date written as a `CFString`, so an ISO-8601 value is written as a `CFDate`
 /// in the system time zone the control displays, then read back as one.
 fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult<()> {
-	// CF caches the system zone per process; the target app follows changes to
-	// it.
-	CFTimeZone::reset_system();
-	let zone = CFTimeZone::system()
+	let zone = system_zone()
 		.ok_or_else(|| DesktopError::ax_failed("the system time zone is unavailable"))?;
 	let offset_at = |at: f64| zone.seconds_from_gmt(at) as i64;
 	let Some(request) = date::parse(text) else {
@@ -1652,6 +2285,384 @@ fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult
 			))),
 		}
 	})
+}
+
+/// The actions that step a value control (a slider) by its own step size.
+const STEP_ACTIONS: [&str; 2] = ["AXIncrement", "AXDecrement"];
+
+/// The refusal of a value write to an element whose `AXValue` is not
+/// settable; nothing was sent. An element that offers step actions names
+/// them, spelled as `actions()` lists them and `perform` takes them, and its
+/// value when that is a number: a text value is never quoted here.
+fn not_settable(value: Option<&CFNumber>, actions: &[String]) -> DesktopError {
+	let offered: Vec<&str> = STEP_ACTIONS
+		.into_iter()
+		.filter(|step| {
+			actions
+				.iter()
+				.any(|action| action.eq_ignore_ascii_case(step))
+		})
+		.collect();
+	if offered.is_empty() {
+		return DesktopError::ax_failed("AXValue is not settable; no typing fallback was attempted");
+	}
+	let reads =
+		value.map_or_else(String::new, |value| format!(" it reads {} and", stringify_number(value)));
+	let calls = offered
+		.iter()
+		.map(|step| format!("el.perform(\"{step}\")"))
+		.collect::<Vec<_>>()
+		.join(" or ");
+	DesktopError::ax_failed(format!(
+		"AXValue is not settable;{reads} it offers {}, which step it by the control's own step: \
+		 {calls}; nothing was sent and no typing fallback was attempted",
+		offered.join(" and "),
+	))
+}
+
+/// How long a number write's read-back waits for the value to arrive, for an
+/// app that applies the write a moment after answering it.
+const NUMBER_SETTLE: Duration = Duration::from_millis(500);
+
+/// The interval between a number write's read-backs.
+const NUMBER_POLL: Duration = Duration::from_millis(25);
+
+/// Number-valued controls (sliders, steppers, level indicators) publish
+/// `AXValue` as a `CFNumber` and refuse the same value written as a
+/// `CFString` (`IllegalArgument`), so the text is parsed and written as a
+/// `CFNumber` of the kind the control holds, then read back: the app clamps
+/// the value to its range or rounds it to its steps while answering the
+/// write, so the call reports what the control holds.
+fn set_number_value(element: &AXUIElement, text: &str, current: &CFNumber) -> CoreResult<()> {
+	let target = parse_number(text, current)?;
+	// The probes before can block; a run cancelled meanwhile, or an app the
+	// user used meanwhile, gets nothing written.
+	control::check()?;
+	control::intervention::check_press()?;
+	write_number(&mut LiveNumber { element }, target)
+}
+
+/// The AX steps of a number write, kept apart so its read-back can be tested
+/// without a live app.
+trait NumberField {
+	fn write(&self, value: &CFNumber) -> AXError;
+	/// `AXValue` as a number, `None` when it does not read as one, and an
+	/// error when the element no longer exists.
+	fn value(&self) -> CoreResult<Option<CFRetained<CFNumber>>>;
+	/// `AXMinValue` or `AXMaxValue`.
+	fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>>;
+	fn now(&self) -> Instant;
+	/// Waits one read-back interval, [`NUMBER_POLL`].
+	fn wait(&mut self);
+	/// Whether the element still reads as the control the ref names.
+	fn confirm(&self) -> CoreResult<()>;
+}
+
+struct LiveNumber<'a> {
+	element: &'a AXUIElement,
+}
+
+impl NumberField for LiveNumber<'_> {
+	fn write(&self, value: &CFNumber) -> AXError {
+		// SAFETY: The element, attribute and number remain retained for the
+		// setter.
+		unsafe {
+			self
+				.element
+				.set_attribute_value(&CFString::from_str("AXValue"), value)
+		}
+	}
+
+	fn value(&self) -> CoreResult<Option<CFRetained<CFNumber>>> {
+		Ok(copy_held_attribute(self.element, "AXValue")?
+			.and_then(|value| value.downcast::<CFNumber>().ok()))
+	}
+
+	fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>> {
+		copy_number(self.element, attribute)
+	}
+
+	fn now(&self) -> Instant {
+		Instant::now()
+	}
+
+	fn wait(&mut self) {
+		control::settle(NUMBER_POLL);
+	}
+
+	fn confirm(&self) -> CoreResult<()> {
+		confirm_read_as("the number", || read_as(self.element))
+	}
+}
+
+/// Writes `target` and reads the value back until it arrives or the settle
+/// time is over. A value that arrived is confirmed as the text paths confirm
+/// theirs: an element the app handed to another control meanwhile may have
+/// taken it in that control's place.
+fn write_number<F: NumberField>(field: &mut F, target: NumberTarget) -> CoreResult<()> {
+	// A setter the app did not answer in time may still apply, so its
+	// read-back decides; any other error means the write was not taken.
+	let unanswered = match field.write(&target.number()) {
+		AXError::Success => false,
+		AXError::CannotComplete => true,
+		error => {
+			return Err(ax_error(
+				error,
+				"setting AXValue to a number failed; inspect the target before writing again",
+			));
+		},
+	};
+	// The settle time starts once the setter has answered: a setter that took
+	// the whole budget still leaves the app its interval to apply the value.
+	let deadline = field.now() + NUMBER_SETTLE;
+	loop {
+		// An app that removes or rebuilds the control once its value changes
+		// leaves the ref dead: no later read can answer, so this ends now.
+		let Ok(actual) = field.value() else {
+			return Err(DesktopError::stale_ref(format!(
+				"the number {target} was sent, but the control no longer exists after the write: the \
+				 app removed or rebuilt it. Re-run ax()/find() and read the control's value there \
+				 before writing again"
+			)));
+		};
+		if actual
+			.as_deref()
+			.is_some_and(|actual| target.reached(actual))
+		{
+			return field.confirm();
+		}
+		if field.now() >= deadline {
+			// A value that did not answer leaves no reading for a range bound
+			// to explain, so the bounds are not read.
+			let (min, max) = match actual {
+				Some(_) => (field.bound("AXMinValue"), field.bound("AXMaxValue")),
+				None => (None, None),
+			};
+			let readback = number_readback(target, actual.as_deref(), min.as_deref(), max.as_deref());
+			return Err(if unanswered {
+				DesktopError::ax_unconfirmed(format!(
+					"the app did not answer the number write in time (CannotComplete) and may still \
+					 apply it; {readback}"
+				))
+			} else {
+				DesktopError::ax_failed(readback)
+			});
+		}
+		field.wait();
+	}
+}
+
+/// The number a value write asks for, of the kind the control holds: whole
+/// text to an integer-valued control stays an exact `i64`, which an `f64`
+/// would round past 2^53; anything else is an `f64`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NumberTarget {
+	Whole(i64),
+	Real(f64),
+}
+
+impl NumberTarget {
+	const fn as_f64(self) -> f64 {
+		match self {
+			Self::Whole(value) => value as f64,
+			Self::Real(value) => value,
+		}
+	}
+
+	fn number(self) -> CFRetained<CFNumber> {
+		match self {
+			Self::Whole(value) => CFNumber::new_i64(value),
+			Self::Real(value) => CFNumber::new_f64(value),
+		}
+	}
+
+	/// A whole target is held to exactly that integer, whether the control
+	/// reads it back as an integer or a floating-point number; otherwise
+	/// [`number_reached`].
+	fn reached(self, actual: &CFNumber) -> bool {
+		match self {
+			Self::Whole(value) if actual.is_float_type() => {
+				actual.as_f64().and_then(whole_f64) == Some(value)
+			},
+			Self::Whole(value) => exact_i64(actual) == Some(value),
+			Self::Real(value) => number_reached(value, actual),
+		}
+	}
+
+	/// The number in decimal, every digit it holds: an `f64` as its shortest
+	/// text that reads back as it, which Rust never prints with an exponent.
+	fn spelled(self) -> String {
+		match self {
+			Self::Whole(value) => value.to_string(),
+			Self::Real(value) => value.to_string(),
+		}
+	}
+}
+
+impl std::fmt::Display for NumberTarget {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(&match self {
+			Self::Whole(value) => bounded_number(*value),
+			Self::Real(value) => bounded_number(*value),
+		})
+	}
+}
+
+/// The longest text a number control takes. Every value it can spell lies
+/// inside `f32`'s normal range, below 1e32 and, when nonzero, at least 1e-30
+/// (`f32` holds 1.2e-38 to 3.4e38), so a control that keeps a `Float` neither
+/// overflows nor underflows on it; and it still spells any `i64` and more
+/// significant digits than an `f64` keeps.
+const NUMBER_TEXT_MAX: usize = 32;
+
+/// Whether `text` is plain decimal: an optional sign, digits, and optionally a
+/// point and digits, at most [`NUMBER_TEXT_MAX`] characters. `Some(true)` when
+/// it names a whole number: no fraction, or a fraction of zeros.
+fn plain_decimal(text: &str) -> Option<bool> {
+	if text.len() > NUMBER_TEXT_MAX {
+		return None;
+	}
+	let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+	let (integer, fraction) = unsigned
+		.split_once('.')
+		.map_or((unsigned, None), |(integer, fraction)| (integer, Some(fraction)));
+	let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+	(digits(integer) && fraction.is_none_or(digits))
+		.then(|| fraction.is_none_or(|fraction| fraction.bytes().all(|byte| byte == b'0')))
+}
+
+/// The number `text` names, as [`NumberTarget`] by the kind `current` is, or
+/// the refusal naming what the control reads; the text is never quoted. The
+/// number written must spell the text back, so no digit is lost to the
+/// parse: an `f64` keeps any decimal of at most 15 significant digits, and
+/// spells some longer ones back (0.30000000000000004) but not all.
+fn parse_number(text: &str, current: &CFNumber) -> CoreResult<NumberTarget> {
+	let refusal = |reason: &str| {
+		DesktopError::ax_failed(format!(
+			"{reason}; it reads {} now; nothing was written",
+			stringify_number(current)
+		))
+	};
+	let not_one = || {
+		refusal(
+			"AXValue is a number and the text given is not one: write digits such as \"75\" or \
+			 \"0.5\", at most 32 characters",
+		)
+	};
+	let whole = plain_decimal(text).ok_or_else(not_one)?;
+	let target = if whole && !current.is_float_type() {
+		let integer = text.split_once('.').map_or(text, |(integer, _)| integer);
+		integer.parse().map(NumberTarget::Whole).map_err(|_| {
+			refusal("AXValue is a whole number and the number given is past the 64-bit integer range")
+		})?
+	} else {
+		text
+			.parse()
+			.map(NumberTarget::Real)
+			.map_err(|_| not_one())?
+	};
+	if decimal_value(text) != decimal_value(&target.spelled()) {
+		return Err(refusal(
+			"AXValue is a number and the text given has more digits than it holds: write at most 15 \
+			 significant digits",
+		));
+	}
+	Ok(target)
+}
+
+/// Plain decimal `text` reduced to what decides its value: whether it is
+/// negative, its integer digits without leading zeros, and its fraction
+/// without trailing zeros. Zero is never negative.
+fn decimal_value(text: &str) -> (bool, &str, &str) {
+	let (negative, unsigned) = match text.strip_prefix('-') {
+		Some(unsigned) => (true, unsigned),
+		None => (false, text.strip_prefix('+').unwrap_or(text)),
+	};
+	let (integer, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+	let integer = integer.trim_start_matches('0');
+	let fraction = fraction.trim_end_matches('0');
+	(negative && !(integer.is_empty() && fraction.is_empty()), integer, fraction)
+}
+
+/// Whether `actual` holds `target`. An integer read-back must be `target`
+/// exactly, compared as an integer so that one past 2^53 does not round onto
+/// it. A floating-point one may be within a few `f64` ulps of it, for an
+/// app's own arithmetic, which never spans two decimals of 15 significant
+/// digits, but never a quarter away, so a whole number apart never passes
+/// this way; and with no absolute floor, so an unchanged 0 never passes for
+/// 5e-8. Or it may be `target` rounded to `f32`, which is what a control
+/// keeping its value in a `Float` reads back (0.3 as 0.30000001192092896)
+/// whether it publishes a `float` or a `double`, where that `f32` still reads
+/// as `target`: a clamp or step that lands on a coarser `f32` (100 for
+/// 100.000001, 16777216 for 16777217, 0 for 1e-50) does not pass for it.
+fn number_reached(target: f64, actual: &CFNumber) -> bool {
+	if !actual.is_float_type() {
+		return exact_i64(actual).is_some_and(|read| whole_f64(target) == Some(read));
+	}
+	let Some(read) = actual.as_f64() else {
+		return false;
+	};
+	let rounded = target as f32;
+	(read - target).abs() <= (target.abs() * 4.0 * f64::EPSILON).min(0.25)
+		|| (read == f64::from(rounded) && rounded.to_string().parse() == Ok(target))
+}
+
+/// What a read-back that is not the written number says: the value the
+/// control reached, and its range bound where that explains it.
+fn number_readback(
+	target: NumberTarget,
+	actual: Option<&CFNumber>,
+	min: Option<&CFNumber>,
+	max: Option<&CFNumber>,
+) -> String {
+	let Some(actual) = actual else {
+		return format!(
+			"wrote {target}, but the control's value could not be read back as a number; inspect the \
+			 target before writing again"
+		);
+	};
+	let wanted = target.as_f64();
+	let bound = |bound: Option<&CFNumber>, past: fn(f64, f64) -> bool, name: &str| {
+		bound
+			.filter(|bound| past(wanted, approximate_f64(bound)))
+			.map(|bound| format!(" (its {name} is {})", stringify_number(bound)))
+	};
+	let range = bound(min, |target, min| target < min, "minimum")
+		.or_else(|| bound(max, |target, max| target > max, "maximum"))
+		.unwrap_or_default();
+	format!(
+		"wrote {target}; the control now reads {}{range}. The app may have clamped, rounded or not \
+		 taken it: inspect the target before writing again",
+		stringify_number(actual),
+	)
+}
+
+/// `number` as the nearest `f64`, also for an integer an `f64` cannot hold
+/// exactly (`i64::MAX`, or an unsigned value past it): for messages and range
+/// notes, never for a match.
+fn approximate_f64(number: &CFNumber) -> f64 {
+	let mut value = 0.0_f64;
+	// SAFETY: `value` is a writable `f64`, the type asked for; a lossy
+	// conversion still stores the nearest value and only reports `false`.
+	let _ = unsafe { number.value(CFNumberType::Float64Type, (&raw mut value).cast()) };
+	value
+}
+
+/// The `i64` an integer `CFNumber` holds, when it holds one. CF keeps an
+/// unsigned value past `i64::MAX` in 128 bits and hands it to `as_i64`
+/// truncated without a lossy flag (`u64::MAX` as -1), so a value whose `f64`
+/// rounding disagrees is not taken for that `i64`.
+fn exact_i64(number: &CFNumber) -> Option<i64> {
+	number
+		.as_i64()
+		.filter(|value| *value as f64 == approximate_f64(number))
+}
+
+/// The `i64` that `value` is exactly, when it is one: -2^63 is, and 2^63,
+/// which a cast would saturate to `i64::MAX`, is not.
+fn whole_f64(value: f64) -> Option<i64> {
+	(value.fract() == 0.0 && (-(2f64.powi(63))..2f64.powi(63)).contains(&value))
+		.then_some(value as i64)
 }
 
 /// Sets `AXFocused` on `element`; the caller holds the background guard.
@@ -1737,6 +2748,9 @@ fn insert_selected_text(
 	text: &str,
 	behind_user: impl FnOnce() -> CoreResult<()>,
 ) -> CoreResult<bool> {
+	if !takes_ax_text_writes(pid) {
+		return Ok(false);
+	}
 	if !takes_inserted_text(
 		|| text_surface(element),
 		copy_string(element, "AXRole").as_deref(),
@@ -1757,7 +2771,8 @@ fn insert_selected_text(
 	skylight::with_background_guard(pid, || {
 		control::intervention::check_press()?;
 		set_string_value(element, "AXSelectedText", text)?;
-		verify_text_value(element, text, &expected)
+		verify_text_value(element, text, &expected)?;
+		confirm_read_as("the text", || read_as(element))
 	})?;
 	Ok(true)
 }
@@ -1946,7 +2961,8 @@ impl TextField for LiveField<'_> {
 
 	fn insert(&self, text: &str) -> CoreResult<()> {
 		set_string_value(self.element, "AXSelectedText", text)?;
-		verify_text_value(self.element, text, text)
+		verify_text_value(self.element, text, text)?;
+		confirm_read_as("the text", || read_as(self.element))
 	}
 }
 
@@ -1996,23 +3012,35 @@ fn replace_utf16_selection(
 /// In a Mac Catalyst (`UIKit`) app, pressing a row scrolled out of its view
 /// reports success and does nothing. Scrolling it into view first lets the
 /// press land; for an element already in view the scroll changes nothing.
-fn scrolls_before_press(native: &str, actions: &[String], uikit: impl FnOnce() -> bool) -> bool {
-	native == "AXPress" && actions.iter().any(|action| action == SCROLL_TO_VISIBLE) && uikit()
+/// The element's own spelling of [`SCROLL_TO_VISIBLE`] when `native`, its
+/// own spelling of the action to perform, is a press that scrolls first.
+fn scroll_before_press<'a>(
+	native: &str,
+	actions: &'a [String],
+	uikit: impl FnOnce() -> bool,
+) -> Option<&'a str> {
+	if !native.eq_ignore_ascii_case("AXPress") {
+		return None;
+	}
+	let scroll = actions
+		.iter()
+		.find(|action| action.eq_ignore_ascii_case(SCROLL_TO_VISIBLE))?;
+	uikit().then_some(scroll.as_str())
 }
 
-/// Sends `native`, after [`SCROLL_TO_VISIBLE`] when `scroll_first`. A failed
-/// scroll leaves the action to report its own outcome; a run cancelled during
-/// the scroll sends nothing more, and nothing is sent once the user has
-/// pressed a key or clicked in the app since the call was admitted
+/// Sends `native`, after `scroll` when given. A failed scroll leaves the
+/// action to report its own outcome; a run cancelled during the scroll sends
+/// nothing more, and nothing is sent once the user has pressed a key or
+/// clicked in the app since the call was admitted
 /// ([`control::intervention::check_press`]).
 fn press_into_view(
 	native: &str,
-	scroll_first: bool,
+	scroll: Option<&str>,
 	mut send: impl FnMut(&str) -> AXError,
 ) -> CoreResult<()> {
 	control::intervention::check_press()?;
-	if scroll_first {
-		let _ = send(SCROLL_TO_VISIBLE);
+	if let Some(scroll) = scroll {
+		let _ = send(scroll);
 		control::check()?;
 		control::intervention::check_press()?;
 	}
@@ -2033,13 +3061,16 @@ fn send_action(element: &AXUIElement, action: &str) -> AXError {
 /// `CannotComplete` from `AXPerformAction` means messaging failed or the app
 /// did not reply in time, e.g. while the action runs a modal dialog. The
 /// request was made, so its outcome is unknown rather than failed.
+/// `AttributeUnsupported` names no attribute an action reads; Preview answers
+/// it after following a PDF link's `AXPressAction` and Finder after carrying
+/// out an icon's `AXOpen`, so it is no proof of failure either.
 fn element_action_result(action: &str, error: AXError) -> CoreResult<()> {
-	if error == AXError::CannotComplete {
+	if matches!(error, AXError::CannotComplete | AXError::AttributeUnsupported) {
 		return Err(DesktopError::ax_unconfirmed(format!(
 			"AX action '{action}' was requested, but its outcome could not be confirmed: the app did \
-			 not reply in time or messaging failed ({error:?}), for example because the action \
-			 opened a modal dialog. It may already have taken effect: observe the window before \
-			 retrying"
+			 not reply in time, messaging failed or the app answered with an unrelated error \
+			 ({error:?}), for example because the action opened a modal dialog. It may already have \
+			 taken effect: observe the window before retrying"
 		)));
 	}
 	ax_result(error, format!("AX action '{action}' failed"))
@@ -2081,10 +3112,19 @@ fn set_timeout(element: &AXUIElement) -> CoreResult<()> {
 	ax_result(error, "AXUIElementSetMessagingTimeout(2.0) failed")
 }
 
+#[cfg(test)]
+thread_local! {
+	// Includes failed lone AX calls, so the projection regression does not
+	// depend on the test process having Accessibility permission.
+	static SINGLE_ATTRIBUTE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn copy_attribute_result(
 	element: &AXUIElement,
 	attribute: &str,
 ) -> Result<Option<CFRetained<CFType>>, AXError> {
+	#[cfg(test)]
+	SINGLE_ATTRIBUTE_READS.with(|reads| reads.set(reads.get() + 1));
 	let attribute = CFString::from_str(attribute);
 	let mut output: *const CFType = ptr::null();
 	let slot = NonNull::from(&mut output);
@@ -2105,6 +3145,28 @@ fn copy_attribute(element: &AXUIElement, attribute: &str) -> Option<CFRetained<C
 	copy_attribute_result(element, attribute).ok().flatten()
 }
 
+/// Reads parameterized `attribute` of `element` for `parameter`, or `None`
+/// when the element does not answer it.
+fn copy_parameterized(
+	element: &AXUIElement,
+	attribute: &str,
+	parameter: &CFType,
+) -> Option<CFRetained<CFType>> {
+	let attribute = CFString::from_str(attribute);
+	let mut output: *const CFType = ptr::null();
+	// SAFETY: `output` is writable and receives a create-rule retained CF
+	// object on success; the element, attribute and parameter outlive the call.
+	let error = unsafe {
+		element.copy_parameterized_attribute_value(&attribute, parameter, NonNull::from(&mut output))
+	};
+	if error != AXError::Success {
+		return None;
+	}
+	// SAFETY: AXUIElementCopyParameterizedAttributeValue returns a +1 object
+	// on success.
+	NonNull::new(output.cast_mut()).map(|pointer| unsafe { CFRetained::from_raw(pointer) })
+}
+
 /// Reads an optional attribute of an element a ref names: a destroyed element
 /// is a stale ref, any other failure reads as no value.
 fn copy_held_attribute(
@@ -2123,6 +3185,33 @@ fn copy_date(element: &AXUIElement, attribute: &str) -> Option<f64> {
 		.downcast::<CFDate>()
 		.ok()?;
 	Some(value.absolute_time())
+}
+
+/// What a value write is written as: the type the element's `AXValue` has
+/// now. A `CFBoolean` is not a number.
+enum ValueKind {
+	Date(f64),
+	Number(CFRetained<CFNumber>),
+	Text,
+}
+
+fn value_kind(value: Option<CFRetained<CFType>>) -> ValueKind {
+	let Some(value) = value else {
+		return ValueKind::Text;
+	};
+	match value.downcast::<CFDate>() {
+		Ok(date) => ValueKind::Date(date.absolute_time()),
+		Err(value) => value
+			.downcast::<CFNumber>()
+			.map_or(ValueKind::Text, ValueKind::Number),
+	}
+}
+
+/// The attribute's value when it is a `CFNumber`; a `CFBoolean` is not one.
+fn copy_number(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFNumber>> {
+	copy_attribute(element, attribute)?
+		.downcast::<CFNumber>()
+		.ok()
 }
 
 fn copy_string(element: &AXUIElement, attribute: &str) -> Option<String> {
@@ -2304,21 +3393,21 @@ fn bounds_matches_window(bounds: AxBounds, window: &DesktopWindow) -> bool {
 		&& (bounds.height - f64::from(window.height)).abs() <= 2.0
 }
 
-fn action_name(action: &str) -> String {
-	match action.trim().to_ascii_lowercase().as_str() {
-		"press" => "AXPress".to_string(),
-		"raise" => "AXRaise".to_string(),
-		"showmenu" | "show_menu" => "AXShowMenu".to_string(),
-		_ if action.starts_with("AX") => action.to_string(),
-		_ => format!("AX{action}"),
-	}
+/// The element's own name for `action`, matched regardless of case: `ax()`
+/// lists actions in lowercase.
+fn supported_action<'a>(available: &'a [String], action: &str) -> Option<&'a String> {
+	let requested = native_action_name(action);
+	available
+		.iter()
+		.find(|name| name.eq_ignore_ascii_case(&requested))
 }
 
 /// Renders an AX attribute value as stable, agent-readable text for
 /// [`AxProps::value`] and `attributes()`.
 ///
-/// Numbers print as numbers (checkbox/radio state, slider position) and an
-/// element reference (a radio group's selected button) prints as that
+/// Numbers print as numbers (checkbox/radio state, slider position), a date
+/// as the local ISO-8601 time the control shows and `setValue` takes back, and
+/// an element reference (a radio group's selected button) prints as that
 /// element's title or description, so snapshots never carry CF debug text
 /// whose pointer addresses change between otherwise identical reads.
 fn stringify_value(value: &CFType) -> String {
@@ -2330,6 +3419,15 @@ fn stringify_value(value: &CFType) -> String {
 	}
 	if let Some(number) = value.downcast_ref::<CFNumber>() {
 		return stringify_number(number);
+	}
+	if let Some(date) = value.downcast_ref::<CFDate>() {
+		// Without the zone a read still names the right instant, in UTC.
+		let zone = system_zone();
+		return date::format_local(date.absolute_time(), |at| {
+			zone
+				.as_ref()
+				.map_or(0, |zone| zone.seconds_from_gmt(at) as i64)
+		});
 	}
 	if let Some(element) = value.downcast_ref::<AXUIElement>() {
 		return nonempty(copy_string(element, "AXTitle"))
@@ -2345,29 +3443,36 @@ fn stringify_value(value: &CFType) -> String {
 }
 
 /// Formats a `CFNumber` at its stored precision: `Float32` values read back
-/// as `f32` so `0.185` does not widen to `0.18500000238418579`.
+/// as `f32` so `0.185` does not widen to `0.18500000238418579`. An integer
+/// past `i64` (an unsigned value CF keeps in 128 bits) shows as its nearest
+/// `f64` in scientific notation, which does not pass for its exact digits.
 fn stringify_number(number: &CFNumber) -> String {
 	let text = if !number.is_float_type() {
-		number.as_i64().map(|value| value.to_string())
+		Some(
+			exact_i64(number).map_or_else(|| format!("{:e}", approximate_f64(number)), bounded_number),
+		)
 	} else if number.byte_size() <= 4 {
-		number.as_f32().map(|value| value.to_string())
+		number.as_f32().map(bounded_number)
 	} else {
-		number.as_f64().map(|value| value.to_string())
+		number.as_f64().map(bounded_number)
 	};
 	text.unwrap_or_default()
 }
 
-fn nonempty(value: Option<String>) -> Option<String> {
-	value.filter(|value| !value.is_empty())
+/// A number as `Display` writes it, or in scientific notation where that would
+/// run past 24 characters (`f64::MAX` has 309 digits), the longest an `f64`
+/// takes in scientific notation: an extreme value an app publishes stays short.
+fn bounded_number<T: std::fmt::Display + std::fmt::LowerExp>(value: T) -> String {
+	let text = value.to_string();
+	if text.len() <= 24 {
+		text
+	} else {
+		format!("{value:e}")
+	}
 }
 
-fn truncate_chars(value: String, max: usize) -> String {
-	if value.chars().count() <= max {
-		return value;
-	}
-	let mut result: String = value.chars().take(max.saturating_sub(1)).collect();
-	result.push('…');
-	result
+fn nonempty(value: Option<String>) -> Option<String> {
+	value.filter(|value| !value.is_empty())
 }
 
 fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
@@ -2393,20 +3498,33 @@ mod tests {
 	use std::{
 		cell::{Cell, RefCell},
 		ptr::NonNull,
+		time::{Duration, Instant},
 	};
 
-	use objc2_application_services::{AXError, AXValue, AXValueType};
-	use objc2_core_foundation::{CFArray, CFNumber, CFString, CFType, CFURL, Type, kCFNull};
+	use objc2_application_services::{AXError, AXUIElement, AXValue, AXValueType};
+	use objc2_core_foundation::{
+		CFArray, CFNumber, CFRetained, CFString, CFType, CFURL, Type, kCFNull,
+	};
 
 	use super::{
-		AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED, FocusedWindow,
-		KeyDestination, KeyFocus, NodeRead, NodeValues, ROLE, TITLE, TextField, TextSurface, VALUE,
+		AX_TIMEOUT_SECONDS, AttachedCandidate, AxWindowRecord, CHILDREN, DESCRIPTION, ENABLED,
+		FocusedWindow, KeyDestination, KeyFocus, NUMBER_POLL, NUMBER_SETTLE, NodeRead, NodeValues,
+		NumberField, NumberTarget, ROLE, TITLE, TextField, TextSurface, VALUE, ValueKind,
 		WindowContent, ax_result, content_owner, create_system_wide, element_action_result,
-		focused_window, may_borrow_focus, menu_window, perform_choosing, replace_utf16_selection,
-		replace_whole_value, required_string, secure_subrole, select_attached, stringify_value,
-		takes_inserted_text, target_window, text_readback, window_records_of,
+		focused_window, is_outside_windows, may_borrow_focus, menu_window, not_settable,
+		number_reached, number_readback, parse_number, perform_choosing, replace_utf16_selection,
+		replace_whole_value, required_string, secure_subrole, select_attached,
+		standard_window_subrole, stringify_number, stringify_value, takes_inserted_text,
+		target_window, value_kind, window_records_of, write_number,
 	};
-	use crate::desktop::error::{CoreResult, ErrorCode};
+	use crate::desktop::error::{CoreResult, DesktopError, ErrorCode};
+
+	#[test]
+	fn an_unreadable_window_subrole_is_unknown_not_a_dialog() {
+		// The real system-wide AX element has no window subrole: an unsupported
+		// attribute, like a failed window read, cannot classify a dialog.
+		assert_eq!(standard_window_subrole(&create_system_wide()), None);
+	}
 
 	#[test]
 	fn batched_values_read_like_lone_reads() {
@@ -2464,15 +3582,83 @@ mod tests {
 		let mut expected: Vec<_> = NodeRead::Walk.attributes().collect();
 		expected.retain(|index| !super::IDENTITY_ONLY.contains(index));
 		assert_eq!(asked, expected);
-		assert_eq!(asked.len(), 7);
+		assert_eq!(asked.len(), 8);
 		assert_eq!(required_string(values.get(ROLE), "AXRole").unwrap(), "AXTextArea");
 		assert_eq!(values.get(VALUE).unwrap_err(), AXError::CannotComplete);
 		assert!(values.get(TITLE).unwrap().is_none());
 	}
 
 	#[test]
+	fn fingerprint_decoding_does_not_query_an_ax_element_value() {
+		use super::{SINGLE_ATTRIBUTE_READS, read_as_values};
+		let role = CFString::from_static_str("AXRadioGroup");
+		let title = CFString::from_static_str("Choice");
+		let child = create_system_wide();
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null = unsafe { kCFNull }.unwrap();
+		let entries: Vec<&CFType> = NodeRead::Props
+			.attributes()
+			.map(|index| -> &CFType {
+				match index {
+					ROLE => &role,
+					TITLE => &title,
+					VALUE => &child,
+					_ => null,
+				}
+			})
+			.collect();
+		let values = NodeValues::from_batch(
+			Ok(CFArray::from_objects(&entries)),
+			NodeRead::Props.attributes(),
+			|_| unreachable!("an answered batch needs no lone reads"),
+		);
+		SINGLE_ATTRIBUTE_READS.with(|reads| reads.set(0));
+		assert!(read_as_values(&values).unwrap().is_some());
+		assert_eq!(SINGLE_ATTRIBUTE_READS.with(|reads| reads.get()), 0);
+	}
+
+	#[test]
+	fn a_control_without_a_label_of_its_own_is_named_by_its_linked_label() {
+		use super::linked_label;
+
+		let link = create_system_wide();
+		let link: &CFType = &link;
+		let text =
+			|text: &'static str| -> CFRetained<CFType> { CFString::from_static_str(text).into() };
+		let mut reads = Vec::new();
+		let mut label = |value: Result<Option<&'static str>, AXError>, title| {
+			reads.clear();
+			linked_label(Some(link), |_, attribute| {
+				reads.push(attribute.to_owned());
+				match attribute {
+					"AXValue" => value.map(|value| value.map(text)),
+					_ => Ok(Some(text(title))),
+				}
+			})
+		};
+		// SwiftUI's toggle label is static text, named by its value.
+		assert_eq!(label(Ok(Some("Launch at login")), "x"), Ok(Some("Launch at login".into())));
+		// An empty or missing value falls back to the label's title.
+		assert_eq!(label(Ok(Some("")), "Mode"), Ok(Some("Mode".into())));
+		assert_eq!(label(Err(AXError::NoValue), "Mode"), Ok(Some("Mode".into())));
+		// A read the app did not answer is no name, and says so.
+		assert_eq!(label(Err(AXError::CannotComplete), "Mode"), Err(AXError::CannotComplete));
+		assert_eq!(reads, ["AXValue"]);
+		// No link, or a link that is not an element, reads nothing.
+		let unread = |_: &AXUIElement, _: &str| -> Result<Option<CFRetained<CFType>>, AXError> {
+			unreachable!("no label to read")
+		};
+		assert_eq!(linked_label(None, unread), Ok(None));
+		assert_eq!(linked_label(Some(&*text("Mode")), unread), Ok(None));
+	}
+
+	#[test]
 	fn only_an_element_whose_app_answered_every_identifying_attribute_has_an_identity() {
-		use super::{HELP, answered, read_identity};
+		use super::{
+			HELP, MacAx, WalkBounds, answered, element_props, read_as_values, read_identity,
+			require_read_as,
+		};
+		use crate::desktop::ax::{AxHandle, AxRegistry, Uniqueness};
 
 		let error = |mut code: AXError| {
 			// SAFETY: An AXError-typed AXValue copies the one AXError it points
@@ -2488,12 +3674,13 @@ mod tests {
 		// SAFETY: kCFNull is a process-lifetime constant.
 		let null = unsafe { kCFNull }.unwrap();
 		// One walk read, in `NODE_ATTRIBUTES` order, with `help` as its `AXHelp`.
-		let walk = |help: &CFType| {
-			let entries: [&CFType; 14] = [
+		let walk_as = |title: &CFType, help: &CFType| {
+			let entries: [&CFType; 16] = [
 				null,
 				&role,
-				&title,
+				title,
 				&no_value,
+				null,
 				null,
 				null,
 				null,
@@ -2504,6 +3691,7 @@ mod tests {
 				null,
 				null,
 				null,
+				null,
 			];
 			NodeValues::from_batch(
 				Ok(CFArray::from_objects(&entries)),
@@ -2511,6 +3699,7 @@ mod tests {
 				|_| unreachable!("an answered batch needs no lone reads"),
 			)
 		};
+		let walk = |help: &CFType| walk_as(&title, help);
 		let go = Some("Go".to_string());
 		let identity = |values: &NodeValues| read_identity(values, "AXButton", [&go, &None, &None]);
 		// Missing and unsupported attributes are the same answer.
@@ -2524,6 +3713,38 @@ mod tests {
 		assert_eq!(identity(&walk(&failed)), Some(failing));
 		// One the app was too busy to answer leaves no identity.
 		assert!(identity(&walk(&busy)).is_none());
+
+		// HELP can be unanswered while the role and chosen title are known.
+		// Both the original ref and the action-time check use those labels,
+		// not the broader identity's completeness.
+		let stop = CFString::from_static_str("Stop");
+		for help in [&no_value, &busy] {
+			let registered = element_props(&walk(help), 0, WalkBounds::Skip).unwrap();
+			assert!(registered.label_complete);
+			let changed_values = walk_as(&stop, &busy);
+			let changed = element_props(&changed_values, 0, WalkBounds::Skip).unwrap();
+			assert!(changed.partial);
+			assert!(changed.label_complete);
+			let mut registry = AxRegistry::default();
+			let reference = registry.register(
+				&mut MacAx,
+				"fixture",
+				1,
+				AxHandle::Test(1),
+				&registered,
+				Uniqueness::Unknown,
+			);
+			let scope = registry.expect_read_as(&reference).unwrap();
+			let error = require_read_as(|| read_as_values(&changed_values)).unwrap_err();
+			assert_eq!(error.code, crate::desktop::error::ErrorCode::StaleRef);
+			assert!(scope.finish());
+		}
+		// An unanswered higher-priority title really can hide the label.
+		assert!(
+			!element_props(&walk_as(&busy, &no_value), 0, WalkBounds::Skip)
+				.unwrap()
+				.label_complete
+		);
 
 		// A batch that fails as a whole falls back to lone reads without the
 		// identity-only attributes, so the element has no identity.
@@ -2543,8 +3764,28 @@ mod tests {
 	}
 
 	#[test]
+	fn a_ref_probe_refuses_when_the_user_picks_its_app_while_it_blocks() {
+		use super::checked_ref_read;
+		use crate::desktop::error::ErrorCode;
+
+		let front = std::cell::Cell::new(Some(9));
+		let result = checked_ref_read(
+			|| front.get(),
+			|| {
+				front.set(Some(7));
+				Ok((7, None))
+			},
+		);
+		assert_eq!(result.unwrap_err().code, ErrorCode::UserIntervened);
+		// A target already in front, or one that stays behind, still passes
+		// the check even when its fingerprint was unanswered.
+		assert!(checked_ref_read(|| Some(7), || Ok((7, None))).is_ok());
+		assert!(checked_ref_read(|| Some(9), || Ok((7, None))).is_ok());
+	}
+
+	#[test]
 	fn a_field_without_a_label_is_named_by_its_placeholder() {
-		use super::{PLACEHOLDER, WalkBounds, element_props};
+		use super::{PLACEHOLDER, TITLE_ELEMENT, WalkBounds, labelled_props};
 
 		let role = CFString::from_static_str("AXTextField");
 		let role: &CFType = &role;
@@ -2556,22 +3797,43 @@ mod tests {
 		// SAFETY: An AXError-typed AXValue copies the one AXError it points at.
 		let busy =
 			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut busy).cast()) }.unwrap();
+		let mut failure = AXError::Failure;
+		// SAFETY: as for `busy`.
+		let failure =
+			unsafe { AXValue::new(AXValueType::AXError, NonNull::from(&mut failure).cast()) }.unwrap();
 		// SAFETY: kCFNull is a process-lifetime constant.
 		let null: &CFType = unsafe { kCFNull }.unwrap();
+		let link = create_system_wide();
+		let link: &CFType = &link;
 		// One walk read of a Reminders date field, with `title` and
-		// `description` as its own labels.
-		let field = |title: &CFType, description: &CFType, placeholder: &CFType| {
-			let mut entries = [null; 14];
+		// `description` as its own labels and `link` as its `AXTitleUIElement`,
+		// whose text `label` answers.
+		let read = |title: &CFType,
+		            description: &CFType,
+		            placeholder: &CFType,
+		            link: &CFType,
+		            label: Result<Option<&'static str>, AXError>| {
+			let mut entries = [null; NodeRead::Walk.attributes().end];
 			entries[ROLE] = role;
 			entries[TITLE] = title;
 			entries[DESCRIPTION] = description;
 			entries[PLACEHOLDER] = placeholder;
+			entries[TITLE_ELEMENT] = link;
 			let values = NodeValues::from_batch(
 				Ok(CFArray::from_objects(&entries)),
 				NodeRead::Walk.attributes(),
 				|_| unreachable!("an answered batch needs no lone reads"),
 			);
-			element_props(&create_system_wide(), &values, 0, WalkBounds::Skip).unwrap()
+			let text =
+				|text: &'static str| -> CFRetained<CFType> { CFString::from_static_str(text).into() };
+			labelled_props(&values, 0, WalkBounds::Skip, |_, attribute| match attribute {
+				"AXValue" => label.map(|label| label.map(text)),
+				_ => Ok(None),
+			})
+			.unwrap()
+		};
+		let field = |title: &CFType, description: &CFType, placeholder: &CFType| {
+			read(title, description, placeholder, null, Ok(None))
 		};
 		let unlabeled = field(null, null, add_date);
 		assert_eq!(unlabeled.description.as_deref(), Some("Add Date"));
@@ -2581,11 +3843,98 @@ mod tests {
 		let titled = field(due, null, add_date);
 		assert_eq!(titled.title.as_deref(), Some("Due"));
 		assert_eq!(titled.description, None);
-		// A placeholder the app was too busy to answer leaves the field
-		// unnamed and without an identity, so no ref is matched by its name.
+		// A linked label names an unlabelled field and outranks its
+		// placeholder, but not a description of its own.
+		let linked = read(null, null, add_date, link, Ok(Some("Mode")));
+		assert_eq!((linked.title.as_deref(), linked.description), (Some("Mode"), None));
+		assert!(!linked.partial);
+		let described = read(null, due, null, link, Ok(Some("Mode")));
+		assert_eq!((described.title, described.description.as_deref()), (None, Some("Due")));
+		// A placeholder or linked label the app was too busy to answer leaves
+		// the field unnamed by it and without an identity, so no ref is
+		// matched by its name.
 		let unanswered = field(null, null, &busy);
 		assert_eq!(unanswered.description, None);
 		assert!(unanswered.partial);
+		let unread = read(null, null, null, link, Err(AXError::CannotComplete));
+		assert_eq!(unread.title, None);
+		assert!(unread.partial);
+		assert!(unread.label_complete);
+		let unread = read(null, null, add_date, &busy, Ok(Some("Mode")));
+		assert!(unread.partial);
+		assert!(unread.label_complete);
+		// A link `AppKit` fails on every read is no link: the field keeps its
+		// placeholder name and its identity.
+		let failed = read(null, null, add_date, &failure, Ok(Some("Mode")));
+		assert_eq!((failed.title, failed.description.as_deref()), (None, Some("Add Date")));
+		assert!(!failed.partial);
+	}
+
+	fn linked_field(
+		title: Option<&'static str>,
+		label: Result<Option<&'static str>, AXError>,
+	) -> (crate::desktop::ax::AxProps, super::AxReadAs) {
+		let role = CFString::from_static_str("AXTextField");
+		let title = title.map(CFString::from_static_str);
+		let link = create_system_wide();
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null: &CFType = unsafe { kCFNull }.unwrap();
+		let mut entries = [null; NodeRead::Walk.attributes().end];
+		entries[ROLE] = &role;
+		entries[TITLE] = title.as_deref().map_or(null, |title| title);
+		entries[super::TITLE_ELEMENT] = &link;
+		let values = NodeValues::from_batch(
+			Ok(CFArray::from_objects(&entries)),
+			NodeRead::Walk.attributes(),
+			|_| unreachable!("an answered batch needs no lone reads"),
+		);
+		let props = super::labelled_props(&values, 0, super::WalkBounds::Skip, |_, attribute| {
+			if attribute == "AXValue" {
+				label.map(|label| label.map(|label| CFString::from_static_str(label).into()))
+			} else {
+				Ok(None)
+			}
+		})
+		.unwrap();
+		(props, super::read_as_values(&values).unwrap().unwrap())
+	}
+
+	fn check_linked_field(
+		before: &crate::desktop::ax::AxProps,
+		after: super::AxReadAs,
+	) -> crate::desktop::error::CoreResult<()> {
+		use crate::desktop::ax::{AxHandle, AxRegistry, Uniqueness};
+		let mut registry = AxRegistry::default();
+		let reference = registry.register(
+			&mut super::MacAx,
+			"fixture",
+			1,
+			AxHandle::Test(1),
+			before,
+			Uniqueness::Unknown,
+		);
+		let _scope = registry.expect_read_as(&reference).unwrap();
+		super::require_read_as(|| Ok(Some(after)))
+	}
+
+	#[test]
+	fn an_own_label_disappearing_is_refused_even_when_the_link_is_unread() {
+		let (before, _) = linked_field(Some("City"), Ok(None));
+		let (_, after) = linked_field(None, Err(AXError::CannotComplete));
+		assert_eq!(check_linked_field(&before, after).unwrap_err().code, ErrorCode::StaleRef);
+	}
+
+	#[test]
+	fn a_changed_linked_label_alone_is_not_an_action_guard() {
+		let (before, _) = linked_field(None, Ok(Some("City")));
+		let (_, after) = linked_field(None, Ok(Some("Street")));
+		assert!(check_linked_field(&before, after).is_ok());
+	}
+
+	#[test]
+	fn an_unchanged_linked_label_does_not_refuse_its_control() {
+		let (before, after) = linked_field(None, Ok(Some("City")));
+		assert!(check_linked_field(&before, after).is_ok());
 	}
 
 	#[test]
@@ -2610,6 +3959,146 @@ mod tests {
 		assert_eq!(code(AXError::InvalidUIElement), ErrorCode::StaleRef);
 		assert_eq!(code(AXError::ActionUnsupported), ErrorCode::AxFailed);
 		assert!(element_action_result("AXPress", AXError::Success).is_ok());
+	}
+
+	#[test]
+	fn an_unrelated_attribute_error_from_an_action_is_unconfirmed() {
+		let error =
+			element_action_result("AXPressAction", AXError::AttributeUnsupported).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("observe the window"), "{}", error.message);
+	}
+
+	#[test]
+	fn a_press_of_a_disabled_element_is_refused_before_anything_is_sent() {
+		let actions = ["AXPress", "AXScrollToVisible", "AXShowMenu"].map(String::from);
+		let mut sent = Vec::new();
+		let mut perform = |action, enabled| {
+			let result = super::choose_action(
+				&actions,
+				action,
+				|| enabled,
+				|native| {
+					sent.push(native.clone());
+					Ok(())
+				},
+			);
+			(result.map_err(|error| (error.code, error.message)), std::mem::take(&mut sent))
+		};
+		let (result, sent) = perform("press", Some(false));
+		let refused = result.unwrap_err();
+		assert_eq!(refused.0, ErrorCode::AxFailed);
+		assert!(refused.1.contains("disabled"), "{}", refused.1);
+		assert!(sent.is_empty(), "{sent:?}");
+		// Enabled, or silent about it: the press is dispatched.
+		assert_eq!(perform("press", Some(true)), (Ok(()), vec!["AXPress".to_owned()]));
+		assert_eq!(perform("press", None), (Ok(()), vec!["AXPress".to_owned()]));
+		// Other actions still dispatch on a disabled element.
+		assert_eq!(
+			perform("AXScrollToVisible", Some(false)),
+			(Ok(()), vec!["AXScrollToVisible".to_owned()])
+		);
+		assert_eq!(perform("showMenu", Some(false)), (Ok(()), vec!["AXShowMenu".to_owned()]));
+		// An action the element lacks is refused as unsupported, with no send.
+		let (result, sent) = perform("AXRaise", Some(false));
+		assert!(!result.unwrap_err().1.contains("disabled"));
+		assert!(sent.is_empty(), "{sent:?}");
+	}
+
+	#[test]
+	fn placement_judges_every_action_but_a_scroll_and_only_background_clicks() {
+		use crate::desktop::backend::DeliveryMode;
+		for native in ["AXPress", "AXShowMenu", "AXOpen", "AXPick", "AXIncrement"] {
+			assert!(super::judges_placement(native), "{native}");
+		}
+		assert!(!super::judges_placement("AXScrollToVisible"));
+		assert!(!super::judges_placement("axscrolltovisible"));
+		assert!(super::click_judges_placement(DeliveryMode::Background));
+		assert!(!super::click_judges_placement(DeliveryMode::Foreground));
+		assert!(!super::click_judges_placement(DeliveryMode::ForegroundReturnFocus));
+	}
+
+	#[test]
+	fn listed_actions_perform_whatever_their_case() {
+		let available = ["AXOpen", "AXShowMenu", "AXPressAction", "AXRaise"].map(String::from);
+		let native = |action| super::supported_action(&available, action).map(String::as_str);
+		assert_eq!(native("open"), Some("AXOpen"));
+		assert_eq!(native("pressaction"), Some("AXPressAction"));
+		assert_eq!(native("showmenu"), Some("AXShowMenu"));
+		assert_eq!(native("AXOpen"), Some("AXOpen"));
+		assert_eq!(native("press"), None);
+		assert_eq!(native("axopen"), Some("AXOpen"));
+		assert_eq!(native("axOpen"), Some("AXOpen"));
+		assert_eq!(native(" open "), Some("AXOpen"));
+		assert_eq!(native("AxShowMenu"), Some("AXShowMenu"));
+		// A raise by any spelling is the raise the Escape stop arms for.
+		for raise in ["axraise", "AxRaise", " Raise "] {
+			assert_eq!(native(raise), Some("AXRaise"));
+			assert!(super::is_raise_action(raise), "{raise}");
+		}
+		// Unicode White_Space trims (U+0085 does, U+FEFF does not), and only
+		// ASCII letters fold; the tool's refusals name actions by the same rule.
+		assert_eq!(native("\u{85}open"), Some("AXOpen"));
+		assert_eq!(native("open\u{85}"), Some("AXOpen"));
+		assert_eq!(native("\u{feff}open"), None);
+		assert_eq!(native("open\u{feff}"), None);
+		let custom = ["AXÖffnen".to_owned()];
+		assert_eq!(
+			super::supported_action(&custom, "axÖffnen").map(String::as_str),
+			Some("AXÖffnen")
+		);
+		assert_eq!(super::supported_action(&custom, "axöffnen"), None);
+		// An element advertising another case is answered with its own spelling.
+		let lower = ["axshowmenu", "axpress", "axopen"].map(String::from);
+		let native = |action| super::supported_action(&lower, action).map(String::as_str);
+		assert_eq!(native("showmenu"), Some("axshowmenu"));
+		assert_eq!(native("press"), Some("axpress"));
+		assert_eq!(native("AXOpen"), Some("axopen"));
+		// `ax()` lists only `open` for a button that also presses; the press
+		// runs.
+		let both = ["AXPress", "AXOpen"].map(String::from);
+		assert_eq!(super::supported_action(&both, "press").map(String::as_str), Some("AXPress"));
+	}
+
+	#[test]
+	fn rows_cells_buttons_and_icons_report_their_selection() {
+		use super::{SELECTED, selected};
+
+		// SAFETY: kCFNull is a process-lifetime constant.
+		let null: &CFType = unsafe { kCFNull }.unwrap();
+		let yes: &CFType = objc2_core_foundation::CFBoolean::new(true);
+		let walk = |slot: &CFType| {
+			let mut entries = [null; NodeRead::Walk.attributes().end];
+			entries[SELECTED] = slot;
+			NodeValues::from_batch(
+				Ok(CFArray::from_objects(&entries)),
+				NodeRead::Walk.attributes(),
+				|_| unreachable!("an answered batch needs no lone reads"),
+			)
+		};
+		let marked = walk(yes);
+		for role in ["AXRow", "AXCell", "AXButton", "AXImage"] {
+			assert!(selected(&marked, role), "{role}");
+		}
+		assert!(!selected(&marked, "AXStaticText"));
+		assert!(!selected(&walk(null), "AXRow"));
+	}
+
+	#[test]
+	fn only_an_unlabeled_window_button_takes_its_subrole_name() {
+		use super::window_control_name;
+
+		let name = |role, title: Option<&str>, subrole: &str| {
+			window_control_name(role, [&title.map(str::to_owned), &None], Some(subrole.to_owned()))
+		};
+		assert_eq!(name("AXButton", None, "AXCloseButton"), Some("close"));
+		assert_eq!(name("AXButton", None, "AXMinimizeButton"), Some("minimize"));
+		assert_eq!(name("AXButton", None, "AXZoomButton"), Some("zoom"));
+		assert_eq!(name("AXButton", None, "AXFullScreenButton"), Some("full screen"));
+		assert_eq!(name("AXButton", Some(" "), "AXCloseButton"), Some("close"));
+		assert_eq!(name("AXButton", Some("Close tab"), "AXCloseButton"), None);
+		assert_eq!(name("AXButton", None, "AXSortButton"), None);
+		assert_eq!(name("AXCheckBox", None, "AXCloseButton"), None);
 	}
 
 	#[test]
@@ -2639,6 +4128,544 @@ mod tests {
 		assert_eq!(stringify_value(&CFNumber::new_i64(-3)), "-3");
 		assert_eq!(stringify_value(&CFNumber::new_f64(0.185)), "0.185");
 		assert_eq!(stringify_value(&CFNumber::new_f32(0.185)), "0.185");
+		assert_eq!(stringify_value(&CFNumber::new_i64(i64::MIN)), "-9223372036854775808");
+		// An extreme value stays short: scientific notation past 24 characters.
+		assert_eq!(stringify_value(&CFNumber::new_f64(f64::MAX)), "1.7976931348623157e308");
+		assert_eq!(
+			stringify_value(&CFNumber::new_f64(-f64::MIN_POSITIVE)),
+			"-2.2250738585072014e-308"
+		);
+		assert_eq!(stringify_value(&CFNumber::new_f32(f32::MAX)), "3.4028235e38");
+		assert_eq!(stringify_value(&CFNumber::new_f64(1e-7)), "0.0000001");
+	}
+
+	#[test]
+	fn number_text_parses_by_the_kind_the_control_holds_or_names_what_it_reads() {
+		let real = CFNumber::new_f64(12.5);
+		assert_eq!(parse_number("75", &real).unwrap(), NumberTarget::Real(75.0));
+		assert_eq!(parse_number("-2.5", &real).unwrap(), NumberTarget::Real(-2.5));
+		assert_eq!(parse_number("+0.30", &real).unwrap(), NumberTarget::Real(0.3));
+		// Whole text an integer control holds as the integer; a float control
+		// holds only text that its double spells back.
+		let whole = CFNumber::new_i64(3);
+		assert_eq!(
+			parse_number("9007199254740993", &whole).unwrap(),
+			NumberTarget::Whole(9_007_199_254_740_993)
+		);
+		// A fraction of zeros is whole, and stays exact.
+		assert_eq!(
+			parse_number("9007199254740993.0", &whole).unwrap(),
+			NumberTarget::Whole(9_007_199_254_740_993)
+		);
+		assert_eq!(parse_number("-0.000", &whole).unwrap(), NumberTarget::Whole(0));
+		assert_eq!(parse_number("-7", &whole).unwrap(), NumberTarget::Whole(-7));
+		assert_eq!(parse_number("42.5", &whole).unwrap(), NumberTarget::Real(42.5));
+		// The longest text a control takes, as small as it gets.
+		let smallest = format!("0.{}1", "0".repeat(29));
+		assert_eq!(parse_number(&smallest, &real).unwrap(), NumberTarget::Real(1e-30));
+		let largest = "9".repeat(32);
+		// What it spells is written: leading and trailing zeros, a sign and -0
+		// change no digit.
+		for (text, number) in [
+			("075", 75.0),
+			("75.0", 75.0),
+			("0.50", 0.5),
+			("0.3", 0.3),
+			("-0", 0.0),
+			("-0.0", 0.0),
+			("100.000001", 100.000_001),
+			("0.30000000000000004", 0.300_000_000_000_000_04),
+			("123456789.012345", 123_456_789.012_345),
+			("9007199254740992", 9_007_199_254_740_992.0),
+		] {
+			assert_eq!(parse_number(text, &real).unwrap(), NumberTarget::Real(number), "{text}");
+		}
+		assert_eq!(parse_number("075", &whole).unwrap(), NumberTarget::Whole(75));
+		// A digit the written number would drop is refused, whatever the control.
+		for (text, current) in [
+			("1.0000000000000001", &real),
+			("1.0000000000000001", &whole),
+			("9007199254740993.5", &whole),
+			("9007199254740993", &real),
+			("9007199254740993.0", &real),
+			(largest.as_str(), &real),
+			("0.10000000000000000555", &real),
+		] {
+			let error = parse_number(text, current).unwrap_err();
+			assert_eq!(
+				error.message,
+				format!(
+					"AXValue is a number and the text given has more digits than it holds: write at \
+					 most 15 significant digits; it reads {} now; nothing was written",
+					stringify_number(current)
+				),
+				"{text}"
+			);
+		}
+		let past_i64 = parse_number(&largest, &whole).unwrap_err();
+		assert_eq!(
+			past_i64.message,
+			"AXValue is a whole number and the number given is past the 64-bit integer range; it \
+			 reads 3 now; nothing was written"
+		);
+		let too_long = format!("0.{}", "1".repeat(31));
+		for text in [
+			"seventy-five",
+			"",
+			"75%",
+			"NaN",
+			"inf",
+			"infinity",
+			"hunter2 secret",
+			"1e3",
+			"1E3",
+			"9007199254740993e0",
+			"0x10",
+			"1_000",
+			"1,000",
+			" 75",
+			".5",
+			"5.",
+			"-",
+			"+-5",
+			"٣",
+			&too_long,
+		] {
+			for current in [&real, &whole] {
+				let error = parse_number(text, current).unwrap_err();
+				assert_eq!(
+					error.message,
+					format!(
+						"AXValue is a number and the text given is not one: write digits such as \"75\" \
+						 or \"0.5\", at most 32 characters; it reads {} now; nothing was written",
+						stringify_number(current)
+					),
+					"{text}"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn a_number_read_back_matches_the_target_or_its_f32_rounding() {
+		assert!(number_reached(0.3, &CFNumber::new_f64(0.3)));
+		assert!(number_reached(75.0, &CFNumber::new_i64(75)));
+		assert!(number_reached(42.5, &CFNumber::new_f64(42.5)));
+		// A control that keeps a `Float` reads 0.3 back rounded to f32, as a
+		// float or as a double.
+		assert!(number_reached(0.3, &CFNumber::new_f32(0.3)));
+		assert!(number_reached(0.3, &CFNumber::new_f64(f64::from(0.3_f32))));
+		assert!(!number_reached(0.3, &CFNumber::new_f64(0.300_000_1)));
+		// An integer control reads what it rounded to.
+		assert!(!number_reached(42.5, &CFNumber::new_i64(42)));
+		assert!(!number_reached(1_000_000_001.0, &CFNumber::new_i64(1_000_000_000)));
+		assert!(!number_reached(150.0, &CFNumber::new_f64(100.0)));
+		// A small value the control left unchanged, and a large one it missed.
+		assert!(!number_reached(5e-8, &CFNumber::new_f64(0.0)));
+		assert!(!number_reached(5e-8, &CFNumber::new_i64(0)));
+		assert!(!number_reached(1e9, &CFNumber::new_f64(1e9 + 100.0)));
+		assert!(number_reached(0.0, &CFNumber::new_i64(0)));
+		// An integer read-back past 2^53 is compared as an integer, not
+		// rounded onto the target.
+		assert!(!number_reached(9_007_199_254_740_992.0, &CFNumber::new_i64(9_007_199_254_740_993)));
+		assert!(number_reached(9_007_199_254_740_992.0, &CFNumber::new_i64(9_007_199_254_740_992)));
+		assert!(!number_reached(2f64.powi(63), &CFNumber::new_i64(i64::MAX)));
+		assert!(!number_reached(0.0, &CFNumber::new_f64(1e-300)));
+		// f32 rounding counts only where f32 can hold the target: a float
+		// control left at 0 for 1e-50 missed, and 1e39 rounds to infinity.
+		assert!(!number_reached(1e-50, &CFNumber::new_f64(0.0)));
+		assert!(!number_reached(1e-50, &CFNumber::new_f32(0.0)));
+		for read in [f64::INFINITY, f64::from(f32::MAX), 0.0] {
+			assert!(!number_reached(1e39, &CFNumber::new_f64(read)));
+		}
+		assert!(!number_reached(1e39, &CFNumber::new_f32(f32::INFINITY)));
+		assert!(!number_reached(1e39, &CFNumber::new_f32(f32::MAX)));
+	}
+
+	#[test]
+	fn a_clamp_or_step_near_the_target_never_passes_for_it() {
+		// f32 rounding passes only where the f32 still reads as the target, so
+		// a double control that clamped or stepped onto a coarser f32 fails.
+		assert!(number_reached(0.123, &CFNumber::new_f32(0.123)));
+		assert!(!number_reached(100.000_001, &CFNumber::new_f64(100.0)));
+		assert!(!number_reached(0.500_000_01, &CFNumber::new_f64(0.5)));
+		assert!(!number_reached(16_777_217.0, &CFNumber::new_f64(16_777_216.0)));
+		assert!(!number_reached(16_777_217.0, &CFNumber::new_f32(16_777_216.0)));
+		// The ulp allowance never spans a whole number, and an integer read-back
+		// is exact.
+		assert!(!number_reached(
+			4_503_599_627_370_500.0,
+			&CFNumber::new_f64(4_503_599_627_370_496.0)
+		));
+		assert!(!number_reached(1_125_899_906_842_624.5, &CFNumber::new_i64(1_125_899_906_842_624)));
+		assert!(number_reached(75.0, &CFNumber::new_f64(75.000_000_000_000_01)));
+		// A whole target read back as a floating-point number is that integer
+		// exactly.
+		let whole = NumberTarget::Whole(9_007_199_254_740_993);
+		assert!(!whole.reached(&CFNumber::new_f64(9_007_199_254_740_992.0)));
+		assert!(!NumberTarget::Whole(16_777_217).reached(&CFNumber::new_f32(16_777_216.0)));
+		assert!(NumberTarget::Whole(75).reached(&CFNumber::new_f64(75.0)));
+		assert!(NumberTarget::Whole(-3).reached(&CFNumber::new_f32(-3.0)));
+		assert!(!NumberTarget::Whole(i64::MAX).reached(&CFNumber::new_f64(f64::INFINITY)));
+		// -2^63 is an i64 and +2^63 is not.
+		assert!(NumberTarget::Whole(i64::MIN).reached(&CFNumber::new_f64(-(2f64.powi(63)))));
+		assert!(!NumberTarget::Whole(i64::MAX).reached(&CFNumber::new_f64(2f64.powi(63))));
+	}
+
+	#[test]
+	fn a_value_write_takes_the_type_the_value_has_now() {
+		let kind = |value: &CFType| value_kind(Some(CFRetained::from(value)));
+		assert!(matches!(kind(&CFNumber::new_f64(0.0)), ValueKind::Number(_)));
+		assert!(matches!(kind(&CFNumber::new_i32(1)), ValueKind::Number(_)));
+		let at = objc2_core_foundation::CFDate::new(None, 0.0).unwrap();
+		assert!(matches!(kind(&at), ValueKind::Date(_)));
+		// A checkbox that publishes a boolean, and text, take the text path.
+		assert!(matches!(kind(objc2_core_foundation::CFBoolean::new(true)), ValueKind::Text));
+		assert!(matches!(kind(&CFString::from_str("75")), ValueKind::Text));
+		assert!(matches!(value_kind(None), ValueKind::Text));
+	}
+
+	/// A number control that reads back `reads` in turn (the last one from
+	/// then on) and is destroyed from read `gone_from` on, on a clock that
+	/// each wait moves by [`NUMBER_POLL`], the write by `write_takes` and a
+	/// read that does not answer by `unread_takes`.
+	struct FakeNumber {
+		write_error:  AXError,
+		write_takes:  Duration,
+		unread_takes: Duration,
+		written:      RefCell<Vec<String>>,
+		reads:        Vec<Option<CFRetained<CFNumber>>>,
+		gone_from:    Option<usize>,
+		read:         Cell<usize>,
+		bounds_read:  Cell<usize>,
+		clock:        Cell<Instant>,
+		confirm:      Option<&'static str>,
+		confirmed:    Cell<usize>,
+	}
+
+	impl FakeNumber {
+		fn reading(reads: Vec<Option<CFRetained<CFNumber>>>) -> Self {
+			Self {
+				write_error: AXError::Success,
+				write_takes: Duration::ZERO,
+				unread_takes: Duration::ZERO,
+				written: RefCell::default(),
+				reads,
+				gone_from: None,
+				read: Cell::new(0),
+				bounds_read: Cell::new(0),
+				clock: Cell::new(Instant::now()),
+				confirm: None,
+				confirmed: Cell::new(0),
+			}
+		}
+	}
+
+	impl NumberField for FakeNumber {
+		fn write(&self, value: &CFNumber) -> AXError {
+			self.written.borrow_mut().push(stringify_number(value));
+			self.clock.set(self.clock.get() + self.write_takes);
+			self.write_error
+		}
+
+		fn value(&self) -> CoreResult<Option<CFRetained<CFNumber>>> {
+			let at = self.read.get();
+			self.read.set(at + 1);
+			if self.gone_from.is_some_and(|gone| at >= gone) {
+				return Err(DesktopError::stale_ref("the element no longer exists"));
+			}
+			let read = self.reads[at.min(self.reads.len() - 1)].clone();
+			if read.is_none() {
+				self.clock.set(self.clock.get() + self.unread_takes);
+			}
+			Ok(read)
+		}
+
+		fn bound(&self, attribute: &str) -> Option<CFRetained<CFNumber>> {
+			self.bounds_read.set(self.bounds_read.get() + 1);
+			Some(CFNumber::new_f64(if attribute == "AXMinValue" {
+				0.0
+			} else {
+				100.0
+			}))
+		}
+
+		fn now(&self) -> Instant {
+			self.clock.get()
+		}
+
+		fn wait(&mut self) {
+			self.clock.set(self.clock.get() + NUMBER_POLL);
+		}
+
+		fn confirm(&self) -> CoreResult<()> {
+			self.confirmed.set(self.confirmed.get() + 1);
+			self
+				.confirm
+				.map_or(Ok(()), |message| Err(DesktopError::new(ErrorCode::AxUnconfirmed, message)))
+		}
+	}
+
+	/// The read-backs of a write the control never takes: one right after the
+	/// write, then one per interval until the settle time is over.
+	const SETTLE_READS: usize = 1 + (NUMBER_SETTLE.as_millis() / NUMBER_POLL.as_millis()) as usize;
+
+	/// Read-backs of these values, in turn.
+	fn numbers(values: &[f64]) -> Vec<Option<CFRetained<CFNumber>>> {
+		values
+			.iter()
+			.map(|value| Some(CFNumber::new_f64(*value)))
+			.collect()
+	}
+
+	#[test]
+	fn a_number_write_reads_back_until_the_value_arrives_then_confirms_the_ref() {
+		let mut field = FakeNumber::reading(numbers(&[0.0, 0.0, 75.0]));
+		write_number(&mut field, NumberTarget::Real(75.0)).unwrap();
+		assert_eq!(*field.written.borrow(), ["75"]);
+		assert_eq!((field.read.get(), field.confirmed.get()), (3, 1));
+		// An element that reads as another control after the write is
+		// unconfirmed.
+		let mut moved = FakeNumber::reading(numbers(&[75.0]));
+		moved.confirm = Some("the number was written, but e7 now reads as slider \"Pan\"");
+		let error = write_number(&mut moved, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		// A refused write reads nothing back.
+		let mut refused = FakeNumber::reading(numbers(&[0.0]));
+		refused.write_error = AXError::IllegalArgument;
+		let error = write_number(&mut refused, NumberTarget::Real(75.0)).unwrap_err();
+		assert!(
+			error
+				.message
+				.starts_with("setting AXValue to a number failed"),
+			"{}",
+			error.message
+		);
+		assert_eq!(refused.read.get(), 0);
+	}
+
+	#[test]
+	fn a_setter_that_takes_the_whole_settle_time_still_leaves_the_app_its_read_backs() {
+		let mut slow = FakeNumber::reading(numbers(&[0.0, 0.0, 75.0]));
+		slow.write_takes = NUMBER_SETTLE + NUMBER_SETTLE;
+		write_number(&mut slow, NumberTarget::Real(75.0)).unwrap();
+		assert_eq!((slow.read.get(), slow.confirmed.get()), (3, 1));
+		let mut missed = FakeNumber::reading(numbers(&[0.0]));
+		missed.write_takes = NUMBER_SETTLE + NUMBER_SETTLE;
+		write_number(&mut missed, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(missed.read.get(), SETTLE_READS);
+	}
+
+	#[test]
+	fn a_write_the_app_did_not_answer_is_decided_by_its_read_back() {
+		let mut late = FakeNumber::reading(numbers(&[0.0, 75.0]));
+		late.write_error = AXError::CannotComplete;
+		write_number(&mut late, NumberTarget::Real(75.0)).unwrap();
+		assert_eq!((late.read.get(), late.confirmed.get()), (2, 1));
+		let mut silent = FakeNumber::reading(numbers(&[0.0]));
+		silent.write_error = AXError::CannotComplete;
+		let error = write_number(&mut silent, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert_eq!(
+			error.message,
+			"the app did not answer the number write in time (CannotComplete) and may still apply \
+			 it; wrote 75; the control now reads 0. The app may have clamped, rounded or not taken \
+			 it: inspect the target before writing again"
+		);
+	}
+
+	#[test]
+	fn a_value_that_did_not_answer_reads_no_range_bound() {
+		// An app that stops answering after the setter: the setter and the
+		// first read-back each take the whole messaging timeout, and the call
+		// ends there, without reading the bounds.
+		let timeout = Duration::from_secs_f32(AX_TIMEOUT_SECONDS);
+		let mut hung = FakeNumber::reading(vec![None]);
+		hung.write_error = AXError::CannotComplete;
+		hung.write_takes = timeout;
+		hung.unread_takes = timeout;
+		let started = hung.now();
+		let error = write_number(&mut hung, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(error.code, ErrorCode::AxUnconfirmed);
+		assert!(error.message.contains("could not be read back"), "{}", error.message);
+		assert_eq!((hung.read.get(), hung.bounds_read.get(), hung.confirmed.get()), (1, 0, 0));
+		assert_eq!(hung.now() - started, timeout * 2);
+		// A value that answered is explained by the bounds, read once each.
+		let mut missed = FakeNumber::reading(numbers(&[150.0]));
+		write_number(&mut missed, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!(missed.bounds_read.get(), 2);
+	}
+
+	#[test]
+	fn a_control_the_app_removed_after_the_write_is_a_stale_ref_at_once() {
+		let gone = |reads, gone_from| {
+			let mut field = FakeNumber::reading(reads);
+			field.gone_from = Some(gone_from);
+			let started = field.now();
+			let error = write_number(&mut field, NumberTarget::Real(75.0)).unwrap_err();
+			assert_eq!(error.code, ErrorCode::StaleRef);
+			assert_eq!(
+				error.message,
+				"the number 75 was sent, but the control no longer exists after the write: the app \
+				 removed or rebuilt it. Re-run ax()/find() and read the control's value there before \
+				 writing again"
+			);
+			// It ends at the read that found the element gone, reading no bound.
+			assert_eq!(
+				(field.read.get(), field.bounds_read.get(), field.confirmed.get()),
+				(gone_from + 1, 0, 0)
+			);
+			field.now() - started
+		};
+		// Gone on the first read-back: no settle time spent.
+		assert_eq!(gone(numbers(&[0.0]), 0), Duration::ZERO);
+		// Gone after one unchanged read: one interval.
+		assert_eq!(gone(numbers(&[0.0]), 1), NUMBER_POLL);
+		// An element that is alive but does not read as a number still polls
+		// out the settle time and fails.
+		let mut unread = FakeNumber::reading(vec![None]);
+		let error = write_number(&mut unread, NumberTarget::Real(75.0)).unwrap_err();
+		assert_eq!((error.code, unread.read.get()), (ErrorCode::AxFailed, SETTLE_READS));
+	}
+
+	#[test]
+	fn a_number_write_the_control_did_not_keep_names_the_value_reached_and_the_bound() {
+		let missed = |target, reads| {
+			let mut field = FakeNumber::reading(reads);
+			let error = write_number(&mut field, target).unwrap_err();
+			// It read on until the settle time was over, and confirmed nothing.
+			assert_eq!((field.read.get(), field.confirmed.get()), (SETTLE_READS, 0));
+			error.message
+		};
+		assert_eq!(
+			missed(NumberTarget::Real(150.0), numbers(&[100.0])),
+			"wrote 150; the control now reads 100 (its maximum is 100). The app may have clamped, \
+			 rounded or not taken it: inspect the target before writing again"
+		);
+		let low = missed(NumberTarget::Real(-5.0), numbers(&[0.0]));
+		assert!(low.contains("now reads 0 (its minimum is 0)."), "{low}");
+		let rounded = missed(NumberTarget::Real(42.5), numbers(&[40.0]));
+		assert!(rounded.starts_with("wrote 42.5; the control now reads 40."), "{rounded}");
+		let ignored = missed(NumberTarget::Real(75.0), numbers(&[0.0]));
+		assert!(ignored.starts_with("wrote 75; the control now reads 0."), "{ignored}");
+		let unread = missed(NumberTarget::Real(75.0), vec![None]);
+		assert!(unread.contains("could not be read back"), "{unread}");
+	}
+
+	#[test]
+	fn a_number_message_stays_short_whatever_the_app_publishes() {
+		let extreme = CFNumber::new_f64(-f64::MAX);
+		let tiny = CFNumber::new_f64(f64::MIN_POSITIVE);
+		let message =
+			number_readback(NumberTarget::Real(-1e31), Some(&extreme), Some(&tiny), Some(&extreme));
+		assert_eq!(
+			message,
+			"wrote -1e31; the control now reads -1.7976931348623157e308 (its minimum is \
+			 2.2250738585072014e-308). The app may have clamped, rounded or not taken it: inspect \
+			 the target before writing again"
+		);
+		let refusal = parse_number("1e3", &extreme).unwrap_err().message;
+		assert!(refusal.contains("it reads -1.7976931348623157e308 now"), "{refusal}");
+		let steps = not_settable(Some(&tiny), &["AXIncrement".to_owned()]).message;
+		assert!(steps.contains("it reads 2.2250738585072014e-308 and"), "{steps}");
+		// An integer an f64 cannot hold still shows, and still explains a
+		// clamp: an unsigned value past i64, and i64::MAX as a bound.
+		let unsigned = objc2_foundation::NSNumber::new_u64(u64::MAX);
+		// SAFETY: NSNumber is toll-free bridged to CFNumber.
+		let unsigned = unsafe { &*objc2::rc::Retained::as_ptr(&unsigned).cast::<CFNumber>() };
+		assert_eq!(stringify_number(unsigned), "1.8446744073709552e19");
+		// CF hands that value to `as_i64` as -1; a control that wrapped -1 to
+		// it has not reached -1.
+		assert!(!NumberTarget::Whole(-1).reached(unsigned));
+		let max = CFNumber::new_i64(i64::MAX);
+		let clamped = number_readback(NumberTarget::Real(1e19), Some(&max), None, Some(&max));
+		assert!(
+			clamped.starts_with(
+				"wrote 10000000000000000000; the control now reads 9223372036854775807 (its maximum \
+				 is 9223372036854775807)."
+			),
+			"{clamped}"
+		);
+	}
+
+	#[test]
+	fn a_whole_number_goes_to_an_integer_control_exactly() {
+		let whole = |value: i64| Some(CFNumber::new_i64(value));
+		let target = NumberTarget::Whole(9_007_199_254_740_993);
+		let mut field = FakeNumber::reading(vec![whole(9_007_199_254_740_993)]);
+		write_number(&mut field, target).unwrap();
+		assert_eq!(*field.written.borrow(), ["9007199254740993"]);
+		let mut rounded = FakeNumber::reading(vec![whole(9_007_199_254_740_992)]);
+		let error = write_number(&mut rounded, target).unwrap_err();
+		assert!(
+			error
+				.message
+				.starts_with("wrote 9007199254740993; the control now reads 9007199254740992 "),
+			"{}",
+			error.message
+		);
+		// Fractional text to an integer control is reported as what it reads.
+		let mut fraction = FakeNumber::reading(vec![whole(42)]);
+		let error = write_number(&mut fraction, NumberTarget::Real(42.5)).unwrap_err();
+		assert!(
+			error
+				.message
+				.starts_with("wrote 42.5; the control now reads 42."),
+			"{}",
+			error.message
+		);
+		// A setter that stored the integer as a double kept only its nearest.
+		let mut widened = FakeNumber::reading(numbers(&[9_007_199_254_740_992.0]));
+		let error = write_number(&mut widened, target).unwrap_err();
+		assert!(
+			error
+				.message
+				.starts_with("wrote 9007199254740993; the control now reads 9007199254740992 "),
+			"{}",
+			error.message
+		);
+	}
+
+	#[test]
+	fn a_value_that_is_not_settable_names_the_step_actions_the_element_offers() {
+		let actions = |names: &[&str]| {
+			names
+				.iter()
+				.map(|name| (*name).to_owned())
+				.collect::<Vec<_>>()
+		};
+		// SwiftUI's Slider lists each step action twice.
+		let slider = not_settable(
+			Some(&CFNumber::new_f64(0.0)),
+			&actions(&["AXIncrement", "AXDecrement", "AXIncrement", "AXDecrement"]),
+		);
+		assert_eq!(
+			slider.message,
+			"AXValue is not settable; it reads 0 and it offers AXIncrement and AXDecrement, which \
+			 step it by the control's own step: el.perform(\"AXIncrement\") or \
+			 el.perform(\"AXDecrement\"); nothing was sent and no typing fallback was attempted"
+		);
+		// A value that is not a number is never quoted.
+		let unread = not_settable(None, &actions(&["AXPress", "AXIncrement"]));
+		assert!(
+			unread
+				.message
+				.starts_with("AXValue is not settable; it offers AXIncrement, which step it"),
+			"{}",
+			unread.message
+		);
+		assert!(
+			unread
+				.message
+				.contains("el.perform(\"AXIncrement\"); nothing"),
+			"{}",
+			unread.message
+		);
+		// Without step actions the refusal is unchanged.
+		assert_eq!(
+			not_settable(Some(&CFNumber::new_i32(1)), &actions(&["AXPress"])).message,
+			"AXValue is not settable; no typing fallback was attempted"
+		);
 	}
 
 	#[test]
@@ -2648,6 +4675,14 @@ mod tests {
 		let (first, second) = (url(), url());
 		assert_eq!(stringify_value(&first), "https://example.com/a");
 		assert_eq!(stringify_value(&first), stringify_value(&second));
+	}
+
+	#[test]
+	fn dates_render_as_the_local_time_set_value_takes_back() {
+		let at = 813_499_200.0;
+		let text = stringify_value(&objc2_core_foundation::CFDate::new(None, at).unwrap());
+		assert_eq!(&text[10..11], "T", "{text}");
+		assert_eq!(super::date::parse(&text), Some(super::date::DateRequest::Instant(at)), "{text}");
 	}
 
 	#[test]
@@ -2673,51 +4708,26 @@ mod tests {
 		let press = perform_choosing(&element, "press", None).unwrap_err();
 		assert_eq!(press.code, ErrorCode::AxFailed);
 		assert!(press.message.contains("'AXPress' is not supported"), "{}", press.message);
-		assert!(press.message.contains("click()"), "{}", press.message);
+		assert!(press.message.contains("available actions: none"), "{}", press.message);
+		// The element's own click, not a window click fed its bounds.
+		assert!(press.message.contains("`await el.click()`"), "{}", press.message);
+		assert!(press.message.contains("bounds() are desktop coordinates"), "{}", press.message);
 		let other = perform_choosing(&element, "AXIncrement", None).unwrap_err();
 		assert!(other.message.contains("'AXIncrement' is not supported"), "{}", other.message);
 		assert!(!other.message.contains("click()"), "{}", other.message);
-	}
-
-	#[test]
-	fn rewritten_readback_fails_and_names_what_the_field_reads() {
-		let error =
-			text_readback("555-789-0123", "555-789-0123", Some("(555) 789-0123"), false).unwrap_err();
-		assert_eq!(error.code, ErrorCode::AxFailed);
-		assert!(error.message.contains(r#""555-789-0123""#), "{}", error.message);
-		assert!(error.message.contains(r#""(555) 789-0123""#), "{}", error.message);
-		assert!(text_readback("555-789-0123", "555-789-0123", Some("555-789-0123"), false).is_ok());
-	}
-
-	#[test]
-	fn inserted_readback_names_the_whole_value_it_expected() {
-		let error = text_readback("b", "abc", Some("ac"), false).unwrap_err();
-		assert_eq!(error.code, ErrorCode::AxFailed);
-		for quoted in [r#""b""#, r#""ac""#, r#""abc""#] {
-			assert!(error.message.contains(quoted), "{quoted}: {}", error.message);
-		}
-		let unread = text_readback("b", "abc", None, false).unwrap_err();
-		assert_eq!(unread.code, ErrorCode::AxFailed);
-		assert!(unread.message.contains(r#""b""#), "{}", unread.message);
-	}
-
-	#[test]
-	fn long_readbacks_are_cut() {
-		let long = "x".repeat(500);
-		let error = text_readback("y", "y", Some(&long), false).unwrap_err();
-		assert!(error.message.len() < 400, "{}", error.message.len());
-		assert!(error.message.contains('…'), "{}", error.message);
-	}
-
-	#[test]
-	fn secure_readbacks_never_quote_the_text() {
-		for actual in [None, Some("••••"), Some("")] {
-			let error = text_readback("hunter2", "sk-hunter2", actual, true).unwrap_err();
-			assert_eq!(error.code, ErrorCode::AxFailed);
-			assert!(!error.message.contains("hunter2"), "{}", error.message);
-			assert!(error.message.contains("secure"), "{}", error.message);
-		}
-		assert!(text_readback("hunter2", "hunter2", Some("hunter2"), true).is_ok());
+		// Contacts and Reminders rows add custom actions perform() cannot take,
+		// whose names run over several lines; they stay out, and each name is
+		// listed once, as perform() takes it.
+		let actions = [
+			"AXShowMenu",
+			"Name:Customize info and appearance\nTarget:0x0\nSelector:(null)",
+			"AXScrollToVisible",
+			"AXShowMenu",
+		]
+		.map(String::from);
+		let listed = super::unsupported_action("AXPress", &actions).message;
+		assert!(listed.contains("available actions: showmenu, scrolltovisible"), "{listed}");
+		assert!(!listed.contains('\n') && !listed.contains("Customize"), "{listed}");
 	}
 
 	#[test]
@@ -2987,8 +4997,59 @@ mod tests {
 	}
 
 	#[test]
+	fn an_element_belongs_to_the_nearest_listed_window_above_it() {
+		use super::nearest_matching;
+
+		// A suggestion list's text: statictext 5 > cell 4 > row 3 > table 2 >
+		// scroll area 1, listed in `AXWindows` > application 0.
+		let parent = |element: &u32| element.checked_sub(1);
+		let listed = |element: &u32| *element == 1;
+		assert_eq!(nearest_matching(5, listed, parent), Some(1));
+		// An element listed itself, as Finder's rename field is.
+		assert_eq!(nearest_matching(1, listed, parent), Some(1));
+		assert_eq!(nearest_matching(5, |element: &u32| *element == 9, parent), None);
+		// A parent that answers with the element itself ends at the bound.
+		assert_eq!(nearest_matching(5, |_: &u32| false, |element: &u32| Some(*element)), None);
+	}
+
+	#[test]
+	fn row_action_deep_descendant_finds_its_row() {
+		let roles = ["AXWindow", "AXRow", "AXCell", "AXLink", "AXStaticText"];
+		let row = super::ancestor_row(
+			4_usize,
+			|node| Ok(Some(roles[*node].into())),
+			|node| Ok(node.checked_sub(1)),
+		)
+		.unwrap();
+		assert_eq!(row, Some(1));
+		assert_eq!(
+			super::ancestor_row(
+				0_usize,
+				|node| Ok(Some(roles[*node].into())),
+				|_| panic!("must not walk beyond the window"),
+			)
+			.unwrap(),
+			None
+		);
+		let reads = Cell::new(0);
+		assert_eq!(
+			super::ancestor_row(
+				0,
+				|_| {
+					reads.set(reads.get() + 1);
+					Ok(Some("AXCell".into()))
+				},
+				|node| Ok(Some(*node)),
+			)
+			.unwrap(),
+			None
+		);
+		assert_eq!(reads.get(), super::MAX_ANCESTRY_DEPTH);
+	}
+
+	#[test]
 	fn only_a_uikit_press_scrolls_its_element_into_view_first() {
-		use super::scrolls_before_press;
+		use super::scroll_before_press;
 
 		let actions = |names: &[&str]| {
 			names
@@ -2997,29 +5058,40 @@ mod tests {
 				.collect::<Vec<_>>()
 		};
 		let row = actions(&["AXPress", "AXScrollToVisible", "AXShowMenu"]);
-		assert!(scrolls_before_press("AXPress", &row, || true));
+		assert_eq!(scroll_before_press("AXPress", &row, || true), Some("AXScrollToVisible"));
+		// An element advertising its actions in another case scrolls by its own
+		// spelling.
+		let lower = actions(&["axpress", "axscrolltovisible"]);
+		assert_eq!(scroll_before_press("axpress", &lower, || true), Some("axscrolltovisible"));
 		// An AppKit app, another action, or an element that cannot scroll: press
 		// as is.
-		assert!(!scrolls_before_press("AXPress", &row, || false));
-		assert!(!scrolls_before_press("AXShowMenu", &row, || true));
-		assert!(!scrolls_before_press("AXPress", &actions(&["AXPress"]), || true));
+		assert_eq!(scroll_before_press("AXPress", &row, || false), None);
+		assert_eq!(scroll_before_press("AXShowMenu", &row, || true), None);
+		assert_eq!(scroll_before_press("AXPress", &actions(&["AXPress"]), || true), None);
 		// The app is only classified when the press could scroll.
-		assert!(!scrolls_before_press("AXShowMenu", &row, || unreachable!()));
+		assert_eq!(scroll_before_press("AXShowMenu", &row, || unreachable!()), None);
 	}
 
 	#[test]
 	fn a_press_follows_its_scroll_unless_the_run_was_cancelled() {
-		use super::{SCROLL_TO_VISIBLE, press_into_view};
+		use super::{press_into_view, scroll_before_press, supported_action};
 		use crate::desktop::control;
 
-		let run = |scroll_first: bool, scroll_result: AXError, cancel: bool| {
+		// `available` as the element advertises it, pressed through
+		// `perform("press")`.
+		let run = |available: &[&str], scroll_result: AXError, cancel: bool| {
+			let available: Vec<String> = available.iter().map(|name| (*name).to_owned()).collect();
+			let native = supported_action(&available, "press")
+				.expect("a press")
+				.clone();
+			let scroll = scroll_before_press(&native, &available, || true);
 			let source = control::CancellationSource::default();
 			let token = source.token();
 			let mut sent = Vec::new();
 			let result = control::with_token_for_test(&token, || {
-				press_into_view("AXPress", scroll_first, |action| {
+				press_into_view(&native, scroll, |action| {
 					sent.push(action.to_owned());
-					if action != SCROLL_TO_VISIBLE {
+					if Some(action) != scroll {
 						return AXError::Success;
 					}
 					if cancel {
@@ -3030,15 +5102,33 @@ mod tests {
 			});
 			(result.map_err(|error| error.code), sent)
 		};
-		let both = vec![SCROLL_TO_VISIBLE.to_owned(), "AXPress".to_owned()];
-		assert_eq!(run(true, AXError::Success, false), (Ok(()), both.clone()));
+		let sent = |names: &[&str]| {
+			names
+				.iter()
+				.map(|name| (*name).to_owned())
+				.collect::<Vec<_>>()
+		};
+		let canonical = ["AXPress", "AXScrollToVisible"];
+		let both = sent(&["AXScrollToVisible", "AXPress"]);
+		assert_eq!(run(&canonical, AXError::Success, false), (Ok(()), both.clone()));
 		// A failed scroll still presses.
-		assert_eq!(run(true, AXError::Failure, false), (Ok(()), both));
-		assert_eq!(run(false, AXError::Success, false), (Ok(()), vec!["AXPress".to_owned()]));
+		assert_eq!(run(&canonical, AXError::Failure, false), (Ok(()), both));
+		assert_eq!(run(&["AXPress"], AXError::Success, false), (Ok(()), sent(&["AXPress"])));
 		// Cancelled while scrolling: the press is never sent.
 		assert_eq!(
-			run(true, AXError::Success, true),
-			(Err(ErrorCode::Cancelled), vec![SCROLL_TO_VISIBLE.to_owned()])
+			run(&canonical, AXError::Success, true),
+			(Err(ErrorCode::Cancelled), sent(&["AXScrollToVisible"]))
+		);
+		// An element advertising both in another case gets its own spellings:
+		// the scroll, then one press, and no press once cancelled.
+		let lower = ["axpress", "axscrolltovisible"];
+		assert_eq!(
+			run(&lower, AXError::Success, false),
+			(Ok(()), sent(&["axscrolltovisible", "axpress"]))
+		);
+		assert_eq!(
+			run(&lower, AXError::Success, true),
+			(Err(ErrorCode::Cancelled), sent(&["axscrolltovisible"]))
 		);
 	}
 
@@ -3057,7 +5147,7 @@ mod tests {
 				listener.record_for_test(7, std::time::Instant::now());
 			}
 			let mut sent = Vec::new();
-			let result = press_into_view("AXPress", true, |action| {
+			let result = press_into_view("AXPress", Some(SCROLL_TO_VISIBLE), |action| {
 				sent.push(action.to_owned());
 				// The user clicks in the app while the scroll runs.
 				listener.record_for_test(7, std::time::Instant::now());
@@ -3075,6 +5165,19 @@ mod tests {
 		// cannot map it; the system-wide element is unmappable the same way.
 		let records = window_records_of(&[create_system_wide()]);
 		assert!(matches!(records.as_slice(), [AxWindowRecord { id: None, .. }]));
+	}
+
+	#[test]
+	fn only_finders_unmapped_scroll_area_is_focus_outside_windows() {
+		// Finder's desktop after a click on it.
+		assert!(is_outside_windows(true, false, Some("AXScrollArea")));
+		// Another app's unmappable scroll view is not a verified desktop.
+		assert!(!is_outside_windows(false, false, Some("AXScrollArea")));
+		// A window that maps, a real window that fails to, or anything else.
+		assert!(!is_outside_windows(true, true, Some("AXScrollArea")));
+		assert!(!is_outside_windows(true, false, Some("AXWindow")));
+		assert!(!is_outside_windows(true, false, Some("AXUnknown")));
+		assert!(!is_outside_windows(true, false, None));
 	}
 
 	#[test]

@@ -5,6 +5,7 @@ import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-a
 import {
 	getEnvApiKey,
 	getProviderDetails,
+	type Model,
 	type ProviderDetails,
 	resolveUsedFraction,
 	type UsageLimit,
@@ -327,7 +328,7 @@ export class CommandController {
 				this.ctx.showError(
 					`Failed to roll back move: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)} (failed to re-align workspace to ${actual})`,
 				);
-				await this.ctx.shutdown();
+				await this.ctx.shutdown({ cancellable: false });
 				return;
 			}
 			this.ctx.showError(
@@ -349,7 +350,7 @@ export class CommandController {
 		} catch {}
 		if (!realigned) {
 			this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
-			await this.ctx.shutdown();
+			await this.ctx.shutdown({ cancellable: false });
 			return;
 		}
 		this.ctx.showError(`Failed to restore source workspace after rollback: workspace remains at ${actual}`);
@@ -1445,10 +1446,7 @@ export class CommandController {
 
 		// An in-place fork moves this process onto the new file; a running turn
 		// would finish there and leave the original transcript cut mid-turn.
-		if (this.ctx.session.isStreaming) {
-			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
-			return;
-		}
+		if (this.ctx.session.isStreaming) await this.ctx.session.abort();
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
@@ -2090,7 +2088,7 @@ export class CommandController {
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
-		internalGuidance?: string,
+		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
@@ -2108,21 +2106,22 @@ export class CommandController {
 		// through as a CompactOptions field instead. That caller also dispatches
 		// the execution turn itself, so the compaction must not resume the
 		// plan-approval turn it aborted.
-		if (internalGuidance) {
+		if (options?.internalGuidance) {
 			return this.executeCompaction(
-				{ internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
+				{ internalGuidance: options.internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
 				false,
 				beforeFlush,
 				mode,
+				options.readerModel,
 			);
 		}
-		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
+		return this.executeCompaction(customInstructions, false, beforeFlush, mode, options?.readerModel);
 	}
 
 	/**
 	 * Run the `/compact` queued for the next yield once the session goes quiet. One watcher serves the
-	 * request from the moment it is queued, so no single event (an `agent_end` that a stale-settle guard
-	 * skips, a setup that bails without one) can strand it; later calls join the running watcher.
+	 * request from the moment it is queued, so no single event (a setup that bails without an
+	 * `agent_end`) can strand it; later calls join the running watcher.
 	 * Follow-ups queued behind the request wait in `compactionQueuedMessages` and flush once it ends.
 	 */
 	runYieldCompaction(): Promise<void> {
@@ -2143,7 +2142,7 @@ export class CommandController {
 			await session.waitForAdmittedSubmissions();
 			// Let a session switch commit or roll back before judging which conversation is live.
 			if (session.isSessionTransitioning) await session.waitForSessionTransition();
-			if (session.hasPendingAsyncWork()) await session.settleAsyncWork();
+			await session.waitForRunEnd();
 			if (this.ctx.session !== session) return;
 			if (this.ctx.yieldCompaction !== request) {
 				// Dequeued (and maybe queued again): serve whatever request is pending now.
@@ -2151,14 +2150,14 @@ export class CommandController {
 				request = this.ctx.yieldCompaction;
 				continue;
 			}
-			// The run yielded only once nothing can continue it: no turn, retry, queued input, pending
-			// submission, background job, or transition. Otherwise something is mid-flight; look again.
+			// The run yielded only once nothing can continue it: no open run, retry, queued input, pending
+			// submission, or transition. Otherwise something is mid-flight; look again.
 			if (
 				!session.isStreaming &&
 				!session.isRetrying &&
 				!session.isSessionTransitioning &&
 				!session.hasAdmittedSubmission &&
-				!session.hasPendingAsyncWork() &&
+				!session.isRunActive &&
 				session.queuedMessageCount === 0 &&
 				!this.ctx.hasPendingSubmission()
 			) {
@@ -2196,8 +2195,10 @@ export class CommandController {
 
 	/**
 	 * TUI handler for `/shake`. `elide` drops heavy structural content,
-	 * `images` strips image blocks, and `thinking` drops all thinking blocks.
-	 * Rebuilds the chat and reports counts.
+	 * `images` strips image blocks, and `thinking` drops the thinking blocks the
+	 * request rebuilds from them, keeping the turns it replays natively (they
+	 * are reported as kept and the transcript is left alone). Rebuilds the chat
+	 * and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -2214,7 +2215,8 @@ export class CommandController {
 			(result.imagesDropped ?? 0) +
 			(result.thinkingBlocksDropped ?? 0);
 		if (dropped === 0) {
-			this.ctx.showStatus("Nothing to shake.");
+			// Replayed thinking was left in place: nothing to rebuild, but say so.
+			this.ctx.showStatus((result.thinkingBlocksKept ?? 0) > 0 ? formatShakeSummary(result) : "Nothing to shake.");
 			return;
 		}
 		this.ctx.rebuildChatFromMessages();
@@ -2228,6 +2230,7 @@ export class CommandController {
 		isAuto = false,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 		mode?: CompactMode,
+		readerModel?: Model,
 	): Promise<CompactionOutcome> {
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
@@ -2268,8 +2271,12 @@ export class CommandController {
 			// it inside the options object. Either source wins over no mode.
 			const effectiveMode = mode ?? baseOptions?.mode;
 			const options =
-				baseOptions || effectiveMode
-					? { ...baseOptions, ...(effectiveMode ? { mode: effectiveMode } : {}) }
+				baseOptions || effectiveMode || readerModel
+					? {
+							...baseOptions,
+							...(effectiveMode ? { mode: effectiveMode } : {}),
+							...(readerModel ? { readerModel } : {}),
+						}
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
 

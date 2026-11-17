@@ -278,10 +278,19 @@ const CASES: &[Case] = &[
 			),
 			Test(
 				"tst NOList\tB\t",
-				"line: {tst \
-				 NOList}{}\nCOMPADD:{}\nINSERT_POSITIONS:{10}\nNO:{NOListambiguous}\nNO:{NOListbeep}\\
-				 nNO:{NOListpacked}\nNO:{NOListrowsfirst}\nNO:{NOListtypes}\nline: {tst NOListBeep \
-				 }{}\nCOMPADD:{}\nINSERT_POSITIONS:{14}",
+				concat!(
+					"line: {tst NOList}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{10}\n",
+					"NO:{NOListambiguous}\n",
+					"NO:{NOListbeep}\n",
+					"NO:{NOListpacked}\n",
+					"NO:{NOListrowsfirst}\n",
+					"NO:{NOListtypes}\n",
+					"line: {tst NOListBeep }{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{14}",
+				),
 			),
 		],
 	},
@@ -297,12 +306,27 @@ const CASES: &[Case] = &[
 			),
 			Test(
 				"tst NO_List\t__\tB\t",
-				"line: {tst \
-				 NO_List}{}\nCOMPADD:{}\nINSERT_POSITIONS:{11}\nNO:{NO_Listambiguous}\nNO:\
-				 {NO_Listbeep}\nNO:{NO_Listpacked}\nNO:{NO_Listrowsfirst}\nNO:{NO_Listtypes}\nline: \
-				 {tst NO_List__}{}\nCOMPADD:{}\nINSERT_POSITIONS:{13}\nNO:{NO_List__ambiguous}\nNO:\
-				 {NO_List__beep}\nNO:{NO_List__packed}\nNO:{NO_List__rowsfirst}\nNO:{NO_List__types}\\
-				 nline: {tst NO_List__Beep }{}\nCOMPADD:{}\nINSERT_POSITIONS:{17}",
+				concat!(
+					"line: {tst NO_List}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{11}\n",
+					"NO:{NO_Listambiguous}\n",
+					"NO:{NO_Listbeep}\n",
+					"NO:{NO_Listpacked}\n",
+					"NO:{NO_Listrowsfirst}\n",
+					"NO:{NO_Listtypes}\n",
+					"line: {tst NO_List__}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{13}\n",
+					"NO:{NO_List__ambiguous}\n",
+					"NO:{NO_List__beep}\n",
+					"NO:{NO_List__packed}\n",
+					"NO:{NO_List__rowsfirst}\n",
+					"NO:{NO_List__types}\n",
+					"line: {tst NO_List__Beep }{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{17}",
+				),
 			),
 		],
 	},
@@ -318,16 +342,38 @@ const CASES: &[Case] = &[
 			),
 			Test(
 				"tst __\tN\t__o\t___\tlist_\tbeep__\t",
-				"line: {tst \
-				 __}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}\nNO:{__kshoptionprint}\nNO:{__listambiguous}\\
-				 \
-				 nNO:{__listbeep}\nNO:{__listpacked}\nNO:{__listrowsfirst}\nNO:{__listtypes}\nNO:{__shglob}\\
-				 nNO:{__shinstdin}\nNO:{__shnullcmd}\nNO:{__shoptionletters}\nNO:{__shortloops}\nNO:\
-				 {__shwordsplit}\nline: {tst __N}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
-				 __N__o}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
-				 __N__o___}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
-				 __N__o___list_}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
-				 __N__o___list_beep__}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}",
+				concat!(
+					"line: {tst __}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{6}\n",
+					"NO:{__kshoptionprint}\n",
+					"NO:{__listambiguous}\n",
+					"NO:{__listbeep}\n",
+					"NO:{__listpacked}\n",
+					"NO:{__listrowsfirst}\n",
+					"NO:{__listtypes}\n",
+					"NO:{__shglob}\n",
+					"NO:{__shinstdin}\n",
+					"NO:{__shnullcmd}\n",
+					"NO:{__shoptionletters}\n",
+					"NO:{__shortloops}\n",
+					"NO:{__shwordsplit}\n",
+					"line: {tst __N}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}\n",
+					"line: {tst __N__o}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}\n",
+					"line: {tst __N__o___}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}\n",
+					"line: {tst __N__o___list_}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}\n",
+					"line: {tst __N__o___list_beep__}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}",
+				),
 			),
 		],
 	},
@@ -343,15 +389,35 @@ const CASES: &[Case] = &[
 			),
 			Test(
 				"tst __\tNo\t___\tlist_\tbeep__\t",
-				"line: {tst \
-				 __}{}\nCOMPADD:{}\nINSERT_POSITIONS:{6}\nNO:{__kshoptionprint}\nNO:{__listambiguous}\\
-				 \
-				 nNO:{__listbeep}\nNO:{__listpacked}\nNO:{__listrowsfirst}\nNO:{__listtypes}\nNO:{__shglob}\\
-				 nNO:{__shinstdin}\nNO:{__shnullcmd}\nNO:{__shoptionletters}\nNO:{__shortloops}\nNO:\
-				 {__shwordsplit}\nline: {tst __No}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
-				 __No___}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
-				 __No___list_}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}\nline: {tst \
-				 __No___list_beep__}{}\nCOMPADD:{}\nINSERT_POSITIONS:{}",
+				concat!(
+					"line: {tst __}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{6}\n",
+					"NO:{__kshoptionprint}\n",
+					"NO:{__listambiguous}\n",
+					"NO:{__listbeep}\n",
+					"NO:{__listpacked}\n",
+					"NO:{__listrowsfirst}\n",
+					"NO:{__listtypes}\n",
+					"NO:{__shglob}\n",
+					"NO:{__shinstdin}\n",
+					"NO:{__shnullcmd}\n",
+					"NO:{__shoptionletters}\n",
+					"NO:{__shortloops}\n",
+					"NO:{__shwordsplit}\n",
+					"line: {tst __No}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}\n",
+					"line: {tst __No___}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}\n",
+					"line: {tst __No___list_}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}\n",
+					"line: {tst __No___list_beep__}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{}",
+				),
 			),
 		],
 	},
@@ -367,14 +433,34 @@ const CASES: &[Case] = &[
 			),
 			Test(
 				"tst ___\tlist_\tbeep__\t",
-				"line: {tst \
-				 ___}{}\nCOMPADD:{}\nINSERT_POSITIONS:{7}\nNO:{___kshoptionprint}\nNO:\
-				 {___listambiguous}\nNO:{___listbeep}\nNO:{___listpacked}\nNO:{___listrowsfirst}\nNO:\
-				 {___listtypes}\nNO:{___shglob}\nNO:{___shinstdin}\nNO:{___shnullcmd}\nNO:\
-				 {___shoptionletters}\nNO:{___shortloops}\nNO:{___shwordsplit}\nline: {tst \
-				 ___list_}{}\nCOMPADD:{}\nINSERT_POSITIONS:{12}\nNO:{___list_ambiguous}\nNO:\
-				 {___list_beep}\nNO:{___list_packed}\nNO:{___list_rowsfirst}\nNO:{___list_types}\\
-				 nline: {tst ___list_beep__ }{}\nCOMPADD:{}\nINSERT_POSITIONS:{18}",
+				concat!(
+					"line: {tst ___}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{7}\n",
+					"NO:{___kshoptionprint}\n",
+					"NO:{___listambiguous}\n",
+					"NO:{___listbeep}\n",
+					"NO:{___listpacked}\n",
+					"NO:{___listrowsfirst}\n",
+					"NO:{___listtypes}\n",
+					"NO:{___shglob}\n",
+					"NO:{___shinstdin}\n",
+					"NO:{___shnullcmd}\n",
+					"NO:{___shoptionletters}\n",
+					"NO:{___shortloops}\n",
+					"NO:{___shwordsplit}\n",
+					"line: {tst ___list_}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{12}\n",
+					"NO:{___list_ambiguous}\n",
+					"NO:{___list_beep}\n",
+					"NO:{___list_packed}\n",
+					"NO:{___list_rowsfirst}\n",
+					"NO:{___list_types}\n",
+					"line: {tst ___list_beep__ }{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{18}",
+				),
 			),
 		],
 	},
@@ -530,21 +616,44 @@ const CASES: &[Case] = &[
 			),
 			Test(
 				"tst .g.\ta\t.\tp\ta\tg\t",
-				"line: {tst comp.graphics.}{}\nCOMPADD:{}\nINSERT_POSITIONS:{18}\nline: {tst \
-				 comp.graphics.a}{}\nCOMPADD:{}\nINSERT_POSITIONS:{19}\nNO:{comp.graphics.algorithms}\\
-				 \
-				 nNO:{comp.graphics.animation}\nNO:{comp.graphics.api}\nNO:{comp.graphics.apps}\nNO:{comp.\
-				 graphics.apps.alias}\nNO:{comp.graphics.apps.gimp}\nNO:{comp.graphics.apps.gnuplot}\\
-				 nNO:{comp.graphics.apps.lightwave}\nNO:{comp.graphics.apps.pagemaker}\nNO:{comp.graphics.apps.\
-				 paint-shop-pro}\nNO:{comp.graphics.apps.photoshop}\nNO:{comp.graphics.apps.\
-				 softimage}\nNO:{comp.graphics.apps.ulead}\nline: {tst \
-				 comp.graphics.apps.}{}\nCOMPADD:{}\nINSERT_POSITIONS:{23}\nline: {tst \
-				 comp.graphics.apps.p}{}\nCOMPADD:{}\nINSERT_POSITIONS:{24}\nNO:{comp.graphics.apps.\
-				 pagemaker}\nNO:{comp.graphics.apps.paint-shop-pro}\nNO:{comp.graphics.apps.\
-				 photoshop}\nline: {tst \
-				 comp.graphics.apps.pa}{}\nCOMPADD:{}\nINSERT_POSITIONS:{25}\nNO:{comp.graphics.apps.\
-				 pagemaker}\nNO:{comp.graphics.apps.paint-shop-pro}\nline: {tst \
-				 comp.graphics.apps.pagemaker }{}\nCOMPADD:{}\nINSERT_POSITIONS:{32}",
+				concat!(
+					"line: {tst comp.graphics.}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{18}\n",
+					"line: {tst comp.graphics.a}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{19}\n",
+					"NO:{comp.graphics.algorithms}\n",
+					"NO:{comp.graphics.animation}\n",
+					"NO:{comp.graphics.api}\n",
+					"NO:{comp.graphics.apps}\n",
+					"NO:{comp.graphics.apps.alias}\n",
+					"NO:{comp.graphics.apps.gimp}\n",
+					"NO:{comp.graphics.apps.gnuplot}\n",
+					"NO:{comp.graphics.apps.lightwave}\n",
+					"NO:{comp.graphics.apps.pagemaker}\n",
+					"NO:{comp.graphics.apps.paint-shop-pro}\n",
+					"NO:{comp.graphics.apps.photoshop}\n",
+					"NO:{comp.graphics.apps.softimage}\n",
+					"NO:{comp.graphics.apps.ulead}\n",
+					"line: {tst comp.graphics.apps.}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{23}\n",
+					"line: {tst comp.graphics.apps.p}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{24}\n",
+					"NO:{comp.graphics.apps.pagemaker}\n",
+					"NO:{comp.graphics.apps.paint-shop-pro}\n",
+					"NO:{comp.graphics.apps.photoshop}\n",
+					"line: {tst comp.graphics.apps.pa}{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{25}\n",
+					"NO:{comp.graphics.apps.pagemaker}\n",
+					"NO:{comp.graphics.apps.paint-shop-pro}\n",
+					"line: {tst comp.graphics.apps.pagemaker }{}\n",
+					"COMPADD:{}\n",
+					"INSERT_POSITIONS:{32}",
+				),
 			),
 		],
 	},

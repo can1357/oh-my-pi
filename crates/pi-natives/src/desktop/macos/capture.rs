@@ -1,6 +1,7 @@
 mod screen_capture_kit;
 
 use std::{
+	collections::HashMap,
 	ffi::c_void,
 	mem,
 	ptr::{self, NonNull},
@@ -450,21 +451,41 @@ pub(in crate::desktop) fn has_onscreen_window(pid: libc::pid_t) -> Option<bool> 
 /// minimized ones and ones the application keeps ordered out. `None` when the
 /// list cannot be read.
 pub(in crate::desktop) fn normal_window_ids(pid: libc::pid_t) -> Option<Vec<u32>> {
+	normal_windows(Some(pid), |id, _| id)
+}
+
+/// Titles of normal-layer windows across all Spaces, including hidden and
+/// minimized windows, so becoming visible is not mistaken for creation.
+pub(in crate::desktop) fn window_titles() -> Option<HashMap<String, String>> {
+	normal_windows(None, |id, dictionary| {
+		// SAFETY: The CoreGraphics key constant is process-lived.
+		(id.to_string(), window_string(dictionary, unsafe { kCGWindowName }))
+	})
+}
+
+/// Reads the normal-layer snapshot once, optionally restricted to an owner.
+/// Both the identity and title views share the same filtering and checked ids.
+fn normal_windows<T, C: FromIterator<T>>(
+	owner: Option<libc::pid_t>,
+	mut read: impl FnMut(u32, &WindowDictionary) -> T,
+) -> Option<C> {
 	let snapshot = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, 0)?;
 	// SAFETY: CoreGraphics returns an immutable array of dictionaries whose
 	// documented window keys are CFStrings and whose values are CFTypes.
 	let snapshot = unsafe { CFRetained::cast_unchecked::<CFArray<WindowDictionary>>(snapshot) };
-	let pid = i64::from(pid);
-	// SAFETY: This copy-rule snapshot remains alive and is never mutated; the
-	// CoreGraphics key constants are process-lived.
+	// SAFETY: This copy-rule snapshot remains alive and is never mutated;
+	// the CoreGraphics key constants are process-lived.
 	Some(
 		unsafe { snapshot.iter_unchecked() }
 			.filter_map(|dictionary| unsafe {
-				(window_number(dictionary, kCGWindowOwnerPID) == Some(pid)
-					&& window_number(dictionary, kCGWindowLayer) == Some(0))
-				.then(|| window_number(dictionary, kCGWindowNumber))
-				.flatten()
-				.and_then(|id| u32::try_from(id).ok())
+				if window_number(dictionary, kCGWindowLayer) != Some(0)
+					|| owner.is_some_and(|pid| {
+						window_number(dictionary, kCGWindowOwnerPID) != Some(i64::from(pid))
+					}) {
+					return None;
+				}
+				let id = u32::try_from(window_number(dictionary, kCGWindowNumber)?).ok()?;
+				Some(read(id, dictionary))
 			})
 			.collect(),
 	)

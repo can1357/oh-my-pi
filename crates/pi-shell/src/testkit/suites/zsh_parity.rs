@@ -552,6 +552,18 @@ fn subst_default_assignment_before_a_substitution_runs_it_once() {
 }
 
 #[test]
+fn subst_default_assignment_expands_to_text_not_a_pattern() {
+	// p10k's `: ${_POWERLEVEL9K_CHRUBY_SHOW_ENGINE_PATTERN=*}` must not glob
+	// (`no matches found: *` in an empty directory); `:-` still does.
+	let (out, err, st) =
+		zsh("unset a b; print -r -- ${a=*} ${b:=x*} $a $b; print -r -- ${c:-/nonexistent*}");
+	assert_eq!(
+		(out.as_str(), err.as_str(), st),
+		("* x* * x*\n", "zsh:1: no matches found: /nonexistent*\n", 1)
+	);
+}
+
+#[test]
 fn subst_assignments_replay_their_state_for_later_words() {
 	// Each substitution re-runs the word: a replay that kept the end state
 	// of the previous pass (`n` = B) would skip `$(echo A)` and hand its
@@ -631,6 +643,50 @@ fn expandmb_multibyte_subscripts_case_padding_and_delimiters() {
 		 étéXX\n"
 	);
 	assert_eq!((err.as_str(), st), ("", 0));
+}
+
+// Failure mode: an element read that loads only that element of the
+// array (not the whole array) loses zsh's answers at the edges: negative
+// and out-of-range indices, an empty element, `${+…}`, `(t)`, defaults,
+// a subscript of the element, a range. Outputs from zsh 5.9.
+#[test]
+fn element_reads_answer_as_zsh_at_every_index() {
+	let (out, err, st) = zsh(
+		"a=(one two three '' five); print -r -- \"1:$a[1] -1:$a[-1] -2:${a[-2]} 4:[${a[4]}] \
+		 0:[$a[0]] 9:[${a[9]}] -9:[${a[-9]}]\"; print -r -- \"def:${a[9]:-dflt} set:${+a[2]} \
+		 set9:${+a[9]} set-1:${+a[-1]} type:${(t)a[1]}\"; print -r -- \"nested:${a[2][1,2]} \
+		 len:${#a[3]} upper:${(U)a[1]} range:${a[2,3]}\"; i=3; print -r -- \"var:$a[i] \
+		 expr:$a[i+1]\"",
+	);
+	assert_eq!(
+		out,
+		"1:one -1:five -2: 4:[] 0:[] 9:[] -9:[]\ndef:dflt set:1 set9:0 set-1:1 type:a\nnested:tw \
+		 len:5 upper:ONE range:two three\nvar:three expr:\n"
+	);
+	assert_eq!((err.as_str(), st), ("", 0));
+}
+
+// Failure mode: a plain assignment or arithmetic on an ordinary variable,
+// written to the store directly, loses what zsh's parameter code does
+// for the variable: an integer's output base, a float's display, case
+// and padding flags, modifiers and subscripts in the value, `GLOB_SUBST`,
+// a new variable's type, a read-only refusal. Outputs from zsh 5.9.
+#[test]
+fn plain_assignments_keep_what_parameters_do() {
+	let (out, err, _) = zsh(
+		"a=one; integer n=7; typeset -i 16 h=255; float f=1.5; typeset -u U=low; typeset -L 6 L=ab; \
+		 x=pre$a-$n/$h; print -r -- \"$x\"; x=$f; print -r -- \"$x\"; x=$a:u$a[2]; print -r -- \
+		 \"$x\"; x=$U[$L]; print -r -- \"$x\"; setopt globsubst; s=\"*\"; x=$s; print -r -- \"$x\"; \
+		 unsetopt globsubst; (( n = n * 3 )); (( h = h + 1 )); (( f = f * 2 )); print -r -- $n $h \
+		 $f ${(t)n} ${(t)h}; (( u = 4 )); print -r -- $u ${(t)u}; typeset -r ro=1; (( ro = 2 )); \
+		 print -r -- after",
+	);
+	assert_eq!(
+		out,
+		"preone-7/16#FF\n1.500000000e+00\nONEn\n\n*\n21 16#100 3.000000000e+00 integer integer\n4 \
+		 integer\nafter\n"
+	);
+	assert!(err.contains("read-only variable: ro"), "{err}");
 }
 
 #[test]
@@ -737,9 +793,17 @@ fn funcs_commands_lists_every_entry_of_path() {
 	let st = rig.run(Script::command(src.as_bytes().to_vec()), Fault::None);
 	assert_eq!(
 		String::from_utf8_lossy(&rig.host.stdout.bytes()),
-		"ztst.zsh 1 \
-		 /tmp/ctst/plain\nplain=/tmp/ctst/plain\nsub=/tmp/ctst/sub\nztst.zsh=/tmp/ctst/ztst.zsh\\
-		 nplain=/tmp/ctst/plain\nsub=/tmp/ctst/sub\nztst.zsh=/tmp/ctst/ztst.zsh\n0\nztst.zsh\n"
+		concat!(
+			"ztst.zsh 1 /tmp/ctst/plain\n",
+			"plain=/tmp/ctst/plain\n",
+			"sub=/tmp/ctst/sub\n",
+			"ztst.zsh=/tmp/ctst/ztst.zsh\n",
+			"plain=/tmp/ctst/plain\n",
+			"sub=/tmp/ctst/sub\n",
+			"ztst.zsh=/tmp/ctst/ztst.zsh\n",
+			"0\n",
+			"ztst.zsh\n",
+		)
 	);
 	assert_eq!((String::from_utf8_lossy(&rig.host.stderr.bytes()).as_ref(), st), ("", 0));
 }
@@ -759,6 +823,11 @@ fn expandmb_quoting_backslashes_the_history_character() {
 
 #[test]
 fn expandmb_sorting_follows_lc_collate() {
+	// The expected order is en_US.UTF-8's; hosts without that locale sort
+	// bytewise.
+	if crate::sys::langinfo::Collator::new(b"en_US.UTF-8").is_none() {
+		return;
+	}
 	let (out, err, st) = zsh(
 		"LANG=en_US.UTF-8; a=(oracle.py oracle_ob.py drive.py B a b10 b9); print ${(o)a}; print \
 		 ${(On)a}; LC_COLLATE=C; print ${(o)a}",

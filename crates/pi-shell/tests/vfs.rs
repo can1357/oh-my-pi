@@ -364,19 +364,21 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 /// name the file that URL aliases, in the bare spelling and in the
 /// attached-value spelling a tool's own flags use. A scheme the filesystem
 /// does not route is not a path and must reach the child as written, as must a
-/// bare scheme root, which is far likelier a search pattern than a directory.
+/// bare scheme root or one followed by words, which are far likelier a search
+/// pattern than a directory.
 #[tokio::test]
 async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
 	fs::create_dir(directory.path().join("docs")).expect("provider directory");
 	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("document");
 	#[cfg(unix)]
-	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3" "$4" "$5"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs' virtual:// --root=virtual://"#;
+	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3" "$4" "$5" "$6" "$7"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs' virtual:// --root=virtual:// 'virtual:// external command' '--search=virtual:// words'"#;
 	#[cfg(windows)]
 	let script = "cmd.exe /c echo virtual://docs/a.txt && cmd.exe /c echo \
 	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt && \
 	              cmd.exe /c echo 'https://example.com/?next=virtual://docs' && cmd.exe /c \
-	              echo virtual:// && cmd.exe /c echo --root=virtual://";
+	              echo virtual:// && cmd.exe /c echo --root=virtual:// && cmd.exe /c echo \
+	              'virtual:// external command' && cmd.exe /c echo '--search=virtual:// words'";
 	let run = run_virtual(directory.path(), script).await;
 	let stdout = run.stdout;
 	assert_eq!(run.status, Some(0), "{}", run.stderr);
@@ -403,6 +405,11 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	assert!(
 		lines.contains(&"virtual://") && lines.contains(&"--root=virtual://"),
 		"a bare scheme root was rewritten: {stdout}"
+	);
+	assert!(
+		stdout.contains("virtual:// external command")
+			&& stdout.contains("--search=virtual:// words"),
+		"a scheme root followed by words was rewritten: {stdout}"
 	);
 }
 

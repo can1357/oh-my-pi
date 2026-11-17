@@ -39,7 +39,7 @@ use super::{
 use crate::bash::{
 	pattern::zsh::{CharEnv, Pattern, remnulargs, tokenize},
 	syntax::zsh::{parse_subst_string, tok},
-	vm::expand::{Expander, X},
+	vm::expand::Expander,
 };
 
 /// compmatch.c's globals (and compcore.c's `freecl`).
@@ -80,7 +80,7 @@ pub(crate) const PP_RANGE: u8 = 21;
 // ---- C-string helpers ------------------------------------------------------
 
 /// The byte at `i`, 0 outside `s` (zsh's NUL).
-fn at(s: &[u8], i: isize) -> u8 {
+const fn at(s: &[u8], i: isize) -> u8 {
 	if i < 0 { 0 } else { tok::at(s, i as usize) }
 }
 
@@ -287,7 +287,7 @@ pub fn add_bmatchers(c: &mut Comp, m: Option<&Arc<Cmatcher>>) {
 /// entry not found).
 pub fn update_bmatchers(c: &mut Comp) {
 	let mut p = c.core.bmatchers.clone();
-	while let Some(pn) = p {
+	while let Some(pn) = p.take() {
 		let mut t = false;
 		let mut ms = c.core.mstack.as_deref();
 		while let Some(m) = ms
@@ -302,9 +302,9 @@ pub fn update_bmatchers(c: &mut Comp) {
 			}
 			ms = m.next.as_deref();
 		}
-		p = pn.next.clone();
+		p.clone_from(&pn.next);
 		if !t {
-			c.core.bmatchers = p.clone();
+			c.core.bmatchers.clone_from(&p);
 		}
 	}
 }
@@ -325,7 +325,7 @@ fn new_cline(c: &mut Comp, data: Cline) -> Cl {
 
 /// zsh `get_cline`: a new cline for the `ll` bytes of `l`, the `wl` of
 /// `w` and the `ol` of `o` (`None` = C `NULL`).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "mirrors the zsh C function's parameters")]
 pub fn get_cline(
 	c: &mut Comp,
 	l: Option<&[u8]>,
@@ -522,7 +522,7 @@ fn add_match_str(c: &mut Comp, m: Option<&Cmatcher>, l: &[u8], w: &[u8], wl: i32
 /// zsh `add_match_part`: a part cline for an anchor (`l`, `w`, `wl`)
 /// with the original line string `o`/`ol`, after the not yet added word
 /// string `s`/`sl` (`osl` line characters).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "mirrors the zsh C function's parameters")]
 fn add_match_part(
 	c: &mut Comp,
 	m: Option<&Cmatcher>,
@@ -614,7 +614,19 @@ fn add_match_sub(
 	};
 	if wl != 0 || ll != 0 {
 		let (n, lp, _) = bld_parts_in(c, w.unwrap_or_default(), wl, ll);
-		if n != lp {
+		if n == lp {
+			let skip = if m.is_some_and(|m| m.wlen == -2) {
+				clf::SKIP
+			} else {
+				0
+			};
+			let n = get_cline(c, l, ll, w, wl, None, 0, flags | skip);
+			match c.matcher.matchlastsub {
+				Some(x) => c.clines.get_mut(x).next = Some(n),
+				None => c.matcher.matchsubs = Some(n),
+			}
+			c.matcher.matchlastsub = Some(n);
+		} else {
 			let mut p = n;
 			while let Some(x) = c.clines.get(p).next
 				&& x != lp
@@ -636,18 +648,6 @@ fn add_match_sub(
 			}
 			c.clines.get_mut(p).next = None;
 			c.matcher.matchlastpart = Some(p);
-		} else {
-			let skip = if m.is_some_and(|m| m.wlen == -2) {
-				clf::SKIP
-			} else {
-				0
-			};
-			let n = get_cline(c, l, ll, w, wl, None, 0, flags | skip);
-			match c.matcher.matchlastsub {
-				Some(x) => c.clines.get_mut(x).next = Some(n),
-				None => c.matcher.matchsubs = Some(n),
-			}
-			c.matcher.matchlastsub = Some(n);
 		}
 	}
 }
@@ -666,7 +666,7 @@ fn add_match_sub(
 /// are zsh's recursive calls; with `part` a match of a part of `l` is
 /// enough. Returns the number of characters of `w` matched (of `l` with
 /// `part`), -1 if there is no match (`test`: 1/0).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "mirrors the zsh C function's parameters")]
 pub fn match_str(
 	c: &mut Comp,
 	l: &[u8],
@@ -682,7 +682,7 @@ pub fn match_str(
 }
 
 /// [`match_str`] of `l` against `w` from its byte `w0` (C's `w + mpl`).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "mirrors the zsh C function's parameters")]
 fn match_str_at(
 	c: &mut Comp,
 	l: &[u8],
@@ -714,7 +714,11 @@ fn match_str_at(
 
 /// The body of zsh `match_str` on buffers: `l` and `w` start at `l0`
 /// and `w0` of `lb`/`wb` and end at their NULs.
-#[allow(clippy::too_many_arguments, clippy::cognitive_complexity)]
+#[allow(
+	clippy::too_many_arguments,
+	clippy::cognitive_complexity,
+	reason = "a line-by-line port of zsh's match_str"
+)]
 fn match_str_core(
 	c: &mut Comp,
 	lb: &mut [u8],
@@ -1262,7 +1266,7 @@ fn match_str_core(
 		}
 		let mut t = c.matcher.matchparts.unwrap_or(mp0);
 		while let Some(tn) = c.clines.get(t).next {
-			let s = c.clines.get(tn).prefix.or(c.clines.get(tn).suffix);
+			let s = c.clines.get(tn).prefix.or_else(|| c.clines.get(tn).suffix);
 			let y = c.clines.get_mut(t);
 			if y.suffix.is_some() {
 				y.suffix = s;
@@ -1319,7 +1323,7 @@ fn match_parts(
 /// string to use as the completion, `None` if `w` doesn't match.
 /// A pattern comes with the character-class environment shared by the
 /// candidates of this compadd call.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "mirrors the zsh C function's parameters")]
 pub fn comp_match(
 	ex: &mut Expander<'_, '_>,
 	c: &mut Comp,
@@ -1334,7 +1338,7 @@ pub fn comp_match(
 	bsl: &mut usize,
 	bcs: i32,
 	exact: &mut i32,
-) -> X<Option<BString>> {
+) -> Option<BString> {
 	let r;
 	if let Some((cp, env)) = cp {
 		let teststr: Vec<u8> = if qu == 0 {
@@ -1352,7 +1356,7 @@ pub fn comp_match(
 			w.to_vec()
 		};
 		if !cp.matches(&teststr, &env) {
-			return Ok(None);
+			return None;
 		}
 		r = if qu == 2 {
 			super::compcore::tildequote(ex, c, w, false)
@@ -1360,7 +1364,7 @@ pub fn comp_match(
 			super::compcore::multiquote(ex, c, w, qu == 0)
 		};
 		let wl = strlen(w) as i32;
-		*clp = bld_parts(c, w, wl, wl, None, None);
+		*clp = Some(bld_parts(c, w, wl, wl, None, None));
 		*exact = 0;
 	} else {
 		let wq = if qu == 2 {
@@ -1368,20 +1372,17 @@ pub fn comp_match(
 		} else {
 			super::compcore::multiquote(ex, c, w, qu == 0)
 		};
-		let Some(m) = comp_match_word(c, pfx, sfx, &wq, clp, qu, bpl, bcp, bsl, bcs, exact) else {
-			return Ok(None);
-		};
-		r = m;
+		r = comp_match_word(c, pfx, sfx, &wq, clp, qu, bpl, bcp, bsl, bcs, exact)?;
 	}
 	if qu == 0 {
 		c.core.hasunqu = 1;
 	}
-	Ok(Some(r))
+	Some(r)
 }
 
 /// The matcher half of [`comp_match`] (no pattern), on the quoted word
 /// `w`; leaves `hasunqu` to the caller.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, reason = "mirrors the zsh C function's parameters")]
 pub(crate) fn comp_match_word(
 	c: &mut Comp,
 	pfx: &[u8],
@@ -1402,80 +1403,76 @@ pub(crate) fn comp_match_word(
 	if mpl < 0 {
 		return None;
 	}
-	let pli;
-	match sfx.filter(|s| at(s, 0) != 0) {
-		Some(sfx) => {
-			let wpl = c.matcher.matchbufadded;
-			let wpfx = c.matcher.matchbuf.clone();
-			if let Some(subs) = c.matcher.matchsubs {
-				let tmp = get_cline(c, None, 0, None, 0, None, 0, 0);
-				c.clines.get_mut(tmp).prefix = Some(subs);
-				match c.matcher.matchlastpart {
-					Some(x) => c.clines.get_mut(x).next = Some(tmp),
-					None => c.matcher.matchparts = Some(tmp),
-				}
+	let pli = if let Some(sfx) = sfx.filter(|s| at(s, 0) != 0) {
+		let wpl = c.matcher.matchbufadded;
+		let wpfx = c.matcher.matchbuf.clone();
+		if let Some(subs) = c.matcher.matchsubs {
+			let tmp = get_cline(c, None, 0, None, 0, None, 0, 0);
+			c.clines.get_mut(tmp).prefix = Some(subs);
+			match c.matcher.matchlastpart {
+				Some(x) => c.clines.get_mut(x).next = Some(tmp),
+				None => c.matcher.matchparts = Some(tmp),
 			}
-			let mut pl = c.matcher.matchparts;
-			let plil = c.matcher.matchlastpart;
-			let mut rsl = 0;
-			let msl = match_str_at(
-				c,
-				sfx,
-				w,
-				mpl.max(0) as usize,
-				Some(bsl),
-				bcs,
-				Some(&mut rsl),
-				true,
-				0,
-				false,
-			);
-			if msl < 0 {
-				free_cline(c, pl);
-				return None;
+		}
+		let mut pl = c.matcher.matchparts;
+		let plil = c.matcher.matchlastpart;
+		let mut rsl = 0;
+		let msl = match_str_at(
+			c,
+			sfx,
+			w,
+			mpl.max(0) as usize,
+			Some(bsl),
+			bcs,
+			Some(&mut rsl),
+			true,
+			0,
+			false,
+		);
+		if msl < 0 {
+			free_cline(c, pl);
+			return None;
+		}
+		if let Some(subs) = c.matcher.matchsubs {
+			let tmp = get_cline(c, None, 0, None, 0, None, 0, clf::SUF);
+			c.clines.get_mut(tmp).suffix = Some(subs);
+			match c.matcher.matchlastpart {
+				Some(x) => c.clines.get_mut(x).next = Some(tmp),
+				None => c.matcher.matchparts = Some(tmp),
 			}
-			if let Some(subs) = c.matcher.matchsubs {
-				let tmp = get_cline(c, None, 0, None, 0, None, 0, clf::SUF);
-				c.clines.get_mut(tmp).suffix = Some(subs);
-				match c.matcher.matchlastpart {
-					Some(x) => c.clines.get_mut(x).next = Some(tmp),
-					None => c.matcher.matchparts = Some(tmp),
-				}
-			}
-			add_match_str(c, None, &[], tail(w, rpl as isize), wl - rpl - rsl, true);
-			add_match_str(c, None, &[], &wpfx, wpl, true);
-			let (mli, mlil, _) =
-				bld_parts_in(c, tail(w, rpl as isize), wl - rpl - rsl, (mpl - rpl) + (msl - rsl));
-			let parts = c.matcher.matchparts;
-			let rev = revert_cline(c, parts);
-			let y = c.clines.get_mut(mlil);
-			y.flags |= clf::MID;
-			y.slen = msl - rsl;
-			y.next = rev;
-			match plil {
-				Some(x) => c.clines.get_mut(x).next = Some(mli),
-				None => pl = Some(mli),
-			}
-			pli = pl;
-		},
-		None => {
-			add_match_str(c, None, &[], tail(w, rpl as isize), wl - rpl, false);
-			add_match_part(
-				c,
-				None,
-				None,
-				None,
-				0,
-				None,
-				0,
-				tail(w, rpl as isize),
-				wl - rpl,
-				mpl - rpl,
-				false,
-			);
-			pli = c.matcher.matchparts;
-		},
-	}
+		}
+		add_match_str(c, None, &[], tail(w, rpl as isize), wl - rpl - rsl, true);
+		add_match_str(c, None, &[], &wpfx, wpl, true);
+		let (mli, mlil, _) =
+			bld_parts_in(c, tail(w, rpl as isize), wl - rpl - rsl, (mpl - rpl) + (msl - rsl));
+		let parts = c.matcher.matchparts;
+		let rev = revert_cline(c, parts);
+		let y = c.clines.get_mut(mlil);
+		y.flags |= clf::MID;
+		y.slen = msl - rsl;
+		y.next = rev;
+		match plil {
+			Some(x) => c.clines.get_mut(x).next = Some(mli),
+			None => pl = Some(mli),
+		}
+		pl
+	} else {
+		add_match_str(c, None, &[], tail(w, rpl as isize), wl - rpl, false);
+		add_match_part(
+			c,
+			None,
+			None,
+			None,
+			0,
+			None,
+			0,
+			tail(w, rpl as isize),
+			wl - rpl,
+			mpl - rpl,
+			false,
+		);
+		c.matcher.matchparts
+	};
 	let mb = &c.matcher.matchbuf;
 	let r = BString::from(&mb[..strlen(mb)]);
 	*clp = pli;
@@ -1717,7 +1714,7 @@ pub fn bld_parts(
 	plen: i32,
 	lp: Option<&mut Option<Cl>>,
 	lprem: Option<&mut Option<Cl>>,
-) -> Option<Cl> {
+) -> Cl {
 	let (r, n, rem) = bld_parts_in(c, s, len, plen);
 	if let Some(lp) = lp {
 		*lp = Some(n);
@@ -1725,7 +1722,7 @@ pub fn bld_parts(
 	if let Some(x) = lprem {
 		*x = rem;
 	}
-	Some(r)
+	r
 }
 
 /// The class environment matcher patterns are tested with.

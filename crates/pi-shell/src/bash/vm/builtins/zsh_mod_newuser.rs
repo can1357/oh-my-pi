@@ -45,7 +45,9 @@ fn join(dir: &[u8], name: &str) -> BString {
 	p
 }
 
-/// For the process shell's startup (zsh `run_init_scripts`): call it for
+/// Candidate `zsh-newuser-install` scripts for the process shell's startup.
+///
+/// For zsh `run_init_scripts`: call it for
 /// an interactive shell in zsh emulation with `RCS` on and `PRIVILEGED`
 /// off, after `/etc/zshenv` and before `$ZDOTDIR/.zshenv`, with the
 /// startup directory (`$ZDOTDIR`, else `$HOME`; `None` when neither is

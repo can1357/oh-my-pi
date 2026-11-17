@@ -51,6 +51,9 @@ pub struct ShellVizOptions {
 	pub speed:          f64,
 	pub selected_node:  Option<String>,
 	pub expanded_nodes: Vec<String>,
+	/// The script is a command still streaming in, not yet run: its
+	/// unfinished end is drawn as it will most likely continue.
+	pub streaming:      Option<bool>,
 }
 
 impl TryFrom<ShellVizOptions> for model::Options {
@@ -94,6 +97,7 @@ impl TryFrom<ShellVizOptions> for model::Options {
 				.into_iter()
 				.map(node)
 				.collect::<Result<_>>()?,
+			streaming: value.streaming.unwrap_or(false),
 		})
 	}
 }
@@ -154,6 +158,22 @@ pub fn get_windows_short_path(path: String) -> String {
 	{
 		path
 	}
+}
+
+/// The commands the embedded shell adds to bash's own builtins, sorted.
+///
+/// For a session started with `sessionEnv` over this process's environment,
+/// whose `PI_DISABLE_*` switches gate them. omp's bash tool lists them to the
+/// model.
+#[napi(ts_args_type = "sessionEnv?: Record<string, string>")]
+pub fn shell_builtins(session_env: Option<Object<'_>>) -> Vec<&'static str> {
+	let var = |name: &str| {
+		session_env
+			.as_ref()
+			.and_then(|env| env.get::<String>(name).ok().flatten())
+			.or_else(|| std::env::var(name).ok())
+	};
+	pi_shell::tools::builtins(|name| pi_shell::git::flag_on(var(name).as_deref()))
 }
 
 /// N-API opt-in handle for the minimizer.
@@ -285,7 +305,7 @@ impl RunTrace {
 	/// instead of an invented primary producer. Decoding ends at capture EOF.
 	/// Segmented minimizer submissions share one epoch and final status;
 	/// their history carries `segment`, with `logicalEnd`/`logicalStatus`
-	/// finalizing the last actual root RunEnd after output draining.
+	/// finalizing the last actual root `RunEnd` after output draining.
 	/// Serialization borrows the locked model rather than cloning its history.
 	#[napi]
 	pub fn snapshot(&self) -> String {
@@ -491,6 +511,31 @@ impl Shell {
 		Self { inner: Arc::new(CoreShell::new(options.map(Into::into))) }
 	}
 
+	/// A new shell with this one's options whose session starts from this
+	/// session's state (variables, functions, aliases, options, working
+	/// directory) as of its last command boundary: while a command runs, the
+	/// state that command started from. What the fork sets stays in the
+	/// fork until `adopt()` carries it back. Never waits for the running
+	/// command.
+	#[napi]
+	pub fn fork(&self) -> Self {
+		Self { inner: Arc::new(self.inner.fork()) }
+	}
+
+	/// Carry what `fork` (a `fork()` of this shell whose `run` settled)
+	/// changed, its variables, functions, aliases, options and traps, into
+	/// this shell's session: at the end of the command it runs now, or at
+	/// once between commands, and into every fork taken from here on. A name
+	/// both changed keeps the value of the command that ended last. Returns
+	/// `false` when there is nothing to carry from or into: the fork did not
+	/// start from a session's state or lost its session, or this shell has
+	/// none.
+	#[napi]
+	#[allow(clippy::use_self, reason = "napi argument types must name the exported class")]
+	pub fn adopt(&self, fork: &Shell) -> bool {
+		self.inner.adopt(&fork.inner)
+	}
+
 	/// Run a shell command using the provided options.
 	///
 	/// The `on_chunk` callback receives streamed stdout/stderr output. Returns
@@ -558,7 +603,9 @@ impl Shell {
 }
 
 /// Run the pi-shell engine as a process shell in this process (`omp zsh`,
-/// `omp bash`, `omp sh`): `argv` is the shell's whole command line,
+/// `omp bash`, `omp sh`).
+///
+/// `argv` is the shell's whole command line,
 /// `argv[0]` naming it (`zsh`, `bash` or `sh` pick the dialect), as a real
 /// shell gets it. Synchronous: blocks the calling thread until the shell
 /// exits and returns the status the process should exit with (0–255; 101

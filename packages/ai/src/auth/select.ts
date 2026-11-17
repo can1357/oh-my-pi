@@ -333,7 +333,7 @@ export class CredentialSelector {
 			modelId: options?.modelId,
 		};
 		const blockScope = strategy.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
@@ -372,20 +372,21 @@ export class CredentialSelector {
 		blockScopes: string | readonly string[] | undefined,
 		options?: AuthApiKeyOptions,
 	): Promise<UsageRankingResult<OAuthCredential>> {
-		let blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
 		let usage: UsageReport | null = null;
 		let usageChecked = false;
-		if (
-			blockedUntil !== undefined &&
-			this.#deps.blocks.canHeal(provider, providerKey, selection.index, blockScopes)
-		) {
-			usage = await this.#deps.usage.report(provider, selection.credential, {
-				...options,
-				timeoutMs: this.#deps.usage.requestTimeoutMs,
-			});
+		const probed = await this.#deps.usage.probeBlocked(
+			provider,
+			providerKey,
+			selection.index,
+			selection.credential,
+			blockScopes,
+			options,
+		);
+		if (probed !== undefined) {
+			usage = probed;
 			usageChecked = true;
-			blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
 		}
+		const blockedUntil = this.#deps.blocks.blockedUntil(provider, providerKey, selection.index, blockScopes);
 		if (blockedUntil === undefined && !usageChecked) {
 			usage = await this.#deps.usage.report(provider, selection.credential, {
 				...options,
@@ -416,7 +417,7 @@ export class CredentialSelector {
 		const planGate = strategy?.planGate?.(rankingContext);
 		if (!this.#oauthUsagePolicy(provider, credentials, strategy, planGate !== undefined).checkUsage) return;
 		const blockScope = strategy?.blockScope?.(rankingContext);
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const providerKey = providerTypeKey(provider, "oauth");
 		await raceSignal(
 			Promise.all(
@@ -606,7 +607,7 @@ export class CredentialSelector {
 		};
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		// Reads honour every scope that applies; the scalar above is for args that persist.
-		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
+		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
 		const planGate = strategy?.planGate?.(rankingContext);
 		const hasPlanRequirement = planGate !== undefined;
 		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;

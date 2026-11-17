@@ -14,6 +14,7 @@
  * with instead of today's.
  */
 import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
+import { isPerCallContextMessage, markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
 import type { SessionEntry } from "./session-entries";
@@ -39,6 +40,12 @@ export interface DateCwdReminderPlacement {
 	 * when a context hook re-creates its first turn under a new key on every request.
 	 */
 	firstTurn?: string;
+	/**
+	 * On a control moved off a per-call message an earlier injector anchored it on: that old anchor.
+	 * It replaces the control journaled there, so a resumed session keeps the move instead of
+	 * re-deriving it from a request whose shape has since changed.
+	 */
+	movedFrom?: string;
 }
 
 /** Where an injector records the reminders it places, and reads back those an earlier injector placed. */
@@ -58,10 +65,17 @@ function placementOfEntry(entry: SessionEntry): DateCwdReminderPlacement | undef
 	if (entry.type !== "custom" || entry.customType !== DATE_CWD_REMINDER_CUSTOM_TYPE) return undefined;
 	const data = entry.data;
 	if (!isRecord(data)) return undefined;
-	const { conversation, turn, reminder, placement, firstTurn } = data;
+	const { conversation, turn, reminder, placement, firstTurn, movedFrom } = data;
 	if (typeof conversation !== "string" || typeof turn !== "string" || typeof reminder !== "string") return undefined;
 	if (placement !== "prefix" && placement !== "control") return undefined;
-	return { conversation, turn, reminder, placement, ...(typeof firstTurn === "string" ? { firstTurn } : {}) };
+	return {
+		conversation,
+		turn,
+		reminder,
+		placement,
+		...(typeof firstTurn === "string" ? { firstTurn } : {}),
+		...(typeof movedFrom === "string" ? { movedFrom } : {}),
+	};
 }
 
 /** Identifies a first turn by what it carries, not by its key: a re-created copy digests the same. */
@@ -145,6 +159,20 @@ function createReminderControl(reminder: string): Message {
 	return control;
 }
 
+/** The per-call copy of each control, sent while only per-call messages follow its anchor. */
+const perCallReminderControls = new WeakMap<Message, Message>();
+
+function perCallReminderControl(control: Message): Message {
+	let copy = perCallReminderControls.get(control);
+	if (!copy) {
+		copy = { ...control };
+		markPerCallContextMessage(copy);
+		reminderControls.add(copy);
+		perCallReminderControls.set(control, copy);
+	}
+	return copy;
+}
+
 /** Trailing `#n` that tells apart turns of one request that would otherwise share a key. */
 const ORDINAL_SUFFIX = /#(\d+)$/;
 
@@ -186,7 +214,9 @@ const MAX_ROOTS = 8;
  *
  * The first value is attached to the first user turn. A changed value attaches
  * to a newly appended user turn or a persistent developer turn, leaving every
- * previously sent message byte-identical.
+ * previously sent message byte-identical. Neither is ever a per-call message
+ * (one a context hook or side request builds for a single provider call): the
+ * next request can leave it out or move it, and the reminder would go with it.
  *
  * Turns are recognised by a key, not by object identity: context hooks, secret
  * obfuscation and conversion-cache resets hand the injector equal but newly
@@ -439,12 +469,24 @@ export class DateCwdReminderInjector {
 			// The conversation's first turn may be back under a new key; it is this request's first turn.
 			const turn = placement.turn === conversation ? root : placement.turn;
 			const index = indexOf.get(turn);
-			if (index === undefined) continue;
-			lastSent = Math.max(lastSent, index);
+			if (index !== undefined) lastSent = Math.max(lastSent, index);
 			if (placement.placement === "control") {
-				state.controls.push({ anchor: turn, message: createReminderControl(placement.reminder) });
+				// Controls are replayed in journal order even when their turn is not in this request (a
+				// per-call message an older build anchored one on), so a journaled move replaces the control
+				// it moved where it stands: it keeps its order ahead of any newer control at the same turn.
+				const control = { anchor: turn, message: createReminderControl(placement.reminder) };
+				let moved = -1;
+				if (placement.movedFrom !== undefined) {
+					const from = placement.movedFrom === conversation ? root : placement.movedFrom;
+					moved = state.controls.findLastIndex(
+						existing => existing.anchor === from && existing.message.content === placement.reminder,
+					);
+				}
+				if (moved === -1) state.controls.push(control);
+				else state.controls[moved] = control;
 				continue;
 			}
+			if (index === undefined) continue;
 			const source = messages[index]!;
 			if (source.role !== "user") continue;
 			state.injections.set(turn, {
@@ -453,6 +495,7 @@ export class DateCwdReminderInjector {
 				injected: injectReminder(source, placement.reminder),
 			});
 		}
+		state.controls = state.controls.filter(control => indexOf.has(control.anchor));
 		for (let index = 0; index <= lastSent; index++) state.seen.add(keys[index]!);
 		state.reminder = this.#carriedReminder(state, keys);
 		return state;
@@ -486,6 +529,40 @@ export class DateCwdReminderInjector {
 		}
 	}
 
+	/**
+	 * An injector from before per-call messages were excluded may have anchored a control on one (a
+	 * context hook's tail message, its key the same on every request). Such a control belongs to the
+	 * last turn before that message: anchored where it is, it would sort after today's reminder and
+	 * look newest. Runs once, on the request that restores the conversation from the journal, and
+	 * journals each move, so a later resume keeps it instead of re-deriving it from a request whose
+	 * shape has changed. Controls this injector placed are never moved.
+	 */
+	#moveLegacyControls(state: RootState, messages: Message[], keys: string[], root: string): void {
+		let previousTurn: string | undefined;
+		const turnBefore = new Map<string, string>();
+		for (const [index, message] of messages.entries()) {
+			if (!isPerCallContextMessage(message)) previousTurn = keys[index]!;
+			else if (previousTurn !== undefined) turnBefore.set(keys[index]!, previousTurn);
+		}
+		let moved = false;
+		for (const control of state.controls) {
+			const anchor = turnBefore.get(control.anchor);
+			if (anchor === undefined || typeof control.message.content !== "string") continue;
+			// The journal names the first turn after its conversation: a hook may re-create it under a new key.
+			const journalName = (key: string) => (key === root ? state.conversation : key);
+			this.#journal?.record({
+				conversation: state.conversation,
+				turn: journalName(anchor),
+				reminder: control.message.content,
+				placement: "control",
+				movedFrom: journalName(control.anchor),
+			});
+			control.anchor = anchor;
+			moved = true;
+		}
+		if (moved) state.reminder = this.#carriedReminder(state, keys) ?? state.reminder;
+	}
+
 	#inject(messages: Message[], reminder: string): Message[] {
 		const firstIndex = messages.findIndex(message => message.role === "user");
 		if (firstIndex === -1) return messages;
@@ -501,31 +578,38 @@ export class DateCwdReminderInjector {
 			// re-created first turn): continue it in memory. Only a conversation it has never seen
 			// reads the journal.
 			const predecessor = this.#predecessorOf(keys);
-			state =
-				(predecessor ? undefined : this.#restoredRootState(messages, keys, counts, root, firstUser)) ??
-				this.#newRootState(keys, counts, root, firstUser, reminder, predecessor);
+			const restored = predecessor ? undefined : this.#restoredRootState(messages, keys, counts, root, firstUser);
+			state = restored ?? this.#newRootState(keys, counts, root, firstUser, reminder, predecessor);
+			if (restored) this.#moveLegacyControls(restored, messages, keys, root);
 		}
 		this.#activate(root, state);
 		if (state.reminder !== reminder) {
 			// Only a turn appended after everything already sent takes the changed
 			// reminder: an unsent key earlier in the history is a turn a context hook
 			// builds afresh for every request (a new timestamp, the same bytes), and
-			// writing into it would rewrite the middle of the cached history.
+			// writing into it would rewrite the middle of the cached history. A per-call
+			// message (a context hook's, a side request's) is rebuilt for every request
+			// and need not come back where it is now, so it neither counts as sent nor
+			// carries the reminder: a hook that stamps one with a fixed timestamp gives it
+			// the same key on every request, and the reminder would follow it to the tail.
 			let lastSent = -1;
 			for (let index = messages.length - 1; index >= 0; index--) {
-				if (state.seen.has(keys[index]!)) {
+				if (!isPerCallContextMessage(messages[index]) && state.seen.has(keys[index]!)) {
 					lastSent = index;
 					break;
 				}
 			}
+			let lastTurn = messages.length - 1;
+			while (lastTurn >= 0 && isPerCallContextMessage(messages[lastTurn])) lastTurn--;
 			let newUser: number | undefined;
-			for (let index = messages.length - 1; index > lastSent; index--) {
-				if (messages[index]!.role === "user") {
+			for (let index = lastTurn; index > lastSent; index--) {
+				const message = messages[index]!;
+				if (message.role === "user" && !isPerCallContextMessage(message)) {
 					newUser = index;
 					break;
 				}
 			}
-			const turnIndex = newUser ?? messages.length - 1;
+			const turnIndex = newUser ?? (lastTurn >= 0 ? lastTurn : messages.length - 1);
 			if (newUser !== undefined) {
 				const message = messages[newUser] as UserMessage;
 				state.injections.set(keys[newUser]!, {
@@ -552,6 +636,16 @@ export class DateCwdReminderInjector {
 			if (controls) controls.push(control.message);
 			else controlsByAnchor.set(control.anchor, [control.message]);
 		}
+		// The per-call messages that end this request. A control anchored on the last
+		// turn before them (or among them) goes after them, as a per-call message itself:
+		// right after its anchor it would be followed by messages the next request leaves
+		// out, so a provider that renders a developer turn by what follows it (Anthropic's
+		// mid-conversation `system`) would send it differently next time, and a prompt-cache
+		// breakpoint on it would cache bytes no later request repeats. From the first
+		// request in which a turn follows its anchor, it sits right after the anchor.
+		let perCallTail = messages.length;
+		while (perCallTail > 0 && isPerCallContextMessage(messages[perCallTail - 1])) perCallTail--;
+		const trailing: Message[] = [];
 
 		let changed = false;
 		const out: Message[] = [];
@@ -571,11 +665,16 @@ export class DateCwdReminderInjector {
 			}
 			const controls = controlsByAnchor.get(key);
 			if (controls) {
-				out.push(...controls);
+				if (perCallTail < messages.length && index >= perCallTail - 1) {
+					for (const control of controls) trailing.push(perCallReminderControl(control));
+				} else {
+					out.push(...controls);
+				}
 				changed = true;
 			}
 			state.seen.add(key);
 		}
+		out.push(...trailing);
 		return changed ? out : messages;
 	}
 }

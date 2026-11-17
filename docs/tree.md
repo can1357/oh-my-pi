@@ -156,10 +156,10 @@ Assistant messages that contain only tool calls (no canonical text) are hidden i
 
 ### Selecting a past `ask` tool result
 
-- Interactive `/tree` reopens the original question UI instead of reusing the stale answer
+- Interactive `/tree` reopens the original form instead of reusing the stale answer
 - Cancel leaves the tree unchanged
 - A new answer is appended as a sibling tool result, preserving the old answer branch, then the agent resumes from it
-- If legacy/corrupt data cannot recover the original questions, selection falls back to a plain leaf move
+- If legacy/corrupt data cannot recover the original form `html`, selection falls back to a plain leaf move
 
 ### Selecting other nodes
 
@@ -179,7 +179,7 @@ selected node
    │
    ├─ current leaf (not ask result)? ──> close selector (no-op)
    │
-   ├─ ask tool result? ──> re-answer as a sibling branch when questions are recoverable
+   ├─ ask tool result? ──> re-answer as a sibling branch when the form is recoverable
    │
    ├─ user or ordinary custom message? ──> leaf := parentId (or root)
    │                                         + prefill only into an empty editor

@@ -82,7 +82,7 @@ export function createGallerySession(options: GallerySessionOptions = {}): Agent
 		isAutoThinking: false,
 		autoResolvedThinkingLevel: () => undefined,
 		isStreaming: false,
-		modelRegistry: { isUsingOAuth: () => options.usingSubscription ?? false },
+		modelRegistry: { isUsingSubscription: () => options.usingSubscription ?? false },
 		settings: Settings.isolated({ "goal.statusInFooter": true, "compaction.reserveTokens": 20_000 }),
 		sessionManager: {
 			getUsageStatistics: () => ({

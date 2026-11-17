@@ -211,8 +211,10 @@ pub trait ModeEngine: Send + Sync {
 		store: &EditStore,
 	) -> Vec<PreviewFile>;
 
-	/// Full parse + locate + apply in memory. All-or-nothing: any failure
-	/// stages nothing. Multi-file payloads return one entry per file in
+	/// Full parse + locate + apply in memory. A failure stages nothing,
+	/// except that `sloppy` rejects failing operations alone: it stages the
+	/// rest and reports the rejected ones in the file's text, failing only
+	/// when no file changes. Multi-file payloads return one entry per file in
 	/// payload order.
 	fn stage(
 		&self,

@@ -1499,7 +1499,8 @@ fn format_key_name(codepoint: i32) -> Option<&'static str> {
 		FUNC_F11 => Some("f11"),
 		FUNC_F12 => Some("f12"),
 
-		// Any printable ASCII can be represented without allocation via the static table.
+		// Any printable ASCII can be represented without allocation via the
+		// static table.
 		33..=126 => Some(ASCII_PRINTABLE[(codepoint - 33) as usize]),
 		_ => None,
 	}

@@ -6,7 +6,7 @@ const VERSION_SENTINEL_RE = /^__piNativesV(\d+)_(\d+)_(\d+)$/;
  * Return the release version a native addon reports: its post-link stamp via
  * `__piNativesBuildVersion()`, else the sole legacy `__piNativesV*` export.
  */
-export function nativeVersionFromBindings(bindings: Record<string, unknown>): string | undefined {
+function nativeVersionFromBindings(bindings: Record<string, unknown>): string | undefined {
 	const report = bindings.__piNativesBuildVersion;
 	if (typeof report === "function") {
 		const version: unknown = report();

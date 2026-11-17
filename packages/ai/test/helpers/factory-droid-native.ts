@@ -42,6 +42,7 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "kimi-k3", upstream: "fireworks", effort: "off" },
 	{ model: "kimi-k3", upstream: "baseten", effort: "high" },
 	{ model: "kimi-k3", upstream: "baseten", effort: "off" },
+	{ model: "kimi-k3.1-pro", upstream: "fireworks", effort: "max" },
 	{ model: "nemotron-3-ultra", upstream: "baseten", effort: "high" },
 	{ model: "nemotron-3-ultra", upstream: "baseten", effort: "off" },
 	{ model: "nemotron-3-ultra", upstream: "fireworks", effort: "high" },
@@ -95,12 +96,14 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "claude-sonnet-5-5", upstream: "bedrock_anthropic", effort: "off" },
 	{ model: "claude-opus-5-5", upstream: "azure_anthropic", effort: "high" },
 	{ model: "claude-opus-5-5", upstream: "anthropic", effort: "high" },
-	// Not capturable from droid 0.237 or 1.1.0 on the capture account, so unit tests own
-	// them (factory-droid-anthropic.test.ts):
+	{ model: "claude-haiku-5-5", upstream: "anthropic", effort: "high" },
+	{ model: "claude-sonnet-5-5", upstream: "anthropic", effort: "high" },
+	{ model: "claude-fable-5.1", upstream: "anthropic", effort: "high" },
+	{ model: "claude-fable-5.2", upstream: "anthropic", effort: "high" },
+	// Not capturable on the capture account, so unit tests own them
+	// (factory-droid-anthropic.test.ts):
 	// - claude-sonnet-5-5@vertex_anthropic off: "Requested model was not found
 	//   on the API provider"; bedrock covers the effort beta on gated routes.
-	// - claude-haiku-5-5 (any upstream): Factory answers 400 "Invalid model ID"
-	//   even with `claude_haiku_5_5` forced on; the account is not entitled.
 	// - claude-sonnet-5-5@azure_anthropic: "Requested model was not found on the
 	//   API provider"; opus-5-5 covers the Azure prefix-binding dialect.
 	// - claude-opus-5@snowflake off after high: Snowflake replays no thinking
@@ -112,6 +115,8 @@ export const NATIVE_CASES: readonly NativeCase[] = [
 	{ model: "gemini-3.8-flash", upstream: "google", effort: "medium" },
 	{ model: "gemini-3.6-flash", upstream: "google", effort: "medium" },
 	{ model: "gemini-3.1-pro-preview", upstream: "google", effort: "low" },
+	{ model: "gemini-4-argon", upstream: "google", effort: "medium" },
+	{ model: "gemini-4-carbon", upstream: "google", effort: "medium" },
 ];
 
 /** Conversation content and per-session values; neither is dialect policy. */
@@ -132,6 +137,10 @@ const SESSION_KEYS = new Set(["prompt_cache_key", "safety_identifier"]);
  * headers droid never sends: since 0.248 it strips the SDK's `X-Stainless-*`
  * telemetry and `x-api-key`, and it never sends Claude Code's app headers, so
  * their presence on an OMP request is an identity leak.
+ *
+ * `x-factory-request-surface` is deliberately not projected: the capture runs
+ * `droid exec`, which reports `cli_exec`, while omp reports the interactive
+ * CLI's `cli_tui` (`factoryDroidClientHeaders`).
  */
 const DIALECT_HEADERS = new Set([
 	"x-api-provider",
@@ -243,4 +252,25 @@ export function projectNativeRequest(
 	if (toolKeys) projectedBody["<tool-keys>"] = toolKeys;
 	if (options.history) projectedBody["<history-thinking>"] = historyHasThinking(body.messages);
 	return { path, headers: projectedHeaders, body: projectedBody };
+}
+
+/**
+ * The corpus after a capture run: each declared case takes this run's capture,
+ * else keeps its entry from the previous corpus (not selected, or its capture
+ * failed); cases no longer declared drop out.
+ */
+export function mergeNativeCaptures(
+	previous: readonly NativeCapture[],
+	captured: readonly NativeCapture[],
+): NativeCapture[] {
+	return NATIVE_CASES.flatMap(testCase => {
+		const entry = [...captured, ...previous].find(
+			capture =>
+				capture.model === testCase.model &&
+				capture.upstream === testCase.upstream &&
+				capture.effort === testCase.effort &&
+				capture.prime === testCase.prime,
+		);
+		return entry ? [entry] : [];
+	});
 }

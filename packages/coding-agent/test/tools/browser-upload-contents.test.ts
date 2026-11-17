@@ -5,9 +5,9 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { findFreeCdpPort, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { findFreeCdpPort, gracefulKillTreeOnce, waitForCdp } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { prepareElementUpload } from "@oh-my-pi/pi-coding-agent/tools/browser/interactions";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import { ensureChromiumExecutable, RENDERER_PRIORITY_ARGS } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import {
 	openUploadSource,
@@ -162,6 +162,8 @@ function makeSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 			"browser.cmux": false,
@@ -177,7 +179,7 @@ function routeProxy(route: UploadRoute, options: ProxyOptions = {}): ProxyOption
 }
 
 /**
- * Launch a Chrome omp did not start, open a fixture page in it over `app.cdp_url` through a CDP proxy, and run cells
+ * Launch a Chrome omp did not start, open a fixture page in it over an `app` CDP URL through a CDP proxy, and run cells
  * there.
  */
 async function openConnectedTab(toolCallId: string, options: { page?: string; proxy?: ProxyOptions } = {}) {
@@ -192,6 +194,7 @@ async function openConnectedTab(toolCallId: string, options: { page?: string; pr
 			"--no-sandbox",
 			"--no-first-run",
 			"--use-mock-keychain",
+			...RENDERER_PRIORITY_ARGS,
 			`--user-data-dir=${root}`,
 			`--remote-debugging-port=${port}`,
 		],
@@ -205,7 +208,7 @@ async function openConnectedTab(toolCallId: string, options: { page?: string; pr
 	const close = async () => {
 		await prelude.invoke({ action: "close", name }, context).catch(() => undefined);
 		proxy.stop();
-		child.kill();
+		await gracefulKillTreeOnce(child.pid);
 		await child.exited;
 		await fs.rm(root, { recursive: true, force: true });
 	};
@@ -216,7 +219,7 @@ async function openConnectedTab(toolCallId: string, options: { page?: string; pr
 				action: "open",
 				name,
 				url: `${url}${options.page ?? ""}`,
-				app: { cdp_url: `http://127.0.0.1:${proxy.port}` },
+				app: `http://127.0.0.1:${proxy.port}`,
 			},
 			context,
 		);

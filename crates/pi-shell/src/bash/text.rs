@@ -28,6 +28,20 @@ pub fn bytes<S: Serializer, B: AsRef<[u8]> + ?Sized>(b: &B, s: S) -> Result<S::O
 	Text(b.as_ref()).serialize(s)
 }
 
+/// `bytes` cut to at most `max` bytes, never inside a UTF-8 character, so a
+/// cut text value still serializes as text ([`Text`]). Bytes invalid before
+/// the cut are kept as they are: the value was never text.
+pub fn cut(bytes: &[u8], max: usize) -> &[u8] {
+	if bytes.len() <= max {
+		return bytes;
+	}
+	let head = &bytes[..max];
+	match std::str::from_utf8(head) {
+		Err(e) if e.error_len().is_none() => &head[..e.valid_up_to()],
+		_ => head,
+	}
+}
+
 /// `serialize_with` for a list of byte strings.
 pub fn list<S: Serializer>(items: &[BString], s: S) -> Result<S::Ok, S::Error> {
 	s.collect_seq(items.iter().map(|b| Text(b)))

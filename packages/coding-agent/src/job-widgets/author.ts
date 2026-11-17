@@ -4,13 +4,12 @@
  * schema, fed the job's brief and redacted output samples.
  */
 import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Model, UserMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Context, ToolChoice, UserMessage } from "@oh-my-pi/pi-ai";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { roleDefaultModels } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { formatBytes, prompt, truncate } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { getModelMatchPreferences, parseModelPattern, resolveModelRoleValue } from "../config/model-resolver";
-import { formatModelRoleAlias } from "../config/model-roles";
+import { resolveRoleChain } from "../config/model-resolver";
+import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
 import systemPrompt from "../prompts/system/job-widget-system.md" with { type: "text" };
@@ -172,40 +171,67 @@ export interface ModelJobWidgetAuthorOptions {
 	costGate?: () => CostGateApi | undefined;
 }
 
+/** One `widget`-role request, sent unchanged to each candidate {@link completeWidgetRequest} tries. */
+export interface WidgetRequest {
+	context: Context;
+	maxTokens: number;
+	toolChoice?: ToolChoice;
+	/** Telemetry kind of the request (`job_widget`, `job_caption`). */
+	oneshotKind: string;
+}
+
 /**
- * The `widget` role's model with a usable credential: the role (configured,
- * or resolved like `smol`), then the built-in `smol` defaults. Job captions
- * use it too.
+ * Sends a `widget`-role request for the spec author and job captions. Tries
+ * each model of the role's chain with a usable credential in order: the
+ * primary (configured, or resolved like `smol`), then
+ * `retry.fallbackChains.widget`, else the built-in `smol` defaults. Stops at
+ * the first reply that is not an error. Every attempt passes the cost gate and
+ * reaches `onUsage`.
+ *
+ * Resolves `undefined` when no candidate has a credential. Throws
+ * `CostCapError` at the cost cap, an error on an aborted reply, and the last
+ * attempt's error once every candidate has replied with one.
  */
-export async function resolveWidgetModel(
-	settings: Settings,
-	registry: ModelRegistry,
-	sessionId: string | undefined,
+export async function completeWidgetRequest(
+	options: ModelJobWidgetAuthorOptions,
+	request: WidgetRequest,
 	signal: AbortSignal,
-): Promise<Model<Api> | undefined> {
-	const available = registry.getAvailable();
-	const matchPreferences = getModelMatchPreferences(settings);
-	const candidates: Model<Api>[] = [];
-	const role = resolveModelRoleValue(formatModelRoleAlias("widget"), available, { settings, matchPreferences }).model;
-	if (role) candidates.push(role);
-	for (const pattern of roleDefaultModels().smol ?? []) {
-		const model = parseModelPattern(pattern, available, matchPreferences).model;
-		if (model) candidates.push(model);
+): Promise<AssistantMessage | undefined> {
+	const { settings, modelRegistry } = options;
+	const sessionId = options.sessionId();
+	const costGate = options.costGate?.();
+	let failure: AssistantMessage | undefined;
+	for (const { model } of resolveRoleChain("widget", settings, roleCandidatePool("widget", settings, modelRegistry))) {
+		if (!(await modelRegistry.getApiKey(model, sessionId, { signal }))) continue;
+		costGate?.admit();
+		const response = await instrumentedCompleteSimple(
+			model,
+			request.context,
+			{
+				apiKey: modelRegistry.resolver(model, sessionId),
+				signal,
+				// Widget specs and captions are formatting work; a forced tool call also rules out thinking on some providers.
+				disableReasoning: true,
+				maxTokens: request.maxTokens,
+				toolChoice: request.toolChoice,
+			},
+			{ telemetry: resolveTelemetry(options.telemetry?.(), sessionId), oneshotKind: request.oneshotKind },
+		);
+		costGate?.record(response.usage.cost.total);
+		options.onUsage?.(response);
+		if (response.stopReason === "aborted" || signal.aborted) {
+			throw new Error(response.errorMessage ?? `${request.oneshotKind} request aborted`);
+		}
+		if (response.stopReason !== "error") return response;
+		failure = response;
 	}
-	for (const model of candidates) {
-		if (await registry.getApiKey(model, sessionId, { signal })) return model;
-	}
+	if (failure) throw new Error(failure.errorMessage ?? `${request.oneshotKind} request failed`);
 	return undefined;
 }
 
 /** A {@link JobWidgetAuthor} backed by the `widget` model role. */
 export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions): JobWidgetAuthor {
 	return async (request, signal) => {
-		const sessionId = options.sessionId();
-		const model = await resolveWidgetModel(options.settings, options.modelRegistry, sessionId, signal);
-		if (!model) return undefined;
-		const costGate = options.costGate?.();
-		costGate?.admit();
 		const obfuscate = options.obfuscate?.();
 		const redact = (text: string): string => redactWidgetSample(text, obfuscate);
 		const message: UserMessage = {
@@ -216,35 +242,28 @@ export function createModelJobWidgetAuthor(options: ModelJobWidgetAuthorOptions)
 		// The system prompt and schema are the reusable prefix (cached by the provider). The job's
 		// samples never repeat, so a cache breakpoint on them would only bill a cache write.
 		markPerCallContextMessage(message);
-		const response = await instrumentedCompleteSimple(
-			model,
+		const response = await completeWidgetRequest(
+			options,
 			{
-				systemPrompt: [systemPrompt],
-				messages: [message],
-				tools: [
-					{
-						name: RESPOND_TOOL,
-						description: "Install the widget spec for this job.",
-						parameters: JOB_WIDGET_SPEC_SCHEMA,
-						strict: false,
-					},
-				],
-			},
-			{
-				apiKey: options.modelRegistry.resolver(model, sessionId),
-				signal,
-				// Spec writing is formatting work; a forced tool call also rules out thinking on some providers.
-				disableReasoning: true,
+				context: {
+					systemPrompt: [systemPrompt],
+					messages: [message],
+					tools: [
+						{
+							name: RESPOND_TOOL,
+							description: "Install the widget spec for this job.",
+							parameters: JOB_WIDGET_SPEC_SCHEMA,
+							strict: false,
+						},
+					],
+				},
 				maxTokens: MAX_SPEC_TOKENS,
 				toolChoice: { type: "tool", name: RESPOND_TOOL },
+				oneshotKind: "job_widget",
 			},
-			{ telemetry: resolveTelemetry(options.telemetry?.(), sessionId), oneshotKind: "job_widget" },
+			signal,
 		);
-		costGate?.record(response.usage.cost.total);
-		options.onUsage?.(response);
-		if (response.stopReason === "error" || response.stopReason === "aborted") {
-			throw new Error(response.errorMessage ?? `widget spec request ${response.stopReason}`);
-		}
+		if (!response) return undefined;
 		const call = extractToolCall(response, RESPOND_TOOL);
 		if (call) return call.arguments;
 		const text = extractTextContent(response);

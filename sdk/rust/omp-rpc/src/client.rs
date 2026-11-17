@@ -822,10 +822,11 @@ impl Client {
 		});
 		let mut client = Self {
 			ready: ReadyEvent {
-				protocol_version:            None,
-				supported_protocol_versions: None,
-				max_frame_bytes:             None,
-				max_reassembled_frame_bytes: None,
+				protocol_version:                   None,
+				supported_protocol_versions:        None,
+				max_frame_bytes:                    None,
+				max_reassembled_frame_bytes:        None,
+				supports_bash_exclude_from_context: None,
 			},
 			shared,
 			child,

@@ -460,10 +460,11 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
-	// Gemini 4 Argon: $2/$10, cache read $0.10. Other Models bill at the
-	// model's API price, so the card follows Google's list-price increase to
-	// $4/$20, cache read $0.20, from 2026-12-01 (midnight US Pacific).
-	models "gemini-4-argon" {
+	// Gemini 4 Argon and Carbon: $2/$10, cache read $0.10. Other Models bill at
+	// the model's API price, so the card follows Google's list-price increase to
+	// $4/$20, cache read $0.20, from 2026-12-01 (midnight US Pacific); Cursor's
+	// table states that switch for Carbon.
+	models "gemini-4-argon" "gemini-4-carbon" {
 		cost-patch {
 			input 2.0
 			output 10.0

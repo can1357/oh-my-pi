@@ -3,14 +3,19 @@ import {
 	getPuppeteerDir,
 	logger,
 	postmortem,
+	prompt,
 	Snowflake,
 	untilAborted,
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { resolveImageMaxEdge, resolveImageTokenization } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import type { CDPSession, Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
+import { TOOL_TIMEOUTS } from "../tool-timeouts";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
+import hiddenFramesNotice from "../../prompts/tools/browser-hidden-frames.md" with { type: "text" };
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
@@ -37,14 +42,19 @@ import {
 	holdBrowser,
 	type PuppeteerBrowserHandle,
 	releaseBrowser,
+	sharedTargetScopeOf,
 	type TernBrowserHandle,
+	type WebKitBrowserHandle,
 } from "./registry";
+import { FOREIGN_FRAME_REFUSAL, type HiddenFrame } from "./relay/protocol";
 import {
 	type AttachPage,
+	isMissingPageGlobal,
 	ownsPage,
 	type ReadyInfo,
 	type RunErrorPayload,
 	type RunResultOk,
+	type ScreenshotLimits,
 	type SessionSnapshot,
 	type Transferable,
 	type Transport,
@@ -56,7 +66,9 @@ import {
 import { cfgBrowserScreenshotDir } from "./settings";
 import { listTernBlocks, noTernBlockError, pickTernBlock } from "./tern/blocks";
 import type * as Tern from "./tern/tern-tab";
+import { TernError } from "./tern/wire";
 import { newUploadStagingDir, removeUploadStaging, sweepUploadStaging } from "./upload-files";
+import { WebKitUnavailableError } from "./webkit/host";
 
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
@@ -89,6 +101,8 @@ export interface PendingRun {
 	 * cancellation into the still-running `runInProcessTab` body (issue #4499).
 	 */
 	closeAc?: AbortController;
+	/** A direct `tab.waitForDownload()` call: it holds the tab until a download finishes. */
+	waitsForDownload?: boolean;
 }
 
 interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
@@ -143,8 +157,15 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	workerExitedAt?: number;
 	/** Set when a worker exited with no run in flight and the tab was reattached; the next call reports it. */
 	workerExitNotice?: string;
-	/** The tab was opened with `ignore_https_errors`; a replacement worker re-applies it. */
-	ignoreHttpsErrors?: boolean;
+	/**
+	 * Chrome refused the tab's re-adoption over another extension's frame. The tab stays open with no worker driving
+	 * it, and the next call on it re-adopts it first.
+	 */
+	heldOut?: boolean;
+	/** Other extensions' frames the omp relay hid in the tab that no call has reported yet. */
+	hiddenFrames?: HiddenFrame[];
+	/** The tab was opened with `insecure`; a replacement worker re-applies it. */
+	insecure?: boolean;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -161,7 +182,14 @@ export interface TernTabSession extends TabSessionBase<TernBrowserHandle> {
 	ternTab: Tern.TernTab;
 }
 
-export type TabSession = WorkerTabSession | CmuxTabSession | TernTabSession;
+/** A tab that is one block (a headless web view) of omp's own WebKit host process. */
+export interface WebKitTabSession extends TabSessionBase<WebKitBrowserHandle> {
+	backend: "webkit";
+	/** The block's driver: the host speaks Tern's browser protocol, so it is the Tern tab driver. */
+	ternTab: Tern.TernTab;
+}
+
+export type TabSession = WorkerTabSession | CmuxTabSession | TernTabSession | WebKitTabSession;
 
 export interface AcquireTabOptions {
 	url?: string;
@@ -189,7 +217,13 @@ export interface AcquireTabOptions {
 	/** Explicit tab user agent override. */
 	userAgent?: string;
 	/** Ignore invalid HTTPS certificates for this page. */
-	ignoreHttpsErrors?: boolean;
+	insecure?: boolean;
+	/**
+	 * Whether the tab should have a window, for a browser that can give or take
+	 * one while the tab lives (omp's WebKit host). Omitted leaves a reused tab
+	 * as it is; other browsers decide visibility when they launch.
+	 */
+	visible?: boolean;
 	cmuxSurface?: string;
 	/**
 	 * Owner id (the agent's kernel owner id) of the acquirer. Recorded on the tab when created (never on
@@ -208,7 +242,7 @@ export interface AcquireTabOptions {
 export interface AcquireTabResult {
 	tab: TabSession;
 	created: boolean;
-	/** What the open recovered from before reusing the tab, for its result. */
+	/** What the open recovered from, for its result. */
 	note?: string;
 }
 
@@ -217,6 +251,8 @@ export interface RunInTabOptions {
 	timeoutMs: number;
 	signal?: AbortSignal;
 	session: ToolSession;
+	/** The call is a direct `tab.waitForDownload()`. */
+	waitsForDownload?: boolean;
 }
 
 export interface ReleaseTabOptions {
@@ -242,6 +278,7 @@ type ExitTrackedWorker = WorkerHandle & { [kWorkerExited]?: true };
 // awaits) cannot interleave and leak a worker + browser refCount.
 const acquireChains = new Map<string, Promise<void>>();
 const GRACE_MS = 750;
+const WORKER_RECOVERY_TIMEOUT_MS = 5_000;
 // Staging folders of closed tabs are swept at most this often (see `sweepUploadStaging`).
 const UPLOAD_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 let lastUploadSweep = 0;
@@ -267,14 +304,48 @@ const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
 // What every worker replacement resets, for results that report one.
 const WORKER_RESETS =
-	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals)";
+	"Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the mapping of positions on a scaled screenshot, the request log, HAR recording, run globals)";
 // What a worker recycle (`recycleTimedOutWorkerTab`) resets, for results that report one.
 const RECYCLE_RESETS = `${WORKER_RESETS}, any open dialog was dismissed, and any page still loading was stopped.`;
+// How to give a call that ran out of time a longer budget; nothing once it had the browser tool's maximum.
+function longerBudgetHint(timeoutMs: number): string {
+	if (timeoutMs >= TOOL_TIMEOUTS.browser.max * 1000) return "";
+	return ` To give long page work more time, raise the Eval cell's \`timeout\` or pass \`timeout\` to \`tab.run\` (seconds, at most ${TOOL_TIMEOUTS.browser.max}); also raise or disable \`tools.maxTimeout\` if it caps that budget.`;
+}
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
 const DEBUGGER_DETACH_CAUSE =
 	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
 const DEBUGGER_DETACH_REFUSAL =
 	"Chrome refuses the attach while another extension's frame, such as a password manager's inline autofill menu, is open in it";
+
+/** Most hidden frames one notice names; the rest are counted. */
+const MAX_HIDDEN_FRAMES_NAMED = 5;
+
+/** Record frames the omp relay reports it hid in `tab`, for the next call on it to report. */
+function noteHiddenFrames(tab: WorkerTabSession, frames: HiddenFrame[] | undefined): void {
+	if (frames && frames.length > 0) (tab.hiddenFrames ??= []).push(...frames);
+}
+
+/**
+ * What the omp relay hid in `tab` since a call last said so, worded for the agent to pass on to the user, who lost
+ * the frame too; `undefined` when nothing was hidden. Clears the record.
+ */
+function takeHiddenFramesNotice(tab: TabSession | undefined): string | undefined {
+	if (tab?.backend !== "worker" || !tab.hiddenFrames) return undefined;
+	const frames = new Map<string, { extensionId: string; path: string; title?: string }>();
+	for (const { extensionId, path, title } of tab.hiddenFrames) {
+		// Quoted: the path is the page's text and the title the other extension's, which the notice labels as such
+		// rather than as a name Chrome vouches for.
+		const frame = { extensionId, path: JSON.stringify(path), ...(title ? { title: JSON.stringify(title) } : {}) };
+		frames.set(JSON.stringify(frame), frame);
+	}
+	tab.hiddenFrames = undefined;
+	const named = [...frames.values()].slice(0, MAX_HIDDEN_FRAMES_NAMED);
+	return prompt
+		.render(hiddenFramesNotice, { frames: named, more: frames.size - named.length, several: frames.size > 1 })
+		.trim();
+}
+
 /** Chrome's `chrome.debugger.onDetach` reason when the user pressed Cancel on its debugging bar. */
 const USER_CANCELLED_DEBUGGER = "canceled_by_user";
 // Init budget for the worker that replaces one that exited on its own; adopting a live page takes well under a second.
@@ -286,6 +357,15 @@ class RecoverableWorkerError extends ToolError {}
 class WorkerMessageError extends ToolError {}
 /** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
 class NavigationTimeoutError extends ToolError {}
+/** The relay detach interrupted a call, but the same page is usable on a replacement worker. */
+class DebuggerReattachedError extends ToolError {
+	constructor(
+		message: string,
+		readonly when: "during" | "before",
+	) {
+		super(message);
+	}
+}
 /** The page's renderer crashed; the run that reports it recycles the worker. */
 class RendererCrashedError extends ToolError {}
 /** Chrome ended the debugger attachment of a relay tab; the worker runs nothing more and the tab is re-adopted. */
@@ -299,6 +379,23 @@ class DebuggerDetachedError extends ToolError {
 	) {
 		super(message);
 	}
+}
+/**
+ * Chrome refused a relay tab's re-adoption over another extension's frame. The tab is not closed for that: it stays
+ * open as it is, and the next call on it re-adopts it.
+ */
+class TabHeldOutError extends ToolError {
+	constructor(context?: string) {
+		super(
+			`${context ? `${context}. ` : ""}omp could not reattach to the tab: ${DEBUGGER_DETACH_REFUSAL}, and that frame was still there after omp cleared it. omp kept the tab open as it is, and the next call on it reattaches to it; if that call fails the same way, the frame stays until the user closes it in Chrome (Escape, or a click elsewhere on the page)`,
+		);
+	}
+}
+/** Rethrow a {@link TabHeldOutError} with what the call was doing when the tab was lost, and any other error as is. */
+function heldOutWith(context: string): (error: unknown) => never {
+	return error => {
+		throw error instanceof TabHeldOutError ? new TabHeldOutError(context) : error;
+	};
 }
 const REPORTED_INIT_FAILURE = Symbol("reported-init-failure");
 
@@ -375,11 +472,14 @@ export function acquireTab(name: string, browser: BrowserHandle, opts: AcquireTa
 		async value => {
 			await releaseBrowser(browser, { kill: false });
 			// A worker that exited with no run in flight left the reset unreported; reusing its tab reports it.
+			const notes: string[] = [];
 			if (!value.created && value.tab.backend === "worker" && value.tab.workerExitNotice) {
-				const notice = value.tab.workerExitNotice;
+				notes.push(value.tab.workerExitNotice);
 				value.tab.workerExitNotice = undefined;
-				return { ...value, note: value.note ? `${notice}\n${value.note}` : notice };
 			}
+			const hidden = takeHiddenFramesNotice(value.tab);
+			if (hidden) notes.push(hidden);
+			if (notes.length > 0) return { ...value, note: [...notes, value.note].filter(Boolean).join("\n") };
 			return value;
 		},
 		async error => {
@@ -427,6 +527,9 @@ async function acquireTabImpl(
 	if (reattaching) await reattaching;
 	const existing = tabs.get(name);
 	if (existing) {
+		if (existing.backend === "webkit" && existing.ternTab.rendererFailure) {
+			throw existing.ternTab.rendererFailure;
+		}
 		if (existing.browser === browser && existing.state === "alive") {
 			const requestedCmuxSurface = "client" in browser ? (opts.cmuxSurface ?? browser.surface) : undefined;
 			if (existing.backend === "cmux" && existing.cmuxAttachedSurface !== requestedCmuxSurface) {
@@ -445,6 +548,9 @@ async function acquireTabImpl(
 				tempHold = true;
 				await releaseTab(name, { kill: false });
 			} else {
+				readoptHeldOutTab(name, opts.timeoutMs);
+				const readopting = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
+				if (readopting) await readopting;
 				// Reuse counts as use: refresh the idle clock and resume a
 				// settle-frozen page before driving it again. A refused
 				// resume fails the open here with the same actionable
@@ -475,18 +581,25 @@ async function acquireTabImpl(
 					existing.persist = opts.persist;
 				}
 				const reuseSteps: string[] = [];
-				if (opts.viewport && browser.kind.kind !== "cmux" && browser.kind.kind !== "tern") {
-					const dsf = opts.viewport.deviceScaleFactor;
+				if (
+					opts.viewport &&
+					browser.kind.kind !== "cmux" &&
+					browser.kind.kind !== "tern" &&
+					browser.kind.kind !== "webkit"
+				) {
+					// Only a hidden headless tab has an emulated scale to fall back on; other windows keep their own (0).
+					const ownScale = browser.kind.kind === "headless" && browser.kind.headless ? undefined : 0;
+					const dsf = opts.viewport.deviceScaleFactor ?? ownScale;
 					reuseSteps.push(
 						`await page.setViewport({ width: ${opts.viewport.width}, height: ${opts.viewport.height}, deviceScaleFactor: ${dsf === undefined ? "undefined" : String(dsf)} });`,
 					);
 				}
-				if (opts.viewport && existing.backend === "tern") {
+				if (opts.viewport && (existing.backend === "tern" || existing.backend === "webkit")) {
 					reuseSteps.push(
 						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor })} });`,
 					);
 				}
-				const reuse = async (): Promise<void> => {
+				const reuse = async (): Promise<string | undefined> => {
 					if (reuseSteps.length) {
 						await runInTabWithSnapshot(
 							name,
@@ -498,11 +611,11 @@ async function acquireTabImpl(
 							{ cwd: getProjectDir() },
 						);
 					}
-					if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
+					if (opts.url) return await navigateOpenedTab(name, opts.url, opts, startedAt);
 				};
 				let note: string | undefined;
 				try {
-					await reuse();
+					note = await reuse();
 				} catch (error) {
 					// The tab's renderer had crashed: the failed step reloaded the page on a new worker, so the
 					// open goes on with it once. A tab closed by the crash, or a second crash, fails the open.
@@ -511,10 +624,16 @@ async function acquireTabImpl(
 					)
 						throw error;
 					note = RENDERER_RELOADED_NOTE;
-					await reuse();
+					const navigationNote = await reuse();
+					if (navigationNote) note += `\n${navigationNote}`;
 				}
 				// The user may have navigated or switched tabs since: the result reports where the page is now.
-				if (existing.backend === "tern") existing.info = await existing.ternTab.readyInfo();
+				if (existing.backend === "tern" || existing.backend === "webkit") {
+					existing.info = await existing.ternTab.readyInfo();
+				}
+				if (existing.backend === "webkit" && opts.visible !== undefined) {
+					await setWebKitTabShown(existing, opts.visible);
+				}
 				return { tab: tabs.get(name)!, created: false, note };
 			}
 		} else {
@@ -526,10 +645,14 @@ async function acquireTabImpl(
 		}
 	}
 
-	if ("client" in browser || "tern" in browser) {
+	if ("client" in browser || "tern" in browser || "webkit" in browser) {
 		try {
 			const result =
-				"client" in browser ? await acquireCmuxTab(name, browser, opts) : await acquireTernTab(name, browser, opts);
+				"client" in browser
+					? await acquireCmuxTab(name, browser, opts)
+					: "tern" in browser
+						? await acquireTernTab(name, browser, opts)
+						: await acquireWebKitTab(name, browser, opts);
 			if (tempHold) await releaseBrowser(browser, { kill: false });
 			return result;
 		} catch (error) {
@@ -629,26 +752,28 @@ async function acquireTabImpl(
 		lastActivityAt: Date.now(),
 		frozen: false,
 		uploadDir: initPayload.uploadDir,
-		ignoreHttpsErrors: opts.ignoreHttpsErrors,
+		insecure: opts.insecure,
 	};
 	attachTabWorker(tab, worker);
+	noteHiddenFrames(tab, info.hiddenFrames);
 	tabs.set(name, tab);
 	sweepClosedTabUploads();
 	// Durably record ownership so another live omp process can reap this page if
 	// this process dies abnormally before its own teardown closes the tab.
-	const scope = sharedScopeOf(browser);
+	const scope = sharedTargetScopeOf(browser);
 	if (scope) void recordSharedTarget(scope, info.targetId);
-	if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
-	return { tab, created: true };
+	const note = opts.url ? await navigateOpenedTab(name, opts.url, opts, startedAt, tab) : undefined;
+	return { tab, created: true, note };
 }
 
 /**
  * Navigate a tab for an open, within what is left of the open's budget. A
  * page that outlasts it fails with goto's own report while the tab stays on
  * what loaded, instead of losing to the open's bare deadline. A tab this open
- * created (`created`) is kept only for that timeout: a navigation that fails
- * outright, or an open cancelled or past its deadline, closes it again so the
- * failed open leaves nothing behind.
+ * created (`created`) is kept for that timeout, a successfully recovered relay
+ * detach, or one Chrome refused over another extension's frame: other
+ * navigation failures, or an open cancelled or past its deadline, close it
+ * again so the failed open leaves nothing behind.
  */
 async function navigateOpenedTab(
 	name: string,
@@ -656,7 +781,7 @@ async function navigateOpenedTab(
 	opts: AcquireTabOptions,
 	startedAt: number,
 	created?: WorkerTabSession,
-): Promise<void> {
+): Promise<string | undefined> {
 	const remainingMs = opts.timeoutMs - (performance.now() - startedAt);
 	const gotoMs = Math.max(1, Math.round(remainingMs - Math.min(OPEN_NAVIGATION_REPORT_MS, remainingMs / 2)));
 	try {
@@ -671,12 +796,24 @@ async function navigateOpenedTab(
 			{ cwd: getProjectDir() },
 		);
 	} catch (error) {
-		if (created && (opts.signal?.aborted || !(error instanceof NavigationTimeoutError))) {
+		if (error instanceof DebuggerReattachedError && error.when === "during" && !opts.signal?.aborted) {
+			return error.message;
+		}
+		if (
+			created &&
+			(opts.signal?.aborted ||
+				!(
+					error instanceof NavigationTimeoutError ||
+					error instanceof DebuggerReattachedError ||
+					error instanceof TabHeldOutError
+				))
+		) {
 			await rollBackCreatedTab(name, created);
 			throw error;
 		}
 		if (
 			error instanceof ToolAbortError ||
+			error instanceof TabHeldOutError ||
 			error instanceof RendererCrashedError ||
 			!(error instanceof Error) ||
 			tabs.get(name)?.state !== "alive"
@@ -833,7 +970,7 @@ async function acquireTernTab(
 		initScripts: opts.initScripts,
 		downloadsPath: opts.downloadsPath,
 		userAgent: opts.userAgent,
-		ignoreHttpsErrors: opts.ignoreHttpsErrors,
+		insecure: opts.insecure,
 	};
 	let ternTab: Tern.TernTab;
 	if (opts.target === undefined) {
@@ -878,16 +1015,152 @@ async function acquireTernTab(
 	}
 }
 
+/**
+ * Open a block of omp's WebKit host through the Tern tab driver: a blank
+ * block configured like a Tern PiP (plus the host's `identity` noise seed,
+ * one per session), then the first real navigation. The block closes again
+ * when anything after its open fails. A host that cannot open and configure
+ * even its first blank block is unusable here ({@link WebKitUnavailableError},
+ * so the open falls back to Chromium); a failed navigation is the page's
+ * failure and stays one. `opts.target` names nothing: the host has no pages
+ * of the user's.
+ */
+async function acquireWebKitTab(
+	name: string,
+	browser: WebKitBrowserHandle,
+	opts: AcquireTabOptions,
+): Promise<AcquireTabResult> {
+	// Loaded on first use, like `acquireTernTab`: the driver stays out of sessions that never open such a tab.
+	const { TernTab } = await import("./tern/tern-tab");
+	const startedAt = performance.now();
+	let firstTab = true;
+	for (const tab of tabs.values()) {
+		if (tab.browser === browser && tab.state === "alive") firstTab = false;
+	}
+	let ternTab: Tern.TernTab;
+	try {
+		ternTab = await TernTab.open(browser.webkit.client, {
+			name,
+			// The host has no panes: it accepts and ignores the owner.
+			pane: 0,
+			viewport: opts.viewport ?? DEFAULT_VIEWPORT,
+			timeoutMs: opts.timeoutMs,
+			signal: opts.signal,
+			dialogs: opts.dialogs,
+			allowedDomains: opts.allowedDomains,
+			initScripts: opts.initScripts,
+			downloadsPath: opts.downloadsPath,
+			userAgent: opts.userAgent,
+			insecure: opts.insecure,
+			identitySeed: browser.webkit.identitySeed(opts.ownerSessionId),
+		});
+	} catch (error) {
+		// A timeout spent the open's budget: nothing is left for Chromium to open in.
+		if (firstTab && error instanceof TernError && error.kind !== "timeout" && !opts.signal?.aborted) {
+			throw new WebKitUnavailableError(error.message);
+		}
+		throw error;
+	}
+	try {
+		// Before the navigation below: documents loaded afterwards see it.
+		await ternTab.setFileAccess(true);
+		if (opts.url && opts.url !== "about:blank") {
+			await ternTab.goto(opts.url, {
+				waitUntil: opts.waitUntil ?? "load",
+				timeoutMs: Math.max(1, opts.timeoutMs - (performance.now() - startedAt)),
+			});
+		}
+		const info = await ternTab.readyInfo();
+		if (opts.signal?.aborted) throw new ToolAbortError("Browser tab open aborted");
+		if (opts.visible) {
+			await browser.webkit.show(ternTab.block, webKitWindowTitle(name));
+		}
+		holdBrowser(browser);
+		const tab: WebKitTabSession = {
+			name,
+			browser,
+			targetId: String(ternTab.block),
+			backend: "webkit",
+			ternTab,
+			state: "alive",
+			info,
+			pending: new Map(),
+			dialogPolicy: opts.dialogs,
+			allowedDomains: opts.allowedDomains ? [...opts.allowedDomains] : undefined,
+			kindTag: browser.kind.kind,
+			ownerSessionId: opts.ownerSessionId,
+			persist: opts.persist ?? false,
+			lastActivityAt: Date.now(),
+			frozen: false,
+		};
+		tabs.set(name, tab);
+		return { tab, created: true };
+	} catch (error) {
+		await ternTab.close({ timeoutMs: DEFAULT_TAB_CLOSE_TIMEOUT_MS }).catch(() => undefined);
+		throw error;
+	}
+}
+
+/** The title of a WebKit tab's window: the tab's name, which is how the user and the agent both know it. */
+function webKitWindowTitle(name: string): string {
+	return `${name} — omp browser`;
+}
+
+/** Give a live WebKit tab its window, or take it away; the page goes on either way. */
+async function setWebKitTabShown(tab: WebKitTabSession, shown: boolean): Promise<void> {
+	const host = tab.browser.webkit;
+	const block = tab.ternTab.block;
+	if (shown === host.isShown(block)) return;
+	if (shown) await host.show(block, webKitWindowTitle(tab.name));
+	else await host.hide(block);
+}
+
+/**
+ * Apply a browser mode change to the WebKit tabs that are open now: each one
+ * whose host can show windows gains its window, or loses it. Tabs of a host
+ * that cannot are left as they are. Throws the first failure after trying
+ * every tab.
+ */
+export async function setWebKitTabsShown(shown: boolean): Promise<void> {
+	let failure: unknown;
+	for (const tab of [...tabs.values()]) {
+		if (tab.backend !== "webkit" || tab.state !== "alive" || !tab.browser.webkit.canShow) continue;
+		try {
+			await setWebKitTabShown(tab, shown);
+		} catch (error) {
+			failure ??= error;
+		}
+	}
+	if (failure !== undefined) throw failure;
+}
+
+function notAliveMessage(name: string): string {
+	const quoted = JSON.stringify(name);
+	return `Tab ${quoted} is not open (never opened, or closed since). Open it with await browser.open({ name: ${quoted} }) (Python: await browser.open(name=${quoted})), passing the url and app it was opened with.`;
+}
+
 export async function runInTab(name: string, opts: RunInTabOptions): Promise<RunResultOk> {
+	const model = opts.session.getActiveModel?.();
 	const result = await runInTabWithSnapshot(
 		name,
-		{ code: opts.code, timeoutMs: opts.timeoutMs, signal: opts.signal, session: opts.session },
+		{
+			code: opts.code,
+			timeoutMs: opts.timeoutMs,
+			signal: opts.signal,
+			session: opts.session,
+			waitsForDownload: opts.waitsForDownload,
+		},
 		{
 			cwd: opts.session.cwd,
 			browserScreenshotDir: expandBrowserScreenshotDir(opts.session),
-			excludeWebP: webpExclusionForModel(opts.session.getActiveModel?.()),
+			excludeWebP: webpExclusionForModel(model),
+			screenshotLimits: model && screenshotLimits(model),
 		},
-	);
+	).catch(error => {
+		// A worker's run reports this through its payload; an in-process (cmux, Tern) run throws the original.
+		if (isMissingPageGlobal(error)) addPageGlobalHint(error);
+		throw error;
+	});
 	// A worker that exited with no run in flight left the reset unreported; this call reports it. Runs an open
 	// makes on the tab leave it for the open to report.
 	const tab = tabs.get(name);
@@ -895,6 +1168,8 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 		result.displays.unshift({ type: "text", text: tab.workerExitNotice });
 		tab.workerExitNotice = undefined;
 	}
+	const hidden = takeHiddenFramesNotice(tab);
+	if (hidden) result.displays.unshift({ type: "text", text: hidden });
 	return result;
 }
 
@@ -907,9 +1182,13 @@ async function runInTabWithSnapshot(
 		session?: ToolSession;
 		/** This run follows a re-adoption that a detach before the previous attempt caused; it is not retried again. */
 		readopted?: boolean;
+		waitsForDownload?: boolean;
 	},
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
+	// Chrome refused this tab's last re-adoption over another extension's frame: re-adopt it first, a reattach this
+	// call and any beside it wait for as for one after a worker exit.
+	readoptHeldOutTab(name, opts.timeoutMs);
 	// A worker that exited on its own is being replaced: wait for that within this call's budget, and run only on the
 	// same tab. A tab closed and reopened under this name meanwhile is not the one this call was meant for.
 	const waitStartedAt = performance.now();
@@ -926,15 +1205,30 @@ async function runInTabWithSnapshot(
 	if (!tab || tab.state === "dead") {
 		const killed = killedTabs.get(name);
 		throw new ToolError(
-			killed
-				? `Tab ${JSON.stringify(name)} was killed: ${killed}. Reopen it.`
-				: `Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`,
+			killed ? `Tab ${JSON.stringify(name)} was killed: ${killed}. Reopen it.` : notAliveMessage(name),
 		);
 	}
 	if (tab.pending.size > 0) {
-		throw new ToolError(
-			`Tab ${JSON.stringify(name)} is busy: another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)`,
-		);
+		const runs = [...tab.pending.values()];
+		const caller = opts.session?.getEvalKernelOwnerId?.() ?? undefined;
+		// Tabs are shared by name across agents: a subagent's sequential calls collide with its parent's.
+		const otherAgent =
+			caller !== undefined &&
+			runs.some(run => {
+				const owner = run.session.getEvalKernelOwnerId?.() ?? undefined;
+				return owner !== undefined && owner !== caller;
+			});
+		let reason: string;
+		if (runs.some(run => run.waitsForDownload)) {
+			reason = `tab.waitForDownload() holds the tab until a download finishes, so the step that starts the download cannot run beside it. Start the wait and that step in one run: await tab.run("const download = tab.waitForDownload(); await tab.click('#export'); return await download;")`;
+		} else if (otherAgent) {
+			reason =
+				"another agent is driving it and its call is still running. Tabs are shared by name: wait for that agent to finish, or open a tab of your own under another name.";
+		} else {
+			reason =
+				"another call on this tab is still running. Await each call before starting the next instead of running them together (Promise.all, asyncio.gather), or group the steps in one tab.run(...)";
+		}
+		throw new ToolError(`Tab ${JSON.stringify(name)} is busy: ${reason}`);
 	}
 	// An already-aborted call never runs: without this early exit the worker
 	// branch below would send `abort` before `run`, which the worker ignores
@@ -956,7 +1250,7 @@ async function runInTabWithSnapshot(
 	//      rejection would fire `unhandledRejection` and the CLI's
 	//      top-level handler would tear the whole session down, killing
 	//      every other tab and subagent sharing the process (issue #4499).
-	// The in-process (cmux, Tern) branch also composes `closeAc.signal` into
+	// The in-process (cmux, Tern, WebKit) branch also composes `closeAc.signal` into
 	// the run's abort signal so `wait(...)`, backend socket calls, and the
 	// facade proxies unwind promptly when the tab is closed — otherwise a
 	// `wait(60_000)` with no in-flight socket request would keep
@@ -969,6 +1263,7 @@ async function runInTabWithSnapshot(
 		signal: opts.signal,
 		toolCalls: new Map(),
 		closeAc,
+		waitsForDownload: opts.waitsForDownload,
 	};
 	// Register BEFORE the unfreeze await below. Settle-freeze guards on
 	// `pending` (and undoes a transition already in flight when it observes
@@ -1004,7 +1299,7 @@ async function runInTabWithSnapshot(
 		// the closure. `race` — not a bare `await promise` — so a teardown
 		// that never settled the run cannot hang us.
 		tab.pending.delete(id);
-		const notAlive = new ToolError(`Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`);
+		const notAlive = new ToolError(notAliveMessage(name));
 		return await Promise.race([promise, Promise.reject(notAlive)]);
 	}
 	// A worker that exited during the resume already failed this run (its exit handler rejected it) and is being
@@ -1016,7 +1311,7 @@ async function runInTabWithSnapshot(
 		);
 		return await Promise.race([promise, Promise.reject(replaced)]);
 	}
-	if (tab.backend === "cmux" || tab.backend === "tern") {
+	if (tab.backend === "cmux" || tab.backend === "tern" || tab.backend === "webkit") {
 		const runSignal = opts.signal ? AbortSignal.any([opts.signal, closeAc.signal]) : closeAc.signal;
 		try {
 			// In-process runners stay out of worker-backed tabs. A close during
@@ -1040,19 +1335,28 @@ async function runInTabWithSnapshot(
 			// Completion is use too: a run outlasting the idle timeout must
 			// not look stale to the sweep right after it finishes.
 			tab.lastActivityAt = Date.now();
-			// Tern pages report url/title through the tab itself (no worker `ready`).
-			if (tab.backend === "tern") {
+			// Tern and WebKit pages report url/title through the tab itself (no worker `ready`).
+			if (tab.backend === "tern" || tab.backend === "webkit") {
 				tab.info = { ...tab.info, url: tab.ternTab.url(), title: tab.ternTab.lastTitle };
+				// The backend no longer has the tab's block: drop the stale handle, so later calls say why
+				// and a reopen under this name opens afresh instead of reusing it.
+				const gone = tab.ternTab.gone;
+				if (gone !== undefined && tabs.get(name) === tab && tab.state === "alive") {
+					await forceKillTab(name, gone);
+				}
 			}
 		}
 	}
+	const cancellation = new AbortController();
+	let abortTimer: Timer | undefined;
 	const abort = (): void => {
 		safeSend(tab, { type: "abort", id });
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(opts.signal?.reason);
+		abortTimer = setTimeout(() => cancellation.abort(new ToolAbortError()), GRACE_MS);
 	};
 	if (opts.signal?.aborted) abort();
 	else opts.signal?.addEventListener("abort", abort, { once: true });
-	try {
+	const execute = async (): Promise<RunResultOk> => {
 		try {
 			tab.worker.send({
 				type: "run",
@@ -1069,11 +1373,12 @@ async function runInTabWithSnapshot(
 				`Tab ${JSON.stringify(name)}'s worker exited before this call reached it; omp reattaches the tab to a new worker, so retry the call.`,
 			);
 		}
+		const hungReason = `Browser code execution hung past its ${opts.timeoutMs}ms budget`;
 		try {
 			const result = await raceWithTimeout(
 				promise,
 				opts.timeoutMs + GRACE_MS,
-				"Browser code execution hung past grace; tab killed",
+				hungReason,
 				async reason => await forceKillTab(name, reason),
 			);
 			if (result.recoverTab) {
@@ -1082,23 +1387,36 @@ async function runInTabWithSnapshot(
 					name,
 					opts.timeoutMs,
 					"Browser request interception cleanup failed; tab killed",
-				);
+					{ signal: cancellation.signal },
+				).catch((error: unknown) => {
+					if (error instanceof TabHeldOutError) return error;
+					throw error;
+				});
 				result.displays.push({
 					type: "text",
-					text: reattached
-						? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
-						: "Browser request interception could not be reset after this run; the tab was closed.",
+					text:
+						reattached === true
+							? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
+							: reattached === false
+								? "Browser request interception could not be reset after this run; the tab was closed."
+								: `Browser request interception could not be reset after this run. ${reattached.message}`,
 				});
 			}
 			return result;
 		} catch (error) {
+			if (error instanceof ToolError && error.message === hungReason) {
+				throw new ToolError(
+					`${hungReason}, so omp released tab ${JSON.stringify(name)} (closing its page if omp opened it); open it again with browser.open().${longerBudgetHint(opts.timeoutMs)}`,
+				);
+			}
 			if (error instanceof RendererCrashedError) {
 				const reattached = await recoverWorkerTab(
 					tab,
 					name,
 					opts.timeoutMs,
 					"Browser tab's renderer crashed; tab killed",
-				);
+					{ signal: cancellation.signal },
+				).catch(heldOutWith(error.message));
 				throw new RendererCrashedError(
 					reattached
 						? `${error.message}. The tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`
@@ -1118,34 +1436,45 @@ async function runInTabWithSnapshot(
 					await closed;
 				}
 				if (error.reason === USER_CANCELLED_DEBUGGER) {
-					// The relay hides a tab whose debugging bar the user cancelled, so a re-adoption cannot succeed.
-					const cancelled = `${error.message}. The user cancelled Chrome's debugging bar${landed}. omp released the tab; the relay hides it until its URL changes, so navigate it in Chrome, then open it again`;
+					// The relay hides a tab whose debugging bar the user cancelled, so a re-adoption cannot succeed. The kill
+					// below attempts to close a tab omp opened; only a borrowed one is deliberately kept open.
+					const cancelled = tab.ownsPage
+						? `${error.message}. The user cancelled Chrome's debugging bar${landed}. omp tried to close the tab it had opened; open a new one to continue`
+						: `${error.message}. The user cancelled Chrome's debugging bar${landed}. omp released the tab; the relay hides it until its URL changes, so navigate it in Chrome, then open it again`;
 					if (tabs.get(name) === tab && tab.state === "alive") await forceKillTab(name, cancelled);
 					if (opts.signal?.aborted) throw new ToolAbortError();
 					throw new ToolError(cancelled);
 				}
 				// Re-adopt the same Chrome tab on a new worker. No `recover` pass: the page is healthy, and stopping
 				// its loading would cancel a navigation the call itself started. Chrome reports the same reason when the
-				// tab itself closes, so only a re-adoption that worked names another extension's frame as the cause.
+				// tab itself closes, so only a re-adoption that worked, or one Chrome refused over such a frame (the tab
+				// is then kept), names another extension's frame as the cause.
 				const detached = `${error.message}. ${DEBUGGER_DETACH_CAUSE}${landed}`;
-				const lost = `${error.message}${landed}. omp could not reattach to the tab, so it was released: either the tab was closed, or ${DEBUGGER_DETACH_REFUSAL}. If the tab is still open, open it again once that frame is gone; if Chrome refused the attach, the relay hides the tab until its URL changes, so navigate it in Chrome first`;
+				const lost = tab.ownsPage
+					? `${error.message}${landed}. omp could not reattach to the tab it had opened, so it tried to close it: either the tab had closed, or ${DEBUGGER_DETACH_REFUSAL}. Open a new tab to continue; if another extension's frame was the cause, it can detach omp there again`
+					: `${error.message}${landed}. omp could not reattach to the tab, so it was released: either the tab was closed, or ${DEBUGGER_DETACH_REFUSAL}. If the tab is still open, open it again once that frame is gone; if Chrome refused the attach, the relay hides the tab until its URL changes, so navigate it in Chrome first`;
 				const reattached = await recoverWorkerTab(tab, name, opts.timeoutMs, lost, {
 					recover: false,
 					failedReason: lost,
-				});
+					signal: cancellation.signal,
+				}).catch(heldOutWith(`${error.message}${landed}`));
 				// A cancel that landed while the tab was re-adopted wins over the detach report and the retry.
 				if (opts.signal?.aborted) throw new ToolAbortError();
 				if (!reattached) throw new ToolError(lost);
 				if (error.when === "during" || opts.readopted) {
-					throw new ToolError(
-						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
+					const hidden = takeHiddenFramesNotice(tab);
+					throw new DebuggerReattachedError(
+						`${detached}. ${hidden ? `${hidden} ` : ""}omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Nothing ran: run the call on the new worker, within what the re-adoption left of its budget.
 				const remainingMs = Math.floor(opts.timeoutMs - (performance.now() - startedAt));
 				if (remainingMs <= 0) {
-					throw new ToolError(
-						`${detached}. omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
+					const hidden = takeHiddenFramesNotice(tab);
+					throw new DebuggerReattachedError(
+						`${detached}. ${hidden ? `${hidden} ` : ""}omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
+						error.when,
 					);
 				}
 				// Its pending entry must go first, or the tab reads as busy.
@@ -1167,11 +1496,35 @@ async function runInTabWithSnapshot(
 				const reason = runTimedOut
 					? "Browser code execution timed out; tab killed"
 					: "Browser request interception cleanup failed; tab killed";
-				await recoverWorkerTab(tab, name, opts.timeoutMs, reason);
+				const recoveryTimeoutMs = runTimedOut
+					? Math.min(opts.timeoutMs, WORKER_RECOVERY_TIMEOUT_MS - GRACE_MS)
+					: opts.timeoutMs;
+				const reattached = await recoverWorkerTab(tab, name, recoveryTimeoutMs, reason, {
+					signal: cancellation.signal,
+				}).catch(heldOutWith(error.message));
+				if (runTimedOut) {
+					throw new ToolError(
+						reattached
+							? `${error.message}. omp reattached the tab to a new worker without reloading its page. ${RECYCLE_RESETS}${longerBudgetHint(opts.timeoutMs)}`
+							: `${error.message}. The tab could not be reattached and was released; open it again with browser.open().${longerBudgetHint(opts.timeoutMs)}`,
+					);
+				}
 			}
 			throw error;
 		}
+	};
+	try {
+		const result = await untilAborted(cancellation.signal, execute);
+		if (opts.signal?.aborted) throw new ToolAbortError();
+		return result;
+	} catch (error) {
+		if (cancellation.signal.aborted) {
+			if (tabs.get(name) === tab) await forceKillTab(name, "Browser code execution did not stop after cancellation");
+			throw new ToolAbortError();
+		}
+		throw error;
 	} finally {
+		clearTimeout(abortTimer);
 		opts.signal?.removeEventListener("abort", abort);
 		tab.pending.delete(id);
 		// Completion is use too: a run outlasting the idle timeout must
@@ -1182,7 +1535,8 @@ async function runInTabWithSnapshot(
 
 /**
  * Recycle a worker whose tab state is unknown; an inline worker shares this process, so its tab is killed instead.
- * Resolves `true` when the tab was reattached to a new worker, `false` when it was killed or closed meanwhile.
+ * Resolves `true` when the tab was reattached to a new worker, `false` when it was killed or closed meanwhile. Rejects
+ * with {@link TabHeldOutError}, the tab kept, when Chrome refused the re-adoption over another extension's frame.
  */
 async function recoverWorkerTab(
 	tab: WorkerTabSession,
@@ -1194,6 +1548,7 @@ async function recoverWorkerTab(
 		recover?: boolean;
 		/** Kill reason when the recycle fails; defaults to a generic recovery failure. */
 		failedReason?: string;
+		signal?: AbortSignal;
 	} = {},
 ): Promise<boolean> {
 	// The kills go by name: a tab closed meanwhile may have been reopened under it, and that one is not ours to kill.
@@ -1203,11 +1558,32 @@ async function recoverWorkerTab(
 	};
 	try {
 		if (tab.worker.mode === "inline") return await killTab(reason);
-		return await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS, { recover: opts.recover });
-	} catch (recycleError) {
-		logger.warn("Failed to recycle browser tab worker; killing tab", {
-			error: recycleError instanceof Error ? recycleError.message : String(recycleError),
+		const reattached = await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS, {
+			recover: opts.recover,
+			signal: opts.signal,
 		});
+		if (reattached) tab.heldOut = undefined;
+		return reattached;
+	} catch (recycleError) {
+		const messages = [recycleError, recycleError instanceof Error ? recycleError.cause : undefined].map(error =>
+			error instanceof Error ? error.message : String(error),
+		);
+		// Chrome refuses the debugger only while another extension's frame is in the tab: the tab is still there,
+		// and the user's. Keep it, with no worker, for the next call to re-adopt.
+		if (
+			tab.kindTag === "relay" &&
+			!opts.signal?.aborted &&
+			messages.some(message => FOREIGN_FRAME_REFUSAL.test(message)) &&
+			tabs.get(name) === tab &&
+			tab.state === "alive"
+		) {
+			logger.warn("Chrome refused to reattach a relay tab over another extension's frame; keeping it", {
+				error: messages[0],
+			});
+			tab.heldOut = true;
+			throw new TabHeldOutError();
+		}
+		logger.warn("Failed to recycle browser tab worker; killing tab", { error: messages[0] });
 		return await killTab(opts.failedReason ?? "Browser tab worker recovery failed; tab killed");
 	}
 }
@@ -1321,14 +1697,14 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	tab.pending.clear();
 	const timeoutMs = opts.timeoutMs ?? DEFAULT_TAB_CLOSE_TIMEOUT_MS;
-	if (tab.backend === "tern") {
+	if (tab.backend === "tern" || tab.backend === "webkit") {
 		let closeError: unknown;
 		if (wasAlive) {
 			try {
 				await waitForTabCleanup(
 					tab,
 					timeoutMs,
-					`Tern browser block ${tab.targetId} (close)`,
+					`${tab.ternTab.product} browser block ${tab.targetId} (close)`,
 					tab.ternTab.close({ timeoutMs }),
 				);
 			} catch (err) {
@@ -1385,7 +1761,8 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	let cleanupError: unknown;
 	let targetCloseFailed = false;
-	if (wasAlive && !(tab.worker as ExitTrackedWorker)[kWorkerExited]) {
+	// A held-out tab's worker was terminated with its failed re-adoption: nothing answers a close.
+	if (wasAlive && !tab.heldOut && !(tab.worker as ExitTrackedWorker)[kWorkerExited]) {
 		try {
 			tab.worker.send({ type: "close", keepPage: opts.keepPage });
 			await waitForClosed(tab);
@@ -1429,7 +1806,7 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 		cleanupError ??= error;
 	} finally {
 		tabs.delete(name);
-		const scope = sharedScopeOf(tab.browser);
+		const scope = sharedTargetScopeOf(tab.browser);
 		if (scope) {
 			if (targetCloseFailed) {
 				// The target outlived its close, so it is still open in the
@@ -1515,10 +1892,15 @@ function isSettleManaged(tab: TabSession): boolean {
 /**
  * Tabs idle-close may reap: every settle-managed tab plus Tern tabs (live,
  * visible pages never frozen, but closed when abandoned like headless tabs;
- * an adopted user block is released, not closed), minus `persist` opt-outs.
+ * an adopted user block is released, not closed) and WebKit tabs (never
+ * frozen either: the host draws nothing unless asked; its process exits with
+ * its last tab), minus `persist` opt-outs.
  */
 function isIdleManaged(tab: TabSession): boolean {
-	return isSettleManaged(tab) || (tab.backend === "tern" && tab.state === "alive" && !tab.persist);
+	return (
+		isSettleManaged(tab) ||
+		((tab.backend === "tern" || tab.backend === "webkit") && tab.state === "alive" && !tab.persist)
+	);
 }
 
 /**
@@ -1865,7 +2247,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			initScripts: opts.initScripts,
 			downloadsPath: opts.downloadsPath,
 			userAgent: opts.userAgent,
-			ignoreHttpsErrors: opts.ignoreHttpsErrors,
+			insecure: opts.insecure,
 		};
 	}
 
@@ -1892,18 +2274,33 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	}
 	return {
 		mode: "attach",
-		browserWSEndpoint,
+		browserWSEndpoint:
+			page.kind === "create" ? browserWSEndpoint : adoptEndpoint(browserWSEndpoint, browser, page.targetId),
 		safeDir,
 		uploadDir,
 		page,
+		viewport: opts.viewport,
 		dialogs: opts.dialogs,
 		allowedDomains: opts.allowedDomains,
 		initScripts: opts.initScripts,
 		downloadsPath: opts.downloadsPath,
 		userAgent: opts.userAgent,
-		ignoreHttpsErrors: opts.ignoreHttpsErrors,
+		insecure: opts.insecure,
 		userDriven,
+		relay: browser.kind.kind === "relay",
 	};
+}
+
+/**
+ * `endpoint` of `browser` for a worker adopting `targetId`. Through the omp relay the worker claims the tab as it
+ * connects, before puppeteer sends the tab anything: only in a tab omp drives does the relay's extension empty
+ * another extension's frame (a password manager's inline menu) that makes Chrome refuse the debugger.
+ */
+function adoptEndpoint(endpoint: string, browser: PuppeteerBrowserHandle, targetId: string): string {
+	if (browser.kind.kind !== "relay") return endpoint;
+	const url = new URL(endpoint);
+	url.searchParams.set("claim", targetId);
+	return url.toString();
 }
 
 /** The tab most recently used on `browser`, for a new relay tab to open beside. */
@@ -1918,6 +2315,7 @@ function lastUsedTargetOn(browser: PuppeteerBrowserHandle): string | undefined {
 
 function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 	if (msg.type === "result") {
+		noteHiddenFrames(tab, msg.hiddenFrames);
 		const pending = tab.pending.get(msg.id);
 		if (!pending) return;
 		// The run's own `finally` drops the entry: a recovery after its result still holds the tab busy.
@@ -1976,6 +2374,38 @@ async function dispatchToolCall(
 		pending.toolCalls.delete(msg.id);
 		pending.signal?.removeEventListener("abort", onParentAbort);
 	}
+}
+
+/**
+ * Re-adopt a tab Chrome refused over another extension's frame, published as the tab's `workerRecovery` so the call
+ * that started it and any beside it wait for it. A refusal again rejects them with {@link TabHeldOutError}, the tab
+ * still kept; a re-adoption that works is reported by the next result.
+ */
+function readoptHeldOutTab(name: string, timeoutMs: number): void {
+	const tab = tabs.get(name);
+	if (tab?.backend !== "worker" || !tab.heldOut || tab.workerRecovery) return;
+	const readoption: Promise<boolean> = recoverWorkerTab(
+		tab,
+		tab.name,
+		timeoutMs,
+		"Browser tab worker lost; tab killed",
+		{
+			// The page is as the user left it; stopping its loading would cancel a navigation they started.
+			recover: false,
+			failedReason: "omp could not reattach to the tab after Chrome had refused it, so the tab was released",
+		},
+	)
+		.then(reattached => {
+			if (reattached) {
+				tab.workerExitNotice = `Chrome had kept omp out of this tab since an earlier call (${DEBUGGER_DETACH_REFUSAL}); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`;
+			}
+			return reattached;
+		})
+		.catch(heldOutWith(`Chrome still keeps omp out of tab ${JSON.stringify(tab.name)}`))
+		.finally(() => {
+			if (tab.workerRecovery === readoption) tab.workerRecovery = undefined;
+		});
+	tab.workerRecovery = readoption;
 }
 
 /**
@@ -2083,7 +2513,7 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 async function recycleTimedOutWorkerTab(
 	tab: WorkerTabSession,
 	timeoutMs: number,
-	opts: { recover?: boolean } = {},
+	opts: { recover?: boolean; signal?: AbortSignal } = {},
 ): Promise<boolean> {
 	// Same deadline carry-over as acquireTabImpl: the inline-fallback retry
 	// must not restart the recycle's init budget.
@@ -2093,18 +2523,19 @@ async function recycleTimedOutWorkerTab(
 	const browserWSEndpoint = tab.browser.wsEndpoint;
 	const payload: WorkerInitPayload = {
 		mode: "attach",
-		browserWSEndpoint,
+		browserWSEndpoint: adoptEndpoint(browserWSEndpoint, tab.browser, tab.targetId),
 		safeDir: getPuppeteerDir(),
 		uploadDir: tab.uploadDir,
 		page: { kind: tab.ownsPage ? "owned" : "borrowed", targetId: tab.targetId },
 		dialogs: tab.dialogPolicy,
 		allowedDomains: tab.allowedDomains,
 		// The override's CDP session died with the old worker.
-		ignoreHttpsErrors: tab.ignoreHttpsErrors,
+		insecure: tab.insecure,
 		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
+		relay: tab.kindTag === "relay",
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.
@@ -2115,15 +2546,17 @@ async function recycleTimedOutWorkerTab(
 		}
 		tab.worker = replacement;
 		tab.info = info;
+		noteHiddenFrames(tab, info.hiddenFrames);
 		tab.state = "alive";
 		attachTabWorker(tab, replacement);
 		return true;
 	};
 	let worker = await spawnTabWorker();
 	try {
-		return await publish(worker, await initializeTabWorker(worker, payload, timeoutMs, startedAt));
+		return await publish(worker, await initializeTabWorker(worker, payload, timeoutMs, startedAt, opts.signal));
 	} catch (error) {
 		await worker.terminate().catch(() => undefined);
+		if (opts.signal?.aborted) throw error;
 		// The page crashed again as this attach brought it back; a second attach would only revive it once more.
 		if (error instanceof RendererCrashedError) throw error;
 		// The recycle's budget is exhausted: the run caller already timed out, so a
@@ -2134,7 +2567,7 @@ async function recycleTimedOutWorkerTab(
 		}
 		worker = await spawnInlineWorker();
 		try {
-			return await publish(worker, await initializeTabWorker(worker, payload, timeoutMs, startedAt));
+			return await publish(worker, await initializeTabWorker(worker, payload, timeoutMs, startedAt, opts.signal));
 		} catch (inlineError) {
 			await worker.terminate().catch(() => undefined);
 			const finalError = new ToolError(
@@ -2177,9 +2610,12 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 	}
 }
 
-/** Teardown half of {@link forceKillTab} for a cmux or Tern surface, published through the release single-flight. */
-async function forceKillSurfaceTab(tab: CmuxTabSession | TernTabSession, name: string): Promise<void> {
-	if (tab.backend === "tern")
+/** Teardown half of {@link forceKillTab} for a cmux or Tern surface or a WebKit block, published through the release single-flight. */
+async function forceKillSurfaceTab(
+	tab: CmuxTabSession | TernTabSession | WebKitTabSession,
+	name: string,
+): Promise<void> {
+	if (tab.backend === "tern" || tab.backend === "webkit")
 		await tab.ternTab.close({ timeoutMs: DEFAULT_TAB_CLOSE_TIMEOUT_MS }).catch(() => undefined);
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(name);
@@ -2209,7 +2645,7 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 	}
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(tab.name);
-	const scope = sharedScopeOf(tab.browser);
+	const scope = sharedTargetScopeOf(tab.browser);
 	if (scope) {
 		if (targetClosed) void forgetSharedTarget(scope, tab.targetId);
 		else recheckSharedBrowser(scope);
@@ -2218,7 +2654,7 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 
 /**
  * Best-effort close of a specific page target in the browser. Close through
- * the browser CDP session rather than `page.close()`: a page whose navigation
+ * the root CDP connection rather than `page.close()`: a page whose navigation
  * wedged during initialization can make Puppeteer's page close wait for the
  * protocol timeout, retaining the cleanup hold for tens of seconds.
  */
@@ -2229,17 +2665,6 @@ async function closeTargetById(
 ): Promise<boolean> {
 	if (browser.kind.kind === "relay") return await closeRelayTarget(browserConnection(browser.browser), targetId);
 	return await closeCdpTarget(browser.browser, targetId, confirmTimeoutMs);
-}
-
-/**
- * Durable-ownership scope for a browser handle, or undefined when the handle is
- * not the project-shared broker-owned Chromium (the only browser whose targets
- * outlive their creating process and thus need cross-process orphan reaping).
- */
-function sharedScopeOf(browser: BrowserHandle): SharedTargetScope | undefined {
-	if (!("browser" in browser)) return undefined;
-	if (browser.kind.kind !== "headless" || !browser.sharedDaemon) return undefined;
-	return { projectDir: browser.sharedDaemon.projectDir, daemonName: browser.sharedDaemon.name };
 }
 
 /**
@@ -2307,6 +2732,19 @@ async function waitForClosed(tab: WorkerTabSession): Promise<void> {
 	}
 }
 
+/** What rescales an image on its way to `model`, for sizing screenshots that reach it untouched. */
+function screenshotLimits(model: Model): ScreenshotLimits {
+	const compat = model.compat;
+	return {
+		tokenization: resolveImageTokenization(model),
+		maxEdge: resolveImageMaxEdge(model),
+		detail:
+			compat && "supportsImageDetailOriginal" in compat && compat.supportsImageDetailOriginal
+				? "original"
+				: undefined,
+	};
+}
+
 function expandBrowserScreenshotDir(session: ToolSession): string | undefined {
 	const value = cfgBrowserScreenshotDir.get(session.settings);
 	return value ? expandPath(value) : undefined;
@@ -2327,6 +2765,14 @@ async function targetIdForTarget(target: Target): Promise<string> {
 	} finally {
 		await session.detach().catch(() => undefined);
 	}
+}
+
+/** Say where `tab.run` code runs, after it failed reaching for a page global. */
+function addPageGlobalHint(error: Error): void {
+	const original = `${error.name}: ${error.message}`;
+	error.message += ": tab.run code runs in omp's Bun runtime, not in the page; run page code with tab.evaluate(...)";
+	if (error.stack?.startsWith(original))
+		error.stack = `${error.name}: ${error.message}${error.stack.slice(original.length)}`;
 }
 
 function errorFromPayload(payload: RunErrorPayload): Error {
@@ -2352,6 +2798,7 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 						: new Error(payload.message);
 	error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
+	if (payload.missingPageGlobal) addPageGlobalHint(error);
 	return error;
 }
 
@@ -2507,6 +2954,7 @@ async function initializeTabWorker(
 	payload: WorkerInitPayload,
 	timeoutMs: number,
 	deadlineStart: number = performance.now(),
+	signal?: AbortSignal,
 ): Promise<ReadyInfo> {
 	// Derive both phase budgets from the remaining caller budget so a
 	// retried attempt (inline fallback) cannot outlive the caller's timeout.
@@ -2542,12 +2990,20 @@ async function initializeTabWorker(
 	});
 	try {
 		worker.send({ type: "init", payload });
-		await raceWithTimeout(setup.promise, setupBudgetMs, "Timed out waiting for tab worker setup");
+		await raceWithTimeout(
+			untilAborted(signal, setup.promise),
+			setupBudgetMs,
+			"Timed out waiting for tab worker setup",
+		);
 		// The ready wait gets only what is left of the caller's budget at
 		// this point; the floor covers sub-3s budgets where the 2s setup
 		// floor alone exceeds it.
 		const readyBudgetMs = Math.max(READY_BUDGET_FLOOR_MS, timeoutMs - Math.round(performance.now() - deadlineStart));
-		return await raceWithTimeout(ready.promise, readyBudgetMs, "Timed out initializing browser tab worker");
+		return await raceWithTimeout(
+			untilAborted(signal, ready.promise),
+			readyBudgetMs,
+			"Timed out initializing browser tab worker",
+		);
 	} finally {
 		unlisten();
 		unlistenError();

@@ -525,7 +525,7 @@ fn lookupstyle(
 }
 
 /// Whether `v` is one of zsh's true words.
-fn truthy(v: &[u8]) -> bool {
+const fn truthy(v: &[u8]) -> bool {
 	matches!(v, b"yes" | b"true" | b"on" | b"1")
 }
 
@@ -549,12 +549,15 @@ fn parse_error(
 	Ok(None)
 }
 
+/// A pattern test of style values (`zstyle -L -e`'s filter).
+type ValueFilter<'a> = Option<&'a dyn Fn(&[u8]) -> bool>;
+
 /// zsh `printstylenode`.
 fn print_style(
 	out: &mut Vec<u8>,
 	s: &Style,
 	list: List,
-	filter: Option<&dyn Fn(&[u8]) -> bool>,
+	filter: ValueFilter<'_>,
 	rc: bool,
 	cs: zsh_quote::Charset,
 ) {
@@ -806,8 +809,7 @@ fn zstyle_set(ctx: &mut Ctx<'_, '_>, args: &[BString], eval: bool) -> R {
 	};
 	let mut tab = styles_load(ctx)?;
 	let si = tab.get_or_add(name);
-	let mut line = None;
-	if eval {
+	let line = if eval {
 		let code = bstr::join(b" ", vals);
 		let at = zsh_line(ctx);
 		if let Some(e) = parse_error(ctx, &code)? {
@@ -819,8 +821,10 @@ fn zstyle_set(ctx: &mut Ctx<'_, '_>, args: &[BString], eval: bool) -> R {
 			});
 			return done(1);
 		}
-		line = Some(at);
-	}
+		Some(at)
+	} else {
+		None
+	};
 	let pats = &mut tab.styles[si].pats;
 	if let Some(p) = pats.iter_mut().find(|p| p.pat == *pat) {
 		// zsh keeps the pattern compiled first.
@@ -876,8 +880,7 @@ fn zstyle_list(ctx: &mut Ctx<'_, '_>, args: &[BString], list: List) -> R {
 	let test = filter
 		.as_ref()
 		.map(|(p, env)| move |s: &[u8]| p.matches(&tok::metafy(s), &env.env()));
-	let test_dyn: Option<&dyn Fn(&[u8]) -> bool> =
-		test.as_ref().map(|f| f as &dyn Fn(&[u8]) -> bool);
+	let test_dyn: ValueFilter<'_> = test.as_ref().map(|f| f as &dyn Fn(&[u8]) -> bool);
 	let mut out = Vec::new();
 	if let Some(name) = stylename {
 		let Some(si) = tab.find(name) else {
@@ -1991,18 +1994,18 @@ pub fn zparseopts(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 				f |= ZOF_SAME;
 			}
 		}
-		let a;
-		if at(p) == b'=' {
+
+		let a = if at(p) == b'=' {
 			if end.is_none() {
 				end = Some(p);
 			}
 			f |= flags;
 			let an = &o[p + 1..];
-			a = Some(z.get_arr(an).unwrap_or_else(|| {
+			Some(z.get_arr(an).unwrap_or_else(|| {
 				z.arrs
 					.push(ZArr { name: an.to_vec(), vals: Vec::new(), num: 0 });
 				z.arrs.len() - 1
-			}));
+			}))
 		} else if p < o.len() {
 			ctx.usage(format!("invalid option description: {}", BStr::new(orig)));
 			return done(1);
@@ -2010,8 +2013,8 @@ pub fn zparseopts(ctx: &mut Ctx<'_, '_>, _ops: &Ops, args: &[BString]) -> R {
 			ctx.usage(format!("no default array defined: {}", BStr::new(orig)));
 			return done(1);
 		} else {
-			a = defarr;
-		}
+			defarr
+		};
 		let raw = &o[..end.unwrap_or(o.len())];
 		let mut name = Vec::with_capacity(raw.len());
 		let mut q = 0;
