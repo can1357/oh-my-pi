@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.22.0] - 2026-11-16
+
 ### Fixed
 
-- Long streaming replies in the collab viewer no longer rebuild the whole message on every token ([#19485](https://github.com/can1357/oh-my-pi/pull/19485) by [@H4vC](https://github.com/H4vC))
+- Improved streaming performance in the collab viewer, preventing long replies from becoming progressively slower as they are received.
 
 ## [18.20.1] - 2026-11-14
 
