@@ -17,7 +17,7 @@ import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
 import { replaceTabs, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
+import { clampTimeout, lspTimeoutSource, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
@@ -120,7 +120,7 @@ import { formatGroupedDiagnosticMessages } from "@oh-my-pi/pi-tui/tools/output-m
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
 
 import { cfgToolsMaxTimeout } from "../tools/settings";
-import { cfgLspRequestTimeout } from "./settings";
+import { cfgLspMinTimeout, cfgLspRequestTimeout } from "./settings";
 
 const MAX_RENAME_PAIRS = 1000;
 
@@ -333,12 +333,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	constructor(private readonly session: ToolSession) {}
 
 	get description(): string {
-		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
-		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(this.session.settings), maxTimeout);
+		const settings = this.session.settings;
+		const maxTimeout = cfgToolsMaxTimeout.get(settings);
+		const minTimeout = cfgLspMinTimeout.get(settings);
+		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(settings), maxTimeout, minTimeout);
 		return prompt.render(lspDescription, {
 			defaultTimeoutSec: defaults.call,
 			defaultWaitSec: defaults.wait,
 			maxTimeoutSec: clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout),
+			minTimeoutSec: minTimeout > 0 ? minTimeout : undefined,
 		});
 	}
 
@@ -357,13 +360,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		if (this.session.lspReadOnly && !LSP_READONLY_ACTIONS.has(action)) {
 			throw new ToolError(`LSP action ${action} is disabled in this read-only session`);
 		}
+		const requestTimeoutSec = cfgLspRequestTimeout.get(this.session.settings);
 		const budget = resolveLspTimeouts(
 			timeout,
-			cfgLspRequestTimeout.get(this.session.settings),
+			requestTimeoutSec,
 			cfgToolsMaxTimeout.get(this.session.settings),
+			cfgLspMinTimeout.get(this.session.settings),
 		);
 		const timeoutSec = budget.call;
 		const waitMs = budget.wait * 1000;
+		const sourceNote = lspTimeoutSource(timeout, requestTimeoutSec, budget);
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const callerSignal = signal;
 		signal = callerSignal ? AbortSignal.any([callerSignal, timeoutSignal]) : timeoutSignal;
@@ -378,7 +384,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			if (timeoutSignal.aborted && !callerSignal?.aborted) {
 				const server = serverName ? ` on ${serverName}` : "";
 				throw new ToolError(
-					`LSP ${action} timed out after ${timeoutSec}s${server}. The server may still be indexing; try again or pass timeout=<larger>.`,
+					`LSP ${action} timed out after ${timeoutSec}s${server}${sourceNote}. The server may still be indexing; try again or pass timeout=<larger>.`,
 				);
 			}
 			throw new ToolAbortError();
