@@ -11,6 +11,7 @@
 ### Changed
 
 - Empty-stop recovery now logs each scheduled retry with the model, provider and stop metadata, so a model that keeps returning nothing is visible in the session log instead of reading as an unexpected user message ([#20122](https://github.com/can1357/oh-my-pi/pull/20122) by [@FnSGit](https://github.com/FnSGit))
+- Added the local omp version to `omp auth-broker status`, flagging a broker that runs a different version ([#19592](https://github.com/can1357/oh-my-pi/pull/19592) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -320,10 +321,6 @@
 - `/restart` now re-execs through the launcher omp was started by, so an open session moves onto an upgraded binary instead of re-running a retained old install ([#19529](https://github.com/can1357/oh-my-pi/pull/19529) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - RPC hosts now always receive a terminal `agent_end` after an over-quota 429: usage-limit bookkeeping is bounded so a stalled usage report can no longer hold the event ([#19411](https://github.com/can1357/oh-my-pi/issues/19411), [#19417](https://github.com/can1357/oh-my-pi/pull/19417) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - Rex and other OSC 7501 terminals no longer play a success sound mid-run when a stale agent end arrives after another run has opened ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#19418](https://github.com/can1357/oh-my-pi/pull/19418) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-
-### Added
-
-- Added the local omp version to `omp auth-broker status`, flagging a broker that runs a different version
 
 ## [18.22.1] - 2026-11-17
 
