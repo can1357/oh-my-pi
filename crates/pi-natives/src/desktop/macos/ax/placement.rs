@@ -63,6 +63,12 @@ pub(super) trait Placement {
 	fn bounds(&self, element: &Self::Element) -> Option<AxBounds>;
 	fn parent(&self, element: &Self::Element) -> Option<Self::Element>;
 	fn children(&self, element: &Self::Element) -> Vec<Self::Element>;
+	/// Whether `parent` lists `child` among its children; a hidden `AppKit`
+	/// view is left out. An application may answer without reading a long
+	/// list whole.
+	fn lists(&self, parent: &Self::Element, child: &Self::Element) -> bool {
+		self.children(parent).iter().any(|listed| listed == child)
+	}
 	fn role(&self, element: &Self::Element) -> Option<String>;
 	fn subrole(&self, element: &Self::Element) -> Option<String>;
 	/// The window holding `element`.
@@ -204,7 +210,7 @@ fn listed_under<P: Placement>(app: &P, ancestor: &P::Element, element: &P::Eleme
 }
 
 fn lists<P: Placement>(app: &P, parent: &P::Element, child: &P::Element) -> bool {
-	app.children(parent).iter().any(|listed| listed == child)
+	app.lists(parent, child)
 }
 
 /// `element`'s ancestors up to its window, nearest first.

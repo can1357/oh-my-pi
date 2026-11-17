@@ -1867,6 +1867,10 @@ impl PartialEq for Node {
 	}
 }
 
+/// Children a parent may have for [`AppPlacement`] to read them all to see
+/// whether it lists one; past it the child counts as listed.
+const PLACEMENT_LIST_SCAN_MAX: CFIndex = 1_000;
+
 /// [`placement::Placement`] read from a live application.
 struct AppPlacement {
 	app: CFRetained<AXUIElement>,
@@ -1887,6 +1891,24 @@ impl placement::Placement for AppPlacement {
 	fn children(&self, element: &Node) -> Vec<Node> {
 		copy_elements_optional(&element.0, "AXChildren")
 			.map_or_else(Vec::new, |children| children.into_iter().map(Node).collect())
+	}
+
+	fn lists(&self, parent: &Node, child: &Node) -> bool {
+		// A hidden `AppKit` view sits in a small container; a table's thousands
+		// of rows are not copied on every press to find one of them.
+		let mut count: CFIndex = 0;
+		// SAFETY: `count` is writable and the retained element outlives the
+		// query.
+		let counted = unsafe {
+			parent.0.attribute_value_count(
+				&CFString::from_static_str("AXChildren"),
+				NonNull::from(&mut count),
+			)
+		};
+		if counted == AXError::Success && count > PLACEMENT_LIST_SCAN_MAX {
+			return true;
+		}
+		self.children(parent).iter().any(|listed| listed == child)
 	}
 
 	fn role(&self, element: &Node) -> Option<String> {
