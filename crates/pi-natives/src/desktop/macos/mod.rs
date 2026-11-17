@@ -291,6 +291,9 @@ impl Backend for MacosBackend {
 		let mac = ax::mac_handle(element)?;
 		let (entry_front, (target, event, _aimed)) = EntryFront::before(skylight::front_pid, || {
 			ax::require_element_read_as(mac)?;
+			if ax::click_judges_placement(click.mode) {
+				ax::require_shown(mac)?;
+			}
 			let (target, event) = locate_element_click(self, element, click)?;
 			// The click goes to the element's frame as read just now; no press
 			// is posted once the app has sorted another row into that place.

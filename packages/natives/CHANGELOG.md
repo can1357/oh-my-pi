@@ -31,6 +31,7 @@
 ### Fixed
 
 - Fixed macOS takeover putting a typing user's keys into the agent's target: a takeover, the background fallback's rerun included, now waits until you have pressed no key or button anywhere for 5 s and hold no modifier or mouse button, failing `UserIntervened` with nothing sent if you are still at it near the run's timeout ([#19296](https://github.com/can1357/oh-my-pi/pull/19296) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS `press()` and background `el.click()` reporting success on a control a person could not click, such as a hover toolbar's button after the pointer left, a hidden control, or one of a window that shows a sheet; they now fail before anything is sent and name what the window shows there ([#19258](https://github.com/can1357/oh-my-pi/pull/19258) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.0] - 2026-11-16
 
