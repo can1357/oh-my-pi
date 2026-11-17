@@ -131,9 +131,9 @@ behavior {
 	}
 
 	// Z.AI and Zhipu emit timezone-naive account-reset wall clocks in Beijing
-	// time. Provider-aware retry paths append this offset before parsing.
+	// time. Custom provider IDs pointing at the Coding Plan endpoint inherit it.
 	retry-reset-timezone provider="zai" offset="+08:00"
-	retry-reset-timezone provider="zhipu-coding-plan" offset="+08:00"
+	retry-reset-timezone provider="zhipu-coding-plan" base-url="https://open.bigmodel.cn/api/coding/paas/v4" offset="+08:00"
 
 	// Cloudflare AI Gateway namespace routing. The Workers AI prefix remains
 	// on the request id; the upstream namespaces are stripped.

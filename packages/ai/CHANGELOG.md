@@ -26,6 +26,10 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+- Added parallel, persistent thinking-capability probes for unknown models, including alternate effort and token-budget request formats.
+### Fixed
+
+- Fixed credential rotation and one-shot retries so custom providers pointing at the Zhipu Coding Plan endpoint honor the Beijing-time quota reset instead of waiting about eight hours too long ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.20.3] - 2026-11-16
 
