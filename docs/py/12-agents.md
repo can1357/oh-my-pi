@@ -776,10 +776,9 @@ three: `agent_settled`, `provider_error`, `thread_projection`): subscribers
 take no `phase=` and return `Continue | Settle`, never an `omp.HookDecision`.
 Multiple extensions may subscribe. Resolution is declared, not incidental:
 
-1. Subscribers run in the catalog's deterministic
-   `(layer, publisher, extension_id)` order (`docs/py/05-hooks.md`) — never in
-   load order. *(Divergence: envd currently orders by `(layer, extension, order, name)`,
-   comparing `layer` as a string.)*
+1. Subscribers run in envd's deterministic order: by `layer` (compared as a
+   string), then extension id, then hook name (`docs/py/05-hooks.md`) — never in
+   load order. Other hook families keep the catalog's `(layer, publisher, extension_id)` order.
 2. The **first** `Continue` wins. Later hooks see it in
    `ctx.pending_continuation` (`omp.PendingContinuation` with `prompt` / `label`)
    and may return `Settle()` to veto it, which is how a guard extension overrides
