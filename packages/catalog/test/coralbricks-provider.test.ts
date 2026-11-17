@@ -87,10 +87,10 @@ describe("CoralBricks built-in provider", () => {
 		expect(glm?.maxTokens).toBe(131072);
 		expect(glm?.reasoning).toBe(true);
 
-		// Unknown ids stay neutral: no invented reasoning or output cap, and
-		// the live tools flag maps through.
+		// Unknown ids stay neutral: no reasoning evidence either way, no output
+		// cap, and the live tools flag maps through.
 		const unknown = models?.find(item => item.id === "coral-unknown-model");
-		expect(unknown?.reasoning).toBe(false);
+		expect(unknown?.reasoning).toBeUndefined();
 		expect(unknown?.maxTokens).toBeNull();
 		expect(unknown?.cost).toEqual({ input: 0.75, output: 2.4, cacheRead: 0, cacheWrite: 0 });
 		expect(unknown?.supportsTools).toBe(false);

@@ -219,6 +219,35 @@ describe("WatchedFilesForwarder", () => {
 		await waitForEvent(sent, { uri: fileToUri(moved), type: FileChangeType.Deleted });
 	});
 
+	// Only Windows says a vanished entry was a directory.
+	it.skipIf(process.platform !== "win32")(
+		"reports a directory's files created again after it was moved out and back",
+		async () => {
+			const { root, sent, forwarder } = setup();
+			const watched = path.join(root, "watched");
+			const outside = path.join(root, "outside");
+			await fs.mkdir(watched, { recursive: true });
+			await fs.mkdir(path.join(outside, "pkg", "nested"), { recursive: true });
+			fsSync.writeFileSync(path.join(outside, "pkg", "nested", "b.ts"), "export {};\n");
+			await forwarder.register("ts", {
+				watchers: [{ globPattern: { baseUri: fileToUri(watched), pattern: "**/*.ts" } }],
+			});
+			await untilWatching(sent, path.join(watched, "ready.ts"));
+
+			const moved = path.join(watched, "pkg");
+			const created = { uri: fileToUri(path.join(moved, "nested", "b.ts")), type: FileChangeType.Created };
+			await fs.rename(path.join(outside, "pkg"), moved);
+			await waitForEvent(sent, created);
+			await fs.rename(moved, path.join(outside, "pkg"));
+			await waitForEvent(sent, { uri: fileToUri(moved), type: FileChangeType.Deleted });
+			sent.length = 0;
+
+			// The vanished directory took its files' earlier creations with it: this one is new.
+			await fs.rename(path.join(outside, "pkg"), moved);
+			await waitForEvent(sent, created);
+		},
+	);
+
 	// Only Windows pairs a directory's old and new names.
 	it.skipIf(process.platform !== "win32")(
 		"reports each file's old path deleted when a directory is renamed",

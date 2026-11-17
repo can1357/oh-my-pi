@@ -96,6 +96,8 @@ export interface FrameApiHooks {
 	waitMs(timeout?: number): number;
 	/** Run a named, abort-aware operation. */
 	op: FrameOperation;
+	/** Run an input action like {@link op}, so the tab's next look waits for its effects. */
+	act: FrameOperation;
 	/** Persist and report a frame element screenshot. */
 	captureScreenshot(frame: Frame, selector: string, signal: AbortSignal): Promise<string>;
 }
@@ -245,7 +247,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 	};
 	return {
 		click: (selector, options) =>
-			hooks.op(
+			hooks.act(
 				`frame.click(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
@@ -268,7 +270,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		fill: (selector, value) =>
-			hooks.op(
+			hooks.act(
 				`frame.fill(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
@@ -282,7 +284,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		type: (selector, text) =>
-			hooks.op(
+			hooks.act(
 				`frame.type(${JSON.stringify(selector)})`,
 				hooks.actionOpMs,
 				async signal => {
@@ -297,7 +299,7 @@ export function createFrameApi(frame: Frame, hooks: FrameApiHooks): BrowserFrame
 				selectorOptions(selector),
 			),
 		press: (key, options) =>
-			hooks.op(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
+			hooks.act(`frame.press(${JSON.stringify(key)})`, hooks.actionOpMs, async signal => {
 				if (options?.selector)
 					await untilAborted(signal, () => frame.focus(hooks.normalizeSelector(options.selector!)));
 				await pressKey(frame.page(), key, undefined, signal);

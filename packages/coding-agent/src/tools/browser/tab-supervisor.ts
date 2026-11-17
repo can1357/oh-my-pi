@@ -3,6 +3,7 @@ import {
 	getPuppeteerDir,
 	logger,
 	postmortem,
+	prompt,
 	Snowflake,
 	untilAborted,
 	withTimeout,
@@ -14,6 +15,7 @@ import type { CDPSession, Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { TOOL_TIMEOUTS } from "../tool-timeouts";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
+import hiddenFramesNotice from "../../prompts/tools/browser-hidden-frames.md" with { type: "text" };
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
@@ -23,6 +25,7 @@ import { gracefulKillTreeOnce, isChromiumBrowserExecutable, pickElectronTarget }
 import type * as Cmux from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { browserConnection, DEFAULT_VIEWPORT } from "./launch";
+import type { FrontTabSource } from "./native-windows";
 import {
 	closeCdpTarget,
 	closeRelayTarget,
@@ -39,11 +42,14 @@ import {
 	type CmuxBrowserHandle,
 	holdBrowser,
 	type PuppeteerBrowserHandle,
+	type PuppeteerBrowserKind,
 	releaseBrowser,
 	sharedTargetScopeOf,
 	type TernBrowserHandle,
 	type WebKitBrowserHandle,
 } from "./registry";
+import { isLoopbackRelayUrl } from "./relay/daemon";
+import { FOREIGN_FRAME_REFUSAL, type HiddenFrame } from "./relay/protocol";
 import {
 	type AttachPage,
 	isMissingPageGlobal,
@@ -154,6 +160,13 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	workerExitedAt?: number;
 	/** Set when a worker exited with no run in flight and the tab was reattached; the next call reports it. */
 	workerExitNotice?: string;
+	/**
+	 * Chrome refused the tab's re-adoption over another extension's frame. The tab stays open with no worker driving
+	 * it, and the next call on it re-adopts it first.
+	 */
+	heldOut?: boolean;
+	/** Other extensions' frames the omp relay hid in the tab that no call has reported yet. */
+	hiddenFrames?: HiddenFrame[];
 	/** The tab was opened with `insecure`; a replacement worker re-applies it. */
 	insecure?: boolean;
 }
@@ -307,6 +320,35 @@ const DEBUGGER_DETACH_CAUSE =
 	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
 const DEBUGGER_DETACH_REFUSAL =
 	"Chrome refuses the attach while another extension's frame, such as a password manager's inline autofill menu, is open in it";
+
+/** Most hidden frames one notice names; the rest are counted. */
+const MAX_HIDDEN_FRAMES_NAMED = 5;
+
+/** Record frames the omp relay reports it hid in `tab`, for the next call on it to report. */
+function noteHiddenFrames(tab: WorkerTabSession, frames: HiddenFrame[] | undefined): void {
+	if (frames && frames.length > 0) (tab.hiddenFrames ??= []).push(...frames);
+}
+
+/**
+ * What the omp relay hid in `tab` since a call last said so, worded for the agent to pass on to the user, who lost
+ * the frame too; `undefined` when nothing was hidden. Clears the record.
+ */
+function takeHiddenFramesNotice(tab: TabSession | undefined): string | undefined {
+	if (tab?.backend !== "worker" || !tab.hiddenFrames) return undefined;
+	const frames = new Map<string, { extensionId: string; path: string; title?: string }>();
+	for (const { extensionId, path, title } of tab.hiddenFrames) {
+		// Quoted: the path is the page's text and the title the other extension's, which the notice labels as such
+		// rather than as a name Chrome vouches for.
+		const frame = { extensionId, path: JSON.stringify(path), ...(title ? { title: JSON.stringify(title) } : {}) };
+		frames.set(JSON.stringify(frame), frame);
+	}
+	tab.hiddenFrames = undefined;
+	const named = [...frames.values()].slice(0, MAX_HIDDEN_FRAMES_NAMED);
+	return prompt
+		.render(hiddenFramesNotice, { frames: named, more: frames.size - named.length, several: frames.size > 1 })
+		.trim();
+}
+
 /** Chrome's `chrome.debugger.onDetach` reason when the user pressed Cancel on its debugging bar. */
 const USER_CANCELLED_DEBUGGER = "canceled_by_user";
 // Init budget for the worker that replaces one that exited on its own; adopting a live page takes well under a second.
@@ -340,6 +382,23 @@ class DebuggerDetachedError extends ToolError {
 	) {
 		super(message);
 	}
+}
+/**
+ * Chrome refused a relay tab's re-adoption over another extension's frame. The tab is not closed for that: it stays
+ * open as it is, and the next call on it re-adopts it.
+ */
+class TabHeldOutError extends ToolError {
+	constructor(context?: string) {
+		super(
+			`${context ? `${context}. ` : ""}omp could not reattach to the tab: ${DEBUGGER_DETACH_REFUSAL}, and that frame was still there after omp cleared it. omp kept the tab open as it is, and the next call on it reattaches to it; if that call fails the same way, the frame stays until the user closes it in Chrome (Escape, or a click elsewhere on the page)`,
+		);
+	}
+}
+/** Rethrow a {@link TabHeldOutError} with what the call was doing when the tab was lost, and any other error as is. */
+function heldOutWith(context: string): (error: unknown) => never {
+	return error => {
+		throw error instanceof TabHeldOutError ? new TabHeldOutError(context) : error;
+	};
 }
 const REPORTED_INIT_FAILURE = Symbol("reported-init-failure");
 
@@ -416,11 +475,14 @@ export function acquireTab(name: string, browser: BrowserHandle, opts: AcquireTa
 		async value => {
 			await releaseBrowser(browser, { kill: false });
 			// A worker that exited with no run in flight left the reset unreported; reusing its tab reports it.
+			const notes: string[] = [];
 			if (!value.created && value.tab.backend === "worker" && value.tab.workerExitNotice) {
-				const notice = value.tab.workerExitNotice;
+				notes.push(value.tab.workerExitNotice);
 				value.tab.workerExitNotice = undefined;
-				return { ...value, note: value.note ? `${notice}\n${value.note}` : notice };
 			}
+			const hidden = takeHiddenFramesNotice(value.tab);
+			if (hidden) notes.push(hidden);
+			if (notes.length > 0) return { ...value, note: [...notes, value.note].filter(Boolean).join("\n") };
 			return value;
 		},
 		async error => {
@@ -489,6 +551,9 @@ async function acquireTabImpl(
 				tempHold = true;
 				await releaseTab(name, { kill: false });
 			} else {
+				readoptHeldOutTab(name, opts.timeoutMs);
+				const readopting = awaitWorkerRecovery(name, opts, "Browser tab open aborted");
+				if (readopting) await readopting;
 				// Reuse counts as use: refresh the idle clock and resume a
 				// settle-frozen page before driving it again. A refused
 				// resume fails the open here with the same actionable
@@ -693,6 +758,7 @@ async function acquireTabImpl(
 		insecure: opts.insecure,
 	};
 	attachTabWorker(tab, worker);
+	noteHiddenFrames(tab, info.hiddenFrames);
 	tabs.set(name, tab);
 	sweepClosedTabUploads();
 	// Durably record ownership so another live omp process can reap this page if
@@ -707,9 +773,10 @@ async function acquireTabImpl(
  * Navigate a tab for an open, within what is left of the open's budget. A
  * page that outlasts it fails with goto's own report while the tab stays on
  * what loaded, instead of losing to the open's bare deadline. A tab this open
- * created (`created`) is kept for that timeout or a successfully recovered relay
- * detach: other navigation failures, or an open cancelled or past its deadline,
- * close it again so the failed open leaves nothing behind.
+ * created (`created`) is kept for that timeout, a successfully recovered relay
+ * detach, or one Chrome refused over another extension's frame: other
+ * navigation failures, or an open cancelled or past its deadline, close it
+ * again so the failed open leaves nothing behind.
  */
 async function navigateOpenedTab(
 	name: string,
@@ -738,13 +805,18 @@ async function navigateOpenedTab(
 		if (
 			created &&
 			(opts.signal?.aborted ||
-				!(error instanceof NavigationTimeoutError || error instanceof DebuggerReattachedError))
+				!(
+					error instanceof NavigationTimeoutError ||
+					error instanceof DebuggerReattachedError ||
+					error instanceof TabHeldOutError
+				))
 		) {
 			await rollBackCreatedTab(name, created);
 			throw error;
 		}
 		if (
 			error instanceof ToolAbortError ||
+			error instanceof TabHeldOutError ||
 			error instanceof RendererCrashedError ||
 			!(error instanceof Error) ||
 			tabs.get(name)?.state !== "alive"
@@ -1099,6 +1171,8 @@ export async function runInTab(name: string, opts: RunInTabOptions): Promise<Run
 		result.displays.unshift({ type: "text", text: tab.workerExitNotice });
 		tab.workerExitNotice = undefined;
 	}
+	const hidden = takeHiddenFramesNotice(tab);
+	if (hidden) result.displays.unshift({ type: "text", text: hidden });
 	return result;
 }
 
@@ -1115,6 +1189,9 @@ async function runInTabWithSnapshot(
 	},
 	snapshot: SessionSnapshot,
 ): Promise<RunResultOk> {
+	// Chrome refused this tab's last re-adoption over another extension's frame: re-adopt it first, a reattach this
+	// call and any beside it wait for as for one after a worker exit.
+	readoptHeldOutTab(name, opts.timeoutMs);
 	// A worker that exited on its own is being replaced: wait for that within this call's budget, and run only on the
 	// same tab. A tab closed and reopened under this name meanwhile is not the one this call was meant for.
 	const waitStartedAt = performance.now();
@@ -1314,12 +1391,18 @@ async function runInTabWithSnapshot(
 					opts.timeoutMs,
 					"Browser request interception cleanup failed; tab killed",
 					{ signal: cancellation.signal },
-				);
+				).catch((error: unknown) => {
+					if (error instanceof TabHeldOutError) return error;
+					throw error;
+				});
 				result.displays.push({
 					type: "text",
-					text: reattached
-						? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
-						: "Browser request interception could not be reset after this run; the tab was closed.",
+					text:
+						reattached === true
+							? `Browser request interception could not be reset after this run; the tab was reattached to a new worker. ${RECYCLE_RESETS}`
+							: reattached === false
+								? "Browser request interception could not be reset after this run; the tab was closed."
+								: `Browser request interception could not be reset after this run. ${reattached.message}`,
 				});
 			}
 			return result;
@@ -1336,7 +1419,7 @@ async function runInTabWithSnapshot(
 					opts.timeoutMs,
 					"Browser tab's renderer crashed; tab killed",
 					{ signal: cancellation.signal },
-				);
+				).catch(heldOutWith(error.message));
 				throw new RendererCrashedError(
 					reattached
 						? `${error.message}. The tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`
@@ -1367,7 +1450,8 @@ async function runInTabWithSnapshot(
 				}
 				// Re-adopt the same Chrome tab on a new worker. No `recover` pass: the page is healthy, and stopping
 				// its loading would cancel a navigation the call itself started. Chrome reports the same reason when the
-				// tab itself closes, so only a re-adoption that worked names another extension's frame as the cause.
+				// tab itself closes, so only a re-adoption that worked, or one Chrome refused over such a frame (the tab
+				// is then kept), names another extension's frame as the cause.
 				const detached = `${error.message}. ${DEBUGGER_DETACH_CAUSE}${landed}`;
 				const lost = tab.ownsPage
 					? `${error.message}${landed}. omp could not reattach to the tab it had opened, so it tried to close it: either the tab had closed, or ${DEBUGGER_DETACH_REFUSAL}. Open a new tab to continue; if another extension's frame was the cause, it can detach omp there again`
@@ -1376,21 +1460,23 @@ async function runInTabWithSnapshot(
 					recover: false,
 					failedReason: lost,
 					signal: cancellation.signal,
-				});
+				}).catch(heldOutWith(`${error.message}${landed}`));
 				// A cancel that landed while the tab was re-adopted wins over the detach report and the retry.
 				if (opts.signal?.aborted) throw new ToolAbortError();
 				if (!reattached) throw new ToolError(lost);
 				if (error.when === "during" || opts.readopted) {
+					const hidden = takeHiddenFramesNotice(tab);
 					throw new DebuggerReattachedError(
-						`${detached}. omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
+						`${detached}. ${hidden ? `${hidden} ` : ""}omp reattached to the same tab on a new worker without reloading it, so the next call works; check the page before repeating this one. ${WORKER_RESETS}.`,
 						error.when,
 					);
 				}
 				// Nothing ran: run the call on the new worker, within what the re-adoption left of its budget.
 				const remainingMs = Math.floor(opts.timeoutMs - (performance.now() - startedAt));
 				if (remainingMs <= 0) {
+					const hidden = takeHiddenFramesNotice(tab);
 					throw new DebuggerReattachedError(
-						`${detached}. omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
+						`${detached}. ${hidden ? `${hidden} ` : ""}omp reattached to the same tab on a new worker without reloading it, but that used up this call's ${opts.timeoutMs}ms budget, so the call was not run again; repeat it. ${WORKER_RESETS}.`,
 						error.when,
 					);
 				}
@@ -1418,7 +1504,7 @@ async function runInTabWithSnapshot(
 					: opts.timeoutMs;
 				const reattached = await recoverWorkerTab(tab, name, recoveryTimeoutMs, reason, {
 					signal: cancellation.signal,
-				});
+				}).catch(heldOutWith(error.message));
 				if (runTimedOut) {
 					throw new ToolError(
 						reattached
@@ -1452,7 +1538,8 @@ async function runInTabWithSnapshot(
 
 /**
  * Recycle a worker whose tab state is unknown; an inline worker shares this process, so its tab is killed instead.
- * Resolves `true` when the tab was reattached to a new worker, `false` when it was killed or closed meanwhile.
+ * Resolves `true` when the tab was reattached to a new worker, `false` when it was killed or closed meanwhile. Rejects
+ * with {@link TabHeldOutError}, the tab kept, when Chrome refused the re-adoption over another extension's frame.
  */
 async function recoverWorkerTab(
 	tab: WorkerTabSession,
@@ -1474,14 +1561,32 @@ async function recoverWorkerTab(
 	};
 	try {
 		if (tab.worker.mode === "inline") return await killTab(reason);
-		return await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS, {
+		const reattached = await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS, {
 			recover: opts.recover,
 			signal: opts.signal,
 		});
+		if (reattached) tab.heldOut = undefined;
+		return reattached;
 	} catch (recycleError) {
-		logger.warn("Failed to recycle browser tab worker; killing tab", {
-			error: recycleError instanceof Error ? recycleError.message : String(recycleError),
-		});
+		const messages = [recycleError, recycleError instanceof Error ? recycleError.cause : undefined].map(error =>
+			error instanceof Error ? error.message : String(error),
+		);
+		// Chrome refuses the debugger only while another extension's frame is in the tab: the tab is still there,
+		// and the user's. Keep it, with no worker, for the next call to re-adopt.
+		if (
+			tab.kindTag === "relay" &&
+			!opts.signal?.aborted &&
+			messages.some(message => FOREIGN_FRAME_REFUSAL.test(message)) &&
+			tabs.get(name) === tab &&
+			tab.state === "alive"
+		) {
+			logger.warn("Chrome refused to reattach a relay tab over another extension's frame; keeping it", {
+				error: messages[0],
+			});
+			tab.heldOut = true;
+			throw new TabHeldOutError();
+		}
+		logger.warn("Failed to recycle browser tab worker; killing tab", { error: messages[0] });
 		return await killTab(opts.failedReason ?? "Browser tab worker recovery failed; tab killed");
 	}
 }
@@ -1659,7 +1764,8 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	let cleanupError: unknown;
 	let targetCloseFailed = false;
-	if (wasAlive && !(tab.worker as ExitTrackedWorker)[kWorkerExited]) {
+	// A held-out tab's worker was terminated with its failed re-adoption: nothing answers a close.
+	if (wasAlive && !tab.heldOut && !(tab.worker as ExitTrackedWorker)[kWorkerExited]) {
 		try {
 			tab.worker.send({ type: "close", keepPage: opts.keepPage });
 			await waitForClosed(tab);
@@ -2125,6 +2231,25 @@ function sweepClosedTabUploads(): void {
 	void sweepUploadStaging(live, now).catch(() => undefined);
 }
 
+/**
+ * The tab list that says whether a call's tab is the one in front of its window, for a browser that draws its windows
+ * on the user's screen; undefined names no native window. omp's own Chromium (the managed launch, or a Chromium browser
+ * omp spawned) ranks its `/json/list` by when each tab was last shown; the loopback relay's marks the extension's active
+ * tab of each window. A headless browser keeps that through a tab's recycle. A connected endpoint may be remote,
+ * headless or a build whose list was never measured, and a spawned app's windows are not browser tabs.
+ */
+export function frontTabSource(kind: PuppeteerBrowserKind): FrontTabSource | undefined {
+	switch (kind.kind) {
+		case "headless":
+			return kind.headless ? undefined : "chrome";
+		case "spawned":
+			return isChromiumBrowserExecutable(kind.path) ? "chrome" : undefined;
+		case "relay":
+			return isLoopbackRelayUrl(kind.cdpUrl) ? "relay" : undefined;
+		case "connected":
+			return undefined;
+	}
+}
 async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTabOptions): Promise<WorkerInitPayload> {
 	const safeDir = getPuppeteerDir();
 	const uploadDir = newUploadStagingDir();
@@ -2138,6 +2263,8 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			// Visible launches still need an OMP-owned page, stealth setup, and
 			// independent lifecycle; only their fixed device emulation is disabled.
 			emulateViewport: browser.kind.headless,
+			frontTab: frontTabSource(browser.kind),
+			browserPid: browser.pid,
 			viewport: opts.viewport,
 			dialogs: opts.dialogs,
 			allowedDomains: opts.allowedDomains,
@@ -2185,6 +2312,8 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		insecure: opts.insecure,
 		userDriven,
 		relay: browser.kind.kind === "relay",
+		frontTab: frontTabSource(browser.kind),
+		browserPid: browser.pid,
 	};
 }
 
@@ -2212,6 +2341,7 @@ function lastUsedTargetOn(browser: PuppeteerBrowserHandle): string | undefined {
 
 function handleTabMessage(tab: WorkerTabSession, msg: WorkerOutbound): void {
 	if (msg.type === "result") {
+		noteHiddenFrames(tab, msg.hiddenFrames);
 		const pending = tab.pending.get(msg.id);
 		if (!pending) return;
 		// The run's own `finally` drops the entry: a recovery after its result still holds the tab busy.
@@ -2270,6 +2400,38 @@ async function dispatchToolCall(
 		pending.toolCalls.delete(msg.id);
 		pending.signal?.removeEventListener("abort", onParentAbort);
 	}
+}
+
+/**
+ * Re-adopt a tab Chrome refused over another extension's frame, published as the tab's `workerRecovery` so the call
+ * that started it and any beside it wait for it. A refusal again rejects them with {@link TabHeldOutError}, the tab
+ * still kept; a re-adoption that works is reported by the next result.
+ */
+function readoptHeldOutTab(name: string, timeoutMs: number): void {
+	const tab = tabs.get(name);
+	if (tab?.backend !== "worker" || !tab.heldOut || tab.workerRecovery) return;
+	const readoption: Promise<boolean> = recoverWorkerTab(
+		tab,
+		tab.name,
+		timeoutMs,
+		"Browser tab worker lost; tab killed",
+		{
+			// The page is as the user left it; stopping its loading would cancel a navigation they started.
+			recover: false,
+			failedReason: "omp could not reattach to the tab after Chrome had refused it, so the tab was released",
+		},
+	)
+		.then(reattached => {
+			if (reattached) {
+				tab.workerExitNotice = `Chrome had kept omp out of this tab since an earlier call (${DEBUGGER_DETACH_REFUSAL}); omp reattached to it on a new worker before this call, without reloading it. ${WORKER_RESETS}.`;
+			}
+			return reattached;
+		})
+		.catch(heldOutWith(`Chrome still keeps omp out of tab ${JSON.stringify(tab.name)}`))
+		.finally(() => {
+			if (tab.workerRecovery === readoption) tab.workerRecovery = undefined;
+		});
+	tab.workerRecovery = readoption;
 }
 
 /**
@@ -2400,6 +2562,9 @@ async function recycleTimedOutWorkerTab(
 		recover: opts.recover ?? true,
 		userDriven: tab.kindTag === "connected" || tab.kindTag === "relay",
 		relay: tab.kindTag === "relay",
+		frontTab: frontTabSource(tab.browser.kind),
+		openedInFront: tab.kindTag === "headless",
+		browserPid: tab.browser.pid,
 	};
 	// A release can land while the new worker starts: it tore down the worker it saw, so a
 	// replacement published after it would drive a closed tab.
@@ -2410,6 +2575,7 @@ async function recycleTimedOutWorkerTab(
 		}
 		tab.worker = replacement;
 		tab.info = info;
+		noteHiddenFrames(tab, info.hiddenFrames);
 		tab.state = "alive";
 		attachTabWorker(tab, replacement);
 		return true;

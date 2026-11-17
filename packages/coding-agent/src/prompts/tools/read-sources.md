@@ -6,11 +6,13 @@
   - &raw=true unquoted strings, &compact=true one-line values, &offset=&limit= page array elements or result values.
   - `&` inside the filter → %26.
   - Output is text, not one JSON document; follow its continuation hint for the next page.
+- Executables (ELF/PE/Mach-O, extensionless ok): on-disk metadata only; no analysis database or backend download.
+  - Universal Mach-O: host-arch slice by default; bin:@<arch> picks another metadata view.
 {{#if BINARY_VIEWS}}
-- Executables (ELF/PE/Mach-O, extensionless ok): overview + function list.
-  - :<func|0xaddr> pseudocode, :<func>:asm, :imports, :exports, :strings, :xrefs:<func|0xaddr>.
-  - Line ranges apply after the view (bin:main:10-40).
-  - Universal Mach-O: host-arch slice by default, bin:@<arch> picks another (bin:@x86_64:main).
+  - Explicit analysis: :overview function list; :<func|0xaddr> pseudocode; :<func>:asm; :imports; :exports; :strings; :xrefs:<func|0xaddr>.
+  - These selectors open the selected disassembler and may provision Ghidra on first analysis.
+  - Line ranges apply after the view (bin:main:10-40); bin:@x86_64:main analyzes a chosen universal slice.
+  - For edits and Python scripting, use eval's `dsm` namespace → xd://eval/dsm.
 {{/if}}
 - Video requires ffmpeg/ffprobe: bare preview grid+metadata, :412 frame, :1h5m42s/:90s/:01:23 time.
 - SVG/SVGZ default text; :img rasterizes an SVG/SVGZ into an image, :raw original.
