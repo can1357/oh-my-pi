@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed one-shot retries to honor an explicitly configured quota reset timezone for custom providers.
+- Fixed one-shot retries to honor an explicitly configured quota reset timezone for custom providers ([#19541](https://github.com/can1357/oh-my-pi/pull/19541) by [@xingmuse](https://github.com/xingmuse))
 
 ## [18.20.1] - 2026-11-14
 

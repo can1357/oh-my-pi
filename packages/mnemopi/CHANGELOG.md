@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed memory completion retries to honor the model's configured quota reset timezone.
+- Fixed memory completion retries to honor the model's configured quota reset timezone ([#19541](https://github.com/can1357/oh-my-pi/pull/19541) by [@xingmuse](https://github.com/xingmuse))
 
 ## [18.21.0] - 2026-11-16
 
