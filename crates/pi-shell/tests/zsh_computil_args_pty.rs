@@ -48,10 +48,10 @@ fn spawn(real: bool, rc: &str, rows: u16, cols: u16) -> Spawn {
 
 /// Source the rc file (`-f` skips it) and wait until it ran.
 fn start(pty: &mut Pty) -> io::Result<()> {
-	pty.settle(QUIET, SLOW)?;
+	pty.wait_raw(SLOW)?;
 	pty.type_keys(". ~/.zshrc; print -r READY$((6*7))\r", KEY)?;
 	pty.read_until("READY42", SLOW)?;
-	pty.settle(QUIET, TIMEOUT)
+	pty.wait_raw(TIMEOUT)
 }
 
 /// Run `run` on obash and, when installed, on the real zsh; the outputs
