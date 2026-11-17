@@ -337,6 +337,11 @@ class KiroAttempt {
 		usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 		if (this.contextUsagePercentage !== undefined && model.contextWindow) {
 			usage.contextTokens = Math.round((this.contextUsagePercentage / 100) * model.contextWindow);
+			// Kiro streams no token counts without `tokenUsage`; the server's context estimate stands in for input.
+			if (Object.keys(this.tokenUsage).length === 0) {
+				usage.input = usage.contextTokens;
+				usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+			}
 		}
 		calculateCost(model, usage);
 	}
