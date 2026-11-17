@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
-import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const cliEntry = path.resolve(import.meta.dir, "../src/cli.ts");
@@ -57,14 +57,15 @@ describe("omp auth-broker serve shutdown", () => {
 			const seedStore = await SqliteAuthCredentialStore.open(dbPath);
 			const seed = new AuthStorage(seedStore);
 			// MCP rows carry their own token endpoint, so the broker's refresh reaches the local server.
-			await seed.credentials.set(MCP_PROVIDER, {
+			const credential: MCPStoredOAuthCredential = {
 				type: "oauth",
 				access: "stale-access",
 				refresh: "original-refresh",
 				expires: Date.now() - 60_000,
 				tokenUrl: `http://127.0.0.1:${tokenServer.port}/token`,
 				clientId: "client-xyz",
-			} as OAuthCredential);
+			};
+			await seed.credentials.set(MCP_PROVIDER, credential);
 			seed.close();
 			seedStore.close();
 

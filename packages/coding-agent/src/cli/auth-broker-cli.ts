@@ -174,10 +174,17 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			.finally(() => storage.close())
 			.then(stopped.resolve, stopped.reject);
 	};
-	process.once("SIGINT", () => shutdown("SIGINT"));
-	process.once("SIGTERM", () => shutdown("SIGTERM"));
+	const onSigint = (): void => shutdown("SIGINT");
+	const onSigterm = (): void => shutdown("SIGTERM");
+	process.once("SIGINT", onSigint);
+	process.once("SIGTERM", onSigterm);
 
-	await stopped.promise;
+	try {
+		await stopped.promise;
+	} finally {
+		process.off("SIGINT", onSigint);
+		process.off("SIGTERM", onSigterm);
+	}
 }
 
 async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
