@@ -28,15 +28,17 @@ function createSession(cwd: string, settings: Record<string, unknown> = {}): Too
 	};
 }
 
+/** One tool call's approval, as its gate asks it: with the call's context. */
 function bashApproval(
 	cwd: string,
 	command: string,
 	extra: { cwd?: string } = {},
 	settings: Record<string, unknown> = {},
 ): ToolApprovalDecision {
-	const approval = new BashTool(createSession(cwd, settings)).approval;
+	const session = createSession(cwd, settings);
+	const approval = new BashTool(session).approval;
 	if (typeof approval !== "function") throw new Error("Bash approval must be dynamic");
-	return approval({ command, ...extra });
+	return approval({ command, ...extra }, { settings: session.settings } as AgentToolContext);
 }
 
 /** The guard rule named in a bash approval's reason, `critical_pattern` for the legacy reason, or `undefined`. */

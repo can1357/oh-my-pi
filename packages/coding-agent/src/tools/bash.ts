@@ -61,13 +61,15 @@ import {
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
 import {
+	bindGuardProbeScope,
 	CRITICAL_BASH_PATTERNS,
 	CRITICAL_PATTERN_REASON,
+	callProbeBudget,
 	checkShellGuard,
 	findShellGuardHit,
 	type GuardHit,
-	GuardProbeBudget,
 	type GuardScope,
+	inGuardProbeScope,
 	type ShellGuardOptions,
 } from "./guard-rules";
 import { ToolAbortError } from "./tool-errors";
@@ -609,16 +611,21 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly approval = (args: unknown, ctx?: AgentToolContext): ToolApprovalDecision =>
 		this.#decide(args, ctx, this.#probeCanChangeDecision(ctx));
 
+	/** The extension wrapper's binding before its final gate: the gate and the prompt rows share a probe budget. */
+	readonly bindApprovalTargets = (): void => bindGuardProbeScope();
+
 	/**
-	 * Whether a `discard_changes`/`kills_harness` probe can change how this call resolves. Under
-	 * `yolo` a bare safety override is ignored, so a hit only matters when the user set a
-	 * `tools.approval.bash` policy (a hit then replaces a `bash.patterns` allow). The mode is the
-	 * one `resolveApproval` resolves this call under, which a caller can choose apart from the
-	 * settings (the ACP permission gate asks under `always-ask` when `yolo` is only the schema
-	 * default); a direct call resolves it the way the extension wrapper does: from the call
-	 * context, else the session settings.
+	 * Whether a `discard_changes`/`kills_harness` probe can change how this call resolves. A lookup
+	 * with no call context outside the call's own approval (the agent loop's scheduling lookup) only
+	 * reads the tier, which no probe changes. Under `yolo` a bare safety override is ignored, so a
+	 * hit only matters when the user set a `tools.approval.bash` policy (a hit then replaces a
+	 * `bash.patterns` allow). The mode is the one `resolveApproval` resolves this call under, which a
+	 * caller can choose apart from the settings (the ACP permission gate asks under `always-ask` when
+	 * `yolo` is only the schema default); a direct call resolves it the way the extension wrapper
+	 * does: from the call context, else the session settings.
 	 */
 	#probeCanChangeDecision(ctx: AgentToolContext | undefined): boolean {
+		if (!ctx && !inGuardProbeScope()) return false;
 		const { approvalMode, userPolicies } =
 			ctx?.approvalResolution ?? resolveApprovalFromContext(ctx ?? { settings: this.session.settings });
 		return approvalMode !== "yolo" || Object.hasOwn(userPolicies, this.name);
@@ -667,7 +674,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
 		}
-		const guardHit = this.#guardHit(command, input.cwd, { probe, toolCall: ctx?.toolCall });
+		const guardHit = this.#guardHit(command, input.cwd, {
+			probe,
+			budget: probe ? callProbeBudget(ctx?.toolCall) : undefined,
+		});
 		const criticalCommand = guardHit !== undefined;
 		const criticalDecision: ToolApprovalDecision = {
 			tier: "exec",
@@ -761,8 +771,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
-		// The segments and the whole chain are checks for one call: their probes share one budget.
-		const budget = new GuardProbeBudget();
+		// The segments and the whole chain are checks for this call: their probes share the budget of
+		// the call's approval paths, so the rows ask nothing the gate already asked.
+		const budget = callProbeBudget();
 		const guardRules = cfgToolsGuardRules.get(this.session.settings);
 		const scope = this.#guardScope(cwd);
 		// The whole chain first: a `git stash pop` anywhere in it may run before any segment, so each

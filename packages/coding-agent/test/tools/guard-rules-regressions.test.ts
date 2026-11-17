@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { AgentToolContext, ToolApprovalDecision, ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { withToolApprovalScope } from "@oh-my-pi/pi-coding-agent/tools/approval-scope";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { parseShellScript } from "@oh-my-pi/pi-coding-agent/tools/shell-tokenize";
@@ -31,10 +32,12 @@ function createSession(cwd: string, settings: Record<string, unknown> = {}): Too
 	};
 }
 
+/** One tool call's approval, as its gate asks it: with the call's context. */
 function bashApproval(cwd: string, command: string): ToolApprovalDecision {
-	const approval = new BashTool(createSession(cwd)).approval;
+	const session = createSession(cwd);
+	const approval = new BashTool(session).approval;
 	if (typeof approval !== "function") throw new Error("Bash approval must be dynamic");
-	return approval({ command });
+	return approval({ command }, { settings: session.settings } as AgentToolContext);
 }
 
 /** The guard rule named in an approval's reason, `critical_pattern` for the legacy reason, or `undefined`. */
@@ -597,6 +600,33 @@ describe("guard rule regressions", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32")("probes a call once across its scheduling lookup, gate and prompt rows", () => {
+		const spawn = spyOn(Bun, "spawnSync").mockImplementation(
+			() => ({ success: false, stdout: Buffer.from("") }) as never,
+		);
+		// Each probe takes one second of clock time.
+		const clock = spyOn(performance, "now").mockImplementation(() => 1_000_000 + spawn.mock.calls.length * 1_000);
+		try {
+			const tool = new BashTool(createSession(cwd, { "bash.allowCompoundCommands": true }));
+			const approval = tool.approval as (args: unknown, ctx?: AgentToolContext) => ToolApprovalDecision;
+			const command = Array.from({ length: 10 }, (_, i) => `pkill zz-n${i}`).join(" && ");
+			// The agent loop's scheduling lookup has no context and reads only the tier.
+			expect(approval({ command })).toBe("exec");
+			expect(spawn.mock.calls.length).toBe(0);
+			// The extension wrapper binds the call's approval scope, gates the call, then shows its rows.
+			withToolApprovalScope(() => {
+				tool.bindApprovalTargets?.({ command });
+				expect(approval({ command }, callContext())).toBe("exec");
+				expect(tool.formatApprovalDetails({ command }).filter(row => row.includes("pkill"))).toHaveLength(10);
+			});
+			// Three seconds of probes for the whole call.
+			expect(spawn.mock.calls.length).toBe(3);
+		} finally {
+			clock.mockRestore();
+			spawn.mockRestore();
+		}
+	});
+
 	it("parses a long `&&` chain in time linear in its length", () => {
 		// Each `&&` once copied the whole chain before it: quadratic, and seconds at this length.
 		const members = 15_000;
@@ -1107,7 +1137,6 @@ describe("guard rule review regressions", () => {
 		// An earlier call of the batch edits a tracked file.
 		fs.writeFileSync(path.join(cwd, "a.txt"), "edited\n");
 		expect(ruleOf(approval(command, callContext()))).toBe("discard_changes");
-		expect(ruleOf(approval(command))).toBe("discard_changes");
 	});
 
 	it("skips git's `--attr-source` value to the subcommand", async () => {

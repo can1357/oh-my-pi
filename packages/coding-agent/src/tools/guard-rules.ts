@@ -67,6 +67,7 @@ import type { ToolApprovalDecision, ToolCallContext, ToolTier } from "@oh-my-pi/
 import { getAgentDbPath, getAuthBrokerSnapshotCachePath } from "@oh-my-pi/pi-utils";
 import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { InternalUrlRouter } from "../internal-urls/router";
+import { toolApprovalScopeToken } from "./approval-scope";
 import { resolveToCwd } from "./path-utils";
 import {
 	parseShellScript,
@@ -1331,58 +1332,89 @@ function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | u
 // -- probes ------------------------------------------------------------------------------------------
 
 /**
- * How long the probes of one bash call may take together. Each probe gets what is left as its
- * timeout; a probe that finds nothing left does not run and counts as no match, as one that times
- * out does.
+ * How long the probes of one bash call may take together, across its approval paths and the rows
+ * of its prompt. Each probe gets what is left as its timeout; a probe that finds nothing left does
+ * not run and counts as no match, as one that times out does.
  */
 const PROBE_BUDGET_MS = 3_000;
 
 type ProbeAnswer = string | boolean | undefined;
 
 /**
- * The probes of the checks a caller makes together, such as the segments of a compound prompt and
- * the whole chain: together they take at most {@link PROBE_BUDGET_MS} from when the budget is made,
- * and each probe is asked once among them.
+ * The probes of the checks one tool call makes: its approval paths (the ACP permission gate, the
+ * extension wrapper before and after `tool_call` hooks) and the rows of its prompt (the segments
+ * and the whole chain of a compound command). Together their probes take at most
+ * {@link PROBE_BUDGET_MS}, each probe is asked once among them, and a command checked on its own
+ * again gets what its first check found. Never shared across calls: an earlier call of the same
+ * batch may change the tree before a later call's gate.
  */
 export class GuardProbeBudget {
-	readonly #deadline = performance.now() + PROBE_BUDGET_MS;
-	readonly #answers: Map<string, ProbeAnswer>;
-
-	/** `answers`: what the earlier checks of the same tool call got, shared with them. */
-	constructor(answers = new Map<string, ProbeAnswer>()) {
-		this.#answers = answers;
-	}
+	#left = PROBE_BUDGET_MS;
+	readonly #answers = new Map<string, ProbeAnswer>();
+	/** What the probing rules found for each command checked on its own, by scope and command. */
+	readonly results = new Map<string, GuardHit | undefined>();
 
 	/**
-	 * The answer to the probe `key`: a kept one, else `run`'s, which gets the time left as its
-	 * timeout. With no time left it does not run and answers `undefined`, which is not kept, so a
-	 * later check with time of its own asks it. A probe that throws answers `undefined`.
+	 * The answer to the probe `key`: a kept one, else `run`'s, which gets the probe time left as its
+	 * timeout and uses up what it takes. With none left it does not run and answers `undefined`. A
+	 * probe that throws answers `undefined`.
 	 */
 	ask(key: string, run: (timeoutMs: number) => ProbeAnswer): ProbeAnswer {
 		if (this.#answers.has(key)) return this.#answers.get(key);
-		const left = this.#deadline - performance.now();
-		if (left <= 0) return undefined;
+		if (this.#left <= 0) return undefined;
+		const start = performance.now();
 		let answer: ProbeAnswer;
 		try {
-			answer = run(Math.ceil(left));
+			answer = run(Math.ceil(this.#left));
 		} catch {
 			answer = undefined;
 		}
+		this.#left -= performance.now() - start;
 		this.#answers.set(key, answer);
 		return answer;
 	}
 }
 
+/** Each tool call's probe budget, by its loop context. */
+const toolCallBudgets = new WeakMap<ToolCallContext, GuardProbeBudget>();
 /**
- * What the checks for each tool call found: each probe's answer, and what the probing rules found
- * for a command, by scope and command. The call's approval paths (the ACP permission gate, the
- * extension wrapper before and after `tool_call` hooks) thus check a command once. Never shared
- * across calls: an earlier call of the same batch may change the tree before a later call's gate.
+ * Each tool call's probe budget, by the approval scope ({@link toolApprovalScopeToken}) the
+ * extension wrapper approves that call in and shows its prompt from.
  */
-const callChecks = new WeakMap<
-	ToolCallContext,
-	{ answers: Map<string, ProbeAnswer>; results: Map<string, GuardHit | undefined> }
->();
+const scopeBudgets = new WeakMap<object, GuardProbeBudget>();
+
+/**
+ * Marks the current approval scope as one tool call's own: the extension wrapper binds it (through
+ * the tool's `bindApprovalTargets`) before its final gate and prompt. Only such a scope keys a probe
+ * budget; a scope the call merely runs inside, such as that of the `task` call that started a
+ * subagent, is shared with other calls.
+ */
+export function bindGuardProbeScope(): void {
+	const scope = toolApprovalScopeToken();
+	if (scope && !scopeBudgets.has(scope)) scopeBudgets.set(scope, new GuardProbeBudget());
+}
+
+/** Whether the current approval scope is a tool call's own ({@link bindGuardProbeScope}). */
+export function inGuardProbeScope(): boolean {
+	const scope = toolApprovalScopeToken();
+	return scope !== undefined && scopeBudgets.has(scope);
+}
+
+/**
+ * The probe budget of the tool call being approved, shared by its approval paths and the rows of
+ * its prompt: found by its loop context `toolCall`, or by the call's own approval scope
+ * ({@link bindGuardProbeScope}), which the prompt rows have without a context. A new one when
+ * neither knows one.
+ */
+export function callProbeBudget(toolCall?: ToolCallContext): GuardProbeBudget {
+	const token = toolApprovalScopeToken();
+	const scope = token && scopeBudgets.has(token) ? token : undefined;
+	const budget =
+		(toolCall && toolCallBudgets.get(toolCall)) ?? (scope && scopeBudgets.get(scope)) ?? new GuardProbeBudget();
+	if (toolCall) toolCallBudgets.set(toolCall, budget);
+	if (scope) scopeBudgets.set(scope, budget);
+	return budget;
+}
 
 // -- discard_changes ---------------------------------------------------------------------------------
 
@@ -2136,15 +2168,11 @@ export interface ShellGuardOptions {
 	 */
 	probe?: boolean;
 	/**
-	 * The probe time this check may use, shared with the other checks the caller makes together.
-	 * Without one the check has its own {@link PROBE_BUDGET_MS}.
+	 * The probe budget of the tool call this check is for ({@link callProbeBudget}): its probes
+	 * share the call's time and answers, and a whole command checked again for the call gets what
+	 * its first check found. Without one the check has its own {@link PROBE_BUDGET_MS}.
 	 */
 	budget?: GuardProbeBudget;
-	/**
-	 * The tool call being approved. Its other approval paths reuse what this check found, and its
-	 * probe answers; no other call does. Without one, nothing is reused.
-	 */
-	toolCall?: ToolCallContext;
 	/**
 	 * Where an earlier part of the command line joined to this one by `&&` leaves the shell (the
 	 * `end` that checking that part reported), for a segment of a compound prompt: the command starts
@@ -2254,15 +2282,13 @@ function firstHit(
 		);
 	}
 	if (options.probe === false) return undefined;
-	const { toolCall } = options;
-	let checks = toolCall && callChecks.get(toolCall);
-	if (toolCall && !checks) {
-		checks = { answers: new Map(), results: new Map() };
-		callChecks.set(toolCall, checks);
-	}
-	const key = `${scope.cwd}\0${scope.home}\0${command}`;
-	if (checks?.results.has(key)) return checks.results.get(key);
-	const budget = options.budget ?? new GuardProbeBudget(checks?.answers);
+	const budget = options.budget ?? new GuardProbeBudget();
+	// A segment of a compound prompt depends on the parts before it: only a whole command is kept.
+	const key =
+		options.after === undefined && options.releases === undefined
+			? `${scope.cwd}\0${scope.home}\0${command}`
+			: undefined;
+	if (key !== undefined && budget.results.has(key)) return budget.results.get(key);
 	let found: GuardHit | undefined;
 	probing: for (const pipeline of pipelines) {
 		for (const simple of pipeline) {
@@ -2270,7 +2296,7 @@ function firstHit(
 			if (found) break probing;
 		}
 	}
-	checks?.results.set(key, found);
+	if (key !== undefined) budget.results.set(key, found);
 	return found;
 }
 
