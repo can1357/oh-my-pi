@@ -422,7 +422,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 		const sleepError = String(await rejectionOf(call("waitFor", [1000])));
 		expect(sleepError).toContain("tab.waitFor(1000) waits for a selector string, not a number of milliseconds");
 		expect(sleepError).toContain("tab.waitForSelector(selector)");
-	}, 60_000);
+	});
 
 	it("calls a parenthesized function expression with its predicate arguments", async () => {
 		expect(await call("waitForFunction", ["((n) => n * 2)", { timeout: 5_000 }, 21])).toBe(42);
