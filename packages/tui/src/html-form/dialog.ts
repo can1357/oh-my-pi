@@ -40,7 +40,7 @@ import { convertImageToPngShared } from "../chat/image-loading";
 import { Editor } from "../components/editor";
 import { Image, type ImageBudget, measureRender } from "../components/image";
 import { Input } from "../components/input";
-import { renderTableRow, type TableColumn } from "../components/table";
+import { renderTableRowLines, type TableColumn } from "../components/table";
 import {
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -1838,7 +1838,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		return [...label, ...rows.map(row => `${prefix}${row}`)];
 	}
 
-	/** Atoms of a non-field block: one per wrapped line, list item or table row. */
+	/** Atoms of a non-field block: one per wrapped line, list item or table row line. */
 	#contextAtoms(
 		block: Exclude<FormBlock, { kind: "field" }>,
 		width: number,
@@ -1877,25 +1877,32 @@ export class HtmlFormDialog implements Component, Focusable {
 				return [atom([theme.fg("dim", truncateToWidth(this.#mediaNote(block, slot), width, Ellipsis.Unicode))])];
 			}
 			case "table": {
-				const cells = block.rows.map(row => row.map(cell => sanitize(spansText(cell)).replace(/\s+/g, " ")));
+				const cells = block.rows.map(row => row.map(cell => sanitize(spansText(cell))));
 				const count = Math.max(0, ...cells.map(row => row.length));
 				const columns: TableColumn[] = Array.from({ length: count }, (_, column) => ({
-					width: Math.max(1, ...cells.map(row => visibleWidth(row[column] ?? ""))),
+					width: Math.max(
+						1,
+						...cells.flatMap(row => (row[column] ?? "").split("\n").map(line => visibleWidth(line))),
+					),
 					minWidth: 4,
 					align: "left",
-					overflow: "truncate",
+					overflow: "wrap",
 				}));
-				const atoms = cells.map((row, index) => {
+				// A row's continuation lines refuse a break before them, so it pages whole unless taller than a page.
+				const atoms: PageAtom[] = [];
+				cells.forEach((row, index) => {
+					if (index > 0 && index === block.headerRows) {
+						atoms.push(atom([theme.fg("dim", "─".repeat(width))], BreakRank.Never));
+					}
 					const style =
 						index < block.headerRows
 							? (text: string) => theme.bold(theme.fg("text", text))
 							: (text: string) => theme.fg("muted", text);
 					const padded = Array.from({ length: count }, (_, column) => ({ text: row[column] ?? "", style }));
-					return atom([renderTableRow(padded, columns, width, { gap: "  " })]);
+					renderTableRowLines(padded, columns, width, { gap: "  " }).forEach((line, part) => {
+						atoms.push(atom([line], part === 0 ? BreakRank.Inside : BreakRank.Never));
+					});
 				});
-				if (block.headerRows > 0 && block.headerRows < atoms.length) {
-					atoms.splice(block.headerRows, 0, atom([theme.fg("dim", "─".repeat(width))], BreakRank.Never));
-				}
 				return atoms;
 			}
 		}

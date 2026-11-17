@@ -8,6 +8,11 @@
 ### Added
 
 - Agent names in Task tool rows and agent hub rows take a colour of their own in the terminal UI: Main takes the theme accent, and subagents take one of six colours in the order they arrive, picked from the theme's own palette so each stays readable on its background; themes can set them with the optional `subagent1`–`subagent6` tokens ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a `wrap` overflow for `TableColumn` and `renderTableRowLines()`, which word-wraps such cells over extra lines and keeps their hard line breaks; `Table` renders them the same way
+
+### Fixed
+
+- Fixed tables in Ask forms cutting long cells off with an ellipsis and dropping their `<br>` lines; cells now wrap within their column ([#19506](https://github.com/can1357/oh-my-pi/issues/19506))
 
 ### Fixed
 
