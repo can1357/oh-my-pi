@@ -141,10 +141,10 @@ mod platform {
 			} else {
 				0
 			};
-			slot
-				.delivered_at
-				.store(monotonic_nanos(), Ordering::Relaxed);
-			slot.sender.store(sender, Ordering::Release);
+			let delivered_at = monotonic_nanos();
+			// Sender before time: `take` reads them the other way round.
+			slot.sender.store(sender, Ordering::Relaxed);
+			slot.delivered_at.store(delivered_at, Ordering::Release);
 		}
 		let previous = slot.previous.load(Ordering::Acquire);
 		if slot.previous_flags.load(Ordering::Acquire) & libc::SA_SIGINFO != 0 {
@@ -190,16 +190,21 @@ mod platform {
 	}
 
 	pub fn take(signal: c_int) -> Option<SignalSender> {
-		let slot = slot(signal)?;
-		let sender = slot.sender.swap(0, Ordering::Acquire);
+		take_from(slot(signal)?, || {})
+	}
+
+	/// `between` runs between the two reads; tests deliver a signal there.
+	fn take_from(slot: &Slot, between: impl FnOnce()) -> Option<SignalSender> {
+		// Time first: a delivery between the reads can only tighten the check.
+		let delivered_at = slot.delivered_at.load(Ordering::Acquire);
+		between();
+		let sender = slot.sender.swap(0, Ordering::Relaxed);
 		if sender == 0 {
 			return None;
 		}
 		let pid = ((sender >> 32) as u32).cast_signed();
 		let uid = sender as u32;
-		let since_delivery = Duration::from_nanos(
-			monotonic_nanos().saturating_sub(slot.delivered_at.load(Ordering::Relaxed)),
-		);
+		let since_delivery = Duration::from_nanos(monotonic_nanos().saturating_sub(delivered_at));
 		// A process younger than the signal took over a reaped sender's pid.
 		let process = ProcInfo::from_pid(pid).filter(|process| {
 			process
@@ -217,6 +222,58 @@ mod platform {
 				.and_then(|process| process.ppid())
 				.filter(|ppid| *ppid > 0),
 		})
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		extern "C" fn runtime_handler(_signal: c_int) {}
+
+		/// The wrapper in front of a handler, as `capture` puts it in front of
+		/// the runtime's.
+		fn install(signal: c_int) {
+			// SAFETY: sigaction is plain data; a zeroed one with a handler is a
+			// valid action.
+			let mut action = unsafe { mem::zeroed::<libc::sigaction>() };
+			action.sa_sigaction = runtime_handler as *const () as usize;
+			// SAFETY: action is valid for the call.
+			let installed =
+				unsafe { libc::sigaction(signal, &raw const action, std::ptr::null_mut()) };
+			assert_eq!(installed, 0);
+			assert!(capture(signal));
+		}
+
+		/// Sends `signal` from this thread; its handler has run on return.
+		fn raise(signal: c_int) {
+			// SAFETY: `install` gave the signal a handler.
+			assert_eq!(unsafe { libc::raise(signal) }, 0);
+		}
+
+		#[test]
+		fn delivery_during_take_cannot_vouch_for_an_older_sender() {
+			let signal = libc::SIGUSR1;
+			install(signal);
+			let slot = slot(signal).unwrap();
+			// SAFETY: none of these can fail.
+			let (pid, uid, ppid) = unsafe { (libc::getpid(), libc::getuid(), libc::getppid()) };
+
+			raise(signal);
+			let sender = take(signal).expect("this process sent the signal");
+			assert_eq!((sender.pid, sender.uid, sender.parent_pid), (pid, uid, Some(ppid)));
+
+			// Delivered before this process started, so whatever holds the pid
+			// now is not the sender; a second delivery lands mid-take.
+			raise(signal);
+			let age = ProcInfo::from_pid(pid)
+				.and_then(|process| process.age())
+				.unwrap();
+			let before_start =
+				monotonic_nanos().saturating_sub((age + Duration::from_secs(1)).as_nanos() as u64);
+			slot.delivered_at.store(before_start, Ordering::Release);
+			let sender = take_from(slot, || raise(signal)).expect("a sender was pending");
+			assert_eq!((sender.pid, sender.command, sender.parent_pid), (pid, None, None));
+		}
 	}
 }
 
