@@ -10,7 +10,10 @@
 import type { Api, CodexCompactionContext, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
-import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import {
+	applyCodexResponsesLiteShape,
+	moveCodexInstructionsToInput,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import type {
 	OpenAICodexCompactionBody,
 	OpenAICodexCompatibilityMetadata,
@@ -231,6 +234,8 @@ export function buildCompactionV2Request(
 	};
 	if (model.useResponsesLite) {
 		applyCodexResponsesLiteShape(body);
+	} else {
+		moveCodexInstructionsToInput(body);
 	}
 	return buildCompactionV2RequestFromBody(model, body, options);
 }

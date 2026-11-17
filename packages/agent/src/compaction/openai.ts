@@ -18,7 +18,10 @@
 import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
-import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import {
+	applyCodexResponsesLiteShape,
+	moveCodexInstructionsToInput,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	applyInferenceHeaders,
 	applySessionHeader,
@@ -991,9 +994,10 @@ export async function requestOpenAiRemoteCompaction(
 				includeInstallationHeader: true,
 			}).headers,
 		);
-		// Responses Lite models take the same rewrite on `/responses/compact`:
-		// instructions ride as an input item and the lite marker header is set
-		// (codex-rs routes compaction through `build_responses_request`).
+		// codex-rs routes `/responses/compact` through `build_responses_request`:
+		// instructions always ride as a leading input item, and Responses Lite
+		// models additionally take the Lite rewrite and marker header.
+		moveCodexInstructionsToInput(request);
 		if (model.useResponsesLite) {
 			applyCodexResponsesLiteShape(request);
 			headers[OPENAI_HEADERS.RESPONSES_LITE] = "true";

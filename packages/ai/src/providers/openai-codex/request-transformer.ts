@@ -338,18 +338,46 @@ function stripImageDetails(input: unknown[]): void {
  */
 export interface CodexLiteShapedBody {
 	instructions?: unknown;
+	prompt_cache_key?: unknown;
 	tools?: unknown;
 	tool_choice?: unknown;
 	input?: unknown;
 	parallel_tool_calls?: unknown;
 }
 
+/** Content-item kind codex-rs tags its base-instructions developer message with. */
+const CODEX_BASE_INSTRUCTIONS_KIND = "model.base_instructions";
+
+/**
+ * Moves top-level `instructions` into a leading developer message in place, as
+ * codex-rs has done for every Responses and `/responses/compact` request since
+ * 0.162 (openai/codex#51156): `BaseInstructionsFragment`, tagged
+ * `model.base_instructions`, with id `msg_<uuidv5(uuidv5(OID, thread), text)>`.
+ * The thread is the prompt cache key, so the id stays stable across retries and
+ * resumed sessions; without one the id is omitted. Empty instructions are
+ * dropped, matching codex-rs.
+ */
+export function moveCodexInstructionsToInput(body: CodexLiteShapedBody): void {
+	const text = body.instructions;
+	delete body.instructions;
+	if (typeof text !== "string" || text.length === 0) return;
+	const thread = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key : "";
+	const item: InputItem = {
+		...(thread ? { id: `msg_${Bun.randomUUIDv5(text, Bun.randomUUIDv5(thread, "oid"))}` } : {}),
+		type: "message",
+		role: "developer",
+		content: [{ type: "input_text", text }],
+		internal_chat_message_metadata_passthrough: { content_item_kinds: [CODEX_BASE_INSTRUCTIONS_KIND] },
+	};
+	body.input = [item, ...(Array.isArray(body.input) ? body.input : [])];
+}
+
 /**
  * Applies the Responses Lite body contract in place (codex-rs
  * `build_responses_request` with `use_responses_lite`): strips pinned image
  * detail, forces parallel tool calling off, moves tools into a leading
- * `additional_tools` developer item and the base instructions into a
- * developer message, then omits top-level `instructions`/`tools`. Because the
+ * `additional_tools` developer item ahead of the base-instructions message
+ * ({@link moveCodexInstructionsToInput}), then omits top-level `tools`. Because the
  * rewrite removes top-level `tools`, a forced hosted-tool choice (e.g.
  * `{ type: "web_search" }`) would leave the backend unable to validate the
  * choice against a tools collection and it rejects the request with HTTP 400
@@ -360,6 +388,7 @@ export interface CodexLiteShapedBody {
  * paths — codex-rs routes `/responses/compact` through the same builder.
  */
 export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
+	moveCodexInstructionsToInput(body);
 	const input = Array.isArray(body.input) ? body.input : [];
 	stripImageDetails(input);
 	sanitizeInputCallIds(input as InputItem[]);
@@ -385,19 +414,10 @@ export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
 			body.tool_choice = "required";
 		}
 	}
-	const prefix: InputItem[] = [{ type: "additional_tools", role: "developer", tools: additionalTools }];
-	if (typeof body.instructions === "string" && body.instructions.length > 0) {
-		prefix.push({
-			type: "message",
-			role: "developer",
-			content: [{ type: "input_text", text: body.instructions }],
-		});
-	}
-	body.input = [...prefix, ...input];
+	body.input = [{ type: "additional_tools", role: "developer", tools: additionalTools }, ...input];
 	if (body.tool_choice !== "none" && body.tool_choice !== "required") {
 		body.tool_choice = "auto";
 	}
-	delete body.instructions;
 	delete body.tools;
 }
 
@@ -475,6 +495,7 @@ export async function transformRequestBody(
 		}
 	}
 
+	moveCodexInstructionsToInput(body);
 	const responsesLite = resolveCodexResponsesLite(options.responsesLite);
 	if (responsesLite) {
 		applyCodexResponsesLiteShape(body);

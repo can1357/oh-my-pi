@@ -1,5 +1,9 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { type InputItem, transformRequestBody } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import {
+	type InputItem,
+	moveCodexInstructionsToInput,
+	transformRequestBody,
+} from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import {
 	buildTransformedCodexRequestBody,
 	convertCodexResponsesMessages,
@@ -18,6 +22,16 @@ import type {
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
+
+/** The base-instructions developer item codex-rs leads every request with. */
+function baseInstructions(text: string): Record<string, unknown> {
+	return {
+		type: "message",
+		role: "developer",
+		content: [{ type: "input_text", text }],
+		internal_chat_message_metadata_passthrough: { content_item_kinds: ["model.base_instructions"] },
+	};
+}
 
 beforeAll(() => configureCredentialRedaction(true));
 afterAll(() => configureCredentialRedaction(false));
@@ -384,11 +398,7 @@ describe("openai-codex Responses Lite input shaping", () => {
 		expect(body.instructions).toBeUndefined();
 		expect(body.tools).toBeUndefined();
 		expect(body.input?.[0]).toEqual({ type: "additional_tools", role: "developer", tools });
-		expect(body.input?.[1]).toEqual({
-			type: "message",
-			role: "developer",
-			content: [{ type: "input_text", text: "test instructions" }],
-		});
+		expect(body.input?.[1]).toEqual(baseInstructions("test instructions"));
 		expect(body.input?.[2]).toEqual({
 			type: "message",
 			role: "user",
@@ -402,7 +412,7 @@ describe("openai-codex Responses Lite input shaping", () => {
 		try {
 			delete Bun.env.PI_CODEX_RESPONSES_LITE;
 			const defaultRequest = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(defaultRequest.instructions).toBe("sys");
+			expect(defaultRequest.input?.[0]).toEqual(baseInstructions("sys"));
 			expect(defaultRequest.input?.some(item => item.type === "additional_tools")).toBe(false);
 
 			Bun.env.PI_CODEX_RESPONSES_LITE = "true";
@@ -413,12 +423,34 @@ describe("openai-codex Responses Lite input shaping", () => {
 			const explicitOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {
 				responsesLite: false,
 			});
-			expect(explicitOptOut.instructions).toBe("sys");
+			expect(explicitOptOut.input?.[0]).toEqual(baseInstructions("sys"));
 			expect(explicitOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
 		} finally {
 			if (previous === undefined) delete Bun.env.PI_CODEX_RESPONSES_LITE;
 			else Bun.env.PI_CODEX_RESPONSES_LITE = previous;
 		}
+	});
+});
+
+describe("moveCodexInstructionsToInput", () => {
+	it("derives the codex-rs item id from the thread and the text", () => {
+		// uuid5(uuid5(NAMESPACE_OID, "thread-1"), "sys"), as codex-rs build_responses_request computes it.
+		const body: Record<string, unknown> = {
+			instructions: "sys",
+			prompt_cache_key: "thread-1",
+			input: [{ role: "user" }],
+		};
+		moveCodexInstructionsToInput(body);
+		expect(body).toEqual({
+			prompt_cache_key: "thread-1",
+			input: [{ id: "msg_6e6ddc8f-32b3-592b-a5b6-b5f2aface174", ...baseInstructions("sys") }, { role: "user" }],
+		});
+	});
+
+	it("drops empty instructions without adding an item", () => {
+		const body: { instructions?: string; input: unknown[] } = { instructions: "", input: [] };
+		moveCodexInstructionsToInput(body);
+		expect(body).toEqual({ input: [] });
 	});
 });
 
@@ -434,8 +466,9 @@ describe("openai-codex fresh execution input shaping", () => {
 			undefined,
 		);
 
-		expect(body.instructions).toBe("You are a helpful assistant.");
+		expect(body.instructions).toBeUndefined();
 		expect(body.input).toEqual([
+			baseInstructions("You are a helpful assistant."),
 			{
 				type: "message",
 				role: "developer",
@@ -461,6 +494,7 @@ describe("openai-codex fresh execution input shaping", () => {
 		);
 
 		expect(body.input).toEqual([
+			baseInstructions("You are a helpful assistant."),
 			{
 				type: "message",
 				role: "developer",
@@ -723,7 +757,10 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(captured?.headers.get("x-openai-internal-codex-responses-lite")).toBeNull();
-		expect(captured?.body.instructions).toBe("You are a helpful assistant.");
+		expect(captured?.body.instructions).toBeUndefined();
+		expect((captured?.body.input as Array<Record<string, unknown>>)[0]).toMatchObject(
+			baseInstructions("You are a helpful assistant."),
+		);
 		expect(captured?.body.parallel_tool_calls).toBeUndefined();
 		expect(captured?.body.client_metadata).toBeDefined();
 	});
