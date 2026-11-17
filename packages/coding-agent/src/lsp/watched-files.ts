@@ -91,6 +91,16 @@ function excludedWithin(rel: string): boolean {
 	return false;
 }
 
+/**
+ * What decides which directories a per-directory tree watches
+ * ({@link WatchedFilesForwarder}'s `#wantsBeneath`): each spec's base and
+ * whether it is deep. Registrations that only change globs or kinds leave it
+ * the same, so the tree needs no new walk.
+ */
+function treeLayout(specs: readonly WatchSpec[]): string {
+	return [...new Set(specs.map(({ base, deep }) => `${foldCase(base)}\0${deep}`))].sort().join("\n");
+}
+
 /** Size and modification time of a path, or undefined when it does not exist. */
 function snapshotOf(stat: fs.Stats | null | undefined): string | undefined {
 	return stat ? `${stat.mtimeMs}:${stat.size}` : undefined;
@@ -134,10 +144,10 @@ interface DirectoryTree {
 	covers(dir: string): boolean;
 	/** Stop watching `dir` and everything below it. */
 	remove(dir: string): void;
-	/** Reconcile watches after registrations change without closing the tree root. */
+	/** Reconcile watches after the tree layout changed, without closing the tree root. */
 	refresh(): Promise<void>;
-	/** Registration snapshot the tree last walked. */
-	specs: readonly WatchSpec[];
+	/** {@link treeLayout} of the registrations the tree was last walked for. */
+	layout: string;
 }
 
 interface Watch {
@@ -506,11 +516,12 @@ export class WatchedFilesForwarder {
 				.filter(([key]) => !this.#watches.has(key) && !this.#failed.has(key))
 				.map(([key, target]) => this.#open(key, target.dir, target.recursive)),
 		);
+		const layout = treeLayout(specs);
 		for (const [key] of wanted) {
 			const tree = this.#watches.get(key)?.tree;
-			if (!tree || tree.specs === specs) continue;
+			if (!tree || tree.layout === layout) continue;
+			tree.layout = layout;
 			await tree.refresh();
-			tree.specs = specs;
 		}
 		if (this.#closed) return;
 		// A base that appeared since the last pass was watched only through an
@@ -668,12 +679,15 @@ export class WatchedFilesForwarder {
 			watch: watchOne,
 			covers: dir => watchers.has(foldCase(path.dirname(dir))),
 			remove: dir => watchers.deleteWithin(foldCase(path.resolve(dir)), watcher => watcher.close()),
-			specs: this.#specs,
+			layout: treeLayout(this.#specs),
 			refresh: async () => {
 				const wanted = new Set<string>();
-				await this.#walk(root, true, dir => {
-					wanted.add(foldCase(dir));
-					watchOne(dir);
+				await this.#walk(root, true, {
+					onDirectory: dir => {
+						wanted.add(foldCase(dir));
+						watchOne(dir);
+					},
+					files: false,
 				});
 				for (const [key, watcher] of watchers) {
 					if (wanted.has(key)) continue;
@@ -683,7 +697,7 @@ export class WatchedFilesForwarder {
 			},
 		};
 		watchOne(root);
-		return { watch, armed: this.#walk(root, true, watchOne).then(() => {}) };
+		return { watch, armed: this.#walk(root, true, { onDirectory: watchOne, files: false }).then(() => {}) };
 	}
 
 	/** One `fs.watch` event of `dir`, part of the watch of `root`; `known`: the entry is a watched directory. */
@@ -747,7 +761,7 @@ export class WatchedFilesForwarder {
 		since: number,
 		options: { renamedFrom?: string; onDirectory?: (dir: string) => void } = {},
 	): Promise<void> {
-		const files = await this.#walk(dir, recursive, options.onDirectory);
+		const files = await this.#walk(dir, recursive, { onDirectory: options.onDirectory });
 		if (this.#closed) return;
 		const { renamedFrom } = options;
 		if (since === 0) {
@@ -774,9 +788,15 @@ export class WatchedFilesForwarder {
 	/**
 	 * The files below `dir` (directly, unless `recursive`), skipping directories
 	 * no spec wants anything below. `onDirectory` sees each directory before it
-	 * is read.
+	 * is read. With `files: false` only directories are visited and nothing is
+	 * collected, as a tree walk needs on a large repository.
 	 */
-	async #walk(dir: string, recursive: boolean, onDirectory?: (dir: string) => void): Promise<string[]> {
+	async #walk(
+		dir: string,
+		recursive: boolean,
+		options: { onDirectory?: (dir: string) => void; files?: boolean } = {},
+	): Promise<string[]> {
+		const { onDirectory, files: collect = true } = options;
 		const files: string[] = [];
 		let level = [dir];
 		while (level.length > 0 && !this.#closed) {
@@ -788,8 +808,9 @@ export class WatchedFilesForwarder {
 			for (const [index, entries] of results.entries()) {
 				for (const entry of entries ?? []) {
 					const target = path.join(level[index], entry.name);
-					if (!entry.isDirectory()) files.push(target);
-					else if (recursive && this.#wantsBeneath(target)) next.push(target);
+					if (!entry.isDirectory()) {
+						if (collect) files.push(target);
+					} else if (recursive && this.#wantsBeneath(target)) next.push(target);
 				}
 			}
 			level = next;
