@@ -285,7 +285,7 @@ describe("Parallel web search", () => {
 		}
 	});
 
-	it("sends trusted session and selected model metadata with anonymous MCP searches", async () => {
+	it("sends only the query to the anonymous MCP, never session or model identifiers", async () => {
 		delete process.env.PARALLEL_API_KEY;
 		const fetchMock = mockMcpFetch({
 			result: { structuredContent: { search_id: "search-parallel-mcp-metadata", results: [] } },
@@ -302,62 +302,14 @@ describe("Parallel web search", () => {
 			fetch: fetchMock,
 		});
 
-		expect(capturedRequestBody).toMatchObject({
-			params: {
-				arguments: {
-					objective: "session-aware search",
-					search_queries: ["session-aware search"],
-					session_id: "stable-session-123",
-					model_name: "parallel",
-				},
-			},
-		});
-	});
-
-	it("sends session identifiers at the MCP schema's 100-character limit", async () => {
-		delete process.env.PARALLEL_API_KEY;
-		const sessionId = "s".repeat(100);
-		const fetchMock = mockMcpFetch({
-			result: { structuredContent: { search_id: "search-parallel-mcp-session-limit", results: [] } },
-		});
-
-		await searchParallel({ query: "session metadata", fetch: fetchMock }, fakeAuthStorage, sessionId);
-
-		expect(capturedRequestBody).toMatchObject({
-			params: { arguments: { session_id: sessionId } },
-		});
-	});
-
-	it("omits overlong session identifiers instead of breaking anonymous MCP searches", async () => {
-		delete process.env.PARALLEL_API_KEY;
-		const fetchMock = mockMcpFetch({
-			result: { structuredContent: { search_id: "search-parallel-mcp-session-over-limit", results: [] } },
-		});
-
-		await searchParallel({ query: "session metadata", fetch: fetchMock }, fakeAuthStorage, "s".repeat(101));
-
-		expect(capturedRequestBody).toMatchObject({
-			params: { arguments: { objective: "session metadata", search_queries: ["session metadata"] } },
-		});
-		expect(capturedRequestBody).not.toMatchObject({
-			params: { arguments: { session_id: expect.any(String) } },
-		});
-	});
-
-	it("omits overlong model identifiers instead of truncating their identity", async () => {
-		delete process.env.PARALLEL_API_KEY;
-		const fetchMock = mockMcpFetch({
-			result: { structuredContent: { search_id: "search-parallel-mcp-model-limit", results: [] } },
-		});
-
-		await searchParallel({ query: "model metadata", modelName: "m".repeat(101), fetch: fetchMock }, fakeAuthStorage);
-
-		expect(capturedRequestBody).toMatchObject({
-			params: { arguments: { objective: "model metadata", search_queries: ["model metadata"] } },
-		});
-		expect(capturedRequestBody).not.toMatchObject({
-			params: { arguments: { model_name: expect.any(String) } },
-		});
+		// `arguments` must equal exactly: any extra field (session_id, model_name) fails.
+		expect(capturedRequestBody).toEqual(
+			expect.objectContaining({
+				params: expect.objectContaining({
+					arguments: { objective: "session-aware search", search_queries: ["session-aware search"] },
+				}),
+			}),
+		);
 	});
 
 	it("parses SSE MCP text content after skipping non-JSON content blocks", async () => {
