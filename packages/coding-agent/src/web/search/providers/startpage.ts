@@ -219,6 +219,10 @@ export class StartpageProvider extends SearchProvider {
 		return true;
 	}
 
+	override isKeyless(): boolean {
+		return true;
+	}
+
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchStartpage(params);
 	}
