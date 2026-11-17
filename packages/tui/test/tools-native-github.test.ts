@@ -80,7 +80,7 @@ describe("GitHub run-watch renderer", () => {
 		const collapsedRaw = collapsedRows.join("\n");
 
 		expect(collapsed).toContain("2/3 #9 Compile");
-		expect(collapsed).toContain("Ctrl+O");
+		expect(collapsed).toMatch(/Ctrl\+O|⌃O/); // key-hint style is process-global; earlier tests may switch it to symbols
 		expect(collapsed).toContain("#2 Run tests · cancelled");
 		expect(collapsed).not.toContain("#5 Upload artifacts");
 		expect(collapsedRaw).not.toContain("clipboardpayload");
