@@ -16,12 +16,15 @@
 //! of their item and can be read and pressed without opening the submenu.
 
 use std::{
+	cell::Cell,
+	ffi::c_void,
 	ptr::{self, NonNull},
-	time::{Duration, Instant},
+	rc::Rc,
+	time::Duration,
 };
 
-use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::CFRetained;
+use objc2_application_services::{AXError, AXObserver, AXUIElement};
+use objc2_core_foundation::{CFRetained, CFRunLoop, CFRunLoopRunResult, CFRunLoopSource, CFString};
 
 use super::{
 	super::{capture, input, skylight},
@@ -47,6 +50,16 @@ pub(crate) const CONTROL_MENU_TIMEOUT: Duration = Duration::from_millis(1000);
 /// How long a menu may take to close after Escape; it fades out for about
 /// 270 ms.
 const MENU_CLOSE_TIMEOUT: Duration = Duration::from_millis(600);
+/// How long a menu whose `AXCancel` returned may stay listed, with no report
+/// from its application that it closed, before the cancel counts as ignored
+/// and Escape goes to it. A native menu that took the cancel reported it,
+/// naming that menu, within 9 ms and left the window list within 177 ms on a
+/// loaded machine; a Chromium `<select>`'s menu takes the cancel and stays
+/// open. A menu that takes the cancel without a report (no `AppKit` menu
+/// measured, but a menu whose element reports another process than the one
+/// showing it may be one) gets Escape at this timeout, not
+/// [`MENU_CLOSE_TIMEOUT`], if it is still listed then.
+const MENU_CANCEL_TIMEOUT: Duration = Duration::from_millis(300);
 const MENU_POLL: Duration = Duration::from_millis(5);
 /// Most items an error lists, submenus included; a submenu that would pass it
 /// is listed by its title alone.
@@ -235,8 +248,8 @@ fn unchosen_message(press: Press<'_>, refusal: Option<&str>, items: &str) -> Str
 
 fn left_open_message(press: Press<'_>, items: &str) -> String {
 	format!(
-		"{} that is still open after Escape, which keeps the keyboard from the user's app; inspect \
-		 the desktop before retrying.{}",
+		"{} that is still open, which keeps the keyboard from the user's app; inspect the desktop \
+		 before retrying.{}",
 		opened(press),
 		listed(items)
 	)
@@ -280,6 +293,29 @@ trait Menus {
 	fn cancel(&mut self, menu: &Self::Node) -> CoreResult<()>;
 	/// Posts Escape to the application, which closes its open menu.
 	fn escape(&mut self) -> CoreResult<()>;
+	/// Ids of the menu windows Escape may be posted to, read right before it:
+	/// those [`Menus::windows`] lists, unless that counts other signs of an
+	/// open menu as well.
+	fn listed(&mut self) -> Option<Vec<u32>> {
+		self.windows()
+	}
+	/// Whether the menu, after an item was pressed, shows in a menu window
+	/// that was not open at the press: shown again rather than fading out, so
+	/// there is no fade to wait for.
+	fn shown_again(&mut self) -> bool {
+		false
+	}
+	/// Listens, until the returned watch is dropped, for the application's
+	/// report (`AXMenuClosed`) that `menu` closed. `None` when it cannot listen.
+	fn watch_closed(&mut self, _menu: &Self::Node) -> Option<Box<dyn ClosedWatch>> {
+		None
+	}
+}
+
+/// A listener [`Menus::watch_closed`] set up for one menu.
+trait ClosedWatch {
+	/// Whether the application has reported the menu closed.
+	fn closed(&mut self) -> bool;
 }
 
 /// Settles a menu that a press of `app_pid` opened, within `timeout`, since
@@ -405,18 +441,202 @@ fn end_chosen<M: Menus>(menus: &mut M, window: u32, menu: &M::Node) -> CoreResul
 /// fallback, leaves it fading out for about 270 ms, and until the fade ends
 /// the keyboard stays with the target, which types the user's keys into its
 /// own key window once the menu is gone.
+///
+/// A native menu that took the cancel stays listed for a few milliseconds
+/// (11-22 ms, 177 ms once under load), and Escape posted then reaches the
+/// app's key window (80 of 80 on four kinds of native menu), so once the
+/// application reports the menu closed nothing is posted: the menu gets
+/// [`MENU_CLOSE_TIMEOUT`] to leave the list and is reported open if it does
+/// not. Escape goes only when the menu neither reports closing nor leaves the
+/// list within [`MENU_CANCEL_TIMEOUT`], as a Chromium `<select>`'s, which
+/// takes the cancel and stays open. Without a report to listen for, the menu
+/// gets [`MENU_CLOSE_TIMEOUT`] to leave the list first.
 fn close<M: Menus>(menus: &mut M, window: u32, menu: Option<&M::Node>) -> CoreResult<bool> {
 	if !is_open(menus, window) {
 		return Ok(true);
 	}
-	if let Some(menu) = menu
-		&& menus.cancel(menu).is_ok()
-		&& await_closed(menus, window)?
-	{
-		return Ok(true);
+	if let Some(menu) = menu {
+		// Listening starts before the cancel, so a report sent at once is kept.
+		let mut watch = menus.watch_closed(menu);
+		if menus.cancel(menu).is_ok() {
+			match watch.as_mut() {
+				Some(watch) => {
+					let reported = poll(MENU_CANCEL_TIMEOUT, || {
+						if is_open(menus, window) {
+							watch.closed().then_some(true)
+						} else {
+							Some(false)
+						}
+					})?;
+					match reported {
+						Some(false) => return Ok(true),
+						Some(true) => return await_closed(menus, window),
+						None => {},
+					}
+				},
+				None => {
+					if await_closed(menus, window)? {
+						return Ok(true);
+					}
+				},
+			}
+		}
+	}
+	escape_listed(menus, window)
+}
+
+/// Posts Escape to close menu window `window` only when the list read right
+/// before it ([`Menus::listed`]) shows the window: a menu that closed
+/// meanwhile would pass the key to the app's key window, where it cancels a
+/// dialog or a form. Nothing is posted to a window no longer listed, which is
+/// closed unless [`Menus::windows`] still counts it open, or when the list
+/// cannot be read, which reports the menu open. Whether it is closed
+/// afterwards.
+fn escape_listed<M: Menus>(menus: &mut M, window: u32) -> CoreResult<bool> {
+	match menus.listed() {
+		Some(now) if now.contains(&window) => {},
+		Some(_) => return Ok(!is_open(menus, window)),
+		None => return Ok(false),
 	}
 	menus.escape()?;
 	await_closed(menus, window)
+}
+
+/// The menu window id [`Opened`] reports for the menu it watches.
+const OPENED: u32 = 0;
+
+/// [`Menus`] on the one menu an accessibility action opened in `pid`: open
+/// while `pid` lists a menu window not among `before`, its menu windows before
+/// the action, or the control still `shows` its menu. A Chromium `<select>`
+/// closes its menu window when an option is pressed and shows the menu in a
+/// new one 20-40 ms later, its menu element staying meanwhile; Escape still
+/// goes only to a listed window.
+struct Opened<'a, M, S> {
+	menus:   M,
+	before:  &'a [u32],
+	shows:   S,
+	/// The new menu windows listed when [`Menus::shown_again`] was first
+	/// asked, right after the press.
+	pressed: Option<Vec<u32>>,
+}
+
+/// [`OPENED`] listed when the menu is `open`.
+fn as_listed(open: bool) -> Vec<u32> {
+	if open { vec![OPENED] } else { Vec::new() }
+}
+
+impl<M: Menus, S: FnMut() -> bool> Opened<'_, M, S> {
+	fn new_window(&mut self) -> Option<bool> {
+		self
+			.menus
+			.windows()
+			.map(|now| new_menu(self.before, &now).is_some())
+	}
+}
+
+impl<M: Menus, S: FnMut() -> bool> Menus for Opened<'_, M, S> {
+	type Node = M::Node;
+
+	fn windows(&mut self) -> Option<Vec<u32>> {
+		let window = self.new_window()?;
+		let open = window || (self.shows)();
+		Some(as_listed(open))
+	}
+
+	fn listed(&mut self) -> Option<Vec<u32>> {
+		let window = self.new_window()?;
+		Some(as_listed(window))
+	}
+
+	fn shown_again(&mut self) -> bool {
+		let Some(now) = self.menus.windows() else {
+			return false;
+		};
+		let new: Vec<u32> = now
+			.into_iter()
+			.filter(|window| !self.before.contains(window))
+			.collect();
+		if let Some(pressed) = &self.pressed {
+			return new.iter().any(|window| !pressed.contains(window));
+		}
+		self.pressed = Some(new);
+		false
+	}
+
+	fn locate(&mut self, _: u32) -> Option<Self::Node> {
+		None
+	}
+
+	fn items(&mut self, menu: &Self::Node) -> CoreResult<Vec<Entry<Self::Node>>> {
+		self.menus.items(menu)
+	}
+
+	fn press(&mut self, item: &Self::Node) -> CoreResult<()> {
+		self.menus.press(item)
+	}
+
+	fn cancel(&mut self, menu: &Self::Node) -> CoreResult<()> {
+		self.menus.cancel(menu)
+	}
+
+	fn watch_closed(&mut self, menu: &Self::Node) -> Option<Box<dyn ClosedWatch>> {
+		self.menus.watch_closed(menu)
+	}
+
+	fn escape(&mut self) -> CoreResult<()> {
+		self.menus.escape()
+	}
+}
+
+/// Closes the menu an accessibility action opened in `pid` ([`Opened`]),
+/// `menu` when its element is known: after an item was `pressed`, `AXCancel`
+/// and the wait for its fade, otherwise as an unchosen menu ([`close`]), and
+/// then, while a new menu window is still listed, Escape to `pid`. Runs under
+/// [`control::cleanup`], so a cancelled call still closes it. Whether it is
+/// closed afterwards; `None` when the window list cannot be read, so the
+/// caller judges by other means.
+pub(crate) fn close_opened(
+	pid: libc::pid_t,
+	before: &[u32],
+	menu: Option<&CFRetained<AXUIElement>>,
+	pressed: bool,
+	shows: impl FnMut() -> bool,
+) -> CoreResult<Option<bool>> {
+	let mut opened =
+		Opened { menus: AxMenus { pid, app_pid: pid, app: None }, before, shows, pressed: None };
+	if opened.new_window().is_none() {
+		return Ok(None);
+	}
+	end_opened(&mut opened, OPENED, menu, pressed).map(Some)
+}
+
+fn end_opened<M: Menus>(
+	menus: &mut M,
+	window: u32,
+	menu: Option<&M::Node>,
+	pressed: bool,
+) -> CoreResult<bool> {
+	control::cleanup(|| {
+		if !pressed {
+			return close(menus, window, menu);
+		}
+		// A pressed menu fades out whether or not it takes the cancel, and
+		// whether or not its element is still known.
+		if let Some(menu) = menu {
+			let _ = menus.cancel(menu);
+		}
+		let settled = poll(MENU_CLOSE_TIMEOUT, || {
+			if is_open(menus, window) {
+				menus.shown_again().then_some(false)
+			} else {
+				Some(true)
+			}
+		})?;
+		if settled == Some(true) {
+			return Ok(true);
+		}
+		escape_listed(menus, window)
+	})
 }
 
 fn await_closed<M: Menus>(menus: &mut M, window: u32) -> CoreResult<bool> {
@@ -556,15 +776,60 @@ pub(crate) fn poll<T>(
 	timeout: Duration,
 	mut probe: impl FnMut() -> Option<T>,
 ) -> CoreResult<Option<T>> {
-	let deadline = Instant::now() + timeout;
+	let deadline = clock::now() + timeout;
 	loop {
 		if let Some(value) = probe() {
 			return Ok(Some(value));
 		}
-		if Instant::now() >= deadline {
+		if clock::now() >= deadline {
 			return Ok(None);
 		}
-		control::wait(MENU_POLL)?;
+		clock::wait(MENU_POLL)?;
+	}
+}
+
+/// The time [`poll`] reads and waits on: the wall clock, and in tests a clock
+/// each wait moves forward at once, so a test counts reads, not milliseconds.
+#[cfg(not(test))]
+mod clock {
+	use std::time::{Duration, Instant};
+
+	use crate::desktop::{control, error::CoreResult};
+
+	pub(super) fn now() -> Instant {
+		Instant::now()
+	}
+
+	pub(super) fn wait(duration: Duration) -> CoreResult<()> {
+		control::wait(duration)
+	}
+}
+
+#[cfg(test)]
+mod clock {
+	use std::{
+		cell::Cell,
+		sync::LazyLock,
+		time::{Duration, Instant},
+	};
+
+	use crate::desktop::{control, error::CoreResult};
+
+	static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+	thread_local! {
+		/// How far this thread's waits have moved the clock.
+		static WAITED: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+	}
+
+	pub(super) fn now() -> Instant {
+		*START + WAITED.get()
+	}
+
+	pub(super) fn wait(duration: Duration) -> CoreResult<()> {
+		control::check()?;
+		WAITED.set(WAITED.get() + duration);
+		Ok(())
 	}
 }
 
@@ -643,11 +908,120 @@ impl Menus for AxMenus {
 	fn escape(&mut self) -> CoreResult<()> {
 		input::post_escape(self.pid)
 	}
+
+	fn watch_closed(&mut self, menu: &Self::Node) -> Option<Box<dyn ClosedWatch>> {
+		MenuClosedWatch::new(menu).map(|watch| Box::new(watch) as Box<dyn ClosedWatch>)
+	}
+}
+
+/// The notification an application posts when one of its menus closes.
+const MENU_CLOSED: &str = "AXMenuClosed";
+/// The run-loop mode the watch's source is in, so reading it runs nothing
+/// else on this thread.
+const MENU_CLOSED_MODE: &str = "pi.menu-closed";
+
+/// What the notification callback writes: the menu it waits for, and whether
+/// its application reported that menu closed.
+struct ClosedState {
+	menu:   CFRetained<AXUIElement>,
+	closed: Cell<bool>,
+}
+
+/// `AXMenuClosed` from one menu's application, kept only when it names that
+/// menu, so another menu closing meanwhile does not count. Registered on this
+/// thread's run loop in a mode of its own; dropping the watch removes the
+/// registration and invalidates the source.
+struct MenuClosedWatch {
+	observer: CFRetained<AXObserver>,
+	app:      CFRetained<AXUIElement>,
+	source:   CFRetained<CFRunLoopSource>,
+	run_loop: CFRetained<CFRunLoop>,
+	state:    Rc<ClosedState>,
+}
+
+impl MenuClosedWatch {
+	fn new(menu: &CFRetained<AXUIElement>) -> Option<Self> {
+		let pid = element_pid(menu).ok()?;
+		let app = create_application(pid).ok()?;
+		set_timeout(&app).ok()?;
+		let run_loop = CFRunLoop::current()?;
+		let mut raw = ptr::null_mut();
+		// SAFETY: `raw` is a valid out pointer, and `menu_closed` matches
+		// `AXObserverCallback`.
+		let created = unsafe { AXObserver::create(pid, Some(menu_closed), NonNull::from(&mut raw)) };
+		if created != AXError::Success {
+			return None;
+		}
+		// SAFETY: a successful create returns an observer the caller owns.
+		let observer = unsafe { CFRetained::from_raw(NonNull::new(raw)?) };
+		let state = Rc::new(ClosedState { menu: menu.clone(), closed: Cell::new(false) });
+		// SAFETY: `refcon` points at `state`, which the watch keeps alive and
+		// only reads through shared references, until `Drop` has removed the
+		// registration.
+		let added = unsafe {
+			observer.add_notification(
+				&app,
+				&CFString::from_static_str(MENU_CLOSED),
+				Rc::as_ptr(&state).cast_mut().cast(),
+			)
+		};
+		if added != AXError::Success {
+			return None;
+		}
+		// SAFETY: the observer is valid; its source is retained here.
+		let source = unsafe { observer.run_loop_source() };
+		run_loop.add_source(Some(&source), Some(&CFString::from_static_str(MENU_CLOSED_MODE)));
+		Some(Self { observer, app, source, run_loop, state })
+	}
+}
+
+impl ClosedWatch for MenuClosedWatch {
+	fn closed(&mut self) -> bool {
+		let mode = CFString::from_static_str(MENU_CLOSED_MODE);
+		while CFRunLoop::run_in_mode(Some(&mode), 0.0, true) == CFRunLoopRunResult::HandledSource {}
+		self.state.closed.get()
+	}
+}
+
+impl Drop for MenuClosedWatch {
+	fn drop(&mut self) {
+		// SAFETY: removes the registration `new` added, before `state` drops.
+		let _ = unsafe {
+			self
+				.observer
+				.remove_notification(&self.app, &CFString::from_static_str(MENU_CLOSED))
+		};
+		self
+			.run_loop
+			.remove_source(Some(&self.source), Some(&CFString::from_static_str(MENU_CLOSED_MODE)));
+		self.source.invalidate();
+	}
+}
+
+/// Notes `AXMenuClosed` when it names the watched menu.
+unsafe extern "C-unwind" fn menu_closed(
+	_: NonNull<AXObserver>,
+	element: NonNull<AXUIElement>,
+	_: NonNull<CFString>,
+	refcon: *mut c_void,
+) {
+	// SAFETY: `refcon` is the `ClosedState` a live `MenuClosedWatch` owns; the
+	// callback runs only while that watch reads its source on this thread, and
+	// `element` is valid for the call.
+	let (state, element) = unsafe { (&*refcon.cast::<ClosedState>(), element.as_ref()) };
+	if *element == *state.menu {
+		state.closed.set(true);
+	}
 }
 
 #[cfg(test)]
 mod tests {
-	use std::{cell::RefCell, collections::HashMap};
+	use std::{
+		cell::{Cell, RefCell},
+		collections::HashMap,
+		rc::Rc,
+		time::Instant,
+	};
 
 	use super::*;
 
@@ -671,8 +1045,42 @@ mod tests {
 		/// fade, and a menu that does not take `AXCancel` refuses it.
 		press_closes: bool,
 		cancel_works: bool,
+		/// `AXCancel` succeeds and leaves the menu open, as in Chromium.
+		cancel_stays: bool,
+		/// The window list read at which the menu window closes by itself.
+		closes_at:    Option<usize>,
+		/// Whether the control still shows its menu element.
+		element:      Rc<Cell<bool>>,
+		/// The window list cannot be read.
+		unreadable:   bool,
 		escape_works: bool,
+		/// The read of a watch ([`Menus::watch_closed`]) from which the app
+		/// reports the menu closed; `None` when no watch can be set up.
+		reports_at:   Option<usize>,
+		/// Watches set up, and those still live.
+		watches:      Rc<Cell<(usize, usize)>>,
 		log:          RefCell<Vec<String>>,
+	}
+
+	/// A [`ClosedWatch`] that reports on its `reports_at`th read.
+	struct FakeWatch {
+		reads:      usize,
+		reports_at: usize,
+		watches:    Rc<Cell<(usize, usize)>>,
+	}
+
+	impl ClosedWatch for FakeWatch {
+		fn closed(&mut self) -> bool {
+			self.reads += 1;
+			self.reads >= self.reports_at
+		}
+	}
+
+	impl Drop for FakeWatch {
+		fn drop(&mut self) {
+			let (made, live) = self.watches.get();
+			self.watches.set((made, live - 1));
+		}
 	}
 
 	impl Menus for Fake {
@@ -680,13 +1088,16 @@ mod tests {
 
 		fn windows(&mut self) -> Option<Vec<u32>> {
 			self.polls += 1;
+			if self.closes_at == Some(self.polls) {
+				self.open.clear();
+			}
 			if let Some((window, from)) = self.opens
 				&& self.polls >= from
 			{
 				self.open.push(window);
 				self.opens = None;
 			}
-			Some(self.open.clone())
+			(!self.unreadable).then(|| self.open.clone())
 		}
 
 		fn locate(&mut self, window: u32) -> Option<u32> {
@@ -719,7 +1130,10 @@ mod tests {
 			if !self.cancel_works {
 				return Err(DesktopError::ax_failed("AXCancel is not supported"));
 			}
-			self.open.clear();
+			if !self.cancel_stays {
+				self.open.clear();
+				self.element.set(false);
+			}
 			Ok(())
 		}
 
@@ -727,8 +1141,16 @@ mod tests {
 			self.log.borrow_mut().push("escape".to_string());
 			if self.escape_works {
 				self.open.clear();
+				self.element.set(false);
 			}
 			Ok(())
+		}
+
+		fn watch_closed(&mut self, _: &u32) -> Option<Box<dyn ClosedWatch>> {
+			let reports_at = self.reports_at?;
+			let (made, live) = self.watches.get();
+			self.watches.set((made + 1, live + 1));
+			Some(Box::new(FakeWatch { reads: 0, reports_at, watches: Rc::clone(&self.watches) }))
 		}
 	}
 
@@ -784,6 +1206,157 @@ mod tests {
 		let settled = settle_with(&mut app, &[], None, CONTEXT_MENU_TIMEOUT, held).expect("settled");
 		assert!(matches!(settled, Settled::Unchosen { closed: true, .. }), "{settled:?}");
 		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
+	}
+
+	/// One open menu window, 1, whose menu is node 1.
+	fn showing() -> Fake {
+		Fake { open: vec![1], cancel_works: true, escape_works: true, ..Fake::default() }
+	}
+
+	#[test]
+	fn escape_closes_a_pressed_menu_that_accepts_cancel_and_stays_open() {
+		// A Chromium `<select>`'s menu.
+		let mut app = Fake { cancel_stays: true, ..showing() };
+		assert!(end_opened(&mut app, 1, Some(&1), true).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
+	}
+
+	#[test]
+	fn a_pressed_menu_that_refuses_cancel_fades_out_without_escape() {
+		let mut app = Fake { cancel_works: false, closes_at: Some(3), ..showing() };
+		assert!(end_opened(&mut app, 1, Some(&1), true).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+	}
+
+	#[test]
+	fn a_pressed_menu_whose_element_is_gone_fades_out_without_escape() {
+		let mut app = Fake { closes_at: Some(3), ..showing() };
+		assert!(end_opened(&mut app, 1, None, true).expect("closed"));
+		assert!(app.log.borrow().is_empty(), "{:?}", app.log.borrow());
+	}
+
+	#[test]
+	fn a_menu_shown_again_in_a_new_window_after_its_press_is_still_closed() {
+		// A Chromium `<select>`: the press closes window 1, the menu shows
+		// again in window 2 two list reads later, and its element stays.
+		let app = Fake {
+			cancel_stays: true,
+			closes_at: Some(2),
+			opens: Some((2, 4)),
+			element: Rc::new(Cell::new(true)),
+			..showing()
+		};
+		let element = Rc::clone(&app.element);
+		let mut opened =
+			Opened { menus: app, before: &[], shows: || element.get(), pressed: None };
+		assert!(end_opened(&mut opened, OPENED, Some(&1), true).expect("closed"));
+		// Not closed at the gap between the windows: Escape closes the second,
+		// as soon as it shows, with no fade to wait for.
+		assert_eq!(*opened.menus.log.borrow(), ["cancel", "escape"]);
+		// Without the re-show, the wait runs out its 600 ms at 5 ms reads.
+		assert!(opened.menus.polls < 20, "{} window list reads", opened.menus.polls);
+	}
+
+	#[test]
+	fn a_menu_shown_only_by_its_element_gets_no_escape_and_reports_open() {
+		// The element still shows the menu, but no window is listed: no Escape,
+		// and the menu is reported open.
+		let app = Fake {
+			open: vec![],
+			cancel_works: false,
+			element: Rc::new(Cell::new(true)),
+			..Fake::default()
+		};
+		let element = Rc::clone(&app.element);
+		let mut opened =
+			Opened { menus: app, before: &[], shows: || element.get(), pressed: None };
+		assert!(!escape_listed(&mut opened, OPENED).expect("read"));
+		assert!(opened.menus.log.borrow().is_empty());
+	}
+
+	#[test]
+	fn a_menu_that_closed_before_the_escape_gets_none() {
+		// Listed when the close began, gone at the read right before Escape.
+		let mut app = Fake { cancel_works: false, closes_at: Some(2), ..showing() };
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+	}
+
+	#[test]
+	fn an_unreadable_window_list_gets_no_escape_and_reports_the_menu_open() {
+		let mut app = Fake { cancel_works: false, unreadable: true, ..showing() };
+		assert!(!close(&mut app, 1, Some(&1)).expect("not closed"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+	}
+
+	/// Menu window 1, which takes the cancel but stays listed (a Chromium
+	/// `<select>`'s, or a native menu on its way out), watched for the app's
+	/// report from read `reports_at` on.
+	fn watched(reports_at: usize) -> Fake {
+		Fake { cancel_stays: true, reports_at: Some(reports_at), ..showing() }
+	}
+
+	#[test]
+	fn a_menu_reported_closed_gets_no_escape_while_it_stays_listed() {
+		// The report comes at once; the window leaves the list at read 100,
+		// past the cancel timeout (61 reads), so only the report keeps Escape
+		// away, which would reach the app's key window.
+		let mut app = Fake { closes_at: Some(100), ..watched(2) };
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn a_menu_reported_closed_that_never_leaves_the_list_is_reported_open_without_escape() {
+		let mut app = watched(2);
+		assert!(!close(&mut app, 1, Some(&1)).expect("read"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn a_menu_that_leaves_the_list_without_a_report_gets_no_escape() {
+		// A toolkit that takes the cancel and posts nothing, listed 170 ms.
+		let mut app = Fake { closes_at: Some(35), ..watched(usize::MAX) };
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel"]);
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn an_ignored_cancel_gets_escape_once_the_cancel_timeout_passes() {
+		// A Chromium `<select>`: no report, still listed.
+		let mut app = watched(usize::MAX);
+		let start = clock::now();
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		let waited = clock::now() - start;
+		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
+		assert!(waited >= MENU_CANCEL_TIMEOUT && waited < MENU_CLOSE_TIMEOUT, "{waited:?}");
+		assert_eq!(app.watches.get(), (1, 0), "watches made, live");
+	}
+
+	#[test]
+	fn without_a_watch_an_unclosed_menu_gets_the_close_timeout_before_escape() {
+		let mut app = Fake { cancel_stays: true, ..showing() };
+		let start = clock::now();
+		assert!(close(&mut app, 1, Some(&1)).expect("closed"));
+		assert_eq!(*app.log.borrow(), ["cancel", "escape"]);
+		assert!(clock::now() - start >= MENU_CLOSE_TIMEOUT);
+	}
+
+	#[test]
+	fn a_cancelled_call_still_closes_the_menu_it_opened() {
+		let cancellation = control::CancellationSource::default();
+		let token = cancellation.token();
+		cancellation.cancel();
+		let (closed, log) = control::with_token_for_test(&token, || {
+			let mut app = Fake { cancel_stays: true, ..showing() };
+			let closed = end_opened(&mut app, 1, Some(&1), false);
+			(closed, app.log.take())
+		});
+		assert!(closed.expect("closed"));
+		assert_eq!(log, ["cancel", "escape"]);
 	}
 
 	#[test]
@@ -940,9 +1513,9 @@ mod tests {
 		assert_eq!(new_menu(&[5], &[5, 9]), Some(9));
 		assert_eq!(new_menu(&[], &[]), None);
 		// No menu: the press returns once the timeout passes.
-		let started = Instant::now();
+		let started = clock::now();
 		assert_eq!(poll(Duration::from_millis(30), || new_menu(&[5], &[5])).expect("poll"), None);
-		assert!(started.elapsed() >= Duration::from_millis(30));
+		assert!(clock::now() - started >= Duration::from_millis(30));
 	}
 
 	#[test]
@@ -1027,7 +1600,7 @@ mod tests {
 		};
 		let error =
 			guard(Press::Action("AXShowMenu"), Some(&[]), None, || Ok(()), open).expect_err("open");
-		assert!(error.message.contains("still open after Escape"), "{}", error.message);
+		assert!(error.message.contains("that is still open,"), "{}", error.message);
 		let cancelled = || Err(DesktopError::cancelled("cancelled"));
 		let error =
 			guard(Press::Action("AXPress"), Some(&[]), None, cancelled, open).expect_err("open");

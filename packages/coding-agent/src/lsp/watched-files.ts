@@ -169,6 +169,89 @@ function relativeWithin(dir: string, target: string): string | undefined {
 	return rel.replaceAll("\\", "/");
 }
 
+/**
+ * A map keyed by resolved, case-folded paths that can drop a directory and
+ * everything below it in time proportional to what it removes.
+ */
+class PathMap<V> {
+	readonly #values = new Map<string, V>();
+	/** Entries of each directory above a key that are keys or lead to one. */
+	readonly #children = new Map<string, Set<string>>();
+
+	get(key: string): V | undefined {
+		return this.#values.get(key);
+	}
+
+	has(key: string): boolean {
+		return this.#values.has(key);
+	}
+
+	set(key: string, value: V): void {
+		if (!this.#values.has(key)) {
+			// Link `key` up to the first ancestor already linked.
+			for (
+				let child = key, parent = path.dirname(key);
+				parent !== child;
+				child = parent, parent = path.dirname(parent)
+			) {
+				const entries = this.#children.get(parent);
+				if (entries) {
+					entries.add(child);
+					break;
+				}
+				this.#children.set(parent, new Set([child]));
+			}
+		}
+		this.#values.set(key, value);
+	}
+
+	delete(key: string): void {
+		if (this.#values.delete(key) && !this.#children.has(key)) this.#unlink(key);
+	}
+
+	/** Remove `dir` and every key below it, passing each removed value to `removed`. */
+	deleteWithin(dir: string, removed?: (value: V) => void): void {
+		const stack = [dir];
+		for (let key = stack.pop(); key !== undefined; key = stack.pop()) {
+			const value = this.#values.get(key);
+			if (value !== undefined && this.#values.delete(key)) removed?.(value);
+			const entries = this.#children.get(key);
+			if (!entries) continue;
+			this.#children.delete(key);
+			for (const entry of entries) stack.push(entry);
+		}
+		this.#unlink(dir);
+	}
+
+	clear(): void {
+		this.#values.clear();
+		this.#children.clear();
+	}
+
+	values(): MapIterator<V> {
+		return this.#values.values();
+	}
+
+	[Symbol.iterator](): MapIterator<[string, V]> {
+		return this.#values.entries();
+	}
+
+	/** Detach `key`, no longer a key nor above one, from its ancestors, dropping those left empty. */
+	#unlink(key: string): void {
+		for (
+			let child = key, parent = path.dirname(key);
+			parent !== child;
+			child = parent, parent = path.dirname(parent)
+		) {
+			const entries = this.#children.get(parent);
+			if (!entries?.delete(child) || entries.size > 0) return;
+			this.#children.delete(parent);
+			// A key stays linked to its own ancestors.
+			if (this.#values.has(parent)) return;
+		}
+	}
+}
+
 function spec(base: string, pattern: string, kind: number): WatchSpec {
 	const glob = foldCase(pattern.replaceAll("\\", "/"));
 	return { base: path.resolve(base), glob: new Bun.Glob(glob), kind, deep: glob.includes("/") || glob.includes("**") };
@@ -264,7 +347,7 @@ export class WatchedFilesForwarder {
 	 * Creations and deletions delivered lately, by case-folded path, with when the server last heard
 	 * of the path: a repeat of one is redundant, and a created file touched since has changed.
 	 */
-	readonly #reported = new Map<string, { type: FileChangeType; at: number }>();
+	readonly #reported = new PathMap<{ type: FileChangeType; at: number }>();
 	#reportedPrunedAt = 0;
 	/** How far the file system's clock was last seen behind ours (network drives); rescans look back that much further. */
 	#clockLag = 0;
@@ -549,7 +632,7 @@ export class WatchedFilesForwarder {
 	 * skipped. `armed` settles once the existing tree is watched.
 	 */
 	#openTree(root: string, ended: (error: unknown) => void): { watch: Watch; armed: Promise<void> } {
-		const watchers = new Map<string, fs.FSWatcher>();
+		const watchers = new PathMap<fs.FSWatcher>();
 		let skipped = false;
 		const watch = newWatch(() => {
 			for (const watcher of watchers.values()) watcher.close();
@@ -585,13 +668,7 @@ export class WatchedFilesForwarder {
 		watch.tree = {
 			watch: watchOne,
 			covers: dir => watchers.has(foldCase(path.dirname(dir))),
-			remove: dir => {
-				for (const [key, watcher] of watchers) {
-					if (relativeWithin(dir, key) === undefined) continue;
-					watcher.close();
-					watchers.delete(key);
-				}
-			},
+			remove: dir => watchers.deleteWithin(foldCase(path.resolve(dir)), watcher => watcher.close()),
 		};
 		watchOne(root);
 		return { watch, armed: this.#walk(root, true, watchOne).then(() => {}) };
@@ -738,7 +815,7 @@ export class WatchedFilesForwarder {
 	/** A directory went away: its files went with it, reported or not. */
 	#directoryVanished(dir: string): void {
 		for (const watch of this.#watches.values()) watch.tree?.remove(dir);
-		for (const key of this.#reported.keys()) if (relativeWithin(dir, key) !== undefined) this.#reported.delete(key);
+		this.#reported.deleteWithin(foldCase(path.resolve(dir)));
 	}
 
 	/** Re-resolve the watched directories when `target` is a spec base or one of its ancestors. */

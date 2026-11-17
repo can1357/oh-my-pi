@@ -129,9 +129,8 @@ function extractIncrementalReviewResult(
 		data: item.data,
 		type: item.type,
 		status: item.status === "aborted" ? "aborted" : item.status === "success" ? "success" : undefined,
-		useLastTurn: item.useLastTurn,
 	}));
-	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_SECTION_SHAPES);
+	const assembled = assembleYieldResult(yieldItems, REVIEWER_SECTION_SHAPES);
 	const data = assembled?.data;
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
 	const record = data as Record<string, unknown>;
@@ -159,7 +158,6 @@ interface RenderYieldItem {
 	data?: unknown;
 	type?: string | string[];
 	status?: string;
-	useLastTurn?: boolean;
 }
 
 /**
@@ -198,7 +196,6 @@ function normalizeYieldData(value: unknown): RenderYieldItem[] {
 			data: record.data,
 			type,
 			status: typeof record.status === "string" ? record.status : undefined,
-			useLastTurn: record.useLastTurn === true ? true : undefined,
 		});
 	}
 	return normalized;
@@ -219,8 +216,7 @@ function getRenderYieldLabels(type: RenderYieldItem["type"]): string[] {
 }
 
 function formatYieldPreview(item: RenderYieldItem): string {
-	if (item.useLastTurn === true && item.data === undefined) return "last assistant turn";
-	if (item.data === undefined) return "last assistant turn";
+	if (item.data === undefined) return "finalize sections";
 	if (typeof item.data === "string") return previewLine(sanitizeText(item.data), 70);
 	try {
 		return previewLine(sanitizeText(JSON.stringify(item.data) ?? "null"), 70);
@@ -2364,8 +2360,6 @@ export interface YieldItem {
 	error?: string;
 	/** A string label is terminal; a non-empty array of labels is incremental. */
 	type?: string | string[];
-	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
-	useLastTurn?: boolean;
 	/** True when an incremental workpool yield completed every item in its batch. */
 	complete?: boolean;
 	/**
