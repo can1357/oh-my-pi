@@ -26,12 +26,11 @@ describe("waitForFullWake", () => {
 		expect(probes).toBe(3);
 	});
 
-	it("rejects when aborted during a probe that then reports a full wake", async () => {
+	it("rejects on abort while a probe is still pending", async () => {
 		const controller = new AbortController();
 		const probe = Promise.withResolvers<boolean>();
 		const held = waitForFullWake(controller.signal, { probe: () => probe.promise, pollMs: 1 });
 		controller.abort();
-		probe.resolve(false);
 		await expect(held).rejects.toThrow();
 	});
 

@@ -5,8 +5,7 @@
  * `pmset -g systemstate` lists the current capabilities; a full wake includes
  * `Graphics`.
  */
-import { logger, sleepLong, withTimeout } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
+import { logger, sleepLong } from "@oh-my-pi/pi-utils";
 
 /** Line of `pmset -g systemstate` that lists the current capabilities. */
 const CAPABILITIES_PREFIX = "Current System Capabilities are:";
@@ -21,20 +20,41 @@ export function isDarkWakeSystemState(output: string): boolean {
 	return capabilities.includes("CPU") && !capabilities.includes("Graphics");
 }
 
-/** Whether the machine is in a macOS dark wake now. Any other platform, or a failed or slow read, reads as awake. */
-async function isDarkWake(): Promise<boolean> {
+/**
+ * Whether the machine is in a macOS dark wake now. Any other platform, or a failed
+ * or slow read, reads as awake. Timeout and abort kill `pmset`, so no probe outlives its wait.
+ */
+async function isDarkWake(signal: AbortSignal): Promise<boolean> {
 	if (process.platform !== "darwin") return false;
 	try {
-		const result = await withTimeout($`pmset -g systemstate`.quiet().nothrow(), PMSET_TIMEOUT_MS, "pmset timed out");
-		return result.exitCode === 0 && isDarkWakeSystemState(result.text());
+		const child = Bun.spawn(["pmset", "-g", "systemstate"], {
+			stdout: "pipe",
+			stderr: "ignore",
+			timeout: PMSET_TIMEOUT_MS,
+			signal,
+		});
+		const [output, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+		return exitCode === 0 && isDarkWakeSystemState(output);
 	} catch {
 		return false;
 	}
 }
 
 export interface FullWakeWaitDeps {
-	probe: () => Promise<boolean>;
+	probe: (signal: AbortSignal) => Promise<boolean>;
 	pollMs: number;
+}
+
+/** Settles with `probe`, or rejects as soon as `signal` aborts even while the probe is pending. */
+async function probeUnlessAborted(deps: FullWakeWaitDeps, signal: AbortSignal): Promise<boolean> {
+	const aborted = Promise.withResolvers<never>();
+	const onAbort = () => aborted.reject(signal.reason);
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		return await Promise.race([deps.probe(signal), aborted.promise]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 const SYSTEM_DEPS: FullWakeWaitDeps = { probe: isDarkWake, pollMs: DARK_WAKE_POLL_MS };
@@ -46,8 +66,7 @@ const SYSTEM_DEPS: FullWakeWaitDeps = { probe: isDarkWake, pollMs: DARK_WAKE_POL
 export async function waitForFullWake(signal: AbortSignal, deps: FullWakeWaitDeps = SYSTEM_DEPS): Promise<void> {
 	signal.throwIfAborted();
 	for (let held = false; ; held = true) {
-		const dark = await deps.probe();
-		signal.throwIfAborted();
+		const dark = await probeUnlessAborted(deps, signal);
 		if (!dark) {
 			if (held) logger.warn("System fully woke; resuming the held retry");
 			return;
