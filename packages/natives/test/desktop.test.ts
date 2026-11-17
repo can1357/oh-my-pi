@@ -50,7 +50,13 @@ describe("DesktopSession", () => {
 			expect(PERMISSION_STATES).toContain(capabilities.capturePermission);
 			expect(PERMISSION_STATES).toContain(capabilities.inputPermission);
 			expect(PERMISSION_STATES).toContain(capabilities.axPermission);
-			expect(typeof capabilities.displayCount).toBe("number");
+			// Wayland learns its monitor from the first capture; every other
+			// backend counts its displays from the start.
+			if (capabilities.backend === "wayland") {
+				expect("displayCount" in capabilities).toBe(false);
+			} else {
+				expect(typeof capabilities.displayCount).toBe("number");
+			}
 		} finally {
 			await session.close();
 		}

@@ -1762,7 +1762,11 @@ export interface DesktopCapabilities {
   capturePermission: string
   inputPermission: string
   axPermission: string
-  displayCount: number
+  /**
+   * Displays capture and coordinate input can use; absent while the backend
+   * cannot tell yet: Wayland learns its monitor from the first capture.
+   */
+  displayCount?: number
   /**
    * The session is locked, or on Windows disconnected or on a secure
    * desktop. Linux reports `false`.
