@@ -335,6 +335,21 @@ export const cfgCompactionIdleThresholdTokens = register({
 	},
 });
 
+export const cfgCompactionIdleMethodOrder = register({
+	id: "compaction.idleMethodOrder",
+	type: "array",
+	default: [],
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Idle Compaction Method Order",
+		description:
+			"Fallback order for idle compaction only; leave empty to use Compaction Method Order. Lets idle passes pay for a model summary while in-turn passes stay local",
+		options: COMPACTION_METHOD_CHOICES,
+		ordered: true,
+	},
+});
+
 export const cfgCompactionIdleTimeoutSeconds = register({
 	id: "compaction.idleTimeoutSeconds",
 	type: "number",
@@ -399,6 +414,7 @@ export const cfgCompaction = combine({
 	v2RetainedMessageBudget: cfgCompactionV2RetainedMessageBudget,
 	idleEnabled: cfgCompactionIdleEnabled,
 	idleThresholdTokens: cfgCompactionIdleThresholdTokens,
+	idleMethodOrder: cfgCompactionIdleMethodOrder,
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
