@@ -209,6 +209,10 @@
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
 
+### Added
+
+- Every saved-reset spend attempt, automatic or from `/usage reset` and `omp usage reset`, now writes an info line `reset spend` to the omp log with the provider, account, credential and credit id, governing window, trigger (`blocked`, `sweep` or `manual`), planner reason and outcome code, so the log shows which process spent an account's reset and why
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

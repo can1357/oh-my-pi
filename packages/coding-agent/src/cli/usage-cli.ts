@@ -35,7 +35,13 @@ import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 import { resetAccountLockKey } from "../session/codex-auto-reset";
-import { checkCodexBalance, type ResetMarker, resetLockPath, withResetFence } from "../session/reset-fence";
+import {
+	checkCodexBalance,
+	logResetSpend,
+	type ResetMarker,
+	resetLockPath,
+	withResetFence,
+} from "../session/reset-fence";
 import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { reportMatchesStatus } from "../session/claude-auto-reset";
 import {
@@ -1512,8 +1518,13 @@ async function runUsageResetCommand(
 			});
 			return outcome;
 		},
-	);
+	).catch(error => {
+		// The marker write after a spend can fail too; the attempt still gets its record.
+		logResetSpend({ trigger: "manual", target, code: "error", error: String(error) });
+		throw error;
+	});
 	if ("state" in result) {
+		logResetSpend({ trigger: "manual", target, code: "fenced", marker: result.state });
 		const ago = formatDuration(Date.now() - result.atMs);
 		failUsageReset(
 			result.state === "reset"
@@ -1522,6 +1533,7 @@ async function runUsageResetCommand(
 		);
 		return;
 	}
+	logResetSpend({ trigger: "manual", target, code: result.code, creditId: result.creditId, cleared: result.cleared });
 	const message = oneLine(describeRedeemOutcome({ ...result, reason: maskOptionalText(result.reason) }, label));
 	if (result.ok) {
 		process.stdout.write(`${message}\n`);
