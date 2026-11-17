@@ -124,11 +124,13 @@ pub(super) const SHOW_WAIT: Duration = Duration::from_millis(2);
 /// windows down to it, for at most [`RAISE_TRIES`] passes during the action;
 /// the `last` pass always raises. `find` looks the window up, which can block
 /// on a busy app, so right before `send` raises it, the user's app is asked
-/// which window is key (`key_now`), `still_kept` is asked again and the
-/// stacking read again: meanwhile the user may have switched, come to the
-/// target, brought another of their windows in front, or made one key that
-/// the stacking does not show, such as a floating panel. After raising it
-/// reads the stacking again, `wait`ing between readings up to [`SHOW_READS`]
+/// which window is key (`key_now`; `None`, an unreadable or unmapped focus,
+/// raises nothing), `still_kept` is asked again and the stacking read again:
+/// meanwhile the user may have switched, come to the target, brought another
+/// of their windows in front, or made one key that the stacking does not
+/// show, such as a floating panel. That last reading is the window a choice
+/// of theirs can still miss: one made during it gets one raise. After raising
+/// it reads the stacking again, `wait`ing between readings up to [`SHOW_READS`]
 /// times ([`LAST_SHOW_READS`] on the last pass), until the raise shows or the
 /// order is no longer kept; the last pass returns the window if it is still
 /// behind.
@@ -431,6 +433,15 @@ mod tests {
 				|| {},
 				true
 			),
+			Ok(())
+		);
+		assert_eq!(tries, 0);
+		// Their app's focused window cannot be read or has no window id, so
+		// which window is key is unknown, even on the last pass: nothing is
+		// raised or counted.
+		let (mut order, mut tries) = (fresh(), 0);
+		assert_eq!(
+			keep(&mut order, &mut tries, again, || true, found, |_| None, |()| panic!(), || {}, true),
 			Ok(())
 		);
 		assert_eq!(tries, 0);

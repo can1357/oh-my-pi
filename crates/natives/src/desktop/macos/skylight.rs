@@ -1542,8 +1542,11 @@ fn keep_key_window(
 			Err(_) => window_order::Found::Failed,
 		},
 		// The user's own app, which just answered the lookup, says which of its
-		// windows is key; a panel the stacking leaves out counts too.
-		|window| ax::key_window_id(window.pid),
+		// windows is key; a panel the stacking leaves out counts too. Only its
+		// focused window counts: the main window `key_window_id` falls back to
+		// can be the one behind that panel, so an unreadable focus raises
+		// nothing.
+		|window| ax::focused_window_id(window.pid),
 		|found| {
 			// A failure shows in a later reading.
 			let _ = ax::raise(&found);
@@ -1705,11 +1708,12 @@ fn guard_focus(
 		// `keep_order` asks their app which window is key, asks again and
 		// reads the stacking again, so a switch of theirs meanwhile is
 		// honoured, one within their app included, which this thread cannot
-		// see while the lookup blocks it; one inside the few microseconds
-		// between that last check and `AXRaise` itself still sees one raise of
-		// their key window, which the next poll then leaves alone. Once a poll
-		// is enough: checking every millisecond showed the target for 19 ms
-		// rather than 28 (median, on a VM) at four times the window-list reads.
+		// see while the lookup blocks it; one made during that last stacking
+		// read (about 0.15 ms on a VM) or before `AXRaise` reaches their app
+		// still sees one raise of their key window, which the next poll then
+		// leaves alone. Once a poll is enough: checking every millisecond
+		// showed the target for 19 ms rather than 28 (median, on a VM) at four
+		// times the window-list reads.
 		let keeps_order = || {
 			let armed = {
 				let lease = lease.lock();
