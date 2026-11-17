@@ -38,13 +38,19 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
       `await el.actions()` lists every action, the role's own press included.
 - AX values:
   - macOS dates are local ISO-8601, the form `setValue` takes.
+  - A macOS slider, stepper or other number control takes `setValue(75)` or `setValue("0.5")` (plain decimal); when the app clamps or rounds it,
+    the call throws `AxFailed` naming the value it settled on. One whose value is not settable names the `AXIncrement`/`AXDecrement` actions to step it.
   - On macOS a long value shows its first 200 characters and ends `… (+N chars; (await computer.ref("eN")).value())`; that call returns it whole.
   - Linux and Windows show 80-character previews without that promise; Linux text values may already be clipped by AT-SPI.
   - To look inside a long value, slice or search it in JS (`v.slice(-300)`, `v.indexOf("…")`, a regex with context) rather than printing all of it;
     large printed output is saved as an artifact you can grep.
-- `await win.menu.items(path?)` lists native menu items;
-  `await win.menu.select(["File", "Export…"])` selects an enabled, unambiguous command in that window's menu context.
-  Matching is case-insensitive and tolerates a trailing ellipsis; missing/disabled/ambiguous paths fail rather than guessing shortcuts.
+- `await win.menu.items(path?)` lists native menu items: with no path the menu bar's menus;
+  with a path that menu's items and exposed descendants depth-first, every item with its full `path`.
+  - Enabled submenus expand up to 150 total items (the named menu's own items are never dropped);
+    a submenu that would exceed the limit or cannot be read stays listed with `hasSubmenu`, so request its path explicitly.
+  - The first unreadable submenu stops further expansion, keeping items already discovered.
+  - `await win.menu.select(["File", "Export…"])` selects an enabled, unambiguous command in that window's menu context.
+    Matching is case-insensitive and tolerates a trailing ellipsis; missing/disabled/ambiguous paths fail rather than guessing shortcuts.
 - `computer.apps.list({query?, runningOnly?})` discovers native application IDs, paths and running PIDs.
 - `computer.apps.open(idOrNameOrNativeAppPath, {activate?})` launches an exact ID/path or unique exact name.
   - On macOS it launches or reopens only when needed, behind the user's app,
@@ -177,6 +183,7 @@ await win.click(120, 48, button="right")
   - on macOS `perform("AXOpen")`, which can bring an Open panel's app forward
   - on macOS every call that opens a menu or names a `menu` item (right-click, Control-click, `perform("AXShowMenu")`, `menu:`,
     `press()` or a click, hold or drag on a popup button or menu button, `setValue` on a popup button), since an open menu takes the user's keyboard
+    Space/Up/Down keys on those controls are still sent; a menu they open is closed before the call returns.
 - `raise()` and `apps.open(…, { activate: true })` bring the app forward and take the user's keyboard.
   NEVER call them to make input work; launching, reopening and window input work in the background.
 - macOS background routes cover left-button drags and `holdMouse` that start on a slider, scroll bar, splitter or stepper,
@@ -189,10 +196,12 @@ await win.click(120, 48, button="right")
     - To select web page text in the background, click where it starts and shift-click where it ends, or double- or triple-click it.
     - Prefer the app's menu command (Font Book: File ▸ New Collection from Selection) or AX.
   - An open menu takes the user's keyboard, so a background right-click or Control-click,
-    or a click, `press()` or `perform("AXShowMenu")` on a menu button or popup button, never leaves its menu open.
+    or a click, `press()`, `perform("AXShowMenu")`, Space or an up or down arrow key on a menu button or popup button, never leaves its menu open.
     - To use a menu item, name its path in the same call: `win.click(x, y, {button: "right", menu: ["Add to", "Fonts"]})`,
       `el.click({button: "right", menu: […]})`, `el.press({menu: ["New Folder"]})`; labels match like `win.menu.select`.
     - Without `menu` the menu closes and the call throws a partial-delivery `InputFailed` listing its items; inspect, then repeat with `menu`.
+      Keys take no `menu`: press or click the control with it instead, unless takeover is refused;
+      then use `win.menu.select` if the menu bar has the command, or tell the user the step needs their screen.
   - A right-button or Control drag, `holdMouse` or multi-click has no background route,
     nor does a drag, `holdMouse` or multi-click on a menu button or popup button: click it once with `menu` instead.
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it.
@@ -200,8 +209,8 @@ await win.click(120, 48, button="right")
   and every other spelling `perform()` takes for `AXOpen` and `AXShowMenu` are refused too.
 - On macOS, `AxUnconfirmed` means an AX action may already have taken effect.
   Inspect fresh AX or a screenshot before repeating it; NEVER retry blindly.
-- `UserIntervened` (macOS or X11): on macOS the user came to that app, or typed or clicked in it;
-  on X11 they kept typing or clicking until the takeover's admission deadline, or pressed a key or button during takeover.
+- `UserIntervened` (macOS or X11): the user kept typing or clicking until the takeover's admission deadline, so no takeover started;
+  on macOS they also came to that app, or typed or clicked in it; on X11 they pressed a key or button during takeover.
   Nothing more was sent, and the tool never reruns it in takeover.
   - The user's edits stand: NEVER undo or retype over them.
   - Read that window again (`win.ax()`, `win.observe()` or `win.screenshot()`) and continue the task from what it shows.

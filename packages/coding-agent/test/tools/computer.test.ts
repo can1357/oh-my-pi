@@ -3688,8 +3688,17 @@ describe("expanded computer APIs", () => {
 		const native = new ArgumentSession();
 		new ComputerWorkerCore(transport, () => native);
 		for (const [code, message] of [
-			['await desktop.ref("e1").setValue()', "setValue(value) requires a string, got undefined"],
-			['await desktop.ref("e1").setValue(42)', "setValue(value) requires a string, got number"],
+			['await desktop.ref("e1").setValue()', "setValue(value) requires a string or a finite number, got undefined"],
+			['await desktop.ref("e1").setValue(NaN)', "setValue(value) requires a string or a finite number, got NaN"],
+			[
+				'await desktop.ref("e1").setValue(Infinity)',
+				"setValue(value) requires a string or a finite number, got Infinity",
+			],
+			[
+				'await desktop.ref("e1").setValue(true)',
+				"setValue(value) requires a string or a finite number, got boolean",
+			],
+			['await desktop.ref("e1").setValue({})', "setValue(value) requires a string or a finite number, got object"],
 			['await desktop.ref("e1").selectText()', "selectText(text) requires a string, got undefined"],
 			['await desktop.ref("e1").selectText(["cat"])', "selectText(text) requires a string, got an array"],
 			['await desktop.ref("e1").perform("")', 'perform(action) requires a non-empty string, got ""'],
@@ -3746,7 +3755,7 @@ describe("expanded computer APIs", () => {
 		runInContext(prelude.javascript, realm);
 		try {
 			await expect(runInContext('computer.ref("e1").setValue()', realm)).rejects.toThrow(
-				"setValue(value) requires a string, got undefined",
+				"setValue(value) requires a string or a finite number, got undefined",
 			);
 			await expect(runInContext('computer.ref("e1").perform()', realm)).rejects.toThrow(
 				"perform(action) requires a non-empty string, got undefined",
@@ -3758,6 +3767,63 @@ describe("expanded computer APIs", () => {
 			await prelude.invoke({ action: "close" }, context);
 		}
 		expect(native.calls).toEqual([]);
+	});
+
+	it("writes a finite number given to setValue as its decimal text, and a string unchanged", async () => {
+		class ValueSession extends FakeNativeSession {
+			readonly values: string[] = [];
+			override async axSetValue(_ref: string, value: string): Promise<void> {
+				this.values.push(value);
+			}
+		}
+		const transport = new MemoryTransport();
+		const native = new ValueSession();
+		new ComputerWorkerCore(transport, () => native);
+		for (const code of [
+			'await desktop.ref("e1").setValue(75)',
+			'await desktop.ref("e1").setValue(-2.5)',
+			'await desktop.ref("e1").setValue(" 007 ")',
+			// The element a ref resolves to, as `find()` returns it, converts too.
+			'await (await desktop.ref("e1")).setValue(75)',
+		]) {
+			const result = await runWorker(transport, `value-${code}`, code);
+			expect(result.ok ? undefined : result.error).toBeUndefined();
+		}
+		const refused = await runWorker(
+			transport,
+			"value-element-boolean",
+			'await (await desktop.ref("e1")).setValue(true)',
+		);
+		expect(refused.ok ? undefined : refused.error).toMatchObject({
+			isToolError: true,
+			message: "setValue(value) requires a string or a finite number, got boolean",
+		});
+		// A whole number past 2^53 has lost digits already, as a Python int has crossing the eval bridge; a
+		// number that prints with an exponent is not text a number control takes. Nothing is sent for either.
+		for (const [code, message] of [
+			[
+				'await desktop.ref("e1").setValue(9007199254740993)',
+				'setValue(value) got 9007199254740992, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"',
+			],
+			[
+				'await desktop.ref("e1").setValue(-1e21)',
+				'setValue(value) got -1e+21, a whole number past 2^53 that a number argument cannot hold exactly; pass it as text in digits, such as "9007199254740993"',
+			],
+			[
+				'await (await desktop.ref("e1")).setValue(1e-7)',
+				'setValue(value) got 1e-7, a number that prints with an exponent; pass it as text in digits, such as "0.0000001"',
+			],
+		]) {
+			const result = await runWorker(transport, `value-${code}`, code);
+			expect(result.ok ? undefined : result.error).toMatchObject({ isToolError: true, message });
+		}
+		const edges = await runWorker(
+			transport,
+			"value-edges",
+			'await desktop.ref("e1").setValue(9007199254740991); await desktop.ref("e1").setValue(0.000001)',
+		);
+		expect(edges.ok ? undefined : edges.error).toBeUndefined();
+		expect(native.values).toEqual(["75", "-2.5", " 007 ", "75", "9007199254740991", "0.000001"]);
 	});
 
 	it("leaves a printed observe() tree out of the JavaScript value's echo, but keeps ax readable", async () => {
@@ -4237,6 +4303,137 @@ describe("display hold follows the agent turn", () => {
 		await run;
 		expect(native.displayHolds).toEqual(["turn"]);
 		await supervisor.close();
+	});
+});
+
+describe("menu.items beneath a named menu", () => {
+	class MenuSession extends FakeNativeSession {
+		readonly read: string[] = [];
+		override async menuItems(_target: string, path: string[] = []) {
+			this.read.push(path.join("/") || "<bar>");
+			const item = (title: string, hasSubmenu = false, enabled = true) => ({
+				title,
+				path: [...path, title],
+				enabled,
+				checked: false,
+				hasSubmenu,
+			});
+			switch (path.join("/")) {
+				case "":
+					return [item("Edit", true), item("View", true)];
+				case "Edit":
+					return [
+						item("Undo"),
+						item("List", true),
+						item("Speech", true, false),
+						item("Services", true),
+						item("Help", true),
+					];
+				case "Edit/List":
+					return [item("Local", true)];
+				case "Edit/List/Local":
+					return [item("Groceries"), item("Errands")];
+				default:
+					throw new Error(`AxFailed: menu ${path.join("/")} has no items until it opens`);
+			}
+		}
+	}
+
+	async function items(native: FakeNativeSession, code: string): Promise<string[]> {
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(transport, crypto.randomUUID(), code);
+		if (!message.ok) throw new Error(`menu run failed: ${JSON.stringify(message)}`);
+		return (message.payload.returnValue as Array<{ path: string[] }>).map(entry => entry.path.join("/"));
+	}
+
+	it("lists descendants depth-first and stops expansion after an unreadable submenu, retaining siblings", async () => {
+		const native = new MenuSession();
+		expect(await items(native, 'return await (await desktop.window("42")).menu.items("Edit")')).toEqual([
+			"Edit/Undo",
+			"Edit/List",
+			"Edit/List/Local",
+			"Edit/List/Local/Groceries",
+			"Edit/List/Local/Errands",
+			"Edit/Speech",
+			"Edit/Services",
+			"Edit/Help",
+		]);
+		expect(native.read).toEqual(["Edit", "Edit/List", "Edit/List/Local", "Edit/Services"]);
+	});
+
+	it("keeps the menu bar one level", async () => {
+		const bar = new MenuSession();
+		expect(await items(bar, 'return await (await desktop.window("42")).menu.items()')).toEqual(["Edit", "View"]);
+		expect(bar.read).toEqual(["<bar>"]);
+	});
+
+	it("leaves oversized submenus unexpanded without dropping sibling commands", async () => {
+		class LargeMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 149 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new LargeMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(149);
+		expect(paths[0]).toBe("Edit/0");
+		expect(paths[148]).toBe("Edit/148");
+	});
+
+	it("expands a submenu that exactly fills the remaining budget", async () => {
+		class ExactMenuSession extends FakeNativeSession {
+			override async menuItems(_target: string, path: string[] = []) {
+				return Array.from({ length: path.length === 1 ? 148 : 2 }, (_, index) => ({
+					title: `${index}`,
+					path: [...path, `${index}`],
+					enabled: true,
+					checked: false,
+					hasSubmenu: path.length === 1 && index === 0,
+				}));
+			}
+		}
+		const paths = await items(new ExactMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")');
+		expect(paths).toHaveLength(150);
+		expect(paths.slice(0, 3)).toEqual(["Edit/0", "Edit/0/0", "Edit/0/1"]);
+		expect(paths[149]).toBe("Edit/147");
+	});
+
+	it("keeps an unexposed Windows submenu available for an explicit path read", async () => {
+		class UnexposedMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/Services") throw new Error("BackgroundUnavailable: menu is unexposed");
+				return await super.menuItems(target, path);
+			}
+		}
+		expect(
+			await items(new UnexposedMenuSession(), 'return await (await desktop.window("42")).menu.items("Edit")'),
+		).toContain("Edit/Services");
+	});
+
+	it("propagates UserIntervened during expansion without reading another submenu", async () => {
+		class FailingMenuSession extends MenuSession {
+			override async menuItems(target: string, path: string[] = []) {
+				if (path.join("/") === "Edit/List") throw new Error("UserIntervened: submenu read failed");
+				return await super.menuItems(target, path);
+			}
+		}
+		const native = new FailingMenuSession();
+		const transport = new MemoryTransport();
+		new ComputerWorkerCore(transport, () => native);
+		const message = await runWorker(
+			transport,
+			crypto.randomUUID(),
+			'return await (await desktop.window("42")).menu.items("Edit")',
+		);
+		expect(message.ok).toBe(false);
+		expect(message.ok ? undefined : message.error.message).toContain("UserIntervened:");
+		expect(native.read).toEqual(["Edit"]);
 	});
 });
 
