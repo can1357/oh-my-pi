@@ -22,6 +22,15 @@ const SHIFT_LEFT = "\x1b[1;2D";
 
 /** A terminal that draws every kind (`meter` included). */
 const CX: DescribeContext = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
+/** A Tern without the plan review's `doc` and dock kinds. */
+const LEGACY: DescribeContext = { ...CX, supports: kind => kind !== "doc" && kind !== "buttons" && kind !== "menu" };
+
+const PLAN = "# Plan\n\n## Alpha\n\nfirst\n\n## Beta\n\nsecond\n\n## Gamma\n\nthird\n";
+const PLAN_CHOICES = [
+	{ id: "execute", label: "Approve and execute", detail: "Start fresh with just the plan" },
+	{ id: "compact", label: "Approve and compact context" },
+	{ id: "keep", label: "Approve and keep context", meta: "~378k / 1m", disabled: "Context is too full" },
+];
 
 function isNode(child: NativeChild): child is NativeNode {
 	return "k" in child && typeof child.k === "string";
@@ -637,42 +646,226 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
-	it("plan review: the title heading titles the sheet and is not repeated in the body; Copy copies what `c` does", () => {
-		const viaKey = vi.fn();
-		const viaButton = vi.fn();
+	it("plan review: the title heading titles the sheet; the document is the plan without it, editable and commentable", () => {
 		const plan = "# Ship credits\n\nintro\n\n## Alpha\n\na\n\n## Beta\n\nb\n";
-		const keyed = new PlanReviewOverlay(
-			plan,
-			{ options: ["Approve"] },
-			{ onPick: vi.fn(), onCancel: vi.fn(), onCopyPlan: viaKey },
-		);
-		keyed.handleInput("c");
-		const pointed = new PlanReviewOverlay(
-			plan,
-			{ options: ["Approve"] },
-			{ onPick: vi.fn(), onCancel: vi.fn(), onCopyPlan: viaButton },
-		);
-		expect(pointed.nativeOverlay.head).toBe("Ship credits");
-		const body = pointed.describe();
-		expect(JSON.stringify(find(body, node => node.p?.role === "omp.plan.body")?.node)).not.toContain(
-			"# Ship credits",
-		);
-		pointed.handleNativeEvent({ type: "action", key: "tools/copyPlan", act: "copyPlan", mods: [] });
-		expect(viaButton.mock.calls).toEqual(viaKey.mock.calls);
-		expect(viaKey).toHaveBeenCalledTimes(1);
+		const overlay = new PlanReviewOverlay(plan, { options: PLAN_CHOICES }, { onPick: vi.fn(), onCancel: vi.fn() });
+		expect(overlay.nativeOverlay.head).toBe("Ship credits");
+		const doc = find(overlay.describe(CX), node => node.k === "doc")?.node;
+		expect(doc?.p).toEqual({
+			role: "omp.plan.doc",
+			text: "\nintro\n\n## Alpha\n\na\n\n## Beta\n\nb\n",
+			edit: true,
+			comment: true,
+			comments: [],
+		});
 	});
 
-	it("plan review: ←/→ walk the horizontal decision bar, Shift+←/→ step the model slider, ↑ leaves it", () => {
+	it("plan review: the dock holds the Approve split with its menu, the model chip, Save and Cancel; no option list", () => {
+		const onPick = vi.fn();
+		const onChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			PLAN,
+			{
+				options: PLAN_CHOICES,
+				refine: { id: "refine", label: "Refine plan" },
+				slider: {
+					segments: [
+						{ label: "default", detail: "Sonnet" },
+						{ label: "slow", detail: "Opus" },
+					],
+					index: 0,
+					onChange,
+				},
+			},
+			{ onPick, onCancel: vi.fn(), onSave: vi.fn() },
+		);
+		const root = overlay.describe(CX);
+		expect(find(root, node => node.key === "options")).toBeUndefined();
+		expect(find(root, node => node.p?.role === "omp.plan.toc")).toBeDefined();
+		const dock = find(root, node => node.key === "dock")!;
+		expect(dock.node.p).toEqual({ role: "omp.plan.dock", gap: "sm", align: "center" });
+		expect(dock.node.c?.filter(isNode).map(child => child.key ?? child.k)).toEqual([
+			"approve",
+			"model",
+			"spacer",
+			"save",
+			"cancel",
+		]);
+		const approve = find(dock.node, node => node.key === "approve")!.node;
+		expect(approve.p).toEqual({ variant: "split", role: "omp.plan.approve" });
+		expect(approve.c?.filter(isNode).map(child => ({ k: child.k, p: child.p }))).toEqual([
+			{ k: "button", p: { text: "Approve", variant: "primary", keys: ["enter"], actions: { click: "approve" } } },
+			{
+				k: "menu",
+				p: {
+					trigger: "primary",
+					icon: "chev",
+					title: "Approve options",
+					align: "start",
+					items: [
+						{ id: "execute", label: "Approve and execute", detail: "Start fresh with just the plan" },
+						{ id: "compact", label: "Approve and compact context" },
+						{
+							id: "keep",
+							label: "Approve and keep context",
+							detail: "~378k / 1m",
+							disabled: "Context is too full",
+						},
+					],
+				},
+			},
+		]);
+		expect(find(dock.node, node => node.key === "model")?.node.p).toMatchObject({
+			role: "omp.plan.model",
+			text: "Sonnet",
+			caret: true,
+			items: [
+				{ id: "tier:0", label: "default", detail: "Sonnet", radio: "tier", checked: true },
+				{ id: "tier:1", label: "slow", detail: "Opus", radio: "tier", checked: false },
+			],
+		});
+
+		// A model pick is a slider move; a disabled approval does nothing; a menu approval picks it.
+		overlay.handleNativeEvent({ type: "action", key: `${dock.path}/model`, act: "tier:1", mods: [] });
+		expect(onChange).toHaveBeenCalledWith(1);
+		overlay.handleNativeEvent({ type: "action", key: `${dock.path}/approve/more`, act: "keep", mods: [] });
+		expect(onPick).not.toHaveBeenCalled();
+		overlay.handleNativeEvent({ type: "action", key: `${dock.path}/approve/more`, act: "compact", mods: [] });
+		expect(onPick).toHaveBeenCalledWith("compact");
+	});
+
+	it("plan review: under the dock Enter approves, ←/→ pick the model and Esc cancels", () => {
+		const onPick = vi.fn();
+		const onChange = vi.fn();
+		const onCancel = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\nbody\n",
+			{
+				options: PLAN_CHOICES,
+				slider: { segments: [{ label: "Fast" }, { label: "Smart" }], index: 0, onChange },
+			},
+			{ onPick, onCancel },
+		);
+		overlay.describe(CX);
+		setNativeRendering(true);
+		try {
+			overlay.handleInput(RIGHT);
+			overlay.handleInput(LEFT);
+			overlay.handleInput(ENTER);
+		} finally {
+			setNativeRendering(false);
+		}
+		expect(onChange.mock.calls).toEqual([[1], [0]]);
+		expect(onPick).toHaveBeenCalledWith("execute");
+		const other = new PlanReviewOverlay("# Plan\n\nbody\n", { options: PLAN_CHOICES }, { onPick, onCancel });
+		other.describe(CX);
+		other.handleInput("\x1b");
+		expect(onCancel).toHaveBeenCalledTimes(1);
+	});
+
+	it("plan review: a comment turns Approve into Refine, hides the Contents and round-trips into the feedback", () => {
+		const onPick = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			PLAN,
+			{ options: PLAN_CHOICES, refine: { id: "refine", label: "Refine plan" } },
+			{ onPick, onCancel: vi.fn(), onFeedbackChange },
+		);
+		const doc = find(overlay.describe(CX), node => node.k === "doc")!;
+		const text = String(doc.node.p && "text" in doc.node.p ? doc.node.p.text : "");
+		const at = text.indexOf("second");
+		overlay.handleNativeEvent({ type: "comment", key: doc.path, quote: "second", at, note: "too vague" });
+		expect(onFeedbackChange).toHaveBeenLastCalledWith(
+			'Refinement feedback on the plan:\n\n## Beta\n> "second"\n- too vague\n',
+		);
+		const root = overlay.describe(CX);
+		expect(find(root, node => node.k === "doc")?.node.p).toMatchObject({
+			comments: [{ id: "c1", quote: "second", at, note: "too vague" }],
+		});
+		expect(find(root, node => node.p?.role === "omp.plan.toc")).toBeUndefined();
+		expect(find(root, node => node.key === "main")?.node.p).toMatchObject({
+			text: "Refine",
+			actions: { click: "refine" },
+		});
+
+		overlay.handleNativeEvent({ type: "commentNote", key: doc.path, comment: "c1", note: "name the API" });
+		expect(String(onFeedbackChange.mock.lastCall?.[0])).toContain("- name the API");
+		overlay.handleNativeEvent({ type: "uncomment", key: doc.path, comment: "c1" });
+		expect(onFeedbackChange).toHaveBeenLastCalledWith("");
+		expect(find(overlay.describe(CX), node => node.key === "main")?.node.p).toMatchObject({ text: "Approve" });
+
+		overlay.handleNativeEvent({ type: "comment", key: doc.path, quote: "second", at, note: "again" });
+		overlay.handleNativeEvent({ type: "action", key: "dock/approve/main", act: "refine", mods: [] });
+		expect(onPick).toHaveBeenCalledWith("refine");
+	});
+
+	it("plan review: an in-place edit updates the plan, reports the full text and keeps the comments", () => {
+		const onPlanEdited = vi.fn();
+		const onFeedbackChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			PLAN,
+			{ options: PLAN_CHOICES },
+			{ onPick: vi.fn(), onCancel: vi.fn(), onPlanEdited, onFeedbackChange },
+		);
+		const doc = find(overlay.describe(CX), node => node.k === "doc")!;
+		const text = String(doc.node.p && "text" in doc.node.p ? doc.node.p.text : "");
+		overlay.handleNativeEvent({
+			type: "comment",
+			key: doc.path,
+			quote: "third",
+			at: text.indexOf("third"),
+			note: "split it",
+		});
+		const edited = text.replace("first", "first, then a much longer opening step");
+		overlay.handleNativeEvent({ type: "docChange", key: doc.path, text: edited });
+		expect(onPlanEdited).toHaveBeenCalledWith(`# Plan\n${edited}`);
+		const after = find(overlay.describe(CX), node => node.k === "doc")?.node.p;
+		// The document's own text comes back unchanged (a no-op for Tern); the comment moved with its quote.
+		expect(after).toMatchObject({
+			text: edited,
+			comments: [{ id: "c1", quote: "third", at: edited.indexOf("third"), note: "split it" }],
+		});
+		expect(String(onFeedbackChange.mock.lastCall?.[0])).toContain('## Gamma\n> "third"\n- split it');
+	});
+
+	it("plan review: Save hands the plan over and keeps the review open", () => {
+		const onSave = vi.fn();
+		const onPick = vi.fn();
+		const onCancel = vi.fn();
+		const overlay = new PlanReviewOverlay(PLAN, { options: PLAN_CHOICES }, { onPick, onCancel, onSave });
+		overlay.describe(CX);
+		overlay.handleNativeEvent({ type: "action", key: "dock/save", act: "save", mods: [] });
+		expect(onSave).toHaveBeenCalledWith(PLAN);
+		expect(onPick).not.toHaveBeenCalled();
+		expect(onCancel).not.toHaveBeenCalled();
+		// Still live: the dock stays, and a later approval goes through.
+		expect(find(overlay.describe(CX), node => node.key === "dock")).toBeDefined();
+		overlay.handleNativeEvent({ type: "action", key: "dock/approve/main", act: "approve", mods: [] });
+		expect(onPick).toHaveBeenCalledWith("execute");
+	});
+
+	it("plan review: older Terns get the option bar; ←/→ walk it, Shift+←/→ step the model slider, ↑ leaves it", () => {
 		const onPick = vi.fn();
 		const onChange = vi.fn();
 		const overlay = new PlanReviewOverlay(
 			"# Plan\n\nbody\n",
 			{
-				options: ["Approve", "Refine", "Stay"],
+				options: PLAN_CHOICES.slice(0, 2),
 				slider: { segments: [{ label: "Fast" }, { label: "Smart" }], index: 0, onChange },
 			},
-			{ onPick, onCancel: vi.fn() },
+			{ onPick, onCancel: vi.fn(), onSave: vi.fn() },
 		);
+		const root = overlay.describe(LEGACY);
+		expect(find(root, node => node.key === "dock")).toBeUndefined();
+		expect(
+			find(root, node => node.key === "options")
+				?.node.c?.filter(isNode)
+				.map(child => child.p),
+		).toEqual([
+			expect.objectContaining({ label: "Approve and execute" }),
+			expect.objectContaining({ label: "Approve and compact context" }),
+			expect.objectContaining({ label: "Save" }),
+		]);
 		setNativeRendering(true);
 		try {
 			// → → ← lands on the middle option; Shift+→ then Shift+← round-trips the slider.
@@ -692,7 +885,7 @@ describe("dialogs under a native surface", () => {
 			setNativeRendering(false);
 		}
 		expect(onChange.mock.calls).toEqual([[1], [0]]);
-		expect(onPick).toHaveBeenCalledWith("Refine");
+		expect(onPick).toHaveBeenCalledWith("compact");
 	});
 
 	it("login: Cancel runs Esc's path and Continue submits the pasted code", async () => {
