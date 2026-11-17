@@ -401,6 +401,13 @@ export async function searchExa(params: ExaSearchParams): Promise<SearchResponse
 		storedKey && params.authStorage
 			? params.authStorage.keys.resolver("exa", { sessionId: params.sessionId })
 			: getEnvApiKey("exa");
+	// A failed credential lookup must not downgrade a configured user to the anonymous MCP.
+	if (!keyOrResolver && params.authStorage?.keys.source("exa") !== undefined) {
+		throw new SearchProviderError(
+			"exa",
+			"Exa credentials could not be resolved. Check your configured API key or credential helper.",
+		);
+	}
 	const response = keyOrResolver
 		? await withAuth(keyOrResolver, key => callExaSearch(key, params), { signal: params.signal })
 		: await callExaMcpSearch(params);
@@ -444,11 +451,13 @@ export class ExaProvider extends SearchProvider {
 	readonly id = "exa";
 	readonly label = "Exa";
 
-	/**
-	 * Available unless disabled in settings: without a credential, search runs
-	 * through Exa's unauthenticated public MCP.
-	 */
-	isAvailable(_authStorage: AuthStorage): boolean {
+	/** The auto chain admits Exa only when enabled and a credential is configured. */
+	isAvailable(authStorage: AuthStorage): boolean {
+		return this.isExplicitlyAvailable(authStorage) && authStorage.keys.source("exa") !== undefined;
+	}
+
+	/** An explicit `web/exa` selection works without a key via Exa's public MCP, unless disabled in settings. */
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
 		try {
 			if (cfgExaEnabled.get(settings) === false) {
 				return false;
