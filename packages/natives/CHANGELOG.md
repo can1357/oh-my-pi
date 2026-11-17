@@ -9,6 +9,10 @@
 - `TtyWriter` now works on Windows consoles: it writes off the JS thread in 16 KiB `WriteFile` chunks, restores the UTF-8 console code pages that child processes change, and `stop()` cancels a blocked write
 - Added `isolateThreadStartsFromConsole()`, which keeps a Windows console whose terminal stopped reading from blocking new threads in the process
 
+### Fixed
+
+- Fixed screenshots of a Linux window partly off its monitor: Wayland labelled the visible part with the whole window's coordinates, so zoom regions landed off target, and X11 failed with "resized since capture"; both now capture the visible part (by [@Deftera186](https://github.com/Deftera186) and [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.1] - 2026-11-17
 
 ### Added

@@ -448,9 +448,12 @@ impl X11Capture {
 					.ok_or_else(|| {
 						DesktopError::window_not_found(format!("window {id} was not found"))
 					})?;
-				let (image, (x, y, width, height)) = self.capture_held(client, id, || {})?;
-				let frame_window = DesktopWindow { x, y, width, height, ..window };
-				let frame = FrameGeometry::for_window(&frame_window, image.width(), image.height());
+				let (image, area, (x, y, width, height)) = self.capture_held(client, id, || {})?;
+				// The window's bounds come from the same grab as its pixels: a
+				// move since `windows()` must not read as a crop offset.
+				let window = DesktopWindow { x, y, width, height, ..window };
+				let frame =
+					FrameGeometry::for_window_part(&window, area, image.width(), image.height());
 				Ok((image, frame))
 			},
 		}
@@ -503,12 +506,14 @@ impl X11Capture {
 	/// in between: from the pixmap a compositing manager keeps of it, which
 	/// nothing over the window reaches, and else from the screen, the only
 	/// copy. `between` runs there, after the check (a no-op but in tests).
+	/// Returns the image, the part of the root it shows, and the window's
+	/// whole bounds on the root, both read while the server was held.
 	fn capture_held(
 		&self,
 		client: Window,
 		id: &str,
 		between: impl Fn(),
-	) -> CoreResult<(RgbaImage, Area)> {
+	) -> CoreResult<(RgbaImage, Area, Area)> {
 		let grab = ServerGrab::new(&self.conn)?;
 		let pending = match self.capture_named(client, id, &between)? {
 			Some(pending) => pending,
@@ -573,7 +578,9 @@ impl X11Capture {
 			})
 			.collect::<Result<Vec<_>, _>>()
 			.map_err(failed)?;
-		let area = self.root_area(id, origins[0], geometry.width, geometry.height)?;
+		let bounds =
+			(origins[0].0, origins[0].1, u32::from(geometry.width), u32::from(geometry.height));
+		let area = self.root_area(id, bounds)?;
 		let (x, y, width, height) = area;
 		let above = self.above(client, area, &tree.siblings)?;
 		if self.covered(above.covers.iter().filter(|over| over.level < level), area)? {
@@ -610,7 +617,7 @@ impl X11Capture {
 			.zip(shapes)
 			.filter_map(|(origin, shape)| Some((origin, shape?)))
 			.collect();
-		Ok(Some(PendingCapture { area, image, clips, popups }))
+		Ok(Some(PendingCapture { area, bounds, image, clips, popups }))
 	}
 
 	/// Where no window from `client` up to the root is redirected, the screen
@@ -637,12 +644,13 @@ impl X11Capture {
 		}
 		let geometry = geometry.reply().map_err(failed)?;
 		let origin = origin.reply().map_err(failed)?;
-		let area = self.root_area(
-			id,
-			(i32::from(origin.dst_x), i32::from(origin.dst_y)),
-			geometry.width,
-			geometry.height,
-		)?;
+		let bounds = (
+			i32::from(origin.dst_x),
+			i32::from(origin.dst_y),
+			u32::from(geometry.width),
+			u32::from(geometry.height),
+		);
+		let area = self.root_area(id, bounds)?;
 		let tree = self.tree(client, id)?;
 		let above = self.above(client, area, &tree.siblings)?;
 		if self.covered(above.covers.iter(), area)? {
@@ -656,17 +664,17 @@ impl X11Capture {
 		let (x, y, width, height) = area;
 		Ok(PendingCapture {
 			area,
+			bounds,
 			image: self.request_root(x, y, width, height)?,
 			clips: Vec::new(),
 			popups: Vec::new(),
 		})
 	}
 
-	fn root_area(&self, id: &str, (x, y): (i32, i32), width: u16, height: u16) -> CoreResult<Area> {
-		clip_to_root(x, y, u32::from(width), u32::from(height), self.root_width, self.root_height)
-			.ok_or_else(|| {
-				DesktopError::capture_failed(format!("window {id} has no visible root area"))
-			})
+	fn root_area(&self, id: &str, (x, y, width, height): Area) -> CoreResult<Area> {
+		clip_to_root(x, y, width, height, self.root_width, self.root_height).ok_or_else(|| {
+			DesktopError::capture_failed(format!("window {id} has no visible root area"))
+		})
 	}
 
 	/// `client`'s ancestry up to a child of the root, and what stacks above it
@@ -1338,7 +1346,10 @@ impl ImageRead<'_> {
 /// A window capture whose reads were queued while the server was held:
 /// the window's image, the shapes to cut it to, and its popups.
 struct PendingCapture<'a> {
+	/// The part of the root the image shows.
 	area:   Area,
+	/// The window's whole bounds on the root.
+	bounds: Area,
 	image:  ImageRead<'a>,
 	/// Origins on the root of the windows whose bounding shapes cut the image.
 	clips:  Vec<((i32, i32), ShapeRequest<'a>)>,
@@ -1346,7 +1357,7 @@ struct PendingCapture<'a> {
 }
 
 impl PendingCapture<'_> {
-	fn finish(self, capture: &X11Capture, id: &str) -> CoreResult<(RgbaImage, Area)> {
+	fn finish(self, capture: &X11Capture, id: &str) -> CoreResult<(RgbaImage, Area, Area)> {
 		let (x, y, ..) = self.area;
 		let mut image = self.image.finish(capture)?;
 		for ((window_x, window_y), shape) in self.clips {
@@ -1360,7 +1371,7 @@ impl PendingCapture<'_> {
 		for popup in self.popups {
 			popup.draw(capture, &mut image)?;
 		}
-		Ok((image, self.area))
+		Ok((image, self.area, self.bounds))
 	}
 }
 
@@ -2024,7 +2035,7 @@ mod tests {
 
 		// The cover's map reaches the server between the check and the read,
 		// and waits there for the grab to end.
-		let (image, _) = capture
+		let (image, ..) = capture
 			.capture_held(red, &id, || {
 				other.map_window(cover).expect("map cover");
 				other.flush().expect("map sent");
@@ -2056,7 +2067,7 @@ mod tests {
 
 		// The child's map reaches the server between the check and the read of
 		// the frame's pixmap, and waits there for the grab to end.
-		let (image, _) = capture
+		let (image, ..) = capture
 			.capture_held(blue, &id, || {
 				other.map_window(child).expect("map child");
 				other.flush().expect("map sent");
@@ -2124,6 +2135,37 @@ mod tests {
 			.expect("unnamed menu");
 		wm.sync().expect("sync");
 		assert_eq!(popup_pixel(), [255, 255, 0, 255], "the popup of a menu naming no window");
+	}
+
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn window_partly_off_the_root_is_framed_as_its_visible_part() {
+		let (_server, display) = start_server();
+		let (wm, _) = x11rb::connect(Some(&display)).expect("connect");
+		let root = wm.setup().roots[0].root;
+		let red =
+			window(&wm, root, (-50, -30, 200, 150), &CreateWindowAux::new().background_pixel(RED));
+		list_windows(&wm, &[red]);
+		let capture = X11Capture::connect(Some(&display), DisplaySelector::All).expect("capture");
+		let id = red.to_string();
+		let listed = capture
+			.windows()
+			.expect("windows")
+			.into_iter()
+			.find(|window| window.id == id)
+			.expect("red is listed");
+		assert_eq!((listed.x, listed.y, listed.width, listed.height), (-50, -30, 200, 150));
+
+		let (image, frame) = capture
+			.capture(&Target::Window(id), None)
+			.expect("the visible part");
+		assert_eq!(image.dimensions(), (150, 120));
+		assert_eq!(pixel(&image, (0, 0)), [255, 0, 0, 255]);
+		frame
+			.validate_window(Some(&listed))
+			.expect("red was not resized");
+		assert_eq!(frame.window_part(&listed), (0, 0, 150, 120));
+		assert_eq!(frame.map_point(10.0, 20.0, Some(&listed)).unwrap(), (10.0, 20.0));
 	}
 
 	#[test]
