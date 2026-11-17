@@ -6,6 +6,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import {
 	$envExact,
 	getAgentDbPath,
@@ -13,6 +14,7 @@ import {
 	getAuthBrokerSnapshotCachePath,
 	getConfigRootDir,
 	isEnoent,
+	isRetryableStatus,
 	logger,
 	MAIN_CONFIG_FILENAMES,
 } from "@oh-my-pi/pi-utils";
@@ -26,7 +28,7 @@ import {
 	SqliteAuthCredentialStore,
 } from "../auth-storage";
 import * as AIError from "../error";
-import { AuthBrokerClient, AuthBrokerError } from "./client";
+import { AuthBrokerClient, AuthBrokerError, type FetchSnapshotResult } from "./client";
 import { type AuthBrokerAccountPool, type AuthBrokerProviderPool, RemoteAuthCredentialStore } from "./remote-store";
 import { readAuthBrokerSnapshotCache, scheduleAuthBrokerSnapshotCacheWrite } from "./snapshot-cache";
 import { DEFAULT_SNAPSHOT_CACHE_TTL_MS, type SnapshotResponse } from "./types";
@@ -369,6 +371,59 @@ function resolveSnapshotTtlMs(): number {
 }
 
 /**
+ * How long startup keeps retrying the initial snapshot when no cache can stand
+ * in, so a broker restart or a short network outage does not fail startup.
+ */
+const INITIAL_SNAPSHOT_RETRY_BUDGET_MS = 30_000;
+const INITIAL_SNAPSHOT_RETRY_INITIAL_DELAY_MS = 500;
+const INITIAL_SNAPSHOT_RETRY_MAX_DELAY_MS = 8_000;
+
+/** No HTTP answer, or one a restarting broker or its proxy gives (5xx, 408, 429). */
+function isTransientAuthBrokerError(error: unknown): error is AuthBrokerError {
+	return error instanceof AuthBrokerError && (error.status === undefined || isRetryableStatus(error.status));
+}
+
+/**
+ * Fetch the snapshot a broker store opens with. With `retry`, transient
+ * failures are retried with exponential backoff under one
+ * {@link INITIAL_SNAPSHOT_RETRY_BUDGET_MS} deadline that also cancels a request
+ * in flight; a rejected token or any other definite answer fails at once.
+ */
+async function fetchInitialSnapshot(client: AuthBrokerClient, retry: boolean): Promise<SnapshotResponse> {
+	const budget = retry ? AbortSignal.timeout(INITIAL_SNAPSHOT_RETRY_BUDGET_MS) : undefined;
+	let delayMs = INITIAL_SNAPSHOT_RETRY_INITIAL_DELAY_MS;
+	let lastError: AuthBrokerError | undefined;
+	for (;;) {
+		let result: FetchSnapshotResult;
+		try {
+			result = await client.fetchSnapshot({ signal: budget });
+		} catch (error) {
+			if (budget?.aborted && lastError) throw initialSnapshotRetriesSpent(lastError);
+			if (!budget || !isTransientAuthBrokerError(error)) throw error;
+			lastError = error;
+			logger.warn("auth-broker initial snapshot failed; retrying", { error: error.message, delayMs });
+			try {
+				await scheduler.wait(delayMs, { signal: budget });
+			} catch {
+				throw initialSnapshotRetriesSpent(lastError);
+			}
+			delayMs = Math.min(delayMs * 2, INITIAL_SNAPSHOT_RETRY_MAX_DELAY_MS);
+			continue;
+		}
+		if (result.status !== 200)
+			throw new AuthBrokerError("Auth broker returned no initial snapshot", { status: result.status });
+		return result.snapshot;
+	}
+}
+
+function initialSnapshotRetriesSpent(lastError: AuthBrokerError): AuthBrokerError {
+	return new AuthBrokerError(
+		`Auth broker gave no initial snapshot after retrying for ${INITIAL_SNAPSHOT_RETRY_BUDGET_MS / 1000}s: ${lastError.message}`,
+		{ status: lastError.status, body: lastError.body, cause: lastError },
+	);
+}
+
+/**
  * Resolve broker connection configuration using the same precedence as the TUI:
  *
  * 1. `OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN` env vars.
@@ -423,6 +478,12 @@ export interface OpenAuthCredentialStoreOptions {
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
+	/**
+	 * Without a usable cache, retry a broker that is restarting or briefly
+	 * unreachable for up to 30 s instead of failing on the first try. Startup
+	 * sets this; a runtime settings switch fails fast and keeps its current store.
+	 */
+	retryUnreachableBroker?: boolean;
 }
 
 /** Credential store opened by {@link openAuthCredentialStore} plus its diagnostics label. */
@@ -433,7 +494,7 @@ export interface OpenedAuthCredentialStore {
 
 /**
  * Open the credential store {@link discoverAuthStorage} would use for
- * `brokerConfig`: the remote broker store (fails fast when the broker has no
+ * `brokerConfig`: the remote broker store (fails when the broker has no
  * usable snapshot) or the local SQLite store. Also feeds
  * {@link AuthStorage.replaceStore} when broker settings change at runtime.
  */
@@ -480,12 +541,7 @@ export async function openAuthCredentialStore(
 			// No usable cache: block on the broker so a misconfigured/unreachable
 			// broker or revoked token fails startup with an actionable error
 			// (issue #8096) instead of yielding an empty credential store.
-			const initialResult = await client.fetchSnapshot();
-			if (initialResult.status !== 200)
-				throw new AuthBrokerError("Auth broker returned no initial snapshot", {
-					status: initialResult.status,
-				});
-			initialSnapshot = initialResult.snapshot;
+			initialSnapshot = await fetchInitialSnapshot(client, options.retryUnreachableBroker === true);
 			persist?.(initialSnapshot);
 		}
 		// Fresh cache: stale-while-revalidate. The store's constructor starts its
@@ -529,6 +585,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		cachePath: options.cachePath,
 		sourceLabel: options.sourceLabel,
 		accountPool: options.accountPool,
+		retryUnreachableBroker: true,
 	});
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,

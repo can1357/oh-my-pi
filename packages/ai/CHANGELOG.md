@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ## [18.22.2] - 2026-11-18
+### Fixed
+
+- Startup with an auth broker and no fresh snapshot cache no longer fails when the broker is restarting or briefly unreachable; it retries for up to 30 seconds, while a rejected token still fails at once
+
+## [18.22.1] - 2026-11-17
 
 ### Added
 
