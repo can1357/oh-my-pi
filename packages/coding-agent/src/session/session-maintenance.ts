@@ -5338,8 +5338,13 @@ export class SessionMaintenance {
 		// returned only when still valid for the current branch/model/settings.
 		// Snapcompact is local and instant, so an armed LLM summary (possible
 		// only when settings/model changed since arming) never overrides it.
+		// Speculation arms from `methodOrder`, so under a separate idle order an
+		// armed result counts only when it was produced by the selected method.
 		const claimedSpec = this.#claimArmedSpeculation(options.triggerContextTokens, options.pendingContextTokens);
-		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
+		const armedSpec =
+			method === "snapcompact" || (idleMethods.length > 0 && claimedSpec?.method !== method)
+				? undefined
+				: claimedSpec;
 
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;

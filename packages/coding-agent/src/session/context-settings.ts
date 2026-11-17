@@ -3,7 +3,11 @@ import {
 	validateModelCompactionThresholds,
 } from "../config/compaction-threshold";
 import { combine, register, type SettingValueOf } from "../config/registry";
-import { COMPACTION_METHOD_CHOICES, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-methods";
+import {
+	COMPACTION_METHOD_CHOICES,
+	type CompactionMethod,
+	DEFAULT_COMPACTION_METHOD_ORDER,
+} from "./compaction-methods";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -338,7 +342,7 @@ export const cfgCompactionIdleThresholdTokens = register({
 export const cfgCompactionIdleMethodOrder = register({
 	id: "compaction.idleMethodOrder",
 	type: "array",
-	default: [],
+	default: [] as CompactionMethod[],
 	ui: {
 		tab: "context",
 		group: "Compaction",
