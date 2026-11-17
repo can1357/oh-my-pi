@@ -44,20 +44,20 @@ function relayed(thresholdMs = 20) {
 }
 
 describe("resolveRelayConfig", () => {
-	it("defaults to 85s and disables only on zero", () => {
-		expect(resolveRelayConfig({})).toEqual({ enabled: true, thresholdMs: 85_000 });
-		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "  " })).toEqual({ enabled: true, thresholdMs: 85_000 });
+	it("stays off until an explicit positive window is set", () => {
+		expect(resolveRelayConfig({})).toEqual({ enabled: false, thresholdMs: 0 });
+		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "  " })).toEqual({ enabled: false, thresholdMs: 0 });
 		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "0" })).toEqual({ enabled: false, thresholdMs: 0 });
+		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "-1" })).toEqual({ enabled: false, thresholdMs: 0 });
+		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "fast" })).toEqual({ enabled: false, thresholdMs: 0 });
 		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "120000" })).toEqual({ enabled: true, thresholdMs: 120_000 });
 	});
 
-	it("clamps to the 5s..165s window and ignores unusable values", () => {
+	it("clamps an explicit window to the 5s..165s range", () => {
 		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "1" }).thresholdMs).toBe(5_000);
 		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "4999" }).thresholdMs).toBe(5_000);
 		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "165001" }).thresholdMs).toBe(165_000);
 		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "999999999" }).thresholdMs).toBe(165_000);
-		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "fast" }).thresholdMs).toBe(85_000);
-		expect(resolveRelayConfig({ OMP_ACP_TOOL_RELAY_MS: "NaN" }).thresholdMs).toBe(85_000);
 	});
 });
 
@@ -179,6 +179,21 @@ describe("ToolRelay", () => {
 		relay.cancelAll("host restarted", "call-1");
 		expect(clock.timers.size).toBe(0);
 		expect(textOf(await other)).toContain("host restarted");
+		result.resolve(body);
+		await Promise.resolve();
+		expect(await relay.awaitResult("call-1")).toEqual(body);
+	});
+
+	it("detaches a waiting control call when its transport stops and keeps the result awaitable", async () => {
+		const { clock, relay, result, parked } = relayed();
+		clock.fire(20);
+		await parked;
+		const awaiting = relay.awaitResult("call-1");
+		expect(relay.awaiting("call-1")).toBe(true);
+		relay.detach("call-1");
+		expect(relay.awaiting("call-1")).toBe(false);
+		expect(clock.timers.size).toBe(0);
+		expect(textOf(await awaiting)).toContain("transport stopped");
 		result.resolve(body);
 		await Promise.resolve();
 		expect(await relay.awaitResult("call-1")).toEqual(body);

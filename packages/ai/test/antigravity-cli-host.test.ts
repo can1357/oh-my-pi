@@ -190,7 +190,10 @@ afterEach(async () => {
 	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 });
 
-/** `relayMs` is 0 for a disabled relay, otherwise the relay threshold under test. */
+/**
+ * `relayMs` is 0 for a disabled relay, otherwise the relay threshold under test;
+ * omitting it leaves the host on its own `OMP_ACP_TOOL_RELAY_MS` default.
+ */
 type FixtureOptions = AgyHostOptions & { relayMs?: number };
 
 async function fixture(options: FixtureOptions = {}) {
@@ -199,6 +202,13 @@ async function fixture(options: FixtureOptions = {}) {
 	const started = new Queue<FakeAgy>();
 	const clock = new Clock();
 	const instances: FakeAgy[] = [];
+	const relay =
+		relayMs === undefined
+			? undefined
+			: new ToolRelay(
+					relayMs === 0 ? { enabled: false, thresholdMs: 0 } : { enabled: true, thresholdMs: relayMs },
+					clock,
+				);
 	const host = new AgyHost(dir, {
 		startupTimeoutMs: 500,
 		cancelTimeoutMs: 60,
@@ -211,20 +221,13 @@ async function fixture(options: FixtureOptions = {}) {
 			return fake;
 		},
 		...hostOptions,
-		...(relayMs === undefined
-			? {}
-			: {
-					relay: new ToolRelay(
-						relayMs === 0 ? { enabled: false, thresholdMs: 0 } : { enabled: true, thresholdMs: relayMs },
-						clock,
-					),
-				}),
+		...(relay ? { relay } : {}),
 	});
 	cleanup.push(async () => {
 		await host.dispose();
 		await rm(dir, { recursive: true, force: true });
 	});
-	return { host, started, instances, dir, clock };
+	return { host, started, instances, dir, clock, relay };
 }
 
 function step(
@@ -819,6 +822,32 @@ describe("AgyHost stateful steps", () => {
 		expect(next.writer.output.content).toEqual([{ type: "text", text: "Restart result received." }]);
 	});
 
+	it("detaches a control call that was waiting when its transport restarted", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		const { relay } = state;
+		if (!relay) throw new Error("Relay fixture is missing");
+		const waiting = state.fake.call(RELAY_CONTROL_NAME, { call_id: callId });
+		expect(relay.awaiting(callId)).toBe(true);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "restart body")], {
+			tools: [...tools, { name: "write", description: "Write", parameters: type({ text: "string" }) }],
+		});
+		const restarted = await state.started.next();
+		// The old socket died with its process, so the result must not be handed to its waiter.
+		expect(relay.awaiting(callId)).toBe(false);
+		expect(outputText(await waiting)).toContain("transport stopped");
+		const late = await restarted.prompts.next();
+		expect(textOf(late.request.prompt)).toContain("restart body");
+		expect(outputText(await restarted.call(RELAY_CONTROL_NAME, { call_id: callId }))).toBe("restart body");
+		restarted.text("Restart result received.");
+		late.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Restart result received." }]);
+	});
+
 	it("keeps a steered result when the relay threshold expires during the steering handshake", async () => {
 		const state = await parked({ relayMs: 20 });
 		state.fake.autoSteer = false;
@@ -847,7 +876,7 @@ describe("AgyHost stateful steps", () => {
 	});
 
 	it("rejects a user tool named like the relay control tool without stopping the live process", async () => {
-		const state = await parked();
+		const state = await parked({ relayMs: 20 });
 		const colliding: Tool = {
 			name: RELAY_CONTROL_NAME,
 			description: "A user tool that happens to share the control name",
@@ -857,7 +886,7 @@ describe("AgyHost stateful steps", () => {
 			tools: [...tools, colliding],
 		});
 		await expect(blocked.done).rejects.toThrow(
-			/tool name "omp_await_result" collides with the tool relay control tool.*OMP_ACP_TOOL_RELAY_MS=0/,
+			/tool name "omp_await_result" collides with the tool relay control tool.*unset OMP_ACP_TOOL_RELAY_MS/,
 		);
 		expect(state.fake.closed).toBe(false);
 		expect(state.instances).toHaveLength(1);
@@ -877,6 +906,44 @@ describe("AgyHost stateful steps", () => {
 		if (!callId) throw new Error("Relay notice lost its call id");
 		const repeat = await state.fake.call("read", { path: "a.txt" });
 		expect(outputText(repeat)).toContain(`"call_id":"${callId}"`);
+		expect(state.first.writer.output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
+	});
+
+	it("rejects a control call from another conversation instead of returning the relay result", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, "relay body")]);
+		await state.fake.prompts.next();
+		const foreign = await state.fake.call(RELAY_CONTROL_NAME, { call_id: callId }, crypto.randomUUID());
+		expect(foreign.isError).toBe(true);
+		expect(outputText(foreign)).not.toContain("relay body");
+		expect(outputText(foreign)).not.toContain(callId);
+		await expect(next.done).rejects.toThrow("outside the active step");
+		expect(state.fake.closed).toBe(true);
+	});
+
+	it("rejects a duplicate call from another conversation instead of repeating the relay notice", async () => {
+		const state = await parked({ relayMs: 20 });
+		state.clock.fire(20);
+		const notice = await state.output;
+		const callId = /"call_id":"([^"]+)"/.exec(outputText(notice))?.[1];
+		if (!callId) throw new Error("Relay notice lost its call id");
+		state.fake.options.onUpdate({
+			sessionId: state.fake.currentId,
+			update: {
+				sessionUpdate: "tool_call",
+				toolCallId: crypto.randomUUID(),
+				title: "mcp_ide-tools_read",
+				status: "in_progress",
+			},
+		});
+		const foreign = await state.fake.options.onCall("read", { path: "a.txt" }, crypto.randomUUID());
+		expect(foreign.isError).toBe(true);
+		expect(outputText(foreign)).not.toContain(callId);
+		expect(state.fake.closed).toBe(true);
 		expect(state.first.writer.output.content.filter(block => block.type === "toolCall")).toHaveLength(1);
 	});
 

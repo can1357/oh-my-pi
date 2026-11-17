@@ -3,13 +3,15 @@
  * response is released with a relay notice, and `omp_await_result` returns the
  * original result once omp supplies it. A result is never executed twice.
  */
+import { prompt } from "@oh-my-pi/pi-utils";
 import type { McpToolDefinition, McpToolOutput } from "./mcp-bridge";
+import relayControlTemplate from "./relay-control.md" with { type: "text" };
+import relayNoticeTemplate from "./relay-notice.md" with { type: "text" };
 
 export const RELAY_CONTROL_NAME = "omp_await_result";
 
 const MIN_THRESHOLD_MS = 5_000;
 const MAX_THRESHOLD_MS = 165_000;
-const DEFAULT_THRESHOLD_MS = 85_000;
 const MISSING_RESULT = "The original tool call returned no result";
 
 /** One relay threshold resolved from `OMP_ACP_TOOL_RELAY_MS`. */
@@ -18,13 +20,14 @@ export interface RelayConfig {
 	thresholdMs: number;
 }
 
-/** Read the relay window; `0` disables relay and other numbers clamp to 5s..165s. */
+/**
+ * Read the relay window. Relay is opt-in: an absent, zero or unusable
+ * `OMP_ACP_TOOL_RELAY_MS` disables it, and a positive value clamps to 5s..165s.
+ */
 export function resolveRelayConfig(env: NodeJS.ProcessEnv = process.env): RelayConfig {
 	const raw = env.OMP_ACP_TOOL_RELAY_MS?.trim();
-	if (!raw) return { enabled: true, thresholdMs: DEFAULT_THRESHOLD_MS };
-	const value = Number(raw);
-	if (!Number.isFinite(value)) return { enabled: true, thresholdMs: DEFAULT_THRESHOLD_MS };
-	if (value === 0) return { enabled: false, thresholdMs: 0 };
+	const value = raw ? Number(raw) : 0;
+	if (!Number.isFinite(value) || value <= 0) return { enabled: false, thresholdMs: 0 };
 	return {
 		enabled: true,
 		thresholdMs: Math.min(MAX_THRESHOLD_MS, Math.max(MIN_THRESHOLD_MS, Math.trunc(value))),
@@ -34,9 +37,7 @@ export function resolveRelayConfig(env: NodeJS.ProcessEnv = process.env): RelayC
 /** Extra MCP tool agy may call; omp never projects it into its own tool list. */
 export const RELAY_CONTROL_TOOL: McpToolDefinition = {
 	name: RELAY_CONTROL_NAME,
-	description:
-		"Wait for the result of an Antigravity tool call that returned a relay notice. " +
-		"Pass the call_id from that notice. Never call the original tool again.",
+	description: prompt.render(relayControlTemplate, { controlName: RELAY_CONTROL_NAME }),
 	inputSchema: {
 		type: "object",
 		properties: { call_id: { type: "string", minLength: 1 } },
@@ -47,11 +48,7 @@ export const RELAY_CONTROL_TOOL: McpToolDefinition = {
 
 /** The notice agy sees instead of a result that is still outstanding. */
 export function relayNotice(callId: string): string {
-	return [
-		"Tool still running.",
-		`Call ${RELAY_CONTROL_NAME} with {"call_id":"${callId}"}.`,
-		"Do not call the original tool again. Do not claim completion before the result arrives.",
-	].join("\n");
+	return prompt.render(relayNoticeTemplate, { controlName: RELAY_CONTROL_NAME, callId });
 }
 
 export interface RelayInvocation {
@@ -72,10 +69,15 @@ const systemClock: RelayClock = {
 		timer.unref?.();
 		return timer;
 	},
-	clearTimeout: timer => clearTimeout(timer as ReturnType<typeof setTimeout>),
+	clearTimeout: timer => clearTimeout(timer as NodeJS.Timeout),
 };
 
 type RelayState = "pending" | "relayed" | "fulfilled" | "failed" | "cancelled";
+
+type RelayWaitOutcome = "settled" | "timeout" | "detached";
+
+/** One registered wait; calling it settles the wait exactly once. */
+type RelayWait = (outcome: RelayWaitOutcome) => void;
 
 interface RelayRecord {
 	readonly callId: string;
@@ -84,9 +86,10 @@ interface RelayRecord {
 	readonly argumentsKey: string;
 	state: RelayState;
 	result?: McpToolOutput;
-	awaiters: number;
 	readonly timers: Set<unknown>;
-	readonly wakers: Set<(outcome: "settled") => void>;
+	readonly wakers: Set<RelayWait>;
+	/** Control calls actually waiting on this id; a stopped transport's waiter is detached. */
+	readonly waiters: Set<RelayWait>;
 }
 
 /** Per-call relay state for one Antigravity CLI host. */
@@ -154,20 +157,29 @@ export class ToolRelay {
 		if (record.turn < this.#turn - 1) return relayError("Relay call id belongs to an expired turn");
 		if (record.turn > this.#turn) return relayError("Relay call id belongs to a future turn");
 		if (this.#isSettled(record)) return record.result ?? relayError(MISSING_RESULT);
-		record.awaiters += 1;
-		try {
-			const outcome = await this.#wait(record, this.config.thresholdMs);
-			if (record.state === "cancelled") return record.result ?? relayError(MISSING_RESULT);
-			if (outcome === "settled") return record.result ?? relayError(MISSING_RESULT);
-			return noticeOutput(record.callId);
-		} finally {
-			record.awaiters -= 1;
-		}
+		const outcome = await this.#wait(record, this.config.thresholdMs, true);
+		if (record.state === "cancelled") return record.result ?? relayError(MISSING_RESULT);
+		if (outcome === "settled") return record.result ?? relayError(MISSING_RESULT);
+		if (outcome === "detached")
+			return relayError("The relay transport stopped before this control call got a result");
+		return noticeOutput(record.callId);
 	}
 
 	/** True while a control call is actually waiting for this id. */
 	awaiting(callId: string): boolean {
-		return (this.#records.get(callId)?.awaiters ?? 0) > 0;
+		return (this.#records.get(callId)?.waiters.size ?? 0) > 0;
+	}
+
+	/**
+	 * Stop counting control calls whose transport stopped. Their socket can no
+	 * longer receive the result, so a restarted process needs it as a late prompt.
+	 */
+	detach(callId: string | undefined): void {
+		const record = callId === undefined ? undefined : this.#records.get(callId);
+		if (!record) return;
+		const waiters = [...record.waiters];
+		record.waiters.clear();
+		for (const waiter of waiters) waiter("detached");
 	}
 
 	/** Stop the threshold countdown for a call whose result is already in hand. */
@@ -192,7 +204,8 @@ export class ToolRelay {
 
 	/**
 	 * Fail every outstanding call; used when the host or its process stops.
-	 * `except` keeps one released call awaitable across that restart.
+	 * `except` keeps one released call awaitable across that restart, and its
+	 * dead control waiters are detached first by {@link detach}.
 	 */
 	cancelAll(reason: string, except?: string): void {
 		for (const record of this.#records.values()) {
@@ -210,9 +223,9 @@ export class ToolRelay {
 			name: invocation.name,
 			argumentsKey: canonicalArguments(invocation.arguments),
 			state: "pending",
-			awaiters: 0,
 			timers: new Set(),
 			wakers: new Set(),
+			waiters: new Set(),
 		};
 		this.#records.set(record.callId, record);
 		return record;
@@ -228,24 +241,27 @@ export class ToolRelay {
 		for (const waker of wakers) waker("settled");
 	}
 
-	#wait(record: RelayRecord, ms: number): Promise<"settled" | "timeout"> {
+	/** `control` marks the wait as an `omp_await_result` call, which `awaiting()` counts. */
+	#wait(record: RelayRecord, ms: number, control = false): Promise<RelayWaitOutcome> {
 		if (this.#isSettled(record)) return Promise.resolve("settled");
-		return new Promise(resolve => {
-			let done = false;
-			const finish = (outcome: "settled" | "timeout") => {
-				if (done) return;
-				done = true;
-				record.wakers.delete(finish);
-				if (timer) {
-					record.timers.delete(timer);
-					this.clock.clearTimeout(timer);
-				}
-				resolve(outcome);
-			};
-			const timer = this.clock.setTimeout(() => finish("timeout"), ms);
-			record.timers.add(timer);
-			record.wakers.add(finish);
-		});
+		const waiting = Promise.withResolvers<RelayWaitOutcome>();
+		let done = false;
+		const finish: RelayWait = outcome => {
+			if (done) return;
+			done = true;
+			record.wakers.delete(finish);
+			record.waiters.delete(finish);
+			if (timer) {
+				record.timers.delete(timer);
+				this.clock.clearTimeout(timer);
+			}
+			waiting.resolve(outcome);
+		};
+		const timer = this.clock.setTimeout(() => finish("timeout"), ms);
+		record.timers.add(timer);
+		record.wakers.add(finish);
+		if (control) record.waiters.add(finish);
+		return waiting.promise;
 	}
 
 	#prune(): void {

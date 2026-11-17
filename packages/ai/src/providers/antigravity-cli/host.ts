@@ -424,7 +424,7 @@ export class AgyHost implements ProviderSessionState {
 		if (!tools.some(tool => tool.name === RELAY_CONTROL_NAME)) return;
 		throw new Error(
 			`Antigravity CLI tool name "${RELAY_CONTROL_NAME}" collides with the tool relay control tool; ` +
-				"rename the tool or set OMP_ACP_TOOL_RELAY_MS=0 to disable relay",
+				"rename the tool or unset OMP_ACP_TOOL_RELAY_MS to disable the relay",
 		);
 	}
 
@@ -524,6 +524,9 @@ export class AgyHost implements ProviderSessionState {
 		this.#turns.clear();
 		const pending = this.#releasePending();
 		if (pending !== preserve) pending?.settle(errorOutput("Tool call cancelled: the host stopped this turn."));
+		// The preserved call's control socket died with this transport, so a stale waiter
+		// must not hide the late prompt that the restarted process needs to get the result.
+		if (preserve) this.#relay.detach(preserve.id);
 		this.#relay.cancelAll("Tool call cancelled: the host stopped this turn.", preserve?.id);
 		for (const waiter of this.#announcementWaiters) waiter.finish(false);
 		this.#announced.clear();
@@ -693,7 +696,13 @@ export class AgyHost implements ProviderSessionState {
 	): Promise<McpToolOutput> {
 		const agy = this.#process;
 		if (!agy || agy.token !== token) return errorOutput("Tool call belongs to a stopped process.");
-		if (name === RELAY_CONTROL_NAME) return this.#onControlCall(args);
+		// The control tool returns a relay result and the duplicate notice repeats its call id,
+		// so a caller from another conversation is rejected before either can answer.
+		if (!this.#ownsCall(agy, callerId)) return this.#rejectCall(agy);
+		if (name === RELAY_CONTROL_NAME) {
+			if (!this.#turn || this.#turn.cancelling) return this.#rejectCall(agy);
+			return this.#onControlCall(args);
+		}
 		const tool = agy.tools.get(name);
 		if (!tool || !validateJsonSchemaValue(tool.inputSchema, args).success) {
 			this.#fail(new Error("Antigravity CLI requested an unknown tool or invalid arguments"));
@@ -706,18 +715,16 @@ export class AgyHost implements ProviderSessionState {
 		const conversationId = this.#conversation?.id;
 		if (
 			!announced ||
-			this.#process !== agy ||
+			!this.#ownsCall(agy, callerId) ||
 			!step ||
 			step.writer.done ||
 			step.aborted ||
 			!conversationId ||
-			(callerId !== undefined && callerId !== conversationId) ||
 			this.#pending ||
 			!this.#turn ||
 			this.#turn.cancelling
 		) {
-			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
-			return errorOutput("Tool call rejected; no execution occurred.");
+			return this.#rejectCall(agy);
 		}
 		const id = `agy_${crypto.randomUUID().replaceAll("-", "")}`;
 		const result = Promise.withResolvers<McpToolOutput>();
@@ -741,6 +748,22 @@ export class AgyHost implements ProviderSessionState {
 			pending.state = "relayed";
 			pending.expiry?.cancel();
 		});
+	}
+
+	/** Whether a call belongs to this process's current conversation. */
+	#ownsCall(agy: AgyProcess, callerId: string | undefined): boolean {
+		const conversationId = this.#conversation?.id;
+		return (
+			this.#process === agy &&
+			conversationId !== undefined &&
+			(callerId === undefined || callerId === conversationId)
+		);
+	}
+
+	/** Stop the turn that made an out-of-scope call; nothing ran, so it has no result. */
+	#rejectCall(agy: AgyProcess): McpToolOutput {
+		if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
+		return errorOutput("Tool call rejected; no execution occurred.");
 	}
 
 	/** Reads a relay record only; the original tool already ran under omp's control. */
