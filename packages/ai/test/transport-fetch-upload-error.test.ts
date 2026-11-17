@@ -99,12 +99,17 @@ describe("transportFetch connection lost before a response", () => {
 		);
 	});
 
-	it("leaves a body below the streaming threshold to Bun's own error", async () => {
+	it("leaves a body below the streaming threshold to Bun's own error, measuring a string in UTF-8 bytes", async () => {
 		const origin = await droppingServer(() => 0);
 		const error = await postThroughTransport(origin, "x".repeat(64 * 1024));
 
 		expect(error).not.toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
 		expect((error as Error).message).toContain("The socket connection was closed unexpectedly");
+
+		// Half a million two-byte characters: 1 MB exactly, so it streams.
+		const atThreshold = await postThroughTransport(origin, "é".repeat(512 * 1024));
+		expect(atThreshold).toBeInstanceOf(AIError.ConnectionLostBeforeResponseError);
+		expect((atThreshold as Error).message).toContain(" the 1.0MB request body");
 	});
 
 	it("names the upload in the Anthropic client's error when the cowork transport falls back to fetch", async () => {

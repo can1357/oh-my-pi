@@ -11,8 +11,11 @@ import type { FetchImpl } from "../types";
 const UPLOAD_PROGRESS_MIN_BYTES = 1024 * 1024;
 const UPLOAD_CHUNK_BYTES = 64 * 1024;
 
+/** A string is measured first and encoded only when it is large enough to stream. */
 function requestBodyBytes(body: RequestInit["body"]): Uint8Array | undefined {
-	if (typeof body === "string") return new TextEncoder().encode(body);
+	if (typeof body === "string") {
+		return Buffer.byteLength(body) < UPLOAD_PROGRESS_MIN_BYTES ? undefined : new TextEncoder().encode(body);
+	}
 	if (body instanceof ArrayBuffer) return new Uint8Array(body);
 	if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
 	return undefined;
