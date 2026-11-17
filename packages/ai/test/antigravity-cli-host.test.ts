@@ -38,6 +38,10 @@ const model = buildModel({
 });
 const tools: Tool[] = [{ name: "read", description: "Read a file", parameters: type({ path: "string" }) }];
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
+/** The reason the interactive agent passes to `abort()` when the operator cancels. */
+const userInterrupt = "Interrupted by user";
+/** An internal labelled abort, e.g. a TTSR interrupt; it must not drain the turn. */
+const internalAbort = "TTSR matched no-placeholder-returns";
 
 class Queue<T> {
 	#items: T[] = [];
@@ -85,6 +89,8 @@ class FakeAgy implements AgyTransport {
 	readonly options: AgyTransportOptions;
 	readonly prompts = new Queue<FakePrompt>();
 	readonly cancellations = new Queue<void>();
+	/** Session ids that received a `session/cancel` notification, in order. */
+	readonly cancelRequests: string[] = [];
 	readonly promptHistory: FakePrompt[] = [];
 	readonly loads: string[] = [];
 	readonly created: string[] = [];
@@ -150,7 +156,8 @@ class FakeAgy implements AgyTransport {
 				);
 				return prompt.response.promise;
 			},
-			cancel: async () => {
+			cancel: async params => {
+				this.cancelRequests.push(params.sessionId);
 				this.cancellations.push(undefined);
 				if (this.cancelMode === "reject") throw new Error("cancel write failed");
 				if (this.cancelMode === "ack") this.acknowledgeCancel();
@@ -913,7 +920,7 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		const fake = await state.started.next();
 		await fake.prompts.next();
 		fake.text("Working.");
-		abort.abort(new Error("user-interrupt"));
+		abort.abort(userInterrupt);
 		await expect(run.done).rejects.toThrow("aborted");
 		// The notification is on the wire before the turn acknowledges it.
 		await fake.cancellations.next();
@@ -929,6 +936,23 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		await next.done;
 	});
 
+	it("stops at once for an internal labelled abort instead of draining the turn", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(internalAbort);
+		await expect(run.done).rejects.toThrow("aborted");
+		// Only an operator cancel drains; this abort writes no session/cancel and
+		// keeps no grace window alive.
+		expect(fake.cancelRequests).toHaveLength(0);
+		expect(fake.closed).toBe(true);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
 	it("stops a cancelled turn that never confirms the drain", async () => {
 		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
 		const abort = new AbortController();
@@ -937,7 +961,7 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		await fake.prompts.next();
 		fake.text("Working.");
 		fake.cancelMode = "hold";
-		abort.abort(new Error("user-interrupt"));
+		abort.abort(userInterrupt);
 		await expect(run.done).rejects.toThrow("aborted");
 		await fake.cancellations.next();
 		expect(fake.closed).toBe(false);
@@ -955,7 +979,7 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		await fake.prompts.next();
 		fake.text("Working.");
 		fake.cancelMode = "hold";
-		abort.abort(new Error("user-interrupt"));
+		abort.abort(userInterrupt);
 		await expect(run.done).rejects.toThrow("aborted");
 		await fake.cancellations.next();
 		const tokens = (ms: number) =>
@@ -974,8 +998,34 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		expect(fake.closed).toBe(true);
 	});
 
+	it("starts the next step without waiting for the cancelled turn's drain", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(userInterrupt);
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		// The cancelled turn is still draining and has not acknowledged anything.
+		expect(fake.closed).toBe(false);
+		const next = step(state.host, [user("hello"), user("again")]);
+		const restarted = await state.started.next();
+		const prompt = await restarted.prompts.next();
+		// The new step cut the grace instead of waiting it out: new process, new session.
+		expect(fake.closed).toBe(true);
+		expect(restarted.created).toHaveLength(1);
+		expect(textOf(prompt.request.prompt)).toContain("again");
+		restarted.text("Second answer.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Second answer." }]);
+	});
+
 	it("continues a max_tokens stop on the same session and merges text and usage", async () => {
-		const state = await fixture();
+		const state = await fixture({ maxContinuations: 1 });
 		const run = step(state.host, [user("count to one hundred")]);
 		const fake = await state.started.next();
 		const first = await fake.prompts.next();
@@ -1023,19 +1073,34 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		expect(run.writer.output.usage.totalTokens).toBe(6);
 	});
 
-	it("disables continuations with OMP_ACP_MAX_CONTINUATIONS=0", async () => {
+	it("leaves automatic continuation off unless OMP_ACP_MAX_CONTINUATIONS enables it", async () => {
 		const previous = Bun.env.OMP_ACP_MAX_CONTINUATIONS;
 		try {
-			Bun.env.OMP_ACP_MAX_CONTINUATIONS = "0";
-			const state = await fixture();
-			const run = step(state.host, [user("hello")]);
-			const fake = await state.started.next();
+			delete Bun.env.OMP_ACP_MAX_CONTINUATIONS;
+			const off = await fixture();
+			const run = step(off.host, [user("hello")]);
+			const fake = await off.started.next();
 			const prompt = await fake.prompts.next();
 			fake.text("1 2 3");
 			prompt.response.resolve({ stopReason: "max_turn_requests" });
 			await run.done;
 			expect(fake.promptHistory).toHaveLength(1);
 			expect(run.writer.output.stopReason).toBe("length");
+
+			Bun.env.OMP_ACP_MAX_CONTINUATIONS = "1";
+			const on = await fixture();
+			const continued = step(on.host, [user("hello")]);
+			const enabled = await on.started.next();
+			const first = await enabled.prompts.next();
+			enabled.text("1 2 3");
+			first.response.resolve({ stopReason: "max_turn_requests" });
+			const continuation = await enabled.prompts.next();
+			expect(enabled.promptHistory).toHaveLength(2);
+			expect(textOf(continuation.request.prompt)).toContain("Continue exactly where");
+			enabled.text(" 4 5 6");
+			continuation.response.resolve({ stopReason: "end_turn" });
+			await continued.done;
+			expect(continued.writer.output.stopReason).toBe("stop");
 		} finally {
 			if (previous === undefined) delete Bun.env.OMP_ACP_MAX_CONTINUATIONS;
 			else Bun.env.OMP_ACP_MAX_CONTINUATIONS = previous;
@@ -1043,7 +1108,7 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 	});
 
 	it("does not add a continuation when agy already resumed the output limit", async () => {
-		const state = await fixture();
+		const state = await fixture({ maxContinuations: 3 });
 		const run = step(state.host, [user("hello")]);
 		const fake = await state.started.next();
 		const prompt = await fake.prompts.next();
@@ -1087,7 +1152,7 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		const fake = await state.started.next();
 		await fake.prompts.next();
 		const pending = fake.options.onCall("read", { path: "a.txt" }, fake.currentId);
-		abort.abort(new Error("user-interrupt"));
+		abort.abort(userInterrupt);
 		const settled = await pending;
 		expect(settled.isError).toBe(true);
 		expect(settled.content[0]).toEqual({ type: "text", text: expect.stringContaining("no longer active") });
@@ -1103,7 +1168,7 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		const fake = await state.started.next();
 		await fake.prompts.next();
 		const cancelledId = fake.currentId;
-		abort.abort(new Error("user-interrupt"));
+		abort.abort(userInterrupt);
 		await expect(run.done).rejects.toThrow("aborted");
 		await fake.cancellations.next();
 		fake.acknowledgeCancel();
@@ -1123,7 +1188,7 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 	});
 
 	it("continues a reasoning-only output-limited part before requiring visible output", async () => {
-		const state = await fixture();
+		const state = await fixture({ maxContinuations: 1 });
 		const run = step(state.host, [user("think then answer")]);
 		const fake = await state.started.next();
 		const first = await fake.prompts.next();
@@ -1150,6 +1215,25 @@ describe("AgyHost cancellation and output-limit continuations", () => {
 		expect(run.writer.output.usage.input).toBe(12);
 		expect(run.writer.output.usage.output).toBe(5);
 		expect(run.writer.output.usage.totalTokens).toBe(17);
+	});
+
+	it("ignores an output-limit notice that only an earlier text block quotes", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const first = await fake.prompts.next();
+		// The notice is quoted mid-part; the part itself ends on ordinary text.
+		fake.text("Your previous response was cut off because it exceeded the output token limit.");
+		fake.thinking("now the actual answer");
+		fake.text("Still writing the answer.");
+		first.response.resolve({ stopReason: "max_tokens" });
+		const continuation = await fake.prompts.next();
+		expect(textOf(continuation.request.prompt)).toContain("Continue exactly where");
+		fake.text(" Done.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(fake.promptHistory).toHaveLength(2);
+		expect(run.writer.output.stopReason).toBe("stop");
 	});
 });
 

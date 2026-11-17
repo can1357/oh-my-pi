@@ -6,7 +6,7 @@
  * session; an explicit user cancellation drains it under a bounded grace.
  */
 import * as path from "node:path";
-import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { $which, isRecord, logger, prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	type ContentBlock,
 	ClientSideConnection,
@@ -30,6 +30,7 @@ import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
 import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 import agentDefinition from "./agent.md" with { type: "text" };
 import { resolveAgyBinary } from "./binary";
+import continuationPrompt from "./continuation.md" with { type: "text" };
 import {
 	conversationStorePath,
 	deleteConversation,
@@ -52,9 +53,14 @@ const CANCEL_TIMEOUT_MS = 5_000;
 const DRAIN_IDLE_MS = 10_000;
 const DRAIN_MAX_MS = 60_000;
 const CONTINUATIONS_ENV = "OMP_ACP_MAX_CONTINUATIONS";
-const DEFAULT_MAX_CONTINUATIONS = 3;
+// A continuation is another paid prompt, so it stays off unless the operator asks for it.
+const DEFAULT_MAX_CONTINUATIONS = 0;
 const MAX_CONTINUATIONS = 10;
-const CONTINUATION_PROMPT = "Continue exactly where your previous output stopped. Do not repeat any earlier text.";
+// The interactive agent labels the operator's own cancel with this exact reason
+// (`USER_INTERRUPT_LABEL` in the TUI, threaded through `AgentSession.abort`).
+// Internal aborts — queue steering, TTSR, streaming-edit recovery, terminal
+// yield, advisors — carry their own labels, so only this reason drains a turn.
+const USER_INTERRUPT_REASON = "Interrupted by user";
 // agy reports its own output-cap continuation as assistant text; a second
 // automatic continuation would duplicate the text it already resumed.
 const OUTPUT_LIMIT_NOTICE = "your previous response was cut off because it exceeded the output token limit";
@@ -123,7 +129,7 @@ export interface AgyHostOptions {
 	drainIdleMs?: number;
 	/** Absolute cap on a cancelled turn's drain, regardless of activity. */
 	drainMaxMs?: number;
-	/** Automatic output-limit continuations per step; 0 disables them. */
+	/** Automatic output-limit continuations per step; 0, the default, disables them. */
 	maxContinuations?: number;
 }
 
@@ -264,6 +270,9 @@ export class AgyHost implements ProviderSessionState {
 
 	async #runStep(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
 		if (this.#step) throw new Error("Antigravity CLI is already running a request for this session");
+		// A cancelled turn may still be draining under its grace window; this step
+		// forks or reloads the conversation anyway, so do not wait the grace out.
+		this.#cutDrain();
 		const step: ActiveStep = {
 			writer,
 			messages: context.messages,
@@ -278,12 +287,13 @@ export class AgyHost implements ProviderSessionState {
 		const onAbort = () => {
 			if (step.aborted) return;
 			step.aborted = true;
-			// A caller-labelled abort is an explicit cancellation: acknowledge the
-			// step now and drain the ACP turn instead of killing the process. A bare
-			// abort is queue steering, which keeps its immediate stop.
-			const reason = AIError.callerAbortReason(options.signal);
-			if (reason === undefined) this.#fail(new Error("Request was aborted"));
-			else this.#cancel(new Error(reason));
+			// Only the operator's own cancel drains the ACP turn: it acknowledges
+			// this step now and gives the process a bounded grace to confirm. Every
+			// other abort — queue steering, TTSR, streaming-edit recovery, terminal
+			// yield, advisors, or a bare abort — stops at once.
+			if (AIError.callerAbortReason(options.signal) === USER_INTERRUPT_REASON)
+				this.#cancel(new Error(USER_INTERRUPT_REASON));
+			else this.#fail(new Error("Request was aborted"));
 		};
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
@@ -667,7 +677,8 @@ export class AgyHost implements ProviderSessionState {
 	#detach(pending: PendingCall): void {
 		if (this.#pending !== pending || pending.state !== "parked") return;
 		pending.state = "cancelling";
-		pending.drain = this.#cancelTurn().then(() => {
+		const turn = this.#turn;
+		const drain = this.#cancelTurn().then(() => {
 			if (this.#pending !== pending)
 				throw new Error("Antigravity CLI tool call was interrupted during cancellation");
 			pending.state = "detached";
@@ -677,7 +688,29 @@ export class AgyHost implements ProviderSessionState {
 				),
 			);
 		});
-		void pending.drain.catch(error => this.#fail(error));
+		pending.drain = drain;
+		void drain.then(
+			() => {
+				if (pending.drain === drain) pending.drain = undefined;
+			},
+			error => {
+				if (pending.drain === drain) pending.drain = undefined;
+				// A step that cut this drain already replaced the turn and its process.
+				if (this.#turn === turn) this.#fail(error);
+			},
+		);
+	}
+
+	/**
+	 * A drain only gives agy a grace to confirm a cancellation. The next step
+	 * reloads or forks the conversation regardless, so drop the grace and the
+	 * process it is protecting instead of making the operator wait for it. A
+	 * deadline detach has no grace window and still waits for its own bounded
+	 * acknowledgement, because its late result belongs to the same conversation.
+	 */
+	#cutDrain(): void {
+		if (!this.#turn?.drain) return;
+		this.#stopProcess();
 	}
 
 	/**
@@ -964,14 +997,12 @@ export class AgyHost implements ProviderSessionState {
 		const step = this.#step;
 		if (!step || step.aborted || step.writer.done) return false;
 		// agy resumed this turn itself; a second continuation would repeat its text.
-		if (
-			step.writer.output.content.some(
-				block => block.type === "text" && block.text.toLowerCase().includes(OUTPUT_LIMIT_NOTICE),
-			)
-		)
-			return false;
+		// Only the trailing text block of the part just ended is inspected: an
+		// earlier block may quote the notice without the part having ended on it.
+		const lastText = step.writer.output.content.findLast(block => block.type === "text");
+		if (lastText?.type === "text" && lastText.text.toLowerCase().includes(OUTPUT_LIMIT_NOTICE)) return false;
 		turn.continuations++;
-		this.#prompt([{ type: "text", text: CONTINUATION_PROMPT }], turn);
+		this.#prompt([{ type: "text", text: prompt.render(continuationPrompt, {}) }], turn);
 		return true;
 	}
 
@@ -1179,7 +1210,7 @@ function mergeUsage(first: PromptResponse["usage"], next: PromptResponse["usage"
 	};
 }
 
-/** Bounded automatic continuations; an unset or empty variable keeps the default. */
+/** Bounded automatic continuations; an unset or empty variable keeps them off. */
 function maxContinuationsFromEnv(env: Record<string, string | undefined> = Bun.env): number {
 	const raw = env[CONTINUATIONS_ENV];
 	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_CONTINUATIONS;

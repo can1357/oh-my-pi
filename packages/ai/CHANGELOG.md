@@ -18,6 +18,7 @@
 - Added a `definitive` option to `OAuthError`; `isDefinitiveOAuthFailure` now takes the error object and disables a credential marked definitive without matching its message ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
 - `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Added opt-in automatic continuations for output-limited Antigravity CLI turns; `max_tokens` and `max_turn_requests` stops continue on the same ACP session and merge their text and usage into one assistant step, up to `OMP_ACP_MAX_CONTINUATIONS` continuations per step (unset or `0`, the default, keeps it off; at most 10) ([#19441](https://github.com/can1357/oh-my-pi/pull/19441) by [@SenCha930511](https://github.com/SenCha930511))
 
 ### Fixed
 
@@ -27,6 +28,7 @@
 - Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
 - Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Antigravity CLI cancellation so only an explicit user cancel sends `session/cancel` immediately and drains the turn under a bounded activity-aware grace that still stops a stuck turn, while internal aborts (queue steering, TTSR, streaming-edit recovery, terminal yield, advisors) keep their immediate stop; a new step cuts the drain short instead of waiting it out, and a tool call from a session this host replaced is answered as stale instead of failing the live turn ([#19441](https://github.com/can1357/oh-my-pi/pull/19441) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.22.1] - 2026-11-17
 
@@ -73,14 +75,7 @@
 ### Fixed
 
 - Fixed the Antigravity CLI provider so a refused turn fails with an explicit refusal error instead of a normal empty stop, and a `max_turn_requests` stop is reported as `length` so the conversation can continue ([#19436](https://github.com/can1357/oh-my-pi/pull/19436) by [@SenCha930511](https://github.com/SenCha930511))
-- Added opt-in Antigravity CLI timing diagnostics behind `OMP_ACP_DIAGNOSTICS=1`; process startup, session creation and loading, prompt, and whole-step durations are sampled in memory and summarized at debug level when the host closes, without collecting request content, model output, account identifiers, or session IDs ([#PLACEHOLDER](https://github.com/can1357/oh-my-pi/pull/PLACEHOLDER) by [@SenCha930511](https://github.com/SenCha930511))
 - Added opt-in Antigravity CLI timing diagnostics behind `OMP_ACP_DIAGNOSTICS=1`; process startup, session creation and loading, prompt, and whole-step durations are sampled in memory and summarized at debug level when the host closes, without collecting request content, model output, account identifiers, or session IDs ([#19437](https://github.com/can1357/oh-my-pi/pull/19437) by [@SenCha930511](https://github.com/SenCha930511))
-- Added bounded automatic continuations for output-limited Antigravity CLI turns; `max_tokens` and `max_turn_requests` stops continue on the same ACP session and merge their text and usage into one assistant step, up to `OMP_ACP_MAX_CONTINUATIONS` (default 3, `0` disables) ([#19441](https://github.com/can1357/oh-my-pi/pull/19441) by [@SenCha930511](https://github.com/SenCha930511))
-
-### Fixed
-
-- Fixed the Antigravity CLI provider so a refused turn fails with an explicit refusal error instead of a normal empty stop, and a `max_turn_requests` stop is reported as `length` so the conversation can continue ([#19436](https://github.com/can1357/oh-my-pi/pull/19436) by [@SenCha930511](https://github.com/SenCha930511))
-- Fixed Antigravity CLI cancellation so an explicit user cancel sends `session/cancel` immediately and drains the turn under a bounded activity-aware grace that still stops a stuck turn, while queue steering keeps its immediate stop ([#19441](https://github.com/can1357/oh-my-pi/pull/19441) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
