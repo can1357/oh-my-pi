@@ -763,68 +763,133 @@ impl AtSpiAx {
 		})
 	}
 
-	/// An element's properties, with its bounds when `bounds` asks for them.
-	fn read_props(&mut self, h: &AxHandle, bounds: WalkBounds) -> CoreResult<AxProps> {
-		let object = Self::object(h).clone();
+	/// An element's properties, with its bounds when `bounds` asks for them,
+	/// and at most `children` children when requested.
+	fn read_node(
+		&mut self,
+		h: &AxHandle,
+		bounds: WalkBounds,
+		children: Option<u32>,
+	) -> CoreResult<(AxProps, Vec<ObjectRefOwned>)> {
 		let Self { rt, connection, native, frames, reply_timeout } = self;
-		rt.block_on(cancellable(answered("the application", *reply_timeout, async {
-			let proxy = object
-				.as_accessible_proxy(connection)
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI accessible: {err}")))?;
-			let title = proxy.name().await.ok().filter(|s| !s.is_empty());
-			let description = proxy.description().await.ok().filter(|s| !s.is_empty());
-			let native_role = match proxy.get_role_name().await {
-				Ok(role) => role,
-				Err(_) => proxy
-					.get_localized_role_name()
-					.await
-					.unwrap_or_else(|_| "unknown".to_string()),
-			};
-			let state = proxy.get_state().await.ok();
-			let multiline = state
-				.as_ref()
-				.is_some_and(|states| states.contains(State::MultiLine));
-			let value = text_value(&*connection, &object).await;
-			let bounds = if bounds == WalkBounds::Read {
-				frames
-					.screen_bounds(connection, native.as_deref(), &object)
-					.await
-			} else {
-				None
-			};
-			let actions = match Self::action(connection, &object).await {
-				Ok(action) => action_names(&action).await.unwrap_or_default(),
-				Err(_) => Vec::new(),
-			};
-			let child_count = proxy.child_count().await;
-			Ok(AxProps {
-				#[cfg(test)]
-				read_as_fingerprint: None,
-				role: normalize_role_atspi(&native_role, multiline),
-				native_role,
-				title,
-				value,
-				description,
-				enabled: state.is_some_and(state_enabled),
-				focused: state
-					.as_ref()
-					.is_some_and(|states| states.contains(State::Focused)),
+		rt.block_on(cancellable(answered(
+			"the application",
+			*reply_timeout,
+			Self::read_element(
+				connection,
+				frames,
+				native.as_deref(),
+				Self::object(h),
 				bounds,
-				actions,
-				child_count: child_count.as_ref().copied().unwrap_or(0).max(0) as u32,
-				identity: None,
-				partial: false,
-				label_complete: false,
-				selected: false,
-				role_name: None,
-				unread_children: if child_count.is_err() {
-					crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN
+				children,
+			),
+		)))??
+	}
+
+	/// [`Self::read_node`] on `bus`: first the fields and interfaces, then
+	/// children and only the interfaces the element implements.
+	async fn read_element(
+		bus: &zbus::Connection,
+		frames: &mut FrameCache,
+		native: Option<&dyn NativeWindows>,
+		object: &ObjectRefOwned,
+		bounds: WalkBounds,
+		children: Option<u32>,
+	) -> CoreResult<(AxProps, Vec<ObjectRefOwned>)> {
+		let proxy = object
+			.as_accessible_proxy(bus)
+			.await
+			.map_err(|err| DesktopError::ax_failed(format!("AT-SPI accessible: {err}")))?;
+		let (title, description, role_name, state, interfaces, child_count) = futures::join!(
+			proxy.name(),
+			proxy.description(),
+			proxy.get_role_name(),
+			proxy.get_state(),
+			proxy.get_interfaces(),
+			proxy.child_count(),
+		);
+		let native_role = match role_name {
+			Ok(role) => role,
+			Err(_) => proxy
+				.get_localized_role_name()
+				.await
+				.unwrap_or_else(|_| "unknown".to_string()),
+		};
+		// An element whose interfaces cannot be read is asked on each.
+		let has = |interface| {
+			interfaces
+				.as_ref()
+				.ok()
+				.is_none_or(|interfaces| interfaces.contains(interface))
+		};
+		let (value, bounds, actions, child_refs) = futures::join!(
+			async {
+				if has(atspi::Interface::Text) {
+					text_value(bus, object).await
 				} else {
-					0
-				},
-			})
-		})))??
+					None
+				}
+			},
+			async {
+				if bounds == WalkBounds::Read && has(atspi::Interface::Component) {
+					frames.screen_bounds(bus, native, object).await
+				} else {
+					None
+				}
+			},
+			async {
+				if !has(atspi::Interface::Action) {
+					return Vec::new();
+				}
+				match Self::action(bus, object).await {
+					Ok(action) => action_names(&action).await.unwrap_or_default(),
+					Err(_) => Vec::new(),
+				}
+			},
+			async {
+				if let Some(limit) = children {
+					children_of(&proxy, child_count.as_ref().ok().map(|n| (*n).max(0) as u32), limit)
+						.await
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI children: {err}")))
+				} else {
+					Ok((Vec::new(), 0))
+				}
+			},
+		);
+		let (child_refs, unread_children) = child_refs?;
+		let unread_children = if child_count.is_err() {
+			crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN
+		} else {
+			unread_children
+		};
+		let child_count = child_count.unwrap_or(0).max(0) as u32;
+		let state = state.ok();
+		let multiline = state
+			.as_ref()
+			.is_some_and(|states| states.contains(State::MultiLine));
+		let props = AxProps {
+			#[cfg(test)]
+			read_as_fingerprint: None,
+			role: normalize_role_atspi(&native_role, multiline),
+			native_role,
+			title: title.ok().filter(|s| !s.is_empty()),
+			value,
+			description: description.ok().filter(|s| !s.is_empty()),
+			enabled: state.is_some_and(state_enabled),
+			focused: state
+				.as_ref()
+				.is_some_and(|states| states.contains(State::Focused)),
+			bounds,
+			actions,
+			child_count,
+			identity: None,
+			partial: false,
+			label_complete: false,
+			selected: false,
+			role_name: None,
+			unread_children,
+		};
+		Ok((props, child_refs))
 	}
 
 	/// The deepest element under `root` at screen point (`x`, `y`). A placed
@@ -1675,7 +1740,9 @@ impl AxBackend for AtSpiAx {
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
 		self.frames.refresh();
-		self.read_props(h, WalkBounds::Read)
+		self
+			.read_node(h, WalkBounds::Read, None)
+			.map(|(props, _)| props)
 	}
 
 	fn walk_node(
@@ -1684,13 +1751,8 @@ impl AxBackend for AtSpiAx {
 		bounds: WalkBounds,
 		max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
-		let mut props = self.read_props(h, bounds)?;
-		if props.unread_children > 0 {
-			return Ok((props, Vec::new()));
-		}
-		let (children, unread) = self.read_children(h, Some(props.child_count), max_children)?;
-		props.unread_children = unread;
-		Ok((props, children))
+		let (props, children) = self.read_node(h, bounds, Some(max_children))?;
+		Ok((props, children.into_iter().map(AxHandle::AtSpi).collect()))
 	}
 
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
@@ -4854,5 +4916,231 @@ mod tests {
 			assert!(disabled.contains("disabled"), "{disabled}");
 			assert!(performed(&log).is_empty());
 		}
+	}
+
+	#[test]
+	fn an_element_is_read_in_two_rounds_and_only_on_its_interfaces() {
+		use std::sync::Mutex;
+
+		use atspi::zbus::{
+			Message, MessageStream,
+			connection::Builder as ConnectionBuilder,
+			message::Type,
+			zvariant::{OwnedObjectPath, Value},
+		};
+		use futures::StreamExt;
+
+		/// Answers like a Qt app: a Kate text view at `/text`, a button at
+		/// `/button`, and at `/legacy` a text view that cannot list its
+		/// interfaces, with `GetAll` refused as Qt refuses it. Each call must
+		/// belong to the round under way, whose calls are held until all of
+		/// them have come and then answered together; each answered round's
+		/// `path member` list goes to `batches`. A signal means the reader
+		/// is waiting on a reply, so it fails the test if it comes between
+		/// a round's calls.
+		async fn qt(
+			server: atspi::zbus::Connection,
+			rounds: &[Vec<String>],
+			batches: &Mutex<Vec<Vec<String>>>,
+		) {
+			let mut stream = MessageStream::from(&server);
+			// After the last round, any call is outside it.
+			for round in rounds.iter().chain(std::iter::once(&Vec::new())) {
+				let mut batch = Vec::new();
+				let mut names = Vec::new();
+				while names.len() < round.len() || round.is_empty() {
+					let Some(Ok(message)) = stream.next().await else {
+						return;
+					};
+					if message.message_type() == Type::Signal {
+						assert!(
+							names.is_empty(),
+							"the read sent {names:?} of the round {round:?}, then waited on a reply"
+						);
+						continue;
+					}
+					if message.message_type() != Type::MethodCall {
+						continue;
+					}
+					let header = message.header();
+					let mut name = format!("{} {}", header.path().unwrap(), header.member().unwrap());
+					if header.member().unwrap().as_str() == "Get" {
+						let (_, property): (String, String) = message.body().deserialize().unwrap();
+						name = format!("{name} {property}");
+					}
+					assert!(
+						round.contains(&name) && !names.contains(&name),
+						"{name} outside the round {round:?}"
+					);
+					names.push(name);
+					batch.push(message);
+				}
+				for message in batch {
+					let header = message.header();
+					let path = header.path().unwrap().to_string();
+					let text = path != "/button";
+					match header.member().unwrap().as_str() {
+						"Get" => {
+							let (_, property): (String, String) = message.body().deserialize().unwrap();
+							let value = match property.as_str() {
+								"Name" => Value::from(if text { "notes.txt" } else { "New" }),
+								"Description" => Value::from(""),
+								"CharacterCount" => Value::from(5),
+								"NActions" => Value::from(1),
+								"ChildCount" => Value::from(1),
+								_ => Value::from(0),
+							};
+							server.reply(&header, &value).await.unwrap();
+						},
+						"GetAll" => server
+							.reply_error(&header, "org.freedesktop.DBus.Error.UnknownInterface", &"")
+							.await
+							.unwrap(),
+						"GetRoleName" => {
+							server
+								.reply(&header, &if text { "text" } else { "push button" })
+								.await
+								.unwrap();
+						},
+						"GetState" => server.reply(&header, &vec![0_u32, 0]).await.unwrap(),
+						"GetInterfaces" if path != "/legacy" => {
+							let interfaces: &[&str] = if text {
+								&["org.a11y.atspi.Accessible", "org.a11y.atspi.Text"]
+							} else {
+								&["org.a11y.atspi.Accessible", "org.a11y.atspi.Action"]
+							};
+							server.reply(&header, &interfaces).await.unwrap();
+						},
+						"GetChildAtIndex" => {
+							let index: i32 = message.body().deserialize().unwrap();
+							assert_eq!(index, 0);
+							server
+								.reply(&header, &(":1.999", OwnedObjectPath::try_from("/child").unwrap()))
+								.await
+								.unwrap();
+						},
+						"GetText" => {
+							let (start, end): (i32, i32) = message.body().deserialize().unwrap();
+							let text: String = "hello"
+								.chars()
+								.skip(start as usize)
+								.take((end - start) as usize)
+								.collect();
+							server.reply(&header, &text).await.unwrap();
+						},
+						"GetName" => server.reply(&header, &"press").await.unwrap(),
+						_ => server
+							.reply_error(&header, "org.freedesktop.DBus.Error.UnknownMethod", &"")
+							.await
+							.unwrap(),
+					}
+				}
+				names.sort();
+				batches.lock().unwrap().push(names);
+			}
+		}
+
+		let round = |path: &str, members: &[&str]| {
+			let mut names: Vec<_> = members
+				.iter()
+				.map(|member| format!("{path} {member}"))
+				.collect();
+			names.sort();
+			names
+		};
+		let own = ["Get Name", "Get Description", "GetRoleName", "GetState", "GetInterfaces"];
+		let first = |path: &str, children: &str| {
+			let mut members = own.to_vec();
+			members.push(children);
+			round(path, &members)
+		};
+		let expected = [
+			first("/text", "Get ChildCount"),
+			round("/text", &["Get CharacterCount", "GetChildAtIndex"]),
+			round("/text", &["GetText"]),
+			first("/button", "Get ChildCount"),
+			round("/button", &["Get NActions", "GetChildAtIndex"]),
+			round("/button", &["GetName"]),
+			// Without its interfaces, every one is asked.
+			first("/legacy", "Get ChildCount"),
+			round("/legacy", &["Get CharacterCount", "Get NActions", "GetExtents", "GetChildAtIndex"]),
+			round("/legacy", &["GetText", "GetName"]),
+			// Without its children, only their count is.
+			first("/button", "Get ChildCount"),
+			round("/button", &["Get NActions"]),
+			round("/button", &["GetName"]),
+		];
+		let batches = Mutex::new(Vec::new());
+
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let reads = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let server = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p()
+				.build();
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(server, client).unwrap();
+			let reads = async {
+				let mut frames = FrameCache::default();
+				let mut reads = Vec::new();
+				for (path, children) in
+					[("/text", true), ("/button", true), ("/legacy", true), ("/button", false)]
+				{
+					let (props, _) = AtSpiAx::read_element(
+						&client,
+						&mut frames,
+						None,
+						&object(path),
+						WalkBounds::Read,
+						children.then_some(1),
+					)
+					.await
+					.unwrap();
+					reads.push((props.role, props.title, props.value, props.actions));
+				}
+				reads
+			};
+			// After every poll that leaves the reads waiting, a signal follows
+			// the calls that poll sent, so a read that waits for one reply
+			// before asking the round's next question fails at the server
+			// instead of deadlocking against the held round.
+			let (waiting, mut waits) = tokio::sync::mpsc::unbounded_channel();
+			let mut reads = std::pin::pin!(reads);
+			let reads = std::future::poll_fn(|cx| {
+				let poll = reads.as_mut().poll(cx);
+				if poll.is_pending() {
+					waiting.send(()).unwrap();
+				}
+				poll
+			});
+			let signal = async {
+				while waits.recv().await.is_some() {
+					let wait = Message::signal("/reader", "test.Reader", "Waiting")
+						.unwrap()
+						.build(&())
+						.unwrap();
+					client.send(&wait).await.unwrap();
+				}
+			};
+			tokio::select! {
+				biased;
+				reads = reads => reads,
+				() = signal => unreachable!("the reads stopped"),
+				() = qt(server, &expected, &batches) => unreachable!("the app stopped answering"),
+			}
+		});
+		let read = |role: &str, title: &str, value: Option<&str>, actions: &[&str]| {
+			let actions: Vec<_> = actions.iter().map(|action| (*action).to_owned()).collect();
+			(role.to_owned(), Some(title.to_owned()), value.map(str::to_owned), actions)
+		};
+		assert_eq!(reads, [
+			read("textfield", "notes.txt", Some("hello"), &[]),
+			read("button", "New", None, &["press"]),
+			read("textfield", "notes.txt", Some("hello"), &["press"]),
+			read("button", "New", None, &["press"]),
+		]);
+		assert_eq!(batches.into_inner().unwrap(), expected);
 	}
 }
