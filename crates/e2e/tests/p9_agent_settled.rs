@@ -95,3 +95,50 @@ async fn python_agent_settled_later_settle_vetoes_continue() -> Result<()> {
 	harness.shutdown().await;
 	Ok(())
 }
+
+#[tokio::test]
+async fn python_agent_settled_continue_through_open_project() -> Result<()> {
+	let scratch = Scratch::new()?;
+	let harness = InProcessEnvHarness::spawn_project_with_extension(scratch, &EXTENSION).await?;
+	let hooks = LifecycleHooks::new(harness.server().admission_gate());
+
+	let first = hooks.agent_settled(payload()).await;
+	assert_eq!(first.decision, AgentSettled::Continue, "open_project attach must dispatch Continue");
+	assert!(
+		format!("{:?}", first.context).contains("one more"),
+		"the prompt is the continuation context: {:?}",
+		first.context
+	);
+
+	let second = hooks.agent_settled(payload()).await;
+	assert_eq!(second.decision, AgentSettled::Settle);
+
+	harness.shutdown().await;
+	Ok(())
+}
+
+#[tokio::test]
+async fn python_agent_settled_continue_through_open_session_host() -> Result<()> {
+	let scratch = Scratch::new()?;
+	let harness =
+		InProcessEnvHarness::spawn_session_host_with_extension(scratch, &EXTENSION).await?;
+	let hooks = LifecycleHooks::new(harness.server().admission_gate());
+
+	let first = hooks.agent_settled(payload()).await;
+	assert_eq!(
+		first.decision,
+		AgentSettled::Continue,
+		"open_session_host attach must dispatch Continue"
+	);
+	assert!(
+		format!("{:?}", first.context).contains("one more"),
+		"the prompt is the continuation context: {:?}",
+		first.context
+	);
+
+	let second = hooks.agent_settled(payload()).await;
+	assert_eq!(second.decision, AgentSettled::Settle);
+
+	harness.shutdown().await;
+	Ok(())
+}
