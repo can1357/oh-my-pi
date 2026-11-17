@@ -1730,7 +1730,8 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 
 /**
  * The compound commands the reserved words at the start of a segment open and close, in order; a
- * `function name` header before a function body opens none.
+ * `function name` header before a function body opens none, nor does `time` (with its `-p` and
+ * `--`) before the pipeline it times.
  */
 function* compoundKeywords(words: readonly string[], quoted: readonly boolean[]): Generator<"open" | "close"> {
 	for (let k = 0; k < words.length && !quoted[k]; k++) {
@@ -1743,6 +1744,9 @@ function* compoundKeywords(words: readonly string[], quoted: readonly boolean[])
 			yield "close";
 		} else if (word === "function") {
 			k++;
+		} else if (word === "time") {
+			if (words[k + 1] === "-p" && !quoted[k + 1]) k++;
+			if (words[k + 1] === "--" && !quoted[k + 1]) k++;
 		} else if (!COMMAND_PREFIXES.includes(word)) {
 			return;
 		}
@@ -2088,11 +2092,20 @@ class ShellScriptParser {
 		// `case` commands being read, innermost last.
 		const cases: CaseReading[] = [];
 		// Whether the next word starts a command, where `case` and `esac` are reserved words.
+		const bare = (at: number, text: string) => !out[at]?.operator && !out[at]?.quoted && out[at]?.text === text;
 		const commandPosition = () => {
-			const last = out.at(-1);
-			if (!last) return true;
-			if (last.operator) return !Object.hasOwn(SHELL_REDIRECTS, last.text);
-			return !last.quoted && COMMAND_PREFIXES.includes(last.text);
+			let at = out.length - 1;
+			for (;;) {
+				const last = out[at];
+				if (!last) return true;
+				if (last.operator) return !Object.hasOwn(SHELL_REDIRECTS, last.text);
+				if (!last.quoted && COMMAND_PREFIXES.includes(last.text)) return true;
+				// `time`, with its `-p` and `--`, times the command after it when it starts one itself.
+				if (bare(at, "--")) at--;
+				if (bare(at, "-p")) at--;
+				if (!bare(at, "time")) return false;
+				at--;
+			}
 		};
 		// Moves the `case` being read past the word just ended, or starts one.
 		const caseWord = () => {
