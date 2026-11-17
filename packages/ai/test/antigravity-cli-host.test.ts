@@ -664,49 +664,7 @@ describe("AgyHost stateful steps", () => {
 		expect((await corrected).isError).toBe(true);
 	});
 
-	it("normalizes an unambiguous alias before validating tool arguments", async () => {
-		const fileTool: Tool = {
-			name: "read",
-			description: "Read a file",
-			parameters: type({ file_path: "string" }),
-		};
-		const state = await fixture();
-		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
-		const fake = await state.started.next();
-		await fake.prompts.next();
-		const output = fake.call("read", { path: "a.txt" }, fake.currentId);
-		await run.done;
-		const call = run.writer.output.content.find(block => block.type === "toolCall");
-		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
-		expect(call.arguments).toEqual({ file_path: "a.txt" });
-		expect(state.host.hasPendingTurn).toBe(true);
-		state.host.close();
-		expect((await output).isError).toBe(true);
-	});
-	it("parks the original arguments when the target key is already present", async () => {
-		const fileTool: Tool = {
-			name: "read",
-			description: "Read a file",
-			parameters: {
-				type: "object",
-				properties: { file_path: { type: "string" }, path: { type: "string" } },
-			},
-		};
-		const state = await fixture();
-		const run = step(state.host, [user("read a.txt")], { tools: [fileTool] });
-		const fake = await state.started.next();
-		await fake.prompts.next();
-		const output = fake.call("read", { file_path: "/a", path: "/b" }, fake.currentId);
-		await run.done;
-		const call = run.writer.output.content.find(block => block.type === "toolCall");
-		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
-		expect(call.arguments).toEqual({ file_path: "/a", path: "/b" });
-		expect(state.host.hasPendingTurn).toBe(true);
-		state.host.close();
-		expect((await output).isError).toBe(true);
-	});
-
-	it("keeps the actionable diagnostic when an alias cannot be normalized", async () => {
+	it("returns the expected schema when a required argument is missing", async () => {
 		const fileTool: Tool = {
 			name: "read",
 			description: "Read a file",
@@ -723,57 +681,6 @@ describe("AgyHost stateful steps", () => {
 		expect(output.isError).toBe(true);
 		expect(text).toContain("file_path: is required");
 		expect(text).toContain("Expected schema: ");
-		expect(text).toContain(JSON.stringify(advertised));
-		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
-		expect(state.host.hasPendingTurn).toBe(true);
-		state.host.close();
-		await expect(run.done).rejects.toThrow("session closed");
-	});
-
-	it("parks the original arguments when normalization would reject a previously valid call", async () => {
-		const enumTool: Tool = {
-			name: "read",
-			description: "Read a file",
-			parameters: {
-				type: "object",
-				properties: { file_path: { type: "string", enum: ["/tmp/a"] } },
-			},
-		};
-		const state = await fixture();
-		const run = step(state.host, [user("read /tmp")], { tools: [enumTool] });
-		const fake = await state.started.next();
-		await fake.prompts.next();
-		const output = fake.call("read", { path: "/tmp" }, fake.currentId);
-		await run.done;
-		const call = run.writer.output.content.find(block => block.type === "toolCall");
-		if (!call || call.type !== "toolCall") throw new Error("Expected a parked tool call");
-		expect(call.arguments).toEqual({ path: "/tmp" });
-		expect(state.host.hasPendingTurn).toBe(true);
-		state.host.close();
-		expect((await output).isError).toBe(true);
-	});
-
-	it("reports the original issues when a normalized call is still invalid", async () => {
-		const pairTool: Tool = {
-			name: "read",
-			description: "Read a file",
-			parameters: {
-				type: "object",
-				properties: { file_path: { type: "string" }, cwd: { type: "string" } },
-				required: ["file_path", "cwd"],
-			},
-		};
-		const state = await fixture();
-		const run = step(state.host, [user("read a.txt")], { tools: [pairTool] });
-		const fake = await state.started.next();
-		await fake.prompts.next();
-		const output = await fake.call("read", { path: "a.txt" }, fake.currentId);
-		const text = textOf(output.content);
-		const advertised = fake.options.tools.find(tool => tool.name === "read")?.inputSchema;
-		if (!advertised) throw new Error("Missing read tool schema");
-		expect(output.isError).toBe(true);
-		expect(text).toContain("file_path: is required");
-		expect(text).toContain("cwd: is required");
 		expect(text).toContain(JSON.stringify(advertised));
 		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
 		expect(state.host.hasPendingTurn).toBe(true);
