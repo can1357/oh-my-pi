@@ -31,6 +31,7 @@ import { fetchWithRetry, isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { readBoundedJson } from "@oh-my-pi/pi-utils/bounded-json";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import * as AIError from "../../error";
+import { fetchKiroAccountEmail } from "../../usage/kiro";
 import { throwIfCancelled } from "../engine/common";
 import { pollOAuthDeviceCodeFlow } from "./device-code";
 import kiroLoginMethodPrompt from "./prompts/kiro-login-method.md" with { type: "text" };
@@ -184,6 +185,23 @@ function profileLabel(profile: KiroProfile, fallback?: string): string {
 
 function profileRow(profileArn: string, orgName: string): Partial<OAuthCredentials> {
 	return { kiroProfileArn: profileArn, region: kiroProfileRegion(profileArn), orgName };
+}
+
+/**
+ * The login with its account email from `GetUsageLimits`, which no Kiro sign-in
+ * returns; a row that has one keeps it. Best effort: a failed lookup keeps the
+ * row as it is, so older logins pick their email up at a later refresh.
+ */
+async function withEmail(ctx: RequestContext, login: OAuthCredentials): Promise<OAuthCredentials> {
+	if (login.email || !login.region) return login;
+	const email = await fetchKiroAccountEmail({
+		region: login.region,
+		token: login.access,
+		profileArn: login.kiroProfileArn,
+		fetch: ctx.fetch,
+		signal: ctx.signal,
+	});
+	return email ? { ...login, email } : login;
 }
 
 /**
@@ -347,6 +365,14 @@ async function loginApiKey(ctrl: OAuthController): Promise<string> {
 
 /** `login "custom" hook="kiro-login"`: Identity Center / Builder ID / API key / Google / GitHub. */
 export async function loginKiroHook(ctrl: OAuthController): Promise<OAuthCredentials | string> {
+	const login = await loginMethod(ctrl);
+	if (typeof login === "string") return login;
+	const row = await withEmail(ctrl, login);
+	throwIfCancelled(ctrl.signal);
+	return row;
+}
+
+async function loginMethod(ctrl: OAuthController): Promise<OAuthCredentials | string> {
 	const answer = (
 		await ask(ctrl, { message: prompt.render(kiroLoginMethodPrompt), placeholder: "1" }, "Kiro login method")
 	)
@@ -402,7 +428,8 @@ export async function refreshKiroHook(current: OAuthCredentials, signal?: AbortS
 		const profileArn = kiroProfileRegion(moved) ? (moved as string) : current.kiroProfileArn;
 		const region = kiroProfileRegion(profileArn);
 		if (!region) throw incompleteRefreshState();
-		return { ...current, ...parseTokens(response.data, current.refresh), kiroProfileArn: profileArn, region };
+		const tokens = parseTokens(response.data, current.refresh);
+		return withEmail({ signal }, { ...current, ...tokens, kiroProfileArn: profileArn, region });
 	}
 	if (!current.kiroClientSecret || !current.kiroOidcRegion) throw incompleteRefreshState();
 	const response = await postJson(
@@ -428,5 +455,5 @@ export async function refreshKiroHook(current: OAuthCredentials, signal?: AbortS
 			: `Kiro refresh failed: HTTP ${response.status}`;
 		throw oauthError(message, { kind: "token-refresh", status: response.status, definitive });
 	}
-	return { ...current, ...parseTokens(response.data, current.refresh) };
+	return withEmail({ signal }, { ...current, ...parseTokens(response.data, current.refresh) });
 }

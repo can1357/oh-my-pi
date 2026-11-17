@@ -5,6 +5,7 @@
  * counters carry the fractional credits the dashboard shows.
  */
 import { KiroManagementHttpError, kiroManagementRequest } from "@oh-my-pi/pi-catalog/discovery/kiro";
+import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { decodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -67,6 +68,8 @@ function precise(record: Record<string, unknown>, key: string): number | undefin
 
 const text = (value: unknown): string | undefined =>
 	typeof value === "string" && value.trim() ? value.trim() : undefined;
+
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
  * Parse a `GetUsageLimits` response: the plan credits, one limit per active
@@ -159,8 +162,48 @@ export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageR
 		});
 	}
 
-	// Response `userInfo` (the account email) is deliberately not carried over.
-	return { provider: PROVIDER_ID, fetchedAt, limits, ...(title ? { metadata: { planType: planName } } : {}) };
+	const email = usageEmail(payload);
+	const metadata = { ...(title ? { planType: planName } : {}), ...(email ? { email } : {}) };
+	return { provider: PROVIDER_ID, fetchedAt, limits, ...(title || email ? { metadata } : {}) };
+}
+
+/** Where and as whom to ask `GetUsageLimits`. */
+interface UsageLimitsRequest {
+	region: string;
+	token: string;
+	profileArn?: string;
+	fetch?: FetchImpl;
+	signal?: AbortSignal;
+}
+
+/** `GetUsageLimits` for one route; `isEmailRequired` makes the reply carry `userInfo.email`. */
+function requestUsageLimits(options: UsageLimitsRequest): Promise<unknown> {
+	const { profileArn, ...route } = options;
+	return kiroManagementRequest({
+		...route,
+		target: "GetUsageLimits",
+		body: {
+			origin: "KIRO_CLI",
+			...(profileArn ? { profileArn } : {}),
+			resourceType: "AGENTIC_REQUEST",
+			isEmailRequired: true,
+		},
+	});
+}
+
+/** The account email a `GetUsageLimits` reply reports, when it reads as one. */
+function usageEmail(payload: unknown): string | undefined {
+	const email = isRecord(payload) && isRecord(payload.userInfo) ? text(payload.userInfo.email) : undefined;
+	return email && EMAIL.test(email) ? email : undefined;
+}
+
+/** A login's account email, best effort: any failure yields `undefined`. */
+export async function fetchKiroAccountEmail(options: UsageLimitsRequest): Promise<string | undefined> {
+	try {
+		return usageEmail(await requestUsageLimits(options));
+	} catch {
+		return undefined;
+	}
 }
 
 export const kiroUsageProvider: UsageProvider = {
@@ -177,15 +220,10 @@ export const kiroUsageProvider: UsageProvider = {
 		if (!route || (credential.expiresAt !== undefined && credential.expiresAt <= Date.now())) return null;
 		let payload: unknown;
 		try {
-			payload = await kiroManagementRequest({
+			payload = await requestUsageLimits({
 				region: route.region,
 				token: route.token,
-				target: "GetUsageLimits",
-				body: {
-					origin: "KIRO_CLI",
-					...(route.profileArn ? { profileArn: route.profileArn } : {}),
-					resourceType: "AGENTIC_REQUEST",
-				},
+				profileArn: route.profileArn,
 				fetch: ctx.fetch,
 				signal: params.signal,
 			});
@@ -203,8 +241,12 @@ export const kiroUsageProvider: UsageProvider = {
 			return null;
 		}
 		const report = parseKiroUsage(payload);
+		if (!report) return null;
 		// Attribute the report to the login it measured: logins sharing a profile stay separate accounts.
-		if (report && credential.accountId) report.metadata = { ...report.metadata, accountId: credential.accountId };
+		if (credential.accountId) report.metadata = { ...report.metadata, accountId: credential.accountId };
+		if (report.metadata?.email === undefined && credential.email) {
+			report.metadata = { ...report.metadata, email: credential.email };
+		}
 		return report;
 	},
 };

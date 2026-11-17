@@ -28,7 +28,7 @@ function livePayload(
 	return {
 		overageConfiguration: { overageStatus: overrides.overage ?? "DISABLED" },
 		subscriptionInfo: { subscriptionTitle: "KIRO PRO" },
-		userInfo: { email: "someone@example.com" },
+		userInfo: { email: "someone@example.com", userId: "d-0000000000.00000000-0000-0000-0000-000000000000" },
 		usageBreakdownList: [
 			{
 				resourceType: "CREDIT",
@@ -90,6 +90,7 @@ describe("kiroUsageProvider", () => {
 			origin: "KIRO_CLI",
 			profileArn: PROFILE_ARN,
 			resourceType: "AGENTIC_REQUEST",
+			isEmailRequired: true,
 		});
 
 		expect(report?.limits.map(limit => limit.id)).toEqual(["kiro:credits", "kiro:bonus:0"]);
@@ -105,8 +106,8 @@ describe("kiroUsageProvider", () => {
 			amount: { used: 0, limit: 500, unit: "credits" },
 			window: { resetsAt: BONUS_EXPIRES_S * 1000, resetLabel: "expires" },
 		});
-		// Overage disabled: no overage row; the account email never leaves the response.
-		expect(JSON.stringify(report)).not.toContain("someone@example.com");
+		// Overage disabled: no overage row. The requested `userInfo.email` names the account.
+		expect(report?.metadata).toMatchObject({ planType: "Kiro Pro", email: "someone@example.com" });
 	});
 
 	it("marks a spent plan exhausted only when no bonus or overage remains, and flags paid overage", () => {
@@ -159,13 +160,28 @@ describe("kiroUsageProvider", () => {
 			context(() => json(livePayload()), captured),
 		);
 		expect(captured[0]?.url).toBe("https://management.eu-central-1.kiro.dev/");
-		expect(captured[0]?.body).toEqual({ origin: "KIRO_CLI", resourceType: "AGENTIC_REQUEST" });
+		expect(captured[0]?.body).toEqual({ origin: "KIRO_CLI", resourceType: "AGENTIC_REQUEST", isEmailRequired: true });
 		expect(
 			await kiroUsageProvider.fetchUsage(
 				params,
 				context(() => json({}, 403)),
 			),
 		).toBeNull();
+	});
+
+	it("names the account by the stored email when the reply carries no valid one", async () => {
+		const params = socialParams();
+		params.credential.email = "stored@example.com";
+		for (const userInfo of [
+			{ userId: "d-0000000000.user" },
+			{ email: "not an email", userId: "d-0000000000.user" },
+		]) {
+			const report = await kiroUsageProvider.fetchUsage(
+				params,
+				context(() => json({ ...livePayload(), userInfo })),
+			);
+			expect(report?.metadata?.email).toBe("stored@example.com");
+		}
 	});
 });
 
