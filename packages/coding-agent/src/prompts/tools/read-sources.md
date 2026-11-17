@@ -10,7 +10,7 @@
   - Universal Mach-O: host-arch slice by default; bin:@<arch> picks another metadata view.
 {{#if BINARY_VIEWS}}
   - Explicit analysis: :overview function list; :<func|0xaddr> pseudocode; :<func>:asm; :imports; :exports; :strings; :xrefs:<func|0xaddr>.
-  - These selectors open the selected disassembler and may provision Ghidra on first analysis.
+  - These selectors open the selected disassembler (IDA, radare2, or Ghidra) and may provision Ghidra on first analysis.
   - Line ranges apply after the view (bin:main:10-40); bin:@x86_64:main analyzes a chosen universal slice.
   - For edits and Python scripting, use eval's `dsm` namespace → xd://eval/dsm.
 {{/if}}

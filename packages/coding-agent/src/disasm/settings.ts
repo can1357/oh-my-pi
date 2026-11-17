@@ -1,6 +1,6 @@
 import { register } from "../config/registry";
 
-/** Backend for explicit analysis through read selectors and eval's dsm namespace; auto prefers idalib. */
+/** Backend for explicit analysis through read selectors and eval's dsm namespace; auto prefers idalib, then radare2. */
 export const cfgDisassembler = register({
 	id: "disassembler.backend",
 	type: "enum",

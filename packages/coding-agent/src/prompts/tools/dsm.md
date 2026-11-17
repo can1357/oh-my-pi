@@ -1,6 +1,6 @@
 Open, inspect, edit, and script binary analysis databases.
 
-The `dsm` object exists in JavaScript and Python Eval; it is not a standalone tool. `disassembler.backend` selects IDA, Ghidra, or Binary Ninja.
+The `dsm` object exists in JavaScript and Python Eval; it is not a standalone tool. `disassembler.backend` selects IDA, radare2, Ghidra, or Binary Ninja (auto prefers IDA, then radare2, then Ghidra; Binary Ninja is opt-in).
 
 <instruction>
 - Bare `read <binary>` shows on-disk Mach-O/ELF/PE metadata only; it never opens an analysis database or downloads a backend.
@@ -13,7 +13,7 @@ The `dsm` object exists in JavaScript and Python Eval; it is not a standalone to
 - Every `open` or `get` owns one independent reference. `close()` releases only that reference; the final release closes the database. Child close/disposal cannot close another owner's live reference.
 - `db.handle()` returns a printable reference bound to this live database incarnation. Pass that exact string in a child's task/context; the child MUST `await dsm.open(handle)` and close its returned handle in `finally`. Keep the parent's reference until the children finish.
 - Portable handles work from any project on the same machine, even when a child's cwd/worktree differs. The selected backend must match; an expired handle never creates or reopens a database.
-- Databases appear in `omp ps` labelled `<Backend label> <ref>` (`IDA …`, `Ghidra …`, `Binary Ninja …`); unit ids are UUIDs. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
+- Databases appear in `omp ps` labelled `<Backend label> <ref>` (`IDA …`, `radare2 …`, `Ghidra …`, `Binary Ninja …`); unit ids are UUIDs. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
 - Handles expose `id`, `backend`, `ref`, `path`, and `info`. Closed references require another `dsm.open(path or handle)` or `dsm.get(id)`.
 
 JavaScript:

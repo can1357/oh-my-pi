@@ -91,12 +91,13 @@ function hostDaemon(endpoint: string): DaemonClient {
 }
 
 /** Real connections and eval kernels; only backend computation and the daemon's unit routing are stand-ins. */
-async function fixture(maxTimeout = 0) {
+async function fixture(maxTimeout = 0, daemonBackend: DisasmBackendId = "ida") {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dsm-prelude-"));
 	const binary = path.join(dir, "sample");
 	await Bun.write(binary, new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]));
 	const endpoint = ipcEndpoint(dir, "dsm");
-	const freshHandle = () => formatDatabaseHandle({ backend: "ida", id: "sample-id", instance: crypto.randomUUID() });
+	const freshHandle = () =>
+		formatDatabaseHandle({ backend: daemonBackend, id: "sample-id", instance: crypto.randomUUID() });
 	const status: HostStatus = {
 		id: "sample-id",
 		ref: binary,
@@ -202,13 +203,14 @@ async function fixture(maxTimeout = 0) {
 	});
 	vi.spyOn(daemon, "daemonClient").mockResolvedValue(hostDaemon(endpoint));
 	const connect = async () => {
-		const connected = await client.DisasmDatabase.attach("ida:sample-id", "status");
+		const connected = await client.DisasmDatabase.attach(`${daemonBackend}:sample-id`, "status");
 		if (!connected) throw new Error("Fixture database did not attach");
 		databases.push(connected);
 		return connected;
 	};
 	let db = await connect();
-	let backend: DisasmBackendId | undefined = "ida";
+	let backend: DisasmBackendId | undefined = daemonBackend;
+	const computeBackend = cfgDisasmBackend.get.bind(cfgDisasmBackend);
 	vi.spyOn(cfgDisasmBackend, "get").mockImplementation(() => backend);
 	const find = vi
 		.spyOn(client, "findOpenDatabase")
@@ -257,7 +259,7 @@ async function fixture(maxTimeout = 0) {
 			const value = await invoke({ action: "get" });
 			const lease = field(value, "lease");
 			if (typeof lease !== "string") throw new Error("Missing retained database reference");
-			return { lease, backend: "ida" };
+			return { lease, backend: daemonBackend };
 		};
 		return {
 			session,
@@ -290,6 +292,9 @@ async function fixture(maxTimeout = 0) {
 		setBackend(value: DisasmBackendId | undefined) {
 			backend = value;
 		},
+		setBackendFromSettings(settings: Settings) {
+			backend = computeBackend(settings);
+		},
 		setOpen(value: boolean) {
 			open = value;
 			if (!value) db.disconnect();
@@ -313,6 +318,38 @@ describe("dsm host capability", () => {
 			instance: crypto.randomUUID(),
 		};
 		expect(parseDatabaseHandle(formatDatabaseHandle(handle))).toEqual(handle);
+	});
+
+	it("dsm.open with backend radare2 routes calls through the r2 fixture", async () => {
+		const f = await fixture(0, "radare2");
+		const r2 = path.join(f.dir, "radare2");
+		await Bun.write(r2, "");
+		await fs.chmod(r2, 0o755);
+		f.setBackendFromSettings(
+			Settings.isolated({
+				"ida.installDir": path.join(f.dir, "no-ida"),
+				"radare2.r2Path": r2,
+			}),
+		);
+		const opened = await f.invoke({ action: "open", path: "sample" });
+		expect(field(opened, "backend")).toBe("radare2");
+		expect(f.acquire).toHaveBeenCalledWith(f.session, "radare2", f.binary, expect.anything());
+		expect(parseDatabaseHandle(String(field(opened, "handle")))?.backend).toBe("radare2");
+		const handle = { lease: field(opened, "lease"), backend: "radare2" };
+		expect(await f.invoke({ ...handle, action: "view" })).toBe("view:overview:");
+		expect(await f.invoke({ ...handle, action: "rename", target: 4096, name: "r2_named" })).toEqual({
+			ea: 4096,
+			old: "main",
+			new: "r2_named",
+		});
+		expect(f.requests).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ op: "call", method: "view" }),
+				expect.objectContaining({ op: "call", method: "rename" }),
+			]),
+		);
+		f.setBackend("ida");
+		await expect(f.invoke({ ...handle, action: "view" })).rejects.toThrow("backend changed");
 	});
 
 	it("creates independent references only through explicit valid opens or existing get", async () => {
