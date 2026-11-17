@@ -187,4 +187,23 @@ describe("transportFetch connection lost before a response", () => {
 		expect(await response.text()).toBe("done");
 		expect(requests).toEqual([`POST ${BODY.length} Bearer sk-test`, "GET 0 null"]);
 	});
+
+	it("returns a 300 with a location to the caller instead of resending the body", async () => {
+		const requests: string[] = [];
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests.push(`${request.method} ${(await request.arrayBuffer()).byteLength}`);
+				return new Response(null, { status: 300, headers: { location: "/elsewhere" } });
+			},
+		});
+		servers.push({ close: () => server.stop(true) });
+		const fetch = transportFetch(testModel("openai", "openai-responses"), undefined);
+
+		const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, { method: "POST", body: BODY });
+
+		expect(response.status).toBe(300);
+		expect(requests).toEqual([`POST ${BODY.length}`]);
+	});
 });
