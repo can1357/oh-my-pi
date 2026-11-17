@@ -167,12 +167,13 @@ impl Pending {
 }
 
 /// Before a read of `element`: when it is a popup with pending type-ahead,
-/// waits until its value differs from the one before the keys or the choice's
-/// deadline passes, then clears the mark. A cancel stops the wait and keeps
-/// the mark for the next read. Without marks it only checks that none exist.
-/// A read made while the call holds the input lease (an element click finding
-/// its point, a refusal naming the element) never waits, since that would
-/// keep every other session's input out: it reads at once and keeps the mark.
+/// waits until its value reads differently from the one read before the keys
+/// or the choice's deadline passes, then clears the mark. A cancel stops the
+/// wait and keeps the mark for the next read. Without marks it only checks that
+/// none exist. A read made while the call holds the input lease (an element
+/// click finding its point, a refusal naming the element) never waits, since
+/// that would keep every other session's input out: it reads at once and keeps
+/// the mark.
 pub(crate) fn settle_read(element: &AXUIElement) -> CoreResult<()> {
 	if control::input_held() {
 		return Ok(());
@@ -216,7 +217,9 @@ fn settle_read_with(
 
 /// Reads the value (`read`) until it differs from `before` or no time is
 /// `left`; `wait` pauses for at most the time left, and its error (a cancel)
-/// ends the wait. Returns the value it ended on.
+/// ends the wait. Returns the value it ended on. A failed read (`None`) shows
+/// no change: one while polling reads again, and with no value from before the
+/// keys only the deadline ends the wait.
 fn await_change(
 	before: Option<&str>,
 	mut read: impl FnMut() -> Option<String>,
@@ -225,7 +228,7 @@ fn await_change(
 ) -> CoreResult<Option<String>> {
 	loop {
 		let value = read();
-		if value.as_deref() != before {
+		if before.is_some() && value.is_some() && value.as_deref() != before {
 			return Ok(value);
 		}
 		let left = left();
@@ -362,6 +365,42 @@ mod tests {
 		settle_read_with(&popup, || now.get(), |_| Some("Delta".to_string()), |_| panic!("no wait"))
 			.expect("read");
 		MARKS.with_borrow(|marks| assert!(marks.is_empty()));
+		// A failed read is no change: one while the letter is pending reads
+		// again, and with no value from before the keys only the deadline ends
+		// the wait.
+		let poll = |pause: Duration| -> CoreResult<()> {
+			now.set(now.get() + CHOICE_POLL.min(pause));
+			Ok(())
+		};
+		for (before, failing) in [(Some("Choose a team"), true), (None, false)] {
+			let start = now.get();
+			let commit = start + Duration::from_secs(1);
+			Pending { popup: popup.clone(), before: before.map(str::to_string), sent: None }
+				.mark_at(start);
+			let read = |_: &AXUIElement| {
+				let at = now.get();
+				if failing && at < start + CHOICE_POLL * 2 {
+					None
+				} else {
+					Some(
+						(if at >= commit {
+							"Research"
+						} else {
+							"Choose a team"
+						})
+						.to_string(),
+					)
+				}
+			};
+			settle_read_with(&popup, || now.get(), read, poll).expect("read");
+			let ended = if before.is_some() {
+				commit
+			} else {
+				start + CHOICE_TIMEOUT
+			};
+			assert_eq!(now.get(), ended, "{before:?}");
+			MARKS.with_borrow(|marks| assert!(marks.is_empty()));
+		}
 	}
 
 	#[test]
@@ -425,8 +464,12 @@ mod tests {
 				.message
 				.contains("key release failed")
 		);
-		assert!(pending(&popup), "the next read of the popup waits for its choice");
-		assert!(!pending(&other));
+		// The mark itself, whatever the time now: the next read of the popup
+		// waits for its choice.
+		MARKS.with_borrow(|marks| {
+			assert!(marks.iter().any(|mark| *mark.popup == *popup));
+			assert!(!marks.iter().any(|mark| *mark.popup == *other));
+		});
 		MARKS.with_borrow_mut(Vec::clear);
 	}
 
@@ -451,7 +494,11 @@ mod tests {
 	fn a_read_under_the_input_lease_never_waits_and_keeps_the_mark() {
 		MARKS.with_borrow_mut(Vec::clear);
 		let (popup, _) = popups();
-		Pending { popup: popup.clone(), before: Some("Bravo".to_string()), sent: None }
+		// The choice is due 50 ms after the mark.
+		let key = Instant::now()
+			.checked_sub(CHOICE_TIMEOUT.saturating_sub(Duration::from_millis(50)))
+			.expect("the clock runs past the timeout");
+		Pending { popup: popup.clone(), before: Some("Bravo".to_string()), sent: Some(key) }
 			.mark_at(Instant::now());
 		let source = control::CancellationSource::default();
 		control::grant_for_test(&source);
@@ -460,8 +507,8 @@ mod tests {
 		settle_read(&popup).expect("read");
 		MARKS.with_borrow(|marks| assert_eq!(marks.len(), 1, "the read under the lease settled"));
 		drop(lease);
-		// The popup is not running, so its value reads as changed: the read
-		// after the call settles and clears the mark.
+		// The popup is not running, so its value cannot be read: the read after
+		// the call waits out the choice's deadline, then clears the mark.
 		settle_read(&popup).expect("read");
 		MARKS.with_borrow(|marks| assert!(marks.is_empty()));
 	}
