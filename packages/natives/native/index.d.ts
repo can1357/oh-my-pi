@@ -929,6 +929,11 @@ export declare class VcsGitRepo {
   clean(options: VcsCleanOptions, signal?: unknown | undefined | null): Promise<undefined>
   /** Read tree into index. */
   readTree(treeish: string, indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /**
+   * Read a tree into a private index while preserving sparse-checkout
+   * exclusions.
+   */
+  readTreeKeepingSparse(treeish: string, indexPath: string, signal?: unknown | undefined | null): Promise<undefined>
   /** Write index tree. */
   writeTree(indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<string>
   /** Apply patch. */
