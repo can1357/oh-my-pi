@@ -4,7 +4,7 @@
 
 ### Added
 
-- Linux GTK and Qt text elements now support `selectText` through AT-SPI, including read-only and unfocused text. Results use UTF-16 offsets; selection is read back with unchanged text and target focus, without keys or a focus request. ([@Deftera186](https://github.com/Deftera186))
+- Linux GTK and Qt text elements now support `selectText` through AT-SPI, including read-only and unfocused text. Results use UTF-16 offsets; selection is read back with unchanged text and target focus, without keys or a focus request. ([#19604](https://github.com/can1357/oh-my-pi/pull/19604), [@Deftera186](https://github.com/Deftera186))
 
 ## [18.22.1] - 2026-11-17
 
