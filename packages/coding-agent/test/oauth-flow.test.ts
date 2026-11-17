@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { MCPOAuthFlow, refreshMCPOAuthToken } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import { MCPOAuthFlow, OMP_CLIENT_METADATA_URL, refreshMCPOAuthToken } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -82,6 +82,74 @@ describe("mcp oauth flow", () => {
 		expect((registrationPayload as { scope?: string } | null)?.scope).toBeUndefined();
 		expect(authUrl.searchParams.get("client_id")).toBe("registered-client-id");
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
+	});
+
+	it("sends omp's client metadata document as client_id before trying dynamic registration", async () => {
+		const registrations: string[] = [];
+		const tokenBodies: string[] = [];
+		const fetchImpl: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url === "https://clerk.example/.well-known/oauth-authorization-server") {
+				return Response.json({
+					registration_endpoint: "https://clerk.example/oauth/register",
+					client_id_metadata_document_supported: true,
+				});
+			}
+			if (url === "https://clerk.example/oauth/register") {
+				registrations.push(String(init?.body));
+				return Response.json({ client_id: "registered-client-id" });
+			}
+			if (url === "https://clerk.example/oauth/token") {
+				tokenBodies.push(String(init?.body));
+				return Response.json({ access_token: "access-token", refresh_token: "refresh-token" });
+			}
+			return new Response("not found", { status: 404 });
+		};
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://clerk.example/oauth/authorize",
+				tokenUrl: "https://clerk.example/oauth/token",
+				fetch: fetchImpl,
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("state", "http://localhost:41234/callback");
+		await flow.exchangeToken("code", "state", "http://localhost:41234/callback");
+
+		expect(new URL(url).searchParams.get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
+		expect(new URLSearchParams(tokenBodies[0]).get("client_id")).toBe(OMP_CLIENT_METADATA_URL);
+		expect(flow.resolvedClientId).toBe(OMP_CLIENT_METADATA_URL);
+		expect(registrations).toEqual([]);
+	});
+
+	it("registers a client when the redirect is not one the metadata document lists", async () => {
+		const fetchImpl: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "https://clerk.example/.well-known/oauth-authorization-server") {
+				return Response.json({
+					registration_endpoint: "https://clerk.example/oauth/register",
+					client_id_metadata_document_supported: true,
+				});
+			}
+			if (url === "https://clerk.example/oauth/register") {
+				return Response.json({ client_id: "registered-client-id" });
+			}
+			return new Response("not found", { status: 404 });
+		};
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://clerk.example/oauth/authorize",
+				tokenUrl: "https://clerk.example/oauth/token",
+				callbackPath: "/oauth/done",
+				fetch: fetchImpl,
+			},
+			{},
+		);
+
+		const { url } = await flow.generateAuthUrl("state", "http://localhost:41234/oauth/done");
+
+		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
 	});
 
 	it("uses the issuer rather than the authorization endpoint to discover DCR metadata", async () => {
