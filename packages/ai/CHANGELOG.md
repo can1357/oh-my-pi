@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ## [18.22.2] - 2026-11-18
+### Added
+
+- Added version exchange between auth-broker clients and the broker: clients log a warning when the broker runs a different omp version, and the broker logs each client's version and records it per client
+
+## [18.22.1] - 2026-11-17
 
 ### Added
 

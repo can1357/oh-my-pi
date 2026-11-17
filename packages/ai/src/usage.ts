@@ -239,6 +239,8 @@ export interface ClientUsageReport {
 	hostname?: string;
 	/** Application label for the process that burned the tokens (e.g. `omp`, `robomp`). */
 	app?: string;
+	/** omp version of the reporting install, when the report came from that install itself. */
+	version?: string;
 	entries: ObservedUsageEntry[];
 }
 
