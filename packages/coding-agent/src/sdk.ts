@@ -1,6 +1,8 @@
 import * as path from "node:path";
-import { type CallRecord, ChangeJournal, callLabel } from "./commit/selective/journal";
+import { type CallRecord, ChangeJournal, callDetails } from "./commit/selective/journal";
 import { createCommitPrelude } from "./commit/selective/prelude-definition";
+import { cfgDisasmBackend } from "./disasm/active";
+import { createDsmPrelude, releaseDsmReferences } from "./disasm/prelude-definition";
 import {
 	Agent,
 	type AgentEvent,
@@ -339,7 +341,6 @@ import {
 	warmupLspServers,
 	xdevEntries,
 } from "./tools";
-import { resolveYieldReportText } from "./tools/yield";
 import {
 	createModelJobCaptionWriter,
 	createModelJobWidgetAuthor,
@@ -2795,14 +2796,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			commitTodoPhases: phases => session.commitTodoPhases(phases),
 			getWorkPoolYieldItems: () => session?.getWorkPoolYieldItems() ?? [],
-			getLastAssistantText: () => session?.getLastAssistantText(),
-			getYieldReportText: toolCallId => resolveYieldReportText(session?.messages ?? [], toolCallId),
 			getToolCallIntent: toolCallId => resolveToolCallIntent(session?.messages ?? [], toolCallId),
 			getCallContext: (toolCallId, source) => {
 				const messages = session?.messages ?? [];
 				return buildCallContext(messages, toolCallId, source, resolveToolCallIntent(messages, toolCallId));
 			},
 			getContextMessages: () => convertToLlm(session?.messages ?? []),
+			noteEvalPreludeCall: name => session?.noteEvalPreludeCall(name),
 			setWorkPoolYieldItems: items => session.setWorkPoolYieldItems(items),
 			getCheckpointState: () => session.getCheckpointState(),
 			setCheckpointState: state => session.setCheckpointState(state ?? undefined),
@@ -2855,6 +2855,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		let ratchetPrelude: EvalPreludeDefinition | undefined;
 		let archivePrelude: EvalPreludeDefinition | undefined;
 		let commitPrelude: EvalPreludeDefinition | undefined;
+		let dsmPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -2877,6 +2878,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (cfgCommitEnabled.get(settings)) {
 				commitPrelude ??= createCommitPrelude(toolSession);
 				builtins.push(commitPrelude);
+			}
+			if (cfgDisasmBackend.get(settings) !== undefined) {
+				dsmPrelude ??= createDsmPrelude(toolSession);
+				builtins.push(dsmPrelude);
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
@@ -5060,6 +5065,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					...streamOptions,
 					promptCacheKey: streamOptions?.promptCacheKey ?? session?.getPromptCacheKeyForModel(streamModel),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
+					omitDemotedReasoning: session?.omitsDemotedReasoning(streamModel) || streamOptions?.omitDemotedReasoning,
 				};
 				// The provider calls `onPayload` as it sends, past any wait for an in-flight
 				// slot: the prompt cache entry's lifetime starts there, not here.
@@ -5150,12 +5156,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		});
 		// Shell-like calls bound the windows in which scripts, formatters, and codegen changed
-		// files on this agent's behalf; selective commits match file mtimes against them.
+		// files on this agent's behalf; selective commits match file ctimes against them, and the
+		// paths their scripts name against deleted files.
 		const shellCalls = new Map<string, Omit<CallRecord, "type" | "agent" | "parent" | "end">>();
 		agent.subscribe(event => {
 			if (event.type === "tool_execution_start") {
 				if (event.toolName !== "bash" && event.toolName !== "eval") return;
-				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), label: callLabel(event.args) });
+				shellCalls.set(event.toolCallId, { tool: event.toolName, start: Date.now(), ...callDetails(event.args) });
 			} else if (event.type === "tool_execution_end") {
 				const call = shellCalls.get(event.toolCallId);
 				if (!call) return;
@@ -5243,6 +5250,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// their own configured tool slate, so a selected write is always full.
 			deviceOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
+			// An advisor is a conversation of its own with no hidden-message channel: its preludes stay read-first.
+			noteEvalPreludeCall: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -6025,8 +6034,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					restoreProviderToggles?.();
 					unsubscribeMcpNotifications?.();
 					unregisterMcpPostmortem?.();
-					for (const callback of disposeCallbacks) callback();
-					disposeCallbacks.clear();
+					try {
+						for (const callback of disposeCallbacks) callback();
+					} finally {
+						disposeCallbacks.clear();
+						await releaseDsmReferences(toolSession);
+					}
 					// Drop refs so the process-global postmortem list doesn't retain
 					// the bridge closure past explicit dispose.
 					unsubscribeMcpNotifications = undefined;
