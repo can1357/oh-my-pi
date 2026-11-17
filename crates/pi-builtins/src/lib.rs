@@ -260,3 +260,10 @@ pub use proc_snapshot::{ProcInfo, ProcessStatus};
 	any(target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use proc_snapshot::sys as proc_sys;
+/// Other sessions of this program, which `pkill` skips and an embedding
+/// shell's `kill` should refuse the same way.
+#[cfg(all(
+	feature = "util.procs",
+	any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+pub use proc_snapshot::PeerSessions;

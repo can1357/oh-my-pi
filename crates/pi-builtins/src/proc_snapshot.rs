@@ -273,6 +273,19 @@ mod proc_snapshot {
 			self.args.clone()
 		}
 
+		/// The file this process executes, as the kernel resolved it at `exec`;
+		/// `None` when unreadable (another user's process). A binary replaced on
+		/// disk since then, as an update does, still reports its original path.
+		pub fn executable(&self) -> Option<std::path::PathBuf> {
+			use std::os::unix::ffi::OsStrExt as _;
+
+			let path = fs::read_link(format!("/proc/{}/exe", self.pid)).ok()?;
+			match path.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+				Some(original) => Some(std::ffi::OsStr::from_bytes(original).into()),
+				None => Some(path),
+			}
+		}
+
 		pub const fn group_id(&self) -> Option<i32> {
 			Some(self.stat.pgrp)
 		}
@@ -752,6 +765,16 @@ mod proc_snapshot {
 
 		pub fn args(&self) -> Vec<String> {
 			self.args.clone()
+		}
+
+		/// The file this process executes, as libproc reports it; `None` when
+		/// unreadable.
+		pub fn executable(&self) -> Option<std::path::PathBuf> {
+			use std::os::unix::ffi::OsStrExt as _;
+
+			let mut buffer = [0u8; sys::PATH_CAPACITY];
+			let path = sys::executable_path(self.pid, &mut buffer)?;
+			Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path)))
 		}
 
 		pub fn group_id(&self) -> Option<i32> {
@@ -1651,6 +1674,16 @@ mod proc_snapshot {
 			vec![self.command_line.clone()]
 		}
 
+		/// The full Win32 path of the file this process executes; `None` when
+		/// unreadable.
+		pub fn executable(&self) -> Option<std::path::PathBuf> {
+			use std::os::windows::ffi::OsStringExt as _;
+
+			let mut buffer = vec![0u16; 32_768];
+			let path = sys::image_path(&self.handle, &mut buffer)?;
+			Some(std::ffi::OsString::from_wide(path).into())
+		}
+
 		pub fn group_id(&self) -> Option<i32> {
 			None
 		}
@@ -2006,6 +2039,94 @@ impl HostProcesses {
 			node = Some(found);
 		}
 		Self { pids, pgids }
+	}
+}
+
+/// Other sessions of this program, and the processes they run under.
+///
+/// A peer is any other live process executing the same file as this one that
+/// this process did not start, directly or through its descendants. Several
+/// agent sessions on one machine are such peers, and a `pkill -f` pattern often
+/// appears in all their command lines, so a pattern meant for one session's
+/// stuck children would also stop every other session. [`HostProcesses`]
+/// protects only our own chain; this covers the sessions beside it.
+///
+/// Like [`HostProcesses`], a peer's chain of ancestors is protected with it (its
+/// launcher and terminal are load-bearing for it), resolved from the snapshot
+/// rather than cached, and descent is judged by the same start-time-checked
+/// parent walk, so a recycled pid neither creates nor hides a peer.
+///
+/// Our own descendants are never peers, even when they execute this same file:
+/// an agent can always stop what it started.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[derive(Default)]
+pub struct PeerSessions {
+	/// Peers and their ancestors.
+	pub pids:  std::collections::HashSet<i32>,
+	/// The process groups those processes belong to.
+	pub pgids: std::collections::HashSet<i32>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+impl PeerSessions {
+	/// Snapshots the process table and resolves the peers in it.
+	#[must_use]
+	pub fn resolve() -> Self {
+		Self::resolve_in(&ProcInfo::all())
+	}
+
+	/// Whether signalling `target` would reach a peer or a process it runs under.
+	///
+	/// `target` follows `kill(2)` as in [`HostProcesses::blocks`]; `0` names our
+	/// own group, which that check already covers.
+	#[must_use]
+	pub fn blocks(&self, target: i32) -> bool {
+		match target {
+			0 => false,
+			-1 => !self.pids.is_empty(),
+			_ => match target.checked_neg() {
+				Some(pgid) if pgid > 0 => self.pgids.contains(&pgid),
+				_ => self.pids.contains(&target),
+			},
+		}
+	}
+
+	/// Resolves the peers in `all`, a process-table snapshot the caller already
+	/// holds.
+	pub(crate) fn resolve_in(all: &[ProcInfo]) -> Self {
+		let mut peers = Self::default();
+		let Ok(self_pid) = i32::try_from(std::process::id()) else {
+			return peers;
+		};
+		let by_pid: std::collections::HashMap<i32, &ProcInfo> =
+			all.iter().map(|process| (process.pid(), process)).collect();
+		let Some(own_executable) = by_pid.get(&self_pid).and_then(|process| process.executable())
+		else {
+			return peers;
+		};
+		let lookup = |pid| {
+			by_pid.get(&pid).map(|process| ChainNode {
+				ppid:  process.ppid(),
+				pgid:  process.group_id(),
+				start: process.start_time(),
+			})
+		};
+		for process in all {
+			if process.pid() == self_pid {
+				continue;
+			}
+			// The chain is walked first because it is in memory; reading the
+			// executable is a system call per process.
+			let chain = HostProcesses::walk(process.pid(), &lookup);
+			if chain.pids.contains(&self_pid)
+				|| process.executable().as_deref() != Some(own_executable.as_path())
+			{
+				continue;
+			}
+			peers.pids.extend(chain.pids);
+			peers.pgids.extend(chain.pgids);
+		}
+		peers
 	}
 }
 

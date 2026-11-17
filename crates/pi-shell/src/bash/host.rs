@@ -112,6 +112,13 @@ pub trait Host {
 	fn signal_process(&mut self, _pid: i32, _signal: Option<crate::bash::Signal>) -> io::Result<()> {
 		Err(io::ErrorKind::Unsupported.into())
 	}
+	/// The `kill` builtin is about to call [`Host::signal_process`] for each
+	/// of its operands, and calls [`Host::end_signals`] after the last. A host
+	/// whose check of a target reads the whole process table may read it once
+	/// for all of them, never for a later command. The default does nothing.
+	fn begin_signals(&mut self) {}
+	/// Ends what [`Host::begin_signals`] began.
+	fn end_signals(&mut self) {}
 	/// Signals ignored when the shell started (B10). A non-interactive bash
 	/// cannot trap them, and externals inherit them as ignored. Hosts without
 	/// OS signals (08's agent shells) keep the default: none.

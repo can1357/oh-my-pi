@@ -108,6 +108,7 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 		return done(2);
 	}
 	let mut status = 0;
+	ctx.cx.host.begin_signals();
 	for arg in &args[i..] {
 		match target(ctx, arg, send, None) {
 			Ok(Some(target)) => {
@@ -137,6 +138,7 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 			},
 		}
 	}
+	ctx.cx.host.end_signals();
 	done(status)
 }
 

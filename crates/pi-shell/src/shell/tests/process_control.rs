@@ -1465,3 +1465,233 @@ async fn pkill_builtin_excludes_own_pid() {
 	assert_eq!(result.exit_code, Some(0), "the shell must survive an explicit pkill");
 	assert!(output.contains("survived"), "{output:?}");
 }
+
+/// Starts a copy of the test binary that this process did not start: a shell
+/// launches it in the background and exits, so the copy is re-parented away
+/// from us. Executing the same file as the test process, it stands in for
+/// another session of the program.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn spawn_peer_session(command: &std::path::Path, duration: Duration) -> PeerSession {
+	let duration_ms = u64::try_from(duration.as_millis()).expect("test duration fits u64");
+	let output = Command::new("/bin/sh")
+		.args([
+			"-c",
+			"\"$0\" --ignored --exact shell::tests::process_test_sleeper </dev/null >/dev/null 2>&1 \
+			 & echo $!",
+		])
+		.arg(command)
+		.env("PI_SHELL_PROCESS_TEST_SLEEP_MS", duration_ms.to_string())
+		.output()
+		.await
+		.expect("peer launcher");
+	assert!(output.status.success(), "peer launcher failed: {output:?}");
+	let pid = String::from_utf8_lossy(&output.stdout)
+		.trim()
+		.parse()
+		.expect("peer pid");
+	PeerSession::open(pid)
+}
+
+/// Like [`spawn_peer_session`], but the copy runs under a shell that waits
+/// for it, and both are in a process group of their own: the shell is a
+/// process a peer runs under that is not ours, and the group belongs to no
+/// process in our own chain, so only the peer rule can refuse either.
+/// Returns the shell and the copy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn spawn_grouped_peer_session(
+	command: &std::path::Path,
+	duration: Duration,
+) -> (PeerSession, PeerSession) {
+	let duration_ms = u64::try_from(duration.as_millis()).expect("test duration fits u64");
+	let output = Command::new("/bin/sh")
+		.args(["-c", "/bin/sh -c \"$1\" \"$0\" & echo \"ancestor $!\""])
+		.arg(command)
+		.arg(
+			"\"$0\" --ignored --exact shell::tests::process_test_sleeper </dev/null >/dev/null 2>&1 \
+			 & echo \"peer $!\"; exec </dev/null >/dev/null 2>&1; wait",
+		)
+		.env("PI_SHELL_PROCESS_TEST_SLEEP_MS", duration_ms.to_string())
+		.process_group(0)
+		.output()
+		.await
+		.expect("peer launcher");
+	assert!(output.status.success(), "peer launcher failed: {output:?}");
+	let stdout = String::from_utf8_lossy(&output.stdout);
+	let pid = |label: &str| -> i32 {
+		stdout
+			.lines()
+			.find_map(|line| line.strip_prefix(label)?.strip_prefix(' ')?.parse().ok())
+			.unwrap_or_else(|| panic!("{label} pid in {stdout:?}"))
+	};
+	(PeerSession::open(pid("ancestor")), PeerSession::open(pid("peer")))
+}
+
+/// A detached peer is nobody's child here, so nothing reaps it on drop. The
+/// handle is pinned to the process it opened (a pidfd on Linux, the start
+/// time on macOS), so neither the probe nor the cleanup can reach a process
+/// that reuses the pid after the peer exits.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct PeerSession(proctree::Process);
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl PeerSession {
+	fn open(pid: i32) -> Self {
+		Self(proctree::Process::from_pid(pid).expect("peer process is running"))
+	}
+
+	const fn pid(&self) -> i32 {
+		self.0.pid()
+	}
+
+	fn is_alive(&self) -> bool {
+		self.0.status() == proctree::ProcessStatus::Running
+	}
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for PeerSession {
+	fn drop(&mut self) {
+		self.0.signal(libc::SIGKILL);
+	}
+}
+
+/// Several agent sessions on one machine run the same program, and a `pkill -f`
+/// pattern aimed at one session's stuck children often appears in every
+/// session's command line. `pkill` must skip the other sessions, say so, and
+/// still signal everything this shell started, including a child executing the
+/// same file as the shell's own process.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn pkill_full_pattern_skips_peer_sessions_but_signals_own_children() {
+	let (_dir, command, name) = process_test_command("opeer");
+	let peer = spawn_peer_session(&command, Duration::from_secs(30)).await;
+	let mut own_copy = process_test_child(&command, Duration::from_secs(30))
+		.spawn()
+		.expect("own copy of the program");
+	let own_copy_pid = i32::try_from(own_copy.id().expect("own copy pid")).expect("pid fits i32");
+	let mut own_plain = Command::new("/bin/sh")
+		.args(["-c", "while :; do sleep 1; done"])
+		.arg(&name)
+		.spawn()
+		.expect("own plain child");
+	wait_for_process_name(peer.pid(), &name).await;
+	wait_for_process_name(own_copy_pid, &name).await;
+
+	let (result, output) =
+		execute_captured(format!("pkill -TERM -f {name}; printf 'pkill=%s\n' \"$?\"")).await;
+
+	let own_copy_status = time::timeout(Duration::from_secs(10), own_copy.wait()).await;
+	let own_plain_status = time::timeout(Duration::from_secs(10), own_plain.wait()).await;
+	let peer_alive = peer.is_alive();
+	let _ = own_copy.start_kill();
+	let _ = own_plain.start_kill();
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	assert!(output.contains("pkill=0"), "own children matched, so pkill succeeds: {output:?}");
+	assert!(
+		output.contains(&format!(
+			"pkill: refusing to signal pid {} (another session of this program",
+			peer.pid()
+		)),
+		"the skipped peer must be reported: {output:?}"
+	);
+	assert!(peer_alive, "pkill -f must not stop another session: {output:?}");
+	assert!(
+		own_copy_status.is_ok_and(|status| status.is_ok_and(|status| !status.success())),
+		"a child executing this same program is still ours to stop: {output:?}"
+	);
+	assert!(
+		own_plain_status.is_ok_and(|status| status.is_ok_and(|status| !status.success())),
+		"an ordinary child must still be signalled: {output:?}"
+	);
+}
+
+/// `kill <pid>` of another session fails with a reason, while `kill` of a
+/// child executing the same program still works. `CONT` keeps the peer
+/// harmless if the guard ever regresses, as in the ancestor test above.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_builtin_refuses_peer_sessions_but_not_own_copies() {
+	let (_dir, command, name) = process_test_command("okpeer");
+	let peer = spawn_peer_session(&command, Duration::from_secs(30)).await;
+	let mut own_copy = process_test_child(&command, Duration::from_secs(30))
+		.spawn()
+		.expect("own copy of the program");
+	let own_copy_pid = i32::try_from(own_copy.id().expect("own copy pid")).expect("pid fits i32");
+	wait_for_process_name(peer.pid(), &name).await;
+	wait_for_process_name(own_copy_pid, &name).await;
+
+	let (result, output) = execute_captured(format!(
+		"kill -CONT {peer}; printf 'peer=%s\n' \"$?\"; kill -TERM {own_copy_pid}; printf 'own=%s\n' \
+		 \"$?\"",
+		peer = peer.pid()
+	))
+	.await;
+
+	let own_copy_status = time::timeout(Duration::from_secs(10), own_copy.wait()).await;
+	let _ = own_copy.start_kill();
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	assert!(
+		output.contains("refusing to signal another session of this program"),
+		"the peer kill must say why it failed: {output:?}"
+	);
+	assert!(output.contains("peer=1"), "the peer kill must fail: {output:?}");
+	assert!(peer.is_alive(), "{output:?}");
+	assert!(output.contains("own=0"), "an own copy must remain signallable: {output:?}");
+	assert!(
+		own_copy_status.is_ok_and(|status| status.is_ok_and(|status| !status.success())),
+		"{output:?}"
+	);
+}
+
+/// `kill` of a peer's process group, or of a process a peer runs under, fails
+/// the way `kill` of the peer does, and neither is signalled; an own copy
+/// named in the same command is still signalled. The peer leads a group of
+/// its own, so the guard of our own group cannot be what refuses it. `TERM`
+/// shows a regression as a dead peer, and reaches only this test's processes.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn kill_builtin_refuses_peer_groups_and_ancestors() {
+	let (_dir, command, name) = process_test_command("okgroup");
+	let (ancestor, peer) = spawn_grouped_peer_session(&command, Duration::from_secs(30)).await;
+	let mut own_copy = process_test_child(&command, Duration::from_secs(30))
+		.spawn()
+		.expect("own copy of the program");
+	let own_copy_pid = i32::try_from(own_copy.id().expect("own copy pid")).expect("pid fits i32");
+	wait_for_process_name(peer.pid(), &name).await;
+	wait_for_process_name(own_copy_pid, &name).await;
+	let group = peer.0.group_id().expect("peer process group");
+	// SAFETY: getpgrp has no preconditions.
+	assert_ne!(group, unsafe { libc::getpgrp() }, "the peer must not share our process group");
+
+	let (result, output) = execute_captured(format!(
+		"kill -TERM -- -{group} {ancestor} {own_copy_pid}; printf 'kill=%s\n' \"$?\"",
+		ancestor = ancestor.pid()
+	))
+	.await;
+
+	let own_copy_status = time::timeout(Duration::from_secs(10), own_copy.wait()).await;
+	let _ = own_copy.start_kill();
+	assert_eq!(result.exit_code, Some(0), "{output:?}");
+	assert!(
+		output.contains(&format!("(-{group}) - refusing to signal another session of this program")),
+		"the peer's group must be refused by the peer rule: {output:?}"
+	);
+	assert!(
+		output.contains(&format!(
+			"({}) - refusing to signal another session of this program",
+			ancestor.pid()
+		)),
+		"a process a peer runs under must be refused: {output:?}"
+	);
+	assert!(
+		!output.contains("refusing to signal the shell process"),
+		"neither target is in our own chain: {output:?}"
+	);
+	assert!(output.contains("kill=1"), "{output:?}");
+	assert!(
+		own_copy_status.is_ok_and(|status| status.is_ok_and(|status| !status.success())),
+		"an own copy in the same command must still be signalled: {output:?}"
+	);
+	assert!(peer.is_alive(), "the peer's group must not be signalled: {output:?}");
+	assert!(ancestor.is_alive(), "the peer's ancestor must not be signalled: {output:?}");
+}
