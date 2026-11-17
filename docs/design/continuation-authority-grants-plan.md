@@ -14,7 +14,7 @@
 - Only `RootOrigin::User` extensions can receive control grants.
 - No control grants when the session's exec sandbox mode is Off.
 - Protected locations: canonical `<data>/ext` (with `grants.toml`) and the canonical user extension root `<config>/agent/extensions`. Each must not be a symlink, must be owned by the effective user, and must not lie inside the workspace or any exec-writable root; the exec sandbox denies writes to both (lexically if missing).
-- Capability names: non-empty, `[a-z0-9._-]` only.
+- Capability names: non-empty, `[a-z0-9._:-]` only, and not starting with `tools.hard:`.
 - Path-grant digest: BLAKE3 over `omp.path-grant.v1`, each sorted unique declared capability as u64-LE length + bytes, then the 32-byte manifest digest; `b3:<hex>`. Signed-install `capability_digest` unchanged.
 - Grant values: `scope Exact`, `duration Persistent`, `tier Sandboxed`, `ship "path"`, `granted_by "explicit-grant"`, `layer Client`, `workspace None`.
 - Any check failure or unreadable store: empty control grants plus `tracing::warn!`; never stop admission.
@@ -62,7 +62,8 @@
 
 **Produces:** one shared `fn exec_writable_roots(...) -> Vec<PathBuf>` (workspace, configured writable roots, `TMPDIR`, `/tmp`) and one shared `fn check_protected_location(path, writable_roots) -> Result<(), ProtectedLocationError>` (symlink, owner via `MetadataExt::uid` vs `libc::geteuid`, containment), both `pub` in omp-driver for Task 4.
 
-- [ ] Failing tests: `user_layer_declared_without_grant_gets_none`, `user_layer_matching_grant_yields_control_grant`, `changed_manifest_voids_grant`, `grant_for_other_root_does_not_cover`, `workspace_layer_never_gets_control_grant`, `explicit_root_never_gets_control_grant`, `sandbox_off_yields_no_control_grants`, `symlinked_store_fails_closed`, `store_inside_workspace_fails_closed`, `extension_root_inside_writable_root_fails_closed`, `symlinked_extension_root_fails_closed`, `foreign_owned_store_fails_closed` (skip with a logged reason if another owner cannot be created), `unreadable_store_fails_closed`.
+- [ ] Failing tests: `user_layer_declared_without_grant_gets_none`, `user_layer_matching_grant_yields_control_grant`, `changed_manifest_voids_grant`, `grant_for_other_root_does_not_cover`, `workspace_layer_never_gets_control_grant`, `explicit_root_never_gets_control_grant`, `sandbox_off_yields_no_control_grants`, `no_sandbox_backend_yields_no_control_grants`, `writable_root_inside_protected_location_fails_closed`, `symlinked_store_fails_closed`, `store_inside_workspace_fails_closed`, `extension_root_inside_writable_root_fails_closed`, `symlinked_extension_root_fails_closed`, `foreign_owned_store_fails_closed` (skip with a logged reason if another owner cannot be created), `unreadable_store_fails_closed`.
+- [ ] Switch `native.rs:577` to call `native_path_publisher` (Task 1) so admission and issuance share it.
 - [ ] Red (`omp-driver`), implement, green, clippy, fmt. Commit `feat(driver): admit control capabilities only with an operator grant`.
 
 ### Task 4: omp-app `omp ext grant` (after Task 3's shared fns)

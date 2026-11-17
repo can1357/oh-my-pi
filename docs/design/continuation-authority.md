@@ -123,3 +123,11 @@ Replacing the extension's code at the same user-layer path while keeping the man
 - **Exec-writable roots.** One shared function computes what the session's exec sandbox can write: the workspace, the configured writable roots, `TMPDIR` and `/tmp`. Admission and `omp ext grant` both call it.
 - **Passing paths to envd.** The driver passes the canonical `<data>/ext` and user extension root into envd's exec sandbox configuration. A path that does not exist yet is denied lexically (`deny_write_lexical`, `exec_sandbox.rs:1521-1523`). A remote envd runs commands on another machine and cannot write these local files.
 
+
+### Amendments 2 (after the Task 1 and Task 2 security reviews, 2026-11-17)
+
+- **Hashes.** `Hash32::sum` is SHA-256 (`crates/core/src/hash32.rs`). The native publisher (`unsigned:path:<hex>`, `native.rs:577`) and the manifest digest (`native.rs:576`) are SHA-256, and `native_path_publisher` keeps that exact value. Only `path_grant_digest` uses BLAKE3, so its `b3:` prefix is accurate. Earlier text saying "blake3(root)" or "BLAKE3 of the manifest text" is wrong.
+- **Name rule (owner decision).** Capability names are non-empty and use only `[a-z0-9._:-]`, and must not start with `tools.hard:`. The colon is allowed because `schedules:project` is an existing capability (bundled extensions, the Python SDK, the conformance script).
+- **Admission also withholds control grants when** (ruling, extending the owner's fail-closed decisions): a protected location *contains* an exec-writable root (the sandbox cannot deny it without denying the workspace), or no kernel-enforced exec sandbox is running (mode Off, or no sandbox backend on the host).
+- **Daemon policy digest.** The new protected-paths sandbox setting is skipped when empty, so daemon policy digests are unchanged for sessions without protected paths.
+
