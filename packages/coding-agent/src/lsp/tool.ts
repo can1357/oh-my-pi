@@ -17,7 +17,14 @@ import { replaceTabs } from "../utils/text-width";
 import { shortenPath } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { ToolError } from "../tools/tool-errors";
-import { clampTimeout, lspTimeoutSource, resolveLspTimeouts, TOOL_TIMEOUTS } from "../tools/tool-timeouts";
+import {
+	clampTimeout,
+	lspFloorSeconds,
+	lspTimeoutMessage,
+	lspTimeoutSource,
+	resolveLspTimeouts,
+	TOOL_TIMEOUTS,
+} from "../tools/tool-timeouts";
 import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
@@ -330,13 +337,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	get description(): string {
 		const settings = this.session.settings;
 		const maxTimeout = cfgToolsMaxTimeout.get(settings);
-		const minTimeout = cfgLspMinTimeout.get(settings);
-		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(settings), maxTimeout, minTimeout);
+		// Render the effective floor, and never advertise a cap below it: the floor
+		// beats a lower tools.maxTimeout, so the model would be told less than it gets.
+		const floor = lspFloorSeconds(cfgLspMinTimeout.get(settings));
+		const defaults = resolveLspTimeouts(undefined, cfgLspRequestTimeout.get(settings), maxTimeout, floor);
 		return prompt.render(lspDescription, {
 			defaultTimeoutSec: defaults.call,
 			defaultWaitSec: defaults.wait,
-			maxTimeoutSec: clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout),
-			minTimeoutSec: minTimeout > 0 ? minTimeout : undefined,
+			maxTimeoutSec: Math.max(floor, clampTimeout("lsp", TOOL_TIMEOUTS.lsp.max, maxTimeout)),
+			minTimeoutSec: floor > 0 ? floor : undefined,
 		});
 	}
 
@@ -377,10 +386,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		const rethrowAbort = (err: unknown, serverName?: string): void => {
 			if (!(err instanceof ToolAbortError) && !signal?.aborted) return;
 			if (timeoutSignal.aborted && !callerSignal?.aborted) {
-				const server = serverName ? ` on ${serverName}` : "";
-				throw new ToolError(
-					`LSP ${action} timed out after ${timeoutSec}s${server}${sourceNote}. The server may still be indexing; try again or pass timeout=<larger>.`,
-				);
+				throw new ToolError(lspTimeoutMessage(action, timeoutSec, serverName, sourceNote));
 			}
 			throw new ToolAbortError();
 		};

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { deferredDiagnosticsWaitMs } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import {
 	clampTimeout,
+	lspTimeoutMessage,
 	lspTimeoutSource,
 	resolveLspTimeouts,
 	TOOL_TIMEOUTS,
@@ -102,6 +103,12 @@ describe("resolveLspTimeouts with an lsp.minTimeout floor", () => {
 		expect(resolveLspTimeouts(5, 30, 20, 30).call).toBe(30);
 	});
 
+	it("does not claim a raise when the global cap lowered a request at or above the floor", () => {
+		// Agent asked 60s, tools.maxTimeout caps to 20s, floor is 30s: budget is
+		// 30s (floor beats the cap) but the floor did not raise the request.
+		expect(resolveLspTimeouts(60, 30, 20, 30)).toEqual({ call: 30, wait: 30 });
+	});
+
 	it("stays inside the tool range when the floor exceeds the lsp maximum", () => {
 		expect(resolveLspTimeouts(5, 30, undefined, 999).call).toBe(TOOL_TIMEOUTS.lsp.max);
 	});
@@ -113,12 +120,28 @@ describe("lspTimeoutSource", () => {
 	});
 
 	it("names the configured default behind an agent override", () => {
-		expect(lspTimeoutSource(5, 30, { call: 5, wait: 5 })).toBe("(agent override; configured default: 30s)");
+		expect(lspTimeoutSource(5, 30, { call: 5, wait: 5 })).toBe(" (agent override; configured default: 30s)");
 	});
 
 	it("reports requested and effective values when the floor raised an override", () => {
 		expect(lspTimeoutSource(5, 30, { call: 30, wait: 30, floorRaisedFrom: 5 })).toBe(
-			"(agent requested 5s; raised to the lsp.minTimeout floor of 30s)",
+			" (agent requested 5s; raised to the lsp.minTimeout floor of 30s)",
+		);
+	});
+});
+
+describe("lspTimeoutMessage", () => {
+	it("composes the full ToolError message with server and source note", () => {
+		expect(lspTimeoutMessage("references", 5, "sourcekit-lsp", lspTimeoutSource(5, 30, { call: 5, wait: 5 }))).toBe(
+			"LSP references timed out after 5s on sourcekit-lsp (agent override; configured default: 30s). The server may still be indexing; try again or pass timeout=<larger>.",
+		);
+	});
+
+	it("composes without a server and with a floor-raise note", () => {
+		expect(
+			lspTimeoutMessage("hover", 30, undefined, lspTimeoutSource(5, 30, { call: 30, wait: 30, floorRaisedFrom: 5 })),
+		).toBe(
+			"LSP hover timed out after 30s (agent requested 5s; raised to the lsp.minTimeout floor of 30s). The server may still be indexing; try again or pass timeout=<larger>.",
 		);
 	});
 });
