@@ -1,8 +1,9 @@
 import type { DesktopRosterWindow } from "@oh-my-pi/pi-natives";
 import { desktopWindowRoster } from "@oh-my-pi/pi-natives/desktop";
-import { isRecord, withTimeout } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Browser, Page } from "puppeteer-core";
 import { probeCdpResponse } from "./attach";
+import nativeWindowNotice from "../../prompts/tools/browser-native-window.md" with { type: "text" };
 
 /** Longest a call waits to read where the tab's window is on screen. */
 const FRAME_TIMEOUT_MS = 300;
@@ -252,11 +253,11 @@ export class NativeWindowWatch {
 		const onScreen = new Set(after.map(window => window.id));
 		for (const window of late) {
 			if (onScreen.has(window.id) && !(pageDialog && window.layer === 0)) {
-				lines.push(this.#line(window, "after the previous browser call returned"));
+				lines.push(notice(window, true));
 			}
 		}
 		for (const window of await this.#raised(after)) {
-			if (!(pageDialog && window.layer === 0)) lines.push(this.#line(window, "during this call"));
+			if (!(pageDialog && window.layer === 0)) lines.push(notice(window, false));
 		}
 		this.#remember(after);
 		this.#tailTimer = setTimeout(() => {
@@ -347,16 +348,6 @@ export class NativeWindowWatch {
 			window => window.layer !== 0 || (pages !== undefined && !pages.some(frame => sameFrame(window, frame))),
 		);
 	}
-
-	#line(window: DesktopRosterWindow, when: string): string {
-		const what =
-			window.layer >= MENU_LAYER
-				? "a popup list or picker (a <select>'s menu, or a colour or date picker; set the value with tab.select or tab.fill instead)"
-				: window.layer >= FLOATING_LAYER
-					? "a floating panel"
-					: "a dialog over the tab (print, save, sign-in, passkey or permission)";
-		return `The browser opened ${what} ${when}. ${handle(window)}`;
-	}
 }
 
 function sameFrame(window: Frame, frame: Frame): boolean {
@@ -397,10 +388,16 @@ function within(window: Frame, tab: Frame): boolean {
 	);
 }
 
-/** How the agent reaches the window: the page cannot, the computer tool can. */
-function handle(window: DesktopRosterWindow): string {
-	const size = `${Math.round(window.width)}x${Math.round(window.height)}`;
-	return window.listed
-		? `It is on the user's screen, outside the page: computer.window(${window.id}) (${size}) reads, answers or closes it.`
-		: `It is on the user's screen, outside the page; computer.screenshot() shows it (window ${window.id}, ${size}).`;
+/** What the browser raised, when, and how the agent reaches it: the page cannot, the computer tool can. */
+function notice(window: DesktopRosterWindow, previous: boolean): string {
+	return prompt
+		.render(nativeWindowNotice, {
+			menu: window.layer >= MENU_LAYER,
+			floating: window.layer >= FLOATING_LAYER,
+			previous,
+			listed: window.listed,
+			id: window.id,
+			size: `${Math.round(window.width)}x${Math.round(window.height)}`,
+		})
+		.trim();
 }
