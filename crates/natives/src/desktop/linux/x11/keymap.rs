@@ -27,6 +27,7 @@ pub(super) struct KeyStep {
 /// Name Xorg gives the core keyboard's `XTest` slave (`Xi/xtest.c`).
 const XTEST_KEYBOARD: &[u8] = b"Virtual core XTEST keyboard";
 
+#[derive(Clone)]
 pub(super) struct Keymap {
 	pub(super) min_keycode:         u8,
 	pub(super) keysyms_per_keycode: u8,
@@ -135,7 +136,7 @@ impl Keymap {
 		})
 	}
 
-	const fn new(
+	pub(super) const fn new(
 		min_keycode: u8,
 		keysyms_per_keycode: u8,
 		keysyms: Vec<u32>,

@@ -517,41 +517,109 @@ fn contiguous_bindings_are_batched_and_reused_without_mapping_notifications() {
 
 #[test]
 #[ignore = "starts Xvfb"]
-fn a_rejected_rebind_still_restores_the_row_it_held() {
+fn another_sessions_row_is_neither_typed_through_nor_chorded() {
 	let (_server, display) = server();
-	let (conn, _) = x11rb::connect(Some(&display)).unwrap();
-	let conn = Arc::new(conn);
-	let min = conn.setup().min_keycode;
-	let count = conn.setup().max_keycode - min + 1;
-	let current = conn
-		.get_keyboard_mapping(min, count)
+	let session = || Arc::new(x11rb::connect(Some(&display)).unwrap().0);
+	let (a, b) = (session(), session());
+	let check = keymap::keysym_for_key(KeyName::Char('✓'));
+	let mut a_map = Keymap::core(&a).unwrap();
+	let mut a_mapping = TextMapping::new(Arc::clone(&a));
+	a_mapping.bind(&mut a_map, "✓").unwrap();
+	let mut chord = Keymap::core(&b).unwrap();
+	let mut b_mapping = TextMapping::new(Arc::clone(&b));
+	b_mapping.hide(&mut chord).unwrap();
+	assert!(chord.lookup(check).is_none(), "B could chord ✓ through A's row");
+	let mut b_map = Keymap::core(&b).unwrap();
+	b_mapping.bind(&mut b_map, "✓").unwrap();
+	let (b_code, _) = b_map.lookup(check).unwrap();
+	a_mapping.finish().unwrap();
+	assert_eq!(
+		Keymap::core(&b)
+			.unwrap()
+			.lookup(check)
+			.map(|(code, _)| code),
+		Some(b_code),
+		"B's ✓ lost its row when A closed"
+	);
+	b_mapping.finish().unwrap();
+}
+
+#[test]
+#[ignore = "starts Xvfb and runs setxkbmap"]
+fn a_row_another_session_took_after_a_reload_is_left_to_it() {
+	let (_server, display) = server();
+	let session = || Arc::new(x11rb::connect(Some(&display)).unwrap().0);
+	let (a, b) = (session(), session());
+	let check = keymap::keysym_for_key(KeyName::Char('✓'));
+	let mut a_mapping = TextMapping::new(Arc::clone(&a));
+	a_mapping.bind(&mut Keymap::core(&a).unwrap(), "✓").unwrap();
+	let reload = Command::new("setxkbmap")
+		.args(["-display", &display, "us"])
+		.status()
+		.unwrap();
+	assert!(reload.success());
+	let mut b_mapping = TextMapping::new(Arc::clone(&b));
+	let mut b_map = Keymap::core(&b).unwrap();
+	b_mapping.bind(&mut b_map, "✓").unwrap();
+	let b_code = b_map.lookup(check).map(|(code, _)| code);
+	a_mapping.bind(&mut Keymap::core(&a).unwrap(), "✓").unwrap();
+	a_mapping.finish().unwrap();
+	assert_eq!(
+		Keymap::core(&b)
+			.unwrap()
+			.lookup(check)
+			.map(|(code, _)| code),
+		b_code,
+		"A's restore cleared B's ✓"
+	);
+	b_mapping.finish().unwrap();
+}
+
+#[test]
+#[ignore = "starts Xvfb"]
+fn a_core_bind_leaves_a_row_only_the_xtest_keyboard_still_shows() {
+	use x11rb::protocol::xinput::{ConnectionExt as _, Device, DeviceType};
+	let (_server, display) = server();
+	let session = || Arc::new(x11rb::connect(Some(&display)).unwrap().0);
+	let (a, b) = (session(), session());
+	let check = keymap::keysym_for_key(KeyName::Char('✓'));
+	let mut a_map = Keymap::xtest(&a).unwrap();
+	let mut a_mapping = TextMapping::new(Arc::clone(&a));
+	a_mapping.bind(&mut a_map, "✓").unwrap();
+	let (code, _) = a_map.lookup(check).unwrap();
+	// The core map is its master's, which a device switch can leave without
+	// A's row while the `XTest` keyboard keeps it.
+	let master = b
+		.xinput_xi_query_device(Device::ALL_MASTER)
 		.unwrap()
 		.reply()
-		.unwrap();
-	// One spare row, so the second text has to take the first one's row.
-	let mut keysyms = current.keysyms;
-	let mut spare = false;
-	for row in keysyms.chunks_exact_mut(usize::from(current.keysyms_per_keycode)) {
-		if row.iter().all(|&symbol| symbol == 0) {
-			if spare {
-				row.fill(u32::from(b'#'));
-			}
-			spare = true;
-		}
-	}
-	conn
-		.change_keyboard_mapping(count, min, current.keysyms_per_keycode, &keysyms)
 		.unwrap()
-		.check()
-		.unwrap();
-	let before = core_symbols(&conn);
-	let mut map = Keymap::core(&conn).unwrap();
-	let mut mapping = TextMapping::new(Arc::clone(&conn));
-	mapping.bind(&mut map, "é").unwrap();
-	mapping.reject_writes = true;
-	assert!(mapping.bind(&mut map, "ö").is_err());
-	mapping.finish().unwrap();
-	assert_eq!(core_symbols(&conn), before, "the row still holding é was not restored");
+		.infos
+		.into_iter()
+		.find(|info| info.type_ == DeviceType::MASTER_KEYBOARD)
+		.unwrap()
+		.deviceid;
+	let width = Keymap::device(&b, master).unwrap().keysyms_per_keycode;
+	b.xinput_change_device_key_mapping(
+		u8::try_from(master).unwrap(),
+		code,
+		width,
+		1,
+		&vec![0; usize::from(width)],
+	)
+	.unwrap()
+	.check()
+	.unwrap();
+	assert!(Keymap::core(&b).unwrap().lookup(check).is_none(), "the core map kept A's row");
+	let mut b_mapping = TextMapping::new(Arc::clone(&b));
+	b_mapping.bind(&mut Keymap::core(&b).unwrap(), "é").unwrap();
+	assert_eq!(
+		Keymap::xtest(&a).unwrap().lookup(check).map(|(row, _)| row),
+		Some(code),
+		"B's core write took A's XTest row"
+	);
+	b_mapping.finish().unwrap();
+	a_mapping.finish().unwrap();
 }
 
 #[test]

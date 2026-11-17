@@ -192,6 +192,11 @@ impl X11Input {
 		if matches!(target, Target::Desktop | Target::Display(_)) || mode != DeliveryMode::Background
 		{
 			self.keymap = Keymap::xtest(&self.conn)?;
+			// Held keys use the layout's rows, as chords do.
+			if matches!(&event, PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. } if !keys.is_empty())
+			{
+				self.text_mapping.hide(&mut self.keymap)?;
+			}
 		}
 		match (target, mode) {
 			(Target::Desktop | Target::Display(_), _) => self.pointer_xtest(&event),
@@ -681,6 +686,7 @@ impl X11Input {
 		// left the `XTest` keyboard's.
 		if !keys.is_empty() {
 			self.keymap = Keymap::core(&self.conn)?;
+			self.text_mapping.hide(&mut self.keymap)?;
 		}
 		let codes = self.keymap.held_keycodes(keys)?;
 		let mut state = 0u16;
@@ -879,7 +885,7 @@ impl X11Input {
 			self.text_mapping.bind(&mut self.keymap, text)?;
 			self.keymap.plan_text(text)?
 		} else {
-			self.text_mapping.hide(&mut self.keymap);
+			self.text_mapping.hide(&mut self.keymap)?;
 			keys.plan(&self.keymap)?
 		};
 		let before = self.text_mapping.presses();

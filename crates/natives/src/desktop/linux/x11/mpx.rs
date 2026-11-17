@@ -947,7 +947,7 @@ impl Mpx {
 		let slave = self.ensure_keyboard()?.slave;
 		// The desktop can reconfigure a hot-plugged device between actions.
 		let mut map = Keymap::mpx(&self.conn, slave, self.master_keyboard)?;
-		self.text_mapping.hide(&mut map);
+		self.text_mapping.hide(&mut map)?;
 		Ok(map)
 	}
 

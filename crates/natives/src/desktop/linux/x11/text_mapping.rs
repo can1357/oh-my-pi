@@ -1,5 +1,7 @@
 //! Session-owned scratch keycodes. Clients may translate queued keys long after
 //! the sending request completes, so an idle binding stays live until eviction.
+//! Each mapping marks its rows on the root window, so other sessions on the
+//! display neither type through them nor take them while their owner lives.
 use std::{
 	cell::Cell,
 	collections::HashSet,
@@ -8,8 +10,14 @@ use std::{
 };
 
 use x11rb::{
-	protocol::{xinput::ConnectionExt as _, xproto::ConnectionExt as _},
+	connection::Connection as _,
+	errors::ReplyError,
+	protocol::{
+		xinput::ConnectionExt as _,
+		xproto::{AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass},
+	},
 	rust_connection::RustConnection,
+	wrapper::ConnectionExt as _,
 };
 
 use super::keymap::{Keymap, keysym_for_key};
@@ -20,6 +28,22 @@ use crate::desktop::{
 };
 
 const REBIND_GRACE: Duration = Duration::from_millis(500);
+/// Root window property listing the core keymap rows every mapping bound as
+/// CARDINAL triples (owner window, keycode, keysym); the owner window lives
+/// as long as the owner's X connection. MPX device maps are their pair's own
+/// and are not marked.
+const MARKS: &[u8] = b"_OMP_TEXT_KEYCODES";
+/// Marks read at most; any after these are ignored.
+const MAX_MARKS: u32 = 1024;
+
+/// A row another text mapping bound; stale once its owner window is gone.
+#[derive(Clone, Copy)]
+struct Mark {
+	owner:  u32,
+	code:   u8,
+	symbol: u32,
+	live:   bool,
+}
 
 struct Binding {
 	code:      u8,
@@ -54,13 +78,14 @@ struct MapTarget {
 }
 
 pub(super) struct TextMapping {
-	conn:                     Arc<RustConnection>,
-	bound:                    Vec<Binding>,
-	targets:                  Vec<MapTarget>,
-	presses:                  Cell<u64>,
-	/// While set, `bind` fails its keymap writes as a server rejecting them.
-	#[cfg(test)]
-	pub(super) reject_writes: bool,
+	conn:    Arc<RustConnection>,
+	bound:   Vec<Binding>,
+	targets: Vec<MapTarget>,
+	presses: Cell<u64>,
+	/// The `MARKS` atom, 0 until interned.
+	atom:    Cell<u32>,
+	/// The window naming this mapping in its marks, created on first bind.
+	window:  Option<u32>,
 }
 
 impl TextMapping {
@@ -70,8 +95,8 @@ impl TextMapping {
 			bound: Vec::new(),
 			targets: Vec::new(),
 			presses: Cell::new(0),
-			#[cfg(test)]
-			reject_writes: false,
+			atom: Cell::new(0),
+			window: None,
 		}
 	}
 
@@ -86,21 +111,181 @@ impl TextMapping {
 		}
 	}
 
-	/// Chords and holds use only the user's layout, not our cached text rows.
-	pub(super) fn hide(&self, map: &mut Keymap) {
-		for binding in &self.bound {
-			if binding.owns(map) {
-				let width = usize::from(map.keysyms_per_keycode);
-				let start = usize::from(binding.code - map.min_keycode) * width;
-				map.keysyms[start..start + width].fill(0);
-			}
+	/// Chords and holds use only the user's layout, not our cached text rows
+	/// or another session's. Rereads `map` with the marks under one grab, so
+	/// a row bound or released between the two reads is not misread.
+	pub(super) fn hide(&self, map: &mut Keymap) -> CoreResult<()> {
+		if !map.core_mapping {
+			self.hide_rows(map, &[], true);
+			return Ok(());
+		}
+		let _grab = ServerGrab::new(&self.conn)?;
+		*map = map.refresh(&self.conn)?;
+		let marks = self.marks(false)?;
+		self.hide_rows(map, &marks, true);
+		Ok(())
+	}
+
+	/// Clears the rows that `marks` match in `map`, and with `own` this
+	/// mapping's rows; otherwise a row we own is kept unless a live owner
+	/// marked it too.
+	fn hide_rows(&self, map: &mut Keymap, marks: &[Mark], own: bool) {
+		let ours = |map: &Keymap, code| {
+			self
+				.bound
+				.iter()
+				.any(|binding| binding.code == code && binding.owns(map))
+		};
+		let mut codes: Vec<u8> = marks
+			.iter()
+			.filter(|mark| {
+				row_matches(map, mark.code, mark.symbol) && (own || mark.live || !ours(map, mark.code))
+			})
+			.map(|mark| mark.code)
+			.collect();
+		if own {
+			codes.extend(
+				self
+					.bound
+					.iter()
+					.filter(|binding| binding.owns(map))
+					.map(|binding| binding.code),
+			);
+		}
+		let width = usize::from(map.keysyms_per_keycode);
+		for code in codes {
+			let start = usize::from(code - map.min_keycode) * width;
+			map.keysyms[start..start + width].fill(0);
 		}
 	}
 
+	fn atom(&self) -> CoreResult<u32> {
+		if self.atom.get() == 0 {
+			let reply = self
+				.conn
+				.intern_atom(false, MARKS)
+				.map_err(failed)?
+				.reply()
+				.map_err(failed)?;
+			self.atom.set(reply.atom);
+		}
+		Ok(self.atom.get())
+	}
+
+	/// Other mappings' marks; with `check_live`, each owner window is asked
+	/// whether it still exists, otherwise all count as live.
+	fn marks(&self, check_live: bool) -> CoreResult<Vec<Mark>> {
+		let reply = self
+			.conn
+			.get_property(false, root(&self.conn), self.atom()?, AtomEnum::CARDINAL, 0, MAX_MARKS * 3)
+			.map_err(failed)?
+			.reply()
+			.map_err(failed)?;
+		let values: Vec<u32> = reply.value32().into_iter().flatten().collect();
+		let mut marks: Vec<Mark> = values
+			.as_chunks::<3>()
+			.0
+			.iter()
+			.filter(|&&[owner, ..]| Some(owner) != self.window)
+			.filter_map(|&[owner, code, symbol]| {
+				Some(Mark { owner, code: u8::try_from(code).ok()?, symbol, live: true })
+			})
+			.collect();
+		if check_live {
+			let mut owners: Vec<u32> = marks.iter().map(|mark| mark.owner).collect();
+			owners.sort_unstable();
+			owners.dedup();
+			let cookies = owners
+				.iter()
+				.map(|&owner| self.conn.get_geometry(owner))
+				.collect::<Result<Vec<_>, _>>()
+				.map_err(failed)?;
+			let mut dead = Vec::new();
+			for (owner, cookie) in owners.into_iter().zip(cookies) {
+				match cookie.reply() {
+					Ok(_) => {},
+					Err(ReplyError::X11Error(_)) => dead.push(owner),
+					Err(error) => return Err(failed(error)),
+				}
+			}
+			for mark in &mut marks {
+				mark.live = !dead.contains(&mark.owner);
+			}
+		}
+		Ok(marks)
+	}
+
+	/// The unmapped window naming this mapping in its marks; the server
+	/// destroys it with our connection, which makes the marks stale.
+	fn window(&mut self) -> CoreResult<u32> {
+		if let Some(window) = self.window {
+			return Ok(window);
+		}
+		let window = self.conn.generate_id().map_err(failed)?;
+		self
+			.conn
+			.create_window(
+				0,
+				window,
+				root(&self.conn),
+				0,
+				0,
+				1,
+				1,
+				0,
+				WindowClass::INPUT_ONLY,
+				0,
+				&CreateWindowAux::new(),
+			)
+			.map_err(failed)?
+			.check()
+			.map_err(failed)?;
+		Ok(*self.window.insert(window))
+	}
+
+	/// Replaces the marks with the live ones of other mappings and this
+	/// mapping's rows under every keysym they may hold; ours come first, so a
+	/// reader's `MAX_MARKS` cut drops another owner's before ours. Another
+	/// owner's mark on a row in `taken` is dropped: that row was empty, ours
+	/// or stale when we took it.
+	fn publish(&self, window: u32, others: &[Mark], taken: &[(u8, u32)]) -> CoreResult<()> {
+		let mut values = Vec::new();
+		for binding in &self.bound {
+			let held = (binding.symbol != 0).then_some(binding.symbol);
+			for symbol in held.into_iter().chain(binding.attempted.iter().copied()) {
+				values.extend([window, u32::from(binding.code), symbol]);
+			}
+		}
+		for mark in others
+			.iter()
+			.filter(|mark| mark.live && !taken.iter().any(|&(code, _)| code == mark.code))
+		{
+			values.extend([mark.owner, u32::from(mark.code), mark.symbol]);
+		}
+		self
+			.conn
+			.change_property32(
+				PropMode::REPLACE,
+				root(&self.conn),
+				self.atom()?,
+				AtomEnum::CARDINAL,
+				&values,
+			)
+			.map_err(failed)?
+			.check()
+			.map_err(failed)
+	}
+
+	/// The map `template` names, fresh, and the other map a write reaches: a
+	/// core write also rewrites the `XTest` keyboard, whose map can differ
+	/// from the core one after a device switch; an MPX keyboard's goes to its
+	/// master.
 	fn snapshots(&self, template: &Keymap) -> CoreResult<(Keymap, Option<Keymap>)> {
 		let source = template.refresh(&self.conn)?;
 		let other = if source.core_mapping && source.device.is_some() {
 			Some(Keymap::core(&self.conn)?)
+		} else if source.core_mapping {
+			Some(Keymap::xtest(&self.conn)?)
 		} else if let Some(master) = source.master {
 			Some(Keymap::device(&self.conn, master.into())?)
 		} else {
@@ -109,7 +294,8 @@ impl TextMapping {
 		Ok((source, other))
 	}
 
-	fn available(&self, map: &Keymap, other: Option<&Keymap>) -> Vec<u8> {
+	/// Rows this text may write: empty, ours, or holding a dead owner's mark.
+	fn available(&self, map: &Keymap, other: Option<&Keymap>, marks: &[Mark]) -> Vec<u8> {
 		let width = usize::from(map.keysyms_per_keycode);
 		if width == 0 {
 			return Vec::new();
@@ -126,6 +312,9 @@ impl TextMapping {
 							.bound
 							.iter()
 							.any(|binding| binding.code == code && binding.owns(map))
+						|| marks.iter().any(|mark| {
+							!mark.live && mark.code == code && row_matches(map, code, mark.symbol)
+						})
 				};
 				(usable(map)
 					&& map.modifier_mask(code) == 0
@@ -135,24 +324,15 @@ impl TextMapping {
 			.collect()
 	}
 
-	/// Keysyms the layout types on its own rows' first two levels; our rows
-	/// do not count.
-	fn natives(&self, map: &Keymap) -> HashSet<u32> {
-		let width = usize::from(map.keysyms_per_keycode);
-		if width == 0 {
-			return HashSet::new();
-		}
-		map.keysyms
-			.chunks_exact(width)
-			.enumerate()
-			.filter(|&(index, _)| {
-				let code = usize::from(map.min_keycode) + index;
-				!self
-					.bound
-					.iter()
-					.any(|binding| usize::from(binding.code) == code && binding.owns(map))
-			})
-			.flat_map(|(_, row)| row.iter().take(2).copied())
+	/// Keysyms the layout types on its own rows' first two levels; rows a
+	/// text mapping bound, ours or marked by another, do not count.
+	fn natives(&self, map: &Keymap, marks: &[Mark]) -> HashSet<u32> {
+		let mut layout = map.clone();
+		self.hide_rows(&mut layout, marks, true);
+		layout
+			.keysyms
+			.chunks_exact(usize::from(layout.keysyms_per_keycode).max(1))
+			.flat_map(|row| row.iter().take(2).copied())
 			.collect()
 	}
 
@@ -168,8 +348,18 @@ impl TextMapping {
 			let conn = Arc::clone(&self.conn);
 			let grab = ServerGrab::new(&conn)?;
 			let (fresh, other) = self.snapshots(map)?;
-			let available = self.available(&fresh, other.as_ref());
-			let natives = self.natives(&fresh);
+			let marks = if fresh.core_mapping {
+				self.marks(true)?
+			} else {
+				Vec::new()
+			};
+			// A row of ours another session marked after a reload cleared it is
+			// that session's now.
+			self
+				.bound
+				.retain(|binding| !claimed(&marks, &fresh, binding.code));
+			let available = self.available(&fresh, other.as_ref(), &marks);
+			let natives = self.natives(&fresh, &marks);
 			let required: Vec<u32> = symbols
 				.iter()
 				.copied()
@@ -208,11 +398,14 @@ impl TextMapping {
 			}
 			self.targets.clear();
 			if fresh.core_mapping {
+				let core = if fresh.device.is_some() {
+					other.as_ref()
+				} else {
+					Some(&fresh)
+				};
 				self.targets.push(MapTarget {
 					device: None,
-					width:  other
-						.as_ref()
-						.map_or(fresh.keysyms_per_keycode, |map| map.keysyms_per_keycode),
+					width:  core.map_or(fresh.keysyms_per_keycode, |map| map.keysyms_per_keycode),
 				});
 			} else {
 				self
@@ -225,36 +418,30 @@ impl TextMapping {
 					});
 				}
 			}
-			// Register before writing, and confirm only after: a rejected or
-			// partial write can leave the row with the old keysym or the new.
-			for &(code, symbol) in &writes {
-				if let Some(binding) = self.bound.iter_mut().find(|binding| binding.code == code) {
-					binding.attempted.push(symbol);
-					binding.last_key.set(None);
-				} else {
-					self.bound.push(Binding {
-						code,
-						symbol: 0,
-						attempted: vec![symbol],
-						last_key: Cell::new(None),
-					});
-				}
-			}
+			register(&mut self.bound, &writes);
 			let mut writes = writes;
 			writes.sort_unstable_by_key(|&(code, _)| code);
+			if fresh.core_mapping && !writes.is_empty() {
+				// Marked before writing, so no session can see the row unmarked.
+				let window = self.window()?;
+				self.publish(window, &marks, &writes)?;
+			}
 			let mut buffer = Vec::new();
 			for &target in &self.targets {
-				#[cfg(test)]
-				if self.reject_writes {
-					return Err(failed("the test rejected this write"));
-				}
 				write_rows(&conn, target, &writes, &mut buffer)?;
 			}
-			let applied = if writes.is_empty() {
+			let mut applied = if writes.is_empty() {
 				fresh
 			} else {
 				fresh.refresh(&conn)?
 			};
+			// The text types only through the layout's rows and ours; a mark on a
+			// row we just took is obsolete, as `publish` found.
+			let marks: Vec<Mark> = marks
+				.into_iter()
+				.filter(|mark| !writes.iter().any(|&(code, _)| code == mark.code))
+				.collect();
+			self.hide_rows(&mut applied, &marks, false);
 			if required
 				.iter()
 				.any(|&symbol| applied.lookup(symbol).is_none())
@@ -263,12 +450,7 @@ impl TextMapping {
 					"X11 device did not adopt the temporary text mapping; no input was sent",
 				));
 			}
-			for &(code, symbol) in &writes {
-				if let Some(binding) = self.bound.iter_mut().find(|binding| binding.code == code) {
-					binding.symbol = symbol;
-					binding.attempted.clear();
-				}
-			}
+			confirm(&mut self.bound, &writes);
 			*map = applied;
 			return Ok(());
 		}
@@ -291,6 +473,12 @@ impl TextMapping {
 		}
 		let result = (|| {
 			let _grab = ServerGrab::new(&self.conn)?;
+			// A row a live owner marked is its row, even holding our keysym.
+			let marks = if self.window.is_some() {
+				self.marks(true)?
+			} else {
+				Vec::new()
+			};
 			let mut buffer = Vec::new();
 			let mut failure = None;
 			for &target in &self.targets {
@@ -301,7 +489,7 @@ impl TextMapping {
 				let result = map.and_then(|map| {
 					let mut clear: Vec<_> = bound
 						.iter()
-						.filter(|binding| binding.owns(&map))
+						.filter(|binding| binding.owns(&map) && !claimed(&marks, &map, binding.code))
 						.map(|binding| (binding.code, 0))
 						.collect();
 					clear.sort_unstable_by_key(|&(code, _)| code);
@@ -315,6 +503,13 @@ impl TextMapping {
 				if let Err(error) = result {
 					failure = Some(error);
 				}
+			}
+			// Rows that may still hold our keysyms stay marked until our
+			// connection closes.
+			if failure.is_none()
+				&& let Some(window) = self.window
+			{
+				failure = self.publish(window, &marks, &[]).err();
 			}
 			failure.map_or(Ok(()), Err)
 		})();
@@ -336,6 +531,40 @@ impl Drop for TextMapping {
 	fn drop(&mut self) {
 		let _ = self.finish();
 	}
+}
+
+/// Registers `writes` before they are sent: until [`confirm`], a rebound row
+/// counts as ours under the keysym it held and the one being written, since a
+/// rejected or partial write can leave either.
+fn register(bound: &mut Vec<Binding>, writes: &[(u8, u32)]) {
+	for &(code, symbol) in writes {
+		if let Some(binding) = bound.iter_mut().find(|binding| binding.code == code) {
+			binding.attempted.push(symbol);
+			binding.last_key.set(None);
+		} else {
+			bound.push(Binding {
+				code,
+				symbol: 0,
+				attempted: vec![symbol],
+				last_key: Cell::new(None),
+			});
+		}
+	}
+}
+
+fn confirm(bound: &mut [Binding], writes: &[(u8, u32)]) {
+	for &(code, symbol) in writes {
+		if let Some(binding) = bound.iter_mut().find(|binding| binding.code == code) {
+			binding.symbol = symbol;
+			binding.attempted.clear();
+		}
+	}
+}
+
+/// Every session's marks live on the first screen's root window: the
+/// keyboard mapping is the display's, not a screen's.
+fn root(conn: &RustConnection) -> u32 {
+	conn.setup().roots[0].root
 }
 
 fn symbols(text: &str) -> Vec<u32> {
@@ -404,6 +633,13 @@ fn no_rows(needed: usize, available: usize) -> DesktopError {
 		 characters per call, or if a killed input tool left temporary mappings, reset the layout \
 		 with setxkbmap and retry"
 	))
+}
+
+/// Whether a live owner's mark shows `code` in `map` as its row.
+fn claimed(marks: &[Mark], map: &Keymap, code: u8) -> bool {
+	marks
+		.iter()
+		.any(|mark| mark.live && mark.code == code && row_matches(map, code, mark.symbol))
 }
 
 // XKB canonicalizes redundant levels to NoSymbol padding.
@@ -506,5 +742,23 @@ mod tests {
 			},
 		];
 		assert_eq!(assignments(&[1, 4], &[255, 254, 253], &bound, |_, _| true), [(254, 4)]);
+	}
+
+	#[test]
+	fn a_rebound_row_is_ours_under_either_keysym_until_its_write_is_confirmed() {
+		let (old, new) = (0xe9, 0xf6);
+		let row = |symbol| Keymap::new(255, 2, vec![symbol, 0], Vec::new());
+		let mut bound = vec![Binding {
+			code:      255,
+			symbol:    old,
+			attempted: Vec::new(),
+			last_key:  Cell::new(None),
+		}];
+		register(&mut bound, &[(255, new)]);
+		// A rejected or partial write leaves either keysym; both are restored.
+		assert!(bound[0].owns(&row(old)) && bound[0].owns(&row(new)));
+		assert!(!bound[0].holds(new));
+		confirm(&mut bound, &[(255, new)]);
+		assert!(bound[0].holds(new) && !bound[0].owns(&row(old)));
 	}
 }
