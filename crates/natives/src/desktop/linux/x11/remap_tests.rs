@@ -511,3 +511,42 @@ fn contiguous_bindings_are_batched_and_reused_without_mapping_notifications() {
 	assert_eq!(notifications(), 0, "a later run reuses the cached rows");
 	mapping.finish().unwrap();
 }
+
+#[test]
+#[ignore = "starts Xvfb"]
+fn a_rejected_rebind_still_restores_the_row_it_held() {
+	let (_server, display) = server();
+	let (conn, _) = x11rb::connect(Some(&display)).unwrap();
+	let conn = Arc::new(conn);
+	let min = conn.setup().min_keycode;
+	let count = conn.setup().max_keycode - min + 1;
+	let current = conn
+		.get_keyboard_mapping(min, count)
+		.unwrap()
+		.reply()
+		.unwrap();
+	// One spare row, so the second text has to take the first one's row.
+	let mut keysyms = current.keysyms;
+	let mut spare = false;
+	for row in keysyms.chunks_exact_mut(usize::from(current.keysyms_per_keycode)) {
+		if row.iter().all(|&symbol| symbol == 0) {
+			if spare {
+				row.fill(u32::from(b'#'));
+			}
+			spare = true;
+		}
+	}
+	conn
+		.change_keyboard_mapping(count, min, current.keysyms_per_keycode, &keysyms)
+		.unwrap()
+		.check()
+		.unwrap();
+	let before = core_symbols(&conn);
+	let mut map = Keymap::core(&conn).unwrap();
+	let mut mapping = TextMapping::new(Arc::clone(&conn));
+	mapping.bind(&mut map, "é").unwrap();
+	mapping.reject_writes = true;
+	assert!(mapping.bind(&mut map, "ö").is_err());
+	mapping.finish().unwrap();
+	assert_eq!(core_symbols(&conn), before, "the row still holding é was not restored");
+}

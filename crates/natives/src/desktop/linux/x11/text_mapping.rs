@@ -22,9 +22,29 @@ use crate::desktop::{
 const REBIND_GRACE: Duration = Duration::from_millis(500);
 
 struct Binding {
-	code:     u8,
-	symbol:   u32,
-	last_key: Cell<Option<Instant>>,
+	code:      u8,
+	/// The keysym a confirmed write left in the row; 0 before the first.
+	symbol:    u32,
+	/// Keysyms written but not confirmed: until one is, the row may hold any
+	/// of them or `symbol`, and all count as ours.
+	attempted: Vec<u32>,
+	last_key:  Cell<Option<Instant>>,
+}
+
+impl Binding {
+	/// Whether `map` shows this row holding a keysym we wrote.
+	fn owns(&self, map: &Keymap) -> bool {
+		(self.symbol != 0 && row_matches(map, self.code, self.symbol))
+			|| self
+				.attempted
+				.iter()
+				.any(|&symbol| row_matches(map, self.code, symbol))
+	}
+
+	/// Whether the row is confirmed to type `symbol`.
+	const fn holds(&self, symbol: u32) -> bool {
+		self.attempted.is_empty() && self.symbol == symbol
+	}
 }
 
 #[derive(Clone, Copy)]
@@ -34,15 +54,25 @@ struct MapTarget {
 }
 
 pub(super) struct TextMapping {
-	conn:    Arc<RustConnection>,
-	bound:   Vec<Binding>,
-	targets: Vec<MapTarget>,
-	presses: Cell<u64>,
+	conn:                     Arc<RustConnection>,
+	bound:                    Vec<Binding>,
+	targets:                  Vec<MapTarget>,
+	presses:                  Cell<u64>,
+	/// While set, `bind` fails its keymap writes as a server rejecting them.
+	#[cfg(test)]
+	pub(super) reject_writes: bool,
 }
 
 impl TextMapping {
 	pub(super) const fn new(conn: Arc<RustConnection>) -> Self {
-		Self { conn, bound: Vec::new(), targets: Vec::new(), presses: Cell::new(0) }
+		Self {
+			conn,
+			bound: Vec::new(),
+			targets: Vec::new(),
+			presses: Cell::new(0),
+			#[cfg(test)]
+			reject_writes: false,
+		}
 	}
 
 	pub(super) const fn presses(&self) -> u64 {
@@ -59,7 +89,7 @@ impl TextMapping {
 	/// Chords and holds use only the user's layout, not our cached text rows.
 	pub(super) fn hide(&self, map: &mut Keymap) {
 		for binding in &self.bound {
-			if row_matches(map, binding.code, binding.symbol) {
+			if binding.owns(map) {
 				let width = usize::from(map.keysyms_per_keycode);
 				let start = usize::from(binding.code - map.min_keycode) * width;
 				map.keysyms[start..start + width].fill(0);
@@ -95,7 +125,7 @@ impl TextMapping {
 						|| self
 							.bound
 							.iter()
-							.any(|binding| binding.code == code && row_matches(map, code, binding.symbol))
+							.any(|binding| binding.code == code && binding.owns(map))
 				};
 				(usable(map)
 					&& map.modifier_mask(code) == 0
@@ -117,9 +147,10 @@ impl TextMapping {
 			.enumerate()
 			.filter(|&(index, _)| {
 				let code = usize::from(map.min_keycode) + index;
-				!self.bound.iter().any(|binding| {
-					usize::from(binding.code) == code && row_matches(map, binding.code, binding.symbol)
-				})
+				!self
+					.bound
+					.iter()
+					.any(|binding| usize::from(binding.code) == code && binding.owns(map))
 			})
 			.flat_map(|(_, row)| row.iter().take(2).copied())
 			.collect()
@@ -199,21 +230,29 @@ impl TextMapping {
 					});
 				}
 			}
-			// Register before writing: a failed round trip may have changed X.
+			// Register before writing, and confirm only after: a rejected or
+			// partial write can leave the row with the old keysym or the new.
 			for &(code, symbol) in &writes {
 				if let Some(binding) = self.bound.iter_mut().find(|binding| binding.code == code) {
-					binding.symbol = symbol;
+					binding.attempted.push(symbol);
 					binding.last_key.set(None);
 				} else {
-					self
-						.bound
-						.push(Binding { code, symbol, last_key: Cell::new(None) });
+					self.bound.push(Binding {
+						code,
+						symbol: 0,
+						attempted: vec![symbol],
+						last_key: Cell::new(None),
+					});
 				}
 			}
 			let mut writes = writes;
 			writes.sort_unstable_by_key(|&(code, _)| code);
 			let mut buffer = Vec::new();
 			for &target in &self.targets {
+				#[cfg(test)]
+				if self.reject_writes {
+					return Err(failed("the test rejected this write"));
+				}
 				write_rows(&conn, target, &writes, &mut buffer)?;
 			}
 			let applied = if writes.is_empty() {
@@ -228,6 +267,12 @@ impl TextMapping {
 				return Err(DesktopError::input_failed(
 					"X11 device did not adopt the temporary text mapping; no further input was sent",
 				));
+			}
+			for &(code, symbol) in &writes {
+				if let Some(binding) = self.bound.iter_mut().find(|binding| binding.code == code) {
+					binding.symbol = symbol;
+					binding.attempted.clear();
+				}
 			}
 			*map = applied;
 			return Ok(());
@@ -261,7 +306,7 @@ impl TextMapping {
 				let result = map.and_then(|map| {
 					let mut clear: Vec<_> = bound
 						.iter()
-						.filter(|binding| row_matches(&map, binding.code, binding.symbol))
+						.filter(|binding| binding.owns(&map))
 						.map(|binding| (binding.code, 0))
 						.collect();
 					clear.sort_unstable_by_key(|&(code, _)| code);
@@ -343,14 +388,14 @@ fn assignments(required: &[u32], available: &[u8], bound: &[Binding]) -> Vec<(u8
 		.filter_map(|symbol| {
 			bound
 				.iter()
-				.find(|binding| binding.symbol == *symbol && available.contains(&binding.code))
+				.find(|binding| binding.holds(*symbol) && available.contains(&binding.code))
 				.map(|binding| binding.code)
 		})
 		.collect();
 	for &symbol in required {
 		if bound
 			.iter()
-			.any(|binding| binding.symbol == symbol && available.contains(&binding.code))
+			.any(|binding| binding.holds(symbol) && available.contains(&binding.code))
 		{
 			continue;
 		}
@@ -468,16 +513,23 @@ mod tests {
 		assert_eq!(segments(text, 2, |_| true).unwrap(), ["αβα", "γδ"]);
 		let start = Instant::now();
 		let bound = [
-			Binding { code: 255, symbol: 1, last_key: Cell::new(Some(start)) },
 			Binding {
-				code:     254,
-				symbol:   2,
-				last_key: Cell::new(Some(start + Duration::from_secs(1))),
+				code:      255,
+				symbol:    1,
+				attempted: Vec::new(),
+				last_key:  Cell::new(Some(start)),
 			},
 			Binding {
-				code:     253,
-				symbol:   3,
-				last_key: Cell::new(Some(start + Duration::from_secs(2))),
+				code:      254,
+				symbol:    2,
+				attempted: Vec::new(),
+				last_key:  Cell::new(Some(start + Duration::from_secs(1))),
+			},
+			Binding {
+				code:      253,
+				symbol:    3,
+				attempted: Vec::new(),
+				last_key:  Cell::new(Some(start + Duration::from_secs(2))),
 			},
 		];
 		assert_eq!(assignments(&[1, 4], &[255, 254, 253], &bound), [(254, 4)]);
