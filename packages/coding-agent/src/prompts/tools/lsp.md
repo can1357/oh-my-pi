@@ -12,7 +12,7 @@ Symbol-aware code intelligence from language servers — navigation, refactors, 
 </operations>
 
 <timeout>
-Default: whole call {{defaultTimeoutSec}}s; project-aware diagnostics wait {{defaultWaitSec}}s. `timeout` sets both for this call — raise it for a server still indexing or cold-starting, lower it to fail fast. Capped at {{maxTimeoutSec}}s.
+Default: whole call {{defaultTimeoutSec}}s; project-aware diagnostics wait {{defaultWaitSec}}s. `timeout` sets both for this call — raise it for a server still indexing or cold-starting, lower it to fail fast{{#if minTimeoutSec}} (cannot go below the lsp.minTimeout floor of {{minTimeoutSec}}s){{/if}}. Capped at {{maxTimeoutSec}}s.
 </timeout>
 
 <critical>

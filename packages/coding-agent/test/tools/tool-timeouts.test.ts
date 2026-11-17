@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { deferredDiagnosticsWaitMs } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
-import { clampTimeout, resolveLspTimeouts, TOOL_TIMEOUTS } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
+import {
+	clampTimeout,
+	lspTimeoutSource,
+	resolveLspTimeouts,
+	TOOL_TIMEOUTS,
+} from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 
 describe("clampTimeout", () => {
 	it("returns the per-tool default when no raw timeout is given", () => {
@@ -66,6 +71,55 @@ describe("resolveLspTimeouts", () => {
 			call: TOOL_TIMEOUTS.lsp.max,
 			wait: TOOL_TIMEOUTS.lsp.max,
 		});
+	});
+});
+
+describe("resolveLspTimeouts with an lsp.minTimeout floor", () => {
+	it("preserves existing behavior when no floor is set", () => {
+		expect(resolveLspTimeouts(5, 60, undefined, 0)).toEqual({ call: 5, wait: 5 });
+		expect(resolveLspTimeouts(5, 60)).toEqual({ call: 5, wait: 5 });
+	});
+
+	it("raises an agent timeout below the floor to the floor and reports what it raised (#19528)", () => {
+		expect(resolveLspTimeouts(5, 30, undefined, 30)).toEqual({ call: 30, wait: 30, floorRaisedFrom: 5 });
+	});
+
+	it("keeps the configured default when the floor equals it and no timeout is passed", () => {
+		expect(resolveLspTimeouts(undefined, 30, undefined, 30)).toEqual({ call: 30, wait: 30 });
+	});
+
+	it("lets a request above the floor win within the existing bounds", () => {
+		expect(resolveLspTimeouts(60, 30, undefined, 30)).toEqual({ call: 60, wait: 60 });
+	});
+
+	it("floors the configured-default path too, so budgets stay monotone", () => {
+		// requestTimeout 10 under a 30s floor must not leave the default wait
+		// below what an agent override (5 -> 30) would get.
+		expect(resolveLspTimeouts(undefined, 10, undefined, 30)).toEqual({ call: 30, wait: 30 });
+	});
+
+	it("wins over a lower global tools.maxTimeout cap, like the per-tool minimum", () => {
+		expect(resolveLspTimeouts(5, 30, 20, 30).call).toBe(30);
+	});
+
+	it("stays inside the tool range when the floor exceeds the lsp maximum", () => {
+		expect(resolveLspTimeouts(5, 30, undefined, 999).call).toBe(TOOL_TIMEOUTS.lsp.max);
+	});
+});
+
+describe("lspTimeoutSource", () => {
+	it("stays silent when the agent passed no timeout", () => {
+		expect(lspTimeoutSource(undefined, 30, { call: 30, wait: 30 })).toBe("");
+	});
+
+	it("names the configured default behind an agent override", () => {
+		expect(lspTimeoutSource(5, 30, { call: 5, wait: 5 })).toBe("(agent override; configured default: 30s)");
+	});
+
+	it("reports requested and effective values when the floor raised an override", () => {
+		expect(lspTimeoutSource(5, 30, { call: 30, wait: 30, floorRaisedFrom: 5 })).toBe(
+			"(agent requested 5s; raised to the lsp.minTimeout floor of 30s)",
+		);
 	});
 });
 
