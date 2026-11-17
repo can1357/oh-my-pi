@@ -29,6 +29,7 @@ import type {
 	FrustrationCounts,
 	MessageStats,
 	MessageStatsInput,
+	SnapcompactCompactionStats,
 	ToolCallStats,
 	ToolResultLink,
 	UserMessageLink,
@@ -99,7 +100,9 @@ export function currentDb(): Database | null {
 const BACKFILL_COMPLETE = "complete";
 const BACKFILL_PENDING = "pending";
 const USER_MESSAGES_BACKFILL_KEY = "user_messages_v10";
-const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
+// v2: replies are linked past the non-message entries (system-prompt digest,
+// extension notices, side-model usage) the agent writes before them.
+const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v2";
 // v2: the parser also records the served service tier per message, so a full
 // re-parse fills `service_tier` and re-derives ultrafast premium counts that the
 // v1 pass (priority only) left at zero.
@@ -150,6 +153,11 @@ const SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY = "spotlight_v5_arg_tokens";
 // count only with the arm that shipped. Every transcript that can hold
 // Spotlight entries is re-parsed once by the new rules.
 const SPOTLIGHT_TOGGLE_BACKFILL_KEY = "spotlight_v6_toggle";
+// Snapcompact compactions are filled by the parser; transcripts ingested before
+// the table existed are re-parsed once. Compaction entries carry `method` and
+// `tokensAfter` only since this date, so older cursors stay put.
+const SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY = "snapcompact_compactions_v1";
+const SNAPCOMPACT_COMPACTIONS_SINCE_MS = Date.parse("2026-08-20T00:00:00Z");
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -388,6 +396,18 @@ export async function initDb(): Promise<Database> {
 			edit TEXT NOT NULL,
 			PRIMARY KEY (session_file, tool_call_id)
 		) WITHOUT ROWID;
+
+		-- Snapcompact compactions: the session's context estimate before and after each one.
+		CREATE TABLE IF NOT EXISTS snapcompact_compactions (
+			session_file TEXT NOT NULL,
+			entry_id TEXT NOT NULL,
+			folder TEXT NOT NULL,
+			timestamp INTEGER NOT NULL,
+			tokens_before INTEGER NOT NULL,
+			tokens_after INTEGER NOT NULL,
+			PRIMARY KEY (session_file, entry_id)
+		) WITHOUT ROWID;
+		CREATE INDEX IF NOT EXISTS idx_snapcompact_compactions_entry ON snapcompact_compactions(entry_id, timestamp);
 	`);
 
 	const offsetColumns = db.query("PRAGMA table_info(file_offsets)").all() as { name: string }[];
@@ -541,11 +561,12 @@ export async function initDb(): Promise<Database> {
 	backfillMissingCatalogCosts(db);
 	backfillNoCacheInputCosts(db);
 	backfillForkDuplicates(db);
-	backfillSpotlight(db, SPOTLIGHT_BACKFILL_KEY);
+	reparseModifiedSince(db, SPOTLIGHT_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
 	reparseSpotlightSessions(db, SPOTLIGHT_EDITS_BACKFILL_KEY);
 	reparseSpotlightSessions(db, SPOTLIGHT_NEEDS_BACKFILL_KEY);
 	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
-	backfillSpotlight(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY);
+	reparseModifiedSince(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
+	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -783,18 +804,19 @@ function backfillNoCacheInputCosts(database: Database): void {
 }
 
 /**
- * Re-parse, once per key, the transcripts that can hold Spotlight entries
- * (modified since {@link SPOTLIGHT_SINCE_MS}) by dropping their cursors; every
- * older cursor stays, so this never triggers a full-history re-parse. The next
- * sync rebuilds those files from byte zero, replacing their Spotlight rows.
- * Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the tables are new),
- * {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became a toggle).
+ * Re-parse, once per key, the transcripts modified since `sinceMs` (the first
+ * day they can hold the entries the key's rows come from) by dropping their
+ * cursors; every older cursor stays, so this never triggers a full-history
+ * re-parse. The next sync rebuilds those files from byte zero, replacing their
+ * parser-filled rows. Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the Spotlight
+ * tables are new), {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became
+ * a toggle), {@link SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY} (the table is new).
  */
-function backfillSpotlight(database: Database, key: string): void {
+function reparseModifiedSince(database: Database, key: string, sinceMs: number): void {
 	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);
 	if (row?.value === BACKFILL_COMPLETE) return;
 	database.transaction(() => {
-		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(SPOTLIGHT_SINCE_MS);
+		database.query("DELETE FROM file_offsets WHERE last_modified >= ?").run(sinceMs);
 		database.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, BACKFILL_COMPLETE);
 	})();
 }
@@ -1062,6 +1084,27 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 					for (const table of SPOTLIGHT_TABLES) {
 						changes += database.query(`DELETE FROM ${table} WHERE session_file = ?`).run(sessionFile).changes;
 					}
+				}
+				// The parse covers the whole transcript: drop compactions it no longer holds or has
+				// rewritten. A removed one may live on in a fork, which only another replay can credit.
+				const parsedCompactions = new Map(result.snapcompactCompactions.map(row => [row.entryId, row]));
+				const storedCompactions = database
+					.query<{ entry_id: string; timestamp: number; tokens_before: number; tokens_after: number }, [string]>(
+						"SELECT entry_id, timestamp, tokens_before, tokens_after FROM snapcompact_compactions WHERE session_file = ?",
+					)
+					.all(sessionFile);
+				for (const stored of storedCompactions) {
+					const parsed = parsedCompactions.get(stored.entry_id);
+					if (parsed?.timestamp !== stored.timestamp) {
+						reconcile = true;
+					} else if (parsed.tokensBefore === stored.tokens_before && parsed.tokensAfter === stored.tokens_after) {
+						continue;
+					}
+					changes += database
+						.query("DELETE FROM snapcompact_compactions WHERE session_file = ? AND entry_id = ?")
+						.run(sessionFile, stored.entry_id).changes;
+				}
+				if (replace) {
 					if (messages.length > 0) {
 						changes += database.query("DELETE FROM messages WHERE session_file = ?").run(sessionFile).changes;
 					}
@@ -1087,6 +1130,7 @@ export function applySessionParseResults(sessions: ParsedSession[]): {
 			updateUserMessageLinks(parsedRows(writes, result => result.userLinks)) +
 			insertToolCalls(parsedRows(writes, result => result.toolCalls)) +
 			updateToolResults(parsedRows(writes, result => result.toolResults)) +
+			insertSnapcompactCompactions(parsedRows(writes, result => result.snapcompactCompactions)) +
 			insertSpotlightSessions(parsedRows(writes, result => result.spotlight.sessions)) +
 			updateSpotlightTitles(parsedRows(writes, result => result.spotlight.titles)) +
 			upsertSpotlightShapes(parsedRows(writes, result => result.spotlight.shapes)) +
@@ -1543,23 +1587,24 @@ function backfillForkDuplicates(database: Database): void {
 }
 
 /**
- * One-shot wipe of `file_offsets` to force `parseSessionFile` to re-parse
- * every session from byte zero. We don't touch `user_messages`; the parser
- * now emits a `UserMessageLink` for every assistant->parent pair, and the
- * guarded `updateUserMessageLinks` UPDATE fixes any row whose `model` was
- * left NULL by the old in-pass-only linking logic. Idempotent: gated by a
- * sentinel row in `meta`.
+ * Re-parse, once, every session holding a user message without a responding
+ * model, by dropping its cursor; the next sync re-reads it from byte zero and
+ * the guarded `updateUserMessageLinks` UPDATE fills each row whose reply is now
+ * found. Every other cursor stays, so this never re-parses the whole history.
  */
 function repairUserMessageLinks(database: Database): void {
-	const row = database.query("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGE_LINKS_REPAIR_KEY) as
-		| { value: string }
-		| undefined;
-	if (!shouldResetBackfill(row?.value)) return;
-
-	database.run("DELETE FROM file_offsets");
-	database
-		.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-		.run(USER_MESSAGE_LINKS_REPAIR_KEY, BACKFILL_PENDING);
+	const row = database
+		.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?")
+		.get(USER_MESSAGE_LINKS_REPAIR_KEY);
+	if (row?.value === BACKFILL_COMPLETE) return;
+	database.transaction(() => {
+		database.run(
+			"DELETE FROM file_offsets WHERE session_file IN (SELECT session_file FROM user_messages WHERE model IS NULL)",
+		);
+		database
+			.query("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(USER_MESSAGE_LINKS_REPAIR_KEY, BACKFILL_COMPLETE);
+	})();
 }
 
 /**
@@ -1594,7 +1639,6 @@ export function markSessionBackfillsComplete(): void {
 		for (const key of [
 			USER_MESSAGES_BACKFILL_KEY,
 			TOOL_CALLS_BACKFILL_KEY,
-			USER_MESSAGE_LINKS_REPAIR_KEY,
 			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
 			COST_REINGEST_BACKFILL_KEY,
 			COST_UNPRICED_BACKFILL_KEY,
@@ -1931,6 +1975,30 @@ export function updateToolResults(links: Iterable<ToolResultLink>): number {
 		}
 	});
 	return updated;
+}
+
+/**
+ * Insert snapcompact compaction rows. Forked transcripts copy compaction
+ * entries verbatim, so the fork guard keeps one row per entry across the lineage.
+ */
+export function insertSnapcompactCompactions(rows: Iterable<SnapcompactCompactionStats>): number {
+	if (!db) return 0;
+	const writer = new ChunkedInsert(db, {
+		verb: "INSERT OR IGNORE",
+		table: "snapcompact_compactions",
+		columns: ["session_file", "entry_id", "folder", "timestamp", "tokens_before", "tokens_after"],
+		identity: ["entry_id", "timestamp"],
+	});
+	return atomically(db, () => {
+		for (const row of rows) {
+			writer.add(
+				row.sessionFile,
+				[row.entryId, row.timestamp],
+				[row.sessionFile, row.entryId, row.folder, row.timestamp, row.tokensBefore, row.tokensAfter],
+			);
+		}
+		return writer.finish();
+	});
 }
 
 /** Tables the parser fills for the Spotlight dashboard, all keyed by `session_file`. */

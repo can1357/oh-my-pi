@@ -680,4 +680,49 @@ describe("Python runner request dispatch", () => {
 			await runner.dispose();
 		}
 	});
+
+	it("preserves source code in linecache for inspect.getsource across consecutive cells", async () => {
+		const runner = spawnRunner();
+		try {
+			runner.send({
+				id: "def-cell",
+				code: "def sample_worker(val):\n    # Return scaled\n    return val * 42\n",
+			});
+			const defFrames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.id === "def-cell") {
+					defFrames.push(frame);
+					if (frame.type === "done") break;
+				}
+			}
+			const defDone = defFrames.find(f => f.type === "done");
+			expect(defDone?.status).toBe("ok");
+
+			runner.send({
+				id: "inspect-cell",
+				code: "import inspect\nsource = inspect.getsource(sample_worker)\nprint('INSPECT_OUTPUT:', repr(source))",
+			});
+			const inspectFrames: RunnerFrame[] = [];
+			while (true) {
+				const frame = await runner.nextFrame();
+				if (frame.id === "inspect-cell") {
+					inspectFrames.push(frame);
+					if (frame.type === "done") break;
+				}
+			}
+			const inspectDone = inspectFrames.find(f => f.type === "done");
+			const stdout = inspectFrames
+				.filter(f => f.type === "stdout")
+				.map(f => f.data ?? "")
+				.join("");
+
+			expect(inspectDone?.status).toBe("ok");
+			expect(stdout).toContain("INSPECT_OUTPUT:");
+			expect(stdout).toContain("def sample_worker(val):");
+			expect(stdout).toContain("return val * 42");
+		} finally {
+			await runner.dispose();
+		}
+	});
 });

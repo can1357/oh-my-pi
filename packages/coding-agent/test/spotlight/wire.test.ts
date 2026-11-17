@@ -1119,6 +1119,26 @@ describe("spotlight shaping of any tool", () => {
 });
 
 describe("spotlight session entry", () => {
+	it.each(["models.noSpotlight", "models.offline"])("%s blocks a foreign Spotlight endpoint", async key => {
+		const manager = SessionManager.inMemory(await tmpDir());
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+		const experiment = startSpotlightExperiment(
+			Settings.isolated({ "spotlight.experiment.enabled": true, [key]: true }),
+			manager,
+			() => "local",
+		);
+		expect(experiment).toBeDefined();
+		await expect(
+			experiment!.client.rank({
+				state: { task: "find files" },
+				source: "search",
+				items: ["one"],
+				questions: { q: "relevant?" },
+			}),
+		).rejects.toThrow("disabled by model policy");
+		expect(fetchSpy).not.toHaveBeenCalled();
+		experiment!.client.close();
+	});
 	it("journals the session entry on a session change only when the journal's last one differs", async () => {
 		const manager = SessionManager.inMemory(await tmpDir());
 		// A journal from before the toggle carries only an arm assignment: it gets a session entry.

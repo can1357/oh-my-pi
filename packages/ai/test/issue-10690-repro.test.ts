@@ -172,6 +172,44 @@ describe("issue #10690: DeepSeek Responses replay must never synthesize empty re
 		expect(reasoningTextOf(reasoning[0]!)).toBe("Inspect bar.ts before editing.");
 	});
 
+	it("fills the required item with another model's demoted thinking instead of the placeholder", async () => {
+		// After a model switch, every prior turn's foreign thinking is demoted to
+		// text. A placeholder in each required item became a few-shot pattern:
+		// DeepSeek and Kimi echoed "reasoning unavailable" as their own reasoning.
+		const prior: AssistantMessage = {
+			role: "assistant",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-opus-4-5",
+			stopReason: "toolUse",
+			usage,
+			content: [
+				{ type: "thinking", thinking: "Inspect bar.ts before editing.", thinkingSignature: "sig_anthropic" },
+				{ type: "toolCall", id: "toolu_read", name: "read", arguments: { path: "bar.ts" } },
+			],
+			timestamp: Date.now(),
+		};
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Edit bar", timestamp: Date.now() },
+				prior,
+				{
+					role: "toolResult",
+					toolCallId: "toolu_read",
+					toolName: "read",
+					content: [{ type: "text", text: "contents" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const payload = await capture(deepseek, context);
+		const reasoning = reasoningItems(payload);
+		expect(reasoning).toHaveLength(1);
+		expect(reasoningTextOf(reasoning[0]!)).toBe("Inspect bar.ts before editing.");
+	});
+
 	it("adds required reasoning before native history from a custom DeepSeek Responses model", async () => {
 		const customDeepseek = buildModel({
 			id: "deepseek-flash",

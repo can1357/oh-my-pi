@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { adaptSchemaForStrict, isJsonSchemaValueValid, toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { procmgr, setProcessName, TempDir } from "@oh-my-pi/pi-utils";
@@ -239,7 +240,7 @@ describe("proc:// background jobs", () => {
 					expect(message).toContain("stdin and persist/session/detached modes are services-only");
 					expect(message).toContain("Start long-lived work as a named service");
 					expect(message).toContain("lifetime controls");
-					expect(message).toContain(JSON.stringify({ path: `proc://${id}/kill` }));
+					expect(message).toContain(JSON.stringify({ path: `proc://${id}/kill`, content: "" }));
 					expect(message).not.toContain("not found");
 
 					const missing = await rejectionMessage(
@@ -317,7 +318,7 @@ describe("proc:// background jobs", () => {
 		try {
 			const kill = await rejectionMessage(protocol.resolve(parseInternalUrl(`proc://${id}/kill`), { session }));
 			expect(kill).toContain("call write with");
-			expect(kill).toContain(JSON.stringify({ path: "proc://bg_12/kill" }));
+			expect(kill).toContain(JSON.stringify({ path: "proc://bg_12/kill", content: "" }));
 			expect(kill).toContain("read proc://bg_12 for its status");
 			expect(manager.getJob(id)?.status).toBe("running");
 			const mode = await rejectionMessage(protocol.resolve(parseInternalUrl(`proc://${id}/mode`), { session }));
@@ -330,7 +331,7 @@ describe("proc:// background jobs", () => {
 		}
 	});
 
-	it("kills without content and never interprets bare job writes as cancellation", async () => {
+	it("kills via /kill and never interprets bare job writes as cancellation", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
 		const id = manager.register(
@@ -353,11 +354,8 @@ describe("proc:// background jobs", () => {
 			await expect(write.execute("empty-stdin", { path: `proc://${id}`, content: "" })).rejects.toThrow(
 				"in-process job",
 			);
-			await expect(
-				write.execute("missing-stdin", write.parameters.assert({ path: `proc://${id}` })),
-			).rejects.toThrow("content is required");
 			expect(manager.getJob(id)?.status).toBe("running");
-			const result = await write.execute("kill", write.parameters.assert({ path: `proc://${id}/kill` }));
+			const result = await write.execute("kill", { path: `proc://${id}/kill`, content: "" });
 			await manager.getJob(id)?.promise;
 			expect(result.details?.proc).toMatchObject({ op: "cancel", cancelled: [{ id, status: "cancelled" }] });
 			expect(manager.getJob(id)?.status).toBe("cancelled");
@@ -395,7 +393,7 @@ describe("proc:// background jobs", () => {
 				deviceOnlyWrite ? "limited to the xd:// device transport" : "Plan mode",
 			);
 			expect(manager.getJob(id)?.status).toBe("running");
-			const result = await write.execute("kill", write.parameters.assert({ path: `proc://${id}/kill` }));
+			const result = await write.execute("kill", { path: `proc://${id}/kill`, content: "" });
 			await manager.getJob(id)?.promise;
 			expect(result.details?.proc).toMatchObject({ op: "cancel", cancelled: [{ id, status: "cancelled" }] });
 			expect(manager.getJob(id)?.status).toBe("cancelled");
@@ -460,10 +458,10 @@ describe("proc:// background jobs", () => {
 				expect(message).toContain("named service");
 				expect(registry.get("Worker")?.status).toBe("running");
 			}
-			const denied = await write.execute("foreign", { path: "proc://Foreign/kill" });
+			const denied = await write.execute("foreign", { path: "proc://Foreign/kill", content: "" });
 			expect(denied.details?.proc).toMatchObject({ cancelled: [{ id: "Foreign", status: "not_found" }] });
 			expect(registry.get("Foreign")?.status).toBe("running");
-			const killed = await write.execute("worker", { path: "proc://Worker/kill" });
+			const killed = await write.execute("worker", { path: "proc://Worker/kill", content: "" });
 			expect(killed.details?.proc).toMatchObject({ cancelled: [{ id: "Worker", status: "cancelled" }] });
 			expect(registry.get("Worker")).toBeUndefined();
 		} finally {
@@ -558,17 +556,13 @@ describe("proc:// background jobs", () => {
 		}
 	});
 
-	it("requires file content instead of silently truncating a file", async () => {
-		using temp = TempDir.createSync("@omp-proc-write-");
-		const file = path.join(temp.path(), "keep.txt");
-		await Bun.write(file, "keep this");
-		const write = new WriteTool(toolSession(temp.path(), undefined, { launch: false }));
-		await expect(write.execute("missing-content", write.parameters.assert({ path: file }))).rejects.toThrow(
-			"content is required",
-		);
-		expect(await Bun.file(file).text()).toBe("keep this");
-		await write.execute("empty-file", { path: file, content: "" });
-		expect(await Bun.file(file).text()).toBe("");
+	it("never offers strict-mode providers a nullable content", () => {
+		const write = new WriteTool(toolSession(process.cwd(), undefined, { launch: false }));
+		const strict = adaptSchemaForStrict(toolWireSchema(write), true);
+		expect(strict.strict).toBe(true);
+		expect(isJsonSchemaValueValid(strict.schema, { path: "proc://bg_1/kill", content: "" })).toBe(true);
+		// An optional `content` became `anyOf: [string, null]` here, and models filled the null.
+		expect(isJsonSchemaValueValid(strict.schema, { path: "keep.txt", content: null })).toBe(false);
 	});
 
 	it("shows a running task's progress in the proc:// listing and its own read, but not a bash job's", async () => {
@@ -828,7 +822,7 @@ describe("bash services via proc://", () => {
 				async: false,
 			});
 			expect(restarted.content[0]?.type === "text" ? restarted.content[0].text : "").toContain("REPLACED");
-			const stopped = await write.execute("kill", write.parameters.assert({ path: "proc://echo-service/kill" }));
+			const stopped = await write.execute("kill", { path: "proc://echo-service/kill", content: "" });
 			expect(stopped.details?.proc).toMatchObject({ action: "stop", daemon: { name: "echo-service" } });
 			const background = await bash.execute("detach-candidate", {
 				command: "printf 'RUNNING\\n'; sleep 30",

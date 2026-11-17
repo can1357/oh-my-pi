@@ -240,6 +240,25 @@ afterEach(() => {
 });
 
 describe("ChainJudge", () => {
+	it.each(["models.noJudge", "models.offline"])(
+		"%s prevents foreign judge requests and retains same-provider fallback",
+		async key => {
+			const settings = Settings.isolated({
+				[key]: true,
+				modelRoles: { judge: "typesafe/jev-preview" },
+			});
+			const registry = makeRegistry([JEV_PREVIEW, ONLINE], { typesafe: "ts-key", [ONLINE.provider]: "online-key" });
+			const fetch = vi.spyOn(globalThis, "fetch");
+			const complete = vi.spyOn(ai, "completeSimple").mockImplementation(async model => reply(model, "level: low"));
+			const judge = new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE });
+
+			const result = await judge.judge({ state: "rename a local", questions: { level: TIER_QUESTION } });
+
+			expect(result.answers.level.choice).toBe("low");
+			expect(fetch).not.toHaveBeenCalled();
+			expect(complete).toHaveBeenCalled();
+		},
+	);
 	it.each([false, true])("tries the lead first and falls back on failure (%s)", async leadFails => {
 		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
 		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
@@ -567,6 +586,48 @@ describe("ChainJudge", () => {
 				urls.push(String(url));
 				if (String(url).endsWith("/v1/systemone")) {
 					return Response.json({ error: { message: "This model is unavailable", code: 404 } }, { status: 404 });
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
+
+		for (let call = 0; call < 2; call++) {
+			const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge(request);
+			expect(result.answers.level.choice).toBe("high");
+		}
+
+		expect(urls).toEqual([
+			"https://judge.example.test/v1/systemone",
+			OPENROUTER_DECISIONS_URL,
+			OPENROUTER_DECISIONS_URL,
+		]);
+	});
+
+	it("sends a gateway's credentials-exhausted 502 once and skips the candidate on later calls", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (String(url).endsWith("/v1/systemone")) {
+					return Response.json(
+						{
+							type: "upstream_credentials_exhausted",
+							is_bifrost_error: false,
+							status_code: 502,
+							error: { type: "upstream_credentials_exhausted", message: "all keys failed" },
+						},
+						{ status: 502, headers: { "retry-after-ms": "1" } },
+					);
 				}
 				return Response.json({
 					model: "jev-1.13.0",

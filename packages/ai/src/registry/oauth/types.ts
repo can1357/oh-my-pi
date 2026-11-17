@@ -1,3 +1,4 @@
+import type { OAuthRefreshReason } from "../../auth/types";
 import type { FetchImpl } from "../../types";
 import type { OAuthProviderUnion } from "../registry";
 
@@ -49,6 +50,11 @@ export type OAuthPrompt = {
 	allowEmpty?: boolean;
 	/** Request masked entry from interactive hosts. Hosts that cannot hide input must reject the prompt. */
 	secret?: boolean;
+	/**
+	 * Marks the yes/no acceptance of a provider's `login-warning`, asked before any auth URL.
+	 * Hosts that refuse pre-auth input (RPC) must still surface it; only an answer of "yes" continues.
+	 */
+	riskAcknowledgement?: boolean;
 };
 
 export type OAuthAuthInfo = {
@@ -111,8 +117,15 @@ export interface OAuthProviderInterface {
 	readonly name: string;
 	readonly sourceId?: string;
 	login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials | string>;
-	/** Refresh a stored grant; the signal bounds provider network work to refresh ownership. */
-	refreshToken?(credentials: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials>;
+	/**
+	 * Refresh a stored grant; the signal bounds provider network work to refresh ownership.
+	 * `reason` is why the refresh was requested; undefined means the grant is near expiry.
+	 */
+	refreshToken?(
+		credentials: OAuthCredentials,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<OAuthCredentials>;
 	getApiKey?(credentials: OAuthCredentials): string;
 	/** Store resulting OAuth credentials under a different provider id. */
 	readonly storeCredentialsAs?: string;

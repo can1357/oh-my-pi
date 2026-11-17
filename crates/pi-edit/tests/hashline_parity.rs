@@ -253,9 +253,9 @@ fn compact_diff_preview_matches_all_diff_preview_cases() {
 			0,
 		),
 		(
-			"dedupes blank gap rows left adjacent by omitted removed lines and trims edge separators",
+			"marks hunk gaps left adjacent by omitted removed lines once and trims edge separators",
 			"\n 1|alpha\n\n-5|beta\n\n 9|gamma\n\n-12|omitted",
-			"1:alpha\n\n8:gamma",
+			"1:alpha\n…\n8:gamma",
 			0,
 			2,
 		),
@@ -952,6 +952,129 @@ async fn block_cut_on_leading_go_statement_keeps_following_siblings() {
 		"{}",
 		result.text
 	);
+}
+
+#[tokio::test]
+async fn block_ops_on_a_first_rust_attribute_or_doc_comment_cover_the_item() {
+	let source = "impl S {\n    #[inline]\n    fn f(&self) -> u32 {\n        1\n    }\n\n    fn \
+	              g(&self) {}\n}\n";
+	let put = Workspace::new(EditMode::Hashline);
+	put.write("x.rs", source);
+	let tag = put.snapshot("x.rs", source, None);
+	let args = json!({
+		"input": format!(
+			"[x.rs#{tag}]\nPUT 2*:\n+    #[inline]\n+    fn f(&self) -> u32 {{\n+        2\n+    }}"
+		)
+	});
+	let result = put
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("replaces the attribute and the method it annotates");
+	assert_eq!(
+		put.read("x.rs").as_deref(),
+		Some(
+			"impl S {\n    #[inline]\n    fn f(&self) -> u32 {\n        2\n    }\n\n    fn g(&self) \
+			 {}\n}\n"
+		)
+	);
+	assert!(
+		result
+			.text
+			.contains("PUT 2*: → resolved lines 2-5 (4 lines)"),
+		"{}",
+		result.text
+	);
+
+	let documented = "/// Docs.\n#[derive(Debug)]\n#[serde(default)]\nstruct S {\n    x: \
+	                  u32,\n}\n\nfn next() {}\n";
+	let cut = Workspace::new(EditMode::Hashline);
+	cut.write("s.rs", documented);
+	let tag = cut.snapshot("s.rs", documented, None);
+	let args = json!({ "input": format!("[s.rs#{tag}]\nCUT 1*") });
+	let result = cut
+		.apply_json(&args, &common::DiskWriter::default())
+		.await
+		.expect("deletes the doc comment, the attributes and the struct they annotate");
+	assert_eq!(cut.read("s.rs").as_deref(), Some("\nfn next() {}\n"));
+	assert!(
+		result
+			.text
+			.contains("CUT 1* → resolved lines 1-6 (6 lines)"),
+		"{}",
+		result.text
+	);
+}
+
+#[tokio::test]
+async fn block_ops_refuse_a_rust_line_that_opens_no_item() {
+	let cases = [
+		("impl S {\n    fn f() {}\n    #[allow(dead_code)]\n}\n", "CUT 3*"),
+		("#![allow(dead_code)]\nfn f() {\n    work();\n}\n", "PUT 1*:\n+#![allow(unused)]"),
+		("impl S {\n    fn f() {}\n    /// Dangling docs.\n}\n", "CUT 3*"),
+		("//! Crate docs.\nfn f() {\n    work();\n}\n", "PUT 1*:\n+//! New docs."),
+		("// Note.\nfn f() {\n    work();\n}\n", "CUT 1*"),
+	];
+	for (source, op) in cases {
+		let workspace = Workspace::new(EditMode::Hashline);
+		workspace.write("x.rs", source);
+		let tag = workspace.snapshot("x.rs", source, None);
+		let error = workspace
+			.apply_json(
+				&json!({ "input": format!("[x.rs#{tag}]\n{op}") }),
+				&common::DiskWriter::default(),
+			)
+			.await
+			.expect_err("a line that annotates no following item is a single line");
+		assert!(error.to_string().contains("resolved a single-line block"), "{op}: {error}");
+		assert_eq!(workspace.read("x.rs").as_deref(), Some(source), "{op}");
+	}
+}
+
+/// `CUT 2*` on a later annotation of a Rust item: the refusal, after checking
+/// that the file is unchanged.
+async fn cut_later_rust_annotation(source: &str) -> String {
+	let workspace = Workspace::new(EditMode::Hashline);
+	workspace.write("x.rs", source);
+	let tag = workspace.snapshot("x.rs", source, None);
+	let error = workspace
+		.apply_json(
+			&json!({ "input": format!("[x.rs#{tag}]\nCUT 2*") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect_err("a later annotation of an item opens no block of its own")
+		.to_string();
+	assert_eq!(workspace.read("x.rs").as_deref(), Some(source));
+	error
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_rust_attribute_points_at_the_first() {
+	let error =
+		cut_later_rust_annotation("/// Docs.\n#[derive(Debug)]\nstruct S {\n    x: u32,\n}\n").await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 5"), "{error}");
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_multi_line_rust_attribute_is_refused() {
+	let error = cut_later_rust_annotation(
+		"#[derive(Debug)]\n#[cfg_attr(\n    feature = \"serde\",\n    derive(Serialize)\n)]\nstruct \
+		 S {\n    x: u32,\n}\n",
+	)
+	.await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 8"), "{error}");
+}
+
+#[tokio::test]
+async fn block_op_on_a_later_multi_line_rust_doc_comment_is_refused() {
+	let error = cut_later_rust_annotation(
+		"#[derive(Debug)]\n/**\n * Docs.\n */\nstruct S {\n    x: u32,\n}\n",
+	)
+	.await;
+	assert!(error.contains("resolved a single-line block"), "{error}");
+	assert!(error.contains("begins at line 1 and ends at line 7"), "{error}");
 }
 
 #[tokio::test]

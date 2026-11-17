@@ -1,12 +1,14 @@
 /**
  * Stepped spawns: the executor sends each step prompt only after the previous
  * one was delivered (a terminal `yield`, or without `yield` the final message),
- * returns the last step's result, and records progress `omp --restore` reads.
+ * returns the last step's result, reports each earlier step to the spawner, and
+ * records progress `omp --restore` reads.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -97,7 +99,6 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 		},
 		getLastAssistantMessage: () => messages.at(-1),
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
-		settleAsyncWork: async () => {},
 	};
 	vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
 		session: session as unknown as AgentSession,
@@ -108,17 +109,25 @@ function stepSession(answer: (prompt: string, child: Child) => void, tools: stri
 	return { prompts, entries };
 }
 
+/** Records the step reports the spawner `Main` receives. */
+function spawnerInbox() {
+	const send = vi.spyOn(IrcBus.global(), "send").mockResolvedValue({ to: "Main", outcome: "injected" });
+	return () => send.mock.calls.map(([message]) => message);
+}
+
 describe("runSubprocess stepped spawns", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 		AsyncJobManager.resetForTests();
+		IrcBus.resetGlobalForTests();
 	});
 
-	it("sends each step after the previous yield and returns the last step's result", async () => {
+	it("sends each step after the previous yield, reports it to the spawner, and returns the last step's result", async () => {
 		const harness = stepSession(
 			(prompt, child) => child.yield({ status: "success", data: { report: `done ${prompt}` } }),
 			["read", "yield"],
 		);
+		const received = spawnerInbox();
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
@@ -127,12 +136,23 @@ describe("runSubprocess stepped spawns", () => {
 			steps: PROMPTS,
 			index: 0,
 			id: "steps-structured",
+			outputSchema: {},
+			parentAgentId: "Main",
 		});
 
 		expect(harness.prompts).toEqual(PROMPTS);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("done STEP-THREE");
 		expect(result.output).not.toContain("done STEP-ONE");
+		// Steps one and two reach the spawner, each with only its own yield; step three is the result.
+		const reports = received();
+		expect(reports).toMatchObject([
+			{ from: "steps-structured", to: "Main", progress: true },
+			{ from: "steps-structured", to: "Main", progress: true },
+		]);
+		expect(reports[0].body).toContain("done STEP-ONE");
+		expect(reports[1].body).toContain("done STEP-TWO");
+		expect(reports[1].body).not.toContain("done STEP-ONE");
 		// Restore reads every prompt as sent: nothing is left to resend.
 		expect(readStepProgress(harness.entries)).toEqual({ prompts: PROMPTS, sent: PROMPTS.length });
 	});
@@ -150,6 +170,7 @@ describe("runSubprocess stepped spawns", () => {
 			steps: PROMPTS,
 			index: 0,
 			id: "steps-failed-yield",
+			outputSchema: {},
 		});
 
 		expect(harness.prompts).toEqual([PROMPTS[0]]);
@@ -157,21 +178,26 @@ describe("runSubprocess stepped spawns", () => {
 		expect(readStepProgress(harness.entries)?.sent).toBe(1);
 	});
 
-	it("without yield, sends the next step after each final message", async () => {
+	it("without yield, sends the next step after each final message and reports it to the spawner", async () => {
 		const harness = stepSession((prompt, child) => child.say(`report ${prompt}`), ["read"]);
+		const received = spawnerInbox();
 
 		const result = await runSubprocess({
 			cwd: "/tmp",
 			agent,
 			task: PROMPTS[0],
 			steps: PROMPTS,
-			structured: false,
 			index: 0,
 			id: "steps-unstructured",
+			parentAgentId: "Main",
 		});
 
 		expect(harness.prompts).toEqual(PROMPTS);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toBe("report STEP-THREE");
+		expect(received().map(report => report.body)).toEqual([
+			expect.stringContaining("report STEP-ONE"),
+			expect.stringContaining("report STEP-TWO"),
+		]);
 	});
 });

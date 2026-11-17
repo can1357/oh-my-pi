@@ -58,13 +58,13 @@ export async function drive<T>(work: Promise<T>, holdClock: () => boolean = () =
 export const wait = <T>(work: Promise<T>): Promise<T> => drive(work, () => true);
 
 /**
- * A turn of `session` through to its result: the clock is nudged until the terminal `agent_end` is out and stands
+ * A turn of `session` through to its result: the clock is nudged until the run's `agent_end` is out and stands
  * still from there. `work` is whatever submits and awaits the turn.
  */
 export async function driveTurn<T>(session: Pick<AgentSession, "subscribe">, work: Promise<T>): Promise<T> {
 	let ended = false;
 	const stop = session.subscribe(event => {
-		if (event.type === "agent_end" && event.isTerminal !== false) ended = true;
+		if (event.type === "agent_end") ended = true;
 	});
 	try {
 		return await drive(work, () => ended);

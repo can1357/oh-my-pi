@@ -46,6 +46,20 @@ const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
 /** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
 const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 /**
+ * How long a flushed CSI introducer waits for its body before it is released
+ * to the input handler as a key. Without a bound, a stray `\x1b[` (Alt+[ on a
+ * legacy encoder, or Esc followed by `[`) would fuse with a keystroke made
+ * arbitrarily later and rewrite it.
+ */
+const CSI_INTRODUCER_GRACE_MS = 150;
+/**
+ * How long a report body applied without its `t` waits for that delayed
+ * terminator. Inside the window a lone `t` is treated as the terminator;
+ * after it, `t` is a real keystroke again.
+ */
+const INBAND_TERMINATOR_GRACE_MS = 300;
+
+/**
  * How long a relayed OSC/DCS/APC string waits for its terminator. Far longer
  * than a lone ESC: a TSP event split across console-host reads must not be
  * released mid-string (its tail would be typed into the composer), and a stall
@@ -350,8 +364,6 @@ export class StdoutStallWatchdog {
  * Minimal terminal interface for TUI
  */
 
-// Track if a terminal was ever started (for emergency restore logic)
-let terminalEverStarted = false;
 // Whether the alternate screen buffer is currently active (mirrors the TUI's
 // overlay enter/leave writes). Consulted by emergencyTerminalRestore: DECRST
 // 1049 must never be written blindly, because Windows' shared VT dispatcher
@@ -469,35 +481,9 @@ export function emergencyTerminalRestore(): void {
 				terminal.write(`${keyboardExit}\x1b[?1049l`);
 				altScreenActive = false;
 			}
-			terminal.stop();
+			// Queue every restore before stop retires the bounded output pump.
 			terminal.showCursor(true);
-		} else if (terminalEverStarted && !isTerminalHeadless()) {
-			// Blind restore only if we know a terminal was started but lost track of it
-			// This avoids writing escape sequences for non-TUI commands (grep, commit, etc.)
-			process.stdout.write(
-				"\x1b[?2026l" + // End synchronized output
-					"\x1b[?7h" + // Restore autowrap
-					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
-					"\x1b[?2004l" + // Disable bracketed paste
-					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
-					"\x1b[?2048l" + // Disable in-band resize notifications
-					"\x1b[?5522l" + // Disable enhanced paste notifications
-					"\x1b[<u" + // Pop kitty keyboard protocol
-					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
-					"\x1b[?9001l" + // Disable win32-input-mode fallback (Windows console)
-					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
-					// Leave the alternate screen only when a fullscreen overlay
-					// actually holds it — on Windows, DECRST 1049 on the main
-					// buffer homes the cursor (unconditional CursorRestoreState
-					// with no prior save), corrupting the shell handoff on exit.
-					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
-					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
-					"\x1b[?25h", // Show cursor
-			);
-			altScreenActive = false;
-			if (process.stdin.setRawMode) {
-				process.stdin.setRawMode(false);
-			}
+			terminal.stop();
 		}
 	} catch {
 		// Terminal may already be dead during crash cleanup - ignore errors
@@ -608,10 +594,19 @@ export interface Terminal {
 	 * Output bytes accepted but not yet delivered to the terminal, when the
 	 * implementation can report it. The renderer skips composing new frames
 	 * while this backlog is deep, so a slow terminal receives only fresh
-	 * frames instead of a queue of stale ones. Optional so custom Terminals
-	 * built against older pi-tui versions keep working.
+	 * frames instead of a queue of stale ones. May be a conservative UTF-8
+	 * upper bound. Implementations reporting a backlog must also implement
+	 * {@link onOutputDrain}; terminals without backpressure may omit both.
 	 */
 	readonly pendingOutputBytes?: number;
+
+	/**
+	 * Subscribe to output becoming healthy (at or below
+	 * {@link STDOUT_BACKLOG_CLEAR_BYTES}). Returns an unsubscribe function.
+	 * Callers must recheck the backlog after subscribing: it may have drained
+	 * before the listener was installed. Notifications may be coalesced.
+	 */
+	onOutputDrain?(callback: () => void): () => void;
 
 	/**
 	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
@@ -727,6 +722,11 @@ export interface Terminal {
 	 */
 	onSixelSupport?(callback: (supported: boolean) => void): void;
 	/**
+	 * Subscribe to OSC 7501 feature-query results across terminal restarts.
+	 * A late subscriber receives the current answer; unsubscribe on host teardown.
+	 */
+	onProgramStatusSupport?(callback: (supported: boolean) => void): () => void;
+	/**
 	 * Register a callback fired once the startup Glyph Protocol handshake
 	 * resolves (see {@link GlyphProtocolReportHandler}). A subscriber that
 	 * arrives after the handshake already resolved is called immediately with
@@ -772,6 +772,7 @@ type Da1SentinelOwner =
 	| { kind: "keyboard" }
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
+	| { kind: "programStatus" }
 	| { kind: "osc99Probe"; id: string }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
 	| { kind: "tsp" }
@@ -932,6 +933,11 @@ export class ProcessTerminal implements Terminal {
 	// reported. Only #safeWrite enqueues and the pump thread only drains, so
 	// the live backlog cannot exceed this until the next enqueue refreshes it.
 	#pumpBacklogBound = 0;
+	#outputSession = 0;
+	#outputStopped = false;
+	#outputDrainCallback?: () => void;
+	#stdoutDrainListener?: () => void;
+	#outputDrainListeners = new Set<() => void>();
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -951,6 +957,10 @@ export class ProcessTerminal implements Terminal {
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
+	#programStatusPending = false;
+	#programStatusReplyBuffer = "";
+	#programStatusResult: boolean | undefined;
+	#programStatusCallbacks = new Set<(supported: boolean) => void>();
 	/**
 	 * Handshake phase: `support` awaits the `s` reply, `confirm` awaits the `q`
 	 * coverage reply sent after the bundle was written.
@@ -985,6 +995,20 @@ export class ProcessTerminal implements Terminal {
 	#inBandResizeActive = false;
 	/** Reassembly buffer for a DEC 2048 in-band resize report split across stdin reads. */
 	#inBandResizeBuffer = "";
+	/**
+	 * A CSI introducer (`\x1b[`) flushed alone by the StdinBuffer. Held so the
+	 * next event is parsed as its parameter body instead of being typed into
+	 * the composer (see the prepend in the stdin sequence handler).
+	 */
+	#csiIntroducerBuffer = "";
+	/** Release timer for a held introducer whose body never arrives. */
+	#csiIntroducerTimer?: Timer;
+	/**
+	 * Timestamp of a DEC 2048 report body applied without its `t` terminator.
+	 * iTerm2 writes the body and the terminator in separate chunks; a `t`
+	 * arriving right after an implicitly completed body is that terminator.
+	 */
+	#pendingInBandTerminatorAt = 0;
 	#reportedColumns?: number;
 	#reportedRows?: number;
 	#mode2031DebounceTimer?: Timer;
@@ -1092,6 +1116,12 @@ export class ProcessTerminal implements Terminal {
 		this.#privateModeCallbacks.push(callback);
 	}
 
+	onProgramStatusSupport(callback: (supported: boolean) => void): () => void {
+		this.#programStatusCallbacks.add(callback);
+		if (this.#programStatusResult !== undefined) callback(this.#programStatusResult);
+		return () => this.#programStatusCallbacks.delete(callback);
+	}
+
 	onGlyphProtocolReport(callback: GlyphProtocolReportHandler): void {
 		this.#glyphProtocolCallbacks.push(callback);
 		// The handshake runs from enableInput(), which can precede the host's
@@ -1130,6 +1160,7 @@ export class ProcessTerminal implements Terminal {
 		onDisconnect?: () => void,
 		options?: TerminalStartOptions,
 	): void {
+		this.#outputStopped = false;
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
 		this.#disconnectHandler = onDisconnect;
@@ -1150,18 +1181,40 @@ export class ProcessTerminal implements Terminal {
 		setActiveTerminal(this);
 		// RGB belongs to this ownership session, including deferred-input prepaint.
 		setTerminalBackgroundColor(undefined);
-		terminalEverStarted = true;
-		// Own the blocking write(2) on a pump thread (unix TTYs only). A stale
-		// prebuilt natives module without the export falls back to direct writes.
+		const outputSession = ++this.#outputSession;
+		const terminalRef = new WeakRef(this);
+		this.#outputDrainCallback = () => {
+			// The native callback must not root its own writer through the terminal.
+			const terminal = terminalRef.deref();
+			if (!terminal || outputSession !== terminal.#outputSession || terminal.#dead) return;
+			const pump = terminal.#outputPump;
+			if (pump?.dead) {
+				terminal.#markTerminalDisconnected("stdout failed; output pump died");
+				return;
+			}
+			// A notification can be queued behind another enqueue. Refresh instead
+			// of assuming the queue is still below the threshold.
+			const pending = pump?.pending() ?? process.stdout.writableLength ?? 0;
+			terminal.#pumpBacklogBound = pending;
+			terminal.#trackStdoutBacklog(pending);
+			if (terminal.#dead || pending > STDOUT_BACKLOG_CLEAR_BYTES) return;
+			for (const listener of terminal.#outputDrainListeners) listener();
+		};
+		// Own write(2) on a dedicated pump thread (unix TTYs only).
 		// Test suites spy on `process.stdout.write` with a faked isTTY, so the
 		// pump stays off under `bun test` — same philosophy as isTerminalHeadless.
 		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
 			try {
-				this.#outputPump = new TtyWriter(1);
+				this.#outputPump = new TtyWriter(1, STDOUT_BACKLOG_CLEAR_BYTES, this.#outputDrainCallback);
 				this.#pumpBacklogBound = 0;
 			} catch (err) {
 				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
 			}
+		}
+
+		if (!this.#outputPump) {
+			this.#stdoutDrainListener = this.#outputDrainCallback;
+			process.stdout.on("drain", this.#stdoutDrainListener);
 		}
 
 		// Keep unmanaged native fd-2 writes off the viewport while we own the
@@ -1269,6 +1322,9 @@ export class ProcessTerminal implements Terminal {
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
+		// OSC 7501 support requires an actual terminal reply; merely writing a
+		// report does not establish that a status record exists to protect.
+		this.#queryProgramStatusSupport();
 
 		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
 		// triggers the bundled icon registration so the nerd symbol preset renders
@@ -1409,6 +1465,11 @@ export class ProcessTerminal implements Terminal {
 		// ignore per spec (#4748): capture the leading digits of each field and
 		// skip the subparameter tail instead of dropping the whole report.
 		const inBandResizePattern = /^\x1b\[48;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?t$/;
+		// The same body without its `t` terminator. iTerm2 writes the body and
+		// the terminator as separate chunks, and the body alone is unambiguous:
+		// no key reply carries a `48;` selector plus four numeric fields.
+		const inBandResizeBodyPattern =
+			/^\x1b\[48;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?;(\d+)(?::[\d:]*)?$/;
 
 		this.#stdinSequenceHandler = (sequence: string) => {
 			const decoder = this.#win32InputDecoder;
@@ -1421,8 +1482,10 @@ export class ProcessTerminal implements Terminal {
 				// of their own and would otherwise be appended to that fragment.
 				this.#privateCsiResponseBuffer = "";
 				this.#inBandResizeBuffer = "";
+				this.#clearCsiIntroducer();
 				this.#osc11ResponseBuffer = "";
 				this.#osc99ResponseBuffer = "";
+				this.#programStatusReplyBuffer = "";
 				this.#glyphProtocolReplyBuffer = "";
 				this.#tspReplyBuffer = "";
 				for (const key of win32Keys) this.#stdinSequenceHandler?.(key);
@@ -1436,6 +1499,60 @@ export class ProcessTerminal implements Terminal {
 						decoder.hasPendingString ? WIN32_RELAYED_STRING_TIMEOUT_MS : WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
 					);
 				}
+				return;
+			}
+			// iTerm2 writes a report body and its `t` terminator in separate
+			// chunks. When a body was applied without its terminator (see the
+			// body match below), the imminent lone `t` is that terminator and
+			// must not reach the composer.
+			if (sequence === "t" && this.#pendingInBandTerminatorAt !== 0 && !this.#inBandResizeBuffer) {
+				const elapsed = Date.now() - this.#pendingInBandTerminatorAt;
+				this.#pendingInBandTerminatorAt = 0;
+				if (elapsed < INBAND_TERMINATOR_GRACE_MS) return;
+			}
+			// A pty read can bundle a CSI with the next escape sequence
+			// (`\x1b[48;…2912\x1b[`): the reassemblers below take one sequence per
+			// event, so split at the embedded ESC and dispatch both halves in
+			// order. A CSI can never contain a raw ESC, and X10 mouse bodies
+			// (bytes >= 0x20) cannot either, so this is always a sequence
+			// boundary.
+			const embeddedEsc = sequence.indexOf("\x1b", 1);
+			if (embeddedEsc > 0 && sequence.startsWith("\x1b[")) {
+				this.#stdinSequenceHandler?.(sequence.slice(0, embeddedEsc));
+				this.#stdinSequenceHandler?.(sequence.slice(embeddedEsc));
+				return;
+			}
+			// A StdinBuffer flush can end immediately after the CSI introducer:
+			// the body then arrives in the next read as bare printable bytes — a
+			// DEC 2048 resize report torn this way during a busy resize or a
+			// terminal teardown types `48;rows;cols;hPx;wPx` into the composer.
+			// Hold the introducer and prepend it to the next event so the
+			// completed sequence reaches whichever reassembler owns it: the
+			// in-band report buffer below, private-CSI probe reassembly, or the
+			// input handler for a genuine key (`\x1b[A`). A fresh ESC-led event
+			// interrupts the held head — it is a sequence of its own.
+			if (this.#csiIntroducerBuffer) {
+				this.#clearCsiIntroducer();
+				if (!sequence.startsWith("\x1b")) sequence = `\x1b[${sequence}`;
+			}
+			if (sequence === "\x1b[" && this.#inBandResizeActive) {
+				// A complete body held from the previous read is waiting on its
+				// late `t`; apply it now. A mere partial is dead once a new
+				// introducer interrupts it.
+				if (this.#inBandResizeBuffer) {
+					const heldBody = this.#inBandResizeBuffer.match(inBandResizeBodyPattern);
+					this.#inBandResizeBuffer = "";
+					if (heldBody) {
+						this.#pendingInBandTerminatorAt = Date.now();
+						this.#handleInBandResizeReport(heldBody[1]!, heldBody[2]!, heldBody[3]!, heldBody[4]!);
+					}
+				}
+				// A new ESC interrupts any private-CSI partial the same way, so
+				// holding unconditionally cannot lose a reply and keeps a report
+				// body from leaking behind the pending partial.
+				this.#privateCsiResponseBuffer = "";
+				this.#csiIntroducerBuffer = sequence;
+				this.#armCsiIntroducerRelease();
 				return;
 			}
 			// Fast path for plain-text bytes: every escape-probe regex below
@@ -1452,6 +1569,7 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
 				this.#osc99ResponseBuffer.length === 0 &&
+				this.#programStatusReplyBuffer.length === 0 &&
 				this.#glyphProtocolReplyBuffer.length === 0 &&
 				this.#tspReplyBuffer.length === 0
 			) {
@@ -1519,6 +1637,24 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer = isInBandResizePartial ? sequence : "";
 				if (isInBandResizePartial) return;
 			} else if (this.#inBandResizeBuffer || isInBandResizePartial) {
+				// A held body with all four fields is a complete report only
+				// waiting on its late `t`. Any other continuation ends it: apply
+				// the report and reprocess the event instead of merging a
+				// keystroke into the report body.
+				const heldBody = this.#inBandResizeBuffer.match(inBandResizeBodyPattern);
+				if (
+					heldBody &&
+					sequence !== "t" &&
+					!sequence.startsWith("\x1b") &&
+					!sequence.startsWith(";") &&
+					!/^\d/.test(sequence)
+				) {
+					this.#inBandResizeBuffer = "";
+					this.#pendingInBandTerminatorAt = Date.now();
+					this.#handleInBandResizeReport(heldBody[1]!, heldBody[2]!, heldBody[3]!, heldBody[4]!);
+					this.#stdinSequenceHandler?.(sequence);
+					return;
+				}
 				this.#inBandResizeBuffer += sequence;
 				if (this.#inBandResizeBuffer.length > 256) {
 					this.#inBandResizeBuffer = "";
@@ -1545,6 +1681,8 @@ export class ProcessTerminal implements Terminal {
 			// handler so the renderer reflows.
 			const resizeMatch = sequence.match(inBandResizePattern);
 			if (resizeMatch) {
+				// The explicit terminator arrived; a later lone `t` is a keystroke.
+				this.#pendingInBandTerminatorAt = 0;
 				this.#handleInBandResizeReport(resizeMatch[1]!, resizeMatch[2]!, resizeMatch[3]!, resizeMatch[4]!);
 				return;
 			}
@@ -1619,6 +1757,10 @@ export class ProcessTerminal implements Terminal {
 							this.#modifyOtherKeysTimeout = undefined;
 						}
 						this.#enableModifyOtherKeysFallback();
+						break;
+					}
+					case "programStatus": {
+						this.#resolveProgramStatusSupport(false);
 						break;
 					}
 					case "osc99Probe": {
@@ -1723,6 +1865,40 @@ export class ProcessTerminal implements Terminal {
 					const [, meta, payload] = osc99Match;
 					this.#osc99ResponseBuffer = "";
 					this.#handleOsc99CapabilityResponse(meta!, payload!);
+					return;
+				}
+			}
+
+			// Swallow OSC 7501 feature replies even after their DA1 sentinel:
+			// a delayed terminal answer must not appear in the composer.
+			if (this.#programStatusReplyBuffer || sequence.startsWith("\x1b]7501;")) {
+				if (this.#programStatusReplyBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#programStatusReplyBuffer = "";
+				} else {
+					this.#programStatusReplyBuffer += sequence;
+					const reply = this.#programStatusReplyBuffer;
+					if (reply.length > 4096) {
+						this.#programStatusReplyBuffer = "";
+						return;
+					}
+					if (!reply.endsWith("\x07") && !reply.endsWith("\x1b\\")) return;
+					this.#programStatusReplyBuffer = "";
+					const match = /^\x1b\]7501;\?((?::[^\x07\x1b]*)?)(?:\x07|\x1b\\)$/u.exec(reply);
+					if (match) {
+						let states: string[] | undefined;
+						for (const pair of match[1]!.split(":")) {
+							// The spec allows whitespace around both keys and values.
+							const eq = pair.indexOf("=");
+							if (eq === -1 || pair.slice(0, eq).trim() !== "states") continue;
+							states = pair
+								.slice(eq + 1)
+								.split(",")
+								.map(state => state.trim());
+						}
+						this.#resolveProgramStatusSupport(
+							states === undefined || (states.includes("working") && states.includes("blocked")),
+						);
+					}
 					return;
 				}
 			}
@@ -1859,6 +2035,38 @@ export class ProcessTerminal implements Terminal {
 		this.#da1SentinelOwners.push({ kind: "osc11" });
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+	}
+
+	#queryProgramStatusSupport(): void {
+		this.#programStatusPending = false;
+		this.#programStatusReplyBuffer = "";
+		this.#programStatusResult = undefined;
+		// Multiplexers can consume the query or leak its reply into the pane;
+		// don't assume their outer terminal's support reaches this process.
+		if (this.#dead || isInsideTerminalMultiplexer($env)) return;
+		if (isBunTestRuntime() && $env.PI_TUI_PROGRAM_STATUS_PROBE !== "1") return;
+		this.#programStatusPending = true;
+		this.#da1SentinelOwners.push({ kind: "programStatus" });
+		this.#safeWrite("\x1b]7501;?\x1b\\\x1b[c");
+	}
+
+	#resolveProgramStatusSupport(supported: boolean): void {
+		if (!this.#programStatusPending) return;
+		this.#programStatusPending = false;
+		this.#programStatusReplyBuffer = "";
+		this.#publishProgramStatusSupport(supported);
+	}
+
+	#publishProgramStatusSupport(supported: boolean): void {
+		if (this.#programStatusResult === supported) return;
+		this.#programStatusResult = supported;
+		for (const callback of this.#programStatusCallbacks) {
+			try {
+				callback(supported);
+			} catch {
+				// A subscriber must not interrupt terminal input processing.
+			}
+		}
 	}
 
 	#shouldQueryOsc99Support(): boolean {
@@ -2260,6 +2468,26 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite(`\x1b[?${mode}l`);
 	}
 
+	/** Arm the release of a held CSI introducer that no body follows. */
+	#armCsiIntroducerRelease(): void {
+		clearTimeout(this.#csiIntroducerTimer);
+		this.#csiIntroducerTimer = setTimeout(() => {
+			this.#csiIntroducerTimer = undefined;
+			const held = this.#csiIntroducerBuffer;
+			this.#csiIntroducerBuffer = "";
+			if (held && this.#active && this.#inputHandler) this.#inputHandler(held);
+		}, CSI_INTRODUCER_GRACE_MS);
+	}
+
+	/** Drop a held introducer (and its release timer) without delivering it. */
+	#clearCsiIntroducer(): void {
+		if (this.#csiIntroducerTimer) {
+			clearTimeout(this.#csiIntroducerTimer);
+			this.#csiIntroducerTimer = undefined;
+		}
+		this.#csiIntroducerBuffer = "";
+	}
+
 	/**
 	 * Enable DEC 2048 in-band resize notifications. The terminal emits an initial
 	 * report immediately, seeding reported geometry and cell dimensions.
@@ -2381,10 +2609,24 @@ export class ProcessTerminal implements Terminal {
 		} finally {
 			process.stdin.removeListener("data", onData);
 			this.#inputHandler = previousHandler;
+			// A report head captured while no handler could claim its body is
+			// stale once the TTY is handed back.
+			this.#clearCsiIntroducer();
+			this.#pendingInBandTerminatorAt = 0;
 		}
 	}
 
 	stop(): void {
+		if (this.#outputStopped) return;
+		// Invalidate even callbacks already queued before removing their source.
+		this.#outputSession++;
+		this.#outputDrainCallback = undefined;
+		if (this.#stdoutDrainListener) {
+			process.stdout.removeListener("drain", this.#stdoutDrainListener);
+			this.#stdoutDrainListener = undefined;
+		}
+		this.#outputDrainListeners.clear();
+		this.#outputDrainListeners = new Set();
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
@@ -2394,7 +2636,10 @@ export class ProcessTerminal implements Terminal {
 			setActiveTerminal(null);
 			setTerminalBackgroundColor(undefined);
 		}
-		if (this.#headless) return;
+		if (this.#headless) {
+			this.#outputStopped = true;
+			return;
+		}
 
 		// Release terminal ownership of fd 2 first so external programs,
 		// suspend, and shutdown see the real stderr even if a later teardown
@@ -2466,6 +2711,11 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
+		this.#programStatusPending = false;
+		this.#programStatusReplyBuffer = "";
+		// A resumed TUI may own a different terminal: keep subscribers, but
+		// release the previous receiver's support until the next probe answers.
+		if (this.#programStatusResult === true) this.#publishProgramStatusSupport(false);
 		this.#glyphProtocolPhase = "idle";
 		this.#glyphProtocolResult = undefined;
 		this.#glyphProtocolReplyBuffer = "";
@@ -2480,6 +2730,8 @@ export class ProcessTerminal implements Terminal {
 		this.#tspCallbacks = [];
 		this.#privateCsiResponseBuffer = "";
 		this.#inBandResizeBuffer = "";
+		this.#clearCsiIntroducer();
+		this.#pendingInBandTerminatorAt = 0;
 		this.#da1SentinelOwners.length = 0;
 		this.#privateModeCallbacks = [];
 		this.#privateModeSupport.clear();
@@ -2529,12 +2781,15 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#disarmStdoutStallWatchdog();
 		this.#resizeHandler = undefined;
-		// Flush the restore sequences enqueued above (bounded — a stalled PTY
-		// must not wedge exit), then retire the pump. Later writes (emergency
-		// restore's showCursor) fall back to direct stdout writes.
+		this.showCursor(true);
+		// Queue all restoration before retiring the pump. This instance cannot
+		// write again until start(), even when the bounded drain times out.
+		this.#outputStopped = true;
 		if (this.#outputPump) {
-			this.#outputPump.stop(1000);
+			const pump = this.#outputPump;
 			this.#outputPump = undefined;
+			this.#pumpBacklogBound = 0;
+			pump.stop(1000);
 		}
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
@@ -2618,7 +2873,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#safeWrite(data: string): void {
-		if (this.#headless) return;
+		if (this.#headless || this.#outputStopped) return;
 		if (this.#dead) return;
 		// Skip control sequences when stdout isn't a TTY (piped output, tests, log
 		// files). They serve no purpose there and would surface as visible noise.
@@ -2634,14 +2889,8 @@ export class ProcessTerminal implements Terminal {
 				this.#markTerminalDisconnected("stdout failed", err);
 				return;
 			}
-			// A live enqueue reports at least this chunk's UTF-8 size, never below
-			// its UTF-16 length; a dead pump enqueues nothing and reports only the
-			// remainder it is dropping (soon zero). Only a report that small can
-			// come from a dead pump, so the native `dead` read is skipped otherwise.
-			if ((pending < data.length || data.length === 0) && pump.dead) {
-				this.#markTerminalDisconnected("stdout failed; output pump died");
-				return;
-			}
+			// Terminal failures are reported by the pump's drain callback even
+			// while idle; enqueue counts cannot distinguish failure from progress.
 			this.#pumpBacklogBound = pending;
 			// Feed the live backlog to the stall watchdog rather than tripping on
 			// the instantaneous byte count: a single large-but-draining frame (a
@@ -2695,6 +2944,12 @@ export class ProcessTerminal implements Terminal {
 		if (this.#inBandResizeActive && this.#reportedColumns) return this.#reportedColumns;
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
 	}
+	onOutputDrain(callback: () => void): () => void {
+		const listeners = this.#outputDrainListeners;
+		listeners.add(callback);
+		return () => listeners.delete(callback);
+	}
+
 	/**
 	 * With the output pump, a backlog bound at or below
 	 * {@link STDOUT_BACKLOG_CLEAR_BYTES} is reported as-is instead of re-read:

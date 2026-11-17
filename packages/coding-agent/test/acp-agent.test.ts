@@ -22,6 +22,7 @@ import {
 	createAcpExtensionUiContext,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
+import { type AgentRef, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type {
 	AgentSession,
 	AgentSessionEvent,
@@ -54,6 +55,7 @@ import {
 } from "@oh-my-pi/pi-utils/acp";
 import { TOOL_NAME as DELAYED_MCP_TOOL_NAME } from "./fixtures/delayed-tool-mcp";
 
+import { cfgMcpStartupTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import { cfgPlanAutosave, cfgPlanAutosaveDir, cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
 /** Validates an ACP wire payload against the in-house protocol schemas. */
@@ -1391,8 +1393,8 @@ describe("ACP agent", () => {
 			},
 			defaults: {
 				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
-				textToSpeechModel: "local/kokoro",
-				voice: "af_heart",
+				textToSpeechModel: "local/phonon-31m",
+				voice: "harper",
 				speed: 1,
 			},
 			speechToText: {
@@ -1405,19 +1407,19 @@ describe("ACP agent", () => {
 				speechVoiceSetting: "speech.voice",
 				speedSetting: "tts.localSpeed",
 				speechSpeedSetting: "speech.speed",
-				defaultModel: "local/kokoro",
-				defaultVoice: "af_heart",
+				defaultModel: "local/phonon-31m",
+				defaultVoice: "harper",
 				defaultSpeed: 1,
-				speedRange: { min: 0.5, max: 2.5 },
+				speedRange: { min: 0.8, max: 1.3 },
 			},
 		});
 		expect(result.speechToText.models).toContainEqual(
 			expect.objectContaining({ value: "local/nemotron-streaming-en-0.6b" }),
 		);
-		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
+		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/phonon-31m"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 		// Speed presets are numbers so clients can write them straight into the numeric settings.
-		expect(result.textToSpeech.speeds.map(speed => speed.value)).toEqual([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5]);
+		expect(result.textToSpeech.speeds.map(speed => speed.value)).toEqual([0.8, 0.9, 1, 1.1, 1.2, 1.3]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
@@ -1826,6 +1828,109 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("adds background subagent spend to usage_update cost (#19102)", async () => {
+		const harness = await createHarness();
+		const live = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(live.sessionId)!;
+		(session as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+		const costing = (total: number) => {
+			const message = makeAssistantMessage("spent");
+			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
+			return message;
+		};
+		session.sessionManager.appendMessage(costing(1));
+		// A blocking `task` result carries its child's $0.30; a background spawn's carries nothing.
+		session.sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "blocking",
+			toolName: "task",
+			content: [{ type: "text", text: "done" }],
+			details: { usage: costing(0.3).usage },
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await session.sessionManager.ensureOnDisk();
+		const artifacts = session.sessionManager.getSessionFile()!.slice(0, -".jsonl".length);
+		const child = (id: string, cost: number): AgentRef => ({
+			id,
+			displayName: id,
+			kind: "sub",
+			status: "parked",
+			session: null,
+			sessionFile: path.join(artifacts, `${id}.jsonl`),
+			generation: 0,
+			createdAt: 0,
+			lastActivity: 0,
+			history: { metrics: { tokens: 1, requests: 1, tools: 0, cost, durationMs: 0 } },
+		});
+		// ACP registers the root itself as `kind: "main"` under `acp:<id>`; it is not part of its own tree.
+		const rootRef: AgentRef = {
+			...child(`acp:${live.sessionId}`, 1.3),
+			kind: "main",
+			sessionFile: session.sessionManager.getSessionFile()!,
+		};
+		const list = spyOn(AgentRegistry.global(), "list").mockReturnValue([
+			rootRef,
+			child("Blocking", 0.3),
+			child("Background", 0.2),
+		]);
+		try {
+			await harness.agent.prompt({ sessionId: live.sessionId, prompt: [{ type: "text", text: "ping" }] });
+		} finally {
+			list.mockRestore();
+		}
+
+		const usageUpdates = harness.updates.filter(
+			update => update.sessionId === live.sessionId && update.update.sessionUpdate === "usage_update",
+		);
+		const last = usageUpdates.at(-1)?.update as { cost?: { amount: number } } | undefined;
+		expect(last?.cost?.amount).toBeCloseTo(1.5, 10);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("counts a loaded session's persisted background subagent spend (#19102)", async () => {
+		const harness = await createHarness();
+		const stored = new FakeAgentSession(harness.cwdA);
+		harness.sessions.push(stored);
+		const costing = (total: number) => {
+			const message = makeAssistantMessage("spent");
+			message.usage.cost = { input: 0, output: total, cacheRead: 0, cacheWrite: 0, total };
+			return message;
+		};
+		stored.sessionManager.appendMessage({ role: "user", content: "spawn", timestamp: Date.now() });
+		stored.sessionManager.appendMessage(costing(1));
+		await stored.sessionManager.ensureOnDisk();
+		await stored.sessionManager.flush();
+		// A background child from before the restart: only its own transcript records its spend.
+		const artifacts = stored.sessionManager.getSessionFile()!.slice(0, -".jsonl".length);
+		const child = SessionManager.create(harness.cwdA, artifacts);
+		child.appendMessage({ role: "user", content: "probe", timestamp: Date.now() });
+		child.appendMessage(costing(0.2));
+		await child.ensureOnDisk();
+		await child.flush();
+		await child.close();
+
+		try {
+			await harness.agent.loadSession({ sessionId: stored.sessionId, cwd: harness.cwdA, mcpServers: [] });
+			const loaded = harness.sessions.at(-1)!;
+			(loaded as { getContextUsage(): unknown }).getContextUsage = () => ({ contextWindow: 1000, tokens: 10 });
+			await harness.agent.prompt({ sessionId: stored.sessionId, prompt: [{ type: "text", text: "ping" }] });
+
+			const last = harness.updates
+				.filter(update => update.sessionId === stored.sessionId && update.update.sessionUpdate === "usage_update")
+				.at(-1)?.update as { cost?: { amount: number } } | undefined;
+			expect(last?.cost?.amount).toBeCloseTo(1.2, 10);
+		} finally {
+			for (const ref of AgentRegistry.global().list()) {
+				if (ref.sessionFile?.startsWith(artifacts)) AgentRegistry.global().unregister(ref.id);
+			}
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("loads a session stored under a legacy/hashed project directory (#7779)", async () => {
@@ -3946,7 +4051,8 @@ describe("ACP agent", () => {
 			expect(calls).toHaveLength(1);
 			const request = calls[0]!;
 			if (!isFormElicitation(request)) throw new Error("expected form-mode elicitation");
-			expect(request.message).toContain("Staging is green; production has a pending migration.");
+			// Section titles are the fields' property titles; the message keeps only the other form text.
+			expect(request.message).toBe("Staging is green; production has a pending migration.");
 			expect(request.requestedSchema.required).toEqual(["replicas"]);
 			expect(request.requestedSchema.properties).toEqual({
 				target: {
@@ -4416,6 +4522,25 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 			// server's tool. Before the fix, this late arrival was dropped.
 			await pollUntil(() => refreshSpy.mock.calls.length > 1);
 			expect(namesOf(refreshSpy.mock.calls.at(-1)?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
+		} finally {
+			refreshSpy.mockRestore();
+		}
+	}, 15_000);
+
+	it("binds a slow server's tools before session/new returns when mcp.startupTimeoutMs covers it (#19253)", async () => {
+		const harness = await createHarness();
+		// Above the fixture's 450ms initialize delay, so the tools must be bound
+		// by the first, synchronous refresh instead of a background one.
+		cfgMcpStartupTimeoutMs.set(Settings.instance, 5_000);
+		const refreshSpy = spyOn(FakeAgentSession.prototype, "refreshMCPTools");
+		const namesOf = (tools: unknown[]) => (tools as Array<{ name: string }>).map(tool => tool.name);
+
+		try {
+			await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [{ name: "delayed", command: BUN_EXEC, args: [FIXTURE_PATH], env: [] }],
+			});
+			expect(namesOf(refreshSpy.mock.calls[0]?.[0] ?? [])).toEqual([`mcp__delayed_${DELAYED_MCP_TOOL_NAME}`]);
 		} finally {
 			refreshSpy.mockRestore();
 		}

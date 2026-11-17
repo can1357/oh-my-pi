@@ -8,6 +8,7 @@ import {
 	chatTextBackend,
 	createNativeJudge,
 	nativeJudgmentAcceptsImages,
+	isGatewayCredentialsExhausted,
 	JudgmentApiError,
 	JudgmentParseError,
 	NativeJudge,
@@ -1268,6 +1269,42 @@ describe("NativeJudge", () => {
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
 	});
 
+	it("sends a gateway's credentials-exhausted 502 once but retries any other 502", async () => {
+		const exhausted = {
+			type: "upstream_credentials_exhausted",
+			is_bifrost_error: false,
+			status_code: 502,
+			error: { type: "upstream_credentials_exhausted", message: "all keys failed" },
+		};
+		let calls = 0;
+		const gateway = new NativeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				calls++;
+				return Response.json(exhausted, { status: 502, headers: { "retry-after-ms": "1" } });
+			},
+		});
+		const error = await gateway.judge(request).catch(e => e);
+		expect(error).toBeInstanceOf(JudgmentApiError);
+		expect(isGatewayCredentialsExhausted(error)).toBe(true);
+		expect(calls).toBe(1);
+
+		const statuses = [502, 502, 200];
+		const flaky = new NativeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				const status = statuses.shift() ?? 200;
+				if (status === 200) return answered();
+				return Response.json(
+					{ error: { type: "bad_gateway", message: "upstream reset" } },
+					{ status, headers: { "retry-after-ms": "1" } },
+				);
+			},
+		});
+		expect((await flaky.judge(request)).answers.urgent.noul).toBe(0.92);
+		expect(statuses).toEqual([]);
+	});
+
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {
 		let calls = 0;
 		const rejecting = new NativeJudge({
@@ -1498,6 +1535,29 @@ describe("NativeJudge OpenAI Decisions dialect", () => {
 		});
 		expect(result).toMatchObject({ api: "openai-decisions", provider: "openai", model: "gpt-6-luna" });
 		expect(result.usage).toMatchObject({ input: 42, output: 0, totalTokens: 42 });
+	});
+
+	it("reads chat-style prompt/completion usage from gateways such as Bifrost", async () => {
+		const judge = createNativeJudge(
+			{ ...luna, provider: "bifrost", baseUrl: "http://bifrost.test:8080/v1" },
+			{
+				apiKey: "sk-bf-test",
+				fetch: async () =>
+					Response.json({
+						model: "gpt-6-luna",
+						answers: [{ type: "predicate", name: "urgent", probability: 0.8 }],
+						usage: { prompt_tokens: 437, completion_tokens: 72, total_tokens: 509 },
+					}),
+			},
+		);
+
+		const result = await judge.judge({
+			state: { ticket: "The site is down." },
+			questions: { urgent: { type: "noul", instructions: "Is it urgent?" } },
+		});
+
+		expect(result.answers).toEqual({ urgent: { type: "noul", noul: 0.8 } });
+		expect(result.usage).toMatchObject({ input: 437, output: 72, totalTokens: 509 });
 	});
 
 	it("encodes separate ordered images as data URLs after JSON state text", async () => {

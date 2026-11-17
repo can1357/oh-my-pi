@@ -1,4 +1,5 @@
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
+import type { SessionCredential } from "./affinity";
 import type {
 	OAuthAuthInfo,
 	OAuthController,
@@ -536,6 +537,12 @@ export function oauthAccountKey(identity: {
 
 /** Non-secret identity bound to the OAuth credential selected for one request attempt. */
 export interface OAuthRequestIdentity {
+	/**
+	 * Provider account UUID of the selected credential (Anthropic
+	 * `oauth_account.account_uuid`). Non-secret; lets wire identity such as the
+	 * Claude `device_id` follow the account actually serving the request.
+	 */
+	accountId?: string;
 	orgId?: string;
 	region?: string;
 	inferenceRegion?: "global" | "eu" | "us";
@@ -1258,6 +1265,14 @@ export interface SessionsApi {
 	 * headroom, before considering a model/provider fallback.
 	 */
 	release(provider: string, sessionId: string): boolean;
+	/**
+	 * Read-only display and usage-attribution surface: the credential row that
+	 * most recently served `sessionId` for `provider`, including API-key rows
+	 * (which carry no OAuth identity). Selection, ranking, and rotation never
+	 * consult it. Optional because worker/broker seams may not expose it;
+	 * callers must treat its absence as "unknown attribution".
+	 */
+	sticky?(provider: string, sessionId: string | undefined): SessionCredential | undefined;
 }
 
 /** Usage reporting, observation, and provider configuration. */

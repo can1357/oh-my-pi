@@ -7,7 +7,11 @@ import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import type { SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { cfgProvidersWebKeyless, cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
+
+/** The real engine loader, captured before any test replaces it. */
+const loadSearchProvider = provider.getSearchProvider;
 
 /** Records each attempted `provider/id` and fails so the chain keeps walking. */
 class RecordingProvider extends SearchProvider {
@@ -29,12 +33,13 @@ class RecordingProvider extends SearchProvider {
 }
 
 describe("default web chain", () => {
+	let settings: Settings;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let attempted: string[];
 
 	beforeEach(async () => {
-		const settings = await Settings.init({ inMemory: true });
+		settings = await Settings.init({ inMemory: true });
 		authStorage = createInMemoryAuthStorage();
 		// Paid credentials the chain must never spend unless the session already runs on them.
 		for (const paid of [
@@ -68,6 +73,20 @@ describe("default web chain", () => {
 		if (!model) throw new Error(`Missing catalog model: ${provider}/${id}`);
 		return model;
 	}
+
+	it("offline skips foreign search engines but still tries hosted search on the session provider", async () => {
+		const isolated = Settings.isolated({ "models.offline": true });
+		await runSearchQuery(
+			{ query: "anything" },
+			{
+				authStorage,
+				modelRegistry,
+				sessionModel: sessionModel("anthropic", "claude-sonnet-4-5"),
+				settings: isolated,
+			},
+		);
+		expect(attempted).toEqual(["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-5"]);
+	});
 
 	it.each([
 		["anthropic", "claude-sonnet-4-5", "claude-haiku-4-5"],
@@ -126,6 +145,7 @@ describe("default web chain", () => {
 			label: "Anthropic",
 			isAvailable: () => true,
 			isExplicitlyAvailable: () => true,
+			isKeyless: () => false,
 			search: async () => ({ provider: "anthropic", answer: "from weights", sources: [] }),
 		});
 
@@ -142,5 +162,70 @@ describe("default web chain", () => {
 
 		expect(attempted).toEqual([]);
 		expect(result.details.error).toContain("no web search grounding");
+	});
+
+	describe("with providers.webKeyless off", () => {
+		/** Credentials and endpoints that would make a keyless-capable engine count as configured. */
+		const ENGINE_ENV = [
+			"PARALLEL_API_KEY",
+			"EXA_API_KEY",
+			"FIRECRAWL_API_KEY",
+			"FIRECRAWL_BASE_URL",
+			"FIRECRAWL_API_URL",
+			"SEARXNG_ENDPOINT",
+		];
+		const savedEnv = new Map<string, string | undefined>();
+
+		beforeEach(() => {
+			for (const name of ENGINE_ENV) {
+				savedEnv.set(name, process.env[name]);
+				delete process.env[name];
+			}
+			cfgProvidersWebKeyless.set(settings, false);
+			// Real engines, so their own keyless detection runs; searches record and fail.
+			vi.spyOn(provider, "getSearchProvider").mockImplementation(async id => {
+				const engine = await loadSearchProvider(id);
+				vi.spyOn(engine, "search").mockImplementation(async params => {
+					attempted.push(`${params.model.provider}/${params.model.id}`);
+					throw new Error("try next");
+				});
+				return engine;
+			});
+		});
+
+		afterEach(() => {
+			for (const [name, value] of savedEnv) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		});
+
+		it("reaches only engines on the user's credential and hosted search", async () => {
+			authStorage.keys.setRuntime("parallel", "test-parallel-key");
+
+			await runSearchQuery(
+				{ query: "anything" },
+				{ authStorage, modelRegistry, sessionModel: sessionModel("anthropic", "claude-sonnet-4-5") },
+			);
+
+			// Keyless Exa, Firecrawl, and the scraped engines in the default chain never run.
+			expect(attempted).toEqual(["web/parallel", "anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-4-5"]);
+		});
+
+		it("skips keyless engines the web role lists and says why nothing ran", async () => {
+			settings.setModelRole("web", "web/exa");
+			cfgRetryFallbackChains.set(settings, { web: ["web/duckduckgo"] });
+
+			const result = await runSearchQuery({ query: "anything" }, { authStorage, modelRegistry });
+
+			expect(attempted).toEqual([]);
+			expect(result.details.error).toContain("providers.webKeyless is off");
+		});
+
+		it("still runs a keyless engine the request names", async () => {
+			await runSearchQuery({ query: "anything", model: "web/duckduckgo" }, { authStorage, modelRegistry });
+
+			expect(attempted).toEqual(["web/duckduckgo"]);
+		});
 	});
 });

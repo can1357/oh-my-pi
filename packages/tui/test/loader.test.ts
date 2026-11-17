@@ -53,6 +53,23 @@ describe("Loader component", () => {
 		loader.stop();
 	});
 
+	it("repaints a single-glyph loader with an animated message on every spinner period without synchronized output", () => {
+		// The working row: one glyph (the interrupt key) beside a shimmering intent. Without DEC 2026
+		// its spinner-period repaints are the only ones it gets, so they cannot wait for a new glyph.
+		vi.useFakeTimers({ now: 0 });
+		const ui = { requestComponentRender: vi.fn() };
+		const colorMessage = ((text: string) => `${text}@${Date.now()}`) as LoaderMessageColorFn & { animated: true };
+		colorMessage.animated = true;
+		const loader = new Loader(ui as unknown as TUI, text => text, colorMessage, "Working", [" esc"]);
+
+		vi.advanceTimersByTime(79);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+
+		vi.advanceTimersByTime(91);
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(3);
+		loader.stop();
+	});
+
 	it("skips animated render requests when composed text is unchanged before the spinner advances", () => {
 		vi.useFakeTimers({ now: 0 });
 		const ui = { requestComponentRender: vi.fn() };
@@ -321,8 +338,7 @@ describe("Loader component", () => {
 	});
 
 	it("holds animated message-only frames when synchronized output is unavailable", () => {
-		vi.useFakeTimers({ now: 0 });
-		setSystemTime(new Date(1_000));
+		vi.useFakeTimers({ now: 1_000 });
 		const ui = { synchronizedOutput: false, requestComponentRender: vi.fn() };
 		const colorMessage = ((text: string) => `${text}-${Date.now()}`) as LoaderMessageColorFn & { animated: true };
 		colorMessage.animated = true;

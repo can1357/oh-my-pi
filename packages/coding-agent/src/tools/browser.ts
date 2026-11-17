@@ -26,8 +26,8 @@ import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
 import { ownsTerminal } from "./browser/terminal-owner";
 import { WebKitUnavailableError } from "./browser/webkit/host";
-import { installWebKitEngine } from "./browser/webkit/install";
-import { resolveWebKitKind, VIEWER_PLATFORMS, webKitEngineToInstall } from "./browser/webkit/kind";
+import { installWebKitEngine, webKitEngineToInstall } from "./browser/webkit/install";
+import { resolveWebKitKind, VIEWER_PLATFORMS } from "./browser/webkit/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -177,7 +177,8 @@ interface BrowserPreludeDetails {
  * over the `browser.tern` setting to adopt a block; `headed` does not opt out),
  * a cmux surface, then omp's own browser ({@link ownBrowserKind}). `app: "auto"`
  * is that chain without the relay. Tern and cmux are automatic only while no
- * other omp owns the terminal. `app: "tern"` and `app: "webkit"` are explicit:
+ * other omp owns the terminal, and none of the user's own surfaces (relay, Tern,
+ * cmux) is automatic for a subagent. `app: "tern"` and `app: "webkit"` are explicit:
  * they throw when Tern or omp's WebKit host is unavailable.
  */
 export function resolveBrowserKind(
@@ -233,8 +234,9 @@ export function resolveBrowserKind(
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
 	// endpoint. A configured endpoint is a default, not an override: an
-	// explicit app wins.
-	if (app !== "auto") {
+	// explicit app wins. A `/tan` clone (task depth 0) keeps its parent's defaults.
+	const subagent = (session.taskDepth ?? 0) > 0;
+	if (app !== "auto" && !subagent) {
 		const relayKind = resolveRelayKind(
 			{
 				settingEnabled: cfgBrowserRelay.get(session.settings),
@@ -250,22 +252,21 @@ export function resolveBrowserKind(
 	}
 	// Tern and cmux show the tab beside the omp drawn in that terminal. An omp started from that
 	// session's commands (`omp -p` from its bash tool, a script an eval cell runs) inherited the
-	// pane env, and its tabs would float over the other session's work.
+	// pane env, and its tabs would float over the other session's work. A subagent has no pane of
+	// its own either: its tabs would pile up over the parent's, so it skips both even when
+	// PI_BROWSER_TERN=1 or PI_BROWSER_CMUX=1 forces them for the parent.
 	const ownsPane = ownsTerminal(env);
-	// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
-	const ternKind = resolveTernKind(
-		{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
-		env,
-	);
-	if (ternKind) return ternKind;
-	const cmuxKind = resolveCmuxKind(
-		{
-			settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings),
-		},
-		env,
-	);
-	if (cmuxKind) {
-		return cmuxKind;
+	if (!subagent || params.target !== undefined) {
+		// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
+		const ternKind = resolveTernKind(
+			{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
+			env,
+		);
+		if (ternKind) return ternKind;
+	}
+	if (!subagent) {
+		const cmuxKind = resolveCmuxKind({ settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings) }, env);
+		if (cmuxKind) return cmuxKind;
 	}
 	return ownBrowserKind(params, session, env);
 }
@@ -320,10 +321,11 @@ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinitio
 		status: describeBrowserCall,
 		// The documentation promises omp's own browser for an open without `app`; while
 		// the relay takes that open, the prompt names where `app: "auto"` goes instead.
-		relayFallback:
-			resolveBrowserKind({ action: "open" }, session).kind === "relay"
+		get relayFallback() {
+			return resolveBrowserKind({ action: "open" }, session).kind === "relay"
 				? resolveBrowserKind({ action: "open", app: "auto" }, session)
-				: undefined,
+				: undefined;
+		},
 	});
 }
 
@@ -534,17 +536,23 @@ async function openBrowser(
 	}
 }
 
+/** Engine directories whose update failed in this process: their installed engine runs without another attempt. */
+const failedWebKitUpdates = new Set<string>();
+
 /**
- * Download omp's WebKit engine before an open that needs it while it is
- * missing from its default location ({@link webKitEngineToInstall}): an open
- * with `app: "webkit"`, or one that otherwise ends at managed Chromium
- * (headless, or visible where released engines ship a viewer) while Chromium
- * itself would first be downloaded. With no browser installed, omp's own engine
- * comes before Chrome for Testing. Like that download, it runs before the
- * open's deadline starts.
+ * Download omp's WebKit engine into its default location
+ * ({@link webKitEngineToInstall}) before an open that needs it. A missing
+ * engine is downloaded for an open with `app: "webkit"`, or one that otherwise
+ * ends at managed Chromium (headless, or visible where released engines ship a
+ * viewer) while Chromium itself would first be downloaded: with no browser
+ * installed, omp's own engine comes before Chrome for Testing. An installed
+ * engine is updated to ABKit's newest build before an open that would run it,
+ * checked once per process. Like Chrome's download, it runs before the open's
+ * deadline starts.
  *
  * Returns why an automatic download failed, for the open to go on to Chromium
- * saying so; for `app: "webkit"` a failed download throws.
+ * saying so; for `app: "webkit"` a failed download throws. A failed update is
+ * logged, and the open runs the engine already installed.
  */
 async function installWebKitForOpen(
 	session: ToolSession,
@@ -552,11 +560,27 @@ async function installWebKitForOpen(
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
 	const explicit = params.app === "webkit";
-	const engineDir = webKitEngineToInstall({
+	const pending = await webKitEngineToInstall({
 		settingEnabled: explicit || cfgBrowserWebKit.get(session.settings),
 		settingPath: cfgBrowserWebKitPath.get(session.settings),
 	});
-	if (engineDir === null) return undefined;
+	if (pending === null) return undefined;
+	const { engineDir } = pending;
+	if (pending.installed) {
+		if (failedWebKitUpdates.has(engineDir)) return undefined;
+		if (!explicit && resolveBrowserKind(params, session).kind !== "webkit") return undefined;
+		try {
+			await untilAborted(signal, () => installWebKitEngine(engineDir));
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			failedWebKitUpdates.add(engineDir);
+			logger.warn("Could not update omp's WebKit engine; running the installed one", {
+				engineDir,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return undefined;
+	}
 	if (!explicit) {
 		const kind = resolveBrowserKind(params, session);
 		if (kind.kind !== "headless" || params.app === "chromium") return undefined;

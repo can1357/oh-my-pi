@@ -17,7 +17,7 @@ import {
 	removeUserDataDir,
 	type UserAgentOverride,
 } from "./launch";
-import { reapOrphanSharedTargets } from "./orphan-registry";
+import { reapOrphanSharedTargets, type SharedTargetScope } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl, restartRelayDaemon } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { UPDATE_RELAY_EXTENSION, waitForRelayExtension } from "./relay/probe";
@@ -54,6 +54,7 @@ export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	/** Browser-level WebSocket endpoint tab workers attach through. */
 	wsEndpoint: string;
 	cdpUrl?: string;
+	/** The browser's main process, which owns its windows on screen; unknown for connected endpoints and the relay. */
 	pid?: number;
 	/** OMP-owned temp Chromium profile directory removed on dispose (process-local headless launches). */
 	userDataDir?: string;
@@ -84,6 +85,17 @@ export interface WebKitBrowserHandle extends BrowserHandleCommon {
 }
 
 export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle | WebKitBrowserHandle;
+
+/**
+ * Durable-ownership scope for a browser handle, or undefined when the handle is
+ * not the project-shared broker-owned Chromium (the only browser whose targets
+ * outlive their creating process and thus need cross-process orphan reaping).
+ */
+export function sharedTargetScopeOf(handle: BrowserHandle): SharedTargetScope | undefined {
+	if (!("browser" in handle)) return undefined;
+	if (handle.kind.kind !== "headless" || !handle.sharedDaemon) return undefined;
+	return { projectDir: handle.sharedDaemon.projectDir, daemonName: handle.sharedDaemon.name };
+}
 
 /** Controls bounded browser-handle teardown and identifies the owning resource in timeout diagnostics. */
 export interface ReleaseBrowserOptions {
@@ -235,7 +247,12 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		return { key: browserKey(kind), kind, tern, refCount: 0 };
 	}
 	if (kind.kind === "webkit") {
-		return { key: browserKey(kind), kind, webkit: await WebKitHost.launch(kind.path, kind.viewer), refCount: 0 };
+		return {
+			key: browserKey(kind),
+			kind,
+			webkit: await WebKitHost.launch(kind.path, kind.viewer, opts.signal),
+			refCount: 0,
+		};
 	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI
@@ -256,6 +273,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			kind,
 			browser,
 			wsEndpoint,
+			pid: browser.process()?.pid,
 			userDataDir,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
@@ -531,6 +549,7 @@ async function openSharedHeadlessHandle(
 			kind,
 			browser,
 			wsEndpoint: shared.wsEndpoint,
+			pid: shared.pid,
 			sharedDaemon: { name: shared.daemonName, projectDir: shared.projectDir },
 			refCount: 0,
 			stealth: { browserSession: null, override: null },

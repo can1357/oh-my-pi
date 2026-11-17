@@ -1,0 +1,8 @@
+auth "bifrost" {
+	name "Bifrost"
+	login "api-key" {
+		auth-url "https://docs.getbifrost.ai/features/governance/virtual-keys"
+		instructions "Run a Bifrost gateway (default http://localhost:8080/v1; set BIFROST_BASE_URL to customize it), then copy a virtual key"
+		prompt "Paste your Bifrost virtual key" placeholder="sk-bf-..."
+	}
+}

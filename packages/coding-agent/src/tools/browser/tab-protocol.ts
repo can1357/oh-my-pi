@@ -1,5 +1,8 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageTokenization } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { FrontTabSource } from "./native-windows";
+import type { HiddenFrame } from "./relay/protocol";
 
 export type Transferable = Bun.Transferable;
 
@@ -36,11 +39,29 @@ export interface ScreenshotResult {
 	height: number;
 }
 
+/**
+ * What rescales an image between the tool and the session's model: the vendor's own resize and the edge the
+ * host passes. A screenshot is sized to pass both untouched, so positions on it stay positions on the page.
+ */
+export interface ScreenshotLimits {
+	/** The model's resize rule; unset when the catalog names none. */
+	tokenization?: ImageTokenization;
+	/** Longest edge the host passes to the model; unset when it keeps the image's size. */
+	maxEdge?: number;
+	/**
+	 * Set where the model's wire sends a screenshot's `detail: "original"` tag as it is. Elsewhere the wire
+	 * drops it and the provider's default level sizes the image.
+	 */
+	detail?: "original";
+}
+
 export interface SessionSnapshot {
 	cwd: string;
 	browserScreenshotDir?: string;
 	/** Force non-WebP screenshot encoding (e.g. for Ollama). Unset honors `OMP_NO_WEBP`. */
 	excludeWebP?: boolean;
+	/** Image limits of the session's active model; unset without one. */
+	screenshotLimits?: ScreenshotLimits;
 }
 
 /**
@@ -94,6 +115,13 @@ export type WorkerInitPayload =
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
 			insecure?: boolean;
+			/**
+			 * The browser draws its windows on the user's screen (a visible launch), so a call can raise native ones, and
+			 * this tab list says whether the call's tab is the one in front of its window.
+			 */
+			frontTab?: FrontTabSource;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  }
 	| {
 			mode: "attach";
@@ -130,6 +158,19 @@ export type WorkerInitPayload =
 			userDriven?: boolean;
 			/** The browser is the omp relay: downloads arrive as page events, and the relay names where Chrome saved them. */
 			relay?: boolean;
+			/**
+			 * The browser draws its windows on the user's screen, so a call can raise native ones, and this tab list says
+			 * whether the call's tab is the one in front of its window. Unset for a headless browser, whose recycled tabs
+			 * attach too, and for a browser whose tab list cannot say.
+			 */
+			frontTab?: FrontTabSource;
+			/**
+			 * The adopted tab was opened in front of its window, so it has been shown: a recycled managed browser tab,
+			 * which a headless-mode worker opened that way.
+			 */
+			openedInFront?: boolean;
+			/** Known local browser process, used to reject another app at the same screen frame. */
+			browserPid?: number;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
@@ -148,6 +189,8 @@ export interface ReadyInfo {
 	title?: string;
 	viewport: { width: number; height: number; deviceScaleFactor?: number };
 	targetId: string;
+	/** Other extensions' frames the omp relay hid in the tab before this worker adopted it. */
+	hiddenFrames?: HiddenFrame[];
 }
 
 export interface RunResultOk {
@@ -157,6 +200,14 @@ export interface RunResultOk {
 	/** The run finished but tab-scoped browser state was not restored; the tab must be recycled. */
 	recoverTab?: boolean;
 }
+
+/**
+ * How a run ended, with the other extensions' frames the omp relay hid in the tab while it or an earlier run went on,
+ * which the supervisor holds for the tab whether the run succeeded or not.
+ */
+export type RunOutcome = ({ ok: true; payload: RunResultOk } | { ok: false; error: RunErrorPayload }) & {
+	hiddenFrames?: HiddenFrame[];
+};
 
 export interface RunErrorPayload {
 	name: string;
@@ -199,8 +250,7 @@ export type WorkerOutbound =
 	  }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
-	| { type: "result"; id: string; ok: true; payload: RunResultOk }
-	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| ({ type: "result"; id: string } & RunOutcome)
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
 	| { type: "closed" };

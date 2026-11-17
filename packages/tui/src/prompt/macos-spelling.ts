@@ -271,14 +271,19 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		let projected: native.SpellingRange[] | undefined;
 		let matchLength = -1;
 		for (const [previous, ranges] of this.#typoCache) {
+			// The shared prefix and suffix together never exceed the shorter text, so skip unread a line
+			// that cannot beat the current match, or that is longer than `text` by more than the one
+			// character a projection may replace.
+			const bound = Math.min(previous.length, text.length);
+			if (bound <= matchLength || previous.length - 1 > bound) continue;
 			let prefix = 0;
-			while (prefix < previous.length && prefix < text.length && previous[prefix] === text[prefix]) prefix++;
+			if (text.startsWith(previous)) prefix = previous.length;
+			else while (prefix < bound && previous.charCodeAt(prefix) === text.charCodeAt(prefix)) prefix++;
 			let suffix = 0;
-			while (suffix < previous.length - prefix && suffix < text.length - prefix) {
-				const previousCharacter = previous[previous.length - suffix - 1];
-				const nextCharacter = text[text.length - suffix - 1];
-				if (previousCharacter === undefined || nextCharacter === undefined || previousCharacter !== nextCharacter)
-					break;
+			while (
+				suffix < bound - prefix &&
+				previous.charCodeAt(previous.length - suffix - 1) === text.charCodeAt(text.length - suffix - 1)
+			) {
 				suffix++;
 			}
 			if (prefix + suffix < previous.length - 1 || prefix + suffix <= matchLength) continue;

@@ -23,6 +23,7 @@ export function startSharpshooterScheduler(options: {
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sessionId: string;
+	getSessionProvider?: () => string | undefined;
 }): () => void {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
 	const existing = schedulers.get(bankDir);

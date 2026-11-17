@@ -169,7 +169,8 @@ export function planFromAnswers(items: string[], answers: Readonly<Record<string
  */
 export async function planParallel(request: string, deps: NativeJudgmentDeps): Promise<ParallelPlan | undefined> {
 	const items = segmentRequest(request).map(item => truncate(cleanTinyMessage(item), MAX_ITEM_CHARS));
-	if (items.length < 2 || items.length > MAX_ITEMS || !hasNativeJudge(deps.settings, deps.registry)) return undefined;
+	if (items.length < 2 || items.length > MAX_ITEMS || !hasNativeJudge(deps.settings, deps.registry, deps.sessionModel))
+		return undefined;
 	const { answers } = await judgeNatively(
 		"auto-parallel",
 		{
