@@ -428,7 +428,7 @@ describe("AgyHost stateful steps", () => {
 	});
 
 	it("restarts a parked turn on a tool-set change and carries the actual result and historical images into the reseed", async () => {
-		const state = await parked();
+		const state = await parked({ warmToolList: true });
 		const image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
 		const toolResult = result(state.first.writer.output);
 		toolResult.content.push(image);
@@ -470,8 +470,31 @@ describe("AgyHost stateful steps", () => {
 		await second.done;
 	});
 
-	it("replaces the tool set on an idle warm transport instead of restarting", async () => {
+	it("restarts on a tool-set change unless warm tool-list reuse is enabled", async () => {
 		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const initial = await fake.prompts.next();
+		fake.text("Hello.");
+		initial.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], {
+			tools: [...tools, { name: "write", description: "Write", parameters: type({ text: "string" }) }],
+		});
+		const restarted = await state.started.next();
+		const continuation = await restarted.prompts.next();
+		expect(restarted).not.toBe(fake);
+		expect(fake.closed).toBe(true);
+		expect(fake.toolUpdates).toHaveLength(0);
+		expect(restarted.options.tools).toHaveLength(2);
+		expect(continuation.request.prompt).toEqual([{ type: "text", text: "continue" }]);
+		restarted.text("Continued.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+	});
+
+	it("replaces the tool set on an idle warm transport instead of restarting", async () => {
+		const state = await fixture({ warmToolList: true });
 		const first = step(state.host, [user("hello")]);
 		const fake = await state.started.next();
 		const initial = await fake.prompts.next();
@@ -496,6 +519,7 @@ describe("AgyHost stateful steps", () => {
 	it("restarts when the transport cannot replace its tool set", async () => {
 		const started = new Queue<FakeAgy>();
 		const state = await fixture({
+			warmToolList: true,
 			startTransport: async input => {
 				const fake = new FakeAgy(input);
 				fake.updateTools = undefined;

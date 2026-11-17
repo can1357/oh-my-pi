@@ -12,6 +12,12 @@ interface Reply {
 	error?: { code: number; message: string };
 }
 
+interface Notification {
+	jsonrpc: "2.0";
+	method: string;
+	params?: unknown;
+}
+
 const cleanups: (() => void)[] = [];
 afterEach(() => {
 	for (const cleanup of cleanups.splice(0).reverse()) cleanup();
@@ -22,6 +28,8 @@ async function client(port: number) {
 	const ready = Promise.withResolvers<void>();
 	const closed = Promise.withResolvers<void>();
 	const replies = new Map<number, PromiseWithResolvers<Reply>>();
+	const notifications: Notification[] = [];
+	const notificationWaiters: PromiseWithResolvers<Notification>[] = [];
 	let buffer = "";
 	socket.setEncoding("utf8");
 	socket.on("connect", ready.resolve);
@@ -32,9 +40,15 @@ async function client(port: number) {
 		for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
 			const line = buffer.slice(0, end);
 			buffer = buffer.slice(end + 1);
-			const reply: Reply = JSON.parse(line);
-			replies.get(reply.id)?.resolve(reply);
-			replies.delete(reply.id);
+			const message = JSON.parse(line) as Reply | Notification;
+			if ("method" in message) {
+				const waiter = notificationWaiters.shift();
+				if (waiter) waiter.resolve(message);
+				else notifications.push(message);
+				continue;
+			}
+			replies.get(message.id)?.resolve(message);
+			replies.delete(message.id);
 		}
 	});
 	cleanups.push(() => socket.destroy());
@@ -43,6 +57,14 @@ async function client(port: number) {
 	return {
 		socket,
 		closed: closed.promise,
+		notifications,
+		nextNotification(): Promise<Notification> {
+			const queued = notifications.shift();
+			if (queued) return Promise.resolve(queued);
+			const deferred = Promise.withResolvers<Notification>();
+			notificationWaiters.push(deferred);
+			return deferred.promise;
+		},
 		request(method: string, params?: unknown, fragmented = false): Promise<Reply> {
 			const id = ++nextId;
 			const deferred = Promise.withResolvers<Reply>();
@@ -193,6 +215,24 @@ describe("McpBridge", () => {
 		bridge.close();
 	});
 
+	it("advertises tool list changes on initialize", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		const reply = await peer.request("initialize", { protocolVersion: "2025-06-18" });
+		expect(reply.result).toMatchObject({ capabilities: { tools: { listChanged: true } } });
+	});
+
+	it("announces the replaced tool set to the connected client", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		await peer.request("ping");
+		const changed = peer.nextNotification();
+		bridge.updateTools([...tools, write]);
+		expect(await changed).toEqual({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+		expect((await peer.request("tools/list")).result).toEqual({ tools: [...tools, write] });
+	});
 	it("lists and validates the updated tool set on the same connection", async () => {
 		const called: string[] = [];
 		const bridge = new McpBridge(tools, async name => {
@@ -223,14 +263,21 @@ describe("McpBridge", () => {
 		const peer = await client(bridge.port);
 		expect(() => bridge.updateTools([...tools, duplicate])).toThrow("Duplicate Antigravity CLI tool name");
 		expect((await peer.request("tools/list")).result).toEqual({ tools });
+		expect(peer.notifications).toEqual([]);
 	});
 
-	it("ignores tool updates after close", async () => {
+	it("keeps the final tool list when updated after close", async () => {
 		const bridge = new McpBridge(tools, async () => ({ content: [] }));
 		cleanups.push(() => bridge.close());
 		const peer = await client(bridge.port);
-		await peer.request("ping");
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
 		bridge.close();
-		expect(() => bridge.updateTools([])).not.toThrow();
+		await peer.closed;
+		// A duplicate name throws on a live bridge and a valid list replaces it, so the closed guard
+		// must skip both: the list served by tools/list stays the pre-close list.
+		const duplicate: McpToolDefinition = { name: "read", description: "Other read", inputSchema: {} };
+		bridge.updateTools([...tools, duplicate]);
+		bridge.updateTools([write]);
+		expect(bridge.tools).toEqual(tools);
 	});
 });

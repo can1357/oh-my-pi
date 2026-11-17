@@ -5,7 +5,7 @@
  * only in a subsequent prompt. Failed drains kill the process and reseed.
  */
 import * as path from "node:path";
-import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { $env, $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	type ContentBlock,
 	ClientSideConnection,
@@ -104,6 +104,11 @@ export interface AgyHostOptions {
 	announcementTimeoutMs?: number;
 	startupTimeoutMs?: number;
 	schedule?: AgyScheduler;
+	/**
+	 * Replace the live process's tools instead of restarting when the tool set changes. Off by default:
+	 * agy's re-list after notifications/tools/list_changed is not yet confirmed against a live session.
+	 */
+	warmToolList?: boolean;
 }
 
 interface AgyProcess extends AgyTransport {
@@ -178,6 +183,7 @@ export class AgyHost implements ProviderSessionState {
 			announcementTimeoutMs: options.announcementTimeoutMs ?? ANNOUNCEMENT_TIMEOUT_MS,
 			startupTimeoutMs: options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS,
 			schedule: options.schedule ?? scheduleTimer,
+			warmToolList: warmToolListEnabled(options.warmToolList),
 		};
 		if (
 			this.#options.holdLimitMs <= 0 ||
@@ -247,7 +253,7 @@ export class AgyHost implements ProviderSessionState {
 			const warm = this.#process;
 			if (warm && warm.cwd === cwd && warm.credentialVersion === options.credentialVersion) {
 				if (warm.toolsKey !== toolsKey) {
-					const updateTools = warm.updateTools;
+					const updateTools = this.#options.warmToolList ? warm.updateTools : undefined;
 					if (toolSetHeld || !updateTools) {
 						await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
 					} else {
@@ -937,6 +943,13 @@ function mapAgyError(error: unknown): Error {
 		return new Error("Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.");
 	}
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+/** Warm tool-list reuse stays opt-in until agy is confirmed to re-list after tools/list_changed. */
+function warmToolListEnabled(requested: boolean | undefined): boolean {
+	if (requested !== undefined) return requested;
+	const value = $env.OMP_ACP_WARM_TOOL_LIST?.trim().toLowerCase();
+	return value === "1" || value === "true";
 }
 
 function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {

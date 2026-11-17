@@ -1,7 +1,8 @@
 /**
  * Loopback NDJSON MCP server for agy's official --ide-mcp-port bridge.
- * Tools are advertised as mcp_ide-tools_<name> and can be replaced on a live connection. MCP progress does
- * not extend agy's 180s timeout; the host cancels and drains parked turns first.
+ * Tools are advertised as mcp_ide-tools_<name> and can be replaced on a live connection, which then
+ * announces notifications/tools/list_changed. MCP progress does not extend agy's 180s timeout; the host
+ * cancels and drains parked turns first.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { Socket, TCPSocketListener } from "bun";
@@ -39,6 +40,7 @@ interface Connection {
 
 const PROTOCOL_VERSION = "2025-06-18";
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
+const TOOLS_CHANGED = `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" })}\n`;
 
 /** Live tool set shared with every connection; updateTools swaps it without restarting agy. */
 interface ToolSet {
@@ -112,12 +114,25 @@ export class McpBridge {
 		this.port = this.#server.port;
 	}
 
-	/** Replace the advertised tools for the live connection; a closed bridge keeps its final list. */
+	/** The tool list served by tools/list; a closed bridge keeps its final list. */
+	get tools(): readonly McpToolDefinition[] {
+		return this.#toolSet.tools;
+	}
+
+	/** Replace the advertised tools and announce the change to every live connection; a closed bridge keeps its final list. */
 	updateTools(tools: readonly McpToolDefinition[]): void {
 		if (this.#closed) return;
 		const next = toolSet(tools);
 		this.#toolSet.tools = next.tools;
 		this.#toolSet.byName = next.byName;
+		for (const socket of this.#sockets) {
+			if (socket.data.closed) continue;
+			try {
+				socket.write(TOOLS_CHANGED);
+			} catch {
+				socket.terminate();
+			}
+		}
 	}
 
 	/** Idempotently stop listening, release waiting replies and terminate all connections. */
@@ -158,7 +173,7 @@ function handleLine(socket: Socket<Connection>, line: string, toolSet: ToolSet, 
 			reply({
 				result: {
 					protocolVersion: typeof params.protocolVersion === "string" ? params.protocolVersion : PROTOCOL_VERSION,
-					capabilities: { tools: {} },
+					capabilities: { tools: { listChanged: true } },
 					serverInfo: { name: "tools", version: "1.0.0" },
 				},
 			});
