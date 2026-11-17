@@ -257,6 +257,14 @@ interface CapacityMerge {
 	merged: Model<Api>;
 }
 
+/** A discovered row merged over `reference` under `override`, valid until the next dated price card. */
+interface DiscoveredMerge {
+	reference: Model<Api> | undefined;
+	override: ProviderOverride | undefined;
+	merged: Model<Api>;
+	validUntil: number;
+}
+
 /** `#contextWindowResolution` of a row; depends on the row alone. */
 const kContextWindowResolution = Symbol("model-registry.contextWindowResolution");
 /** A bundled row rebuilt under its provider's models.yml override (`#overriddenBuiltInModel`). */
@@ -265,6 +273,8 @@ const kProviderOverrideBuild = Symbol("model-registry.providerOverrideBuild");
 const kTransportOverrideBuild = Symbol("model-registry.transportOverrideBuild");
 /** A replacement row's capacity merge in `#mergeResolvedModels`. */
 const kCapacityMerge = Symbol("model-registry.capacityMerge");
+/** A discovered row's `mergeDiscoveredModel` result (`#mergeDiscoveredModelMemoized`). */
+const kDiscoveredMerge = Symbol("model-registry.discoveredMerge");
 
 /**
  * Composition results memoized on the row they derive from. Recomposing after
@@ -279,6 +289,7 @@ type TaggedModel = Model<Api> & {
 	[kProviderOverrideBuild]?: OverrideBuild;
 	[kTransportOverrideBuild]?: OverrideBuild;
 	[kCapacityMerge]?: CapacityMerge;
+	[kDiscoveredMerge]?: DiscoveredMerge;
 };
 
 /**
@@ -473,25 +484,6 @@ export class ModelRegistry {
 	#implicitProviderEndpointEnv: Map<string, string> = new Map();
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
-	/**
-	 * Last `mergeDiscoveredModel` result per discovered row. Every refresh
-	 * re-resolves each built-in provider, and offline (or unchanged online)
-	 * passes hand back the same bundled/cached row objects against the same
-	 * references, so re-running the full model build for thousands of rows is
-	 * pure repetition. A changed reference or provider override misses, and so
-	 * does reaching the next dated price card the build would select. Held per
-	 * registry (not tagged onto the rows): bundled rows outlive every registry,
-	 * so their merges must be collected with the registry.
-	 */
-	#discoveredMergeMemo = new WeakMap<
-		Model<Api>,
-		{
-			reference: Model<Api> | undefined;
-			override: ProviderOverride | undefined;
-			merged: Model<Api>;
-			validUntil: number;
-		}
-	>();
 	// Provider overrides as last loaded; a reload keeps the object of every entry that reads the same,
 	// so memos keyed on override identity survive reloads that left the entry alone.
 	#loadedProviderOverrides: Map<string, ProviderOverride> = new Map();
@@ -2692,21 +2684,34 @@ export class ModelRegistry {
 		this.#models = this.#finalizeModels(this.#applyRuntimeModelModifiers(this.#unprojectedModels));
 	}
 
+	/**
+	 * `mergeDiscoveredModel`, memoized on the discovered row. Every refresh
+	 * re-resolves each built-in provider, and offline (or unchanged online)
+	 * passes hand back the same bundled/cached row objects against the same
+	 * references, so re-running the full model build for thousands of rows is
+	 * pure repetition. A changed reference or provider override misses, and so
+	 * does reaching the next dated price card the build would select.
+	 *
+	 * Tagged on the row rather than held per registry, so every registry in the
+	 * process reading the same bundled rows or the same cache payload (parsed
+	 * once per payload hash in `model-cache.ts`) shares the build. The cost: a
+	 * row pins its latest merge, reference and override for as long as it lives,
+	 * which for a bundled row is the process.
+	 */
 	#mergeDiscoveredModelMemoized(
 		model: Model<Api>,
 		reference: Model<Api> | undefined,
 		override: ProviderOverride | undefined,
 	): Model<Api> {
 		const now = Date.now();
-		const memo = this.#discoveredMergeMemo.get(model);
+		const memo = (model as TaggedModel)[kDiscoveredMerge];
 		if (memo && memo.reference === reference && memo.override === override && now < memo.validUntil) {
 			return memo.merged;
 		}
 		const merged = mergeDiscoveredModel(model, reference, override);
 		// Measured before the build: a card falling due mid-build expires the memo at once.
 		const validUntil = nextBuildPriceChange(model.cost, now);
-		this.#discoveredMergeMemo.set(model, { reference, override, merged, validUntil });
-		return merged;
+		return tagModel(model, kDiscoveredMerge, { reference, override, merged, validUntil }).merged;
 	}
 
 	/**

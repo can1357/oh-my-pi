@@ -14,6 +14,7 @@ import {
 	openSqliteDatabaseSync,
 	VERSION,
 } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import RULES from "./compat/rules.json" with { type: "json" };
 import type { Api, Model } from "./types";
 
@@ -293,6 +294,15 @@ interface ReadRowCacheEntry {
 
 const readRowCache = new Map<string, ReadRowCacheEntry>();
 const READ_ROW_CACHE_MAX = 64;
+
+/**
+ * Parsed `models` payloads by `models_hash`, shared across database files: a
+ * byte-identical payload in another file (a fresh models.db per registry, as in
+ * tests) or rewritten unchanged yields the same row objects, so memos tagged on
+ * row identity in the registry carry over. Rows are shared and must not be
+ * mutated, as with `readRowCache`.
+ */
+const parsedPayloads = new LRUCache<string, Model<Api>[]>({ max: READ_ROW_CACHE_MAX });
 
 function readCacheKey(resolvedPath: string, providerId: string): string {
 	return `${resolvedPath} ${providerId}`;
@@ -651,6 +661,16 @@ function parseMaterializedModels<TApi extends Api>(serialized: string): Model<TA
 	}
 }
 
+/** {@link parseMaterializedModels}, memoized by the row's `models_hash` (rows without one always parse). */
+function parsePayload<TApi extends Api>(serialized: string, hash: string): Model<TApi>[] | null {
+	if (hash === "") return parseMaterializedModels<TApi>(serialized);
+	const cached = parsedPayloads.get(hash);
+	if (cached !== undefined) return cached as Model<TApi>[];
+	const models = parseMaterializedModels<TApi>(serialized);
+	if (models !== null) parsedPayloads.set(hash, models as Model<Api>[]);
+	return models;
+}
+
 function parseModelIds(serialized: string): string[] | null {
 	try {
 		const parsed: unknown = JSON.parse(serialized);
@@ -773,7 +793,7 @@ function parseCacheRow<TApi extends Api>(
 	if (!row || row.version !== CACHE_SCHEMA_VERSION) {
 		return null;
 	}
-	const models = parseMaterializedModels<TApi>(row.models);
+	const models = parsePayload<TApi>(row.models, row.models_hash);
 	const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
 	const unrestorableHeaderModelIds = parseModelIds(row.unrestorable_header_model_ids);
 	if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
