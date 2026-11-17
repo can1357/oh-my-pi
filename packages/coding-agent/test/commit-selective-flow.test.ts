@@ -664,6 +664,41 @@ describe("selective commit flow", () => {
 		expect(await git(root, ["ls-files", "--stage"])).toBe(index);
 		expect(await fs.readdir(gitDir)).toEqual(state);
 		expect(await Bun.file(path.join(root, "conflict.txt")).text()).toBe(conflict);
+	it("tells an empty repository apart from an empty selection when committing", async () => {
+		const { root, journal } = await emptyRepo();
+		await Bun.write(path.join(root, "a.ts"), "export const a = 1;\n");
+		await git(root, ["add", "."]);
+		await git(root, ["commit", "-q", "-m", "seed"]);
+		const context = { journal, agent: { agent: "Main" } };
+
+		const clean = await createDraft({ cwd: root, journal, caller: "Main" });
+		await expect(commitSelection(clean, { subject: "fix: a" }, context)).rejects.toThrow(
+			/Nothing to commit: .* has no changes against HEAD/,
+		);
+
+		// Error output must not expose the absolute home directory.
+		Object.defineProperty(clean, "root", { value: path.join(os.homedir(), "workspace") });
+		await expect(commitSelection(clean, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing to commit: ~/workspace has no changes against HEAD.",
+		);
+
+		// A nested repository is dirty but skipped: the repository is not clean.
+		const nested = path.join(root, "vendor");
+		await fs.mkdir(nested);
+		await git(nested, ["init", "-q"]);
+		const skippedOnly = await createDraft({ cwd: root, journal, caller: "Main" });
+		expect(skippedOnly.skipped).toEqual(["vendor"]);
+		await expect(commitSelection(skippedOnly, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing to commit: only vendor changed (submodule or nested repository), which selective commits skip.",
+		);
+		await fs.rm(nested, { recursive: true });
+
+		// The user's unjournaled edit is a change, just not selected.
+		await Bun.write(path.join(root, "a.ts"), "export const a = 2;\n");
+		const unselected = await createDraft({ cwd: root, journal, caller: "Main" });
+		await expect(commitSelection(unselected, { subject: "fix: a" }, context)).rejects.toThrow(
+			"Nothing selected; use take() first.",
+		);
 	});
 
 	it("rejects an unknown hunk unit id without changing the selection", async () => {

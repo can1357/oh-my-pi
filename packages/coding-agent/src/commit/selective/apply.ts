@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
@@ -133,7 +134,14 @@ export async function commitSelection(
 	const gitDir = repo.info().gitDir;
 	const message = composeMessage(request);
 	const changes = draft.selection();
-	if (changes.length === 0) throw new Error("Nothing selected; use take() first.");
+	if (changes.length === 0) {
+		if (draft.paths.length > 0) throw new Error("Nothing selected; use take() first.");
+		throw new Error(
+			draft.skipped.length > 0
+				? `Nothing to commit: only ${draft.skipped.join(", ")} changed (submodule or nested repository), which selective commits skip.`
+				: `Nothing to commit: ${shortenPath(draft.root)} has no changes against HEAD.`,
+		);
+	}
 	const patches: Array<{ path: string; patch: string }> = [];
 	for (const change of changes) {
 		const patch = await patchFor(repo, draft.head, change);
