@@ -485,23 +485,35 @@ const READ_PANE = `await tab.evaluate(() => [pane.textContent, document.body.dat
 
 describe("browser reads after an action", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"read a fetch the click started once it answers, not the loading state",
+		"read a fetch the click started once it answers, without waiting when no action came before",
 		async () => {
 			const pages = detailServer();
 			try {
 				const result = await runOnPage(
 					pages.url,
 					`
+						await tab.observe();
+						${latency(1500)}
+						const sent = page.waitForRequest(request => request.url().endsWith("/hold"));
+						await tab.evaluate(() => startPoll());
+						await sent;
+						const unprompted = [await tab.text("#pane"), ${READ_PANE}];
 						const reads = [];
 						for (const latency of [300, 800, 2000]) {
 							await page.emulateNetworkConditions({ download: -1, upload: -1, latency });
 							await tab.click("#load");
 							reads.push(await tab.text("#pane"));
 						}
-						return reads;
+						await tab.click("#load");
+						const together = await Promise.all([tab.text("#pane"), tab.text("#pane")]);
+						return { unprompted, reads, together };
 					`,
 				);
-				expect(result).toEqual(["Detail", "Detail", "Detail"]);
+				expect(result).toEqual({
+					unprompted: ["Empty", ["Empty", "early"]],
+					reads: ["Detail", "Detail", "Detail"],
+					together: ["Detail", "Detail"],
+				});
 			} finally {
 				pages.stop();
 			}
@@ -520,47 +532,6 @@ describe("browser reads after an action", () => {
 					`${latency(1500)} await tab.click("#never"); return ${READ_PANE};`,
 				);
 				expect(result).toEqual(["Loading", "late"]);
-			} finally {
-				pages.stop();
-			}
-		},
-		45_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"do not wait when no action came before them, even with a request in flight",
-		async () => {
-			const pages = detailServer();
-			try {
-				const result = await runOnPage(
-					pages.url,
-					`
-						await tab.observe();
-						${latency(1500)}
-						const sent = page.waitForRequest(request => request.url().endsWith("/hold"));
-						await tab.evaluate(() => startPoll());
-						await sent;
-						return [await tab.text("#pane"), ${READ_PANE}];
-					`,
-				);
-				expect(result).toEqual(["Empty", ["Empty", "early"]]);
-			} finally {
-				pages.stop();
-			}
-		},
-		45_000,
-	);
-
-	it.skipIf(!CHROMIUM_AVAILABLE)(
-		"settle reads issued together once, for all of them",
-		async () => {
-			const pages = detailServer();
-			try {
-				const result = await runOnPage(
-					pages.url,
-					`${latency(800)} await tab.click("#load"); return await Promise.all([tab.text("#pane"), tab.text("#pane")]);`,
-				);
-				expect(result).toEqual(["Detail", "Detail"]);
 			} finally {
 				pages.stop();
 			}
