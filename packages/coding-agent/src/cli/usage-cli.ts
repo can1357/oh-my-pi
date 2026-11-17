@@ -1642,8 +1642,10 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			getAccountPolicy: (provider, identity) => authStorage.oauth.policy(provider, identity),
 		};
 		const modelRegistry = await loadUsageSources(cmd, settings, authStorage);
+		const wanted = cmd.provider?.toLowerCase() || undefined;
 		const reports =
 			(await authStorage.usage.reports({
+				provider: wanted,
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),
 			})) ?? [];
 		const storedAccounts = collectStoredAccounts(authStorage);
@@ -1663,7 +1665,6 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 		let filteredReports = reports;
 		if (cmd.provider) {
-			const wanted = cmd.provider.toLowerCase();
 			filteredReports = reports.filter(report => report.provider.toLowerCase() === wanted);
 			accounts = accounts.filter(account => account.provider.toLowerCase() === wanted);
 			disabled = disabled.filter(summary => summary.provider.toLowerCase() === wanted);

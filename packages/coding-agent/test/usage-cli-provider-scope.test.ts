@@ -1,9 +1,11 @@
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, expect, test, vi } from "bun:test";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import { AuthStorage, SqliteAuthCredentialStore, type UsageProvider } from "@oh-my-pi/pi-ai";
 import { runUsageCommand } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import * as utils from "@oh-my-pi/pi-utils";
+import { TempDir } from "@oh-my-pi/pi-utils";
 
 let db: Database;
 let authStorage: AuthStorage;
@@ -76,3 +78,43 @@ test.each([
 	expect(stdout).toBe(`Invalidated cached usage reports for provider "${provider}".\n`);
 	expect(process.exitCode).toBe(0);
 });
+
+test.each([
+	["a named provider case-insensitively", "SCOPE-A", ["scope-a"]],
+	["all providers when no filter is given", undefined, ["scope-a", "scope-b"]],
+] satisfies Array<[string, string | undefined, string[]]>)(
+	"omp usage fetches only %s",
+	async (_name, provider, expected) => {
+		const tmp = await TempDir.create("@usage-provider-scope-");
+		try {
+			vi.spyOn(utils, "getAgentDir").mockReturnValue(tmp.path());
+			const fetched: string[] = [];
+			const providers = new Map<string, UsageProvider>();
+			for (const id of ["scope-a", "scope-b"]) {
+				providers.set(id, {
+					id,
+					async fetchUsage() {
+						fetched.push(id);
+						return { provider: id, fetchedAt: Date.now(), limits: [] };
+					},
+				});
+			}
+			const scopedAuth = new AuthStorage(new SqliteAuthCredentialStore(db), {
+				usageProviderResolver: id => providers.get(id),
+			});
+			await scopedAuth.credentials.reload();
+			for (const id of providers.keys()) {
+				await scopedAuth.credentials.set(id, { type: "api_key", key: "synthetic-usage-key" });
+			}
+			vi.spyOn(sdkModule, "discoverAuthStorage").mockResolvedValue(scopedAuth);
+
+			await runUsageCommand({ provider, json: true, noExtensions: true });
+
+			expect(fetched.sort()).toEqual(expected);
+			const output = JSON.parse(stdout) as { reports: Array<{ provider: string }> };
+			expect(output.reports.map(report => report.provider).sort()).toEqual(expected);
+		} finally {
+			await tmp.remove();
+		}
+	},
+);
