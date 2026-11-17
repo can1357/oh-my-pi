@@ -6,6 +6,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerError,
 	type AuthBrokerServerHandle,
+	type AuthBrokerStartupRetry,
 	openAuthCredentialStore,
 	readAuthBrokerSnapshotCache,
 	type SnapshotResponse,
@@ -172,7 +173,7 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 		}
 	});
 
-	test("retries the initial snapshot while the broker restarts", async () => {
+	test("retries the initial snapshot while the broker restarts, reporting each retry", async () => {
 		const brokerStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
 		await brokerStore.saveApiKey(PROVIDER, "broker-api-key");
 		const brokerStorage = new AuthStorage(brokerStore);
@@ -200,9 +201,13 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			process.env.OMP_AUTH_BROKER_URL = proxy.url.toString();
 			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
 			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
-			storage = await discoverAuthStorage(tempDir);
+			const retries: AuthBrokerStartupRetry[] = [];
+			storage = await discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
 			expect(await storage.keys.get(PROVIDER)).toBe("broker-api-key");
 			expect(snapshotRequests).toBe(2);
+			expect(retries).toMatchObject([
+				{ url: proxy.url.toString(), error: { status: 503 }, delayMs: 500, budgetMs: 30_000 },
+			]);
 		} finally {
 			storage?.close();
 			proxy.stop(true);
@@ -261,7 +266,9 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			process.env.OMP_AUTH_BROKER_TOKEN = TOKEN;
 			process.env.OMP_AUTH_BROKER_SNAPSHOT_TTL_MS = "0";
 			let settled = false;
-			const outcome = rejectionOf(discoverAuthStorage(tempDir)).finally(() => {
+			const retries: AuthBrokerStartupRetry[] = [];
+			const discovered = discoverAuthStorage(tempDir, { onBrokerRetry: retry => retries.push(retry) });
+			const outcome = rejectionOf(discovered).finally(() => {
 				settled = true;
 			});
 			await reached.promise;
@@ -274,6 +281,8 @@ describe("discoverAuthStorage auth-broker snapshot cache", () => {
 			// At 30 s the deadline cancels the request in flight.
 			vi.advanceTimersByTime(1_000);
 			expect(await outcome).toBeInstanceOf(AuthBrokerError);
+			// Giving up is not reported as one more retry.
+			expect(retries).toEqual([]);
 		} finally {
 			vi.useRealTimers();
 			hang.resolve(new Response(null, { status: 503 }));

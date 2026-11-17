@@ -52,6 +52,21 @@ export interface DiscoverAuthStorageOptions {
 	accountPool?: AuthBrokerAccountPool;
 	accountPolicies?: AuthAccountPolicies;
 	authStorageOptions?: Omit<AuthStorageOptions, "accountPolicies" | "configValueResolver" | "sourceLabel">;
+	/**
+	 * Called after each failed attempt at the initial snapshot that startup will
+	 * retry, so an interactive CLI can tell its user it is waiting on the broker.
+	 */
+	onBrokerRetry?: (retry: AuthBrokerStartupRetry) => void;
+}
+
+/** A failed attempt at the initial snapshot that startup retries. */
+export interface AuthBrokerStartupRetry {
+	url: string;
+	error: AuthBrokerError;
+	/** Wait before the next attempt. */
+	delayMs: number;
+	/** How long startup retries in total before failing. */
+	budgetMs: number;
 }
 
 /** Path to the local bearer token file. Created by `omp auth-broker token`. */
@@ -383,13 +398,23 @@ function isTransientAuthBrokerError(error: unknown): error is AuthBrokerError {
 	return error instanceof AuthBrokerError && (error.status === undefined || isRetryableStatus(error.status));
 }
 
+interface InitialSnapshotOptions {
+	url: string;
+	/** Retry transient failures; without it the first failure throws. */
+	retry: boolean;
+	onRetry?: (retry: AuthBrokerStartupRetry) => void;
+}
+
 /**
  * Fetch the snapshot a broker store opens with. With `retry`, transient
  * failures are retried with exponential backoff under one
  * {@link INITIAL_SNAPSHOT_RETRY_BUDGET_MS} deadline that also cancels a request
  * in flight; a rejected token or any other definite answer fails at once.
  */
-async function fetchInitialSnapshot(client: AuthBrokerClient, retry: boolean): Promise<SnapshotResponse> {
+async function fetchInitialSnapshot(
+	client: AuthBrokerClient,
+	{ url, retry, onRetry }: InitialSnapshotOptions,
+): Promise<SnapshotResponse> {
 	const budget = retry ? AbortSignal.timeout(INITIAL_SNAPSHOT_RETRY_BUDGET_MS) : undefined;
 	let delayMs = INITIAL_SNAPSHOT_RETRY_INITIAL_DELAY_MS;
 	let lastError: AuthBrokerError | undefined;
@@ -398,10 +423,13 @@ async function fetchInitialSnapshot(client: AuthBrokerClient, retry: boolean): P
 		try {
 			result = await client.fetchSnapshot({ signal: budget });
 		} catch (error) {
-			if (budget?.aborted && lastError) throw initialSnapshotRetriesSpent(lastError);
+			// The deadline cancelled this request: give up without reporting another retry.
+			const cause = budget?.aborted ? (lastError ?? error) : undefined;
+			if (cause instanceof AuthBrokerError) throw initialSnapshotRetriesSpent(cause);
 			if (!budget || !isTransientAuthBrokerError(error)) throw error;
 			lastError = error;
 			logger.warn("auth-broker initial snapshot failed; retrying", { error: error.message, delayMs });
+			onRetry?.({ url, error, delayMs, budgetMs: INITIAL_SNAPSHOT_RETRY_BUDGET_MS });
 			try {
 				await scheduler.wait(delayMs, { signal: budget });
 			} catch {
@@ -484,6 +512,8 @@ export interface OpenAuthCredentialStoreOptions {
 	 * sets this; a runtime settings switch fails fast and keeps its current store.
 	 */
 	retryUnreachableBroker?: boolean;
+	/** Called after each failed attempt that {@link retryUnreachableBroker} retries. */
+	onBrokerRetry?: (retry: AuthBrokerStartupRetry) => void;
 }
 
 /** Credential store opened by {@link openAuthCredentialStore} plus its diagnostics label. */
@@ -541,7 +571,11 @@ export async function openAuthCredentialStore(
 			// No usable cache: block on the broker so a misconfigured/unreachable
 			// broker or revoked token fails startup with an actionable error
 			// (issue #8096) instead of yielding an empty credential store.
-			initialSnapshot = await fetchInitialSnapshot(client, options.retryUnreachableBroker === true);
+			initialSnapshot = await fetchInitialSnapshot(client, {
+				url: brokerConfig.url,
+				retry: options.retryUnreachableBroker === true,
+				onRetry: options.onBrokerRetry,
+			});
 			persist?.(initialSnapshot);
 		}
 		// Fresh cache: stale-while-revalidate. The store's constructor starts its
@@ -586,6 +620,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		sourceLabel: options.sourceLabel,
 		accountPool: options.accountPool,
 		retryUnreachableBroker: true,
+		onBrokerRetry: options.onBrokerRetry,
 	});
 	const storage = new AuthStorage(store, {
 		...options.authStorageOptions,
