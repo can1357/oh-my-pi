@@ -635,6 +635,29 @@ describe("usage JSON policy", () => {
 		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
 		expect(text).toContain("eligible · 98.0% left");
 	});
+
+	it("keeps the shared pool's state when only a model-scoped weekly row is spent", () => {
+		const report = makeReport("anthropic", "fable-spent@example.test", [
+			makeLimit({ id: "anthropic:5h", usedFraction: 0.3, windowId: "5h", shared: true }),
+			makeLimit({ id: "anthropic:7d", usedFraction: 0.98, windowId: "7d", shared: true }),
+			makeLimit({ id: "anthropic:7d:fable", label: "Claude 7 Day (Fable)", usedFraction: 1, tier: "fable" }),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 1,
+			getAccountPolicy: (_provider, identity) => ({ provider: "anthropic", account: { email: identity.email } }),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toEqual({
+			priority: 0,
+			reservePct: 1,
+			reserveSource: "global",
+			scopedExhausted: ["anthropic:7d:fable"],
+			state: "eligible",
+			remainingPct: 2,
+		});
+		const text = stripVTControlCharacters(formatUsageBreakdown([report], [], Date.now(), undefined, [], options));
+		expect(text).toContain("eligible · 2.0% left · Claude 7 Day (Fable) exhausted");
+	});
 });
 
 describe("formatUsageBreakdown", () => {
