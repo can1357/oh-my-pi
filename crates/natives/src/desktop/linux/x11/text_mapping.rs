@@ -178,7 +178,14 @@ impl TextMapping {
 			if required.len() > available.len() {
 				return Err(no_rows(required.len(), available.len()));
 			}
-			let writes = assignments(&required, &available, &self.bound);
+			// Another client (`setxkbmap`) may have cleared a row we bound.
+			let current = |code, symbol| {
+				row_matches(&fresh, code, symbol)
+					&& other
+						.as_ref()
+						.is_none_or(|other| row_matches(other, code, symbol))
+			};
+			let writes = assignments(&required, &available, &self.bound, current);
 			let until = writes
 				.iter()
 				.filter_map(|&(code, _)| {
@@ -340,22 +347,30 @@ fn symbols(text: &str) -> Vec<u32> {
 		.collect()
 }
 
-fn assignments(required: &[u32], available: &[u8], bound: &[Binding]) -> Vec<(u8, u32)> {
+/// Rows to write for `required`. A binding is reused only where `current`
+/// shows its row still holding the keysym, so a row another client cleared
+/// is written again.
+fn assignments(
+	required: &[u32],
+	available: &[u8],
+	bound: &[Binding],
+	current: impl Fn(u8, u32) -> bool,
+) -> Vec<(u8, u32)> {
+	let reusable = |binding: &Binding, symbol| {
+		binding.holds(symbol) && available.contains(&binding.code) && current(binding.code, symbol)
+	};
 	let mut result = Vec::new();
 	let protected: Vec<_> = required
 		.iter()
 		.filter_map(|symbol| {
 			bound
 				.iter()
-				.find(|binding| binding.holds(*symbol) && available.contains(&binding.code))
+				.find(|binding| reusable(binding, *symbol))
 				.map(|binding| binding.code)
 		})
 		.collect();
 	for &symbol in required {
-		if bound
-			.iter()
-			.any(|binding| binding.holds(symbol) && available.contains(&binding.code))
-		{
+		if bound.iter().any(|binding| reusable(binding, symbol)) {
 			continue;
 		}
 		let free = available.iter().copied().find(|code| {
@@ -490,6 +505,6 @@ mod tests {
 				last_key:  Cell::new(Some(start + Duration::from_secs(2))),
 			},
 		];
-		assert_eq!(assignments(&[1, 4], &[255, 254, 253], &bound), [(254, 4)]);
+		assert_eq!(assignments(&[1, 4], &[255, 254, 253], &bound, |_, _| true), [(254, 4)]);
 	}
 }

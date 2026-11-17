@@ -553,3 +553,23 @@ fn a_rejected_rebind_still_restores_the_row_it_held() {
 	mapping.finish().unwrap();
 	assert_eq!(core_symbols(&conn), before, "the row still holding é was not restored");
 }
+
+#[test]
+#[ignore = "starts Xvfb and runs setxkbmap"]
+fn a_row_a_layout_reload_cleared_is_bound_again() {
+	let (_server, display) = server();
+	let (conn, _) = x11rb::connect(Some(&display)).unwrap();
+	let conn = Arc::new(conn);
+	let mut map = Keymap::core(&conn).unwrap();
+	let mut mapping = TextMapping::new(Arc::clone(&conn));
+	mapping.bind(&mut map, "é").unwrap();
+	let reload = Command::new("setxkbmap")
+		.args(["-display", &display, "us"])
+		.status()
+		.unwrap();
+	assert!(reload.success());
+	assert!(Keymap::core(&conn).unwrap().lookup(0xe9).is_none(), "the reload kept é");
+	mapping.bind(&mut map, "é").unwrap();
+	assert!(map.lookup(0xe9).is_some());
+	mapping.finish().unwrap();
+}
