@@ -25,6 +25,8 @@
 - Stopping the terminal (external editor, suspend, exit) stops reading stdin first, so keys typed during teardown stay queued for the program that takes the terminal next.
 - Windows terminal writes split only between escape sequences, so a large repaint can no longer be cut inside a row.
 - The event-loop watchdog reads process CPU time half as often while the loop is healthy, and stall checks on input read it only after a pause long enough to be a suspend ([#19538](https://github.com/can1357/oh-my-pi/pull/19538) by [@H4vC](https://github.com/H4vC))
+- Streaming a long answer takes less CPU: the finished part of the message is no longer re-rendered from the top each time a block completes, its rows are checked against the screen without re-comparing unchanged ones every frame, and between seconds the status line redraws only its spinner.
+- Typing with macOS spell checking on does less work per key: placing the last check's undercurls on the edited line no longer compares it character by character against every line checked before.
 
 ## [18.22.0] - 2026-11-16
 
