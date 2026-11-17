@@ -54,7 +54,6 @@ async function emptyRepo() {
 	return { root, journal, write };
 }
 
-/** Existing gitlink whose commits are deliberately absent from the superproject's object store. */
 async function gitlinkWorkspace() {
 	const workspace = await emptyRepo();
 	const { root } = workspace;

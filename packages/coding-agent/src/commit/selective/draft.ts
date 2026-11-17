@@ -439,8 +439,6 @@ async function loadFile(
 	calls: CallEvidence,
 ): Promise<FileChange | "skip" | undefined> {
 	const absolute = path.join(root, file);
-	// Gitlinks refer to commits in another repository, not blobs in this one. Only update
-	// an existing, initialized checkout: additions, deletions, and type changes stay out.
 	if (head.mode === "160000") {
 		const stat = await fs.lstat(absolute).catch(error => {
 			if (!isEnoent(error)) throw error;
