@@ -4,11 +4,27 @@
 
 ### Added
 
-- Added Modal as a hosted inference provider ([#18785](https://github.com/can1357/oh-my-pi/pull/18785) by [@andrewhinh](https://github.com/andrewhinh))
+- Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed Factory Droid's Muse Spark 1.3 dropping image input and staying hidden behind its retired feature flag; it now accepts images and lists without the flag ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed GitLab Duo's Claude models (`duo-chat-opus-*`, `duo-chat-sonnet-*`, `duo-chat-haiku-*`) not being treated as Claude when quoting earlier reasoning: compaction summaries and interrupted-turn notes now leave it out for them, and a `reasoning_extraction` refusal is retried without it, as for Claude elsewhere ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added Modal as a hosted inference provider.
 
 ### Changed
 
-- Changed the local speech model `kokoro` to `phonon-31m`
+- Changed the local speech model from Kokoro to Phonon 31M.
+- Improved reasoning capability detection by preserving unverified thinking-level support and using endpoint-specific probe results when available.
+
+### Fixed
+
+- Fixed xAI Grok OAuth model grok-composer-2.5-fast being incorrectly identified as non-reasoning; it now supports thinking levels from minimal through xhigh.
 
 ## [18.20.3] - 2026-11-16
 

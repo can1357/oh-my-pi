@@ -149,7 +149,7 @@ async function startRun(options: {
 		id: AGENT_ID,
 		parentAgentId: PARENT_ID,
 		asyncJobManager: manager,
-		structured: options.structured ?? false,
+		outputSchema: options.structured ? {} : undefined,
 		modelOverride: "mock/mock-model",
 		authStorage,
 		modelRegistry,
@@ -450,7 +450,6 @@ it("keeps a follow-up turn's report when a peer message arrives right after it",
 			id: AGENT_ID,
 			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
 			message: "report again",
-			structured: false,
 			artifactsDir: child.artifactsDir,
 		});
 		expect(followUp.output).toBe("FOLLOW_UP_REPORT");
@@ -515,6 +514,7 @@ it("keeps a structured follow-up's yield when a peer message arrives as a turn o
 			agent: { name: "task", description: "test", systemPrompt: "test", tools: ["read"], source: "bundled" },
 			message: "report again",
 			artifactsDir: child.artifactsDir,
+			outputSchema: {},
 		});
 		expect((await peerSent)?.outcome).not.toBe("failed");
 		expect(followUp.output).toContain("FOLLOW_UP");
