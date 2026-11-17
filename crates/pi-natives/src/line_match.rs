@@ -45,7 +45,12 @@ fn utf16_offset(line: &str, ascii: bool, byte: usize) -> i32 {
 	(if ascii {
 		byte
 	} else {
-		line[..byte].chars().map(char::len_utf16).sum()
+		let prefix = &line[..byte];
+		if prefix.len() < 64 {
+			prefix.chars().map(char::len_utf16).sum()
+		} else {
+			xutf::transcoded_len::<xutf::Utf8, xutf::Utf16>(prefix.as_bytes())
+		}
 	}) as i32
 }
 
@@ -256,6 +261,13 @@ mod tests {
 		// `✓` is 3 bytes and 1 UTF-16 unit; `𝄞` is 4 bytes and 2 units.
 		let m = core(&[r"(?<mark>\S) (?<name>\S+) (?<n>\d+)"]).match_lines("✓ lint 7\n𝄞 x 12");
 		assert_eq!(m.spans, vec![0, 1, 2, 6, 7, 8, 0, 2, 3, 4, 5, 7]);
+	}
+
+	#[test]
+	fn line_match_long_unicode_prefix_spans_count_utf16_units() {
+		let line = format!("{}𝄞✓ 42", "é".repeat(40));
+		let m = core(&[r"(?<mark>𝄞✓) (?<n>\d+)"]).match_lines(&line);
+		assert_eq!(m.spans, vec![40, 43, 44, 46]);
 	}
 
 	#[test]

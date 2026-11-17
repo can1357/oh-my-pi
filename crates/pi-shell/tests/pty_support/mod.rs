@@ -510,8 +510,8 @@ impl Pty {
 		})
 	}
 
-	/// Wait until the program has taken the terminal out of canonical
-	/// (line) mode: a line editor reads the keys typed from now on.
+	/// Wait until the program has disabled canonical mode and echo: a line
+	/// editor, rather than the kernel's line discipline, handles the keys.
 	///
 	/// # Errors
 	///
@@ -524,11 +524,12 @@ impl Pty {
 			self.pump()?;
 			// The terminal side's modes: a pty's other side has its own on
 			// Linux.
-			if !tty::attrs(term.as_raw_fd())?.get(TermFlag::Icanon) {
+			let attrs = tty::attrs(term.as_raw_fd())?;
+			if !attrs.get(TermFlag::Icanon) && !attrs.get(TermFlag::Echo) {
 				return Ok(());
 			}
 			if Instant::now() >= deadline {
-				return Err(self.timeout("non-canonical mode"));
+				return Err(self.timeout("non-canonical mode with echo disabled"));
 			}
 			thread::sleep(Duration::from_millis(5));
 		}
