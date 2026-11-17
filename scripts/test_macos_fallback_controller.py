@@ -3,6 +3,7 @@
 
 import io
 import json
+import os
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -35,6 +36,22 @@ class Clock:
 
     def sleep(self, seconds):
         self.now += seconds
+
+
+class SourceBoundFallbackTests(unittest.TestCase):
+    def test_changed_controls_do_not_require_a_frozen_parent_workflow_digest(self):
+        env = {"CI_MACOS_FALLBACK_ENABLED": "true", "CI_MACOS_FALLBACK_TRUST": "repository-writers",
+               "CI_MACOS_CONTROL_POLICY": "source-bound",
+               "CI_MACOS_FALLBACK_LABELS": '["self-hosted","macOS","ARM64"]'}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertTrue(controller.fallback_enabled(request()))
+            for field, value in (("CI_MACOS_FALLBACK_ENABLED", "false"),
+                                 ("CI_MACOS_FALLBACK_TRUST", ""),
+                                 ("CI_MACOS_FALLBACK_LABELS", '["macos-15"]'),
+                                 ("CI_MACOS_CONTROL_POLICY", "")):
+                with self.subTest(field=field), patch.dict(os.environ, {field: value}):
+                    self.assertFalse(controller.fallback_enabled(request()))
+            self.assertFalse(controller.fallback_enabled(dict(request(), triggering_actor="outsider")))
 
 
 class FakeAPI:

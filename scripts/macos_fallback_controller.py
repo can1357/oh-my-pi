@@ -423,7 +423,8 @@ def fallback_enabled(request):
     if (os.environ.get("CI_MACOS_FALLBACK_ENABLED") != "true" or
             os.environ.get("CI_MACOS_FALLBACK_TRUST") != "repository-writers" or
             request["actor"] != "blyzer" or request["triggering_actor"] != "blyzer" or
-            not re.fullmatch(r"[0-9a-f]{64}", os.environ.get("CI_MACOS_PARENT_WORKFLOW_SHA256", ""))):
+            (os.environ.get("CI_MACOS_CONTROL_POLICY") != "source-bound" and
+             not re.fullmatch(r"[0-9a-f]{64}", os.environ.get("CI_MACOS_PARENT_WORKFLOW_SHA256", "")))):
         return False
     try:
         labels = json.loads(os.environ.get("CI_MACOS_FALLBACK_LABELS", ""))

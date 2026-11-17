@@ -98,22 +98,28 @@ class HostedRunnerPolicy(unittest.TestCase):
         self.assertIn('python3 scripts/ci_scope.py --workflow ci', self.ci)
         steps = worker['jobs']['native']['steps']
         admission = next(i for i, step in enumerate(steps) if step.get('id') == 'admit')
-        candidate = next(i for i, step in enumerate(steps) if step.get('with', {}).get('path') == '.ci-source')
+        candidate = next(i for i, step in enumerate(steps) if step.get('name') == 'Check out admitted candidate')
         self.assertLess(admission, candidate)
         self.assertEqual(steps[candidate]['with']['ref'], '${{ steps.admit.outputs.source_sha }}')
         for step in steps:
             if step.get('uses', '').startswith('actions/checkout@'):
                 self.assertEqual(step['with']['persist-credentials'], 'false')
         native = next(step for step in steps if step.get('name') == 'Run native objective')
-        self.assertEqual(native['with']['control-directory'], '.')
-        self.assertEqual(native['with']['source-directory'], '.ci-source')
+        self.assertEqual(native['with']['control-directory'], '.ci-control')
+        self.assertEqual(native['with']['source-directory'], '.')
         self.assertEqual(native['with']['guarded'], 'true')
+        restored = next(i for i, step in enumerate(steps) if step.get('with', {}).get('path') == '.ci-control')
+        self.assertLess(candidate, restored)
+        self.assertEqual(steps[restored]['with']['ref'], '${{ github.workflow_sha }}')
+        self.assertNotIn('path', steps[candidate]['with'])
+        self.assertEqual(worker['jobs']['native']['env']['CI_MACOS_CONTROL_POLICY'], 'source-bound')
         self.assertTrue(any('macos_worker_guard.py' in step.get('run', '') for step in action['runs']['steps']))
         for step in action['runs']['steps']:
             if step.get('name') in {'Select pinned Rust toolchain', 'Check provisioned cargo-nextest'} or step.get('uses') == './.github/actions/macos-build-state':
                 self.assertIn("inputs.guarded != 'true'", step['if'])
         execute = next(step for step in action['runs']['steps'] if step.get('name') == 'Execute native objective')
-        self.assertIn('-- python3 "$control/scripts/macos_worker_state.py" -- bash', execute['run'])
+        self.assertIn('-- python3 scripts/macos_worker_state.py -- bash scripts/ci-macos-objective.sh', execute['run'])
+        self.assertIn('python3 "$control/scripts/macos_worker_guard.py" run', execute['run'])
         self.assertIn('--request-file "$RUNNER_TEMP/macos-request.json"', execute['run'])
         self.assertIn('&& 330 || 120', str(ci['jobs']['rust']['timeout-minutes']))
         self.assertIn('&& 330 || 45', str(ci['jobs']['lint_macos']['timeout-minutes']))

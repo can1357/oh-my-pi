@@ -151,6 +151,27 @@ class ProtocolTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(common.VerificationError):
                 common.resolve_worker_ref(FakeAPI({}), "blyzer/oh-my-pi", name)
 
+    def test_source_bound_policy_admits_changed_workflow_only_for_current_owner_source(self):
+        req = request()
+        env = {"CI_MACOS_FALLBACK_ENABLED": "true", "CI_MACOS_FALLBACK_TRUST": "repository-writers",
+               "CI_MACOS_CONTROL_POLICY": "source-bound", "CI_MACOS_PARENT_WORKFLOW_SHA256": "outdated"}
+        data = observations(req)
+        with patch.dict(os.environ, env):
+            common.verify_mac_configuration(FakeAPI(data), req)
+            for mutation in ("actor", "triggering_actor", "fork", "stale", "cancelled"):
+                bad = copy.deepcopy(data)
+                run = bad["repos/blyzer/oh-my-pi/actions/runs/20"]
+                if mutation in ("actor", "triggering_actor"):
+                    run[mutation]["login"] = "someone-else"
+                elif mutation == "fork":
+                    run["head_repository"]["full_name"] = "outside/fork"
+                elif mutation == "stale":
+                    bad["repos/blyzer/oh-my-pi/pulls/42"]["head"]["sha"] = "0" * 40
+                else:
+                    run["status"] = "completed"
+                with self.subTest(mutation=mutation), self.assertRaises(common.VerificationError):
+                    common.verify_mac_configuration(FakeAPI(bad), req)
+
     def test_artifact_redirect_does_not_forward_the_job_token(self):
         calls = []
         class Opener:
