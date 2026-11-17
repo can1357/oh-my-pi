@@ -28,7 +28,7 @@ import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
 import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 import agentDefinition from "./agent.md" with { type: "text" };
 import { resolveAgyBinary } from "./binary";
-import { checkPromptBudget } from "./budget";
+import { checkPromptBudget, checkToolResultBudget, toolResultBlocks } from "./budget";
 import {
 	conversationStorePath,
 	deleteConversation,
@@ -336,7 +336,7 @@ export class AgyHost implements ProviderSessionState {
 					if (plan.toolResult) {
 						if (this.#pending !== pending || !pending || pending.state !== "parked")
 							throw new Error("Antigravity CLI tool continuation was interrupted");
-						this.#releasePending()?.settle(toMcpOutput(plan.toolResult));
+						this.#releasePending()?.settle(toolResultOutput(plan.toolResult, model));
 					}
 				}
 			} else {
@@ -889,15 +889,14 @@ function toMcpTool(tool: Tool): McpToolDefinition {
 	return { name: tool.name, description: tool.description, inputSchema: schema };
 }
 
+/** agy feeds a released tool result back as model input, so an oversized one settles as an actionable error. */
+function toolResultOutput(result: ToolResultMessage, model: Model): McpToolOutput {
+	const overBudget = checkToolResultBudget(result, model);
+	return overBudget ? errorOutput(overBudget) : toMcpOutput(result);
+}
+
 function toMcpOutput(result: ToolResultMessage): McpToolOutput {
-	return {
-		content: result.content.map(part =>
-			part.type === "text"
-				? { type: "text", text: part.text }
-				: { type: "image", data: part.data, mimeType: part.mimeType },
-		),
-		isError: result.isError,
-	};
+	return { content: toolResultBlocks(result), isError: result.isError };
 }
 
 function errorOutput(text: string): McpToolOutput {

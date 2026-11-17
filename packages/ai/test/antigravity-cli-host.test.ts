@@ -359,6 +359,76 @@ describe("AgyHost prompt budgets", () => {
 		await run.done;
 		expect(run.writer.output.content).toEqual([{ type: "text", text: "Fits." }]);
 	});
+
+	it("settles an oversized parked tool result as an actionable error instead of sending it", async () => {
+		const state = await parked();
+		const oversized = result(state.first.writer.output, "a".repeat(ACP_STEP_TEXT_BYTES + 1));
+		const next = step(state.host, [...state.messages, oversized]);
+		const settled = await state.output;
+		expect(settled.isError).toBe(true);
+		const [block] = settled.content;
+		if (block?.type !== "text") throw new Error("Expected a text tool error");
+		expect(block.text).toContain("188001 bytes of text");
+		expect(block.text).toContain("safe single-step budget is 188000 bytes");
+		expect(block.text).toContain("The result was not sent");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect(state.fake.closed).toBe(false);
+		state.fake.text("Narrowing the tool output.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Narrowing the tool output." }]);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("settles an oversized parked tool-result image as an actionable error instead of sending it", async () => {
+		const state = await parked();
+		const oversized = result(state.first.writer.output);
+		oversized.content.push({
+			type: "image",
+			data: Buffer.alloc(MAX_IMAGE_BYTES + 1).toString("base64"),
+			mimeType: "image/png",
+		});
+		const next = step(state.host, [...state.messages, oversized]);
+		const settled = await state.output;
+		expect(settled.isError).toBe(true);
+		const [block] = settled.content;
+		if (block?.type !== "text") throw new Error("Expected a text tool error");
+		expect(block.text).toContain("8388609 bytes of images");
+		expect(block.text).toContain("local ACP image budget is 8388608 bytes");
+		expect(block.text).toContain("The result was not sent");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect(state.fake.closed).toBe(false);
+		state.fake.text("Dropping the image.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Dropping the image." }]);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("releases a parked tool result that exactly fits the step budget", async () => {
+		const state = await parked();
+		const body = "d".repeat(ACP_STEP_TEXT_BYTES);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, body)]);
+		expect(await state.output).toEqual({ content: [{ type: "text", text: body }], isError: false });
+		state.fake.text("Received.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+	});
+
+	it("rejects an oversized late tool result before sending it as a new prompt", async () => {
+		const state = await parked({ holdLimitMs: 20, cancelTimeoutMs: 300 });
+		state.fake.cancelMode = "hold";
+		state.clock.fire(20);
+		await state.fake.cancellations.next();
+		const late = result(state.first.writer.output, "e".repeat(ACP_STEP_TEXT_BYTES + 1));
+		const next = step(state.host, [...state.messages, late]);
+		await Promise.resolve();
+		state.fake.acknowledgeCancel();
+		expect((await state.output).isError).toBe(true);
+		await expect(next.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect(state.fake.closed).toBe(true);
+	});
 });
 
 describe("AgyHost stateful steps", () => {
