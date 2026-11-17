@@ -19,6 +19,7 @@ import * as snapcompactModule from "@oh-my-pi/snapcompact";
 import {
 	cfgCompaction,
 	cfgCompactionAsyncEnabled,
+	cfgCompactionIdleMethodOrder,
 	cfgCompactionMethodOrder,
 	cfgCompactionRemoteEndpoint,
 } from "@oh-my-pi/pi-coding-agent/session/context-settings";
@@ -836,6 +837,28 @@ describe("async speculative compaction", () => {
 		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("snapcompact archive");
 		// Exactly the speculation's summarizer call — the pass never re-summarized.
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("discards an armed summary when the idle order selects a different method", async () => {
+		const generateHandoffDocument = vi.fn(async () => ({ document: "idle handoff document" }));
+		maintenance = createMaintenance({ generateHandoffDocument });
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "armed summary",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		// Speculation armed from `methodOrder` (soft); idle runs its own order.
+		cfgCompactionIdleMethodOrder.override(maintenanceSettings, ["handoff"]);
+
+		await maintenance.runAutoCompaction("idle", false);
+
+		expect(generateHandoffDocument).toHaveBeenCalledTimes(1);
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		expect(entry?.type === "compaction" ? entry.summary : undefined).not.toBe("armed summary");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 	});
 
