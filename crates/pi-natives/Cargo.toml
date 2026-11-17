@@ -36,6 +36,8 @@ notify = "=8.2.0"
 log = "0.4"
 # Already in the graph via pi-builtins; SIMD newline search for IPC line framing.
 memchr = "2.7.4"
+# Already in the graph via pi-builtins; fast hasher for the TUI row-reuse index.
+foldhash = "0.2.0"
 pi-vcs.workspace = true
 parking_lot.workspace = true
 pdf-inspector.workspace = true

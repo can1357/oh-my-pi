@@ -8,8 +8,9 @@
 //! shared: a row unchanged since the previous frame — at the same index or
 //! scrolled to another — is reused instead of prepared again.
 
-use std::{borrow::Cow, collections::HashMap, rc::Rc};
+use std::{borrow::Cow, rc::Rc};
 
+use foldhash::HashMap;
 use memchr::memmem;
 
 use super::{
@@ -109,7 +110,7 @@ impl Preparer {
 	/// merges adjacent SGR sequences in the written bytes
 	/// (`Facts::sgr_coalesce`).
 	pub(crate) fn new(image_protocol: Option<ImageProtocol>, sgr_coalesce: bool) -> Self {
-		Self { image_protocol, sgr_coalesce, memo: HashMap::new(), spare: HashMap::new() }
+		Self { image_protocol, sgr_coalesce, memo: HashMap::default(), spare: HashMap::default() }
 	}
 
 	/// Change the image protocol; rows prepared under another protocol are no
