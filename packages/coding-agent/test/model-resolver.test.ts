@@ -9,6 +9,7 @@ import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
+	formatModelString,
 	formatModelStringWithRouting,
 	parseModelPattern,
 	pickDefaultAvailableModel,
@@ -1481,6 +1482,23 @@ describe("resolveModelOverride", () => {
 		expect(pinned.model && formatModelStringWithRouting(pinned.model)).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(pinned.thinkingLevel).toBe(Effort.High);
 		expect(unpinned.model && formatModelStringWithRouting(unpinned.model)).toBe("openrouter/z-ai/glm-4.7");
+	});
+
+	test("exactOnly accepts an OpenRouter route variant of a catalog model", () => {
+		const registry = { getAvailable: () => allModels } as Parameters<typeof resolveModelOverride>[1];
+
+		const nitro = resolveModelOverride(["openrouter/z-ai/glm-4.7:nitro:high"], registry, undefined, {
+			exactOnly: true,
+		});
+
+		expect(nitro.model && formatModelString(nitro.model)).toBe("openrouter/z-ai/glm-4.7:nitro");
+		expect(nitro.thinkingLevel).toBe(Effort.High);
+		expect(nitro.model && resolveExactModelIdentity(formatModelString(nitro.model), registry)?.id).toBe(
+			"z-ai/glm-4.7:nitro",
+		);
+		expect(
+			resolveModelOverride(["openrouter/z-ai/no-such-model:nitro"], registry, undefined, { exactOnly: true }).model,
+		).toBeUndefined();
 	});
 
 	test("preserves explicit off and explicit-thinking metadata", () => {

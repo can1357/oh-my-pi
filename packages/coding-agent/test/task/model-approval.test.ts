@@ -554,6 +554,13 @@ describe("per-call model grants", () => {
 		expect(parentModelGrantPattern(pinnedSonnet)).toBe("openrouter/anthropic/claude-sonnet-4.5@anthropic");
 	});
 
+	it("approves an OpenRouter route variant its role names", () => {
+		const nitro = parseModelPattern("openrouter/anthropic/claude-sonnet-4.5:nitro", [sonnet]).model!;
+		const settings = Settings.isolated({ modelRoles: { fast: "openrouter/anthropic/claude-sonnet-4.5:nitro" } });
+		expect(nitro.id).toBe("anthropic/claude-sonnet-4.5:nitro");
+		expect(approved(nitro, { settings, agentName: "worker" })).toBe(true);
+	});
+
 	it("never trusts a project agent file that claims a user source", () => {
 		const agent = parseAgent(
 			"/project/.omp/agents/worker.md",
