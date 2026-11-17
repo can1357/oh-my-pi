@@ -356,6 +356,8 @@ export interface TspDiffProps {
 	/** A language overriding the one `path` gives. */
 	lang?: string;
 	mode?: "unified" | "split" | "auto";
+	/** Long lines wrap inside their rows (absent: `true`); `false` keeps a line per row, scrolled sideways together. */
+	wrap?: boolean;
 }
 export interface TspAnsiProps {
 	/** Raw terminal output (SGR, OSC 8, `\r`, `\b` allowed). */

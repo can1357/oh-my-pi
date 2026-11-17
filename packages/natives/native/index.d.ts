@@ -837,6 +837,11 @@ export declare class VcsGitRepo {
    * change.
    */
   isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /**
+   * Operation underway, including unresolved index conflicts without state
+   * files.
+   */
+  operationKind(signal?: unknown | undefined | null): Promise<"merge" | "cherry-pick" | "revert" | "rebase" | "am" | "unmerged-index" | null>
   /** Porcelain status. */
   statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
   /** Status counts. */
@@ -1690,12 +1695,44 @@ export declare function desktopEscapeStops(key: string): number
  * backends and background delivery resolve to `null`.
  */
 export interface DesktopFocusReturn {
-  /** Whether the takeover handed focus back to the app front before it. */
+  /** Whether the takeover handed the front back to the app front before it. */
   handedBack: boolean
   /** The process front before the takeover. */
   previousPid?: number
   /** The process front once the takeover ended; absent when unreadable. */
   frontPid?: number
+  /**
+   * What a macOS takeover did with the user's keyboard; absent elsewhere and
+   * when it did not reach the hand-back.
+   */
+  keyboard?: DesktopKeyboardReturn
+}
+
+/**
+ * What a macOS takeover did to give the user back their keyboard. Nothing
+ * outside an app can see which of its windows is key, so these name what was
+ * sent, not a key state that was observed.
+ */
+export declare enum DesktopKeyboardReturn {
+  /** The window that was key when the takeover began was made key again. */
+  HandedBack = 'handedBack',
+  /**
+   * The user clicked, used a shortcut or switched during the takeover, so
+   * nothing was sent over their choice.
+   */
+  LeftAsChosen = 'leftAsChosen',
+  /**
+   * The user's app never left the front (the target was another of its
+   * windows) and still reported its key window, so nothing was sent.
+   */
+  Kept = 'kept',
+  /** The user's app showed no window: only its front status came back. */
+  FrontOnly = 'frontOnly',
+  /**
+   * macOS refused the hand-back or the user's last input was still being
+   * read, so their window was not made key.
+   */
+  NotSent = 'notSent'
 }
 
 /**
@@ -1722,6 +1759,41 @@ export interface DesktopPoint {
 }
 
 /**
+ * One on-screen window from the unfiltered roster. Unlike
+ * [`super::DesktopWindow`] it keeps popup menus, pickers and system panels,
+ * which publish no title or sharing state and sit above layer 0.
+ */
+export interface DesktopRosterWindow {
+  /** `kCGWindowNumber`, decimal; the same id `listWindows` reports. */
+  id: string
+  /** Owning process id. */
+  pid: number
+  /** Owning process name. */
+  app: string
+  /**
+   * Window title; empty without Screen Recording permission and for
+   * windows that publish none.
+   */
+  title: string
+  x: number
+  y: number
+  width: number
+  height: number
+  /**
+   * `kCGWindowLayer`: 0 for ordinary windows, 3 for floating panels, 101
+   * for popup menus, higher for system panels.
+   */
+  layer: number
+  /** `kCGWindowAlpha`; 0 is an invisible overlay. */
+  alpha: number
+  /**
+   * Whether `listWindows` reports this window, so `computer.window(id)`
+   * resolves it.
+   */
+  listed: boolean
+}
+
+/**
  * Lock and display-sleep state of the user session, read live per call.
  * macOS detects both; Windows detects lock state; Linux reports both false.
  */
@@ -1737,6 +1809,11 @@ export interface DesktopSessionOptions {
    * count, which `desktopEscapeStops` reads after they close.
    */
   escapeStopKey?: string
+  /**
+   * The registry id of the agent this session acts for, named to other
+   * sessions that wait for its input/focus control.
+   */
+  agentId?: string
 }
 
 /** What a typing call did. */
@@ -1776,6 +1853,12 @@ export interface DesktopWindow {
   /** Whether the window currently holds input focus. */
   focused: boolean
 }
+
+/**
+ * Samples every on-screen window, front to back, in one `WindowServer` pass,
+ * with no desktop session and no permission prompt. Empty off macOS.
+ */
+export declare function desktopWindowRoster(): Array<DesktopRosterWindow>
 
 /**
  * Detect macOS system appearance via CoreFoundation.
