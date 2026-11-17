@@ -20,7 +20,7 @@ export interface AcpSessionHandle {
  */
 export type AcpSessionFactory = (
 	cwd: string,
-	options?: { interactivePrompts?: boolean },
+	options?: { interactivePrompts?: boolean; additionalDirectories?: string[] },
 ) => Promise<AgentSession | AcpSessionHandle>;
 
 /** Creates an ACP connection and exposes its agent when process-level teardown must own it. */

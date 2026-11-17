@@ -529,7 +529,10 @@ interface AcpSessionHandle {
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
 }
 
-type AcpSessionFactory = (cwd: string, options?: { interactivePrompts?: boolean }) => Promise<AcpSessionHandle>;
+type AcpSessionFactory = (
+	cwd: string,
+	options?: { interactivePrompts?: boolean; additionalDirectories?: string[] },
+) => Promise<AcpSessionHandle>;
 
 export interface AcpSessionFactoryOptions {
 	baseOptions: CreateAgentSessionOptions;
@@ -576,6 +579,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 	return async (cwd, factoryOptions) => {
 		const nextSettings = await args.settings.cloneForCwd(cwd);
 		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
+		const additionalDirectories = factoryOptions?.additionalDirectories ?? [];
 		const agentId = `acp:${nextSessionManager.getSessionId()}`;
 		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
 		// host can open `session/new` for any client-supplied workspace, so
@@ -601,6 +605,8 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			...args.baseOptions,
 			cwd,
 			sessionManager: nextSessionManager,
+			// An explicit list (including []) prevents SDK fallback to workspace settings.
+			additionalDirectories,
 			settings: nextSettings,
 			authStorage: args.authStorage,
 			modelRegistry: args.modelRegistry,

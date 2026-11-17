@@ -253,6 +253,7 @@ describe("ACP initialize conformance", () => {
 				mcpCapabilities: expect.objectContaining({ http: true, sse: true }),
 				promptCapabilities: expect.objectContaining({ embeddedContext: true, image: true }),
 				sessionCapabilities: expect.objectContaining({
+					additionalDirectories: expect.any(Object),
 					list: expect.any(Object),
 					fork: expect.any(Object),
 					resume: expect.any(Object),

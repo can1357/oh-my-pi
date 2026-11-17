@@ -458,7 +458,7 @@ type AcpSessionHandle = {
 
 type CreateAcpSession = (
 	cwd: string,
-	options?: { interactivePrompts?: boolean },
+	options?: { interactivePrompts?: boolean; additionalDirectories?: string[] },
 ) => Promise<AgentSession | AcpSessionHandle>;
 
 function normalizeCreatedAcpSession(created: AgentSession | AcpSessionHandle): {
@@ -1072,6 +1072,7 @@ export class AcpAgent implements Agent {
 					image: true,
 				},
 				sessionCapabilities: {
+					additionalDirectories: {},
 					list: {},
 					fork: {},
 					resume: {},
@@ -1101,7 +1102,8 @@ export class AcpAgent implements Agent {
 
 	async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
-		const record = await this.#createNewSessionRecord(params.cwd, params.mcpServers);
+		const additionalDirectories = this.#validateAdditionalDirectories(params.additionalDirectories);
+		const record = await this.#createNewSessionRecord(params.cwd, params.mcpServers, additionalDirectories);
 		const response: NewSessionResponse = {
 			sessionId: record.protocolSessionId,
 			configOptions: this.#buildConfigOptions(record.session),
@@ -1113,7 +1115,13 @@ export class AcpAgent implements Agent {
 
 	async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
-		const record = await this.#loadManagedSession(params.sessionId, params.cwd, params.mcpServers);
+		const additionalDirectories = this.#validateAdditionalDirectories(params.additionalDirectories);
+		const record = await this.#loadManagedSession(
+			params.sessionId,
+			params.cwd,
+			params.mcpServers,
+			additionalDirectories,
+		);
 		await this.#replaySessionHistory(record);
 		const response: LoadSessionResponse = {
 			configOptions: this.#buildConfigOptions(record.session),
@@ -1142,7 +1150,13 @@ export class AcpAgent implements Agent {
 
 	async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
-		const record = await this.#resumeManagedSession(params.sessionId, params.cwd, params.mcpServers ?? []);
+		const additionalDirectories = this.#validateAdditionalDirectories(params.additionalDirectories);
+		const record = await this.#resumeManagedSession(
+			params.sessionId,
+			params.cwd,
+			params.mcpServers ?? [],
+			additionalDirectories,
+		);
 		const response: ResumeSessionResponse = {
 			configOptions: this.#buildConfigOptions(record.session),
 			modes: this.#buildModeState(record.session),
@@ -1153,7 +1167,8 @@ export class AcpAgent implements Agent {
 
 	async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
 		this.#assertAbsoluteCwd(params.cwd);
-		const record = await this.#forkManagedSession(params);
+		const additionalDirectories = this.#validateAdditionalDirectories(params.additionalDirectories);
+		const record = await this.#forkManagedSession(params, additionalDirectories);
 		const response: ForkSessionResponse = {
 			sessionId: record.protocolSessionId,
 			configOptions: this.#buildConfigOptions(record.session),
@@ -1824,13 +1839,19 @@ export class AcpAgent implements Agent {
 		);
 	}
 
-	async #createNewSessionRecord(cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
+	async #createNewSessionRecord(
+		cwd: string,
+		mcpServers: McpServer[],
+		additionalDirectories: string[],
+	): Promise<ManagedSessionRecord> {
 		const { session, setToolUIContext } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
+				additionalDirectories,
 			}),
 		);
 		try {
+			await this.#applyAdditionalDirectories(session, additionalDirectories);
 			await session.sessionManager.ensureOnDisk();
 		} catch (error) {
 			await this.#disposeStandaloneSession(session);
@@ -1839,28 +1860,40 @@ export class AcpAgent implements Agent {
 		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
 	}
 
-	async #loadManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
+	async #loadManagedSession(
+		sessionId: string,
+		cwd: string,
+		mcpServers: McpServer[],
+		additionalDirectories: string[],
+	): Promise<ManagedSessionRecord> {
 		const existing = this.#sessions.get(sessionId);
 		if (existing) {
-			this.#assertMatchingCwd(existing.session, cwd);
+			this.#assertMatchingCwd(existing.session.sessionId, existing.session.sessionManager.getCwd(), cwd);
+			await this.#applyAdditionalDirectories(existing.session, additionalDirectories);
 			await this.#configureMcpServers(existing, mcpServers);
 			return existing;
 		}
 
 		const storedSession = await this.#findHandleSession(sessionId, cwd);
-		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		return await this.#openStoredSession(storedSession, cwd, mcpServers, sessionId, additionalDirectories);
 	}
 
-	async #resumeManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
+	async #resumeManagedSession(
+		sessionId: string,
+		cwd: string,
+		mcpServers: McpServer[],
+		additionalDirectories: string[],
+	): Promise<ManagedSessionRecord> {
 		const existing = this.#sessions.get(sessionId);
 		if (existing) {
-			this.#assertMatchingCwd(existing.session, cwd);
+			this.#assertMatchingCwd(existing.session.sessionId, existing.session.sessionManager.getCwd(), cwd);
+			await this.#applyAdditionalDirectories(existing.session, additionalDirectories);
 			await this.#configureMcpServers(existing, mcpServers);
 			return existing;
 		}
 
 		const storedSession = await this.#findHandleSession(sessionId, cwd);
-		return await this.#openStoredSession(storedSession.path, cwd, mcpServers, sessionId);
+		return await this.#openStoredSession(storedSession, cwd, mcpServers, sessionId, additionalDirectories);
 	}
 
 	/** The stored session behind `handle`: the session an extension moved it to, else the handle's own. */
@@ -1889,15 +1922,22 @@ export class AcpAgent implements Agent {
 			.catch(error => logger.warn("Failed to record ACP session handle", { handle, sessionId, error }));
 	}
 
-	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
-		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
+	async #forkManagedSession(
+		params: ForkSessionRequest,
+		additionalDirectories: string[],
+	): Promise<ManagedSessionRecord> {
+		const source = await this.#resolveForkSourceSession(
+			params.sessionId,
+			additionalDirectories.length > 0 ? params.cwd : undefined,
+		);
 		const { session, setToolUIContext } = normalizeCreatedAcpSession(
-			await this.#createSession(path.resolve(params.cwd), {
+			await this.#createSession(path.resolve(source.cwd || params.cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
+				additionalDirectories,
 			}),
 		);
 		try {
-			const success = await session.switchSession(sourcePath);
+			const success = await session.switchSession(source.path);
 			if (!success) {
 				throw new Error(`ACP session fork was cancelled: ${params.sessionId}`);
 			}
@@ -1905,6 +1945,7 @@ export class AcpAgent implements Agent {
 			if (!forked) {
 				throw new Error(`ACP session fork failed: ${params.sessionId}`);
 			}
+			await this.#applyAdditionalDirectories(session, additionalDirectories);
 		} catch (error) {
 			await this.#disposeStandaloneSession(session);
 			throw error;
@@ -1913,21 +1954,31 @@ export class AcpAgent implements Agent {
 	}
 
 	async #openStoredSession(
-		sessionPath: string,
+		storedSession: StoredSessionInfo,
 		cwd: string,
 		mcpServers: McpServer[],
 		protocolSessionId: string,
+		additionalDirectories: string[],
 	): Promise<ManagedSessionRecord> {
+		// Preserve legacy reopening after /move or through a cwd alias unless the client activates extra roots.
+		if (additionalDirectories.length > 0 && storedSession.cwd) {
+			this.#assertMatchingCwd(storedSession.id, storedSession.cwd, cwd);
+		}
 		const { session, setToolUIContext } = normalizeCreatedAcpSession(
-			await this.#createSession(path.resolve(cwd), {
+			await this.#createSession(path.resolve(storedSession.cwd || cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
+				additionalDirectories,
 			}),
 		);
 		try {
-			const success = await session.switchSession(sessionPath);
+			const success = await session.switchSession(storedSession.path);
 			if (!success) {
 				throw new Error(`ACP session load was cancelled: ${protocolSessionId}`);
 			}
+			if (additionalDirectories.length > 0) {
+				this.#assertMatchingCwd(session.sessionId, session.sessionManager.getCwd(), cwd);
+			}
+			await this.#applyAdditionalDirectories(session, additionalDirectories);
 		} catch (error) {
 			await this.#disposeStandaloneSession(session);
 			throw error;
@@ -2076,17 +2127,23 @@ export class AcpAgent implements Agent {
 		return record;
 	}
 
-	#assertMatchingCwd(session: AgentSession, cwd: string): void {
+	#assertMatchingCwd(sessionId: string, actualCwd: string, cwd: string): void {
 		const expected = path.resolve(cwd);
-		const actual = path.resolve(session.sessionManager.getCwd());
+		const actual = path.resolve(actualCwd);
 		if (actual !== expected) {
-			throw new Error(`ACP session ${session.sessionId} is already loaded for ${actual}, not ${expected}`);
+			throw RequestError.invalidParams(
+				undefined,
+				`ACP session ${sessionId} is already loaded for ${actual}, not ${expected}`,
+			);
 		}
 	}
 
-	async #resolveForkSourceSessionPath(sessionId: string): Promise<string> {
+	async #resolveForkSourceSession(sessionId: string, cwd?: string): Promise<{ path: string; cwd: string }> {
 		const loaded = this.#sessions.get(sessionId);
 		if (loaded) {
+			if (cwd !== undefined) {
+				this.#assertMatchingCwd(loaded.session.sessionId, loaded.session.sessionManager.getCwd(), cwd);
+			}
 			if (isPromptTurnInFlight(loaded.promptTurn)) {
 				throw new Error(`ACP session fork is unavailable while a prompt is in progress: ${sessionId}`);
 			}
@@ -2095,14 +2152,15 @@ export class AcpAgent implements Agent {
 			if (!sessionPath) {
 				throw new Error(`ACP session cannot be forked before it is persisted: ${sessionId}`);
 			}
-			return sessionPath;
+			return { path: sessionPath, cwd: loaded.session.sessionManager.getCwd() };
 		}
 
 		const storedSession = await this.#findStoredSessionById(sessionId);
 		if (!storedSession) {
 			throw new Error(`ACP session not found: ${sessionId}`);
 		}
-		return storedSession.path;
+		if (cwd !== undefined && storedSession.cwd) this.#assertMatchingCwd(storedSession.id, storedSession.cwd, cwd);
+		return { path: storedSession.path, cwd: storedSession.cwd };
 	}
 
 	async #handlePromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
@@ -2373,6 +2431,29 @@ export class AcpAgent implements Agent {
 				messageId: crypto.randomUUID(),
 			},
 		});
+	}
+
+	#validateAdditionalDirectories(directories: unknown): string[] {
+		if (directories === undefined) return [];
+		if (
+			!Array.isArray(directories) ||
+			directories.some(directory => typeof directory !== "string" || !path.isAbsolute(directory))
+		) {
+			throw RequestError.invalidParams(
+				undefined,
+				"additionalDirectories must be an array of non-empty absolute paths",
+			);
+		}
+		return directories;
+	}
+
+	async #applyAdditionalDirectories(session: AgentSession, directories: string[]): Promise<void> {
+		const previous = session.sessionManager.getAdditionalDirectories();
+		await session.sessionManager.setAdditionalDirectories(directories);
+		const current = session.sessionManager.getAdditionalDirectories();
+		if (previous.length !== current.length || previous.some((directory, index) => directory !== current[index])) {
+			await session.refreshBaseSystemPrompt();
+		}
 	}
 
 	#assertAbsoluteCwd(cwd: string): void {

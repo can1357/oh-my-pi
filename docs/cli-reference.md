@@ -260,6 +260,12 @@ print-mode disposal semantics when the advisor runtime is enabled.
 
 `--no-ui` (with `--mode rpc` or `--mode rpc-ui`) runs extensions headless: `ctx.hasUI` is `false`, extension dialogs resolve to defaults, and extension presentation updates are dropped. In `rpc-ui`, tool UI such as `ask` still sends `extension_ui_request` frames for the host to answer. Host-issued `login` UI is unaffected. See [RPC startup](./rpc.md#startup).
 
+### ACP multi-root workspaces
+
+`omp acp` advertises `sessionCapabilities.additionalDirectories`. Clients such as Zed can send an `additionalDirectories` array on session creation, loading, resuming, or forking. Each entry must be an absolute path; malformed lists fail with JSON-RPC `invalid_params`.
+
+`cwd` remains the primary root and the base for relative paths. Each lifecycle request supplies the complete additional-root list: omitting it or sending `[]` activates no additional roots, rather than restoring roots from the stored session, launch flags, or workspace settings. Clients must resend their intended roots when reopening a thread. `/dirs` reports the active roots.
+
 ## Subcommands
 
 Run `omp <command> --help` for each command's own flags and examples.
