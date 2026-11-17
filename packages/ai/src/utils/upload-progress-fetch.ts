@@ -21,7 +21,10 @@ function requestBodyBytes(body: RequestInit["body"]): Uint8Array | undefined {
 	return undefined;
 }
 
-/** The fetch standard's redirect limit, which Bun's `fetch` also applies. */
+/**
+ * The Fetch standard's redirect limit. Bun's own `fetch` allows more, so a body of 1 MiB or more fails on a chain
+ * longer than 20 where a small body follows it. After a 303 the GET leg goes to Bun's `fetch` with its own budget.
+ */
 const MAX_REDIRECTS = 20;
 /** Headers the fetch standard drops when a redirect turns the request into a bodiless GET. */
 const BODY_HEADERS = ["content-type", "content-length", "content-encoding", "content-language", "content-location"];
@@ -30,9 +33,15 @@ const ORIGIN_CREDENTIAL_HEADERS = ["authorization", "cookie", "proxy-authorizati
 /** The fetch standard's redirect statuses; any other 3xx (300, 304, …) is returned to the caller as is. */
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-/** A redirect followed here leaves the final `Response` reading `redirected: false`; say it was, as `fetch` does. */
+/**
+ * A redirect followed here leaves the final `Response` reading `redirected: false`; say it was, as `fetch` does,
+ * on the response and on every clone of it.
+ */
 function markRedirected(response: Response): Response {
-	Object.defineProperty(response, "redirected", { value: true });
+	Object.defineProperties(response, {
+		redirected: { value: true },
+		clone: { value: () => markRedirected(Response.prototype.clone.call(response)) },
+	});
 	return response;
 }
 

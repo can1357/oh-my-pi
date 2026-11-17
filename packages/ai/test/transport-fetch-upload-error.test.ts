@@ -183,8 +183,10 @@ describe("transportFetch connection lost before a response", () => {
 
 		const response = await fetch(`http://127.0.0.1:${server.port}/v1/responses`, { method: "POST", body: BODY });
 
+		const copy = response.clone();
 		expect(await response.text()).toBe("done");
 		expect(response.redirected).toBe(true);
+		expect([copy.redirected, copy.clone().redirected]).toEqual([true, true]);
 		expect(requests).toEqual([`POST ${BODY.length}`, `POST ${BODY.length}`]);
 	});
 
