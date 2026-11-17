@@ -31,6 +31,14 @@ def _install_log_sink(sink: Callable[..., None] | None) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingContinuation:
+    """A prior `agent_settled` Continue still subject to later Settle veto."""
+
+    prompt: str
+    label: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Context:
     """Immutable public projection of a host-owned callback scope."""
 
@@ -56,6 +64,7 @@ class Context:
     thinking: Effort | None = None
     settings: Mapping[str, object] = field(default_factory=lambda: _EMPTY_SETTINGS)
     deadline: float | None = None
+    pending_continuation: PendingContinuation | None = None
     _scope: _scope.Scope | None = field(default=None, repr=False, compare=False)
     _update_sink: Callable[[object], None] | None = field(
         default=None,

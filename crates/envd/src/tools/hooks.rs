@@ -781,9 +781,10 @@ impl HookControlFactory {
 		}
 	}
 
-	/// Asks the session's Python `agent_settled` domain rows, in order, and
-	/// returns the first Continue; no row, a stale revision, a failed call or a
-	/// Settle reply all defer. Awaited inline: nothing outlives the call.
+	/// Asks the session's Python `agent_settled` domain rows, in order. The
+	/// first Continue is pending; later hooks see it as `pending_continuation`
+	/// and may veto with Settle. A stale revision, failed call or timeout
+	/// never vetoes. Awaited inline: nothing outlives the call.
 	pub(crate) async fn dispatch_agent_settled(
 		&self,
 		session: &Str,
@@ -799,8 +800,9 @@ impl HookControlFactory {
 				session_generation,
 			)
 		};
-		super::settled::first_continue(&rows, |row| {
+		super::settled::resolve_settled(&rows, |row, pending| {
 			let row = row.clone();
+			let pending = pending.cloned();
 			async move {
 				let expected = <omp_contract::AgentSettledEvent as omp_contract::HookEvent>::REV;
 				if u32::from(row.event_policy.revision) != expected {
@@ -842,6 +844,19 @@ impl HookControlFactory {
 				callback.insert("phase".to_owned(), JsonValue::String("domain".to_owned()));
 				callback.insert("name".to_owned(), JsonValue::String(row.name.to_string()));
 				callback.insert("payload".to_owned(), payload.clone());
+				if let Some(pending) = pending {
+					let mut pending_obj = JsonMap::new();
+					pending_obj
+						.insert("prompt".to_owned(), JsonValue::String(pending.prompt.to_string()));
+					pending_obj.insert(
+						"label".to_owned(),
+						pending
+							.label
+							.map(|label| JsonValue::String(label.to_string()))
+							.unwrap_or(JsonValue::Null),
+					);
+					callback.insert("pending_continuation".to_owned(), JsonValue::Object(pending_obj));
+				}
 				self
 					.callbacks
 					.dispatch_provider_hook(

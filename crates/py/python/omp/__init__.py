@@ -147,7 +147,7 @@ class Fault:
 
 
 
-from ._context import Context
+from ._context import Context, PendingContinuation
 from ._errors import (
     ApiLevelError,
     CapabilityError,
@@ -1402,6 +1402,7 @@ __all__ = (
     "BlobPart",
     "Budget",
     "Context",
+    "PendingContinuation",
     "Field",
     "Fault",
     "Bucket",

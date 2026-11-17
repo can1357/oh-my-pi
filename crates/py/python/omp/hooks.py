@@ -1031,14 +1031,36 @@ def _validate_decision(decision: object, phase: HookPhase) -> HookDecision | Non
     return decision
 
 
+def _pending_continuation_from_wire(value: object):
+    """Decode a host-supplied pending Continue for `ctx.pending_continuation`."""
+    from ._context import PendingContinuation
+
+    if value is None:
+        return None
+    if isinstance(value, PendingContinuation):
+        return value
+    if not isinstance(value, Mapping):
+        raise HookContractError("pending_continuation must be an object or None")
+    prompt = value.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise HookContractError("pending_continuation.prompt must be a non-empty string")
+    label = value.get("label")
+    if label is not None and not isinstance(label, str):
+        raise HookContractError("pending_continuation.label must be a string or None")
+    return PendingContinuation(prompt=prompt, label=label)
+
+
 async def _dispatch_hook_callback(
     event: str,
     phase: str,
     name: str,
     payload: object,
     context: object | None = None,
+    pending_continuation: object | None = None,
 ) -> object:
     """Execute exactly one host-selected frozen subscription."""
+    from dataclasses import replace
+
     from ._context import Context
     from .events import spec as event_spec
 
@@ -1080,6 +1102,11 @@ async def _dispatch_hook_callback(
         context_value = context
     else:
         context_value = _value_from_wire(Context, context)
+    if pending_continuation is not None:
+        context_value = replace(
+            context_value,
+            pending_continuation=_pending_continuation_from_wire(pending_continuation),
+        )
 
     async def call_handler() -> object:
         result = declaration.handler(event_value, context_value)
