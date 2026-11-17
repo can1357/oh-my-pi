@@ -39,7 +39,6 @@ import {
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
-	type KiroDiscoveryAccount,
 	kiroModelManagerOptions,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
 	modelsDevCatalogFallback,
@@ -2814,16 +2813,6 @@ export class ModelRegistry {
 		return projectId ? projectId : undefined;
 	}
 
-	async #resolveKiroDiscoveryAccounts(selectedKey: string): Promise<KiroDiscoveryAccount[] | null> {
-		const accounts: KiroDiscoveryAccount[] = [];
-		for (const access of await this.authStorage.oauth.accessAll("kiro")) {
-			if (!access.ok) return null;
-			accounts.push({ apiKey: access.apiKey, accountKey: oauthAccountKey(access) });
-		}
-		if (!accounts.some(account => account.apiKey === selectedKey)) accounts.push({ apiKey: selectedKey });
-		return accounts;
-	}
-
 	async #collectBuiltInModelManagerOptions(
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
@@ -2865,6 +2854,24 @@ export class ModelRegistry {
 						oauthToken,
 						projectId: extractGoogleOAuthProjectId(raw) ?? this.#resolveGeminiCliDiscoveryProjectId(oauthToken),
 						endpoint: this.#descriptorBaseUrl("google-gemini-cli"),
+						fetch: this.#fetch,
+					}),
+			},
+			{
+				providerId: "kiro",
+				resolveKey: value => value,
+				createOptions: apiKey =>
+					kiroModelManagerOptions({
+						apiKey,
+						resolveAccounts: async () => {
+							const accounts = await resolveOAuthDiscoveryAccounts(this.authStorage, "kiro", apiKey);
+							return (
+								accounts?.map(account => ({
+									apiKey: account.apiKey,
+									accountKey: oauthAccountKey(account),
+								})) ?? null
+							);
+						},
 						fetch: this.#fetch,
 					}),
 			},
@@ -2930,7 +2937,7 @@ export class ModelRegistry {
 				this.#resolveBuiltInDiscoveryApiKey(
 					descriptor.providerId,
 					strategy,
-					descriptor.providerId,
+					isCredentialScopedModelCacheProvider(descriptor.providerId) ? undefined : descriptor.providerId,
 					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
 			),
@@ -2968,13 +2975,7 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const kiroKey = descriptor.providerId === "kiro" ? discoveryConfig.apiKey : undefined;
-				const managerOptions = kiroKey
-					? kiroModelManagerOptions({
-							...preparedConfig,
-							resolveAccounts: () => this.#resolveKiroDiscoveryAccounts(kiroKey),
-						})
-					: descriptor.createModelManagerOptions(preparedConfig);
+				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
