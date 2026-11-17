@@ -2,6 +2,7 @@ import ariaBundle from "../aria/aria-snapshot.bundle.txt" with { type: "text" };
 import type { AriaSnapshotPayload } from "../aria/aria-snapshot";
 import { DEFAULT_STYLE_PROPERTIES, type QueryBox } from "../queries";
 import { roleRules, SEMANTIC_QUERY_HANDLERS } from "../query-handlers";
+import type { SelectOptionChoice } from "../select-options";
 import type { Observation } from "../tab-protocol";
 import type { TernSelector } from "./selectors";
 
@@ -129,8 +130,8 @@ export interface TernKitApi {
 	caretToEnd(sel: TernSelector): void;
 	/** Checked state of a checkbox, radio, or ARIA checkbox/radio/switch. */
 	checkState(sel: TernSelector): { checked: boolean };
-	/** Select `<select>` options by value, then label; returns the selected values. */
-	select(sel: TernSelector, values: string[]): string[];
+	/** Select `<select>` options by value, label, or zero-based index; returns the selected values. */
+	select(sel: TernSelector, values: SelectOptionChoice[]): string[];
 	/** Assign files to a file input, or drop them on any other element. */
 	setFiles(sel: TernSelector, files: TernFilePayload[]): void;
 	/** Whether the first match is a file input or a `<label>` whose control is one. */
@@ -920,12 +921,14 @@ const kit = {
 		const options = Array.from(el.options);
 		const wanted = new Set();
 		const missing = [];
-		for (const value of values.map(String)) {
-			const option =
-				options.find(candidate => candidate.value === value) ||
-				options.find(candidate => candidate.label === value || normalizeSpace(candidate.text) === value);
+		for (const choice of values) {
+			const option = choice.kind === "index"
+				? options[choice.value]
+				: (choice.kind !== "label" && options.find(candidate => candidate.value === choice.value)) ||
+					(choice.kind !== "value" && options.find(candidate =>
+						candidate.label === choice.value || normalizeSpace(candidate.text) === choice.value));
 			if (option) wanted.add(option);
-			else missing.push(value);
+			else missing.push(choice.kind === "string" ? choice.value : { [choice.kind]: choice.value });
 		}
 		// A value that matches nothing leaves the select untouched rather than blanking it.
 		if (missing.length > 0) {

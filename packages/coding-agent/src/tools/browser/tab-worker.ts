@@ -207,6 +207,7 @@ import {
 	wheel,
 	withLiveElement,
 } from "./interactions";
+import { normalizeSelectOptions, type SelectOptionInput } from "./select-options";
 import {
 	captureScreenshotBuffer,
 	createPngDiff,
@@ -449,7 +450,7 @@ interface TabApi {
 	waitFor(selector: string, opts?: { timeout?: number }): Promise<ActionableHandle>;
 	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	scrollIntoView(selector: string): Promise<void>;
-	select(selector: string, ...values: string[]): Promise<string[]>;
+	select(selector: string, ...values: SelectOptionInput[]): Promise<string[]>;
 	uploadFile(selector: string, ...filePaths: string[]): Promise<void>;
 	waitForUrl(pattern: string | RegExp, opts?: { timeout?: number }): Promise<string>;
 	waitForResponse(
@@ -1095,7 +1096,8 @@ export function toActionableHandle(
 		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { count: 2 });
 		enriched.check = () => setElementChecked(enriched, true, "handle.check()");
 		enriched.uncheck = () => setElementChecked(enriched, false, "handle.uncheck()");
-		enriched.select = (...values) => selectElementOptions(enriched, values, "handle.select()");
+		enriched.select = async (...values) =>
+			await selectElementOptions(enriched, normalizeSelectOptions(values), "handle.select()");
 		enriched.highlight = options => highlightElement(enriched, options);
 		const controller = new AbortController();
 		return enrichElementQueries(enriched, (_label, fn) => fn(controller.signal));
@@ -1226,17 +1228,19 @@ export function toActionableHandle(
 				invalidate,
 			),
 		);
-	enriched.select = (...values) =>
-		guard<string[]>("handle.select()", signal =>
+	enriched.select = async (...values) => {
+		const choices = normalizeSelectOptions(values);
+		return await guard<string[]>("handle.select()", signal =>
 			runGuardedHandleAction(
 				enriched,
 				originals,
 				"handle.select()",
 				signal,
-				() => selectElementOptions(enriched, values, "handle.select()", signal),
+				() => selectElementOptions(enriched, choices, "handle.select()", signal),
 				invalidate,
 			),
 		);
+	};
 	enriched.highlight = (options?: HighlightOptions) =>
 		guard<void>("handle.highlight()", signal =>
 			runGuardedHandleAction(
@@ -4036,10 +4040,16 @@ export class WorkerCore {
 		}
 	}
 
-	async #select(selector: string, values: string[], timeoutMs: number, signal: AbortSignal): Promise<string[]> {
+	async #select(
+		selector: string,
+		values: SelectOptionInput[],
+		timeoutMs: number,
+		signal: AbortSignal,
+	): Promise<string[]> {
+		const choices = normalizeSelectOptions(values);
 		const handle = await this.#resolveActionHandle(selector, timeoutMs, signal);
 		try {
-			return await selectElementOptions(handle, values, "tab.select()", signal);
+			return await selectElementOptions(handle, choices, "tab.select()", signal);
 		} finally {
 			await handle.dispose().catch(() => undefined);
 		}
