@@ -28,36 +28,49 @@ pub(crate) fn pressed_at(pid: libc::pid_t, x: f64, y: f64) -> Option<Pressed> {
 impl Pressed {
 	/// The control whose value the press moves, and that value: the element
 	/// itself, or for a value indicator (a slider's knob, a scroll bar's
-	/// thumb) its control. `None` when it publishes no numeric `AXValue`.
+	/// thumb) its control. `None` unless it is a slider or scroll bar
+	/// ([`tracked`]) publishing a numeric `AXValue`.
 	pub(crate) fn control(&self) -> Option<(Control, f64)> {
 		let element = if self.role.as_deref() == Some("AXValueIndicator") {
 			copy_element(&self.element, "AXParent")?
 		} else {
 			self.element.clone()
 		};
-		let value = number(&element, "AXValue")?;
-		let role = copy_string(&element, "AXRole")?;
-		// A scroll bar's value is the fraction scrolled, 0 to 1.
-		let range = number(&element, "AXMinValue")
-			.zip(number(&element, "AXMaxValue"))
-			.or_else(|| (role == "AXScrollBar").then_some((0.0, 1.0)));
-		let vertical =
-			copy_string(&element, "AXOrientation").as_deref() == Some("AXVerticalOrientation");
-		let steps = (role == "AXSlider" && text_surface(&element) == TextSurface::Web)
-			.then(|| {
-				let actions = copy_strings_from_action_names(&element).ok()?;
-				let steps = ["AXIncrement", "AXDecrement"]
-					.iter()
-					.all(|action| actions.iter().any(|name| name == action));
-				steps.then(|| bounds(&element)).flatten()
-			})
-			.flatten();
-		Some((Control { element, role, range, vertical, steps }, value))
+		tracked(copy_string(&element, "AXRole"), |role| {
+			let value = number(&element, "AXValue")?;
+			// A scroll bar's value is the fraction scrolled, 0 to 1.
+			let range = number(&element, "AXMinValue")
+				.zip(number(&element, "AXMaxValue"))
+				.or_else(|| (role == "AXScrollBar").then_some((0.0, 1.0)));
+			let vertical =
+				copy_string(&element, "AXOrientation").as_deref() == Some("AXVerticalOrientation");
+			let steps = (role == "AXSlider" && text_surface(&element) == TextSurface::Web)
+				.then(|| {
+					let actions = copy_strings_from_action_names(&element).ok()?;
+					let steps = ["AXIncrement", "AXDecrement"]
+						.iter()
+						.all(|action| actions.iter().any(|name| name == action));
+					steps.then(|| bounds(&element)).flatten()
+				})
+				.flatten();
+			Some((Control { element, role, range, vertical, steps }, value))
+		})
 	}
 }
 
-/// A control that publishes its position as a number: a slider, a scroll
-/// bar, or another one a drag may start on (a checkbox, a splitter).
+/// Runs `read` on a slider or scroll bar only, before any of its values is
+/// read. A drag from a checkbox, radio button or stepper need not change its
+/// value (a row reorder, a segmented control), and a splitter publishes no
+/// range, so one held at its stop cannot be told from one that ignored the
+/// drag.
+fn tracked<T>(role: Option<String>, read: impl FnOnce(String) -> Option<T>) -> Option<T> {
+	role
+		.filter(|role| matches!(role.as_str(), "AXSlider" | "AXScrollBar"))
+		.and_then(read)
+}
+
+/// A control that tracks a drag itself and publishes its position as a
+/// number: a slider or a scroll bar.
 pub(crate) struct Control {
 	element:             CFRetained<AXUIElement>,
 	pub(crate) role:     String,
@@ -95,16 +108,12 @@ impl Control {
 	/// Whether a pointer moving by `(dx, dy)` moves the control toward its
 	/// maximum: rightward on a horizontal slider or scroll bar, up on a
 	/// vertical slider (its maximum is at the top), down on a vertical scroll
-	/// bar. `None` for any other control: a drag from a checkbox, radio button
-	/// or stepper need not change it (a row reorder, a segmented control), and
-	/// a splitter publishes no range, so one held at its stop cannot be told
-	/// from one that ignored the drag.
-	pub(crate) fn toward_max(&self, dx: f64, dy: f64) -> Option<bool> {
-		match (self.role.as_str(), self.vertical) {
-			("AXSlider" | "AXScrollBar", false) => Some(dx > 0.0),
-			("AXSlider", true) => Some(dy < 0.0),
-			("AXScrollBar", true) => Some(dy > 0.0),
-			_ => None,
+	/// bar.
+	pub(crate) fn toward_max(&self, dx: f64, dy: f64) -> bool {
+		match (self.role == "AXScrollBar", self.vertical) {
+			(_, false) => dx > 0.0,
+			(false, true) => dy < 0.0,
+			(true, true) => dy > 0.0,
 		}
 	}
 }
@@ -139,5 +148,19 @@ mod tests {
 		let frame = AxBounds { x: 0.0, y: 0.0, width: 100.0, height: 16.0 };
 		let thumb = AxBounds { x: 90.0, y: 0.0, width: 10.0, height: 16.0 };
 		assert_eq!(thumb_distance(frame, thumb, false, 150.0, 8.0), Some(0.0));
+	}
+
+	#[test]
+	fn a_drag_from_a_checkbox_or_splitter_tracks_nothing_and_reads_no_value() {
+		// A row reorder from a checkbox leaves its value as it was, and a
+		// splitter dragged against its stop does not move: neither drag is
+		// judged, so it returns done whatever its value reads.
+		for role in ["AXCheckBox", "AXSplitter"] {
+			let read = tracked(Some(role.to_string()), |_| -> Option<()> { panic!("{role} read") });
+			assert!(read.is_none(), "{role}");
+		}
+		for role in ["AXSlider", "AXScrollBar"] {
+			assert_eq!(tracked(Some(role.to_string()), Some).as_deref(), Some(role));
+		}
 	}
 }
