@@ -56,6 +56,7 @@ import { resolveToCwd } from "./path-utils";
 import { parseSqlitePathCandidates } from "./sqlite-reader";
 import {
 	append,
+	attachedValue,
 	boundedDirectory,
 	parseShellCommands,
 	resolveCommandWordPath,
@@ -919,16 +920,13 @@ function patternReaderWords(command: ShellCommand): string[] {
  */
 const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
 /**
- * Options of readers whose value is a key, certificate, netrc file or key folder the program
+ * Long options of readers whose value is a key, certificate, netrc file or key folder the program
  * authenticates, verifies or keeps its keys with (`curl --key`, `wget --private-key`,
  * `gpg --homedir`), or a socket it connects to (`curl --unix-socket`): it neither prints nor
- * copies the value, as `scp -i` does not, so the value is not read. A one-letter option
- * (`curl -E`) counts only for {@link WRITING_READERS}, whose option bundles are read letter by
- * letter.
+ * copies the value, as `scp -i` does not, so the value is not read.
  */
 const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
 	curl: [
-		"-E",
 		"--abstract-unix-socket",
 		"--cacert",
 		"--capath",
@@ -950,12 +948,24 @@ const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
 	gpg: ["--homedir"],
 };
 /**
- * Readers that also write files: their one-letter options that take a value (in a bundle, the
- * first of them takes the rest of the word, or the next word when it ends the bundle), the options
- * whose value they write to rather than read, and, for a copy, whether a last operand without
- * `-t` is the destination.
+ * Readers that also write files, whose options the guard reads in full: their one-letter options
+ * that take a value (in a bundle, the first of them takes the rest of the word, or the next word
+ * when it ends the bundle), the options whose value they write to (`writes`) or read (`reads`),
+ * the other long options that take the next word as their value (`valued`), whether a last operand
+ * without `-t` is the destination (a copy), and whether their operands are URLs, not files (a
+ * download). Each takes a long option's value after an `=` too, curl since 8.16.
  */
-const WRITING_READERS: Record<string, { letters: string; writes: readonly string[]; destination?: true }> = {
+const WRITING_READERS: Record<
+	string,
+	{
+		letters: string;
+		writes: readonly string[];
+		reads?: readonly string[];
+		valued?: readonly string[];
+		destination?: true;
+		urls?: true;
+	}
+> = {
 	curl: {
 		letters: CURL_VALUE_LETTERS,
 		writes: [
@@ -972,6 +982,8 @@ const WRITING_READERS: Record<string, { letters: string; writes: readonly string
 			"--trace",
 			"--trace-ascii",
 		],
+		reads: ["-K", "--config"],
+		urls: true,
 	},
 	wget: {
 		letters: "aABDeiIlnoOPQRtTUwX",
@@ -986,55 +998,56 @@ const WRITING_READERS: Record<string, { letters: string; writes: readonly string
 			"--output-file",
 			"--save-cookies",
 		],
+		reads: ["-i", "--input-file"],
+		urls: true,
 	},
-	cp: { letters: "St", writes: ["-t", "--target-directory"], destination: true },
-	mv: { letters: "St", writes: ["-t", "--target-directory"], destination: true },
+	cp: { letters: "St", writes: ["-t", "--target-directory"], valued: ["--suffix"], destination: true },
+	mv: { letters: "St", writes: ["-t", "--target-directory"], valued: ["--suffix"], destination: true },
+	sort: {
+		letters: "kotST",
+		writes: ["-o", "--output"],
+		valued: ["--key", "--field-separator", "--buffer-size", "--temporary-directory"],
+	},
 };
 
 /**
- * The words a {@link WRITING_READERS} command reads: its arguments, without what it writes to and
- * the values of its {@link KEY_VALUE_OPTIONS}.
+ * The words a {@link WRITING_READERS} command reads: the values of its `reads` options and its
+ * operands (none for a download), without what it writes to and the values of its other options,
+ * {@link KEY_VALUE_OPTIONS} included. A value after an `=` or in its option's word gets no tilde
+ * expansion ({@link attachedValue}).
  */
 function writingReaderWords(command: ShellCommand): string[] {
-	const { letters, writes, destination } = WRITING_READERS[command.argv[0]];
+	const { letters, writes, reads = [], valued = [], destination, urls } = WRITING_READERS[command.argv[0]];
 	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, command.argv[0]) ? KEY_VALUE_OPTIONS[command.argv[0]] : [];
 	const argv = args(command);
 	const words: string[] = [];
 	const operands: string[] = [];
 	let targeted = false;
+	// The value of an option that takes one: where the command writes, a file it reads, or neither.
+	const take = (option: string, value: string | undefined) => {
+		if (writes.includes(option)) targeted = true;
+		else if (reads.includes(option) && value !== undefined) words.push(value);
+	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			append(
-				operands,
-				argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
-			);
+			if (!urls) {
+				append(
+					operands,
+					argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
+				);
+			}
 			break;
 		}
 		if (arg.startsWith("--")) {
 			const eq = arg.indexOf("=");
-			const option = eq > 0 ? arg.slice(0, eq) : arg;
-			if (writes.includes(option)) {
-				targeted = true;
-				if (eq < 0) i++;
-			} else if (keys.includes(option)) {
-				if (eq < 0) i++;
-			} else {
-				words.push(arg);
-			}
+			if (eq > 0) take(arg.slice(0, eq), attachedValue(arg.slice(eq + 1)));
+			else if ([writes, reads, valued, keys].some(options => options.includes(arg))) take(arg, argv[++i]);
 		} else if (arg.startsWith("-") && arg.length > 1) {
 			let k = 1;
 			while (k < arg.length && !letters.includes(arg[k])) k++;
-			const option = `-${arg[k]}`;
-			if (k < arg.length && writes.includes(option)) {
-				targeted = true;
-				if (k === arg.length - 1) i++;
-			} else if (k < arg.length && keys.includes(option)) {
-				if (k === arg.length - 1) i++;
-			} else {
-				words.push(arg);
-			}
-		} else {
+			if (k < arg.length) take(`-${arg[k]}`, k + 1 < arg.length ? attachedValue(arg.slice(k + 1)) : argv[++i]);
+		} else if (!urls) {
 			append(operands, shellBraces(command, arg));
 		}
 	}
@@ -1053,15 +1066,16 @@ const READER_OUTPUT_OPTIONS: Record<string, readonly string[]> = {
 };
 
 /**
- * A plain reader's arguments, without the values of its {@link KEY_VALUE_OPTIONS} (long options
- * only) and {@link READER_OUTPUT_OPTIONS}, given in the next word or after an `=`.
+ * A plain reader's operands: its arguments without its options (`cat -n` names no file `-n`), and
+ * without the values of its {@link KEY_VALUE_OPTIONS} (long options only) and
+ * {@link READER_OUTPUT_OPTIONS}, given in the next word or after an `=`. The value of another option
+ * stays, as the guard does not know which options take one.
  */
 function readerArgs(command: ShellCommand): string[] {
 	const name = command.argv[0];
 	const argv = args(command);
 	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, name) ? KEY_VALUE_OPTIONS[name] : [];
 	const outputs = Object.hasOwn(READER_OUTPUT_OPTIONS, name) ? READER_OUTPUT_OPTIONS[name] : [];
-	if (keys.length === 0 && outputs.length === 0) return argv;
 	const words: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -1073,29 +1087,39 @@ function readerArgs(command: ShellCommand): string[] {
 		const option = eq > 0 ? arg.slice(0, eq) : arg;
 		if ((arg.startsWith("--") && keys.includes(option)) || outputs.includes(option)) {
 			if (eq < 0) i++;
-			continue;
+		} else if (!arg.startsWith("-")) {
+			words.push(arg);
 		}
-		words.push(arg);
 	}
 	return words;
 }
 
+/** A URL (`https://host/x`, `hkps://keys.example`), which names no local file. */
+const URL_RE = /^[a-z][a-z\d+.-]*:\/\//i;
+
 /**
  * The words a reading command reads files from: a copy's local sources, a search's operands after
- * its pattern, a download's arguments other than where it saves, any other reader's arguments; the
- * value of an option that names a key it authenticates with is not read ({@link KEY_VALUE_OPTIONS}).
+ * its pattern, the files a download reads (`curl -K`, `wget -i`) but not where it saves, any other
+ * reader's operands; never `-` (standard input) or a URL. The value of an option that names a key
+ * it authenticates with is not read ({@link KEY_VALUE_OPTIONS}).
  */
 function readWords(command: ShellCommand, home: string): string[] {
 	const name = command.argv[0];
-	if (name === "tar") return tarReadWords(command, home);
-	if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
-		return copyOperands(command)
+	let words: string[];
+	if (name === "tar") {
+		words = tarReadWords(command, home);
+	} else if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
+		words = copyOperands(command)
 			.slice(0, -1)
 			.filter(operand => !REMOTE_OPERAND_RE.test(operand));
+	} else if (Object.hasOwn(PATTERN_READERS, name)) {
+		words = patternReaderWords(command);
+	} else if (Object.hasOwn(WRITING_READERS, name)) {
+		words = writingReaderWords(command);
+	} else {
+		words = Object.hasOwn(READERS, name) ? readerArgs(command) : [];
 	}
-	if (Object.hasOwn(PATTERN_READERS, name)) return patternReaderWords(command);
-	if (Object.hasOwn(WRITING_READERS, name)) return writingReaderWords(command);
-	return Object.hasOwn(READERS, name) ? readerArgs(command) : [];
+	return words.filter(word => word !== "-" && !URL_RE.test(word));
 }
 
 // -- credential_read ---------------------------------------------------------------------------------
