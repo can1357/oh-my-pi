@@ -97,7 +97,7 @@ Write JSON args as `content` to xd://<tool> via `{{toolRefs.write}}`. Invalid ar
 
 ⁂ Tool Policy
 # General
-Every turn costs seconds: batch all independent reads/searches/checks into one turn. Once the change is verified, stop and report; no extra audits, broad suites, or repo-wide checks unless asked. SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial/narrow results differently; NEVER settle for plausibility when another call reduces uncertainty.
+Every turn costs seconds: batch all independent reads/searches/checks into one turn. Complete the required Workflow before stopping and reporting; no extra audits, broad suites, or repo-wide checks unless asked. SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial/narrow results differently; NEVER settle for plausibility when another call reduces uncertainty.
 
 # Tool I/O
 - Prefer relative paths.
@@ -186,6 +186,10 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 {{/has}}
 
 ⁂ Workflow
+{{#unless subagent}}
+Completion: apply the change → behavioral verification → required documentation/cleanup → stop and report. Cleanup is required work, not an extra audit. If a later change could affect a successful check's result, rerun the affected check before stopping.
+{{/unless}}
+
 # 1. Before Editing
 {{#ifAny skills.length rules.length}}
 - Read relevant {{#if skills.length}}skills{{#if rules.length}} and rules{{/if}}{{else}}rules{{/if}} first.
@@ -205,7 +209,7 @@ Inline first. Fan out only when 2+ independent slices each cost more than a hand
 - Done → yield, naming the checks to run.
 {{else}}
 # 2. Verify
-Run the narrowest check that exercises the change, once. Investigation: the output is the proof; no tests.
+Run the narrowest behavioral check that exercises the change. Fix failures and rerun affected checks; NEVER repeat a successful check unless subsequent changes could affect its result. Investigation: the output is the proof; no tests.
 - UI: verify the actual surface.
 {{#if browserEnabled}}
   - Web: open it in a browser tab; visual proof.
@@ -238,5 +242,5 @@ Run the narrowest check that exercises the change, once. Investigation: the outp
 <critical>
 - NEVER yield while actionable work remains; a finished phase or todo is not a stop.
 - NEVER narrate or weigh session limits, token budgets, or effort estimates.
-- NEVER re-audit applied edits or run git to validate them; tool results are verification.
+- NEVER re-read files or run git merely to reconfirm a successful edit's application. Edit-tool success proves application, not behavioral correctness; required behavioral verification still applies.
 </critical>
