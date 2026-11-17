@@ -223,6 +223,8 @@ interface ComputerRunContext {
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
+	/** Whether this run's output holds the background-move note, spent for the session only if the run succeeds. */
+	backgroundMoveNote: boolean;
 	confirmControl(reason: string): Promise<ControlVerdict>;
 	screenshots: ComputerScreenshot[];
 }
@@ -519,12 +521,14 @@ const MENU_CONTROL_ROUTE =
 /**
  * The note after a macOS background `move`, printed for the first one in a
  * desktop session: eval sends each window call as its own run, so a per-run
- * note would repeat once per move. Measured in a macOS 26 guest on an `AppKit`
- * tracking area and a Chrome `:hover` element: a background move gave neither
- * any hover; a takeover move's hover ended when native warped the pointer
- * back, before the call returned; a takeover click on the hidden control
- * reached it every time. Under `refuse` both takeover routes are refused, so
- * that ending names neither.
+ * note would repeat once per move. A failed run delivers only its error, so
+ * the session counts as told only once a successful run carries the note.
+ * Measured in a macOS 26 guest on an `AppKit` tracking area and a Chrome
+ * `:hover` element: a background move gave neither any hover; a takeover
+ * move's hover ended when native warped the pointer back, before the call
+ * returned; a takeover click on the hidden control reached it every time.
+ * Under `refuse` both takeover routes are refused, so that ending names
+ * neither.
  */
 const backgroundMoveNoted = new WeakSet<NativeDesktopSession>();
 const BACKGROUND_MOVE_HOVER =
@@ -1284,8 +1288,13 @@ class Win {
 			},
 			this.pid,
 		);
-		if (background && this.#session.capabilities.backend === "quartz" && !backgroundMoveNoted.has(this.#session)) {
-			backgroundMoveNoted.add(this.#session);
+		if (
+			background &&
+			this.#session.capabilities.backend === "quartz" &&
+			!context.backgroundMoveNote &&
+			!backgroundMoveNoted.has(this.#session)
+		) {
+			context.backgroundMoveNote = true;
 			const text =
 				context.snapshot.backgroundFallback === "refuse" ? BACKGROUND_MOVE_HOVER_REFUSED : BACKGROUND_MOVE_HOVER;
 			context.output.push({ type: "text", text });
@@ -1684,6 +1693,7 @@ export class ComputerWorkerCore {
 			readOnly: message.session.readOnly,
 			snapshot: message.session,
 			output,
+			backgroundMoveNote: false,
 			screenshots,
 			confirmControl: reason =>
 				this.#confirmControl(active, reason, deadline - Math.min(CONTROL_ANSWER_RESERVE_MS, message.timeoutMs / 4)),
@@ -1792,6 +1802,7 @@ export class ComputerWorkerCore {
 				});
 				return;
 			}
+			if (runContext.backgroundMoveNote && this.#guarded) backgroundMoveNoted.add(this.#guarded);
 			this.#transport.send({
 				type: "result",
 				id: message.id,

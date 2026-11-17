@@ -4623,6 +4623,9 @@ describe("computer background fallback", () => {
 		expect(fellBack).toHaveLength(1);
 		expect(fellBack[0]).toStartWith("move ran in takeover because");
 		mac.refuseMove = false;
+		// A run that fails after a background move delivers only its error, so it leaves the note unspent.
+		const failed = await runMac(`${win} await w.move(1, 2); assert(false, "stop");`, "takeover");
+		expect(failed.ok).toBe(false);
 		// Background moves, with and without `takeover: false`, in one run and then as separate runs (as eval
 		// sends each window call), print one note for the whole session.
 		mac.sent.length = 0;
