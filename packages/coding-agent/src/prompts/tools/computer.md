@@ -38,6 +38,8 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
       `await el.actions()` lists every action, the role's own press included.
 - AX values:
   - macOS dates are local ISO-8601, the form `setValue` takes.
+  - A macOS slider, stepper or other number control takes `setValue(75)` or `setValue("0.5")` (plain decimal) and reports the value it settled on
+    when the app clamps or rounds it; one whose value is not settable names the `AXIncrement`/`AXDecrement` actions to step it.
   - On macOS a long value shows its first 200 characters and ends `… (+N chars; (await computer.ref("eN")).value())`; that call returns it whole.
   - Linux and Windows show 80-character previews without that promise; Linux text values may already be clipped by AT-SPI.
   - To look inside a long value, slice or search it in JS (`v.slice(-300)`, `v.indexOf("…")`, a regex with context) rather than printing all of it;
