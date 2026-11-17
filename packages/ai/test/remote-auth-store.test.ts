@@ -371,8 +371,13 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			initialSnapshot: initial.snapshot,
 			streamSnapshots: false,
 		});
+		// Reports probed from a stored row carry that row's id (#19492).
+		const codexId = serverStore!.listAuthCredentials("openai-codex")[0]!.id;
 		try {
-			expect(await remote.getUsageReport("anthropic", credential)).toEqual(anthropicReport);
+			expect(await remote.getUsageReport("anthropic", credential)).toEqual({
+				...anthropicReport,
+				metadata: { ...anthropicReport.metadata, credentialId: entry.id },
+			});
 			expect(fastFetch).toHaveBeenCalledTimes(1);
 			expect(slowFetch).not.toHaveBeenCalled();
 
@@ -382,9 +387,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			expect((await aggregate)?.map(report => report.provider).sort()).toEqual(["anthropic", "openai-codex"]);
 			expect(fastFetch).toHaveBeenCalledTimes(1);
 			expect(slowFetch).toHaveBeenCalledTimes(1);
-			expect(await remote.getUsageReport("openai-codex", { ...credential, accountId: "codex-account" })).toEqual(
-				codexReport,
-			);
+			expect(await remote.getUsageReport("openai-codex", { ...credential, accountId: "codex-account" })).toEqual({
+				...codexReport,
+				metadata: { ...codexReport.metadata, credentialId: codexId },
+			});
 		} finally {
 			releaseSlow.resolve();
 			remote.close();

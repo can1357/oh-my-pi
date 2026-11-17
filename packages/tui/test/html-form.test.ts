@@ -847,6 +847,20 @@ describe("html form", () => {
 				expect(view.term.graphicsPlacements()).toEqual([]);
 			});
 
+			it("sends a WebP picture's rows as PNG, the only format Kitty draws, and keeps the original natively", async () => {
+				const WEBP_1PX = "UklGRhwAAABXRUJQVlA4TBAAAAAvAAAAAAcQ/e9//wMR0f8A";
+				const view = await kittyForm(`<form><img src="data:image/webp;base64,${WEBP_1PX}" alt="dot">${OK}</form>`);
+				const sent = view.writes.join("");
+				expect(sent).toContain("f=100");
+				expect(sent).toContain("iVBORw0KGgo");
+				expect(sent).not.toContain("UklGR");
+				// A native renderer (Tern) decodes the original itself, so a GIF there keeps its animation.
+				const find = (node: NativeNode): NativeNode | undefined =>
+					node.k === "image" ? node : (node.c ?? []).filter(isNode).map(find).find(Boolean);
+				const image = find(view.form.describe(CX));
+				expect(getNativeBlob(String(image?.p && "blob" in image.p ? image.p.blob : ""))?.mime).toBe("image/webp");
+			});
+
 			it("spends image slots only on the pictures of the page shown", async () => {
 				// One live image: a picture on a later page must not take it from the one shown.
 				const view = await kittyForm(TWO_PAGES, { liveImages: 1, pictures: 2 });
@@ -968,6 +982,33 @@ describe("html form", () => {
 			form.handleInput("\x05"); // End
 			expect(titleRow()).toContain("calmer defaults");
 			expect(titleRow()).not.toContain("Colorful Markdown");
+		});
+
+		it("wraps a narrow table cell over extra lines under its column and keeps its <br> breaks", () => {
+			const { form } = dialog(`<form><table>
+				<tr><th>Option</th><th>Tradeoff</th></tr>
+				<tr><td>Postgres</td><td>Durable transactional storage with replication, but needs a managed server and connection pooling<br>Ops cost: high</td></tr>
+			</table><label><input type="radio" name="db" value="pg"> Postgres</label></form>`);
+			const rows = form.render(60).map(row => Bun.stripANSI(row));
+			const first = rows.findIndex(row => row.includes("Postgres  Durable"));
+			const column = rows[first]!.indexOf("Durable");
+			const cell = rows
+				.slice(
+					first,
+					rows.findIndex(row => row.includes("○ Postgres")),
+				)
+				.map(row =>
+					row
+						.slice(column)
+						.replace(/│\s*$/, "")
+						.trimEnd(),
+				)
+				.filter(Boolean);
+
+			expect(cell.slice(0, -1).join(" ")).toBe(
+				"Durable transactional storage with replication, but needs a managed server and connection pooling",
+			);
+			expect(cell.at(-1)).toBe("Ops cost: high");
 		});
 
 		it("Other: typed text becomes a radio's value or joins a checkbox group; picking an option sets it aside", () => {
