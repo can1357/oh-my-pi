@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- The JavaScript eval `commit` helper now throws a `TypeError` for option names it does not know (e.g. `commit.draft({ cwd })`, which used to draft the session's own checkout) and for a non-object options argument, naming the expected options; scripts that passed extra keys must drop them. Committing a draft of an unchanged repository now says so instead of suggesting `take()` ([#19440](https://github.com/can1357/oh-my-pi/issues/19440))
+
 ### Added
 
 - Added the `providers.webKeyless` setting (default on): turn it off and `web_search` and URL reading use only services you configured, skipping keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines even when your `web` chain lists them; `omp q --model web/<engine>` still runs one on request ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#16336](https://github.com/can1357/oh-my-pi/issues/16336))
@@ -21,6 +25,7 @@
 - Browser tasks start without reading `xd://eval/browser`: a short guide follows the first browser call as a hidden session message, outside cell output limits and shaping. Compaction or a rewind that drops or shortens it sends it again. Advisors keep reading the full guide first; real-session, borrowed-tab and page-integrity safety rules arrive before the first call ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
 - Named-menu reads now include exposed nested commands with their full paths, avoiding a separate read for each submenu ([#18222](https://github.com/can1357/oh-my-pi/pull/18222) by [@will-bogusz](https://github.com/will-bogusz))
 - On macOS the first background `computer` `win.move()` of a session now says in its output that the app gets no hover from it and that a control shown only on hover is pressed with a takeover click, instead of returning as a plain success ([#19509](https://github.com/can1357/oh-my-pi/pull/19509) by [@will-bogusz](https://github.com/will-bogusz))
+- The eval `commit` helper now also runs Git hooks defined in config (`hook.<name>.event`, Git 2.54+), alongside `.git/hooks/` ones, as `git commit` does. With such hooks configured, including in your global Git config, commits made through omp can now be slower or rejected where they used to pass ([#19443](https://github.com/can1357/oh-my-pi/issues/19443))
 
 ### Fixed
 
@@ -61,8 +66,6 @@
 - Fixed Objective-C message results and arm64 retain-register data flow in Ghidra analysis of Mach-O binaries, including previously analyzed cache-extracted frameworks ([#19558](https://github.com/can1357/oh-my-pi/pull/19558) by [@shgew](https://github.com/shgew)).
 - With a modal dialog open, browser `fill`, `type` and `press` aimed at a field behind it now fail naming what covers it, as `click` does, instead of typing into the dialog's button and reporting success (on Chromium tabs and Tern tabs without native DOM reads); `press` also refuses a disabled element (on Chromium tabs and Tern tabs without native DOM reads), and Chromium `drag` refuses a covered start or end ([#19524](https://github.com/can1357/oh-my-pi/pull/19524) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed RPC `login` refusing providers with an at-your-own-risk warning (`antigravity-cli`, `google-antigravity`): the warning now reaches the host as an `extension_ui_request` `input`, and login continues on "yes" and cancels on anything else ([#19523](https://github.com/can1357/oh-my-pi/issues/19523))
-- The eval `commit` helper now runs Git hooks defined in config (`hook.<name>.event`, Git 2.54+) alongside `.git/hooks/` ones, as `git commit` does, so a failing config-defined `pre-commit` or `commit-msg` hook stops the commit ([#19443](https://github.com/can1357/oh-my-pi/issues/19443))
-- Fixed the JavaScript `commit` eval prelude silently ignoring unknown options (e.g. `commit.draft({ cwd })` drafted the session's own checkout); it now throws naming the expected options, and committing a draft of an unchanged repository says so instead of suggesting `take()` ([#19440](https://github.com/can1357/oh-my-pi/issues/19440))
 - On Linux, file watching for language servers no longer puts an inotify watch on every directory under `node_modules` and `.git/objects`, which could use up the system's inotify watch limit and keep other programs such as systemd from adding watches ([#19459](https://github.com/can1357/oh-my-pi/issues/19459))
 - `/restart` now re-execs through the launcher omp was started by, so an open session moves onto an upgraded binary instead of re-running a retained old install ([#19529](https://github.com/can1357/oh-my-pi/pull/19529) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 - RPC hosts now always receive a terminal `agent_end` after an over-quota 429: usage-limit bookkeeping is bounded so a stalled usage report can no longer hold the event ([#19411](https://github.com/can1357/oh-my-pi/issues/19411), [#19417](https://github.com/can1357/oh-my-pi/pull/19417) by [@yuzu-octopus](https://github.com/yuzu-octopus))
