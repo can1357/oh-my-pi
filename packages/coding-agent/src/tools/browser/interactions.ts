@@ -2,6 +2,7 @@ import type { Protocol } from "devtools-protocol";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type {
+	BoundingBox,
 	ElementHandle,
 	Frame,
 	JSHandle,
@@ -354,6 +355,17 @@ export async function isClickActionable(
 	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
 }
 
+function sameBox(previous: BoundingBox | null, current: BoundingBox | null): boolean {
+	return (
+		previous !== null &&
+		current !== null &&
+		Math.abs(previous.x - current.x) < 0.5 &&
+		Math.abs(previous.y - current.y) < 0.5 &&
+		Math.abs(previous.width - current.width) < 0.5 &&
+		Math.abs(previous.height - current.height) < 0.5
+	);
+}
+
 async function actionableClickPoint(
 	handle: ElementHandle,
 	label: string,
@@ -373,13 +385,7 @@ async function actionableClickPoint(
 			throwIfAborted(signal);
 			await untilAborted(signal, () => Bun.sleep(16));
 			const current = await untilAborted(signal, () => handle.boundingBox());
-			const stable =
-				previous !== null &&
-				current !== null &&
-				Math.abs(previous.x - current.x) < 0.5 &&
-				Math.abs(previous.y - current.y) < 0.5 &&
-				Math.abs(previous.width - current.width) < 0.5 &&
-				Math.abs(previous.height - current.height) < 0.5;
+			const stable = sameBox(previous, current);
 			const result = await isClickActionable(handle, signal, options);
 			if (!result.ok && result.detached) throw new ElementDetachedError(label);
 			// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
@@ -395,6 +401,105 @@ async function actionableClickPoint(
 		if (signal?.aborted && refusal !== undefined) throw new ClickRefusedError(refusal, { cause: signal.reason });
 		throw error;
 	}
+}
+
+/**
+ * Page function: whether an open modal dialog of the element's document leaves the element behind it, unfocusable
+ * and under the dialog's backdrop. A dialog inside a shadow root is not found.
+ */
+const behindModalDialogInPage = new Function(
+	"el",
+	`const contains = ${composedContains.toString()};
+	for (const dialog of el.ownerDocument.querySelectorAll("dialog:modal")) {
+		if (!contains(dialog, el)) return true;
+	}
+	return false;`,
+) as (el: unknown) => boolean;
+
+/** Which covers {@link refuseCoveredTarget} refuses, and whether it may scroll to look. */
+interface CoverCheck {
+	/**
+	 * Refuse only an element behind a modal dialog. Keys go wherever focus is, so a field focus reaches takes them
+	 * under any other layer; a modal dialog leaves the page behind it unfocusable, so they would go to the dialog.
+	 */
+	modalOnly: boolean;
+	/** Scroll an off-screen element into view to hit-test it; without it, an off-screen element is not refused. */
+	scroll: boolean;
+}
+
+/**
+ * Refuse an element another one covers before input meant for it goes out, as a click is refused: this runs click's
+ * hit test ({@link isClickActionable}) and refuses only a cover, once the element's box holds still, so a hidden or
+ * zero-size element keeps the handling its action already gives it.
+ */
+export async function refuseCoveredTarget(
+	handle: ElementHandle,
+	label: string,
+	signal: AbortSignal | undefined,
+	{ modalOnly, scroll }: CoverCheck,
+): Promise<ActionabilityResult | undefined> {
+	if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
+	let result = await isClickActionable(handle, signal);
+	if (scroll && !result.ok && result.reason === "off-viewport") {
+		await untilAborted(signal, () =>
+			handle.evaluate(el => {
+				const element = el as unknown as PageElement;
+				element.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+			}),
+		);
+		result = await isClickActionable(handle, signal);
+	}
+	if (result.ok || !result.coveredBy) return result;
+	let coveredBy = result.coveredBy;
+	let previous = await untilAborted(signal, () => handle.boundingBox());
+	try {
+		while (true) {
+			await untilAborted(signal, () => Bun.sleep(16));
+			if (modalOnly && !(await untilAborted(signal, () => handle.evaluate(behindModalDialogInPage)))) return;
+			const current = await untilAborted(signal, () => handle.boundingBox());
+			result = await isClickActionable(handle, signal);
+			if (result.ok || !result.coveredBy) return result;
+			coveredBy = result.coveredBy;
+			// A cover counts once the element holds still, as for a click: an overlay may be animating away.
+			const stable = sameBox(previous, current);
+			if (stable) throw new ToolError(`${label} blocked: covered by ${coveredBy}`);
+			previous = current;
+		}
+	} catch (error) {
+		if (signal?.aborted) throw new ClickRefusedError(`covered by ${coveredBy}`, { cause: signal.reason });
+		throw error;
+	}
+}
+
+/**
+ * Focus the element keys are pressed in, refusing one they could not reach: a disabled one, whose `focus()` leaves
+ * focus where it was, or one behind a modal dialog, which leaves it unfocusable ({@link refuseCoveredTarget}).
+ */
+export async function focusKeyTarget(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<void> {
+	const { disabled, focused } = await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const node = el as unknown as {
+				focus?: () => void;
+				matches(selector: string): boolean;
+				contains(other: unknown): boolean;
+				getRootNode(): {
+					activeElement?: { isContentEditable?: boolean; contains(other: unknown): boolean } | null;
+				};
+			};
+			node.focus?.();
+			const active = node.getRootNode().activeElement;
+			return {
+				disabled: node.matches(":disabled"),
+				focused:
+					!!active &&
+					(active === node ||
+						node.contains(active) ||
+						(active.isContentEditable === true && active.contains(node))),
+			};
+		}),
+	);
+	if (disabled) throw new ToolError(`${label} blocked: the element is disabled`);
+	if (!focused) await refuseCoveredTarget(handle, label, signal, { modalOnly: true, scroll: true });
 }
 
 /**
@@ -555,12 +660,15 @@ export async function hoverElement(handle: ElementHandle, signal?: AbortSignal):
 /**
  * Focus a text-entry target, refusing one that cannot take keystrokes. A
  * disabled control ignores `focus()`, so they would land in whichever element
- * had focus; a read-only one drops them. The check runs after `focus()` so a
- * focus handler that locks the field is seen.
+ * had focus; a read-only one drops them; one that focus did not reach is
+ * refused when a modal dialog covers it ({@link refuseCoveredTarget}), since
+ * the dialog leaves the page behind it unfocusable. The checks run after
+ * `focus()` so a focus handler that locks the field is seen.
  */
 async function focusTextEntryTarget(
 	handle: ElementHandle,
 	action: "fill" | "type into",
+	label: string,
 	signal?: AbortSignal,
 ): Promise<void> {
 	const refusal = await untilAborted(signal, () =>
@@ -570,6 +678,10 @@ async function focusTextEntryTarget(
 				isContentEditable?: boolean;
 				focus?: () => void;
 				matches(selector: string): boolean;
+				contains(other: unknown): boolean;
+				getRootNode(): {
+					activeElement?: { isContentEditable?: boolean; contains(other: unknown): boolean } | null;
+				};
 				ownerDocument: {
 					createRange(): { selectNodeContents(node: unknown): void };
 					getSelection(): { removeAllRanges(): void; addRange(range: unknown): void } | null;
@@ -588,10 +700,18 @@ async function focusTextEntryTarget(
 			node.focus?.();
 			if (node.matches(":disabled")) return "disabled";
 			if (node.readOnly) return "read-only";
+			// Keys go where focus is: the element, an element inside it, or the editing host around it.
+			const active = node.getRootNode().activeElement;
+			const focused =
+				!!active &&
+				(active === node || node.contains(active) || (active.isContentEditable === true && active.contains(node)));
+			if (!focused) return "unfocused";
 			return null;
 		}, action === "fill"),
 	);
-	if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
+	// Another miss (a node inside an editor, a focus handler that moved focus to a picker) keeps the handling it had.
+	if (refusal === "unfocused") await refuseCoveredTarget(handle, label, signal, { modalOnly: true, scroll: true });
+	else if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
 }
 
 /**
@@ -630,10 +750,11 @@ async function typeKeys(
 export async function typeIntoElement(
 	handle: ElementHandle,
 	text: string,
+	label: string,
 	signal?: AbortSignal,
 	options?: Readonly<KeyboardTypeOptions>,
 ): Promise<void> {
-	await focusTextEntryTarget(handle, "type into", signal);
+	await focusTextEntryTarget(handle, "type into", label, signal);
 	await typeKeys(handle.frame.page(), text, signal, options);
 }
 
@@ -665,8 +786,13 @@ const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
  * and `IntersectionObserver` callbacks that a backgrounded headless tab never
  * delivers (#12892). Typing stops at the next key once `signal` aborts.
  */
-export async function fillViaHandle(handle: ElementHandle, value: string, signal?: AbortSignal): Promise<void> {
-	await focusTextEntryTarget(handle, "fill", signal);
+export async function fillViaHandle(
+	handle: ElementHandle,
+	value: string,
+	label: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	await focusTextEntryTarget(handle, "fill", label, signal);
 	const prepared = await untilAborted(signal, () =>
 		handle.evaluate(
 			(el, wanted, pickerTypes) => {
