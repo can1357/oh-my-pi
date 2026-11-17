@@ -108,6 +108,10 @@
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
 
+### Fixed
+
+- Fixed Wayland screenshots of a still screen failing after 5 s with `PipeWire frame timed out` on Hyprland and other wlroots compositors: the screen share now stays open between screenshots and closes 120 s after the last one, so on GNOME and KDE the sharing indicator stays on while omp is capturing instead of flashing for each screenshot
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

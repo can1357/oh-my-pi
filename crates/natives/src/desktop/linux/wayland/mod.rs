@@ -143,6 +143,7 @@ impl PortalGeometry {
 pub struct WaylandBackend {
 	display:           DisplaySelector,
 	pipewire:          pipewire::Loaded,
+	cast:              capture::Cast,
 	ax:                Option<AtSpiAx>,
 	ax_error:          Option<DesktopError>,
 	input:             Option<libei::Libei>,
@@ -196,6 +197,7 @@ impl WaylandBackend {
 		Self {
 			display,
 			pipewire: pipewire::library(),
+			cast: capture::Cast::default(),
 			ax,
 			ax_error,
 			input: None,
@@ -324,9 +326,9 @@ impl Backend for WaylandBackend {
 
 	fn validate_frame_layout(&mut self, frame: &FrameGeometry) -> CoreResult<()> {
 		control::check()?;
-		// ScreenCast exposes geometry only when opening a stream. Enumeration can
-		// use the last snapshot, but coordinate delivery needs fresh bounds.
-		let geometry = capture::geometry(self.pipewire);
+		// ScreenCast exposes geometry only through a stream. Enumeration can use
+		// the last snapshot, but coordinate delivery needs fresh bounds.
+		let geometry = self.cast.geometry(self.pipewire);
 		control::check()?;
 		let geometry = geometry.map_err(|error| {
 			DesktopError::invalid_coordinate_frame(format!(
@@ -389,7 +391,7 @@ impl Backend for WaylandBackend {
 		_caps: &CaptureCaps,
 		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)> {
-		let (image, geometry) = capture::capture(self.pipewire)?;
+		let (image, geometry) = self.cast.capture(self.pipewire)?;
 		self.displays = vec![geometry.display()];
 		let explicit = target.display_selector();
 		let selected = selector
@@ -562,6 +564,7 @@ mod tests {
 		WaylandBackend {
 			display:           DisplaySelector::All,
 			pipewire:          Err("libpipewire-0.3.so.0 could not be loaded (not installed)"),
+			cast:              capture::Cast::default(),
 			ax:                None,
 			ax_error:          None,
 			input:             None,

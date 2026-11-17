@@ -115,7 +115,11 @@ fn load(name: &CStr) -> Result<PipeWire, String> {
 pub(super) const SPA_DIRECTION_INPUT: u32 = 0;
 pub(super) const PW_STREAM_FLAG_AUTOCONNECT: u32 = 1 << 0;
 pub(super) const PW_STREAM_FLAG_MAP_BUFFERS: u32 = 1 << 2;
+pub(super) const PW_STREAM_FLAG_DONT_RECONNECT: u32 = 1 << 7;
 pub(super) const PW_VERSION_STREAM_EVENTS: u32 = 2;
+/// `enum pw_stream_state` values the stream thread acts on.
+pub(super) const PW_STREAM_STATE_ERROR: c_int = -1;
+pub(super) const PW_STREAM_STATE_UNCONNECTED: c_int = 0;
 
 /// `struct spa_dict`.
 #[repr(C)]
@@ -145,18 +149,18 @@ impl SpaHook {
 
 type Unused = Option<unsafe extern "C" fn()>;
 
-/// `struct pw_stream_events` at version 2, with the two callbacks capture
+/// `struct pw_stream_events` at version 2, with the four callbacks capture
 /// uses.
 #[repr(C)]
 pub(super) struct StreamEvents {
 	version:       u32,
 	destroy:       Unused,
-	state_changed: Unused,
+	state_changed: Option<unsafe extern "C" fn(*mut c_void, c_int, c_int, *const c_char)>,
 	control_info:  Unused,
 	io_changed:    Unused,
 	param_changed: Option<unsafe extern "C" fn(*mut c_void, u32, *const SpaPod)>,
 	add_buffer:    Unused,
-	remove_buffer: Unused,
+	remove_buffer: Option<unsafe extern "C" fn(*mut c_void, *mut Buffer)>,
 	process:       Option<unsafe extern "C" fn(*mut c_void)>,
 	drained:       Unused,
 	command:       Unused,
@@ -165,18 +169,20 @@ pub(super) struct StreamEvents {
 
 impl StreamEvents {
 	pub(super) const fn new(
+		state_changed: unsafe extern "C" fn(*mut c_void, c_int, c_int, *const c_char),
 		param_changed: unsafe extern "C" fn(*mut c_void, u32, *const SpaPod),
+		remove_buffer: unsafe extern "C" fn(*mut c_void, *mut Buffer),
 		process: unsafe extern "C" fn(*mut c_void),
 	) -> Self {
 		Self {
 			version:       PW_VERSION_STREAM_EVENTS,
 			destroy:       None,
-			state_changed: None,
+			state_changed: Some(state_changed),
 			control_info:  None,
 			io_changed:    None,
 			param_changed: Some(param_changed),
 			add_buffer:    None,
-			remove_buffer: None,
+			remove_buffer: Some(remove_buffer),
 			process:       Some(process),
 			drained:       None,
 			command:       None,
