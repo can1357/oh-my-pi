@@ -156,6 +156,7 @@ import {
 	normalizeOpenAIPromptCacheKey,
 	pickUnrecordedResponsesToolCalls,
 	populateResponsesUsageFromResponse,
+	parseAssistantMessagePhase,
 	promoteResponsesToolUseStopReason,
 	settleReasoningSummary,
 	type SequentialCutoffSummaryState,
@@ -1952,7 +1953,7 @@ function createOutputBlockForItem(item: CodexEventItem): CodexOutputBlock | null
 		return { type: "thinking", thinking: "" };
 	}
 	if (item.type === "message") {
-		const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined;
+		const phase = parseAssistantMessagePhase(item.phase);
 		return { type: "text", text: "", textSignature: encodeTextSignatureV1(item.id, phase) };
 	}
 	if (item.type === "function_call") {
@@ -2491,7 +2492,7 @@ class CodexStreamProcessor {
 
 		if (item.type === "message" && block?.type === "text") {
 			block.text = finalizeMessageText(item, block.text);
-			const phase = item.phase === "commentary" || item.phase === "final_answer" ? item.phase : undefined;
+			const phase = parseAssistantMessagePhase(item.phase);
 			block.textSignature = encodeTextSignatureV1(item.id, phase);
 			stream.push({
 				type: "text_end",

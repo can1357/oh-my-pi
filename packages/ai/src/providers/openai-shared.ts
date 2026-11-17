@@ -57,6 +57,7 @@ import {
 	type StreamOptions,
 	shouldSendServiceTier,
 	type TextContent,
+	type AssistantMessagePhase,
 	type TextSignatureV1,
 	type ThinkingContent,
 	type Tool,
@@ -1497,6 +1498,11 @@ export function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase
 	return JSON.stringify(payload);
 }
 
+/** Narrows a wire `phase` value to a known {@link AssistantMessagePhase}; unknown values yield `undefined`. */
+export function parseAssistantMessagePhase(value: unknown): AssistantMessagePhase | undefined {
+	return value === "commentary" || value === "final_answer" || value === "partial_answer" ? value : undefined;
+}
+
 export function parseTextSignature(
 	signature: string | undefined,
 ): { id: string; phase?: TextSignatureV1["phase"] } | undefined {
@@ -1505,8 +1511,9 @@ export function parseTextSignature(
 		try {
 			const parsed = JSON.parse(signature) as Partial<TextSignatureV1>;
 			if (parsed.v === 1 && typeof parsed.id === "string") {
-				if (parsed.phase === "commentary" || parsed.phase === "final_answer") {
-					return { id: parsed.id, phase: parsed.phase };
+				const phase = parseAssistantMessagePhase(parsed.phase);
+				if (phase) {
+					return { id: parsed.id, phase };
 				}
 				return { id: parsed.id };
 			}

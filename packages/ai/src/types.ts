@@ -906,10 +906,16 @@ export type StreamFunction<TApi extends Api> = (
 	options: OptionsForApi<TApi>,
 ) => AssistantMessageEventStream;
 
+/**
+ * Responses API assistant message phase. `partial_answer` (Codex 0.162+) marks
+ * answer text that more output or tool calls may follow; `final_answer` ends the turn.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer" | "partial_answer";
+
 export interface TextSignatureV1 {
 	v: 1;
 	id: string;
-	phase?: "commentary" | "final_answer";
+	phase?: AssistantMessagePhase;
 }
 
 export interface TextContent {
