@@ -182,18 +182,20 @@ function storedAccountReport(
 }
 
 /**
- * The one stored account a usage report belongs to, matched as the reset
- * planners match them (a Claude credential stored without an organization
- * adopts its report's); `undefined` when none or several match.
+ * The one stored account `report` belongs to among `reports` (all of its
+ * provider's), matched as the reset planners match them: a Claude credential
+ * stored without an organization adopts a report only when no other report
+ * fits it. `undefined` when none or several accounts match.
  */
 export function reportStoredAccount<T extends Omit<StoredAccountIdentity, "provider">>(
 	report: UsageReport,
 	accounts: readonly T[],
+	reports: readonly UsageReport[],
 ): T | undefined {
 	const stored = accounts.map(account => ({ ...account, provider: report.provider }));
 	const owners = accounts.filter((_, index) =>
 		report.provider === CLAUDE_PROVIDER
-			? storedAccountReport(stored[index]!, stored, [report]) !== undefined
+			? storedAccountReport(stored[index]!, stored, reports)?.report === report
 			: reportMatchesStatus(report, stored[index]!),
 	);
 	return owners.length === 1 ? owners[0] : undefined;

@@ -36,16 +36,18 @@ export interface ResetCreditsDeps {
 
 /**
  * Whether the stored row a target names still holds the account the target was
- * planned for: each identity field both sides carry must agree.
+ * planned for: no identity field both sides carry may differ, and a target that
+ * names an account must share its account id or email with the row. An
+ * organization only one side knows is not compared: Claude discovers it for a
+ * credential stored without one.
  */
 function isSameAccount(target: ResetCreditTarget, stored: OAuthAccountIdentity): boolean {
-	const differs = (left: string | undefined, right: string | undefined) =>
-		left !== undefined && right !== undefined && left.trim().toLowerCase() !== right.trim().toLowerCase();
-	return !(
-		differs(target.accountId, stored.accountId) ||
-		differs(target.email, stored.email) ||
-		differs(target.orgId, stored.orgId)
-	);
+	const compare = (left: string | undefined, right: string | undefined) =>
+		left === undefined || right === undefined ? undefined : left.trim().toLowerCase() === right.trim().toLowerCase();
+	const accountId = compare(target.accountId, stored.accountId);
+	const email = compare(target.email, stored.email);
+	if (accountId === false || email === false || compare(target.orgId, stored.orgId) === false) return false;
+	return (target.accountId === undefined && target.email === undefined) || accountId === true || email === true;
 }
 
 /** Saved rate-limit resets (Codex / Claude): list offers and redeem one per account. */

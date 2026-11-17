@@ -1106,7 +1106,7 @@ A Claude Fable launch reset restores Fable weekly usage (its 5h clear is inciden
 
 When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Consent, provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
 
-`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set every window key of a provider to `no` to disable its automatic spending.
+`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set every window key of a provider to `no`, with no account policy setting one to `yes`, to disable its automatic spending.
 
 To spend one by hand, use `/usage reset` in a session or `omp usage reset` from a shell, which needs no session or TTY and works from an auth-broker client: without arguments it lists each account's saved resets by `<provider>/<credential id>`, and with one it spends a single reset on that account.
 

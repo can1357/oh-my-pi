@@ -178,6 +178,29 @@ describe("Claude saved reset account safety", () => {
 			baseUrlResolver: f.baseUrlResolver,
 		});
 		expect(reused.code).toBe("no_account");
+		// Nor one whose new row shares no identity field with the planned account.
+		await f.storage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "token-other",
+				refresh: "refresh-other",
+				expires: Date.now() + 3_600_000,
+				email: "other@example.com",
+				orgId: "org-b",
+			},
+		]);
+		const [other] = f.storage.oauth.accounts("anthropic");
+		if (!other) throw new Error("Expected the replacement credential");
+		const disjoint = await f.storage.resets.redeem({
+			target: {
+				provider: "anthropic",
+				credentialId: other.credentialId,
+				accountId: "shared-account",
+				orgId: "org-b",
+			},
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(disjoint.code).toBe("no_account");
 		expect(f.posts.length).toBe(1);
 	});
 
