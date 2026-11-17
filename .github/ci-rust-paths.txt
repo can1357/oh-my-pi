@@ -1,7 +1,6 @@
-# Paths whose change makes a pull request run the HEAVY Rust jobs (ci.yml, output rust of the changes job).
-# Every entry must also be in .github/ci-paths.txt (just check-ci-paths). A change matching only
-# ci-paths.txt (workflow, justfile, scripts) runs the light CI-infrastructure jobs; a push to omp2 runs everything.
-# One glob per line; ** matches across directories.
+# Historical flat heavy-job list, retained for source/research compatibility.
+# Runtime selection now uses per-job .github/ci-job-paths.json rules instead.
+# Safe ordinary push diffs are classified; pushes no longer unconditionally run all jobs.
 .cargo/**
 .config/**
 Cargo.lock

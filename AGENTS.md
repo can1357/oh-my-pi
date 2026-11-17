@@ -100,8 +100,14 @@ on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P12, P14 a
 `tool_sources` (P13 is not, and is the one gap) (`ci.yml` says which job runs which; keep it and `just e2e` in
 step). P12 needs Seatbelt, so it gates on the macOS job: it skips off macOS,
 and on macOS a failed Seatbelt probe fails it.
+CI job selection uses `.github/ci-job-paths.json` and `scripts/ci_scope.py`:
+complete PR files and safe push endpoint diffs select declared consumers;
+unknown/incomplete inputs stay conservative. Required contexts remain declared.
+Manual/merge-group runs stay complete. CodeQL selects push analysis by language,
+and P8 selects push recordings by platform; their scheduled/manual runs stay full.
+See `docs/research/ci-job-scopes.md`. This does not reverse macOS runner priority.
 P8 remains a non-gating recorder: only its metric schema/arithmetic test
-gates. The measured performance baseline is recorded per omp2 push by
+gates. The measured performance baseline is recorded for relevant omp2 pushes by
 `.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),
 never in a PR. Native CI defaults to standard GitHub-hosted `ubuntu-24.04` or
 `macos-15`. The two required macOS jobs can opt into hosted-first Ubuntu

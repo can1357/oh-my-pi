@@ -6,8 +6,6 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-HEAVY_GATE = "needs.changes.outputs.rust != 'false'"
-LIGHT_GATE = "needs.changes.outputs.ci != 'false'"
 
 
 class CheckCiPaths(unittest.TestCase):
@@ -18,6 +16,7 @@ class CheckCiPaths(unittest.TestCase):
         (self.tmp / "scripts").mkdir()
         shutil.copy(ROOT / "scripts/check-ci-paths.py", self.tmp / "scripts/check-ci-paths.py")
         shutil.copy(ROOT / "scripts/ci-macos-objective.sh", self.tmp / "scripts/ci-macos-objective.sh")
+        shutil.copy(ROOT / "scripts/ci_scope.py", self.tmp / "scripts/ci_scope.py")
         self.ci = self.tmp / ".github/workflows/ci.yml"
 
     def run_check(self):
@@ -58,30 +57,89 @@ class CheckCiPaths(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("checks_requested", out)
 
-    def test_changes_job_without_the_no_pull_request_branch_fails(self):
-        self.mutate_ci('if [ -z "$PULL_REQUEST" ]; then', 'if [ -z "$NEVER_SET" ]; then')
+    def test_changes_job_without_selector_fails(self):
+        self.mutate_ci('python3 scripts/ci_scope.py --workflow ci --github-output "$GITHUB_OUTPUT"', 'echo "ci=true"')
         code, out = self.run_check()
         self.assertEqual(code, 1)
-        self.assertIn("no pull request number", out)
+        self.assertIn("selector", out)
+
+    def test_changes_job_without_workflow_selection_fails(self):
+        self.mutate_ci('scripts/ci_scope.py --workflow ci --github-output', 'scripts/ci_scope.py --github-output')
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("PR/push diffs and manual/merge-group full fallback", out)
 
     def test_heavy_job_gated_on_ci_only_fails(self):
-        self.mutate_job_gate("p7_linux", HEAVY_GATE, LIGHT_GATE)
+        self.mutate_job_gate("p7_linux", "needs.changes.outputs.p7_linux != 'false'", "needs.changes.outputs.ci != 'false'")
         code, out = self.run_check()
         self.assertEqual(code, 1)
         self.assertIn("p7_linux", out)
 
     def test_light_job_gated_on_rust_fails(self):
-        self.mutate_job_gate("protobuf", LIGHT_GATE, HEAVY_GATE)
+        self.mutate_job_gate("protobuf", "needs.changes.outputs.protobuf != 'false'", "needs.changes.outputs.rust != 'false'")
         code, out = self.run_check()
         self.assertEqual(code, 1)
         self.assertIn("protobuf", out)
 
-    def test_rust_path_missing_from_ci_paths_fails(self):
-        with (self.tmp / ".github/ci-rust-paths.txt").open("a") as handle:
-            handle.write("Unlisted/**\n")
+    def test_missing_declared_scope_fails(self):
+        self.mutate_ci('      protobuf: ${{ steps.paths.outputs.protobuf }}\n', '')
         code, out = self.run_check()
         self.assertEqual(code, 1)
-        self.assertIn("Unlisted/**", out)
+        self.assertIn("protobuf scope output", out)
+
+    def test_push_path_filter_fails(self):
+        self.mutate_ci('  push:\n', '  push:\n    paths: ["crates/**"]\n')
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("push must not filter", out)
+
+    def test_pull_request_path_filter_fails(self):
+        self.mutate_ci('  pull_request:\n', '  pull_request:\n    paths-ignore: ["docs/**"]\n')
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("pull_request must not filter", out)
+
+    def test_scope_true_gate_does_not_fail_closed(self):
+        self.mutate_job_gate("rust", "needs.changes.outputs.rust != 'false'", "needs.changes.outputs.rust == 'true'")
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("fail closed", out)
+
+    def test_missing_selector_file_fails(self):
+        (self.tmp / 'scripts/ci_scope.py').unlink()
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("selector", out)
+
+    def test_missing_scoped_job_fails(self):
+        self.mutate_ci('  protobuf:\n', '  renamed_protobuf:\n')
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("SCOPED_JOBS names a job", out)
+
+    def test_missing_job_gate_fails(self):
+        self.mutate_job_gate("lint_linux", "needs.changes.outputs.lint_linux != 'false'", "true")
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("lint_linux must fail closed", out)
+
+    def test_cancelled_guard_is_required(self):
+        self.mutate_job_gate("p7_linux", "!cancelled() && ", "")
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("p7_linux must fail closed", out)
+
+    def test_rust_format_steps_must_use_format_rust_scope(self):
+        self.mutate_job_gate("format", "- name: Check formatting\n        if: needs.changes.outputs.format_rust != 'false'", "- name: Check formatting\n        if: needs.changes.outputs.format != 'false'")
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("format_rust gate", out)
+
+    def test_rust_setup_gate_must_fail_closed(self):
+        self.mutate_job_gate("format", "- name: Select pinned Rust toolchain\n        if: needs.changes.outputs.format_rust != 'false'", "- name: Select pinned Rust toolchain\n        if: needs.changes.outputs.format_rust == 'true'")
+        code, out = self.run_check()
+        self.assertEqual(code, 1)
+        self.assertIn("format_rust gate", out)
 
 
     def test_affected_job_without_the_opt_in_variable_fails(self):

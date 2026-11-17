@@ -94,7 +94,8 @@ class HostedRunnerPolicy(unittest.TestCase):
         action = yaml.load((ROOT / '.github/actions/macos-native-objective/action.yml').read_text(), Loader=yaml.BaseLoader)
         self.assertEqual(set(worker['on']), {'workflow_dispatch'})
         self.assertEqual(worker['permissions'], {'contents': 'read', 'actions': 'read'})
-        self.assertIn('.github/workflows/macos-verification.yml', ci['on']['push']['paths'])
+        self.assertNotIn('paths', ci['on']['push'])
+        self.assertIn('python3 scripts/ci_scope.py --workflow ci', self.ci)
         steps = worker['jobs']['native']['steps']
         admission = next(i for i, step in enumerate(steps) if step.get('id') == 'admit')
         candidate = next(i for i, step in enumerate(steps) if step.get('with', {}).get('path') == '.ci-source')

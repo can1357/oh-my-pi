@@ -15,17 +15,6 @@ on:
     - cron: "0 4 * * *"
   push:
     branches: [omp2]
-    paths:
-      - ".cargo/**"
-      - ".github/actions/**"
-      - ".github/workflows/p8-baseline.yml"
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "justfile"
-      - "scripts/remote-verify.sh"
-      - "scripts/remote-verify-runner.sh"
-      - "rust-toolchain.toml"
   # A manual re-recording, for example of an omp2 commit measured while the
   # runner was busy. GitHub offers it because omp2 is the default branch; the
   # artifact names the commit of whatever ref is dispatched.
@@ -44,8 +33,25 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  changes:
+    name: Select P8 platforms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      p8_macos: ${{ steps.scope.outputs.p8_macos }}
+      p8_linux: ${{ steps.scope.outputs.p8_linux }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Select affected platforms
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci_scope.py --workflow p8 --github-output "$GITHUB_OUTPUT"
+
   record:
     name: Record P8 baseline (${{ matrix.name }})
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.p8_macos != 'false' }}
     strategy:
       matrix:
         include:
@@ -185,6 +191,8 @@ jobs:
 
   buildbuddy_linux:
     name: Record P8 baseline (BuildBuddy Linux)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.p8_linux != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
