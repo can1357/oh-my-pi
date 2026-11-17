@@ -1675,9 +1675,9 @@ export class RelayBridge {
 	 * The extension emptied and hid other extensions' frames in a tab omp drives. They wait on the tab for a worker to
 	 * take them; one driving the attached tab now is told to, and the next one takes them when it adopts the tab.
 	 */
-	#onFramesHidden(tabKey: string, frames: HiddenFrame[]): void {
+	#onFramesHidden(tabKey: string, frames: unknown): void {
 		const tab = this.#tabs.get(tabKey);
-		if (!tab) return;
+		if (!tab || !Array.isArray(frames)) return;
 		// The report comes off a socket and its title is another extension's text: keep well-formed, single-line
 		// entries, once each, and only the latest few while no worker takes them.
 		for (const frame of frames) {
@@ -2371,10 +2371,10 @@ const MAX_HIDDEN_FRAMES = 16;
 /** Longest extension id, path or title a hidden-frame report keeps. */
 const HIDDEN_FRAME_FIELD_MAX = 100;
 
-/** `text` on one line, without control characters, at most `max` characters. */
+/** `text` on one line, without control, format or line/paragraph separator characters, at most `max` characters. */
 function singleLine(text: string, max: number): string {
 	return text
-		.replace(/\p{Cc}+/gu, " ")
+		.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ")
 		.trim()
 		.slice(0, max);
 }
