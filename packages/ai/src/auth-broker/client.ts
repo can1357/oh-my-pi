@@ -344,12 +344,13 @@ export class AuthBrokerClient {
 	 */
 	reportClientUsage(
 		report: ClientUsageReportRequest,
-		opts: { relayed?: boolean; signal?: AbortSignal } = {},
+		signal?: AbortSignal,
+		opts: { relayed?: boolean } = {},
 	): Promise<ClientUsageReportResponse> {
 		return this.#request<ClientUsageReportResponse>("POST", "/v1/usage/observed", {
 			body: report,
 			schema: "clientUsageReportResponseSchema",
-			signal: opts.signal,
+			signal,
 			relayed: opts.relayed,
 		});
 	}

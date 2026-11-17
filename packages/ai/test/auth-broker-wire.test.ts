@@ -13,6 +13,7 @@ import {
 	AuthBrokerStreamUnsupportedError,
 	type SnapshotResponse,
 	type SnapshotStreamEvent,
+	RemoteAuthCredentialStore,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -726,15 +727,33 @@ describe("auth-broker wire surface", () => {
 				costUsd: 0,
 			};
 			// A gateway relays its callers' usage over its own connection, a same-host
-			// caller's under the gateway's own install id; only the sender's own report
+			// caller's under the gateway's own install id; only the sender's own usage
 			// may stamp the sender's version.
-			const versionRow = () => db.query("SELECT version FROM clients WHERE install_id = ?").get(getInstallId());
-			await skewed.reportClientUsage({ installId: getInstallId(), app: "omp", entries: [entry] }, { relayed: true });
-			expect(versionRow()).toEqual({ version: null });
-			await skewed.reportClientUsage({ installId: getInstallId(), entries: [entry] });
-			expect(versionRow()).toEqual({ version: VERSION });
-			await skewed.reportClientUsage({ installId: getInstallId(), app: "omp", entries: [entry] }, { relayed: true });
-			expect(versionRow()).toEqual({ version: VERSION });
+			const remote = new RemoteAuthCredentialStore({ client: skewed, observedUsageFlushMs: 10 });
+			const caller = { installId: getInstallId(), hostname: os.hostname(), app: "omp" };
+			// The store flushes on its own timer over real HTTP and exposes no flush
+			// promise, so wait for the broker row to reach the expected request count.
+			const reported = async (requests: number) => {
+				const deadline = Date.now() + 2_000;
+				const row = () =>
+					db
+						.query(
+							"SELECT c.version, SUM(u.requests) requests FROM clients c JOIN client_usage u USING (install_id) WHERE c.install_id = ?",
+						)
+						.get(getInstallId()) as { version: string | null; requests: number | null };
+				while (row().requests !== requests && Date.now() < deadline) await Bun.sleep(10);
+				return row();
+			};
+			try {
+				remote.recordObservedUsage([entry], caller);
+				expect(await reported(1)).toEqual({ version: null, requests: 1 });
+				remote.recordObservedUsage([entry]);
+				expect(await reported(2)).toEqual({ version: VERSION, requests: 2 });
+				remote.recordObservedUsage([entry], caller);
+				expect(await reported(3)).toEqual({ version: VERSION, requests: 3 });
+			} finally {
+				remote.close();
+			}
 		} finally {
 			await sameVersionBroker.close();
 			await olderBroker.close();
