@@ -5646,7 +5646,11 @@ export class SessionMaintenance {
 		// were being persisted), drop the stale request rather than fall through
 		// to ordinary summary compaction: no summary-provider request was agreed.
 		if (explicitNewContextRequest) return COMPACTION_CHECK_NONE;
-		const methods = resolveCompactionMethodOrder(compactionSettings.methodOrder);
+		// Idle passes may use their own order (e.g. a remote summary while the user is away, with a
+		// local method first for in-turn passes); an empty idle order inherits `methodOrder`.
+		const idleMethods = reason === "idle" ? resolveCompactionMethodOrder(compactionSettings.idleMethodOrder) : [];
+		const methods =
+			idleMethods.length > 0 ? idleMethods : resolveCompactionMethodOrder(compactionSettings.methodOrder);
 		if (methods.length === 0) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =

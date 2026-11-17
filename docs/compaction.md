@@ -157,6 +157,7 @@ The automatic paths are intentionally different:
    - Short-tier trade-off (deliberate): the fallback delay counts from the moment the turn settles while the cache lifetime counts from the request send, so with the default 300s delay an idle summary after a 5-minute entry always runs on an expired cache and pays a cold full-prefix read. This is accepted so a short break never triggers compaction; shorter `compaction.idleTimeoutSeconds` values (minimum 60s) can still land inside the entry's lifetime.
    - While the pass rewrites history, prompts, turn-starting custom messages, IRC wakes and background-result deliveries wait for it to finish and then run on the compacted context.
    - Uses `reason: "idle"` and does not auto-continue afterward.
+   - Walks `compaction.idleMethodOrder` when it names at least one method, otherwise `compaction.methodOrder`. This lets an idle pass pay for a model summary (e.g. `[remote, snapcompact, soft]`) while threshold, overflow and incomplete-output recovery keep a local method first (e.g. `methodOrder: [snapcompact, remote, soft]`).
 
 ### Payload-rejection guard
 
@@ -548,6 +549,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `task.agentCompactionThresholdOverrides` = `{}`; exact-name task/eval agent → token count (`90000`) or percentage (`"80%"`) replacing both thresholds for that agent only. See [Settings](./settings.md#context-compaction-and-memory).
 - `compaction.idleEnabled` = `false`
 - `compaction.idleThresholdTokens` = `200000`
+- `compaction.idleMethodOrder` = `[]` (empty inherits `compaction.methodOrder`; applies only to idle maintenance)
 - `compaction.idleTimeoutSeconds` = `300` (fallback unless a confirmed 1h prompt-cache entry sets the timing)
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
