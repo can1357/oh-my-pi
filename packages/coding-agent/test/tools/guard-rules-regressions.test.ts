@@ -600,7 +600,7 @@ describe("guard rule regressions", () => {
 		}
 	});
 
-	it.skipIf(process.platform === "win32")("probes a call once across its scheduling lookup, gate and prompt rows", () => {
+	it.skipIf(process.platform === "win32")("probes a call once across its lookup, gate and prompt rows", () => {
 		const spawn = spyOn(Bun, "spawnSync").mockImplementation(
 			() => ({ success: false, stdout: Buffer.from("") }) as never,
 		);
