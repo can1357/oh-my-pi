@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a macOS `computer` takeover that ended while another program was typing for you (a remote-control, text-expansion or automation tool posting keystrokes) putting your app back in front with no key window: its window looked inactive and web pages saw a blur until you clicked or switched apps. The window you were typing in is now made key again unless you clicked, used a shortcut the takeover read, focused another of your app's windows, or have ⌘ or ⌃ down at that moment, or another app is in front; if the window then does not report itself key within 400 ms, the call fails saying restoration failed instead of reporting success ([#19504](https://github.com/can1357/oh-my-pi/pull/19504) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
