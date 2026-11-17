@@ -4,12 +4,47 @@
 
 ### Added
 
-- `HtmlFormDialog` option notes take pasted images when the form is opened with `acceptImages`: the open note is a paste target (`attachImage`, `beginPaste`, `pasteText`), a deleted `[Image #N]` marker drops its image, and `OptionNote.images` carries the rest ([#19376](https://github.com/can1357/oh-my-pi/pull/19376) by [@Dangerboi](https://github.com/Dangerboi))
+- Agent names in Task tool rows and agent hub rows take a colour of their own in the terminal UI: Main takes the theme accent, and subagents take one of six colours in the order they arrive, picked from the theme's own palette so each stays readable on its background; themes can set them with the optional `subagent1`–`subagent6` tokens ([#18987](https://github.com/can1357/oh-my-pi/pull/18987) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.0] - 2026-11-16
+
+### Breaking Changes
+
+- Terminals that support output backpressure must now implement onOutputDrain(callback), which returns an unsubscribe function; terminals without backpressure can omit both pendingOutputBytes and onOutputDrain.
+- Updated PlanReviewOverlay options to use PlanReviewOverlayChoice objects and report choice IDs to onPick and selectOption. Refine and Save actions now reflect plan feedback and saving behavior; removed disabledIndices and externalEditorName, and updated describe to receive DescribeContext.
+
+### Added
+
+- Added configurable model search placement, provider scopes, and an optional thinking-level slider to ModelPickerComponent; selected thinking levels are reported through onPick metadata. The native picker sheet now supports anchoring, scope styling, level display, and icon actions.
+- Added a native plan review document and dock with editable and commentable plans, quote annotations, plan-edit notifications, Approve, Save, and Cancel actions, plus model selection.
+
+### Changed
+
+- Provider scopes now show only the selected provider's models when a provider is chosen, with scope cycling able to return to the full model list.
+- Updated thinking-level controls to use left and right arrow keys, and refreshed the slider and footer hint presentation.
+- Retitled the plan-saving overlay to “Save plan” and updated its action label.
 
 ### Fixed
 
-- Fixed the model hub offering models a role can never use (such as image or speech models for Default) when adding or replacing that role's fallback ([#19371](https://github.com/can1357/oh-my-pi/pull/19371) by [@Xytronix](https://github.com/Xytronix))
-- Fixed spelling assistance (macOS typo marks, autocorrect and replacements) and word completion acting on `!` shell and `$` Python drafts ([#12474](https://github.com/can1357/oh-my-pi/pull/12474) by [@aleister1102](https://github.com/aleister1102))
+- Fixed slow scrolling and typing in long agent transcripts.
+- Fixed slow typing and cursor movement in drafts longer than 256 lines.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added support for pasting images into `HtmlFormDialog` option notes when opened with `acceptImages`, including image attachment, removal, and access to retained images through `OptionNote.images`.
+- Added live web-page and image rendering in assistant replies for supported terminals, including inline images and embedded page previews. Added the `/btw` transcript note for sharing side topics without interrupting the main conversation.
+
+### Changed
+
+- Improved reasoning-capability discovery so models awaiting discovery follow the session's thinking default and offer automatic thinking in addition to disabled and effort-level settings.
+- Renamed the public `html-form/media` APIs to `media`, including `loadMedia`, `Media`, and `MAX_MEDIA_BYTES`.
+
+### Fixed
+
+- Fixed fallback model selection so roles are offered only models they can use, excluding incompatible image and speech models.
+- Fixed macOS spelling assistance, autocorrect, replacements, and word completion for shell (`!`) and Python (`$`) drafts.
 
 ## [18.20.1] - 2026-11-14
 

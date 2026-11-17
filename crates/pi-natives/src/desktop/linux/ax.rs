@@ -18,6 +18,7 @@ use crate::desktop::{
 	types::DesktopWindow,
 };
 
+mod combo;
 mod menus;
 
 /// How long an application gets to answer before it counts as not answering:
@@ -250,6 +251,49 @@ pub fn resolve_focus(
 	for index in all_active {
 		windows[index].window.focused = Some(index) == focused;
 	}
+}
+
+/// Bound standalone child reads and focus searches independently of tree walks.
+const MAX_CHILDREN: u32 = 5_000;
+// Bound in-flight replies to avoid flooding the application's bus.
+const CHILD_READ_CONCURRENCY: usize = 32;
+
+/// Read at most `limit` children by index; a stale count never authorizes an
+/// unbounded whole-list request. Failed indices count as unread; if none
+/// answers, the first error is returned.
+async fn children_of(
+	proxy: &atspi::proxy::accessible::AccessibleProxy<'_>,
+	count: Option<u32>,
+	limit: u32,
+) -> zbus::Result<(Vec<ObjectRefOwned>, u32)> {
+	use futures::StreamExt;
+
+	let Some(count) = count else {
+		return Ok((Vec::new(), crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN));
+	};
+	let read = limit.min(count);
+	let mut replies = futures::stream::iter(0..read)
+		.map(|index| proxy.get_child_at_index(index as i32))
+		.buffered(CHILD_READ_CONCURRENCY);
+	let mut children = Vec::with_capacity(read as usize);
+	let mut first_error = None;
+	let mut unread = count - read;
+	while let Some(reply) = replies.next().await {
+		match reply {
+			Ok(child) if !child.is_null() => children.push(child),
+			Ok(_) => unread += 1,
+			Err(err) => {
+				unread += 1;
+				first_error.get_or_insert(err);
+			},
+		}
+	}
+	if children.is_empty()
+		&& let Some(err) = first_error
+	{
+		return Err(err);
+	}
+	Ok((children, unread))
 }
 
 impl AtSpiAx {
@@ -667,16 +711,19 @@ impl AtSpiAx {
 		let proxy = answered("the application", reply_timeout, root.as_accessible_proxy(connection))
 			.await?
 			.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
-		if answered("the application", reply_timeout, proxy.get_state())
-			.await?
-			.is_ok_and(|state| state.contains(State::Focused))
-		{
+		let state = answered("the application", reply_timeout, proxy.get_state()).await?;
+		if state.is_ok_and(|state| state.contains(State::Focused)) {
 			return Ok(Some(root));
 		}
-		for child in answered("the application", reply_timeout, proxy.get_children())
+		let count = answered("the application", reply_timeout, proxy.child_count())
 			.await?
-			.unwrap_or_default()
-		{
+			.ok()
+			.map(|count| count.max(0) as u32);
+		let (children, _) =
+			answered("the application", reply_timeout, children_of(&proxy, count, MAX_CHILDREN))
+				.await?
+				.unwrap_or_default();
+		for child in children {
 			if let Some(found) =
 				Box::pin(Self::find_focused(connection, child, depth + 1, reply_timeout)).await?
 			{
@@ -684,6 +731,36 @@ impl AtSpiAx {
 			}
 		}
 		Ok(None)
+	}
+
+	/// `h`'s children, at most `limit`, with the number left unread.
+	/// `count` is its `ChildCount` when already read.
+	fn read_children(
+		&self,
+		h: &AxHandle,
+		count: Option<u32>,
+		limit: u32,
+	) -> CoreResult<(Vec<AxHandle>, u32)> {
+		let object = Self::object(h).clone();
+		self.request(async {
+			let failed = |err: String| DesktopError::ax_failed(format!("AT-SPI children: {err}"));
+			let proxy = object
+				.as_accessible_proxy(&self.connection)
+				.await
+				.map_err(|err| failed(err.to_string()))?;
+			let count = match count {
+				Some(count) => Some(count),
+				None => proxy
+					.child_count()
+					.await
+					.ok()
+					.map(|count| count.max(0) as u32),
+			};
+			let (children, unread) = children_of(&proxy, count, limit)
+				.await
+				.map_err(|err| failed(err.to_string()))?;
+			Ok((children.into_iter().map(AxHandle::AtSpi).collect(), unread))
+		})
 	}
 
 	/// An element's properties, with its bounds when `bounds` asks for them.
@@ -720,8 +797,10 @@ impl AtSpiAx {
 				Ok(action) => action_names(&action).await.unwrap_or_default(),
 				Err(_) => Vec::new(),
 			};
-			let child_count = proxy.child_count().await.unwrap_or(0).max(0) as u32;
+			let child_count = proxy.child_count().await;
 			Ok(AxProps {
+				#[cfg(test)]
+				read_as_fingerprint: None,
 				role: normalize_role_atspi(&native_role, multiline),
 				native_role,
 				title,
@@ -733,12 +812,17 @@ impl AtSpiAx {
 					.is_some_and(|states| states.contains(State::Focused)),
 				bounds,
 				actions,
-				child_count,
+				child_count: child_count.as_ref().copied().unwrap_or(0).max(0) as u32,
 				identity: None,
 				partial: false,
 				label_complete: false,
 				selected: false,
 				role_name: None,
+				unread_children: if child_count.is_err() {
+					crate::desktop::ax::UNKNOWN_UNREAD_CHILDREN
+				} else {
+					0
+				},
 			})
 		})))??
 	}
@@ -1175,14 +1259,206 @@ async fn text_contents(
 	name: &UniqueName<'static>,
 	object: &ObjectRefOwned,
 ) -> atspi::zbus::Result<String> {
-	let text = atspi::proxy::text::TextProxy::builder(connection)
+	whole_text(&text_proxy(connection, name, object).await?).await
+}
+
+/// All of the text `text` reads.
+async fn whole_text(text: &atspi::proxy::text::TextProxy<'_>) -> atspi::zbus::Result<String> {
+	let count = text.character_count().await?;
+	text.get_text(0, count).await
+}
+
+/// What the AT-SPI text route did with text typed into an element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextRoute {
+	/// The element took the text, and reads back as typing would leave it.
+	Inserted,
+	/// The element offers no route that leaves it as typing would; nothing
+	/// was written.
+	Absent,
+	/// The element offers the interfaces, but its toolkit applies a write
+	/// differently from typing, for the reason given; nothing was written.
+	Declined(&'static str),
+}
+
+/// Why a Qt single-line field declines the route. Qt's widgets apply an
+/// accessible insert, delete or replace on a line edit as `setText` of the
+/// whole new text (`QAccessibleLineEdit` in `simplewidgets.cpp`, Qt 5.15 and
+/// 6), and spin boxes, date edits and editable combo boxes pass theirs to
+/// their line edit, so the write skips what typing goes through. Qt's
+/// multi-line text edits insert through a `QTextCursor`, as typing does.
+pub(crate) const QT_LINE_EDIT_SETS_TEXT: &str =
+	"Qt applies an accessibility insert to a single-line field by replacing its whole text, which \
+	 skips the field's validator and input mask and does not count as a user edit";
+
+/// Puts `text` into an element as focusing it and typing would, through the
+/// element's AT-SPI `Text` and `EditableText` interfaces: the text replaces
+/// the element's selection, or goes in at its caret. An unfocused GTK entry
+/// takes it only for an empty or fully selected value: then either
+/// selection-on-focus setting leaves the same result.
+/// No keys are sent and no focus moves. `Absent` means the element took
+/// nothing, so keys may follow: its application's `toolkit` is neither GTK
+/// nor Qt (unnamed included), it lacks either interface, is or may be a
+/// password field, is read-only or disabled, its text or caret could not be
+/// read, or it left its text as it was after the write. `Declined` means the
+/// same for a single-line field of a Qt application
+/// ([`QT_LINE_EDIT_SETS_TEXT`]) or a GTK entry whose focus selection is
+/// unknown. Text changed to anything other than what typing would give is an
+/// error, after which nothing more is sent.
+///
+/// GTK applies the insert through the field's own `insert-text` handlers, and
+/// Qt's multi-line edits through a `QTextCursor`, so the field validates and
+/// signals the edit as for typing; a GTK 4 entry records no undo step for it.
+/// Other toolkits keep keys, as their inserts were not shown to act as typing:
+/// Firefox 160 answers `true` and keeps the old text, and Writer
+/// (`LibreOffice`) took the insert in 1 of 10 tries.
+///
+/// Only printable ASCII goes this way, into a field whose text has no
+/// character outside the Basic Multilingual Plane: `InsertText`'s length is
+/// UTF-8 bytes in GTK 3 (`gtk_editable_insert_text`) and UTF-16 units in Qt
+/// (`QString::resize` in its `AtSpiAdaptor`), and Qt's offsets count UTF-16
+/// units where GTK's count characters, so outside those limits the units
+/// disagree. Control characters, such as a newline, are keys that act (Return
+/// submits a form), not text to insert.
+async fn insert_typed_text(
+	connection: &atspi::zbus::Connection,
+	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+	toolkit: &str,
+	text: &str,
+) -> CoreResult<TextRoute> {
+	const ABSENT: CoreResult<TextRoute> = Ok(TextRoute::Absent);
+	let qt = toolkit.eq_ignore_ascii_case("qt");
+	if !qt && !toolkit.eq_ignore_ascii_case("gtk") {
+		return ABSENT;
+	}
+	if text.is_empty() || !text.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+		return ABSENT;
+	}
+	let Ok(interfaces) = accessible.get_interfaces().await else {
+		return ABSENT;
+	};
+	if !interfaces.contains(atspi::Interface::EditableText)
+		|| !interfaces.contains(atspi::Interface::Text)
+	{
+		return ABSENT;
+	}
+	// A role that cannot be read counts as a password field's, as for setValue.
+	if accessible
+		.get_role()
+		.await
+		.ok()
+		.is_none_or(|role| role == Role::PasswordText)
+	{
+		return ABSENT;
+	}
+	// Typing changes nothing in a read-only or disabled field, while an insert
+	// would: Qt's line edit takes one either way.
+	let Ok(states) = accessible.get_state().await else {
+		return ABSENT;
+	};
+	if !states.contains(State::Editable)
+		|| states.contains(State::ReadOnly)
+		|| !state_enabled(states)
+	{
+		return ABSENT;
+	}
+	if qt && !states.contains(State::MultiLine) {
+		return Ok(TextRoute::Declined(QT_LINE_EDIT_SETS_TEXT));
+	}
+	let Ok(reader) = text_proxy(connection, name, object).await else {
+		return ABSENT;
+	};
+	let Ok(before) = whole_text(&reader).await else {
+		return ABSENT;
+	};
+	let length = before.chars().count();
+	// A field showing a mask hides its text (a GTK 4 entry with visibility off
+	// is a plain `Text`), so where its caret falls cannot be checked.
+	if crate::desktop::ax::masked(&before) || length != before.encode_utf16().count() {
+		return ABSENT;
+	}
+	let Ok(caret) = reader.caret_offset().await else {
+		return ABSENT;
+	};
+	let (start, end) = match reader.get_n_selections().await {
+		Ok(0) => (caret, caret),
+		Ok(_) => match reader.get_selection(0).await {
+			Ok((from, to)) => (from.min(to), from.max(to)),
+			Err(_) => return ABSENT,
+		},
+		Err(_) => return ABSENT,
+	};
+	// GTK's per-application select-on-focus setting is not exposed by AT-SPI.
+	// Only an empty or already fully selected value gives the same edit with
+	// either setting, so no inferred selection may delete existing text.
+	if !(qt
+		|| states.contains(State::Focused)
+		|| states.contains(State::MultiLine)
+		|| start == 0 && usize::try_from(end).ok() == Some(length))
+	{
+		return Ok(TextRoute::Declined("the field's selection after focusing is unknown"));
+	}
+	let (Ok(first), Ok(last)) = (usize::try_from(start), usize::try_from(end)) else {
+		return ABSENT;
+	};
+	if last > length {
+		return ABSENT;
+	}
+	let expected: String = before
+		.chars()
+		.take(first)
+		.chain(text.chars())
+		.chain(before.chars().skip(last))
+		.collect();
+	let Ok(editable) = atspi::proxy::editable_text::EditableTextProxy::builder(connection)
+		.destination(name.clone())
+		.and_then(|b| b.path(object.path().clone()))
+	else {
+		return ABSENT;
+	};
+	let Ok(editable) = editable.build().await else {
+		return ABSENT;
+	};
+	// ASCII: as many bytes as characters and UTF-16 units.
+	let inserted = i32::try_from(text.len())
+		.map_err(|_| DesktopError::ax_failed("text is too long for an AT-SPI insert"))?;
+	// The app's answers are not proof either way; what the field reads is.
+	if start < end {
+		let _ = editable.delete_text(start, end).await;
+	}
+	let _ = editable.insert_text(start, text, inserted).await;
+	let actual = whole_text(&reader).await.ok();
+	if actual
+		.as_deref()
+		.is_some_and(|actual| actual == expected || masks(actual, &expected))
+	{
+		// A GTK 3 text view does not move its caret on an insert
+		// (`gtktextviewaccessible.c`); typing leaves it after the text.
+		let _ = reader.set_caret_offset(start + inserted).await;
+		return Ok(TextRoute::Inserted);
+	}
+	if actual.as_deref() == Some(before.as_str()) {
+		return ABSENT;
+	}
+	let secure = actual.as_deref().is_some_and(crate::desktop::ax::masked);
+	text_readback(text, &expected, actual.as_deref(), secure).map(|()| TextRoute::Inserted)
+}
+
+/// The element's `Text` interface, read live: its caret and length change
+/// under every write.
+async fn text_proxy(
+	connection: &atspi::zbus::Connection,
+	name: &UniqueName<'static>,
+	object: &ObjectRefOwned,
+) -> atspi::zbus::Result<atspi::proxy::text::TextProxy<'static>> {
+	atspi::proxy::text::TextProxy::builder(connection)
 		.destination(name.clone())?
 		.path(object.path().clone())?
 		.cache_properties(atspi::zbus::proxy::CacheProperties::No)
 		.build()
-		.await?;
-	let count = text.character_count().await?;
-	text.get_text(0, count).await
+		.await
 }
 
 /// The text of an element with the `Text` interface, up to 16,384 characters.
@@ -1406,29 +1682,21 @@ impl AxBackend for AtSpiAx {
 		&mut self,
 		h: &AxHandle,
 		bounds: WalkBounds,
+		max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
-		Ok((self.read_props(h, bounds)?, self.children(h)?))
+		let mut props = self.read_props(h, bounds)?;
+		if props.unread_children > 0 {
+			return Ok((props, Vec::new()));
+		}
+		let (children, unread) = self.read_children(h, Some(props.child_count), max_children)?;
+		props.unread_children = unread;
+		Ok((props, children))
 	}
 
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>> {
-		let object = Self::object(h).clone();
-		self.request(async {
-			let proxy = object
-				.as_accessible_proxy(&self.connection)
-				.await
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI children: {err}")))?;
-			proxy
-				.get_children()
-				.await
-				.map(|items| {
-					items
-						.into_iter()
-						.filter(|item| !item.is_null())
-						.map(AxHandle::AtSpi)
-						.collect()
-				})
-				.map_err(|err| DesktopError::ax_failed(format!("AT-SPI children: {err}")))
-		})
+		self
+			.read_children(h, None, MAX_CHILDREN)
+			.map(|(children, _)| children)
 	}
 
 	fn parent(&mut self, h: &AxHandle) -> CoreResult<Option<AxHandle>> {
@@ -1458,11 +1726,52 @@ impl AxBackend for AtSpiAx {
 					.await
 					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
 				let index = resolve_action(&proxy, &accessible, action).await?;
+				let role = accessible
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI role: {err}")))?;
+				if role == Role::ComboBox {
+					let name = proxy
+						.get_name(index)
+						.await
+						.map_err(|err| DesktopError::ax_failed(format!("AT-SPI actions: {err}")))?;
+					if combo::opens_grabbing_list(&name) {
+						return Err(self.combo_press_refusal(&object).await?);
+					}
+				}
 				proxy
 					.do_action(index)
 					.await
 					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI action: {err}")))?
 					.ok_or_else(|| DesktopError::ax_failed(format!("AT-SPI action '{action}' failed")))
+			})
+			.map_err(unconfirmed)
+	}
+
+	fn perform_menu(&mut self, h: &AxHandle, action: &str, path: &[String]) -> CoreResult<()> {
+		let object = Self::object(h).clone();
+		self
+			.request(async {
+				let role = object
+					.as_accessible_proxy(&self.connection)
+					.await
+					.map_err(|err| DesktopError::ax_failed(err.to_string()))?
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(err.to_string()))?;
+				if !action.eq_ignore_ascii_case("press") || role != Role::ComboBox {
+					return Err(DesktopError::new(
+						ErrorCode::Unsupported,
+						"choosing a menu item in the action that opens the menu is available on Linux \
+						 only for a combo box's press, and on macOS",
+					));
+				}
+				let [value] = path else {
+					return Err(DesktopError::ax_failed(
+						"a combo box option is one title: pass menu: [\"<option>\"]",
+					));
+				};
+				self.combo_choose(&object, value).await
 			})
 			.map_err(unconfirmed)
 	}
@@ -1494,6 +1803,14 @@ impl AxBackend for AtSpiAx {
 						&mut emptied,
 					)
 					.await;
+				}
+				if accessible
+					.get_role()
+					.await
+					.map_err(|err| DesktopError::ax_failed(format!("AT-SPI role: {err}")))?
+					== Role::ComboBox
+				{
+					return self.combo_choose(&object, value).await;
 				}
 				if !interfaces.contains(atspi::Interface::Value) {
 					return Err(DesktopError::ax_failed(
@@ -1651,27 +1968,50 @@ impl AtSpiAx {
 				.await
 				.map_err(failed)?
 				.contains(State::Focused);
-			let app = proxy.get_application().await.map_err(failed)?;
-			let toolkit = async {
-				let app = atspi::proxy::application::ApplicationProxy::builder(connection)
-					.destination(app.name()?.clone())
-					.ok()?
-					.path(app.path().clone())
-					.ok()?
-					// atk-bridge answers `Get` for these properties, not `GetAll`.
-					.cache_properties(zbus::proxy::CacheProperties::No)
-					.build()
-					.await
-					.ok()?;
-				let toolkit = app.toolkit_name().await.ok()?;
-				let version = app.version().await.unwrap_or_default();
-				Some((toolkit, version))
-			}
-			.await;
-			let (toolkit, version) = toolkit.unwrap_or_default();
+			let (toolkit, version) = app_toolkit(connection, &proxy).await.unwrap_or_default();
 			Ok(ElementFocus { focused, toolkit, version })
 		})
 	}
+
+	/// Puts `text` into the element through its AT-SPI text interfaces, as
+	/// typing it would ([`insert_typed_text`]).
+	pub(crate) fn type_text(&self, h: &AxHandle, text: &str) -> CoreResult<TextRoute> {
+		let object = Self::object(h).clone();
+		let Some(name) = object.name().cloned() else {
+			return Ok(TextRoute::Absent);
+		};
+		self.request(async {
+			let connection = &self.connection;
+			let Ok(accessible) = object.as_accessible_proxy(connection).await else {
+				return Ok(TextRoute::Absent);
+			};
+			let (toolkit, _) = app_toolkit(connection, &accessible)
+				.await
+				.unwrap_or_default();
+			insert_typed_text(connection, &accessible, &name, &object, &toolkit, text).await
+		})
+	}
+}
+
+/// The toolkit name and version the element's application reports, if any.
+async fn app_toolkit(
+	connection: &atspi::zbus::Connection,
+	accessible: &atspi::proxy::accessible::AccessibleProxy<'_>,
+) -> Option<(String, String)> {
+	let app = accessible.get_application().await.ok()?;
+	let app = atspi::proxy::application::ApplicationProxy::builder(connection)
+		.destination(app.name()?.clone())
+		.ok()?
+		.path(app.path().clone())
+		.ok()?
+		// atk-bridge answers `Get` for these properties, not `GetAll`.
+		.cache_properties(zbus::proxy::CacheProperties::No)
+		.build()
+		.await
+		.ok()?;
+	let toolkit = app.toolkit_name().await.ok()?;
+	let version = app.version().await.unwrap_or_default();
+	Some((toolkit, version))
 }
 
 #[cfg(test)]
@@ -2148,6 +2488,352 @@ mod tests {
 	}
 
 	#[test]
+	fn typed_text_goes_in_where_typing_would_put_it_or_not_at_all() {
+		use std::sync::{Arc, Mutex};
+
+		use atspi::zbus::{connection::Builder as ConnectionBuilder, interface};
+
+		const PEER: &str = ":1.7";
+
+		/// What a field does with an edit: applies it as GTK 3 does (`length`
+		/// in bytes, caret left where it was), answers true and keeps its text
+		/// (Firefox 160), applies a delete but not the insert after it, or puts
+		/// in something else.
+		#[derive(Clone, Copy, PartialEq)]
+		enum Edits {
+			Applied,
+			Ignored,
+			DeleteOnly,
+			Garbled,
+		}
+
+		struct Field {
+			text:      String,
+			caret:     i32,
+			selection: Option<(i32, i32)>,
+			edits:     Edits,
+			/// How many edits (deletes and inserts) it got.
+			writes:    usize,
+			/// One mask character per character, as a hidden GTK 4 entry.
+			hidden:    bool,
+		}
+
+		type Shared = Arc<Mutex<Field>>;
+
+		struct Text(Shared);
+
+		#[interface(name = "org.a11y.atspi.Text")]
+		impl Text {
+			#[zbus(property)]
+			fn character_count(&self) -> i32 {
+				self.0.lock().unwrap().text.chars().count() as i32
+			}
+
+			#[zbus(property)]
+			fn caret_offset(&self) -> i32 {
+				self.0.lock().unwrap().caret
+			}
+
+			fn get_text(&self, start: i32, end: i32) -> String {
+				let field = self.0.lock().unwrap();
+				let text = field
+					.text
+					.chars()
+					.skip(start as usize)
+					.take((end - start) as usize);
+				if field.hidden {
+					text.map(|_| '●').collect()
+				} else {
+					text.collect()
+				}
+			}
+
+			fn get_n_selections(&self) -> i32 {
+				i32::from(self.0.lock().unwrap().selection.is_some())
+			}
+
+			#[zbus(out_args("start_offset", "end_offset"))]
+			fn get_selection(&self, selection_num: i32) -> (i32, i32) {
+				assert_eq!(selection_num, 0, "only the first selection is read");
+				self.0.lock().unwrap().selection.unwrap_or_default()
+			}
+
+			fn set_caret_offset(&self, offset: i32) -> bool {
+				self.0.lock().unwrap().caret = offset;
+				true
+			}
+		}
+
+		struct Editable(Shared);
+
+		#[interface(name = "org.a11y.atspi.EditableText")]
+		impl Editable {
+			fn delete_text(&self, start: i32, end: i32) -> bool {
+				let mut field = self.0.lock().unwrap();
+				field.writes += 1;
+				if field.edits != Edits::Ignored {
+					let kept: String = field.text.chars().take(start as usize).collect();
+					let rest: String = field.text.chars().skip(end as usize).collect();
+					field.text = kept + &rest;
+					field.selection = None;
+				}
+				true
+			}
+
+			fn insert_text(&self, position: i32, text: String, length: i32) -> bool {
+				let mut field = self.0.lock().unwrap();
+				field.writes += 1;
+				let inserted = match field.edits {
+					Edits::Applied => text[..length as usize].to_owned(),
+					Edits::Ignored | Edits::DeleteOnly => return true,
+					Edits::Garbled => format!("{text}?"),
+				};
+				let kept: String = field.text.chars().take(position as usize).collect();
+				let rest: String = field.text.chars().skip(position as usize).collect();
+				field.text = kept + &inserted + &rest;
+				true
+			}
+		}
+
+		struct Accessible {
+			/// `None`: the role cannot be read.
+			role:     Option<Role>,
+			editable: bool,
+			states:   StateSet,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Accessible {
+			fn get_role(&self) -> atspi::zbus::fdo::Result<u32> {
+				self
+					.role
+					.map(|role| role as u32)
+					.ok_or_else(|| atspi::zbus::fdo::Error::Failed("no role".into()))
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				let bits = self.states.bits();
+				vec![bits as u32, (bits >> 32) as u32]
+			}
+
+			fn get_interfaces(&self) -> Vec<String> {
+				let mut names = vec!["org.a11y.atspi.Accessible", "org.a11y.atspi.Text"];
+				if self.editable {
+					names.push("org.a11y.atspi.EditableText");
+				}
+				names.into_iter().map(str::to_owned).collect()
+			}
+		}
+
+		/// The outcome: taken, and the field's text and caret afterward; not
+		/// taken (keys may follow), or declined with a reason; or an error
+		/// naming what the field reads.
+		#[derive(Debug, PartialEq)]
+		enum Outcome {
+			Taken(&'static str, i32),
+			NotTaken,
+			Declined,
+			Reads(&'static str),
+		}
+
+		struct Case {
+			path:      &'static str,
+			text:      &'static str,
+			old:       &'static str,
+			caret:     i32,
+			selection: Option<(i32, i32)>,
+			edits:     Edits,
+			role:      Option<Role>,
+			editable:  bool,
+			states:    StateSet,
+			hidden:    bool,
+			toolkit:   &'static str,
+			outcome:   Outcome,
+			writes:    usize,
+		}
+
+		let field = |path, old, caret, outcome, writes| Case {
+			path,
+			text: "AB",
+			old,
+			caret,
+			selection: None,
+			edits: Edits::Applied,
+			role: Some(Role::Entry),
+			editable: true,
+			// GTK 4 reports `Sensitive` without `Enabled`. Focused, so the
+			// caret and selection count.
+			states: StateSet::new(State::Editable | State::Sensitive | State::Focused),
+			hidden: false,
+			toolkit: "gtk",
+			outcome,
+			writes,
+		};
+		let cases = [
+			field("/caret", "hello", 2, Outcome::Taken("heABllo", 4), 1),
+			// Select-on-focus can be off: do not delete an unfocused entry's
+			// text without evidence that its whole value is selected.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				..field("/unfocused_entry", "hello", 2, Outcome::Declined, 0)
+			},
+			// Both setting values agree for a full selection or an empty value.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				selection: Some((5, 0)),
+				..field("/unfocused_selected", "hello", 0, Outcome::Taken("AB", 2), 2)
+			},
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive),
+				..field("/unfocused_empty", "", 0, Outcome::Taken("AB", 2), 1)
+			},
+			// A text view keeps its caret when focused.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive | State::MultiLine),
+				..field("/unfocused_text_view", "hello", 2, Outcome::Taken("heABllo", 4), 1)
+			},
+			// LibreOffice reports `-1` for a paragraph without the caret.
+			field("/no_caret", "hello", -1, Outcome::NotTaken, 0),
+			Case {
+				selection: Some((6, 11)),
+				..field("/selection", "hello world", 3, Outcome::Taken("hello AB", 8), 2)
+			},
+			// A selection made from its end backward.
+			Case {
+				selection: Some((11, 6)),
+				..field("/backward", "hello world", 3, Outcome::Taken("hello AB", 8), 2)
+			},
+			Case { edits: Edits::Ignored, ..field("/gecko", "hello", 5, Outcome::NotTaken, 1) },
+			// The read-back repeats the written text, which an error never quotes.
+			Case {
+				edits: Edits::Garbled,
+				..field(
+					"/garbled",
+					"hello",
+					5,
+					Outcome::Reads(r#"now reads "hello<the written text>?""#),
+					1,
+				)
+			},
+			// The selection went, the text did not: the field changed.
+			Case {
+				selection: Some((6, 11)),
+				edits: Edits::DeleteOnly,
+				..field("/delete_only", "hello world", 3, Outcome::Reads(r#"now reads "hello ""#), 2)
+			},
+			// No edit interface (Chromium): nothing is tried.
+			Case { editable: false, ..field("/chromium", "hello", 5, Outcome::NotTaken, 0) },
+			// Qt's line edit would take an insert typing could not make.
+			Case {
+				states: StateSet::new(State::Editable | State::Sensitive | State::ReadOnly),
+				..field("/read_only", "hello", 5, Outcome::NotTaken, 0)
+			},
+			Case {
+				states: StateSet::new(State::Editable),
+				..field("/disabled", "hello", 5, Outcome::NotTaken, 0)
+			},
+			Case { role: Some(Role::PasswordText), ..field("/password", "", 0, Outcome::NotTaken, 0) },
+			Case { role: None, ..field("/no_role", "hello", 5, Outcome::NotTaken, 0) },
+			// A hidden field takes the text; its mask shows as many characters.
+			Case { hidden: true, ..field("/hidden", "", 0, Outcome::Taken("●●", 2), 1) },
+			// A hidden field that already holds text hides where its caret is.
+			Case { hidden: true, ..field("/hidden_text", "pw", 2, Outcome::NotTaken, 0) },
+			// Qt counts offsets in UTF-16 units, GTK in characters.
+			field("/astral", "😀x", 2, Outcome::NotTaken, 0),
+			// Lengths are bytes in GTK 3 and UTF-16 units in Qt.
+			Case { text: "é", ..field("/accented", "hello", 5, Outcome::NotTaken, 0) },
+			// Return is a key that acts, not text.
+			Case { text: "a\n", ..field("/newline", "hello", 5, Outcome::NotTaken, 0) },
+			Case { text: "", ..field("/empty", "hello", 5, Outcome::NotTaken, 0) },
+			// A Qt line edit applies the insert as `setText`, past its validator:
+			// a digits-only field would hold "AB" after a reported success.
+			Case { toolkit: "Qt", ..field("/qt_line_edit", "12", 2, Outcome::Declined, 0) },
+			// A toolkit whose insert was never measured, or one the application
+			// does not name, keeps keys: a Qt line edit read as unnamed would
+			// otherwise take `setText` and report success.
+			Case { toolkit: "", ..field("/unnamed_toolkit", "12", 2, Outcome::NotTaken, 0) },
+			Case { toolkit: "VCL", ..field("/other_toolkit", "12", 2, Outcome::NotTaken, 0) },
+			// A Qt multi-line edit inserts through a text cursor, as typing does.
+			Case {
+				toolkit: "Qt",
+				states: StateSet::new(State::Editable | State::Enabled | State::MultiLine),
+				..field("/qt_text_edit", "12", 2, Outcome::Taken("12AB", 4), 1)
+			},
+		];
+		let fields: Vec<Shared> = cases
+			.iter()
+			.map(|case| {
+				Arc::new(Mutex::new(Field {
+					text:      case.old.to_owned(),
+					caret:     case.caret,
+					selection: case.selection,
+					edits:     case.edits,
+					writes:    0,
+					hidden:    case.hidden,
+				}))
+			})
+			.collect();
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let results = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let mut builder = ConnectionBuilder::unix_stream(server)
+				.server(atspi::zbus::Guid::generate())
+				.unwrap()
+				.p2p();
+			for (case, field) in cases.iter().zip(&fields) {
+				builder = builder
+					.serve_at(case.path, Text(field.clone()))
+					.unwrap()
+					.serve_at(case.path, Editable(field.clone()))
+					.unwrap()
+					.serve_at(case.path, Accessible {
+						role:     case.role,
+						editable: case.editable,
+						states:   case.states,
+					})
+					.unwrap();
+			}
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(builder.build(), client).unwrap();
+			let mut results = Vec::new();
+			for case in &cases {
+				let object = ObjectRefOwned::from_static_str_unchecked(PEER, case.path);
+				let name = object.name().unwrap().clone();
+				let accessible = object.as_accessible_proxy(&client).await.unwrap();
+				results.push(
+					insert_typed_text(&client, &accessible, &name, &object, case.toolkit, case.text)
+						.await,
+				);
+			}
+			drop(server);
+			results
+		});
+		for ((case, result), field) in cases.iter().zip(results).zip(&fields) {
+			let field = field.lock().unwrap();
+			assert_eq!(field.writes, case.writes, "{}: edits", case.path);
+			match (&case.outcome, result) {
+				(Outcome::Taken(text, caret), Ok(TextRoute::Inserted)) => {
+					let shown = if field.hidden {
+						"●".repeat(field.text.chars().count())
+					} else {
+						field.text.clone()
+					};
+					assert_eq!((shown.as_str(), field.caret), (*text, *caret), "{}", case.path);
+				},
+				(Outcome::NotTaken, Ok(TextRoute::Absent)) => {
+					assert_eq!(field.text, case.old, "{}: text changed", case.path);
+				},
+				(Outcome::Declined, Ok(TextRoute::Declined(reason))) => {
+					assert_eq!(field.text, case.old, "{}: text changed", case.path);
+					assert!(!reason.is_empty(), "{}: missing decline reason", case.path);
+				},
+				(Outcome::Reads(text), Err(err)) if err.message.contains(text) => {},
+				(outcome, result) => panic!("{}: expected {outcome:?}, got {result:?}", case.path),
+			}
+		}
+	}
+
+	#[test]
 	fn frame_ownership_requires_unique_process_and_title() {
 		let window = |id: &str, pid: u32| DesktopWindow {
 			id:      id.to_owned(),
@@ -2357,12 +3043,17 @@ mod tests {
 
 		#[interface(name = "org.a11y.atspi.Accessible")]
 		impl Node {
+			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				self.children.len() as i32
+			}
+
 			fn get_state(&self) -> Vec<u32> {
 				self.state.clone()
 			}
 
-			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
-				self.children.clone()
+			fn get_child_at_index(&self, index: i32) -> (String, OwnedObjectPath) {
+				self.children[index as usize].clone()
 			}
 		}
 
@@ -2407,6 +3098,247 @@ mod tests {
 				.as_deref(),
 			Some("/focus")
 		);
+	}
+
+	mod long_lists {
+		use std::sync::{
+			Arc,
+			atomic::{AtomicU32, Ordering},
+		};
+
+		use atspi::zbus::{
+			Connection, connection::Builder as ConnectionBuilder, fdo, interface,
+			zvariant::OwnedObjectPath,
+		};
+
+		use super::*;
+
+		const PEER: &str = ":1.7";
+
+		/// A table that reports a million children, as Qt does for a
+		/// 250,000-row `QTableView`, and counts each request for all of them.
+		struct Table {
+			whole_reads: Arc<AtomicU32>,
+			/// The child that holds focus.
+			focused_at:  i32,
+			/// Whether it fails every request for one child.
+			refuses:     bool,
+			failed_at:   Option<i32>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Table {
+			#[allow(clippy::unused_self, reason = "the fake table's count is fixed")]
+			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				1_000_000
+			}
+
+			#[allow(clippy::unused_self, reason = "the fake table is never focused")]
+			fn get_state(&self) -> Vec<u32> {
+				vec![0, 0]
+			}
+
+			fn get_children(&self) -> fdo::Result<Vec<(String, OwnedObjectPath)>> {
+				self.whole_reads.fetch_add(1, Ordering::SeqCst);
+				Err(fdo::Error::LimitsExceeded("a million children".into()))
+			}
+
+			fn get_child_at_index(&self, index: i32) -> fdo::Result<(String, OwnedObjectPath)> {
+				if self.refuses || self.failed_at == Some(index) {
+					return Err(fdo::Error::Failed("no such child".into()));
+				}
+				let path = if index == self.focused_at {
+					"/focus"
+				} else {
+					"/cell"
+				};
+				Ok((PEER.to_owned(), OwnedObjectPath::try_from(path).unwrap()))
+			}
+		}
+
+		struct Cell {
+			count_reads: Arc<AtomicU32>,
+			state:       Vec<u32>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Cell {
+			#[allow(clippy::unused_self, reason = "fake cells have no children")]
+			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				self.count_reads.fetch_add(1, Ordering::SeqCst);
+				0
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				self.state.clone()
+			}
+
+			#[allow(clippy::unused_self, reason = "fake cells have no children")]
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				Vec::new()
+			}
+		}
+
+		/// Runs `check` against a client connected to an app serving the
+		/// table at `/table`, one that answers no request for a child at
+		/// `/refusing`, a plain cell at `/cell` and a focused cell at `/focus`;
+		/// returns its result and how often a table was asked for all of its
+		/// children.
+		fn with_table<T>(check: impl AsyncFnOnce(&Connection) -> T) -> (T, u32) {
+			let focused = State::Focused as u64;
+			let whole_reads = Arc::new(AtomicU32::new(0));
+			let rt = Builder::new_current_thread().enable_all().build().unwrap();
+			let result = rt.block_on(async {
+				let (client, server) = tokio::net::UnixStream::pair().unwrap();
+				let table = Table {
+					whole_reads: whole_reads.clone(),
+					focused_at:  2,
+					refuses:     false,
+					failed_at:   None,
+				};
+				let refusing = Table {
+					whole_reads: whole_reads.clone(),
+					focused_at:  -1,
+					refuses:     true,
+					failed_at:   None,
+				};
+				let partial = Table {
+					whole_reads: whole_reads.clone(),
+					focused_at:  -1,
+					refuses:     false,
+					failed_at:   Some(1),
+				};
+				let server = ConnectionBuilder::unix_stream(server)
+					.server(atspi::zbus::Guid::generate())
+					.unwrap()
+					.p2p()
+					.serve_at("/table", table)
+					.unwrap()
+					.serve_at("/refusing", refusing)
+					.unwrap()
+					.serve_at("/cell", Cell {
+						count_reads: Arc::new(AtomicU32::new(0)),
+						state:       vec![0, 0],
+					})
+					.unwrap()
+					.serve_at("/partial", partial)
+					.unwrap()
+					.serve_at("/focus", Cell {
+						count_reads: whole_reads.clone(),
+						state:       vec![focused as u32, (focused >> 32) as u32],
+					})
+					.unwrap()
+					.build();
+				let client = ConnectionBuilder::unix_stream(client).p2p().build();
+				let (server, client) = tokio::try_join!(server, client).unwrap();
+				let result = check(&client).await;
+				drop(server);
+				result
+			});
+			(result, whole_reads.load(Ordering::SeqCst))
+		}
+
+		/// Proxy for `path`'s accessible and its child count.
+		async fn table(
+			client: &Connection,
+			path: &'static str,
+		) -> (atspi::proxy::accessible::AccessibleProxy<'static>, u32) {
+			let proxy = atspi::proxy::accessible::AccessibleProxy::builder(client)
+				.destination(PEER)
+				.unwrap()
+				.path(path)
+				.unwrap()
+				.cache_properties(atspi::zbus::proxy::CacheProperties::No)
+				.build()
+				.await
+				.unwrap();
+			let count = proxy.child_count().await.unwrap() as u32;
+			(proxy, count)
+		}
+
+		#[test]
+		fn an_unknown_child_count_leaves_children_unread_without_asking_for_all() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, _) = table(client, "/table").await;
+				children_of(&proxy, None, 800).await.unwrap()
+			});
+			assert!(children.is_empty());
+			assert_eq!(unread, u32::MAX);
+			assert_eq!(whole_reads, 0);
+		}
+
+		#[test]
+		fn a_small_stale_count_never_requests_all_children_or_exceeds_the_budget() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, _) = table(client, "/table").await;
+				children_of(&proxy, Some(4), 2).await.unwrap()
+			});
+			assert_eq!((children.len(), unread, whole_reads), (2, 2, 0));
+		}
+
+		#[test]
+		fn a_focused_root_does_not_read_its_child_count() {
+			let (found, count_reads) = with_table(async |client| {
+				AtSpiAx::find_focused(
+					client,
+					ObjectRefOwned::from_static_str_unchecked(PEER, "/focus"),
+					0,
+					Duration::from_secs(1),
+				)
+				.await
+				.unwrap()
+			});
+			assert!(found.is_some());
+			assert_eq!(count_reads, 0);
+		}
+
+		#[test]
+		fn a_failed_index_is_counted_as_unread() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, count) = table(client, "/partial").await;
+				children_of(&proxy, Some(count), 3).await.unwrap()
+			});
+			assert_eq!((children.len(), unread, whole_reads), (2, 999_998, 0));
+		}
+
+		#[test]
+		fn a_long_list_is_read_by_index_up_to_the_limit() {
+			let ((children, unread), whole_reads) = with_table(async |client| {
+				let (proxy, count) = table(client, "/table").await;
+				children_of(&proxy, Some(count), 6_000).await.unwrap()
+			});
+			assert_eq!((children.len(), unread, whole_reads), (6_000, 994_000, 0));
+		}
+
+		#[test]
+		fn a_long_list_that_answers_no_child_fails_the_read() {
+			let (read, whole_reads) = with_table(async |client| {
+				let (proxy, count) = table(client, "/refusing").await;
+				children_of(&proxy, Some(count), 800).await
+			});
+			assert!(read.is_err(), "{read:?}");
+			assert_eq!(whole_reads, 0);
+		}
+
+		#[test]
+		fn the_focused_search_finds_a_cell_of_a_long_table_without_reading_it_whole() {
+			let (found, whole_reads) = with_table(async |client| {
+				let table = ObjectRefOwned::from_static_str_unchecked(PEER, "/table");
+				AtSpiAx::find_focused(client, table, 0, REPLY_TIMEOUT).await
+			});
+			let found = found.expect("the focused search must not fail");
+			assert_eq!(
+				(
+					found
+						.map(|object| object.path_as_str().to_owned())
+						.as_deref(),
+					whole_reads
+				),
+				(Some("/focus"), 0)
+			);
+		}
 	}
 
 	#[test]
@@ -2958,6 +3890,8 @@ mod tests {
 	}
 
 	mod unanswered {
+		use std::sync::{Arc, Mutex};
+
 		use atspi::zbus::{
 			Guid, connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
 		};
@@ -3033,6 +3967,11 @@ mod tests {
 		#[interface(name = "org.a11y.atspi.Accessible")]
 		impl Element {
 			#[zbus(property)]
+			fn child_count(&self) -> i32 {
+				self.children.len() as i32
+			}
+
+			#[zbus(property)]
 			fn name(&self) -> String {
 				self.name.to_owned()
 			}
@@ -3054,6 +3993,10 @@ mod tests {
 
 			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
 				self.children.clone()
+			}
+
+			fn get_child_at_index(&self, index: i32) -> (String, OwnedObjectPath) {
+				self.children[index as usize].clone()
 			}
 		}
 
@@ -3576,6 +4519,340 @@ mod tests {
 					.collect::<Vec<_>>(),
 				[("File > Mark".to_owned(), false), ("File > Other".to_owned(), false)]
 			);
+		}
+
+		/// Which option of a fake combo box is chosen, and the actions performed.
+		#[derive(Clone, Default)]
+		struct ComboLog {
+			chosen:    Arc<Mutex<Option<&'static str>>>,
+			performed: Arc<Mutex<Vec<&'static str>>>,
+		}
+
+		struct ComboElement {
+			name:      &'static str,
+			role:      Role,
+			parent:    &'static str,
+			children:  &'static [&'static str],
+			selection: bool,
+			enabled:   bool,
+			name_gate: Mutex<Option<Arc<tokio::sync::Barrier>>>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl ComboElement {
+			#[zbus(property)]
+			async fn name(&self) -> String {
+				let gate = self.name_gate.lock().unwrap().take();
+				if let Some(gate) = gate {
+					gate.wait().await;
+				}
+				self.name.to_owned()
+			}
+
+			#[zbus(property)]
+			fn parent(&self) -> (String, OwnedObjectPath) {
+				(PEER.to_owned(), path(self.parent))
+			}
+
+			fn get_role(&self) -> u32 {
+				self.role as u32
+			}
+
+			fn get_interfaces(&self) -> Vec<&'static str> {
+				let mut interfaces = vec!["org.a11y.atspi.Accessible", "org.a11y.atspi.Action"];
+				if self.selection {
+					interfaces.push("org.a11y.atspi.Selection");
+				}
+				interfaces
+			}
+
+			fn get_state(&self) -> Vec<u32> {
+				let state = if self.enabled {
+					State::Enabled as u64 | State::Sensitive as u64
+				} else {
+					0
+				};
+				vec![state as u32, (state >> 32) as u32]
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				self
+					.children
+					.iter()
+					.map(|child| (PEER.to_owned(), path(child)))
+					.collect()
+			}
+		}
+
+		/// An element's actions. Performing one records `title`, and chooses it
+		/// when `applies`.
+		struct ComboAction {
+			names:   &'static [&'static str],
+			title:   &'static str,
+			applies: bool,
+			log:     ComboLog,
+		}
+
+		#[interface(name = "org.a11y.atspi.Action")]
+		impl ComboAction {
+			#[zbus(property)]
+			fn n_actions(&self) -> i32 {
+				self.names.len() as i32
+			}
+
+			fn get_name(&self, index: i32) -> String {
+				self.names[index as usize].to_owned()
+			}
+
+			fn do_action(&self, index: i32) -> bool {
+				let exists = usize::try_from(index).is_ok_and(|index| index < self.names.len());
+				if exists {
+					self.log.performed.lock().unwrap().push(self.title);
+				}
+				if exists && self.applies {
+					*self.log.chosen.lock().unwrap() = Some(self.title);
+				}
+				exists
+			}
+		}
+
+		/// The `Selection` naming the chosen option.
+		struct ComboSelection {
+			log: ComboLog,
+		}
+
+		#[interface(name = "org.a11y.atspi.Selection")]
+		impl ComboSelection {
+			#[zbus(property)]
+			fn n_selected_children(&self) -> i32 {
+				i32::from(self.log.chosen.lock().unwrap().is_some())
+			}
+
+			fn get_selected_child(&self, index: i32) -> (String, OwnedObjectPath) {
+				let chosen = self.log.chosen.lock().unwrap().filter(|_| index == 0);
+				let at = chosen.map_or_else(
+					|| "/org/a11y/atspi/null".to_owned(),
+					|title| format!("/combo/list/{title}"),
+				);
+				(PEER.to_owned(), path(&at))
+			}
+		}
+
+		#[derive(Clone, Copy)]
+		enum Toolkit {
+			/// GTK 3: the combo box publishes the choice, options take `click`.
+			Gtk,
+			/// The option names wait until all their reads are in flight.
+			Concurrent,
+			/// Chromium: the list publishes the choice, options take `select`,
+			/// and the combo box's `open` takes no keyboard grab.
+			Chromium,
+			/// Qt: nothing publishes the choice, options take only `Toggle`.
+			Qt,
+			/// GTK 3, but the app ignores the option's action.
+			Ignoring,
+			/// GTK 3, greyed out.
+			Disabled,
+		}
+
+		/// A combo box at `/combo` with options One, Two and Three.
+		fn combo_box(toolkit: Toolkit) -> (AtSpiAx, Connection, ComboLog) {
+			const OPTIONS: [&str; 3] = ["One", "Two", "Three"];
+			const PATHS: [&str; 3] = ["/combo/list/One", "/combo/list/Two", "/combo/list/Three"];
+			struct Shape {
+				combo_selection: bool,
+				list_selection:  bool,
+				combo_actions:   &'static [&'static str],
+				names:           &'static [&'static str],
+				applies:         bool,
+				enabled:         bool,
+			}
+			let log = ComboLog::default();
+			let gtk = Shape {
+				combo_selection: true,
+				list_selection:  false,
+				combo_actions:   &["press"],
+				names:           &["click"],
+				applies:         true,
+				enabled:         true,
+			};
+			let Shape { combo_selection, list_selection, combo_actions, names, applies, enabled } =
+				match toolkit {
+					Toolkit::Gtk | Toolkit::Concurrent => gtk,
+					Toolkit::Chromium => Shape {
+						combo_selection: false,
+						list_selection: true,
+						combo_actions: &["open", "showContextMenu"],
+						names: &["select", "showContextMenu"],
+						..gtk
+					},
+					Toolkit::Qt => Shape {
+						combo_selection: false,
+						combo_actions: &["Show-Menu", "Press"],
+						names: &["Toggle"],
+						..gtk
+					},
+					Toolkit::Ignoring => Shape { applies: false, ..gtk },
+					Toolkit::Disabled => Shape { enabled: false, ..gtk },
+				};
+			let name_gate = matches!(toolkit, Toolkit::Concurrent)
+				.then(|| Arc::new(tokio::sync::Barrier::new(OPTIONS.len())));
+			let served = log.clone();
+			let (ax, server) = backend(HUNG_CALL_TIMEOUT, move |server| {
+				let mut server = server
+					.serve_at("/combo", ComboElement {
+						name: "Choice",
+						role: Role::ComboBox,
+						parent: "/frame",
+						children: &["/combo/list"],
+						selection: combo_selection,
+						enabled,
+						name_gate: Mutex::new(None),
+					})
+					.unwrap()
+					.serve_at("/combo", ComboAction {
+						names:   combo_actions,
+						title:   "the combo box",
+						applies: false,
+						log:     served.clone(),
+					})
+					.unwrap()
+					.serve_at("/combo/list", ComboElement {
+						name:      "",
+						role:      Role::Menu,
+						parent:    "/combo",
+						children:  &PATHS,
+						selection: list_selection,
+						enabled:   true,
+						name_gate: Mutex::new(None),
+					})
+					.unwrap();
+				if combo_selection {
+					server = server
+						.serve_at("/combo", ComboSelection { log: served.clone() })
+						.unwrap();
+				}
+				if list_selection {
+					server = server
+						.serve_at("/combo/list", ComboSelection { log: served.clone() })
+						.unwrap();
+				}
+				for (title, at) in OPTIONS.into_iter().zip(PATHS) {
+					server = server
+						.serve_at(at, ComboElement {
+							name:      title,
+							role:      Role::MenuItem,
+							parent:    "/combo/list",
+							children:  &[],
+							selection: false,
+							enabled:   true,
+							name_gate: Mutex::new(name_gate.clone()),
+						})
+						.unwrap()
+						.serve_at(at, ComboAction { names, title, applies, log: served.clone() })
+						.unwrap();
+				}
+				server
+			});
+			(ax, server, log)
+		}
+
+		#[test]
+		fn a_combo_box_option_is_chosen_without_opening_its_list() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let option =
+				AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo/list/One"));
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+			let error = |result: CoreResult<()>| result.unwrap_err();
+			let message = |result: CoreResult<()>| error(result).message;
+
+			// GTK 3: setValue performs the option's own action and reads it back.
+			let (mut ax, _server, log) = combo_box(Toolkit::Gtk);
+			ax.set_value(&combo, "Two").unwrap();
+			assert_eq!(performed(&log), ["Two"]);
+			// Already chosen: nothing is performed again.
+			ax.set_value(&combo, "Two").unwrap();
+			assert_eq!(performed(&log), ["Two"]);
+			let missing = message(ax.set_value(&combo, "Four"));
+			assert!(missing.contains("Options: \"One\", \"Two\", \"Three\""), "{missing}");
+			// A press would open the list: refused, the combo box's own action
+			// not performed.
+			let press = message(ax.perform(&combo, "press"));
+			assert!(press.contains("nothing was pressed"), "{press}");
+			assert!(press.contains("setValue(option)"), "{press}");
+			// A menu path names one option, and only a combo box's press takes
+			// one.
+			let two = error(ax.perform_menu(&combo, "press", &["One".to_owned(), "Two".to_owned()]));
+			assert_eq!(two.code, ErrorCode::AxFailed, "{}", two.message);
+			let item = error(ax.perform_menu(&option, "press", &["One".to_owned()]));
+			assert_eq!(item.code, ErrorCode::Unsupported, "{}", item.message);
+			assert_eq!(performed(&log), ["Two"]);
+		}
+
+		#[test]
+		fn combo_option_names_are_read_concurrently_before_choosing() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let (mut ax, _server, log) = combo_box(Toolkit::Concurrent);
+			ax.set_value(&combo, "Two").unwrap();
+			assert_eq!(*log.performed.lock().unwrap(), ["Two"]);
+		}
+
+		#[test]
+		fn chromium_combo_menu_chooses_and_plain_press_still_opens() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// Chromium: press with a menu path chooses through the list, and a
+			// plain press opens it as on main.
+			let (mut ax, _server, log) = combo_box(Toolkit::Chromium);
+			ax.perform_menu(&combo, "press", &["Three".to_owned()])
+				.unwrap();
+			ax.perform(&combo, "press").unwrap();
+			assert_eq!(performed(&log), ["Three", "the combo box"]);
+		}
+
+		#[test]
+		fn qt_combo_refuses_to_open_or_choose_its_hidden_list() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let message = |result: CoreResult<()>| result.unwrap_err().message;
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// Qt: no action chooses an option, and both of the combo box's
+			// actions open the list, so nothing is performed.
+			let (mut ax, _server, log) = combo_box(Toolkit::Qt);
+			let qt = message(ax.set_value(&combo, "Two"));
+			assert!(qt.contains("needs the user's screen"), "{qt}");
+			for action in ["press", "Show-Menu"] {
+				let press = message(ax.perform(&combo, action));
+				assert!(press.contains("nothing was pressed"), "{action}: {press}");
+			}
+			assert!(performed(&log).is_empty());
+		}
+
+		#[test]
+		fn a_combo_option_action_that_does_not_choose_is_reported() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let message = |result: CoreResult<()>| result.unwrap_err().message;
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// An app that ignores the action: the choice is not confirmed.
+			let (mut ax, _server, log) = combo_box(Toolkit::Ignoring);
+			let ignored = message(ax.set_value(&combo, "Two"));
+			assert!(ignored.contains("now shows no option"), "{ignored}");
+			assert_eq!(performed(&log), ["Two"]);
+		}
+
+		#[test]
+		fn a_disabled_combo_is_left_alone() {
+			let combo = AxHandle::AtSpi(ObjectRefOwned::from_static_str_unchecked(PEER, "/combo"));
+			let message = |result: CoreResult<()>| result.unwrap_err().message;
+			let performed = |log: &ComboLog| log.performed.lock().unwrap().clone();
+
+			// A greyed-out combo box is left alone.
+			let (mut ax, _server, log) = combo_box(Toolkit::Disabled);
+			let disabled = message(ax.set_value(&combo, "Two"));
+			assert!(disabled.contains("disabled"), "{disabled}");
+			assert!(performed(&log).is_empty());
 		}
 	}
 }

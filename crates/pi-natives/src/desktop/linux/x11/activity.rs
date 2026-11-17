@@ -25,13 +25,10 @@ use x11rb::{
 
 use super::listener::{Listener, Source, source_of};
 use crate::desktop::{
-	control,
+	control::{self, USER_QUIET as QUIET},
 	error::{CoreResult, DesktopError},
 };
 
-/// How long the user leaves the keyboard and pointer alone before a takeover
-/// starts; macOS waits as long for the user to pause in the target app.
-const QUIET: Duration = Duration::from_secs(5);
 const READ_AGAIN: &str =
 	"read the window again (win.ax(), win.observe() or win.screenshot()) before acting on it";
 
@@ -127,13 +124,7 @@ impl UserActivity {
 			match admission(last, now, limit) {
 				Admission::Start => return Ok(count),
 				Admission::Wait(duration) => wait(duration)?,
-				Admission::Refuse(idle) => {
-					return Err(DesktopError::user_intervened(format!(
-						"the user is still typing, clicking or holding input (last activity {:.1} s \
-						 ago), so no takeover started; nothing was sent; try again once they pause",
-						idle.as_secs_f64(),
-					)));
-				},
+				Admission::Refuse(idle) => return Err(control::still_active_refusal(idle)),
 			}
 		}
 	}

@@ -16,6 +16,33 @@ import type { Draft, SelectedChange } from "./draft";
 import type { ChangeJournal, JournalAgent } from "./journal";
 import { formatTextPatch } from "./patch";
 
+/** Attempts at a shared-index write while another git process holds `index.lock`. */
+const INDEX_WRITE_ATTEMPTS = 5;
+/** Pause before the first retry of a shared-index write, doubled per attempt. */
+const INDEX_WRITE_BACKOFF_MS = 40;
+
+/**
+ * Apply `patch` to the shared index, retrying while it cannot be written; the last failure's
+ * message, or `undefined` once applied. A patch whose preimage the index no longer holds fails
+ * every attempt, which the caller tells apart with `canApplyPatch`.
+ */
+async function applyToSharedIndex(repo: VcsGitRepo, patch: string, signal?: AbortSignal): Promise<string | undefined> {
+	let failure = "";
+	for (let attempt = 0; attempt < INDEX_WRITE_ATTEMPTS; attempt++) {
+		if (attempt > 0) {
+			if (!(await repo.canApplyPatch(patch, { cached: true }).catch(() => true))) return failure;
+			await Bun.sleep(INDEX_WRITE_BACKOFF_MS << (attempt - 1));
+		}
+		try {
+			await repo.applyPatch(patch, { cached: true }, signal);
+			return undefined;
+		} catch (error) {
+			failure = error instanceof Error ? error.message : String(error);
+		}
+	}
+	return failure;
+}
+
 /** Attempts when HEAD moves between building the private index and committing it. */
 const HEAD_RACE_ATTEMPTS = 3;
 
@@ -73,18 +100,30 @@ async function patchFor(repo: VcsGitRepo, head: string | null, change: SelectedC
 
 /**
  * Commit the draft's selection on top of the current HEAD.
- * @throws when nothing is selected; on `amend` when HEAD is not a selective commit of this
- * session; when HEAD moved onto changes that conflict with the selection; or when a hook fails.
+ * @throws when a merge, cherry-pick, revert, rebase, or git am is in progress, or the index has
+ * unresolved conflicts; when nothing is selected;
+ * on `amend` when HEAD is not a selective commit of this session; when HEAD moved onto changes
+ * that conflict with the selection; or when a hook fails.
  */
 export async function commitSelection(
 	draft: Draft,
 	request: CommitRequest,
 	context: { journal: ChangeJournal | null; agent: JournalAgent; signal?: AbortSignal },
 ): Promise<CommitOutcome> {
+	const repo = vcs.requireGit(draft.root);
+	const operation = await repo.operationKind(context.signal);
+	if (operation === "unmerged-index") {
+		throw new Error("The index has unresolved conflicts; resolve them before using commit().");
+	}
+	if (operation) {
+		throw new Error(
+			`A ${operation === "am" ? "git am" : operation} is in progress; finish or abort it before using commit(). Use plain \`git commit\` for commits within that operation.`,
+		);
+	}
+	const gitDir = repo.info().gitDir;
 	const message = composeMessage(request);
 	const changes = draft.selection();
 	if (changes.length === 0) throw new Error("Nothing selected; use take() first.");
-	const repo = vcs.requireGit(draft.root);
 	const patches: Array<{ path: string; patch: string }> = [];
 	for (const change of changes) {
 		const patch = await patchFor(repo, draft.head, change);
@@ -100,7 +139,7 @@ export async function commitSelection(
 		: undefined;
 	const joined = vcs.joinPatches(patches.map(entry => entry.patch));
 	const indexPath = path.join(
-		repo.info().gitDir,
+		gitDir,
 		`omp-commit-${draft.id}-${Math.floor(Math.random() * 46656).toString(36)}.index`,
 	);
 	let sha: string | undefined;
@@ -150,18 +189,23 @@ export async function commitSelection(
 	const indexNotes: string[] = [];
 	// A new repository may have no index file yet. Git reads that as an empty index, but patch
 	// application reads HEAD in its place, so seed it with the root commit's tree instead.
-	const seedIndex = parent === null && !(await Bun.file(path.join(repo.info().gitDir, "index")).exists());
+	const seedIndex = parent === null && !(await Bun.file(path.join(gitDir, "index")).exists());
 	if (seedIndex) await repo.readTree(sha, undefined, context.signal);
-	for (const entry of seedIndex ? [] : patches) {
-		try {
-			await repo.applyPatch(entry.patch, { cached: true }, context.signal);
-		} catch {
-			if (await repo.canApplyPatch(entry.patch, { cached: true, reverse: true }).catch(() => false)) continue;
-			indexNotes.push(
-				`${entry.path}: its shared-index entry holds someone else's staged changes and was left as is; ` +
-					"`git diff --cached` there shows this commit reverted until they restage.",
-			);
-		}
+	// One write for every path: each write takes `index.lock`, which a concurrent git (a prompt's
+	// or an editor's `git status`) may hold. Per-path writes only when a path's entry differs.
+	const synced = seedIndex || (await applyToSharedIndex(repo, joined, context.signal)) === undefined;
+	for (const entry of synced ? [] : patches) {
+		const failure = await applyToSharedIndex(repo, entry.patch, context.signal);
+		if (failure === undefined) continue;
+		if (await repo.canApplyPatch(entry.patch, { cached: true, reverse: true }).catch(() => false)) continue;
+		const staged = await repo.canApplyPatch(entry.patch, { cached: true }).catch(() => undefined);
+		indexNotes.push(
+			staged === false
+				? `${entry.path}: its shared-index entry holds someone else's staged changes and was left as is; ` +
+						"`git diff --cached` there shows this commit reverted until they restage."
+				: `${entry.path}: the shared index could not be written (${failure}); ` +
+						`\`git diff --cached\` there shows this commit reverted until \`git reset -q -- ${entry.path}\`.`,
+		);
 	}
 	const paths = patches.map(entry => entry.path);
 	await context.journal?.recordCommit({ agent: context.agent.agent, parent: context.agent.parent, sha, paths });
