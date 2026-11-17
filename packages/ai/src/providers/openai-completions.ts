@@ -1791,8 +1791,9 @@ const streamOpenAICompletionsOnce = (
 						if (!output.upstreamModel) output.upstreamModel = servedModelFromOpenRouterReasoning(detail);
 						accumulateReasoningDetail(receivedReasoningDetails, detail);
 						// An encrypted entry also stays on the tool call it names (blob in
-						// OpenRouter's `data` or Bifrost's `signature`): rewriting the thinking
-						// text drops the block's envelope, and the call must keep its signature.
+						// OpenRouter's `data` or Bifrost's `signature`): a pass that rewrites the
+						// turn's thinking or arguments drops the envelope, and an unchanged call
+						// must keep its signature.
 						if (detail.type !== "reasoning.encrypted" || !detail.id || !(detail.data ?? detail.signature)) {
 							continue;
 						}
@@ -2888,9 +2889,9 @@ export function convertMessages(
 					break;
 				}
 			}
-			// Replay `reasoning_details` exactly as received. Once the thinking block's
-			// envelope is gone (its text was rewritten, or the turn predates it), the
-			// encrypted entries kept on the tool calls still replay.
+			// Replay `reasoning_details` exactly as received. Once the envelope is gone
+			// (a pass rewrote the turn's thinking or arguments, or the turn predates
+			// it), the encrypted entries kept on unchanged tool calls still replay.
 			const receivedReasoningDetails = msg.content.flatMap(block =>
 				block.type === "thinking"
 					? (parseReasoningDetailsSignature(block.thinkingSignature)?.reasoningDetails ?? [])

@@ -18,7 +18,7 @@ import {
 	findDeepSeekTemplateToken,
 } from "../dialect/deepseek";
 import type { AssistantMessage, Model } from "../types";
-import { isReasoningField, parseReasoningDetailsSignature } from "./reasoning-source";
+import { dropReasoningDetailsEnvelopes, isReasoningField, parseReasoningDetailsSignature } from "./reasoning-source";
 
 // Structural DSML tags in either pipe spelling (fullwidth `｜` U+FF5C or ASCII),
 // including doubled delimiters and the observed malformed ` calls` wrapper.
@@ -133,11 +133,13 @@ export function stripDsmlToolMarkup(text: string): string | undefined {
  * including reasoning blocks and turns with valid structured calls. Rewritten
  * thinking with an opaque signature is discarded; OpenAI-compatible reasoning
  * field names and `reasoning_details` envelopes are replay state, not
- * signatures, and survive cleanup. An envelope's entries carry the old text,
- * so only its field marker is kept.
+ * signatures, and survive cleanup. Envelope entries carry the turn's original
+ * reasoning text, so rewriting any thinking block reduces every envelope of the
+ * turn to its field marker.
  */
 export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 	let content: AssistantMessage["content"] | undefined;
+	let thinkingChanged = false;
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index]!;
 		if (block.type !== "text" && block.type !== "thinking") {
@@ -153,19 +155,17 @@ export function removeDsmlToolMarkupLeak(message: AssistantMessage): boolean {
 		if (block.type === "text") {
 			if (stripped.trim().length > 0) content.push({ ...block, text: stripped });
 		} else {
+			thinkingChanged = true;
 			const signature = block.thinkingSignature;
 			const completionsTurn = message.api === "openai-completions" || message.api === "openrouter";
-			const reasoningField = completionsTurn && isReasoningField(signature);
-			const envelope = completionsTurn ? parseReasoningDetailsSignature(signature) : undefined;
-			if ((!signature || reasoningField || envelope) && stripped.trim().length > 0) {
-				content.push(
-					envelope
-						? { ...block, thinking: stripped, thinkingSignature: envelope.field }
-						: { ...block, thinking: stripped },
-				);
+			const replayState =
+				completionsTurn && (isReasoningField(signature) || parseReasoningDetailsSignature(signature) !== undefined);
+			if ((!signature || replayState) && stripped.trim().length > 0) {
+				content.push({ ...block, thinking: stripped });
 			}
 		}
 	}
-	if (content) message.content = content;
-	return content !== undefined;
+	if (!content) return false;
+	message.content = thinkingChanged ? dropReasoningDetailsEnvelopes(content) : content;
+	return true;
 }

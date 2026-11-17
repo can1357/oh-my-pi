@@ -311,6 +311,47 @@ describe("buildShareSnapshot", () => {
 		expect(JSON.stringify(entries)).toContain(secret);
 	});
 
+	test("drops chat-completions reasoning_details envelopes, which hold the raw reasoning text", () => {
+		const secret = "share-details-secret-ABCDE";
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:00.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "thinking",
+							thinking: `Use ${secret} now.`,
+							thinkingSignature: JSON.stringify({
+								reasoningDetails: [{ type: "reasoning.text", text: `Use ${secret} now.`, index: 0 }],
+								field: "reasoning",
+							}),
+						},
+					],
+					api: "openai-completions",
+					provider: "openrouter",
+					model: "google/gemini-3-pro-preview",
+					stopReason: "stop",
+					timestamp: 1,
+				},
+			} as unknown as SessionEntry,
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "a1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const flat = JSON.stringify(buildShareSnapshot(sm, { obfuscator }));
+
+		expect(flat).not.toContain(secret);
+		expect(flat).toContain('"thinkingSignature":"reasoning"');
+	});
+
 	test("redacts every title-change field before sharing", () => {
 		const secret = "share-title-secret";
 		const entries: SessionEntry[] = [

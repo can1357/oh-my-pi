@@ -22,6 +22,7 @@ import {
 	kSyntheticUser,
 	type SyntheticUserCarrier,
 } from "../utils/block-symbols";
+import { dropReasoningDetailsEnvelopes } from "../utils/reasoning-source";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -853,6 +854,9 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 		if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			let changed = false;
+			// Rewritten thinking or arguments invalidate the turn's `reasoning_details`
+			// envelope, which still holds the original text and call signatures.
+			let replayStateChanged = false;
 			const content = assistantMsg.content.map((block): AssistantMessage["content"][number] => {
 				if (block.type === "text") {
 					const redacted = redactSensitiveCredentials(block.text);
@@ -864,6 +868,7 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 					const redacted = redactSensitiveCredentials(block.thinking);
 					if (redacted !== block.thinking) {
 						changed = true;
+						replayStateChanged = true;
 						return { ...block, thinking: redacted, thinkingSignature: undefined };
 					}
 				} else if (block.type === "toolCall") {
@@ -871,6 +876,7 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 						const { result: redactedArgs, changed: argsChanged } = redactSensitiveInObject(block.arguments);
 						if (argsChanged) {
 							changed = true;
+							replayStateChanged = true;
 							const castArgs =
 								redactedArgs && typeof redactedArgs === "object" && !Array.isArray(redactedArgs)
 									? (redactedArgs as Record<string, unknown>)
@@ -885,7 +891,11 @@ function redactSensitiveCredentialsInMessages(messages: Message[]): Message[] {
 				}
 				return block;
 			});
-			return (changed ? { ...assistantMsg, content } : assistantMsg) as Message;
+			if (!changed) return assistantMsg as Message;
+			return {
+				...assistantMsg,
+				content: replayStateChanged ? dropReasoningDetailsEnvelopes(content) : content,
+			} as Message;
 		}
 
 		return msg;

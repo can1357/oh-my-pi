@@ -110,17 +110,17 @@ async function streamAndReplay(
 	}
 	const assistant = await stream.result();
 	beforeReplay?.(assistant);
-	const toolCall = assistant.content.find(block => block.type === "toolCall");
-	if (toolCall?.type !== "toolCall") throw new Error("streamed tool call missing");
-	const toolResult: Message = {
+	const toolCalls = assistant.content.filter(block => block.type === "toolCall");
+	if (toolCalls.length === 0) throw new Error("streamed tool call missing");
+	const toolResults = toolCalls.map((toolCall): Message => ({
 		role: "toolResult",
 		toolCallId: toolCall.id,
 		toolName: toolCall.name,
 		content: [{ type: "text", text: "18C, cloudy" }],
 		isError: false,
 		timestamp: 2,
-	};
-	const restored: Message[] = JSON.parse(JSON.stringify([userMessage, assistant, toolResult]));
+	}));
+	const restored: Message[] = JSON.parse(JSON.stringify([userMessage, assistant, ...toolResults]));
 	await streamOpenAICompletions(model, { messages: restored }, { apiKey: "test-key", fetch: fetchMock }).result();
 
 	const replayMessages = Reflect.get(payloads[1] as object, "messages") as Array<Record<string, unknown>>;
@@ -271,6 +271,100 @@ describe("openai-completions reasoning_details", () => {
 		}
 	});
 
+	it("drops the turn's reasoning_details when redaction rewrites a later thinking block", async () => {
+		const model = completionsModel("google/gemini-3-pro-preview", "openrouter", "https://openrouter.ai/api/v1");
+		const format = "google-gemini-v1";
+		// Built at runtime so no credential-shaped literal sits in the source.
+		const token = `ghp_${"Ab1".repeat(12)}`;
+		const later = `Use ${token} now.`;
+		const toolCallChunk = {
+			delta: {
+				tool_calls: [
+					{
+						index: 0,
+						id: "call_1",
+						type: "function",
+						function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+					},
+				],
+			},
+		};
+		// OpenRouter mirrors its `reasoning` string into the entries; Bifrost sends only the entries.
+		const shapes = [
+			(text: string) => ({
+				reasoning: text,
+				reasoning_details: [{ type: "reasoning.text", text, format, index: 0 }],
+			}),
+			(text: string) => ({ reasoning_details: [{ type: "reasoning.text", text, format, index: 0 }] }),
+		];
+		for (const reasoningDelta of shapes) {
+			const firstTurn = sseChunks(model.id, [
+				{ delta: { role: "assistant", ...reasoningDelta("Plan.") } },
+				{ delta: { content: "Working." } },
+				{ delta: reasoningDelta(later) },
+				toolCallChunk,
+				{ delta: {}, finish: "tool_calls" },
+			]);
+			const { assistant, replayed } = await withCredentialRedaction(true, () => streamAndReplay(model, firstTurn));
+
+			expect(assistant.content.map(block => block.type)).toEqual(["thinking", "text", "thinking", "toolCall"]);
+			// The first block holds entries covering both blocks' text, so it cannot replay them.
+			expect(JSON.stringify(replayed)).not.toContain(token);
+			expect(replayed.reasoning_details).toBeUndefined();
+		}
+	});
+
+	it("does not replay the encrypted entry of a call whose arguments redaction rewrote", async () => {
+		const model = completionsModel("google/gemini-3-pro-preview", "openrouter", "https://openrouter.ai/api/v1");
+		const format = "google-gemini-v1";
+		const token = `ghp_${"Ab1".repeat(12)}`;
+		const rewritten = { type: "reasoning.encrypted", id: "call_1", data: "blob-1", format, index: 1 };
+		const untouched = { type: "reasoning.encrypted", id: "call_2", data: "blob-2", format, index: 2 };
+		const firstTurn = sseChunks(model.id, [
+			{
+				delta: {
+					role: "assistant",
+					reasoning: "Write the file.",
+					reasoning_details: [{ type: "reasoning.text", text: "Write the file.", format, index: 0 }],
+				},
+			},
+			{
+				delta: {
+					tool_calls: [
+						{
+							index: 0,
+							id: "call_1",
+							type: "function",
+							function: { name: "write", arguments: JSON.stringify({ content: `TOKEN=${token}` }) },
+						},
+					],
+					reasoning_details: [rewritten],
+				},
+			},
+			{
+				delta: {
+					tool_calls: [
+						{
+							index: 1,
+							id: "call_2",
+							type: "function",
+							function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+						},
+					],
+					reasoning_details: [untouched],
+				},
+			},
+			{ delta: {}, finish: "tool_calls" },
+		]);
+		const { replayed } = await withCredentialRedaction(true, () => streamAndReplay(model, firstTurn));
+
+		// A signature issued for the raw arguments must not ride on the rewritten ones;
+		// the untouched call keeps its own.
+		expect(JSON.stringify(replayed)).not.toContain(token);
+		expect(replayed.reasoning_details).toEqual([untouched]);
+		expect(replayed.tool_calls).toMatchObject([{ id: "call_1" }, { id: "call_2" }]);
+	});
+
 	it("keeps DSML-cleaned reasoning from a reasoning_details turn for DeepSeek replay", async () => {
 		const model = completionsModel("deepseek/deepseek-v4-pro", "openrouter", "https://openrouter.ai/api/v1");
 		const leaked = "Read the file first.</｜｜DSML｜｜parameter>";
@@ -305,6 +399,43 @@ describe("openai-completions reasoning_details", () => {
 		]);
 		expect(replayed.reasoning_content).toBe("Read the file first.");
 		expect(JSON.stringify(replayed)).not.toContain("DSML");
+	});
+
+	it("drops the turn's reasoning_details when DSML cleanup rewrites a later thinking block", async () => {
+		const model = completionsModel("deepseek/deepseek-v4-pro", "openrouter", "https://openrouter.ai/api/v1");
+		const leaked = "Read the file first.</｜｜DSML｜｜parameter>";
+		const reasoningDelta = (text: string) => ({
+			reasoning: text,
+			reasoning_details: [{ type: "reasoning.text", text, format: "unknown", index: 0 }],
+		});
+		const firstTurn = sseChunks(model.id, [
+			{ delta: { role: "assistant", ...reasoningDelta("Plan.") } },
+			{ delta: { content: "Working." } },
+			{ delta: reasoningDelta(leaked) },
+			{
+				delta: {
+					tool_calls: [
+						{
+							index: 0,
+							id: "call_1",
+							type: "function",
+							function: { name: "read", arguments: '{"path":"README.md"}' },
+						},
+					],
+				},
+			},
+			{ delta: {}, finish: "tool_calls" },
+		]);
+		const { assistant, replayed } = await streamAndReplay(model, firstTurn, message => {
+			expect(removeDsmlToolMarkupLeak(message)).toBe(true);
+		});
+
+		expect(assistant.content.filter(block => block.type === "thinking")).toMatchObject([
+			{ thinking: "Plan." },
+			{ thinking: "Read the file first." },
+		]);
+		expect(JSON.stringify(replayed)).not.toContain("DSML");
+		expect(replayed.reasoning_details).toBeUndefined();
 	});
 
 	it("still replays encrypted entries persisted on tool calls by earlier versions", async () => {
