@@ -496,6 +496,7 @@
 - On Linux, language-server file watching no longer consumes excessive inotify watches in `node_modules` and `.git/objects`.
 
 - A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, a drag that leaves a web slider part-way names the value it reached, and a drag whose slider, scroll bar or splitter did not move now fails with `InputFailed` instead of reporting success ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.0] - 2026-11-16
 
 ### Breaking Changes
