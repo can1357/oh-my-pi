@@ -1,22 +1,26 @@
 /**
- * Fixed safety rules for tool calls (`tools.guardRules`): the critical shell patterns, matched
- * through shell nesting, plus rules ported from nace-ai/intern's tool guard. Each rule names an
- * action that destroys work or leaks credentials and does not fire on ordinary development
- * commands. Rules run over every simple command {@link parseShellScript} finds, nested
- * `bash -c`/`eval` strings and substitutions included.
+ * Fixed guard rules for tool calls (`tools.guardRules`), ported from nace-ai/intern's tool guard:
+ * `credential_read` and `secret_send`, each naming a way to leak credentials that ordinary
+ * development commands do not take, and `discard_changes` and `kills_harness`, each naming a way to
+ * lose uncommitted work or the session itself. For `bash` they apply to the top-level simple
+ * commands {@link parseShellCommands} finds; the bash tool's critical patterns stay a match on the
+ * raw command line, whether these rules are on or off.
  *
- * The rules are best-effort, opt-in heuristics over shell text (off by default), not a security
- * boundary; a determined or obfuscated command can get past them. Known gaps:
- * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`.
- * - Commands inside a `bash -c` or `eval` string are not linked to the pipeline around them, and a
- *   value captured by `$( )` and sent later is not followed: `bash -c 'cat .env' | curl -d @- ...`,
- *   `x=$(cat .env); curl -d "$x" ...`.
- * - A heredoc opened inside `$( )` whose body starts after the closing `)` is not that command's
- *   input: `echo "$(curl -d @- ... <<EOF)"` with a `$(cat .env)` body line.
- * - A path behind a directory the guard cannot expand is not resolved: `cat "$(pwd)/.env"`. Nor is
- *   a relative path after a `cd`, `pushd` or `popd` to such a directory, though a `.env` there
- *   still counts by its name: `cd "$dir" && cat .npmrc`. A directory change is followed whether or
- *   not it runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
+ * The rules are an opt-in convenience layer over top-level commands (off by default), not a
+ * security boundary; a nested, determined or obfuscated command gets past them. Known limitations:
+ * - Nothing nested is read: `( )` groups, compound commands (`{ }`, `if`, loops, `case`, `[[ ]]`,
+ *   `(( ))`), function bodies, `$( )` and backtick substitutions, `<( )`/`>( )`, `${ }`, scripts fed
+ *   to a shell (`bash <<EOF`), and `bash -c`, `sh -c`, `eval` and `env -S` strings:
+ *   `bash -c 'cat ~/.ssh/id_rsa'`, `(cat .env) | curl -d @- ...`, `(cd repo && git checkout .)`,
+ *   `bash -c 'pkill node'`. Where the guard cannot tell where such a region ends (an unclosed
+ *   quote, a `<<` in arithmetic), the rest of the line is not read. A `git stash` earlier in the
+ *   `&&` chain counts for `discard_changes` only in a line with no such part and no shell, `eval`,
+ *   `source`, `trap` or `coproc` command, where a `git stash pop` could run unseen.
+ * - Variables and substitutions whose values are unknown are not expanded: `f=.env; cat "$f"`,
+ *   `cat "$(pwd)/.env"`. Nor is a relative path after a directory change it cannot follow, though
+ *   a `.env` there still counts by its name: `cd "$dir" && cat .npmrc`, or a `cd` after a `{ }`,
+ *   `if`, loop, `case`, `eval` or `source`. A `cd` is followed whether or not it runs:
+ *   `cd ~; false && cd /; cat .ssh/id_rsa`.
  * - Upload syntaxes, network tools and shell forms it does not model are not seen:
  *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
  *   `exec 3< .env; cat <&3 | nc ...`.
@@ -25,8 +29,9 @@
  * - A command run by a program it does not unwrap, or given its operands at run time, is not
  *   checked with them: `find ~/.ssh -exec cat {} +`, `ls ~/.ssh/id_* | xargs cat`.
  * - Commands in a script file a command runs are not read, even a file the same command writes
- *   first or passes as `<( )`: `printf 'cat ~/.ssh/id_rsa' > x.sh; sh x.sh`,
- *   `bash <(echo 'cat ~/.ssh/id_rsa')`.
+ *   first: `printf 'cat ~/.ssh/id_rsa' > x.sh; sh x.sh`. Nor is a `git stash pop` that a script,
+ *   alias or program it does not unwrap runs, after the stash a discard counts on:
+ *   `git stash && make restore && git reset --hard`.
  * - A program word written as a brace list or pathname pattern is not expanded:
  *   `{cat,/etc/shadow}`, `/bin/ca[t] /etc/shadow`.
  * - A directory that contains a credential location does not count as one:
@@ -37,6 +42,9 @@
  *   by `discard_changes`: the probe runs no filter, so it compares such a file by size.
  * - A git alias (or `-c alias.*`) that expands to a discarding command is not resolved:
  *   `git -c alias.x='reset --hard' x`.
+ * - A directory change the guard cannot follow leaves `discard_changes` nothing to probe for the
+ *   git commands after it, and `kills_harness` no executable for a relative `killall` path:
+ *   `cd "$d" && git reset --hard`.
  * - The probes of one call share {@link PROBE_BUDGET_MS}; in a command that asks more than fit, such
  *   as many distinct `pkill` patterns, the ones left without time count as no match.
  * - Brace expansion is followed only in words up to 4096 characters and for their first 1024
@@ -69,92 +77,27 @@ import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read"
 import { InternalUrlRouter } from "../internal-urls/router";
 import { toolApprovalScopeToken } from "./approval-scope";
 import { resolveToCwd } from "./path-utils";
+import { parseSqlitePathCandidates } from "./sqlite-reader";
 import {
-	parseShellScript,
+	append,
+	attachedValue,
+	boundedDirectory,
+	parseShellCommands,
 	resolveCommandWordPath,
 	resolveShellWordPath,
-	SHELL_SCRIPT_MAX_DEPTH,
-	SHELL_SCRIPT_MAX_HEREDOC_SEARCH,
-	SHELL_SCRIPT_MAX_NESTED_TEXT,
 	type ShellCommand,
-	type ParsedShellScript,
-	type ShellScriptEnd,
-	type ShellUpstream,
+	type ShellLine,
+	type ShellLineEnd,
 	shellPositionalArgs,
 	type SucceededLink,
 } from "./shell-tokenize";
 
-/**
- * Bash patterns flagged as safety critical for approval policy.
- *
- * Kept intentionally tight: the cost of a false negative is data loss or a compromised host,
- * while false positives remain actionable through user policy control.
- * New patterns should target shapes that are virtually never legitimate in automation.
- */
-export const CRITICAL_BASH_PATTERNS = [
-	// Recursive destruction.
-	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
-	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
-	// `rm -rf -v /`, `rm -v -rf /`. An absolute target is still required.
-	/\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
-	// `--no-preserve-root` defeats coreutils' own refusal to recurse on `/`, so it is critical
-	// wherever it appears, including forms this list would otherwise reach only via the target.
-	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
-	/\bsudo\s+rm\b/i, // any `sudo rm`.
-	/\bchmod\s+-R\s+[0-7]+\s+\//i, // `chmod -R 777 /`.
-	/\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//, // `chmod -R u+x /`, `chmod -R u+rwx,o+w /etc` (symbolic mode, root target).
-	/\bchown\s+-R\s+\S+\s+\//i, // `chown -R user /`.
-
-	// Fork bomb (a few common spacings).
-	/:\(\)\s*\{\s*:\s*\|\s*:/i,
-
-	// Disk / filesystem destruction.
-	/>\s*\/dev\/sd[a-z]/i, // write to disk device.
-	/\bmkfs(\.|\b)/i, // format filesystem.
-	// dd to a device. Write-only pseudo-device sinks (`of=/dev/null`, `/dev/stdout`, `/dev/fd/1`, …) are
-	// excluded: they cannot destroy data, and `dd … of=/dev/null` is the standard read-throughput idiom.
-	/\bdd\s+if=.+of=\/dev\/(?!(?:null|zero|stdout|stderr|tty|fd\/\d+)(?:[\s;&|)<>]|$))/i,
-	/\bshred\s+\/dev\//i,
-	/\bcryptsetup\b/i,
-
-	// System-config destruction.
-	/>\s*\/etc\/(?:passwd|shadow|sudoers)\b/i,
-	/\btee\s+(?:-a\s+)?\/etc\/(?:passwd|shadow|sudoers)\b/i, // `tee /etc/passwd`, `tee -a /etc/sudoers`.
-
-	// Remote-fetch-then-execute (curl/wget piped to a shell or process-subbed).
-	/\b(?:curl|wget|fetch)\b[^|]*\|\s*(?:bash|sh|zsh|fish)\b/i,
-	// Process-sub variants: `bash <(curl …)`, `source <(curl …)`, `. <(curl …)`. `.` and `source` are
-	// anchored to a command boundary so `find . -name` and similar don't false-positive.
-	/(?:^|[\s;&|(])(?:bash|sh|zsh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\b/i,
-	// `eval "$(curl …)"` / `eval $(curl …)` / `eval \`curl …\``.
-	/\beval\s+["'`]?\$\(\s*(?:curl|wget|fetch)\b|\beval\s+`\s*(?:curl|wget|fetch)\b/i,
-
-	// Process/host control.
-	/\bkill\s+-9\s+1\b/, // kill PID 1.
-	// Process/host control: must sit at command position so `npm run reboot-tests`
-	// or `echo 'shutdown the queue'` don't false-positive.
-	/(?:^|[\s;&|(])(?:shutdown|poweroff|reboot|halt)(?:\s|$|[;|&])/i,
-	/(?:^|[\s;&|(])init\s+0\b/i,
-
-	// Network-shell exfil.
-	/\bnc\b[^|;]*\s-[a-zA-Z]*[ec][a-zA-Z]*\s/i, // `nc -e` / `nc -c`.
-] as const;
-
-/** Reason the bash tool reports for a {@link CRITICAL_BASH_PATTERNS} match. */
-export const CRITICAL_PATTERN_REASON = "Critical pattern detected";
-
-export type GuardRule =
-	| "critical_pattern"
-	| "nesting_limit"
-	| "credential_read"
-	| "secret_send"
-	| "discard_changes"
-	| "kills_harness";
+export type GuardRule = "credential_read" | "secret_send" | "discard_changes" | "kills_harness" | "size_limit";
 
 /** A fixed rule a call breaks. */
 export interface GuardHit {
 	rule: GuardRule;
-	/** Approval-prompt reason: {@link CRITICAL_PATTERN_REASON} for a critical pattern, else `<rule>: <why>`. */
+	/** Approval-prompt reason: `<rule>: <why>`. */
 	reason: string;
 }
 
@@ -164,7 +107,7 @@ export interface GuardScope {
 	home: string;
 }
 
-function hit(rule: Exclude<GuardRule, "critical_pattern">, why: string): GuardHit {
+function hit(rule: GuardRule, why: string): GuardHit {
 	return { rule, reason: `${rule}: ${why}` };
 }
 
@@ -383,7 +326,7 @@ const MAX_BRACE_WORDS = 1024;
  * The most characters {@link expandBraces} makes while the guard checks one command line, each word
  * counted with one for the space after it. Every rule checks each word made, so this bounds the
  * guard's work on brace lists however many of them a command has; past it no more words are made
- * and the command fails closed (`nesting_limit`).
+ * and the command fails closed (`size_limit`).
  */
 const MAX_BRACE_TEXT = 256 * 1024;
 /** What is left of {@link MAX_BRACE_TEXT} for the command line being checked, below 0 once passed; {@link findShellGuardHit} resets it. */
@@ -398,10 +341,10 @@ const BRACE_SEQUENCE_RE = /^(-?\d+|[A-Za-z])\.\.(-?\d+|[A-Za-z])(?:\.\.(-?\d+))?
 /**
  * The words brace expansion makes of `word`: `a{b,c}` gives `ab` and `ac`, `{1..3}` and `{a..c}`
  * give sequences, and nested lists expand too; a brace with neither a top-level `,` nor a sequence,
- * or one after `$`, stays as written. Quotes are not known here, so a quoted brace expands too. A
- * word longer than {@link MAX_BRACE_WORD_LENGTH} stays whole, and at most {@link MAX_BRACE_WORDS}
- * words are made. Once the words made for the command line pass {@link MAX_BRACE_TEXT}, a word
- * stays whole.
+ * or one after `$`, stays as written. Quotes are not known here: {@link shellBraces} leaves whole a
+ * word whose braces the source quoted. A word longer than {@link MAX_BRACE_WORD_LENGTH} stays
+ * whole, and at most {@link MAX_BRACE_WORDS} words are made. Once the words made for the command
+ * line pass {@link MAX_BRACE_TEXT}, a word stays whole.
  */
 function expandBraces(word: string): string[] {
 	if (word.length > MAX_BRACE_WORD_LENGTH || !word.includes("{")) return [word];
@@ -465,6 +408,15 @@ function expandBraces(word: string): string[] {
 }
 
 /**
+ * The words the shell makes of a word of `command` by brace expansion ({@link expandBraces}); a
+ * word whose every `{` the source quoted or escaped (`'{"a":1,"b":2}'`) stays whole, as the shell
+ * expands no brace in it.
+ */
+function shellBraces(command: ShellCommand, word: string): string[] {
+	return command.literalBraces.has(word) ? [word] : expandBraces(word);
+}
+
+/**
  * The words read `parts` stand for, at most {@link MAX_BRACE_WORDS}, or `undefined` once they, or
  * the alternatives of one brace, come to more than `maxText` characters.
  */
@@ -504,13 +456,13 @@ function braceWords(parts: readonly BracePart[], maxText: number): string[] | un
 
 /**
  * The absolute paths a word of `command` names, one per word its braces expand to
- * ({@link expandBraces}), each resolved from `cwd` as {@link resolveCommandWordPath} resolves it;
+ * ({@link shellBraces}), each resolved from `cwd` as {@link resolveCommandWordPath} resolves it;
  * those that cannot be resolved, relative ones from an unknown `cwd` included, are left out.
  */
 function wordPaths(command: ShellCommand, word: string, cwd: string | undefined, home: string): string[] {
 	const literalTilde = command.literalTildes.has(word);
 	const paths: string[] = [];
-	for (const expanded of expandBraces(word)) {
+	for (const expanded of shellBraces(command, word)) {
 		const target = resolveShellWordPath(literalTilde ? `./${expanded}` : expanded, cwd, home);
 		if (target !== undefined) paths.push(target);
 	}
@@ -524,7 +476,7 @@ function wordPaths(command: ShellCommand, word: string, cwd: string | undefined,
  * location, and names are compared without regard to case where the file system does so
  * ({@link foldsCase}). Paths are compared as written: a symlink to a location is not followed.
  */
-export function credentialLocation(absPath: string, home: string): string | undefined {
+function credentialLocation(absPath: string, home: string): string | undefined {
 	const names = pathNames(absPath);
 	const fixed = [
 		...Object.keys(SYSTEM_CREDENTIAL_FILES).map(file => ({ file, shown: file })),
@@ -546,7 +498,8 @@ export function credentialLocation(absPath: string, home: string): string | unde
 		// Bare wildcards for every component (`~/*/*/package.json`) name any folder, not this one.
 		if (!folderNames.some((_, k) => /[^*?]/.test(rest[k]))) continue;
 		const name = foldsCase() ? rest.at(-1)!.toLowerCase() : rest.at(-1)!;
-		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) return undefined;
+		// A public file of this folder; a pattern can still name a secret of a later one (`~/.*/config`).
+		if (rest.length > folderNames.length && (publicFiles.includes(name) || name.endsWith(".pub"))) continue;
 		return `~/${folder}`;
 	}
 	return undefined;
@@ -696,7 +649,10 @@ function copyOperands(command: ShellCommand): string[] {
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
+			append(
+				operands,
+				argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
+			);
 			break;
 		}
 		if (arg.startsWith("--")) {
@@ -708,7 +664,7 @@ function copyOperands(command: ShellCommand): string[] {
 			while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
 			if (k === arg.length - 1) i++;
 		} else {
-			operands.push(...expandBraces(arg));
+			append(operands, shellBraces(command, arg));
 		}
 	}
 	return operands;
@@ -731,25 +687,44 @@ const TAR_VALUE_OPTIONS: Record<string, boolean> = {
 };
 /** tar's letter for an exclusion list (`-X list`), whose paths tar leaves out. */
 const TAR_EXCLUDE_LETTER = "X";
+/** tar's one-letter operations whose members name entries of the archive, not files tar reads: extract and list. */
+const TAR_ENTRY_LETTERS = "xt";
+/**
+ * tar's long operations whose members name entries of the archive, not files tar reads, each with
+ * the shortest abbreviation GNU tar takes for it (`--ex` could also be `--exclude`).
+ */
+const TAR_ENTRY_OPTIONS: Record<string, string> = {
+	"--extract": "--ext",
+	"--get": "--ge",
+	"--list": "--list",
+	"--delete": "--dele",
+};
 
 /**
  * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
- * that directory, as tar does; each `-C` is relative to the one before it. Option values stay as
- * written, and exclusions are left out. A member after a directory the guard cannot resolve is
- * left out unless it is absolute.
+ * that directory, as tar does; each `-C` is relative to the one before it. A member's braces are
+ * expanded before it is resolved, as the shell expands them before tar sees the member
+ * (`{/etc/shadow,x}`, `{~/.ssh,~/.aws}`). Option values stay as written, and exclusions are left
+ * out. A member after a directory the guard cannot resolve, or one longer than
+ * {@link SHELL_MAX_DIRECTORY}, is left out unless it is absolute. An extraction, listing or
+ * deletion (`x`, `t`, `--delete`) reads only the archive and the member lists: its members name
+ * entries of the archive, not files.
  */
 function tarReadWords(command: ShellCommand, home: string): string[] {
 	const argv = args(command);
 	const words: string[] = [];
+	const members: string[] = [];
+	let entries = false;
 	let dir: string | undefined = command.cwd;
 	const changeDir = (word: string) => {
-		dir = dir === undefined ? undefined : resolveCommandWordPath(command, word, dir, home);
+		dir = dir === undefined ? undefined : boundedDirectory(resolveCommandWordPath(command, word, dir, home));
 	};
 	let i = 0;
 	// An old-style first word (`tar cfC x.tar ~ .ssh`): each letter that takes a value takes the next word.
 	if (argv.length > 0 && !argv[0].startsWith("-")) {
 		const letters = argv[i++];
 		for (const letter of letters) {
+			entries ||= TAR_ENTRY_LETTERS.includes(letter);
 			if (!TAR_VALUE_LETTERS.includes(letter) || i >= argv.length) continue;
 			const value = argv[i++];
 			if (letter === "C") changeDir(value);
@@ -772,26 +747,36 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 			} else if (Object.hasOwn(TAR_VALUE_OPTIONS, flag)) {
 				const target = value ?? argv[++i];
 				if (target !== undefined && TAR_VALUE_OPTIONS[flag]) words.push(target);
+			} else {
+				entries ||= Object.entries(TAR_ENTRY_OPTIONS).some(
+					([full, shortest]) => flag.startsWith(shortest) && full.startsWith(flag),
+				);
 			}
 		} else if (options && arg.startsWith("-") && arg.length > 1) {
 			let k = 1;
-			while (k < arg.length && !TAR_VALUE_LETTERS.includes(arg[k])) k++;
+			for (; k < arg.length && !TAR_VALUE_LETTERS.includes(arg[k]); k++) {
+				entries ||= TAR_ENTRY_LETTERS.includes(arg[k]);
+			}
 			if (k === arg.length) continue;
 			const value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
 			if (value === undefined) continue;
 			if (arg[k] === "C") changeDir(value);
 			else if (arg[k] !== TAR_EXCLUDE_LETTER) words.push(value);
 		} else {
-			const member: string | undefined =
-				dir !== undefined
-					? resolveCommandWordPath(command, arg, dir, home)
-					: path.isAbsolute(arg) || ABSOLUTE_EXPANSION_RE.test(arg)
-						? arg
-						: undefined;
-			if (member !== undefined) words.push(member);
+			const literalTilde = command.literalTildes.has(arg);
+			for (const expanded of shellBraces(command, arg)) {
+				const word = literalTilde ? `./${expanded}` : expanded;
+				const member: string | undefined =
+					dir !== undefined
+						? resolveShellWordPath(word, dir, home)
+						: path.isAbsolute(word) || ABSOLUTE_EXPANSION_RE.test(word)
+							? word
+							: undefined;
+				if (member !== undefined) members.push(member);
+			}
 		}
 	}
-	return words;
+	return entries ? words : [...words, ...members];
 }
 
 /**
@@ -799,28 +784,40 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
  * per such option, whether its value is the pattern itself or a file read for it. `valued` lists
  * the other options that take the next word as their value, only those that take one in every
  * common implementation, so that no file is mistaken for an option value. `suffixed` lists the
- * one-letter options whose optional value is only the rest of their word (`sed -i.bak`).
+ * one-letter options whose optional value is only the rest of their word (`sed -i.bak`). `walks`
+ * says when a search given no file reads the directory it runs in: `"always"` (`rg`, unless its
+ * input is piped or redirected, which it reads instead), or after one of `flags` (`grep -r`) or
+ * one of `recurse` with the value `recurse` (`grep -d recurse`).
  */
 const PATTERN_READERS: Record<
 	string,
-	{ supplies: Record<string, "pattern" | "file">; valued: readonly string[]; suffixed?: readonly string[] }
+	{
+		supplies: Record<string, "pattern" | "file">;
+		valued: readonly string[];
+		suffixed?: readonly string[];
+		walks?: "always" | { flags: readonly string[]; recurse: readonly string[] };
+	}
 > = {
 	grep: {
 		supplies: { "-e": "pattern", "--regexp": "pattern", "-f": "file", "--file": "file" },
+		walks: { flags: ["-r", "-R", "--recursive", "--dereference-recursive"], recurse: ["-d", "--directories"] },
 		valued: [
 			"-A",
 			"-B",
+			"-C",
 			"-D",
 			"-d",
 			"-m",
 			"--after-context",
 			"--before-context",
 			"--binary-files",
+			"--context",
 			"--devices",
 			"--directories",
 			"--exclude",
 			"--exclude-dir",
 			"--exclude-from",
+			"--group-separator",
 			"--include",
 			"--label",
 			"--max-count",
@@ -828,6 +825,7 @@ const PATTERN_READERS: Record<
 	},
 	rg: {
 		supplies: { "-e": "pattern", "--regexp": "pattern", "-f": "file", "--file": "file" },
+		walks: "always",
 		valued: [
 			"-A",
 			"-B",
@@ -879,35 +877,48 @@ const PATTERN_READERS: Record<
 /**
  * The words a {@link PATTERN_READERS} command reads files from: its operands, without the first
  * when no option supplied the pattern, and a pattern file. A long option that abbreviates one
- * that supplies the pattern (`--reg=x`, `--fil x`) counts as that option.
+ * that takes a value (`--reg=x`, `--fil x`, `--cont 2`), or one that makes the search recurse
+ * (`--rec`), counts as that option. A search with a pattern and no file operand that reads the
+ * directory it runs in ({@link PATTERN_READERS} `walks`) reads `.`; one with no pattern
+ * (`rg --files`, `rg --version`) searches nothing.
  */
 function patternReaderWords(command: ShellCommand): string[] {
-	const { supplies, valued, suffixed = [] } = PATTERN_READERS[command.argv[0]];
+	const { supplies, valued, suffixed = [], walks } = PATTERN_READERS[command.argv[0]];
 	const supplier = (option: string) => (Object.hasOwn(supplies, option) ? supplies[option] : undefined);
+	const flags = walks === undefined || walks === "always" ? [] : walks.flags;
 	const argv = args(command);
 	const words: string[] = [];
 	const operands: string[] = [];
 	let supplied = false;
+	let recursive = false;
 	// The value of an option that takes one: a pattern file is read, a pattern is not.
 	const take = (option: string, value: string | undefined) => {
 		const kind = supplier(option);
 		supplied ||= kind !== undefined;
 		if (kind === "file" && value !== undefined) words.push(value);
+		// GNU grep takes an abbreviated value (`-d rec`) once it names one choice alone.
+		if (walks !== undefined && walks !== "always" && walks.recurse.includes(option) && value !== undefined) {
+			recursive ||= value.length >= 3 && "recurse".startsWith(value);
+		}
 	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
+			append(
+				operands,
+				argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
+			);
 			break;
 		}
 		if (arg.startsWith("--")) {
 			const eq = arg.indexOf("=");
 			let name = eq > 0 ? arg.slice(0, eq) : arg;
 			if (supplier(name) === undefined && !valued.includes(name) && name.length > 2) {
-				const expanded = Object.keys(supplies).filter(option => option.startsWith(name));
+				const expanded = [...Object.keys(supplies), ...valued].filter(option => option.startsWith(name));
 				if (expanded.length === 1) name = expanded[0];
 			}
 			if (supplier(name) !== undefined || valued.includes(name)) take(name, eq > 0 ? arg.slice(eq + 1) : argv[++i]);
+			else recursive ||= name.length > 2 && flags.some(flag => flag.startsWith(name));
 		} else if (arg.startsWith("-") && arg.length > 1) {
 			// In a bundle (`-rne x`, `-A3`), the first letter that takes a value takes the rest of
 			// the word, or the next word when it ends the bundle; a suffix option (`sed -i.bak`) takes
@@ -915,15 +926,19 @@ function patternReaderWords(command: ShellCommand): string[] {
 			for (let k = 1; k < arg.length; k++) {
 				const option = `-${arg[k]}`;
 				if (suffixed.includes(option)) break;
+				recursive ||= flags.includes(option);
 				if (supplier(option) === undefined && !valued.includes(option)) continue;
 				take(option, k + 1 < arg.length ? arg.slice(k + 1) : argv[++i]);
 				break;
 			}
 		} else {
-			operands.push(...expandBraces(arg));
+			append(operands, shellBraces(command, arg));
 		}
 	}
-	return [...words, ...operands.slice(supplied ? 0 : 1)];
+	const files = operands.slice(supplied ? 0 : 1);
+	const walksCwd = walks === "always" ? !command.fedInput : recursive;
+	if (files.length === 0 && (supplied || operands.length > 0) && walksCwd) files.push(".");
+	return [...words, ...files];
 }
 
 /**
@@ -932,12 +947,52 @@ function patternReaderWords(command: ShellCommand): string[] {
  */
 const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
 /**
- * Readers that also write files: their one-letter options that take a value (in a bundle, the
- * first of them takes the rest of the word, or the next word when it ends the bundle), the options
- * whose value they write to rather than read, and, for a copy, whether a last operand without
- * `-t` is the destination.
+ * Long options of readers whose value is a key, certificate, netrc file or key folder the program
+ * authenticates, verifies or keeps its keys with (`curl --key`, `wget --private-key`,
+ * `gpg --homedir`), or a socket it connects to (`curl --unix-socket`): it neither prints nor
+ * copies the value, as `scp -i` does not, so the value is not read.
  */
-const WRITING_READERS: Record<string, { letters: string; writes: readonly string[]; destination?: true }> = {
+const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
+	curl: [
+		"--abstract-unix-socket",
+		"--cacert",
+		"--capath",
+		"--cert",
+		"--crlfile",
+		"--key",
+		"--netrc-file",
+		"--pinnedpubkey",
+		"--proxy-cacert",
+		"--proxy-capath",
+		"--proxy-cert",
+		"--proxy-crlfile",
+		"--proxy-key",
+		"--proxy-pinnedpubkey",
+		"--pubkey",
+		"--unix-socket",
+	],
+	wget: ["--ca-certificate", "--ca-directory", "--certificate", "--crl-file", "--pinnedpubkey", "--private-key"],
+	gpg: ["--homedir"],
+};
+/**
+ * Readers that also write files, whose options the guard reads in full: their one-letter options
+ * that take a value (in a bundle, the first of them takes the rest of the word, or the next word
+ * when it ends the bundle), the options whose value they write to (`writes`) or read (`reads`),
+ * the other long options that take the next word as their value (`valued`), whether a last operand
+ * without `-t` is the destination (a copy), and whether their operands are URLs, not files (a
+ * download). Each takes a long option's value after an `=` too, curl since 8.16.
+ */
+const WRITING_READERS: Record<
+	string,
+	{
+		letters: string;
+		writes: readonly string[];
+		reads?: readonly string[];
+		valued?: readonly string[];
+		destination?: true;
+		urls?: true;
+	}
+> = {
 	curl: {
 		letters: CURL_VALUE_LETTERS,
 		writes: [
@@ -954,6 +1009,8 @@ const WRITING_READERS: Record<string, { letters: string; writes: readonly string
 			"--trace",
 			"--trace-ascii",
 		],
+		reads: ["-K", "--config"],
+		urls: true,
 	},
 	wget: {
 		letters: "aABDeiIlnoOPQRtTUwX",
@@ -968,43 +1025,57 @@ const WRITING_READERS: Record<string, { letters: string; writes: readonly string
 			"--output-file",
 			"--save-cookies",
 		],
+		reads: ["-i", "--input-file"],
+		urls: true,
 	},
-	cp: { letters: "St", writes: ["-t", "--target-directory"], destination: true },
-	mv: { letters: "St", writes: ["-t", "--target-directory"], destination: true },
+	cp: { letters: "St", writes: ["-t", "--target-directory"], valued: ["--suffix"], destination: true },
+	mv: { letters: "St", writes: ["-t", "--target-directory"], valued: ["--suffix"], destination: true },
+	sort: {
+		letters: "kotST",
+		writes: ["-o", "--output"],
+		valued: ["--key", "--field-separator", "--buffer-size", "--temporary-directory"],
+	},
 };
 
-/** The words a {@link WRITING_READERS} command reads: its arguments, without what it writes to. */
+/**
+ * The words a {@link WRITING_READERS} command reads: the values of its `reads` options and its
+ * operands (none for a download), without what it writes to and the values of its other options,
+ * {@link KEY_VALUE_OPTIONS} included. A value after an `=` or in its option's word gets no tilde
+ * expansion ({@link attachedValue}).
+ */
 function writingReaderWords(command: ShellCommand): string[] {
-	const { letters, writes, destination } = WRITING_READERS[command.argv[0]];
+	const { letters, writes, reads = [], valued = [], destination, urls } = WRITING_READERS[command.argv[0]];
+	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, command.argv[0]) ? KEY_VALUE_OPTIONS[command.argv[0]] : [];
 	const argv = args(command);
 	const words: string[] = [];
 	const operands: string[] = [];
 	let targeted = false;
+	// The value of an option that takes one: where the command writes, a file it reads, or neither.
+	const take = (option: string, value: string | undefined) => {
+		if (writes.includes(option)) targeted = true;
+		else if (reads.includes(option) && value !== undefined) words.push(value);
+	};
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
 		if (arg === "--") {
-			operands.push(...argv.slice(i + 1).flatMap(expandBraces));
+			if (!urls) {
+				append(
+					operands,
+					argv.slice(i + 1).flatMap(word => shellBraces(command, word)),
+				);
+			}
 			break;
 		}
 		if (arg.startsWith("--")) {
 			const eq = arg.indexOf("=");
-			if (writes.includes(eq > 0 ? arg.slice(0, eq) : arg)) {
-				targeted = true;
-				if (eq < 0) i++;
-			} else {
-				words.push(arg);
-			}
+			if (eq > 0) take(arg.slice(0, eq), attachedValue(arg.slice(eq + 1)));
+			else if ([writes, reads, valued, keys].some(options => options.includes(arg))) take(arg, argv[++i]);
 		} else if (arg.startsWith("-") && arg.length > 1) {
 			let k = 1;
 			while (k < arg.length && !letters.includes(arg[k])) k++;
-			if (k < arg.length && writes.includes(`-${arg[k]}`)) {
-				targeted = true;
-				if (k === arg.length - 1) i++;
-			} else {
-				words.push(arg);
-			}
-		} else {
-			operands.push(...expandBraces(arg));
+			if (k < arg.length) take(`-${arg[k]}`, k + 1 < arg.length ? attachedValue(arg.slice(k + 1)) : argv[++i]);
+		} else if (!urls) {
+			append(operands, shellBraces(command, arg));
 		}
 	}
 	if (destination && !targeted) operands.pop();
@@ -1012,20 +1083,70 @@ function writingReaderWords(command: ShellCommand): string[] {
 }
 
 /**
+ * Options of plain readers whose value is a file they write, not read (`openssl genrsa -out
+ * ~/.ssh/deploy.pem`, `gpg --output pub.asc --export`), as each reader spells them: openssl takes
+ * its long options after one dash or two.
+ */
+const READER_OUTPUT_OPTIONS: Record<string, readonly string[]> = {
+	openssl: ["-out", "--out", "-keyout", "--keyout"],
+	gpg: ["-o", "--output"],
+};
+
+/**
+ * A plain reader's operands: its arguments without its options (`cat -n` names no file `-n`), and
+ * without the values of its {@link KEY_VALUE_OPTIONS} (long options only) and
+ * {@link READER_OUTPUT_OPTIONS}, given in the next word or after an `=`. The value of another option
+ * stays, as the guard does not know which options take one.
+ */
+function readerArgs(command: ShellCommand): string[] {
+	const name = command.argv[0];
+	const argv = args(command);
+	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, name) ? KEY_VALUE_OPTIONS[name] : [];
+	const outputs = Object.hasOwn(READER_OUTPUT_OPTIONS, name) ? READER_OUTPUT_OPTIONS[name] : [];
+	const words: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") {
+			append(words, argv.slice(i + 1));
+			break;
+		}
+		const eq = arg.indexOf("=");
+		const option = eq > 0 ? arg.slice(0, eq) : arg;
+		if ((arg.startsWith("--") && keys.includes(option)) || outputs.includes(option)) {
+			if (eq < 0) i++;
+		} else if (!arg.startsWith("-")) {
+			words.push(arg);
+		}
+	}
+	return words;
+}
+
+/** A URL (`https://host/x`, `hkps://keys.example`), which names no local file. */
+const URL_RE = /^[a-z][a-z\d+.-]*:\/\//i;
+
+/**
  * The words a reading command reads files from: a copy's local sources, a search's operands after
- * its pattern, a download's arguments other than where it saves, any other reader's arguments.
+ * its pattern, the files a download reads (`curl -K`, `wget -i`) but not where it saves, any other
+ * reader's operands; never `-` (standard input) or a URL. The value of an option that names a key
+ * it authenticates with is not read ({@link KEY_VALUE_OPTIONS}).
  */
 function readWords(command: ShellCommand, home: string): string[] {
 	const name = command.argv[0];
-	if (name === "tar") return tarReadWords(command, home);
-	if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
-		return copyOperands(command)
+	let words: string[];
+	if (name === "tar") {
+		words = tarReadWords(command, home);
+	} else if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
+		words = copyOperands(command)
 			.slice(0, -1)
 			.filter(operand => !REMOTE_OPERAND_RE.test(operand));
+	} else if (Object.hasOwn(PATTERN_READERS, name)) {
+		words = patternReaderWords(command);
+	} else if (Object.hasOwn(WRITING_READERS, name)) {
+		words = writingReaderWords(command);
+	} else {
+		words = Object.hasOwn(READERS, name) ? readerArgs(command) : [];
 	}
-	if (Object.hasOwn(PATTERN_READERS, name)) return patternReaderWords(command);
-	if (Object.hasOwn(WRITING_READERS, name)) return writingReaderWords(command);
-	return Object.hasOwn(READERS, name) ? args(command) : [];
+	return words.filter(word => word !== "-" && !URL_RE.test(word));
 }
 
 // -- credential_read ---------------------------------------------------------------------------------
@@ -1155,28 +1276,35 @@ function sentFiles(command: ShellCommand): string[] {
 			const arg = argv[i];
 			let option: string;
 			let value: string | undefined;
+			// The word the value is in, which tells whether the source quoted its braces.
+			let source: string | undefined = arg;
 			if (arg.startsWith("--")) {
 				const eq = arg.indexOf("=");
 				option = eq > 0 ? arg.slice(0, eq) : arg;
 				if (!Object.hasOwn(CURL_DATA_OPTIONS, option)) continue;
-				value = eq > 0 ? arg.slice(eq + 1) : argv[++i];
+				if (eq < 0) source = argv[++i];
+				value = eq > 0 ? arg.slice(eq + 1) : source;
 			} else if (arg.startsWith("-") && arg.length > 1) {
 				let k = 1;
 				while (k < arg.length && !CURL_VALUE_LETTERS.includes(arg[k])) k++;
 				if (k === arg.length) continue;
 				option = `-${arg[k]}`;
-				value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
+				if (k + 1 === arg.length) source = argv[++i];
+				value = k + 1 < arg.length ? arg.slice(k + 1) : source;
 				if (!Object.hasOwn(CURL_DATA_OPTIONS, option)) continue;
 			} else {
 				continue;
 			}
-			if (value === undefined) continue;
+			if (value === undefined || source === undefined) continue;
 			if (option === "-T" || option === "--upload-file") {
-				// `-T "{a,b}"` uploads each file of the list, as braces expand ({@link sentSecret}), and
-				// curl reads a set of one, `-T "{.env}"`, as its file.
-				files.push(value.replace(/\{([^{},]*)\}/g, "$1"));
+				// curl globs the value itself, quoted or not: `-T "{a,b}"` uploads each file of the list,
+				// and curl reads a set of one, `-T "{.env}"`, as its file.
+				append(files, expandBraces(value.replace(/\{([^{},]*)\}/g, "$1")));
 			} else if (option === "-F" || option === "--form") {
-				files.push(...formFiles(value));
+				// The shell brace-expands an unquoted field as it does a `-d @file` value (`f=@{a,.env}`).
+				for (const field of command.literalBraces.has(source) ? [value] : expandBraces(value)) {
+					append(files, formFiles(field));
+				}
 			} else if (option === "--data-urlencode") {
 				// `name@file` or `@file`; after an `=`, the rest is the content.
 				const at = value.indexOf("@");
@@ -1210,7 +1338,10 @@ function sentFiles(command: ShellCommand): string[] {
 		const operands = copyOperands(command);
 		const destination = operands.at(-1);
 		if (operands.length > 1 && destination !== undefined && REMOTE_OPERAND_RE.test(destination)) {
-			files.push(...operands.slice(0, -1).filter(operand => !REMOTE_OPERAND_RE.test(operand)));
+			append(
+				files,
+				operands.slice(0, -1).filter(operand => !REMOTE_OPERAND_RE.test(operand)),
+			);
 		}
 	}
 	return files;
@@ -1247,85 +1378,21 @@ function firstSecret(
  * The secret a command puts on its output: the environment, or a credential or `.env` file it
  * reads, through its arguments from where it runs or its `<` redirections from where the shell opens them.
  */
-function secretOutput(command: ShellCommand, scope: GuardScope): string | undefined {
+function secretOutput(command: ShellCommand, home: string): string | undefined {
 	if (dumpsEnvironment(command)) return "the environment";
-	const words = command.argv[0] === "source" ? args(command) : readWords(command, scope.home);
-	return (
-		firstSecret(command, command.reads, command.shellCwd, scope.home) ??
-		firstSecret(command, words, command.cwd, scope.home)
-	);
+	const words = command.argv[0] === "source" ? args(command) : readWords(command, home);
+	return firstSecret(command, command.reads, command.shellCwd, home) ?? firstSecret(command, words, command.cwd, home);
 }
 
 /**
- * The secrets commands put on their output, each command and upstream stage worked out once per
- * {@link findShellGuardHit}, so a long pipeline of senders costs no more than its length.
+ * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, or
+ * `upstream`, the secret an earlier stage of its pipeline puts on its output.
  */
-class SecretOutputs {
-	readonly #commands = new Map<ShellCommand, string | undefined>();
-	/** Per command list of an upstream stage, the index of the first command from each index on that puts a secret out. */
-	readonly #next = new Map<readonly ShellCommand[], Int32Array>();
-	readonly #upstream = new Map<ShellUpstream, string | undefined>();
-
-	constructor(readonly scope: GuardScope) {}
-
-	/**
-	 * The secret `command` can put on its output: its own ({@link secretOutput}), or one a command
-	 * in its substitutions puts in its words (`printf "$(cat .env)"`), at any depth.
-	 */
-	of(command: ShellCommand): string | undefined {
-		if (this.#commands.has(command)) return this.#commands.get(command);
-		const found = secretOutput(command, this.scope) ?? this.first(command.subs);
-		this.#commands.set(command, found);
-		return found;
-	}
-
-	/** The first secret one of `commands` can put on its output. */
-	first(commands: readonly ShellCommand[]): string | undefined {
-		for (const command of commands) {
-			const found = this.of(command);
-			if (found) return found;
-		}
-		return undefined;
-	}
-
-	/** The first secret a command upstream can put on its output, the earliest stage first. */
-	upstream(upstream: ShellUpstream | undefined): string | undefined {
-		const stages: ShellUpstream[] = [];
-		let known = upstream;
-		for (; known && !this.#upstream.has(known); known = known.before) stages.push(known);
-		let found = known === undefined ? undefined : this.#upstream.get(known);
-		for (const stage of stages.reverse()) {
-			found ??= this.#stage(stage);
-			this.#upstream.set(stage, found);
-		}
-		return found;
-	}
-
-	/** The first secret a command of the stage itself can put on its output. */
-	#stage({ commands, from, to }: ShellUpstream): string | undefined {
-		let next = this.#next.get(commands);
-		if (!next) {
-			next = new Int32Array(commands.length + 1);
-			next[commands.length] = commands.length;
-			for (let i = commands.length - 1; i >= 0; i--) next[i] = this.of(commands[i]) ? i : next[i + 1];
-			this.#next.set(commands, next);
-		}
-		return next[from] < to ? this.of(commands[next[from]]) : undefined;
-	}
-}
-
-/**
- * A network command sending a secret: on its input from a `<` redirection, in a file it uploads, from
- * an upstream stage's output, or from a substitution's.
- */
-function secretSend(command: ShellCommand, outputs: SecretOutputs): GuardHit | undefined {
-	if (!Object.hasOwn(SENDERS, command.argv[0])) return undefined;
-	const { home } = outputs.scope;
+function secretSend(command: ShellCommand, upstream: string | undefined, home: string): GuardHit | undefined {
 	const found =
 		firstSecret(command, command.reads, command.shellCwd, home) ??
 		firstSecret(command, sentFiles(command), command.cwd, home) ??
-		outputs.upstream(command.upstream) ??
-		outputs.first(command.subs);
+		upstream;
 	return found ? hit("secret_send", `it sends ${found} over the network (\`${command.argv[0]}\`)`) : undefined;
 }
 
@@ -1514,11 +1581,11 @@ function isLongOption(arg: string, name: string): boolean {
 	return flag.length > 2 && name.startsWith(flag);
 }
 
-/** A word the shell expands before git sees it: a variable, a substitution (its key), a leading `~`. */
+/** A word the shell expands before git sees it: a variable, a nested part such as `$( )` (a NUL), a leading `~`. */
 const SHELL_EXPANDED_RE = /[$\0]|^~/;
 /**
- * A brace expansion, which can make one word several (`{build,dist}`, `out{1..3}`). A word records
- * only that some part of it was quoted, not which, so a quoted one counts too.
+ * A brace expansion, which can make one word several (`{build,dist}`, `out{1..3}`). One the source
+ * quoted counts too, which only widens the check.
  */
 const BRACE_EXPANSION_RE = /\{[^{}]*(?:,|\.\.)[^{}]*\}/;
 
@@ -1877,18 +1944,20 @@ const STASH_LOOKBACK = 64;
 /**
  * What the `git stash` commands that have succeeded by the time `command` runs (earlier in its `&&`
  * chain) saved in the repository and work tree `target` works on and still hold, or `undefined` for
- * none. `releases` counts the commands anywhere in the command line that take saved work back out
- * of the stash (`pop`, `drop`, `clear`, `branch`; in any pipeline stage, group, substitution, nested
- * script or function). A stash holds its work only when every one of them is a link of its chain
- * before it, known to have run first; any other may run between it and `command`. Only stashes are
- * visited, at most {@link STASH_LOOKBACK} of them.
+ * none. `releases` counts the top-level commands anywhere in the command line that take saved work
+ * back out of the stash (`pop`, `drop`, `clear`, `branch`, in any pipeline stage). A stash holds
+ * its work only when every one of them is a link of its chain before it, known to have run first;
+ * any other may run between it and `command`. When the line can run one the guard does not see
+ * (`"unseen"`: a group, substitution or other nested part, or a shell or `eval`), no stash counts.
+ * Only stashes are visited, at most {@link STASH_LOOKBACK} of them.
  */
 function stashedBefore(
 	command: ShellCommand,
 	target: GitTarget,
 	scope: GuardScope,
-	releases: number,
+	releases: StashReleases,
 ): Stashed | undefined {
+	if (releases === "unseen") return undefined;
 	let stashed: Stashed | undefined;
 	let stash = latestStash(command.succeeded, scope);
 	// Looked up at the first stash that saved something.
@@ -1918,7 +1987,7 @@ function discardChanges(
 	command: ShellCommand,
 	scope: GuardScope,
 	probes: GuardProbeBudget,
-	releases: number,
+	releases: StashReleases,
 ): GuardHit | undefined {
 	if (command.argv[0] !== "git") return undefined;
 	const { sub, rest, target } = gitInvocation(command, scope.home);
@@ -1978,7 +2047,7 @@ interface KillProbe {
 	run(timeoutMs: number): string | undefined;
 }
 
-/** A probe running `pgrep` with `argv`; none for an argument holding a substitution the guard did not run. */
+/** A probe running `pgrep` with `argv`; none for an argument holding a nested part the guard does not read. */
 function pgrepProbe(argv: string[]): KillProbe[] {
 	if (argv.some(arg => arg.includes("\0"))) return [];
 	const run = (timeoutMs: number) => {
@@ -2132,8 +2201,7 @@ function killMatchProbes(command: ShellCommand, scope: GuardScope): KillProbe[] 
 /**
  * The embedded shell runs `pkill` as its own builtin, which refuses to signal this process or its
  * ancestors, so that builtin cannot reach omp. The rule still asks: a PTY or client-terminal backend
- * runs the system `pkill`, and so does a `pkill` behind a wrapper such as `sudo` or `xargs`, or in a
- * nested `bash -c`.
+ * runs the system `pkill`, and so does a `pkill` behind a wrapper such as `sudo` or `xargs`.
  */
 function killsHarness(command: ShellCommand, scope: GuardScope, budget: GuardProbeBudget): GuardHit | undefined {
 	const name = command.argv[0];
@@ -2160,6 +2228,13 @@ function killsHarness(command: ShellCommand, scope: GuardScope, budget: GuardPro
 
 // -- entry points ------------------------------------------------------------------------------------
 
+/**
+ * The commands of a command line that take saved work back out of the stash (`git stash pop`,
+ * `drop`, `clear`, `branch`; see {@link stashedBefore}): how many top-level ones it has, or
+ * `"unseen"` when part of it can run one the guard does not see ({@link stashReleases}).
+ */
+export type StashReleases = number | "unseen";
+
 /** Options for {@link checkShellGuard}. */
 export interface ShellGuardOptions {
 	/**
@@ -2178,28 +2253,25 @@ export interface ShellGuardOptions {
 	 * `end` that checking that part reported), for a segment of a compound prompt: the command starts
 	 * there, after the `cd`s and `git stash`es of the part before it.
 	 */
-	after?: ShellScriptEnd;
+	after?: ShellLineEnd;
 	/**
 	 * For a segment of a compound prompt, the `releases` that checking the whole command line
 	 * reported: a release elsewhere in the line may run before the segment. Without it, the
 	 * command's own.
 	 */
-	releases?: number;
+	releases?: StashReleases;
 }
 
 /** What {@link checkShellGuard} found, and where the command leaves the shell. */
 export interface ShellGuardCheck {
 	hit: GuardHit | undefined;
 	/** For the next segment of a compound prompt, as its {@link ShellGuardOptions.after}. */
-	end: ShellScriptEnd | undefined;
-	/**
-	 * How many commands in the command take saved work back out of the stash (`git stash pop`,
-	 * `drop`, `clear`, `branch`), anywhere, nested ones included (see {@link stashedBefore}).
-	 */
-	releases: number;
+	end: ShellLineEnd | undefined;
+	/** The command's releases of saved work from the stash, for its segments ({@link ShellGuardOptions.releases}). */
+	releases: StashReleases;
 }
 
-/** The first fixed rule a shell command breaks, or `undefined` (see {@link checkShellGuard}). */
+/** The first fixed rule a shell command line breaks, or `undefined` (see {@link checkShellGuard}). */
 export function findShellGuardHit(
 	command: string,
 	scope: GuardScope,
@@ -2209,25 +2281,54 @@ export function findShellGuardHit(
 }
 
 /**
- * The first fixed rule a shell command breaks, and where the command leaves the shell. Critical
- * patterns are matched against the command and every nested script it runs; the other rules against
- * every simple command it runs. A command nested deeper than the parser follows, with more nested
- * script text than it reads, with more text to search for heredoc delimiters that never come, or
- * with brace lists that expand past {@link MAX_BRACE_TEXT} and break no rule before that, fails
- * closed (`nesting_limit`). Probing rules run only after every other rule has passed, and their
- * probes share one budget: the ones left without time count as no match.
+ * The first fixed rule a shell command line breaks over its top-level simple commands
+ * ({@link parseShellCommands}), and where the line leaves the shell: `secret_send` across a
+ * pipeline first, then `credential_read`, then the probing rules `discard_changes` and
+ * `kills_harness`, which run only after every other rule has passed and whose probes share one
+ * budget: the ones left without time count as no match. A command line whose brace lists expand
+ * past {@link MAX_BRACE_TEXT} before a rule matches fails closed (`size_limit`).
  */
 export function checkShellGuard(command: string, scope: GuardScope, options: ShellGuardOptions = {}): ShellGuardCheck {
 	if (command.trim() === "") return { hit: undefined, end: options.after, releases: options.releases ?? 0 };
-	const parsed = parseShellScript(command, { ...scope, after: options.after });
-	const releases = options.releases ?? stashReleases(parsed.pipelines, scope.home);
-	return { hit: firstHit(command, parsed, scope, options, releases), end: parsed.end, releases };
+	const line = parseShellCommands(command, { ...scope, after: options.after });
+	const releases = options.releases ?? stashReleases(line, scope.home);
+	return { hit: firstHit(command, line.pipelines, scope, options, releases), end: line.end, releases };
 }
 
-/** How many of the commands in `pipelines` take saved work back out of the stash ({@link releasesStash}). */
-function stashReleases(pipelines: readonly ShellCommand[][], home: string): number {
+/**
+ * Programs that run shell code the guard does not read: a shell (its `-c` string, its script, or
+ * the script it is fed), `eval`, `source` and `.`, `trap`'s action, and `coproc`'s command.
+ */
+const SHELL_CODE_RUNNERS: Record<string, true> = {
+	".": true,
+	ash: true,
+	bash: true,
+	busybox: true,
+	coproc: true,
+	csh: true,
+	dash: true,
+	eval: true,
+	fish: true,
+	ksh: true,
+	mksh: true,
+	sh: true,
+	source: true,
+	tcsh: true,
+	trap: true,
+	yash: true,
+	zsh: true,
+};
+
+/**
+ * The commands of `line` that take saved work back out of the stash ({@link releasesStash}), or
+ * `"unseen"` when one can run where the guard does not look: the line has a part it does not read
+ * ({@link ShellLine.nested}), or a command that runs shell code ({@link SHELL_CODE_RUNNERS}).
+ */
+function stashReleases(line: ShellLine, home: string): StashReleases {
+	if (line.nested) return "unseen";
 	let count = 0;
-	for (const command of new Set(pipelines.flat())) {
+	for (const command of line.pipelines.flat()) {
+		if (Object.hasOwn(SHELL_CODE_RUNNERS, command.argv[0])) return "unseen";
 		if (releasesStash(command, home)) count++;
 	}
 	return count;
@@ -2236,48 +2337,30 @@ function stashReleases(pipelines: readonly ShellCommand[][], home: string): numb
 /** `releases`: as for {@link stashedBefore}. */
 function firstHit(
 	command: string,
-	{ pipelines, scripts, truncated }: ParsedShellScript,
+	pipelines: readonly ShellCommand[][],
 	scope: GuardScope,
 	options: ShellGuardOptions,
-	releases: number,
+	releases: StashReleases,
 ): GuardHit | undefined {
 	braceTextLeft = MAX_BRACE_TEXT;
-	// The raw line, each nested script, and each simple command in canonical quoting: the program
-	// and plain unquoted words bare, everything else single-quoted. `bash -c "eval '\"rm\" -rf /'"`
-	// matches like `rm -rf /`, while an argument quoted in the source (`git commit -m "reboot"`)
-	// stays quoted, as it is in the raw line. A program named by an absolute path (`/sbin/reboot`)
-	// is its basename; one named by a relative path (`./scripts/shutdown`) stays as written.
-	const canonical = pipelines.flat().map(c =>
-		[
-			...c.wrappers,
-			...c.argv.map((arg, index) => {
-				const word = index === 0 && !c.program.startsWith("/") ? c.program : arg;
-				return /^[\w@%+=:,./-]+$/.test(word) && (index === 0 || !c.quoted[index])
-					? word
-					: `'${word.replaceAll("'", "'\\''")}'`;
-			}),
-		].join(" "),
-	);
-	const texts = [command, ...scripts, ...canonical];
-	if (CRITICAL_BASH_PATTERNS.some(pattern => texts.some(text => pattern.test(text)))) {
-		return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
-	}
-	if (truncated) {
-		return hit(
-			"nesting_limit",
-			`it nests \`bash -c\`, \`eval\`, heredoc scripts, or substitutions more than ${SHELL_SCRIPT_MAX_DEPTH} levels deep or in more than ${SHELL_SCRIPT_MAX_NESTED_TEXT / 1024}K characters of nested script, or has heredocs that never close past ${SHELL_SCRIPT_MAX_HEREDOC_SEARCH / 1024}K characters of searching, past what the guard can check`,
-		);
-	}
-	const outputs = new SecretOutputs(scope);
 	for (const pipeline of pipelines) {
-		const found =
-			pipeline.map(c => secretSend(c, outputs)).find(Boolean) ??
-			pipeline.map(c => credentialRead(c, scope)).find(Boolean);
-		if (found) return found;
+		// The first secret a stage before the sender being checked puts out; each stage is read once.
+		let upstream: string | undefined;
+		let read = 0;
+		for (const [index, sender] of pipeline.entries()) {
+			if (!Object.hasOwn(SENDERS, sender.argv[0])) continue;
+			for (; read < index && upstream === undefined; read++) upstream = secretOutput(pipeline[read], scope.home);
+			const found = secretSend(sender, upstream, scope.home);
+			if (found) return found;
+		}
+		for (const reader of pipeline) {
+			const found = credentialRead(reader, scope);
+			if (found) return found;
+		}
 	}
 	if (braceTextLeft < 0) {
 		return hit(
-			"nesting_limit",
+			"size_limit",
 			`its brace lists expand to more than ${MAX_BRACE_TEXT / 1024}K characters, past what the guard can check`,
 		);
 	}
@@ -2303,26 +2386,32 @@ function firstHit(
 /**
  * Applies `credential_read` to a file tool (`read`, `grep`): when any target path is in a
  * credential location, the call keeps `tier` but carries a safety override, like a critical bash
- * command. Internal and web URLs are not files and never match.
+ * command. A database path with a table or query selector (`agent.db:table`, `agent.db?q=...`)
+ * targets the database file. Internal and web URLs are not files and never match.
  */
 export function fileToolApproval(tier: ToolTier, rawPaths: readonly string[], cwd: string): ToolApprovalDecision {
 	const router = InternalUrlRouter.instance();
 	const home = os.homedir();
 	for (const rawPath of rawPaths) {
-		const filePath = splitPathAndSel(rawPath).path;
-		if (filePath === "" || router.canHandle(filePath) || isReadableUrlPath(filePath)) continue;
-		let found: string | undefined;
-		try {
-			found = credentialLocation(resolveToCwd(filePath, cwd), home);
-		} catch {
-			continue;
+		const filePaths = [
+			splitPathAndSel(rawPath).path,
+			...parseSqlitePathCandidates(rawPath).map(candidate => candidate.sqlitePath),
+		];
+		for (const filePath of filePaths) {
+			if (filePath === "" || router.canHandle(filePath) || isReadableUrlPath(filePath)) continue;
+			let found: string | undefined;
+			try {
+				found = credentialLocation(resolveToCwd(filePath, cwd), home);
+			} catch {
+				continue;
+			}
+			if (found)
+				return {
+					tier,
+					override: true,
+					reason: hit("credential_read", `it reads your credentials in ${found}`).reason,
+				};
 		}
-		if (found)
-			return {
-				tier,
-				override: true,
-				reason: hit("credential_read", `it reads your credentials in ${found}`).reason,
-			};
 	}
 	return tier;
 }

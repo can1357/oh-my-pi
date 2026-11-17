@@ -56,14 +56,12 @@ import {
 	extractLiteralAndChainSegments,
 	isShellEnvironmentAssignment,
 	type LiteralShellCommandSegment,
-	type ShellScriptEnd,
+	type ShellLineEnd,
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
 import {
 	bindGuardProbeScope,
-	CRITICAL_BASH_PATTERNS,
-	CRITICAL_PATTERN_REASON,
 	callProbeBudget,
 	checkShellGuard,
 	findShellGuardHit,
@@ -196,6 +194,62 @@ export function wrapShellLineForClientTerminal(
 	const finalLine = shellConfig.prefix ? `${shellConfig.prefix} ${line}` : line;
 	return { command: shellConfig.shell, args: [...shellConfig.args, finalLine] };
 }
+
+/**
+ * Bash patterns flagged as safety critical for approval policy.
+ *
+ * Kept intentionally tight — the cost of a false negative is data loss or a compromised host,
+ * while false positives remain actionable through user policy control.
+ * New patterns should target shapes that are virtually never legitimate in automation.
+ */
+export const CRITICAL_BASH_PATTERNS = [
+	// Recursive destruction.
+	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
+	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
+	// `rm -rf -v /`, `rm -v -rf /`. An absolute target is still required.
+	/\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
+	// `--no-preserve-root` defeats coreutils' own refusal to recurse on `/`, so it is critical
+	// wherever it appears — including forms this list would otherwise reach only via the target.
+	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
+	/\bsudo\s+rm\b/i, // any `sudo rm`.
+	/\bchmod\s+-R\s+[0-7]+\s+\//i, // `chmod -R 777 /`.
+	/\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//, // `chmod -R u+x /`, `chmod -R u+rwx,o+w /etc` (symbolic mode, root target).
+	/\bchown\s+-R\s+\S+\s+\//i, // `chown -R user /`.
+
+	// Fork bomb (a few common spacings).
+	/:\(\)\s*\{\s*:\s*\|\s*:/i,
+
+	// Disk / filesystem destruction.
+	/>\s*\/dev\/sd[a-z]/i, // write to disk device.
+	/\bmkfs(\.|\b)/i, // format filesystem.
+	// dd to a device. Write-only pseudo-device sinks (`of=/dev/null`, `/dev/stdout`, `/dev/fd/1`, …) are
+	// excluded: they cannot destroy data, and `dd … of=/dev/null` is the standard read-throughput idiom.
+	/\bdd\s+if=.+of=\/dev\/(?!(?:null|zero|stdout|stderr|tty|fd\/\d+)(?:[\s;&|)<>]|$))/i,
+	/\bshred\s+\/dev\//i,
+	/\bcryptsetup\b/i,
+
+	// System-config destruction.
+	/>\s*\/etc\/(?:passwd|shadow|sudoers)\b/i,
+	/\btee\s+(?:-a\s+)?\/etc\/(?:passwd|shadow|sudoers)\b/i, // `tee /etc/passwd`, `tee -a /etc/sudoers`.
+
+	// Remote-fetch-then-execute (curl/wget piped to a shell or process-subbed).
+	/\b(?:curl|wget|fetch)\b[^|]*\|\s*(?:bash|sh|zsh|fish)\b/i,
+	// Process-sub variants — `bash <(curl …)`, `source <(curl …)`, `. <(curl …)`. `.` and `source` are
+	// anchored to a command boundary so `find . -name` and similar don't false-positive.
+	/(?:^|[\s;&|(])(?:bash|sh|zsh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\b/i,
+	// `eval "$(curl …)"` / `eval $(curl …)` / `eval \`curl …\``.
+	/\beval\s+["'`]?\$\(\s*(?:curl|wget|fetch)\b|\beval\s+`\s*(?:curl|wget|fetch)\b/i,
+
+	// Process/host control.
+	/\bkill\s+-9\s+1\b/, // kill PID 1.
+	// Process/host control — must sit at command position so `npm run reboot-tests`
+	// or `echo 'shutdown the queue'` don't false-positive.
+	/(?:^|[\s;&|(])(?:shutdown|poweroff|reboot|halt)(?:\s|$|[;|&])/i,
+	/(?:^|[\s;&|(])init\s+0\b/i,
+
+	// Network-shell exfil.
+	/\bnc\b[^|;]*\s-[a-zA-Z]*[ec][a-zA-Z]*\s/i, // `nc -e` / `nc -c`.
+] as const;
 
 function normalizeBashApprovalPattern(value: string): string {
 	return value.trim().replace(/\s+/gu, " ");
@@ -674,52 +728,52 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				reason: `Prompt required by bash pattern: ${prompted.rule.match}`,
 			};
 		}
-		const guardHit = this.#guardHit(command, input.cwd, {
-			probe,
-			budget: probe ? callProbeBudget(ctx?.toolCall) : undefined,
-		});
-		const criticalCommand = guardHit !== undefined;
-		const criticalDecision: ToolApprovalDecision = {
-			tier: "exec",
-			override: true,
-			reason: guardHit?.reason ?? CRITICAL_PATTERN_REASON,
-		};
+		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
 		if (!compoundSegments && criticalCommand) {
-			return criticalDecision;
+			return { tier: "exec", override: true, reason: "Critical pattern detected" };
 		}
 		if (compoundSegments) {
 			for (const segment of compoundSegments) {
 				const literalCommand = segment.argv.join(" ");
 				if (criticalCommand || CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
-					return criticalDecision;
+					return { tier: "exec", override: true, reason: "Critical pattern detected" };
 				}
 			}
 		}
+		const guardHit = this.#guardHit(command, input.cwd, {
+			probe,
+			budget: probe ? callProbeBudget(ctx?.toolCall) : undefined,
+		});
+		if (guardHit) return { tier: "exec", override: true, reason: guardHit.reason };
 		if (decision.kind === "allow") return { tier: "write", policy: "allow" };
 		return "exec";
 	}
 	/**
-	 * The fixed rule `command` breaks. With `tools.guardRules` off, a critical pattern matched against
-	 * the raw command line; on, every guard rule, through shell nesting.
+	 * The fixed guard rule (`tools.guardRules`) `command` breaks over its top-level commands, or
+	 * `undefined`, as always with the setting off. The critical patterns are not among the rules:
+	 * they match the raw command line either way.
 	 */
 	#guardHit(command: string, cwd: unknown, options: ShellGuardOptions): GuardHit | undefined {
-		if (cfgToolsGuardRules.get(this.session.settings)) {
-			return findShellGuardHit(command, this.#guardScope(cwd), options);
-		}
-		return command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command))
-			? { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON }
+		return cfgToolsGuardRules.get(this.session.settings)
+			? findShellGuardHit(command, this.#guardScope(cwd), options)
 			: undefined;
 	}
 	/**
 	 * Where the fixed guard rules see a call run: its `cwd` argument (resolved like execution
-	 * resolves it) or the session cwd. An internal-URL cwd has no host directory to probe.
+	 * resolves it) or the session cwd. An internal-URL cwd has no host directory to probe, and a `cwd`
+	 * execution cannot resolve (`@local://notes`) is left for execution to report: the rules see the
+	 * session cwd for both.
 	 */
 	#guardScope(cwd: unknown): GuardScope {
 		const sessionCwd = this.session.cwd ?? process.cwd();
-		const commandCwd =
-			typeof cwd === "string" && cwd !== "" && !InternalUrlRouter.instance().canHandle(cwd)
-				? resolveToCwd(cwd, sessionCwd)
-				: sessionCwd;
+		let commandCwd = sessionCwd;
+		if (typeof cwd === "string" && cwd !== "" && !InternalUrlRouter.instance().canHandle(cwd)) {
+			try {
+				commandCwd = resolveToCwd(cwd, sessionCwd);
+			} catch {
+				commandCwd = sessionCwd;
+			}
+		}
 		return { cwd: commandCwd, home: os.homedir() };
 	}
 	/**
@@ -751,7 +805,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		};
 	}
 
-	#formatCompoundApprovalDetails(command: string, cwd: string | undefined): string[] | null {
+	#formatCompoundApprovalDetails(command: string, cwd: unknown): string[] | null {
 		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
 			? this.session.settings.getShellConfig().shell
 			: undefined;
@@ -771,38 +825,45 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				}
 			}
 		}
+		const segmentCritical = segments.map(segment => {
+			const literalCommand = segment.literal?.argv.join(" ");
+			return CRITICAL_BASH_PATTERNS.some(
+				pattern => pattern.test(segment.text) || (literalCommand !== undefined && pattern.test(literalCommand)),
+			);
+		});
+		const wholeChainOnlyCritical =
+			command !== "" &&
+			CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) &&
+			!segmentCritical.some(Boolean);
+		if (wholeChainOnlyCritical) return null;
 		// The segments and the whole chain are checks for this call: their probes share the budget of
 		// the call's approval paths, so the rows ask nothing the gate already asked.
 		const budget = callProbeBudget();
-		const guardRules = cfgToolsGuardRules.get(this.session.settings);
 		const scope = this.#guardScope(cwd);
 		// The whole chain first: a `git stash pop` anywhere in it may run before any segment, so each
 		// segment is checked with the chain's count of them.
-		const whole = guardRules ? checkShellGuard(command, scope, { budget }) : undefined;
-		const wholeHit = whole ? whole.hit : this.#guardHit(command, cwd, { budget });
+		const whole = cfgToolsGuardRules.get(this.session.settings)
+			? checkShellGuard(command, scope, { budget })
+			: undefined;
 		// Each segment is checked where the ones before it leave the shell (after their `cd`s, with
 		// their `git stash`es known to have succeeded), as the whole chain checks it.
-		let after: ShellScriptEnd | undefined;
-		const segmentHits = segments.map((segment): GuardHit | undefined => {
-			const check = whole
-				? checkShellGuard(segment.text, scope, { budget, after, releases: whole.releases })
-				: undefined;
-			after = check?.end;
-			const literalCommand = segment.literal?.argv.join(" ");
-			if (literalCommand !== undefined && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
-				return { rule: "critical_pattern", reason: CRITICAL_PATTERN_REASON };
-			}
-			return check ? check.hit : this.#guardHit(segment.text, cwd, { budget });
+		let after: ShellLineEnd | undefined;
+		const segmentGuards = segments.map((segment): GuardHit | undefined => {
+			if (!whole) return undefined;
+			const check = checkShellGuard(segment.text, scope, { budget, after, releases: whole.releases });
+			after = check.end;
+			return check.hit;
 		});
-		const wholeChainOnlyCritical = wholeHit !== undefined && !segmentHits.some(hit => hit !== undefined);
-		if (wholeChainOnlyCritical) return null;
+		// A guard rule only the whole chain breaks (brace lists past the size limit only together) has
+		// no segment to name.
+		if (!segmentGuards.some(Boolean) && whole?.hit) return null;
 
 		let chainUntainted = true;
 		const rows: string[] = [];
 		for (let i = 0; i < segments.length; i++) {
 			const segment = segments[i]!;
-			const segmentHit = segmentHits[i];
-			const isCritical = segmentHit !== undefined;
+			const isCritical = segmentCritical[i]!;
+			const guardRule = segmentGuards[i]?.rule;
 			const segmentRule = findBashApprovalPatternRule(segment.text, policy.rules, policy.allowedEnvVars);
 			const authorityRule =
 				authority === policy
@@ -818,6 +879,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				chainUntainted &&
 				segment.literal !== null &&
 				!isCritical &&
+				!guardRule &&
 				!promptRule &&
 				authorityRule?.approval !== "deny" &&
 				segmentRule?.approval === "allow";
@@ -827,11 +889,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			} else {
 				const reason = promptRule
 					? `prompt: ${promptRule.match}`
-					: segmentHit
-						? segmentHit.rule === "critical_pattern"
-							? "critical pattern"
-							: segmentHit.rule
-						: "requires approval";
+					: isCritical
+						? "critical pattern"
+						: (guardRule ?? "requires approval");
 				rows.push(`  ? ${truncateForPrompt(segment.text)} (${reason})`);
 			}
 		}

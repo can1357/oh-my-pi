@@ -104,10 +104,10 @@ nace-ai/intern 0.30.1 (packages/coding-agent/src/tools/guard-rules.ts,
 packages/coding-agent/src/tools/shell-tokenize.ts)
 
 The fixed guard rules (credential_read, secret_send, discard_changes,
-kills_harness) and the nested shell parser (parseShellScript) are derived from
-src/intern/guard.py of Intern (https://github.com/nace-ai/intern, commit
-e1bbd096f97d434b22851d525ea0cf9e029107d1), used under the Apache License 2.0,
-whose text is reproduced below.
+kills_harness) and the top-level shell command parser (parseShellCommands) are
+derived from src/intern/guard.py of Intern (https://github.com/nace-ai/intern,
+commit e1bbd096f97d434b22851d525ea0cf9e029107d1), used under the Apache License
+2.0, whose text is reproduced below.
 
   Copyright Nace AI. The repository names Nace AI as its author (pyproject.toml,
   CITATION.cff) and carries no other copyright notice and no NOTICE file.
@@ -116,8 +116,8 @@ Modified for omp: rewritten in TypeScript; a rule hit returns an approval
 override instead of refusing the call, and the rules are opt-in
 (tools.guardRules); credential locations include omp's own credential stores;
 the git working-tree check runs through @oh-my-pi/pi-natives/vcs without
-repository-configured programs; the parser tracks cd, ( ) subshells, &&
-chains, quote-aware heredocs, and scripts fed to a shell's stdin.
+repository-configured programs; the parser reads only top-level commands,
+tracks cd and && chains, and skips heredoc bodies.
 
 BUNDLED NPM PACKAGES
 ====================

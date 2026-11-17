@@ -560,8 +560,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		if (!cfgToolsGuardRules.get(this.session.settings)) return searchPathTier(args);
 		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
-		const roots = toPathList(a?.path ?? a?.paths).flatMap(root => approvalRootCandidates(root));
-		return fileToolApproval(searchPathTier(args), roots, this.session.cwd);
+		// Execution trims each root and strips its outer double quotes before searching it or its parts.
+		const roots = toPathList(a?.path ?? a?.paths)
+			.flatMap(root => approvalRootCandidates(normalizePathLikeInput(root)).map(normalizePathLikeInput))
+			.filter(root => root.length > 0);
+		// With no path, execution searches the session cwd.
+		return fileToolApproval(searchPathTier(args), roots.length > 0 ? roots : ["."], this.session.cwd);
 	};
 	/**
 	 * `always-ask-cached` keys: every file and folder this grep searches, so a
