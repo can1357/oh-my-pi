@@ -609,9 +609,10 @@ for (const option of [{}, { unknown: "us" }, { label: "Canada", value: "ca" }, {
 }
 const valueDoesNotMatchLabel = await tab.select("#size", { value: "Extra large" }).then(() => "selected", error => error.message);
 const missingIndex = await handle.select({ index: 99 }).then(() => "selected", error => error.message);
+const invalidOnMissing = await tab.select("#missing", { label: 1 }).then(() => "selected", error => error.message);
 return {
 	byLabel, afterLabel, byValue, handleByLabel, afterHandle, valueWins, cleared, afterCleared, firstOnSingle, handleFirstOnSingle, afterFirst, noMatch, handleNoMatch, afterNoMatch, multiple, reset, handleReset, afterReset, swapped, ternSwapped,
-	explicitLabel, explicitValue, firstIndex, laterIndex, mixed, fullLabel, invalid, valueDoesNotMatchLabel, missingIndex,
+	explicitLabel, explicitValue, firstIndex, laterIndex, mixed, fullLabel, invalid, valueDoesNotMatchLabel, missingIndex, invalidOnMissing,
 	afterInvalid: await tab.value("#country"), afterInvalidValue: await tab.value("#size"),
 	eventsBefore, eventsAfter: await tab.evaluate(() => window.selectEvents),
 };`,
@@ -650,6 +651,7 @@ return {
 				invalid: Array.from({ length: 9 }, () => expect.stringMatching(/label.*value.*index/i)),
 				valueDoesNotMatchLabel: expect.stringContaining("Extra large"),
 				missingIndex: expect.stringContaining("99"),
+				invalidOnMissing: expect.stringMatching(/label.*value.*index/i),
 				afterInvalid: "ca",
 				afterInvalidValue: "Large",
 				eventsBefore: expect.any(Array),

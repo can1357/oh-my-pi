@@ -16,7 +16,7 @@ import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { splitKeyCombo, ternKey } from "./tern/keys";
 import { devtoolsFrameId } from "./frames";
 import { untilAbortedOrReleased } from "./op-timeouts";
-import { normalizeSelectOptions, type SelectOptionInput } from "./select-options";
+import type { SelectOptionChoice, SelectOptionInput } from "./select-options";
 import {
 	createFilePicker,
 	openUploadSources,
@@ -1194,17 +1194,17 @@ export async function highlightElement(
 }
 
 /**
- * Select options by string (value before label), explicit label/value, or zero-based index.
+ * Select options by string (value before label), explicit label/value, or zero-based index, as
+ * `normalizeSelectOptions` returns them, so a bad choice fails before the element is looked up.
  * Return the values selected after the page's input and change handlers have run.
- * A single `<select>` takes the first match. Invalid or unmatched choices leave it untouched.
+ * A single `<select>` takes the first match. Unmatched choices leave it untouched.
  */
 export async function selectElementOptions(
 	handle: ElementHandle,
-	values: SelectOptionInput[],
+	choices: SelectOptionChoice[],
 	label: string,
 	signal?: AbortSignal,
 ): Promise<string[]> {
-	const choices = normalizeSelectOptions(values);
 	const outcome = (await untilAborted(signal, () =>
 		handle.evaluate((el, vals) => {
 			interface SelectOption {
