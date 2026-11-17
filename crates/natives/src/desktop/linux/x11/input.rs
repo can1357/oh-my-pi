@@ -13,6 +13,7 @@
 
 use std::{
 	cell::{Cell, RefCell},
+	os::fd::AsFd as _,
 	sync::Arc,
 	time::{Duration, Instant},
 };
@@ -989,7 +990,7 @@ impl X11Input {
 		}
 		// Reaps a watcher that died before its replacement starts.
 		*release = None;
-		match ReleaseWatcher::start(self.display.clone(), self.root) {
+		match ReleaseWatcher::start(self.conn.stream().as_fd(), self.display.clone(), self.root) {
 			Ok(watcher) => *release = Some(watcher),
 			Err(_) => self.release_failed.set(true),
 		}
@@ -1589,9 +1590,15 @@ mod tests {
 	}
 
 	fn start_server() -> (Server, String) {
+		start_server_with(&["-nolisten", "tcp"])
+	}
+
+	/// `Xvfb` with `listen`, its arguments for TCP.
+	fn start_server_with(listen: &[&str]) -> (Server, String) {
 		let mut server = Server(
 			Command::new("Xvfb")
-				.args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp"])
+				.args(["-displayfd", "1", "-screen", "0", "320x240x24"])
+				.args(listen)
 				.stdout(Stdio::piped())
 				.stderr(Stdio::null())
 				.spawn()
@@ -2431,9 +2438,9 @@ mod tests {
 	}
 
 	/// A session whose release watcher cannot start, here because the display
-	/// it is given is unreachable, presses and releases as it would without
-	/// one. Starts its own `Xvfb`: `cargo test -p omp-natives -- --ignored
-	/// without_a_release_watcher`.
+	/// name it is given cannot be parsed, presses and releases as it would
+	/// without one. Starts its own `Xvfb`: `cargo test -p omp-natives --
+	/// --ignored without_a_release_watcher`.
 	#[test]
 	#[ignore = "starts Xvfb"]
 	fn a_session_without_a_release_watcher_still_presses() {
@@ -2473,6 +2480,22 @@ mod tests {
 			}
 		}
 		assert_eq!((pressed, released), (1, 1), "Shift goes down and up once");
+	}
+
+	/// A session connected over TCP to a display whose host name does not
+	/// resolve still gets its watcher, which connects to the other end of the
+	/// session's own connection and looks no name up. Starts its own `Xvfb`:
+	/// `cargo test -p omp-natives -- --ignored looks_up_no_host_name`.
+	#[test]
+	#[ignore = "starts Xvfb"]
+	fn a_release_watcher_looks_up_no_host_name() {
+		let (_server, display) = start_server_with(&["-listen", "tcp", "-ac"]);
+		let number = display.trim_start_matches(':');
+		let (conn, screen) =
+			x11rb::connect(Some(&format!("127.0.0.1:{number}"))).expect("connect to Xvfb over TCP");
+		let root = conn.setup().roots[screen].root;
+		ReleaseWatcher::start(conn.stream().as_fd(), Some(format!("nowhere.invalid:{number}")), root)
+			.expect("the watcher starts");
 	}
 }
 
