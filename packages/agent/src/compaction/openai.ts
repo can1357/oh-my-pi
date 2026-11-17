@@ -55,6 +55,7 @@ import {
 	truncateResponseItemId,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { withResolvedHeaders } from "@oh-my-pi/pi-ai/utils/model-headers";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
@@ -64,21 +65,11 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import {
-	$env,
-	isRecord,
-	logger,
-	prompt,
-	ptree,
-	stringifyJson,
-	structuredCloneJSON,
-	untilAborted,
-} from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { dataUrlImageSize } from "../image-tokens";
 import { Tokenizer } from "../tokenizer";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
-import { withResolvedHeaders } from "./request-headers";
 import { isOpenAiRemoteCompactionApi, remoteCompactionPolicyModel } from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
@@ -1105,11 +1096,7 @@ export async function requestRemoteCompaction(
 	if (isChatCompletions) {
 		if (opts?.apiKey) headers.set("Authorization", `Bearer ${opts.apiKey}`);
 		const model = opts?.model;
-		const resolveHeaders = model?.resolveHeaders;
-		const configuredHeaders = resolveHeaders
-			? await untilAborted(signal, () => resolveHeaders(signal))
-			: model?.headers;
-		signal?.throwIfAborted();
+		const configuredHeaders = model ? (await withResolvedHeaders(model, signal)).headers : undefined;
 		// `set` replaces case-insensitively, so a configured `authorization` overrides the default bearer.
 		if (configuredHeaders) {
 			for (const name in configuredHeaders) headers.set(name, configuredHeaders[name]!);

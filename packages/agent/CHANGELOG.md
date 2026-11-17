@@ -2,13 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI remote compaction (V1 and V2) dropping configured headers of models.yml and extension-registered models, so header-authenticated gateways returned 401 ([#19579](https://github.com/can1357/oh-my-pi/pull/19579) by [@ryanskidmore](https://github.com/ryanskidmore))
+
 ## [18.22.1] - 2026-11-17
 
 ### Fixed
 
 - Provider replay (`filterProviderReplayMessages`, the default `convertToLlm`) now sends a tool call stopped by a provider error as "not executed" without the provider's error text, so a refusal explanation is never fed back to the model ([#19419](https://github.com/can1357/oh-my-pi/pull/19419) by [@flosrn](https://github.com/flosrn))
 - Fixed one-shot retries and title generation to pass the model endpoint so custom Zhipu Coding Plan providers honor the Beijing-time quota reset ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed OpenAI remote compaction (V1 `/responses/compact` and V2 streaming) dropping every configured header of a `models.yml` or extension-registered model: those models carry their headers only in `resolveHeaders`, which the compaction requests never resolved, so a gateway that authenticates by header answered 401 ([#19579](https://github.com/can1357/oh-my-pi/pull/19579) by [@ryanskidmore](https://github.com/ryanskidmore))
 
 ## [18.20.1] - 2026-11-14
 
