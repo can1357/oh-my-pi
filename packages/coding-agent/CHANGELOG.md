@@ -22,7 +22,7 @@
 ### Fixed
 
 - With several Kiro logins, the model list now includes every model any login can use, and a request goes to a login that serves its model ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
-- Kiro logins now show their account email in `/usage`, `omp usage` and the account list; older logins pick it up at their next token refresh ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+- `/usage` and `omp usage` now label each Kiro login with its account email; two logins of one email stay separate accounts ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
 - Kiro turns now report input tokens from Kiro's context estimate when the stream carries no token counts, instead of showing 0 ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
 - Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
 - Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))

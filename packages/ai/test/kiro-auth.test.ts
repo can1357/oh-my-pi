@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { resolveCredentialIdentityKey } from "@oh-my-pi/pi-ai/auth-storage";
+import { isSameOAuthAccount, type OAuthCredential, resolveCredentialIdentityKey } from "@oh-my-pi/pi-ai/auth-storage";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { loginKiroHook, refreshKiroHook } from "@oh-my-pi/pi-ai/registry/oauth/kiro";
 import type { OAuthController, OAuthCredentials, OAuthPrompt } from "@oh-my-pi/pi-ai/registry/oauth/types";
@@ -139,10 +139,7 @@ describe("Kiro device login", () => {
 		const { fetch, calls } = server(oidcHandler(() => json({}, 500)));
 		const row = (await loginKiroHook(controller(fetch, "2").ctrl)) as OAuthCredentials;
 		expect(calls[1]?.body).toMatchObject({ startUrl: "https://view.awsapps.com/start" });
-		// Only the best-effort email lookup leaves the OIDC host; it failed without failing the login.
-		const oidc = calls.filter(call => call.body?.isEmailRequired === undefined);
-		expect(oidc.every(call => call.url.startsWith("https://oidc.us-east-1.amazonaws.com/"))).toBe(true);
-		expect(row.email).toBeUndefined();
+		expect(calls.every(call => call.url.startsWith("https://oidc.us-east-1.amazonaws.com/"))).toBe(true);
 		expect(row).toMatchObject({ region: "us-east-1", kiroOidcRegion: "us-east-1" });
 		expect(row.kiroProfileArn).toBeUndefined();
 	});
@@ -157,7 +154,6 @@ describe("Kiro social login", () => {
 			`${SOCIAL_AUTH}/oauth/device/authorization`,
 			`${SOCIAL_AUTH}/oauth/device/poll`,
 			`${SOCIAL_AUTH}/oauth/device/poll`,
-			"https://management.eu-central-1.kiro.dev/",
 		]);
 		expect(row).toMatchObject({ kiroProfileArn: PROFILE_EU, region: "eu-central-1", orgName: "Google" });
 		expect(row.kiroClientId).toBeUndefined();
@@ -184,19 +180,22 @@ describe("Kiro social login", () => {
 		}
 	});
 
-	it("stores the account email GetUsageLimits reports, keeping the login id as the identity", async () => {
-		const { fetch, calls } = server(
-			socialHandler({ profileArn: PROFILE_US }, () =>
-				json({ userInfo: { email: "someone@example.com", userId: "d-0000000000.user" } }),
-			),
-		);
-		const row = (await loginKiroHook(controller(fetch, "4").ctrl)) as OAuthCredentials;
-		expect(calls.at(-1)).toEqual({
-			url: "https://management.us-east-1.kiro.dev/",
-			body: { origin: "KIRO_CLI", profileArn: PROFILE_US, resourceType: "AGENTIC_REQUEST", isEmailRequired: true },
-		});
-		expect(row.email).toBe("someone@example.com");
-		expect(resolveCredentialIdentityKey("kiro", { type: "oauth", ...row })).toBe(`account:${row.accountId}`);
+	it("keeps two sign-ins of one email as two accounts", async () => {
+		const logins: OAuthCredential[] = [];
+		for (let i = 0; i < 2; i++) {
+			const { fetch } = server(
+				socialHandler({ profileArn: PROFILE_US }, () =>
+					json({ userInfo: { email: "someone@example.com", userId: "d-0000000000.user" } }),
+				),
+			);
+			const row = await loginKiroHook(controller(fetch, "4").ctrl);
+			if (typeof row === "string") throw new Error("expected an OAuth login");
+			logins.push({ type: "oauth", ...row });
+		}
+		const [first, second] = logins;
+		if (!first || !second) throw new Error("expected two logins");
+		expect(isSameOAuthAccount(first, second)).toBe(false);
+		expect(resolveCredentialIdentityKey("kiro", first)).not.toBe(resolveCredentialIdentityKey("kiro", second));
 	});
 });
 
@@ -246,7 +245,6 @@ describe("Kiro token refresh", () => {
 		kiroClientId: "client-id",
 		kiroClientSecret: "client-secret",
 		kiroOidcRegion: "eu-west-1",
-		email: "someone@example.com",
 	};
 	const socialRow: OAuthCredentials = {
 		access: "old",
@@ -255,7 +253,6 @@ describe("Kiro token refresh", () => {
 		accountId: "login",
 		region: "us-east-1",
 		kiroProfileArn: PROFILE_US,
-		email: "someone@example.com",
 	};
 
 	/** Refresh `row` with global fetch answering `response`; returns the result or the error, plus the calls. */
@@ -315,29 +312,5 @@ describe("Kiro token refresh", () => {
 			region: "eu-central-1",
 			accountId: "login",
 		});
-	});
-
-	it("looks up the email of a login stored without one, keeping the refreshed tokens when the lookup fails", async () => {
-		const { email: _, ...older } = socialRow;
-		const cases: Array<[Response, string | undefined]> = [
-			[json({ userInfo: { email: "someone@example.com", userId: "d-0000000000.user" } }), "someone@example.com"],
-			[json({}, 500), undefined],
-		];
-		for (const [usage, email] of cases) {
-			const { fetch, calls } = server(url =>
-				url.startsWith(SOCIAL_AUTH) ? json({ accessToken: "next", refreshToken: "rotated" }) : usage,
-			);
-			const spy = spyOn(globalThis, "fetch").mockImplementation(
-				Object.assign(fetch, { preconnect: globalThis.fetch.preconnect }),
-			);
-			try {
-				const result = await refreshKiroHook(older);
-				expect(calls.at(-1)?.body).toMatchObject({ isEmailRequired: true });
-				expect(result).toMatchObject({ access: "next", refresh: "rotated", accountId: "login" });
-				expect(result.email).toBe(email);
-			} finally {
-				spy.mockRestore();
-			}
-		}
 	});
 });

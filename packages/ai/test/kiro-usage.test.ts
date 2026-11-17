@@ -3,6 +3,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-sto
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { encodeKiroCredential } from "@oh-my-pi/pi-catalog/wire/kiro";
+import { dedupeUsageReports } from "../src/auth/usage-report";
 import type { UsageFetchContext, UsageFetchParams, UsageReport } from "../src/usage";
 import { kiroRankingStrategy, kiroUsageProvider, parseKiroUsage } from "../src/usage/kiro";
 
@@ -169,19 +170,21 @@ describe("kiroUsageProvider", () => {
 		).toBeNull();
 	});
 
-	it("names the account by the stored email when the reply carries no valid one", async () => {
-		const params = socialParams();
-		params.credential.email = "stored@example.com";
-		for (const userInfo of [
-			{ userId: "d-0000000000.user" },
-			{ email: "not an email", userId: "d-0000000000.user" },
-		]) {
+	it("keeps two logins that share an email as two accounts, each labelled by the email", async () => {
+		const reports: UsageReport[] = [];
+		for (const accountId of ["login-a", "login-b"]) {
+			const params = socialParams();
+			params.credential.accountId = accountId;
 			const report = await kiroUsageProvider.fetchUsage(
 				params,
-				context(() => json({ ...livePayload(), userInfo })),
+				context(() => json(livePayload())),
 			);
-			expect(report?.metadata?.email).toBe("stored@example.com");
+			if (report) reports.push(report);
 		}
+		expect(dedupeUsageReports(reports).map(report => report.metadata)).toEqual([
+			{ planType: "Kiro Pro", email: "someone@example.com", accountId: "login-a" },
+			{ planType: "Kiro Pro", email: "someone@example.com", accountId: "login-b" },
+		]);
 	});
 });
 

@@ -39,7 +39,9 @@ function usageReportScopeProjectId(report: UsageReport): string | undefined {
 
 function usageReportIdentifiers(report: UsageReport): string[] {
 	const identifiers: string[] = [];
-	const email = usageReportMetadataValue(report, "email");
+	// One email can sign in to Kiro more than once and each login is its own
+	// account, so a Kiro report's email only labels it.
+	const email = report.provider === "kiro" ? undefined : usageReportMetadataValue(report, "email");
 	if (email) identifiers.push(`email:${email.toLowerCase()}`);
 	if (authPolicyFor(report.provider)?.orgScopedIdentity === true) {
 		// One account email can hold several org-scoped subscriptions
