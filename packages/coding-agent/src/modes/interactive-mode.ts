@@ -4984,6 +4984,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 		this.chatContainer.clear();
+		// The cleared container no longer holds any topic block; a later retract
+		// must not look for them (and replayed notices are not re-tracked).
+		this.#topicBlocks.clear();
 		// Live display collapses to the compacted transcript tail unless the
 		// user opted into the full inline history; export/resume callers choose
 		// their own mode.
@@ -8798,6 +8801,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	resetTranscript(): void {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+		// The blocks and the container holding them are gone; tracking them would
+		// pin the old session's components for the life of the new one.
+		this.#topicBlocks.clear();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
 		this.#commandController.clearCommandReport();
@@ -8838,8 +8844,20 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Transcript blocks per notice topic, so a newer report can retract the one it replaces. */
 	readonly #topicBlocks = new Map<string, Component[]>();
 
+	/**
+	 * Retract the blocks a notice topic presented.
+	 *
+	 * A block still live below the viewport is dropped in place. One already
+	 * retired into native scrollback cannot be deleted there — the render engine
+	 * can only append or rewrite the whole tape — so the transcript is replayed
+	 * from session messages instead, which drops every notice block and leaves
+	 * the conversation itself untouched. That is the same scrollback-clearing
+	 * rebuild compaction uses; without it the stale error row would outlive the
+	 * recovery it contradicts, forever.
+	 */
 	retractTopics(topics: readonly string[]): void {
 		let removed = false;
+		let committed = false;
 		for (const topic of topics) {
 			const blocks = this.#topicBlocks.get(topic);
 			if (!blocks) continue;
@@ -8849,8 +8867,16 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (this.chatContainer.canRemoveBlock(block)) {
 					this.chatContainer.removeChild(block);
 					removed = true;
+				} else {
+					committed = true;
 				}
 			}
+		}
+		if (committed) {
+			// The replay re-renders from messages, so it drops topic blocks wholesale.
+			this.rebuildChatFromMessages();
+			this.ui.requestRender(true, { clearScrollback: true });
+			return;
 		}
 		if (removed) this.ui.requestRender();
 	}

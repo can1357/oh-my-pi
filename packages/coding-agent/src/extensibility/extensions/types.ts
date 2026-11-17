@@ -1815,6 +1815,12 @@ export type {
 // `getArgumentCompletions` and bind handlers to ExtensionCommandContext.
 export interface RegisteredCommand {
 	name: string;
+	/**
+	 * The extension file that registered the command. A failure in its handler is
+	 * reported against this path, so the same reload that replaces the extension
+	 * retracts the error line it left behind.
+	 */
+	extensionPath?: string;
 	description?: string;
 	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;

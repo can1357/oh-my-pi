@@ -26,6 +26,7 @@ describe("InteractiveMode topic notices", () => {
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode;
 	let session: AgentSession;
+	let requestRender: ReturnType<typeof vi.fn>;
 	let tempDir: TempDir;
 
 	beforeAll(async () => {
@@ -44,7 +45,8 @@ describe("InteractiveMode topic notices", () => {
 			modelRegistry,
 		});
 		mode = new InteractiveMode(session, "test");
-		mode.ui.requestRender = vi.fn();
+		requestRender = vi.fn();
+		mode.ui.requestRender = requestRender;
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 	});
 
@@ -90,5 +92,26 @@ describe("InteractiveMode topic notices", () => {
 		const text = rendered(mode);
 		expect(text).toContain("first");
 		expect(text).toContain("second");
+	});
+
+	it("clears a topic block already retired into native scrollback by replaying the transcript", () => {
+		session.sessionManager.appendMessage({ role: "user", content: "keep this turn", timestamp: Date.now() });
+		const broken = "/agent/extensions/auto-goal/index.ts";
+		mode.presentTopic(extensionErrorTopic(broken), new Text(`Extension "${broken}" error: boom`, 1, 0));
+		// Retire the block into the committed ledger, where nothing can delete it in place.
+		expect(mode.chatContainer.peekFinalizedBatch(WIDTH, 0)).toBeDefined();
+		const stale = mode.chatContainer.children.at(-1)!;
+		expect(mode.chatContainer.canRemoveBlock(stale)).toBe(false);
+		requestRender.mockClear();
+
+		mode.showTopicNotice("info", "extensions reloaded: +0 ~1 -0", "extensions", [extensionErrorTopic(broken)]);
+
+		expect(mode.chatContainer.children).not.toContain(stale);
+		const text = rendered(mode);
+		expect(text).not.toContain("boom");
+		expect(text).toContain("extensions reloaded");
+		// The scrollback-clearing replay rebuilds from session messages, so the turn survives.
+		expect(text).toContain("keep this turn");
+		expect(requestRender).toHaveBeenCalledWith(true, { clearScrollback: true });
 	});
 });

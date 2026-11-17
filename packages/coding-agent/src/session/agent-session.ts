@@ -9929,9 +9929,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return "ran";
 		} catch (err) {
 			// Emit error via extension runner
+			// Report the owning extension, not the command name: a reload replaces
+			// the extension and retracts the error line by its path, and a label
+			// like `command:deploy` would leave that line on screen forever. The
+			// command still names itself in `event`.
 			this.#extensionRunner.emitError({
-				extensionPath: `command:${commandName}`,
-				event: "command",
+				extensionPath: command.extensionPath ?? `command:${commandName}`,
+				event: `command:${commandName}`,
 				error: err instanceof Error ? err.message : String(err),
 			});
 			return "failed";

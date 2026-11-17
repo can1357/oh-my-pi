@@ -400,6 +400,12 @@ describe("ExtensionRunner", () => {
 			const commands = runner.getRegisteredCommands();
 
 			expect(commands.length).toBe(2);
+			// Each command names the extension that registered it, so a handler
+			// failure is reported against a file a reload can retract.
+			expect(commands.map(command => command.extensionPath)).toEqual([
+				path.join(extensionsDir, "cmd-a.ts"),
+				path.join(extensionsDir, "cmd-b.ts"),
+			]);
 			expect(commands.map(c => c.name).sort()).toEqual(["cmd-a", "cmd-b"]);
 		});
 
