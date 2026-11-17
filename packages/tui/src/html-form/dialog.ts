@@ -36,10 +36,11 @@ import { BracketedPasteHandler } from "../bracketed-paste";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 import { SvgFigure } from "../chat/svg-figure";
+import { convertImageToPngShared } from "../chat/image-loading";
 import { Editor } from "../components/editor";
 import { Image, type ImageBudget, measureRender } from "../components/image";
 import { Input } from "../components/input";
-import { renderTableRow, type TableColumn } from "../components/table";
+import { renderTableRowLines, type TableColumn } from "../components/table";
 import {
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -67,6 +68,7 @@ import { compactImageAttachments, formatVisionMarker, PLACEHOLDER_REGEX } from "
 import { classifyImagePaste } from "../prompt/custom-editor";
 import { OrderedPastes } from "../prompt/ordered-pastes";
 import { wrapPrefixedLine } from "../render/hanging-wrap";
+import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { getEditorTheme, type ThemeColor, theme } from "../theme/theme";
 import { optionMarker } from "../tools/ask";
 import type { Component, Focusable } from "../tui";
@@ -221,6 +223,17 @@ interface OpenNote {
 /** Strip control bytes a model could smuggle into labels (escape sequences, `\r`); keep `\n`. */
 function sanitize(text: string): string {
 	return replaceTabs(text).replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "");
+}
+
+/** Kitty's `f=100` transmit takes PNG only, so a WebP/JPEG/GIF picture's rows draw from a PNG copy or draw blank. */
+async function kittyReady(media: Media): Promise<Media> {
+	if (TERMINAL.imageProtocol !== ImageProtocol.Kitty || media.mime === "image/png" || isSvgMedia(media)) return media;
+	const { data } = await convertImageToPngShared({
+		type: "image",
+		data: media.bytes.toBase64(),
+		mimeType: media.mime,
+	});
+	return { bytes: Uint8Array.fromBase64(data), mime: "image/png" };
 }
 
 /** A single select draws as a one-row dropdown; multi-selects keep option rows. */
@@ -746,14 +759,17 @@ export class HtmlFormDialog implements Component, Focusable {
 		}
 		this.#media.set(block, { state: "loading" });
 		const signal = this.#mediaAbort.signal;
-		loadMedia(block.src, { cwd: this.#options.cwd ?? process.cwd(), signal }).then(
-			// A picture landing after dispose must not take an image key nobody will release.
-			media => signal.aborted || this.#settleMedia(block, this.#readyMedia(media, block.alt || "image")),
-			(error: unknown) => {
-				const reason = error instanceof Error ? error.message : String(error);
-				this.#settleMedia(block, { state: "failed", reason });
-			},
-		);
+		loadMedia(block.src, { cwd: this.#options.cwd ?? process.cwd(), signal })
+			.then(async media => ({ media, raster: await kittyReady(media) }))
+			.then(
+				// A picture landing after dispose must not take an image key nobody will release.
+				({ media, raster }) =>
+					signal.aborted || this.#settleMedia(block, this.#readyMedia(media, block.alt || "image", raster)),
+				(error: unknown) => {
+					const reason = error instanceof Error ? error.message : String(error);
+					this.#settleMedia(block, { state: "failed", reason });
+				},
+			);
 	}
 
 	#settleMedia(block: MediaBlock, slot: MediaSlot): void {
@@ -772,8 +788,9 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * Rows draw a raster through {@link Image} and an SVG through {@link SvgFigure}; natively both are image blobs.
 	 * Both go through the TUI's image budget: without an id, a Kitty image is a self-contained
 	 * `a=T` placement that repainting the rows never removes, so it outlives the form.
+	 * `raster` is what the rows draw; the native blob keeps the original bytes (a GIF stays animated).
 	 */
-	#readyMedia(media: Media, alt: string): MediaSlot {
+	#readyMedia(media: Media, alt: string, raster: Media = media): MediaSlot {
 		const maxRows = this.#pictureRows();
 		const budget = this.#options.tui?.imageBudget;
 		const native = nativeImageNode(media.bytes, media.mime, { alt, max: { h: `${maxRows}lines` } });
@@ -788,8 +805,8 @@ export class HtmlFormDialog implements Component, Focusable {
 			return { state: "ready", rows: figure, native };
 		}
 		const image = new Image(
-			media.bytes.toBase64(),
-			media.mime,
+			raster.bytes.toBase64(),
+			raster.mime,
 			{ fallbackColor: text => theme.fg("dim", text) },
 			{ maxHeightCells: maxRows, filename: alt, budget, requestRender: () => this.#mediaChanged() },
 		);
@@ -1821,7 +1838,7 @@ export class HtmlFormDialog implements Component, Focusable {
 		return [...label, ...rows.map(row => `${prefix}${row}`)];
 	}
 
-	/** Atoms of a non-field block: one per wrapped line, list item or table row. */
+	/** Atoms of a non-field block: one per wrapped line, list item or table row line. */
 	#contextAtoms(
 		block: Exclude<FormBlock, { kind: "field" }>,
 		width: number,
@@ -1860,25 +1877,32 @@ export class HtmlFormDialog implements Component, Focusable {
 				return [atom([theme.fg("dim", truncateToWidth(this.#mediaNote(block, slot), width, Ellipsis.Unicode))])];
 			}
 			case "table": {
-				const cells = block.rows.map(row => row.map(cell => sanitize(spansText(cell)).replace(/\s+/g, " ")));
+				const cells = block.rows.map(row => row.map(cell => sanitize(spansText(cell))));
 				const count = Math.max(0, ...cells.map(row => row.length));
 				const columns: TableColumn[] = Array.from({ length: count }, (_, column) => ({
-					width: Math.max(1, ...cells.map(row => visibleWidth(row[column] ?? ""))),
+					width: Math.max(
+						1,
+						...cells.flatMap(row => (row[column] ?? "").split("\n").map(line => visibleWidth(line))),
+					),
 					minWidth: 4,
 					align: "left",
-					overflow: "truncate",
+					overflow: "wrap",
 				}));
-				const atoms = cells.map((row, index) => {
+				// A row's continuation lines refuse a break before them, so it pages whole unless taller than a page.
+				const atoms: PageAtom[] = [];
+				cells.forEach((row, index) => {
+					if (index > 0 && index === block.headerRows) {
+						atoms.push(atom([theme.fg("dim", "─".repeat(width))], BreakRank.Never));
+					}
 					const style =
 						index < block.headerRows
 							? (text: string) => theme.bold(theme.fg("text", text))
 							: (text: string) => theme.fg("muted", text);
 					const padded = Array.from({ length: count }, (_, column) => ({ text: row[column] ?? "", style }));
-					return atom([renderTableRow(padded, columns, width, { gap: "  " })]);
+					renderTableRowLines(padded, columns, width, { gap: "  " }).forEach((line, part) => {
+						atoms.push(atom([line], part === 0 ? BreakRank.Inside : BreakRank.Never));
+					});
 				});
-				if (block.headerRows > 0 && block.headerRows < atoms.length) {
-					atoms.splice(block.headerRows, 0, atom([theme.fg("dim", "─".repeat(width))], BreakRank.Never));
-				}
 				return atoms;
 			}
 		}

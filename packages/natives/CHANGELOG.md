@@ -6,6 +6,7 @@
 
 - `DesktopFocusReturn.keyboard` says what a macOS takeover did with the user's keyboard (`handedBack`, `leftAsChosen`, `kept`, `frontOnly`, `notSent`) ([#19208](https://github.com/can1357/oh-my-pi/pull/19208) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `desktopWindowRoster()` to `@oh-my-pi/pi-natives/desktop`: every on-screen window on macOS, popup menus, pickers and system prompts included, with owner, layer and whether `listWindows` reports it, in one pass and without a desktop session ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `readTreeKeepingSparse()` to seed a private commit index from HEAD while keeping the shared checkout's sparse exclusions; `diffText({ cached: true })`, `commitCreate()` and `writeTree()` now preserve out-of-cone files and collapsed sparse-directory entries ([#19453](https://github.com/can1357/oh-my-pi/pull/19453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Changed
 
@@ -37,6 +38,12 @@
 - Fixed Linux `ax()`, `find()`, `el.children()` and focus reads freezing a Qt app with a very long table (up to 45 s, over 1 GB) or knocking it off the accessibility bus, and showing nothing of a GTK 3 list over 65,536 cells; they read only the children they can use, and `ax()` says how many it left out ([#19036](https://github.com/can1357/oh-my-pi/pull/19036) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed macOS background input leaving its target in front after you clicked in your own app while that app was busy or hung, or just before a session's first action; a drag and drop from your app onto the target, or a click on it from a remote-control tool, now counts as choosing it ([#16553](https://github.com/can1357/oh-my-pi/pull/16553) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed Wayland screenshots, and the clicks, drags and scrolls that need them, failing in released Linux builds; without PipeWire installed, `capabilities()` reports `capture: false` and the capture error says why ([#18353](https://github.com/can1357/oh-my-pi/pull/18353) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed a Windows crash in the native IPC transport that left every daemon-served tool hanging after another session closed its pipe mid-operation ([#16045](https://github.com/can1357/oh-my-pi/issues/16045), [#19508](https://github.com/can1357/oh-my-pi/pull/19508) by [@ve3xone](https://github.com/ve3xone))
+- Tree listings now include gitlink modes so selective commits can distinguish submodule pointers from ordinary files ([#19556](https://github.com/can1357/oh-my-pi/pull/19556) by [@kim-dali](https://github.com/kim-dali))
+- Fixed macOS background actions stopping with `UserIntervened` while you typed in your own app and the target briefly took the keyboard, such as when a pop-up button's menu opened ([#19515](https://github.com/can1357/oh-my-pi/pull/19515) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `commitCreate()` dropping a rejecting `pre-commit`/`commit-msg` hook's stdout from the error; hook output now arrives interleaved in `stderr` and the message, as under `git commit` ([#19449](https://github.com/can1357/oh-my-pi/issues/19449))
+- Block edits (`PUT N*`, `CUT N*`) anchored on the first `#[...]` attribute or `///` doc comment of a Rust item now cover the item, instead of failing as a single-line block ([#19464](https://github.com/can1357/oh-my-pi/pull/19464) by [@acfrazier](https://github.com/acfrazier))
+- Fixed Linux `find()`, `ax()` and element reads taking seconds in large apps: each element's independent accessibility questions now go out together, so `find()` takes about half as long in Kate, Dolphin and LibreOffice Writer ([#19521](https://github.com/can1357/oh-my-pi/pull/19521) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Removed
 
