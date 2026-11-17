@@ -22,13 +22,30 @@ describe("waitForFullWake", () => {
 	it("holds until the probe reports a full wake", async () => {
 		const states = [true, true, false];
 		let probes = 0;
-		await waitForFullWake(new AbortController().signal, async () => states[probes++] ?? false, 1);
+		await waitForFullWake(new AbortController().signal, { probe: async () => states[probes++] ?? false, pollMs: 1 });
 		expect(probes).toBe(3);
 	});
 
-	it("rejects when aborted while held", async () => {
+	it("rejects when aborted during a probe that then reports a full wake", async () => {
 		const controller = new AbortController();
-		const held = waitForFullWake(controller.signal, async () => true, 60_000);
+		const probe = Promise.withResolvers<boolean>();
+		const held = waitForFullWake(controller.signal, { probe: () => probe.promise, pollMs: 1 });
+		controller.abort();
+		probe.resolve(false);
+		await expect(held).rejects.toThrow();
+	});
+
+	it("rejects when aborted while held between probes", async () => {
+		const controller = new AbortController();
+		const probed = Promise.withResolvers<void>();
+		const held = waitForFullWake(controller.signal, {
+			probe: async () => {
+				probed.resolve();
+				return true;
+			},
+			pollMs: 60_000,
+		});
+		await probed.promise;
 		controller.abort();
 		await expect(held).rejects.toThrow();
 	});
