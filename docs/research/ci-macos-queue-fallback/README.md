@@ -6,6 +6,11 @@ macOS workers; [preflight](preflight.md) records live-access blockers. No broade
 Mac-writer trust acceptance or activation is implied by plan approval.
 No workflow, dispatcher, credential, ruleset or Mac service is changed here.
 
+Implementation follow-up: [code and staged rollout](implementation.md) describe
+opt-in hosted-first controllers/workers. Deployment, configuration and live Mac
+preflight remain prerequisites; this historical evaluation is not a claim of
+active runner diversification.
+
 Inspected OMP2: `1a32fad0dfe602da1db6ee53c24577a7941b8e78` on `omp2`.
 This is separate from PR #658's native verifier implementation.
 [Source research](sources.md) and [EGM evaluation](egm-review.md) accompany it.

@@ -17,6 +17,7 @@ class CheckCiPaths(unittest.TestCase):
         shutil.copytree(ROOT / ".github", self.tmp / ".github")
         (self.tmp / "scripts").mkdir()
         shutil.copy(ROOT / "scripts/check-ci-paths.py", self.tmp / "scripts/check-ci-paths.py")
+        shutil.copy(ROOT / "scripts/ci-macos-objective.sh", self.tmp / "scripts/ci-macos-objective.sh")
         self.ci = self.tmp / ".github/workflows/ci.yml"
 
     def run_check(self):
@@ -90,9 +91,8 @@ class CheckCiPaths(unittest.TestCase):
         self.assertIn("CI_AFFECTED_ONLY", out)
 
     def test_proved_tree_recorded_for_a_narrowed_run_fails(self):
-        self.mutate_ci(
-            "        if: ${{ needs.affected.outputs.scope != 'subset' && needs.affected.outputs.scope != 'none' }}\n", ""
-        )
+        objective = self.tmp / 'scripts/ci-macos-objective.sh'
+        objective.write_text(objective.read_text().replace(' && [ "${AFFECTED_SCOPE:-full}" != subset ]', ''))
         code, out = self.run_check()
         self.assertEqual(code, 1)
         self.assertIn("proved-tree", out)
@@ -105,15 +105,8 @@ class CheckCiPaths(unittest.TestCase):
 
 
 def step_script(step_name):
-    lines = (ROOT / ".github/workflows/ci.yml").read_text().split("\n")
-    start = next(i for i, line in enumerate(lines) if line == f"      - name: {step_name}")
-    run = next(i for i in range(start, len(lines)) if lines[i] == "        run: |")
-    body = []
-    for line in lines[run + 1 :]:
-        if line.strip() and not line.startswith("          "):
-            break
-        body.append(line[10:])
-    return "\n".join(body)
+    script = (ROOT / 'scripts/ci-macos-objective.sh').read_text()
+    return script.split(f'# {step_name}\n', 1)[1].split('\n# ', 1)[0]
 
 
 class AffectedScopeFallback(unittest.TestCase):
@@ -121,7 +114,7 @@ class AffectedScopeFallback(unittest.TestCase):
         script = "cargo() { echo \"cargo $*\"; }\n" + step_script(step)
         done = subprocess.run(
             ["bash", "-c", script],
-            env={"AFFECTED_SCOPE": scope, "AFFECTED_ARGS": args, "PATH": "/usr/bin:/bin"},
+            env={"AFFECTED_SCOPE": scope, "AFFECTED_ARGS": args, "AFFECTED_DOC_ARGS": args, "PATH": "/usr/bin:/bin"},
             capture_output=True,
             text=True,
         )

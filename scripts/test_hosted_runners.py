@@ -2,8 +2,14 @@
 
 import importlib.util
 import re
+import subprocess
 import unittest
 from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("check_ci_paths", ROOT / "scripts/check-ci-paths.py")
@@ -20,6 +26,8 @@ def native_runner_failures(text):
     failures = []
     for job, runner in CI_PATHS.runs_on(text.splitlines()):
         if job in BUILDBUDDY_JOBS:
+            continue
+        if job in MACOS_JOBS and runner == CI_PATHS.MACOS_CONTROLLER_RUNNER:
             continue
         expected = "macos-15" if job in MACOS_JOBS else "ubuntu-24.04"
         if runner != expected:
@@ -46,12 +54,7 @@ class HostedRunnerPolicy(unittest.TestCase):
         self.assertEqual(failures[0][0], "changes")
 
     def test_rust_cannot_return_to_the_personal_mac(self):
-        redirected = re.sub(
-            r"(  rust:\n[\s\S]*?    runs-on:) macos-15",
-            r"\1 ${{ vars.MACOS_RUNNER }}",
-            self.ci,
-            count=1,
-        )
+        redirected = self.ci.replace(CI_PATHS.MACOS_CONTROLLER_RUNNER, '${{ vars.MACOS_RUNNER }}', 1)
         failures = native_runner_failures(redirected)
         self.assertEqual([failure[0] for failure in failures], ["rust"])
 
@@ -79,6 +82,74 @@ class HostedRunnerPolicy(unittest.TestCase):
         body = "\n".join(CI_PATHS.block(p8.splitlines(), "buildbuddy_linux", 2))
         self.assertIn("scripts/remote-verify.sh remote-p8-baseline", body)
         self.assertIn("secrets.BUILDBUDDY_ORG_API_KEY", body)
+
+    def test_controller_runner_rejects_a_widened_event_boundary(self):
+        redirected = self.ci.replace("github.base_ref == 'omp2'", "github.base_ref != ''", 1)
+        self.assertEqual([failure[0] for failure in native_runner_failures(redirected)], ['rust'])
+
+    @unittest.skipIf(yaml is None, 'PyYAML is unavailable')
+    def test_worker_and_shared_action_parse_as_real_yaml(self):
+        worker = yaml.load((ROOT / '.github/workflows/macos-verification.yml').read_text(), Loader=yaml.BaseLoader)
+        ci = yaml.load(self.ci, Loader=yaml.BaseLoader)
+        action = yaml.load((ROOT / '.github/actions/macos-native-objective/action.yml').read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(set(worker['on']), {'workflow_dispatch'})
+        self.assertEqual(worker['permissions'], {'contents': 'read', 'actions': 'read'})
+        self.assertIn('.github/workflows/macos-verification.yml', ci['on']['push']['paths'])
+        steps = worker['jobs']['native']['steps']
+        admission = next(i for i, step in enumerate(steps) if step.get('id') == 'admit')
+        candidate = next(i for i, step in enumerate(steps) if step.get('with', {}).get('path') == '.ci-source')
+        self.assertLess(admission, candidate)
+        self.assertEqual(steps[candidate]['with']['ref'], '${{ steps.admit.outputs.source_sha }}')
+        for step in steps:
+            if step.get('uses', '').startswith('actions/checkout@'):
+                self.assertEqual(step['with']['persist-credentials'], 'false')
+        native = next(step for step in steps if step.get('name') == 'Run native objective')
+        self.assertEqual(native['with']['control-directory'], '.')
+        self.assertEqual(native['with']['source-directory'], '.ci-source')
+        self.assertEqual(native['with']['guarded'], 'true')
+        self.assertTrue(any('macos_worker_guard.py' in step.get('run', '') for step in action['runs']['steps']))
+        for step in action['runs']['steps']:
+            if step.get('name') in {'Select pinned Rust toolchain', 'Check provisioned cargo-nextest'} or step.get('uses') == './.github/actions/macos-build-state':
+                self.assertIn("inputs.guarded != 'true'", step['if'])
+        execute = next(step for step in action['runs']['steps'] if step.get('name') == 'Execute native objective')
+        self.assertIn('-- python3 "$control/scripts/macos_worker_state.py" -- bash', execute['run'])
+        self.assertIn('--request-file "$RUNNER_TEMP/macos-request.json"', execute['run'])
+        self.assertIn('&& 330 || 120', str(ci['jobs']['rust']['timeout-minutes']))
+        self.assertIn('&& 330 || 45', str(ci['jobs']['lint_macos']['timeout-minutes']))
+        self.assertNotIn('BUILDBUDDY', str(worker))
+
+    def test_extracted_rust_objective_keeps_the_native_command_inventory(self):
+        objective = ROOT / 'scripts/ci-macos-objective.sh'
+        harness = '''
+cargo() { printf 'cargo %s\\n' "$*"; }
+python3() { printf 'python3 %s\\n' "$*"; }
+git() { printf proved-tree; }
+function scripts/ssh-loopback-fixture.sh { printf 'ssh-fixture %s\\n' "$*"; }
+source "$1" rust
+'''
+        done = subprocess.run(['bash', '-c', harness, 'test', str(objective)], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for command in (
+            'ssh-fixture cargo nextest run --profile ci -p omp-exec-ssh --locked --run-ignored all',
+            'cargo nextest run --profile ci --workspace --no-run --locked',
+            'cargo nextest run --profile ci --workspace --exclude omp-e2e --locked',
+            'cargo test --doc --workspace --exclude omp-e2e --locked',
+            'python3 scripts/check-python-examples.py',
+            '--test p1_doc_race', '--test p2_cancel_matrix', '--test p3_detached_jobs',
+            '--test p4_schema_isolation', '--test p5_prefix_stability', '--test p6_crash_resume',
+            '--test p7_tui --test p7_tsp', '--test p12_daemon_approvals', '--test p8_baselines',
+            '::notice title=proved-tree::proved-tree',
+        ):
+            self.assertIn(command, done.stdout)
+        failed = subprocess.run(['bash', '-c', harness.replace('printf \'cargo %s\\n\' "$*";', 'return 1;'), 'test', str(objective)], capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertNotIn('::notice title=proved-tree', failed.stdout)
+
+
+def load_tests(loader, tests, pattern):
+    """Keep controller/guard tests on the existing CI runner-policy gate."""
+    tests.addTests(loader.discover(str(ROOT / "scripts"), pattern="test_macos*.py"))
+    return tests
 
 
 if __name__ == "__main__":
