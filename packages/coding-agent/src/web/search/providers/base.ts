@@ -112,6 +112,19 @@ export abstract class SearchProvider {
 	}
 
 	/**
+	 * Whether a search now would reach a third party without a credential or
+	 * endpoint the user configured: a public MCP, an anonymous API tier, or a
+	 * scraped search page. With `providers.webKeyless` off, `web_search` skips
+	 * such candidates unless the request names the model itself.
+	 *
+	 * Defaults to `false`, which holds for providers that only run on the
+	 * user's own credential; every provider with a keyless path MUST override it.
+	 */
+	isKeyless(_authStorage: AuthStorage, _model?: Model<Api>): Promise<boolean> | boolean {
+		return false;
+	}
+
+	/**
 	 * Execute a search. Credentials MUST be resolved through `params.authStorage`.
 	 */
 	abstract search(params: SearchParams): Promise<SearchResponse>;

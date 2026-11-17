@@ -36,6 +36,19 @@ describe("WatchedFilesForwarder", () => {
 		return { root, sent, forwarder };
 	}
 
+	function inotifyWatches(): number {
+		return fsSync
+			.readdirSync("/proc/self/fdinfo")
+			.map(fd => {
+				try {
+					return fsSync.readFileSync(`/proc/self/fdinfo/${fd}`, "utf8");
+				} catch {
+					return "";
+				}
+			})
+			.reduce((count, info) => count + info.split("\n").filter(line => line.startsWith("inotify wd")).length, 0);
+	}
+
 	async function waitForEvent(sent: FileEvent[], event: FileEvent): Promise<void> {
 		const deadline = Date.now() + EVENT_TIMEOUT_MS;
 		while (!sent.some(change => change.uri === event.uri && change.type === event.type)) {
@@ -273,10 +286,10 @@ describe("WatchedFilesForwarder", () => {
 		await fs.mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
 		await fs.mkdir(path.join(types, "foo"), { recursive: true });
 		await forwarder.register("ts", {
-			watchers: [
-				{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } },
-				{ globPattern: { baseUri: fileToUri(types), pattern: "**/*.d.ts" } },
-			],
+			watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }],
+		});
+		await forwarder.register("types", {
+			watchers: [{ globPattern: { baseUri: fileToUri(types), pattern: "**/*.d.ts" } }],
 		});
 		await untilWatching(sent, path.join(root, "ready.ts"));
 
@@ -288,6 +301,44 @@ describe("WatchedFilesForwarder", () => {
 		await Bun.sleep(QUIET_MS);
 		expect(sent.filter(change => change.uri === fileToUri(skipped))).toEqual([]);
 	});
+
+	// A recursive `fs.watch` on Linux adds an inotify watch per directory; package trees must not use up the user's limit.
+	it.skipIf(process.platform !== "linux")("puts no inotify watches on package contents or object stores", async () => {
+		const { root, sent, forwarder } = setup();
+		const packages = 300;
+		for (let i = 0; i < packages; i++)
+			await fs.mkdir(path.join(root, "node_modules", `pkg${i}`, "lib"), { recursive: true });
+		for (let i = 0; i < 16; i++)
+			await fs.mkdir(path.join(root, ".git", "objects", i.toString(16)), { recursive: true });
+		await fs.mkdir(path.join(root, "src"));
+		const before = inotifyWatches();
+		await forwarder.register("ts", { watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }] });
+		// root, src, node_modules and .git: package and object store directories stay unwatched.
+		expect(inotifyWatches() - before).toBeLessThanOrEqual(4);
+
+		const source = path.join(root, "src", "index.ts");
+		fsSync.writeFileSync(source, "export {};\n");
+		await waitForEvent(sent, { uri: fileToUri(source), type: FileChangeType.Created });
+	});
+
+	it.skipIf(process.platform !== "linux")(
+		"releases nested package watches when their registration is removed",
+		async () => {
+			const { root, forwarder } = setup();
+			const types = path.join(root, "node_modules", "@types");
+			await fs.mkdir(path.join(types, "foo"), { recursive: true });
+			await forwarder.register("ts", {
+				watchers: [{ globPattern: { baseUri: fileToUri(root), pattern: "**/*.ts" } }],
+			});
+			const before = inotifyWatches();
+			await forwarder.register("types", {
+				watchers: [{ globPattern: { baseUri: fileToUri(types), pattern: "**/*.d.ts" } }],
+			});
+			expect(inotifyWatches()).toBeGreaterThan(before);
+			await forwarder.unregister("types");
+			expect(inotifyWatches()).toBe(before);
+		},
+	);
 
 	it("does not report a file created and removed within one batch as existing", async () => {
 		const { root, sent, forwarder } = setup();
