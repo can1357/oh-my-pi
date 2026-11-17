@@ -119,4 +119,95 @@ describe("concurrent ACP sessions", () => {
 			AgentStorage.close();
 		}
 	});
+
+	it("builds each initial workspace prompt from client roots, never launch options or project defaults", async () => {
+		using launchDir = TempDir.createSync("@pi-acp-roots-launch-");
+		using projectDir = TempDir.createSync("@pi-acp-roots-project-");
+		const launchRoot = launchDir.join("launch-root");
+		const configuredRoot = launchDir.join("configured-root");
+		const firstRoot = launchDir.join("first-client-root");
+		const secondRoot = launchDir.join("second-client-root");
+		const rootInstructions = new Map([
+			[launchRoot, "LAUNCH_ROOT_INSTRUCTIONS"],
+			[configuredRoot, "CONFIGURED_ROOT_INSTRUCTIONS"],
+			[firstRoot, "FIRST_CLIENT_ROOT_INSTRUCTIONS"],
+			[secondRoot, "SECOND_CLIENT_ROOT_INSTRUCTIONS"],
+		]);
+		for (const [root, instructions] of rootInstructions) {
+			await Bun.write(`${root}/AGENTS.md`, instructions);
+		}
+		await Bun.write(
+			projectDir.join(".omp/config.yml"),
+			JSON.stringify({ workspace: { additionalDirectories: [configuredRoot] } }),
+		);
+		const launchSettings = await Settings.loadIsolated({
+			cwd: launchDir.path(),
+			agentDir: launchDir.join("agent"),
+		});
+		const factory = createAcpSessionFactory({
+			baseOptions: {
+				agentDir: launchDir.join("agent"),
+				additionalDirectories: [launchRoot],
+				model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				rules: [],
+				enableLsp: false,
+				skipPythonPreflight: true,
+			},
+			settings: launchSettings,
+			sessionDir: launchDir.join("sessions"),
+			authStorage,
+			modelRegistry,
+			parsedArgs: { invalidFlagValues: [] },
+			rawArgs: [],
+			createSession: createAgentSession,
+		});
+		const sessions: AgentSession[] = [];
+		const assertInitialWorkspace = (session: AgentSession, roots: string[]) => {
+			expect(session.sessionManager.getCwd()).toBe(projectDir.path());
+			expect(session.sessionManager.getAdditionalDirectories()).toEqual(roots);
+			const initialPrompt = session.systemPrompt.join("\n");
+			for (const [root, instructions] of rootInstructions) {
+				if (roots.includes(root)) {
+					expect(initialPrompt).toContain(root);
+					expect(initialPrompt).toContain(instructions);
+				} else {
+					expect(initialPrompt).not.toContain(root);
+					expect(initialPrompt).not.toContain(instructions);
+				}
+			}
+		};
+		try {
+			// The manager normalizes duplicate roots and the primary cwd before prompt creation.
+			const first = (
+				await factory(projectDir.path(), {
+					additionalDirectories: [firstRoot, projectDir.path(), firstRoot],
+				})
+			).session;
+			sessions.push(first);
+			assertInitialWorkspace(first, [firstRoot]);
+			const second = (await factory(projectDir.path(), { additionalDirectories: [secondRoot] })).session;
+			sessions.push(second);
+			assertInitialWorkspace(second, [secondRoot]);
+			assertInitialWorkspace(first, [firstRoot]);
+
+			// Both absence forms must suppress the SDK's configured-directory fallback.
+			const omitted = (await factory(projectDir.path())).session;
+			sessions.push(omitted);
+			assertInitialWorkspace(omitted, []);
+			const empty = (await factory(projectDir.path(), { additionalDirectories: [] })).session;
+			sessions.push(empty);
+			assertInitialWorkspace(empty, []);
+		} finally {
+			for (const session of sessions.reverse()) {
+				if (!session.isDisposed) await session.dispose();
+			}
+			launchSettings.cancelPendingSaves();
+			AgentStorage.close();
+		}
+	});
 });

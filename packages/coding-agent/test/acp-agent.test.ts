@@ -181,6 +181,7 @@ class FakeAgentSession {
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
 	buildUserSkillPrompt = buildSkillPromptMessage;
 	async refreshSkillsAndCommands(): Promise<void> {}
+	async refreshBaseSystemPrompt(): Promise<void> {}
 	subscribeCommandMetadataChanged(_listener: () => void): () => void {
 		return () => {};
 	}
@@ -511,7 +512,7 @@ interface AgentHarness {
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	setToolUIContextSpies: SetToolUIContextSpy[];
-	sessionFactoryOptions: Array<{ interactivePrompts?: boolean } | undefined>;
+	sessionFactoryOptions: Array<{ interactivePrompts?: boolean; additionalDirectories?: string[] } | undefined>;
 	cwdA: string;
 	cwdB: string;
 	findSession(sessionId: string): FakeAgentSession | undefined;
@@ -578,7 +579,7 @@ async function createHarness(
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
 	const setToolUIContextSpies: SetToolUIContextSpy[] = [];
-	const sessionFactoryOptions: Array<{ interactivePrompts?: boolean } | undefined> = [];
+	const sessionFactoryOptions: AgentHarness["sessionFactoryOptions"] = [];
 	const connection = {
 		sessionUpdate: async (notification: SessionNotification) => {
 			// Only await when a hook is configured: `await undefined` would insert a
@@ -602,8 +603,12 @@ async function createHarness(
 
 	const initialSession = new FakeAgentSession(cwdA);
 	sessions.push(initialSession);
-	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
+	const factory = async (
+		cwd: string,
+		factoryOptions?: { interactivePrompts?: boolean; additionalDirectories?: string[] },
+	) => {
 		const session = new FakeAgentSession(cwd);
+		await session.sessionManager.setAdditionalDirectories(factoryOptions?.additionalDirectories ?? []);
 		if (options.authStorage) session.authStorage = options.authStorage;
 		if (options.extensionRunners) {
 			session.extensionRunner = new ExtensionRunner(
@@ -652,6 +657,225 @@ async function advanceBootstrapGuard(): Promise<void> {
 }
 
 describe("ACP agent", () => {
+	it("normalizes requested roots in order without dropping nested roots or sharing roots between sessions", async () => {
+		const harness = await createHarness();
+		try {
+			const nested = path.join(harness.cwdB, "nested");
+			const first = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [],
+				additionalDirectories: [
+					harness.cwdA,
+					`${harness.cwdB}${path.sep}.`,
+					nested,
+					harness.cwdB,
+					`${nested}${path.sep}..${path.sep}nested`,
+				],
+			});
+			const second = await harness.agent.newSession({
+				cwd: harness.cwdB,
+				mcpServers: [],
+				additionalDirectories: [harness.cwdA],
+			});
+			const firstSession = harness.findSession(first.sessionId)!;
+			const secondSession = harness.findSession(second.sessionId)!;
+			expect(firstSession.sessionManager.getCwd()).toBe(harness.cwdA);
+			expect(firstSession.sessionManager.getAdditionalDirectories()).toEqual([harness.cwdB, nested]);
+			expect(secondSession.sessionManager.getAdditionalDirectories()).toEqual([harness.cwdA]);
+			await harness.agent.loadSession({ sessionId: first.sessionId, cwd: harness.cwdA, mcpServers: [] });
+			expect(firstSession.sessionManager.getAdditionalDirectories()).toEqual([]);
+			expect(secondSession.sessionManager.getAdditionalDirectories()).toEqual([harness.cwdA]);
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	for (const method of ["loadSession", "resumeSession"] as const) {
+		for (const closed of [false, true]) {
+			it(`${method} replaces and clears persisted roots for ${closed ? "closed" : "live"} sessions`, async () => {
+				const harness = await createHarness();
+				try {
+					const created = await harness.agent.newSession({
+						cwd: harness.cwdA,
+						mcpServers: [],
+						additionalDirectories: [harness.cwdB],
+					});
+					let session = harness.findSession(created.sessionId)!;
+					session.sessionManager.appendMessage({ role: "user", content: "keep workspace", timestamp: 1 });
+					await session.sessionManager.ensureOnDisk();
+					await session.sessionManager.flush();
+					const sessionFile = session.sessionManager.getSessionFile()!;
+					const replacement = path.join(harness.cwdB, "replacement");
+					for (const requestRoots of [
+						{ additionalDirectories: [replacement] },
+						{},
+						{ additionalDirectories: [harness.cwdB] },
+						{ additionalDirectories: [] },
+					]) {
+						if (closed) await harness.agent.closeSession({ sessionId: created.sessionId });
+						await harness.agent[method]({
+							sessionId: created.sessionId,
+							cwd: harness.cwdA,
+							mcpServers: [],
+							...requestRoots,
+						});
+						session = harness.sessions.findLast(candidate => candidate.sessionId === created.sessionId)!;
+						const expected = requestRoots.additionalDirectories ?? [];
+						expect(session.sessionManager.getAdditionalDirectories()).toEqual(expected);
+						await session.sessionManager.flush();
+						const reopened = await SessionManager.open(sessionFile);
+						try {
+							expect(reopened.getAdditionalDirectories()).toEqual(expected);
+						} finally {
+							await reopened.close();
+						}
+					}
+				} finally {
+					await harness.agent.dispose();
+				}
+			});
+		}
+	}
+
+	it("forks with only the requested roots and never changes the source workspace", async () => {
+		const harness = await createHarness();
+		try {
+			const source = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [],
+				additionalDirectories: [harness.cwdB],
+			});
+			const sourceSession = harness.findSession(source.sessionId)!;
+			sourceSession.sessionManager.appendMessage({ role: "user", content: "fork workspace", timestamp: 1 });
+			await sourceSession.sessionManager.ensureOnDisk();
+			await sourceSession.sessionManager.flush();
+			const replacement = path.join(harness.cwdB, "fork-root");
+			for (const requestRoots of [{ additionalDirectories: [replacement] }, {}]) {
+				const forked = await harness.agent.unstable_forkSession({
+					sessionId: source.sessionId,
+					cwd: harness.cwdA,
+					mcpServers: [],
+					...requestRoots,
+				});
+				const forkSession = harness.findSession(forked.sessionId)!;
+				expect(forkSession.sessionManager.getAdditionalDirectories()).toEqual(
+					requestRoots.additionalDirectories ?? [],
+				);
+				expect(sourceSession.sessionManager.getAdditionalDirectories()).toEqual([harness.cwdB]);
+				await forkSession.sessionManager.flush();
+				const reopened = await SessionManager.open(forkSession.sessionManager.getSessionFile()!);
+				try {
+					expect(reopened.getAdditionalDirectories()).toEqual(requestRoots.additionalDirectories ?? []);
+				} finally {
+					await reopened.close();
+				}
+				await harness.agent.closeSession({ sessionId: forked.sessionId });
+			}
+			const reopenedSource = await SessionManager.open(sourceSession.sessionManager.getSessionFile()!);
+			try {
+				expect(reopenedSource.getAdditionalDirectories()).toEqual([harness.cwdB]);
+			} finally {
+				await reopenedSource.close();
+			}
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("rejects mismatched primary roots without changing live or stored additional roots", async () => {
+		const harness = await createHarness();
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [],
+				additionalDirectories: [harness.cwdB],
+			});
+			const session = harness.findSession(created.sessionId)!;
+			session.sessionManager.appendMessage({ role: "user", content: "original workspace", timestamp: 1 });
+			await session.sessionManager.ensureOnDisk();
+			await session.sessionManager.flush();
+			const sessionFile = session.sessionManager.getSessionFile()!;
+			for (const closed of [false, true]) {
+				if (closed) await harness.agent.closeSession({ sessionId: created.sessionId });
+				for (const method of ["loadSession", "resumeSession", "unstable_forkSession"] as const) {
+					const count = harness.sessions.length;
+					await expect(
+						harness.agent[method]({
+							sessionId: created.sessionId,
+							cwd: harness.cwdB,
+							mcpServers: [],
+							additionalDirectories: [],
+						}),
+					).rejects.toMatchObject({ code: -32602 });
+					expect(harness.sessions).toHaveLength(count);
+					expect(session.sessionManager.getAdditionalDirectories()).toEqual([harness.cwdB]);
+					const reopened = await SessionManager.open(sessionFile);
+					try {
+						expect(reopened.getAdditionalDirectories()).toEqual([harness.cwdB]);
+					} finally {
+						await reopened.close();
+					}
+				}
+			}
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("rejects malformed additional roots before creating, reopening, or mutating sessions", async () => {
+		const harness = await createHarness();
+		try {
+			const created = await harness.agent.newSession({
+				cwd: harness.cwdA,
+				mcpServers: [],
+				additionalDirectories: [harness.cwdB],
+			});
+			const session = harness.findSession(created.sessionId)!;
+			session.sessionManager.appendMessage({ role: "user", content: "unchanged workspace", timestamp: 1 });
+			await session.sessionManager.ensureOnDisk();
+			await session.sessionManager.flush();
+			const sessionFile = session.sessionManager.getSessionFile()!;
+			for (const closed of [false, true]) {
+				if (closed) await harness.agent.closeSession({ sessionId: created.sessionId });
+				for (const additionalDirectories of [
+					null,
+					"not-an-array",
+					{},
+					[""],
+					["   "],
+					["relative"],
+					[7],
+					[null],
+					[harness.cwdB, false],
+				]) {
+					for (const method of ["newSession", "loadSession", "resumeSession", "unstable_forkSession"] as const) {
+						const count = harness.sessions.length;
+						const updates = harness.updates.length;
+						await expect(
+							harness.agent[method]({
+								sessionId: created.sessionId,
+								cwd: harness.cwdA,
+								mcpServers: [],
+								additionalDirectories: additionalDirectories as unknown as string[],
+							}),
+						).rejects.toMatchObject({ code: -32602 });
+						expect(harness.sessions).toHaveLength(count);
+						expect(harness.updates).toHaveLength(updates);
+						expect(session.sessionManager.getAdditionalDirectories()).toEqual([harness.cwdB]);
+					}
+				}
+				const reopened = await SessionManager.open(sessionFile);
+				try {
+					expect(reopened.getAdditionalDirectories()).toEqual([harness.cwdB]);
+				} finally {
+					await reopened.close();
+				}
+			}
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
 	it("keeps the ACP handle after the durable session changes", async () => {
 		const elicitations: CreateElicitationRequest[] = [];
 		const permissions: RequestPermissionRequest[] = [];
@@ -3677,7 +3901,7 @@ describe("ACP agent", () => {
 			prompt: [{ type: "text", text: "ping" }],
 		} as PromptRequest);
 
-		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: true }]);
+		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: true, additionalDirectories: [] }]);
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledTimes(1);
 		expect(harness.setToolUIContextSpies[0]).toHaveBeenCalledWith(
@@ -3696,7 +3920,7 @@ describe("ACP agent", () => {
 			prompt: [{ type: "text", text: "ping" }],
 		} as PromptRequest);
 
-		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false }]);
+		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false, additionalDirectories: [] }]);
 		expect(harness.setToolUIContextSpies).toHaveLength(1);
 		expect(harness.setToolUIContextSpies[0]).not.toHaveBeenCalled();
 
@@ -3721,7 +3945,7 @@ describe("ACP agent", () => {
 		expect(runner?.hasUI()).toBe(true);
 		expect(await runner?.getUIContext().select("Spend a saved reset?", ["Yes", "No"])).toBeUndefined();
 		expect(messages).toEqual([]);
-		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false }]);
+		expect(harness.sessionFactoryOptions).toEqual([{ interactivePrompts: false, additionalDirectories: [] }]);
 
 		await harness.agent.dispose();
 	});
