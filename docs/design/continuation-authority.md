@@ -86,3 +86,31 @@ The security review of the gate found that a CONTROL identity's capabilities are
 - `ship = "path"` for native path extensions.
 - An unreadable grants file fails closed with a warning instead of stopping the session.
 
+
+## Revision 2 (2026-11-17): after the Codex security review
+
+The first revision was reviewed by Codex (CONCERNS: one blocker, five major). The owner chose the fixes below. Where this section and "Revision (2026-11-17)" disagree, this section wins.
+
+### Findings and decisions
+
+1. **Forgeable digest (blocker).** `capability_digest` joins entries with newlines and capability names are not validated (`crates/ext/src/trust.rs:1130-1141`, `crates/ext/src/config.rs:1699-1821`), so `["approvals.decide\nzz"]` hashes like two entries. Decision: reject capability names outside `[a-z0-9._-]+` (non-empty) in `DeploymentManifest::validate` (`config.rs:1699`), and give path grants their own length-prefixed digest. The digest used by signed installs is unchanged, so existing install grants keep working.
+2. **An extension's own commands can rewrite `grants.toml` (major).** `env.exec` is self-declared, and the exec sandbox only carves out `.git`, `.omp` and `.agents` under each writable root (`crates/envd/src/exec_sandbox.rs:37`, `:1385-1398`); Off mode makes `/` writable (`:1400-1401`). Decision: the sandbox always denies writes to the canonical `<data>/ext`, in every mode that builds a sandbox spec, including Off. This PR.
+3. **Unchecked store location (major).** `OMP_DATA_DIR`, `XDG_DATA_HOME` and `--data-dir` accept any path (`crates/core/src/dirs.rs:40-52`, `:244-257`), and `GrantsFile::read` follows symlinks without an owner check (`trust.rs:468-482`). Decision: no control grants, with a warning, if `<data>/ext` or `grants.toml` resolves inside the workspace root or any configured writable root, either is a symlink, or either is not owned by the effective user.
+4. **Path is a weak identity (major) and 5. layer rules conflict (major).** Decision: only **user-layer** extensions (`<config>/agent/extensions`, `RootOrigin::User`, `crates/driver/src/discovery/native.rs:219`, `:283`) can receive control grants. Workspace and explicit-root extensions never do. The grant binds the canonical root path and the manifest digest. This removes the layer conflict and the workspace self-grant path.
+6. **Tests miss real failures (major).** Decision: add the forged-digest, extension-writes-store, symlinked store and root, and layer cases, and one end-to-end test through the real flow: write the grant, admit the extension, call over CONTROL.
+
+### Design (replaces the corresponding parts of the first revision)
+
+- **Names.** `DeploymentManifest::validate` rejects any base or feature capability name that is empty or contains a character outside `[a-z0-9._-]`, with `ExtensionError::new(ExtensionCode::EManifestParse, ...)` naming the capability. A manifest that fails this no longer loads.
+- **Path-grant digest.** `pub fn path_grant_digest(capabilities: impl IntoIterator<Item = Str>, manifest_digest: &[u8; 32]) -> Str` in `crates/ext/src/trust.rs`: BLAKE3 over the domain tag `omp.path-grant.v1`, then each sorted, deduplicated capability as an 8-byte little-endian length followed by its bytes, then the 32-byte manifest digest; rendered `b3:<hex>`. The manifest digest is BLAKE3 of the manifest text (`native.rs:576`), so any manifest edit voids the grant.
+- **Publisher.** `pub fn native_path_publisher(canonical_root: &Path) -> Str` in `trust.rs`, returning today's exact value (`native.rs:577`), called by both admission and the grant command. The root passed in is always canonical.
+- **Admission** (`native.rs`, next to `spec.data_grants`). Only for `RootOrigin::User`. Let `wanted` = declared capabilities in `CONTROL_CAPABILITIES`. If `wanted` is empty, nothing. Otherwise: run the store checks; on any failure, empty control grants plus `tracing::warn!` naming the extension, the path and the reason. Else read `GrantsFile` and call `grant_covers(grants, id, publisher, Layer::Client, None, path_grant_digest(declared, manifest_digest), TrustTier::Sandboxed, "path")`. If covered, `spec.control_grants = wanted`.
+- **Store checks** (in omp-driver, which has `libc`): `<data>/ext` and `grants.toml` (if present) must not be symlinks (`symlink_metadata`), must be owned by `libc::geteuid()` (`MetadataExt::uid`), and their canonical paths must not start with the canonical workspace root or any configured writable root. A missing `grants.toml` means no grants (not an error).
+- **Sandbox.** The exec sandbox spec gets an absolute protected-path list holding canonical `<data>/ext`, applied with the same `record_write_deny` machinery as the carve-outs, in every mode including Off.
+- **Identity.** Unchanged from the first revision: `ExtHostSpec.control_grants` (default empty), unioned into the CONTROL identity at `worker.rs:1118`; DATA uses of `data_grants` untouched.
+- **Issuing.** `omp ext grant <NAME>` (and `--revoke`) accepts only an extension installed under `<config>/agent/extensions`; anything else is refused with a message saying control grants are user-layer only. It runs the same store checks before writing and refuses on failure. It writes through `GrantsFile::try_update` with `scope Exact`, `duration Persistent`, `tier Sandboxed`, `ship "path"`, `granted_by "explicit-grant"`, `layer Client`, `workspace None`.
+
+### Residual risk
+
+Replacing the extension's code at the same user-layer path while keeping the manifest byte-identical keeps the grant. Writing to `<config>/agent/extensions` already requires the operator's account, and the sandbox does not make that directory writable to extensions unless it lies under a writable root; the store checks do not cover the extension directory itself. Recorded in `TASKS.md` as OPEN (bind the code digest too).
+
