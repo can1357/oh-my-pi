@@ -5,14 +5,12 @@
   darwin,
   lib,
   ninja,
-  pipewire,
   pkg-config,
   rustPlatform,
   source,
   stdenv,
   swiftPackages,
   writeText,
-  withWaylandScreencast ? false,
   withFatLto ? true,
   withAppleFm ? stdenv.hostPlatform.system == "aarch64-darwin",
 }:
@@ -67,15 +65,14 @@ let
     };
 
     cargoVendorDir = craneLib.vendorCargoDeps { cargoLockContents = lockText; };
-    cargoExtraArgs = "--locked -p pi-natives ${lib.optionalString withWaylandScreencast "--features wayland-pipewire"}";
+    cargoExtraArgs = "--locked -p pi-natives";
     nativeBuildInputs = [
       cmake
       ninja
       pkg-config
       rustPlatform.bindgenHook
     ];
-    buildInputs =
-      lib.optionals withWaylandScreencast [ pipewire ] ++ lib.optional withAppleFm apple-sdk_27;
+    buildInputs = lib.optional withAppleFm apple-sdk_27;
     strictDeps = true;
     doCheck = false;
     # Stamping, patching, and signing belong to the downstream package.
