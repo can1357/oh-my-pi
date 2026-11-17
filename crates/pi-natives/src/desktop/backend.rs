@@ -487,7 +487,7 @@ pub trait AxBackend {
 	) -> CoreResult<AxTextSelection> {
 		Err(DesktopError::new(
 			super::error::ErrorCode::Unsupported,
-			"selecting text by accessibility is available only on macOS",
+			"selecting text by accessibility is available only on macOS and Linux",
 		))
 	}
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;

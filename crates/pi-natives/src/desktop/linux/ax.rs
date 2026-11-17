@@ -15,11 +15,13 @@ use crate::desktop::{
 	backend::AxBackend,
 	control::cancellable,
 	error::{CoreResult, DesktopError, ErrorCode},
-	types::DesktopWindow,
+	text_range::TextSelectRequest,
+	types::{AxTextSelection, DesktopWindow},
 };
 
 mod combo;
 mod menus;
+mod selection;
 
 /// How long an application gets to answer before it counts as not answering:
 /// one request reads one element (about a dozen calls) or walks a short chain
@@ -161,6 +163,18 @@ fn unconfirmed(mut error: DesktopError) -> DesktopError {
 			.push_str(". What was sent to it may still take effect when it answers");
 	}
 	error
+}
+
+/// A selection mutation may have reached the app even if its reply was lost.
+fn selection_unconfirmed(error: DesktopError) -> DesktopError {
+	DesktopError::new(
+		ErrorCode::AxUnconfirmed,
+		format!(
+			"{}; the selection write was attempted, so the element's selection may already have \
+			 changed and must be inspected before retrying or typing",
+			error.message
+		),
+	)
 }
 
 /// `future`, or [`unanswered`] once it has waited `within`.
@@ -1904,6 +1918,26 @@ impl AxBackend for AtSpiAx {
 					.ok_or_else(|| DesktopError::ax_failed("AT-SPI focus request was rejected"))
 			})
 			.map_err(unconfirmed)
+	}
+
+	fn select_text(
+		&mut self,
+		h: &AxHandle,
+		request: &TextSelectRequest,
+	) -> CoreResult<AxTextSelection> {
+		let object = Self::object(h).clone();
+		// Set by the request at its one write, before the write is awaited:
+		// from then on a failure may still have changed the selection.
+		let mut attempted = false;
+		let outcome =
+			self.request(selection::select(&self.connection, &object, request, &mut attempted));
+		outcome.map_err(|error| {
+			if attempted {
+				selection_unconfirmed(error)
+			} else {
+				error
+			}
+		})
 	}
 
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>> {
