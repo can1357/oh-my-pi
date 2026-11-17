@@ -212,25 +212,27 @@ process.stdout.write(Bun.spawnSync([exe, "-e", "console.log('running build')"]).
 		30_000,
 	);
 
-	it("restarts through the upgraded launcher when the old keg is still installed", () => {
-		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
-		const root = process.platform === "win32" ? "C:" : "";
-		const oldKeg = `${root}/opt/homebrew/Cellar/omp/18.1.8/bin/omp`;
-		const launcher = `${root}/opt/homebrew/bin/omp`;
+	it.skipIf(process.platform === "win32")(
+		"restarts through the upgraded launcher when the old keg is still installed",
+		() => {
+			vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+			const oldKeg = "/opt/homebrew/Cellar/omp/18.1.8/bin/omp";
+			const launcher = "/opt/homebrew/bin/omp";
 
-		setProcessProp("execPath", oldKeg);
-		setProcessProp("argv0", "omp");
+			setProcessProp("execPath", oldKeg);
+			setProcessProp("argv0", "omp");
 
-		vi.spyOn(utils, "$which").mockImplementation((cmd: string) => (cmd === "omp" ? launcher : null));
-		vi.spyOn(utils, "isExecutable").mockReturnValue(true);
+			vi.spyOn(utils, "$which").mockImplementation((cmd: string) => (cmd === "omp" ? launcher : null));
+			vi.spyOn(utils, "isExecutable").mockReturnValue(true);
 
-		expect(resolveRestartCmd()).toEqual([launcher]);
-		// The shared entry resolver and workers stay pinned to the running build.
-		expect(resolveCliEntryCmd()).toEqual([oldKeg]);
-		expect(resolveWorkerSpawnCmd("__omp_worker_test")).toEqual({
-			cmd: [oldKeg, "__omp_worker_test"],
-		});
-	});
+			expect(resolveRestartCmd()).toEqual([launcher]);
+			// The shared entry resolver and workers stay pinned to the running build.
+			expect(resolveCliEntryCmd()).toEqual([oldKeg]);
+			expect(resolveWorkerSpawnCmd("__omp_worker_test")).toEqual({
+				cmd: [oldKeg, "__omp_worker_test"],
+			});
+		},
+	);
 
 	it("restarts a build started by path as itself, not as another omp on PATH", () => {
 		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
@@ -246,5 +248,22 @@ process.stdout.write(Bun.spawnSync([exe, "-e", "console.log('running build')"]).
 		vi.spyOn(utils, "isExecutable").mockReturnValue(true);
 
 		expect(resolveRestartCmd()).toEqual([devBuild]);
+	});
+
+	// cmd.exe runs `omp` from the current directory before PATH and passes argv0 as typed, so on
+	// Windows a bare argv0 cannot say which copy is running.
+	it.skipIf(process.platform !== "win32")("restarts a bare-named Windows launch as itself", () => {
+		vi.spyOn(utils, "isCompiledBinary").mockReturnValue(true);
+		const local = "C:\\work\\omp\\dist\\omp.exe";
+
+		setProcessProp("execPath", local);
+		setProcessProp("argv0", "omp");
+
+		vi.spyOn(utils, "$which").mockImplementation((cmd: string) =>
+			cmd === "omp" ? "C:\\Users\\me\\.omp\\bin\\omp.exe" : null,
+		);
+		vi.spyOn(utils, "isExecutable").mockReturnValue(true);
+
+		expect(resolveRestartCmd()).toEqual([local]);
 	});
 });

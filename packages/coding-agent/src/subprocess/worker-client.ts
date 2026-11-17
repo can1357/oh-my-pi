@@ -169,9 +169,12 @@ export function resolveCliEntryCmd(): string[] {
  * version (issue #19454). Re-exec the launcher this process was started
  * through when it now points at a different executable: `argv0` itself when
  * it is a full path, else its PATH lookup. Never a different `omp` on PATH: a
- * build started by path restarts as itself. Keep the unchanged entry command
- * otherwise, and leave workers on {@link resolveExecutablePath} so they stay
- * pinned to the parent build (issues #16262, #19259).
+ * build started by path restarts as itself. On Windows a bare `argv0` names no
+ * launcher: `cmd.exe` runs a copy in the current directory before PATH and
+ * still passes the bare name, while PowerShell passes the full path. Keep the
+ * unchanged entry command otherwise, and leave workers on
+ * {@link resolveExecutablePath} so they stay pinned to the parent build
+ * (issues #16262, #19259).
  */
 export function resolveRestartCmd(): string[] {
 	if (!isCompiledBinary()) return resolveCliEntryCmd();
@@ -183,7 +186,9 @@ export function resolveRestartCmd(): string[] {
 		? isFullyQualifiedPath(argv0)
 			? argv0
 			: null
-		: $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass });
+		: process.platform === "win32"
+			? null
+			: $which(argv0, { requireAbsolutePaths: true, cache: WhichCachePolicy.Bypass });
 	if (!launcher || !isExecutable(launcher)) return [executable];
 	let sameBuild: boolean;
 	try {
