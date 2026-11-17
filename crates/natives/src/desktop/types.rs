@@ -104,7 +104,9 @@ pub struct DesktopCapabilities {
 	pub capture_permission: String,
 	pub input_permission: String,
 	pub ax_permission: String,
-	pub display_count: u32,
+	/// Displays capture and coordinate input can use; absent while the backend
+	/// cannot tell yet: Wayland learns its monitor from the first capture.
+	pub display_count: Option<u32>,
 	/// The session is locked, or on Windows disconnected or on a secure
 	/// desktop. Linux reports `false`.
 	pub screen_locked: bool,
@@ -133,7 +135,7 @@ impl DesktopCapabilities {
 			capture_permission: "unavailable".to_string(),
 			input_permission: "unavailable".to_string(),
 			ax_permission: "unavailable".to_string(),
-			display_count: 0,
+			display_count: Some(0),
 			screen_locked: false,
 			display_asleep: false,
 		}

@@ -43,6 +43,14 @@
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
 
+### Breaking Changes
+
+- `DesktopCapabilities.displayCount` is now `displayCount?: number`, absent while the backend cannot tell how many displays it can use; it was always a number
+
+### Fixed
+
+- Fixed Wayland `capabilities()` reporting zero displays before the first capture; the count is now absent until known
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

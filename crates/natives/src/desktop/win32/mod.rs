@@ -95,7 +95,7 @@ impl Backend for Win32Backend {
 			.to_string(),
 			input_permission: "granted".to_string(),
 			ax_permission: "granted".to_string(),
-			display_count,
+			display_count: Some(display_count),
 			screen_locked: screen.locked,
 			display_asleep: screen.display_asleep,
 		}
