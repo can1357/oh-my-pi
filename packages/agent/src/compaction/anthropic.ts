@@ -17,8 +17,10 @@ import type {
 	SimpleStreamOptions,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import { isBuiltinApi } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
+	declaresAnthropicCompactionEndpoint,
 	supportsAnthropicCompaction,
 	supportsBedrockConverseCompaction,
 } from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
@@ -60,15 +62,19 @@ function isBedrockConverseModel(model: Model): model is Model<"bedrock-converse-
 }
 
 /**
- * Whether a custom api (an extension's `registerProvider` stream) declares
- * that it serves its model over Anthropic Messages (`remoteCompaction.api`)
- * and opts that model into on-demand compaction (`remoteCompaction.enabled`).
- * The request goes through the model's own api like any turn, so the custom
- * stream shapes and authenticates it; whether the beta is actually sent is
- * decided by the Anthropic provider it delegates to.
+ * Whether a custom api (an extension's `registerProvider` stream, never a
+ * built-in adapter) declares that it dispatches its model to Anthropic
+ * Messages with an endpoint that serves on-demand compaction
+ * (`declaresAnthropicCompactionEndpoint`). The request goes through the
+ * model's own api like any turn, so the custom stream shapes and
+ * authenticates it, and the Anthropic provider it delegates to still applies
+ * its own model and endpoint policy. The stream receives the caller's
+ * `reasoning` as is: it resolves the effort earlier controls left in force
+ * (`resolveAnthropicCompactionEffort`) on the Anthropic model it delegates to,
+ * which the agent never sees.
  */
 function declaresAnthropicCompaction(model: Model): boolean {
-	return model.remoteCompaction?.api === "anthropic-messages" && model.remoteCompaction.enabled === true;
+	return !isBuiltinApi(model.api) && declaresAnthropicCompactionEndpoint(model);
 }
 
 /**

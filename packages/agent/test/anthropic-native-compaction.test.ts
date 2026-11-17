@@ -97,11 +97,12 @@ function makeOpenAiModel(): Model<"openai-responses"> {
 /** An extension's custom api that serves Claude over Anthropic Messages behind a gateway. */
 function makeGatewayModel(
 	remoteCompaction: ModelSpec<ai.Api>["remoteCompaction"] = { api: "anthropic-messages", enabled: true },
+	api: ai.Api = "acme-gateway",
 ): Model {
 	return buildModel({
 		id: "claude-fable-5",
 		name: "Claude Fable 5",
-		api: "acme-gateway",
+		api,
 		provider: "acme",
 		baseUrl: "https://llm-gateway.example.test/anthropic",
 		reasoning: true,
@@ -245,6 +246,8 @@ describe("shouldUseAnthropicNativeCompaction", () => {
 			false,
 		);
 		expect(shouldUseAnthropicNativeCompaction(makeGatewayModel({ api: "anthropic-messages" }))).toBe(false);
+		// A built-in adapter ignores `anthropicCompaction`, so the declaration never applies to one.
+		expect(shouldUseAnthropicNativeCompaction(makeGatewayModel(undefined, "openai-completions"))).toBe(false);
 	});
 });
 

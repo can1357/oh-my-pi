@@ -309,7 +309,11 @@ describe("Anthropic on-demand compaction requests", () => {
 			compat: { supportsServerCompaction: true },
 		};
 		expect(supportsAnthropicCompaction(buildModel(gatewaySpec))).toBe(false);
-		const optedIn = buildModel({ ...gatewaySpec, remoteCompaction: { enabled: true } });
+		// `enabled` alone keeps an unknown gateway excluded, as before.
+		expect(supportsAnthropicCompaction(buildModel({ ...gatewaySpec, remoteCompaction: { enabled: true } }))).toBe(
+			false,
+		);
+		const optedIn = buildModel({ ...gatewaySpec, remoteCompaction: { api: "anthropic-messages", enabled: true } });
 		const response = await captureRequest(optedIn, { anthropicCompaction: {} });
 		expect(response.payload.compaction).toEqual({ type: "summarize" });
 		expect(response.beta).toContain("compact-2026-09-04");

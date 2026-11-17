@@ -2,10 +2,11 @@
 
 ## [Unreleased]
 
-## [18.22.1] - 2026-11-17
 ### Added
 
-- A model on a custom api (an extension's `registerProvider` stream) can take the Anthropic on-demand compaction lane by declaring `remoteCompaction: { api: "anthropic-messages", enabled: true }`; the request goes through its own stream like any turn ([#19580](https://github.com/can1357/oh-my-pi/pull/19580) by [@ryanskidmore](https://github.com/ryanskidmore))
+- A model on an extension's custom api can take the Anthropic on-demand compaction lane by declaring `remoteCompaction: { api: "anthropic-messages", enabled: true }`; the request goes through its own stream like any turn ([#19580](https://github.com/can1357/oh-my-pi/pull/19580) by [@ryanskidmore](https://github.com/ryanskidmore))
+
+## [18.22.1] - 2026-11-17
 
 ### Fixed
 

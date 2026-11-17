@@ -32,6 +32,17 @@ export function resolvesToOfficialAnthropicEndpoint(model: Model<"anthropic-mess
 	return isOfficialAnthropicApiUrl(baseUrl);
 }
 
+/**
+ * Whether a model declares that its configured endpoint serves Anthropic
+ * Messages on-demand compaction: `remoteCompaction: { api: "anthropic-messages",
+ * enabled: true }`, `api` naming the compaction endpoint's adapter family as it
+ * does for the OpenAI lanes. This is the opt-in for a gateway outside the known
+ * deployments, and for a custom api that dispatches to Anthropic Messages.
+ */
+export function declaresAnthropicCompactionEndpoint(model: Model): boolean {
+	return model.remoteCompaction?.api === "anthropic-messages" && model.remoteCompaction.enabled === true;
+}
+
 /** Whether model policy and the effective deployment support on-demand compaction. */
 export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, effectiveBaseUrl?: string): boolean {
 	if (!isCompactionCapableModel(model)) return false;
@@ -56,10 +67,10 @@ export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, 
 	) {
 		return true;
 	}
-	// An explicit opt-in vouches for the endpoint the model is configured with, on any
-	// host, as `remoteCompaction.enabled` does for the OpenAI lanes and Bedrock Converse.
-	// A reroute away from that endpoint still has to reach a known deployment.
-	if (model.remoteCompaction?.enabled === true && route === normalizeAnthropicBaseUrl(model.baseUrl)) {
+	// A gateway outside the known deployments qualifies only by declaring that its own
+	// endpoint serves the compaction protocol; `enabled` alone keeps it excluded, and a
+	// reroute away from the configured endpoint still has to reach a known deployment.
+	if (declaresAnthropicCompactionEndpoint(model) && route === normalizeAnthropicBaseUrl(model.baseUrl)) {
 		return true;
 	}
 	return (
