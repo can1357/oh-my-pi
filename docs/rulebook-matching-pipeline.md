@@ -222,7 +222,7 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 1. Drop rules listed in `ttsr.disabledRules`.
 2. Drop rules from the `builtin-defaults` provider when `ttsr.builtinRules === false`.
 3. Drop rules whose `agents` globs do not match the session's agent name (`main` for a top-level session, otherwise the agent definition name); rules without `agents` apply to every agent.
-4. Register rules with a non-empty `condition`, `astCondition`, or `question` into `TtsrManager`; if registration succeeds, the rule is TTSR-only.
+4. Register rules with a non-empty `condition`, `astCondition`, or `question`, or a `gate`, into `TtsrManager`; if registration succeeds, the rule is TTSR-only. A gate without a `question` is refused with a warning and falls through to the next steps.
 5. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
 6. Put remaining rules with `description` into `rulebookRules`.
 

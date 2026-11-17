@@ -1,7 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { bucketRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { logger } from "@oh-my-pi/pi-utils";
 
 function source(provider: string): Rule["_source"] {
 	return { provider, providerName: provider, path: "/tmp/rule.md", level: "user" };
@@ -18,6 +19,8 @@ function makeRule(partial: Partial<Rule>): Rule {
 		condition: partial.condition,
 		astCondition: partial.astCondition,
 		question: partial.question,
+		gate: partial.gate,
+		onJudgeError: partial.onJudgeError,
 		scope: partial.scope,
 		agents: partial.agents,
 		interruptMode: partial.interruptMode,
@@ -26,6 +29,10 @@ function makeRule(partial: Partial<Rule>): Rule {
 }
 
 describe("bucketRules", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("registers a condition rule as TTSR and excludes it from rulebook/always buckets", () => {
 		const mgr = new TtsrManager();
 		const ttsr = makeRule({ name: "no-foo", condition: ["FORBIDDEN"], description: "blocks foo" });
@@ -110,6 +117,24 @@ describe("bucketRules", () => {
 		expect(mgr.hasJudgedRules()).toBe(true);
 		// Its condition only gates the question; streamed text never interrupts.
 		expect(mgr.checkDelta("all tests pass", { source: "text" })).toEqual([]);
+	});
+
+	it("warns about a gate rule without a question at session start instead of dropping it silently", () => {
+		const warn = vi.spyOn(logger, "warn");
+		const mgr = new TtsrManager();
+		const gate = makeRule({
+			name: "no-rm",
+			gate: "before",
+			onJudgeError: "block",
+			scope: ["tool:bash"],
+			description: "never delete outside the project",
+		});
+
+		const { rulebookRules } = bucketRules([gate], mgr);
+
+		expect(warn).toHaveBeenCalledWith(expect.any(String), { ruleName: "no-rm" });
+		expect(mgr.hasGateRules()).toBe(false);
+		expect(rulebookRules.map(r => r.name)).toEqual(["no-rm"]);
 	});
 
 	it("splits non-TTSR rules into always-apply and rulebook by metadata", () => {
