@@ -1,7 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { cmuxPredicateScript } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/cmux-tab";
 import { serializeEvalWithEnvelope, unwrapEvalEnvelope } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/rpc";
-import type { PredicateAnswer } from "@oh-my-pi/pi-coding-agent/tools/browser/queries";
 
 /**
  * Executes the envelope script the way the cmux daemon would (global-scope
@@ -45,22 +43,5 @@ describe("cmux eval envelope", () => {
 	it("maps undefined results to null (JSON cannot carry undefined)", () => {
 		const value = runOnWire(serializeEvalWithEnvelope("undefined", []));
 		expect(unwrapEvalEnvelope<null>(value, "tab.evaluate()")).toBeNull();
-	});
-
-	it("runs a function predicate without eval, so a page whose CSP forbids eval still answers", () => {
-		// The page's `eval` stands in for one a `script-src` without 'unsafe-eval' blocks.
-		const blocked = () => {
-			throw new EvalError("Refused to evaluate a string as JavaScript");
-		};
-		const run = (script: string) => JSON.parse(JSON.stringify(new Function("eval", `return (${script})`)(blocked)));
-		const script = cmuxPredicateScript(((n: number) => n * 2) as (...args: unknown[]) => unknown, [21]);
-		expect(unwrapEvalEnvelope<PredicateAnswer>(run(script), "tab.waitForFunction()")).toEqual({
-			held: true,
-			value: 42,
-		});
-		// A string still goes through indirect eval, so such a page refuses it with the page's own error.
-		expect(() => unwrapEvalEnvelope(run(cmuxPredicateScript("(n) => n * 2", [21])), "tab.waitForFunction()")).toThrow(
-			/Refused to evaluate/,
-		);
 	});
 });

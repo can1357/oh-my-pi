@@ -484,18 +484,17 @@ const RESPONSE_OBSERVER_SCRIPT = String.raw`
 /**
  * The cmux script for one poll of a page predicate. A function is inlined, so a page whose CSP forbids `eval` still
  * runs it; a string goes through indirect eval, so its syntax error reaches the envelope instead of failing the
- * whole script with the daemon's opaque `js_error`. The daemon evaluates synchronously: a Promise is handed to the
- * envelope, which reports it, not judged here.
+ * whole script with the daemon's opaque `js_error`. The predicate is evaluated as an argument, in the scope
+ * `tab.evaluate` runs a function in, so its free names reach the page's globals. The daemon evaluates
+ * synchronously: a Promise is handed to the envelope, which reports it, not judged here.
  */
-export function cmuxPredicateScript(
+function cmuxPredicateScript(
 	fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
 	args: unknown[],
 ): string {
 	const predicate = typeof fn === "function" ? `(${String(fn)}\n)` : `(0, eval)(${JSON.stringify(`(${fn}\n)`)})`;
-	const call = `(${PREDICATE_CALL_SOURCE})(${predicate}, ${JSON.stringify(args)})`;
-	return wrapEvalEnvelope(
-		`(() => { const value = ${call}; return value && typeof value.then === "function" ? value : (${PREDICATE_ANSWER_SOURCE})(value); })()`,
-	);
+	const answer = `function (value) { return value && typeof value.then === "function" ? value : (${PREDICATE_ANSWER_SOURCE})(value); }`;
+	return wrapEvalEnvelope(`(${answer})((${PREDICATE_CALL_SOURCE})(${predicate}, ${JSON.stringify(args)}))`);
 }
 
 export class CmuxTab implements InProcessRunTab {
