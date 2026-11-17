@@ -111,6 +111,8 @@ const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const GENERIC_ABORT_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+/** Bounds best-effort usage-limit bookkeeping so a stalled report or sibling probe cannot hold the terminal agent_end event. */
+const USAGE_LIMIT_BOOKKEEPING_TIMEOUT_MS = 3_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
@@ -867,27 +869,46 @@ export class TurnRecovery {
 			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
-				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
-					activeModel.provider,
-					this.#host.sessionId(),
-					{
+				// This runs on the agent_end path: a stalled usage report or
+				// sibling probe must never hold the run's terminal event. Bound the
+				// bookkeeping and treat a timeout as "no usage report", so the
+				// retry policy falls back to the retry-after hint.
+				const bookkeepingTimeout = AbortSignal.timeout(USAGE_LIMIT_BOOKKEEPING_TIMEOUT_MS);
+				try {
+					const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
+						activeModel.provider,
+						this.#host.sessionId(),
+						{
+							retryAfterMs,
+							// Provider-stated timing only when the error text parsed;
+							// the 30-minute fallback is a guess.
+							providerTimed: parsedRetryAfterMs !== undefined,
+							baseUrl: activeModel.baseUrl,
+							modelId: activeModel.id,
+							signal: bookkeepingTimeout,
+						},
+					);
+					return {
+						switchedCredential: outcome.switched,
 						retryAfterMs,
-						// Provider-stated timing only when the error text parsed;
-						// the 30-minute fallback is a guess.
-						providerTimed: parsedRetryAfterMs !== undefined,
-						baseUrl: activeModel.baseUrl,
-						modelId: activeModel.id,
-					},
-				);
-				return {
-					switchedCredential: outcome.switched,
-					retryAfterMs,
-					retryAtMs: outcome.retryAtMs,
-					blockedUntilMs: outcome.blockedUntilMs,
-					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
-					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
-					reportResetAtMs: outcome.reportResetAtMs,
-				};
+						retryAtMs: outcome.retryAtMs,
+						blockedUntilMs: outcome.blockedUntilMs,
+						priorBlockedUntilMs: outcome.priorBlockedUntilMs,
+						priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
+						reportResetAtMs: outcome.reportResetAtMs,
+					};
+				} catch (error) {
+					if (!bookkeepingTimeout.aborted) throw error;
+					return {
+						switchedCredential: false,
+						retryAfterMs,
+						retryAtMs: undefined,
+						blockedUntilMs: undefined,
+						priorBlockedUntilMs: undefined,
+						priorBlockedUntilTimed: undefined,
+						reportResetAtMs: undefined,
+					};
+				}
 			})();
 			this.#usageLimitOutcomes.set(message, recorded);
 		}
@@ -2691,7 +2712,8 @@ export class TurnRecovery {
 		// form (account resets, retry-after-ms, legacy retry-after /
 		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
 		// can never shadow a longer retry signal carried in the same message.
-		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
+		const model = this.#host.model();
+		return extractProviderRetryHint(model?.provider, errorMessage, model?.baseUrl);
 	}
 
 	/**
@@ -2967,6 +2989,7 @@ export class TurnRecovery {
 					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
 						error: errorMessage,
 						modelId: currentModel.id,
+						baseUrl: currentModel.baseUrl,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,
 					})
