@@ -5978,7 +5978,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// Re-add it now so the agent can call resume, complete, or drop on this goal.
 			if (restored?.goal) {
 				const enabledTools = this.session.getEnabledToolNames();
-				this.#goalToolAddedByMode = true;
+				if (!enabledTools.includes("goal")) this.#goalToolAddedByMode = true;
 				await this.session.setActiveToolsByName([...new Set([...enabledTools, "goal"])]);
 			}
 			this.#updateGoalModeStatus();
@@ -6294,7 +6294,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const enabledTools = this.session.getEnabledToolNames();
 		const goalTools = [...new Set([...enabledTools, "goal"])];
-		this.#goalToolAddedByMode = true;
+		const ownedGoalTool = this.#goalToolAddedByMode;
+		if (!enabledTools.includes("goal")) this.#goalToolAddedByMode = true;
 		let state: GoalModeState | undefined;
 		try {
 			state = options.resume
@@ -6305,7 +6306,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					});
 			await this.session.setActiveToolsByName(goalTools);
 		} catch (error) {
-			this.#goalToolAddedByMode = false;
+			this.#goalToolAddedByMode = ownedGoalTool;
 			// The runtime already journaled the goal; without its tool it must not
 			// stay active, or every later entry is refused against a stuck goal.
 			if (state) {
@@ -7429,8 +7430,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
 			// eventual goal exit drops only that tool from the live roster.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalToolAddedByMode = true;
 			if (!enabledTools.includes("goal")) {
+				this.#goalToolAddedByMode = true;
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}
 			this.#guidedGoalInterviewActive = true;
