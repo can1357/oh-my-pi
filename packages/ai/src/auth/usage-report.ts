@@ -104,6 +104,20 @@ function mergeUsageReportGroup(reports: UsageReport[]): UsageReport {
 			for (const [key, value] of Object.entries(report.metadata)) {
 				if (mergedMetadata[key] === undefined) {
 					mergedMetadata[key] = value;
+				} else if (key === "credentialId" && value !== mergedMetadata.credentialId) {
+					// Two stored rows for the same account merged into one
+					// report: keep every contributing row id so
+					// credential-scoped attribution (the status-line usage
+					// segment) still matches each pinned row.
+					const ids = new Set<number>(
+						Array.isArray(mergedMetadata.credentialIds)
+							? [...(mergedMetadata.credentialIds as number[])]
+							: typeof mergedMetadata.credentialId === "number"
+								? [mergedMetadata.credentialId]
+								: [],
+					);
+					if (typeof value === "number") ids.add(value);
+					mergedMetadata.credentialIds = [...ids].sort((a, b) => a - b);
 				}
 			}
 		}

@@ -35,12 +35,12 @@ function sharedLimit(
 	};
 }
 
-function tierLimit(tier: string, usedFraction: number): UsageLimit {
+function tierLimit(tier: string, usedFraction: number, resetsAt = Date.now() + 24 * 60 * 60_000): UsageLimit {
 	return {
 		id: `anthropic:7d:${tier}`,
 		label: `7d ${tier}`,
 		scope: { provider: "anthropic", tier, windowId: "7d" },
-		window: { id: "7d", label: "7d", resetsAt: Date.now() + 24 * 60 * 60_000 },
+		window: { id: "7d", label: "7d", resetsAt },
 		amount: { usedFraction, unit: "percent" },
 		status: usedFraction >= 1 ? "exhausted" : "ok",
 	};
@@ -123,15 +123,17 @@ interface HealHarness {
 function makeHarness(
 	report: UsageReport,
 	blockScope = "tier:fable",
-	options?: { reports?: UsageReport[]; blockedCredentialId?: number; blockedUntilMs?: number },
+	options?: { reports?: UsageReport[]; blockedCredentialId?: number; blockedUntilMs?: number; seedBlock?: boolean },
 ): HealHarness {
 	const rows = options?.reports ? options.reports.map((_, index) => oauthRow(index + 1)) : [oauthRow(1), oauthRow(2)];
 	const cache = new Map<string, { value: string; expiresAtSec: number }>();
 	const blocks = new Map<string, number>();
-	blocks.set(
-		`${options?.blockedCredentialId ?? 1}:${blockScope}`,
-		options?.blockedUntilMs ?? Date.now() + 3 * 24 * 60 * 60_000,
-	);
+	if (options?.seedBlock !== false) {
+		blocks.set(
+			`${options?.blockedCredentialId ?? 1}:${blockScope}`,
+			options?.blockedUntilMs ?? Date.now() + 3 * 24 * 60 * 60_000,
+		);
+	}
 	const clearedScopes: string[] = [];
 	let probes = 0;
 	const store: AuthCredentialStore = {
@@ -639,4 +641,78 @@ describe("Claude Mythos rotation with a stale usable sibling", () => {
 			}
 		});
 	}
+
+	it("rotates onto a sibling whose model-scoped weekly counter is labelled with another family", async () => {
+		// Anthropic meters Mythos on the scoped weekly row it labels "Fable"; row 2 holds a stale tier:mythos block.
+		const modelId = "claude-mythos-5-2";
+		const retryAfterMs = 186_987_000;
+		// The provider's hint is the binding row's reset countdown, so the report
+		// reset and the hint agree (as they did on the wire).
+		const failedReset = Date.now() + retryAfterMs;
+		const siblingReset = Date.now() + 74 * 60 * 60_000;
+		const failed = claudeReport([
+			sharedLimit("5h", "5h", 0),
+			sharedLimit("7d", "7d", 0.93, failedReset),
+			tierLimit("fable", 1, failedReset),
+		]);
+		const sibling = claudeReport([
+			sharedLimit("5h", "5h", 0.1, siblingReset),
+			sharedLimit("7d", "7d", 0.86, siblingReset),
+			tierLimit("fable", 0.05, siblingReset),
+		]);
+		const { storage, blocks } = makeHarness(failed, "tier:mythos", {
+			reports: [failed, sibling],
+			blockedCredentialId: 2,
+			blockedUntilMs: siblingReset,
+		});
+		try {
+			await storage.credentials.reload();
+			expect(blocks.has("2:tier:mythos")).toBe(true);
+
+			const before = Date.now();
+			const rotation = await storage.limits.rotate("anthropic", "scoped-label", {
+				apiKey: "access-1",
+				modelId,
+				error: new ProviderHttpError(
+					`429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}} retry-after-ms=${retryAfterMs}`,
+					429,
+				),
+			});
+			const after = Date.now();
+			expect(rotation.switched).toBe(true);
+			expect(await storage.keys.get("anthropic", "scoped-label", { modelId })).toBe("access-2");
+			expect(blocks.has("2:tier:mythos")).toBe(false);
+			const failedUntil = blocks.get("1:tier:mythos");
+			expect(failedUntil).toBeGreaterThanOrEqual(before + retryAfterMs);
+			expect(failedUntil).toBeLessThanOrEqual(after + retryAfterMs);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("skips an account whose model-scoped weekly counter is exhausted, whatever its label", async () => {
+		// The same gauge gates Mythos requests, so selection must not route a Mythos
+		// turn onto an account sitting at 100% of it and eat a 429 first. Row 2 is
+		// given the tighter shared weekly window, so only the scoped row can move
+		// the choice off row 1.
+		const modelId = "claude-mythos-5-2";
+		const reset = Date.now() + 52 * 60 * 60_000;
+		const failed = claudeReport([
+			sharedLimit("5h", "5h", 0, reset),
+			sharedLimit("7d", "7d", 0.9, reset),
+			tierLimit("fable", 1, reset),
+		]);
+		const sibling = claudeReport([
+			sharedLimit("5h", "5h", 0.1, reset),
+			sharedLimit("7d", "7d", 0.95, reset),
+			tierLimit("fable", 0.05, reset),
+		]);
+		const { storage } = makeHarness(failed, "", { reports: [failed, sibling], seedBlock: false });
+		try {
+			await storage.credentials.reload();
+			expect(await storage.keys.get("anthropic", "capped-scoped", { modelId })).toBe("access-2");
+		} finally {
+			storage.close();
+		}
+	});
 });
