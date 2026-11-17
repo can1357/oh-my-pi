@@ -3,8 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgIdaAvailable, cfgIdaInstall } from "@oh-my-pi/pi-coding-agent/ida/install";
-import { isExecutableHeader, parseFatSlices, selectSlice, splitSliceRef } from "@oh-my-pi/pi-coding-agent/ida/store";
+import { cfgDisasmBackend } from "@oh-my-pi/pi-coding-agent/disasm/active";
+import { ghidraHostSupported } from "@oh-my-pi/pi-coding-agent/ghidra/platform";
+import { isExecutableHeader, parseFatSlices, selectSlice, splitSliceRef } from "@oh-my-pi/pi-coding-agent/disasm/store";
 import { type BinaryView, parseBinaryView } from "@oh-my-pi/pi-coding-agent/tools/read-binary";
 
 describe("isExecutableHeader", () => {
@@ -94,6 +95,7 @@ describe("universal Mach-O slices", () => {
 describe("parseBinaryView", () => {
 	const cases: Array<[string, BinaryView]> = [
 		["", { kind: "overview" }],
+		["overview", { kind: "overview" }],
 		["imports", { kind: "imports" }],
 		["main:asm", { kind: "asm", target: "main" }],
 		["xrefs:0x401000", { kind: "xrefs", target: "0x401000" }],
@@ -110,7 +112,7 @@ describe("parseBinaryView", () => {
 	});
 });
 
-describe("IDA availability", () => {
+describe("disassembler backend selection", () => {
 	let withIdalib: string;
 	let withoutIdalib: string;
 
@@ -127,19 +129,31 @@ describe("IDA availability", () => {
 		await fs.rm(withoutIdalib, { recursive: true, force: true });
 	});
 
-	it("exposes IDA when the configured install ships idalib", () => {
+	it("prefers an idalib install", () => {
 		const settings = Settings.isolated({ "ida.installDir": withIdalib });
-		expect(cfgIdaInstall.get(settings)).toBe(withIdalib);
-		expect(cfgIdaAvailable.get(settings)).toBe(true);
+		expect(cfgDisasmBackend.get(settings)).toBe("ida");
 	});
 
-	it("hides IDA when the configured install lacks idalib, without falling back", () => {
-		expect(cfgIdaAvailable.get(Settings.isolated({ "ida.installDir": withoutIdalib }))).toBe(false);
+	it("disables both backends even with an idalib install", () => {
+		expect(
+			cfgDisasmBackend.get(Settings.isolated({ "disassembler.backend": "none", "ida.installDir": withIdalib })),
+		).toBeUndefined();
 	});
 
-	it("hides IDA when disabled even with a valid install", () => {
-		expect(cfgIdaAvailable.get(Settings.isolated({ "ida.enabled": false, "ida.installDir": withIdalib }))).toBe(
-			false,
-		);
+	it("does not fall back when IDA is explicitly selected but unavailable", () => {
+		expect(
+			cfgDisasmBackend.get(Settings.isolated({ "disassembler.backend": "ida", "ida.installDir": withoutIdalib })),
+		).toBeUndefined();
+	});
+
+	it("falls back to Ghidra without idalib on supported hosts", () => {
+		const settings = Settings.isolated({ "ida.installDir": withoutIdalib });
+		expect(cfgDisasmBackend.get(settings)).toBe(ghidraHostSupported() ? "ghidra" : undefined);
+	});
+
+	it("honors explicit Ghidra selection despite an idalib install", () => {
+		expect(
+			cfgDisasmBackend.get(Settings.isolated({ "disassembler.backend": "ghidra", "ida.installDir": withIdalib })),
+		).toBe(ghidraHostSupported() ? "ghidra" : undefined);
 	});
 });
