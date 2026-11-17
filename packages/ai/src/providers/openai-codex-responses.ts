@@ -1157,8 +1157,9 @@ function getCodexServiceTierCostMultiplier(
 ): number {
 	// The subscription route draws on included plan usage, so its cost is the
 	// usage-equivalent: each tier's multiplier comes from the catalog table, which
-	// uses OpenAI's included-usage rates (Astra: Fast 2.5x, Ultrafast 8x). A tier
-	// with no entry stays at 1x rather than an invented multiplier.
+	// uses OpenAI's included-usage rates (GPT-6 Astra: Fast 2.5x, Ultrafast 8x;
+	// GPT-6.2: Fast 2x, Ultrafast 6x). A tier with no entry stays at 1x rather
+	// than an invented multiplier.
 	if (serviceTier !== "flex" && serviceTier !== "priority" && serviceTier !== "ultrafast") return 1;
 	return model.serviceTierCost?.[serviceTier] ?? 1;
 }
