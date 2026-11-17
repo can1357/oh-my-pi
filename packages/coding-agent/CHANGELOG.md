@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Avoided Google Cloud Code 429 quota exhaustion and provider prompt blocklists by removing fingerprint-matched identity and tool catalog phrases ([#PR](https://github.com/can1357/oh-my-pi/pull/PR) by [@KaifKol](https://github.com/KaifKol)).
+- Avoided Google Cloud Code 429 quota exhaustion and provider prompt blocklists by removing fingerprint-matched identity and tool catalog phrases ([#19570](https://github.com/can1357/oh-my-pi/pull/19570) by [@KaifKol](https://github.com/KaifKol)).
 
 ## [18.22.0] - 2026-11-16
 
