@@ -419,30 +419,41 @@ export function idealShapeVariant(modelId: string): IdealShape | undefined {
 }
 
 /** What will read the frames: the model id (shape and billing), the wire API
- *  (request hints, fallback billing), and optionally the host and parsed
- *  identity of a built model. */
+ *  (request hints, fallback billing), and optionally the host, parsed
+ *  identity and configured shape of a built model. */
 export interface ShapeTarget {
 	api?: Api;
 	id?: string;
 	provider?: string;
 	identity?: ImageTokenizationTarget["identity"];
+	snapcompactShape?: Model["snapcompactShape"];
 }
 
 /**
  * Pick the frame shape for a reader. An explicit `variant` (anything but
- * `"auto"`) forces that geometry; otherwise the model id selects the
- * eval-winning shape — and frame size — for its model line, falling back to
- * the API family's winner when the model is unmeasured. Either way the frame
- * is no wider than the host's catalog `image-max-edge`. Billing (token
- * estimate, detail hint) is computed for the resolved frame size from the
- * model's catalog image rule. Accepts a full pi-ai `Model` or any
- * `{ api, id }` subset.
+ * `"auto"`) forces that geometry; otherwise the model's configured shape
+ * (`snapcompactShape`), else its model id, selects the shape — and frame
+ * size — falling back to the API family's winner when the model is
+ * unmeasured. Either way the frame is no wider than the host's catalog
+ * `image-max-edge`. Billing (token estimate, detail hint) is computed for
+ * the resolved frame size from the model's catalog image rule. Accepts a
+ * full pi-ai `Model` or any `{ api, id }` subset.
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
 	if (variant && variant !== "auto") return priceShape(fitHostImageEdge(SHAPE_VARIANTS[variant], model), model);
-	const ideal = model?.id ? idealShapeVariant(model.id) : undefined;
+	const ideal = configuredShape(model) ?? (model?.id ? idealShapeVariant(model.id) : undefined);
 	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
 	return priceShape(fitHostImageEdge(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model), model);
+}
+
+/** The model's configured shape; an unknown variant name or a non-positive frame size is ignored. */
+function configuredShape(target: ShapeTarget | undefined): IdealShape | undefined {
+	const configured = target?.snapcompactShape;
+	if (!configured || !isShapeVariantName(configured.variant)) return undefined;
+	const { frameSize } = configured;
+	return frameSize !== undefined && Number.isSafeInteger(frameSize) && frameSize > 0
+		? { variant: configured.variant, frameSize }
+		: { variant: configured.variant };
 }
 
 /** Shrink `base` to the longest image edge `target`'s host passes to the model. */

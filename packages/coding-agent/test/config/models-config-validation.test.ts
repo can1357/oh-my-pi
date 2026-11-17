@@ -89,6 +89,34 @@ describe("ModelsConfigSchema tokenizer", () => {
 	});
 });
 
+describe("ModelsConfigSchema snapcompactShape", () => {
+	const config = (snapcompactShape: unknown) => ({
+		providers: {
+			p: {
+				baseUrl,
+				apiKey: "K",
+				models: [{ id: "gemini-3.5-flash", api: "google-generative-ai" as const, snapcompactShape }],
+				modelOverrides: { "gemini-3.5-pro": { snapcompactShape } },
+			},
+		},
+	});
+
+	test("accepts a known variant with an optional frame size", () => {
+		expect(ModelsConfigSchema(config({ variant: "11on16-bw", frameSize: 1932 }))).not.toBeInstanceOf(OmpErrors);
+		expect(ModelsConfigSchema(config({ variant: "11on16-bw" }))).not.toBeInstanceOf(OmpErrors);
+	});
+
+	test("rejects an unknown variant or a non-positive frame size in models and modelOverrides", () => {
+		for (const shape of [{ variant: "11on16" }, { variant: "11on16-bw", frameSize: 0 }]) {
+			const checked = ModelsConfigSchema(config(shape));
+			if (!(checked instanceof OmpErrors)) throw new Error(`expected ${JSON.stringify(shape)} to be rejected`);
+			expect(new Set(checked.map(error => error.path.slice(0, 4).join(".")))).toEqual(
+				new Set(["providers.p.models.0", "providers.p.modelOverrides.gemini-3.5-pro"]),
+			);
+		}
+	});
+});
+
 describe("ModelsConfigSchema Responses compat overrides", () => {
 	/** A custom Responses-compatible proxy serving gpt-6-astra, as a user writes it in models.yml. */
 	function astraProxyConfig(compat: Record<string, unknown>): unknown {

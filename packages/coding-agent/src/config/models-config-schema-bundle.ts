@@ -2,6 +2,7 @@ import { type NarrowContext, type } from "@oh-my-pi/omptype";
 import { AXES } from "@oh-my-pi/pi-catalog/compat/axes";
 import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
+import { isShapeVariantName, SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 
 /**
  * Input modalities the catalog can express (`input-modalities` axis). A
@@ -33,6 +34,21 @@ function validateMaxContextWindow(
 			(value.contextWindow !== undefined && value.maxContextWindow < value.contextWindow))
 	) {
 		return ctx.mustBe("maxContextWindow a positive integer no smaller than contextWindow");
+	}
+	return true;
+}
+
+function validateSnapcompactShape(
+	value: { snapcompactShape?: { variant: string; frameSize?: number } },
+	ctx: NarrowContext,
+): boolean {
+	const shape = value.snapcompactShape;
+	if (shape === undefined) return true;
+	if (!isShapeVariantName(shape.variant)) {
+		return ctx.mustBe(`snapcompactShape.variant one of ${SHAPE_VARIANT_NAMES.join(", ")}`);
+	}
+	if (shape.frameSize !== undefined && (!Number.isSafeInteger(shape.frameSize) || shape.frameSize <= 0)) {
+		return ctx.mustBe("snapcompactShape.frameSize a positive integer");
 	}
 	return true;
 }
@@ -204,6 +220,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "cl100k" | "o200k"',
 	);
 
+	const SnapcompactShapeSchema = type({
+		variant: "string",
+		"frameSize?": "number",
+	});
+
 	const RemoteCompactionSchema = type({
 		"enabled?": "boolean",
 		"api?": ApiSchema,
@@ -243,6 +264,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -291,7 +313,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
+		return (
+			validateImageCountBudget(value, ctx) &&
+			validateSnapcompactShape(value, ctx) &&
+			validateMaxContextWindow(value, ctx)
+		);
 	});
 
 	const ModelOverrideSchema = type({
@@ -303,6 +329,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"input?": ModelInputSchema,
 		"imageInputDecoder?": '"stb"',
 		"imageCountBudget?": "number",
+		"snapcompactShape?": SnapcompactShapeSchema,
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -344,7 +371,11 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
+		return (
+			validateImageCountBudget(value, ctx) &&
+			validateSnapcompactShape(value, ctx) &&
+			validateMaxContextWindow(value, ctx)
+		);
 	});
 
 	const ProviderDiscoverySchema = type({
