@@ -4465,6 +4465,10 @@ type NoticeEvent struct {
 	Level   NotifyType `json:"level"`
 	Message string     `json:"message"`
 	Source  *string    `json:"source,omitempty"`
+	// A UI that keeps notices on screen shows only the latest of a topic.
+	Topic *string `json:"topic,omitempty"`
+	// Topics this notice makes stale; a UI retracts those blocks.
+	Clears []string `json:"clears,omitempty"`
 }
 
 func (v *NoticeEvent) UnmarshalJSON(data []byte) error {
@@ -4478,6 +4482,8 @@ func (v *NoticeEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("level", &out.Level)
 	d.required("message", &out.Message)
 	d.optional("source", &out.Source)
+	d.optional("topic", &out.Topic)
+	d.optional("clears", &out.Clears)
 	if d.err != nil {
 		return d.err
 	}

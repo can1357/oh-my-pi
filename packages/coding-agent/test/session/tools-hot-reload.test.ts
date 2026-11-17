@@ -18,6 +18,8 @@ describe("describeCustomToolsRefresh", () => {
 				replaced: [],
 				removed: [],
 				errors: [],
+				recovered: [],
+				stillFailing: [],
 			}),
 		).toBeUndefined();
 	});
@@ -29,10 +31,13 @@ describe("describeCustomToolsRefresh", () => {
 				replaced: ["c"],
 				removed: [],
 				errors: [],
+				recovered: [],
+				stillFailing: [],
 			}),
 		).toEqual({
 			level: "info",
 			message: "tools reloaded: +2 ~1 -0",
+			topic: "tools",
 		});
 	});
 
@@ -42,6 +47,8 @@ describe("describeCustomToolsRefresh", () => {
 			replaced: [],
 			removed: [],
 			errors: [{ path: "/tools/broken.ts", error: "boom" }],
+			recovered: [],
+			stillFailing: [],
 		});
 		expect(notice?.level).toBe("warning");
 		expect(notice?.message).toBe("tools reloaded: +1 ~0 -0, 1 failed\n  broken.ts: boom");
@@ -53,8 +60,25 @@ describe("describeCustomToolsRefresh", () => {
 			replaced: [],
 			removed: [],
 			errors: [{ path: "/tools/broken.ts", error: "boom" }],
+			recovered: [],
+			stillFailing: [],
 		});
 		expect(notice?.message.split("\n")[0]).toBe("tools unchanged: +0 ~0 -0, 1 failed");
+	});
+
+	it("announces a module that is healthy again, so its earlier failure is not left standing", () => {
+		const notice = describeCustomToolsRefresh({
+			added: [],
+			replaced: ["a"],
+			removed: [],
+			errors: [],
+			recovered: ["/tools/fixed/index.ts"],
+			stillFailing: [{ path: "/tools/other/index.ts", error: "boom" }],
+		});
+		expect(notice?.level).toBe("warning");
+		expect(notice?.message).toBe(
+			"tools reloaded: +0 ~1 -0, 1 failed\n  recovered: index.ts\n  still failing: index.ts: boom",
+		);
 	});
 });
 

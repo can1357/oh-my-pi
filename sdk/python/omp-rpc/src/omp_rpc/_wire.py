@@ -1231,6 +1231,10 @@ class NoticeEvent:
     level: NotifyType
     message: str
     source: str | None = None
+    topic: str | None = None
+    """A UI that keeps notices on screen shows only the latest of a topic."""
+    clears: tuple[str, ...] | None = None
+    """Topics this notice makes stale; a UI retracts those blocks."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2698,6 +2702,8 @@ def parse_notice_event(value: object, path: str = "NoticeEvent") -> NoticeEvent:
         level=required(payload, "level", _decode_notify_type, path),
         message=required(payload, "message", decode_str, path),
         source=optional(payload, "source", decode_str, path),
+        topic=optional(payload, "topic", decode_str, path),
+        clears=optional(payload, "clears", array(decode_str), path),
     )
 
 

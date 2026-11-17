@@ -314,6 +314,10 @@ export interface CustomToolsRefresh {
 	removed: LoadedCustomTool[];
 	/** Modules that failed to import or returned invalid or conflicting tools. A module that failed entirely keeps its previous tools. */
 	errors: ToolLoadError[];
+	/** Modules that failed on an earlier refresh and import cleanly now (or no longer exist): their old errors are stale. */
+	recovered: string[];
+	/** Modules that failed earlier, were not retried this time (source unchanged), and are still broken. */
+	stillFailing: ToolLoadError[];
 }
 
 /** Options for {@link CustomToolLoader.refresh}. */

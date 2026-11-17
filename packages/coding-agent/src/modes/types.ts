@@ -464,6 +464,20 @@ export interface InteractiveModeContext {
 	showPinnedError(message: string): void;
 	clearPinnedError(): void;
 	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;
+	/**
+	 * Show a notice that stays current: the previous block of `topic` is retracted first, and every
+	 * topic in `clears` is retracted too. A block already committed to scrollback cannot be retracted.
+	 */
+	showTopicNotice(
+		level: "info" | "warning" | "error",
+		message: string,
+		topic: string | undefined,
+		clears?: readonly string[],
+	): void;
+	/** Mount `content` as the one block of `topic`, retracting the previous one. */
+	presentTopic(topic: string, content: Component): void;
+	/** Retract the blocks of `topics` that have not yet been committed to scrollback. */
+	retractTopics(topics: readonly string[]): void;
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;

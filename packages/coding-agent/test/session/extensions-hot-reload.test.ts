@@ -15,7 +15,16 @@ import { HotReloadCoordinator } from "../../src/session/hot-reload";
 
 describe("describeExtensionsRefresh", () => {
 	it("is silent when nothing changed and nothing failed", () => {
-		expect(describeExtensionsRefresh({ added: [], replaced: [], removed: [], errors: [] })).toBeUndefined();
+		expect(
+			describeExtensionsRefresh({
+				added: [],
+				replaced: [],
+				removed: [],
+				errors: [],
+				recovered: [],
+				stillFailing: [],
+			}),
+		).toBeUndefined();
 	});
 
 	it("counts additions, replacements and removals and names each changed extension", () => {
@@ -25,10 +34,13 @@ describe("describeExtensionsRefresh", () => {
 				replaced: ["/x/b.ts", "/x/c.ts"],
 				removed: ["/x/d.ts"],
 				errors: [],
+				recovered: [],
+				stillFailing: [],
 			}),
-		).toEqual({
+		).toMatchObject({
 			level: "info",
 			message: "extensions reloaded: +1 ~2 -1\n  + a.ts\n  ~ b.ts\n  ~ c.ts\n  - d.ts",
+			topic: "extensions",
 		});
 	});
 
@@ -38,6 +50,8 @@ describe("describeExtensionsRefresh", () => {
 			replaced: ["/x/b.ts"],
 			removed: [],
 			errors: [{ path: "/x/broken.ts", error: "SyntaxError: nope" }],
+			recovered: [],
+			stillFailing: [],
 		});
 		expect(notice?.level).toBe("warning");
 		expect(notice?.message).toBe("extensions reloaded: +0 ~1 -0, 1 failed\n  ~ b.ts\n  broken.ts: SyntaxError: nope");
@@ -49,6 +63,8 @@ describe("describeExtensionsRefresh", () => {
 			replaced: [],
 			removed: [],
 			errors: [{ path: "/x/broken.ts", error: "boom" }],
+			recovered: [],
+			stillFailing: [],
 		});
 		expect(notice?.message.split("\n")[0]).toBe("extensions unchanged: +0 ~0 -0, 1 failed");
 	});
@@ -150,7 +166,14 @@ describe("ExtensionsReloader", () => {
 		const file = await writeSource("new.ts");
 		discovered = [file];
 
-		expect(await reloader.refresh()).toEqual({ added: [file], replaced: [], removed: [], errors: [] });
+		expect(await reloader.refresh()).toEqual({
+			added: [file],
+			replaced: [],
+			removed: [],
+			errors: [],
+			recovered: [],
+			stillFailing: [],
+		});
 		expect(committed).toEqual([file]);
 		expect(loaded.map(extension => extension.resolvedPath)).toEqual([file]);
 	});
@@ -163,9 +186,88 @@ describe("ExtensionsReloader", () => {
 
 		const summary = await reloader.refresh({ changedOnly: true });
 
-		expect(summary).toEqual({ added: [], replaced: [edited], removed: [], errors: [] });
+		expect(summary).toEqual({
+			added: [],
+			replaced: [edited],
+			removed: [],
+			errors: [],
+			recovered: [],
+			stillFailing: [],
+		});
 		expect(loadCalls).toEqual([edited]);
 		expect(loaded.map(extension => extension.resolvedPath).sort()).toEqual([calm, edited].sort());
+	});
+
+	it("reports a failure once it is fixed as recovered, and not as failing any more", async () => {
+		const file = await install("flaky.ts");
+		await reloader.captureBaseline();
+		loadErrors[file] = "SyntaxError: Unexpected token (795:6)";
+		await writeSource("flaky.ts");
+		const broken = await reloader.refresh({ changedOnly: true });
+		expect(broken.errors).toEqual([{ path: file, error: "SyntaxError: Unexpected token (795:6)" }]);
+		expect(broken.recovered).toEqual([]);
+
+		delete loadErrors[file];
+		await writeSource("flaky.ts");
+		const fixed = await reloader.refresh({ changedOnly: true });
+
+		expect(fixed.errors).toEqual([]);
+		expect(fixed.stillFailing).toEqual([]);
+		expect(fixed.recovered).toEqual([file]);
+		expect(describeExtensionsRefresh(fixed)?.message).toBe(
+			"extensions reloaded: +0 ~1 -0\n  ~ flaky.ts\n  recovered: flaky.ts",
+		);
+		expect(describeExtensionsRefresh(fixed)?.clears).toContain(`extension-error:${file}`);
+	});
+
+	it("keeps naming an extension that is still broken when another one changes", async () => {
+		const bad = await install("bad.ts");
+		const other = await install("other.ts");
+		await reloader.captureBaseline();
+		loadErrors[bad] = "boom";
+		await writeSource("bad.ts");
+		await reloader.refresh({ changedOnly: true });
+
+		await writeSource("other.ts");
+		const summary = await reloader.refresh({ changedOnly: true });
+
+		expect(summary.replaced).toEqual([other]);
+		expect(summary.errors).toEqual([]);
+		expect(summary.stillFailing).toEqual([{ path: bad, error: "boom" }]);
+		expect(describeExtensionsRefresh(summary)).toMatchObject({
+			level: "warning",
+			message: "extensions reloaded: +0 ~1 -0, 1 failed\n  ~ other.ts\n  still failing: bad.ts: boom",
+		});
+	});
+
+	it("says nothing when nothing changed and a broken extension is the same one as before", async () => {
+		const bad = await install("bad.ts");
+		await reloader.captureBaseline();
+		loadErrors[bad] = "boom";
+		await writeSource("bad.ts");
+		await reloader.refresh({ changedOnly: true });
+
+		const again = await reloader.refresh({ changedOnly: true });
+
+		// Reported as still failing (so the standing block stays accurate), never re-attempted.
+		expect(again.stillFailing).toEqual([{ path: bad, error: "boom" }]);
+		expect(loadCalls.filter(entry => entry === bad)).toHaveLength(1);
+	});
+
+	it("clears a failure whose extension file was deleted", async () => {
+		const gone = await install("gone.ts");
+		await reloader.captureBaseline();
+		loadErrors[gone] = "boom";
+		await writeSource("gone.ts");
+		await reloader.refresh({ changedOnly: true });
+
+		discovered = [];
+		loaded = loaded.filter(extension => extension.resolvedPath !== gone);
+		await fs.rm(gone);
+		const summary = await reloader.refresh({ changedOnly: true });
+
+		expect(summary.stillFailing).toEqual([]);
+		expect(summary.recovered).toEqual([gone]);
 	});
 
 	it("re-imports everything on a plain refresh, changed or not", async () => {
@@ -208,6 +310,8 @@ describe("ExtensionsReloader", () => {
 			replaced: [],
 			removed: [],
 			errors: [{ path: file, error: "start failed" }],
+			recovered: [],
+			stillFailing: [],
 		});
 		expect(loaded[0]).toBe(before);
 		expect(committed).toEqual([]);
@@ -318,7 +422,7 @@ describe("ExtensionsReloader", () => {
 
 		const summary = await reloader.refresh();
 
-		expect(summary).toEqual({ added: [], replaced: [], removed: [], errors: [] });
+		expect(summary).toEqual({ added: [], replaced: [], removed: [], errors: [], recovered: [], stillFailing: [] });
 		expect(reloader.entryPaths()).toEqual([]);
 		expect(loaded).toHaveLength(1);
 	});

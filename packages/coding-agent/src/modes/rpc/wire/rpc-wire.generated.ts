@@ -1029,6 +1029,10 @@ export interface NoticeEvent {
 	level: NotifyType;
 	message: string;
 	source?: string;
+	/** A UI that keeps notices on screen shows only the latest of a topic. */
+	topic?: string;
+	/** Topics this notice makes stale; a UI retracts those blocks. */
+	clears?: string[];
 }
 
 /** The effective thinking level changed. */

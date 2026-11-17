@@ -164,7 +164,14 @@ export const eventDefs = {
 	},
 	TodoAutoClearEvent: { type: "'todo_auto_clear'" },
 	IrcMessageEvent: { type: "'irc_message'", message: "CustomMessage" },
-	NoticeEvent: { type: "'notice'", level: "NotifyType", message: "string", "source?": "string" },
+	NoticeEvent: {
+		type: "'notice'",
+		level: "NotifyType",
+		message: "string",
+		"source?": "string",
+		"topic?": doc("string", "A UI that keeps notices on screen shows only the latest of a topic."),
+		"clears?": doc("string[]", "Topics this notice makes stale; a UI retracts those blocks."),
+	},
 	ThinkingLevelChangedEvent: doc(
 		{
 			type: "'thinking_level_changed'",

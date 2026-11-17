@@ -190,6 +190,8 @@ export class CustomToolLoader {
 	#signatures = new Map<string, string | undefined>();
 	/** Modules whose last import attempt produced nothing but errors. */
 	#failedModules = new Set<string>();
+	/** The errors of each module in {@link #failedModules}, so a refresh that skips it can still report it. */
+	#failures = new Map<string, ToolLoadError[]>();
 
 	constructor(
 		cwd: string,
@@ -254,6 +256,7 @@ export class CustomToolLoader {
 		const cwd = this.#sharedApi.cwd;
 		const entries = pathsWithSources.map(entry => ({ entry, resolvedPath: resolvePath(entry.path, cwd) }));
 		const previousByPath = Map.groupBy(this.tools, loaded => loaded.resolvedPath);
+		const failedBefore = new Set(this.#failedModules);
 		const modulesToImport = new Set<string>();
 		for (const { resolvedPath } of entries) {
 			const unchanged =
@@ -304,9 +307,14 @@ export class CustomToolLoader {
 			if (knownPaths.has(resolvedPath)) continue;
 			this.#signatures.delete(resolvedPath);
 			this.#failedModules.delete(resolvedPath);
+			this.#failures.delete(resolvedPath);
 		}
 		this.tools = nextTools;
-		return { added, replaced, removed, errors };
+		const recovered = [...failedBefore].filter(modulePath => !this.#failedModules.has(modulePath));
+		const stillFailing = entries
+			.filter(({ resolvedPath }) => !modulesToImport.has(resolvedPath) && this.#failedModules.has(resolvedPath))
+			.flatMap(({ resolvedPath }) => this.#failures.get(resolvedPath) ?? []);
+		return { added, replaced, removed, errors, recovered, stillFailing };
 	}
 
 	/**
@@ -338,8 +346,13 @@ export class CustomToolLoader {
 		}
 		const failed = result.tools.length === 0 && errors.length > 0;
 		this.#signatures.set(resolvedPath, signature);
-		if (failed) this.#failedModules.add(resolvedPath);
-		else this.#failedModules.delete(resolvedPath);
+		if (failed) {
+			this.#failedModules.add(resolvedPath);
+			this.#failures.set(resolvedPath, errors);
+		} else {
+			this.#failedModules.delete(resolvedPath);
+			this.#failures.delete(resolvedPath);
+		}
 		return { tools, errors, failed };
 	}
 

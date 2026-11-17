@@ -4333,6 +4333,17 @@
 				},
 				"source": {
 					"type": "string"
+				},
+				"topic": {
+					"type": "string",
+					"description": "A UI that keeps notices on screen shows only the latest of a topic."
+				},
+				"clears": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "Topics this notice makes stale; a UI retracts those blocks."
 				}
 			},
 			"required": [

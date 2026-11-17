@@ -173,6 +173,31 @@ describe("custom tools hot reload", () => {
 		expect(notices.join("\n")).toContain("broken.ts: ");
 	});
 
+	it("announces a module that was fixed as recovered and keeps still-broken ones in the same report", async () => {
+		const { session, notices } = await startSession();
+		const topics: Array<string | undefined> = [];
+		session.subscribe((event: AgentSessionEvent) => {
+			if (event.type === "notice" && event.source === "tools") topics.push(event.topic);
+		});
+		const brokenFile = path.join(toolsDir, "mends.ts");
+		fs.writeFileSync(brokenFile, "throw new Error('mends at import');");
+		fs.writeFileSync(path.join(toolsDir, "stays.ts"), "throw new Error('stays broken');");
+		await session.refreshCustomTools();
+
+		writeToolFile("mends.ts", "mends_tool", "fixed");
+		const summary = await session.refreshCustomTools();
+
+		expect(summary?.errors).toEqual([]);
+		expect(summary?.recovered).toEqual([brokenFile]);
+		expect(summary?.stillFailing).toHaveLength(1);
+		expect(summary?.stillFailing[0]?.error).toContain("stays broken");
+		const report = notices.at(-1) ?? "";
+		expect(report).toContain("recovered: mends.ts");
+		expect(report).toContain("still failing: stays.ts");
+		// Both reports share one topic, so a UI shows only the latest.
+		expect(topics).toEqual(["tools", "tools"]);
+	});
+
 	it("picks up edits on its own with hotReload.tools on", async () => {
 		writeToolFile("hot_probe.ts", "hot_probe", "first version");
 		const { session, notices } = await startSession({ "hotReload.tools": true });

@@ -5835,7 +5835,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session.subscribeRunState(runState => {
 					if (runState === "idle") listener();
 				}),
-			notify: (level, message, source = "tools") => session.emitNotice(level, message, source),
+			notify: (level, message, source = "tools", supersedes) =>
+				session.emitNotice(level, message, source, supersedes),
 		});
 		session.setHotReloadCoordinator(hotReloadCoordinator);
 		disposeCallbacks.add(() => hotReloadCoordinator.stop());
@@ -5852,6 +5853,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					replaced: [],
 					removed: [],
 					errors: delta.errors.map(({ path: modulePath, error }) => ({ path: modulePath, error })),
+					recovered: [...delta.recovered],
+					stillFailing: delta.stillFailing.map(({ path: modulePath, error }) => ({ path: modulePath, error })),
 				};
 				const applied = async (loaded: LoadedCustomTool, apply: () => Promise<void>): Promise<boolean> => {
 					try {
@@ -5863,6 +5866,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							path: loaded.path,
 							error: `Failed to apply tool "${loaded.tool.name}": ${message}`,
 						});
+						// It imported, but did not start: still broken, so not recovered.
+						summary.recovered = summary.recovered.filter(modulePath => modulePath !== loaded.resolvedPath);
 						return false;
 					}
 				};

@@ -1572,6 +1572,10 @@ export class EventController {
 
 	async #handleNotice(event: Extract<AgentSessionEvent, { type: "notice" }>): Promise<void> {
 		const message = event.source ? `${event.source}: ${event.message}` : event.message;
+		if (event.topic !== undefined || (event.clears?.length ?? 0) > 0) {
+			this.ctx.showTopicNotice(event.level, message, event.topic, event.clears);
+			return;
+		}
 		if (event.level === "error") {
 			this.ctx.showError(message);
 		} else if (event.level === "warning") {

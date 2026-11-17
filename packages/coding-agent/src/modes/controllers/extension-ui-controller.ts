@@ -1,3 +1,4 @@
+import { extensionErrorTopic } from "../../session/notice-topics";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
@@ -1676,7 +1677,8 @@ export class ExtensionUiController {
 		const errorText = new Text(`Extension "${extensionPath}" error: ${error}`, 1, 0).setStyleFn(t =>
 			theme.fg("error", t),
 		);
-		this.ctx.present(errorText);
+		// One block per extension: a reload that touches it retracts the line (see `extensionErrorTopic`).
+		this.ctx.presentTopic(extensionErrorTopic(extensionPath), errorText);
 	}
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
 		await this.ctx.executeCompaction(instructionsOrOptions, false);

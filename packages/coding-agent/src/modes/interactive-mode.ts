@@ -8835,6 +8835,54 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.showWarning(message, options);
 	}
 
+	/** Transcript blocks per notice topic, so a newer report can retract the one it replaces. */
+	readonly #topicBlocks = new Map<string, Component[]>();
+
+	retractTopics(topics: readonly string[]): void {
+		let removed = false;
+		for (const topic of topics) {
+			const blocks = this.#topicBlocks.get(topic);
+			if (!blocks) continue;
+			this.#topicBlocks.delete(topic);
+			for (const block of blocks) {
+				if (!this.chatContainer.children.includes(block)) continue;
+				if (this.chatContainer.canRemoveBlock(block)) {
+					this.chatContainer.removeChild(block);
+					removed = true;
+				}
+			}
+		}
+		if (removed) this.ui.requestRender();
+	}
+
+	presentTopic(topic: string, content: Component): void {
+		this.retractTopics([topic]);
+		this.present(content);
+		this.#topicBlocks.set(topic, [content]);
+	}
+
+	showTopicNotice(
+		level: "info" | "warning" | "error",
+		message: string,
+		topic: string | undefined,
+		clears: readonly string[] = [],
+	): void {
+		this.retractTopics(topic === undefined ? [...clears] : [topic, ...clears]);
+		const added = this.#captureAddedChatComponents(() => {
+			if (level === "error") this.showError(message);
+			else if (level === "warning") this.showWarning(message);
+			else this.showStatus(message);
+		});
+		if (topic === undefined) return;
+		// A status line may have been merged into the previous one rather than appended.
+		const merged = this.lastStatus;
+		const tail = this.chatContainer.children[this.chatContainer.children.length - 1];
+		this.#topicBlocks.set(
+			topic,
+			added.length > 0 ? added : level === "info" && merged && merged === tail ? [merged] : [],
+		);
+	}
+
 	#handleLspStartupEvent(event: LspStartupEvent): void {
 		if (event.type === "failed") {
 			this.showWarning(`LSP startup failed: ${event.error}. It will retry lazily on write.`);

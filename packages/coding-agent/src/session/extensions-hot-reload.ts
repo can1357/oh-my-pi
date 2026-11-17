@@ -16,6 +16,7 @@ import type { ReboundExtension } from "../extensibility/extensions/loader";
 import type { Extension } from "../extensibility/extensions/types";
 import { collectExtensionSourcePaths } from "../extensibility/plugins/legacy-pi-compat";
 import type { HotReloadSubsystem } from "./hot-reload";
+import { EXTENSIONS_NOTICE_TOPIC, extensionErrorTopic } from "./notice-topics";
 import { sourceSignature } from "./tools-hot-reload";
 
 /** Extension paths changed by one refresh, plus the ones that could not be applied. */
@@ -24,6 +25,10 @@ export interface ExtensionsRefreshSummary {
 	replaced: string[];
 	removed: string[];
 	errors: Array<{ path: string; error: string }>;
+	/** Extensions that failed on an earlier refresh and are healthy now: their old error is stale. */
+	recovered: string[];
+	/** Extensions that failed earlier, were not retried this time (source unchanged), and are still broken. */
+	stillFailing: Array<{ path: string; error: string }>;
 }
 
 export interface ExtensionsRefreshOptions {
@@ -41,25 +46,43 @@ export type ExtensionsRefresher = (options?: ExtensionsRefreshOptions) => Promis
 export interface ExtensionsRefreshNotice {
 	level: "info" | "warning";
 	message: string;
+	/** The one standing block for extension reloads: showing this notice retracts the previous one. */
+	topic: string;
+	/** Runtime-error topics of the extensions this refresh touched; those blocks are stale now. */
+	clears: string[];
 }
 
 /**
- * The status line for a refresh, e.g. `extensions reloaded: +1 ~2 -0`, one line per changed
- * extension (`+` added, `~` replaced, `-` removed), then one line per failed extension.
- * `undefined` when nothing changed and nothing failed.
+ * The report for a refresh, e.g. `extensions reloaded: +1 ~2 -0`: one line per changed extension
+ * (`+` added, `~` replaced, `-` removed), one per extension that recovered, one per new failure, and
+ * one per extension still broken from an earlier refresh, so this report is the whole current truth
+ * and can replace the previous one. `undefined` when nothing changed, recovered, or newly failed:
+ * the previous report is still accurate.
  */
 export function describeExtensionsRefresh(summary: ExtensionsRefreshSummary): ExtensionsRefreshNotice | undefined {
 	const changed = summary.added.length + summary.replaced.length + summary.removed.length > 0;
-	if (!changed && summary.errors.length === 0) return undefined;
+	if (!changed && summary.errors.length === 0 && summary.recovered.length === 0) return undefined;
 	const counts = `+${summary.added.length} ~${summary.replaced.length} -${summary.removed.length}`;
-	const failures = summary.errors.length > 0 ? `, ${summary.errors.length} failed` : "";
-	const lines = [`extensions ${changed ? "reloaded" : "unchanged"}: ${counts}${failures}`];
+	const failedCount = summary.errors.length + summary.stillFailing.length;
+	const failures = failedCount > 0 ? `, ${failedCount} failed` : "";
+	const reloaded = changed || summary.recovered.length > 0;
+	const lines = [`extensions ${reloaded ? "reloaded" : "unchanged"}: ${counts}${failures}`];
 	for (const extensionPath of summary.added) lines.push(`  + ${path.basename(extensionPath)}`);
 	for (const extensionPath of summary.replaced) lines.push(`  ~ ${path.basename(extensionPath)}`);
 	for (const extensionPath of summary.removed) lines.push(`  - ${path.basename(extensionPath)}`);
+	for (const extensionPath of summary.recovered) lines.push(`  recovered: ${path.basename(extensionPath)}`);
 	for (const { path: extensionPath, error } of summary.errors)
 		lines.push(`  ${path.basename(extensionPath)}: ${error}`);
-	return { level: summary.errors.length > 0 ? "warning" : "info", message: lines.join("\n") };
+	for (const { path: extensionPath, error } of summary.stillFailing)
+		lines.push(`  still failing: ${path.basename(extensionPath)}: ${error}`);
+	return {
+		level: failedCount > 0 ? "warning" : "info",
+		message: lines.join("\n"),
+		topic: EXTENSIONS_NOTICE_TOPIC,
+		clears: [...summary.added, ...summary.replaced, ...summary.removed, ...summary.recovered].map(
+			extensionErrorTopic,
+		),
+	};
 }
 
 /**
@@ -105,6 +128,8 @@ export interface ExtensionsReloaderHost {
 export class ExtensionsReloader {
 	readonly #host: ExtensionsReloaderHost;
 	readonly #baseline = new Map<string, string>();
+	/** Entry path to the error of its last failed load or start; cleared when it loads cleanly or its source is gone. */
+	readonly #failing = new Map<string, string>();
 
 	constructor(host: ExtensionsReloaderHost) {
 		this.#host = host;
@@ -127,7 +152,14 @@ export class ExtensionsReloader {
 	}
 
 	async refresh(options: ExtensionsRefreshOptions = {}): Promise<ExtensionsRefreshSummary> {
-		const summary: ExtensionsRefreshSummary = { added: [], replaced: [], removed: [], errors: [] };
+		const summary: ExtensionsRefreshSummary = {
+			added: [],
+			replaced: [],
+			removed: [],
+			errors: [],
+			recovered: [],
+			stillFailing: [],
+		};
 		const fail = (extensionPath: string, error: unknown): void => {
 			summary.errors.push({ path: extensionPath, error: error instanceof Error ? error.message : String(error) });
 		};
@@ -158,13 +190,42 @@ export class ExtensionsReloader {
 			try {
 				await this.#host.remove(extension);
 				this.#baseline.delete(resolvedPath);
+				this.#failing.delete(resolvedPath);
 				summary.removed.push(extension.path);
 				await this.#host.reconcileTools([...extension.tools.keys()]);
 			} catch (error) {
 				fail(extension.path, error);
 			}
 		}
+		this.#settleFailures(summary, seen);
 		return summary;
+	}
+
+	/**
+	 * Fold this refresh's failures into the standing set. A path that failed now is failing; one that
+	 * failed before and was not retried stays failing and is reported, so a report never reads as if
+	 * it had healed; one whose source is gone is cleared.
+	 */
+	#settleFailures(summary: ExtensionsRefreshSummary, discovered: ReadonlySet<string>): void {
+		const failedNow = new Set<string>();
+		for (const { path: failedPath, error } of summary.errors) {
+			failedNow.add(failedPath);
+			this.#failing.set(failedPath, error);
+		}
+		for (const [failingPath, error] of this.#failing) {
+			if (failedNow.has(failingPath)) continue;
+			if (discovered.has(failingPath)) {
+				summary.stillFailing.push({ path: failingPath, error });
+			} else {
+				this.#failing.delete(failingPath);
+				summary.recovered.push(failingPath);
+			}
+		}
+	}
+
+	/** An extension that loaded and started is no longer failing; say so when it had been. */
+	#markHealthy(entryPath: string, summary: ExtensionsRefreshSummary): void {
+		if (this.#failing.delete(entryPath)) summary.recovered.push(entryPath);
 	}
 
 	async #refreshOne(
@@ -187,13 +248,17 @@ export class ExtensionsReloader {
 		const { extension: next, commit } = loadedResult.rebound;
 		if (!loaded) {
 			const added = await this.#host.add(next, commit);
-			if (added.ok) summary.added.push(entryPath);
-			else summary.errors.push({ path: entryPath, error: added.error });
+			if (added.ok) {
+				summary.added.push(entryPath);
+				this.#markHealthy(entryPath, summary);
+			} else summary.errors.push({ path: entryPath, error: added.error });
 			return;
 		}
 		const replaced = await this.#host.replace(loaded, next, commit);
-		if (replaced.ok) summary.replaced.push(entryPath);
-		else summary.errors.push({ path: entryPath, error: replaced.error });
+		if (replaced.ok) {
+			summary.replaced.push(entryPath);
+			this.#markHealthy(entryPath, summary);
+		} else summary.errors.push({ path: entryPath, error: replaced.error });
 		// Success or rollback, the tool registry may now name tools of the wrong instance.
 		await this.#host.reconcileTools([...new Set([...loaded.tools.keys(), ...next.tools.keys()])]);
 	}

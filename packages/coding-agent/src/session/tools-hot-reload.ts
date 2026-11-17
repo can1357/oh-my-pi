@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { CustomToolsRefreshOptions } from "../extensibility/custom-tools/types";
 import type { HotReloadSubsystem } from "./hot-reload";
+import { TOOLS_NOTICE_TOPIC } from "./notice-topics";
 
 /** Names changed by one custom-tool refresh, plus the modules that could not be loaded. */
 export interface CustomToolsRefreshSummary {
@@ -19,6 +20,10 @@ export interface CustomToolsRefreshSummary {
 	replaced: string[];
 	removed: string[];
 	errors: Array<{ path: string; error: string }>;
+	/** Modules that failed on an earlier refresh and are healthy (or gone) now. */
+	recovered: string[];
+	/** Modules still broken from an earlier refresh that this refresh did not retry. */
+	stillFailing: Array<{ path: string; error: string }>;
 }
 
 /** Re-reads the custom tool sources and applies the difference to the live session. */
@@ -27,22 +32,32 @@ export type CustomToolsRefresher = (options?: CustomToolsRefreshOptions) => Prom
 export interface CustomToolsRefreshNotice {
 	level: "info" | "warning";
 	message: string;
+	/** The one standing block for tool reloads: showing this notice retracts the previous one. */
+	topic: string;
 }
 
 /**
- * The status line for a refresh, e.g. `tools reloaded: +2 ~1 -0`, followed by one line per
- * failed module. `undefined` when nothing changed and nothing failed.
+ * The report for a refresh, e.g. `tools reloaded: +2 ~1 -0`: the changed counts, one line per
+ * module that recovered, one per new failure, and one per module still broken from an earlier
+ * refresh, so it is the whole current truth and replaces the previous report. `undefined` when
+ * nothing changed, recovered, or newly failed.
  */
 export function describeCustomToolsRefresh(summary: CustomToolsRefreshSummary): CustomToolsRefreshNotice | undefined {
 	const changed = summary.added.length + summary.replaced.length + summary.removed.length > 0;
-	if (!changed && summary.errors.length === 0) return undefined;
+	if (!changed && summary.errors.length === 0 && summary.recovered.length === 0) return undefined;
 	const counts = `+${summary.added.length} ~${summary.replaced.length} -${summary.removed.length}`;
-	const failures = summary.errors.length > 0 ? `, ${summary.errors.length} failed` : "";
-	const lines = [`tools ${changed ? "reloaded" : "unchanged"}: ${counts}${failures}`];
+	const failedCount = summary.errors.length + summary.stillFailing.length;
+	const failures = failedCount > 0 ? `, ${failedCount} failed` : "";
+	const reloaded = changed || summary.recovered.length > 0;
+	const lines = [`tools ${reloaded ? "reloaded" : "unchanged"}: ${counts}${failures}`];
+	for (const modulePath of summary.recovered) lines.push(`  recovered: ${path.basename(modulePath)}`);
 	for (const { path: modulePath, error } of summary.errors) lines.push(`  ${path.basename(modulePath)}: ${error}`);
+	for (const { path: modulePath, error } of summary.stillFailing)
+		lines.push(`  still failing: ${path.basename(modulePath)}: ${error}`);
 	return {
-		level: summary.errors.length > 0 ? "warning" : "info",
+		level: failedCount > 0 ? "warning" : "info",
 		message: lines.join("\n"),
+		topic: TOOLS_NOTICE_TOPIC,
 	};
 }
 

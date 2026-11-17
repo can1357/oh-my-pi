@@ -89,7 +89,16 @@ export type AgentSessionEvent =
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }
-	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
+	| {
+			type: "notice";
+			level: "info" | "warning" | "error";
+			message: string;
+			source?: string;
+			/** A UI that keeps notices on screen shows only the latest of a topic: it replaces the previous block. */
+			topic?: string;
+			/** Topics this notice makes stale; a UI retracts those blocks. */
+			clears?: string[];
+	  }
 	| {
 			type: "thinking_level_changed";
 			thinkingLevel: ThinkingLevel | undefined;

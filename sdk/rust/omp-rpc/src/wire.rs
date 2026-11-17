@@ -3951,6 +3951,12 @@ pub struct NoticeEvent {
 	pub message: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub source: Option<String>,
+	/// A UI that keeps notices on screen shows only the latest of a topic.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub topic: Option<String>,
+	/// Topics this notice makes stale; a UI retracts those blocks.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub clears: Option<Vec<String>>,
 }
 
 /// The effective thinking level changed.

@@ -58,6 +58,8 @@ export interface HotReloadNotice {
 	level: "info" | "warning" | "error";
 	message: string;
 	source?: string;
+	topic?: string;
+	clears?: readonly string[];
 }
 
 /**
@@ -104,7 +106,12 @@ export interface HotReloadCoordinatorOptions {
 	/** Subscribe to the session settling idle; returns the unsubscribe callback. */
 	onIdle: (listener: () => void) => () => void;
 	/** Emits a user-visible notice. */
-	notify: (level: "info" | "warning" | "error", message: string, source?: string) => void;
+	notify: (
+		level: "info" | "warning" | "error",
+		message: string,
+		source?: string,
+		supersedes?: { topic?: string; clears?: readonly string[] },
+	) => void;
 	/** Poll period. Default 2000 ms. */
 	pollIntervalMs?: number;
 }
@@ -354,7 +361,7 @@ export class HotReloadCoordinator {
 			if (summary !== undefined && subsystem.describe) {
 				const notice = subsystem.describe(summary);
 				if (notice) {
-					this.#options.notify(notice.level, notice.message, notice.source ?? source);
+					this.#options.notify(notice.level, notice.message, notice.source ?? source, notice);
 				}
 			}
 		} catch (error) {
