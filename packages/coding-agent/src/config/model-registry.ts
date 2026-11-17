@@ -39,6 +39,8 @@ import {
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
+	type KiroDiscoveryAccount,
+	kiroModelManagerOptions,
 	MODELS_DEV_CATALOG_PROVIDER_IDS,
 	modelsDevCatalogFallback,
 	openaiCodexModelManagerOptions,
@@ -2812,6 +2814,23 @@ export class ModelRegistry {
 		return projectId ? projectId : undefined;
 	}
 
+	/**
+	 * Every stored Kiro login, refreshed once, as discovery accounts. Kiro plans
+	 * gate the roster per login, so reading only the selected login hid models a
+	 * sibling login serves. The selected key is kept when it is not a stored
+	 * login (an API key), which leaves the union untagged. Returns `null` when a
+	 * login fails to resolve, so a partial union never replaces the cache.
+	 */
+	async #resolveKiroDiscoveryAccounts(selectedKey: string): Promise<KiroDiscoveryAccount[] | null> {
+		const accounts: KiroDiscoveryAccount[] = [];
+		for (const access of await this.authStorage.oauth.accessAll("kiro")) {
+			if (!access.ok) return null;
+			accounts.push({ apiKey: access.apiKey, accountKey: oauthAccountKey(access) });
+		}
+		if (!accounts.some(account => account.apiKey === selectedKey)) accounts.push({ apiKey: selectedKey });
+		return accounts;
+	}
+
 	async #collectBuiltInModelManagerOptions(
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
@@ -2956,7 +2975,13 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				const kiroKey = descriptor.providerId === "kiro" ? discoveryConfig.apiKey : undefined;
+				const managerOptions = kiroKey
+					? kiroModelManagerOptions({
+							...preparedConfig,
+							resolveAccounts: () => this.#resolveKiroDiscoveryAccounts(kiroKey),
+						})
+					: descriptor.createModelManagerOptions(preparedConfig);
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
