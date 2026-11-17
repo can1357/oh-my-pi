@@ -339,7 +339,7 @@ export const cfgTaskStructured = register({
 		group: "Subagents",
 		label: "Structured Task Results",
 		description:
-			"Expose outputSchema/schemaMode on the task tool and return subagent results through the yield tool, validated against caller or agent output schemas. Off: task subagents have no yield tool and return their final message as plain text, except agents whose definition sets structured: true. Eval agent()/workpool spawns always keep structured results.",
+			"Expose outputSchema/schemaMode on the task tool and honor agent output schemas; a subagent with a schema returns its result through the yield tool, validated against it. Off: task subagents ignore schemas, except agents whose definition sets structured: true. A subagent without a schema has no yield tool and returns its final message. Eval agent()/workpool spawns always honor schemas.",
 	},
 });
 

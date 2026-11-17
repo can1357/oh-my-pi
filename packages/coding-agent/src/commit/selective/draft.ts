@@ -614,10 +614,22 @@ export class Draft {
 		return this.#select(target, false);
 	}
 
-	/** Deselect every path matching none of `globs` (exact paths, globs, or unique suffixes). */
+	/**
+	 * Deselect every path matching none of `globs` (exact paths, globs, or unique suffixes).
+	 * Report unmatched targets. @throws if none match, leaving the selection unchanged.
+	 */
 	only(globs: readonly string[]): string {
 		if (globs.length === 0) throw new Error("Name at least one path or glob to keep.");
-		const keep = new Set(globs.flatMap(glob => this.#match(glob)));
+		const keep = new Set<FileChange>();
+		const unmatched: string[] = [];
+		for (const glob of globs) {
+			const matched = this.#resolve(glob);
+			if (matched.length === 0) unmatched.push(glob);
+			for (const file of matched) keep.add(file);
+		}
+		if (keep.size === 0) {
+			throw new Error(`No changed path matches any keep target: ${unmatched.join(", ")}.`);
+		}
 		let dropped = 0;
 		for (const file of this.#files) {
 			if (keep.has(file) || (file.selected.size === 0 && !file.wholeSelected)) continue;
@@ -625,7 +637,8 @@ export class Draft {
 			file.wholeSelected = false;
 			dropped++;
 		}
-		return `Deselected ${dropped} path(s) outside ${globs.join(", ")}.`;
+		const report = `Deselected ${dropped} path(s) outside ${globs.join(", ")}.`;
+		return unmatched.length > 0 ? `${report} Unmatched: ${unmatched.join(", ")}.` : report;
 	}
 
 	#select(target: SelectionTarget, take: boolean): string {
@@ -694,22 +707,29 @@ export class Draft {
 		return ops;
 	}
 
-	/** Files a path argument names: exact path, glob, or unique path suffix. @throws when none or several suffix matches. */
+	/** Files a path argument names; unmatched paths and ambiguous suffixes throw. */
 	#match(target: string): FileChange[] {
+		const matched = this.#resolve(target);
+		if (matched.length === 0) {
+			const label = /[*?[{]/.test(target) ? target : `"${target}"`;
+			throw new Error(`No changed path matches ${label}.`);
+		}
+		return matched;
+	}
+
+	/** Resolve an exact path, glob, or unique path suffix. Only ambiguous suffixes throw. */
+	#resolve(target: string): FileChange[] {
 		const exact = this.#files.find(file => file.path === target);
 		if (exact) return [exact];
 		if (/[*?[{]/.test(target)) {
 			const glob = new Bun.Glob(target);
-			const matched = this.#files.filter(file => glob.match(file.path));
-			if (matched.length === 0) throw new Error(`No changed path matches ${target}.`);
-			return matched;
+			return this.#files.filter(file => glob.match(file.path));
 		}
 		const suffix = this.#files.filter(file => file.path.endsWith(`/${target}`));
-		if (suffix.length === 1) return suffix;
 		if (suffix.length > 1) {
 			throw new Error(`"${target}" is ambiguous: ${suffix.map(file => file.path).join(", ")}`);
 		}
-		throw new Error(`No changed path matches "${target}".`);
+		return suffix;
 	}
 
 	/** Summary of the selection, review items, and what stays out; shown on draft creation and in `/commit`. */
