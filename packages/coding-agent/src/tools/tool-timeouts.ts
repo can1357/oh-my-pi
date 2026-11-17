@@ -54,8 +54,9 @@ export interface LspTimeouts {
 /**
  * The `lsp.minTimeout` floor, clamped into the tool's own range. Like the per-tool
  * minimum it wins over a lower `tools.maxTimeout` cap; `0`/undefined disables it.
+ * Exported so the `lsp` tool description renders the effective floor, not the raw setting.
  */
-function lspFloorSeconds(minTimeout: number | undefined): number {
+export function lspFloorSeconds(minTimeout: number | undefined): number {
 	return minTimeout !== undefined && minTimeout > 0
 		? Math.min(Math.max(minTimeout, TOOL_TIMEOUTS.lsp.min), TOOL_TIMEOUTS.lsp.max)
 		: 0;
@@ -80,8 +81,11 @@ export function resolveLspTimeouts(
 	const floor = lspFloorSeconds(minTimeout);
 	if (requested !== undefined) {
 		const seconds = clampTimeout("lsp", requested, maxTimeout);
-		if (floor > seconds) return { call: floor, wait: floor, floorRaisedFrom: requested };
-		return { call: seconds, wait: seconds };
+		const call = Math.max(floor, seconds);
+		// The floor beats a lower global cap for the budget, but the note below may
+		// only claim a raise when the agent actually asked for less than the floor.
+		if (floor > requested) return { call, wait: call, floorRaisedFrom: requested };
+		return { call, wait: call };
 	}
 	return {
 		call: Math.max(floor, clampTimeout("lsp", Math.max(TOOL_TIMEOUTS.lsp.default, requestTimeout), maxTimeout)),
@@ -93,7 +97,8 @@ export function resolveLspTimeouts(
  * A note for `lsp` timeout errors naming where the budget came from: empty when the
  * agent passed no `timeout` (the configured default speaks for itself), the configured
  * default when an explicit agent override is in effect, and requested/effective values
- * when `lsp.minTimeout` raised an override.
+ * when `lsp.minTimeout` raised an override. Non-empty notes start with a space so they
+ * splice into {@link lspTimeoutMessage} after the server name.
  */
 export function lspTimeoutSource(
 	requested: number | undefined,
@@ -102,7 +107,21 @@ export function lspTimeoutSource(
 ): string {
 	if (requested === undefined) return "";
 	if (budget.floorRaisedFrom !== undefined) {
-		return `(agent requested ${budget.floorRaisedFrom}s; raised to the lsp.minTimeout floor of ${budget.call}s)`;
+		return ` (agent requested ${budget.floorRaisedFrom}s; raised to the lsp.minTimeout floor of ${budget.call}s)`;
 	}
-	return `(agent override; configured default: ${requestTimeoutSec}s)`;
+	return ` (agent override; configured default: ${requestTimeoutSec}s)`;
+}
+
+/**
+ * The `lsp` deadline ToolError message: budget and server, the budget's source note
+ * when there is one, and the standing retry hint.
+ */
+export function lspTimeoutMessage(
+	action: string,
+	timeoutSec: number,
+	serverName: string | undefined,
+	note: string,
+): string {
+	const server = serverName ? ` on ${serverName}` : "";
+	return `LSP ${action} timed out after ${timeoutSec}s${server}${note}. The server may still be indexing; try again or pass timeout=<larger>.`;
 }
