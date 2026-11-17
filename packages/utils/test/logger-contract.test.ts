@@ -103,12 +103,18 @@ interface LogEntry {
 	readonly message: string;
 }
 
+function parseLogLines(text: string): LogEntry[] {
+	return text
+		.split(os.EOL)
+		.filter(line => line.length > 0)
+		.map(line => {
+			const entry: LogEntry = JSON.parse(line);
+			return entry;
+		});
+}
+
 async function readLogEntries(directory: string): Promise<LogEntry[]> {
-	const lines = (await readSingleLog(directory)).text.split(os.EOL).filter(line => line.length > 0);
-	return lines.map(line => {
-		const entry: LogEntry = JSON.parse(line);
-		return entry;
-	});
+	return parseLogLines((await readSingleLog(directory)).text);
 }
 
 function expectedLine(
@@ -313,14 +319,7 @@ describe("central logger transport lifecycle", () => {
 		{ logLevel: "", messages: ["console-warn", "console-info", "console-debug"] },
 	])("OMP_LOG_LEVEL=$logLevel gates the console transport", async ({ logLevel, messages }) => {
 		const result = await runScenario("console-levels", { logLevel });
-		const messagesPrinted = result.stdout
-			.split(os.EOL)
-			.filter(line => line.length > 0)
-			.map(line => {
-				const entry: LogEntry = JSON.parse(line);
-				return entry.message;
-			});
-		expect(messagesPrinted).toEqual([...messages]);
+		expect(parseLogLines(result.stdout).map(entry => entry.message)).toEqual([...messages]);
 	});
 
 	test("keeps disabled mode silent, sends sinks, preserves void returns, and re-enables", async () => {
