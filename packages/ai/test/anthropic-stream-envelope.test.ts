@@ -1393,6 +1393,15 @@ describe("anthropic stream envelope handling", () => {
 			}),
 		],
 		[
+			"Vertex org policy denying structured outputs",
+			Object.assign(
+				new Error(
+					"400 FAILED_PRECONDITION: Organization Policy constraint constraints/vertexai.allowedPartnerModelFeatures violated for projects/123 attempting to use a disallowed feature structured_outputs for Partner model claude-opus-5-5",
+				),
+				{ status: 400 },
+			),
+		],
+		[
 			"an unsupported strict field",
 			Object.assign(
 				new Error(

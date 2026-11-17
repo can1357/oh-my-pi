@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Google Vertex Claude requests denied the `structured_outputs` partner feature by organization policy now retry without strict tools and keep them disabled for the session ([#19576](https://github.com/can1357/oh-my-pi/issues/19576))
 - Fixed OpenAI Decisions judge usage reading as zero from gateways such as Bifrost that report `prompt_tokens`/`completion_tokens` instead of `input_tokens`/`output_tokens` ([#19053](https://github.com/can1357/oh-my-pi/pull/19053) by [@Xytronix](https://github.com/Xytronix))
 - Fenced (```thinking) reasoning with very long unbroken lines no longer slows down as it streams ([#19493](https://github.com/can1357/oh-my-pi/pull/19493) by [@H4vC](https://github.com/H4vC))
 - Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
