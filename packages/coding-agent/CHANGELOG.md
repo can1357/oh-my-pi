@@ -15,6 +15,7 @@
 - Subagents no longer open browser tabs in your Chrome (with `browser.relay` on) or over your Tern or cmux pane unless the open asks with `app: "relay"` or `app: "tern"`; they use `browser.cdpUrl` or omp's own Chromium ([#18789](https://github.com/can1357/oh-my-pi/pull/18789) by [@will-bogusz](https://github.com/will-bogusz))
 - Browser tasks start without reading `xd://eval/browser`: a short guide follows the first browser call as a hidden session message, outside cell output limits and shaping. Compaction or a rewind that drops or shortens it sends it again. Advisors keep reading the full guide first; real-session, borrowed-tab and page-integrity safety rules arrive before the first call ([#18786](https://github.com/can1357/oh-my-pi/pull/18786) by [@will-bogusz](https://github.com/will-bogusz))
 - Named-menu reads now include exposed nested commands with their full paths, avoiding a separate read for each submenu ([#18222](https://github.com/can1357/oh-my-pi/pull/18222) by [@will-bogusz](https://github.com/will-bogusz))
+- With no `web` role configured, `web_search` now searches through your session's own provider first (Anthropic, OpenAI, Gemini and others with built-in search) and falls back to keyless Parallel only when that provider has no search or it fails ([#13694](https://github.com/can1357/oh-my-pi/issues/13694), [#19548](https://github.com/can1357/oh-my-pi/pull/19548) by [@a-glapinski](https://github.com/a-glapinski))
 
 ### Fixed
 

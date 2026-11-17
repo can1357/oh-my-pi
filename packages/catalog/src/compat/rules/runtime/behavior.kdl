@@ -516,8 +516,11 @@ behavior {
 		model "factory-droid/gemini-3-pro-image-preview"
 	}
 	role-defaults "web" {
-		model "web/parallel"
+		// Hosted search first: it runs on the session provider, which already
+		// receives the conversation. Keyless engines follow for sessions whose
+		// provider has no grounded search.
 		model "web/hosted"
+		model "web/parallel"
 		model "web/exa"
 		model "web/firecrawl"
 		model "web/searxng"

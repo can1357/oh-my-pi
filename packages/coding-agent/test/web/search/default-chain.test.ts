@@ -93,8 +93,8 @@ describe("default web chain", () => {
 			{ authStorage, modelRegistry, sessionModel: sessionModel(host, sessionId) },
 		);
 
-		// The cheaper same-provider swap runs first; its failure falls back to the session model as-is.
-		expect(attempted.slice(0, 3)).toEqual(["web/parallel", `${host}/${searchId}`, `${host}/${sessionId}`]);
+		// Hosted search leads: the cheaper same-provider swap runs first, its failure falls back to the session model as-is.
+		expect(attempted.slice(0, 3)).toEqual([`${host}/${searchId}`, `${host}/${sessionId}`, "web/parallel"]);
 		expect(attempted.filter(selector => !selector.startsWith("web/"))).toEqual([
 			`${host}/${searchId}`,
 			`${host}/${sessionId}`,
@@ -109,7 +109,7 @@ describe("default web chain", () => {
 
 		await runSearchQuery({ query: "anything" }, { authStorage, modelRegistry, sessionModel: active });
 
-		expect(attempted.slice(0, 3)).toEqual(["web/parallel", "openai-codex/gpt-6-luna", "web/exa"]);
+		expect(attempted.slice(0, 3)).toEqual(["openai-codex/gpt-6-luna", "web/parallel", "web/exa"]);
 		expect(attempted.filter(selector => !selector.startsWith("web/"))).toEqual(["openai-codex/gpt-6-luna"]);
 	});
 
@@ -132,6 +132,8 @@ describe("default web chain", () => {
 
 		expect(attempted.every(selector => selector.startsWith("web/"))).toBe(true);
 		expect(attempted).not.toContain("web/hosted");
+		// Without hosted search the keyless engines take over, Parallel first.
+		expect(attempted[0]).toBe("web/parallel");
 	});
 
 	it("rejects a grounded answer without sources so a tool-dropping host cannot pass off a plain reply", async () => {
