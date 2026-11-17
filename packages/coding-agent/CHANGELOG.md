@@ -92,6 +92,7 @@
 
 - Removed the legacy standalone disassembler tools and their associated prompt instructions.
 - Removed the Copy and Edit-in-editor buttons from the Tern plan review sheet; use selection copying and double-click editing instead.
+- On Linux, file watching for language servers no longer puts an inotify watch on every directory under `node_modules` and `.git/objects`, which could use up the system's inotify watch limit and keep other programs such as systemd from adding watches ([#19459](https://github.com/can1357/oh-my-pi/issues/19459))
 
 ## [18.21.0] - 2026-11-16
 
