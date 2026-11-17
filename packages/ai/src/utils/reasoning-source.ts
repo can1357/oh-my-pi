@@ -53,6 +53,25 @@ export function signatureReasoningField(signature: string | undefined): Reasonin
 	return isReasoningField(signature) ? signature : parseReasoningDetailsSignature(signature)?.field;
 }
 
+function isReadableReasoningDetail(detail: unknown): boolean {
+	return isRecord(detail) && (detail.type === "reasoning.text" || detail.type === "reasoning.summary");
+}
+
+function isSignedReasoningDetail(detail: unknown): boolean {
+	return isRecord(detail) && (detail.signature != null || detail.data != null);
+}
+
+/** The entries a request that drops the model's own thinking still replays: encrypted ones and signed text, which must stay intact. */
+export function reasoningDetailsWithoutThinkingText<T>(details: readonly T[]): T[] {
+	return details.filter(detail => !isReadableReasoningDetail(detail) || isSignedReasoningDetail(detail));
+}
+
+/** Whether `signature` is an envelope whose thinking text replays even where the model's own thinking is dropped. */
+export function replaysSignedReasoningText(signature: string | undefined): boolean {
+	const details = parseReasoningDetailsSignature(signature)?.reasoningDetails ?? [];
+	return details.some(detail => isReadableReasoningDetail(detail) && isSignedReasoningDetail(detail));
+}
+
 /**
  * `content` with every `reasoning_details` envelope reduced to its field
  * marker. A pass that rewrote any thinking text or tool call arguments of the

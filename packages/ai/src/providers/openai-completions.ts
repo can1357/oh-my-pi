@@ -20,6 +20,8 @@ import {
 	MISTRAL_CONTENT_PARTS_SIGNATURE,
 	parseReasoningDetailsSignature,
 	type ReasoningDetailsSignature,
+	type ReasoningField,
+	reasoningDetailsWithoutThinkingText,
 	signatureReasoningField,
 } from "../utils/reasoning-source";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
@@ -1368,9 +1370,11 @@ const streamOpenAICompletionsOnce = (
 				: undefined;
 			const explicitReasoningDeltasMayBeCumulative = policy.stream.reasoningDeltasMayBeCumulative;
 			let suppressHealedThinking = false;
-			// Set once a plain reasoning field streamed: OpenRouter mirrors that text
-			// into `reasoning.text` entries, which then must not render twice.
-			let sawReasoningField = false;
+			// OpenRouter mirrors a plain reasoning field into `reasoning.text` entries;
+			// whichever streams first in the turn is its thinking, the other is skipped.
+			let reasoningSource: "field" | "details" | undefined;
+			// The plain field that streamed after `reasoning.text` won, kept as the replay marker.
+			let mirroredReasoningField: ReasoningField | undefined;
 			const receivedReasoningDetails: ReasoningDetail[] = [];
 			let healedToolCallEmitted = false;
 			const emitHealedToolCall = (call: HealedToolCall): void => {
@@ -1554,7 +1558,6 @@ const streamOpenAICompletionsOnce = (
 							break;
 						}
 					}
-					if (foundReasoningField) sawReasoningField = true;
 					const rawReasoningDetails = (choice.delta as OpenAICompletionsDeltaWithReasoningDetails)
 						.reasoning_details;
 					const reasoningDetails = Array.isArray(rawReasoningDetails)
@@ -1563,11 +1566,9 @@ const streamOpenAICompletionsOnce = (
 							)
 						: [];
 					let reasoningDetailsText = "";
-					if (!sawReasoningField) {
-						for (const detail of reasoningDetails) {
-							if (detail.type === "reasoning.text" && typeof detail.text === "string") {
-								reasoningDetailsText += detail.text;
-							}
+					for (const detail of reasoningDetails) {
+						if (detail.type === "reasoning.text" && typeof detail.text === "string") {
+							reasoningDetailsText += detail.text;
 						}
 					}
 
@@ -1596,14 +1597,20 @@ const streamOpenAICompletionsOnce = (
 						for (const entry of liteLLMThinkingBlocks) appendLiteLLMThinkingBlock(entry);
 						suppressHealedThinking = true;
 					} else if (foundReasoningField && !hasTypedThinking) {
-						appendThinkingDelta(
-							foundReasoningDelta,
-							foundReasoningField,
-							explicitReasoningDeltasMayBeCumulative ? "cumulative" : "delta",
-						);
-						suppressHealedThinking = true;
-					} else if (reasoningDetailsText && !hasTypedThinking) {
+						if (reasoningSource === "details") {
+							if (isReasoningField(foundReasoningField)) mirroredReasoningField ??= foundReasoningField;
+						} else {
+							reasoningSource = "field";
+							appendThinkingDelta(
+								foundReasoningDelta,
+								foundReasoningField,
+								explicitReasoningDeltasMayBeCumulative ? "cumulative" : "delta",
+							);
+							suppressHealedThinking = true;
+						}
+					} else if (reasoningDetailsText && !hasTypedThinking && reasoningSource !== "field") {
 						// Bifrost streams Gemini thinking only as `reasoning.text` entries.
+						reasoningSource = "details";
 						appendThinkingDelta(reasoningDetailsText);
 						suppressHealedThinking = true;
 					}
@@ -1877,8 +1884,9 @@ const streamOpenAICompletionsOnce = (
 						(block.thinkingSignature === undefined || isReasoningField(block.thinkingSignature)),
 				);
 				const stored: ReasoningDetailsSignature = { reasoningDetails: receivedReasoningDetails };
-				const field = holder?.thinkingSignature;
-				if (isReasoningField(field)) stored.field = field;
+				const holderField = holder?.thinkingSignature;
+				const field = isReasoningField(holderField) ? holderField : mirroredReasoningField;
+				if (field) stored.field = field;
 				if (holder) holder.thinkingSignature = JSON.stringify(stored);
 				else if (output.content.length > 0) openThinkingBlock(JSON.stringify(stored));
 			}
@@ -2894,6 +2902,7 @@ export function convertMessages(
 			// Replay `reasoning_details` exactly as received. Once the envelope is gone
 			// (a pass rewrote the turn's thinking or arguments, or the turn predates
 			// it), the encrypted entries kept on unchanged tool calls still replay.
+			// A request that drops the model's own thinking also drops its unsigned text.
 			const receivedReasoningDetails = msg.content.flatMap(block =>
 				block.type === "thinking"
 					? (parseReasoningDetailsSignature(block.thinkingSignature)?.reasoningDetails ?? [])
@@ -2909,7 +2918,10 @@ export function convertMessages(
 							return [perCall];
 						});
 			if (reasoningDetails.length > 0) {
-				assistantMsg.reasoning_details = reasoningDetails;
+				const replayed = completionsSendsOwnThinking(model, compat)
+					? reasoningDetails
+					: reasoningDetailsWithoutThinkingText(reasoningDetails);
+				if (replayed.length > 0) assistantMsg.reasoning_details = replayed;
 			}
 			// Some OpenAI-compatible backends concatenate assistant content as a
 			// string even for tool-call replay. OpenAI accepts an empty string here;

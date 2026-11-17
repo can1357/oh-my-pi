@@ -13,6 +13,7 @@ import {
 	isSameModelTurn,
 	shouldDropTruncatedThinkingOnlyAssistant,
 } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { replaysSignedReasoningText } from "@oh-my-pi/pi-ai/utils/reasoning-source";
 import { resolveThinkingReplayTokens, type ThinkingReplayTokens } from "@oh-my-pi/pi-catalog/compat/thinking-replay";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -569,8 +570,15 @@ export class Tokenizer {
 							continue;
 						}
 						if (this.#dropsOllamaThinking && ownOllamaTurn) continue;
-						// Chat-completions drops it unless LiteLLM replays it in `thinking_blocks`.
-						if (ownDroppedCompletionsTurn && !isLiteLLMThinkingSignature(block.thinkingSignature)) continue;
+						// Chat-completions drops it unless LiteLLM replays it in `thinking_blocks`
+						// or signed `reasoning_details` text replays with it.
+						if (
+							ownDroppedCompletionsTurn &&
+							!isLiteLLMThinkingSignature(block.thinkingSignature) &&
+							!replaysSignedReasoningText(block.thinkingSignature)
+						) {
+							continue;
+						}
 						if (this.#filtersReasoningHistory && this.#model !== undefined) {
 							// The demoted rendering is the visible text the request carries.
 							if (block.thinking.trim()) fragments.push(renderDemotedThinking(this.#model.id, block.thinking));

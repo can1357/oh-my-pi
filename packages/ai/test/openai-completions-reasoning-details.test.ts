@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import {
+	completionsDropsOwnThinking,
+	convertMessages,
+	streamOpenAICompletions,
+} from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type { AssistantMessage, FetchImpl, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
@@ -143,8 +147,8 @@ describe("openai-completions reasoning_details", () => {
 		expect(thinkingBlocks[0]).toMatchObject({ thinking: reasoningText });
 		expect(assistant.content.map(block => block.type)).toEqual(["thinking", "text", "toolCall"]);
 
+		// Bifrost drops the model's own thinking on replay, so only the encrypted entry goes back.
 		expect(replayed.reasoning_details).toEqual([
-			{ index: 0, type: "reasoning.text", text: reasoningText },
 			{ index: 0, type: "reasoning.encrypted", signature: "gemini-2.5-thought-signature" },
 		]);
 		expect(replayed.tool_calls).toMatchObject([{ id: "get_weather", function: { name: "get_weather" } }]);
@@ -159,15 +163,14 @@ describe("openai-completions reasoning_details", () => {
 		expect(thinkingDeltas.join("")).toStartWith("**Comparing Exponents**");
 		expect(thinkingDeltas.join("")).toEndWith("I've confirmed $3^{20} > 2^{31}$.");
 
-		const details = replayed.reasoning_details as Array<Record<string, unknown>>;
-		expect(details.map(detail => detail.type)).toEqual(["reasoning.text", "reasoning.encrypted"]);
-		expect(details[0]).toEqual({ index: 0, type: "reasoning.text", text: thinkingDeltas.join("") });
-		expect(details[1]).toEqual({
-			id: "tool_call_call_1",
-			index: 0,
-			type: "reasoning.encrypted",
-			signature: "gemini-3.5-thought-signature",
-		});
+		expect(replayed.reasoning_details).toEqual([
+			{
+				id: "tool_call_call_1",
+				index: 0,
+				type: "reasoning.encrypted",
+				signature: "gemini-3.5-thought-signature",
+			},
+		]);
 		expect(replayed.tool_calls).toMatchObject([{ id: "call_1_ts_gemini-3.5-thought-signature" }]);
 	});
 
@@ -230,6 +233,74 @@ describe("openai-completions reasoning_details", () => {
 			{ type: "reasoning.encrypted", data: "encrypted-blob", id: "call_1", format, index: 1 },
 		]);
 		expect(replayed.tool_calls).toMatchObject([{ id: "call_1", function: { name: "get_weather" } }]);
+	});
+
+	it("renders reasoning.text once when the mirrored reasoning string streams after it", async () => {
+		const model = completionsModel("google/gemini-3-pro-preview", "openrouter", "https://openrouter.ai/api/v1");
+		const format = "google-gemini-v1";
+		const firstTurn = sseChunks(model.id, [
+			{
+				delta: {
+					role: "assistant",
+					reasoning_details: [{ type: "reasoning.text", text: "Same thought.", format, index: 0 }],
+				},
+			},
+			{ delta: { reasoning: "Same thought." } },
+			{
+				delta: {
+					tool_calls: [
+						{
+							index: 0,
+							id: "call_1",
+							type: "function",
+							function: { name: "get_weather", arguments: '{"city":"Paris"}' },
+						},
+					],
+				},
+			},
+			{ delta: {}, finish: "tool_calls" },
+		]);
+		const { assistant, thinkingDeltas } = await streamAndReplay(model, firstTurn);
+
+		expect(thinkingDeltas.join("")).toBe("Same thought.");
+		expect(assistant.content.map(block => block.type)).toEqual(["thinking", "toolCall"]);
+	});
+
+	it("replays only encrypted and signed entries when the request drops the model's own thinking", () => {
+		const model = completionsModel("gemini/gemini-2.5-flash", "bifrost", "http://localhost:8080/v1");
+		const unsigned = { type: "reasoning.text", text: "Plain thought.", index: 0 };
+		const signed = { type: "reasoning.text", text: "Signed thought.", signature: "text-signature", index: 1 };
+		const encrypted = { type: "reasoning.encrypted", signature: "thought-signature", index: 2 };
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "thinking",
+					thinking: "Plain thought.Signed thought.",
+					thinkingSignature: JSON.stringify({ reasoningDetails: [unsigned, signed, encrypted] }),
+				},
+				{ type: "text", text: "Done." },
+			],
+			api: "openai-completions",
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 2,
+		};
+
+		expect(completionsDropsOwnThinking(model)).toBe(true);
+		const replayed = convertMessages(model, { messages: [userMessage, assistant] }, model.compat).find(
+			message => message.role === "assistant",
+		);
+		expect(Reflect.get(replayed ?? {}, "reasoning_details")).toEqual([signed, encrypted]);
 	});
 
 	it("still replays a tool call's encrypted entry when redaction rewrites the thinking text", async () => {
