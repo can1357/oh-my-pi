@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `@oh-my-pi/pi-utils/sandbox`: `detectSandbox()` reports the sandbox omp runs in as layers (nono, Docker, Podman, Kubernetes, or a `confined` layer for an unnamed kernel sandbox) with the kernel facts behind them, `inspectSandbox()` adds the kernel's Landlock version and what each probe reports on request, and `registerSandboxProbe()` lets a distribution or an extension describe its own sandbox ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
+- Added `@oh-my-pi/pi-utils/sandbox`: `detectSandbox()` reports the sandbox omp runs in as layers (nono, Docker, Podman, Kubernetes, or a `confined` layer for an unnamed kernel sandbox) with the kernel facts behind them, `inspectSandbox({ cwd })` adds the kernel's Landlock version and what each probe reports for a session directory on request, and `registerSandboxProbe()` lets a distribution or an extension describe its own sandbox ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 - Added `filterLauncherEnv()`, which returns the environment omp was started with, without what dotenv files added ([#18802](https://github.com/can1357/oh-my-pi/pull/18802) by [@breakwaterlabs](https://github.com/breakwaterlabs))
 
 ### Fixed

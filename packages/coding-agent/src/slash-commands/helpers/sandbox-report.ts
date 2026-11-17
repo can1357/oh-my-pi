@@ -338,8 +338,8 @@ export function buildSandboxReport(status: SandboxStatus, context: SandboxReport
 }
 
 /** The `/sandbox` report for a session, with what only a report asks for: probe reports and the policy files on disk. */
-export async function loadSandboxReport(approvalMode: ApprovalMode): Promise<SandboxReport> {
-	const status = await inspectSandbox();
+export async function loadSandboxReport(approvalMode: ApprovalMode, cwd?: string): Promise<SandboxReport> {
+	const status = await inspectSandbox(cwd === undefined ? undefined : { cwd });
 	const policyFiles = await resolvePolicyFiles(status);
 	return buildSandboxReport(status, { approvalMode, policyFiles });
 }

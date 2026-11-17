@@ -592,13 +592,13 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		subcommandOptional: true,
 		acpInputHint: "[section]",
 		handle: async (command, runtime) => {
-			const report = await loadSandboxReport(runtime.session.approvalMode);
+			const report = await loadSandboxReport(runtime.session.approvalMode, runtime.cwd);
 			await runtime.output(sandboxReportText(report, command.args));
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
 			clearSubmittedText(runtime);
-			const report = await loadSandboxReport(runtime.ctx.session.approvalMode);
+			const report = await loadSandboxReport(runtime.ctx.session.approvalMode, runtime.ctx.sessionManager.getCwd());
 			runtime.ctx.showCommandReport(sandboxReportView(report, command.args));
 		},
 	},

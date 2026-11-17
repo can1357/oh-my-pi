@@ -646,10 +646,16 @@ describe("SandboxDetector", () => {
 		expect((await waiting).layers.map(l => l.id)).toEqual(["first", "second"]);
 	});
 
-	it("detects again for each report, so the files answer follows a working directory that has moved", async () => {
+	it("detects again for each report, following moved or per-session working directories without cross-talk", async () => {
 		let cwd = "/home/alice/src/app";
 		const detector = new SandboxDetector({ host: () => nonoHost(NONO_CAPS, { cwd }) });
 		expect((await detector.inspect()).layers[0].files?.cwd).toBe("writable");
+		const [sessionWritable, sessionReadOnly] = await Promise.all([
+			detector.inspect({ cwd: "/home/alice/src/app" }),
+			detector.inspect({ cwd: "/opt/project" }),
+		]);
+		expect(sessionWritable.layers[0].files?.cwd).toBe("writable");
+		expect(sessionReadOnly.layers[0].files?.cwd).toBe("read-only");
 		cwd = "/opt/project";
 		expect((await detector.inspect()).layers[0].files?.cwd).toBe("read-only");
 	});

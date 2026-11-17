@@ -319,12 +319,12 @@ describe("/sandbox command", () => {
 	it("answers a text host with the summary, a named section, or the list of sections, without escape codes", async () => {
 		const policyFiles = { title: "Policy files", files: [{ label: "capability file", path: "/run/nono/caps.json" }] };
 		const detected = status({ layers: [{ ...NONO, details: [...(NONO.details ?? []), policyFiles] }] });
-		vi.spyOn(sandbox, "inspectSandbox").mockResolvedValue(detected);
+		const inspect = vi.spyOn(sandbox, "inspectSandbox").mockResolvedValue(detected);
 		// A session started auto-approved runs tool calls under yolo whatever the setting says.
 		const session = { settings: Settings.isolated({ "tools.approvalMode": "always-ask" }), approvalMode: "yolo" };
 		const run = async (text: string) => {
 			const chunks: string[] = [];
-			const runtime = { session, output: (chunk: string) => void chunks.push(chunk) };
+			const runtime = { session, cwd: "/session/work", output: (chunk: string) => void chunks.push(chunk) };
 			await executeAcpBuiltinSlashCommand(text, runtime as unknown as SlashCommandRuntime);
 			return chunks.join("\n");
 		};
@@ -333,6 +333,7 @@ describe("/sandbox command", () => {
 		try {
 			const summary = await run("/sandbox");
 			expect(summary).toContain("nono");
+			expect(inspect).toHaveBeenCalledWith({ cwd: "/session/work" });
 			expect(summary).toMatch(/yolo/i);
 			expect(summary).not.toMatch(/always.ask/i);
 			expect(summary).not.toContain("/work/app");

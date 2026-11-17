@@ -242,14 +242,20 @@ export interface SandboxDetectorOptions {
  */
 export class SandboxDetector {
 	readonly #probes = new Map<string, SandboxProbe>();
-	#host: () => SandboxHost;
+	#host: (cwd?: string) => SandboxHost;
 	#timeoutMs: number;
 	#status: SandboxStatus | undefined;
 	#running: Promise<SandboxStatus> | undefined;
 
 	constructor(options: SandboxDetectorOptions = {}) {
 		for (const probe of options.probes ?? BUILTIN_SANDBOX_PROBES) this.#add(probe);
-		this.#host = options.host ?? (() => createSandboxHost());
+		const customHost = options.host;
+		this.#host = customHost
+			? cwd => {
+					const base = customHost();
+					return cwd === undefined ? base : { ...base, cwd };
+				}
+			: cwd => createSandboxHost("", { cwd });
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	}
 
@@ -284,8 +290,8 @@ export class SandboxDetector {
 	 * A fresh status with report-time data added. Detection runs again on each call, so a report follows a working
 	 * directory that has moved since the cached status was taken; every probe's `report()` runs on each call too.
 	 */
-	async inspect(): Promise<SandboxStatus> {
-		const host = this.#host();
+	async inspect(options: { cwd?: string } = {}): Promise<SandboxStatus> {
+		const host = this.#host(options.cwd);
 		const status = await runSandboxDetection(host, [...this.#probes.values()], this.#timeoutMs);
 		return runSandboxReport(status, host, this.#probes, this.#timeoutMs);
 	}
@@ -325,6 +331,6 @@ export function detectSandbox(): Promise<SandboxStatus> {
 }
 
 /** A fresh status with report-time data, for `/sandbox`; see {@link SandboxDetector.inspect}. */
-export function inspectSandbox(): Promise<SandboxStatus> {
-	return detector.inspect();
+export function inspectSandbox(options?: { cwd?: string }): Promise<SandboxStatus> {
+	return detector.inspect(options);
 }
