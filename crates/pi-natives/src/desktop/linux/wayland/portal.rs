@@ -60,12 +60,10 @@ pub(super) fn remove_orphaned_remote_desktop_token() {
 	}
 }
 
-#[cfg(feature = "wayland-pipewire")]
 fn token_path(name: &str) -> Option<PathBuf> {
 	Some(omp_state_dir()?.join(name))
 }
 
-#[cfg(feature = "wayland-pipewire")]
 pub(super) fn read_token(name: &str) -> Option<String> {
 	fs::read_to_string(token_path(name)?)
 		.ok()
@@ -73,7 +71,6 @@ pub(super) fn read_token(name: &str) -> Option<String> {
 		.filter(|token| !token.is_empty())
 }
 
-#[cfg(feature = "wayland-pipewire")]
 pub(super) fn store_token(name: &str, token: Option<&str>) {
 	let (Some(path), Some(token)) = (token_path(name), token) else {
 		return;
