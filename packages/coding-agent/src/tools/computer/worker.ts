@@ -517,6 +517,22 @@ const MENU_CONTROL_ROUTE =
 	"Its options are chosen only through that menu: use the window's menu bar with win.menu.select(...) if it has the same command, or tell the user the step needs their screen.";
 
 /**
+ * The note after a macOS background `move`, printed for the first one in a
+ * desktop session: eval sends each window call as its own run, so a per-run
+ * note would repeat once per move. Measured in a macOS 26 guest on an `AppKit`
+ * tracking area and a Chrome `:hover` element: a background move gave neither
+ * any hover; a takeover move's hover ended when native warped the pointer
+ * back, before the call returned; a takeover click on the hidden control
+ * reached it every time. Under `refuse` both takeover routes are refused, so
+ * that ending names neither.
+ */
+const backgroundMoveNoted = new WeakSet<NativeDesktopSession>();
+const BACKGROUND_MOVE_HOVER =
+	"move ran in the background, which gives the app no hover, and a takeover move's hover ends before it returns; to press a control shown only on hover, click it with { takeover: true }";
+const BACKGROUND_MOVE_HOVER_REFUSED =
+	"move ran in the background, which gives the app no hover; the user's setting refuses takeover, so press a control shown only on hover through AX or tell the user the step needs their screen";
+
+/**
  * Under `refuse`, a macOS call that opens a menu is refused before anything is
  * sent: `WindowServer` sends the user's keys to an open menu, so even one
  * closed at once costs the user about a keystroke.
@@ -1255,14 +1271,25 @@ class Win {
 		strictOptions(options, inputOptionsKeys, "move");
 		const context = this.#guardInput("move");
 		const native = pointerOptions(options);
+		// A desktop or display move drives the user's own pointer whatever the options, so it is never background.
+		let background = native.takeover !== true && this.id !== "desktop" && !this.id.startsWith("display:");
 		await sendInput(
 			this.#session,
 			context,
 			"move",
 			native.takeover,
-			fallback => this.#session.moveMouse(this.id, x, y, { ...native, ...fallback }),
+			fallback => {
+				if (fallback) background = false;
+				return this.#session.moveMouse(this.id, x, y, { ...native, ...fallback });
+			},
 			this.pid,
 		);
+		if (background && this.#session.capabilities.backend === "quartz" && !backgroundMoveNoted.has(this.#session)) {
+			backgroundMoveNoted.add(this.#session);
+			const text =
+				context.snapshot.backgroundFallback === "refuse" ? BACKGROUND_MOVE_HOVER_REFUSED : BACKGROUND_MOVE_HOVER;
+			context.output.push({ type: "text", text });
+		}
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<AxTextSelection | undefined> {
