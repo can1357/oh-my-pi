@@ -80,6 +80,37 @@ def open(target, flags=None):
     return StubR2(target, flags)
 `;
 
+/** Cancellation stub: exposes a real child so the worker's SIGKILL/reap is observable. */
+const STUB_R2PIPE_PROCESS = STUB_R2PIPE.replace("import builtins\nimport os\n", "import builtins\nimport os\nimport subprocess\n")
+	.replace(
+		"class StubR2:\n    def __init__(self, target, flags):\n        self.target = target\n        self.flags = flags\n",
+		`class TrackedPopen(subprocess.Popen):
+    def kill(self):
+        _record("kill:" + str(self.pid))
+        return super().kill()
+    def wait(self, timeout=None):
+        code = super().wait(timeout=timeout)
+        _record("reaped:" + str(self.pid) + ":" + str(code))
+        return code
+
+class StubR2:
+    def __init__(self, target, flags):
+        self.target = target
+        self.flags = flags
+        self.process = TrackedPopen(
+            [os.sys.executable, "-c", "import time; time.sleep(60)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _record("child:" + str(self.process.pid))
+`,
+	)
+	.replace(
+		'    def quit(self):\n        _record("quit")\n',
+		'    def quit(self):\n        _record("quit")\n        self.process.kill()\n        self.process.wait()\n',
+	);
+
+
 describe("radare2 worker protocol from a hidden managed store", () => {
 	let dir: string | undefined;
 	let databaseDir: string;
@@ -343,13 +374,13 @@ type StubWorker = { worker: DisasmWorker; dir: string; databaseDir: string; log:
 type MutationResult = { ea: string; [key: string]: unknown };
 
 /** Start a radare2 worker against a fresh temp tree; frameMode forces an stdin interrupt frame. */
-async function startStubWorker(prefix: string, frameMode = false): Promise<StubWorker> {
+async function startStubWorker(prefix: string, frameMode = false, childProcess = false): Promise<StubWorker> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
 	const databaseDir = path.join(dir, ".omp", "db");
 	const log = path.join(dir, "r2.log");
 	const stubs = path.join(dir, "stubs");
 	await Bun.write(log, "");
-	await Bun.write(path.join(stubs, "r2pipe.py"), STUB_R2PIPE);
+	await Bun.write(path.join(stubs, "r2pipe.py"), childProcess ? STUB_R2PIPE_PROCESS : STUB_R2PIPE);
 	const binary = path.join(databaseDir, "stub.bin");
 	await Bun.write(binary, "radare2 mutation fixture\n");
 	const env: Record<string, string> = {};
@@ -395,6 +426,15 @@ async function stopStubWorker(stub: StubWorker): Promise<void> {
 		await fs.rm(stub.dir, { recursive: true, force: true });
 	}
 }
+function pidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 
 describe("radare2 mutations and cancellation", () => {
 	let stub: StubWorker;
@@ -452,11 +492,14 @@ describe("radare2 mutations and cancellation", () => {
 	});
 
 	it("interrupt frame terminates r2 and preserves the last saved project", async () => {
-		const cancelStub = await startStubWorker("radare2-cancel-", true);
+		const cancelStub = await startStubWorker("radare2-cancel-", true, true);
 		try {
 			await cancelStub.worker.request("save", {});
-			expect(await Bun.file(cancelStub.marker).exists()).toBe(true);
-			expect((await Bun.file(cancelStub.log).text()).split("\n")).not.toContain("terminate");
+			const before = await Bun.file(cancelStub.log).text();
+			const childPids = [...before.matchAll(/^child:(\d+)$/gm)].map(match => Number(match[1]));
+			const childPid = childPids.at(-1);
+			expect(childPid).toBeDefined();
+			expect(pidAlive(childPid!)).toBe(true);
 
 			const interrupted = await cancelStub.worker.request<ExecResult>(
 				"exec",
@@ -464,10 +507,82 @@ describe("radare2 mutations and cancellation", () => {
 				{ timeoutMs: 300 },
 			);
 			expect(interrupted.error?.toLowerCase()).toContain("interrupted");
-			expect((await Bun.file(cancelStub.log).text()).split("\n")).toContain("terminate");
+			const after = await Bun.file(cancelStub.log).text();
+			expect(after).toContain(`kill:${childPid}`);
+			expect(after).toContain(`reaped:${childPid}:`);
+			if (process.platform !== "win32") expect(after).toContain(`reaped:${childPid}:-9`);
+			expect(pidAlive(childPid!)).toBe(false);
 			expect(await Bun.file(cancelStub.marker).exists()).toBe(true);
 		} finally {
 			await stopStubWorker(cancelStub);
 		}
 	}, 15_000);
+
+	it("POSIX SIGINT SIGKILLs and reaps r2 and preserves the last saved project", async () => {
+		const signalStub = await startStubWorker("radare2-signal-", false, true);
+		try {
+			await signalStub.worker.request("save", {});
+			const before = await Bun.file(signalStub.log).text();
+			const childPids = [...before.matchAll(/^child:(\d+)$/gm)].map(match => Number(match[1]));
+			const childPid = childPids.at(-1);
+			expect(childPid).toBeDefined();
+			expect(pidAlive(childPid!)).toBe(true);
+
+			const interrupted = await signalStub.worker.request<ExecResult>(
+				"exec",
+				{ code: "while True: pass" },
+				{ timeoutMs: 300 },
+			);
+			expect(interrupted.error?.toLowerCase()).toContain("interrupted");
+			const after = await Bun.file(signalStub.log).text();
+			expect(after).toContain(`kill:${childPid}`);
+			expect(after).toContain(`reaped:${childPid}:`);
+			if (process.platform !== "win32") expect(after).toContain(`reaped:${childPid}:-9`);
+			expect(pidAlive(childPid!)).toBe(false);
+			expect(await Bun.file(signalStub.marker).exists()).toBe(true);
+		} finally {
+			await stopStubWorker(signalStub);
+		}
+	}, 15_000);
+
+	it("emits an interrupted frame when an interrupt lands before dispatch", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "radare2-interrupt-gap-"));
+		try {
+			const stubs = path.join(dir, "stubs");
+			const result = path.join(dir, "frames.json");
+			await Bun.write(path.join(stubs, "r2pipe.py"), STUB_R2PIPE);
+			await Bun.write(path.join(dir, "worker.py"), DISASM_BACKENDS.radare2.workerScript);
+			await Bun.write(path.join(dir, "probe.py"), `
+import json
+import sys
+sys.path.insert(0, ${JSON.stringify(dir)})
+import worker
+frames = []
+worker._send = lambda frame: frames.append(frame)
+def interrupt(*args, **kwargs):
+    raise KeyboardInterrupt()
+worker._run = interrupt
+worker._handle('{"id": 7, "method": "view", "params": {}}')
+with open(${JSON.stringify(result)}, "w") as handle:
+    json.dump(frames, handle)
+`);
+			const log = path.join(dir, "r2.log");
+			await Bun.write(log, "");
+			const env: Record<string, string> = {};
+			for (const key in process.env) {
+				const value = process.env[key];
+				if (value !== undefined) env[key] = value;
+			}
+			env.PYTHONPATH = stubs;
+			env.OMP_R2_STUB_LOG = log;
+			const proc = Bun.spawn([pythonPath, path.join(dir, "probe.py")], { env, stdout: "pipe", stderr: "pipe" });
+			expect(await proc.exited).toBe(0);
+			const frames = JSON.parse(await Bun.file(result).text());
+			expect(frames).toEqual([
+				{ id: 7, ok: false, error: { type: "KeyboardInterrupt", message: "interrupted" } },
+			]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });

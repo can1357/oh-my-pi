@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -661,6 +662,25 @@ _running_id = None
 _interrupt_pending = False
 
 
+def _kill_r2(r2):
+    """SIGKILL and reap the r2 child; SIGINT is swallowed by `r2 -q0`."""
+    proc = getattr(r2, "process", None)
+    if proc is None:
+        try:
+            r2.quit()
+        except Exception:
+            traceback.print_exc()
+        return
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        traceback.print_exc()
+
+
 def _cancel_session():
     global R2, _DIRTY
     r2 = R2
@@ -668,10 +688,7 @@ def _cancel_session():
     _DIRTY = False
     NS.clear()
     if r2 is not None:
-        try:
-            r2.terminate()
-        except Exception:
-            traceback.print_exc()
+        _kill_r2(r2)
 
 
 def _on_sigint(signum, frame):
@@ -744,6 +761,18 @@ def _close(save):
         NS.clear()
 
 
+def _send_error(req_id, exc):
+    frame = {"id": req_id, "ok": False, "error": _error(exc)}
+    try:
+        _send(frame)
+    except KeyboardInterrupt:
+        # A second SIGINT at the mask boundary must not lose the interrupted frame.
+        try:
+            _send(frame)
+        except KeyboardInterrupt:
+            pass
+
+
 def _handle(line):
     req_id = None
     try:
@@ -758,7 +787,7 @@ def _handle(line):
             try:
                 _close(save)
             except Exception as exc:
-                _send({"id": req_id, "ok": False, "error": _error(exc)})
+                _send_error(req_id, exc)
                 traceback.print_exc()
                 sys.exit(1)
             _send({"id": req_id, "ok": True, "result": {"closed": True, "saved": save}, "dirty": False})
@@ -766,16 +795,15 @@ def _handle(line):
         handler = _METHODS.get(method)
         if handler is None:
             raise ValueError("unknown method: " + str(method))
+        ok, result = _run(req_id, handler, params)
+        if ok:
+            _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
+        else:
+            _send({"id": req_id, "ok": False, "error": _error(result)})
     except SystemExit:
         raise
     except BaseException as exc:
-        _send({"id": req_id, "ok": False, "error": _error(exc)})
-        return
-    ok, result = _run(req_id, handler, params)
-    if ok:
-        _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
-    else:
-        _send({"id": req_id, "ok": False, "error": _error(result)})
+        _send_error(req_id, exc)
 
 
 def main():
@@ -783,7 +811,10 @@ def main():
         signal.signal(signal.SIGINT, _on_sigint)
     threading.Thread(target=_read_requests, name="omp-radare2-stdin", daemon=True).start()
     while True:
-        line = _requests.get()
+        try:
+            line = _requests.get()
+        except KeyboardInterrupt:
+            continue
         if not line:
             break
         if line.strip():
