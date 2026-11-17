@@ -565,7 +565,13 @@ fn parse_patch(text: &str) -> std::result::Result<Vec<FilePatch>, ApplyFailure> 
 }
 
 fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
-	let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+	let lines: Vec<&str> = if raw.len() < 64 {
+		raw.split_inclusive('\n').collect()
+	} else {
+		xutf::lines_str(raw, xutf::LineEnds::Lf)
+			.map(|line| line.with_end())
+			.collect()
+	};
 	let first = lines
 		.first()
 		.map_or_default(|line| line.trim_end_matches('\n'));
@@ -2398,6 +2404,18 @@ mod tests {
 		);
 		assert_eq!(git(temp.path(), &["show", "HEAD:tracked.txt"]), "updated\n");
 		assert_eq!(git(temp.path(), &["show", "HEAD~1:new-file.txt"]), "new\n");
+	}
+
+	#[test]
+	fn patch_lines_keep_crlf_and_unterminated_hunk_data() {
+		let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\r\n+new\r\n\\ No newline \
+		           at end of file";
+		let file = parse_file_patch(raw).expect("parse patch");
+		assert_eq!(file.raw, raw);
+		assert_eq!(file.hunks.len(), 1);
+		assert_eq!(file.hunks[0].lines[0].data, b"old\r");
+		assert_eq!(file.hunks[0].lines[1].data, b"new\r");
+		assert!(file.hunks[0].lines[1].no_newline);
 	}
 
 	#[test]
