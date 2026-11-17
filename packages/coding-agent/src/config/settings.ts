@@ -3661,13 +3661,13 @@ export class Settings {
 			delete raw["task.completionProbeMs"];
 		}
 
-		// Early per-agent toggles were persisted as booleans even though the
-		// runtime record contract is "on"/"off"/model pattern. Normalize each
-		// layer before merging so project-level false still overrides global true.
+		// Per-agent records accept booleans from early persisted toggles and
+		// hand-written YAML, though the runtime contract is "on"/"off"/model pattern.
+		// Normalize each layer before merging so project-level false still overrides global true.
 		{
 			const taskObj = isRecord(raw.task) ? raw.task : undefined;
 			if (taskObj) {
-				for (const key of ["agentPrewalk", "agentAdvisor"]) {
+				for (const key of ["agentPrewalk", "agentAdvisor", "agentPrewalkAuto"]) {
 					const overrides = isRecord(taskObj[key]) ? taskObj[key] : undefined;
 					if (!overrides) continue;
 					for (const agentName in overrides) {

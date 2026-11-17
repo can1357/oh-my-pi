@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
+### Changed
+
+- Improved file memory bank performance by reducing unnecessary disk synchronization during checkpointing, lowering per-turn I/O overhead for banks shared across multiple processes.
+
 ## [18.20.3] - 2026-11-16
 
 ### Added

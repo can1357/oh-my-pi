@@ -12,6 +12,7 @@ The theme system drives:
 - symbol preset + symbol overrides (`unicode`, `nerd`, `ascii`)
 - syntax highlighting colors used by native highlighter (`@oh-my-pi/pi-natives`)
 - status line segment colors
+- agent name colors in the agent hub, agent tree and Task tool rows
 
 Primary implementation: `packages/tui/src/theme/theme.ts`.
 
@@ -38,7 +39,7 @@ Color values accept:
 
 ## Required and optional color tokens
 
-All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset/empty keeps the terminal default foreground) and `mdExtensionLink` (unset derives a muted `mdLink`).
+All tokens below are required in `colors` except `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset/empty keeps the terminal default foreground), `mdExtensionLink` (unset derives a muted `mdLink`) and `subagent1`–`subagent6` (unset lets omp pick agent colors from the theme).
 
 ### Core text and borders (11)
 
@@ -75,6 +76,12 @@ With the `tui.colorfulMarkdown` setting on (the default), headings, `**strong**`
 
 `statusLineSep`, `statusLineModel`, `statusLinePath`, `statusLineGitClean`, `statusLineGitDirty`, `statusLineContext`, `statusLineSpend`, `statusLineStaged`, `statusLineDirty`, `statusLineUntracked`, `statusLineOutput`, `statusLineCost`, `statusLineSubagents`
 
+### Agent name colors (6 optional)
+
+`subagent1`, `subagent2`, `subagent3`, `subagent4`, `subagent5`, `subagent6`
+
+The main agent's name takes `accent`. Subagents take a color in the order they arrive in the session: the first gets the first subagent color, the seventh reuses it, and an agent keeps its color for the rest of the session. A declared `subagentN` is used as written. Slots the theme leaves unset are filled, in order, with colors that are at least 3:1 against every surface names are drawn on (`terminal.background`, else `statusLineBg`, and the Task card tints `toolPendingBg`, `toolSuccessBg`, `toolErrorBg`) and at least 0.10 apart in OKLab from `accent`, `error` and each other: first the theme's own `terminal.ansi` hues (blue, green, yellow, magenta, cyan, then their bright slots; red is left to errors), then hues derived from `accent` the way the session color is (each also offered one and two lightness steps further from the background), then a fixed fallback set.
+
 ## Optional tokens
 
 ### `export` section (optional)
@@ -89,7 +96,7 @@ If omitted, export code derives defaults from resolved theme colors.
 
 ### `terminal` section (optional)
 
-Describes the terminal the theme was made for, for hosts that paint the terminal themselves (Tern); omp never sets the terminal's colors. `terminal.ansi` (exactly 16 entries, ANSI 0–15) is also the palette colorful Markdown paints from; a theme without it falls back to the terminal's own ANSI colors.
+Describes the terminal the theme was made for, for hosts that paint the terminal themselves (Tern); omp never sets the terminal's colors. `terminal.ansi` (exactly 16 entries, ANSI 0–15) is also the palette colorful Markdown paints from; a theme without it falls back to the terminal's own ANSI colors. Agent name colors draw on `terminal.ansi` first and check contrast against `terminal.background`.
 
 ### `symbols` section (optional)
 
@@ -238,7 +245,7 @@ Auto mode also reevaluates dark/light slot mapping from terminal appearance chan
 - `toolDiffAdded` is HSV-adjusted (green shifted toward blue)
 - adjustment is applied only when resolved value is a hex string
 
-Other tokens are unchanged.
+Other tokens are unchanged. Agent name colors derived from `accent` steer clear of the theme's hues, `toolDiffAdded` among them, so the shifted token can move one of those derived colors.
 
 ## Where theme settings are persisted
 
@@ -370,7 +377,7 @@ Use this workflow:
 
 ## Real constraints and caveats
 
-- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset keeps the terminal default foreground) and `mdExtensionLink` (unset blends `mdLink` with `text`).
+- All `colors` tokens are required for custom themes except optional `thinkingMax` (falls back to `thinkingXhigh`), `assistantMessageText` (unset keeps the terminal default foreground), `mdExtensionLink` (unset blends `mdLink` with `text`) and `subagent1`–`subagent6` (unset lets omp pick agent colors from the theme).
 - `export` and `symbols` are optional.
 - `$schema` in theme JSON is informational; custom-theme runtime validation is enforced by `@oh-my-pi/omptype` in `packages/tui/src/theme/schema-validation.ts`.
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.

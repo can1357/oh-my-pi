@@ -278,13 +278,13 @@ pub trait Backend: Send {
 		ScreenState::default()
 	}
 	/// Waits, before a window or element takeover takes the input lease,
-	/// until the backend lets it start: X11 waits for the user to pause.
-	/// Backends that see no user input admit it at once.
+	/// until the backend lets it start: X11 and macOS wait for the user to
+	/// pause. Backends that see no user input admit it at once.
 	fn admit_takeover(&mut self) -> CoreResult<()> {
 		Ok(())
 	}
 	/// With the lease held: whether the last [`Self::admit_takeover`] still
-	/// holds (on X11, the user has pressed nothing since).
+	/// holds (on X11 and macOS, the user has pressed nothing since).
 	fn takeover_admitted(&mut self) -> CoreResult<bool> {
 		Ok(true)
 	}
@@ -454,11 +454,14 @@ pub trait AxBackend {
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps>;
 	fn children(&mut self, h: &AxHandle) -> CoreResult<Vec<AxHandle>>;
 	/// Reads an element and its children for a tree walk, letting a backend
-	/// share one children read and skip bounds the walk does not need.
+	/// share one children read and skip bounds the walk does not need. A
+	/// backend may read only the first `max_children` children of an element
+	/// that has very many, counting the rest in [`AxProps::unread_children`].
 	fn walk_node(
 		&mut self,
 		h: &AxHandle,
 		_bounds: WalkBounds,
+		_max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 		Ok((self.props(h)?, self.children(h)?))
 	}
@@ -469,7 +472,8 @@ pub trait AxBackend {
 	fn perform_menu(&mut self, _h: &AxHandle, _action: &str, _path: &[String]) -> CoreResult<()> {
 		Err(DesktopError::new(
 			ErrorCode::Unsupported,
-			"choosing a menu item in the action that opens the menu is available only on macOS",
+			"choosing a menu item in the action that opens the menu is available only on macOS, and \
+			 on Linux for a combo box's options",
 		))
 	}
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()>;

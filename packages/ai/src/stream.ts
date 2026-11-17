@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
+	GOOGLE_THINKING_BUDGETS,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
 	requireSupportedEffort,
@@ -28,6 +29,7 @@ import {
 	resolveNextAuthRetryKey,
 } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
+import { withProbedThinking } from "./thinking-probe";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
@@ -1215,8 +1217,7 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
-	// Unverified thinking is opt-in: without a requested effort the request is
-	// byte-identical to a non-reasoning model's.
+	// Requests without an effort keep unknown thinking controls off the wire.
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
 	if (!effortRequested) model = withoutUnverifiedThinking(model);
@@ -1421,6 +1422,14 @@ function streamSimpleRequest<TApi extends Api>(
 		);
 	}
 
+	return withProbedThinking(model, context, requestOptions, streamSimpleDispatch);
+}
+
+function streamSimpleDispatch<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	requestOptions: SimpleStreamOptions,
+): AssistantMessageEventStream {
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't
 	// need an `apiKey` from `getEnvApiKey` here — `options.apiKey` carries
@@ -1596,15 +1605,6 @@ export const ANTHROPIC_THINKING: Record<Effort, number> = {
 	max: 32768,
 };
 
-const GOOGLE_THINKING: Record<Effort, number> = {
-	minimal: 1024,
-	low: 4096,
-	medium: 8192,
-	high: 16384,
-	xhigh: 24575,
-	max: 32768,
-};
-
 /**
  * Estimated thinking spend for an effort, used to size Google's
  * `maxOutputTokens` (Gemini counts thinking against it). Level mode and the
@@ -1615,7 +1615,7 @@ function googleThinkingHeadroom(model: Model<Api>, effort: Effort, customBudgets
 	const custom = customBudgets?.[effort];
 	if (custom !== undefined && custom > 0) return custom;
 	const catalog = model.thinking?.effortBudgets?.[effort];
-	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING[effort];
+	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING_BUDGETS[effort];
 }
 
 /**
@@ -1877,6 +1877,7 @@ function mapOptionsForApi<TApi extends Api>(
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		omitDemotedReasoning: options?.omitDemotedReasoning,
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
@@ -2242,7 +2243,9 @@ function mapOptionsForApi<TApi extends Api>(
 				}
 
 				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
+					options.thinkingBudgets?.[effort] ??
+					model.thinking?.effortBudgets?.[effort] ??
+					GOOGLE_THINKING_BUDGETS[effort];
 
 				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);

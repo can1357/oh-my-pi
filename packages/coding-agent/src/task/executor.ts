@@ -160,6 +160,7 @@ import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly"
 import {
 	cfgTaskPrewalk,
 	cfgTaskAgentPrewalk,
+	cfgTaskAgentPrewalkAuto,
 	cfgTaskMaxEffort,
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
@@ -177,7 +178,10 @@ import {
 	cfgTierOpenai,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
+	cfgPrewalkAutoTarget,
 } from "../session/settings";
+import { type AutoPrewalkDecision, classifyAutoPrewalk } from "../auto-prewalk/classifier";
+import { type JudgmentUsage, journalJudgmentUsage, type NativeJudgmentDeps } from "../judgment";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
@@ -501,12 +505,10 @@ export interface ExecutorOptions {
 	/** Caller's description of how open-ended the work is; rides the initial prompt into the child's `auto` thinking classifier. */
 	solutionSpace?: string;
 	/**
-	 * `false` = the child has no `yield` tool and its final assistant message is
-	 * the result (`task.structured` off); callers then supply no {@link outputSchema}.
-	 * Default `true`.
+	 * Schema used to validate the final structured completion. Its presence is
+	 * what gives the child a `yield` tool (see {@link usesYield}); without one the
+	 * child's final assistant message is the result.
 	 */
-	structured?: boolean;
-	/** Schema used to validate the final structured completion. */
 	outputSchema?: unknown;
 	/** Enforcement policy for {@link outputSchema}; defaults to legacy permissive behavior. */
 	outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -725,9 +727,6 @@ interface FinalizeSubprocessOutputArgs {
 	outputSchema: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
-	lastAssistantText?: string;
-	/** `false` = no `yield` tool: `rawOutput` is the final assistant message, returned verbatim. Default `true`. */
-	structured?: boolean;
 }
 
 interface FinalizeSubprocessOutputResult {
@@ -744,6 +743,15 @@ export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yiel
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 export const SUBAGENT_WARNING_EMPTY_MESSAGE = "SYSTEM WARNING: Subagent ended without a final message.";
+
+/**
+ * Whether a run returns its result through `yield`. Only a schema-bound result
+ * needs the tool; without an output schema the child has no `yield` and its
+ * final assistant message is the result, verbatim.
+ */
+export function usesYield(outputSchema: unknown): boolean {
+	return outputSchema !== undefined;
+}
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -772,7 +780,7 @@ function buildSchemaViolationOutcome(
 
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
-	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
+	const { yieldItems, doneAborted, signalAborted, outputSchema } = args;
 	const mode = args.outputSchemaMode ?? "permissive";
 	const source = args.outputSchemaSource ?? (outputSchema === undefined ? "none" : "session");
 	const includeStructuredOutput = source !== "none";
@@ -793,7 +801,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				rawOutput = `{"aborted":true,"error":"${lastYield.error || "Unknown error"}"}`;
 			}
 		} else {
-			const assembled = assembleYieldResult(yieldItems, lastAssistantText, yieldSectionShapes(outputSchema));
+			const assembled = assembleYieldResult(yieldItems, yieldSectionShapes(outputSchema));
 			if (!assembled || assembled.missingData) {
 				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
 				if (includeStructuredOutput) {
@@ -815,7 +823,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				}
 			} else {
 				const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
-				const submittedData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
+				const submittedData = parseStringifiedJson(assembled.data ?? null);
 				const completeData =
 					mode === "strict" ? (validator?.normalize(submittedData) ?? submittedData) : submittedData;
 				const validation = validator?.validate(completeData);
@@ -850,10 +858,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 					exitCode = outcome.exitCode;
 				} else {
 					try {
-						rawOutput =
-							assembled.rawText && typeof completeData === "string"
-								? completeData
-								: (JSON.stringify(completeData, null, 2) ?? "null");
+						rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
 					} catch (err) {
 						const errorMessage = err instanceof Error ? err.message : String(err);
 						rawOutput = `{"error":"Failed to serialize yield data: ${errorMessage}"}`;
@@ -869,7 +874,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				}
 			}
 		}
-	} else if (args.structured === false) {
+	} else if (!usesYield(outputSchema)) {
 		// The final assistant message is the result verbatim; only an empty one fails.
 		if (exitCode === 0 && !rawOutput.trim()) {
 			rawOutput = SUBAGENT_WARNING_EMPTY_MESSAGE;
@@ -1435,6 +1440,35 @@ interface SubagentRunMonitor {
  */
 function isAsyncResultInjection(message: AgentMessage | undefined): boolean {
 	return message?.role === "custom" && message.customType === ASYNC_RESULT_MESSAGE_TYPE;
+}
+
+/**
+ * Judges one assignment for `task.agentPrewalkAuto`. False on a non-arming or
+ * failed judgment: the spawn then runs without prewalk. An abort still throws.
+ */
+async function judgeSubagentAutoPrewalk(
+	request: string,
+	agentName: string,
+	deps: NativeJudgmentDeps,
+): Promise<boolean> {
+	let decision: AutoPrewalkDecision | undefined;
+	try {
+		decision = await classifyAutoPrewalk({ request, history: [] }, deps);
+	} catch (error) {
+		if (deps.signal?.aborted) throw error;
+		logger.debug("Subagent auto-prewalk judgment failed; skipping prewalk", {
+			agent: agentName,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return false;
+	}
+	if (decision?.arm) return true;
+	logger.debug("Subagent auto-prewalk judgment did not arm; skipping prewalk", {
+		agent: agentName,
+		route: decision?.route,
+		prewalkProbability: decision?.probabilities.prewalk,
+	});
+	return false;
 }
 
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
@@ -2565,9 +2599,8 @@ function recordedYields(progress: AgentProgress): YieldItem[] {
  * delivered no data.
  */
 function stepReport(monitor: SubagentRunMonitor, structured: boolean, firstYield: number): string | undefined {
-	const lastTurn = monitor.lastReportTurnText();
-	if (!structured) return lastTurn;
-	const assembled = assembleYieldResult(recordedYields(monitor.progress).slice(firstYield), lastTurn);
+	if (!structured) return monitor.lastReportTurnText();
+	const assembled = assembleYieldResult(recordedYields(monitor.progress).slice(firstYield));
 	if (!assembled || assembled.missingData) return undefined;
 	return typeof assembled.data === "string" ? assembled.data : JSON.stringify(assembled.data, null, 2);
 }
@@ -3022,8 +3055,7 @@ interface FinalizeRunArgs {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
-	/** `false` = no `yield` tool: the run's last report turn is the result verbatim. Default `true`. */
-	structured?: boolean;
+	/** Absent = no `yield` tool: the run's last report turn is the result verbatim (see {@link usesYield}). */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -3061,7 +3093,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// A structured run finalizes from its yield (falling back to the run's
 	// output); a message-result run is exactly its final report turn, never
 	// the narration of earlier turns.
-	const structured = args.structured !== false;
+	const structured = usesYield(args.outputSchema);
 	let rawOutput = structured ? monitor.rawOutput() : (monitor.lastReportTurnText() ?? "");
 	const yieldItems = recordedYields(progress);
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
@@ -3079,8 +3111,6 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchema: args.outputSchema,
 			outputSchemaMode: args.outputSchemaMode,
 			outputSchemaSource: args.outputSchemaSource,
-			lastAssistantText: monitor.lastReportTurnText(),
-			structured,
 		});
 	} finally {
 		popLoopPhase();
@@ -3287,8 +3317,7 @@ export interface IrcWakeTurnMonitorOptions {
 	completionProbe?: boolean;
 	softRequestBudget?: number;
 	softRequestBudgetNotice?: boolean;
-	/** `false` = the session has no `yield` tool; see {@link ExecutorOptions.structured}. */
-	structured?: boolean;
+	/** Absent = the session has no `yield` tool; see {@link usesYield}. */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -3676,7 +3705,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					task: ircTask,
 					modelOverride: options.modelOverride,
 					modelRole: options.modelRole,
-					structured: options.structured,
 					outputSchema: options.outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
 					outputSchemaSource: options.outputSchemaSource,
@@ -3702,7 +3730,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// A focused-user result can complete without a registered wake job;
 				// enqueue its delivery without reserving an execution slot.
 				const messageResult =
-					(userPrompted || ownerPrompted) && options.structured === false && result?.outputPath !== undefined;
+					(userPrompted || ownerPrompted) && !usesYield(options.outputSchema) && result?.outputPath !== undefined;
 				if (messageResult && !wakeJob && ownerId && session.asyncJobManager && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					try {
@@ -3928,8 +3956,7 @@ export interface FollowUpTurnOptions {
 	description?: string;
 	/** Explicit pre-expansion model role alias retained from the original run. */
 	modelRole?: string;
-	/** Structured-output state retained from the original invocation; see {@link ExecutorOptions.structured}. */
-	structured?: boolean;
+	/** Output schema retained from the original invocation; absent = no `yield` tool (see {@link usesYield}). */
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -4121,7 +4148,7 @@ async function driveFollowUpTurn(
 	// ordinary contract so the wake cannot consume pooled items, wait it out,
 	// then reinstall and reattach for the retry.
 	let attemptUnsubscribe = monitor.attach(session);
-	const structured = options.structured !== false;
+	const structured = usesYield(options.outputSchema);
 	// As in a first run: this turn's monitor would take a wake turn's answer
 	// (or its `yield`) as this turn's result, so non-parent wakes wait for it.
 	const releaseIrcWakes = session.holdIrcWakes();
@@ -4172,7 +4199,6 @@ async function driveFollowUpTurn(
 			agent,
 			task: message,
 			modelRole: options.modelRole,
-			structured,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
@@ -4600,7 +4626,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		onProgress,
 	} = options;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
-	const structured = options.structured !== false;
+	const structured = usesYield(outputSchema);
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
 	// loop dispatches a chat request to the provider — the launch-complete boundary.
@@ -4780,7 +4806,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		maxRuntimeMs,
 		softRequestBudget,
 		softRequestBudgetNotice,
-		structured,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
@@ -5000,46 +5025,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
-			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
-			// `task.agentPrewalk` settings override hands the subagent off to a
-			// fast/cheap target at its first edit/write — the same mechanism as the
-			// session-level --prewalk. The bundled generic `task` agent has no
-			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn. A per-call
-			// worker never switches models, so it never prewalks.
-			const perCallModelGrants = options.perCallModelGrants;
-			let prewalk: Prewalk | undefined;
-			const prewalkPattern = perCallModelGrants
-				? undefined
-				: resolveAgentPrewalkPattern({
-						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-					});
-			if (prewalkPattern) {
-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
-					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-						warning: resolvedPrewalk.warning,
-					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
-					// Same model AND same effective thinking level: switching would only
-					// inject the plan/checklist nudges for no gain — skip. An effort-only
-					// delta on the same model still arms (it is a real cheapening hand-off).
-					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-					});
-				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
-				}
-			}
-
-			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
-			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -5063,6 +5048,76 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 							conversationId: undefined,
 						}
 					: undefined;
+
+			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
+			// `task.agentPrewalk` settings override hands the subagent off to a
+			// fast/cheap target at its first edit/write — the same mechanism as the
+			// session-level --prewalk. The bundled generic `task` agent has no
+			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
+			// Resolution failures skip prewalk instead of failing the spawn. A per-call
+			// worker never switches models, so it never prewalks.
+			// `task.agentPrewalkAuto` (same "on"/"off"/pattern grammar; "on" targets
+			// `prewalk.autoTarget`) asks the judge per assignment when nothing arms
+			// unconditionally. The judgment runs only after the target is known to be
+			// usable; a non-arming or failed judgment leaves the spawn without prewalk.
+			const perCallModelGrants = options.perCallModelGrants;
+			let prewalk: Prewalk | undefined;
+			const judgmentUsage: JudgmentUsage[] = [];
+			const unconditionalPattern = perCallModelGrants
+				? undefined
+				: resolveAgentPrewalkPattern({
+						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+					});
+			const autoEntry =
+				unconditionalPattern === undefined && !perCallModelGrants && !restrictToolNames
+					? cfgTaskAgentPrewalkAuto.get(settings)[agent.name]?.trim()
+					: undefined;
+			const autoPattern = autoEntry
+				? resolveAgentPrewalkPattern({
+						settingsOverride: autoEntry,
+						agentPrewalk: cfgPrewalkAutoTarget.get(settings),
+					})
+				: undefined;
+			const prewalkPattern = unconditionalPattern ?? autoPattern;
+			if (prewalkPattern) {
+				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
+				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
+				const target = resolvedPrewalk.model;
+				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
+					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+						warning: resolvedPrewalk.warning,
+					});
+				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
+					// Same model AND same effective thinking level: switching would only
+					// inject the plan/checklist nudges for no gain — skip. An effort-only
+					// delta on the same model still arms (it is a real cheapening hand-off).
+					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
+						agent: agent.name,
+						pattern: prewalkPattern,
+					});
+				} else {
+					const armed =
+						unconditionalPattern !== undefined ||
+						(await awaitAbortable(
+							judgeSubagentAutoPrewalk(assignment?.trim() || task, agent.name, {
+								settings,
+								registry: modelRegistry,
+								sessionModel: model,
+								sessionId: id,
+								signal: abortSignal,
+								onUsage: usage => judgmentUsage.push(usage),
+								telemetry: subagentTelemetry,
+							}),
+						));
+					if (armed) prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
+				}
+			}
+
+			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
+			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
 			if (options.parentTelemetry && subagentAgentIdentity) {
 				const parentTelemetryHandle = resolveTelemetry(
@@ -5242,6 +5297,13 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 				formatModelStringWithRouting(session.model) === formatModelStringWithRouting(model)
 			) {
 				sessionManager.appendModelChange(formatModelStringWithRouting(model), retryFallbackRole);
+			}
+			// Bill the auto-prewalk judgment to the child session it decided for, only now:
+			// an earlier entry would make the SDK treat this fresh session as resumed and
+			// skip persisting its starting model, effort and service tier.
+			const journalJudgment = journalJudgmentUsage(sessionManager);
+			if (journalJudgment) {
+				for (const usage of judgmentUsage) journalJudgment(usage);
 			}
 			sessionCreatedAt = performance.now();
 
@@ -5602,7 +5664,6 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			assignment,
 			modelOverride,
 			modelRole,
-			structured,
 			outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,

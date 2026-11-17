@@ -150,6 +150,7 @@ import { type BashResult, drainAbortedShells, releaseShellSessions } from "../ex
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { MCPLoadResult } from "../mcp";
 import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
@@ -533,6 +534,7 @@ import { EAGER_TODO_PRELUDE_MESSAGE_TYPE, TodoTracker, type TodoTrackerHost } fr
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
+import { cfgDisasmBackend } from "../disasm/active";
 import { cfgBrowserEnabled, cfgBrowserFreezeOnTurnEnd, cfgBrowserIdleCloseSec } from "../tools/browser/settings";
 import {
 	cfgClaudeResets,
@@ -1340,6 +1342,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#sideStreamFn: StreamFn;
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
+	#reloadOwnedMcpServers: (() => Promise<MCPLoadResult | undefined>) | undefined;
+	#projectScopeRefresher: (() => Promise<void>) | undefined;
+	#projectScopeRefresh: Promise<void> = Promise.resolve();
 
 	readonly #ttsr: TtsrCoordinator;
 	readonly #stats: SessionStatsTracker;
@@ -2253,8 +2258,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					},
 				),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
-			setModelTemporary: (model, thinkingLevel) =>
-				this.#models.setModelTemporary(model, thinkingLevel, { prewalk: true }, "automatic"),
+			setModelTemporary: (model, thinkingLevel, isCurrent) =>
+				this.#models.setModelTemporary(model, thinkingLevel, { prewalk: true }, "automatic", isCurrent),
 			setActiveToolsByName: names => this.setActiveToolsByName(names),
 			restoreNonMCPToolPresentation: (nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames) =>
 				this.restoreNonMCPToolPresentation(nonMCPToolNames, nonMCPMountedToolNames, registeredToolNames),
@@ -2330,9 +2335,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: async (model, selection = "explicit") => {
-				await this.#setModelWithProviderSessionReset(model);
-				// Only a completed explicit selection, including same-model reselection, takes ownership.
+				// An explicit selection, including same-model reselection, takes ownership when it publishes. The reset
+				// publishes before its first await, so releasing first lets an in-flight prewalk switch see the newer
+				// selection without a window where the new model is live but the handoff still owns the session.
 				if (selection === "explicit") this.#prewalk.releaseHandoff();
+				await this.#setModelWithProviderSessionReset(model);
 			},
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
@@ -2481,7 +2488,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#autoTitle = config.autoTitle === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
-		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
+		const sideStreamFn = config.sideStreamFn ?? streamSimple;
+		// Side requests over this history (native compaction, handoff) send it as
+		// the live turns do: once this session leaves other models' reasoning out,
+		// so do they.
+		this.#sideStreamFn = (model, context, options) =>
+			sideStreamFn(
+				model,
+				context,
+				this.#recovery.omitsDemotedReasoning(model) ? { ...options, omitDemotedReasoning: true } : options,
+			);
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
 		// Avoid wrapping in an `async` closure when no user callback is configured: the
@@ -2531,9 +2547,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// A transition swaps the transcript under the agent: hold idle deliveries until it
 			// settles, so a result from the outgoing session cannot start a turn in the target.
 			isStreaming: () => this.isStreaming || this.isSessionTransitioning,
-			injectIdle: async messages => {
-				const first = messages[0];
+			injectIdle: async delivered => {
+				const first = delivered[0];
 				if (!first) return;
+				// A background job may have made a prelude's first call: its guide rides the job's delivery.
+				const guide = this.#tools.takeEvalPreludeGuide();
+				const messages = guide ? [...delivered, guide] : delivered;
 				if (this.#clientBridge?.deferAgentInitiatedTurns) {
 					this.#recordWithoutTurn(messages);
 					return;
@@ -2620,8 +2639,16 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// one: that turn's text is its result.
 			const keepPeerMessages =
 				boundary === "stop" && (this.#ircWakeHolds > 0 || this.#ircWakeTurnObserver !== undefined);
-			const thunks: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
-			thunks.push(...this.yieldQueue.drainLazy());
+			let hasDelivery = false;
+			const queued: AsideMessage[] = this.#irc.drainPending({ keepPeerMessages }).map(record => () => record);
+			queued.push(...this.yieldQueue.drainLazy());
+			const thunks: AsideMessage[] = queued.map(entry => () => {
+				const message = typeof entry === "function" ? entry() : entry;
+				if (message) hasDelivery = true;
+				return message;
+			});
+			// A guide follows work, or rides an actual delivery; a stale queued entry cannot extend the turn.
+			thunks.push(() => (boundary === "work" || hasDelivery ? (this.#tools.takeEvalPreludeGuide() ?? null) : null));
 			// Mid-run todo reconciliation — evaluated at injection time so a turn
 			// that flips a todo just before this poll suppresses the nudge.
 			thunks.push(() => this.#todo.takeMidRunNudge());
@@ -2697,6 +2724,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			skillsReloadable: config.skillsReloadable,
 		});
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
+		this.#reloadOwnedMcpServers = config.reloadOwnedMcpServers;
 		const ttsrHost: TtsrCoordinatorHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -3055,8 +3083,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			runRecoveryCompactionWithRollback: (reason, message, options) =>
 				this.#recovery.runRecoveryCompactionWithRollback(reason, message, options),
 			parseRetryAfterMsFromError: errorMessage => this.#recovery.parseRetryAfterMsFromError(errorMessage),
-			setModelTemporary: (model, thinkingLevel, options) =>
-				this.#models.setModelTemporary(model, thinkingLevel, options, "automatic"),
+			setModelTemporary: async (model, thinkingLevel, options) => {
+				await this.#models.setModelTemporary(model, thinkingLevel, options, "automatic");
+			},
 			abort: options => this.abort(options),
 			abortHandoff: () => this.abortHandoff(),
 		};
@@ -3129,6 +3158,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		cfgRatchetEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("ratchet.enabled", enabled));
 		cfgArchiveEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("archive.enabled", enabled));
 		cfgCommitEnabled.listen(this, enabled => this.#reconcileEvalPreludeSetting("commit.enabled", enabled));
+		cfgDisasmBackend.listen(this, backend =>
+			this.#reconcileEvalPreludeSetting("disassembler.backend", backend !== undefined),
+		);
 		cfgBrowserIdleCloseSec.listen(this, seconds => {
 			const ownerId = this.sessionManager.getSessionId() ?? "";
 			// Any change invalidates the armed deadline: cancel first (its
@@ -3189,14 +3221,20 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * `browser.enabled` / `computer.enabled` / `ratchet.enabled` / `archive.enabled` / `commit.enabled` change the live eval preludes; the browser toggle also
+	 * Capability settings change the live eval preludes; the browser toggle also
 	 * re-filters its MCP tools first. An empty transcript rebuilds the system prompt to advertise
 	 * them; mid-session the cached prompt stays byte-stable and the next user prompt carries a
 	 * hidden prelude notice instead (see {@link SessionTools.takeEvalPreludeNotice}).
 	 * A failed browser switch-on reverts to off.
 	 */
 	async #reconcileEvalPreludeSetting(
-		path: "browser.enabled" | "computer.enabled" | "ratchet.enabled" | "archive.enabled" | "commit.enabled",
+		path:
+			| "browser.enabled"
+			| "computer.enabled"
+			| "ratchet.enabled"
+			| "archive.enabled"
+			| "commit.enabled"
+			| "disassembler.backend",
 		enabled: boolean,
 	): Promise<void> {
 		try {
@@ -7816,6 +7854,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#getEvalPreludes?.() ?? [];
 	}
 
+	/** Records a call into an eval prelude; its first-call guide follows the current tool batch. */
+	noteEvalPreludeCall(name: string): void {
+		this.#tools.noteEvalPreludeCall(name);
+	}
+
 	/** Eval preludes frozen into the provider-visible prompt (see {@link SessionTools.advertisedEvalPreludes}). */
 	getAdvertisedEvalPreludes(): readonly EvalPreludeDefinition[] {
 		return this.#tools.advertisedEvalPreludes;
@@ -7897,6 +7940,34 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Bind startup-deferred extensions on the first {@link loadDeferredExtensions} call. */
 	setDeferredExtensionLoader(load: () => Promise<void>): void {
 		this.#deferredExtensionLoader = load;
+	}
+
+	/** Install the {@link refreshProjectScope} implementation (top-level sessions only). */
+	setProjectScopeRefresher(refresh: () => Promise<void>): void {
+		this.#projectScopeRefresher = refresh;
+	}
+
+	/**
+	 * Re-scope what this session discovered from its working directory after the cwd changed
+	 * (`/move`, resuming a session from another project): task agents, project extensions and
+	 * custom tools, and the owned MCP manager's servers. Serialized; a no-op for sessions without
+	 * a project scope (subagents). MCP servers reconnect in the background and turns wait for
+	 * them, bounded, as they do for startup discovery.
+	 */
+	refreshProjectScope(): Promise<void> {
+		const refresh = this.#projectScopeRefresher;
+		if (!refresh) return Promise.resolve();
+		const next = this.#projectScopeRefresh.catch(() => {}).then(refresh);
+		this.#projectScopeRefresh = next;
+		return next;
+	}
+
+	/**
+	 * Reconnect the owned MCP manager's servers against the current cwd and rebind MCP tools.
+	 * Resolves `undefined` when this session borrows or disables MCP.
+	 */
+	reloadMCPServers(): Promise<MCPLoadResult | undefined> {
+		return this.#reloadOwnedMcpServers?.() ?? Promise.resolve(undefined);
 	}
 
 	/** Whether startup-deferred extensions are still unbound (loading or not yet started). */
@@ -8373,6 +8444,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#toolChoiceQueue.clear();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		this.#tools.clearEvalPreludeCalls();
 		// A `/new`, session switch, or tree navigation reuses tool-call ids, so a
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
@@ -12262,8 +12334,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Replace the title-generation system prompt override. Called by
-	 *  {@link InteractiveMode.refreshTitleSystemPrompt} after the session cwd
-	 *  changes (e.g. `/move` relocation) so the next replan refresh resolves
+	 *  `rescopeSessionToCwd` after the session cwd changes (e.g. `/move`
+	 *  relocation) so the next replan refresh resolves
 	 *  against the destination project's override. */
 	setTitleSystemPrompt(prompt: string | undefined): void {
 		this.#titleSystemPrompt = prompt;
@@ -12750,12 +12822,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
-	setModelTemporary(
+	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
-		return this.#models.setModelTemporary(model, thinkingLevel, options);
+		await this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
@@ -12794,8 +12866,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		this.#prewalk.releaseHandoff();
-		return this.#models.cycleThinkingLevel();
+		// Ownership transfers only when a level is selected; the level is applied synchronously, before any
+		// in-flight prewalk switch can resume and read the epoch.
+		const level = this.#models.cycleThinkingLevel();
+		if (level !== undefined) this.#prewalk.releaseHandoff();
+		return level;
 	}
 
 	/** Lists all selectable effort selectors for the active model. */
@@ -16037,9 +16112,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * Get text content of last assistant message.
-	 * Consumed by the `/copy` command and by the yield tool's empty-last-turn
-	 * guard (a data-less `useLastTurn` finalize is rejected when this is
-	 * undefined, so a thinking-only turn cannot become a null-data run failure).
+	 * Consumed by the `/copy` command and the RPC `get_last_assistant_text` request.
 	 * @returns Trimmed text content, or undefined if no assistant message has text
 	 */
 	getLastAssistantText(): string | undefined {
@@ -16564,5 +16637,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	consumeActiveFallbackCreditRedemption(targetModel?: Model): AnthropicFallbackCreditHandle | undefined {
 		return this.#recovery.consumeActiveFallbackCreditRedemption(targetModel);
+	}
+
+	/** Whether requests to `model` leave other models' reasoning out of their input. */
+	omitsDemotedReasoning(model: Model): boolean {
+		return this.#recovery.omitsDemotedReasoning(model);
 	}
 }
