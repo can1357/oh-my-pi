@@ -66,7 +66,7 @@ export interface DraftSource {
 	signal?: AbortSignal;
 }
 
-/** A file's text or `Subproject commit` line and git mode on one side of a change. */
+/** A file's text and git mode (`100644`, `100755`) on one side of a change. */
 export interface FileState {
 	text: string;
 	mode: string;
@@ -81,7 +81,7 @@ export type SelectedChange =
 
 /**
  * Why a file has no line attribution and is committed whole: binary, non-UTF-8, or oversized
- * content; a symlink on either side; a mode change with identical content; or a gitlink SHA update.
+ * content; a symlink on either side; or a mode change with identical content.
  */
 type WholeReason = "content" | "symlink" | "mode" | "gitlink";
 
@@ -427,7 +427,7 @@ export async function createDraft(source: DraftSource): Promise<Draft> {
 
 /**
  * One changed path of the worktree against `head` (`sha: null` on an unborn HEAD; `mode: null`
- * when HEAD lacks the path). `"skip"` for unsupported directories and gitlink transitions.
+ * when HEAD lacks the path). `"skip"` for submodules and other directories.
  */
 async function loadFile(
 	repo: VcsGitRepo,
@@ -590,7 +590,7 @@ export class Draft {
 	readonly agents: DraftInit["agents"];
 	/** Paths whose shared-index entry differs from HEAD (someone staged them); never committed by this draft. */
 	readonly staged: readonly string[];
-	/** Unsupported directories and gitlink transitions. */
+	/** Paths the draft cannot handle (submodules, nested repositories). */
 	readonly skipped: readonly string[];
 	#files: FileChange[];
 

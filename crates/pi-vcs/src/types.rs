@@ -160,13 +160,12 @@ pub struct CommitDetails {
 	pub message: String,
 }
 
-/// One blob, symlink, or gitlink of a tree listing
-/// ([`crate::git::GitRepo::ls_tree`]).
+/// One blob or symlink of a tree listing ([`crate::git::GitRepo::ls_tree`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntry {
 	/// Repository-relative path.
 	pub path: String,
-	/// Git file mode: `0o100644`, `0o100755`, `0o120000`, or `0o160000`.
+	/// Git file mode: `0o100644`, `0o100755`, or `0o120000`.
 	pub mode: u32,
 }
 

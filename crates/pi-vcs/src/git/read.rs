@@ -894,8 +894,8 @@ impl GitRepo {
 		Ok(out)
 	}
 
-	/// List the blobs, symlinks, and gitlinks of a tree recursively with their
-	/// modes, sorted by path, optionally filtered by pathspec-like prefixes.
+	/// List the blobs and symlinks of a tree recursively with their modes,
+	/// sorted by path, optionally filtered by pathspec-like prefixes.
 	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<TreeEntry>> {
 		if self.is_reftable() {
 			let mut owned =
