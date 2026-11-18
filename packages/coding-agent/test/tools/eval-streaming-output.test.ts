@@ -172,7 +172,7 @@ describe("EvalTool live stdout streaming", () => {
 				expect(result.details?.cells?.[0]?.status).toBe(cancelled ? "error" : "complete");
 				expect(result.details?.cells?.[0]?.exitCode).toBe(cancelled ? undefined : 0);
 				expect(text).toContain("not saved completely");
-				expect(text).not.toContain("artifact://");
+				expect(text).not.toMatch(/local:\/\/\d+\.log/);
 				expect(Buffer.byteLength(body)).toBeLessThanOrEqual(1024);
 				expect(Boolean(result.details?.meta?.truncation)).toBe(respilled);
 				expect(saveArtifact).not.toHaveBeenCalled();
@@ -186,7 +186,7 @@ describe("EvalTool live stdout streaming", () => {
 						.join("\n"),
 				);
 				expect(rendered).toContain("not saved completely");
-				expect(rendered).not.toContain("artifact://");
+				expect(rendered).not.toMatch(/local:\/\/\d+\.log/);
 			} finally {
 				await sessionManager.close();
 				await removeWithRetries(dir);

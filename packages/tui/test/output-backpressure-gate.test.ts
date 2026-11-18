@@ -3,7 +3,7 @@
  *
  * `process.stdout.write` on a TTY blocks the event loop until the terminal
  * drains, so multi-MB repaints froze the whole TUI when the emulator was slow
- * or occluded. The fix pairs an off-thread writer (pi-natives `TtyWriter`)
+ * or occluded. The fix pairs an off-thread writer (omp-natives `TtyWriter`)
  * with a render gate: while `Terminal.pendingOutputBytes` exceeds the frame
  * budget, composing another frame would only queue a stale paint behind the
  * backlog.

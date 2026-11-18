@@ -12,7 +12,7 @@ The `dsm` object exists in JavaScript and Python Eval; it is not a standalone to
 - `dsm.list()` returns database descriptors with portable `handle` strings and live reference counts. `dsm.get(id)` attaches to an already-open database; omit `id` only when exactly one is open.
 - Every `open` or `get` owns one independent reference. `close()` releases only that reference; the final release closes the database. Child close/disposal cannot close another owner's live reference.
 - `db.handle()` returns a printable reference bound to this live database incarnation. Pass that exact string in a child's task/context; the child MUST `await dsm.open(handle)` and close its returned handle in `finally`. Keep the parent's reference until the children finish.
-- Portable handles route to the originating project on the same machine, even when a child's cwd/worktree differs. The selected backend must match; an expired handle never creates or reopens a database.
+- Portable handles work from any project on the same machine, even when a child's cwd/worktree differs. The selected backend must match; an expired handle never creates or reopens a database.
 - Databases appear in `omp ps` as `omp.ida.<id>` or `omp.ghidra.<id>`. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
 - Handles expose `id`, `backend`, `ref`, `path`, and `info`. Closed references require another `dsm.open(path or handle)` or `dsm.get(id)`.
 

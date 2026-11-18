@@ -8,7 +8,7 @@ export interface PowerAssertionHandle {
 
 /**
  * Code prefix `PowerAssertion.start` puts on its error message on Linux when the
- * system D-Bus socket does not exist (crates/pi-natives/src/power.rs,
+ * system D-Bus socket does not exist (crates/natives/src/power.rs,
  * `start_login1`), the "platform backend not present" case headless containers
  * hit by design. Refused or rejected connections do not carry it.
  */
