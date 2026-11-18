@@ -26,6 +26,29 @@ describe("grep hashline snapshot tags", () => {
 		await removeWithRetries(cwd);
 	});
 
+	it("searches a notebook's cell projection and anchors it like read does", async () => {
+		const session: ToolSession = {
+			cwd,
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated(),
+		};
+		const notebookPath = path.join(cwd, "nb.ipynb");
+		await Bun.write(
+			notebookPath,
+			JSON.stringify({ cells: [{ cell_type: "code", source: ["needle = 1\n"] }], nbformat: 4 }, null, 1),
+		);
+
+		const text = textOf(await new GrepTool(session).execute("notebook", { pattern: "needle", path: "nb.ipynb" }));
+
+		const tag = getEditStore(session).headHash(notebookPath);
+		expect(tag).toBeDefined();
+		expect(text).toContain(`#${tag}`);
+		expect(text).toContain("needle = 1");
+		expect(text).not.toContain('"needle = 1\\n"');
+	});
+
 	it("re-mints the tag when a file is rewritten with same-length content between searches", async () => {
 		const session: ToolSession = {
 			cwd,

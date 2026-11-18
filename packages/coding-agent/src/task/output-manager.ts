@@ -2,9 +2,9 @@
  * Session-scoped manager for agent output IDs.
  *
  * Keeps every subagent output id unique within a session without polluting the
- * common case with bookkeeping. A requested name is used verbatim the first
- * time it appears; only a *repeated* name gets a numeric suffix to disambiguate
- * it (e.g. "Anna", "Anna-2", "Anna-3"). When a parent prefix is configured, ids
+ * common case with bookkeeping. With cross-instance messaging enabled, digit-only
+ * names get an `Agent` prefix to distinguish them from PIDs. Repeated names get a
+ * numeric suffix (e.g. "Anna", "Anna-2", "Anna-3"). With a parent prefix, ids
  * are nested under it (e.g. "Anna.Bob") so hierarchical outputs stay grouped.
  *
  * This enables reliable agent:// URL resolution and prevents artifact
@@ -12,14 +12,15 @@
  */
 import * as fs from "node:fs/promises";
 import { ADVISOR_TRANSCRIPT_STEM } from "../advisor/transcript-recorder";
+import type { Settings } from "../config/settings";
+import { cfgTaskCrossInstance } from "./settings";
 /** HUD expander click target reserved by the allocator so it cannot name a subagent. */
 export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
 
 /**
  * Manages agent output ID allocation to ensure uniqueness.
  *
- * The first allocation of a given name keeps the name as-is; subsequent
- * allocations of the same name get a `-2`, `-3`, … suffix. On resume, scans
+ * Repeated allocations of a name get a `-2`, `-3`, … suffix. On resume, scans
  * existing output and child-session files so prior state is never overwritten.
  */
 export class AgentOutputManager {
@@ -29,10 +30,12 @@ export class AgentOutputManager {
 	readonly #taken = new Set<string>();
 	readonly #getArtifactsDir: () => string | null;
 	readonly #parentPrefix: string | undefined;
+	readonly #settings: Settings | undefined;
 
-	constructor(getArtifactsDir: () => string | null, options?: { parentPrefix?: string }) {
+	constructor(getArtifactsDir: () => string | null, options?: { parentPrefix?: string; settings?: Settings }) {
 		this.#getArtifactsDir = getArtifactsDir;
 		this.#parentPrefix = options?.parentPrefix;
+		this.#settings = options?.settings;
 		// Reserve the advisor transcript stem: a subagent allocated this id would
 		// write `<id>.jsonl`, clobbering the advisor's `__advisor.jsonl` in the same
 		// artifacts dir. Reserving bumps such a request to `__advisor-2`.
@@ -115,6 +118,7 @@ export class AgentOutputManager {
 	 */
 	async allocate(id: string): Promise<string> {
 		await this.#ensureInitialized();
-		return this.#allocateUnique(id);
+		const usePrefix = /^\d+$/.test(id) && this.#settings && cfgTaskCrossInstance.get(this.#settings);
+		return this.#allocateUnique(usePrefix ? `Agent${id}` : id);
 	}
 }

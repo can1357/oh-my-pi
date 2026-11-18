@@ -68,7 +68,7 @@ Structural code search via native ast-grep AST matching.
 Bucket each real-prompt line:
 
 - **Prune candidate:** stable across samples **and** models; schema restatement — parameter names/types, `required`, field-description value examples, stated clamp ranges.
-- **Keep:** no model recovers it — defaults/direction (`gitignore` default true); routing/escalation (`NEVER` shell out to `find`/`fd` → use this tool; broad exploration → `Task` subagent); exact output shape (mtime sort, grouping, `artifact://` truncation); worked anti-patterns; type-invisible constraints (AST metavariable grammar, C++ trailing `;`).
+- **Keep:** no model recovers it — defaults/direction (`gitignore` default true); routing/escalation (`NEVER` shell out to `find`/`fd` → use this tool; broad exploration → `Task` subagent); exact output shape (mtime sort, grouping, `local://N.log` truncation); worked anti-patterns; type-invisible constraints (AST metavariable grammar, C++ trailing `;`).
 
 One sample: noise. Stable cross-sample/model overlap is only a candidate; history must clear it. MUST NOT delete on inferability alone.
 

@@ -52,6 +52,14 @@ import {
 /** Temporary block after a transient OAuth refresh failure. */
 export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 
+/**
+ * A refresh abandoned by this process (caller cancel or shutdown) says nothing
+ * about the credential, so it must not record a failure or a shared block.
+ */
+function isAbandonedRefresh(error: unknown): boolean {
+	return error instanceof Error && error.name === "AbortError";
+}
+
 /** OAuth bearer and credential chosen for a request, with its durable row id when available. */
 export type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
 
@@ -915,7 +923,7 @@ export class CredentialSelector {
 							// to a sibling account with the wrong prefetched usage/plan.
 							return;
 						}
-					} else {
+					} else if (!isAbandonedRefresh(error)) {
 						recordTransientRefreshFailure(error);
 						if (credentialId !== undefined) {
 							const latestIndex = this.#deps.pool
@@ -1232,7 +1240,7 @@ export class CredentialSelector {
 				if (this.#deps.pool.credentials(provider).some(credential => credential.type === "oauth")) {
 					if (allowFallback) return this.resolveOAuth(provider, sessionId, options);
 				}
-			} else {
+			} else if (!isAbandonedRefresh(error)) {
 				usageOptions.onTransientRefreshFailure?.(error);
 				// Block temporarily for transient failures (5 minutes)
 				this.#deps.blocks.mark(

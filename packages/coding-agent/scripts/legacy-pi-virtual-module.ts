@@ -52,7 +52,7 @@ const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 		rootShim: "legacy-pi-coding-agent-shim.ts",
 		rootWildcard: null,
 	},
-	{ dir: "natives", npmDir: "pi-natives", identifier: "PiNatives", rootShim: null, rootWildcard: null },
+	{ dir: "natives", npmDir: "omp-natives", identifier: "PiNatives", rootShim: null, rootWildcard: null },
 	// pi-tui keeps stateful singletons (`TERMINAL`, theme, figure settings) in
 	// root-level and nested modules; extensions must share the host's records.
 	{ dir: "tui", npmDir: "pi-tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts", rootWildcard: "nested" },

@@ -4,7 +4,7 @@ import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { readSevenZip, sniffSevenZip } from "../../src/ar/sevenzip";
 import { memoryByteSource } from "../../src/ar/source";
 import type { ArchiveIndexEntry } from "../../src/ar/types";
-import { arFixture as fixture } from "./fixtures";
+import { arFixture as fixture, extractLargestMember } from "./fixtures";
 
 const MESSAGE_HASH = "5ef6774c4d7f61a40b8ff89151687d63129888e89efffe183d0de94da95dfd8c";
 
@@ -108,10 +108,8 @@ describe("7z container", () => {
 		corrupt[32] ^= 0x80;
 		const corruptIndex = await readSevenZip(memoryByteSource(corrupt), { limits: DEFAULT_ARCHIVE_LIMITS });
 		await expect(extract(at(corruptIndex, "nested/message.txt"))).rejects.toBeInstanceOf(ArchiveError);
-		await expect(
-			readSevenZip(memoryByteSource(original), {
-				limits: { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 1 },
-			}),
-		).rejects.toThrow("too large");
+		const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 1 };
+		const memberIndex = await readSevenZip(memoryByteSource(original), { limits: memberLimits });
+		await expect(extractLargestMember("7z", memberIndex, memberLimits)).rejects.toThrow("too large");
 	});
 });

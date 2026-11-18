@@ -178,6 +178,13 @@ switch (scenario) {
 		logger.info("mode-console", { mode: "console" });
 		disableTransports();
 		break;
+	case "console-levels":
+		logger.setTransports({ console: true, file: false });
+		logger.warn("console-warn");
+		logger.info("console-info");
+		logger.debug("console-debug");
+		disableTransports();
+		break;
 	case "both":
 		logger.setTransports({ console: true, file: primaryDir });
 		logger.info("mode-both", { mode: "both" });
