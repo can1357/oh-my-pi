@@ -10376,16 +10376,35 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#throwIfExtensionCommand(text);
 		}
 
-		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+		const queued = this.#expandQueuedMentions(
+			expandPromptTemplate(text, [...this.#promptTemplates]),
+			options?.attribution,
+		);
 		// Stamp before image preprocessing so a queued image steer measures from
 		// the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
-		await this.#queueUserMessage(expandedText, images, "steer", {
+		await this.#queueUserMessage(queued.text, images, "steer", {
 			timestamp: submittedAt,
 			attribution: options?.attribution,
+			prependMessages: queued.prependMessages,
 			rawText: text,
 			onPromptQueued: options?.onPromptQueued,
 		});
+	}
+
+	/**
+	 * Expand `^model` mentions in a user-authored queued message and take the
+	 * session-agent notice to ride with it, as #dispatchPrompt does for a typed
+	 * prompt (#14093). Agent-attributed messages pass through: a mention is the user's tag.
+	 */
+	#expandQueuedMentions(
+		text: string,
+		attribution: MessageAttribution = "user",
+	): { text: string; prependMessages: CustomMessage[] } {
+		if (attribution !== "user") return { text, prependMessages: [] };
+		const expandedText = this.#modelMentions.expandMentions(text);
+		const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
+		return { text: expandedText, prependMessages: sessionAgentNotice ? [sessionAgentNotice] : [] };
 	}
 
 	/**
@@ -10406,9 +10425,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// from the operator's submission, not after the vision-model description.
 		const submittedAt = Date.now();
 		if (!options?.synthetic) {
-			await this.#queueUserMessage(expandedText, images, "followUp", {
+			const queued = this.#expandQueuedMentions(expandedText, options?.attribution);
+			await this.#queueUserMessage(queued.text, images, "followUp", {
 				timestamp: submittedAt,
 				attribution: options?.attribution,
+				prependMessages: queued.prependMessages,
 				rawText: text,
 				onPromptQueued: options?.onPromptQueued,
 			});
@@ -10523,9 +10544,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 		}
 		const mode = options?.queue === "followUp" ? "followUp" : "steer";
-		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		return await this.#queueUserMessage(expandedText, images, mode, {
+		const queued = this.#expandQueuedMentions(expandPromptTemplate(text, [...this.#promptTemplates]));
+		return await this.#queueUserMessage(queued.text, images, mode, {
 			timestamp: Date.now(),
+			prependMessages: queued.prependMessages,
 			rawText: text,
 			requireActiveRun: true,
 			skipIdleDrain: true,
@@ -10680,8 +10702,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#resumeStrandedIrcAsides();
 			return true;
 		}
-		// The session-agent notice rides via prependMessages (from prompt()),
-		// so it arrives alongside the user message in the same turn (#14093).
+		// The session-agent notice rides in prependMessages (from prompt() or
+		// #expandQueuedMentions), so it arrives alongside the user message in the same turn (#14093).
 		const queued = this.#pushQueuedUserMessage(
 			mode,
 			[...prependMessages, ...attachmentSourceNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])],
@@ -10739,8 +10761,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#queueFollowUpTexts(texts: readonly string[]): void {
 		this.#advisors.autoResumeSuppressed = false;
 		for (const text of texts) {
-			const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-			this.#pushQueuedUserMessage("followUp", [], [{ type: "text", text: expandedText }], "user", Date.now(), text);
+			const queued = this.#expandQueuedMentions(expandPromptTemplate(text, [...this.#promptTemplates]));
+			const content: TextContent[] = [{ type: "text", text: queued.text }];
+			this.#pushQueuedUserMessage("followUp", queued.prependMessages, content, "user", Date.now(), text);
 		}
 		this.#scheduleIdleQueueDrain();
 	}
