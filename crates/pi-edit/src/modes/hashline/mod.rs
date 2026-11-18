@@ -18,10 +18,6 @@ pub mod syntax;
 pub mod tokenizer;
 pub mod types;
 
-use std::sync::LazyLock;
-
-use regex::Regex;
-
 use self::{
 	input::{Patch, SplitOptions},
 	types::FileOp,
@@ -94,47 +90,15 @@ impl ModeEngine for HashlineEngine {
 	}
 }
 
-static PATH_NOISE: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?i)^\s*\*{3}\s*(?:(?:Add|Update|Delete)\s+File|Move\s+to)\s*:\s*")
-		.expect("valid hashline path-noise regex")
-});
-static HEADER: LazyLock<Regex> = LazyLock::new(|| {
-	Regex::new(r"(?m)^\s*\[([^\]\r\n]+)\]\s*$").expect("valid hashline header regex")
-});
-
-fn strip_path_noise(value: &str) -> String {
-	PATH_NOISE.replace(value, "").trim().to_owned()
-}
-
-fn header_parts(input: &str) -> Vec<(String, usize, usize)> {
-	HEADER
-		.captures_iter(input)
-		.filter_map(|captures| {
-			let whole = captures.get(0)?;
-			let mut inner = captures.get(1)?.as_str();
-			if inner.len() >= 5
-				&& inner.as_bytes()[inner.len() - 5] == b'#'
-				&& inner[inner.len() - 4..]
-					.bytes()
-					.all(|byte| byte.is_ascii_hexdigit())
-			{
-				inner = &inner[..inner.len() - 5];
-			}
-			let path = strip_path_noise(inner);
-			(!path.is_empty()).then_some((path, whole.start(), whole.end()))
-		})
-		.collect()
-}
-
 fn inspect_input(input: &str) -> Inspection {
-	let headers = header_parts(input);
+	let (headers, patch_end) = input::header_spans(input);
 	let paths = headers.iter().map(|(path, ..)| path.clone()).collect();
 	let mut entries = Vec::<(String, String)>::new();
 	let mut sections = Vec::new();
 	for (index, (path, start, body_start)) in headers.iter().enumerate() {
 		let body_end = headers
 			.get(index + 1)
-			.map_or(input.len(), |(_, start, _)| *start);
+			.map_or(patch_end, |(_, start, _)| *start);
 		super::push_section(&mut sections, path, input[*start..body_end].trim());
 		let digest = super::added_lines(input[*body_start..body_end].lines()).unwrap_or_default();
 		if digest.is_empty() {
@@ -177,5 +141,14 @@ mod tests {
 			("src/a.ts".into(), "[*** Update File: src/a.ts#ABCD]\nPUT 1.=1:\n+new".into()),
 			("src/b.ts".into(), "[src/b.ts]\nCUT 2.=2".into()),
 		]);
+	}
+
+	#[test]
+	fn an_indented_bracket_row_stays_in_its_file_section() {
+		let input = "[settings.toml#ABCD]\nPUT 3.=3:\n+[server]\n  [server.auth]\n+token = \"x\"";
+		let inspected = inspect_input(input);
+		assert_eq!(inspected.paths, ["settings.toml"]);
+		assert_eq!(inspected.entries, [("settings.toml".into(), "[server]\ntoken = \"x\"".into())]);
+		assert_eq!(inspected.sections, [("settings.toml".into(), input.into())]);
 	}
 }

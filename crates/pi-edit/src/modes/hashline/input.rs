@@ -211,6 +211,40 @@ pub fn first_header_path(input: &str, options: &SplitOptions<'_>) -> Option<Stri
 	})
 }
 
+/// Byte spans of the rows the section splitter reads as file headers.
+///
+/// Returns `(path, header start, body start)` per header, plus the byte offset
+/// where the patch ends (an envelope end or abort row, else the input's end).
+/// Rows the splitter keeps as body content, such as an indented `[name]`,
+/// never start a span.
+pub fn header_spans(input: &str) -> (Vec<(String, usize, usize)>, usize) {
+	let tokenizer = Tokenizer::new();
+	let mut spans = Vec::new();
+	let mut offset = 0;
+	for raw in input.split_inclusive('\n') {
+		let start = offset;
+		offset += raw.len();
+		let line = raw.strip_suffix('\n').unwrap_or(raw);
+		let body_start = start + line.len();
+		let line = line.strip_suffix('\r').unwrap_or(line);
+		let line = if start == 0 {
+			line.strip_prefix('\u{feff}').unwrap_or(line)
+		} else {
+			line
+		};
+		let clean = unbracket_envelope_markers(line.trim_end());
+		if matches!(tokenizer.tokenize(clean, 0), Token::EnvelopeEnd { .. } | Token::Abort { .. }) {
+			return (spans, start);
+		}
+		if clean.starts_with('[')
+			&& let Ok(Some(header)) = parse_header_line(clean, None)
+		{
+			spans.push((header.path, start, body_start));
+		}
+	}
+	(spans, input.len())
+}
+
 fn unquote(path: &str) -> &str {
 	path
 		.strip_circumfix('"', '"')
