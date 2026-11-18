@@ -1105,7 +1105,7 @@ describe("wave 3 commands", () => {
 		const { output, session, runtime } = createRuntime();
 		session._todoPhases = [{ name: "Work", tasks: [{ content: "Ship it", status: "pending" }] }];
 
-		const result = await executeAcpBuiltinSlashCommand("/todo export artifact://1", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/todo export agent://1", runtime);
 
 		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Failed to write todos:");
@@ -1115,7 +1115,7 @@ describe("wave 3 commands", () => {
 	it("/todo import: reports invalid internal-scheme paths", async () => {
 		const { output, session, runtime } = createRuntime();
 
-		const result = await executeAcpBuiltinSlashCommand("/todo import artifact://1", runtime);
+		const result = await executeAcpBuiltinSlashCommand("/todo import agent://1", runtime);
 
 		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Failed to read todos:");

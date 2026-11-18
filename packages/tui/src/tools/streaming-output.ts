@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
+import { formatRawOutputNotice } from "./output-meta";
 
 // =============================================================================
 // Constants
@@ -60,11 +61,11 @@ export interface OutputSummary {
 	columnTruncatedRange?: { first: number; last: number };
 	/** Configured per-line column cap in effect (UTF-8 bytes), when > 0. */
 	columnMax?: number;
-	/** Artifact ID for internal URL access (artifact://<id>) when truncated */
+	/** Spill id of the full output (`local://<id>.log`) when truncated */
 	artifactId?: string;
 	/**
 	 * Bytes the artifact cap dropped from the middle of the saved file. When
-	 * set, `artifact://<id>` holds a head/tail sample, not the full output.
+	 * set, `local://<id>.log` holds a head/tail sample, not the full output.
 	 */
 	artifactElidedBytes?: number;
 	/** Full raw output was not completely saved; artifactId is unavailable. */
@@ -719,7 +720,7 @@ export interface InlineByteCapOptions {
 	maxBytes?: number;
 	/**
 	 * Persist the full text as a session artifact. When an artifact id is
-	 * returned, a `[raw output: artifact://<id>]` footer is appended so the
+	 * returned, a `[raw output: local://<id>.log]` footer is appended so the
 	 * elided bytes stay recoverable.
 	 */
 	saveArtifact?: (full: string) => string | undefined | Promise<string | undefined>;
@@ -745,7 +746,7 @@ function trimTailToLineBoundary(text: string): string {
  * ~60% of the budget from the head and ~25% from the tail — cut on line
  * boundaries, never splitting a multi-byte UTF-8 sequence — with an elision
  * marker between. The remaining ~15% is slack for the marker and the optional
- * `[raw output: artifact://<id>]` footer, so the result stays under `maxBytes`.
+ * `[raw output: local://<id>.log]` footer, so the result stays under `maxBytes`.
  */
 export async function enforceInlineByteCap(text: string, options: InlineByteCapOptions): Promise<string> {
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -762,7 +763,7 @@ export async function enforceInlineByteCap(text: string, options: InlineByteCapO
 	const artifactId = await options.saveArtifact?.(text);
 	if (artifactId) {
 		const sep = composed.endsWith(NL) ? "" : NL;
-		composed += `${sep}[raw output: artifact://${artifactId}]`;
+		composed += `${sep}${formatRawOutputNotice(artifactId)}`;
 	}
 	return composed;
 }
@@ -1543,7 +1544,7 @@ export class OutputSink {
 	 * were actually dropped from the middle (the head budget was exhausted
 	 * *and* the tail ring evicted), a single `[ARTIFACT TRUNCATED: …]`
 	 * notice is injected between head and tail so a reader of
-	 * `artifact://<id>` understands the gap. When the total stream simply
+	 * `local://<id>.log` understands the gap. When the total stream simply
 	 * spilled past the head budget but still fits below `artifactMaxBytes`,
 	 * `droppedBytes` is zero — head + tail together are the verbatim stream
 	 * and the notice is suppressed so we don't corrupt the artifact with a

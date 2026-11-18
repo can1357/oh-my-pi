@@ -30,8 +30,6 @@ if "__omp_prelude_loaded__" not in globals():
         return val
 
     _OMP_INTERNAL_URL_RE = re.compile(r"^([a-z][a-z0-9+.-]*)://(.*)$", re.IGNORECASE)
-    _OMP_ARTIFACT_ID_RE = re.compile(r"^\d+$")
-    _OMP_BARE_ARTIFACT_RE = re.compile(r"^artifact://\d+$", re.IGNORECASE)
 
     def _omp_url_roots() -> dict:
         """On-disk roots for internal-URL schemes, keyed by scheme (PI_EVAL_LOCAL_ROOTS)."""
@@ -42,19 +40,13 @@ if "__omp_prelude_loaded__" not in globals():
         return roots if isinstance(roots, dict) else {}
 
     def _should_delegate_read(path: str | Path) -> bool:
-        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root.
-
-        `artifact://<id>` reads its file directly; selector forms
-        (`artifact://3:raw:5-9`) stay with the read tool, which parses them."""
+        """Delegate `scheme://` reads to the read tool unless the scheme has an injected root."""
         if not isinstance(path, str):
             return False
         match = _OMP_INTERNAL_URL_RE.match(path)
         if match is None:
             return False
-        scheme = match.group(1).lower()
-        if scheme not in _omp_url_roots():
-            return True
-        return scheme == "artifact" and not _OMP_ARTIFACT_ID_RE.match(match.group(2))
+        return match.group(1).lower() not in _omp_url_roots()
 
     def _read_line_selector(offset: int, limit: int | None) -> str | None:
         if offset <= 1 and limit is None:
@@ -69,22 +61,6 @@ if "__omp_prelude_loaded__" not in globals():
         if isinstance(result, dict) and "text" in result:
             return result["text"]
         return result
-
-    def _artifact_file(path: str) -> Path | None:
-        """This session's file for `artifact://<id>` (`<id>.<tool>.log` in its
-        artifacts dir), or None when the id is not there or no dir is known."""
-        root = _omp_url_roots().get("artifact")
-        if not root:
-            return None
-        artifact_id = path[11:]
-        try:
-            names = os.listdir(root)
-        except FileNotFoundError:
-            return None
-        for name in names:
-            if name.startswith(f"{artifact_id}."):
-                return Path(os.path.join(os.path.abspath(root), name))
-        return None
 
     def _read_through_tool(path: str, offset: int, limit: int | None) -> str:
         if limit is not None and limit <= 0:
@@ -103,8 +79,7 @@ if "__omp_prelude_loaded__" not in globals():
         PI_EVAL_LOCAL_ROOTS) is rewritten under that root so it lands where
         `read scheme://…` resolves — not a literal `scheme:/` directory under
         the cwd (which `Path("scheme://x")` collapses to). Plain paths pass
-        through unchanged; any other `scheme://` is rejected, as is
-        `artifact://`, whose root is a lookup dir for reads, not a path prefix."""
+        through unchanged; any other `scheme://` is rejected."""
         if not isinstance(path, str):
             return Path(path)
         match = _OMP_INTERNAL_URL_RE.match(path)
@@ -112,7 +87,7 @@ if "__omp_prelude_loaded__" not in globals():
             return Path(path)
         scheme = match.group(1).lower()
         root = _omp_url_roots().get(scheme)
-        if not root or scheme == "artifact":
+        if not root:
             raise ValueError(f"Protocol paths are not supported by this helper: {path}")
         relative = unquote(match.group(2).replace("\\", "/"))
         # Mirror the host `path.resolve`/`resolveLocalUrlToPath`: normalize and
@@ -131,22 +106,7 @@ if "__omp_prelude_loaded__" not in globals():
 
     def read(path: str | Path, offset: int = 1, limit: int | None = None) -> str:
         """Read file or read-tool URI contents. offset/limit are 1-indexed lines."""
-        if isinstance(path, str) and _OMP_BARE_ARTIFACT_RE.match(path):
-            if limit is not None and limit <= 0:
-                return ""
-            p = _artifact_file(path)
-            if p is None:
-                # Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-                # A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
-                located = _bridge_call("read", {"path": f"{path}:raw:1-1"})
-                details = located.get("details") if isinstance(located, dict) else None
-                file_path = details.get("resolvedPath") if isinstance(details, dict) else None
-                if not isinstance(file_path, str):
-                    # An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
-                    return _read_through_tool(f"{path}:raw", offset, limit)
-                # Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
-                p = Path(file_path)
-        elif _should_delegate_read(path):
+        if _should_delegate_read(path):
             return _read_through_tool(path, offset, limit)
         else:
             p = _resolve_omp_path(path)

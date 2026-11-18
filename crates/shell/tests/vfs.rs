@@ -67,7 +67,7 @@ impl FileSystem for DelayedFilesystem {
 	}
 
 	/// `virtual://frozen/…` stands in for an immutable file-backed scheme
-	/// (`skill://`, `artifact://`): readable, but refusing every mutation.
+	/// (`skill://`): readable, but refusing every mutation.
 	async fn access(&self, path: &Path, read: bool, write: bool, execute: bool) -> io::Result<()> {
 		delay().await;
 		if write

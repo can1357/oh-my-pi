@@ -33,7 +33,7 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 - ignores `async: true` and any supplied `timeout` in named-service mode, adding a notice for each; readiness uses `ready.timeout`,
 - ignores `ready` without a nonblank `name`, adding a notice.
 
-There are no structured `head` or `tail` parameters. Command text is never rewritten for internal URLs. The embedded shell and its in-process coreutils resolve `scheme://` paths through an injected async filesystem (`InternalUrlFilesystem`) at the moment of each operation, so URLs built from variables, redirections, globs, `cd`, and a URL `cwd` all work. File-backed schemes operate on their backing files, and `ln -s` from one to a host path stores the backing file's path; rendered resources are read-only. An external program has no view of that filesystem, so the program path, every argument (`skill://example-skill/tool.py`, `--index=skill://example-skill/data`), and the working directory it is spawned with are translated to the files they alias. Translation covers whole arguments and `--option=URL` values only; a bare scheme root (`local://`), a root followed by words (`skill:// external command`), and URLs embedded in other text stay literal, as do schemes the filesystem does not route (`https://`, `s3://`) and arguments naming a scheme that aliases no file (`omp://`, `history://`). A URL the provider rejects (an unknown skill, a path escaping its root) fails the command with the provider's error. External programs cannot start in a scheme that aliases no file, nor in a read-only one (`skill://`, `artifact://`), since the child could write anywhere under its working directory; read-only is otherwise enforced only for builtins, so an external program handed a translated read-only path can still write it. `xargs`, `find -exec`/`-execdir`, and `ifne` run their commands through the shell's own dispatch in a subshell, so `… | xargs cat` reaches the in-process `cat` and its URL arguments. The finite-command routes also load configured direnv/devenv changes. SDK callers of the executor can supply an `env` overlay; the bash tool itself uses shell assignments for per-command variables.
+There are no structured `head` or `tail` parameters. Command text is never rewritten for internal URLs. The embedded shell and its in-process coreutils resolve `scheme://` paths through an injected async filesystem (`InternalUrlFilesystem`) at the moment of each operation, so URLs built from variables, redirections, globs, `cd`, and a URL `cwd` all work. File-backed schemes operate on their backing files, and `ln -s` from one to a host path stores the backing file's path; rendered resources are read-only. An external program has no view of that filesystem, so the program path, every argument (`skill://example-skill/tool.py`, `--index=skill://example-skill/data`), and the working directory it is spawned with are translated to the files they alias. Translation covers whole arguments and `--option=URL` values only; a bare scheme root (`local://`), a root followed by words (`skill:// external command`), and URLs embedded in other text stay literal, as do schemes the filesystem does not route (`https://`, `s3://`) and arguments naming a scheme that aliases no file (`omp://`, `history://`). A URL the provider rejects (an unknown skill, a path escaping its root) fails the command with the provider's error. External programs cannot start in a scheme that aliases no file, nor in a read-only one (`skill://`), since the child could write anywhere under its working directory; read-only is otherwise enforced only for builtins, so an external program handed a translated read-only path can still write it. `xargs`, `find -exec`/`-execdir`, and `ifne` run their commands through the shell's own dispatch in a subshell, so `… | xargs cat` reaches the in-process `cat` and its URL arguments. The finite-command routes also load configured direnv/devenv changes. SDK callers of the executor can supply an `env` overlay; the bash tool itself uses shell assignments for per-command variables.
 
 ### Approval policy
 
@@ -109,7 +109,7 @@ PTY eligibility is decided by `canUseInteractiveBashPty(pty, ctx)` (`src/tools/b
 
 If `pty` is requested but unavailable, the call falls back to non-PTY and appends a `pty requested but unavailable …` notice.
 
-A pty command runs as a shell process (`src/exec/shell-process.ts`): the embedded engine with the tool profile in a process of its own, leading the overlay's pseudo-terminal, so its programs own that terminal (`/dev/tty`, terminal signals, resize). It starts from the session shell's exports, functions and aliases, and its `local://`, `skill://`, `artifact://` and `attachment://` paths resolve to the session's host files; other schemes are missing there.
+A pty command runs as a shell process (`src/exec/shell-process.ts`): the embedded engine with the tool profile in a process of its own, leading the overlay's pseudo-terminal, so its programs own that terminal (`/dev/tty`, terminal signals, resize). It starts from the session shell's exports, functions and aliases, and its `local://` (spills included), `skill://` and `attachment://` paths resolve to the session's host files; other schemes are missing there.
 
 Before the local PTY/non-PTY choice, a foreground (`async: false`) call can route to a managed background job (auto-backgrounding; see below) or — when the session's client advertises a terminal capability (`clientBridge.capabilities.terminal` + `createTerminal`, with `pty` false) — to a **client-bridge editor terminal** that runs the command remotely (streaming `terminalId` updates, killing on timeout, mapping a signal kill to exit code `137`). Otherwise it uses non-interactive `executeBash()`.
 
@@ -120,7 +120,7 @@ Print mode and non-UI RPC/tool contexts cannot use the local interactive overlay
 A nonblank `name` routes to `startService()` before finite-command timeout, async, terminal, or output-sink selection.
 
 - Names are 1–48 characters: an initial letter or digit, followed by letters, digits, dots, underscores, or hyphens. Names are project-broker scoped; starting an existing live name replaces that process.
-- Services run as a shell process too (the embedded engine with the tool profile, started by the broker), with the configured shell prefix, from the session shell's exports, functions and aliases plus `PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_TOOL_CALL_ID`. Their `local://`, `skill://`, `artifact://` and `attachment://` paths resolve to the owning session's host files; other schemes are missing there.
+- Services run as a shell process too (the embedded engine with the tool profile, started by the broker), with the configured shell prefix, from the session shell's exports, functions and aliases plus `PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_TOOL_CALL_ID`. Their `local://` (spills included), `skill://` and `attachment://` paths resolve to the owning session's host files; other schemes are missing there.
 - `pty` defaults to `true`; no command deadline is imposed.
 - `ready` must include a log regex or TCP port (1–65535). When both are present, both must pass. TCP host defaults to `127.0.0.1`; readiness timeout defaults to 30 seconds and is clamped to 0.05–3600 seconds.
 - Without a readiness condition, startup returns the running service. With one, startup waits for readiness, exit, or the readiness deadline. A readiness timeout is reported without stopping the process. A queued steering message ends the readiness wait early: the call returns `starting` and the service keeps starting.
@@ -264,7 +264,7 @@ Kitty direct-image and Sixel frames are extracted before text sanitization/trunc
 
 ### Shell output minimizer
 
-Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate `bash-original` artifact, referenced by a `[raw output: artifact://<id>]` footer, and returns `{ filter, inputBytes, outputBytes, artifactId }` as `BashResult.minimized`, which the tool result keeps as `details.meta.minimized` and the renderer shows as a `Minimized` footer fact. If saving returns no artifact ID, the lossless sink output is retained instead and no `minimized` is recorded.
+Non-PTY execution also passes shell-minimizer settings into the native `Shell` session. When the minimizer rewrites verbose output, the executor substitutes the minimized text only after the original capture has been saved as a separate spill, referenced by a `[raw output: local://<id>.log]` footer, and returns `{ filter, inputBytes, outputBytes, artifactId }` as `BashResult.minimized`, which the tool result keeps as `details.meta.minimized` and the renderer shows as a `Minimized` footer fact. If saving returns no artifact ID, the lossless sink output is retained instead and no `minimized` is recorded.
 
 ## Live tool updates and async jobs
 
@@ -299,7 +299,7 @@ After execution:
 
 Result details can also include resolved/requested timeout, `timeoutDisabled`, client `terminalId`, wall time, async job state, and truncation metadata. Truncation includes direction/reason, total and shown line/byte counts, shown range, and `artifactId` when persistence succeeded.
 
-Built-in tool wrapping appends the model-facing recovery notice automatically, for example `Read artifact://<id> for full output`.
+Built-in tool wrapping appends the model-facing recovery notice automatically, for example `Read local://<id>.log for full output`.
 
 ## Rendering paths
 
@@ -309,7 +309,7 @@ Built-in tool wrapping appends the model-facing recovery notice automatically, f
 
 - collapsed mode shows visual-line-truncated preview,
 - expanded mode shows all currently available output text,
-- warning line includes truncation reason and `artifact://<id>` when truncated,
+- warning line includes truncation reason and `local://<id>.log` when truncated,
 - timeout value (from args) is shown in footer metadata line.
 
 ### Caveat: full artifact expansion
@@ -345,7 +345,7 @@ This table covers finite-command execution; named-service routing is described s
 ## Operational caveats
 
 - Interceptor only blocks commands when suggested tool is currently available in context.
-- If artifact allocation fails, truncation still occurs but no `artifact://` back-reference is available.
+- If artifact allocation fails, truncation still occurs but no `local://N.log` back-reference is available.
 - Ordinary shell session cache entries are process-scoped with no size-based eviction. Cancelled/broken sessions are removed and quarantined; per-job `:async:` entries are removed after completion. Shells with live background children can be retained until those children exit.
 - Timeout shaping is backend-specific: local non-PTY and interactive-PTY timeouts return error results with `details.timedOut`; the client-bridge terminal creation/execution timeout paths throw `ToolError`. Non-timeout cancellations throw across these tool-call routes.
 
@@ -370,4 +370,4 @@ This table covers finite-command execution; named-service routing is described s
 - [`packages/tui/src/chat/bash-execution.ts`](../packages/tui/src/chat/bash-execution.ts) — interactive `!` command execution component.
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — wiring for interactive `!` command UI stream/update completion.
 - [`src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts) — RPC `bash` and `abort_bash` command surface.
-- [`src/internal-urls/artifact-protocol.ts`](../packages/coding-agent/src/internal-urls/artifact-protocol.ts) — `artifact://<id>` resolution.
+- [`src/internal-urls/local-protocol.ts`](../packages/coding-agent/src/internal-urls/local-protocol.ts) — `local://` resolution, including spills (`local://<id>.log`).

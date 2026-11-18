@@ -975,7 +975,7 @@ async function runBrowser(
 /** Persist over-cap browser run output as a session artifact; mirrors the bash minimizer's save path. */
 async function saveBrowserOutputArtifact(session: ToolSession, fullText: string): Promise<string | undefined> {
 	try {
-		const alloc = await session.allocateOutputArtifact?.("browser-original");
+		const alloc = await session.allocateOutputArtifact?.();
 		if (!alloc?.path || !alloc.id) return undefined;
 		await Bun.write(alloc.path, fullText);
 		return alloc.id;

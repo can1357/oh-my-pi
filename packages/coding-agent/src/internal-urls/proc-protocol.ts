@@ -1,6 +1,6 @@
 import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
-import { formatBytes, logger, sanitizeText, truncate } from "@oh-my-pi/pi-utils";
+import { formatBytes, logger, sanitizeText, spillUrl, truncate } from "@oh-my-pi/pi-utils";
 import type { AsyncJob } from "../async";
 import {
 	agentStaleNote,
@@ -273,7 +273,7 @@ export class ProcProtocolHandler implements ProtocolHandler {
 				if (typeof details?.output === "string") lines.push(details.output);
 				if (job.type === "task") lines.push(`agent://${job.agentId ?? job.id}`);
 				const artifact = details?.meta?.truncation?.artifactId;
-				if (artifact) lines.push(`artifact://${artifact}`);
+				if (artifact) lines.push(spillUrl(artifact));
 			} else if (job.type === "task") {
 				const agentId = job.agentId ?? job.id;
 				const successor = runningJobOfAgent(jobs, agentId);

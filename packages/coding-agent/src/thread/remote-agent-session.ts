@@ -346,7 +346,6 @@ export class RemoteAgentSession implements AgentViewSession {
 			putBlob: (data: Buffer, options?: BlobPutOptions): Promise<BlobPutResult> => blobs().put(data, options),
 			putBlobSync: (data: Buffer, options?: BlobPutOptions): BlobPutResult => blobs().putSync(data, options),
 			getArtifactPath: id => this.#command("getArtifactPath", id),
-			getArtifactContent: id => this.#command("getArtifactContent", id),
 		};
 	}
 

@@ -112,6 +112,7 @@ import {
 	toError,
 	untilAborted,
 	withTimeout,
+	spillUrl,
 	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
@@ -4027,13 +4028,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				maxBytes: ASYNC_PREVIEW_MAX_CHARS,
 				maxHeadBytes: ASYNC_PREVIEW_MAX_CHARS - ASYNC_PREVIEW_TAIL_CHARS,
 			}).content;
-			return `${headTail}\nFull output: artifact://${rawArtifactId}`;
+			return `${headTail}\nFull output: ${spillUrl(rawArtifactId)}`;
 		}
 		try {
-			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
+			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath();
 			if (artifactPath && artifactId) {
 				await writeArtifact(artifactPath, result);
-				return `${preview}\nFull output: artifact://${artifactId}`;
+				return `${preview}\nFull output: ${spillUrl(artifactId)}`;
 			}
 		} catch (error) {
 			logger.warn("Failed to persist async follow-up artifact", {
@@ -12800,7 +12801,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			const leafId = this.#resolveForkLeaf(entryId);
 			// Await inside the `using` scope so the transition stays open until it settles.
-			// Kept tool results may cite `artifact://N`, so the fork carries the artifacts too.
+			// Kept tool results may cite `local://N.log`, so the fork carries the spills too.
 			return await this.#branchIntoNewSession("fork", leafId, leafId, {
 				copyArtifacts: true,
 				requireIdleFor,

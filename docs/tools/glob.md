@@ -110,7 +110,7 @@ The tool returns a single text block plus structured `details`.
    - `Limit must be a positive number`
    - `Path is not a directory: ...`
    - Timeout returns partial matches with an incomplete-scan notice directing the caller to a deeper directory. With zero matches it explicitly says the scan is `NOT proof of absence`. It is a successful truncated result, not a thrown error.
-   - `Cannot glob <url>: <reason>` when a URL target cannot be stat'ed through the URL filesystem: the handler's diagnosis (`Cannot glob artifact://9: Artifact 9 not found. Available: …`; `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
+   - `Cannot glob <url>: <reason>` when a URL target cannot be stat'ed through the URL filesystem: the handler's diagnosis (a missing `local://` file; `skill:// URL requires a skill name` for `skill://*/SKILL.md`) or the tier refusal (`ssh:// access needs exec approval; …`).
 - If the caller aborts, the local branch converts `AbortError` into `ToolAbortError`, and the custom branch rejects with the `AbortError` from `untilAborted()` (not `ToolAbortError`); the backend's `options.signal` is aborted and no further backend calls run. A deadline expiry is not a caller abort and is reported as a timeout, not as an error.
 - Non-`ENOENT` stat failures and other unexpected errors are rethrown.
 - Empty matches are not errors; they return the no-files text result.

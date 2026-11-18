@@ -67,7 +67,7 @@ export type SchemeBacking = "file" | "virtual" | "remote" | "device";
 
 /**
  * Read-selector grammar after the URL.
- * - `lines`: any trailing `:<selector>` chain is a read selector (`artifact://3:raw:1-50`).
+ * - `lines`: any trailing `:<selector>` chain is a read selector (`local://3.log:raw:1-50`).
  * - `none`: never peel; the URL is passed through as written.
  * - `opaque`: server-defined URIs that may legitimately end in selector-shaped tails (mcp://).
  */
@@ -117,8 +117,11 @@ export interface SchemeSpec {
 	pathAuthority?: true;
 	/** Default immutability of resolved resources; a resource may override it per URL. */
 	immutable: boolean;
-	/** Resources are session artifact storage (artifact://); located read pages skip the artifact spill. */
-	artifactStore?: true;
+	/**
+	 * Located read pages get the full line-scaled byte budget and never spill: the file is already
+	 * session storage (`local://N.log` spills) that selectors re-read, so a spill would only copy it.
+	 */
+	unspilledPages?: true;
 	/** Approval tier for reading/searching this scheme. Default `read`; ssh:// is `exec`. */
 	readTier?: ToolTier;
 	/** Read output bypasses result truncation limits (skill:// instructions). */

@@ -173,7 +173,7 @@ Kernel-backed execution rendering expects:
 - optional structured status events
 - optional JSON output trees
 - image outputs
-- truncation warnings + optional `artifact://<id>` pointer
+- truncation warnings + optional `local://<id>.log` pointer
 
 This renderer behavior is unrelated to notebook JSON editing except that both reuse shared TUI primitives.
 
