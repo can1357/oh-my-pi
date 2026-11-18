@@ -634,6 +634,13 @@ export class CredentialSelector {
 			strategy,
 			hasPlanRequirement,
 		);
+		// A session with no account yet starts on the one its policy pins (`startup: "pin"`).
+		// An existing account (resumed, inherited from the parent, or chosen by the user) wins.
+		if (sessionId && this.#deps.affinity.get(provider, sessionId) === undefined) {
+			const startupIndex = this.#deps.policies.startupPinIndex(provider, credentials);
+			const startupCredentialId = startupIndex === undefined ? undefined : credentialIds[startupIndex];
+			if (startupCredentialId !== undefined) this.#deps.affinity.pin(provider, sessionId, startupCredentialId);
+		}
 		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
