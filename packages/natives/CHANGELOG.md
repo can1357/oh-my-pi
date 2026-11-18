@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Added
 
 - Added `VcsGitRepo.worktreeToGit()` to convert worktree content into the blob representation produced by `git add`.

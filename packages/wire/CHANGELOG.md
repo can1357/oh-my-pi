@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Added
 
 - Added tray state and interaction properties, including focus, peek, quiet, main status, item references, card status and actions, and event state.

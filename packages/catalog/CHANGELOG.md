@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Added
 
 - Added support for prompt-cache prewarming on the first-party Anthropic endpoint via the `isPromptCachePrewarmSupported` compatibility capability.

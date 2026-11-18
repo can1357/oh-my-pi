@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Added
 
 - Added a `prewarm` stream option for Anthropic Messages requests to refresh prompt caches without generating billable output; it is rejected for budget thinking, forced tool choice, and structured output.

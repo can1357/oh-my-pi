@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Breaking Changes
 
 - Full-output references and the `[raw output: …]` footer now use `local://N.log` instead of `artifact://N`.

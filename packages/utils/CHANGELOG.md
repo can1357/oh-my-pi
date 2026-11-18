@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Added
 
 - Added utilities for formatting and parsing session spill URLs using the `local://N.log` format.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
 ### Breaking Changes
 
 - Spotlight recovery counts reads from local spill files toward recovery counts; reads from artifact references in older sessions continue to count as before.
