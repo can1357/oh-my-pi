@@ -1,10 +1,11 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { Diagnostics } from "@oh-my-pi/pi-ai/providers/antigravity-cli/diagnostics";
 import {
 	AgyHost,
 	describeToolArguments,
@@ -20,6 +21,7 @@ import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-write
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
 
 const model = buildModel({
@@ -36,6 +38,10 @@ const model = buildModel({
 });
 const tools: Tool[] = [{ name: "read", description: "Read a file", parameters: type({ path: "string" }) }];
 const user = (text: string): Message => ({ role: "user", content: text, timestamp: 0 });
+/** The reason the interactive agent passes to `abort()` when the operator cancels. */
+const userInterrupt = "Interrupted by user";
+/** An internal labelled abort, e.g. a TTSR interrupt; it must not drain the turn. */
+const internalAbort = "TTSR matched no-placeholder-returns";
 
 class Queue<T> {
 	#items: T[] = [];
@@ -83,6 +89,8 @@ class FakeAgy implements AgyTransport {
 	readonly options: AgyTransportOptions;
 	readonly prompts = new Queue<FakePrompt>();
 	readonly cancellations = new Queue<void>();
+	/** Session ids that received a `session/cancel` notification, in order. */
+	readonly cancelRequests: string[] = [];
 	readonly promptHistory: FakePrompt[] = [];
 	readonly loads: string[] = [];
 	readonly created: string[] = [];
@@ -95,6 +103,7 @@ class FakeAgy implements AgyTransport {
 	cancelMode: "ack" | "hold" | "reject" = "ack";
 	autoSteer = true;
 	failLoad = false;
+	failPrompt = false;
 	configureGate: Promise<void> | undefined;
 	currentId = "";
 	#pending = new Set<FakePrompt>();
@@ -135,6 +144,7 @@ class FakeAgy implements AgyTransport {
 				return { configOptions };
 			},
 			prompt: request => {
+				if (this.failPrompt) throw new Error("prompt dispatch failed");
 				if (this.autoSteer) for (const old of this.#pending) old.response.resolve({ stopReason: "end_turn" });
 				const prompt = { request, response: Promise.withResolvers<PromptResponse>() };
 				this.#pending.add(prompt);
@@ -146,7 +156,8 @@ class FakeAgy implements AgyTransport {
 				);
 				return prompt.response.promise;
 			},
-			cancel: async () => {
+			cancel: async params => {
+				this.cancelRequests.push(params.sessionId);
 				this.cancellations.push(undefined);
 				if (this.cancelMode === "reject") throw new Error("cancel write failed");
 				if (this.cancelMode === "ack") this.acknowledgeCancel();
@@ -163,7 +174,15 @@ class FakeAgy implements AgyTransport {
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
 		});
 	}
-	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
+
+	thinking(text: string): void {
+		this.options.onUpdate({
+			sessionId: this.currentId,
+			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } },
+		});
+	}
+
+	announce(name = "read", id = this.currentId): void {
 		this.options.onUpdate({
 			sessionId: id,
 			update: {
@@ -173,6 +192,10 @@ class FakeAgy implements AgyTransport {
 				status: "in_progress",
 			},
 		});
+	}
+
+	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
+		this.announce(name, id);
 		return this.options.onCall(name, args, id);
 	}
 	close(): void {
@@ -299,6 +322,138 @@ describe("AgyHost stateful steps", () => {
 			additionalProperties: false,
 			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
 		});
+	});
+	it("fails a refused turn with an explicit provider error instead of an empty stop", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("I cannot help with that.");
+		prompt.response.resolve({ stopReason: "refusal" });
+		await expect(run.done).rejects.toThrow("Antigravity CLI refused the request");
+		expect(state.host.hasPendingTurn).toBe(false);
+		expect(fake.closed).toBe(true);
+	});
+	it("finishes a max_turn_requests stop as length and continues the same conversation", async () => {
+		// Automatic continuations are covered below; this keeps the length mapping alone.
+		const state = await fixture({ maxContinuations: 0 });
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("1 2 3");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "1 2 3" }]);
+		const next = step(state.host, [user("count to one hundred"), run.writer.output, user("continue")]);
+		const continuation = await fake.prompts.next();
+		expect(textOf(continuation.request.prompt)).toBe("continue");
+		expect(fake.created).toHaveLength(1);
+		fake.text("4 5 6");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.stopReason).toBe("stop");
+	});
+	it("reports an empty max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([]);
+	});
+
+	it("reports a thinking-only max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.thinking("still thinking");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([{ type: "thinking", thinking: "still thinking" }]);
+	});
+	it("cancels a tool callback that outlives an automatic continuation", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const stale = fake.options.onCall("read", { path: "old.txt" }, fake.currentId);
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		const continuation = await fake.prompts.next();
+		state.clock.fire(30);
+		await expect(stale).resolves.toMatchObject({ isError: true });
+		fake.text("continued");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "continued" }]);
+	});
+
+	it("routes a same-named announcement to the current continuation", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const stale = fake.options.onCall("read", { path: "old.txt" }, fake.currentId);
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await fake.prompts.next();
+		const current = fake.call("read", { path: "new.txt" });
+		void current.catch(() => undefined);
+		await expect(stale).resolves.toMatchObject({ isError: true });
+		expect(state.host.hasPendingTurn).toBe(true);
+		const call = run.writer.output.content.find(block => block.type === "toolCall");
+		expect(call).toMatchObject({ type: "toolCall", name: "read", arguments: { path: "new.txt" } });
+	});
+
+	it("does not let a previous turn's waiter consume a new turn's announcement", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("read a.txt")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		const stale = fake.options.onCall("read", { path: "old.txt" }, fake.currentId);
+		fake.text("done");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("read b.txt")]);
+		await fake.prompts.next();
+		const current = fake.call("read", { path: "new.txt" });
+		void current.catch(() => undefined);
+		await expect(stale).resolves.toMatchObject({ isError: true });
+		const call = second.writer.output.content.find(block => block.type === "toolCall");
+		expect(call).toMatchObject({ type: "toolCall", name: "read", arguments: { path: "new.txt" } });
+	});
+
+	it("does not reuse a pre-continuation announcement in the next generation", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("1 2 3");
+		fake.announce("read");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await fake.prompts.next();
+		const pending = fake.options.onCall("read", { path: "new.txt" }, fake.currentId);
+		void pending.catch(() => undefined);
+		await Promise.resolve();
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		fake.announce("read");
+		await Promise.resolve();
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(true);
+	});
+
+	it("keeps an end_turn stop as a normal stop", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("stop");
+		expect(fake.closed).toBe(false);
 	});
 	it("parks and resumes multiple serial tool steps under exactly one ACP prompt", async () => {
 		const state = await parked();
@@ -826,5 +981,476 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+});
+
+describe("AgyHost cancellation and output-limit continuations", () => {
+	it("sends session/cancel at once for an explicit cancellation and keeps the warm process", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		abort.abort(userInterrupt);
+		await expect(run.done).rejects.toThrow("aborted");
+		// The notification is on the wire before the turn acknowledges it.
+		await fake.cancellations.next();
+		expect(fake.closed).toBe(false);
+		fake.acknowledgeCancel();
+		const next = step(state.host, [user("hello"), user("again")]);
+		const prompt = await fake.prompts.next();
+		expect(textOf(prompt.request.prompt)).toContain("again");
+		expect(state.instances).toHaveLength(1);
+		expect(fake.created).toHaveLength(2);
+		fake.text("Second answer.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+	});
+
+	it("stops at once for an internal labelled abort instead of draining the turn", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(internalAbort);
+		await expect(run.done).rejects.toThrow("aborted");
+		// Only an operator cancel drains; this abort writes no session/cancel and
+		// keeps no grace window alive.
+		expect(fake.cancelRequests).toHaveLength(0);
+		expect(fake.closed).toBe(true);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("stops a cancelled turn that never confirms the drain", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(userInterrupt);
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		expect(fake.closed).toBe(false);
+		state.clock.fire(100);
+		await fake.exited;
+		expect(fake.closed).toBe(true);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("extends the drain while the cancelled turn keeps producing updates", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(userInterrupt);
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		const tokens = (ms: number) =>
+			[...state.clock.timers.entries()].filter(([, timer]) => timer.ms === ms).map(([token]) => token);
+		const idleBefore = tokens(100);
+		const capBefore = tokens(1_000);
+		expect(idleBefore).toHaveLength(1);
+		expect(capBefore).toHaveLength(1);
+		fake.text("Still working.");
+		expect(tokens(100)).toHaveLength(1);
+		expect(tokens(100)[0]).not.toBe(idleBefore[0]);
+		expect(tokens(1_000)).toEqual(capBefore);
+		expect(fake.closed).toBe(false);
+		state.clock.fire(1_000);
+		await fake.exited;
+		expect(fake.closed).toBe(true);
+	});
+
+	it("starts the next step without waiting for the cancelled turn's drain", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text("Working.");
+		fake.cancelMode = "hold";
+		abort.abort(userInterrupt);
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		// The cancelled turn is still draining and has not acknowledged anything.
+		expect(fake.closed).toBe(false);
+		const next = step(state.host, [user("hello"), user("again")]);
+		const restarted = await state.started.next();
+		const prompt = await restarted.prompts.next();
+		// The new step cut the grace instead of waiting it out: new process, new session.
+		expect(fake.closed).toBe(true);
+		expect(restarted.created).toHaveLength(1);
+		expect(textOf(prompt.request.prompt)).toContain("again");
+		restarted.text("Second answer.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Second answer." }]);
+	});
+
+	it("continues a max_tokens stop on the same session and merges text and usage", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const first = await fake.prompts.next();
+		fake.text("1 2 3");
+		first.response.resolve({
+			stopReason: "max_tokens",
+			usage: { inputTokens: 10, outputTokens: 4, totalTokens: 14 },
+		});
+		const continuation = await fake.prompts.next();
+		expect(textOf(continuation.request.prompt)).toBe(
+			"Continue exactly where your previous output stopped. Do not repeat any earlier text.",
+		);
+		expect(fake.created).toHaveLength(1);
+		expect(run.writer.done).toBe(false);
+		fake.text(" 4 5 6");
+		continuation.response.resolve({
+			stopReason: "end_turn",
+			usage: { inputTokens: 20, outputTokens: 6, cachedReadTokens: 2, totalTokens: 26 },
+		});
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "1 2 3 4 5 6" }]);
+		expect(run.writer.output.stopReason).toBe("stop");
+		expect(run.writer.output.usage.input).toBe(30);
+		expect(run.writer.output.usage.output).toBe(10);
+		expect(run.writer.output.usage.cacheRead).toBe(2);
+		expect(run.writer.output.usage.totalTokens).toBe(42);
+	});
+
+	it("stops continuing an output-limited turn at the configured limit", async () => {
+		const state = await fixture({ maxContinuations: 2 });
+		const run = step(state.host, [user("keep going")]);
+		const fake = await state.started.next();
+		for (let round = 0; round < 3; round++) {
+			const prompt = await fake.prompts.next();
+			fake.text(`part${round}`);
+			prompt.response.resolve({
+				stopReason: "max_turn_requests",
+				usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+			});
+		}
+		await run.done;
+		expect(fake.promptHistory).toHaveLength(3);
+		expect(fake.created).toHaveLength(1);
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.usage.totalTokens).toBe(6);
+	});
+
+	it("leaves automatic continuation off unless OMP_ACP_MAX_CONTINUATIONS enables it", async () => {
+		const previous = Bun.env.OMP_ACP_MAX_CONTINUATIONS;
+		try {
+			delete Bun.env.OMP_ACP_MAX_CONTINUATIONS;
+			const off = await fixture();
+			const run = step(off.host, [user("hello")]);
+			const fake = await off.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("1 2 3");
+			prompt.response.resolve({ stopReason: "max_turn_requests" });
+			await run.done;
+			expect(fake.promptHistory).toHaveLength(1);
+			expect(run.writer.output.stopReason).toBe("length");
+
+			Bun.env.OMP_ACP_MAX_CONTINUATIONS = "1";
+			const on = await fixture();
+			const continued = step(on.host, [user("hello")]);
+			const enabled = await on.started.next();
+			const first = await enabled.prompts.next();
+			enabled.text("1 2 3");
+			first.response.resolve({ stopReason: "max_turn_requests" });
+			const continuation = await enabled.prompts.next();
+			expect(enabled.promptHistory).toHaveLength(2);
+			expect(textOf(continuation.request.prompt)).toContain("Continue exactly where");
+			enabled.text(" 4 5 6");
+			continuation.response.resolve({ stopReason: "end_turn" });
+			await continued.done;
+			expect(continued.writer.output.stopReason).toBe("stop");
+		} finally {
+			if (previous === undefined) delete Bun.env.OMP_ACP_MAX_CONTINUATIONS;
+			else Bun.env.OMP_ACP_MAX_CONTINUATIONS = previous;
+		}
+	});
+
+	it("does not add a continuation when agy already resumed the output limit", async () => {
+		const state = await fixture({ maxContinuations: 3 });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text(
+			"1 2 3\n⚠ Your previous response was cut off because it exceeded the output token limit. Please continue from where you left off, keeping your response shorter.",
+		);
+		prompt.response.resolve({ stopReason: "max_tokens" });
+		await run.done;
+		expect(fake.promptHistory).toHaveLength(1);
+		expect(run.writer.output.stopReason).toBe("length");
+	});
+
+	it("rejects a stale tool callback that completes after a new step begins", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("first")]);
+		const fake = await state.started.next();
+		const firstPrompt = await fake.prompts.next();
+		fake.text("Working.");
+		// The call is announced late; it keeps waiting while the first step ends.
+		const stale = fake.options.onCall("read", { path: "a.txt" }, fake.currentId);
+		firstPrompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("first"), first.writer.output, user("second")]);
+		const secondPrompt = await fake.prompts.next();
+		state.clock.fire(30);
+		const rejected = await stale;
+		expect(rejected.isError).toBe(true);
+		expect(rejected.content[0]).toEqual({ type: "text", text: expect.stringContaining("no longer active") });
+		expect(fake.closed).toBe(false);
+		expect(second.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		fake.text("Second answer.");
+		secondPrompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.content).toEqual([{ type: "text", text: "Second answer." }]);
+	});
+
+	it("settles a call awaiting its announcement when the request is cancelled", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const pending = fake.options.onCall("read", { path: "a.txt" }, fake.currentId);
+		abort.abort(userInterrupt);
+		const settled = await pending;
+		expect(settled.isError).toBe(true);
+		expect(settled.content[0]).toEqual({ type: "text", text: expect.stringContaining("no longer active") });
+		await expect(run.done).rejects.toThrow("aborted");
+		expect(fake.closed).toBe(false);
+		fake.acknowledgeCancel();
+	});
+
+	it("rejects a late call for the cancelled session without failing the replacement step", async () => {
+		const state = await fixture({ drainIdleMs: 100, drainMaxMs: 1_000 });
+		const abort = new AbortController();
+		const run = step(state.host, [user("hello")], {}, abort.signal);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		const cancelledId = fake.currentId;
+		abort.abort(userInterrupt);
+		await expect(run.done).rejects.toThrow("aborted");
+		await fake.cancellations.next();
+		fake.acknowledgeCancel();
+		const second = step(state.host, [user("hello"), user("again")]);
+		const prompt = await fake.prompts.next();
+		expect(fake.currentId).not.toBe(cancelledId);
+		// The bridge call is seen for the first time only after the new prompt started.
+		const late = fake.options.onCall("read", { path: "a.txt" }, cancelledId);
+		const rejected = await late;
+		expect(rejected.isError).toBe(true);
+		expect(rejected.content[0]).toEqual({ type: "text", text: expect.stringContaining("no longer active") });
+		expect(fake.closed).toBe(false);
+		fake.text("Second answer.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.content).toEqual([{ type: "text", text: "Second answer." }]);
+	});
+
+	it("continues a reasoning-only output-limited part before requiring visible output", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("think then answer")]);
+		const fake = await state.started.next();
+		const first = await fake.prompts.next();
+		fake.thinking("pondering");
+		fake.text("   ");
+		first.response.resolve({
+			stopReason: "max_tokens",
+			usage: { inputTokens: 5, outputTokens: 3, totalTokens: 8 },
+		});
+		const continuation = await fake.prompts.next();
+		expect(fake.created).toHaveLength(1);
+		expect(run.writer.done).toBe(false);
+		fake.text("Answer.");
+		continuation.response.resolve({
+			stopReason: "end_turn",
+			usage: { inputTokens: 7, outputTokens: 2, totalTokens: 9 },
+		});
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("stop");
+		expect(run.writer.output.content).toEqual([
+			{ type: "thinking", thinking: "pondering" },
+			{ type: "text", text: "   Answer." },
+		]);
+		expect(run.writer.output.usage.input).toBe(12);
+		expect(run.writer.output.usage.output).toBe(5);
+		expect(run.writer.output.usage.totalTokens).toBe(17);
+	});
+
+	it("ignores an output-limit notice that only an earlier text block quotes", async () => {
+		const state = await fixture({ maxContinuations: 1 });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const first = await fake.prompts.next();
+		// The notice is quoted mid-part; the part itself ends on ordinary text.
+		fake.text("Your previous response was cut off because it exceeded the output token limit.");
+		fake.thinking("now the actual answer");
+		fake.text("Still writing the answer.");
+		first.response.resolve({ stopReason: "max_tokens" });
+		const continuation = await fake.prompts.next();
+		expect(textOf(continuation.request.prompt)).toContain("Continue exactly where");
+		fake.text(" Done.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(fake.promptHistory).toHaveLength(2);
+		expect(run.writer.output.stopReason).toBe("stop");
+	});
+});
+
+describe("AgyHost diagnostics", () => {
+	it("records the startup, session, prompt and step stages when enabled", async () => {
+		const diagnostics = new Diagnostics(true);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		const summary = diagnostics.summary();
+		expect(summary.enabled).toBe(true);
+		expect(summary.stages["process.start"]?.count).toBe(1);
+		expect(summary.stages["session.new"]?.count).toBe(1);
+		expect(summary.stages.prompt?.count).toBe(1);
+		expect(summary.stages["step.total"]?.count).toBe(1);
+		expect(summary.stages["session.load"]).toBeUndefined();
+		for (const stats of Object.values(summary.stages)) {
+			expect(stats.maxMs).toBeGreaterThanOrEqual(0);
+			expect(Number.isFinite(stats.medianMs)).toBe(true);
+		}
+	});
+
+	it("bounds the close-time wait when diagnostics never settle", async () => {
+		const diagnostics = new Diagnostics(true);
+		diagnostics.settled = () => new Promise(() => {});
+		const state = await fixture({
+			diagnostics,
+			schedule: (_ms, callback) => {
+				const timer = setTimeout(callback, 0);
+				return { cancel: () => clearTimeout(timer) };
+			},
+		});
+		await expect(state.host.dispose()).resolves.toBeUndefined();
+	});
+
+	it("records nothing when diagnostics are disabled", async () => {
+		const diagnostics = new Diagnostics(false);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(diagnostics.summary().samples).toBe(0);
+	});
+
+	it("logs one debug rollup when the host closes", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+			expect(rollups[0][1]).toEqual(diagnostics.summary());
+			expect(diagnostics.summary().stages["step.total"]?.count).toBe(1);
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it("enables diagnostics from OMP_ACP_DIAGNOSTICS=1 without an injected seam", async () => {
+		const previous = Bun.env.OMP_ACP_DIAGNOSTICS;
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			Bun.env.OMP_ACP_DIAGNOSTICS = "1";
+			const state = await fixture();
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+		} finally {
+			debug.mockRestore();
+			if (previous === undefined) delete Bun.env.OMP_ACP_DIAGNOSTICS;
+			else Bun.env.OMP_ACP_DIAGNOSTICS = previous;
+		}
+	});
+
+	it("retains a prompt sample when dispatch throws synchronously", async () => {
+		const diagnostics = new Diagnostics(true);
+		const state = await fixture({ diagnostics });
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		fake.failPrompt = true;
+		await expect(run.done).rejects.toThrow("prompt dispatch failed");
+		const { stages } = diagnostics.summary();
+		expect(stages.prompt?.count).toBe(1);
+		expect(stages["step.total"]?.count).toBe(1);
+	});
+
+	it("includes in-flight prompt and step samples in the rollup after closing mid-turn", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			await fake.prompts.next();
+			state.host.close();
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+			const summary = diagnostics.summary();
+			expect(summary.stages.prompt?.count).toBe(1);
+			expect(summary.stages["step.total"]?.count).toBe(1);
+			expect(rollups[0][1]).toEqual(summary);
+		} finally {
+			debug.mockRestore();
+		}
+	});
+
+	it("logs exactly one rollup across close and repeated dispose", async () => {
+		const debug = spyOn(logger, "debug").mockImplementation(() => {});
+		try {
+			const diagnostics = new Diagnostics(true);
+			const state = await fixture({ diagnostics });
+			const run = step(state.host, [user("hello")]);
+			const fake = await state.started.next();
+			const prompt = await fake.prompts.next();
+			fake.text("Hello.");
+			prompt.response.resolve({ stopReason: "end_turn" });
+			await run.done;
+			state.host.close();
+			await state.host.dispose();
+			await state.host.dispose();
+			const rollups = debug.mock.calls.filter(([message]) => message === "Antigravity CLI diagnostics");
+			expect(rollups).toHaveLength(1);
+		} finally {
+			debug.mockRestore();
+		}
 	});
 });

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in Antigravity CLI timing diagnostics behind `OMP_ACP_DIAGNOSTICS=1`; process startup, session creation and loading, prompt, and whole-step durations are sampled in memory and summarized at debug level when the host closes, without collecting request content, model output, account identifiers, or session IDs ([#19437](https://github.com/can1357/oh-my-pi/pull/19437) by [@SenCha930511](https://github.com/SenCha930511))
+- Added opt-in automatic continuations for output-limited Antigravity CLI turns; `max_tokens` and `max_turn_requests` stops continue on the same ACP session and merge their text and usage into one assistant step, up to `OMP_ACP_MAX_CONTINUATIONS` continuations per step (unset or `0`, the default, keeps it off; at most 10) ([#19441](https://github.com/can1357/oh-my-pi/pull/19441) by [@SenCha930511](https://github.com/SenCha930511))
+
+### Fixed
+
+- Fixed the Antigravity CLI provider so a refused turn fails with an explicit refusal error instead of a normal empty stop, and a `max_turn_requests` stop is reported as `length` so the conversation can continue ([#19436](https://github.com/can1357/oh-my-pi/pull/19436) by [@SenCha930511](https://github.com/SenCha930511))
+- Fixed Antigravity CLI cancellation so only an explicit user cancel sends `session/cancel` immediately and drains the turn under a bounded activity-aware grace that still stops a stuck turn, while internal aborts (queue steering, TTSR, streaming-edit recovery, terminal yield, advisors) keep their immediate stop; a new step cuts the drain short instead of waiting it out, and a tool call from a session this host replaced is answered as stale instead of failing the live turn ([#19441](https://github.com/can1357/oh-my-pi/pull/19441) by [@SenCha930511](https://github.com/SenCha930511))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
