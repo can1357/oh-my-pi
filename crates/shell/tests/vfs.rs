@@ -1100,20 +1100,24 @@ async fn direnv_exec_commands_open_provider_urls() {
 	assert_eq!(run.stdout, "alpha\nhello\n");
 }
 
-/// Serves one file wherever a path spells `/dev/fd/-1` and leaves every other
-/// path to the host: a stand-in for a file at `\dev\fd\-1` on the current
+/// Serves one file wherever a path ends in `spelled` and leaves every other
+/// path to the host: a stand-in for a file at `\dev\fd\N` on the current
 /// drive, which a test must not create.
 #[cfg(windows)]
 #[derive(Debug)]
-struct DevFdMinusOneFilesystem {
-	file: PathBuf,
+struct DriveDevFdFilesystem {
+	spelled: &'static str,
+	file:    PathBuf,
 }
 
 #[cfg(windows)]
-impl DevFdMinusOneFilesystem {
+impl DriveDevFdFilesystem {
 	fn served(&self, path: &Path) -> io::Result<&Path> {
-		let spelled = path.to_string_lossy().replace('\\', "/");
-		if spelled.ends_with("/dev/fd/-1") {
+		if path
+			.to_string_lossy()
+			.replace('\\', "/")
+			.ends_with(self.spelled)
+		{
 			Ok(&self.file)
 		} else {
 			Err(io::Error::from(io::ErrorKind::NotFound))
@@ -1123,7 +1127,7 @@ impl DevFdMinusOneFilesystem {
 
 #[cfg(windows)]
 #[async_trait]
-impl FileSystem for DevFdMinusOneFilesystem {
+impl FileSystem for DriveDevFdFilesystem {
 	fn is_native_local(&self, path: &Path) -> bool {
 		self.served(path).is_err()
 	}
@@ -1141,18 +1145,20 @@ impl FileSystem for DevFdMinusOneFilesystem {
 	}
 }
 
-/// A descriptor the shell does not have fails like a missing file on Windows
-/// too. Its placeholder path used to be `/dev/fd/-1`, an ordinary path on the
-/// current drive, so `cat /dev/fd/9` read whatever file was there.
+/// On Windows `/dev/fd/N` is also a path on the current drive. A descriptor
+/// the shell lacks reads a file that exists there, and otherwise fails like a
+/// missing file without reaching the placeholder (`\dev\fd\-1` used to be
+/// read).
 #[cfg(windows)]
 #[tokio::test]
-async fn closed_descriptors_never_open_a_drive_file() {
+async fn closed_descriptors_read_only_a_drive_file_that_exists() {
 	let directory = tempfile::tempdir().expect("isolated host directory");
-	let trap = directory.path().join("trap");
-	fs::write(&trap, b"trap\n").expect("file behind /dev/fd/-1");
-	let filesystem = Fs::new(Arc::new(DevFdMinusOneFilesystem { file: trap }));
-	let run = run_script(filesystem, Some(directory.path()), "cat /dev/fd/9").await;
-	assert_eq!(run.status, Some(1), "stdout: {:?}, stderr: {:?}", run.stdout, run.stderr);
-	assert_eq!(run.stdout, "");
-	assert!(run.stderr.contains("/dev/fd/9"), "{}", run.stderr);
+	let file = directory.path().join("file");
+	fs::write(&file, b"on the drive\n").expect("file behind the descriptor path");
+	for (spelled, status, stdout) in [("/dev/fd/9", 0, "on the drive\n"), ("/dev/fd/-1", 1, "")] {
+		let filesystem = Fs::new(Arc::new(DriveDevFdFilesystem { spelled, file: file.clone() }));
+		let run = run_script(filesystem, Some(directory.path()), "cat /dev/fd/9").await;
+		assert_eq!(run.status, Some(status), "{spelled}: stderr {:?}", run.stderr);
+		assert_eq!(run.stdout, stdout, "{spelled}");
+	}
 }

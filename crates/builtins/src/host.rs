@@ -567,10 +567,10 @@ impl ShellPaths {
 	pub fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
 		let resolved = self.absolute(path.as_ref());
 		let spelled = Self::descriptor_spelling(path.as_ref(), &resolved);
-		if let Some(descriptor) = DescriptorPath::parse(spelled) {
-			return self.descriptor_target(descriptor);
+		match DescriptorPath::parse(spelled) {
+			Some(descriptor) => self.descriptor_or_native(descriptor, resolved),
+			None => resolved,
 		}
-		resolved
 	}
 
 	/// Like [`ShellPaths::resolve`], for calls that inspect `path` itself
@@ -583,14 +583,16 @@ impl ShellPaths {
 	pub fn resolve_link(&self, path: impl AsRef<Path>) -> PathBuf {
 		let resolved = self.absolute(path.as_ref());
 		let spelled = Self::descriptor_spelling(path.as_ref(), &resolved);
-		if let Some(descriptor) = DescriptorPath::parse(spelled)
-			&& descriptor != DescriptorPath::Terminal
-			// `/dev/stdin` and friends sit directly under `/dev`.
-			&& spelled.components().count() != 3
-		{
-			return self.descriptor_target(descriptor);
+		match DescriptorPath::parse(spelled) {
+			Some(descriptor)
+				if descriptor != DescriptorPath::Terminal
+					// `/dev/stdin` and friends sit directly under `/dev`.
+					&& spelled.components().count() != 3 =>
+			{
+				self.descriptor_or_native(descriptor, resolved)
+			},
+			_ => resolved,
 		}
-		resolved
 	}
 
 	/// The path to match against the descriptor spellings. On Windows
@@ -598,6 +600,22 @@ impl ShellPaths {
 	/// directory's drive (`C:/dev/fd/N`); the path as written is matched.
 	fn descriptor_spelling<'a>(path: &'a Path, resolved: &'a Path) -> &'a Path {
 		if cfg!(windows) { path } else { resolved }
+	}
+
+	/// What a descriptor spelling opens. On Windows the spelling is also an
+	/// ordinary path on the working directory's drive (`C:\dev\fd\9`): a
+	/// descriptor the engine backs (`<(…)`) wins, then a file that really exists
+	/// there, and only when neither does it become a path that cannot be opened,
+	/// so a write never creates one.
+	fn descriptor_or_native(&self, descriptor: DescriptorPath, resolved: PathBuf) -> PathBuf {
+		let target = self.descriptor_target(descriptor);
+		if cfg!(windows)
+			&& !omp_vfs::is_virtual_path(&target)
+			&& self.filesystem.symlink_metadata(&resolved).is_ok()
+		{
+			return resolved;
+		}
+		target
 	}
 
 	fn absolute(&self, path: &Path) -> PathBuf {
