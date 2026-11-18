@@ -131,6 +131,23 @@ describe("read URL binary dispatch", () => {
 		expect(text).not.toContain("�");
 	});
 
+	it("reads a member of a remote zip named after the archive URL", async () => {
+		const zipBytes = await encodeArchive("zip", [
+			["root.txt", "root file\n"],
+			["nested/data.txt", "nested line one\nnested line two\n"],
+		]);
+		const url = uniqueUrl("archive", ".zip");
+		const fetchBinary = stubUrlBytes(zipBytes, "application/zip");
+
+		const tool = new ReadTool(makeSession(testDir));
+		const member = textOutput(await tool.execute("read-url-zip-member", { path: `${url}:nested/data.txt` }));
+		expect(member).toContain("nested line one");
+		expect(fetchBinary.mock.calls[0]?.[0]).toBe(url);
+
+		const listing = textOutput(await tool.execute("read-url-zip-dir", { path: `${url}:nested/` }));
+		expect(listing).toContain("data.txt");
+	});
+
 	it("downloads a generic-MIME convertible document body only once", async () => {
 		const url = uniqueUrl("report", ".pdf");
 		const bodyReads: string[] = [];
@@ -153,7 +170,10 @@ describe("read URL binary dispatch", () => {
 		expect(bodyReads).toEqual([]);
 		// One download even when it fails: the binary fallback reuses the conversion attempt.
 		expect(fetchBinary).toHaveBeenCalledTimes(1);
-		expect(textOutput(result).split("Binary fetch failed: offline").length - 1).toBe(1);
+		// The notice itself says why no text came out: a ranged read shows no notes.
+		expect(textOutput(result)).toContain(
+			"[Binary content: application/octet-stream, unknown size; Binary fetch failed: offline]",
+		);
 	});
 
 	it("returns a metadata notice when a hinted binary refetch fails", async () => {

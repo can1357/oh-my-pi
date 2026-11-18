@@ -39,6 +39,21 @@ export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 /** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
 export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
 
+/** A model picked for this session only (the model selector, `/model`), not through a configured role. */
+export const TEMPORARY_MODEL_CHANGE_ROLE = "temporary";
+
+/**
+ * The configured model role a `model_change` entry's `role` assigned; undefined for the markers of
+ * switches no role made (retry fallback, prewalk handoff, temporary pick). The Agent Hub labels rows with it.
+ */
+export function modelRoleOf(role: string | undefined): string | undefined {
+	return role === EPHEMERAL_MODEL_CHANGE_ROLE ||
+		role === PREWALK_MODEL_CHANGE_ROLE ||
+		role === TEMPORARY_MODEL_CHANGE_ROLE
+		? undefined
+		: role;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this
@@ -110,6 +125,43 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	message: AgentMessage;
 }
 
+/**
+ * One judgment answer as journaled: a noul's probability of yes; `[label, confidence]` for a choice;
+ * `[score, confidence]` for a score; `[top, bottom, left, right, confidence]` for a box. Full
+ * distributions stay in the judgment answer cache.
+ */
+export type JudgmentRecordAnswer =
+	| number
+	| [choice: string, confidence: number]
+	| [score: number, confidence: number]
+	| [top: number, bottom: number, left: number, right: number, confidence: number];
+
+/**
+ * A native judgment as journaled on its {@link ModelUsageEntry}. No prompt text is written: the
+ * judgment answer cache (`judgment-cache.db`) keeps the state once under `states.id` and each
+ * question's rendered instructions under `oracle(state, name)`, so `state` plus a question id
+ * recovers the whole query.
+ */
+export interface JudgmentRecord {
+	/** `sha256` of the canonical state (and image digests): the cache's `states.id`. */
+	state: string;
+	/** Answers the request produced, by question id; empty when it failed. */
+	answers: Record<string, JudgmentRecordAnswer>;
+	/** Questions of the same judgment the cache answered: not billed and not in `answers`. */
+	cached?: number;
+}
+
+/**
+ * An off-transcript text completion as journaled on its {@link ModelUsageEntry}. The entry's
+ * `purpose` names the static prompt, which is never written; text too long to journal is left out.
+ */
+export interface CompletionRecord {
+	/** User-turn text the model was sent; absent when the request read the conversation at the entry's `parentId`. */
+	prompt?: string;
+	/** Reply text as the model produced it, before parsing. */
+	reply?: string;
+}
+
 /** Usage from a model call that does not belong in the conversation transcript. */
 export interface ModelUsageEntry extends SessionEntryBase {
 	type: "model_usage";
@@ -127,7 +179,18 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	 * the cache lifetime then) and whether it read the cache. Absent on a failed, replaced or outdated refresh.
 	 */
 	cacheRefresh?: { sentAt: number; hit: boolean };
+	/** Wall time of the request in milliseconds. */
+	duration?: number;
+	/** Milliseconds until the first streamed token. */
+	ttft?: number;
+	/** What a native judge was asked and answered. */
+	judgment?: JudgmentRecord;
+	/** What a text side channel (title generation) was sent and replied. */
+	completion?: CompletionRecord;
 }
+
+/** A {@link ModelUsageEntry} as its writer supplies it; the session adds identity, position, and time. */
+export type ModelUsageRecord = Omit<ModelUsageEntry, keyof SessionEntryBase>;
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	type: "thinking_level_change";

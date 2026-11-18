@@ -5,7 +5,6 @@ import {
 	type AgentToolResult,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core";
-import type { Message } from "@oh-my-pi/pi-ai";
 import { buildJobResult } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -37,13 +36,6 @@ function session(
 		getAgentId: () => agentId,
 		...extra,
 	} as unknown as ToolSession;
-}
-
-/** A caller context whose latest turn made `elapse`'s wait call plus one call to each of `otherTools`. */
-function latestTurn(...otherTools: string[]): () => Message[] {
-	const calls = [{ id: "idle-wait", name: "wait" }, ...otherTools.map((name, i) => ({ id: `${name}-${i}`, name }))];
-	const message = { role: "assistant", content: calls.map(call => ({ type: "toolCall", ...call, arguments: {} })) };
-	return () => [message as unknown as Message];
 }
 
 // Lets every pending continuation run, so the wait reaches its next block before the test acts.
@@ -158,26 +150,24 @@ describe("wait", () => {
 		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed" });
 	});
 
-	test("back-to-back idle waits climb the ladder and, from the 10s rung on, send the agent back to work", async () => {
+	test("a first idle wait returns after 5s, then every back-to-back one takes the 4m window and sends the agent back to work", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const build = Promise.withResolvers<string>();
 		const id = manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn("read") }));
+		const tool = new WaitTool(session(manager));
 		const first = await elapse(tool, 5_000);
 		expect(first.useless).toBe(true);
 		expect(first.details?.jobs?.[0]).toMatchObject({ id, status: "running" });
 		expect(notice(first)).toBeUndefined();
 		expect(report(first)).toContain("within 5.0s");
-		expect(report(first)).toContain("Call `wait` right away with no other tool call: it then blocks up to 4m.");
-		expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
-		expect(notice(await elapse(tool, 30_000))).toContain("45.0s");
-		await elapse(tool, 60_000);
-		await elapse(tool, 240_000);
-		const capped = await elapse(tool, 240_000);
-		expect(report(capped)).toContain("within 4m");
-		expect(report(capped)).toContain("up to 4m");
-		expect(notice(capped)).toContain("9m45s");
+		expect(report(first)).toContain("Call `wait` again right away: it then blocks up to 4m.");
+		const second = await elapse(tool, 240_000);
+		expect(report(second)).toContain("within 4m");
+		expect(notice(second)).toContain("4m5s");
+		const third = await elapse(tool, 240_000);
+		expect(report(third)).toContain("within 4m");
+		expect(notice(third)).toContain("8m5s");
 		build.resolve("done");
 	});
 
@@ -190,7 +180,7 @@ describe("wait", () => {
 		await elapse(tool, 5_000);
 		vi.advanceTimersByTime(60_000);
 		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
-		await elapse(tool, 10_000);
+		await elapse(tool, 240_000);
 		const lint = Promise.withResolvers<string>();
 		manager.register("bash", "lint", async () => lint.promise, { ownerId: "Main" });
 		const woke = tool.execute("wait-news", {});
@@ -200,20 +190,6 @@ describe("wait", () => {
 		vi.advanceTimersByTime(1_500);
 		expect((await woke).useless).toBeUndefined();
 		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
-		build.resolve("done");
-	});
-
-	test("a back-to-back wait that is the only call of its turn takes the top rung at once", async () => {
-		vi.useFakeTimers();
-		const manager = new AsyncJobManager({ onJobComplete: () => {} });
-		const build = Promise.withResolvers<string>();
-		manager.register("bash", "build", async () => build.promise, { ownerId: "Main" });
-		const tool = new WaitTool(session(manager, "Main", false, { getContextMessages: latestTurn() }));
-		// The first wait of a streak keeps the floor: the agent has not yet shown it has nothing else to do.
-		expect(notice(await elapse(tool, 5_000))).toBeUndefined();
-		const top = await elapse(tool, 240_000);
-		expect(report(top)).toContain("within 4m");
-		expect(notice(top)).toContain("4m5s");
 		build.resolve("done");
 	});
 
@@ -232,7 +208,7 @@ describe("wait", () => {
 		expect(headless.description).not.toContain("End your turn");
 		const headlessReport = report(await elapse(headless, 5_000));
 		expect(headlessReport).not.toContain("End your turn");
-		expect(headlessReport).toContain("Call `wait` right away with no other tool call");
+		expect(headlessReport).toContain("Call `wait` again right away");
 		build.resolve("done");
 	});
 
@@ -320,15 +296,15 @@ describe("wait", () => {
 		expect(text).not.toContain("delivered by this wait");
 	});
 
-	test("finds nothing to wait for in a subagent whose only running work is its parent's job on it", async () => {
+	test("finds nothing to wait for in an agent whose only running work is another agent's job on it", async () => {
 		const registry = AgentRegistry.global();
 		const streaming = { isStreaming: true, hasIrcInterrupts: () => false } as never;
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: streaming, status: "running" });
+		// Not Main's subagent: a live parent would keep the wait blocking for its message.
 		registry.register({
 			id: "Child",
 			displayName: "Child",
 			kind: "sub",
-			parentId: "Main",
 			session: streaming,
 			status: "running",
 		});
@@ -634,7 +610,12 @@ describe("wait", () => {
 			};
 		}
 
-		function registerParentAndChild() {
+		/**
+		 * Registers `Main` and `Child`. `Child` is `Main`'s subagent only with
+		 * `subagent`: a live parent may message its subagent at any time, so it
+		 * keeps every jobless wait of the child blocking (see the parent tests).
+		 */
+		function registerParentAndChild({ subagent = false } = {}) {
 			const registry = AgentRegistry.global();
 			const main = liveSession();
 			const child = liveSession();
@@ -643,7 +624,7 @@ describe("wait", () => {
 				id: "Child",
 				displayName: "Child",
 				kind: "sub",
-				parentId: "Main",
+				...(subagent ? { parentId: "Main" } : {}),
 				session: child.session,
 				status: "running",
 			});
@@ -930,7 +911,7 @@ describe("wait", () => {
 			vi.useFakeTimers();
 			const tool = new WaitTool(session(new AsyncJobManager({}), "Child"));
 			expect(await idleText(elapse(tool, 5_000))).toContain("No reply within 5.0s");
-			expect(notice(await elapse(tool, 10_000))).toContain("15.0s");
+			expect(notice(await elapse(tool, 240_000))).toContain("4m5s");
 		});
 
 		test("returns at once while the agent asked waits on the user, and blocks again once they answer", async () => {
@@ -951,6 +932,67 @@ describe("wait", () => {
 			const closeDialog = registry.awaits.hold("Main", [USER_AWAIT_ID], { interruptible: false });
 			expect(await idleText(waiting)).toContain("`Main` is waiting on the user");
 			closeDialog();
+		});
+
+		test("a subagent blocks for its live parent's message without asking it anything", async () => {
+			const { child } = registerParentAndChild({ subagent: true });
+			const waiting = childWait();
+			expect(await stillPending(waiting)).toBe(true);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "go" });
+			expect(await received(waiting, child)).toMatchObject([{ from: "Main", body: "go" }]);
+		});
+
+		test("a subagent's parent wait survives an interim answer that was not a progress note", async () => {
+			const { child } = registerParentAndChild({ subagent: true });
+			await ask();
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "hold on, wait for my go" });
+			const waiting = childWait();
+			expect(await stillPending(waiting)).toBe(true);
+			await IrcBus.global().send({ from: "Main", to: "Child", body: "go" });
+			expect(await received(waiting, child)).toMatchObject([
+				{ from: "Main", body: "hold on, wait for my go" },
+				{ from: "Main", body: "go" },
+			]);
+		});
+
+		test("a subagent's parent wait reports the parent by name when its window elapses", async () => {
+			registerParentAndChild({ subagent: true });
+			vi.useFakeTimers();
+			const tool = new WaitTool(session(new AsyncJobManager({}), "Child"));
+			expect(await idleText(elapse(tool, 5_000))).toContain("No message from `Main` within 5.0s");
+		});
+
+		test("a subagent does not wait on a parent that waits on its result", async () => {
+			registerParentAndChild({ subagent: true });
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const childRun = registerChildJob(manager);
+			const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+			const result = await childWait(manager);
+			expect(result.isError).toBeUndefined();
+			expect(result.content[0]).toMatchObject({
+				text: expect.stringContaining("`Main` cannot reply before you finish"),
+			});
+			expect(result.useless).toBe(true);
+			childRun.resolve("done");
+			await parentWait;
+		});
+
+		test("a subagent's parent wait ends once the parent starts waiting on its result", async () => {
+			registerParentAndChild({ subagent: true });
+			const manager = new AsyncJobManager({ onJobComplete: () => {} });
+			const childRun = registerChildJob(manager);
+			const waiting = childWait(manager);
+			expect(await stillPending(waiting)).toBe(true);
+			const parentWait = new WaitTool(session(manager, "Main")).execute("parent-wait", {});
+			expect(await idleText(waiting)).toContain("`Main` cannot reply before you finish");
+			childRun.resolve("done");
+			await parentWait;
+		});
+
+		test("a subagent does not wait on a parent that is gone", async () => {
+			const { registry } = registerParentAndChild({ subagent: true });
+			registry.get("Main")!.session = null;
+			expect(await idleText(childWait())).toContain("Nothing to wait for");
 		});
 	});
 });

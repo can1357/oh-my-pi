@@ -158,6 +158,7 @@ export interface DashboardStats {
 	byModel: ModelStats[];
 	byFolder: FolderStats[];
 	byAgentType: AgentTypeStats[];
+	bySideChannel: SideChannelStats[];
 	timeSeries: TimeSeriesPoint[];
 	modelSeries: ModelTimeSeriesPoint[];
 	modelPerformanceSeries: ModelPerformancePoint[];
@@ -173,12 +174,12 @@ export interface DashboardStats {
 export type AgentType = "main" | "subagent" | "advisor";
 
 /**
- * Token usage aggregated by {@link AgentType} over the active range. Token
- * columns are explicit so the dashboard's share denominator matches the
- * counts it renders (input + output + cache read + cache write).
+ * Request, token and cost totals of one usage-attribution group over the
+ * active range. Token columns are explicit so the dashboard's share
+ * denominator matches the counts it renders (input + output + cache read +
+ * cache write).
  */
-export interface AgentTypeStats {
-	agentType: AgentType;
+export interface UsageAttributionTotals {
 	/** Total number of requests */
 	totalRequests: number;
 	/** Total input tokens */
@@ -191,6 +192,28 @@ export interface AgentTypeStats {
 	totalCacheWriteTokens: number;
 	/** Total cost */
 	totalCost: number;
+}
+
+/**
+ * Usage of conversation turns (assistant messages, discarded ones included)
+ * aggregated by {@link AgentType}. Off-transcript model calls are not in here:
+ * see {@link SideChannelStats}.
+ */
+export interface AgentTypeStats extends UsageAttributionTotals {
+	agentType: AgentType;
+}
+
+/**
+ * Usage of side channels (model calls that are not conversation turns: title
+ * generation, job captions, judge queries, …) aggregated per use case, apart
+ * for calls served by a decision model and calls served by a language model.
+ * Busiest group first.
+ */
+export interface SideChannelStats extends UsageAttributionTotals {
+	/** Use case, such as `title` or `progress`; a purpose without a known category is its own. */
+	category: string;
+	/** Whether the calls ran on a decision model (an api that answers judgments natively). */
+	decision: boolean;
 }
 
 /**

@@ -505,6 +505,20 @@ export async function focusKeyTarget(handle: ElementHandle, label: string, signa
 }
 
 /**
+ * Focus an element with the DOM's own `focus()`. Puppeteer's `ElementHandle.focus()` refuses anything but an
+ * HTMLElement, though a focusable SVG element (`<g tabindex="0" role="button">`) takes focus too.
+ */
+export async function focusElement(handle: ElementHandle, signal?: AbortSignal): Promise<void> {
+	await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const node = el as unknown as { focus?: () => void };
+			if (typeof node.focus !== "function") throw new Error("Cannot focus an element without a focus() method");
+			node.focus();
+		}),
+	);
+}
+
+/**
  * Click an element only after verifying the dispatched point is not occluded, then confirm the browser
  * delivered the click to it: the target got the `mousedown` or `click` (a label's forwarded `click` counts
  * for its control), or the page consumed its `pointerdown` with `preventDefault()`, which suppresses the
@@ -530,18 +544,42 @@ export async function clickElement(
 			}
 			type Listen = (type: string, listener: (event: InputEvent) => void, capture: boolean) => void;
 			const target = el as unknown as { addEventListener: Listen; removeEventListener: Listen };
-			const page = globalThis as unknown as { addEventListener: Listen; removeEventListener: Listen };
+			const page = globalThis as unknown as {
+				addEventListener: Listen;
+				removeEventListener: Listen;
+				location: { href: string };
+				document: { documentElement: unknown };
+				MutationObserver: new (callback: () => void) => {
+					observe(node: unknown, options: Record<string, boolean>): void;
+					disconnect(): void;
+				};
+			};
 			const pointerDowns: InputEvent[] = [];
+			const href = page.location.href;
+			let changed = false;
 			const state = {
 				get detached() {
 					return !(el as unknown as PageElement).isConnected;
 				},
 				reached: false,
-				// Read after the click: the page's handlers have run by then.
-				delivered: () => state.reached || pointerDowns.some(event => event.defaultPrevented),
+				// Read after the click: the page's handlers have run by then. A handler that replaced the element,
+				// changed the DOM, submitted a form or navigated also shows the page took the click,
+				// even when it re-rendered the target before the listeners saw it.
+				delivered: () =>
+					state.reached ||
+					pointerDowns.some(event => event.defaultPrevented) ||
+					state.detached ||
+					changed ||
+					page.location.href !== href,
 				stop: () => {},
 			};
 			if (state.detached) return state;
+			const observer = new page.MutationObserver(() => {
+				changed = true;
+			});
+			const onChange = () => {
+				changed = true;
+			};
 			const record = (event: InputEvent) => {
 				if (event.type === "pointerdown") pointerDowns.push(event);
 				else state.reached = true;
@@ -552,15 +590,25 @@ export async function clickElement(
 				if (event.composedPath().includes(el)) record(event);
 			};
 			const types = ["pointerdown", "mousedown", "click"];
+			const pageChanges = ["submit", "beforeunload", "pagehide"];
 			for (const type of types) {
 				target.addEventListener(type, record, true);
 				page.addEventListener(type, onPage, true);
 			}
+			for (const type of pageChanges) page.addEventListener(type, onChange, true);
+			observer.observe(page.document.documentElement, {
+				childList: true,
+				subtree: true,
+				attributes: true,
+				characterData: true,
+			});
 			state.stop = () => {
+				observer.disconnect();
 				for (const type of types) {
 					target.removeEventListener(type, record, true);
 					page.removeEventListener(type, onPage, true);
 				}
+				for (const type of pageChanges) page.removeEventListener(type, onChange, true);
 			};
 			return state;
 		}),
@@ -607,7 +655,9 @@ export async function clickElement(
 	});
 	await watch.dispose().catch(() => undefined);
 	if (!delivered) {
-		throw new ToolError(`${label}: the browser did not deliver the click to the element (disabled or inert)`);
+		throw new ToolError(
+			`${label}: could not confirm the click reached the element (no listener saw it and the page did not change; it may be disabled or inert); check the page before clicking again`,
+		);
 	}
 }
 
@@ -777,7 +827,7 @@ const PICKER_VALUE_EXAMPLES: Record<string, string> = {
 const PICKER_INPUT_TYPES = Object.keys(PICKER_VALUE_EXAMPLES);
 
 /**
- * Focus a field that can take text, clear any existing value, then retype. A colour, date, time or
+ * Focus a field that can take text, clear any existing value, then insert the value in one input. A colour, date, time or
  * range input gets its value set the way its picker would, and refuses one it rejects. A
  * contenteditable element has its contents selected and replaced by one text insertion (or deleted
  * by Backspace for an empty value), as a paste would.
@@ -935,7 +985,7 @@ export async function fillViaHandle(
 				}
 				const before = node.value;
 				if ("value" in node) write("");
-				// Typing a value fires its own input events; an empty value types nothing,
+				// Inserting a value fires its own input event; an empty value inserts nothing,
 				// so report the clear itself when there was something to clear.
 				if (wanted === "" && before) report();
 				return { target: "field" as const };
@@ -955,6 +1005,23 @@ export async function fillViaHandle(
 			return;
 		case "unfocused":
 			throw new ToolError("Cannot fill an element that does not keep focus");
+		case "field":
+			// One `Input.insertText` puts the whole value in with a single native input event: a newline stays text
+			// instead of pressing Enter (which submits chat forms), a controlled component sees the full value
+			// rather than re-rendering its old one between keys, and long text takes one round trip.
+			if (!value) return;
+			throwIfAborted(signal);
+			try {
+				await untilAborted(signal, () => page.keyboard.sendCharacter(value));
+			} catch (error) {
+				if (signal?.aborted) {
+					throw new TypingInterruptedError("the value was already sent and may have reached the field", {
+						cause: signal.reason,
+					});
+				}
+				throw error;
+			}
+			return;
 		case "editable":
 			if (!value && !prepared.deletable) return;
 			throwIfAborted(signal);
@@ -975,8 +1042,6 @@ export async function fillViaHandle(
 				throw error;
 			}
 			return;
-		case "field":
-			await typeKeys(page, value, signal);
 	}
 }
 
@@ -1689,6 +1754,11 @@ async function deliverToInput(
 ): Promise<void> {
 	if (route === "paths") {
 		const staged = await staging.stage(sources, signal);
+		// Chrome expands a folder for a `webkitdirectory` input only on the front tab, as when a person picks one; a
+		// tab omp opened in the background is brought forward for this upload alone.
+		if (sources.some(source => source.directory)) {
+			await untilAborted(signal, () => input.frame.page().bringToFront());
+		}
 		await untilAborted(signal, () => {
 			filling?.();
 			return setFileInputPaths(input, staged);

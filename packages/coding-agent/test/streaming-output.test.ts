@@ -711,7 +711,7 @@ describe("truncation notice formatting", () => {
 
 	test("formatHeadTruncationNotice formats head truncation range", () => {
 		const lineTruncation = truncateHead("l1\nl2\nl3", { maxLines: 2, maxBytes: 100 });
-		expect(formatHeadTruncationNotice(lineTruncation)).toBe("\n\n[Showing lines 1-2 of 3. Use :3 to continue]");
+		expect(formatHeadTruncationNotice(lineTruncation)).toBe("\n\n[Showing lines 1-2 of 3. Use :3- to continue]");
 
 		const byteTruncation = truncateHead("12345\nabc\nz", { maxLines: 10, maxBytes: 7 });
 		expect(
@@ -719,7 +719,7 @@ describe("truncation notice formatting", () => {
 				startLine: 100,
 				totalFileLines: 500,
 			}),
-		).toBe("\n\n[Showing lines 100-100 of 500. Use :101 to continue]");
+		).toBe("\n\n[Showing lines 100-100 of 500. Use :101- to continue]");
 	});
 });
 

@@ -54,7 +54,7 @@ import type {
 import type { IdleMaintenanceOptions } from "../session/idle-maintenance";
 import type { CustomMessage } from "../session/messages";
 import type { ServingModel } from "../session/retry-fallback-chains";
-import type { ModelUsageEntry, SessionEntry, UsageStatistics } from "../session/session-entries";
+import type { ModelUsageRecord, SessionEntry, UsageStatistics } from "../session/session-entries";
 import type { AgentDefinition } from "../task/types";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { RemoteObject, RpcMethod } from "./rpc";
@@ -166,7 +166,6 @@ export interface SessionViewState {
 	compactionSpeculation: "idle" | "running" | "armed";
 	contextUsageRevision: number;
 	contextUsage: ContextUsage | undefined;
-	isGeneratingHandoff: boolean;
 	isRetrying: boolean;
 	retryAttempt: number;
 	isTtsrAbortPending: boolean;
@@ -245,16 +244,7 @@ export type SessionHostProtocol = {
 	popQueuedMessage: RpcMethod<[id: string], void>;
 	setTodoPhases: RpcMethod<[phases: TodoPhase[]], void>;
 	appendCustomEntry: RpcMethod<[customType: string, data: unknown], void>;
-	appendModelUsage: RpcMethod<
-		[
-			usage: Pick<
-				ModelUsageEntry,
-				"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
-			>,
-			owner: { sessionId: string; parentId: string | null },
-		],
-		void
-	>;
+	appendModelUsage: RpcMethod<[usage: ModelUsageRecord, owner: { sessionId: string; parentId: string | null }], void>;
 	flushSession: RpcMethod<[], void>;
 	ensureOnDisk: RpcMethod<[], void>;
 	getArtifactPath: RpcMethod<[id: string], string | null>;
@@ -263,7 +253,6 @@ export type SessionHostProtocol = {
 	retry: RpcMethod<[], boolean>;
 	abortRetry: RpcMethod<[], void>;
 	abortCompaction: RpcMethod<[reason?: unknown], void>;
-	abortHandoff: RpcMethod<[], void>;
 	setModelTemporary: RpcMethod<
 		[model: Model, thinkingLevel?: ConfiguredThinkingLevel, options?: { ephemeral?: boolean }],
 		void

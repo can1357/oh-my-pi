@@ -40,7 +40,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { syncOpenAIResponsesHistoryTexts } from "@oh-my-pi/pi-ai/utils";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { $env } from "@oh-my-pi/pi-utils/env";
+import { $env, isInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
@@ -158,6 +158,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionStateApi } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions, outRepliesActive } from "./internal-urls";
+import { onJudgeRejection } from "./judgment";
 import { stripXdUnderscorePrefix, stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { holdSharedLsp } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -254,6 +255,7 @@ import {
 import { describeUsageFallback } from "./session/retry-fallback-reason";
 import { kUsageLimitRequestProvider } from "./session/turn-recovery";
 import { getReadableCompactionEntry, getRestorableSessionModels } from "./session/session-context";
+import { completionRecord } from "./session/model-usage-journal";
 import { SessionManager } from "./session/session-manager";
 import { cfgOffline } from "./config/auxiliary-model-policy";
 import { SHAPE_RULE } from "./spotlight/shape";
@@ -469,6 +471,16 @@ const cfgToolCallSwitches = combine({
 	abortOnFabricatedResult: cfgToolsAbortOnFabricatedResult,
 });
 
+/**
+ * Whether tool calls carry {@link INTENT_FIELD}: an explicit `tools.intentTracing` (any settings layer
+ * or `PI_INTENT_TRACING`) wins; unset, it follows {@link isInteractiveHost} — on in the interactive TUI
+ * and its subagents, whose transcript and task progress show intents, off in print, RPC, ACP, and SDK
+ * processes, where the field only costs tokens.
+ */
+function intentTracingActive(settings: Settings): boolean {
+	return cfgToolsIntentTracing.isConfigured(settings) ? cfgToolsIntentTracing.get(settings) : isInteractiveHost();
+}
+
 /** Settings skill and file slash-command discovery reads (foreign sources gated by the provider lists). */
 const cfgSkillsAndCommandsDiscovery = combine({
 	skills: cfgSkills,
@@ -664,8 +676,11 @@ export interface CreateAgentSessionOptions {
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
-	/** Authenticated fallback selector for deferred subagent model patterns. */
-	modelPatternAuthFallback?: string;
+	/**
+	 * Parent model selector a subagent falls back to when its deferred patterns
+	 * resolve to no model, or to one without credentials.
+	 */
+	modelPatternParentFallback?: string;
 	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
 	modelPatternFallbackRole?: string;
 	/** Validated inherited retry chain for a deferred singleton pattern; empty explicitly disables fallbacks. */
@@ -2566,7 +2581,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	if (asyncJobManager) {
 		const usagePurpose =
 			(purpose: string): ModelJobWidgetAuthorOptions["onUsage"] =>
-			message => {
+			(message, userPrompt) => {
 				if (!message.usage) return;
 				sessionManager.appendModelUsage(
 					{
@@ -2577,6 +2592,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						usage: message.usage,
 						stopReason: message.stopReason,
 						errorMessage: message.errorMessage,
+						duration: message.duration,
+						ttft: message.ttft,
+						completion: completionRecord(userPrompt, message),
 					},
 					{ sessionId: sessionManager.getSessionId(), parentId: sessionManager.getLeafId() },
 				);
@@ -3550,11 +3568,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					selectedExplicitThinkingLevel = true;
 				}
 				let authFallbackUsed = false;
-				if (options.modelPatternAuthFallback) {
+				if (options.modelPatternParentFallback) {
 					const primaryKey = await modelRegistry.getApiKey(primary.model);
 					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
 						const fallback = parseModelPattern(
-							options.modelPatternAuthFallback,
+							options.modelPatternParentFallback,
 							resolutionModels,
 							matchPreferences,
 						);
@@ -3630,6 +3648,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const hint =
 					deferredModelPatterns.length === 1 ? providerModelHint(deferredModelPatterns[0], allEnabledModels) : "";
 				modelFallbackMessage = `Model ${requested} not found${hint ? `.${hint}` : ""}`;
+				// A subagent whose own patterns match nothing runs on its parent's model
+				// rather than starting with none; the message names the substitution.
+				const parentFallback = options.modelPatternParentFallback
+					? parseModelPattern(options.modelPatternParentFallback, availableModels, matchPreferences)
+					: undefined;
+				if (parentFallback?.model) {
+					model = parentFallback.model;
+					if (parentFallback.explicitThinkingLevel) restoredSessionThinkingLevel = parentFallback.thinkingLevel;
+					adoptThinkingForModel(parentFallback.model);
+					void prewarmModelConnection(parentFallback.model);
+					modelFallbackMessage += `. Using parent model ${parentFallback.model.provider}/${parentFallback.model.id}`;
+				}
 			}
 		}
 
@@ -4347,6 +4377,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			deferCompression: true,
 			compress: createSkillDescriptionCompressor(modelRegistry, settings, {
 				getCostGate: currentCostGate,
+				usageLedger: sessionManager,
 				getTelemetry: () =>
 					agent
 						? resolveTelemetry(agent.telemetry, agent.sessionId)
@@ -4576,7 +4607,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				skillsSettings: cfgSkills.get(settings),
 				inlineToolDescriptors,
 				nativeTools,
-				intentField: cfgToolsIntentTracing.get(settings) ? INTENT_FIELD : undefined,
+				intentField: intentTracingActive(settings) ? INTENT_FIELD : undefined,
 				// Spotlight ranks output against the call's intent: experiment sessions ask what each call's output is for.
 				intentGuidance: spotlightExperiment ? SPOTLIGHT_INTENT_GUIDANCE : undefined,
 				// task.eager steers the top-level agent only; subagents keep the model's own delegation policy.
@@ -5130,7 +5161,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformAssistantMessagePreservesToolCalls: true,
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
-			intentTracing: cfgToolsIntentTracing.get(settings),
+			intentTracing: intentTracingActive(settings),
 			intentDescription: spotlightExperiment ? SPOTLIGHT_INTENT_DESCRIPTION : undefined,
 			pruneToolDescriptions: resolveInlineToolDescriptors(),
 			// Per request against the model actually requested, so `tools.format`
@@ -5539,8 +5570,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// change callbacks, so start a fresh one there. Stale hashline tags would
 		// otherwise surface as "issued in this session" in mismatch diagnostics
 		// (#13370), and conflict ids, already-shown diagnostics and repeat-read
-		// counts would leak into the new conversation. The tools keep their state
-		// on THIS session, not the AgentSession's own lazy mention store.
+		// counts would leak into the new conversation. The tools and @file
+		// mentions keep their state on THIS session.
 		session.registerSessionChangeCallback(() => {
 			toolSession.state = new ToolConversationState();
 		});
@@ -5582,8 +5613,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
 		// change applies from the next run without splitting one response's schema/strip.
 		// The prompt listener above republishes the intent-field guidance.
-		cfgToolCallSwitches.listen(session, ({ intentTracing, abortOnFabricatedResult }) => {
-			agent.intentTracing = intentTracing;
+		cfgToolCallSwitches.listen(session, ({ abortOnFabricatedResult }) => {
+			agent.intentTracing = intentTracingActive(settings);
 			agent.abortOnFabricatedToolResult = abortOnFabricatedResult;
 		});
 		// Tool-gating settings add or remove the tools they gate and refresh the
@@ -5601,6 +5632,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `find.enabled: auto` follows the judge role; a role change only touches
 			// the prompt when it actually adds or removes `find`.
 			cfgModelRoles.listen(session, () => reconcileGatedTools({ refreshPrompt: false }));
+			// A judge rejecting the account withdraws `find` (and its hints) once no native judge is left.
+			session.addDisposer(onJudgeRejection(modelRegistry, () => void reconcileGatedTools({ refreshPrompt: false })));
 		}
 		// Backfill the resumed advisor spend without blocking startup: the scan
 		// runs after the session is live, so `--resume` no longer scales with the

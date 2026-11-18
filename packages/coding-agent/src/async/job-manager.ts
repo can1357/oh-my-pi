@@ -22,6 +22,8 @@ const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
  * nobody polled) keep the full {@link DEFAULT_RETENTION_MS} window.
  */
 const CONSUMED_RESULT_EVICTION_MS = 30_000;
+/** Evicted job ids remembered for {@link AsyncJobManager.getEvictedJob}; the oldest go first. */
+const EVICTED_JOB_LIMIT = 256;
 /**
  * Extra delay after an `async-result` delivery settles (its `ASIDE_MESSAGE_COMMIT`
  * hook fires, resolving `enqueueWithReceipt()`) before retained artifacts are
@@ -98,6 +100,25 @@ export function agentProgress(
 		first ??= record;
 	}
 	return first;
+}
+
+/**
+ * What an evicted job's id still answers once its row is gone, so a reader
+ * learns where its result went instead of a bare "not found".
+ */
+export interface EvictedJob {
+	id: string;
+	type: AsyncJobType;
+	label: string;
+	ownerId?: string;
+	status: AsyncJob["status"];
+	/** When the job's run settled. */
+	endTime?: number;
+	evictedAt: number;
+	/** Whether its result reached the owner (pushed, or read by a snapshot) before the row went. */
+	delivered: boolean;
+	/** `expired`: retention ran out; `cleared`: its owner's session was reset, replaced, or switched. */
+	reason: "expired" | "cleared";
 }
 
 export interface AsyncJob {
@@ -375,6 +396,10 @@ export interface AsyncJobManagerApi {
 	cancelAll(filter?: AsyncJobFilter, reason?: unknown): void;
 	/** Evict settled jobs matching the filter now; returns how many. */
 	evictCompletedJobs(filter?: AsyncJobFilter): number;
+	/** The record an evicted job left behind; undefined for live or unknown ids, or a filter whose owner does not match. */
+	getEvictedJob(id: string, filter?: AsyncJobFilter): EvictedJob | undefined;
+	/** Records of evicted jobs matching the filter, most recently evicted first. */
+	getEvictedJobs(filter?: AsyncJobFilter): EvictedJob[];
 	waitForAll(): Promise<void>;
 	/** Route completions of jobs owned by `ownerId` to `sink`; returns the unregister. */
 	registerDeliverySink(ownerId: string, sink: AsyncJobDeliverySink): () => void;
@@ -423,6 +448,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #watchedJobs = new Set<string>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
+	readonly #evicted = new Map<string, EvictedJob>();
 	readonly #releasedForegroundJobs = new Set<string>();
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
@@ -604,6 +630,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		})();
 
 		this.#jobs.set(id, job);
+		this.#evicted.delete(id);
 		return id;
 	}
 
@@ -636,6 +663,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 			agentOutputPublished: result.agentOutputPublished,
 		};
 		this.#jobs.set(id, job);
+		this.#evicted.delete(id);
 		this.#recordAgentReply(job);
 		this.#enqueueDelivery(id, result.text);
 		this.#scheduleEviction(id);
@@ -853,9 +881,20 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		for (const job of this.#filterJobs(this.#jobs.values(), filter)) {
 			if (job.status !== "completed" && job.status !== "failed") continue;
 			this.acknowledgeDeliveries([job.id]);
-			if (this.#evictJob(job.id)) evicted += 1;
+			if (this.#evictJob(job.id, "cleared")) evicted += 1;
 		}
 		return evicted;
+	}
+
+	getEvictedJob(id: string, filter?: AsyncJobFilter): EvictedJob | undefined {
+		const record = this.#evicted.get(id);
+		if (!record || (filter?.ownerId !== undefined && record.ownerId !== filter.ownerId)) return undefined;
+		return record;
+	}
+
+	getEvictedJobs(filter?: AsyncJobFilter): EvictedJob[] {
+		const records = [...this.#evicted.values()].reverse();
+		return filter?.ownerId === undefined ? records : records.filter(record => record.ownerId === filter.ownerId);
 	}
 
 	async waitForAll(): Promise<void> {
@@ -1189,15 +1228,34 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		}
 	}
 
-	#evictJob(jobId: string): boolean {
+	/** Drop a job row; `reason` leaves an {@link EvictedJob} record for a background job's id. */
+	#evictJob(jobId: string, reason?: EvictedJob["reason"]): boolean {
 		clearTimeout(this.#evictionTimers.get(jobId));
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
 		this.#supersededDeliveries.delete(jobId);
 		this.#watchedJobs.delete(jobId);
-		this.#consumedJobResults.delete(jobId);
+		const delivered = this.#consumedJobResults.delete(jobId);
 		const job = this.#jobs.get(jobId);
 		if (job) this.#runRetainedArtifactsCleanup(job);
+		if (job && reason && !job.foreground) {
+			this.#evicted.delete(jobId);
+			this.#evicted.set(jobId, {
+				id: jobId,
+				type: job.type,
+				label: job.label,
+				ownerId: job.ownerId,
+				status: job.status,
+				endTime: job.endTime,
+				evictedAt: Date.now(),
+				delivered,
+				reason,
+			});
+			if (this.#evicted.size > EVICTED_JOB_LIMIT) {
+				const oldest = this.#evicted.keys().next().value;
+				if (oldest !== undefined) this.#evicted.delete(oldest);
+			}
+		}
 		this.widgets?.forget(jobId);
 		return this.#jobs.delete(jobId);
 	}
@@ -1218,7 +1276,7 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	#scheduleEviction(jobId: string, delayMs: number = this.#retentionMs): void {
 		if (this.#disposed) return;
 		if (this.#retentionMs <= 0) {
-			this.#evictJob(jobId);
+			this.#evictJob(jobId, "expired");
 			return;
 		}
 		const delay = Math.max(0, Math.min(this.#retentionMs, delayMs));
@@ -1226,13 +1284,13 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		const timer = setTimeout(() => {
 			const inFlight = this.#inFlightDeliveries.find(delivery => delivery.jobId === jobId)?.promise;
 			if (!inFlight || !this.isDeliverySuppressed(jobId)) {
-				this.#evictJob(jobId);
+				this.#evictJob(jobId, "expired");
 				return;
 			}
 			// The settled attempt may re-arm this job's timer (consumed grace);
 			// only evict when nothing replaced this one in the meantime.
 			void inFlight.then(() => {
-				if (this.#evictionTimers.get(jobId) === timer) this.#evictJob(jobId);
+				if (this.#evictionTimers.get(jobId) === timer) this.#evictJob(jobId, "expired");
 			});
 		}, delay);
 		timer.unref();

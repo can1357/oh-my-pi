@@ -132,7 +132,7 @@ describe("JSON query in read tool", () => {
 
 		const tool = wrapToolWithMetaNotice(new ReadTool(session));
 		const result = await tool.execute("call_large_pretty", { path: `${largeJsonlFile}?q=.&limit=8` });
-		expect(getText(result)).toBe('{\n  "id": 0,\n\n[Showing lines 1-2 of 8 (50.0KB limit). Use :3 to continue]');
+		expect(getText(result)).toBe('{\n  "id": 0,\n\n[Showing lines 1-2 of 8 (50.0KB limit). Use :3- to continue]');
 	});
 
 	it("fails cleanly with descriptive error on invalid jq syntax", async () => {

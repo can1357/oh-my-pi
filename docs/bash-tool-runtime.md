@@ -85,7 +85,7 @@ Named-service calls omit the rules whose suggested tool is `bash`, so service co
 
 ## 3) CWD validation and timeout resolution
 
-A host `cwd` is resolved relative to session cwd (`resolveToCwd`) and validated via filesystem `stat`. A recognized internal-URL cwd is normalized and validated through `InternalUrlFilesystem`; it is usable only by the embedded shell, not services or an interactive PTY. Client-terminal routing is skipped for a virtual cwd.
+A host `cwd` is resolved relative to session cwd (`resolveToCwd`) and validated via filesystem `stat`. A recognized internal-URL cwd is normalized and validated through `InternalUrlFilesystem`; the embedded shell enters it, and a service's or pty command's shell process starts in the session cwd and enters it from there. Client-terminal routing is skipped for a virtual cwd.
 
 - missing path -> `ToolError("Working directory does not exist: ...")`
 - non-directory -> `ToolError("Working directory is not a directory: ...")`
@@ -109,6 +109,8 @@ PTY eligibility is decided by `canUseInteractiveBashPty(pty, ctx)` (`src/tools/b
 
 If `pty` is requested but unavailable, the call falls back to non-PTY and appends a `pty requested but unavailable …` notice.
 
+A pty command runs as a shell process (`src/exec/shell-process.ts`): the embedded engine with the tool profile in a process of its own, leading the overlay's pseudo-terminal, so its programs own that terminal (`/dev/tty`, terminal signals, resize). It starts from the session shell's exports, functions and aliases, and its `local://`, `skill://`, `artifact://` and `attachment://` paths resolve to the session's host files; other schemes are missing there.
+
 Before the local PTY/non-PTY choice, a foreground (`async: false`) call can route to a managed background job (auto-backgrounding; see below) or — when the session's client advertises a terminal capability (`clientBridge.capabilities.terminal` + `createTerminal`, with `pty` false) — to a **client-bridge editor terminal** that runs the command remotely (streaming `terminalId` updates, killing on timeout, mapping a signal kill to exit code `137`). Otherwise it uses non-interactive `executeBash()`.
 
 Print mode and non-UI RPC/tool contexts cannot use the local interactive overlay. Named services have their own broker-owned PTY and do not require a TUI.
@@ -118,7 +120,7 @@ Print mode and non-UI RPC/tool contexts cannot use the local interactive overlay
 A nonblank `name` routes to `startService()` before finite-command timeout, async, terminal, or output-sink selection.
 
 - Names are 1–48 characters: an initial letter or digit, followed by letters, digits, dots, underscores, or hyphens. Names are project-broker scoped; starting an existing live name replaces that process.
-- Services execute the configured external shell with its args, prefix, and shell environment plus `PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_TOOL_CALL_ID`, not the embedded shell or finite-command direnv preflight.
+- Services run as a shell process too (the embedded engine with the tool profile, started by the broker), with the configured shell prefix, from the session shell's exports, functions and aliases plus `PI_SESSION_ID`/`PI_SESSION_FILE`/`PI_TOOL_CALL_ID`. Their `local://`, `skill://`, `artifact://` and `attachment://` paths resolve to the owning session's host files; other schemes are missing there.
 - `pty` defaults to `true`; no command deadline is imposed.
 - `ready` must include a log regex or TCP port (1–65535). When both are present, both must pass. TCP host defaults to `127.0.0.1`; readiness timeout defaults to 30 seconds and is clamped to 0.05–3600 seconds.
 - Without a readiness condition, startup returns the running service. With one, startup waits for readiness, exit, or the readiness deadline. A readiness timeout is reported without stopping the process. A queued steering message ends the readiness wait early: the call returns `starting` and the service keeps starting.
@@ -153,7 +155,7 @@ A session can own more than one shell cache entry: surfaces that need their own 
 
 ## Native shell visualization
 
-`pi-shell` owns Raw/Pseudo generation, static analysis, source mapping, replay reduction and last-setter annotations. It retains the actual parser's `List`, `Command` and `Word` nodes as units compile; arithmetic formatting uses the engine's existing arithmetic parser. There is no second TypeScript AST or shfmt conversion in this path.
+`omp-shell` owns Raw/Pseudo generation, static analysis, source mapping, replay reduction and last-setter annotations. It retains the actual parser's `List`, `Command` and `Word` nodes as units compile; arithmetic formatting uses the engine's existing arithmetic parser. There is no second TypeScript AST or shfmt conversion in this path.
 
 - **Incremental:** only engine-announced syntax is presented as Pseudo. Uncompiled source remains literal; creating or presenting a pending `RunTrace` does not parse ahead.
 - **Live:** the executor attaches each immutable snapshot to its actual native `RunTrace` before publishing it. `RunTrace.present(options)` borrows native syntax/history; the UI does not serialize and reload an AST on each update.
@@ -274,7 +276,7 @@ When `async.enabled` is true and the call passes `async: true`, `BashTool` start
 
 ### Pipe streams (`proc://<id>/streams`)
 
-Every managed bash job passes a native `PipeStreams` to the embedded shell (`ShellRunOptions.streams`). The engine mirrors the bytes written into each `|` pipe of the run into a per-stream ring (newest 1 MiB; a run keeps up to 16 streams, 4 of them finished) without changing pipe semantics: backpressure, EOF, and an early-exiting consumer (`| head`) widowing the producer behave as on a plain pipe (`pi_shell::bash::Host::pipe_tap`, `crates/pi-shell/src/bash/mem.rs`, `crates/pi-shell/src/taps.rs`). `read proc://<id>/streams` lists them (stream `n` is what stage `n` reads) and `proc://<id>/streams/<n>` returns the decoded, sanitized text, so `cmd | tail -5` can be followed while `tail` holds `cmd`'s output back. The streams stay with the job row until it is evicted. User-shell (zsh/fish) and PTY runs are not tapped, and each stage's stderr still goes to the job's own output.
+Every managed bash job passes a native `PipeStreams` to the embedded shell (`ShellRunOptions.streams`). The engine mirrors the bytes written into each `|` pipe of the run into a per-stream ring (newest 1 MiB; a run keeps up to 16 streams, 4 of them finished) without changing pipe semantics: backpressure, EOF, and an early-exiting consumer (`| head`) widowing the producer behave as on a plain pipe (`omp_shell::bash::Host::pipe_tap`, `crates/shell/src/bash/mem.rs`, `crates/shell/src/taps.rs`). `read proc://<id>/streams` lists them (stream `n` is what stage `n` reads) and `proc://<id>/streams/<n>` returns the decoded, sanitized text, so `cmd | tail -5` can be followed while `tail` holds `cmd`'s output back. The streams stay with the job row until it is evicted. User-shell (zsh/fish) and PTY runs are not tapped, and each stage's stderr still goes to the job's own output.
 
 ### Job widgets
 

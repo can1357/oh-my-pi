@@ -1,6 +1,6 @@
 import { crc32 } from "./checksums";
 import { ArchiveError } from "./error";
-import { assertArchiveMemberSize, assertEntryCount, assertIndexSize, assertInMemorySize } from "./limits";
+import { assertArchiveMemberSizeField, assertEntryCount, assertIndexSize, assertInMemorySize } from "./limits";
 import { assertArchivePathBytes, assertArchivePathString, normalizeArchiveEntryPath } from "./paths";
 import {
 	type SevenZipBindPair,
@@ -572,7 +572,7 @@ async function buildEntries(
 			(attribute !== undefined && (attribute & 0x10) !== 0) ||
 			(mode !== undefined && (mode & 0o170000) === 0o040000);
 		const size = stream?.size ?? 0;
-		assertArchiveMemberSize(size, path, options.limits);
+		assertArchiveMemberSizeField(size, path);
 		const entry: ArchiveIndexEntry = { path, isDirectory, size, mtimeMs: files.mtimes[fileIndex], mode };
 		if (isSymlink && stream) {
 			assertArchivePathBytes(size, "link target", options.limits.maxPathBytes);

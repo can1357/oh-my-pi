@@ -6,6 +6,8 @@ import {
 	WALL_TIME_NOTICE_MIN_MS,
 } from "@oh-my-pi/pi-tui/tools/bash";
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -17,7 +19,8 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams, shellBuiltins } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $which, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
 	compileNotifyPattern,
@@ -27,6 +30,7 @@ import {
 	resolveAutoBackgroundWaitMs,
 } from "../async";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
+import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import {
@@ -49,6 +53,8 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
+import { applyPatchShellInput } from "./bash-apply-patch";
+import { hostCommandUrls, urlBacking } from "./bash-host-urls";
 import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
@@ -100,6 +106,7 @@ import {
 import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
+import { sessionShellSpeech } from "../tts/shell-speech";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
@@ -451,6 +458,18 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 
 const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
 
+// Blank stays valid: some tool-call layers spell an unset field as "".
+const SERVICE_NAME = type(/^(?:\s*|[A-Za-z0-9][A-Za-z0-9._-]{0,47})$/).describe(
+	"starts a long-lived supervised service under this name; omit for finite commands, async jobs included. 1-48 of [A-Za-z0-9._-]",
+);
+
+const SERVICE_READY = type({
+	"log?": type("string").describe("regex an output line matches once the service is ready"),
+	"port?": type("number").describe("TCP port the service accepts connections on once ready"),
+	"host?": type("string").describe("host for the port probe; default localhost (127.0.0.1 and ::1)"),
+	"timeout?": type("number").describe("seconds to wait for readiness; default 30"),
+}).describe("service readiness; needs log or port");
+
 const bashSchemaBase = type({
 	command: type("string"),
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
@@ -473,13 +492,8 @@ const bashSchemaWithService = type({
 	"cwd?": "string",
 	"pty?": "boolean",
 	"notify?": "string",
-	"name?": "string <= 48",
-	"ready?": type({
-		"log?": "string",
-		"port?": "number",
-		"host?": "string",
-		"timeout?": "number",
-	}),
+	"name?": SERVICE_NAME,
+	"ready?": SERVICE_READY,
 });
 
 const bashSchemaWithAsyncAndService = type({
@@ -489,20 +503,22 @@ const bashSchemaWithAsyncAndService = type({
 	"pty?": "boolean",
 	"async?": "boolean",
 	"notify?": "string",
-	"name?": "string <= 48",
-	"ready?": type({
-		"log?": "string",
-		"port?": "number",
-		"host?": "string",
-		"timeout?": "number",
-	}),
+	"name?": SERVICE_NAME,
+	"ready?": SERVICE_READY,
 });
+
+// Without an interactive UI a finite command's `pty` can only fall back, so those sessions are not
+// offered it; services keep it, since the broker gives them a terminal of their own.
+const bashSchemaBaseNoPty = bashSchemaBase.omit("pty");
+const bashSchemaWithAsyncNoPty = bashSchemaWithAsync.omit("pty");
 
 type BashToolSchema =
 	| typeof bashSchemaBase
 	| typeof bashSchemaWithAsync
 	| typeof bashSchemaWithService
-	| typeof bashSchemaWithAsyncAndService;
+	| typeof bashSchemaWithAsyncAndService
+	| typeof bashSchemaBaseNoPty
+	| typeof bashSchemaWithAsyncNoPty;
 
 export interface BashToolInput {
 	command: string;
@@ -531,19 +547,20 @@ function blankToUndefined(value: string | undefined): string | undefined {
 }
 
 /**
- * Drops readiness fields that carry no condition, and the whole spec when none
- * survive. An empty `log` pattern would otherwise match the first byte of
- * output, an empty `host` would break the TCP probe, and a zero `port` (how
- * tool-call layers materialize an unset number; no listener has it) would fail
- * port validation, so placeholder values must not reach {@link startService}.
+ * Drops placeholder readiness fields, and the whole spec when it names no
+ * condition (`log` or `port`): `host` and `timeout` only configure one. An
+ * empty `log` pattern would otherwise match the first byte of output, an empty
+ * `host` would break the TCP probe, and a zero `port` (how tool-call layers
+ * materialize an unset number; no listener has it) would fail port validation,
+ * so placeholder values must not reach {@link startService}.
  */
 function normalizeReady(ready: ServiceReady | undefined): ServiceReady | undefined {
 	if (!ready) return undefined;
 	const log = blankToUndefined(ready.log);
-	const host = blankToUndefined(ready.host);
 	const port = Number.isFinite(ready.port) && ready.port !== 0 ? ready.port : undefined;
+	if (log === undefined && port === undefined) return undefined;
+	const host = blankToUndefined(ready.host);
 	const timeout = Number.isFinite(ready.timeout) ? ready.timeout : undefined;
-	if (log === undefined && host === undefined && port === undefined && timeout === undefined) return undefined;
 	return { log, host, port, timeout };
 }
 
@@ -875,17 +892,24 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				(this.session.skillHintVisible ??
 					(cfgSkillful.get(this.session.settings) && (this.session.skills?.length ?? 0) > 0)) === true,
 			hasLaunch: this.#launchEnabled,
+			hasPty: this.#ptyAvailable || this.#launchEnabled,
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			// The embedded shell's session env is the shell config env (see bash-executor).
 			builtins: shellBuiltins(this.session.settings.getShellConfig().env),
 			isWindows: process.platform === "win32",
 		});
 	}
-	/** Schema variant for the live `async.enabled` and `launch.enabled` settings. */
+	/** Schema variant for the live `async.enabled` and `launch.enabled` settings and PTY availability. */
 	get parameters(): BashToolSchema {
 		const asyncEnabled = cfgAsyncEnabled.get(this.session.settings);
 		if (this.#launchEnabled) return asyncEnabled ? bashSchemaWithAsyncAndService : bashSchemaWithService;
-		return asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
+		if (this.#ptyAvailable) return asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
+		return asyncEnabled ? bashSchemaWithAsyncNoPty : bashSchemaBaseNoPty;
+	}
+
+	/** Whether `pty: true` can get a terminal: only an interactive UI hosts one. */
+	get #ptyAvailable(): boolean {
+		return this.session.hasUI && $env.PI_NO_PTY !== "1";
 	}
 	// Non-pty calls run alongside each other (the executor isolates overlapping
 	// runs on the same shell session); pty takes over the terminal UI and must
@@ -923,6 +947,99 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
 			PI_TOOL_CALL_ID: toolCallId,
 		};
+	}
+
+	/**
+	 * Where the session's persistent shell stands, read from a copy of it, for a shell process
+	 * (a service, a pty command) to start from: `env` holds what it exports (PATH included), as a
+	 * child of that shell would see in the host directory `cwd` (its direnv environment
+	 * included), and `script` defines its functions and aliases. Shell bookkeeping variables
+	 * stay with the process's own shell.
+	 */
+	async #sessionSeed(
+		sessionId: string | undefined,
+		cwd: string,
+		signal: AbortSignal | undefined,
+	): Promise<{ env: Record<string, string>; script: string }> {
+		const dumpPath = path.join(os.tmpdir(), `omp-shell-env-${crypto.randomUUID()}`);
+		const scriptPath = `${dumpPath}.sh`;
+		const quote = (file: string): string => `'${file.replaceAll("'", `'\\''`)}'`;
+		try {
+			const sessionKey = sessionId ?? "";
+			const dump = `env -0 > ${quote(dumpPath)} && { shopt -p expand_aliases; declare -f; alias -p; } > ${quote(scriptPath)} 2>/dev/null`;
+			const result = await executeBash(dump, {
+				cwd,
+				// The same shell options as the session's calls, so the copy is of that session's shell.
+				sessionKey: `${sessionKey}:async:service-env:${crypto.randomUUID()}`,
+				seedSessionKey: sessionKey,
+				minimize: !nativeShapingOff(this.session),
+				gitGuard: cfgBashGitGuard.get(this.session.settings),
+				ovnfs: ovnfsCommand(this.session.settings),
+				timeout: 10_000,
+				signal,
+			});
+			if (result.exitCode !== 0) throw new Error(result.output || `env exited ${result.exitCode}`);
+			const [dumped, script] = await Promise.all([Bun.file(dumpPath).text(), Bun.file(scriptPath).text()]);
+			const env: Record<string, string> = {};
+			for (const entry of dumped.split("\0")) {
+				const eq = entry.indexOf("=");
+				if (eq <= 0) continue;
+				const key = entry.slice(0, eq);
+				if (key === "PWD" || key === "OLDPWD" || key === "SHLVL" || key === "_") continue;
+				env[key] = entry.slice(eq + 1);
+			}
+			return { env, script };
+		} catch (error) {
+			logger.warn("Could not read the session shell's state for a shell process", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return { env: {}, script: "" };
+		} finally {
+			await Promise.all([fs.promises.rm(dumpPath, { force: true }), fs.promises.rm(scriptPath, { force: true })]);
+		}
+	}
+
+	/**
+	 * Run `command` as a shell process on a pseudo-terminal the user drives: the session's shell
+	 * (its exports, functions and aliases, and the host files `mounts` puts behind its URL paths)
+	 * leading a terminal of its own, so its programs own that terminal.
+	 */
+	async #runOnTerminal(
+		ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
+		run: {
+			command: string;
+			/** Host directory the process starts in. */
+			hostCwd: string;
+			/** URL directory its shell enters first. */
+			urlCwd: string | undefined;
+			sessionId: string | undefined;
+			sessionEnv: Record<string, string>;
+			timeoutMs: number | undefined;
+			signal: AbortSignal | undefined;
+			/** `urlmap` commands for the session's URL paths ({@link shellMounts}). */
+			mounts: string;
+			artifactPath: string | undefined;
+			artifactId: string | undefined;
+		},
+	): Promise<BashInteractiveResult> {
+		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
+		const script = run.mounts + seed.script;
+		const source = script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
+		try {
+			if (source !== undefined) await fs.promises.writeFile(source, script, { mode: 0o600 });
+			return await runInteractiveBashPty(ui, {
+				command: run.command,
+				...shellProcessCommand({ command: run.command, source, cwd: run.urlCwd }),
+				cwd: run.hostCwd,
+				env: { ...seed.env, ...run.sessionEnv },
+				timeoutMs: run.timeoutMs,
+				signal: run.signal,
+				artifactPath: run.artifactPath,
+				artifactId: run.artifactId,
+			});
+		} finally {
+			if (source !== undefined) await fs.promises.rm(source, { force: true });
+		}
 	}
 
 	/** Service launch mode: live `launch.enabled` while `bash` itself is an active tool. */
@@ -1295,8 +1412,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						// persistent shell, like the direct path, so its variables,
 						// functions, and options reach the next call even after it is
 						// backgrounded. A job that starts in the background gets its own
-						// shell, so it never holds the session's.
+						// copy of the session's shell, so it sees what earlier calls set
+						// but never holds the session's shell nor changes it.
 						sessionKey: options.foreground ? options.sessionId : `${options.sessionId ?? ""}:async:${jobId}`,
+						seedSessionKey: options.foreground ? undefined : (options.sessionId ?? ""),
 						isSessionCurrent: () => (this.session.getSessionId?.() ?? undefined) === options.sessionId,
 						timeout: options.timeoutMs ?? 0,
 						signal: runSignal,
@@ -1309,6 +1428,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							onWrite: noticeUrlWrites(notices),
 							toolCallId: options.toolCallId,
 						}).shellFilesystem(),
+						speech: sessionShellSpeech(this.session),
 						artifactPath,
 						artifactId,
 						onChunk: chunk => {
@@ -1502,14 +1622,24 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
+			// Without a readiness condition nothing marks this as a service but `name`, while
+			// async/timeout ask for a finite command: refuse rather than guess.
+			if (ready === undefined && (rawAsync === true || rawTimeout !== undefined)) {
+				throw new ToolError(
+					"`name` starts a long-lived service, which takes no async or timeout. Omit `name` for a finite command (async jobs included), or drop async/timeout to start a service.",
+				);
+			}
 			if (rawTimeout !== undefined)
 				pendingNotices.push("Ignored timeout: service-only; readiness follows ready.timeout.");
 			if (rawAsync === true)
 				pendingNotices.push("Ignored async: service-only; a service start is asynchronous already.");
-		} else if (ready !== undefined && (ready.log !== undefined || ready.port !== undefined)) {
-			// Host/timeout only configure a readiness condition; neither requests one.
-			// Keep service validation unchanged, but only warn when a condition was
-			// actually ignored.
+			// Host and timeout configure a readiness condition without naming one.
+			if (
+				ready === undefined &&
+				(blankToUndefined(rawReady?.host) !== undefined || Number.isFinite(rawReady?.timeout))
+			)
+				pendingNotices.push("Ignored ready: it needs log or port; the service started without a readiness wait.");
+		} else if (ready !== undefined) {
 			pendingNotices.push("Ignored ready: service-only, and no service name was given.");
 		}
 		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
@@ -1532,9 +1662,28 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? []);
 		if (interception) throw new ToolError(interception);
+		// Models trained on Codex call the apply_patch tool as a shell command; omp ships no such
+		// program, so a patch given that way goes to the tool (through its own approval).
+		const shellPatch = applyPatchShellInput(command);
+		if (shellPatch !== undefined && !$which("apply_patch")) {
+			const applyPatch = this.session.getToolForEvalBridge?.("apply_patch");
+			if (applyPatch?.customWireName === "apply_patch") {
+				if (shellPatch === null) {
+					throw new ToolError("apply_patch is a tool, not a shell command: call it with the patch text.");
+				}
+				const patched = await applyPatch.execute(toolCallId, { input: shellPatch }, signal, undefined, ctx);
+				return { content: patched.content, isError: patched.isError, details: {} };
+			}
+		}
 
 		if (cfgWorktreeClone.get(this.session.settings)) {
-			command = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());
+			const rewritten = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());
+			if (rewritten !== command) {
+				pendingNotices.push(
+					"Ran `git worktree add` as `omp worktree add`: a copy-on-write clone of the checkout without .git, other worktrees, or untracked .env files. Set worktree.clone=false for plain git.",
+				);
+				command = rewritten;
+			}
 		}
 
 		// Best-effort cache invalidation: drop github-cache rows for any issue/PR
@@ -1545,20 +1694,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		// URL paths resolve through the embedded shell's filesystem, within the
 		// tier this command was approved at. A URL cwd stays a URL: only that
-		// filesystem can enter it, so external backends (service, PTY, client
-		// terminal) never run there.
+		// filesystem can enter it, so a service's or pty command's shell process
+		// starts on the host and enters it, and the client terminal never runs there.
 		const approval = this.approval({ command: rawCommand });
 		const approvalTier = typeof approval === "string" ? approval : approval.tier;
 		const router = InternalUrlRouter.instance();
 		const virtualCwd = cwd && router.canHandle(cwd) ? router.normalize(cwd) : undefined;
 		const commandCwd = virtualCwd ?? resolveCommandCwd(cwd, this.session.cwd, hoistedShellCwd);
 		if (cwd) ran.cwd = commandCwd;
+		// Where a process for this command starts: a URL directory has none of its own.
+		const hostCwd = virtualCwd === undefined ? commandCwd : this.session.cwd;
 		if (virtualCwd !== undefined) {
-			if (name !== undefined || canUseInteractiveBashPty(pty === true, ctx)) {
-				throw new ToolError(
-					`Working directory ${virtualCwd} exists only in the embedded shell; ${name !== undefined ? "services" : "pty commands"} run external processes and need a host directory.`,
-				);
-			}
 			const cwdStat = await this.#urlFilesystem(signal, { tier: approvalTier })
 				.stat(virtualCwd)
 				.catch((err: unknown) => {
@@ -1588,6 +1734,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 
 		if (name !== undefined) {
+			// The service is the session's shell as a process of its own: it starts from this
+			// shell's exports, functions and aliases, with the host files behind its URL paths.
+			const seed = await this.#sessionSeed(sessionId, hostCwd, signal);
 			// Only a readiness wait can outlast a steer; without `ready` the start
 			// returns once the process spawns.
 			const service = await startService(
@@ -1599,7 +1748,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					pty: pty ?? true,
 					ready,
 					notify: notifySource,
-					env: sessionEnv,
+					env: { ...seed.env, ...sessionEnv },
+					seed: (await shellMounts(sessionResolveContext(this.session), approvalTier)) + seed.script,
 				},
 				signal,
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
@@ -1773,26 +1923,34 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			});
 		}
 
-		// Fold direnv/devenv env into (command, env) ONCE for the two backends
-		// that bypass `executeBash` — the ACP client terminal and the PTY. The
+		// Fold direnv/devenv env into (command, env) ONCE for the one backend
+		// that runs outside the engine: the ACP client terminal. The
 		// `executeBash` branch below is intentionally excluded: it runs its own
 		// preflight internally, so routing the pre-applied command there too
 		// would double-apply the unset prefix. No
 		// `commandPrefix` here: ACP applies the shell prefix via
-		// `wrapShellLineForClientTerminal`, and the PTY path never wrapped one.
+		// `wrapShellLineForClientTerminal`.
 		// `callerTimeoutMs` clamps the direnv load to a positive command timeout
 		// (the backend's own timeout is installed only after this await), matching
 		// the executeBash branch so a cold `.envrc` can't outlast a short call.
-		const backendPreflight =
-			bridgeTerminalAvailable || canUseInteractiveBashPty(pty === true, ctx)
-				? await applyDirenvPreflight(command, commandCwd, {
+		const backendPreflight = bridgeTerminalAvailable
+			? await applyDirenvPreflight(
+					// The client's shell knows no internal URL.
+					await hostCommandUrls(
+						command,
+						urlBacking(this.#urlFilesystem(signal, { tier: approvalTier })),
+						this.session.settings.getShellConfig().shell,
+					),
+					commandCwd,
+					{
 						callerEnv: sessionEnv,
 						signal,
 						timeoutMs: cfgBashDirenvLoadTimeoutMs.get(this.session.settings),
 						callerTimeoutMs: timeoutMs,
 						direnvSetting: cfgBashDirenv.get(this.session.settings),
-					})
-				: undefined;
+					},
+				)
+			: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.
 		// Skip when pty=true (PTY needs the local terminal UI) or the cwd is a URL
@@ -2101,15 +2259,15 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					})
 			: undefined;
 		const result: BashResult | BashInteractiveResult = interactiveUi
-			? await runInteractiveBashPty(interactiveUi, {
-					// PTY bypasses executeBash, so feed it the direnv-transformed
-					// command + direnv env (backendPreflight is defined whenever this
-					// branch runs, since both gate on canUseInteractiveBashPty).
-					command: backendPreflight?.command ?? command,
-					cwd: commandCwd,
+			? await this.#runOnTerminal(interactiveUi, {
+					command,
+					hostCwd,
+					urlCwd: virtualCwd,
+					sessionId,
+					sessionEnv,
 					timeoutMs,
 					signal,
-					env: backendPreflight?.env,
+					mounts: await shellMounts(sessionResolveContext(this.session, { signal }), approvalTier),
 					artifactPath,
 					artifactId,
 				})
@@ -2134,6 +2292,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onWrite: noticeUrlWrites(pendingNotices),
 						toolCallId,
 					}).shellFilesystem(),
+					speech: sessionShellSpeech(this.session),
 					artifactPath,
 					artifactId,
 					// Stream the sink's own inline view rather than re-buffering chunks.

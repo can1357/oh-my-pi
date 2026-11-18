@@ -5,7 +5,7 @@ import type { Subprocess } from "bun";
 import { getAgentDir, getProjectDir, MAIN_CONFIG_FILENAMES } from "./dirs";
 import { $env, filterChildShellEnv } from "./env";
 import { isExecutable } from "./executable";
-import { $which } from "./which";
+import { $which, $whichAll } from "./which";
 
 export { isExecutable };
 export interface ShellConfig {
@@ -142,7 +142,7 @@ export function resolveBasicShell(): string | undefined {
  * Resolve the external shell to advertise on Windows.
  *
  * A host bash is OPTIONAL: bash tool commands always execute in the embedded
- * bash engine (pi-shell). The resolved binary only serves the spawn-a-shell paths
+ * bash engine. The resolved binary only serves the spawn-a-shell paths
  * (interactive PTY sessions, ACP client terminals, SHELL env), so this
  * prefers a real Git Bash when one exists and otherwise falls back to
  * cmd.exe — it never fails.
@@ -151,7 +151,7 @@ export function resolveBasicShell(): string | undefined {
  * 1. Git for Windows install roots (machine + per-user installers)
  * 2. scoop installs — scoop's git manifest sets GIT_INSTALL_ROOT and shims
  *    sh.exe/git.exe but never bash.exe, so PATH lookup alone misses it
- * 3. bash.exe on PATH (Cygwin, MSYS2, ...)
+ * 3. bash.exe on PATH (Cygwin, MSYS2, ...), skipping the WSL launcher
  * 4. sh.exe on PATH (Git for Windows' sh.exe is bash; prefer a sibling
  *    bash.exe when present)
  * 5. cmd.exe from ComSpec
@@ -173,7 +173,13 @@ export function resolveWindowsShell(env: Record<string, string | undefined> = Bu
 		if (fs.existsSync(candidate)) return candidate;
 	}
 
-	const bashOnPath = $which("bash.exe");
+	// `System32\bash.exe` (and its WindowsApps alias) launches WSL: a Linux shell that cannot run
+	// Windows paths or programs as given.
+	const systemRoot = `${(env.SystemRoot || env.windir || "C:\\Windows").toLowerCase()}\\`;
+	const bashOnPath = $whichAll("bash.exe").find(candidate => {
+		const lower = candidate.toLowerCase();
+		return !lower.startsWith(systemRoot) && !lower.includes("\\microsoft\\windowsapps\\");
+	});
 	if (bashOnPath) return bashOnPath;
 
 	const shOnPath = $which("sh.exe");

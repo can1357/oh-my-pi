@@ -141,6 +141,7 @@ function harness(options: HarnessOptions = {}) {
 			model: MODEL.id,
 			usage: { input: 10, output: 5 },
 			stopReason: "stop",
+			content: [{ type: "text", text: replyText }],
 		} as unknown as EphemeralTurnResult["assistantMessage"];
 		turn.options.onUsage?.(assistantMessage);
 		turn.resolve({ replyText, assistantMessage });
@@ -250,6 +251,7 @@ describe("ComposerPredictionController", () => {
 				purpose: "composer-prediction",
 				parentId: firstLeafId,
 				usage: { input: 10, output: 5 },
+				completion: { reply: "too late" },
 			}),
 		]);
 	});

@@ -59,7 +59,6 @@ interface FakeAcpBuiltinSession {
 	moveSession(newCwd: string, targetSessionDir?: string): Promise<void>;
 	markMovedFromEmptySessionFile(sessionFile: string): void;
 	fork(): Promise<boolean>;
-	handoff(instr?: string): Promise<{ document: string; savedPath?: string } | undefined>;
 	dispose(): Promise<void>;
 	exportToHtml(outputPath?: string): Promise<string>;
 	effectiveExtensionRoots: unknown;
@@ -154,9 +153,6 @@ function createRuntime() {
 		},
 		async fork() {
 			return true;
-		},
-		async handoff(_instr?: string) {
-			return undefined;
 		},
 		async exportToHtml(outputPath?: string) {
 			return outputPath ?? "/tmp/exported-session.html";
@@ -1449,18 +1445,6 @@ describe("wave 3 commands", () => {
 		const result = await executeAcpBuiltinSlashCommand("/compact", runtime);
 		expect(result).toEqual({ consumed: true, failed: true });
 		expect(output[0]).toContain("Compaction failed: no available model");
-	});
-
-	it("/handoff: marks the run failed when the handoff fails", async () => {
-		// Same contract as /compact: an operational failure (here: nothing to
-		// hand off) must reach print mode's exit status, not only its output.
-		const { output, session, runtime } = createRuntime();
-		session.handoff = async (_instr?: string) => {
-			throw new Error("nothing to hand off");
-		};
-		const result = await executeAcpBuiltinSlashCommand("/handoff", runtime);
-		expect(result).toEqual({ consumed: true, failed: true });
-		expect(output.join("\n")).toContain("Handoff failed: nothing to hand off");
 	});
 });
 

@@ -460,6 +460,11 @@ export class TurnRecovery {
 	 * that carried it. Anchored like {@link #fallbackRoutedFor}.
 	 */
 	#demotedReasoningOmittedFor: string | undefined;
+	/**
+	 * Whether the current retry saga already resampled a `reasoning_extraction`
+	 * refusal that arrived mid-stream. Cleared in `resolveRetry()`.
+	 */
+	#midStreamRefusalResampled = false;
 	/** Memoized bootstrap answer, for the window before anything has served. */
 	#bootstrapCache:
 		| { model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
@@ -950,6 +955,7 @@ export class TurnRecovery {
 	/** Resolve the pending retry promise; the saga is over, and so is its refusal walk. */
 	resolveRetry(): void {
 		this.#refusalWalkTried.clear();
+		this.#midStreamRefusalResampled = false;
 		this.#accountPolicyRotationsRemaining.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
@@ -3132,9 +3138,40 @@ export class TurnRecovery {
 			});
 		}
 
-		if (!staleOpenAIResponsesReplayError && !switchedCredential && !stripDemotedReasoning && currentSelector) {
+		// A `reasoning_extraction` refusal that stopped output already streaming judged
+		// that sample, not the request: the same request on this model answers on the
+		// next try. Resample once per turn before walking the chain; a second refusal
+		// takes the existing path.
+		const resampleMidStreamRefusal =
+			classifierRefusal &&
+			!retryBudgetExhausted &&
+			!stripDemotedReasoning &&
+			!this.#midStreamRefusalResampled &&
+			message.stopDetails?.category === "reasoning_extraction" &&
+			message.content.some(
+				block =>
+					block.type === "toolCall" ||
+					(block.type === "thinking" && hasNonWhitespace(block.thinking)) ||
+					(block.type === "text" && hasNonWhitespace(block.text)),
+			);
+		if (resampleMidStreamRefusal) {
+			this.#midStreamRefusalResampled = true;
+			delayMs = 0;
+			logger.info("Classifier refused a turn mid-stream; resampling it on the same model", {
+				model: currentModel ? `${currentModel.provider}/${currentModel.id}` : undefined,
+			});
+		}
+
+		if (
+			!staleOpenAIResponsesReplayError &&
+			!switchedCredential &&
+			!stripDemotedReasoning &&
+			!resampleMidStreamRefusal &&
+			currentSelector
+		) {
 			// The retry budget bounds same-model retries against a failing provider. A
-			// classifier refusal is not that: retrying the same model reproduces it, and
+			// classifier refusal is not that: retrying the same model reproduces a refusal
+			// of the request itself (the mid-stream kind is resampled above), and
 			// the next model in the chain is one request away and often answers. Stopping
 			// the walk at the budget ends the turn with models left untried.
 			//
@@ -3239,7 +3276,8 @@ export class TurnRecovery {
 			(classifierRefusal || accountPolicyDenial) &&
 			!switchedCredential &&
 			!switchedModel &&
-			!stripDemotedReasoning
+			!stripDemotedReasoning &&
+			!resampleMidStreamRefusal
 		) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1

@@ -13,7 +13,6 @@ import approvalFolderTemplate from "../prompts/tools/approval-folder.md" with { 
 import type { AgentTool, AgentToolContext, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
-import { normalizeToLF } from "../edit/normalize";
 import type {
 	ExtensionApprovalAnswer,
 	ExtensionApprovalGrant,
@@ -659,7 +658,8 @@ function formatPayloadValue(value: unknown, indent: number): string {
 	if (value === null) return "null";
 	if (typeof value === "boolean" || typeof value === "number") return String(value);
 	if (typeof value === "string") {
-		const normalized = replaceTabs(normalizeToLF(value));
+		// Display only: every line break, a lone CR included, becomes a row.
+		const normalized = replaceTabs(value.replace(/\r\n?/g, "\n"));
 		if (normalized.includes("\n")) {
 			const padding = " ".repeat(indent);
 			// Keep delimiters and commas outside the body, including in arrays.
