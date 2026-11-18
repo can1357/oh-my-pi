@@ -155,6 +155,8 @@
 - Fixed MCP OAuth reauthentication errors to expose registration endpoints, status details, and remedies, and fixed auth-broker shutdown so refreshed tokens are saved safely.
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
+- Hashline no longer re-indents replacement bodies that omit their base indent
+- Ctrl+O now collapses tool output that has scrolled into terminal history instead of leaving expanded rows behind ([#19631](https://github.com/can1357/oh-my-pi/pull/19631) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.22.2] - 2026-11-18
 
