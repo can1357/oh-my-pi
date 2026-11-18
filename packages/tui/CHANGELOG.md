@@ -2,11 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
 
 - `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+- Added the `async-notify` transcript block, which shows the output lines a running background job or service reported
 
 ### Changed
 

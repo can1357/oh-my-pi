@@ -2019,8 +2019,11 @@ export class CustomEditor extends Editor {
 
 	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
 	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
-	 *  already just the prefix is left alone so the user can keep editing it. */
+	 *  already just the prefix is left alone so the user can keep editing it. Natively drawn
+	 *  (Tern), the prefix stays as dimmed text rather than a `Queueing` label, so the body
+	 *  goes on the same line and nothing is opened. */
 	#normalizeQueuePrefix(hadBareQueuePrefix: boolean): void {
+		if (isNativeRendering()) return;
 		if (hadBareQueuePrefix || !(this.textEquals("->") || this.textEquals("=>"))) return;
 		const cursor = this.getCursor();
 		if (cursor.line === 0 && cursor.col === 2) {
