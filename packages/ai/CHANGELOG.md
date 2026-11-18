@@ -6,6 +6,7 @@
 
 - Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
 
+- Model usage health now names why an account is depleted (`depletedBy`: `usage`, `account-policy` or `auth`).
 ## [18.22.2] - 2026-11-18
 
 ### Added

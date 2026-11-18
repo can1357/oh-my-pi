@@ -896,7 +896,7 @@ export const cfgRetryUsageAwareFallback = register({
 		group: "Retry & Fallback",
 		label: "Usage-Aware Fallback",
 		description:
-			"Use reliable coding-plan quota reports to prefer same-provider accounts, then configured fallback models, before a hard usage limit. Ordinary configured API keys are excluded.",
+			"Use reliable coding-plan quota reports to prefer same-provider accounts, then configured fallback models, before a hard usage limit. After a failed request, the fallback walk skips a model whose usage is spent. Ordinary configured API keys are excluded.",
 	},
 });
 
