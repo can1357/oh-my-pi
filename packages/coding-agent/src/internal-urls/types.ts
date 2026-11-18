@@ -164,6 +164,8 @@ export interface SchemeHost {
 	settingsApproval: boolean;
 	/** `out://` writes reach the user as transcript replies: `out.enabled` is on in the top-level TUI session. */
 	outReplies: boolean;
+	/** Advertise PID-qualified agent URLs and same-folder peer discovery. */
+	crossInstanceAgents?: boolean;
 	/** The session is a subagent: `agent://all` broadcasts are refused, so they go unadvertised. */
 	subagent: boolean;
 }

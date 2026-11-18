@@ -817,7 +817,9 @@ export class VibeSessionRegistry {
 		const manager = this.#manager(session);
 		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
 		if (!session.agentOutputManager) {
-			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
+			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null), {
+				settings: session.settings,
+			});
 		}
 		const reservedIds = this.#persistedIds(session, scope);
 		for (const ref of AgentRegistry.global().list()) reservedIds.add(ref.id);

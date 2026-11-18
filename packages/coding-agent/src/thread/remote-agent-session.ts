@@ -126,6 +126,7 @@ export function emptyMirrorState(): SessionMirrorState {
 		isStreaming: false,
 		runStartedAt: undefined,
 		ircWakesPending: false,
+		hasPendingWake: false,
 		ircQueuedFrom: [],
 		isPaused: false,
 		streamMessage: null,
@@ -378,6 +379,10 @@ export class RemoteAgentSession implements AgentViewSession {
 
 	get ircWakesPending(): boolean {
 		return this.#state.ircWakesPending;
+	}
+
+	get hasPendingWake(): boolean {
+		return this.#state.hasPendingWake;
 	}
 
 	get messages(): AgentMessage[] {
@@ -934,7 +939,13 @@ export class RemoteAgentSession implements AgentViewSession {
 	close(reason: string): void {
 		if (this.#closed !== undefined) return;
 		const wasRunning = this.#state.runStartedAt !== undefined;
-		this.#state = { ...this.#state, isStreaming: false, runStartedAt: undefined, streamMessage: null };
+		this.#state = {
+			...this.#state,
+			isStreaming: false,
+			runStartedAt: undefined,
+			hasPendingWake: false,
+			streamMessage: null,
+		};
 		if (wasRunning) this.applyRunState("idle");
 		this.#closed = reason;
 		this.#settledQueued.clear();

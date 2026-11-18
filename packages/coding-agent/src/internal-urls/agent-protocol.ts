@@ -23,10 +23,14 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { type AgentRef, AgentRegistry, type AgentRegistryApi } from "../registry/agent-registry";
-import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { ensurePersistedRoster, sessionFileBelongsToRoot } from "../registry/persisted-agents";
 import { IrcBus } from "../irc/bus";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
+import { agentMesh } from "../irc/mesh";
+import { formatPeerAddress, type PeerAddress } from "../irc/mesh-protocol";
+import type { AgentSessionHandle } from "../session/agent-session-handle";
+import { cfgTaskCrossInstance } from "../task/settings";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
@@ -43,6 +47,59 @@ import type {
 	UrlCompletion,
 	WriteContext,
 } from "./types";
+
+/**
+ * A `agent://<pid>[/<id>[/<json-path>]]` URL: an agent of the omp instance
+ * with that pid. This process's own pid reads as a local address.
+ */
+interface PidTarget {
+	address: PeerAddress;
+	/** JSON-path segments after the agent id. */
+	segments: string[];
+	local: boolean;
+}
+
+function pidTarget(url: InternalUrl): PidTarget | undefined {
+	const host = url.rawHost || url.hostname;
+	if (!/^\d+$/.test(host)) return undefined;
+	const [id, ...segments] = url.pathname.split("/").filter(Boolean).map(decodeSegment);
+	if (id && /[/\\\0]/.test(id)) throw new Error("Invalid agent ID in PID-qualified URL.");
+	const pid = Number(host);
+	return { address: { pid, ...(id ? { id } : {}) }, segments, local: pid === process.pid };
+}
+
+function crossInstanceEnabled(context?: ResolveContext): boolean {
+	const settings = context?.session?.settings ?? context?.settings;
+	return settings !== undefined && cfgTaskCrossInstance.get(settings);
+}
+
+function decodeSegment(segment: string): string {
+	try {
+		return decodeURIComponent(segment);
+	} catch {
+		return segment;
+	}
+}
+
+/** What a progress view reads: a live session, else a transcript file. */
+interface ProgressSource {
+	id: string;
+	status: string;
+	session: AgentSessionHandle | null;
+	sessionFile: string | null;
+}
+
+/** Where {@link AgentProtocolHandler.resolve} looks up one output id. */
+interface OutputTarget {
+	outputId: string;
+	segments: string[];
+	dirs: string[];
+	registry?: AgentRegistryApi;
+	/** Last status published by the peer that owns this subagent. */
+	remoteStatus?: string;
+	/** Transcript-backed progress source for a peer, including retained agents. */
+	remoteProgress?: () => Promise<ProgressSource | undefined>;
+}
 
 /** Upper bound on the ids a `Not found` error suggests. */
 const MAX_ID_SUGGESTIONS = 5;
@@ -179,7 +236,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	};
 
 	promptDoc(host: SchemeHost): string {
-		return prompt.render(agentPromptDoc, { subagent: host.subagent }).trim();
+		return prompt
+			.render(agentPromptDoc, {
+				subagent: host.subagent,
+				crossInstanceAgents: host.crossInstanceAgents,
+			})
+			.trim();
 	}
 
 	/**
@@ -193,6 +255,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
 		if (outputId === "all" || hasPathExtraction(url)) return null;
+		if (crossInstanceEnabled(context) && (outputId === "peers" || /^\d+$/.test(outputId))) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
@@ -213,12 +276,17 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
-		const named = url.rawHost || url.hostname;
+		const pid = cfgTaskCrossInstance.get(session.settings) ? pidTarget(url) : undefined;
+		const named = pid
+			? pid.local
+				? (pid.address.id ?? MAIN_AGENT_ID)
+				: formatPeerAddress(pid.address)
+			: url.rawHost || url.hostname;
 		if (!named) throw new Error("agent:// URL requires a recipient: agent://<id>");
-		if (hasPathExtraction(url)) {
+		if (pid ? pid.segments.length > 0 : hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
-		const to = resolveRecipient(registry, senderId, named);
+		const to = pid && !pid.local ? named : resolveRecipient(registry, senderId, named);
 		const progress = url.searchParams.has("progress");
 		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
 		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
@@ -238,7 +306,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content, progress },
+			{ to, message: content, progress, remote: pid !== undefined && !pid.local },
 		);
 		return {
 			content: [
@@ -258,51 +326,110 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
-
-		const extraction = hasPathExtraction(url);
-
-		const dirs = await this.#outputDirs(context);
-		const scan = dirs.length > 0 ? await this.#findOutput(dirs, outputId) : undefined;
+		const crossInstance = crossInstanceEnabled(context);
+		if (crossInstance && outputId === "peers") return this.#resolvePeers(url);
 		const registry = context?.agentRegistry ?? AgentRegistry.global();
+		const pid = crossInstance ? pidTarget(url) : undefined;
+		if (pid && !pid.local) return this.#resolvePeer(url, pid);
+		return this.#resolveOutput(url, {
+			outputId: pid ? (pid.address.id ?? MAIN_AGENT_ID) : outputId,
+			segments: pid ? pid.segments : url.pathname.split("/").filter(Boolean).map(decodeSegment),
+			dirs: await this.#outputDirs(context),
+			registry,
+		});
+	}
+
+	/** Roster of the other omp instances in this project. */
+	#resolvePeers(url: InternalUrl): InternalResource {
+		const peers = agentMesh()?.peers() ?? [];
+		const content =
+			peers.length === 0
+				? "No other omp instances in this project.\n"
+				: `${peers.map(peer => `- agent://${peer.pid} (${peer.status})`).join("\n")}\n\nRead agent://<pid>/<id> for a subagent's output; write agent://<pid> to message its main agent.\n`;
+		return {
+			url: url.href,
+			content,
+			contentType: "text/markdown",
+			size: Buffer.byteLength(content, "utf-8"),
+			notes: [`This instance: ${process.pid}`],
+			shape: "document",
+		};
+	}
+
+	/** An agent of another omp instance, read from that instance's session files. */
+	async #resolvePeer(url: InternalUrl, target: PidTarget): Promise<InternalResource> {
+		const { pid, id } = target.address;
+		const peer = agentMesh()?.peer(pid);
+		if (!peer) throw new Error(`No omp instance with pid ${pid} in this project. List them with agent://peers`);
+		const sessionFile = peer.sessionFile;
+		if (!sessionFile) throw new Error(`Instance ${pid} has no session file; its agents cannot be read.`);
+		if (!id) {
+			if (target.segments.length > 0) throw new Error(`agent://${pid} is a main agent; it has no JSON output.`);
+			return this.#resolveProgress(url, { id: String(pid), status: peer.status, session: null, sessionFile }, false);
+		}
+		const dir = sessionFile.slice(0, -".jsonl".length);
+		const agent = peer.agents.find(agent => agent.id === id);
+		const transcript =
+			agent && sessionFileBelongsToRoot(agent.sessionFile, sessionFile)
+				? agent.sessionFile
+				: path.join(dir, `${id}.jsonl`);
+		return this.#resolveOutput(url, {
+			outputId: id,
+			segments: target.segments,
+			dirs: [dir],
+			remoteStatus: agent?.status,
+			remoteProgress: async () => {
+				const exists = await Bun.file(transcript).exists();
+				if (!exists && !agent) return undefined;
+				return {
+					id: formatPeerAddress(target.address),
+					status: agent?.status ?? "not registered",
+					session: null,
+					sessionFile: exists ? transcript : null,
+				};
+			},
+		});
+	}
+
+	async #resolveOutput(url: InternalUrl, target: OutputTarget): Promise<InternalResource> {
+		const { outputId, dirs, registry } = target;
+		const extraction = target.segments.length > 0;
+		const scan = dirs.length > 0 ? await this.#findOutput(dirs, outputId) : undefined;
 		if (!scan?.foundPath) {
 			// No published output yet. A registered agent (running, idle after a
 			// non-terminal yield, or parked before publishing) is the same
 			// registry `write agent://<id>` delivers to: answer with its progress.
-			const ref = registry.get(outputId);
-			if (ref && ref.kind !== "advisor") return this.#resolveProgress(url, ref, extraction);
+			const ref = registry?.get(outputId);
+			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
+			if (progress) return this.#resolveProgress(url, progress, extraction);
 			if (!scan) throw new Error("No session - agent outputs unavailable");
 			if (!scan.anyDirExists) throw new Error("No artifacts directory found");
-			const registered = registry
-				.list()
-				.filter(candidate => candidate.kind !== "advisor")
-				.map(candidate => candidate.id);
+			const registered =
+				registry
+					?.list()
+					.filter(candidate => candidate.kind !== "advisor")
+					.map(candidate => candidate.id) ?? [];
 			throw notFoundError(outputId, [...scan.availableIds, ...registered]);
 		}
 
-		const pathSegments = extraction ? url.pathname.split("/").filter(Boolean) : [];
-		const decodedSegments = pathSegments.map(segment => {
-			try {
-				return decodeURIComponent(segment);
-			} catch {
-				return segment;
-			}
-		});
+		const decodedSegments = target.segments;
 
 		const rawContent = await Bun.file(scan.foundPath).text();
 		// A run that failed or was cancelled can publish an empty output; a blank
 		// read would pass for success, so show what the agent did instead.
 		if (!extraction && !rawContent.trim()) {
-			const ref = registry.get(outputId);
-			if (ref && ref.kind !== "advisor") return this.#resolveProgress(url, ref, false, true);
+			const ref = registry?.get(outputId);
+			const progress = ref && ref.kind !== "advisor" ? ref : await target.remoteProgress?.();
+			if (progress) return this.#resolveProgress(url, progress, false, true);
 		}
-		const notes: string[] = [];
+		const notes: string[] = target.remoteStatus === undefined ? [] : [`Status: ${target.remoteStatus}`];
 		let content = rawContent.trim()
 			? rawContent
 			: `${outputId} published an empty output. Transcript: history://${outputId}\n`;
 		// A published file belongs to a finished run. If the agent is streaming
 		// again (follow-up or IRC wake), the file is the previous run's result;
 		// unmarked, a reader takes it as the current state.
-		if (!extraction && isSuperseded(registry, outputId)) {
+		if (!extraction && (registry ? isSuperseded(registry, outputId) : target.remoteStatus === "running")) {
 			const publishedAt = (await fs.stat(scan.foundPath)).mtimeMs;
 			content = `${prompt.render(agentSupersededTemplate, {
 				id: outputId,
@@ -375,7 +502,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 */
 	async #resolveProgress(
 		url: InternalUrl,
-		ref: AgentRef,
+		ref: ProgressSource,
 		extraction: boolean,
 		publishedEmpty = false,
 	): Promise<InternalResource> {

@@ -106,6 +106,12 @@ export interface AgentSessionHandle {
 	readonly runStartedAt: number | undefined;
 	/** Whether the session still owes turns to IRC messages (held, queued, or awaiting compaction). */
 	readonly ircWakesPending: boolean;
+	/**
+	 * Whether the agent acts again without anyone messaging it: its turn is streaming or
+	 * continues, or something wakes it once the turn ends (queued input, or a background
+	 * job, live service or running subagent of its own that is not waiting on it).
+	 */
+	readonly hasPendingWake: boolean;
 	/** Full message list, including custom message types. */
 	readonly messages: AgentMessage[];
 	/** Current transcript path, or undefined when sessions are disabled. */

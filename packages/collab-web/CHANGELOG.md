@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed web search cards without a synthesized answer (e.g. Parallel) showing the raw numbered result listing; each source now shows a short cleaned excerpt instead.
+
 ## [18.22.0] - 2026-11-16
 
 ### Fixed

@@ -23,7 +23,9 @@ use std::{
 
 use hashbrown::HashMap;
 
-use crate::watch::{Descend, Flags, MISSING_ROOT_RECHECK, Root, Timing, batch::Emitter, missing_root};
+use crate::watch::{
+	Descend, Flags, MISSING_ROOT_RECHECK, Root, Timing, batch::Emitter, missing_root,
+};
 
 /// Everything a vnode can report.
 const NOTES: u32 = libc::NOTE_DELETE

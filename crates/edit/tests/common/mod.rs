@@ -33,11 +33,11 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use omp_edit::{
 	ApplyOutcome, ApplyRequest, EditError, EditMode, EditResult, EditStore, EditWriter, FileOp,
 	PathPolicy, Session, WriteRequest, WriteResponse, session::SessionConfig, store::Clipboard,
 };
+use parking_lot::Mutex;
 use serde_json::Value;
 
 pub type RewriteFn = Box<dyn Fn(&WriteRequest) -> String + Send + Sync>;

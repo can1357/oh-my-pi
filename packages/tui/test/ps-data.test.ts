@@ -1,18 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
 import { formatCommand } from "../src/apps/ps-data";
-import type { DaemonSpec } from "../src/tools/daemon";
+import type { ProcSpec } from "../src/tools/daemon";
 
-const spec = (application: string, args: string[]): DaemonSpec => ({
-	name: "web",
+const spec = (application: string, args: string[]): ProcSpec => ({
 	application,
 	args,
 	env: {},
 	cwd: "/work",
 	pty: true,
-	restart: "no",
-	persist: false,
-	detached: false,
 });
 
 describe("formatCommand", () => {

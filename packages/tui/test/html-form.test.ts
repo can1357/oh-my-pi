@@ -331,6 +331,25 @@ describe("html form", () => {
 			form.dispose();
 		});
 
+		it("opens each field on its preselected answer, so Enter keeps it (#19657)", () => {
+			const { form } = dialog(`<form>
+<fieldset><legend>Store</legend>
+<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+<label><input type="radio" name="db" value="pg" checked> Postgres</label>
+</fieldset>
+<fieldset><legend>Cache</legend>
+<label><input type="radio" name="cache" value="none"> None</label>
+<label><input type="radio" name="cache" value="redis" checked> Redis</label>
+</fieldset></form>`);
+			expect(form.debugState().focus).toBe("db=pg");
+			form.handleInput(ENTER);
+			expect(form.debugState().focus).toBe("cache=redis");
+			form.handleInput(ENTER);
+			form.handleInput(ENTER);
+			expect(form.data()).toMatchObject({ db: "pg", cache: "redis" });
+			form.dispose();
+		});
+
 		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
 			const { form } = dialog(DB_FORM);
 			form.handleInput("n");
@@ -345,7 +364,8 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.data().extras).toEqual(["ci"]);
 			form.handleInput(SPACE);
-			form.handleInput("\x1b[Z");
+			form.handleInput("\x1b[Z"); // back to Database, on its answer (Postgres)
+			form.handleInput("\x1b[A");
 			form.handleInput("n");
 			form.handleInput("\x05");
 			form.handleInput(" edited");
