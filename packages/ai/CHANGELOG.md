@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `antigravity-cli` provider now uses a compatible `agy` from `PATH` before downloading the managed release. `PI_AGY_PATH` still takes precedence. ([#19400](https://github.com/can1357/oh-my-pi/pull/19400) by [@SenCha930511](https://github.com/SenCha930511))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

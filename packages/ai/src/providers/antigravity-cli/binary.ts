@@ -1,14 +1,30 @@
-/** Managed agy releases, installed from Google's manifest without running its shell-profile installer. */
+/** agy binary selection and managed release installation, without running Google's shell-profile installer. */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { $env, formatBytes, getAntigravityCliDir, isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	$which,
+	compareVersions,
+	formatBytes,
+	getAntigravityCliDir,
+	isEnoent,
+	logger,
+	ptree,
+	WhichCachePolicy,
+	withFileLock,
+} from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../../types";
 
 const MANIFEST_BASE_URL = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
 const UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 /** Releases run to hundreds of MB, so only silence aborts a download; a total deadline would exclude slow links. */
 const DOWNLOAD_STALL_MS = 60_000;
+const MINIMUM_AGY_VERSION = "1.5.9";
+const AGY_VERSION =
+	/^((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?=\s|$)/u;
+const VERSION_PROBE_TIMEOUT_MS = 5_000;
 const operations = new Map<string, Promise<string>>();
+const versionChecks = new Map<string, Promise<boolean>>();
 
 interface ReleaseManifest {
 	version: string;
@@ -26,11 +42,55 @@ export function agyGeminiDir(): string {
 	return path.join(getAntigravityCliDir(), "gemini");
 }
 
-/** Resolves an existing override or installs agy; subsequent calls check for updates at most daily. */
-export async function resolveAgyBinary(fetchImpl: FetchImpl = fetch): Promise<string> {
+/** Overrides for installed-CLI discovery and the managed install directory. */
+export interface ResolveAgyOptions {
+	which?: (command: string) => string | null;
+	probe?: (binary: string) => Promise<string | undefined>;
+	directory?: string;
+}
+
+/** Resolves PI_AGY_PATH, a compatible agy on PATH, or the managed release. */
+export async function resolveAgyBinary(fetchImpl: FetchImpl = fetch, options: ResolveAgyOptions = {}): Promise<string> {
 	const override = $env.PI_AGY_PATH;
 	if (override) return override;
-	return ensureAgyInstalled(path.join(getAntigravityCliDir(), "bin"), fetchImpl);
+	const installed = (
+		options.which ?? (command => $which(command, { cache: WhichCachePolicy.Bypass, requireAbsolutePaths: true }))
+	)("agy");
+	if (installed && (await installedAgyCompatible(installed, options.probe))) return installed;
+	return ensureAgyInstalled(options.directory ?? path.join(getAntigravityCliDir(), "bin"), fetchImpl);
+}
+
+function installedAgyCompatible(
+	binary: string,
+	probe: ((binary: string) => Promise<string | undefined>) | undefined,
+): Promise<boolean> {
+	if (probe) return probe(binary).then(compatibleAgyVersion, () => false);
+	let check = versionChecks.get(binary);
+	if (!check) {
+		check = probeAgyVersion(binary)
+			.then(compatibleAgyVersion, () => false)
+			.finally(() => versionChecks.delete(binary));
+		versionChecks.set(binary, check);
+	}
+	return check;
+}
+
+function compatibleAgyVersion(version: string | undefined): boolean {
+	const match = AGY_VERSION.exec(version ?? "");
+	if (match === null || match[2] !== undefined) return false;
+	return compareVersions(match[1]!, MINIMUM_AGY_VERSION) >= 0;
+}
+
+async function probeAgyVersion(binary: string): Promise<string | undefined> {
+	const result = await ptree.exec([binary, "acp", "--version"], {
+		env: { ...Bun.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+		timeout: VERSION_PROBE_TIMEOUT_MS,
+		allowNonZero: true,
+		allowAbort: true,
+	});
+	if (!result.ok || result.exitError?.aborted) return undefined;
+	const version = result.stdout.trim().split(/\r?\n/u)[0]?.trim();
+	return version || undefined;
 }
 
 /** Installs a verified release into `directory`; versioned paths keep running processes valid during updates. */
