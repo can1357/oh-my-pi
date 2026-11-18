@@ -655,8 +655,8 @@ function accountOAuthIdentity(account: UsageAccountIdentity): OAuthAccountIdenti
 /**
  * The identity whose saved-reset consent applies to a report: the stored account
  * the reset planners attribute it to among `reports`. `null` when stored accounts
- * are known but none owns the report alone: the planners spend nothing for it, so
- * no account's consent applies. Without stored accounts, the report's own identity.
+ * are known but none owns the report alone: no one account's consent can be
+ * named for it. Without stored accounts, the report's own identity.
  */
 function reportConsentIdentity(
 	report: UsageReport,
@@ -862,7 +862,7 @@ function formatResetExpiryBanner(
 			warning,
 			options.settings,
 			nowMs,
-			// No unique owner: the planners spend nothing for this report, so no account policy decides it.
+			// No unique owner: no one account's policy can be named, so the provider key decides, as on main.
 			owners[index] && options.getAccountPolicy(warning.provider, owners[index]),
 		),
 	);
