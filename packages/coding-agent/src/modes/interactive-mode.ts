@@ -8422,7 +8422,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
 			try {
-				execReplace(cmd); // never returns on success
+				const env: Record<string, string> = {};
+				for (const key in process.env) {
+					const value = process.env[key];
+					if (value !== undefined) env[key] = value;
+				}
+				execReplace(cmd[0], cmd, env, []); // never returns on success
 			} catch (err) {
 				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
 			}

@@ -187,6 +187,13 @@ impl Process {
 	pub fn status(&self) -> ProcessStatus {
 		self.inner.status().into()
 	}
+
+	/// Process start time in milliseconds since the Unix epoch, when the
+	/// platform reports it; a pid-reuse guard for re-adopting processes.
+	#[napi]
+	pub fn start_time(&self) -> Option<f64> {
+		start_time_ms(self.inner.pid())
+	}
 }
 
 impl Process {
@@ -195,42 +202,46 @@ impl Process {
 	}
 }
 
-/// Replace the current process image via `execvp(3)`.
-///
-/// On success this never returns: the kernel tears down every other thread and
-/// the new program takes over this PID, controlling terminal, and inherited
-/// (non-`CLOEXEC`) file descriptors. Callers must flush logs and restore the
-/// terminal first — no JS or native cleanup runs after a successful call.
-///
-/// # Errors
-/// Returns an error, leaving the process untouched, when `argv` is empty, an
-/// argument contains an interior NUL byte, or the exec itself fails (e.g.
-/// executable not found). Windows has no exec-replace semantics, so this
-/// always errors there; callers fall back to spawn-and-wait.
-#[napi]
-pub fn exec_replace(argv: Vec<String>) -> Result<()> {
-	#[cfg(unix)]
-	{
-		use std::ffi::CString;
+/// Start time of `pid` in milliseconds since the Unix epoch.
+#[cfg(target_os = "linux")]
+fn start_time_ms(pid: i32) -> Option<f64> {
+	let ticks = omp_builtins::proc_sys::start_time(pid)? as f64;
+	// SAFETY: sysconf reads a process-global constant.
+	let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+	if hz <= 0 {
+		return None;
+	}
+	let stat = std::fs::read_to_string("/proc/stat").ok()?;
+	let boot_secs: f64 = stat
+		.lines()
+		.find_map(|line| line.strip_prefix("btime "))?
+		.trim()
+		.parse()
+		.ok()?;
+	Some((boot_secs + ticks / hz as f64) * 1000.0)
+}
 
-		if argv.is_empty() {
-			return Err(napi::Error::from_reason("exec_replace: argv must not be empty"));
-		}
-		let args = argv
-			.into_iter()
-			.map(CString::new)
-			.collect::<std::result::Result<Vec<_>, _>>()
-			.map_err(|err| napi::Error::from_reason(format!("exec_replace: {err}")))?;
-		let mut ptrs: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
-		ptrs.push(std::ptr::null());
-		// SAFETY: `ptrs` is a NUL-terminated array of pointers into `args`, which
-		// outlives the call; execvp only returns on failure.
-		unsafe { libc::execvp(ptrs[0], ptrs.as_ptr()) };
-		Err(napi::Error::from_reason(format!("execvp failed: {}", std::io::Error::last_os_error())))
-	}
-	#[cfg(not(unix))]
-	{
-		let _ = argv;
-		Err(napi::Error::from_reason("exec_replace is unsupported on this platform"))
-	}
+/// Start time of `pid` in milliseconds since the Unix epoch.
+#[cfg(target_os = "macos")]
+fn start_time_ms(pid: i32) -> Option<f64> {
+	let info = omp_builtins::proc_sys::bsdinfo(pid)?;
+	Some(info.pbi_start_tvsec as f64 * 1000.0 + info.pbi_start_tvusec as f64 / 1000.0)
+}
+
+/// Start time of `pid` in milliseconds since the Unix epoch.
+#[cfg(windows)]
+fn start_time_ms(pid: i32) -> Option<f64> {
+	use omp_builtins::proc_sys as sys;
+	/// FILETIME ticks (100 ns) between 1601-01-01 and 1970-01-01.
+	const EPOCH_DELTA_TICKS: u64 = 116_444_736_000_000_000;
+	let handle =
+		sys::open_process(u32::try_from(pid).ok()?, sys::PROCESS_QUERY_LIMITED_INFORMATION)?;
+	let creation = sys::process_times(&handle)?.0;
+	Some(creation.checked_sub(EPOCH_DELTA_TICKS)? as f64 / 10_000.0)
+}
+
+/// Start time of `pid` in milliseconds since the Unix epoch.
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn start_time_ms(_pid: i32) -> Option<f64> {
+	None
 }

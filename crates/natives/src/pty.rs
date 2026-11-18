@@ -20,9 +20,9 @@ use napi::{
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode, UnknownReturnValue},
 };
 use napi_derive::napi;
-use parking_lot::Mutex;
 use omp_shell::output_decode::OutputDecoder;
-use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
+use parking_lot::Mutex;
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::{
 	js::into_string,
@@ -148,7 +148,7 @@ enum ControlMessage {
 	/// `on_chunk` failed: nothing is left to deliver output to.
 	JsGone,
 	/// The waiter thread reaped the child.
-	Exited(std::io::Result<ExitStatus>),
+	Exited(std::io::Result<i32>),
 }
 
 const POST_CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
@@ -179,10 +179,23 @@ struct PtySessionCore {
 	control_tx: flume::Sender<ControlMessage>,
 }
 
+/// Raw identity of the running (or adopted, not yet resumed) PTY child.
+#[derive(Default)]
+struct PtyHandles {
+	/// Unix pty master fd.
+	master_fd: Option<i32>,
+	/// Child process id.
+	pid:       Option<i32>,
+	/// Master adopted by [`PtySession::adopt`], consumed by `resume`.
+	#[cfg(unix)]
+	pending:   Option<std::os::fd::OwnedFd>,
+}
+
 /// Stateful PTY session for interactive stdin/stdout passthrough.
 #[napi]
 pub struct PtySession {
-	core: Arc<Mutex<Option<PtySessionCore>>>,
+	core:    Arc<Mutex<Option<PtySessionCore>>>,
+	handles: Arc<Mutex<PtyHandles>>,
 }
 
 impl Default for PtySession {
@@ -195,7 +208,53 @@ impl Default for PtySession {
 impl PtySession {
 	#[napi(constructor)]
 	pub fn new() -> Self {
-		Self { core: Arc::new(Mutex::new(None)) }
+		Self { core: Arc::new(Mutex::new(None)), handles: Arc::default() }
+	}
+
+	/// Wrap an inherited pty master fd and its child pid (e.g. kept across
+	/// `execReplace`); call `resume` to drive it like a started session.
+	#[napi(factory)]
+	pub fn adopt(master_fd: i32, pid: i32) -> Result<Self> {
+		#[cfg(unix)]
+		{
+			use std::os::fd::{FromRawFd, OwnedFd};
+			if master_fd < 0 || pid <= 0 {
+				return Err(Error::from_reason("PtySession.adopt: invalid master fd or pid"));
+			}
+			// SAFETY: the caller hands over ownership of the inherited master fd.
+			let fd = unsafe { OwnedFd::from_raw_fd(master_fd) };
+			// Re-arm CLOEXEC (cleared for the exec) and restore the blocking mode
+			// the reader thread expects.
+			// SAFETY: fcntl on the fd owned above with scalar arguments.
+			unsafe {
+				libc::fcntl(master_fd, libc::F_SETFD, libc::FD_CLOEXEC);
+				let flags = libc::fcntl(master_fd, libc::F_GETFL);
+				if flags >= 0 {
+					libc::fcntl(master_fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+				}
+			}
+			let session = Self::new();
+			*session.handles.lock() =
+				PtyHandles { master_fd: Some(master_fd), pid: Some(pid), pending: Some(fd) };
+			Ok(session)
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = (master_fd, pid);
+			Err(Error::from_reason("PtySession.adopt is unsupported on this platform"))
+		}
+	}
+
+	/// Unix pty master fd of the running session, for `execReplace` keepFds.
+	#[napi]
+	pub fn master_fd(&self) -> Option<i32> {
+		self.handles.lock().master_fd
+	}
+
+	/// Process id of the running session's child.
+	#[napi]
+	pub fn pid(&self) -> Option<i32> {
+		self.handles.lock().pid
 	}
 
 	/// Start a shell command, stream output chunks, and report the spawned child
@@ -218,7 +277,10 @@ impl PtySession {
 			cols:    dimensions.cols,
 			rows:    dimensions.rows,
 		};
-		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
+		let handles = Arc::clone(&self.handles);
+		self.launch(env, "pty.start", options.timeout_ms, options.signal, move |tx, rx, ct| {
+			run_pty_sync(run_config, on_chunk, on_start, tx, rx, ct, &handles)
+		})
 	}
 
 	/// Start an executable with separate arguments, stream output chunks, and
@@ -241,7 +303,40 @@ impl PtySession {
 			cols:    dimensions.cols,
 			rows:    dimensions.rows,
 		};
-		self.start_config(env, run_config, options.timeout_ms, options.signal, on_chunk, on_start)
+		let handles = Arc::clone(&self.handles);
+		self.launch(env, "pty.start", options.timeout_ms, options.signal, move |tx, rx, ct| {
+			run_pty_sync(run_config, on_chunk, on_start, tx, rx, ct, &handles)
+		})
+	}
+
+	/// Drive an adopted session: stream output chunks and resolve when the
+	/// child exits (exit code via `waitpid`).
+	#[napi]
+	pub fn resume<'env>(
+		&self,
+		env: &'env Env,
+		#[napi(ts_arg_type = "(error: Error | null, chunk: string) => void")]
+		on_chunk: ThreadsafeFunction<String, UnknownReturnValue>,
+	) -> Result<PromiseRaw<'env, PtyRunResult>> {
+		#[cfg(unix)]
+		{
+			let (fd, pid) = {
+				let mut handles = self.handles.lock();
+				let Some(fd) = handles.pending.take() else {
+					return Err(Error::from_reason("PtySession.resume: no adopted PTY to resume"));
+				};
+				(fd, handles.pid.unwrap_or(0))
+			};
+			let handles = Arc::clone(&self.handles);
+			self.launch(env, "pty.resume", None, None, move |tx, rx, ct| {
+				run_adopted_sync(fd, pid, Some(on_chunk), tx, rx, ct, &handles)
+			})
+		}
+		#[cfg(not(unix))]
+		{
+			let _ = (env, on_chunk);
+			Err(Error::from_reason("PtySession.resume is unsupported on this platform"))
+		}
 	}
 
 	/// Write raw input bytes to PTY stdin.
@@ -265,14 +360,20 @@ impl PtySession {
 }
 
 impl PtySession {
-	fn start_config<'env>(
+	/// Register the control channel and run `run` on a blocking thread.
+	fn launch<'env>(
 		&self,
 		env: &'env Env,
-		run_config: PtyRunConfig,
+		tag: &'static str,
 		timeout_ms: Option<u32>,
 		signal: Option<Unknown<'env>>,
-		on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
-		on_start: Option<ThreadsafeFunction<u32>>,
+		run: impl FnOnce(
+			flume::Sender<ControlMessage>,
+			flume::Receiver<ControlMessage>,
+			task::CancelToken,
+		) -> Result<PtyRunResult>
+		+ Send
+		+ 'static,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let ct = task::CancelToken::new(timeout_ms, signal);
 		let core = Arc::clone(&self.core);
@@ -287,11 +388,9 @@ impl PtySession {
 			}
 			*guard = Some(PtySessionCore { control_tx: control_tx.clone() });
 		}
-		task::future(env, "pty.start", async move {
-			let run_result = tokio::task::spawn_blocking(move || {
-				run_pty_sync(run_config, on_chunk, on_start, control_tx, control_rx, ct)
-			})
-			.await;
+		task::future(env, tag, async move {
+			let run_result =
+				tokio::task::spawn_blocking(move || run(control_tx, control_rx, ct)).await;
 
 			let mut guard = core.lock();
 			*guard = None;
@@ -315,6 +414,118 @@ impl PtySession {
 	}
 }
 
+/// Master side of a PTY: one opened by portable-pty, or an adopted raw fd.
+enum PtyMaster {
+	Portable(Box<dyn MasterPty + Send>),
+	#[cfg(unix)]
+	Adopted(std::os::fd::OwnedFd),
+}
+
+impl PtyMaster {
+	fn resize(&self, cols: u16, rows: u16) {
+		match self {
+			Self::Portable(master) => {
+				let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+			},
+			#[cfg(unix)]
+			Self::Adopted(fd) => {
+				use std::os::fd::AsRawFd;
+				let size =
+					libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+				// SAFETY: TIOCSWINSZ reads one `winsize` from a valid pointer.
+				unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &size) };
+			},
+		}
+	}
+
+	#[cfg(unix)]
+	fn process_group_leader(&self) -> Option<i32> {
+		match self {
+			Self::Portable(master) => master.process_group_leader(),
+			Self::Adopted(fd) => {
+				use std::os::fd::AsRawFd;
+				// SAFETY: tcgetpgrp on the owned master fd.
+				let pgid = unsafe { libc::tcgetpgrp(fd.as_raw_fd()) };
+				(pgid > 0).then_some(pgid)
+			},
+		}
+	}
+
+	fn raw_fd(&self) -> Option<i32> {
+		match self {
+			#[cfg(unix)]
+			Self::Portable(master) => master.as_raw_fd(),
+			#[cfg(not(unix))]
+			Self::Portable(_) => None,
+			#[cfg(unix)]
+			Self::Adopted(fd) => {
+				use std::os::fd::AsRawFd;
+				Some(fd.as_raw_fd())
+			},
+		}
+	}
+}
+
+/// Everything [`drive_pty`] needs from a spawned or adopted PTY child.
+struct PtyIo {
+	master:    PtyMaster,
+	reader:    Box<dyn Read + Send>,
+	writer:    Box<dyn Write + Send>,
+	child_pid: Option<i32>,
+	/// Blocks until the child exits; returns its exit code.
+	wait:      Box<dyn FnOnce() -> std::io::Result<i32> + Send>,
+}
+
+/// Drive an adopted master fd and child pid until the child exits.
+#[cfg(unix)]
+fn run_adopted_sync(
+	fd: std::os::fd::OwnedFd,
+	pid: i32,
+	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
+	control_tx: flume::Sender<ControlMessage>,
+	control_rx: flume::Receiver<ControlMessage>,
+	ct: task::CancelToken,
+	handles: &Mutex<PtyHandles>,
+) -> Result<PtyRunResult> {
+	let clone = |what: &str| {
+		fd.try_clone()
+			.map(std::fs::File::from)
+			.map_err(|err| Error::from_reason(format!("Failed to create PTY {what}: {err}")))
+	};
+	let reader = clone("reader")?;
+	let writer = clone("writer")?;
+	let io = PtyIo {
+		master:    PtyMaster::Adopted(fd),
+		reader:    Box::new(reader),
+		writer:    Box::new(writer),
+		child_pid: Some(pid),
+		wait:      Box::new(move || wait_pid_exit_code(pid)),
+	};
+	drive_pty(io, on_chunk, control_tx, control_rx, ct, handles)
+}
+
+/// Blocking `waitpid` for `pid`; a signal death reports exit code 1 like
+/// portable-pty does.
+#[cfg(unix)]
+fn wait_pid_exit_code(pid: i32) -> std::io::Result<i32> {
+	let mut status = 0;
+	loop {
+		// SAFETY: blocking waitpid on a specific pid with a valid out pointer.
+		if unsafe { libc::waitpid(pid, &mut status, 0) } == pid {
+			break;
+		}
+		let error = std::io::Error::last_os_error();
+		if error.kind() != std::io::ErrorKind::Interrupted {
+			return Err(error);
+		}
+	}
+	Ok(if libc::WIFEXITED(status) {
+		libc::WEXITSTATUS(status)
+	} else {
+		1
+	})
+}
+
 fn run_pty_sync(
 	config: PtyRunConfig,
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
@@ -322,6 +533,7 @@ fn run_pty_sync(
 	control_tx: flume::Sender<ControlMessage>,
 	control_rx: flume::Receiver<ControlMessage>,
 	ct: task::CancelToken,
+	handles: &Mutex<PtyHandles>,
 ) -> Result<PtyRunResult> {
 	let pty_system = native_pty_system();
 	ct.heartbeat()
@@ -424,6 +636,7 @@ fn run_pty_sync(
 	// kills, and whose waiter thread reaps, correctly.
 
 	let master = pair.master;
+	#[cfg_attr(not(windows), allow(unused_mut, reason = "only ConPTY needs the startup reply"))]
 	let mut writer = master
 		.take_writer()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY writer: {err}")))?;
@@ -435,9 +648,39 @@ fn run_pty_sync(
 		let _ = writer.write_all(b"\x1b[1;1R");
 		let _ = writer.flush();
 	}
-	let mut reader = master
+	let reader = master
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
+	let io = PtyIo {
+		master: PtyMaster::Portable(master),
+		reader,
+		writer,
+		child_pid,
+		wait: Box::new(move || {
+			child
+				.wait()
+				.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX))
+		}),
+	};
+	drive_pty(io, on_chunk, control_tx, control_rx, ct, handles)
+}
+
+/// Stream output, apply control messages, and tear down once the child exits
+/// or the run is terminated.
+fn drive_pty(
+	io: PtyIo,
+	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
+	control_tx: flume::Sender<ControlMessage>,
+	control_rx: flume::Receiver<ControlMessage>,
+	ct: task::CancelToken,
+	handles: &Mutex<PtyHandles>,
+) -> Result<PtyRunResult> {
+	let PtyIo { master, mut reader, mut writer, child_pid, wait } = io;
+	{
+		let mut handles = handles.lock();
+		handles.master_fd = master.raw_fd();
+		handles.pid = child_pid;
+	}
 
 	// The reader→JS queue is bounded like the bash bridge (#4078): a full queue
 	// parks the reader's `send`, filling the OS PTY buffer and backpressuring
@@ -494,7 +737,7 @@ fn run_pty_sync(
 	// SIGKILL'd child (`std::process::Child` never waits on `Drop`).
 	let exit_tx = control_tx.clone();
 	std::thread::spawn(move || {
-		let _ = exit_tx.send(ControlMessage::Exited(child.wait()));
+		let _ = exit_tx.send(ControlMessage::Exited(wait()));
 	});
 	let cancel_tx = control_tx.clone();
 	let cancel_task = napi::tokio::spawn(async move {
@@ -548,7 +791,7 @@ fn run_pty_sync(
 				false
 			},
 			Ok(ControlMessage::Resize { cols, rows }) => {
-				let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+				master.resize(cols, rows);
 				false
 			},
 			Ok(ControlMessage::Kill) => {
@@ -596,8 +839,7 @@ fn run_pty_sync(
 	cancel_task.abort();
 	let exit_code = status
 		.transpose()
-		.map_err(|err| Error::from_reason(format!("Failed waiting PTY process: {err}")))?
-		.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
+		.map_err(|err| Error::from_reason(format!("Failed waiting PTY process: {err}")))?;
 	// --- Teardown ---
 
 	// Step 1: Close the ConPTY input pipe first.
@@ -624,6 +866,11 @@ fn run_pty_sync(
 	#[cfg(not(windows))]
 	{
 		drop(master);
+	}
+	{
+		let mut handles = handles.lock();
+		handles.master_fd = None;
+		handles.pid = None;
 	}
 	await_pty_output_drain(
 		pump_done_rx,
@@ -967,7 +1214,7 @@ mod zombie_repro_tests {
 			};
 			// Pre-spawn heartbeats bail with `Err`, so `Ok` means this iteration
 			// reached the post-spawn cancellation path.
-			if run_pty_sync(config, None, None, tx, rx, ct).is_ok() {
+			if run_pty_sync(config, None, None, tx, rx, ct, &Mutex::default()).is_ok() {
 				spawned += 1;
 			}
 		}

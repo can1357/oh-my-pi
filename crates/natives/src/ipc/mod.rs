@@ -1,12 +1,13 @@
-//! Native local IPC: Unix domain sockets and Windows named pipes behind one
+//! Native IPC: Unix domain sockets, Windows named pipes and TCP behind one
 //! N-API surface.
 //!
-//! The native layer owns transport, peer security, single-instance bind,
-//! stale-endpoint takeover and line framing; lifecycle policy (spawn, auth,
+//! The native layer owns transport, peer security (local transports),
+//! single-instance bind, stale-endpoint takeover, line framing and the
+//! lines→raw upgrade; lifecycle policy (spawn, auth,
 //! idle exit) stays in TypeScript. Every failure surfaces as a JS `Error`
 //! whose `code` is an errno-style string (`ENOENT`, `EADDRINUSE`, …).
 
-use std::{io, sync::Arc, time::Duration};
+use std::{future::Future, io, sync::Arc, time::Duration};
 
 use memchr::memchr;
 use napi::{
@@ -25,6 +26,7 @@ mod conn;
 mod cork;
 mod endpoint;
 mod lines;
+mod tcp;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -35,7 +37,7 @@ use unix as platform;
 #[cfg(windows)]
 use windows as platform;
 
-use self::conn::{FrameCallback, Framing, Shared};
+use self::conn::{FrameCallback, Framing, Shared, Stream};
 
 #[cfg(not(any(unix, windows)))]
 compile_error!("omp-natives IPC requires Unix or Windows");
@@ -114,7 +116,14 @@ fn parse_framing(env: &Env, framing: &str) -> Result<Framing> {
 	}
 }
 
-/// Options for `IpcServer.listen`.
+/// TCP port from JS, range-checked.
+fn parse_port(env: &Env, port: u32) -> Result<u16> {
+	u16::try_from(port).map_err(|_| {
+		type_error(env, "ERR_INVALID_ARG_VALUE", &format!("port must be 0..=65535, got {port}"))
+	})
+}
+
+/// Options for `IpcServer.listen` / `IpcServer.listenTcp`.
 #[napi(object)]
 pub struct IpcListenOptions {
 	/// `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
@@ -126,7 +135,7 @@ pub struct IpcListenOptions {
 	pub max_frame_bytes: Option<u32>,
 }
 
-/// Options for `IpcConnection.connect`.
+/// Options for `IpcConnection.connect` / `IpcConnection.connectTcp`.
 #[napi(object)]
 pub struct IpcConnectOptions {
 	/// `lines`: UTF-8 text frames delimited by LF; `raw`: byte chunks as
@@ -170,10 +179,35 @@ struct ServerState {
 	bound:         Option<platform::Bound>,
 }
 
+/// Listening socket of either transport.
+enum Listener {
+	Local(platform::Listener),
+	Tcp(tokio::net::TcpListener),
+}
+
+impl Listener {
+	async fn accept(&mut self) -> io::Result<Stream> {
+		match self {
+			Self::Local(listener) => listener.accept().await.map(Stream::Local),
+			Self::Tcp(listener) => tcp::accept(listener).await.map(Stream::Tcp),
+		}
+	}
+}
+
+/// A bound listener and what the server reports about it.
+struct Bind {
+	listener: Listener,
+	/// Local endpoint to release on close (Unix socket file).
+	bound:    Option<platform::Bound>,
+	endpoint: String,
+	port:     Option<u16>,
+}
+
 /// Listening IPC endpoint.
 #[napi]
 pub struct IpcServer {
 	endpoint: String,
+	port:     Option<u16>,
 	state:    Arc<Mutex<ServerState>>,
 }
 
@@ -199,46 +233,58 @@ impl IpcServer {
 		options: IpcListenOptions,
 		on_connection: Function<'_, IpcConnection, UnknownReturnValue>,
 	) -> Result<PromiseRaw<'env, Self>> {
-		let framing = parse_framing(env, &options.framing)?;
-		let max_frame_bytes = options.max_frame_bytes.unwrap_or(DEFAULT_MAX_FRAME_BYTES) as usize;
-		let callback: ConnectionCallback = on_connection.build_threadsafe_function().build()?;
-		let state = Arc::new(Mutex::new(ServerState {
-			on_connection: Some(callback),
-			refed:         true,
-			accept_task:   None,
-			cancel:        CancellationToken::new(),
-			bound:         None,
-		}));
-		let task_state = Arc::clone(&state);
-		env.spawn_future_with_callback(
-			async move {
-				let bound = platform::listen(&endpoint).await;
-				Ok(bound.map(|(listener, bound)| {
-					let cancel = {
-						let mut guard = task_state.lock();
-						guard.bound = Some(bound);
-						guard.cancel.clone()
-					};
-					let accept_state = Arc::clone(&task_state);
-					let task = napi::bindgen_prelude::spawn(accept_loop(
-						listener,
-						accept_state,
-						cancel,
-						framing,
-						max_frame_bytes,
-					));
-					task_state.lock().accept_task = Some(task);
-					Self { endpoint, state: task_state }
-				}))
-			},
-			|env, outcome| outcome.map_err(|error| error.into_js(env)),
-		)
+		Self::serve(env, &options, &on_connection, async move {
+			let (listener, bound) = platform::listen(&endpoint).await?;
+			Ok(Bind { listener: Listener::Local(listener), bound: Some(bound), endpoint, port: None })
+		})
 	}
 
-	/// The endpoint this server listens on.
+	/// Bind and listen on TCP `host:port`; `port` 0 picks an ephemeral port
+	/// (read it back from `port`). Loopback and non-loopback hosts are both
+	/// allowed. No peer-credential check: authenticate in-band. Accepted
+	/// sockets have `TCP_NODELAY` set. `onConnection` receives each accepted
+	/// connection (not yet started). Rejects with code EADDRINUSE,
+	/// EADDRNOTAVAIL, EACCES, or the OS errno name.
+	#[napi(
+		js_name = "listenTcp",
+		ts_args_type = "host: string, port: number, options: IpcListenOptions, onConnection: \
+		                (connection: IpcConnection) => void",
+		ts_return_type = "Promise<IpcServer>"
+	)]
+	pub fn listen_tcp<'env>(
+		env: &'env Env,
+		host: String,
+		port: u32,
+		options: IpcListenOptions,
+		on_connection: Function<'_, IpcConnection, UnknownReturnValue>,
+	) -> Result<PromiseRaw<'env, Self>> {
+		let port = parse_port(env, port)?;
+		Self::serve(env, &options, &on_connection, async move {
+			let listener = tcp::listen(&host, port).await?;
+			let local = listener
+				.local_addr()
+				.map_err(|error| IpcError::io(&error, "read tcp listener address"))?;
+			Ok(Bind {
+				listener: Listener::Tcp(listener),
+				bound:    None,
+				endpoint: local.to_string(),
+				port:     Some(local.port()),
+			})
+		})
+	}
+
+	/// The endpoint this server listens on: the socket path / pipe name, or
+	/// `"<ip>:<port>"` for TCP.
 	#[napi(getter)]
 	pub fn endpoint(&self) -> String {
 		self.endpoint.clone()
+	}
+
+	/// The bound TCP port (the real one when listening on port 0); `null` for
+	/// Unix-socket / named-pipe servers.
+	#[napi(getter)]
+	pub fn port(&self) -> Option<u32> {
+		self.port.map(u32::from)
 	}
 
 	/// Stop accepting. Unix: unlink the socket file if it is still the inode
@@ -278,6 +324,47 @@ impl IpcServer {
 }
 
 impl IpcServer {
+	/// Shared body of `listen`/`listenTcp`: await `bind`, then run the accept
+	/// loop.
+	fn serve<'env>(
+		env: &'env Env,
+		options: &IpcListenOptions,
+		on_connection: &Function<'_, IpcConnection, UnknownReturnValue>,
+		bind: impl Future<Output = std::result::Result<Bind, IpcError>> + Send + 'static,
+	) -> Result<PromiseRaw<'env, Self>> {
+		let framing = parse_framing(env, &options.framing)?;
+		let max_frame_bytes = options.max_frame_bytes.unwrap_or(DEFAULT_MAX_FRAME_BYTES) as usize;
+		let callback: ConnectionCallback = on_connection.build_threadsafe_function().build()?;
+		let state = Arc::new(Mutex::new(ServerState {
+			on_connection: Some(callback),
+			refed:         true,
+			accept_task:   None,
+			cancel:        CancellationToken::new(),
+			bound:         None,
+		}));
+		env.spawn_future_with_callback(
+			async move {
+				Ok(bind.await.map(|Bind { listener, bound, endpoint, port }| {
+					let cancel = {
+						let mut guard = state.lock();
+						guard.bound = bound;
+						guard.cancel.clone()
+					};
+					let task = napi::bindgen_prelude::spawn(accept_loop(
+						listener,
+						Arc::clone(&state),
+						cancel,
+						framing,
+						max_frame_bytes,
+					));
+					state.lock().accept_task = Some(task);
+					Self { endpoint, port, state }
+				}))
+			},
+			|env, outcome| outcome.map_err(|error| error.into_js(env)),
+		)
+	}
+
 	#[allow(deprecated, reason = "explicit loop ref toggling is the documented intent")]
 	fn set_ref(&self, env: &Env, refed: bool) -> Result<()> {
 		let mut state = self.state.lock();
@@ -297,7 +384,7 @@ impl IpcServer {
 }
 
 async fn accept_loop(
-	mut listener: platform::Listener,
+	mut listener: Listener,
 	state: Arc<Mutex<ServerState>>,
 	cancel: CancellationToken,
 	framing: Framing,
@@ -355,7 +442,42 @@ impl IpcConnection {
 						)
 					})
 					.flatten();
-				Ok(connected.map(|stream| Self::spawn(stream, framing, max_frame_bytes)))
+				Ok(connected.map(|stream| Self::spawn(Stream::Local(stream), framing, max_frame_bytes)))
+			},
+			|env, outcome| outcome.map_err(|error| error.into_js(env)),
+		)
+	}
+
+	/// Dial TCP `host:port` (`TCP_NODELAY` set; no peer-credential check:
+	/// authenticate in-band). Rejects with code ECONNREFUSED, ETIMEDOUT
+	/// (`timeoutMs` expired), EADDRNOTAVAIL, or the OS errno name.
+	#[napi(js_name = "connectTcp", ts_return_type = "Promise<IpcConnection>")]
+	pub fn connect_tcp(
+		env: &Env,
+		host: String,
+		port: u32,
+		options: IpcConnectOptions,
+	) -> Result<PromiseRaw<'_, Self>> {
+		let port = parse_port(env, port)?;
+		let framing = parse_framing(env, &options.framing)?;
+		let max_frame_bytes = options.max_frame_bytes.unwrap_or(DEFAULT_MAX_FRAME_BYTES) as usize;
+		let timeout =
+			Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(DEFAULT_CONNECT_TIMEOUT_MS)));
+		env.spawn_future_with_callback(
+			async move {
+				let connected = tokio::time::timeout(timeout, tcp::connect(&host, port))
+					.await
+					.map_err(|_| {
+						IpcError::new(
+							"ETIMEDOUT",
+							format!(
+								"connect tcp {host}:{port} timed out after {} ms",
+								timeout.as_millis()
+							),
+						)
+					})
+					.flatten();
+				Ok(connected.map(|stream| Self::spawn(Stream::Tcp(stream), framing, max_frame_bytes)))
 			},
 			|env, outcome| outcome.map_err(|error| error.into_js(env)),
 		)
@@ -397,8 +519,46 @@ impl IpcConnection {
 			.start(env, FrameCallback::Raw(on_chunk.create_ref()?), &on_close)
 	}
 
+	/// On a started `lines` connection: stop line framing. Bytes received
+	/// past the last line already passed to `onLine` — including the rest of
+	/// the batch when called from inside `onLine` — and every later byte go to
+	/// `onChunk`, in order, nothing lost or reframed. `send()` then takes raw
+	/// strings (UTF-8) / `Uint8Array` written as-is, without an LF. The
+	/// `onClose` given to `start` still fires exactly once, last.
+	/// `maxFrameBytes` stops applying once the switch reaches the reader. Throws
+	/// `TypeError` on a `raw` connection, ERR_INVALID_STATE before `start` or
+	/// when already upgraded.
+	#[napi(js_name = "upgradeRaw", ts_args_type = "onChunk: (chunk: Uint8Array) => void")]
+	pub fn upgrade_raw(
+		&self,
+		env: &Env,
+		on_chunk: Function<'_, Uint8Array, UnknownReturnValue>,
+	) -> Result<()> {
+		if self.shared.framing != Framing::Lines {
+			return Err(type_error(
+				env,
+				"ERR_INVALID_ARG_TYPE",
+				"upgradeRaw() requires a lines connection",
+			));
+		}
+		if !self.shared.is_started() {
+			return Err(
+				IpcError::new("ERR_INVALID_STATE", "upgradeRaw() requires a started connection")
+					.into_js(env),
+			);
+		}
+		if self.shared.upgrade.is_active() {
+			return Err(
+				IpcError::new("ERR_INVALID_STATE", "connection already upgraded").into_js(env),
+			);
+		}
+		self.shared.upgrade_raw(on_chunk.create_ref()?);
+		Ok(())
+	}
+
 	/// Send one frame. lines: a string without LF (`TypeError` otherwise);
-	/// LF is appended. raw: string (UTF-8) or `Uint8Array` written as-is.
+	/// LF is appended. raw (or after `upgradeRaw`): string (UTF-8) or
+	/// `Uint8Array` written as-is.
 	/// Frames sent during one JS task are written together when it ends (a
 	/// microtask), in order; `end()` writes them first. Returns false once
 	/// unwritten bytes exceed 1 MiB (await `drained()` before sending more).
@@ -408,7 +568,12 @@ impl IpcConnection {
 		// Bytes are copied once, from the JS string scratch (or the caller's
 		// typed array) into the cork — or not at all for large frames the
 		// socket takes directly.
-		let outcome = match (self.shared.framing, frame) {
+		let framing = if self.shared.upgrade.is_active() {
+			Framing::Raw
+		} else {
+			self.shared.framing
+		};
+		let outcome = match (framing, frame) {
 			(Framing::Lines, Either::A(text)) => {
 				let text = js::utf8(text)?;
 				if memchr(b'\n', text.as_bytes()).is_some() {
@@ -480,7 +645,7 @@ impl IpcConnection {
 }
 
 impl IpcConnection {
-	fn spawn(stream: platform::Stream, framing: Framing, max_frame_bytes: usize) -> Self {
+	fn spawn(stream: Stream, framing: Framing, max_frame_bytes: usize) -> Self {
 		let (commands, receiver) = mpsc::unbounded_channel();
 		let stream = Arc::new(stream);
 		let shared = Arc::new(Shared::new(framing, commands, Arc::clone(&stream)));
