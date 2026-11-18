@@ -237,7 +237,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 				await tab.back();
 				await tab.forward({ waitUntil: "domcontentloaded" });
 				await tab.reload({ waitUntil: "domcontentloaded" });
-				return [tab.url(), await tab.evaluate(() => document.readyState)];
+				return [await tab.url(), await tab.evaluate(() => document.readyState)];
 			`,
 		});
 		expect(valueOf(result)).toEqual([`${baseUrl}/stuck-frame`, "interactive"]);
@@ -258,7 +258,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 					message = String(error?.message ?? error);
 				}
 				await tab.goto(${JSON.stringify(`${baseUrl}/three`)}, { waitUntil: ["load", "domcontentloaded"] });
-				return [message, tab.url()];
+				return [message, await tab.url()];
 			`,
 		});
 		const [message, url] = valueOf(result) as [string, string];
