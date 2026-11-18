@@ -475,17 +475,33 @@ describe("planClaudeResetRedemptions: never a wider reset than the block needs",
 		]);
 	});
 
-	it("spends the Fable grant on the same block once Claude offers it", () => {
-		const live = status({
+	it("restores another account's Fable grant rather than the active account's full reset", () => {
+		const active = status({
+			credit: {
+				id: "full-reset-2611",
+				clears: fullClears,
+				blocking: ["anthropic:7d:fable"],
+				usedFractions: { "anthropic:7d:fable": 1 },
+				expiresAt: new Date(NOW + 20 * 24 * HOUR).toISOString(),
+			},
+		});
+		const other = status({
+			credentialId: 22,
+			orgId: "org-b",
+			active: false,
 			credit: { ...fableGrant, usable: true, status: "available", blocking: ["anthropic:7d:fable"] },
 		});
 		const plan = planClaudeResetRedemptions(
-			input({ modelId: "claude-fable-5", reports: [report(fableBlock)], statuses: [live] }),
+			input({
+				modelId: "claude-fable-5",
+				reports: [report(fableBlock), report({ ...fableBlock, orgId: "org-b" })],
+				statuses: [active, other],
+			}),
 		);
 		expect(plan.actions).toMatchObject([
-			{ reason: "blocked-account", window: "fable", target: { creditId: "launch-2610-fable" } },
+			{ reason: "blocked-account", target: { credentialId: 22, creditId: "launch-2610-fable" } },
 		]);
-		expect(plan.held).toBeUndefined();
+		expect(plan.held).toMatchObject([{ target: { credentialId: 11, creditId: "full-reset-2611" } }]);
 	});
 
 	it("holds a reset that also clears the weekly window on a 5h-only block", () => {
