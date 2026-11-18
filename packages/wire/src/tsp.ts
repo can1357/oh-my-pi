@@ -231,6 +231,8 @@ export interface TspColProps {
 	focus?: number;
 	/** On `omp.tray`: the `ref` of the card its `omp.tray.peek` child belongs to. */
 	peek?: string;
+	/** On `omp.tray` (sent while it has cards): what the main agent is doing. */
+	main?: TspTrayMain;
 	/** On `omp.tray.card`: what the card stands for. */
 	item?: TspTrayItem;
 	/** On `omp.tray.card` and `omp.tray.peek`: the item's id (an agent id, a job id, or `done`). */
@@ -244,6 +246,12 @@ export interface TspColProps {
 export type TspTrayItem = "agent" | "job" | "done";
 /** The state of an `omp.tray.card`. */
 export type TspTrayStatus = "queued" | "running" | "done" | "failed" | "stopped";
+/**
+ * The main agent on `omp.tray`: `idle` once it has yielded (no turn runs, or the run waits only on
+ * outside work), `waiting` while every call it executes only blocks on its agents or jobs (a `wait`,
+ * a `vibe_wait`, a `task` call running an agent inline), `working` otherwise.
+ */
+export type TspTrayMain = "idle" | "working" | "waiting";
 export interface TspRowProps {
 	gap?: TspSpace;
 	align?: "start" | "center" | "baseline" | "end" | "stretch";
@@ -251,6 +259,8 @@ export interface TspRowProps {
 	wrap?: boolean;
 	/** On `omp.tray.ev`: how the operation went, or `run` while it is in flight. */
 	state?: "ok" | "err" | "run";
+	/** On `omp.tray.done.item`: the finished agent's id. */
+	ref?: string;
 }
 export interface TspCardProps {
 	/** Header content, inline. */

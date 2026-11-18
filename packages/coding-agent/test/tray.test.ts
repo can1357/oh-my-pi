@@ -1,6 +1,15 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
-import { buildTrayItems, Tray, type TrayHost, type TrayInput, TrayMemory } from "@oh-my-pi/pi-coding-agent/modes/tray";
+import {
+	buildTrayItems,
+	runsInlineAgent,
+	Tray,
+	type TrayHost,
+	type TrayInput,
+	type TrayMain,
+	TrayMainActivity,
+	TrayMemory,
+} from "@oh-my-pi/pi-coding-agent/modes/tray";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
@@ -78,10 +87,22 @@ interface Fixture {
 	agentJobs: Map<string, AsyncJob>;
 	consumed: Set<string>;
 	showAgents: boolean;
+	/** Agents focusing cannot open (no session, no transcript). */
+	unopenable: Set<string>;
+	main: TrayMain;
 }
 
 function fixture(): Fixture {
-	return { sessions: [], refs: [], jobs: [], agentJobs: new Map(), consumed: new Set(), showAgents: true };
+	return {
+		sessions: [],
+		refs: [],
+		jobs: [],
+		agentJobs: new Map(),
+		consumed: new Set(),
+		showAgents: true,
+		unopenable: new Set(),
+		main: "working",
+	};
 }
 
 function input(f: Fixture, now = 60_000): TrayInput {
@@ -94,6 +115,7 @@ function input(f: Fixture, now = 60_000): TrayInput {
 		consumed: id => f.consumed.has(id),
 		widget: () => undefined,
 		showAgents: f.showAgents,
+		canOpen: candidate => !f.unopenable.has(candidate.id),
 		now,
 	};
 }
@@ -223,8 +245,8 @@ describe("Tray", () => {
 	function setup(f: Fixture) {
 		const host = {
 			input: () => input(f),
+			main: () => f.main,
 			focusAgent: vi.fn(),
-			showAgentHub: vi.fn(),
 			showJobsSheet: vi.fn(),
 			stopAgent: vi.fn(),
 			cancelJob: vi.fn(),
@@ -255,7 +277,7 @@ describe("Tray", () => {
 			.filter(node => role(node) === "omp.tray.card")
 			.map(node => node.p && Reflect.get(node.p, "ref"));
 
-	it("routes each event: open, stop, dismiss and the hub and sheet actions", () => {
+	it("routes each event: open, stop, dismiss and the jobs sheet; the done card and `agents.open` open nothing", () => {
 		const { host, tray } = setup(seeded());
 		tray.describe();
 
@@ -267,8 +289,11 @@ describe("Tray", () => {
 		expect(tray.describe().p && Reflect.get(tray.describe().p!, "peek")).toBeUndefined();
 		tray.handleNativeEvent(action("tray.open", "bg_1"));
 		expect(host.showJobsSheet).toHaveBeenCalledTimes(1);
+		tray.handleNativeEvent(action("tray.peek", "done"));
 		tray.handleNativeEvent(action("tray.open", "done"));
-		expect(host.showAgentHub).toHaveBeenCalledTimes(1);
+		// The closer look stays: the done card is opened row by row.
+		expect(tray.describe().p).toMatchObject({ peek: "done" });
+		tray.handleNativeEvent(action("tray.peek", ""));
 
 		tray.handleNativeEvent(action("tray.stop", "Scout"));
 		expect(host.stopAgent).toHaveBeenCalledWith("Scout");
@@ -290,9 +315,12 @@ describe("Tray", () => {
 			'"2 done"',
 		);
 
+		const calls = (): number[] =>
+			[host.focusAgent, host.showJobsSheet, host.stopAgent, host.cancelJob].map(fn => fn.mock.calls.length);
+		const before = calls();
 		tray.handleNativeEvent(action("agents.open", ""));
+		expect(calls()).toEqual(before);
 		tray.handleNativeEvent(action("jobs.open", ""));
-		expect(host.showAgentHub).toHaveBeenCalledTimes(2);
 		expect(host.showJobsSheet).toHaveBeenCalledTimes(2);
 	});
 
@@ -349,5 +377,149 @@ describe("Tray", () => {
 		tray.setOnHost(false);
 		expect(tray.header(true)).toEqual({ caption: undefined, counts: undefined });
 		expect(tray.focus()).toBe(false);
+	});
+
+	it("lists the done card's agents in its closer look, newest first, capped, each opening its transcript", () => {
+		const f = fixture();
+		for (let i = 0; i < 53; i++) f.refs.push(ref(`Old${i}`, "idle", i));
+		// Finished in this run: the observer knows how it went and what it last said.
+		f.refs.push({ ...ref("Fresh", "idle", 100), sessionFile: "/tmp/fresh.jsonl" });
+		f.sessions.push(
+			observed("Fresh", "failed", {
+				durationMs: 252_000,
+				toolCount: 38,
+				cost: 0.12,
+				recentOutput: ["", "Tests fail in auth"],
+			}),
+		);
+		// Restored from disk: its persisted history and summary.
+		f.refs.push({
+			...ref("Restored", "aborted", 99),
+			sessionFile: "/tmp/restored.jsonl",
+			activity: "Fixed the lexer\nand more",
+			history: { metrics: { tokens: 0, requests: 0, tools: 4, cost: 0, durationMs: 0 } },
+		});
+		f.unopenable.add("Old52");
+		const { host, tray } = setup(f);
+		tray.describe();
+		tray.handleNativeEvent(action("tray.peek", "done"));
+		const look = children(tray.describe()).at(-1)!;
+		expect(look.p).toMatchObject({ role: "omp.tray.peek", ref: "done" });
+		// Only the close button: the rows open agents, nothing opens the done card.
+		const head = children(look)[0]!;
+		expect(
+			children(head)
+				.filter(node => node.k === "button")
+				.map(node => node.p && Reflect.get(node.p, "actions")),
+		).toEqual([{ click: "tray.peek=" }]);
+
+		const list = children(look)[1]!;
+		expect(list.p).toMatchObject({ role: "omp.tray.done" });
+		const rows = children(list);
+		expect(rows).toHaveLength(51);
+		expect(rows.slice(0, 3).map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["Fresh", "Restored", "Old52"]);
+		expect(rows.at(-1)!.p).toMatchObject({ role: "omp.tray.done.more", text: "+5 earlier" });
+
+		const [fresh, restored, old] = rows;
+		expect(fresh!.p).toMatchObject({
+			role: "omp.tray.done.item",
+			actions: { click: "tray.open=Fresh" },
+			aria: "Fresh, failed, 4m12s · 38 tools · $0.120, Tests fail in auth",
+		});
+		expect(
+			children(fresh).map(node => [
+				role(node),
+				node.p && (Reflect.get(node.p, "text") ?? Reflect.get(node.p, "spans")),
+			]),
+		).toEqual([
+			["omp.tray.dot", [{ t: "●", s: "error" }]],
+			["omp.tray.name", "Fresh"],
+			["omp.tray.meta", [{ t: "4m12s · 38 tools · $0.120", s: "dim" }]],
+			["omp.tray.line", "Tests fail in auth"],
+		]);
+		// Unknown numbers are left out rather than printed as zeros.
+		expect(children(restored).map(role)).toEqual(["omp.tray.dot", "omp.tray.name", "omp.tray.meta", "omp.tray.line"]);
+		expect(JSON.stringify(children(restored)[2]!.p)).toContain('"4 tools"');
+		expect(children(restored)[0]!.p).toMatchObject({ spans: [{ t: "●", s: "muted" }] });
+		// A row nothing can open sends no click.
+		expect(old!.p && Reflect.get(old!.p, "actions")).toBeUndefined();
+
+		tray.handleNativeEvent(action("tray.open", "Old52"));
+		expect(host.focusAgent).not.toHaveBeenCalled();
+		tray.handleNativeEvent(action("tray.open", "Restored"));
+		expect(host.focusAgent).toHaveBeenCalledWith("Restored");
+		expect(tray.describe().p && Reflect.get(tray.describe().p!, "peek")).toBeUndefined();
+	});
+
+	it("says what the main agent is doing on the tray node while it has cards, and nothing without", () => {
+		const f = fixture();
+		const { tray } = setup(f);
+		expect(tray.describe().p).toEqual({ role: "omp.tray", hidden: true });
+		f.main = "waiting";
+		expect(tray.mainChanged()).toBe(false);
+
+		f.jobs.push(job("bg_1"));
+		tray.refresh();
+		expect(tray.describe().p).toMatchObject({ role: "omp.tray", main: "waiting" });
+		f.main = "idle";
+		expect(tray.mainChanged()).toBe(true);
+		expect(tray.describe().p).toMatchObject({ main: "idle" });
+		expect(tray.mainChanged()).toBe(false);
+	});
+});
+
+describe("TrayMainActivity", () => {
+	const start = (toolCallId: string, toolName: string) => ({
+		type: "tool_execution_start" as const,
+		toolCallId,
+		toolName,
+	});
+	const end = (toolCallId: string) => ({ type: "tool_execution_end" as const, toolCallId });
+
+	it("reads working, then waiting while a wait call executes, then working, then idle once the turn ends", () => {
+		const main = new TrayMainActivity(false);
+		const state = () => main.state(() => false);
+		expect(state()).toBe("idle");
+		main.handle({ type: "agent_start" }, true);
+		expect(state()).toBe("working");
+		main.handle(start("call-1", "wait"), true);
+		expect(state()).toBe("waiting");
+		main.handle(end("call-1"), true);
+		expect(state()).toBe("working");
+		main.handle({ type: "agent_end" }, false);
+		expect(state()).toBe("idle");
+	});
+
+	it("stays working while another call runs beside the wait, and idles when the turn yields to background work", () => {
+		const main = new TrayMainActivity(true);
+		const state = () => main.state(() => false);
+		main.handle(start("call-1", "wait"), true);
+		main.handle(start("call-2", "bash"), true);
+		expect(state()).toBe("working");
+		main.handle(end("call-2"), true);
+		expect(state()).toBe("waiting");
+		// A vibe worker wait blocks the same way.
+		main.handle(start("call-3", "vibe_wait"), true);
+		expect(state()).toBe("waiting");
+		// The run stays open on background jobs, but the model yielded.
+		main.handle({ type: "agent_pause", yielded: true }, true);
+		expect(state()).toBe("idle");
+		// A pause the session continues on its own is still the turn's work.
+		main.handle({ type: "agent_start" }, true);
+		main.handle({ type: "agent_pause", yielded: false }, true);
+		expect(state()).toBe("working");
+	});
+
+	it("counts a task call as waiting only while it runs an agent inline", () => {
+		const main = new TrayMainActivity(true);
+		main.handle(start("call-1", "task"), true);
+		const sessions: ObservableSession[] = [];
+		const state = () => main.state(id => runsInlineAgent(sessions, id));
+		expect(state()).toBe("working");
+		// A background spawn of the same call blocks nothing.
+		sessions.push({ ...observed("Bg", "active"), parentToolCallId: "call-1", detached: true });
+		expect(state()).toBe("working");
+		sessions.push({ ...observed("Inline", "active"), parentToolCallId: "call-1", detached: false });
+		expect(state()).toBe("waiting");
 	});
 });

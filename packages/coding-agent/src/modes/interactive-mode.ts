@@ -55,7 +55,7 @@ import type { AsyncJobManagerApi } from "../async/job-manager";
 import { stopAgentRun } from "../async/job-control";
 import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { collectTrayInput, Tray } from "./tray";
+import { collectTrayInput, runsInlineAgent, Tray, TrayMainActivity } from "./tray";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -1805,9 +1805,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#traySyncTimer = undefined;
 		}
 	}
-	/** The agents-hub key on a host showing tray cards moves focus into the tray; false when it shows none. */
-	#focusTray(): boolean {
-		return this.#trayShown() && this.#tray.focus();
+	/**
+	 * Follow the main session's turn and calls for the tray's `main` prop, repainting
+	 * a tray host the moment it flips (a `wait` starting or ending, the turn yielding).
+	 */
+	#followTrayMain(event: AgentSessionEvent): void {
+		switch (event.type) {
+			case "agent_start":
+			case "agent_pause":
+			case "agent_end":
+			case "tool_execution_start":
+			case "tool_execution_end":
+				if (this.#trayMain.handle(event, this.session.isRunActive) && this.#trayShown() && this.#tray.mainChanged())
+					this.ui.requestRender();
+		}
 	}
 	/** Stop agent `id` for good from the tray, as cancelling its task job from the jobs sheet does. */
 	#stopTrayAgent(id: string): void {
@@ -2207,13 +2218,14 @@ export class InteractiveMode implements InteractiveModeContext {
 				snapshot: () => this.session.getAsyncJobSnapshot({ recentLimit: Number.POSITIVE_INFINITY }),
 				irc: IrcBus.existing(),
 				showAgents: cfgDisplayPinnedAgents.get(settings) !== "off",
+				canFocus: this.collabGuest === undefined,
 			}),
+		main: () => this.#trayMain.state(id => runsInlineAgent(this.#observerRegistry.getSessions(), id)),
 		focusAgent: id => {
 			this.focusAgentSession(id).catch((error: unknown) =>
 				this.showError(error instanceof Error ? error.message : String(error)),
 			);
 		},
-		showAgentHub: () => this.showAgentHub(),
 		showJobsSheet: () => this.showJobsSheet(),
 		stopAgent: id => this.#stopTrayAgent(id),
 		cancelJob: id => {
@@ -2221,6 +2233,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		},
 		requestRender: () => this.ui.requestRender(),
 	});
+	/** What the main agent is doing, as the tray's `main` prop says; follows the main session's events. */
+	readonly #trayMain = new TrayMainActivity(false);
 	/** The root job manager the tray repaints on, and how to stop listening to it. */
 	#trayJobsListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
 	#traySyncTimer?: NodeJS.Timeout;
@@ -3085,6 +3099,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
+				this.#followTrayMain(event);
 				if (event.type === "model_changed") {
 					this.#scheduleComposerStatusPersist();
 					this.session.prewarmModelConnection();
@@ -9691,7 +9706,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showAgentHub(options?: AgentHubOpenOptions): void {
-		if (options?.trayFirst && this.#focusTray()) return;
+		// The agents-hub key on a tray host: into the tray while it shows cards, else nothing, as
+		// the tray has no hub to fall back to. With its agents turned off, the key opens the hub.
+		if (options?.trayFirst && this.#trayShown()) {
+			if (this.#tray.focus() || cfgDisplayPinnedAgents.get(settings) !== "off") return;
+		}
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 

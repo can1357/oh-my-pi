@@ -1,12 +1,15 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { JobWidgetRegistry } from "@oh-my-pi/pi-coding-agent/job-widgets/types";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { cfgDisplayPinnedAgents } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { asyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/async-job-views";
@@ -26,6 +29,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const context = (tray: boolean): DescribeContext => ({
 	cols: 120,
@@ -426,5 +430,151 @@ describe("InteractiveMode tray", () => {
 		mode.showAgentHub({ trayFirst: true });
 		expect(hub).toHaveBeenCalledTimes(1);
 		expect(trayOf(cx).node.p).toMatchObject({ focus: 1 });
+	});
+
+	it("leaves the agents-hub key inert on a tray host with no cards, unless the tray's agents are turned off", () => {
+		const hub = spyOn(SelectorController.prototype, "showAgentHub").mockImplementation(() => {});
+		setNativeRendering(true);
+		const cx = context(true);
+		expect(trayOf(cx).node.p).toMatchObject({ hidden: true });
+		mode.showAgentHub({ trayFirst: true });
+		expect(hub).not.toHaveBeenCalled();
+
+		cfgDisplayPinnedAgents.override(Settings.instance, "off");
+		mode.showAgentHub({ trayFirst: true });
+		expect(hub).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InteractiveMode tray: the main agent across a real turn", () => {
+	let tempDir: TempDir;
+	let auth: AuthStorage;
+	let session: AgentSession;
+	let mode: InteractiveMode;
+	const release: Array<() => void> = [];
+
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	afterEach(async () => {
+		for (const done of release.splice(0)) done();
+		AgentRegistry.global().unregister("TrayLive");
+		setNativeRendering(false);
+		vi.restoreAllMocks();
+		mode?.stop();
+		await session?.dispose();
+		auth?.close();
+		tempDir?.removeSync();
+	});
+
+	/** A gate the test opens: `wait()` blocks until `open()`, `reached` resolves once something waits on it. */
+	function gate() {
+		const reached = Promise.withResolvers<void>();
+		const opened = Promise.withResolvers<void>();
+		release.push(opened.resolve);
+		return {
+			reached: reached.promise,
+			open: opened.resolve,
+			wait: async (): Promise<void> => {
+				reached.resolve();
+				await opened.promise;
+			},
+		};
+	}
+
+	it("sends working while the model streams, waiting while the wait call executes, then working, then idle", async () => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-tray-main-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "startup.quiet": true } });
+		const firstCall = gate();
+		const waitCall = gate();
+		const secondCall = gate();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					await firstCall.wait();
+					return { content: [{ type: "toolCall", id: "call-wait", name: "wait", arguments: {} }] };
+				},
+				async () => {
+					await secondCall.wait();
+					return { content: ["done"] };
+				},
+			],
+		});
+		const waitTool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks on background work",
+			parameters: type({}),
+			execute: async () => {
+				await waitCall.wait();
+				return { content: [{ type: "text", text: "settled" }], details: {} };
+			},
+		};
+		auth = createInMemoryAuthStorage();
+		await auth.credentials.set(mock.model.provider, { type: "api_key", key: "test-key" });
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock.model, systemPrompt: [], tools: [waitTool] },
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false }),
+			modelRegistry: new ModelRegistry(auth, path.join(tempDir.path(), "models.yml")),
+		});
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		// A card, so the tray node is sent: a running agent only the registry knows.
+		AgentRegistry.global().register({
+			id: "TrayLive",
+			displayName: "TrayLive",
+			kind: "sub",
+			session: null,
+			status: "running",
+		});
+		setNativeRendering(true);
+		const cx = context(true);
+		const tray = (): NativeNode => {
+			for (const child of mode.composer.describeSurface(cx).dock) {
+				const described = (child as Component).describe?.(cx);
+				if (role(described ?? undefined) === "omp.tray") return described!;
+			}
+			throw new Error("no tray in the dock");
+		};
+		const main = (): unknown => tray().p && Reflect.get(tray().p!, "main");
+		const renders = spyOn(mode.ui, "requestRender");
+		/** The session hands its events to subscribers asynchronously: let them through. */
+		const delivered = async (): Promise<void> => {
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		};
+		expect(main()).toBe("idle");
+
+		const prompt = session.prompt("go");
+		await firstCall.reached;
+		await delivered();
+		expect(main()).toBe("working");
+
+		renders.mockClear();
+		firstCall.open();
+		await waitCall.reached;
+		await delivered();
+		// The flip asks for a frame itself; no unrelated repaint is needed to send it.
+		expect(renders).toHaveBeenCalled();
+		expect(main()).toBe("waiting");
+
+		renders.mockClear();
+		waitCall.open();
+		await secondCall.reached;
+		await delivered();
+		expect(renders).toHaveBeenCalled();
+		expect(main()).toBe("working");
+
+		secondCall.open();
+		await prompt;
+		await session.waitForIdle();
+		await delivered();
+		expect(main()).toBe("idle");
 	});
 });
