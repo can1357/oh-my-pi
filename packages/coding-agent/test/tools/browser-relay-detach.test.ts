@@ -317,7 +317,7 @@ describe("relay tabs Chrome detaches omp from", () => {
 	});
 
 	afterAll(async () => {
-		if (chromium) await closeLaunchedBrowser(chromium);
+		if (chromium) await closeLaunchedBrowser({ browser: chromium });
 		site?.stop(true);
 	});
 
