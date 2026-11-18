@@ -36,11 +36,14 @@ import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 import { cfgTaskSpeculativeLaunch } from "../task/settings";
 
 import {
+	cfgToolInterceptorEnabled,
+	cfgToolInterceptorRules,
 	cfgToolsApproval,
 	cfgToolsApprovalMode,
 	cfgToolsSpeculativeExecutionEnabled,
 	cfgToolsSpeculativeExecutionMaxInFlight,
 } from "../tools/settings";
+import { hasApplicableToolInterceptorRules } from "../tools/tool-interceptor";
 
 type LocalReadEvidence = {
 	path: string;
@@ -151,7 +154,7 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 				},
 			};
 		}
-		const gate = this.#policyGate(context.tool, context.args);
+		const gate = this.#policyGate(context.tool, context.args, operation === "eval.read" ? ["eval"] : undefined);
 		if (!gate.allowed) return { authorization: gate };
 		const resource = context.effect.resources[0];
 		if (!resource || context.effect.resources.length !== 1 || resource.access !== "read") {
@@ -217,8 +220,12 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 		return this.#policyGate(context.tool, context.args);
 	}
 
-	/** Extension lifecycle handlers and non-auto-allow approval both veto early execution. */
-	#policyGate(tool: SpeculativeToolReference, args: unknown): SpeculativeAuthorization {
+	/** Extension lifecycle handlers, tool interceptor rules, and non-auto-allow approval all veto early execution. */
+	#policyGate(
+		tool: SpeculativeToolReference,
+		args: unknown,
+		extraToolNames?: readonly string[],
+	): SpeculativeAuthorization {
 		if (hasLifecycleHandlers(this.extensionRunner)) {
 			return { allowed: false, reason: "active extension lifecycle handler" };
 		}
@@ -231,6 +238,18 @@ export class CodingAgentSpeculativeExecutionHost implements SpeculativeExecution
 			approvalRestrictions(this.settings, this.toolSession.cwd),
 		);
 		if (approval.policy !== "allow") return { allowed: false, reason: "tool approval is not auto-allow" };
+		if (cfgToolInterceptorEnabled.get(this.settings)) {
+			const targetTools = extraToolNames ? [tool.name, ...extraToolNames] : [tool.name];
+			if (
+				hasApplicableToolInterceptorRules(targetTools, {
+					rules: cfgToolInterceptorRules.get(this.settings),
+					availableTools: this.toolSession.getToolContext?.()?.toolNames,
+					policy: "allow",
+				})
+			) {
+				return { allowed: false, reason: "active tool interceptor rule" };
+			}
+		}
 		return { allowed: true };
 	}
 

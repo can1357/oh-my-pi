@@ -57,6 +57,38 @@ function ruleAppliesToPolicy(rule: ToolInterceptorRule, policy: ApprovalPolicy |
 	return policy === rule.whenPolicy;
 }
 
+/**
+ * Whether any rule in `rules` could apply to `toolNames` under `options`.
+ * Used by speculative execution gates so speculation is only vetoed for tools
+ * targeted by an active rule.
+ */
+export function hasApplicableToolInterceptorRules(
+	toolNames: string | readonly string[],
+	options: {
+		rules?: readonly ToolInterceptorRule[];
+		availableTools?: readonly string[];
+		policy?: ApprovalPolicy;
+	} = {},
+): boolean {
+	const rules = options.rules ?? DEFAULT_TOOL_INTERCEPTOR_RULES;
+	const names = (typeof toolNames === "string" ? [toolNames] : [...toolNames]).filter(Boolean);
+	if (names.length === 0) return false;
+	const availableTools = options.availableTools;
+	for (const rule of rules) {
+		if (!ruleAppliesToPolicy(rule, options.policy)) continue;
+		if (!ruleAppliesToTool(rule, names)) continue;
+		const suggestedTool = rule.suggestedTool?.trim() || undefined;
+		if (suggestedTool && availableTools && !availableTools.includes(suggestedTool)) continue;
+		const hasPattern = typeof rule.pattern === "string" && rule.pattern.length > 0;
+		const hasQuestion = typeof rule.question === "string" && rule.question.trim().length > 0;
+		if (hasPattern || hasQuestion) return true;
+	}
+	return false;
+}
+
+let warnedMissingJudge = false;
+let warnedJudgeFailure = false;
+
 const PRIMARY_ARG_KEYS = ["code", "command", "input", "content", "path", "query"] as const;
 const XD_HELP_CONTENT_RE = /^\s*(\?|help)?\s*$/i;
 
@@ -190,6 +222,7 @@ export async function checkToolInterception(
 	const effectiveArgs = unwrapXdArgs(args);
 	let candidates: string[] | undefined;
 	const judgedCandidates: Array<{ rule: ToolInterceptorRule; question: string; suggestedTool?: string }> = [];
+	let fallbackPatternBlock: InterceptionResult | undefined;
 
 	for (const rule of rules) {
 		if (!ruleAppliesToPolicy(rule, options.policy)) continue;
@@ -207,11 +240,16 @@ export async function checkToolInterception(
 			candidates ??= extractCandidateStrings(effectiveArgs);
 			if (!matchesRulePattern(rule, candidates)) continue;
 			if (!hasQuestion) {
-				return {
+				const patternBlock: InterceptionResult = {
 					block: true,
 					message: rule.message,
 					suggestedTool,
 				};
+				if (judgedCandidates.length === 0) return patternBlock;
+				// Earlier `question` rules exist: run the batch for them first so rule order is preserved,
+				// falling back to this pattern-only match if none of the earlier questions block.
+				fallbackPatternBlock = patternBlock;
+				break;
 			}
 		}
 
@@ -220,10 +258,18 @@ export async function checkToolInterception(
 		}
 	}
 
-	if (judgedCandidates.length === 0) return { block: false };
+	if (judgedCandidates.length === 0) return fallbackPatternBlock ?? { block: false };
 
 	const judge = typeof options.judge === "function" ? options.judge() : options.judge;
-	if (!judge) return { block: false };
+	if (!judge) {
+		if (!warnedMissingJudge) {
+			warnedMissingJudge = true;
+			logger.warn("toolInterceptor: judge role unavailable; question-backed rules are failing open", {
+				tool: toolName,
+			});
+		}
+		return fallbackPatternBlock ?? { block: false };
+	}
 
 	const questions: Record<string, NoulQuestion> = {};
 	for (const [index, candidate] of judgedCandidates.entries()) {
@@ -252,8 +298,16 @@ export async function checkToolInterception(
 		}
 	} catch (error) {
 		if (options.signal?.aborted) throw error;
-		logger.debug("toolInterceptor judge failed", { tool: toolName, error: String(error) });
+		if (!warnedJudgeFailure) {
+			warnedJudgeFailure = true;
+			logger.warn("toolInterceptor: judge evaluation failed; question-backed rules are failing open", {
+				tool: toolName,
+				error: String(error),
+			});
+		} else {
+			logger.debug("toolInterceptor judge failed", { tool: toolName, error: String(error) });
+		}
 	}
 
-	return { block: false };
+	return fallbackPatternBlock ?? { block: false };
 }

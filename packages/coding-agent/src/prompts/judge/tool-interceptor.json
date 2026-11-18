@@ -1,0 +1,20 @@
+{
+	"evalToolBridge": {
+		"instructions": "Is this code merely wrapping one or a few direct session tool calls (`tool.<name>(...)`, including `xd://` device writes) that could be invoked directly as tool calls, rather than orchestrating them inside a programmatic loop or reusable `@tool` definition?"
+	},
+	"evalShell": {
+		"instructions": "Is this code merely running one or a few shell commands that could be executed directly with the bash tool (rather than programmatically parsing or aggregating command output, looping over dynamic inputs, or driving a benchmark or test harness)?"
+	},
+	"evalJson": {
+		"instructions": "Is this code only reading a single JSON or JSONL file or artifact to extract, filter, or inspect fields—without joining multiple sources, computing statistical aggregations, or mutating persistent kernel state—such that a single read tool call with a ?q=<jq filter> selector handles it directly?"
+	},
+	"evalRead": {
+		"instructions": "Is this code merely reading, slicing, or printing a file's contents without performing non-trivial computation, statistical aggregation, cross-file analysis, or testing that the read tool cannot do?"
+	},
+	"evalGlob": {
+		"instructions": "Is this code merely listing or walking directories to find file paths that the glob tool could find (rather than reading and analyzing or aggregating the contents of many files in bulk)?"
+	},
+	"evalWrite": {
+		"instructions": "Is this code writing or modifying text files in the project or workspace that should be written with the write or edit tool (rather than writing to an internal URL such as out://, local://, or agent://, generating binary/plot/image data, or creating an isolated temporary test fixture)?"
+	}
+}
