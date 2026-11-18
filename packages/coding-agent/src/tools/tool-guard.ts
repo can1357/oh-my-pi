@@ -556,6 +556,13 @@ export class ToolGuard {
 	readonly #host: ToolGuardHost;
 	#consecutive = 0;
 	#total = 0;
+	/**
+	 * The last call that ended a run of refusals, and how long that run was. A device call (`write
+	 * xd://<tool>`, a shell redirect to one) passes the guard twice under one id: its carrier, then
+	 * the device's tool. When the device's tool is refused, its carrier ran nothing and ended no run.
+	 */
+	#endedBy: string | undefined;
+	#endedRun = 0;
 	/** Non-synthetic user messages when the counts last restarted; one more starts a new run. */
 	#runKey: number | undefined;
 	/** Judgments in a row that failed or timed out. */
@@ -577,19 +584,20 @@ export class ToolGuard {
 			this.#runKey = runKey;
 			this.#consecutive = 0;
 			this.#total = 0;
+			this.#endedBy = undefined;
 		}
 		// Rule gates never consult the judge breaker below: a failing judge must not open them.
 		const gate = await this.#host.gate?.(tool, args, toolCall.toolCallId, signal);
 		if (gate?.refusal !== undefined) {
 			logger.warn("tool guard: a rule gate refused a call", { tool: tool.name });
-			return this.#refused(gate.refusal);
+			return this.#refused(toolCall.toolCallId, gate.refusal);
 		}
 		// An allowed call ends a run of refusals, except a read-tier call no gate covers: nothing could
 		// have refused it.
 		const endsRefusals = tier !== "read" || gate?.covered === true;
 		const settings = this.#host.settings;
 		if (toolCall.prompted || !guardEnabled(settings)) {
-			if (endsRefusals) this.#consecutive = 0;
+			if (endsRefusals) this.#endRefusals(toolCall.toolCallId);
 			return undefined;
 		}
 		const cwd = this.#host.cwd();
@@ -607,12 +615,12 @@ export class ToolGuard {
 			judged = true; // a command the scanner cannot follow is judged
 		}
 		if (!judged) {
-			if (endsRefusals) this.#consecutive = 0;
+			if (endsRefusals) this.#endRefusals(toolCall.toolCallId);
 			return undefined;
 		}
 		const verdict = await this.#judge(call, messages, guardRequests(messages), cwd, signal);
 		if (!verdict) {
-			this.#consecutive = 0;
+			this.#endRefusals(toolCall.toolCallId);
 			return undefined;
 		}
 		logger.warn("tool guard refused a call", {
@@ -622,6 +630,7 @@ export class ToolGuard {
 			askedProbability: verdict.askedProbability,
 		});
 		return this.#refused(
+			toolCall.toolCallId,
 			prompt.render(refusedTemplate, {
 				risk: verdict.risk,
 				reason: verdict.reason,
@@ -633,8 +642,20 @@ export class ToolGuard {
 		);
 	}
 
+	/** Ends the current run of refusals at an allowed call. */
+	#endRefusals(toolCallId: string): void {
+		this.#endedBy = toolCallId;
+		this.#endedRun = this.#consecutive;
+		this.#consecutive = 0;
+	}
+
 	/** Counts one refusal, stopping the run after too many, and returns it. */
-	#refused(refusal: string): string {
+	#refused(toolCallId: string, refusal: string): string {
+		// The device's tool of a call whose carrier ended the run: the carrier ran nothing, so the run goes on.
+		if (this.#endedBy === toolCallId) {
+			this.#endedBy = undefined;
+			this.#consecutive += this.#endedRun;
+		}
 		this.#consecutive++;
 		this.#total++;
 		const exhausted =

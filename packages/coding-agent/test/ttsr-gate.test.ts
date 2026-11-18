@@ -1,3 +1,4 @@
+import { type } from "@oh-my-pi/omptype";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { Judge, JudgmentRequest, NoulAnswer } from "@oh-my-pi/pi-ai";
@@ -16,8 +17,10 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { TtsrCoordinator } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type GuardJudge, ToolGuard } from "@oh-my-pi/pi-coding-agent/tools/tool-guard";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { assistant, fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-rules";
 
 const DELETES = "Does the command delete files outside the project?";
@@ -317,6 +320,52 @@ describe("TTSR gate rules", () => {
 		expect((error as Error).message).toContain("no-rm guidance");
 		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(1);
 		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("[gate-21] stops the run after three refused device calls, though each one's write carrier passes", async () => {
+		const REWRITES = "Does the call rewrite code?";
+		const { judge } = fakeJudge({ [REWRITES]: 0.9 });
+		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
+		const rule = judgedRule("no-rewrite", { gate: "before", question: REWRITES, scope: ["tool:ast_edit"] });
+		const { coordinator, events } = setup([rule], judge, settings);
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			"/work",
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const stops: string[] = [];
+		runner.setToolGuard(guardOver(coordinator, settings, stops));
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "rewrote" }] }));
+		const device = {
+			name: "ast_edit",
+			label: "ast_edit",
+			description: "structural rewrite",
+			parameters: type({ pattern: "string" }),
+			approval: "write",
+			execute,
+		} as AgentTool;
+		const xdev: XdevState = {
+			tools: new Map([["ast_edit", new ExtensionToolWrapper(device, runner) as unknown as Tool]]),
+			mountedNames: new Set(["ast_edit"]),
+			builtInNames: new Set(),
+			isActive: () => false,
+			resolve: name => resolveXdevTool(xdev, name),
+		};
+		const session = { cwd: "/work", hasUI: false, getSessionFile: () => null, settings, xdev } as ToolSession;
+		const write = new ExtensionToolWrapper(new WriteTool(session) as unknown as AgentTool, runner);
+		const call = { path: "xd://ast_edit", content: JSON.stringify({ pattern: "foo($A)" }) };
+
+		for (let i = 0; i < 3; i++) {
+			const result = await write.execute(`call-${i}`, call, undefined, undefined, { settings } as AgentToolContext);
+			expect(result.isError).toBe(true);
+			expect(JSON.stringify(result.content)).toContain("no-rewrite guidance");
+		}
+
+		expect(execute).not.toHaveBeenCalled();
+		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(3);
+		expect(stops).toEqual(["The tool guard refused 3 tool calls in a row; the run stopped."]);
 	});
 
 	it("[gate-18] judges the whole edit call, so a file it deletes beside an added line cannot slip past", async () => {
