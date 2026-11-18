@@ -4,9 +4,11 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { ACP_STEP_TEXT_BYTES, MAX_IMAGE_BYTES } from "@oh-my-pi/pi-ai/providers/antigravity-cli/budget";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
 import {
 	AgyHost,
+	alignContextTokens,
 	describeToolArguments,
 	type AgyConnection,
 	type AgyHostOptions,
@@ -32,6 +34,18 @@ const model = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	maxTokens: 8_192,
 	contextWindow: 200_000,
+	reasoning: true,
+});
+const wideModel = buildModel({
+	api: "antigravity-acp",
+	provider: "antigravity-cli",
+	id: "gemini-4-argon",
+	name: "Wide test model",
+	baseUrl: "",
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	maxTokens: 8_192,
+	contextWindow: 500_000,
 	reasoning: true,
 });
 const tools: Tool[] = [{ name: "read", description: "Read a file", parameters: type({ path: "string" }) }];
@@ -95,6 +109,7 @@ class FakeAgy implements AgyTransport {
 	cancelMode: "ack" | "hold" | "reject" = "ack";
 	autoSteer = true;
 	failLoad = false;
+	configureUsage: { used: number; size: number } | undefined;
 	configureGate: Promise<void> | undefined;
 	currentId = "";
 	#pending = new Set<FakePrompt>();
@@ -132,6 +147,8 @@ class FakeAgy implements AgyTransport {
 			setSessionConfigOption: async params => {
 				await this.configureGate;
 				this.configurations.push(`${params.configId}:${params.value}`);
+				if (params.configId === "model" && this.configureUsage)
+					this.usage(this.configureUsage.used, this.configureUsage.size);
 				return { configOptions };
 			},
 			prompt: request => {
@@ -162,6 +179,9 @@ class FakeAgy implements AgyTransport {
 			sessionId: this.currentId,
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
 		});
+	}
+	usage(used: number, size: number): void {
+		this.options.onUpdate({ sessionId: this.currentId, update: { sessionUpdate: "usage_update", used, size } });
 	}
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
 		this.options.onUpdate({
@@ -220,10 +240,11 @@ function step(
 	extra: Partial<Context> = {},
 	signal?: AbortSignal,
 	options: Omit<AgyStepOptions, "signal"> = {},
+	activeModel = model,
 ) {
 	const stream = new AssistantMessageEventStream();
-	const writer = new StepWriter(model, stream);
-	const done = host.step(model, { messages, tools, ...extra }, { ...options, signal }, writer);
+	const writer = new StepWriter(activeModel, stream);
+	const done = host.step(activeModel, { messages, tools, ...extra }, { ...options, signal }, writer);
 	done.catch(() => undefined);
 	return { writer, done, stream };
 }
@@ -256,6 +277,188 @@ async function parked(options: AgyHostOptions = {}) {
 function textOf(blocks: ContentBlock[]): string {
 	return blocks.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 }
+
+describe("alignContextTokens", () => {
+	it("scales the ACP occupancy into omp's context window", () => {
+		expect(alignContextTokens(500_000, 1_000_000, 200_000)).toBe(100_000);
+		expect(alignContextTokens(1_000, 4_000, 1_000)).toBe(250);
+		expect(alignContextTokens(3, 2, 10)).toBe(15);
+		expect(alignContextTokens(2, 3, 100)).toBe(67);
+	});
+
+	it("keeps the raw count when the server window is missing or unusable", () => {
+		expect(alignContextTokens(408, 0, 200_000)).toBe(408);
+		expect(alignContextTokens(408, -1_000, 200_000)).toBe(408);
+		expect(alignContextTokens(408, 1.5, 200_000)).toBe(408);
+		expect(alignContextTokens(408, Number.NaN, 200_000)).toBe(408);
+	});
+
+	it("keeps the raw count when the model window is missing or unusable", () => {
+		expect(alignContextTokens(408, 1_000)).toBe(408);
+		expect(alignContextTokens(408, 1_000, 0)).toBe(408);
+		expect(alignContextTokens(408, 1_000, -200_000)).toBe(408);
+		expect(alignContextTokens(408, 1_000, 1.25)).toBe(408);
+	});
+
+	it("keeps non-integer or negative occupancy untouched", () => {
+		expect(alignContextTokens(-1, 1_000, 200_000)).toBe(-1);
+		expect(alignContextTokens(1.5, 1_000, 200_000)).toBe(1.5);
+		expect(alignContextTokens(Number.NaN, 1_000, 200_000)).toBeNaN();
+		expect(alignContextTokens(0, 1_000, 200_000)).toBe(0);
+	});
+});
+describe("AgyHost prompt budgets", () => {
+	it("rejects an oversized replay before sending it", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("a".repeat(ACP_STEP_TEXT_BYTES + 1))]);
+		const fake = await state.started.next();
+		await expect(run.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(fake.promptHistory).toHaveLength(0);
+		expect(fake.closed).toBe(true);
+	});
+
+	it("rejects an oversized image on the replay path", async () => {
+		const state = await fixture();
+		const run = step(state.host, [
+			{
+				role: "user",
+				content: [
+					{ type: "image", data: Buffer.alloc(MAX_IMAGE_BYTES + 1).toString("base64"), mimeType: "image/png" },
+				],
+				timestamp: 0,
+			},
+		]);
+		const fake = await state.started.next();
+		await expect(run.done).rejects.toThrow("local ACP image budget is 8388608 bytes");
+		expect(fake.promptHistory).toHaveLength(0);
+	});
+
+	it("rejects an oversized resume input before steering the parked turn", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const next = step(state.host, [
+			...state.messages,
+			result(state.first.writer.output),
+			user("b".repeat(ACP_STEP_TEXT_BYTES + 1)),
+		]);
+		await expect(next.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect((await state.output).isError).toBe(true);
+		expect(state.fake.closed).toBe(true);
+	});
+
+	it("rejects a parked tool result and steering input that together exceed the budget", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const large = "b".repeat(100_000);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, large), user(large)]);
+		await expect(next.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect((await state.output).isError).toBe(true);
+		expect(state.fake.closed).toBe(true);
+	});
+
+	it("sends an under-budget replay unchanged", async () => {
+		const state = await fixture();
+		const body = "c".repeat(ACP_STEP_TEXT_BYTES);
+		const run = step(state.host, [user(body)]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		expect(prompt.request.prompt).toEqual([{ type: "text", text: body }]);
+		fake.text("Fits.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Fits." }]);
+	});
+
+	it("settles an oversized parked tool result as an actionable error instead of sending it", async () => {
+		const state = await parked();
+		const oversized = result(state.first.writer.output, "a".repeat(ACP_STEP_TEXT_BYTES + 1));
+		const next = step(state.host, [...state.messages, oversized]);
+		const settled = await state.output;
+		expect(settled.isError).toBe(true);
+		const [block] = settled.content;
+		if (block?.type !== "text") throw new Error("Expected a text tool error");
+		expect(block.text).toContain("188001 bytes of text");
+		expect(block.text).toContain("safe single-step budget is 188000 bytes");
+		expect(block.text).toContain("The result was not sent");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect(state.fake.closed).toBe(false);
+		state.fake.text("Narrowing the tool output.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Narrowing the tool output." }]);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("settles an oversized parked tool result and still steers the turn", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const oversized = result(state.first.writer.output, "a".repeat(ACP_STEP_TEXT_BYTES + 1));
+		const next = step(state.host, [...state.messages, oversized, user("continue")]);
+		const steering = await state.fake.prompts.next();
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		const settled = await state.output;
+		expect(settled.isError).toBe(true);
+		const [block] = settled.content;
+		if (block?.type !== "text") throw new Error("Expected a text tool error");
+		expect(block.text).toContain("safe single-step budget is 188000 bytes");
+		state.fake.text("Narrowing the tool output.");
+		steering.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Narrowing the tool output." }]);
+	});
+
+	it("settles an oversized parked tool-result image as an actionable error instead of sending it", async () => {
+		const state = await parked();
+		const oversized = result(state.first.writer.output);
+		oversized.content.push({
+			type: "image",
+			data: Buffer.alloc(MAX_IMAGE_BYTES + 1).toString("base64"),
+			mimeType: "image/png",
+		});
+		const next = step(state.host, [...state.messages, oversized]);
+		const settled = await state.output;
+		expect(settled.isError).toBe(true);
+		const [block] = settled.content;
+		if (block?.type !== "text") throw new Error("Expected a text tool error");
+		expect(block.text).toContain("8388609 bytes of images");
+		expect(block.text).toContain("local ACP image budget is 8388608 bytes");
+		expect(block.text).toContain("The result was not sent");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect(state.fake.closed).toBe(false);
+		state.fake.text("Dropping the image.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Dropping the image." }]);
+		expect(state.host.hasPendingTurn).toBe(false);
+	});
+
+	it("releases a parked tool result that exactly fits the step budget", async () => {
+		const state = await parked();
+		const body = "d".repeat(ACP_STEP_TEXT_BYTES);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, body)]);
+		expect(await state.output).toEqual({ content: [{ type: "text", text: body }], isError: false });
+		state.fake.text("Received.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+	});
+
+	it("rejects an oversized late tool result before sending it as a new prompt", async () => {
+		const state = await parked({ holdLimitMs: 20, cancelTimeoutMs: 300 });
+		state.fake.cancelMode = "hold";
+		state.clock.fire(20);
+		await state.fake.cancellations.next();
+		const late = result(state.first.writer.output, "e".repeat(ACP_STEP_TEXT_BYTES + 1));
+		const next = step(state.host, [...state.messages, late]);
+		await Promise.resolve();
+		state.fake.acknowledgeCancel();
+		expect((await state.output).isError).toBe(true);
+		await expect(next.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect(state.fake.closed).toBe(true);
+	});
+});
 
 describe("AgyHost stateful steps", () => {
 	it("rejects an ACP end that contains no usable model response", async () => {
@@ -792,6 +995,117 @@ describe("AgyHost stateful steps", () => {
 		expect(writer.output.usage.output).toBe(25);
 		expect(writer.output.usage.totalTokens).toBe(408);
 		expect(writer.output.usage.contextTokens).toBe(408);
+	});
+	it("writes the ACP occupancy scaled into the model window for parked and finished steps", async () => {
+		const state = await fixture();
+		const messages = [user("read a.txt")];
+		const first = step(state.host, messages);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Reading now.");
+		fake.usage(500_000, 1_000_000);
+		const held = fake.call();
+		await first.done;
+		expect(first.writer.output.usage.contextTokens).toBe(100_000);
+		const second = step(state.host, [...messages, first.writer.output, result(first.writer.output)]);
+		await held;
+		fake.text("Finished.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(100_000);
+	});
+
+	it("resets occupancy when a fresh session replaces the edited conversation", async () => {
+		const state = await parked();
+		state.fake.usage(900_000, 1_000_000);
+		const edited = {
+			...state.first.writer.output,
+			content: state.first.writer.output.content.map(block =>
+				block.type === "text" ? { ...block, text: "Edited text" } : block,
+			),
+		};
+		const next = step(state.host, [state.messages[0]!, edited, result(edited)]);
+		await state.fake.cancellations.next();
+		const prompt = await state.fake.prompts.next();
+		expect((await state.output).isError).toBe(true);
+		state.fake.text("Edited history received.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.usage.contextTokens).toBe(0);
+	});
+
+	it("resets occupancy when a loaded session starts the next turn", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.usage(900_000, 1_000_000);
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		expect(first.writer.output.usage.contextTokens).toBe(180_000);
+		const conversationId = state.host.conversationId;
+		if (!conversationId) throw new Error("Completed turn lost its conversation");
+		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], {}, undefined, {
+			cwd: path.join(state.dir, "moved"),
+		});
+		const restarted = await state.started.next();
+		const continuation = await restarted.prompts.next();
+		expect(restarted.loads).toEqual([conversationId]);
+		restarted.text("Continued.");
+		void restarted.call("read", { path: "b.txt" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(0);
+		continuation.response.resolve({ stopReason: "end_turn" });
+	});
+	it("records the configuration-time usage_update of a switched model instead of reusing the old window", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.usage(900_000, 1_000_000);
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		expect(first.writer.output.usage.contextTokens).toBe(180_000);
+		fake.configureUsage = { used: 400_000, size: 2_000_000 };
+		const second = step(
+			state.host,
+			[user("hello"), first.writer.output, user("continue")],
+			{},
+			undefined,
+			{},
+			wideModel,
+		);
+		const continuation = await fake.prompts.next();
+		fake.text("Continued.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(100_000);
+	});
+
+	it("falls back to the raw occupancy when a model switch sends no replacement window", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.usage(900_000, 1_000_000);
+		fake.text("Hello.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(
+			state.host,
+			[user("hello"), first.writer.output, user("continue")],
+			{},
+			undefined,
+			{},
+			wideModel,
+		);
+		const continuation = await fake.prompts.next();
+		fake.text("Continued.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		expect(second.writer.output.usage.contextTokens).toBe(900_000);
 	});
 	it("keeps completed stream output immutable and emits exactly one terminal event", () => {
 		const stream = new AssistantMessageEventStream();

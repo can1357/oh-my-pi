@@ -28,6 +28,7 @@ import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
 import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
 import agentDefinition from "./agent.md" with { type: "text" };
 import { resolveAgyBinary } from "./binary";
+import { checkPromptBudget, checkToolResultBudget, toolResultBlocks } from "./budget";
 import {
 	conversationStorePath,
 	deleteConversation,
@@ -46,6 +47,19 @@ const ANNOUNCEMENT_TIMEOUT_MS = 2_000;
 const HOLD_LIMIT_MS = 165_000;
 const CANCEL_TIMEOUT_MS = 5_000;
 const MCP_TOOL_NAME = /\bmcp_ide-tools_(\S+)/;
+
+/**
+ * omp compacts against its own model.contextWindow, while ACP reports the
+ * server's window in usage_update.size; normalize the occupancy before omp's
+ * threshold decision and fall back to the raw count when either is unusable.
+ */
+export function alignContextTokens(used: number, size: number, ompContextWindow?: number): number {
+	if (!Number.isSafeInteger(used) || used < 0) return used;
+	if (!Number.isSafeInteger(size) || size <= 0) return used;
+	if (ompContextWindow === undefined || !Number.isSafeInteger(ompContextWindow) || ompContextWindow <= 0) return used;
+	const scaled = Math.round((used / size) * ompContextWindow);
+	return Number.isSafeInteger(scaled) && scaled >= 0 ? scaled : used;
+}
 
 /** Per-step request settings. */
 export interface AgyStepOptions {
@@ -163,6 +177,8 @@ export class AgyHost implements ProviderSessionState {
 	readonly #turns = new Set<Turn>();
 	#loading: object | undefined;
 	#contextTokens = 0;
+	#contextSize: number | undefined;
+	#contextWindow: number | undefined;
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
 
@@ -199,6 +215,7 @@ export class AgyHost implements ProviderSessionState {
 	/** Emit one assistant step, parking at a tool call or finishing at the ACP turn end. */
 	async step(model: Model, context: Context, options: AgyStepOptions, writer: StepWriter): Promise<void> {
 		if (this.#step) throw new Error("Antigravity CLI is already running a request for this session");
+		this.#contextWindow = model.contextWindow ?? undefined;
 		const step: ActiveStep = {
 			writer,
 			messages: context.messages,
@@ -289,6 +306,7 @@ export class AgyHost implements ProviderSessionState {
 					defaultEffort: thoughtLevel(created.configOptions),
 				};
 				this.#contextTokens = 0;
+				this.#contextSize = undefined;
 			}
 			await this.#setup(this.#configure(model.id, options.reasoning));
 			step.controller.signal.throwIfAborted();
@@ -297,12 +315,18 @@ export class AgyHost implements ProviderSessionState {
 				if (pending?.drain) await this.#setup(pending.drain);
 				if (plan.toolResult && pending?.state === "detached") {
 					this.#releasePending();
-					this.#prompt([...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
+					this.#prompt(model, [...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
 				} else {
 					pending?.expiry.cancel();
+					const settled = plan.toolResult ? toolResultOutput(plan.toolResult, model) : undefined;
 					if (plan.input.length > 0) {
+						if (settled) {
+							const combined = [...plan.input.flatMap(inputBlocks), ...settled.content];
+							const overBudget = checkPromptBudget(combined, model);
+							if (overBudget) throw new Error(overBudget);
+						}
 						const previous = this.#turn;
-						this.#prompt(plan.input.flatMap(inputBlocks));
+						this.#prompt(model, plan.input.flatMap(inputBlocks));
 						// The old prompt settling proves agy accepted the steer before the held tool resumes.
 						if (previous)
 							await this.#setup(
@@ -315,16 +339,16 @@ export class AgyHost implements ProviderSessionState {
 							);
 					}
 					if (pending?.drain) await this.#setup(pending.drain);
-					if (plan.toolResult) {
+					if (settled) {
 						if (this.#pending !== pending || !pending || pending.state !== "parked")
 							throw new Error("Antigravity CLI tool continuation was interrupted");
-						this.#releasePending()?.settle(toMcpOutput(plan.toolResult));
+						this.#releasePending()?.settle(settled);
 					}
 				}
 			} else {
 				const blocks = replayPrompt(plan.replay);
 				if (blocks.length === 0) throw new Error("Antigravity CLI has nothing new to send for this request");
-				this.#prompt(blocks);
+				this.#prompt(model, blocks);
 			}
 			await step.done.promise;
 		} catch (error) {
@@ -369,6 +393,12 @@ export class AgyHost implements ProviderSessionState {
 	#requireProcess(): AgyProcess {
 		if (!this.#process) throw new Error("Antigravity CLI process is unavailable");
 		return this.#process;
+	}
+
+	/** Occupancy measured in the active model's window, or the raw ACP count when its size is unknown. */
+	#occupancy(): number {
+		if (this.#contextSize === undefined) return this.#contextTokens;
+		return alignContextTokens(this.#contextTokens, this.#contextSize, this.#contextWindow);
 	}
 
 	async #startProcess(
@@ -498,6 +528,7 @@ export class AgyHost implements ProviderSessionState {
 				throw new Error("Antigravity CLI load was interrupted");
 			this.#conversation = { id, systemKey, loaded: true, defaultEffort: thoughtLevel(loaded.configOptions) };
 			this.#contextTokens = 0;
+			this.#contextSize = undefined;
 		} finally {
 			if (this.#loading === loading) this.#loading = undefined;
 		}
@@ -508,6 +539,8 @@ export class AgyHost implements ProviderSessionState {
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
 		const connection = this.#requireProcess().connection;
 		if (conversation.model !== modelId) {
+			// A switched model reports its own window; keep the previous size only if configuration resends one.
+			this.#contextSize = undefined;
 			const response = await connection.setSessionConfigOption({
 				sessionId: conversation.id,
 				configId: "model",
@@ -529,9 +562,11 @@ export class AgyHost implements ProviderSessionState {
 		conversation.requestedEffort = effort;
 	}
 
-	#prompt(blocks: ContentBlock[]): void {
+	#prompt(model: Model, blocks: ContentBlock[]): void {
 		const conversation = this.#conversation;
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
+		const overBudget = checkPromptBudget(blocks, model);
+		if (overBudget) throw new Error(overBudget);
 		const turn: Turn = {
 			conversationId: conversation.id,
 			response: Promise.withResolvers<PromptResponse>(),
@@ -663,7 +698,7 @@ export class AgyHost implements ProviderSessionState {
 		};
 		this.#pending = pending;
 		step.writer.toolCall({ type: "toolCall", id, name, arguments: args });
-		step.writer.usage(this.#contextTokens);
+		step.writer.usage(this.#occupancy());
 		const digest = transcriptDigest([...step.messages, step.writer.output]);
 		step.writer.finish("toolUse", { type: "antigravityCli", conversationId, digest });
 		this.#ledger = { count: step.messages.length + 1, digest, pendingToolCallId: id };
@@ -692,9 +727,14 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	#onUpdate(notification: SessionNotification): void {
-		if (this.#loading || !this.#turn || notification.sessionId !== this.#conversation?.id || this.#turn.cancelling)
-			return;
+		if (this.#loading || notification.sessionId !== this.#conversation?.id || this.#turn?.cancelling) return;
 		const update = notification.update;
+		if (update.sessionUpdate === "usage_update") {
+			this.#contextTokens = update.used;
+			this.#contextSize = update.size;
+			return;
+		}
+		if (!this.#turn) return;
 		const writer = this.#step?.aborted ? undefined : this.#step?.writer;
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
@@ -702,9 +742,6 @@ export class AgyHost implements ProviderSessionState {
 				return;
 			case "agent_thought_chunk":
 				if (update.content.type === "text") writer?.thinking(update.content.text);
-				return;
-			case "usage_update":
-				this.#contextTokens = update.used;
 				return;
 			case "tool_call": {
 				const name = MCP_TOOL_NAME.exec(update.title)?.[1];
@@ -738,7 +775,7 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
 			return;
 		}
-		writer.usage(this.#contextTokens, response.usage);
+		writer.usage(this.#occupancy(), response.usage);
 		const digest = transcriptDigest([...step.messages, writer.output]);
 		let checkpoint: AntigravityCliCheckpoint | undefined;
 		if (response.stopReason === "end_turn") {
@@ -858,15 +895,14 @@ function toMcpTool(tool: Tool): McpToolDefinition {
 	return { name: tool.name, description: tool.description, inputSchema: schema };
 }
 
+/** agy feeds a released tool result back as model input, so an oversized one settles as an actionable error. */
+function toolResultOutput(result: ToolResultMessage, model: Model): McpToolOutput {
+	const overBudget = checkToolResultBudget(result, model);
+	return overBudget ? errorOutput(overBudget) : toMcpOutput(result);
+}
+
 function toMcpOutput(result: ToolResultMessage): McpToolOutput {
-	return {
-		content: result.content.map(part =>
-			part.type === "text"
-				? { type: "text", text: part.text }
-				: { type: "image", data: part.data, mimeType: part.mimeType },
-		),
-		isError: result.isError,
-	};
+	return { content: toolResultBlocks(result), isError: result.isError };
 }
 
 function errorOutput(text: string): McpToolOutput {

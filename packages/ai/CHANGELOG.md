@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Antigravity CLI context occupancy so it is measured against omp's configured context window instead of the server's reported window, keeping the server count when either window is unknown ([#19426](https://github.com/can1357/oh-my-pi/pull/19426) by [@SenCha930511](https://github.com/SenCha930511))
+- Fixed Antigravity CLI steps whose text or image payload exceeds the server budget so they fail before inference with the measured bytes, the budget, and confirmation that nothing was silently truncated; the same text and image limits now apply to MCP tool results, which are settled with an actionable error instead of being sent when they are oversized ([#19428](https://github.com/can1357/oh-my-pi/pull/19428) by [@SenCha930511](https://github.com/SenCha930511))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
