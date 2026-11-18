@@ -26,7 +26,7 @@ use crate::bash::{
 	vm::{
 		Cx, Kernel,
 		builtins::{Chunk, Ctx, Need, zsh_module},
-		exec::{pop_frame, push_script},
+		exec::{cleanup_status, push_script, unwind},
 		expand::Expander,
 		probe,
 		proc::{PendingWrite, ScriptKind, Slot, Vproc},
@@ -270,10 +270,8 @@ fn modules(k: &mut Kernel, cx: &mut Cx<'_>, vp: &mut Vproc) -> Option<WaitKey> {
 		.expect("zexit under way");
 	z.step = Step::Done;
 	let (exit, depth) = (z.exit, z.depth as usize);
-	while vp.frames.len() > depth {
-		pop_frame(&mut k.root, cx.store, vp);
-	}
-	vp.status = exit;
+	let cleaned = unwind(k, cx, vp, depth);
+	vp.status = cleanup_status(exit, cleaned);
 	None
 }
 

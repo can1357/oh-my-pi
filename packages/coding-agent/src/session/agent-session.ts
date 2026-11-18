@@ -578,6 +578,7 @@ import {
 } from "./settings";
 import { type AnthropicSlowModeLane, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
 import type { UsageLimitState } from "./usage-limit";
+import { ConversationChangedError, type ConversationPosition, continuesConversation } from "./conversation-position";
 import { cfgInterruptMode } from "../modes/settings";
 import { cfgFollowUpMode } from "../modes/settings";
 import { cfgSteeringMode } from "../modes/settings";
@@ -3974,15 +3975,25 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		return this.#admittedSubmissionsSettled.promise;
 	}
 
+	#assertConversationOrigin(origin: ConversationPosition): void {
+		if (!continuesConversation(this.sessionManager, origin)) throw new ConversationChangedError();
+	}
+
 	/** Run session work outside an agent run (prompt setup, manual maintenance) under the agent's log context. */
 	#inLogContext<T>(work: () => T): T {
 		return this.agent.logContext ? logger.withContext(this.agent.logContext, work) : work();
 	}
 
-	async #admitSubmission<T>(work: () => Promise<T>): Promise<T> {
+	async #admitSubmission<T>(work: () => Promise<T>, origin?: ConversationPosition): Promise<T> {
 		this.#admittedSubmissionCount++;
 		try {
 			if (this.hasPendingDeferredExtensions) await this.loadDeferredExtensions();
+			// Only explicitly origin-bound external input waits here. Transition
+			// hooks' ordinary SDK submissions must not wait on their own transition.
+			if (origin) {
+				while (this.isSessionTransitioning) await this.waitForSessionTransition();
+				this.#assertConversationOrigin(origin);
+			}
 			return await this.#inLogContext(work);
 		} finally {
 			if (--this.#admittedSubmissionCount === 0) this.#scheduleRunCheck();
@@ -9068,7 +9079,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * {@link PromptDroppedError} instead.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
-		return this.#admitSubmission(() => this.#prompt(text, options));
+		return this.#admitSubmission(() => this.#prompt(text, options), options?.conversationOrigin);
 	}
 
 	/**
@@ -9177,11 +9188,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// Locally handled commands and failed dispatches release that claim.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
 			try {
+				if (options?.conversationOrigin) {
+					while (this.isSessionTransitioning) await this.waitForSessionTransition();
+					this.#assertConversationOrigin(options.conversationOrigin);
+				}
 				return await this.#dispatchPrompt(text, options, submittedAt, outcome, followUps);
 			} finally {
-				release(outcome.sessionClaimed);
+				release?.(outcome.sessionClaimed);
 			}
 		} catch (error) {
 			// Setup threw before the prompt went live: its follow-ups go back with it.
@@ -9232,6 +9246,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return false;
 				}
 
+				if (options?.conversationOrigin) {
+					while (this.isSessionTransitioning) await this.waitForSessionTransition();
+					this.#assertConversationOrigin(options.conversationOrigin);
+				}
 				// Try custom commands (TypeScript slash commands)
 				const customResult = await this.#tryExecuteCustomCommand(text);
 				if (customResult !== null) {
@@ -9241,6 +9259,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					}
 					text = customResult;
 				}
+			}
+			if (options?.conversationOrigin) {
+				while (this.isSessionTransitioning) await this.waitForSessionTransition();
+				this.#assertConversationOrigin(options.conversationOrigin);
 			}
 
 			// Try file-based slash commands (markdown files from commands/ directories)
@@ -9292,6 +9314,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				rawText: typedText,
 				onPromptQueued: options?.onPromptQueued,
 				onPromptAdmitted: onPromptQueuedAdmitted,
+				conversationOrigin: options?.conversationOrigin,
 				promptGeneration: queueGeneration,
 			});
 			outcome.sessionClaimed = queued;
@@ -9331,6 +9354,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		if (options?.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 
 		// abort() bumps #promptGeneration and can land while normalization and the
 		// vision-description call above are still in flight. #promptWithMessage below
@@ -9370,6 +9397,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				},
 				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
+				conversationOrigin: options?.conversationOrigin,
 			});
 			outcome.sessionClaimed = queued;
 			if (!queued) this.#reportDroppedPrompt(typedText, options, followUps);
@@ -9473,18 +9501,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "conversationOrigin" | "followUps"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
 		},
 	): Promise<boolean> {
-		return this.#admitSubmission(() => this.#promptCustomMessage(message, options));
+		return this.#admitSubmission(() => this.#promptCustomMessage(message, options), options?.conversationOrigin);
 	}
 
 	async #promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
+		options?: Pick<
+			PromptOptions,
+			"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "conversationOrigin" | "followUps"
+		> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 			onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9497,11 +9531,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// prompts and the CLI initial message must not start during a blocking compaction.
 			const release = await this.#maintenance.waitForMaintenanceCleanup();
 			const outcome: PromptDispatchOutcome = { sessionClaimed: false };
-			if (!release) return await this.#dispatchCustomPrompt(message, options, outcome, followUps);
 			try {
+				if (options?.conversationOrigin) {
+					while (this.isSessionTransitioning) await this.waitForSessionTransition();
+					this.#assertConversationOrigin(options.conversationOrigin);
+				}
 				return await this.#dispatchCustomPrompt(message, options, outcome, followUps);
 			} finally {
-				release(outcome.sessionClaimed);
+				release?.(outcome.sessionClaimed);
 			}
 		} catch (error) {
 			// Setup threw before the prompt went live: its follow-ups go back with it.
@@ -9534,7 +9571,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	async #dispatchCustomPrompt<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options:
-			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "followUps"> & {
+			| (Pick<
+					PromptOptions,
+					"streamingBehavior" | "toolChoice" | "onPromptAdmitted" | "conversationOrigin" | "followUps"
+			  > & {
 					queueChipText?: string;
 					queueOnly?: boolean;
 					onPromptQueued?: PromptOptions["onPromptQueued"];
@@ -9589,6 +9629,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				prependMessages: queuedNotices,
 				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
+				conversationOrigin: options?.conversationOrigin,
 			});
 			// Still held only if the message was not queued (an aside whose session changed while it was prepared).
 			this.#reportDroppedCustomPrompt(message, options, followUps);
@@ -9614,6 +9655,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const descriptionNotice = hasSkillImages
 			? await this.#buildSkillImageDescriptionNotice(preparedMessage)
 			: undefined;
+		if (options?.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 		// Same drop as #dispatchPrompt: abort() during normalization or the vision
 		// description must not publish the skill or start a turn afterwards.
 		if (hasSkillImages && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
@@ -9639,6 +9684,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				prependMessages: queuedNotices,
 				onPromptAdmitted: onPromptQueuedAdmitted,
 				onPromptQueued: options?.onPromptQueued,
+				conversationOrigin: options?.conversationOrigin,
 			});
 			// Still held only if the message was not queued (an aside whose session changed while it was prepared).
 			this.#reportDroppedCustomPrompt(message, options, followUps);
@@ -9872,7 +9918,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		expandedText: string,
 		options?: Pick<
 			PromptOptions,
-			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted"
+			"toolChoice" | "images" | "skipCompactionCheck" | "solutionSpace" | "onPromptAdmitted" | "conversationOrigin"
 		> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
@@ -9885,6 +9931,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
+		if (options?.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 		const inFlightEpoch = this.#beginInFlight();
 		// Client ownership is reserved by #prompt before dispatch preprocessing
 		// and released when its bracket settles; callers that reach this
@@ -10352,6 +10402,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(text: string, images?: ImageContent[], options?: SteerOptions): Promise<void> {
+		if (options?.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -10365,6 +10419,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			attribution: options?.attribution,
 			rawText: text,
 			onPromptQueued: options?.onPromptQueued,
+			conversationOrigin: options?.conversationOrigin,
 		});
 	}
 
@@ -10376,6 +10431,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * flipping advisor auto-resume.
 	 */
 	async followUp(text: string, images?: ImageContent[], options?: FollowUpOptions): Promise<void> {
+		if (options?.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -10391,6 +10450,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				attribution: options?.attribution,
 				rawText: text,
 				onPromptQueued: options?.onPromptQueued,
+				conversationOrigin: options?.conversationOrigin,
 			});
 			return;
 		}
@@ -10406,6 +10466,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		if (options.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 		this.#allowQueuedMessageDrainRetry();
 		if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 		const directive: AgentMessage = {
@@ -10567,6 +10631,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onPromptAdmitted?: () => void;
 			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+			conversationOrigin?: ConversationPosition;
 			/**
 			 * `joinActiveTurn` admission: the caller treats "not admitted" as "keep
 			 * your content". A run that settled while normalization/vision
@@ -10625,6 +10690,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			: normalizedImages?.length
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
+		if (options?.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 		if (options?.promptGeneration !== undefined && this.#promptGeneration !== options.promptGeneration) {
 			return false;
 		}
@@ -10645,7 +10714,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return false;
 		}
 		if (mode === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+			const changed = await this.#sessionGenerationChanged(sessionGeneration);
+			if (options?.conversationOrigin) {
+				while (this.isSessionTransitioning) await this.waitForSessionTransition();
+				this.#assertConversationOrigin(options.conversationOrigin);
+			}
+			if (changed) return false;
 			const records: AgentMessage[] = [...prependMessages, ...attachmentSourceNotices];
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			const userMessage: AgentMessage = { role: "user", content, attribution, timestamp: timestamp ?? Date.now() };
@@ -10744,13 +10818,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	#reportDroppedPrompt(
 		text: string,
-		options: Pick<PromptOptions, "images" | "synthetic"> | undefined,
+		options: Pick<PromptOptions, "images" | "synthetic" | "onPromptDropped"> | undefined,
 		followUps: PromptFollowUps | undefined,
 		reason?: string,
 	): void {
 		const unsent = followUps?.handBack() ?? [];
 		if (options?.synthetic) return;
-		this.#promptDropped?.({
+		(options?.onPromptDropped ?? this.#promptDropped)?.({
 			text,
 			images: options?.images,
 			reason,
@@ -11194,6 +11268,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			onPromptAdmitted?: () => void;
 			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
+			conversationOrigin?: ConversationPosition;
 		},
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
@@ -11227,8 +11302,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const descriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
+		if (options?.conversationOrigin) {
+			while (this.isSessionTransitioning) await this.waitForSessionTransition();
+			this.#assertConversationOrigin(options.conversationOrigin);
+		}
 		if (deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+			const changed = await this.#sessionGenerationChanged(sessionGeneration);
+			if (options?.conversationOrigin) {
+				while (this.isSessionTransitioning) await this.waitForSessionTransition();
+				this.#assertConversationOrigin(options.conversationOrigin);
+			}
+			if (changed) return;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.

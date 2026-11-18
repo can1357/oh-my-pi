@@ -14,10 +14,12 @@
 
 #![cfg(unix)]
 
+mod comp_support;
 mod pty_support;
 
-use std::{fs, io, path::Path, time::Duration};
+use std::{cell::RefCell, fs, io, path::Path, time::Duration};
 
+use comp_support::{compsys_fpath, fpath_words};
 use pty_support::{Pty, Spawn, ZLE_SYNC_SCRIPT, differential, have_real_zsh};
 
 /// The pause between keys.
@@ -283,6 +285,62 @@ fn compsys_ssh_hosts_and_options() {
 #[test]
 fn compsys_kill_signals() {
 	same(COMPINIT, |pty| keys(pty, "kill -\t"));
+}
+
+/// Candidate membership is portable; ordered menu behavior follows the
+/// same-host oracle, including forward, reverse and wraparound selection.
+#[test]
+fn compsys_option_and_value_menus_cycle_like_zsh() {
+	let Some(fpath) = compsys_fpath() else {
+		eprintln!("skipped: zsh 5.9 completion functions are not installed");
+		return;
+	};
+	let rc = format!(
+		"PS1='> '\nexport LC_ALL=en_US.UTF-8\nfpath=( {} )\n{COMPINIT}_fx() {{ _arguments '-a[show \
+		 all]' '-l[long listing]' '--color=[colourize]:when:(always never auto)' '*:file:_files' \
+		 }}\ncompdef _fx fxtool\nsetopt menucomplete\nbindkey '^[[Z' reverse-menu-complete\n",
+		fpath_words(&fpath)
+	);
+	type Frame = (String, (usize, usize));
+	fn assert_cycle(frames: &[Frame], mut expected: [&str; 3]) {
+		let selection = |index: usize| {
+			let (contents, cursor) = &frames[index];
+			(contents.lines().nth(cursor.0).expect("selected input row"), *cursor)
+		};
+		let mut candidates: [&str; 3] =
+			std::array::from_fn(|index| selection(index).0.strip_prefix("> ").expect("fixed prompt"));
+		candidates.sort_unstable();
+		expected.sort_unstable();
+		assert_eq!(candidates, expected);
+		for (actual, previous) in [(3, 0), (4, 2), (5, 1), (6, 0)] {
+			assert_eq!(selection(actual), selection(previous));
+		}
+	}
+	let first = RefCell::new(None::<Vec<Frame>>);
+	same(&rc, |pty| {
+		let mut trace = Vec::with_capacity(14);
+		for prefix in ["fxtool -", "\x15fxtool --color="] {
+			keys(pty, prefix)?;
+			for key in ["\t", "\t", "\t", "\t", "\x1b[Z", "\x1b[Z", "\x1b[Z"] {
+				keys(pty, key)?;
+				let screen = pty.screen();
+				trace.push((screen.contents(), screen.cursor()));
+			}
+		}
+		assert_cycle(&trace[..7], ["fxtool -a", "fxtool -l", "fxtool --color="]);
+		assert_cycle(&trace[7..], [
+			"fxtool --color=always",
+			"fxtool --color=auto",
+			"fxtool --color=never",
+		]);
+		let mut saved = first.borrow_mut();
+		if let Some(oracle) = saved.as_ref() {
+			assert_eq!(&trace, oracle, "ordered menu screens and cursors differ");
+		} else {
+			*saved = Some(trace);
+		}
+		Ok(())
+	});
 }
 
 #[test]

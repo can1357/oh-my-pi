@@ -437,11 +437,13 @@ pub fn job_params(
 					};
 					let (whole, one) = match j.state {
 						JobState::Running => ("running", String::from("running")),
-						JobState::Stopped(sig) => ("suspended", String::from(jobctl::sigmsg(sig))),
+						JobState::Stopped(sig) => {
+							("suspended", String::from(jobctl::sigmsg(sig, platform)))
+						},
 						JobState::Done(0) => ("done", String::from("done")),
 						JobState::Done(status) => {
 							("done", match jobctl::death_signal(status, platform) {
-								Some(sig) => String::from(jobctl::sigmsg(sig)),
+								Some(sig) => String::from(jobctl::sigmsg(sig, platform)),
 								// zsh prints the raw wait status here.
 								None => format!("exit {}", status << 8),
 							})

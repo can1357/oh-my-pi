@@ -48,6 +48,7 @@ fn screens(
 ) -> io::Result<(String, Option<String>)> {
 	let run = |pty: &mut Pty| -> io::Result<()> {
 		pty.wait_raw(TIMEOUT)?;
+		pty.wait_raw(TIMEOUT)?;
 		if !rc.is_empty() {
 			pty.type_keys(". ~/.zshrc\r", KEY)?;
 			pty.read_until("RCDONE", TIMEOUT)?;

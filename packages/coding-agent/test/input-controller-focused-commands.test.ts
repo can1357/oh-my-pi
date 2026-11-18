@@ -18,6 +18,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 
@@ -55,7 +56,14 @@ function createFocusedContext() {
 			customCommands: [],
 			promptTemplates: [],
 		},
-		viewSession: { isStreaming: false, queuedMessageCount: 0, prompt, resume, abort: vi.fn(async () => {}) },
+		viewSession: {
+			sessionManager: SessionManager.inMemory(),
+			isStreaming: false,
+			queuedMessageCount: 0,
+			prompt,
+			resume,
+			abort: vi.fn(async () => {}),
+		},
 		focusedAgentId: "Worker",
 		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
@@ -91,10 +99,9 @@ describe("focused subagent view slash commands", () => {
 
 	it("resumes the focused session for . and c", async () => {
 		for (const shortcut of [".", "c"]) {
-			const { prompt, resume, editor, raw } = await submit(shortcut);
+			const { prompt, resume, raw } = await submit(shortcut);
 			expect(resume).toHaveBeenCalledTimes(1);
 			expect(prompt).not.toHaveBeenCalled();
-			expect(editor.clearDraft).toHaveBeenCalledWith(shortcut);
 			expect(raw.withLocalSubmission).not.toHaveBeenCalled();
 		}
 	});

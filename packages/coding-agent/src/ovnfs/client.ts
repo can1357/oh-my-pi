@@ -240,7 +240,11 @@ function connection(socket: string, signal?: AbortSignal): Promise<Connection> {
  * once `signal` aborts (the daemon is told to cancel).
  */
 export async function callSocket<T>(socket: string, op: string, args: object, signal?: AbortSignal): Promise<T> {
-	const conn = await connection(socket, signal);
+	const conn = await untilAborted(signal, connection(socket, signal)).catch(error => {
+		// Keep this client's exact abort reason without closing the shared socket.
+		if (signal?.aborted) throw signal.reason;
+		throw error;
+	});
 	// Replies are the daemon's api shapes; callers name the one their op returns.
 	return conn.call(op, args, signal) as Promise<T>;
 }

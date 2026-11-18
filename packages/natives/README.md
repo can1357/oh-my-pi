@@ -13,11 +13,18 @@ Native Rust functionality via N-API.
 - **Local IPC**: `IpcServer`/`IpcConnection` over Unix sockets and Windows named pipes — owner-only access, single-instance binding with stale-endpoint takeover, newline or raw framing; `ipcEndpoint(dir, name)` names endpoints per platform
 - **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
 - **Binary patches**: `applyBinaryPatch(oldPath, patchPath, outPath)` applies an HDiffPatch single-stream patch (HDIFFSF20, zstd or uncompressed), streaming from files; callers verify digests
+- **Shell**: Embedded Bash execution with tracing, snapshots, process cancellation, and a Zsh compatibility profile
 
 General-purpose image processing (decode/resize/encode for files and buffers)
 lives in [`Bun.Image`](https://bun.com/docs/runtime/image) on the JS side; this
 crate only ships the SIXEL encoder because no built-in equivalent exists for
 that terminal protocol.
+
+## Git repository initialization
+
+Use `initGit(directory)` from `@oh-my-pi/pi-natives/vcs` to initialize a non-bare checkout through the in-process Git backend. It returns a lazy `VcsGitRepo` handle; configure local identity and hooks with `configSet` before its first ref/object/index access so those settings are used when the handle opens. Re-initializing an existing checkout is rejected without replacing HEAD or worktree files.
+
+The handle's `commitCreate` and `worktreeAdd` methods cover initial empty commits (`{ allowEmpty: true }`) and detached linked worktrees (`{ detach: true, clone: false }`) without a caller-side command wrapper.
 
 ## Usage
 
@@ -72,6 +79,40 @@ Import `expandWindowsLongPath` and `getWindowsShortPath` from
 The addon loads only when a helper is called on Windows; other platforms preserve
 the input path without loading it. These helpers change long/8.3 spellings without
 resolving symlinks or junctions.
+
+### Embedded shell compatibility
+
+`Shell` still defaults to Bash. Zsh-mode execution uses a separate signal-name
+profile: the Linux profile follows the project's GNU Zsh 5.9 reference names
+(`IOT` and `POLL`, with `CLD` and `IO` accepted as aliases). Bash and native
+signal names remain `ABRT` and `IO`.
+
+Zsh keeps numeric trap activation separate from function-name existence.
+Function definitions, `functions -c`, and `enable -f`/`disable -f` therefore take
+different activation paths; a copied `TRAP...` name alone does not install a
+handler. Local trap scopes retain the original function key and disabled flag,
+and restore the corresponding OS disposition. Restoring or re-executing a
+shell reinstalls its active function handlers as well as its list traps.
+Missing function bodies do not clear numeric activation; repeated delivery
+leaves that activation intact. `trap -` resets active entries even when no
+function body is available for listing.
+
+OS handler-setup failures emit `SignalSetup` diagnostics without skipping
+remaining scope cleanup. A restoration error changes an otherwise successful
+return or exit to status 1; it does not replace an existing failure or the
+designated cancellation status.
+
+Cancellation captures every external tree before the batched TERM wave. Each
+lifecycle tracker retains its captured process identities until hard escalation,
+then refreshes surviving orphan subtrees before KILL. This includes descendants
+that escape the original session or are born during the grace period. Ordinary
+script signals do not start cancellation escalation.
+Repeated cancellation combines live captured identities rather than replacing
+the original snapshot.
+
+Externalized execution frames are build-specific. Layout version 31 adds the
+assumed-name origin of local traps and widens the saved-node flags to four bits;
+restore rejects incompatible build/layout images rather than reusing them.
 
 ## Building
 

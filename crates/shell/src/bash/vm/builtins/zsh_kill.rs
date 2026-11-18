@@ -6,6 +6,8 @@
 //! Ported from zsh 5.9 (MIT-style licence, Copyright (c) 1992-1997 Paul
 //! Falstad and the zsh development group).
 
+use std::borrow::Cow;
+
 use bstr::{BString, ByteSlice};
 
 use super::{
@@ -14,42 +16,28 @@ use super::{
 	zsh_args::isset,
 };
 use crate::bash::{
-	ControlHandle, Platform, SigTarget, Signal, diag, vm::proc::JobState, zshopt::ZshOpt,
+	ControlHandle, Platform, SigTarget, Signal, diag, signal::ZSH_SIGCOUNT, vm::proc::JobState,
+	zshopt::ZshOpt,
 };
 
 /// zsh `SIGCOUNT`: the signals `kill -l` lists (`$signals[2,32]`).
-const SIGCOUNT: i64 = 31;
+const SIGCOUNT: i64 = ZSH_SIGCOUNT as i64;
 
 /// zsh `sigs[n]` for `1 <= n <= SIGCOUNT` (as `$signals`).
-fn sig_name(n: i64, platform: Platform) -> String {
+fn sig_name(n: i64, platform: Platform) -> Cow<'static, str> {
 	u8::try_from(n)
 		.ok()
 		.and_then(|n| Signal::from_number(n, platform))
-		.map_or_else(|| format!("SIG{n}"), |s| s.to_string())
+		.map_or_else(|| Cow::Owned(format!("SIG{n}")), |s| Cow::Borrowed(s.zsh_name(platform)))
 }
 
 /// The signal number `name` (without `SIG`) names in `sigs`, then zsh's
 /// `alt_sigs` (`CLD` and `IO` where they alias `CHLD` and `POLL`; `ERR`
 /// names zsh's `SIGZERR`, past `SIGCOUNT`, so never a signal here).
 fn sig_number(name: &[u8], platform: Platform, nocase: bool) -> Option<i64> {
-	let eq = |a: &[u8], b: &[u8]| {
-		if nocase {
-			a.eq_ignore_ascii_case(b)
-		} else {
-			a == b
-		}
-	};
-	if let Some(n) = (1..=SIGCOUNT).find(|&n| eq(sig_name(n, platform).as_bytes(), name)) {
-		return Some(n);
-	}
-	if platform == Platform::Linux {
-		for (alt, sig) in [(&b"CLD"[..], Signal::Chld), (b"IO", Signal::Io)] {
-			if eq(alt, name) {
-				return Some(i64::from(sig.number(platform)));
-			}
-		}
-	}
-	None
+	let (sig, _) = Signal::parse_zsh_name(name, platform, nocase)?;
+	let number = i64::from(sig.number(platform));
+	(1..=SIGCOUNT).contains(&number).then_some(number)
 }
 
 /// zsh `zstrtol(s, &end, 10)`: blanks, a sign, decimal digits; the value
@@ -155,7 +143,8 @@ pub fn kill(ctx: &mut Ctx<'_, '_>, args: &[BString]) -> R {
 				if rest.len() > 1 {
 					return list(ctx, &rest[1..], platform);
 				}
-				let names: Vec<String> = (1..=SIGCOUNT).map(|n| sig_name(n, platform)).collect();
+				let names: Vec<Cow<'static, str>> =
+					(1..=SIGCOUNT).map(|n| sig_name(n, platform)).collect();
 				ctx.out(format!("{}\n", names.join(" ")).as_bytes());
 				return done(0);
 			}

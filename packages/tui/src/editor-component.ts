@@ -39,7 +39,11 @@ export interface EditorComponent extends Component {
 	// History support (optional)
 	// =========================================================================
 
-	/** Add text to history for up/down navigation */
+	/**
+	 * Add text to history for up/down navigation. Records under the context active at the call,
+	 * so a host that dispatches a command able to switch the conversation or move the working
+	 * directory calls this before dispatch.
+	 */
 	addToHistory?(text: string): void;
 
 	// =========================================================================

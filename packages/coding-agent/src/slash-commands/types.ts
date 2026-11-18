@@ -1,7 +1,7 @@
 import type { Settings } from "../config/settings";
 import type { SlashCommandIconName } from "@oh-my-pi/pi-tui/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
-import type { ConversationPosition } from "../modes/utils/conversation-position";
+import type { ConversationPosition } from "../session/conversation-position";
 import type { MCPManager } from "../mcp/manager";
 import type { MCPServerConfig } from "../mcp/types";
 import type { AgentSession } from "../session/agent-session";

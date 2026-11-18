@@ -217,6 +217,7 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 		pendingShellContainer: { clear: () => {} },
 		pendingMessagesContainer: { clear: () => {} },
 		compactionQueuedMessages: [],
+		restoreCompactionQueueToEditor: () => {},
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),

@@ -60,6 +60,8 @@ pub type SpawnFn = Box<dyn FnMut(SpawnSpec<'_>) -> io::Result<Box<dyn ExtProc>> 
 /// each process comes to exist.
 pub type SpawnFutureFn = Box<dyn FnMut(SpawnSpec<'_>) -> SpawnFuture + Send>;
 
+type SignalTrapFn = Box<dyn FnMut(Signal, Option<&BStr>) -> io::Result<bool> + Send>;
+
 /// Shared in-memory output buffer.
 #[derive(Clone, Debug, Default)]
 pub struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -248,6 +250,10 @@ impl ExtProc for CountedExt {
 		self.ext.signal(sig)
 	}
 
+	fn signal_delivered(&mut self, sig: Signal, targets: crate::proctree::TerminationTargets) {
+		self.ext.signal_delivered(sig, targets);
+	}
+
 	fn stop(&mut self) -> io::Result<()> {
 		self.ext.stop()
 	}
@@ -303,6 +309,7 @@ pub struct FakeHost {
 	/// ([`Invocation::umask`]).
 	pub starts:  Vec<(BString, u32)>,
 	spawner:     Option<SpawnFutureFn>,
+	signal_trap: Option<SignalTrapFn>,
 	census:      Arc<Census>,
 	pipe_tap:    Option<Arc<dyn PipeTap>>,
 	/// [`Host::child_opens`](crate::bash::Host::child_opens) answers this.
@@ -340,6 +347,7 @@ impl FakeHost {
 			pid:         4242,
 			starts:      Vec::new(),
 			spawner:     None,
+			signal_trap: None,
 			census:      Arc::new(Census::default()),
 			pipe_tap:    None,
 			child_opens: false,
@@ -385,6 +393,16 @@ impl FakeHost {
 	/// spawn back, one that is dropped spawns nothing.
 	pub fn with_spawn_future(mut self, spawn: SpawnFutureFn) -> Self {
 		self.spawner = Some(spawn);
+		self
+	}
+
+	/// Observe or refuse root signal-disposition updates. This controls
+	/// the host contract, not the engine's trap execution.
+	pub fn with_signal_trap(
+		mut self,
+		trap: impl FnMut(Signal, Option<&BStr>) -> io::Result<bool> + Send + 'static,
+	) -> Self {
+		self.signal_trap = Some(Box::new(trap));
 		self
 	}
 
@@ -606,6 +624,13 @@ impl Drop for FakeTimer {
 }
 
 impl crate::bash::Host for FakeHost {
+	fn set_signal_trap(&mut self, signal: Signal, action: Option<&BStr>) -> io::Result<bool> {
+		self
+			.signal_trap
+			.as_mut()
+			.map_or(Ok(true), |trap| trap(signal, action))
+	}
+
 	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if let Some(i) = self.tools.iter().position(|(n, _)| n.as_bstr() == name) {
 			return Resolved::Tool(ToolRef(i as u64));

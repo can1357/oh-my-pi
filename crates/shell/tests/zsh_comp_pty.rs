@@ -8,8 +8,10 @@
 //! steps; after each step it waits for the output to settle and records the
 //! screen (rows without trailing blanks) and the cursor, and for colour
 //! cases the text and SGR sequences the step wrote
-//! (`comp_support::sgr_transcript`). The record must equal the snapshot in
-//! `tests/fixtures/zsh_comp_pty/<case>.txt`.
+//! (`comp_support::sgr_transcript`). Most records must equal the snapshot in
+//! `tests/fixtures/zsh_comp_pty/<case>.txt`. The option/value case checks
+//! candidate associations and editing behavior directly: locale-specific
+//! ordering of described rows is compared against the live oracle elsewhere.
 //!
 //! `PI_COMP_ORACLE=1` runs `/bin/zsh` against the snapshots;
 //! `PI_COMP_ORACLE=1 PI_COMP_BLESS=1` rewrites them from `/bin/zsh`.
@@ -171,15 +173,57 @@ fn options_of_ls_ask_then_list() {
 
 #[test]
 fn options_and_values_of_arguments() {
+	let Some(fpath) = compsys_fpath() else {
+		eprintln!("skipped: zsh 5.9 completion functions are not installed");
+		return;
+	};
 	let rc = "_fx() { _arguments '-a[show all]' '-l[long listing]' \
 	          '--color=[colourize]:when:(always never auto)' '*:file:_files' }\ncompdef _fx fxtool";
-	check(
-		"options_and_values_of_arguments",
+	let got = record(
+		&fpath_words(&fpath),
 		Setup::Compsys,
 		rc,
 		&["fxtool -\t", "-\t", "\x15fxtool --color=\t", "\t"],
 		Record::Screen,
+	)
+	.expect("completion pty session");
+	fn body(frame: &str) -> &str {
+		frame.split_once('\n').expect("recorded step header").1
+	}
+	let options = |frame: &str, prompt: &str, cursor: &str| {
+		let mut rows = body(frame).lines();
+		assert_eq!(rows.next(), Some(prompt));
+		let mut candidates: [(&str, &str); 3] = std::array::from_fn(|_| {
+			let (candidate, description) = rows
+				.next()
+				.expect("option row")
+				.split_once("  -- ")
+				.expect("option description");
+			(candidate.trim(), description)
+		});
+		// Membership and description association are stable; their display
+		// order follows the host's locale tables, not a portable snapshot.
+		candidates.sort_unstable();
+		assert_eq!(candidates, [
+			("--color", "colourize"),
+			("-a", "show all"),
+			("-l", "long listing")
+		]);
+		assert_eq!(rows.next(), Some(cursor));
+		assert_eq!(rows.next(), None);
+	};
+	let mut frames = got.split("### ").skip(1);
+	options(frames.next().expect("option listing"), "% fxtool -", "@ 0,10");
+	options(frames.next().expect("long option insertion"), "% fxtool --color=", "@ 0,17");
+	assert_eq!(
+		body(frames.next().expect("value listing")),
+		"% fxtool --color=\nalways  auto    never\n@ 0,17\n"
 	);
+	assert_eq!(
+		body(frames.next().expect("value insertion")),
+		"% fxtool --color=always\nalways  auto    never\n@ 0,23\n"
+	);
+	assert_eq!(frames.next(), None);
 }
 
 #[test]

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 function createContext(options?: {
 	hasInterruptibleInput?: boolean;
@@ -14,6 +15,7 @@ function createContext(options?: {
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
 	const showError = vi.fn();
+	const sessionManager = SessionManager.inMemory(process.cwd());
 	const ctx = {
 		editor: {
 			imageLinks: undefined as (string | undefined)[] | undefined,
@@ -35,7 +37,9 @@ function createContext(options?: {
 				([] as (string | undefined)[]),
 		},
 		ui: { requestRender },
+		sessionManager,
 		session: {
+			sessionManager,
 			isStreaming: true,
 			isCompacting: false,
 			isBashRunning: false,

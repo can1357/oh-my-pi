@@ -8,6 +8,11 @@
 //! [`Spawn::spawn`] starts it as the leader of a new session whose
 //! controlling terminal is the pty (fds 0–2 on its terminal side).
 //!
+//! `spawn()` starts the process, not the interactive editor. Call
+//! [`Pty::wait_raw`] before sending editor keys so the canonical line
+//! discipline cannot consume them first. Canonical `read` scripts do not
+//! enter editing mode and must not wait for raw mode.
+//!
 //! [`Pty`] is the terminal side a test drives: [`Pty::write`] keys,
 //! [`Pty::read_until`] a pattern in the output, [`Pty::wait_screen`] a
 //! condition on the rendered screen ([`vt::Screen`], a small VT model that

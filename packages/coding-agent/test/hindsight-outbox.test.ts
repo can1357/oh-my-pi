@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as utils from "@oh-my-pi/pi-utils";
 import { Settings } from "../src/config/settings";
 import { hindsightBackend } from "../src/hindsight/backend";
 import { HindsightApi } from "../src/hindsight/client";
@@ -154,6 +155,61 @@ describe("Hindsight retain outbox", () => {
 			expect((await fs.stat(path.dirname(file))).mode & 0o777).toBe(0o700);
 			expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
 		}
+	});
+
+	it("does not deliver part of a call while publication can still fail", async () => {
+		const first = fixture();
+		const second = fixture({}, "other");
+		const publishing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const snapshotWaiting = Promise.withResolvers<void>();
+		const write = atomicFile.writeFileAtomically;
+		const lock = utils.withFileLock;
+		let writes = 0;
+		let queueLocks = 0;
+		vi.spyOn(utils, "withFileLock").mockImplementation((file, action, options) => {
+			if (file.endsWith(`${path.sep}queue`) && ++queueLocks === 2) snapshotWaiting.resolve();
+			return lock(file, action, options);
+		});
+		vi.spyOn(atomicFile, "writeFileAtomically").mockImplementation(async (file, content, mode) => {
+			if (++writes === 2) {
+				publishing.resolve();
+				await release.promise;
+				throw new Error("publication failed");
+			}
+			await write(file, content, mode);
+		});
+		const enqueue = first.tool.execute("failed-batch", { items: [{ content: "first" }, { content: "second" }] });
+		const rejected = enqueue.then(
+			() => undefined,
+			error => error,
+		);
+		await publishing.promise;
+		const drain = second.state.flushRetainQueue();
+		try {
+			await Promise.race([drain, snapshotWaiting.promise]);
+		} finally {
+			release.resolve();
+		}
+		expect(await rejected).toMatchObject({ message: "Hindsight outbox write failed; memory NOT queued." });
+		await drain;
+		expect(requests).toHaveLength(0);
+		expect(await events()).toHaveLength(0);
+	});
+
+	it("preserves a call's item order when publication timestamps tie", async () => {
+		const { tool, state } = fixture();
+		const items = Array.from({ length: 8 }, (_, index) => ({ content: `ordered fact ${index}` }));
+		await tool.execute("call-ordered", { items });
+		const timestamp = new Date();
+		for (const file of await eventFiles()) {
+			const event: OutboxEvent = await Bun.file(file).json();
+			event.timestamp = timestamp.toISOString();
+			await Bun.write(file, JSON.stringify(event));
+			await fs.utimes(file, timestamp, timestamp);
+		}
+		await state.flushRetainQueue();
+		expect(accepted.map(item => item.content)).toEqual(items.map(item => item.content));
 	});
 
 	it("keeps a failed delivery and sends it from the next primary session with its document id and time", async () => {

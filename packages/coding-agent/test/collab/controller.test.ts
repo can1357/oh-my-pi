@@ -744,6 +744,19 @@ describe("interactive collaboration startup", () => {
 		expect(local.collabHost?.sessionId).toBe(local.sessionManager.getSessionId());
 	});
 
+	it("returns unsent queued local input to the editor when the replica activates", async () => {
+		const { local, remote } = await prepareGuestMode();
+		local.compactionQueuedMessages = [
+			{ text: "older unsent", mode: "followUp", images: [] },
+			{ text: "newer unsent", mode: "followUp", images: [] },
+		];
+		const guest = new CollabGuestLink(local);
+		await guest.join(remote.link);
+		expect(local.compactionQueuedMessages).toEqual([]);
+		expect(local.editor.getExpandedText()).toBe("older unsent\n\nnewer unsent");
+		await guest.leave("done");
+	});
+
 	it("does not release a replica when the void resume wrapper silently cancels restoration", async () => {
 		const { local, remote, localFile } = await prepareGuestMode();
 		const guest = new CollabGuestLink(local);

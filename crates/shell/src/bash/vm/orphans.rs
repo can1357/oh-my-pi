@@ -122,7 +122,7 @@ impl Shell {
 			.filter(|&i| !self.procs[i].lineage.detached && self.in_job(self.procs[i].vpid, job))
 			.collect();
 		for &i in hits.iter().rev() {
-			self.kill(cx, i, Signal::Term, status);
+			self.kill(cx, i, Signal::Term, status, true);
 		}
 		self.orphans.retain(|&v| v != job);
 	}

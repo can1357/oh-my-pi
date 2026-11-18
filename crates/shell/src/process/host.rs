@@ -537,6 +537,14 @@ impl ExtProc for SignalsOnExit {
 		self.child.signal(sig)
 	}
 
+	fn signal_delivered(
+		&mut self,
+		sig: crate::bash::Signal,
+		targets: crate::proctree::TerminationTargets,
+	) {
+		self.child.signal_delivered(sig, targets);
+	}
+
 	fn stop(&mut self) -> io::Result<()> {
 		self.child.stop()
 	}
@@ -617,6 +625,12 @@ pub fn inherited_fds(embedded: bool) -> Vec<(i32, Box<dyn File>)> {
 			(fd, Box::new(crate::sys::StdFile::new(file)) as Box<dyn File>)
 		})
 		.collect()
+}
+
+/// No inherited fds are taken over off Unix.
+#[cfg(not(unix))]
+pub fn inherited_fds(_embedded: bool) -> Vec<(i32, Box<dyn File>)> {
+	Vec::new()
 }
 
 /// Enumerate inherited descriptor candidates without libc's 32 KiB
@@ -706,12 +720,6 @@ fn user_fd(fd: i32) -> bool {
 			| libc::S_IFCHR
 			| libc::S_IFBLK
 	)
-}
-
-/// No inherited fds are taken over off Unix.
-#[cfg(not(unix))]
-pub fn inherited_fds(_embedded: bool) -> Vec<(i32, Box<dyn File>)> {
-	Vec::new()
 }
 
 fn read_login_shell() -> Option<BString> {

@@ -1347,6 +1347,8 @@ describe("html form", () => {
 		});
 
 		it("natively: the skip notice warns under the questions and dims them", () => {
+			// Initialized with a placeholder, assigned when the notice appears:
+			// a single `const` would hide the first, notice-less render.
 			let notice: string | undefined = undefined;
 			const { form } = dialog(DB_FORM, { skipNotice: () => notice });
 			expect(byRole(form.describe(CX), "omp.ask.skip")).toEqual([]);

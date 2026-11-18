@@ -50,7 +50,7 @@ function createLoopContext(options: {
 			promptTemplates: [],
 			prompt,
 		},
-		sessionManager: { putBlob: vi.fn() },
+		sessionManager: { putBlob: vi.fn(), getSessionId: () => "main-session" },
 		loopModeEnabled: true,
 		get loopPrompt() {
 			return loopPrompt;

@@ -6,6 +6,7 @@ import { SubagentSpawnSignal } from "../../src/thread/subagent-spawn-signal";
 import {
 	prewarmSubagentWorker,
 	SubagentWorkerPool,
+	SUBAGENT_WORKER_THRESHOLD,
 	setSubagentWorkerPoolForTests,
 } from "../../src/thread/subagent-worker";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -116,10 +117,10 @@ describe("prewarmSubagentWorker", () => {
 		try {
 			const settings = Settings.isolated();
 			const modelRegistry = new ModelRegistry(createInMemoryAuthStorage());
-			prewarmSubagentWorker(settings, modelRegistry, 8);
+			prewarmSubagentWorker(settings, modelRegistry, SUBAGENT_WORKER_THRESHOLD - 1);
 			await nextImmediate();
 			expect(pool.workers()).toEqual([]);
-			prewarmSubagentWorker(settings, modelRegistry, 9);
+			prewarmSubagentWorker(settings, modelRegistry, SUBAGENT_WORKER_THRESHOLD);
 			expect(pool.workers()).toEqual([]);
 			await nextImmediate();
 			const [worker] = pool.workers();

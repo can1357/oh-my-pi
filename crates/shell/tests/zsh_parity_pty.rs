@@ -42,6 +42,7 @@ fn keys(pty: &mut Pty, text: &str) -> io::Result<()> {
 fn same(drive: impl Fn(&mut Pty) -> io::Result<()>) {
 	let run = |pty: &mut Pty| -> io::Result<()> {
 		pty.wait_raw(TIMEOUT)?;
+		pty.wait_raw(TIMEOUT)?;
 		drive(pty)
 	};
 	if !have_real_zsh() {

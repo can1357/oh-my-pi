@@ -9,6 +9,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -207,10 +208,13 @@ describe("ChatTranscriptBuilder token-usage row timestamp", () => {
 			{ type: "message", id: "tool-entry", parentId: null, timestamp: new Date(0).toISOString(), message },
 		]);
 
-		const rendered = builder.container.render(120);
-		// Shell visualization (on by default) draws the command as pseudo code.
-		expect(Bun.stripANSI(rendered.join("\n"))).toContain('print("ok")');
-		expect(builder.rowForEntry("tool-entry")).toBe(0);
+		builder.container.render(120);
+		const cards = builder.container.children.filter(child => child instanceof ToolExecutionComponent);
+		expect(cards).toHaveLength(1);
+		const startRow = builder.container.getChildStartRow(cards[0]!);
+		expect(startRow).toBeDefined();
+		expect(builder.rowForEntry("tool-entry")).toBe(startRow);
+		expect(startRow).toBe(0);
 	});
 
 	it("keeps grouped read metrics nested on the reusable transcript-builder path", () => {

@@ -37,14 +37,30 @@ impl<const BYTES: usize, const N: usize> PackedNames<BYTES, N> {
 	/// Pack `names` (an enum's `strum::VariantNames::VARIANTS`); a size
 	/// mismatch fails the constant's evaluation, so the build.
 	pub const fn new(names: &[&str]) -> Self {
-		assert!(names.len() == N && packed_len(names) == BYTES && BYTES <= u16::MAX as usize);
-		let mut bytes = [0_u8; BYTES];
-		let mut ends = [0_u16; N];
+		Self::prefixed(names, "")
+	}
+
+	/// Pack every name with `prefix`, without a runtime allocation or
+	/// a table of relocated string pointers.
+	pub const fn prefixed(names: &[&str], prefix: &str) -> Self {
+		assert!(
+			names.len() == N
+				&& packed_len(names) + prefix.len() * N == BYTES
+				&& BYTES <= u16::MAX as usize
+		);
+		let mut bytes = [0u8; BYTES];
+		let mut ends = [0u16; N];
 		let mut at = 0;
 		let mut i = 0;
 		while i < N {
-			let name = names[i].as_bytes();
 			let mut j = 0;
+			while j < prefix.len() {
+				bytes[at] = prefix.as_bytes()[j];
+				at += 1;
+				j += 1;
+			}
+			let name = names[i].as_bytes();
+			j = 0;
 			while j < name.len() {
 				bytes[at] = name[j];
 				at += 1;

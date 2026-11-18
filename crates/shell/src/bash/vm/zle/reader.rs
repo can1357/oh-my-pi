@@ -1098,14 +1098,19 @@ impl Reader {
 			return Some(key);
 		}
 		self.tmout = None;
-		let trapped = matches!(
-			state::record(
-				cx.store,
-				vp,
-				Key::Trap(crate::bash::store::TrapKey::Signal(crate::bash::signal::Signal::Alrm))
-			),
-			Ok(Some(Record::Trap { .. }))
-		) || exec::function_exists(cx, vp, b"TRAPALRM");
+		let trap = crate::bash::store::TrapKey::Signal(crate::bash::signal::Signal::Alrm);
+		let trapped = match crate::bash::vm::builtins::trap::effective(
+			cx.store,
+			vp,
+			trap,
+			k.engine.config().platform,
+		) {
+			Ok(handler) => handler != crate::bash::vm::builtins::trap::Handler::Absent,
+			Err(err) => {
+				k.fail(err);
+				return None;
+			},
+		};
 		if trapped {
 			vp.pending_traps = vp.pending_traps.with(crate::bash::signal::Signal::Alrm);
 			let tmout = scalar(k, cx, vp, b"TMOUT").map_or(0, |v| params::parse_int(&v));

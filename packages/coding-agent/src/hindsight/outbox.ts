@@ -35,6 +35,8 @@ export interface OutboxEvent {
 	content: string;
 	context: string;
 	sessionId: string;
+	/** Input order when filesystem publication timestamps tie; absent in older events. */
+	itemIndex?: number;
 }
 
 export interface RetainCall {
@@ -185,6 +187,7 @@ export class HindsightOutbox {
 			scope,
 			tags: scope === "global" ? [] : (call.tags ?? []).map(tag => this.#clean(tag)),
 			timestamp: new Date().toISOString(),
+			itemIndex: index,
 			content,
 			context,
 			sessionId: this.#clean(call.sessionId),
@@ -224,7 +227,12 @@ export class HindsightOutbox {
 		// Hindsight unions a request's item tags onto its document(s): one request per tag set, so
 		// untagged global memories never share a request with project-tagged ones.
 		const groups = new Map<string, Pending[]>();
-		for (const entry of pending.sort((a, b) => a.published - b.published)) {
+		for (const entry of pending.sort(
+			(a, b) =>
+				a.published - b.published ||
+				Date.parse(a.event.timestamp) - Date.parse(b.event.timestamp) ||
+				(a.event.itemIndex ?? 0) - (b.event.itemIndex ?? 0),
+		)) {
 			const key = JSON.stringify(entry.event.tags.toSorted());
 			const group = groups.get(key);
 			if (group) group.push(entry);
@@ -368,6 +376,7 @@ async function readEvent(file: string, now: number): Promise<Pending | undefined
 			Array.isArray(event.tags) &&
 			event.tags.every(tag => typeof tag === "string") &&
 			Number.isFinite(Date.parse(event.timestamp)) &&
+			(event.itemIndex === undefined || (Number.isInteger(event.itemIndex) && event.itemIndex >= 0)) &&
 			typeof event.content === "string" &&
 			typeof event.context === "string" &&
 			typeof event.sessionId === "string";
