@@ -99,10 +99,20 @@ class FakeAgy implements AgyTransport {
 	currentId = "";
 	#pending = new Set<FakePrompt>();
 
-	constructor(options: AgyTransportOptions) {
+	constructor(options: AgyTransportOptions, roster: string[] = [model.id]) {
 		this.options = options;
+		// agy advertises either bare ids with a separate thought level or effort-suffixed ids (#19638).
 		const configOptions: SessionConfigOption[] = [
 			{
+				id: "model",
+				name: "Model",
+				type: "select",
+				currentValue: roster[0],
+				options: roster.map(value => ({ value, name: value })),
+			},
+		];
+		if (roster.includes(model.id)) {
+			configOptions.push({
 				id: "thought_level",
 				name: "Reasoning",
 				type: "select",
@@ -111,8 +121,8 @@ class FakeAgy implements AgyTransport {
 					{ value: "medium", name: "Medium" },
 					{ value: "high", name: "High" },
 				],
-			},
-		];
+			});
+		}
 		this.connection = {
 			signal: this.abort.signal,
 			initialize: async () => ({ protocolVersion: 1 }),
@@ -131,6 +141,9 @@ class FakeAgy implements AgyTransport {
 			closeSession: async () => ({}),
 			setSessionConfigOption: async params => {
 				await this.configureGate;
+				if (params.configId === "model" && !roster.includes(String(params.value))) {
+					throw new Error(`Unknown model ID: ${params.value}`);
+				}
 				this.configurations.push(`${params.configId}:${params.value}`);
 				return { configOptions };
 			},
@@ -189,7 +202,7 @@ afterEach(async () => {
 	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 });
 
-async function fixture(options: AgyHostOptions = {}) {
+async function fixture(options: AgyHostOptions = {}, roster?: string[]) {
 	const dir = await mkdtemp(path.join(tmpdir(), "agy-host-test-"));
 	const started = new Queue<FakeAgy>();
 	const clock = new Clock();
@@ -200,7 +213,7 @@ async function fixture(options: AgyHostOptions = {}) {
 		announcementTimeoutMs: 30,
 		schedule: clock.schedule,
 		startTransport: async input => {
-			const fake = new FakeAgy(input);
+			const fake = new FakeAgy(input, roster);
 			instances.push(fake);
 			started.push(fake);
 			return fake;
@@ -266,6 +279,36 @@ describe("AgyHost stateful steps", () => {
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await expect(run.done).rejects.toThrow("without a usable response");
 		expect(fake.closed).toBe(true);
+	});
+	it("selects the model and thought level agy advertises, including effort-suffixed rosters", async () => {
+		const turn = async (roster: string[], efforts: (string | undefined)[]) => {
+			const state = await fixture({}, roster);
+			let messages: Message[] = [];
+			let fake: FakeAgy | undefined;
+			for (const reasoning of efforts) {
+				messages = [...messages, user("hello")];
+				const run = step(state.host, messages, {}, undefined, { reasoning });
+				fake ??= await state.started.next();
+				const ended = run.done.then(() => Promise.reject(new Error("step ended without prompting")));
+				const prompt = await Promise.race([fake.prompts.next(), ended]);
+				fake.text("Done.");
+				prompt.response.resolve({ stopReason: "end_turn" });
+				await run.done;
+				messages = [...messages, run.writer.output];
+			}
+			return fake!.configurations;
+		};
+		expect(await turn([model.id], ["high", "medium"])).toEqual([
+			`model:${model.id}`,
+			"thought_level:high",
+			"thought_level:medium",
+		]);
+		const suffixed = ["low", "medium", "high"].map(level => `${model.id}-${level}`);
+		expect(await turn(suffixed, ["high", "low", undefined])).toEqual([
+			`model:${model.id}-high`,
+			`model:${model.id}-low`,
+			`model:${model.id}-medium`,
+		]);
 	});
 	it("publishes host tools with mixed-type unions without collapsing their properties", async () => {
 		// Shape of a typed `yield`: section variants make `data` an object|string union,
