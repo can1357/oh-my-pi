@@ -164,7 +164,7 @@ describe("issue #3569 fresh launch default role from extension provider", () => 
 			preloadedCustomToolPaths: [],
 			workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
 			toolNames: ["read"],
-			cacheWarming: false,
+			cacheWarming: "off",
 		});
 		const sessions: AgentSession[] = [];
 
