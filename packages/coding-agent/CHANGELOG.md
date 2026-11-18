@@ -43,6 +43,7 @@
 - MCP tool calls default to a 10-minute deadline (handshakes and listings keep 30 s), never shorter than the wait the tool's own `timeout`/`timeout_ms`/`*_seconds` argument requests; without a configured timeout, progress notifications extend it up to one hour
 - A bare `:N` line selector now reads line N (with the usual 1-before/3-after context) in every read, grep and URL selector; `:N-` reads from line N onward, and every "Use :N- to continue" hint uses the open-ended form
 - Named services and `pty: true` commands now run in omp's own shell, as a process of their own, instead of your login shell: the in-process utilities (`jq`, `rg`, `sd`, `timeout`, `xargs`, …) resolve first, internal URLs (`local://…`, `skill://…`, a URL `cwd`) work as in every other bash call, and the command starts from the session shell's exports, functions and aliases. A pty command's programs still own a real terminal (`/dev/tty`, Ctrl-C, resize)
+- `sh`, `bash` and `zsh` run by bare name in the bash tool (`bash -c '…'`, `bash script.sh`, `… | bash`, `bash -s`, also under `env`, `xargs`, `find -exec` and `timeout`) are child shells of the embedded engine instead of the system shell, so omp's built-in utilities and internal URLs (`local://`, `skill://`, …) work inside them; `/bin/bash`, `exec bash`, `nohup bash …` and interactive (`-i`) shells still run the system shell
 
 ### Fixed
 
@@ -230,6 +231,8 @@
 - `omp` commands run from bash (`omp read 'skill://name:1-20'`, also behind `nice`/`npx`/`sudo`) receive their URL arguments untouched
 - Bash builtins now accept internal URIs that carry a read selector, as `read` does: `jq . artifact://12:raw` opens the artifact itself and `jq . artifact://12:raw:21-21`, `head local://log.txt:-50` or `cat agent://Id:5-9` read exactly those lines (they failed with "Invalid argument" or "Input/output error")
 - `jq: command not found` (and other in-process utilities missing) in named services and `pty: true` commands
+- `bash local://run.sh` and `sh skill://name/scripts/x.sh` run the script (with `$0` its real path, so it finds the files next to it) instead of failing with "No such file or directory"
+- `kill`, `timeout` and a cancelled command reach a child shell's `trap` handlers (and bash's `EXIT` trap) when the shell runs in the background, in a pipeline or under `timeout`
 
 ### Removed
 

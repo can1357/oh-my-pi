@@ -255,6 +255,19 @@ impl Fs for VfsFs {
 		)
 	}
 
+	fn backing_path(&mut self, path: &BStr) -> FsPoll<BString> {
+		self.route(
+			path,
+			|| FsPoll::Ready(Err(io::ErrorKind::Unsupported.into())),
+			|fs, path| async move {
+				let file = fs.backing_path(&path).await?;
+				file
+					.map(|file| os_bytes(file.as_os_str()))
+					.ok_or_else(|| io::ErrorKind::Unsupported.into())
+			},
+		)
+	}
+
 	fn mkfifo_or_temp(&mut self, purpose: TempPurpose) -> FsPoll<TempNode> {
 		StdFs::default().mkfifo_or_temp(purpose)
 	}

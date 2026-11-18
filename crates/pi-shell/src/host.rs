@@ -35,6 +35,7 @@ use crate::{
 	tools::{SpawnLog, ToolConfig},
 };
 
+mod loopback;
 mod urls;
 
 /// Time between TERM and KILL when a running external is abandoned (a cancel
@@ -113,6 +114,18 @@ impl StdStreams {
 		let slots = Arc::clone(&self.slots.lock());
 		let stdout = slots[1].lock();
 		stdout.as_ref()?.dup().ok()
+	}
+
+	/// Whether the run's stdin and stderr are both terminals: a shell
+	/// reading its commands there is interactive.
+	fn on_terminal(&self) -> bool {
+		let slots = Arc::clone(&self.slots.lock());
+		[0, 2].into_iter().all(|index| {
+			slots[index]
+				.lock()
+				.as_ref()
+				.is_some_and(|file| file.kind() == FileKind::Tty)
+		})
 	}
 
 	/// Remove every stream, closing the files installed last.
@@ -543,8 +556,9 @@ impl PiHost {
 impl crate::bash::Host for PiHost {
 	/// pi's order ([`crate::extras`]): the engine's intrinsics (`suspend`
 	/// withheld), the tools (`timeout`, `nohup`, `git`, the extras that run
-	/// command lines), the other extras, then `PATH`. A name with a slash is
-	/// only ever a path; `exec` searches `PATH` without asking.
+	/// command lines), the other extras, the shells the engine runs itself
+	/// (`sh`, `bash`, `zsh`: [`loopback`]), then `PATH`. A name with a slash
+	/// is only ever a path; `exec` searches `PATH` without asking.
 	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if why.has_slash {
 			return Resolved::NotFound;
@@ -559,10 +573,13 @@ impl crate::bash::Host for PiHost {
 		if let Some(tool) = self.tools.lookup(name) {
 			return Resolved::Tool(tool);
 		}
-		self
-			.tools
-			.native_extra(name)
-			.map_or(Resolved::NotFound, Resolved::Native)
+		if let Some(native) = self.tools.native_extra(name) {
+			return Resolved::Native(native);
+		}
+		if crate::sys::shebang::is_self_shell(name) {
+			return Resolved::SelfShell;
+		}
+		Resolved::NotFound
 	}
 
 	/// On Windows, a utility written in the syntax of the System32 program it
@@ -572,7 +589,13 @@ impl crate::bash::Host for PiHost {
 	/// `tar --hard-dereference`) goes to `PATH`'s program, which may have it;
 	/// with none there the extra runs and reports the option. Windows' `PATH`
 	/// programs of those names are System32's, a different command language.
+	/// A shell command line the engine's own shell does not stand in for
+	/// (`bash -i`, restricted mode) goes to `PATH`'s shell
+	/// ([`loopback::needs_program`]).
 	fn defers_to_path(&mut self, name: &BStr, argv: &[BString]) -> bool {
+		if crate::sys::shebang::is_self_shell(name) {
+			return loopback::needs_program(argv, self.launcher.streams.on_terminal());
+		}
 		(cfg!(windows)
 			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default()))
 			|| (!cfg!(windows)

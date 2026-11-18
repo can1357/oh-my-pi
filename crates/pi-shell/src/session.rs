@@ -837,7 +837,7 @@ impl Driver {
 			match self.jobs.try_recv() {
 				Ok(Request::Run(job)) => self.run(job).await,
 				Ok(Request::LiveJobs(reply)) => {
-					let _ = reply.send(self.shell.live_external_jobs());
+					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
 				},
 				Err(flume::TryRecvError::Disconnected) => break,
 				Err(flume::TryRecvError::Empty) => self.idle_turn().await,

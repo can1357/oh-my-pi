@@ -1508,8 +1508,8 @@ async fn umask_is_scoped_to_the_shell() {
 	let before = host_umask();
 	let dir = tempfile::tempdir().expect("temp dir");
 	let (result, output) = execute_captured(format!(
-		"cd '{}' && umask 077 && : > redirect && touch builtin && sh -c ': > external' && mkdir \
-		 made && (umask 000) && umask",
+		"cd '{}' && umask 077 && : > redirect && touch builtin && /bin/sh -c ': > external' && \
+		 mkdir made && (umask 000) && umask",
 		dir.path().display()
 	))
 	.await;
@@ -1610,7 +1610,7 @@ async fn shebangless_background_script_with_fifo_stdin() {
 #[tokio::test(flavor = "multi_thread")]
 async fn external_command_receives_extra_file_descriptor() {
 	let (result, output) =
-		execute_captured("sh -c 'printf descriptor-output >&3' 3>&1".into()).await;
+		execute_captured("/bin/sh -c 'printf descriptor-output >&3' 3>&1".into()).await;
 	assert_eq!(result.exit_code, Some(0), "{output}");
 	assert_eq!(output, "descriptor-output");
 }
@@ -1667,17 +1667,17 @@ async fn uutils_xargs_children_feed_pipeline_and_report_failure() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_signal_death_reports_125() {
 	let (result, output) =
-		execute_captured("echo x | xargs sh -c 'kill -9 $$' 2>&1 >/dev/null".into()).await;
+		execute_captured("echo x | xargs /bin/sh -c 'kill -9 $$' 2>&1 >/dev/null".into()).await;
 	assert_eq!(result.exit_code, Some(125), "{output}");
-	assert!(output.contains("xargs: sh: terminated by signal 9"), "{output}");
+	assert!(output.contains("xargs: /bin/sh: terminated by signal 9"), "{output}");
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_signal_death_stops_sequential_commands() {
 	let (result, output) = execute_captured(
-		"printf 'first\\nsecond\\n' | xargs -n1 sh -c 'if [ \"$1\" = first ]; then kill -9 $$; else \
-		 echo unexpected; fi' _"
+		"printf 'first\\nsecond\\n' | xargs -n1 /bin/sh -c 'if [ \"$1\" = first ]; then kill -9 $$; \
+		 else echo unexpected; fi' _"
 			.into(),
 	)
 	.await;
@@ -1701,13 +1701,13 @@ async fn xargs_exit_137_is_not_signal_death() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_parallel_signal_death_stops_scheduling() {
 	let (result, output) = execute_captured(
-		"printf 'first\\nsecond\\nthird\\n' | xargs -n1 -P2 sh -c 'case \"$1\" in first) sleep 1;; \
-		 second) kill -9 $$;; third) echo unexpected;; esac' _"
+		"printf 'first\\nsecond\\nthird\\n' | xargs -n1 -P2 /bin/sh -c 'case \"$1\" in first) sleep \
+		 1;; second) kill -9 $$;; third) echo unexpected;; esac' _"
 			.into(),
 	)
 	.await;
 	assert_eq!(result.exit_code, Some(125), "{output}");
-	assert!(output.contains("xargs: sh: terminated by signal 9"), "{output}");
+	assert!(output.contains("xargs: /bin/sh: terminated by signal 9"), "{output}");
 	assert!(!output.contains("unexpected"), "{output}");
 }
 
@@ -1715,13 +1715,13 @@ async fn xargs_parallel_signal_death_stops_scheduling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_unlimited_parallel_observes_signal_before_next_launch() {
 	let (result, output) = execute_captured(
-		"{ printf 'first\\nsecond\\n'; sleep 1; printf 'third\\n'; } | xargs -n1 -P0 sh -c 'if [ \
-		 \"$1\" = first ]; then kill -9 $$; else echo unexpected; fi' _"
+		"{ printf 'first\\nsecond\\n'; sleep 1; printf 'third\\n'; } | xargs -n1 -P0 /bin/sh -c 'if \
+		 [ \"$1\" = first ]; then kill -9 $$; else echo unexpected; fi' _"
 			.into(),
 	)
 	.await;
 	assert_eq!(result.exit_code, Some(125), "{output}");
-	assert!(output.contains("xargs: sh: terminated by signal 9"), "{output}");
+	assert!(output.contains("xargs: /bin/sh: terminated by signal 9"), "{output}");
 	assert!(!output.contains("unexpected"), "{output}");
 }
 

@@ -30,8 +30,8 @@ async fn run(shell: &Shell, script: &str) -> Arc<RunTrace> {
 	assert_eq!(result.exit_code, Some(0));
 	trace
 }
-// TestKit explicitly resolves bare shell names to SelfShell; PiHost leaves
-// OS shells external. Exercise native provenance without changing execution.
+// TestKit resolves bare shell names to SelfShell whatever `PATH` and the
+// command line say. Exercise native provenance without changing execution.
 fn run_native_shell(script: &str) -> (Arc<RunTrace>, Vec<u8>) {
 	let trace = Arc::new(RunTrace::new(script));
 	let sink: Arc<dyn EventSink> = trace.clone();
@@ -830,7 +830,7 @@ async fn expanded_script_equal_to_a_literal_does_not_borrow_its_origin() {
 #[tokio::test(flavor = "multi_thread")]
 async fn external_shell_literal_is_rendered_without_inventing_native_child_outcomes() {
 	let shell = Shell::new(None);
-	let trace = run(&shell, "bash -c 'native_viz_external=inside; printf outside'").await;
+	let trace = run(&shell, "/bin/sh -c 'native_viz_external=inside; printf outside'").await;
 	let snapshot = trace.snapshot();
 	assert_eq!(snapshot.units.len(), 1);
 	assert!(snapshot.units[0].syntax.as_ref().unwrap().parent.is_none());

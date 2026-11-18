@@ -2217,7 +2217,12 @@ impl Shell {
 					} else {
 						exec::finish_cancel(&mut self.k.root, cx.store, &mut self.procs[i], status);
 					}
-				} else {
+				} else if stands_for_nested(&self.procs[i])
+					.is_some_and(|shell| self.procs.iter().any(|p| p.vpid == shell))
+				{
+					// Its nested shell was cancelled above and runs a trap as
+					// its last action: the vproc ends with that shell's status.
+				} else if !self.exit_trap_on_signal(cx, i, sig, status) {
 					self.kill(cx, i, sig, status);
 				}
 			}
@@ -2269,6 +2274,60 @@ impl Shell {
 			return Some(Step::SuspendReady);
 		}
 		None
+	}
+
+	/// bash runs its `EXIT` trap when a signal ends it: so does vproc `i`
+	/// when it is a nested `bash` or `sh` that set one, which then exits with
+	/// `status` (its task or external is signalled as [`Self::kill`] does).
+	/// `false` for any other vproc and for `KILL`: the caller ends it.
+	fn exit_trap_on_signal(&mut self, cx: &mut Cx<'_>, i: usize, sig: Signal, status: i32) -> bool {
+		let p = &mut self.procs[i];
+		if sig == Signal::Kill
+			|| p.mode.dialect() != crate::bash::ids::Dialect::Bash
+			|| !p.own_traps.has(crate::bash::store::TrapKey::Exit)
+			|| !nested::is_nested_root(cx.store, p)
+		{
+			return false;
+		}
+		for f in &mut p.frames {
+			if let Some(sc) = f.scratch.as_mut() {
+				match &mut sc.live {
+					Live::Task(t) => t.signal(sig),
+					Live::Ext(e) => {
+						let _ = e.signal(sig);
+						let _ = e.cont();
+					},
+					_ => {},
+				}
+			}
+		}
+		p.blocked = None;
+		p.stopped = false;
+		exec::exit_shell(&mut self.k, p, cx, status);
+		true
+	}
+
+	/// Add to `hits` (indices of signalled vprocs, left sorted) the nested
+	/// shells that hit vprocs stand for ([`stands_for_nested`]), and return
+	/// those vprocs' indices with their shells: a signal aimed at one (`kill
+	/// $!` of `bash -c … &`) is its shell's, as a signal to a process is
+	/// what it `exec`'d's.
+	fn nested_stand_ins(&self, hits: &mut Vec<usize>) -> Vec<(usize, Vpid)> {
+		let mut stand_ins = Vec::new();
+		let mut at = 0;
+		while let Some(&i) = hits.get(at) {
+			at += 1;
+			if let Some(shell) = stands_for_nested(&self.procs[i])
+				&& let Some(j) = self.procs.iter().position(|p| p.vpid == shell)
+			{
+				if !hits.contains(&j) {
+					hits.push(j);
+				}
+				stand_ins.push((i, shell));
+			}
+		}
+		hits.sort_unstable();
+		stand_ins
 	}
 
 	/// Terminate vproc `i` with `status`: signal its task or external, end its
@@ -2416,6 +2475,7 @@ impl Shell {
 			})
 			.collect();
 		self.callout_trees(&mut hits);
+		let stand_ins = self.nested_stand_ins(&mut hits);
 		// Vprocs this signal stopped or continued (job states follow).
 		let mut changed: Vec<(Vpid, Option<Signal>)> = Vec::new();
 		for &i in hits.iter().rev() {
@@ -2455,6 +2515,22 @@ impl Shell {
 			// it, and the vproc ends with the program's real status, once it
 			// has exited (`wait` returns then, not before).
 			if terminating && target != SigTarget::Vpid(root.0) {
+				// A vproc that stands for its nested shell does not die by
+				// itself either: the shell got the signal (it is a hit of a
+				// higher index, handled before) and, when it lives on (a
+				// trap, an ignored signal), ends the vproc with its own
+				// status. One the signal ended takes the vproc with it.
+				if stand_ins
+					.iter()
+					.any(|&(at, shell)| at == i && self.procs.iter().any(|p| p.vpid == shell))
+				{
+					let p = &mut self.procs[i];
+					if p.stopped {
+						set_stopped(p, false);
+						changed.push((p.vpid, None));
+					}
+					continue;
+				}
 				let reaches_children = !matches!(target, SigTarget::Vpid(_));
 				if let Some(lone) = transparent(&self.procs[i], reaches_children) {
 					let p = &mut self.procs[i];
@@ -2504,7 +2580,12 @@ impl Shell {
 				continue;
 			}
 			match sig.default_action() {
-				DefaultAction::Terminate => self.kill(cx, i, sig, sig.exit_status(platform)),
+				DefaultAction::Terminate => {
+					let status = sig.exit_status(platform);
+					if !self.exit_trap_on_signal(cx, i, sig, status) {
+						self.kill(cx, i, sig, status);
+					}
+				},
 				DefaultAction::Stop | DefaultAction::Continue => {
 					let stop = sig.default_action() == DefaultAction::Stop;
 					let p = &mut self.procs[i];
@@ -2580,12 +2661,13 @@ impl Shell {
 	}
 
 	/// Number of the root's background jobs that still wait for a running
-	/// external process, or for the host to finish starting one (`sh -c
-	/// 'sleep 9' &`, a pipeline stage); jobs that
-	/// only run in-engine work (a builtin `sleep`, a loop) are not counted.
-	/// A host keeping a shell alive for its externals asks this between
-	/// scripts.
-	pub fn live_external_jobs(&self) -> usize {
+	/// external process, or for the host to finish starting one (`/bin/sleep
+	/// 9 &`, a pipeline stage), or that run a nested shell (`sh -c 'sleep 9'
+	/// &`: the child shell stands for the process it would be); other jobs
+	/// that only run in-engine work (a builtin `sleep`, a loop) are not
+	/// counted. A host keeping a shell alive for its externals asks this
+	/// between scripts.
+	pub fn live_external_jobs(&self, store: &mut dyn StateStore) -> usize {
 		let Some(root) = self.procs.first() else {
 			return 0;
 		};
@@ -2595,11 +2677,11 @@ impl Shell {
 			.filter(|job| {
 				self.procs.iter().any(|p| {
 					self.in_job(p.vpid, job.vpid)
-						&& p.frames.iter().any(|f| {
+						&& (p.frames.iter().any(|f| {
 							f.scratch
 								.as_ref()
 								.is_some_and(|sc| matches!(sc.live, Live::Ext(_) | Live::Spawn(_)))
-						})
+						}) || nested::is_nested_root(store, p))
 				})
 			})
 			.count()
@@ -2783,6 +2865,33 @@ fn transparent(p: &Vproc, children: bool) -> Option<bool> {
 		},
 		_ => None,
 	}
+}
+
+/// The nested shell `p` stands for, when a terminating signal to `p` is that
+/// shell's business rather than `p`'s: `p` is a subshell vproc (no `EXIT`
+/// trap of its own) whose one frame awaits the nested shell that is its last
+/// command (`bash -c … &`, a pipeline stage, `( sh x )`, a callout's
+/// operand) or one it `exec`s. bash would have `exec`'d the shell: `p` ends
+/// with the shell's status, not by the signal.
+fn stands_for_nested(p: &Vproc) -> Option<Vpid> {
+	if !p.transient || p.own_traps.has(crate::bash::store::TrapKey::Exit) {
+		return None;
+	}
+	let [frame] = p.frames.as_slice() else {
+		return None;
+	};
+	let unit = frame.unit.as_ref()?;
+	let exec = frame.scratch.as_ref()?.exec.as_ref()?;
+	let code_at = |pc: u32| unit.ops.get(pc as usize).map(|op| op.code);
+	let &[shell] = exec.wait_for.as_slice() else {
+		return None;
+	};
+	let nested = code_at(frame.pc) == Some(ir::Opcode::Exec)
+		&& matches!(exec.target, Some(proc::Target::SelfShell | proc::Target::Script(_)))
+		&& matches!(exec.waiting, Some(proc::Awaited::Jobs { .. }));
+	let last = exec.exec_as.is_some()
+		|| matches!(code_at(frame.pc + 1), Some(ir::Opcode::SubExit | ir::Opcode::End));
+	(nested && last).then_some(shell)
 }
 
 fn set_stopped(p: &mut Vproc, on: bool) {

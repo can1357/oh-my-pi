@@ -1087,7 +1087,7 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
+						command:    "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'".to_string(),
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
@@ -1137,7 +1137,7 @@ mod tests {
 			shell
 				.run(
 					CoreShellRunOptions {
-						command:    "sh -c 'sleep 30 & wait'".to_string(),
+						command:    "/bin/sh -c 'sleep 30 & wait'".to_string(),
 						cwd:        None,
 						env:        None,
 						timeout_ms: None,
