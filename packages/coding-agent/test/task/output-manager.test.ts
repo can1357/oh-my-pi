@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentOutputManager, PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -19,12 +20,16 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Bob")).toBe("Bob");
 	});
 
-	it("prefixes numeric names before checking for collisions with existing outputs", async () => {
+	it("reserves numeric names for PIDs only when cross-instance messaging is enabled", async () => {
 		using tmp = TempDir.createSync("@omp-output-manager-");
 		await Bun.write(path.join(tmp.path(), "Agent123.md"), "prior output");
-		const mgr = new AgentOutputManager(() => tmp.path());
+		const local = new AgentOutputManager(() => tmp.path(), { settings: Settings.isolated() });
+		const sharing = new AgentOutputManager(() => tmp.path(), {
+			settings: Settings.isolated({ "task.crossInstance": true }),
+		});
 
-		expect(await mgr.allocate("123")).toBe("Agent123-2");
+		expect(await local.allocate("123")).toBe("123");
+		expect(await sharing.allocate("123")).toBe("Agent123-2");
 	});
 
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {

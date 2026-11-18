@@ -11,7 +11,7 @@
 
 ### Added
 
-- `agent://peers` lists interactive omp instances in the same folder. Use `agent://<pid>` or `agent://<pid>/<id>` to message them and read live agent status and saved output. Digit-only task names get an `Agent` prefix so they don't collide with PIDs.
+- Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
 - A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
 - The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
 - Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session

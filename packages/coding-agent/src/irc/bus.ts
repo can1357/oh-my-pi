@@ -56,10 +56,13 @@ interface SendMark {
 /** Mailbox cap per agent; oldest messages are dropped beyond it. */
 const MAILBOX_CAP = 100;
 
+/** A message awaiting delivery; local-only sends never fall through to a peer tunnel. */
+export type IrcSend = Omit<IrcMessage, "id" | "ts"> & { localOnly?: boolean };
+
 /** Public surface of the process-global IRC bus, implemented locally on main and by a proxy in workers. */
 export interface IrcBusApi {
 	/** Fire-and-forget delivery; the receipt reports how the message reached the recipient. */
-	send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt>;
+	send(msg: IrcSend): Promise<IrcDeliveryReceipt>;
 	/** Whether `from` successfully sent `to` anything, progress included, at or after `sinceTs`. */
 	sentSince(from: string, to: string, sinceTs: number): boolean;
 	/** Agents `from` messaged directly at or after `sinceTs` that have not answered since. */
@@ -154,12 +157,12 @@ export class IrcBus implements IrcBusApi {
 	 * `wait`/`inbox` and inflate unread counts. Only a failed live hand-off
 	 * is buffered for the recipient to drain later.
 	 */
-	async send(msg: Omit<IrcMessage, "id" | "ts">): Promise<IrcDeliveryReceipt> {
+	async send({ localOnly, ...msg }: IrcSend): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		// Taken before delivery: a reply sent while this message is still being
 		// delivered must still order after it.
 		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
-		const receipt = await this.#deliver(message);
+		const receipt = await this.#deliver(message, { localOnly });
 		if (receipt.outcome !== "failed") {
 			if (message.progress) {
 				this.#record(this.#lastProgress, message.from, message.to, mark);
@@ -238,13 +241,14 @@ export class IrcBus implements IrcBusApi {
 		return unanswered;
 	}
 
-	async #deliver(message: IrcMessage): Promise<IrcDeliveryReceipt> {
+	async #deliver(message: IrcMessage, options: { localOnly?: boolean }): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
-		const peer = ref ? undefined : parsePeerAddress(message.to);
-		if (peer && peer.pid !== process.pid) {
+		const mesh = ref || options.localOnly ? undefined : agentMesh();
+		const peer = mesh && parsePeerAddress(message.to);
+		if (mesh && peer && peer.pid !== process.pid) {
 			// Another omp instance in this project: the mesh forwards it, and the
 			// recipient's own bus decides how it lands.
-			return agentMesh().send(peer, message.from, message.body, message.progress);
+			return mesh.send(peer, message.from, message.body, message.progress);
 		}
 		if (!ref) {
 			return {

@@ -129,10 +129,11 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const replies: PendingReplies = { from: [], blocked: [], onUser: [], stopped: [] };
 	const since = registry.get(senderId)?.session?.runStartedAt ?? 0;
 	const asked = new Set<string>();
+	const mesh = agentMesh();
 	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
 		asked.add(to);
-		const peer = parsePeerAddress(to);
-		if (peer && agentMesh().peer(peer.pid)) {
+		const peer = mesh && parsePeerAddress(to);
+		if (mesh && peer && !registry.get(to) && mesh.peer(peer.pid)) {
 			// Another instance's agent: its state is not visible here, so a live instance can still answer.
 		const session = registry.get(to)?.session;
 		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);

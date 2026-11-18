@@ -30,6 +30,7 @@ import { executeSend, isIrcEnabled } from "../irc/messaging";
 import { agentMesh } from "../irc/mesh";
 import { formatPeerAddress, type PeerAddress } from "../irc/mesh-protocol";
 import type { AgentSessionHandle } from "../session/agent-session-handle";
+import { cfgTaskCrossInstance } from "../task/settings";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
 import agentSupersededTemplate from "../prompts/tools/agent-url-superseded.md" with { type: "text" };
@@ -65,6 +66,11 @@ function pidTarget(url: InternalUrl): PidTarget | undefined {
 	if (id && /[/\\\0]/.test(id)) throw new Error("Invalid agent ID in PID-qualified URL.");
 	const pid = Number(host);
 	return { address: { pid, ...(id ? { id } : {}) }, segments, local: pid === process.pid };
+}
+
+function crossInstanceEnabled(context?: ResolveContext): boolean {
+	const settings = context?.session?.settings ?? context?.settings;
+	return settings !== undefined && cfgTaskCrossInstance.get(settings);
 }
 
 function decodeSegment(segment: string): string {
@@ -230,7 +236,12 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	};
 
 	promptDoc(host: SchemeHost): string {
-		return prompt.render(agentPromptDoc, { subagent: host.subagent }).trim();
+		return prompt
+			.render(agentPromptDoc, {
+				subagent: host.subagent,
+				crossInstanceAgents: host.crossInstanceAgents,
+			})
+			.trim();
 	}
 
 	/**
@@ -243,7 +254,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
-		if (outputId === "all" || outputId === "peers" || /^\d+$/.test(outputId) || hasPathExtraction(url)) return null;
+		if (outputId === "all" || hasPathExtraction(url)) return null;
+		if (crossInstanceEnabled(context) && (outputId === "peers" || /^\d+$/.test(outputId))) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
@@ -264,7 +276,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
-		const pid = pidTarget(url);
+		const pid = cfgTaskCrossInstance.get(session.settings) ? pidTarget(url) : undefined;
 		const named = pid
 			? pid.local
 				? (pid.address.id ?? MAIN_AGENT_ID)
@@ -294,7 +306,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 		const result = await executeSend(
 			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content, progress },
+			{ to, message: content, progress, remote: pid !== undefined && !pid.local },
 		);
 		return {
 			content: [
@@ -314,9 +326,10 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
 		}
-		if (outputId === "peers") return this.#resolvePeers(url);
+		const crossInstance = crossInstanceEnabled(context);
+		if (crossInstance && outputId === "peers") return this.#resolvePeers(url);
 		const registry = context?.agentRegistry ?? AgentRegistry.global();
-		const pid = pidTarget(url);
+		const pid = crossInstance ? pidTarget(url) : undefined;
 		if (pid && !pid.local) return this.#resolvePeer(url, pid);
 		return this.#resolveOutput(url, {
 			outputId: pid ? (pid.address.id ?? MAIN_AGENT_ID) : outputId,
@@ -328,7 +341,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 
 	/** Roster of the other omp instances in this project. */
 	#resolvePeers(url: InternalUrl): InternalResource {
-		const peers = agentMesh().peers();
+		const peers = agentMesh()?.peers() ?? [];
 		const content =
 			peers.length === 0
 				? "No other omp instances in this project.\n"
@@ -346,7 +359,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	/** An agent of another omp instance, read from that instance's session files. */
 	async #resolvePeer(url: InternalUrl, target: PidTarget): Promise<InternalResource> {
 		const { pid, id } = target.address;
-		const peer = agentMesh().peer(pid);
+		const peer = agentMesh()?.peer(pid);
 		if (!peer) throw new Error(`No omp instance with pid ${pid} in this project. List them with agent://peers`);
 		const sessionFile = peer.sessionFile;
 		if (!sessionFile) throw new Error(`Instance ${pid} has no session file; its agents cannot be read.`);
