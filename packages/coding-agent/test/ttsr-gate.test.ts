@@ -271,12 +271,9 @@ describe("TTSR gate rules", () => {
 			{} as ModelRegistry,
 		);
 		const select = vi.fn(async () => "Approve");
-		runner.initialize(
-			{} as ExtensionActions,
-			{} as ExtensionContextActions,
-			undefined,
-			{ select } as unknown as ExtensionUIContext,
-		);
+		runner.initialize({} as ExtensionActions, {} as ExtensionContextActions, undefined, {
+			select,
+		} as unknown as ExtensionUIContext);
 		runner.setToolGuard(guardOver(coordinator, settings));
 		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
 		const wrapped = new ExtensionToolWrapper({ ...bash, execute } as AgentTool, runner) as ExtensionToolWrapper<any>;
