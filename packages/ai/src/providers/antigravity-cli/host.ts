@@ -657,7 +657,6 @@ export class AgyHost implements ProviderSessionState {
 			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer.text) : undefined);
 		if (quota) {
 			this.#noticeBuffer = undefined;
-			step.writer.discardText();
 			this.#fail(quota);
 			return errorOutput(quota.message);
 		}
@@ -778,7 +777,6 @@ export class AgyHost implements ProviderSessionState {
 			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer.text) : undefined);
 		if (quota) {
 			this.#noticeBuffer = undefined;
-			writer.discardText();
 			this.#fail(quota);
 			return;
 		}

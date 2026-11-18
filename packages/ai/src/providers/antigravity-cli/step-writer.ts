@@ -116,19 +116,6 @@ export class StepWriter {
 		this.#stream.push({ type: "done", reason, message: this.output });
 	}
 
-	/** Drop visible text before failing; a provider notice is not model output. */
-	discardText(): void {
-		const content = this.output.content;
-		for (let index = content.length - 1; index >= 0; index--) {
-			const block = content[index];
-			if (block?.type === "text") block.text = "";
-		}
-		this.#endText();
-		this.#endThinking();
-		for (let index = content.length - 1; index >= 0; index--) {
-			if (content[index]?.type === "text") content.splice(index, 1);
-		}
-	}
 	/** Fail once without allowing later ACP events to mutate the published result. */
 	fail(reason: "aborted" | "error", message: string): void {
 		if (this.done) return;

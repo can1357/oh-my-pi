@@ -325,6 +325,26 @@ describe("AgyHost stateful steps", () => {
 		expect(text).toMatchObject({ type: "text", text: "Next file." });
 	});
 
+	it("keeps streamed normal text when a quota notice ends the turn", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Working on it.");
+		fake.text(
+			"Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.",
+		);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const failure = await run.done.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toBeInstanceOf(Error);
+		expect(failure instanceof Error ? failure.message : "").toMatch(/quota exceeded/);
+		const text = run.writer.output.content.find(block => block.type === "text");
+		expect(text).toMatchObject({ type: "text", text: "Working on it." });
+	});
+
 	it("does not stream the quota notice before failing", async () => {
 		const state = await fixture();
 		const run = step(state.host, [user("hello")]);
