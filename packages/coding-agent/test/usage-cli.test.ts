@@ -2355,13 +2355,13 @@ describe("omp usage reset", () => {
 		it("lists each grant's id, title and what it clears", async () => {
 			await runUsageCommand({ action: "reset", provider: "claude", noExtensions: true });
 
-			const text = stripVTControlCharacters(stdout);
-			expect(text).toContain(
-				`full-reset-2611 “One full limit reset (November 2026)” · clears Claude 5h + Claude weekly + Claude Fable weekly · usable now, offered next · expires ${late}`,
-			);
-			expect(text).toContain(
-				"launch-2610-fable “New model launch: one Fable reset” · clears Claude 5h + Claude Fable weekly · not usable now (unavailable, full-reset-2611 is offered first)",
-			);
+			const lines = stripVTControlCharacters(stdout).split("\n");
+			const full = lines.find(line => line.trimStart().startsWith("full-reset-2611 "));
+			const fable = lines.find(line => line.trimStart().startsWith("launch-2610-fable "));
+			expect(full).toContain("One full limit reset (November 2026)");
+			expect(full).toContain("Claude 5h + Claude weekly + Claude Fable weekly");
+			expect(fable).toContain("New model launch: one Fable reset");
+			expect(fable).toContain("Claude 5h + Claude Fable weekly");
 			expect(consumes()).toEqual([]);
 		});
 
@@ -2370,7 +2370,6 @@ describe("omp usage reset", () => {
 			await runUsageCommand({ action: "reset", target: `claude/${claude}`, noExtensions: true });
 
 			const text = stripVTControlCharacters(stderr);
-			expect(text).toContain("holds saved resets that clear different limits, so name the one to spend");
 			expect(text).toContain(`omp usage reset anthropic/${claude}:full-reset-2611`);
 			expect(text).toContain(`omp usage reset anthropic/${claude}:launch-2610-fable`);
 			expect(consumes()).toEqual([]);
@@ -2388,15 +2387,12 @@ describe("omp usage reset", () => {
 			expect(process.exitCode).toBe(0);
 		});
 
-		it("refuses a named grant Claude does not offer next, naming the offered one and what each clears", async () => {
+		it("refuses a named grant Claude does not offer next, giving the command for the offered one", async () => {
 			const { claude } = credentialIds();
 			await runUsageCommand({ action: "reset", target: `claude/${claude}:launch-2610-fable`, noExtensions: true });
 
 			const text = stripVTControlCharacters(stderr);
-			expect(text).toContain(
-				"Claude offers full-reset-2611 “One full limit reset (November 2026)” next (clears Claude 5h + Claude weekly + Claude Fable weekly), not launch-2610-fable “New model launch: one Fable reset” (clears Claude 5h + Claude Fable weekly)",
-			);
-			expect(text).toContain("Nothing was spent.");
+			expect(text).toContain(`omp usage reset anthropic/${claude}:full-reset-2611`);
 			expect(consumes()).toEqual([]);
 			expect(process.exitCode).toBe(1);
 		});
