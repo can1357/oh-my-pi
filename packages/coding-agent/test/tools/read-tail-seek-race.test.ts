@@ -68,7 +68,9 @@ describe("read :-N tail on a file edited between the count and the window read",
 
 		const output = textOf(await tool.execute("tail", { path: `${filePath}:-2` }));
 		expect(edited).toBe(true);
-		// The selected tail plus one leading context line, each whole.
-		expect(output.split("\n").map(row => row.slice(row.indexOf(":") + 1))).toEqual(lines.slice(-3));
+		// The snapshot tag, then the selected tail plus one leading context line, each whole.
+		const [header, ...rows] = output.split("\n");
+		expect(header).toMatch(/^\[.*big\.log#[0-9A-F]{4}\]$/);
+		expect(rows.map(row => row.slice(row.indexOf(":") + 1))).toEqual(lines.slice(-3));
 	});
 });

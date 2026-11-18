@@ -45,7 +45,7 @@ export interface PromptCacheWarming {
 	state: "scheduled" | "refreshing" | "inactive";
 	/** When the armed refresh decides. */
 	nextWarmAt?: number;
-	/** When warming gives up: its 60-minute streaming or 30-minute idle safety window. */
+	/** When warming gives up: the 30-minute idle window, or while streaming, when refreshing stops paying at current prices. */
 	stopsAt?: number;
 	/** Why nothing is scheduled. */
 	reason?: string;

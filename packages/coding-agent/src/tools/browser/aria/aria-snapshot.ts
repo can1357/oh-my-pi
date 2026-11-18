@@ -114,15 +114,21 @@ export function assertSelectorString(selector: unknown): asserts selector is str
 	if (typeof selector === "string") return;
 	let kind: string;
 	if (selector !== null && typeof selector === "object") {
+		const proto = Object.getPrototypeOf(selector);
 		kind =
-			"then" in selector && typeof selector.then === "function" ? "a Promise (missing await?)" : "an ElementHandle";
+			"then" in selector && typeof selector.then === "function"
+				? "a Promise (missing await?)"
+				: (proto === Object.prototype || proto === null) &&
+					  !Object.values(selector).some(value => typeof value === "function")
+					? "an options object (the selector comes first; to wait for time or a condition, use wait(ms | predicate) inside tab.run)"
+					: "an element handle";
 	} else {
 		kind = `a ${typeof selector}`;
 	}
 	throw new ToolError(
 		`Browser selector must be a string; got ${kind}. ` +
 			"tab.click/type/fill/waitFor take string selectors only — " +
-			'call the handle method directly (e.g. (await tab.id(n)).click()) or pass a string like "aria-ref=eN".',
+			'call the element\'s own method instead (tab.id(n).click()) or pass a string like "aria-ref=eN".',
 	);
 }
 
