@@ -1,5 +1,5 @@
 import { expect, vi } from "bun:test";
-import type { Agent } from "@oh-my-pi/pi-agent-core";
+import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, JudgmentRequest, NoulAnswer } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -36,8 +36,8 @@ export function fakeJudge(verdicts: Record<string, number>, gate?: Promise<void>
 	return { judge, requests };
 }
 
-/** A coordinator over `rules` whose host judges with `judge` (undefined: judged rules off). */
-export function setup(rules: Rule[], judge: Judge | undefined, settings = {} as Settings) {
+/** A coordinator over `rules` whose host judges with `judge` (undefined: judged rules off) and holds `tools`. */
+export function setup(rules: Rule[], judge: Judge | undefined, settings = {} as Settings, tools: AgentTool[] = []) {
 	const manager = new TtsrManager({
 		enabled: true,
 		contextMode: "discard",
@@ -51,7 +51,7 @@ export function setup(rules: Rule[], judge: Judge | undefined, settings = {} as 
 	const warnings: { content: string; rules: string[] }[] = [];
 	const events: AgentSessionEvent[] = [];
 	const host = {
-		agent: { state: { messages: [], tools: [] }, abort } as unknown as Agent,
+		agent: { state: { messages: [], tools }, abort } as unknown as Agent,
 		sessionManager: { getCwd: () => "/work", appendTtsrInjection: vi.fn() } as unknown as SessionManager,
 		settings,
 		emitSessionEvent: async (event: AgentSessionEvent) => {

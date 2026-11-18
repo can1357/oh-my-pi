@@ -427,9 +427,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * section targets plus move/rename destinations. "write" while no target is known.
 	 */
 	readonly approval = (args: unknown): ToolApprovalDecision => {
-		const { paths, fileOps } = this.#inspect(args);
-		const targets = [...paths];
-		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		const targets = this.#targets(args);
 		if (targets.length === 0) return "write";
 		const router = InternalUrlRouter.instance();
 		return strictestApproval(targets.map(target => router.writeTier(target, undefined, this.session)));
@@ -451,9 +449,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * plus move/rename destinations, mirroring {@link approval}.
 	 */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
-		const { paths, fileOps } = this.#inspect(args);
-		const targets = [...paths];
-		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		const targets = this.#targets(args);
 		const keys: string[] = [];
 		for (const target of targets) {
 			const key = approvalTargetKey(this.session.cwd, target);
@@ -470,10 +466,10 @@ export class EditTool implements AgentTool<TInput> {
 		return digest || undefined;
 	}
 
+	/** Every file the payload touches, as {@link approval} sees them: deleted and moved files too, not only those it adds lines to. */
 	matcherPaths(args: unknown): readonly string[] | undefined {
-		const inspection = this.#inspect(args);
-		const paths = inspection.entries.length > 0 ? inspection.entries.map(entry => entry.path) : inspection.paths;
-		return paths.length > 0 ? paths : undefined;
+		const targets = this.#targets(args);
+		return targets.length > 0 ? targets : undefined;
 	}
 
 	matcherEntries(args: unknown): readonly { path: string; digest: string }[] | undefined {
@@ -636,6 +632,14 @@ export class EditTool implements AgentTool<TInput> {
 		}
 		if (tagged) tagged[kInspection] = { mode: this.mode, inspection };
 		return inspection;
+	}
+
+	/** Every path the payload writes: section targets plus move/rename destinations. */
+	#targets(args: unknown): string[] {
+		const { paths, fileOps } = this.#inspect(args);
+		const targets = [...paths];
+		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		return targets;
 	}
 
 	/**

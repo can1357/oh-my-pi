@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import type { Judge } from "@oh-my-pi/pi-ai";
+import type { Judge, JudgmentRequest, NoulAnswer } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -15,6 +16,7 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { TtsrCoordinator } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type GuardJudge, ToolGuard } from "@oh-my-pi/pi-coding-agent/tools/tool-guard";
 import { assistant, fakeJudge, judgedRule, setup } from "./helpers/ttsr-judged-rules";
 
@@ -42,6 +44,33 @@ const failingJudge: Judge = {
 		throw new Error("judge unavailable");
 	},
 };
+
+/** Judge answering every question yes when the judged content contains `needle`, else no. */
+function contentJudge(needle: string): Judge {
+	return {
+		label: "content",
+		judge: async (request: JudgmentRequest) => {
+			const { content } = request.state as { content: string };
+			const answers: Record<string, NoulAnswer> = {};
+			for (const id in request.questions) answers[id] = { type: "noul", noul: content.includes(needle) ? 1 : 0 };
+			return { api: "fake", provider: "fake", model: "fake", answers, usage: {} };
+		},
+	} as unknown as Judge;
+}
+
+function applyPatchTool(): AgentTool {
+	return new EditTool(
+		{ cwd: "/work", settings: Settings.isolated() } as unknown as ToolSession,
+		"apply_patch",
+	) as AgentTool;
+}
+
+/** An apply_patch call adding a line to `src/a.ts`, then the given envelope sections. */
+function patchAddingLineAnd(...sections: string[]) {
+	return {
+		input: ["*** Begin Patch", "*** Update File: src/a.ts", "@@", "+// x", ...sections, "*** End Patch"].join("\n"),
+	};
+}
 
 function guardOver(coordinator: TtsrCoordinator, settings: Settings, stops: string[] = []): ToolGuard {
 	const messages: AgentMessage[] = [{ role: "user", content: "Clean up.", timestamp: Date.now() } as AgentMessage];
@@ -288,6 +317,46 @@ describe("TTSR gate rules", () => {
 		expect((error as Error).message).toContain("no-rm guidance");
 		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(1);
 		expect(execute).not.toHaveBeenCalled();
+	});
+
+	it("[gate-18] judges the whole edit call, so a file it deletes beside an added line cannot slip past", async () => {
+		const edit = applyPatchTool();
+		const DELETES_FILE = "Does this call delete a file?";
+		const rule = judgedRule("no-delete", {
+			gate: "before",
+			question: DELETES_FILE,
+			onJudgeError: "block",
+			scope: ["tool:edit"],
+		});
+		const { coordinator } = setup([rule], contentJudge("Delete File: secrets.env"), Settings.isolated(), [edit]);
+
+		const { refusal } = await coordinator.gateToolCall(
+			edit,
+			patchAddingLineAnd("*** Delete File: secrets.env"),
+			"call-1",
+		);
+
+		expect(refusal).toContain("no-delete guidance");
+	});
+
+	it.each([
+		{ name: "deletes", sections: ["*** Delete File: secrets.env"] },
+		{ name: "moves to", sections: ["*** Update File: config.txt", "*** Move to: secrets.env"] },
+		{ name: "only removes lines from", sections: ["*** Update File: secrets.env", "@@", "-TOKEN=1"] },
+	])("[gate-19] asks a gate globbed to a file the edit call $name, beside an added line", async ({ sections }) => {
+		const edit = applyPatchTool();
+		const rule = judgedRule("env-files", {
+			gate: "before",
+			question: "Does this call change an env file?",
+			scope: ["tool:edit"],
+			globs: ["*.env"],
+		});
+		const { coordinator } = setup([rule], contentJudge("secrets.env"), Settings.isolated(), [edit]);
+
+		const verdict = await coordinator.gateToolCall(edit, patchAddingLineAnd(...sections), "call-1");
+
+		expect(verdict.covered).toBe(true);
+		expect(verdict.refusal).toContain("env-files guidance");
 	});
 
 	it("asks nothing and runs a call outside the gate's scope, globs or prefilter", async () => {

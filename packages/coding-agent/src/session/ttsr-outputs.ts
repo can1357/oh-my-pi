@@ -157,7 +157,7 @@ export class TtsrToolInspector {
 		for (const [index, block] of message.content.entries()) {
 			if (block.type === "text") text.push(block.text);
 			else if (block.type === "thinking") thinking.push(block.thinking);
-			else if (block.type === "toolCall") outputs.push(...this.toolCallOutputs(block, index));
+			else if (block.type === "toolCall") outputs.push(...this.#toolCallOutputs(block, index));
 		}
 		const reply = text.join("\n\n");
 		if (/\S/.test(reply)) outputs.push({ content: reply, context: { source: "text" }, subject: "reply" });
@@ -168,8 +168,24 @@ export class TtsrToolInspector {
 		return outputs;
 	}
 
-	/** One tool call's outputs: per file when the tool reports entries, else its digest or serialized arguments. */
-	toolCallOutputs(toolCall: ToolCall, contentIndex: number): TtsrOutput[] {
+	/**
+	 * What a gate judges about one tool call before it runs: its outputs as above and, when those are
+	 * per-file digests of added lines, the whole call once more, since deleted, moved and removed-line
+	 * files appear in no digest. That output's paths are every file the call touches.
+	 */
+	gateOutputs(toolCall: ToolCall): TtsrOutput[] {
+		const outputs = this.#toolCallOutputs(toolCall, 0);
+		if (!this.entries(toolCall)) return outputs;
+		const args = toolCall.arguments;
+		outputs.push({
+			content: typeof args === "string" ? args : JSON.stringify(args ?? {}),
+			context: this.matchContext(toolCall, 0),
+			subject: `\`${toolCall.name}\` call`,
+		});
+		return outputs;
+	}
+
+	#toolCallOutputs(toolCall: ToolCall, contentIndex: number): TtsrOutput[] {
 		const context = this.matchContext(toolCall, contentIndex);
 		const entries = this.entries(toolCall);
 		if (entries) {

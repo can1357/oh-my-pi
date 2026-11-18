@@ -644,9 +644,7 @@ export class TtsrCoordinator {
 		const timeout = AbortSignal.timeout(cfgTtsrGateTimeoutMs.get(settings.grantAuthority?.() ?? settings));
 		const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
 		const verdicts = await Promise.all(
-			this.#inspector
-				.toolCallOutputs(toolCall, 0)
-				.map(output => this.#gateOutput(manager, output, signal, deadline)),
+			this.#inspector.gateOutputs(toolCall).map(output => this.#gateOutput(manager, output, signal, deadline)),
 		);
 		const covered = verdicts.some(verdict => verdict !== undefined);
 		const refused = verdicts.find(verdict => verdict?.rule !== undefined);
