@@ -61,6 +61,7 @@ import {
 	type CustomMessageEntry,
 	EPHEMERAL_MODEL_CHANGE_ROLE,
 	PREWALK_MODEL_CHANGE_ROLE,
+	TEMPORARY_MODEL_CHANGE_ROLE,
 	type FileEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
@@ -3926,7 +3927,9 @@ export class SessionManager {
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "model_change") continue;
-			return entry.role === "temporary" || entry.role === PREWALK_MODEL_CHANGE_ROLE ? entry : undefined;
+			return entry.role === TEMPORARY_MODEL_CHANGE_ROLE || entry.role === PREWALK_MODEL_CHANGE_ROLE
+				? entry
+				: undefined;
 		}
 		return undefined;
 	}

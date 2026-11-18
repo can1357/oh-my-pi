@@ -39,6 +39,21 @@ export const EPHEMERAL_MODEL_CHANGE_ROLE = "fallback";
 /** A prewalk or plan-yolo handoff: restored on resume, passed over when looking up the assigned role. */
 export const PREWALK_MODEL_CHANGE_ROLE = "prewalk";
 
+/** A model picked for this session only (the model selector, `/model`), not through a configured role. */
+export const TEMPORARY_MODEL_CHANGE_ROLE = "temporary";
+
+/**
+ * The configured model role a `model_change` entry's `role` assigned; undefined for the markers of
+ * switches no role made (retry fallback, prewalk handoff, temporary pick). The Agent Hub labels rows with it.
+ */
+export function modelRoleOf(role: string | undefined): string | undefined {
+	return role === EPHEMERAL_MODEL_CHANGE_ROLE ||
+		role === PREWALK_MODEL_CHANGE_ROLE ||
+		role === TEMPORARY_MODEL_CHANGE_ROLE
+		? undefined
+		: role;
+}
+
 export interface SessionHeader {
 	type: "session";
 	version?: number; // v1 sessions don't have this

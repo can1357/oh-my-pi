@@ -45,7 +45,7 @@ import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -389,7 +389,7 @@ export class ModelControls {
 					? PREWALK_MODEL_CHANGE_ROLE
 					: options?.ephemeral
 						? EPHEMERAL_MODEL_CHANGE_ROLE
-						: "temporary",
+						: TEMPORARY_MODEL_CHANGE_ROLE,
 			);
 			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 		}
