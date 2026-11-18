@@ -31,6 +31,8 @@ export const TAIL = "~tail";
 export const UNRECORDED = "~none";
 /** Inserter of lines present in HEAD. */
 const HEAD = "~head";
+/** Largest HEAD-side × worktree-side item product a cancellation window aligns; larger ones stay as replayed. */
+const PAIRING_BUDGET = 250_000;
 
 /** True for the pseudo-actors that stand for "no recorded edit explains this". */
 export function isPseudoActor(actor: string): boolean {
@@ -251,85 +253,158 @@ export function attribute(head: readonly string[], steps: readonly Step[], work:
 	return deriveOps(items);
 }
 
-/**
- * Turn a deleted HEAD line and an identical re-inserted line of the same region back into an
- * unchanged HEAD line. Happens when HEAD moved to include content the recorded history deleted
- * and re-added (e.g. part of the work was committed meanwhile, possibly only some of it). Run
- * after every step, so a later step that deletes the line again is recorded as that step's
- * deletion of a HEAD line.
- */
-function cancelReinsertions(items: Item[]): Item[] {
-	const out: Item[] = [];
-	let regionStart = 0;
-	items.forEach((item, index) => {
-		if (item.alive && item.head !== undefined) {
-			settleRegion(items, regionStart, index, out);
-			out.push(item);
-			regionStart = index + 1;
-		}
-	});
-	settleRegion(items, regionStart, items.length, out);
-	return out;
+/** An unchanged HEAD line: present in HEAD and alive in the current content. */
+function isAnchor(item: Item): boolean {
+	return item.alive && item.head !== undefined;
 }
 
 /**
- * Append `items[start, end)`, the region between two HEAD anchors, to `out` with each deleted
- * HEAD line paired to an identical re-inserted line restored as one HEAD anchor. Every other item
- * moves between the restored anchors it falls between on its own side (HEAD order for deleted
- * HEAD lines, worktree order for the rest), so an unpaired deletion keeps its HEAD position and a
- * later step re-adding that line lands in the same region.
+ * Turn a deleted HEAD line and an identical re-inserted line back into an unchanged HEAD line.
+ * Happens when HEAD moved to include content the recorded history deleted and re-added (e.g. part
+ * of the work was committed meanwhile, possibly only some of it). Run after every step, so a later
+ * step that deletes the line again is recorded as that step's deletion of a HEAD line.
+ *
+ * Pairs are sought within each region between HEAD anchors, and across the anchors between two
+ * regions when those may be what keeps a pair apart: the steps' diffs can place the same block at
+ * different spots among repeated lines (`return;`, `}`), leaving its deletion before an anchor
+ * and its re-insertion after it.
  */
-function settleRegion(items: readonly Item[], start: number, end: number, out: Item[]): void {
-	// Inside a region every item carrying a HEAD index is a deleted HEAD line.
-	const dels: Item[] = [];
-	const ins: Item[] = [];
+function cancelReinsertions(items: Item[]): Item[] {
+	const out: Item[] = [];
+	let index = 0;
+	while (index < items.length) {
+		if (isAnchor(items[index])) {
+			out.push(items[index++]);
+			continue;
+		}
+		const start = index;
+		let end = regionEnd(items, start);
+		const window = tally(items, start, end);
+		while (end < items.length) {
+			let next = end;
+			while (next < items.length && isAnchor(items[next])) next++;
+			if (next === items.length) break;
+			const nextEnd = regionEnd(items, next);
+			const region = tally(items, next, nextEnd);
+			// Pairing across the anchors shifts their first onto a line before it and their last onto
+			// one after them; without such lines every anchor keeps pairing with itself.
+			if (!window.texts.has(items[end].text) || !region.texts.has(items[next - 1].text)) break;
+			const anchors = next - end;
+			const headCount = window.head + anchors + region.head;
+			const workCount = window.work + anchors + region.work;
+			if (headCount * workCount > PAIRING_BUDGET) break;
+			window.head = headCount;
+			window.work = workCount;
+			for (let n = end; n < next; n++) window.texts.add(items[n].text);
+			for (const text of region.texts) window.texts.add(text);
+			end = nextEnd;
+		}
+		settleWindow(items, start, end, out);
+		index = end;
+	}
+	return out;
+}
+
+/** End of the run of non-anchor items starting at `start`. */
+function regionEnd(items: readonly Item[], start: number): number {
+	let end = start;
+	while (end < items.length && !isAnchor(items[end])) end++;
+	return end;
+}
+
+/** HEAD-side and worktree-side item counts of `items[start, end)`, and the texts of those items. */
+function tally(items: readonly Item[], start: number, end: number): { head: number; work: number; texts: Set<string> } {
+	const counts = { head: 0, work: 0, texts: new Set<string>() };
 	for (let index = start; index < end; index++) {
 		const item = items[index];
-		if (item.head !== undefined) dels.push(item);
-		else if (item.alive) ins.push(item);
+		if (item.head !== undefined) counts.head++;
+		if (item.alive) counts.work++;
+		if (item.head !== undefined || item.alive) counts.texts.add(item.text);
+	}
+	return counts;
+}
+
+/**
+ * Append `items[start, end)` to `out` with each deleted HEAD line paired to an identical
+ * re-inserted line restored as one HEAD anchor. Anchors inside the window stay anchors but may
+ * take over an equal HEAD line next to them, letting the pairs they separated meet. Every other
+ * item moves between the restored anchors it falls between on its own side (HEAD order for
+ * deleted HEAD lines, worktree order for the rest), so an unpaired deletion keeps its HEAD
+ * position and a later step re-adding that line lands in the same region.
+ */
+function settleWindow(items: readonly Item[], start: number, end: number, out: Item[]): void {
+	const headSide: Item[] = [];
+	const workSide: Item[] = [];
+	let deleted = false;
+	let inserted = false;
+	for (let index = start; index < end; index++) {
+		const item = items[index];
+		if (item.head !== undefined) {
+			headSide.push(item);
+			deleted ||= !item.alive;
+		}
+		if (item.alive) {
+			workSide.push(item);
+			inserted ||= item.head === undefined;
+		}
 	}
 	const pairs =
-		dels.length > 0 && ins.length > 0 && dels.length * ins.length <= 250_000 ? longestCommonPairs(dels, ins) : [];
+		deleted && inserted && headSide.length * workSide.length <= PAIRING_BUDGET ? alignSides(headSide, workSide) : [];
 	if (pairs.length === 0) {
 		for (let index = start; index < end; index++) out.push(items[index]);
 		return;
 	}
 	// segments[n] holds the unpaired items before restored anchor n; paired deletions are dropped.
+	// Anchors always pair on both sides (see alignSides), so they leave only through their worktree side.
 	const segments: Item[][] = Array.from({ length: pairs.length + 1 }, () => []);
-	let headSide = 0;
-	let workSide = 0;
+	let headAt = 0;
+	let workAt = 0;
 	for (let index = start; index < end; index++) {
 		const item = items[index];
 		if (item.head !== undefined) {
-			if (pairs[headSide]?.[0] === item) headSide++;
-			else segments[headSide].push(item);
-		} else if (pairs[workSide]?.[1] === item) workSide++;
-		else segments[workSide].push(item);
+			if (pairs[headAt]?.[0] === item) headAt++;
+			else segments[headAt].push(item);
+		}
+		if (item.alive) {
+			if (pairs[workAt]?.[1] === item) workAt++;
+			else if (item.head === undefined) segments[workAt].push(item);
+		} else if (item.head === undefined) segments[workAt].push(item);
 	}
-	pairs.forEach(([del, add], n) => {
+	// An anchor can be the HEAD side of one pair and the worktree side of an earlier one.
+	const heads = pairs.map(([del]) => del.head);
+	pairs.forEach(([, add], n) => {
 		for (const item of segments[n]) out.push(item);
 		// The line is HEAD's now: editing it later must not count as building on its old inserter's work.
-		add.head = del.head;
+		add.head = heads[n];
 		add.by = HEAD;
 		out.push(add);
 	});
 	for (const item of segments[pairs.length]) out.push(item);
 }
 
-/** Matched pairs of a longest common subsequence of the two lists' texts, in order. */
-function longestCommonPairs(a: readonly Item[], b: readonly Item[]): Array<[Item, Item]> {
-	const table = Array.from({ length: a.length + 1 }, () => new Int32Array(b.length + 1));
-	for (let i = a.length - 1; i >= 0; i--) {
-		for (let j = b.length - 1; j >= 0; j--) {
-			table[i][j] = a[i].text === b[j].text ? table[i + 1][j + 1] + 1 : Math.max(table[i + 1][j], table[i][j + 1]);
+/**
+ * Order-preserving pairs of equal-text HEAD-side and worktree-side items that cancel the most
+ * changes while every anchor stays paired on both sides, with itself or an equal neighbour.
+ * Weighting each anchor side above any count of cancellations makes keeping them all paired
+ * (always possible: each anchor with itself) take precedence.
+ */
+function alignSides(head: readonly Item[], work: readonly Item[]): Array<[Item, Item]> {
+	const anchorWeight = Math.min(head.length, work.length) + 1;
+	const weight = (a: Item, b: Item) => 1 + (a.alive ? anchorWeight : 0) + (b.head !== undefined ? anchorWeight : 0);
+	const table = Array.from({ length: head.length + 1 }, () => new Int32Array(work.length + 1));
+	for (let i = head.length - 1; i >= 0; i--) {
+		for (let j = work.length - 1; j >= 0; j--) {
+			const skip = Math.max(table[i + 1][j], table[i][j + 1]);
+			table[i][j] =
+				head[i].text === work[j].text ? Math.max(skip, table[i + 1][j + 1] + weight(head[i], work[j])) : skip;
 		}
 	}
 	const pairs: Array<[Item, Item]> = [];
 	let i = 0;
 	let j = 0;
-	while (i < a.length && j < b.length) {
-		if (a[i].text === b[j].text) {
-			pairs.push([a[i], b[j]]);
+	while (i < head.length && j < work.length) {
+		if (head[i].text === work[j].text && table[i][j] === table[i + 1][j + 1] + weight(head[i], work[j])) {
+			pairs.push([head[i], work[j]]);
 			i++;
 			j++;
 		} else if (table[i + 1][j] >= table[i][j + 1]) i++;
@@ -345,7 +420,7 @@ function deriveOps(items: Item[]): Attribution {
 	let workLine = 0;
 	let hunk: Hunk | undefined;
 	for (const item of items) {
-		const anchor = item.alive && item.head !== undefined;
+		const anchor = isAnchor(item);
 		const deletedHead = !item.alive && item.head !== undefined;
 		const inserted = item.alive && item.head === undefined;
 		if (anchor) {

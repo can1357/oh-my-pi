@@ -186,7 +186,7 @@ set(CMAKE_MT "${CMAKE_CURRENT_LIST_DIR}/bin/llvm-mt")
 # try_compile defaults to the Debug configuration, whose debug CRT the splat
 # lacks; pin try_compile to Release. The shipped win32 addon statically links
 # the CRT (rustc +crt-static + the static_link_msvcrt cc feature; see
-# bazel/defs.bzl and crates/pi-natives/BUILD.bazel), so pin the runtime library
+# bazel/defs.bzl and crates/natives/BUILD.bazel), so pin the runtime library
 # to the static release CRT /MT for every config as well — otherwise CMake's
 # authoritative CMAKE_MSVC_RUNTIME_LIBRARY (CMP0091 NEW) would emit /MD for the
 # bundled opus objects, which then import VCRUNTIME140.dll and conflict with the

@@ -1,7 +1,7 @@
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { node, text } from "../native/describe";
+import { col, node, text } from "../native/describe";
 import type { NativeNode } from "../native/node";
 import { styledSpans } from "../native/spans";
 import { theme } from "../theme";
@@ -31,6 +31,8 @@ export interface NoticeRowOptions {
 	/** Icon name in place of the tone's own (`read` for a file read, `download` for an update). */
 	readonly icon?: string;
 	readonly key?: string;
+	/** Lines under the message, aligned to it, with no icon of their own (a job's output beneath its header). */
+	readonly body?: readonly NativeNode[];
 }
 
 /**
@@ -38,7 +40,8 @@ export interface NoticeRowOptions {
  * leading icon beside the wrapped message. Warnings, errors, background-job
  * completions and prompt file reads all draw as this row, so they read alike.
  * The tone colors the icon (an info notice keeps it quiet); the message spans
- * carry emphasis only (`path`, `mono`, `dim`), never the tone itself.
+ * carry emphasis only (`path`, `mono`, `dim`), never the tone itself. A
+ * `body` stacks beneath the message in the same column.
  */
 export function noticeRow(tone: NoticeTone, message: TspText, options: NoticeRowOptions = {}): NativeNode {
 	const icon = node("icon", {
@@ -46,12 +49,10 @@ export function noticeRow(tone: NoticeTone, message: TspText, options: NoticeRow
 		tone: tone === "info" ? undefined : tone,
 		aria: tone === "warning" || tone === "error" ? LABELS[tone] : undefined,
 	});
-	return node(
-		"row",
-		{ role: `omp.notice.${tone}`, tone, gap: "sm", align: "start" },
-		[icon, text(message, { wrap: "word", grow: 1, shrink: 1 })],
-		options.key,
-	);
+	const content = options.body?.length
+		? col([text(message, { wrap: "word" }), ...options.body], { grow: 1, shrink: 1 })
+		: text(message, { wrap: "word", grow: 1, shrink: 1 });
+	return node("row", { role: `omp.notice.${tone}`, tone, gap: "sm", align: "start" }, [icon, content], options.key);
 }
 
 /**

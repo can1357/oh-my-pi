@@ -3,11 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import * as brokerClients from "@oh-my-pi/pi-coding-agent/launch/client";
-import type { DaemonOperation } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import * as daemonClients from "@oh-my-pi/pi-coding-agent/daemon/client";
+import type { DaemonClient, DaemonOp } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 
 const MARKER = "omp-bash-cd-root-marker";
 const FILESYSTEM_ROOT = path.resolve("/");
@@ -89,42 +89,47 @@ describe("bash leading cd filesystem root", () => {
 
 	it.skipIf(process.platform === "win32")("starts a service from a leading cd / in the filesystem root", async () => {
 		workspace = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "bash-cd-root-svc-")));
-		const started: DaemonOperation[] = [];
-		const snapshot: DaemonSnapshot = {
-			name: "cdroot",
+		const started: DaemonOp[] = [];
+		const snapshot: UnitSnapshot = {
 			id: "cdroot-1",
+			kind: "proc",
+			scope: { kind: "project", dir: workspace },
+			key: "cdroot",
+			label: "cdroot",
+			generation: "cdroot-gen-1",
 			state: "running",
+			pids: [],
 			createdAt: 1,
 			startedAt: 1,
 			restartCount: 0,
 			outputBytes: 0,
-			persist: false,
-			detached: false,
+			leases: 1,
+			policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "exec" },
+			supervised: true,
 		};
-		const client = spyOn(brokerClients, "daemonClientForProject").mockResolvedValue({
-			projectDir: workspace,
+		const client = spyOn(daemonClients, "daemonClient").mockResolvedValue({
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
+			onReconnect: () => () => {},
 			close: () => {},
-			request: async operation => {
+			request: async (operation: DaemonOp) => {
 				started.push(operation);
-				if (operation.op === "start") return { op: "start", daemon: snapshot, readyTimedOut: false };
-				if (operation.op === "logs") {
-					return { op: "logs", name: "cdroot", text: "", cursor: 0, timedOut: false, state: "running" };
-				}
+				if (operation.op === "open") return { unit: snapshot, lease: "lease-1", created: true };
+				if (operation.op === "logs") return { text: "", terminalOutput: "", cursor: 0, unit: snapshot };
 				throw new Error(`unexpected ${operation.op}`);
 			},
-		});
+		} as unknown as DaemonClient);
 		try {
 			const result = await new BashTool(sessionFor(workspace)).execute("cd-root-service", {
 				command: "cd / && pwd",
 				name: "cdroot",
 			});
-			const start = started.find(operation => operation.op === "start");
-			if (start?.op !== "start") throw new Error("service did not start");
+			const start = started.find(operation => operation.op === "open");
+			if (start?.op !== "open" || !start.proc) throw new Error("service did not start");
 
 			expect(result.isError).toBeUndefined();
-			expect(path.resolve(start.spec.cwd)).toBe(FILESYSTEM_ROOT);
-			expect(start.spec.args.at(-1)).toBe("pwd");
+			expect(path.resolve(start.proc.cwd)).toBe(FILESYSTEM_ROOT);
+			expect(start.proc.args.at(-1)).toBe("pwd");
 		} finally {
 			client.mockRestore();
 		}

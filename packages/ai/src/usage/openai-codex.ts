@@ -504,7 +504,9 @@ function buildAdditionalUsageLimit(args: {
 			provider: "openai-codex",
 			accountId: args.accountId,
 			tier: args.slug,
-			modelId: args.limitName,
+			// The meter is per model even when the payload names only its feature
+			// codename; `omp usage` keeps rows with a `modelId` out of the account-wide state.
+			modelId: args.limitName ?? args.meteredFeature,
 			windowId: usageWindow.id,
 			shared: true,
 		},
