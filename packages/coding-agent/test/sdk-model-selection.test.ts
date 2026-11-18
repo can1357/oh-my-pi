@@ -202,7 +202,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			extensions: [outOfScopeExtension],
 			taskDepth: 1,
 			settings: Settings.isolated({ enabledModels: ["runtime-provider/runtime-fallback-model"] }),
-			modelPatternAuthFallback: "runtime-blocked-provider/runtime-model",
+			modelPatternParentFallback: "runtime-blocked-provider/runtime-model",
 		});
 		try {
 			expect(session.model).toBeUndefined();
