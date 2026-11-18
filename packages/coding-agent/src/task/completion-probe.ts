@@ -60,7 +60,7 @@ export interface CompletionProbeOptions {
 export interface CompletionEstimate {
 	/** Whole-number completion, 0–100. */
 	percent: number;
-	/** The agent's current step in its own words; ≤ {@link MAX_STAGE_CHARS} chars, one line. */
+	/** Short label for the task's current work item; ≤ {@link MAX_STAGE_CHARS} chars, one line. */
 	stage?: string;
 	/** Which output or metric shows the agent's progress and what target; ≤ {@link MAX_WATCH_CHARS} chars, one line. */
 	watch?: string;
