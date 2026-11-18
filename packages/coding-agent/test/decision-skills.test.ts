@@ -19,6 +19,7 @@ import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/mes
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { asGlobalFetch } from "./helpers/fetch-mock";
+import { resourceText } from "./helpers/resource-text";
 
 const JEV = {
 	id: "jev-preview",
@@ -319,17 +320,21 @@ describe("progressive skill catalogue", () => {
 		).rejects.toThrow();
 		const settings = Settings.isolated(progressive);
 		const search = JSON.parse(
-			(await handler.resolve(parseInternalUrl("skill://?q=terraform%20drift"), { skills, settings })).content,
+			resourceText(await handler.resolve(parseInternalUrl("skill://?q=terraform%20drift"), { skills, settings })),
 		);
 		expect(search.skills.map((skill: Skill) => skill.name)).toEqual(["terraform-plan"]);
 
 		const first = JSON.parse(
-			(await handler.resolve(parseInternalUrl("skill://?limit=2"), { skills, settings })).content,
+			resourceText(await handler.resolve(parseInternalUrl("skill://?limit=2"), { skills, settings })),
 		);
 		expect(first).toMatchObject({ total: 3, coverageComplete: false });
 		const second = JSON.parse(
-			(await handler.resolve(parseInternalUrl(`skill://?limit=2&cursor=${first.nextCursor}`), { skills, settings }))
-				.content,
+			resourceText(
+				await handler.resolve(parseInternalUrl(`skill://?limit=2&cursor=${first.nextCursor}`), {
+					skills,
+					settings,
+				}),
+			),
 		);
 		expect(second).toMatchObject({ coverageComplete: true, nextCursor: null });
 		expect([...first.skills, ...second.skills].map((skill: Skill) => skill.name)).toEqual(skills.map(s => s.name));
