@@ -525,26 +525,70 @@ fn envelope_body_end(input: &str) -> usize {
 	}
 }
 
+/// Start offset and path of each line before `body_end` that
+/// `parse_with_options` reads as a file header. Inside an update body only a
+/// column-0 `*** Add/Delete/Update File:` line ends the body, and inside an add
+/// body every `+` line is content, so header text on a hunk line never starts
+/// a section.
+fn section_headers(input: &str, body_end: usize) -> Vec<(String, usize)> {
+	enum Body {
+		None,
+		Add,
+		Update,
+	}
+	let mut headers = Vec::new();
+	let mut body = Body::None;
+	let mut offset = 0;
+	for raw in input[..body_end].split_inclusive('\n') {
+		let start = offset;
+		offset += raw.len();
+		let line = raw.strip_suffix('\n').unwrap_or(raw);
+		let in_body = match body {
+			Body::None => false,
+			Body::Add => line.starts_with('+'),
+			Body::Update => {
+				!(line.starts_with("*** Add File:")
+					|| line.starts_with("*** Delete File:")
+					|| line.starts_with("*** Update File:"))
+			},
+		};
+		if in_body {
+			continue;
+		}
+		let trimmed = js_trim(line);
+		let header = trimmed
+			.strip_prefix(ADD_FILE_MARKER)
+			.map(|path| (path, Body::Add))
+			.or_else(|| {
+				trimmed
+					.strip_prefix(DELETE_FILE_MARKER)
+					.map(|path| (path, Body::None))
+			})
+			.or_else(|| {
+				trimmed
+					.strip_prefix(UPDATE_FILE_MARKER)
+					.map(|path| (path, Body::Update))
+			});
+		body = Body::None;
+		if let Some((path, next)) = header {
+			headers.push((path.to_owned(), start));
+			body = next;
+		}
+	}
+	headers
+}
+
 fn inspect_entries(input: &str) -> Inspection {
-	let headers = ENVELOPE_PATH
+	let paths = ENVELOPE_PATH
 		.captures_iter(input)
-		.filter_map(|capture| {
-			let path = capture.get(1)?.as_str().trim();
-			let start = capture.get(0)?.start();
-			(!path.is_empty()).then(|| (path.to_owned(), start))
-		})
-		.collect::<Vec<_>>();
-	let paths = headers
-		.iter()
-		.map(|(path, _)| path.clone())
+		.filter_map(|capture| capture.get(1).map(|value| value.as_str().trim().to_owned()))
+		.filter(|path| !path.is_empty())
 		.collect::<Vec<_>>();
 	let body_end = envelope_body_end(input);
+	let headers = section_headers(input, body_end);
 	let mut sections = Vec::new();
 	for (index, (path, start)) in headers.iter().enumerate() {
-		let end = headers
-			.get(index + 1)
-			.map_or(body_end, |(_, next)| *next)
-			.max(*start);
+		let end = headers.get(index + 1).map_or(body_end, |(_, next)| *next);
 		super::push_section(&mut sections, path, input[*start..end].trim());
 	}
 	let entries = parse_apply_patch(input)

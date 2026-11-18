@@ -195,6 +195,23 @@ fn a_hunk_line_mentioning_the_end_marker_keeps_the_rest_of_its_section() {
 	}
 }
 
+#[test]
+fn indented_header_text_inside_an_update_hunk_stays_in_its_section() {
+	let engine = ApplyPatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let body = "*** Update File: secrets.env\n@@\n *** Add File: notes.txt\n-TOKEN=1";
+	let input = format!("*** Begin Patch\n{body}\n*** End Patch");
+	let parsed = parse_apply_patch(&input).unwrap();
+	assert_eq!(parsed.len(), 1);
+	assert_eq!(parsed[0].path, "secrets.env");
+	let args = pi_edit::stream_json::ArgSnapshot {
+		input: Some(input),
+		complete: true,
+		..Default::default()
+	};
+	let inspection = engine.inspect(&args);
+	assert_eq!(inspection.sections, [("secrets.env".into(), body.into())]);
+}
+
 #[tokio::test]
 async fn streaming_preview_keeps_body_rows_in_input_order() {
 	let mut workspace = common::Workspace::new(EditMode::ApplyPatch);
