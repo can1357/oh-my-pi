@@ -930,14 +930,15 @@ describe("AgyHost diagnostics", () => {
 	it("bounds the close-time wait when diagnostics never settle", async () => {
 		const diagnostics = new Diagnostics(true);
 		diagnostics.settled = () => new Promise(() => {});
-		const state = await fixture({
-			diagnostics,
-			schedule: (_ms, callback) => {
-				const timer = setTimeout(callback, 0);
-				return { cancel: () => clearTimeout(timer) };
-			},
-		});
-		await expect(state.host.dispose()).resolves.toBeUndefined();
+		const state = await fixture({ diagnostics });
+		const disposed = state.host.dispose();
+		for (let i = 0; i < 100 && ![...state.clock.timers.values()].some(timer => timer.ms === 250); i++) {
+			await Promise.resolve();
+		}
+		expect([...state.clock.timers.values()].some(timer => timer.ms === 250)).toBe(true);
+		state.clock.fire(250);
+		await expect(disposed).resolves.toBeUndefined();
+		expect(state.clock.timers.size).toBe(0);
 	});
 
 	it("records nothing when diagnostics are disabled", async () => {
