@@ -27,9 +27,12 @@
 - Cache warming refreshes first-party Anthropic entries with a `max_tokens: 0` pre-warm that bills no output, replaying for the rest of the session where the endpoint rejects it, and prices replays with the output this session's replays were actually billed
 - Task subagents keep their prompt cache warm through long tool calls (`streaming` mode; still off when `providers.cacheWarming` is `off`)
 - Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
+- A reply wait or a subagent's wait for its parent blocks up to the session's prompt-cache lifetime less a minute (4m to 30m) once it is back-to-back, instead of always 4m
 
 ### Fixed
 
+- An agent that promised another a later reply, or whose subagent waits for its next message, and ends its turn with nothing left to wake it gets one notice naming each waiter (what it asked, what was promised, for how long) instead of leaving it blocked until someone notices
+- `wait` returns at once, naming the agent, when one that promised the caller a reply (or the caller's parent) is idle with nothing to wake it, or when any agent it would block on (asked agent, parent, or subagent whose result it waits for) is itself waiting on the caller, with the chain it waits through (e.g. "`B` is waiting on you (via `C`)"); a top-level session's wait no longer says to end the turn while an agent is blocked on it and nothing else will wake it
 - Resuming a session with supervised process exits or `proc://` service results from before the unified daemon no longer crashes with `undefined is not an object (evaluating 'text.includes')`
 - The model switcher's thinking slider shows the level auto settled on (as the status line does) instead of `Auto`, in subagents and any session running on auto
 - `/tan` tells a running agent about the tangent at its next step, as a `<tangent-notice>` naming the tangent's handle and work, instead of only after its turn ends

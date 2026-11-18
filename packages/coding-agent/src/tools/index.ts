@@ -32,6 +32,7 @@ import type { CallContext, SpotlightSession } from "../spotlight/types";
 import type { AgentLifecycleApi } from "../registry/agent-lifecycle";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { ArtifactManagerApi } from "../session/artifacts";
+import type { PromptCacheEntry } from "../session/cache-warmer";
 import type { AsyncNotifyEntry, AsyncNotifySource } from "../session/async-notify";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CostGateApi } from "../session/cost-gate";
@@ -392,6 +393,10 @@ export interface ToolSession {
 	getAgentId?: () => string | null;
 	/** Parent cache identity for sibling sharing; the child stores it independently of its initial model, and each request consumes it only when its own model opts in. */
 	getPromptCacheKey?: () => string | undefined;
+	/** Prompt cache entry the session's latest main-loop request wrote, while still current (see `AgentSession.promptCacheEntry`). */
+	getPromptCacheEntry?: () => PromptCacheEntry | undefined;
+	/** Whether something besides the current turn starts this agent's next one (see `AgentSession.hasWakeAfterTurn`). */
+	hasWakeAfterTurn?: () => boolean;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */

@@ -2763,6 +2763,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (!model) return undefined;
 				return session.getPromptCacheKeyForModel(model) ?? session.agent.sessionId;
 			},
+			getPromptCacheEntry: () => session?.promptCacheEntry,
+			hasWakeAfterTurn: () => session?.hasWakeAfterTurn() ?? false,
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getAdvertisedEvalToolNames: () => session?.getAdvertisedEvalToolNames() ?? [],
