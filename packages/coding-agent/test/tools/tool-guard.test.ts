@@ -176,6 +176,7 @@ describe("tool guard", () => {
 			"git --no-pager --git-dir=.git log",
 			"git config --get user.name",
 			"git config -l",
+			"git config --global --show-origin --get core.pager",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(true);
 		}
@@ -236,6 +237,11 @@ describe("tool guard", () => {
 			// Legacy `git config` stops reading options at the first operand, so a trailing `-l` lists nothing.
 			"git config --global core.pager vi -l",
 			"git config --global core.fsmonitor /tmp/x.sh --get",
+			// An option with a value takes `--get` as it: these set core.fsmonitor and core.pager.
+			"git config --comment --get core.fsmonitor /tmp/x.sh",
+			"git config --global --comment --get core.pager vi",
+			"git config --com --get core.fsmonitor /tmp/x.sh",
+			"git config -f --get core.pager vi",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(false);
 		}

@@ -234,6 +234,13 @@ function longOption(arg: string, options: readonly string[], exact: readonly str
 const GIT_EXEC_OPTIONS = ["--output", "--open-files-in-pager", "--ext-diff", "--textconv"];
 /** `git grep -O[CMD]`, also inside a cluster (`-iO`), runs a pager on the matching files. */
 const GIT_PAGER_FLAG = /^-[^-]*O/;
+/** Legacy `git config` actions that read a value or list them. */
+const GIT_CONFIG_READS = wordTable("--get --get-all --get-regexp --get-urlmatch --get-color --get-colorbool --list -l");
+/** Legacy `git config` scope, display and type flags without a value; any other (`--comment`, `-f`, `--blob`, `--type`, `--default`) may take the next word as its value. */
+const GIT_CONFIG_FLAGS = wordTable(
+	"--global --system --local --worktree --includes --no-includes --null -z --name-only --show-origin " +
+		"--show-scope --show-names --bool --int --bool-or-int --bool-or-str --path --expiry-date --fixed-value",
+);
 
 function readOnlyGit(args: string[]): boolean {
 	let i = 0;
@@ -266,10 +273,14 @@ function readOnlyGit(args: string[]): boolean {
 		return listing && flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list");
 	}
 	if (sub === "config") {
-		// Legacy `git config` stops reading options at the first operand (`--global KEY VALUE -l` sets KEY).
+		// Legacy `git config` stops reading options at the first operand (`--global KEY VALUE -l` sets KEY), and an
+		// option with a value takes the next word, `--get` too (`--comment --get KEY VALUE` sets KEY).
 		const operand = rest.findIndex(arg => !arg.startsWith("-"));
 		const options = operand === -1 ? rest : rest.slice(0, operand);
-		return options.some(arg => arg.startsWith("--get") || arg === "--list" || arg === "-l");
+		return (
+			options.some(arg => inTable(GIT_CONFIG_READS, arg)) &&
+			options.every(arg => inTable(GIT_CONFIG_READS, arg) || inTable(GIT_CONFIG_FLAGS, arg))
+		);
 	}
 	return sub === "reflog" && (positional[0] === undefined || positional[0] === "show");
 }
