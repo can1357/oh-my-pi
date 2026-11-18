@@ -14,7 +14,7 @@
 
 ### Fixed
 
-- The dashboard refuses requests under a public host name it was not told about, so a web page can no longer read it through DNS rebinding; IP addresses, `localhost`, LAN short names, `.local` and Tailscale (`*.ts.net`) names keep working, and other names such as a reverse proxy's domain go in `OMP_STATS_ALLOWED_HOSTS`
+- The dashboard refuses requests under a public host name it was not told about, so a web page can no longer read it through DNS rebinding; IP addresses, `localhost`, LAN short names, `.local`/`.lan`/`.home` names and Tailscale (`*.ts.net`) names keep working, and other names such as a reverse proxy's domain go in `OMP_STATS_ALLOWED_HOSTS` (`*.example.com` allows its subdomains)
 
 ## [18.22.1] - 2026-11-17
 

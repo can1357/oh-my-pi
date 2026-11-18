@@ -24,7 +24,7 @@ async function statusFor(host: string): Promise<number> {
 describe("dashboard Host guard", () => {
 	it("refuses public names a rebinding page would send and serves names public DNS cannot hand out", async () => {
 		const previous = process.env[STATS_ALLOWED_HOSTS_ENV];
-		process.env[STATS_ALLOWED_HOSTS_ENV] = " Stats.Example.com ,";
+		process.env[STATS_ALLOWED_HOSTS_ENV] = " Stats.Example.com ,*.trycloudflare.com,";
 		try {
 			server = await startServer(0);
 		} finally {
@@ -36,6 +36,8 @@ describe("dashboard Host guard", () => {
 		expect(await statusFor("evil.example")).toBe(403);
 		expect(await statusFor("localhost.evil.example")).toBe(403);
 		expect(await statusFor("evil-ts.net")).toBe(403);
+		// A `*.` entry allows subdomains only, not the bare domain.
+		expect(await statusFor("trycloudflare.com")).toBe(403);
 
 		expect(await statusFor("127.0.0.1")).toBe(200);
 		expect(await statusFor("[::1]")).toBe(200);
@@ -43,8 +45,12 @@ describe("dashboard Host guard", () => {
 		// MagicDNS short name and Tailscale Serve's forwarded Host.
 		expect(await statusFor("mybox")).toBe(200);
 		expect(await statusFor("mybox.tail1234.ts.net")).toBe(200);
+		// Home router search domain.
+		expect(await statusFor("mybox.lan")).toBe(200);
 		// Reverse proxy under a real domain, opted in through the environment.
 		expect(await statusFor("stats.example.com")).toBe(200);
 		expect(await statusFor("stats.example.com.")).toBe(200);
+		// Tunnel with a changing subdomain, opted in through a `*.` entry.
+		expect(await statusFor("random-words.trycloudflare.com")).toBe(200);
 	});
 });

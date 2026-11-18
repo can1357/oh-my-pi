@@ -41,10 +41,10 @@ omp stats --summary
 omp stats --json
 ```
 
-The dashboard answers to its `--host` name, IP addresses, `localhost`, single-label names, and `.localhost`, `.local`, `.internal`, `.home.arpa` and Tailscale `.ts.net` names. Any other host name (for example a reverse proxy's domain) is refused to block DNS rebinding unless listed in `OMP_STATS_ALLOWED_HOSTS`:
+The dashboard answers to its `--host` name, IP addresses, `localhost`, single-label names, and `.localhost`, `.local`, `.internal`, `.home.arpa`, `.lan`, `.home`, `.corp`, `.localdomain` and Tailscale `.ts.net` names. Any other host name (for example a reverse proxy's or tunnel's domain) is refused to block DNS rebinding unless listed in `OMP_STATS_ALLOWED_HOSTS`; a `*.` entry allows that domain's subdomains:
 
 ```bash
-OMP_STATS_ALLOWED_HOSTS=stats.example.com omp stats --host 0.0.0.0
+OMP_STATS_ALLOWED_HOSTS=stats.example.com,*.trycloudflare.com omp stats --host 0.0.0.0
 ```
 
 ### Programmatic
