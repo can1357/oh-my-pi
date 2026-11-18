@@ -5,6 +5,9 @@
 ### Added
 
 - Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+### Changed
+
+- Model search treats `provider/model` specially: the text before `/` prefixes the provider (an exact provider first), the rest searches that provider's model ids, and those rows list ahead of other matches — `ol/` now shows Ollama models first instead of recent `…-sol` models
 
 ### Fixed
 
