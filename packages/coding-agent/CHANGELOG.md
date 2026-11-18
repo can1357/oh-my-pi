@@ -14,6 +14,7 @@
 ### Changed
 
 - Commit draft `show()` now prints each run of lines from one unit under a single `1a ✓ Main` header instead of repeating the unit, mark, and owner on every line
+- The "Separate checkouts" guidance and the git guard's hint for a refused command now say how work comes back from an ovnfs checkout: `ovnfs land` puts its commits on the folder's branch with their files, `ovnfs pull` brings the folder's newer files in to resolve a conflict there, and `ovnfs rm` discards the rest. They no longer send agents through `apply --branch` and a fast-forward merge of their own, and point at `ovnfs help` for the rest (needs an ovnfs with `land`)
 
 ## [18.22.2] - 2026-11-18
 
