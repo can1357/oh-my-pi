@@ -27,7 +27,7 @@ import {
 	type TtsrMatchContext,
 	type TtsrOutput,
 } from "../export/ttsr";
-import { cfgTtsrGateTimeoutMs } from "../export/ttsr-settings";
+import { gateTimeoutMs } from "../export/ttsr-settings";
 import ttsrGateRefusedTemplate from "../prompts/system/ttsr-gate-refused.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrProseNoticeTemplate from "../prompts/system/ttsr-prose-notice.md" with { type: "text" };
@@ -643,7 +643,7 @@ export class TtsrCoordinator {
 		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
 		const settings = this.#host.settings;
 		// Read from the operator layers only; a project layer does not set the gate's wait.
-		const timeout = AbortSignal.timeout(cfgTtsrGateTimeoutMs.get(settings.grantAuthority?.() ?? settings));
+		const timeout = AbortSignal.timeout(gateTimeoutMs(settings.grantAuthority?.() ?? settings));
 		const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
 		const verdicts = await Promise.all(
 			this.#inspector.gateOutputs(toolCall).map(output => this.#gateOutput(manager, output, signal, deadline)),

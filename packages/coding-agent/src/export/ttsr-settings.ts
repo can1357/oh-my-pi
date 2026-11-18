@@ -3,6 +3,7 @@
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
 import { combine, register, type SettingValueOf } from "../config/registry";
+import type { Settings } from "../config/settings";
 
 // TTSR
 export const cfgTtsrEnabled = register({
@@ -136,12 +137,22 @@ export const cfgTtsrGateTimeoutMs = register({
 	default: 10_000,
 	validate: raw => {
 		if (raw === undefined || raw === null) return;
-		// AbortSignal.timeout throws above 2^53-1; 2^31-1 ms (24 days) is already past any judge.
-		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0 || raw > 2_147_483_647) {
+		if (!isGateTimeoutMs(raw)) {
 			throw new Error("ttsr.gateTimeoutMs must be a positive number of milliseconds up to 2147483647");
 		}
 	},
 });
+
+// AbortSignal.timeout throws above 2^53-1; 2^31-1 ms (24 days) is already past any judge.
+function isGateTimeoutMs(raw: unknown): raw is number {
+	return typeof raw === "number" && Number.isFinite(raw) && raw > 0 && raw <= 2_147_483_647;
+}
+
+/** The gate's wait from the operator view, which load never validates when a project value hides it. */
+export function gateTimeoutMs(operator: Settings): number {
+	const value = cfgTtsrGateTimeoutMs.get(operator);
+	return isGateTimeoutMs(value) ? value : cfgTtsrGateTimeoutMs.default;
+}
 
 /** Time-traveling stream rules configuration (`ttsr.*`). */
 export const cfgTtsr = combine({

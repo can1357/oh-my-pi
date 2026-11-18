@@ -7,6 +7,7 @@ import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-regis
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
+import { cfgTtsrGateTimeoutMs } from "@oh-my-pi/pi-coding-agent/export/ttsr-settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
@@ -125,6 +126,18 @@ describe("TTSR gate rules", () => {
 		expect(Date.now() - started).toBeLessThan(2_000);
 		expect(refusal).toContain("no-rm guidance");
 		expect(allowed).toBeUndefined();
+	});
+
+	it("[gate-23] waits the default when the operator's ttsr.gateTimeoutMs is out of range", async () => {
+		const { judge, requests } = fakeJudge({ [DELETES]: 0.9 });
+		const { coordinator } = setup([gateRule("no-rm", {})], judge, Settings.isolated());
+		// A project value can hide an invalid operator value from load-time validation.
+		vi.spyOn(cfgTtsrGateTimeoutMs, "get").mockReturnValue(-5);
+
+		const { refusal } = await coordinator.gateToolCall(bash, RM, "call-1");
+
+		expect(refusal).toContain("no-rm guidance");
+		expect(requests).toHaveLength(1);
 	});
 
 	it("[gate-04] a failing judge refuses under onJudgeError block and runs the call by default", async () => {
