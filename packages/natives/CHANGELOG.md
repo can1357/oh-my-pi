@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS background drags reporting success when their slider or scroll bar did not move. A web slider with no thumb position (Chrome and Electron range inputs) is hit-tested before it is read, so Chromium publishes the value its page took, and one not at the release is pressed once on its track at the path's end, if it is still under that point, and its value read back; such a slider is never stepped, and one the drag did not move to a value the release can mean throws `InputFailed` naming the value read. Sliders that expose their thumb are stepped toward the release; geometry steps confirm value changes without waiting for fifteen unchanged positions, and undo a step that moves away from the release ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [19.1.0] - 2026-11-21
 
 ### Added
@@ -42,11 +46,6 @@
 - Fixed Wayland input operations on desktops without an available input route to fail immediately with a clear `PermissionDenied` error instead of attempting unnecessary screen capture first.
 - Fixed macOS `computer` interactions so background clicks, key presses, pop-up menu actions, and takeover calls restore the previously active window within the call.
 - Fixed macOS pop-up menu reads immediately after typing so they reflect the option selected by the entered letters.
-
-### Fixed
-
-- Fixed macOS background drags returning as done when the slider or scroll bar they started on did not move, and a drag on a web page's slider doing nothing: such a drag now throws `InputFailed` saying no change was observed, and a web slider the page left where it was is stepped on to the straight-line value under the drag's end; a web slider the pointer moved is left there, and `drag` resolves with a `note` naming its value ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed macOS background drags reporting success when their slider or scroll bar did not move. Web sliders left short are stepped toward the release only when their thumb position or a value-changing track press establishes the direction; otherwise `InputFailed` names the recovery route. Geometry steps confirm value changes without waiting for fifteen unchanged positions, and undo a step that moves away from the release ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 

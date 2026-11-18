@@ -2741,7 +2741,16 @@ fn background_gesture(
 						} else {
 							frame.width
 						};
-					let at = match after_web_drag(
+					// A slider with no thumb position: the point on its track under
+					// the path's end. Hit-testing it makes Chromium publish what the
+					// drag did to the value
+					// ([`ax::drag_control::Control::publish`]).
+					let track = control
+						.distance_to(end.x, end.y)
+						.is_none()
+						.then(|| control.track_point(to, end.x, end.y))
+						.flatten();
+					let after = after_web_drag(
 						before,
 						pressed,
 						range,
@@ -2749,17 +2758,10 @@ fn background_gesture(
 						|| control.distance_to(end.x, end.y),
 						|| control.value(),
 						control::settle,
-					) {
-						AfterWebDrag::Done => return Ok(()),
-						AfterWebDrag::Left(at) => {
-							control::report_drag_note(left_note(&control.role, at, target, tolerance));
-							return Ok(());
-						},
-						AfterWebDrag::Short(at) => at,
-						AfterWebDrag::Unsure => {
-							return Err(slider_direction_refusal(window, &control.role, before));
-						},
-					};
+					);
+					if after == AfterWebDrag::Done {
+						return Ok(());
+					}
 					let thumb = control.distance_to(end.x, end.y);
 					// The drag went out: a refusal from here on says so.
 					let recheck = || {
@@ -2789,30 +2791,42 @@ fn background_gesture(
 							control::settle,
 						);
 					}
-					if let Some(left) = step_slider(
+					// Without a thumb position, a press on the track where the path
+					// ends sets the value the page's own scale has there. The
+					// slider must still be what is under that point when it goes.
+					let press = track.map(|(x, y)| {
+						let recheck = &recheck;
+						let control = &control;
+						move || {
+							// Before the hover that primes the press, too.
+							recheck()?;
+							background_left_click(
+								source,
+								to,
+								to_wid,
+								window,
+								(x, y, 1),
+								CGEventFlags::empty(),
+								slider_press_check(window, &control.role, recheck, || {
+									control.track_point(to, end.x, end.y) == Some((x, y))
+								}),
+								skylight::post_routed,
+							)?;
+							ax::drag_control::Control::publish(to, x, y);
+							Ok(())
+						}
+					});
+					if let Some(note) = finish_thumbless_drag(
 						window,
 						&control.role,
-						(at, target),
+						(before, target, tolerance),
 						range,
-						recheck,
-						step,
+						after,
+						press,
 						|| control.value(),
 						control::settle,
 					)? {
-						// The pointer had moved it: rule as for a slider it moved.
-						control::report_drag_note(left_note(&control.role, left, target, tolerance));
-						return Ok(());
-					}
-					if let Some(now) = control.value()
-						&& now != at
-					{
-						control::report_drag_note(format!(
-							"the {} took none of the drag's moves and was set by steps to {}, the \
-							 straight-line value for the path's end; it exposes no thumb position, so \
-							 its own scale was not checked",
-							control.role,
-							shown(now),
-						));
+						control::report_drag_note(note);
 					}
 					Ok(())
 				},
@@ -3312,8 +3326,10 @@ enum DragCheck {
 	/// Its value is read back ([`tracked_drag_outcome`]).
 	Confirm,
 	/// A slider a web page draws, which takes `AXIncrement` and `AXDecrement`
-	/// (`steppable`), with no key held: read back, and stepped on when the
-	/// page left it short ([`after_web_drag`], [`step_slider`]).
+	/// (`steppable`), with no key held: read back, and when the page left it
+	/// short, stepped on along its thumb ([`step_slider_geometry`]) or, with no
+	/// thumb, pressed at the release ([`after_web_drag`],
+	/// [`finish_thumbless_drag`]).
 	StepOn,
 }
 
@@ -3341,9 +3357,8 @@ fn drag_check(drag: &TrackedDrag<'_>, keys_held: bool, steppable: bool) -> DragC
 /// its renderer handled the change.
 const TRACKED_POLLS: u32 = 15;
 const TRACKED_POLL: Duration = Duration::from_millis(40);
-/// The most steps [`step_slider`] takes: a 0-1000 range input with its
-/// default step of 1 needs 1000, and a burst of that many takes well under a
-/// second.
+/// The most steps [`step_slider_geometry`] takes: a 0-1000 range input with
+/// its default step of 1 needs 1000.
 const MAX_SLIDER_STEPS: u32 = 1000;
 
 /// [`background_drag`]'s verdict for a drag that started on a control which
@@ -3427,8 +3442,9 @@ enum AfterWebDrag {
 	/// position, a move that stopped part-way cannot be told from a scale that
 	/// is not a straight line, so it is left there and its value reported.
 	Left(f64),
-	/// The page took none of the drag's moves: it is stepped on from this
-	/// value, where it was or the value under the press.
+	/// The page took none of the drag's moves: it reads `before`, or about the
+	/// value under the press on a slider that runs either way. With a thumb it
+	/// is stepped on; without one it is pressed at the release.
 	Short(f64),
 	/// No thumb position establishes the direction, and the press did not
 	/// establish it either: stepping could move a reversed slider to the
@@ -3436,25 +3452,48 @@ enum AfterWebDrag {
 	Unsure,
 }
 
-fn slider_direction_refusal(window: &DesktopWindow, role: &str, before: f64) -> DesktopError {
+/// The error for a slider with no thumb position that reads `at` after the
+/// release (and, when `pressed_end`, after a press at the path's end): still
+/// the value it had before the drag (`changed` false), which no input shows
+/// it took, or neither value the release can mean.
+fn slider_direction_refusal(
+	window: &DesktopWindow,
+	role: &str,
+	at: f64,
+	pressed_end: bool,
+	changed: bool,
+) -> DesktopError {
+	let after = if pressed_end {
+		"the release and a press on its track at the path's end"
+	} else {
+		"the release"
+	};
+	let reading = if changed {
+		"which is not the value under the path's end on either scale"
+	} else {
+		"the value it had before the drag, so no change was observed"
+	};
 	DesktopError::input_failed(format!(
-		"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} still \
-		 reads {before} after the release. It was not stepped on because it exposes no thumb \
-		 position and its direction could not be established. Read the target before retrying; \
-		 focus the slider and press arrow keys, or use its AXIncrement/AXDecrement accessibility \
-		 actions; takeover (takeover: true) drags it with the pointer",
-		window.id, window.app,
+		"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} reads \
+		 {} through accessibility after {after}, {reading}. It was not stepped on: it exposes no \
+		 thumb position, so which way it runs could not be established. Read the target before \
+		 retrying; focus the slider and press arrow keys, or use its AXIncrement/AXDecrement \
+		 accessibility actions; takeover (takeover: true) drags it with the pointer",
+		window.id,
+		window.app,
+		shown(at),
 	))
 }
 
-/// After a background drag on a slider a web page draws, whether to step it
-/// on. A web page may take the press of a background drag and none of its
+/// After a background drag on a slider a web page draws, whether to finish
+/// it. A web page may take the press of a background drag and none of its
 /// moves (on macOS 26.5, an Electron range input stayed where it was in 20 of
 /// 20 such drags, each of which returned as done): the slider then still reads
 /// `before`, or reads about `pressed`, the value under the press (within
-/// `press_tolerance`). `distance` is the thumb's distance from the release,
-/// when the slider exposes its thumb. A value that changed is judged once it
-/// reads the same twice ([`held`]).
+/// `press_tolerance`), or its mirror on a slider that runs the other way.
+/// `distance` is the thumb's distance from the release, when the slider
+/// exposes its thumb. A value that changed is judged once it reads the same
+/// twice ([`held`]).
 fn after_web_drag(
 	before: f64,
 	pressed: f64,
@@ -3478,13 +3517,14 @@ fn after_web_drag(
 	match distance() {
 		Some(distance) if distance.abs() <= SLIDER_POSITION_TOLERANCE => AfterWebDrag::Done,
 		Some(_) => AfterWebDrag::Short(at),
-		None
-			if (at - pressed).abs() <= press_tolerance
-				&& (at - (min + max - pressed)).abs() > press_tolerance =>
-		{
-			AfterWebDrag::Short(at)
+		None => {
+			let near = |value: f64| (at - value).abs() <= press_tolerance;
+			if near(pressed) == near(min + max - pressed) {
+				AfterWebDrag::Left(at)
+			} else {
+				AfterWebDrag::Short(at)
+			}
 		},
-		None => AfterWebDrag::Left(at),
 	}
 }
 
@@ -3509,6 +3549,89 @@ fn held(
 		}
 	}
 	Followed::Moved(at)
+}
+
+/// [`background_left_click`]'s check before each press of the press that
+/// finishes a drag on a web slider of `role`: before the press at the point
+/// (`target_press`), that the slider is still what `under` finds there, so a
+/// control the page put over it in the meantime is not pressed; then
+/// `recheck`, after that probe, which can block while the user comes to the
+/// app.
+fn slider_press_check<'a>(
+	window: &'a DesktopWindow,
+	role: &'a str,
+	recheck: impl Fn() -> CoreResult<()> + 'a,
+	under: impl Fn() -> bool + 'a,
+) -> impl Fn(bool) -> CoreResult<()> + 'a {
+	move |target_press| {
+		if target_press && !under() {
+			return Err(DesktopError::input_failed(format!(
+				"the drag reached window {} ({}) and went out, but the {role} it started on is no \
+				 longer under the path's end, so the press that would finish it there was not sent. \
+				 Read the target before retrying",
+				window.id, window.app,
+			)));
+		}
+		recheck()
+	}
+}
+
+/// How a drag on a web slider with no thumb position ends, from what
+/// [`after_web_drag`] found (`after`, never `Done`). Such a slider is never
+/// stepped: without a thumb, nothing it reads shows which way it runs (a
+/// value read before a programmatic change was published can look like one
+/// under the press), and a step the wrong way leaves it at the mirrored value.
+///
+/// A slider the pointer left within `tolerance` of the straight-line `target`
+/// is left there. Otherwise `press`, when the slider is under the path's end,
+/// presses its track there and has its value published: the press sets the
+/// value the page's own scale has there, whichever way the slider runs, and a
+/// value that then moves and holds ([`held`]) is reported as read. A slider
+/// still unchanged is left where it reads when the pointer moved it (`Left`),
+/// or when the drag changed its value to either value the release can mean
+/// (`target`, or its mirror on a slider that runs the other way); a value it
+/// had before the drag is no evidence either way. Otherwise the call throws
+/// `InputFailed`. Returns the note the drag's result carries.
+fn finish_thumbless_drag(
+	window: &DesktopWindow,
+	role: &str,
+	(before, target, tolerance): (f64, f64, f64),
+	range: (f64, f64),
+	after: AfterWebDrag,
+	press: Option<impl FnOnce() -> CoreResult<()>>,
+	mut value: impl FnMut() -> Option<f64>,
+	mut wait: impl FnMut(Duration),
+) -> CoreResult<Option<String>> {
+	let at = match after {
+		AfterWebDrag::Done => return Ok(None),
+		AfterWebDrag::Left(at) if (at - target).abs() <= tolerance => {
+			return Ok(Some(left_note(role, at, target, tolerance)));
+		},
+		AfterWebDrag::Left(at) | AfterWebDrag::Short(at) => at,
+		AfterWebDrag::Unsure => before,
+	};
+	let pressed_end = press.is_some();
+	if let Some(press) = press {
+		press()?;
+		match held(at, &mut value, &mut wait) {
+			Followed::Moved(now) => {
+				return Ok(Some(format!(
+					"the {role} reads {} after a press on its track at the path's end",
+					shown(now),
+				)));
+			},
+			Followed::Gone => return Ok(None),
+			Followed::Unchanged => {},
+		}
+	}
+	let changed = !matches!(after, AfterWebDrag::Unsure) && at != before;
+	let at_release = [target, range.0 + range.1 - target]
+		.iter()
+		.any(|release| (at - release).abs() <= tolerance);
+	if matches!(after, AfterWebDrag::Left(_)) || (changed && at_release) {
+		return Ok(Some(left_note(role, at, target, tolerance)));
+	}
+	Err(slider_direction_refusal(window, role, at, pressed_end, changed))
 }
 
 /// What a drag that left a web slider with no thumb position at `at` says:
@@ -3596,198 +3719,6 @@ fn step_slider_geometry(
 		distance = next;
 	}
 	Err(failure(value()))
-}
-
-/// A slider a web page draws that a background drag left at `before`, short
-/// of `target`, stepped on with `AXIncrement` or `AXDecrement` (`step(up)`)
-/// to the step nearest `target`; the steps reach it in the background. The
-/// drag already went out, so `check` (run before the first step and before the
-/// rest) and the steps report a refusal or failure with the value the slider
-/// reads then. The first step, read once it holds ([`held`]), gives the
-/// slider's step size, and a second confirms it: a slider whose steps are not
-/// even is not stepped further. The rest go out together, since the page
-/// applies them in order, and the value is read until it settles. When the
-/// first step changes nothing, the steps are uneven and stepping back does
-/// not return it, or the slider settles short of where the steps lead and not
-/// at the end of `range`, the call throws `InputFailed` instead of returning as
-/// if the slider had moved. Uneven steps that step back to where the second
-/// step says the slider stood mean the first read was stale and the pointer
-/// had moved it: `Some` with the value it is back at.
-fn step_slider(
-	window: &DesktopWindow,
-	role: &str,
-	(before, target): (f64, f64),
-	(min, max): (f64, f64),
-	mut check: impl FnMut() -> CoreResult<()>,
-	mut step: impl FnMut(bool) -> CoreResult<()>,
-	mut value: impl FnMut() -> Option<f64>,
-	mut wait: impl FnMut(Duration),
-) -> CoreResult<Option<f64>> {
-	let up = target > before;
-	let action = if up { "AXIncrement" } else { "AXDecrement" };
-	if target == before {
-		return Ok(None);
-	}
-	// A refusal that says nothing was sent, or a failed step, would hide that
-	// the drag and maybe some steps went out.
-	let stopped = |error: DesktopError, now: Option<f64>| match error.code {
-		ErrorCode::UserIntervened | ErrorCode::Cancelled | ErrorCode::InputFailed => error,
-		_ => DesktopError::input_failed(format!(
-			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
-			 {target}, the value under the path's end, and {action} steps on from there stopped: {}; \
-			 the {role} now reads {}. Read the target before retrying",
-			window.id,
-			window.app,
-			error.message,
-			now.map_or_else(|| "nothing".to_owned(), |now| now.to_string()),
-		)),
-	};
-	check().map_err(|error| stopped(error, value()))?;
-	step(up).map_err(|error| stopped(error, value()))?;
-	let first = match held(before, &mut value, &mut wait) {
-		Followed::Unchanged => {
-			return Err(DesktopError::input_failed(format!(
-				"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} \
-				 it started on still reads {before} after the release and an {action} step, so no \
-				 change was observed. Read the target before retrying; takeover (takeover: true) \
-				 drags it with the pointer",
-				window.id, window.app,
-			)));
-		},
-		// No longer readable: nothing left to confirm.
-		Followed::Gone => return Ok(None),
-		Followed::Moved(first) => first,
-	};
-	let size = (first - before).abs();
-	let short = |at: f64| if up { at < target } else { at > target };
-	// The rest of the steps to the one nearest the target, at most
-	// `MAX_SLIDER_STEPS` in all.
-	let needed = if short(first) {
-		((target - first).abs() / size).round() as u32
-	} else {
-		0
-	};
-	let wanted = needed.min(MAX_SLIDER_STEPS - 1);
-	if wanted == 0 {
-		// One step past the target: step back when the start was nearer.
-		if !short(first) && (first - target).abs() > (before - target).abs() {
-			check().map_err(|error| stopped(error, value()))?;
-			step(!up).map_err(|error| stopped(error, value()))?;
-			if let Some(settled) = settle(before, size * 1e-6, &mut value, &mut wait)
-				&& (settled - before).abs() > size * 1e-6
-			{
-				return Err(DesktopError::input_failed(format!(
-					"the drag on window {} ({}) left the {role} it started on at {before}, short of \
-					 {target}, the value under the path's end, and the corrective step stopped: the \
-					 {role} went from {before} to {settled}, where the steps lead to {before}. Read \
-					 the target before retrying; takeover (takeover: true) drags it with the pointer",
-					window.id, window.app,
-				)));
-			}
-		}
-		return Ok(None);
-	}
-	// A second step confirms the step size: a read that caught the page still
-	// applying the drag gives a size the slider does not step by.
-	check().map_err(|error| stopped(error, value()))?;
-	step(up).map_err(|error| stopped(error, value()))?;
-	let second = match held(first, &mut value, &mut wait) {
-		Followed::Gone => return Ok(None),
-		Followed::Unchanged => first,
-		Followed::Moved(second) => second,
-	};
-	let at_limit = |at: f64| if up { at >= max } else { at <= min };
-	if ((second - first).abs() - size).abs() > size * 1e-6 && !at_limit(second) {
-		// The second step's size is the slider's own: the first read was stale,
-		// so the pointer had moved the slider to one step short of `first`.
-		// Send back both steps; a slider that returns there was moved by the
-		// pointer and is left there.
-		let true_size = (second - first).abs();
-		if second != first {
-			let start = if up {
-				first - true_size
-			} else {
-				first + true_size
-			};
-			check().map_err(|error| stopped(error, value()))?;
-			step(!up).map_err(|error| stopped(error, value()))?;
-			step(!up).map_err(|error| stopped(error, value()))?;
-			let undone = settle(start, true_size / 2.0, &mut value, &mut wait);
-			match undone {
-				Some(undone) if (undone - start).abs() <= true_size / 2.0 => return Ok(Some(undone)),
-				None => return Ok(None),
-				Some(undone) => {
-					return Err(DesktopError::input_failed(format!(
-						"the drag on window {} ({}) left the {role} it started on short of {target}, \
-						 the value under the path's end, and its {action} steps were not even (from \
-						 {before} to {first}, then to {second}); stepping back to {start} left it at \
-						 {undone}. Read the target before retrying; takeover (takeover: true) drags it \
-						 with the pointer",
-						window.id, window.app,
-					)));
-				},
-			}
-		}
-		return Err(DesktopError::input_failed(format!(
-			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
-			 {target}, the value under the path's end, and its {action} steps were not even (from \
-			 {before} to {first}, then to {second}), so it was not stepped further: it reads \
-			 {second}. Read the target before retrying; takeover (takeover: true) drags it with the \
-			 pointer",
-			window.id, window.app,
-		)));
-	}
-	if wanted > 1 {
-		check().map_err(|error| stopped(error, value()))?;
-		for _ in 1..wanted {
-			step(up).map_err(|error| stopped(error, value()))?;
-		}
-	}
-	let expected = f64::from(wanted).mul_add(if up { size } else { -size }, first);
-	let Some(settled) = settle(expected, size / 2.0, &mut value, &mut wait) else {
-		return Ok(None);
-	};
-	let at_end = at_limit(settled);
-	if (settled - expected).abs() > size / 2.0 && !at_end {
-		return Err(DesktopError::input_failed(format!(
-			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
-			 {target}, the value under the path's end, and {action} steps on from there stopped \
-			 short: the {role} went from {before} to {settled}, where the steps lead to {expected}. \
-			 Read the target before retrying; takeover (takeover: true) drags it with the pointer",
-			window.id, window.app,
-		)));
-	}
-	if wanted < needed && !at_end {
-		return Err(DesktopError::input_failed(format!(
-			"the drag on window {} ({}) left the {role} it started on at {before}, short of \
-			 {target}, the value under the path's end, and {action} steps on from there stopped \
-			 after {MAX_SLIDER_STEPS} steps, the most one drag takes: the {role} went from {before} \
-			 to {settled}, short of {target}. Drag again from there, or drag it with the pointer in \
-			 takeover (takeover: true)",
-			window.id, window.app,
-		)));
-	}
-	Ok(None)
-}
-
-/// Reads `value`, `TRACKED_POLL` apart, until it reads within `within` of
-/// `expected` or has read the same for `TRACKED_POLLS` reads in a row: `Some`
-/// with the last value, or `None` once it is no longer readable.
-fn settle(
-	expected: f64,
-	within: f64,
-	value: &mut impl FnMut() -> Option<f64>,
-	wait: &mut impl FnMut(Duration),
-) -> Option<f64> {
-	let mut last = value()?;
-	let mut same = 1;
-	while (last - expected).abs() > within && same < TRACKED_POLLS {
-		wait(TRACKED_POLL);
-		let next = value()?;
-		same = if next == last { same + 1 } else { 1 };
-		last = next;
-	}
-	Some(last)
 }
 
 /// A background press held for `duration` at `at` for window `wid` of `pid`,
@@ -9313,10 +9244,257 @@ mod tests {
 			after_web_drag(40.0, 60.0, (0.0, 100.0), 1.0, || None, || Some(40.0), |_| {}),
 			AfterWebDrag::Unsure,
 		);
-		let error = slider_direction_refusal(&background_window("Chromium"), "AXSlider", 40.0);
+		// A page that takes no press at the path's end either is not stepped.
+		let (outcome, presses) = finish_thumbless(AfterWebDrag::Unsure, 40.0, true, |_, _| {});
+		let error = outcome.unwrap_err();
 		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(
+			error
+				.message
+				.contains("reads 40 through accessibility after the release and a press on its track"),
+			"{}",
+			error.message
+		);
 		assert!(error.message.contains("AXIncrement/AXDecrement"));
 		assert!(error.message.contains("arrow keys"));
+		assert_eq!(presses, 1);
+	}
+
+	/// [`finish_thumbless_drag`] on a 0-100 slider at 40, released at 75%,
+	/// after `after`. The page holds `page` and publishes, as `AXValue`, the
+	/// value `after` read (40 for `Unsure`); `press(page, published)` is what a
+	/// press on the track at the path's end, with the hit test that has the
+	/// value published, does, when `pressable`. Returns the outcome and the
+	/// presses sent.
+	fn finish_thumbless(
+		after: AfterWebDrag,
+		page: f64,
+		pressable: bool,
+		press: impl Fn(&Cell<f64>, &Cell<f64>),
+	) -> (CoreResult<Option<String>>, u32) {
+		let read = match after {
+			AfterWebDrag::Left(at) | AfterWebDrag::Short(at) => at,
+			AfterWebDrag::Done | AfterWebDrag::Unsure => 40.0,
+		};
+		let (page, published) = (Cell::new(page), Cell::new(read));
+		let presses = Cell::new(0);
+		let outcome = finish_thumbless_drag(
+			&background_window("Chromium"),
+			"AXSlider",
+			(40.0, 75.0, 4.0),
+			(0.0, 100.0),
+			after,
+			pressable.then_some(|| {
+				presses.update(|n| n + 1);
+				press(&page, &published);
+				Ok(())
+			}),
+			|| Some(published.get()),
+			|_| {},
+		);
+		(outcome, presses.get())
+	}
+
+	#[test]
+	fn a_thumbless_web_slider_a_drag_set_without_publishing_is_read_after_a_press_at_the_release() {
+		// Chrome took the drag but kept publishing 40 until an accessibility
+		// hit test reached the slider: the press at the path's end, on the
+		// thumb now, changes nothing on the page, and the value it publishes
+		// is read.
+		let (outcome, presses) =
+			finish_thumbless(AfterWebDrag::Unsure, 75.0, true, |page, published| {
+				published.set(page.get());
+			});
+		assert_eq!(
+			outcome.unwrap().as_deref(),
+			Some("the AXSlider reads 75 after a press on its track at the path's end"),
+		);
+		assert_eq!(presses, 1);
+	}
+
+	#[test]
+	fn a_thumbless_web_slider_that_ignored_the_drag_takes_the_value_a_press_at_the_release_sets() {
+		// Electron took none of the drag; the press at the path's end sets the
+		// page's own value there (25 on a slider that runs right to left), and
+		// that is what is read.
+		let (outcome, presses) =
+			finish_thumbless(AfterWebDrag::Unsure, 40.0, true, |page, published| {
+				page.set(25.0);
+				published.set(25.0);
+			});
+		assert_eq!(
+			outcome.unwrap().as_deref(),
+			Some("the AXSlider reads 25 after a press on its track at the path's end"),
+		);
+		assert_eq!(presses, 1);
+	}
+
+	#[test]
+	fn a_thumbless_web_slider_that_reads_like_a_press_only_drag_is_never_stepped() {
+		// It reads 60, the value under the drag's press, and the press at the
+		// release changes nothing. That reading may be stale or a page's own
+		// change rather than the press, so it shows no direction: the call
+		// fails naming the value instead of stepping toward 75 or 25.
+		for pressable in [true, false] {
+			let (outcome, _) = finish_thumbless(AfterWebDrag::Short(60.0), 60.0, pressable, |_, _| {});
+			let error = outcome.unwrap_err();
+			assert_eq!(error.code, ErrorCode::InputFailed);
+			assert!(error.message.contains("reads 60 through accessibility"), "{}", error.message);
+			assert!(error.message.contains("It was not stepped on"), "{}", error.message);
+		}
+	}
+
+	#[test]
+	fn a_thumbless_drag_that_reads_either_release_value_is_left_there() {
+		// Pressed at 25% and released at 75% of a slider that runs left to
+		// right, the pointer completed the drag: 75 is also the mirror of the
+		// value under the press, so it reads like a press-only drag on a
+		// reversed slider. A press at the release that changes nothing, or no
+		// press at all (the release point did not hit-test as the slider),
+		// leaves it at 75.
+		let after = after_web_drag(10.0, 25.0, (0.0, 100.0), 1.0, || None, || Some(75.0), |_| {});
+		assert_eq!(after, AfterWebDrag::Short(75.0));
+		for pressable in [true, false] {
+			let (outcome, presses) = finish_thumbless(after, 75.0, pressable, |_, _| {});
+			assert_eq!(outcome.unwrap().as_deref(), Some("the AXSlider reads 75"));
+			assert_eq!(presses, u32::from(pressable));
+		}
+		// Chrome 154, right-to-left range input at 40, dragged from 25% of
+		// its width to 75%: the page set 25, the value under the release on
+		// its own scale, which mirrors the straight-line 75. It is left there,
+		// and the note names the straight-line value it was not checked
+		// against.
+		let (outcome, _) = finish_thumbless(AfterWebDrag::Short(25.0), 25.0, true, |_, _| {});
+		let note = outcome.unwrap().unwrap();
+		assert!(note.starts_with("the AXSlider reads 25; the path's end would be 75"), "{note}");
+	}
+
+	#[test]
+	fn a_thumbless_slider_still_at_the_mirror_of_the_release_is_not_passed_off_as_moved() {
+		// A left-to-right slider at 25, dragged from 25% to 75%, that took
+		// neither the drag nor the press at its end (or got no press) still
+		// reads 25, the mirror of 75: no change shows which way it runs.
+		for pressable in [true, false] {
+			let error = finish_thumbless_drag(
+				&background_window("Chromium"),
+				"AXSlider",
+				(25.0, 75.0, 4.0),
+				(0.0, 100.0),
+				AfterWebDrag::Unsure,
+				pressable.then_some(|| Ok(())),
+				|| Some(25.0),
+				|_| {},
+			)
+			.unwrap_err();
+			assert_eq!(error.code, ErrorCode::InputFailed);
+			assert!(error.message.contains("reads 25 through accessibility"), "{}", error.message);
+			assert!(error.message.contains("no change was observed"), "{}", error.message);
+		}
+	}
+
+	#[test]
+	fn a_thumbless_slider_the_pointer_left_short_is_pressed_at_the_release() {
+		// The pointer moved it to 56, short of 75 on a straight line: the
+		// press at the release finishes a slider that took only part of the
+		// drag, and one whose own scale puts 56 there stays, as before.
+		let (outcome, presses) =
+			finish_thumbless(AfterWebDrag::Left(56.0), 56.0, true, |page, published| {
+				page.set(75.0);
+				published.set(75.0);
+			});
+		assert_eq!(
+			outcome.unwrap().as_deref(),
+			Some("the AXSlider reads 75 after a press on its track at the path's end"),
+		);
+		assert_eq!(presses, 1);
+		let (outcome, presses) = finish_thumbless(AfterWebDrag::Left(56.0), 56.0, true, |_, _| {});
+		assert!(
+			outcome
+				.unwrap()
+				.unwrap()
+				.starts_with("the AXSlider reads 56; the path's end")
+		);
+		assert_eq!(presses, 1);
+		// At the release already: no press.
+		let (outcome, presses) = finish_thumbless(AfterWebDrag::Left(74.0), 74.0, true, |_, _| {});
+		assert_eq!(outcome.unwrap().as_deref(), Some("the AXSlider reads 74"));
+		assert_eq!(presses, 0);
+	}
+
+	#[test]
+	fn a_press_only_drag_on_a_reversed_thumbless_slider_is_short_not_left() {
+		// Pressed at 60% of a slider that runs right to left, it reads 40, the
+		// value under the press on its own scale: the page took the press and
+		// none of the moves, so the drag is not over.
+		assert_eq!(
+			after_web_drag(10.0, 60.0, (0.0, 100.0), 1.0, || None, || Some(40.0), |_| {}),
+			AfterWebDrag::Short(40.0),
+		);
+	}
+
+	/// The events [`background_left_click`] posts for the press that finishes
+	/// a slider drag, with [`slider_press_check`]: `under` is whether the
+	/// slider is still under the point, called once the primer is out, and
+	/// `recheck` refuses once `intervened` is set. Returns the error and the
+	/// event types posted.
+	fn finishing_press(
+		under: impl Fn(&Cell<bool>) -> bool,
+	) -> (crate::desktop::error::DesktopError, Vec<CGEventType>) {
+		let source = source().expect("event source");
+		let window = background_window("Google Chrome");
+		let (primed, intervened) = (Cell::new(false), Cell::new(false));
+		let posted = std::cell::RefCell::new(Vec::new());
+		let error = background_left_click(
+			&source,
+			7,
+			42,
+			&window,
+			(10.0, 10.0, 1),
+			CGEventFlags::empty(),
+			slider_press_check(
+				&window,
+				"AXSlider",
+				|| {
+					if intervened.get() {
+						Err(DesktopError::user_intervened("the user came to the app"))
+					} else {
+						Ok(())
+					}
+				},
+				|| !primed.get() || under(&intervened),
+			),
+			|_, event| {
+				let kind = CGEvent::r#type(Some(event));
+				posted.borrow_mut().push(kind);
+				if kind == CGEventType::LeftMouseUp {
+					primed.set(true);
+				}
+				Ok(())
+			},
+		)
+		.unwrap_err();
+		(error, posted.into_inner())
+	}
+
+	#[test]
+	fn the_press_that_finishes_a_slider_drag_is_not_sent_once_the_slider_left_its_point() {
+		let primer = [CGEventType::MouseMoved, CGEventType::LeftMouseDown, CGEventType::LeftMouseUp];
+		// The page put another control over the release point while the
+		// press was being primed: the press at the point is not sent, and the
+		// error says the drag already went out.
+		let (error, posted) = finishing_press(|_| false);
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(error.message.contains("went out"), "{}", error.message);
+		assert!(error.message.contains("was not sent"), "{}", error.message);
+		assert_eq!(posted, primer);
+		// The user came to the app while the slider was hit-tested: the check
+		// after that probe stops the press.
+		let (error, posted) = finishing_press(|intervened| {
+			intervened.set(true);
+			true
+		});
+		assert_eq!(error.code, ErrorCode::UserIntervened);
+		assert_eq!(posted, primer);
 	}
 
 	#[test]
@@ -9520,45 +9698,6 @@ mod tests {
 	}
 
 	#[test]
-	fn a_web_slider_read_while_the_page_still_applies_the_drag_is_stepped_back_and_left() {
-		use std::cell::{Cell, RefCell};
-		// The page moved the slider to 40, but the reads caught the press's 2
-		// twice: the first step lands on 41, a "step" of 39; the second, on 42.
-		// `stuck` steps back by `back` instead of 1. Returns the outcome, where
-		// the slider ends and the steps sent.
-		let run = |back: f64| {
-			let page = Cell::new(40.0);
-			let shown = Cell::new(2.0);
-			let steps = RefCell::new(Vec::new());
-			let outcome = step_slider(
-				&background_window("Electron"),
-				"AXSlider",
-				(2.0, 75.0),
-				(0.0, 100.0),
-				|| Ok(()),
-				|up| {
-					steps.borrow_mut().push(up);
-					page.set(page.get() + if up { 1.0 } else { -back });
-					shown.set(page.get());
-					Ok(())
-				},
-				|| Some(shown.get()),
-				|_| {},
-			);
-			(outcome.map_err(|error| (error.code, error.message)), page.get(), steps.into_inner())
-		};
-		// Both steps are sent back, and it is left at 40, where the pointer
-		// put it: the caller reports it as a slider the pointer moved.
-		assert_eq!(run(1.0), (Ok(Some(40.0)), 40.0, vec![true, true, false, false]));
-		// A step back that does not return it there fails naming the value.
-		let (outcome, at, steps) = run(0.0);
-		let (code, message) = outcome.unwrap_err();
-		assert_eq!((code, at, steps.len()), (ErrorCode::InputFailed, 42.0, 4));
-		assert!(message.contains("were not even (from 2 to 41, then to 42)"), "{message}");
-		assert!(message.contains("stepping back to 40 left it at 42"), "{message}");
-	}
-
-	#[test]
 	fn a_non_linear_web_slider_is_stepped_to_the_nearest_thumb_position() {
 		use std::cell::Cell;
 		let index = Cell::new(0usize);
@@ -9583,8 +9722,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_drag_on_a_web_slider_steps_it_to_the_value_under_the_paths_end() {
-		use std::cell::{Cell, RefCell};
+	fn the_value_under_a_paths_end_is_read_on_a_straight_line_clamped_to_the_track() {
 		let frame = AxBounds { x: 26.0, y: 221.0, width: 400.0, height: 16.0 };
 		// The kit's drag ends three quarters along a 0-100 range input.
 		let end = CGPoint::new(26.0 + 300.0, 229.0);
@@ -9592,159 +9730,6 @@ mod tests {
 		assert_eq!(slider_value_at(frame, (0.0, 100.0), false, CGPoint::new(900.0, 229.0)), 100.0);
 		let tall = AxBounds { x: 0.0, y: 100.0, width: 16.0, height: 200.0 };
 		assert_eq!(slider_value_at(tall, (0.0, 10.0), true, CGPoint::new(8.0, 150.0)), 7.5);
-		let window = background_window("Electron");
-		// A 0-100 slider of step `size` that moves no further up than `stops`
-		// (100: the end of its range); `refuse` names the check (counted from
-		// 1) that refuses and `fail` the step that fails. Returns the verdict,
-		// the final value and the steps taken.
-		let run_with =
-			|before: f64, target: f64, size: f64, stops: f64, refuse: usize, fail: usize| {
-				let at = Cell::new(before);
-				let steps = RefCell::new(Vec::new());
-				let checks = Cell::new(0);
-				let outcome = step_slider(
-					&window,
-					"AXSlider",
-					(before, target),
-					(0.0, 100.0),
-					|| {
-						checks.update(|v| v + 1);
-						if checks.get() == refuse {
-							Err(DesktopError::background_unavailable(
-								"the front application could not be identified; no further input was sent",
-							))
-						} else {
-							Ok(())
-						}
-					},
-					|up| {
-						if steps.borrow().len() + 1 == fail {
-							return Err(DesktopError::ax_failed("AX action 'AXIncrement' failed"));
-						}
-						steps.borrow_mut().push(up);
-						let next = at.get() + if up { size } else { -size };
-						at.set(next.clamp(0.0, stops.max(at.get())));
-						Ok(())
-					},
-					|| Some(at.get()),
-					|_| {},
-				);
-				(
-					outcome.map_err(|error| (error.code.as_str(), error.message)),
-					at.get(),
-					steps.into_inner(),
-				)
-			};
-		let run = |before, target, size, stops| run_with(before, target, size, stops, 0, 0);
-		let (outcome, value, steps) = run(0.0, 75.0, 1.0, 100.0);
-		assert_eq!((outcome, value, steps.len()), (Ok(None), 75.0, 75));
-		assert!(steps.iter().all(|&up| up));
-		// Down, and to the step nearest the target: 7 is nearer 7.4 than 10.
-		assert_eq!(run(50.0, 7.4, 1.0, 100.0).1, 7.0);
-		assert_eq!(run(0.0, 7.4, 5.0, 100.0), (Ok(None), 5.0, vec![true]));
-		// One step past the target is taken back when the start was nearer.
-		assert_eq!(run(0.0, 2.0, 5.0, 100.0), (Ok(None), 0.0, vec![true, false]));
-		// Steps that run into the end of the range are not a shortfall.
-		assert_eq!(run(97.0, 100.0, 2.0, 100.0), (Ok(None), 100.0, vec![true, true]));
-		// Already there: nothing is taken.
-		assert_eq!(run(40.0, 40.0, 1.0, 100.0), (Ok(None), 40.0, vec![]));
-		// A fractional step settles without waiting out every read.
-		assert_eq!(run(0.2, 0.5, 0.1, 100.0).0, Ok(None));
-		// A slider that takes no step is reported, not passed off as moved.
-		let (outcome, value, steps) = run(0.0, 75.0, 1.0, 0.0);
-		let (code, message) = outcome.unwrap_err();
-		assert_eq!(code, "InputFailed");
-		assert!(message.contains("could not be confirmed"), "{message}");
-		assert!(message.contains("no change was observed"), "{message}");
-		assert!(message.contains("takeover"), "{message}");
-		assert_eq!((value, steps), (0.0, vec![true]));
-		// One that stops partway says where it stopped.
-		let (outcome, value, _) = run(0.0, 75.0, 1.0, 30.0);
-		let (code, message) = outcome.unwrap_err();
-		assert_eq!((code, value), ("InputFailed", 30.0));
-		assert!(message.contains("stopped short"), "{message}");
-		assert!(message.contains("from 0 to 30, where the steps lead to 75"), "{message}");
-		// Past the most steps one drag takes, it says where it stopped.
-		let (outcome, value, steps) = run(0.0, 75.0, 0.01, 100.0);
-		let (code, message) = outcome.unwrap_err();
-		assert_eq!((code, steps.len()), ("InputFailed", MAX_SLIDER_STEPS as usize));
-		assert!(f64::from(MAX_SLIDER_STEPS).mul_add(-0.01, value).abs() < 1e-6, "{value}");
-		assert!(message.contains(&format!("stopped after {MAX_SLIDER_STEPS} steps")), "{message}");
-		assert!(message.contains("short of 75"), "{message}");
-		// The check before the rest refuses: the call says the drag and the
-		// first step went out and where the slider is, not that nothing did.
-		let (outcome, value, steps) = run_with(0.0, 75.0, 1.0, 100.0, 2, 0);
-		let (code, message) = outcome.unwrap_err();
-		assert_eq!((code, value, steps.len()), ("InputFailed", 1.0, 1));
-		assert!(message.contains("now reads 1"), "{message}");
-		// A step that fails partway says so too.
-		let (outcome, value, steps) = run_with(0.0, 75.0, 1.0, 100.0, 0, 3);
-		let (code, message) = outcome.unwrap_err();
-		assert_eq!((code, value, steps.len()), ("InputFailed", 2.0, 2));
-		assert!(message.contains("AXIncrement' failed"), "{message}");
-		assert!(message.contains("now reads 2"), "{message}");
-	}
-
-	#[test]
-	fn a_web_slider_that_ignores_the_corrective_step_reports_where_it_stopped() {
-		use std::cell::Cell;
-		let at = Cell::new(0.0);
-		let outcome = step_slider(
-			&background_window("Electron"),
-			"AXSlider",
-			(0.0, 2.0),
-			(0.0, 100.0),
-			|| Ok(()),
-			|up| {
-				if up {
-					at.set(5.0);
-				}
-				Ok(())
-			},
-			|| Some(at.get()),
-			|_| {},
-		);
-		let error = outcome.unwrap_err();
-		assert_eq!(error.code, ErrorCode::InputFailed);
-		assert_eq!(at.get(), 5.0);
-		assert!(error.message.contains("went from 0 to 5"), "{}", error.message);
-		assert!(error.message.contains("where the steps lead to 0"), "{}", error.message);
-	}
-
-	#[test]
-	fn a_web_slider_target_between_two_steps_ends_on_the_nearest_step() {
-		use std::cell::{Cell, RefCell};
-		// A 0-100 slider of step 10 at `before`, stepped toward `target`, which
-		// falls between two of its steps; returns the verdict, where it ends
-		// and the steps taken.
-		let run = |before: f64, target: f64| {
-			let at = Cell::new(before);
-			let steps = RefCell::new(Vec::new());
-			let outcome = step_slider(
-				&background_window("Electron"),
-				"AXSlider",
-				(before, target),
-				(0.0, 100.0),
-				|| Ok(()),
-				|up| {
-					steps.borrow_mut().push(up);
-					at.set((at.get() + if up { 10.0 } else { -10.0 }).clamp(0.0, 100.0));
-					Ok(())
-				},
-				|| Some(at.get()),
-				|_| {},
-			);
-			(outcome.map_err(|error| error.message), at.get(), steps.into_inner())
-		};
-		// Nearer the lower step, and nearer the upper one: the drag is done
-		// there, not short of the value under the path's end.
-		assert_eq!(run(0.0, 34.0), (Ok(None), 30.0, vec![true; 3]));
-		assert_eq!(run(0.0, 36.0), (Ok(None), 40.0, vec![true; 4]));
-		assert_eq!(run(100.0, 64.0), (Ok(None), 60.0, vec![false; 4]));
-		// Within the first step: the step out is kept when it lands nearer,
-		// and taken back when the start was nearer.
-		assert_eq!(run(0.0, 6.0), (Ok(None), 10.0, vec![true]));
-		assert_eq!(run(0.0, 4.0), (Ok(None), 0.0, vec![true, false]));
 	}
 
 	#[test]
