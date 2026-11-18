@@ -65,6 +65,17 @@ export interface AuthAccountPolicy {
 	readonly reservePct?: number;
 	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
+	/**
+	 * `"pin"`: a new session starts explicitly pinned to this account, as one `/session pin` would,
+	 * instead of ranking it against its siblings. Ranking, reserve and reclaim never move the
+	 * session off it; it still falls through to a sibling while the account is blocked, its
+	 * token cannot be refreshed, or it fails a required plan. It is applied once per session:
+	 * after the session's account is released (for example by the usage-aware fallback) ranking
+	 * takes over, as it does after a user pin. A session that already has an account (resumed,
+	 * inherited from its parent, or pinned by the user) keeps it. At most one policy per
+	 * provider may set it.
+	 */
+	readonly startup?: "pin";
 }
 
 /** Read-only set of per-account routing policies. */

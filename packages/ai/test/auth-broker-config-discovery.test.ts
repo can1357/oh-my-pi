@@ -70,6 +70,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				account: { email: "policy@example.com" },
 				reservePct: 25,
 				reclaimAbovePct: 60,
+				startup: "pin",
 			},
 		] satisfies AuthAccountPolicies;
 		await Bun.write(
@@ -256,6 +257,18 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"",
 				].join("\n"),
 				error: "auth.accountPolicies[0].reclaimAbovePct must be a finite number",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: anthropic",
+					"      account:",
+					"        email: preferred@example.com",
+					"      startup: always",
+					"",
+				].join("\n"),
+				error: 'auth.accountPolicies[0].startup must be "pin"',
 			},
 			{
 				yaml: [

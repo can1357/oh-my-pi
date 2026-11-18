@@ -60,6 +60,7 @@ export class AccountPolicies {
 	}
 
 	static #validateAccountPolicyConfiguration(accountPolicies: AuthAccountPolicies, defaultReservePct: number): void {
+		const startupPinPolicies = new Map<string, number>();
 		for (let index = 0; index < accountPolicies.length; index += 1) {
 			const policy = accountPolicies[index]!;
 			const path = `auth.accountPolicies[${index}]`;
@@ -107,6 +108,18 @@ export class AccountPolicies {
 						`${path}.reclaimAbovePct must be a finite number above the account's reserve (${reservePct}%) and at most 100`,
 					);
 				}
+			}
+			if (policy.startup !== undefined) {
+				if (policy.startup !== "pin") {
+					throw new AIError.ConfigurationError(`${path}.startup must be "pin"`);
+				}
+				const previousIndex = startupPinPolicies.get(policy.provider);
+				if (previousIndex !== undefined) {
+					throw new AIError.ConfigurationError(
+						`auth.accountPolicies[${previousIndex}] and ${path} both set startup for ${policy.provider}; only one account can be pinned at startup`,
+					);
+				}
+				startupPinPolicies.set(policy.provider, index);
 			}
 		}
 	}
@@ -183,5 +196,19 @@ export class AccountPolicies {
 	/** Return the configured policy for a stored OAuth credential. */
 	forCredential(provider: string, credential: AuthCredential): AuthAccountPolicy | undefined {
 		return credential.type === "oauth" ? this.find(provider, credential) : undefined;
+	}
+
+	/**
+	 * Pool index of the stored OAuth account a new `provider` session starts pinned on
+	 * (`startup: "pin"`), or undefined when no policy asks for one or its account is absent.
+	 * `credentials` must already have passed {@link validateFor}, so a selector matches at most one.
+	 */
+	startupPinIndex(
+		provider: string,
+		credentials: readonly { credential: OAuthCredential; index: number }[],
+	): number | undefined {
+		const policy = this.#accountPolicies.find(entry => entry.provider === provider && entry.startup === "pin");
+		if (!policy) return undefined;
+		return credentials.find(entry => matchesAuthAccountSelector(policy.account, entry.credential))?.index;
 	}
 }

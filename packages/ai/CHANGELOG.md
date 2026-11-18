@@ -5,6 +5,7 @@
 ### Added
 
 - Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
+- Added `startup: "pin"` to `auth.accountPolicies`, so a new session starts on a chosen account even when it is nearly out of 5-hour quota or inside its reserve. A blocked account still falls through to a sibling ([#19676](https://github.com/can1357/oh-my-pi/pull/19676) by [@JoshKirk800](https://github.com/JoshKirk800)).
 
 ## [18.22.2] - 2026-11-18
 

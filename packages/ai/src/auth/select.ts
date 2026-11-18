@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
 import type { OAuthProvider } from "../registry/oauth/types";
@@ -6,7 +7,7 @@ import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import { isWithinUsageReserve } from "../usage";
 import type { RankingStrategyResolver } from "../usage/registry";
-import type { SessionAffinity } from "./affinity";
+import type { SessionAffinity, SessionCredential } from "./affinity";
 import { raceSignal } from "./abort";
 import {
 	AUTH_BLOCK_SCOPE,
@@ -59,6 +60,9 @@ function isAbandonedRefresh(error: unknown): boolean {
 	return error instanceof Error && error.name === "AbortError";
 }
 
+/** Sessions remembered as having had their `startup: "pin"` account applied. */
+const STARTUP_PIN_MAX_SESSIONS = 1024;
+
 /** OAuth bearer and credential chosen for a request, with its durable row id when available. */
 export type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
 
@@ -96,6 +100,8 @@ export interface CredentialSelectorDeps {
 export class CredentialSelector {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
+	/** Sessions whose `startup: "pin"` account was already applied, so a release is not undone. */
+	#startupPinApplied = new LRUCache<string, true>({ max: STARTUP_PIN_MAX_SESSIONS });
 	#deps: CredentialSelectorDeps;
 
 	constructor(deps: CredentialSelectorDeps) {
@@ -109,6 +115,33 @@ export class CredentialSelector {
 				this.#providerRoundRobinIndex.delete(key);
 			}
 		}
+	}
+
+	/**
+	 * The session's account, starting a session that has none on the one its policy pins
+	 * (`startup: "pin"`). The pin is applied once per session, like a single `/session pin`:
+	 * a later release or clear of the session's account is final and ranking takes over.
+	 * An account the session already has (resumed, inherited from the parent, or chosen by the
+	 * user) wins. A probe that must not record affinity sees the startup account as the
+	 * session's preference without writing it, so it ranks like a real session.
+	 */
+	#sessionCredentialWithStartupPin(
+		provider: string,
+		sessionId: string | undefined,
+		credentials: readonly { credential: OAuthCredential; index: number }[],
+		credentialIds: readonly number[],
+		recordAffinity: boolean,
+	): SessionCredential | undefined {
+		const current = this.#deps.affinity.get(provider, sessionId);
+		const appliedKey = `${provider}\0${sessionId}`;
+		if (current !== undefined || !sessionId || this.#startupPinApplied.has(appliedKey)) return current;
+		const startupIndex = this.#deps.policies.startupPinIndex(provider, credentials);
+		const credentialId = startupIndex === undefined ? undefined : credentialIds[startupIndex];
+		if (startupIndex === undefined || credentialId === undefined) return current;
+		if (!recordAffinity) return { type: "oauth", index: startupIndex, credentialId, explicit: true };
+		if (!this.#deps.affinity.pin(provider, sessionId, credentialId)) return current;
+		this.#startupPinApplied.set(appliedKey, true);
+		return this.#deps.affinity.get(provider, sessionId);
 	}
 
 	/**
@@ -634,7 +667,13 @@ export class CredentialSelector {
 			strategy,
 			hasPlanRequirement,
 		);
-		const sessionCredential = this.#deps.affinity.get(provider, sessionId);
+		const sessionCredential = this.#sessionCredentialWithStartupPin(
+			provider,
+			sessionId,
+			credentials,
+			credentialIds,
+			options?.recordAffinity !== false,
+		);
 		const sessionPreferredIndex = sessionCredential?.type === "oauth" ? sessionCredential.index : undefined;
 		const sessionPreferredCredential =
 			sessionPreferredIndex !== undefined
