@@ -28,9 +28,12 @@
 	};
 	const invoke = async (action, options) => {
 		const response = await globalThis.__omp_prelude__("computer", { ...options, action });
-		if (response && typeof response.text === "string" && response.text.length > 0) {
-			globalThis.__omp_log__("log", response.text);
-		}
+		const failure = response?.hasError ? response.details?.error : undefined;
+		let text = typeof response?.text === "string" ? response.text : "";
+		// The result ends with the failure's `name: message` line for direct calls; the error thrown below carries it here.
+		const failureLine = failure ? `${failure.name}: ${failure.message}` : undefined;
+		if (failureLine && text.endsWith(failureLine)) text = text.slice(0, -failureLine.length);
+		if (text.length > 0) globalThis.__omp_log__("log", text);
 		if (response?.hasError) {
 			const error = new Error(response.details?.error?.message ?? response.text);
 			error.name = response.details?.error?.name ?? "Error";

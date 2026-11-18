@@ -543,6 +543,8 @@ describe("computer prelude", () => {
 			expect(result.exitCode).not.toBe(0);
 			expect(result.output).toContain("MARK");
 			expect(result.output).toContain("TypeError: stop after act");
+			// The partial output is logged without the failure line the direct result appends; only the thrown error shows it.
+			expect(result.output.split("TypeError: stop after act")).toHaveLength(2);
 			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
 			expect(statuses).toContainEqual(expect.objectContaining({ op: "computer", error: "stop after act" }));
 		} finally {
@@ -569,6 +571,8 @@ describe("computer prelude", () => {
 			expect(result.exitCode).not.toBe(0);
 			expect(result.output).toContain("MARK");
 			expect(result.output).toContain("RuntimeError: stop after act");
+			expect(result.output.split("RuntimeError: stop after act")).toHaveLength(2);
+			expect(result.output).not.toContain("TypeError: stop after act");
 			expect(result.displayOutputs).toContainEqual(expect.objectContaining({ type: "image" }));
 		} finally {
 			await supervisor.close();

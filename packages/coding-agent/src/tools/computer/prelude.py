@@ -46,12 +46,19 @@ def _make_computer():
             return {}
         if not isinstance(response, dict):
             raise RuntimeError("computer returned an invalid response")
+        details = response.get("details")
+        error = details.get("error") if isinstance(details, dict) else None
+        if not isinstance(error, dict):
+            error = {}
         text = response.get("text")
         if isinstance(text, str) and text:
-            print(text)
-        details = response.get("details")
+            # The result ends with the failure's `name: message` line for direct calls; the raise below carries it here.
+            failure_line = f"{error.get('name')}: {error.get('message')}" if response.get("hasError") and error else None
+            if failure_line and text.endswith(failure_line):
+                text = text[: -len(failure_line)]
+            if text:
+                print(text)
         if response.get("hasError"):
-            error = details.get("error", {}) if isinstance(details, dict) else {}
             raise RuntimeError(error.get("message", text))
         return details if isinstance(details, dict) else {}
 

@@ -229,7 +229,7 @@ Native errors are surfaced as `ToolError` text prefixed by the stable code name:
 
 Prelude/worker errors include `Computer session is closed`, `Computer worker is busy`, `Timed out starting computer worker`, `Computer code execution timed out after <ms>ms`, read-only mutation errors, and the worker-restart message above. A missing or mistyped text argument fails before any native call, naming the helper and parameter: `selectText(text) requires a string, got undefined`.
 
-If a run or helper fails after producing text or screenshots, Eval shows that partial output and still raises the original error. User cancellation and worker crashes can discard output that has not reached the host.
+If a run or helper fails after producing text or screenshots, Eval shows that partial output and still raises the original error. That output leaves out the locked-screen, sleeping-display and secure-input notices, since a failed run does not read native capabilities. User cancellation and worker crashes can discard output that has not reached the host.
 
 `AxUnconfirmed` (macOS) means an AX action was requested but its outcome could not be confirmed: the app did not reply in time or messaging failed, for example because the action opened a modal dialog, or the app answered with an attribute error that does not apply to actions, as Preview does after following a PDF link and Finder after opening an item. It may already have taken effect, so observe the window it names, with its app, before repeating it.
 
