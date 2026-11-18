@@ -473,12 +473,14 @@ export function parseCell(markdown: string): Cell {
 	const figureEnd = unit ? text.length - groups.rest!.length : text.indexOf(groups.num!) + groups.num!.length;
 	const figure = text.slice(0, figureEnd).trim();
 	if (groups.cur) unit = groups.cur;
-	// `24–72 h`: the unit after the range's end applies to its start too.
+	// `24–72 h`, `402.7 → 13.3 µs`: the unit after a range's end or a transition's target applies to its start too.
 	const range = RANGE_TAIL.exec(rest);
-	const rangeUnit = range?.[2] ? knownUnit(range[2]) : undefined;
-	if (!unit && rangeUnit) {
-		[dim, factor] = rangeUnit;
-		unit = range![2]!;
+	const arrow = range ? null : ARROW_TAIL.exec(rest);
+	const tailUnit = range?.[2] ?? arrow?.[3];
+	const carried = !unit && tailUnit ? knownUnit(tailUnit) : undefined;
+	if (carried) {
+		[dim, factor] = carried;
+		unit = tailUnit!;
 	}
 	// A magnitude suffix on money (`$6.0k`, `$1.2M`, `$4.4k–6.1k`) scales it; the amount stays currency.
 	if (groups.cur && dim === "count") {
@@ -519,7 +521,6 @@ export function parseCell(markdown: string): Cell {
 		const upper = toNumber(range[1]!) * tailFactor(range[2], factor);
 		return { ...cell, fit: "range", upper, figure: `${figure}${range[0].trim()}` };
 	}
-	const arrow = ARROW_TAIL.exec(rest);
 	if (arrow) {
 		const sign = arrow[1] === "-" || arrow[1] === "−" ? -1 : 1;
 		const to = sign * toNumber(arrow[2]!) * tailFactor(arrow[3], factor);
@@ -967,7 +968,7 @@ const LOOSE_QUOTIENT = 0.05;
 
 /**
  * `ratio = a ÷ b` in every row holding all three, `a` and `b` in one unit
- * (`Python (ms)` ÷ `old C++ (ms)` = `0.997`; `Go` ÷ `pi-walker` = `4.1×`),
+ * (`Python (ms)` ÷ `old C++ (ms)` = `0.997`; `Go` ÷ `omp-xfs` = `4.1×`),
  * within the precision each figure is written to, over three or more rows
  * pinned to {@link LOOSE_QUOTIENT}. Percent columns are left alone: a part's
  * share of a whole (`Share` = `Tokens` ÷ `Total`) is a measure the table states.

@@ -65,7 +65,7 @@ let
     };
 
     cargoVendorDir = craneLib.vendorCargoDeps { cargoLockContents = lockText; };
-    cargoExtraArgs = "--locked -p pi-natives";
+    cargoExtraArgs = "--locked -p omp-natives";
     nativeBuildInputs = [
       cmake
       ninja

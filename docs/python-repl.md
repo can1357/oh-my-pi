@@ -228,7 +228,7 @@ The runner sets `MPLBACKEND=Agg` as an environ default so figures render off-scr
 
 ### Storage and truncation
 
-Output is streamed through `OutputSink` in `packages/tui/src/tools/streaming-output.ts`. The default inline body budget is 50 KiB shared by retained head and tail, with middle elision and a per-line byte cap (`tools.outputMaxColumns`). Full sanitized text can spill to an uncapped artifact. Tool results include truncation metadata and `artifact://<id>` when persistence succeeds; an artifact I/O failure is reported separately and suppresses that ID.
+Output is streamed through `OutputSink` in `packages/tui/src/tools/streaming-output.ts`. The default inline body budget is 50 KiB shared by retained head and tail, with middle elision and a per-line byte cap (`tools.outputMaxColumns`). Full sanitized text can spill to an uncapped artifact. Tool results include truncation metadata and `local://<id>.log` when persistence succeeds; an artifact I/O failure is reported separately and suppresses that ID.
 
 ### Renderer behavior
 

@@ -4,6 +4,14 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 /** Automatic JavaScript-dialog policy. */
 export type DialogPolicy = "accept" | "dismiss";
 
+/** Refuse a `tab.setDialogs()` policy other than "accept", "dismiss" or null, which would otherwise dismiss. */
+export function assertDialogPolicy(policy: unknown): asserts policy is DialogPolicy | null | undefined {
+	if (policy === "accept" || policy === "dismiss" || policy === null || policy === undefined) return;
+	throw new ToolError(
+		`tab.setDialogs() takes "accept", "dismiss" or null (back to the default); got ${JSON.stringify(policy)}`,
+	);
+}
+
 /** JSON-safe description of the currently pending JavaScript dialog. */
 export interface DialogState {
 	/** Whether a confirm or prompt is waiting for a decision. */
@@ -101,6 +109,7 @@ export class RuntimeDialogController {
 
 	/** Change the automatic policy and settle an already-pending decision when enabled. */
 	async setPolicy(policy: DialogPolicy | null): Promise<void> {
+		assertDialogPolicy(policy);
 		this.#policy = policy ?? undefined;
 		if (!this.#policy || !this.#pending) return;
 		await this.#settle(this.#pending, this.#policy === "accept", undefined);
@@ -142,6 +151,9 @@ export class RuntimeDialogController {
 		try {
 			if (accept) await dialog.accept(text);
 			else await dialog.dismiss();
+		} catch (error) {
+			// A raw `page.on("dialog")` handler in `tab.run` answered it first: it is no longer pending.
+			if (!(error instanceof Error && /already handled/i.test(error.message))) throw error;
 		} finally {
 			if (this.#pending === dialog) this.#pending = undefined;
 		}

@@ -2505,7 +2505,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 
 ### Special casings
 
-- Apple Foundation Models is an in-process pi-natives bridge for macOS 27+ on Apple silicon. Availability is discovered at runtime; no models are bundled.
+- Apple Foundation Models is an in-process omp-natives bridge for macOS 27+ on Apple silicon. Availability is discovered at runtime; no models are bundled.
 
 ### Auth & usage
 

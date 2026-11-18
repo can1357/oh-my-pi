@@ -44,15 +44,8 @@ describe("launch vterm runtime ownership", () => {
 		expect(result.modules, JSON.stringify(result)).toBe(0);
 	});
 
-	test("legacy replay evaluates vterm outside the client process", async () => {
-		const result = await runProbe(fixture("xterm-cache-legacy-replay-probe.ts"));
-		expect(result.terminalRows).toEqual(["\x1b[0m\x1b[1;38;5;2mready"]);
-		expect(result.modules, JSON.stringify(result)).toBe(0);
-		expect(result.bytes, JSON.stringify(result)).toBe(0);
-	});
-
-	test("broker import owns the vterm runtime", async () => {
-		const result = await runProbe(fixture("xterm-cache-broker-probe.ts"));
+	test("daemon units import owns the vterm runtime", async () => {
+		const result = await runProbe(fixture("xterm-cache-daemon-probe.ts"));
 		expect(result.modules, JSON.stringify(result)).toBeGreaterThan(0);
 		expect(result.bytes, JSON.stringify(result)).toBeGreaterThan(0);
 	});
