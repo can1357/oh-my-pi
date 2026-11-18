@@ -15,6 +15,7 @@ import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 
 function progress(id: string, overrides: Partial<AgentProgress> = {}): AgentProgress {
@@ -80,6 +81,14 @@ function job(id: string, overrides: Partial<AsyncJob> = {}): AsyncJob {
 	};
 }
 
+const WIDGET: JobWidgetView = {
+	title: "loadtest",
+	headline: { text: "186 tok/s" },
+	blocks: [{ kind: "stat", items: [{ label: "p99", text: "212 ms" }] }],
+	state: "live",
+	updatedAt: 1,
+};
+
 interface Fixture {
 	sessions: ObservableSession[];
 	refs: AgentRecordLike[];
@@ -90,6 +99,8 @@ interface Fixture {
 	showAgents: boolean;
 	/** Agents focusing cannot open (no session, no transcript). */
 	unopenable: Set<string>;
+	/** Running jobs that draw a widget. */
+	widgets: Set<string>;
 	main: TrayMain;
 }
 
@@ -102,6 +113,7 @@ function fixture(): Fixture {
 		consumed: new Set(),
 		showAgents: true,
 		unopenable: new Set(),
+		widgets: new Set(),
 		main: "working",
 	};
 }
@@ -114,7 +126,7 @@ function input(f: Fixture, now = 60_000): TrayInput {
 		agentJob: id => f.agentJobs.get(id),
 		jobs: f.jobs,
 		consumed: id => f.consumed.has(id),
-		widget: () => undefined,
+		widget: candidate => (f.widgets.has(candidate.id) ? WIDGET : undefined),
 		showAgents: f.showAgents,
 		canOpen: candidate => !f.unopenable.has(candidate.id),
 		now,
@@ -275,6 +287,8 @@ describe("tray items", () => {
 			duration: 30_000,
 			stats: "22% · $0.120",
 			openable: true,
+			// Its task says more than its outcome line.
+			look: true,
 		});
 		expect(broke).toMatchObject({ text: "boom" });
 		// Saved history: duration and tools; no tokens, context or cost known, so none is shown.
@@ -286,6 +300,8 @@ describe("tray items", () => {
 			duration: 95_000,
 			stats: "",
 			aria: "Restored, m2, done, NOTES.md: it now records the run, 4 tools",
+			// No task, no calls recorded: a closer look would repeat the card.
+			look: false,
 		});
 		const card = describeTrayCard(restored!, 0);
 		expect(children(children(card)[0]).map(role)).toEqual([
@@ -416,7 +432,7 @@ describe("Tray", () => {
 		f.agentJobs.set("Review", job("Review", { type: "task", agentId: "Review", status: "completed" }));
 		f.jobs.push(
 			job("bg_1", { progressText: "one\ntwo" }),
-			job("bg_2", { status: "completed", endTime: 3_000, resultText: "ok" }),
+			job("bg_2", { status: "completed", endTime: 3_000, resultText: "one\ntwo\nok" }),
 		);
 		return f;
 	}
@@ -532,6 +548,10 @@ describe("Tray", () => {
 
 	it("looks closer at, opens and dismisses a finished agent's own card in a quiet tray", () => {
 		const f = fixture();
+		// Finished in this run, with calls to list.
+		f.sessions.push(
+			observed("Openable", "completed", { recentTools: [{ tool: "read", args: "a.ts", endMs: 1_000 }] }),
+		);
 		f.refs.push(
 			{ ...ref("Openable", "idle", 2), sessionFile: "/tmp/Openable.jsonl" },
 			{ ...ref("Advisor", "idle", 1), kind: "advisor" },
@@ -551,19 +571,66 @@ describe("Tray", () => {
 		tray.handleNativeEvent(action("tray.open", "Openable"));
 		expect(host.focusAgent).toHaveBeenCalledWith("Openable");
 
-		// One nothing can open has no Open, and opening it does nothing.
+		// One nothing can open, with nothing more to show than its card: no closer look, no Open.
+		tray.handleNativeEvent(action("tray.peek", "Openable"));
+		const advisor = children(tray.describe()).find(node => node.p && Reflect.get(node.p, "ref") === "Advisor")!;
+		expect(advisor.p).toMatchObject({ look: false });
 		tray.handleNativeEvent(action("tray.peek", "Advisor"));
-		expect(JSON.stringify(children(tray.describe()).at(-1))).not.toContain("tray.open=");
+		// The open closer look stays where it was.
+		expect(tray.describe().p).toMatchObject({ peek: "Openable" });
 		tray.handleNativeEvent(action("tray.open", "Advisor"));
 		expect(host.focusAgent).toHaveBeenCalledTimes(1);
 
-		// Dismissed, its card goes; the done card keeps it reachable.
-		tray.handleNativeEvent(action("tray.dismiss", "Openable"));
+		// Dismissed without a closer look ever opened on it: its card goes, the done card keeps it reachable.
+		tray.handleNativeEvent(action("tray.peek", ""));
+		tray.handleNativeEvent(action("tray.dismiss", "Advisor"));
 		const after = tray.describe();
-		expect(refs(after)).toEqual(["Advisor", "done"]);
+		expect(refs(after)).toEqual(["Openable", "done"]);
 		expect(JSON.stringify(children(after).find(node => node.p && Reflect.get(node.p, "ref") === "done"))).toContain(
 			'"1 more done"',
 		);
+	});
+
+	it("marks the cards whose closer look would add nothing, and ignores a look at them", () => {
+		const f = fixture();
+		// A running agent with its task and a call to list: a closer look worth having.
+		f.sessions.push(observed("Scout", "active", { currentTool: "read", currentToolArgs: "a.ts" }));
+		f.refs.push(
+			{ ...ref("Scout", "running"), sessionFile: "/tmp/Scout.jsonl" },
+			// Woken by a message: running in the registry, nothing recorded to list.
+			{ ...ref("Woken", "running"), sessionFile: "/tmp/Woken.jsonl" },
+			{ ...ref("Old", "idle"), sessionFile: "/tmp/Old.jsonl" },
+		);
+		f.jobs.push(
+			job("bg_1"),
+			job("bg_2", { progressText: "one\ntwo" }),
+			job("bg_3", { progressText: "one\ntwo\nthree" }),
+		);
+		f.widgets.add("bg_1");
+		const { host, tray } = setup(f);
+		const looks = Object.fromEntries(
+			children(tray.describe()).map(card => [
+				card.p && Reflect.get(card.p, "ref"),
+				card.p && Reflect.get(card.p, "look"),
+			]),
+		);
+		expect(looks).toEqual({
+			Scout: undefined,
+			Woken: false,
+			done: undefined,
+			bg_1: undefined,
+			bg_2: false,
+			bg_3: undefined,
+		});
+		tray.handleNativeEvent(action("tray.peek", "bg_2"));
+		expect(children(tray.describe()).some(node => role(node) === "omp.tray.peek")).toBe(false);
+		// Its menu works without a closer look.
+		tray.handleNativeEvent(action("tray.stop", "bg_2"));
+		expect(host.cancelJob).toHaveBeenCalledWith("bg_2");
+		tray.handleNativeEvent(action("tray.stop", "Woken"));
+		expect(host.stopAgent).toHaveBeenCalledWith("Woken");
+		tray.handleNativeEvent(action("tray.peek", "Scout"));
+		expect(tray.describe().p).toMatchObject({ peek: "Scout" });
 	});
 
 	it("lists the done card's agents in its closer look, newest first, capped, each opening its transcript", () => {

@@ -72,6 +72,8 @@ interface TrayCardFace {
 	readonly name: string;
 	readonly status: TspTrayStatus;
 	readonly aria: string;
+	/** Whether its closer look adds anything to its face; `tray.peek` on one that does not is ignored. */
+	readonly look: boolean;
 }
 
 /** A subagent's card. */
@@ -519,7 +521,17 @@ function agentItem(
 		start: remembered.start,
 		duration: remembered.duration,
 		openable: ref !== undefined && input.canOpen(ref),
+		look: agentHasLook(session, doing.text),
 	};
+}
+
+/**
+ * Whether an agent's closer look adds to its card: a task line other than
+ * what the card says, or operations to list.
+ */
+function agentHasLook(session: ObservableSession | undefined, text: string): boolean {
+	const detail = trayAgentDetail(session, 0);
+	return detail.tail.length > 0 || (detail.task !== "" && detail.task !== text);
 }
 
 /** How a finished agent ended, by its observer session and its registry ref. */
@@ -588,6 +600,7 @@ function finishedAgentItem(
 		start: acted - (duration ?? 0),
 		duration,
 		openable: ref !== undefined && input.canOpen(ref),
+		look: agentHasLook(session, text),
 	};
 }
 
@@ -639,6 +652,8 @@ function jobItem(input: TrayInput, memory: TrayMemory, job: AsyncJob): TrayJobIt
 		view,
 		output,
 		command: command === name ? "" : command,
+		// The closer look adds the full widget, more output lines than the card's two, or the command.
+		look: view !== undefined || output.split("\n").length > TRAY_OUT_LINES || (command !== "" && command !== name),
 	};
 }
 
@@ -712,6 +727,7 @@ function doneItem(
 		count: done.length,
 		names: summary,
 		entries: memory.doneEntries.entries,
+		look: true,
 	};
 }
 
@@ -862,6 +878,7 @@ function cardProps(item: TrayItem): TspProps<"col"> {
 		status: item.status,
 		tone: toneOf(item.status),
 		...(item.item === "agent" ? { acted: item.acted } : {}),
+		...(item.look ? {} : { look: false }),
 		aria: item.aria,
 	};
 }
@@ -1445,7 +1462,9 @@ export class Tray implements Component {
 		this.#items = items;
 		this.#quiet = quiet;
 		this.#fresh = true;
-		const peeked = this.#peekRef === undefined ? undefined : items.find(item => item.ref === this.#peekRef);
+		// The closer look goes with its card, and once that card has nothing more to show.
+		const found = this.#peekRef === undefined ? undefined : items.find(item => item.ref === this.#peekRef);
+		const peeked = found?.look ? found : undefined;
 		if (!peeked) this.#peekRef = undefined;
 		const detail =
 			peeked?.item === "agent"
@@ -1566,6 +1585,8 @@ export class Tray implements Component {
 		const item = ref ? this.#items.find(candidate => candidate.ref === ref) : undefined;
 		switch (event.act) {
 			case "tray.peek":
+				// Nothing more to show: the open closer look, if any, stays as it is.
+				if (item && !item.look) return;
 				this.#peekRef = item?.ref;
 				this.refresh();
 				return;

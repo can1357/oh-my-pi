@@ -246,6 +246,8 @@ export interface TspColProps {
 	status?: TspTrayStatus;
 	/** On an agent's `omp.tray.card`: epoch ms of its last operation (its latest tool call start, or when it settled). */
 	acted?: number;
+	/** On `omp.tray.card`: `false` when its closer look would add nothing to its face (`tray.peek` on it is ignored). */
+	look?: boolean;
 }
 /** What an `omp.tray.card` stands for. */
 export type TspTrayItem = "agent" | "job" | "done";
