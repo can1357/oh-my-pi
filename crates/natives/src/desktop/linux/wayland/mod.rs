@@ -143,7 +143,7 @@ impl PortalGeometry {
 pub struct WaylandBackend {
 	display:           DisplaySelector,
 	pipewire:          pipewire::Loaded,
-	cast:              capture::Cast,
+	shares:            capture::share::Shares,
 	ax:                Option<AtSpiAx>,
 	ax_error:          Option<DesktopError>,
 	input:             Option<libei::Libei>,
@@ -185,6 +185,12 @@ fn compositor_pid() -> Option<u32> {
 	(status == 0 && credentials.pid > 0).then_some(credentials.pid as u32)
 }
 
+/// The process name `/proc` reports for `pid`.
+fn process_name(pid: u32) -> Option<String> {
+	let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+	Some(comm.trim_end().to_owned())
+}
+
 impl WaylandBackend {
 	pub fn new(display: DisplaySelector) -> Self {
 		// Remove the world-readable RemoteDesktop restore token that pre-#7884
@@ -194,16 +200,19 @@ impl WaylandBackend {
 			Ok(ax) => (Some(ax.with_alert_windows()), None),
 			Err(err) => (None, Some(err)),
 		};
+		let compositor_pid = compositor_pid();
 		Self {
 			display,
 			pipewire: pipewire::library(),
-			cast: capture::Cast::default(),
+			shares: capture::share::Shares::for_compositor(
+				compositor_pid.and_then(process_name).as_deref(),
+			),
 			ax,
 			ax_error,
 			input: None,
 			input_unavailable: OnceCell::new(),
 			displays: Vec::new(),
-			compositor_pid: compositor_pid(),
+			compositor_pid,
 			unanswered: Vec::new(),
 		}
 	}
@@ -326,9 +335,9 @@ impl Backend for WaylandBackend {
 
 	fn validate_frame_layout(&mut self, frame: &FrameGeometry) -> CoreResult<()> {
 		control::check()?;
-		// ScreenCast exposes geometry only through a stream. Enumeration can use
-		// the last snapshot, but coordinate delivery needs fresh bounds.
-		let geometry = self.cast.geometry(self.pipewire);
+		// ScreenCast exposes geometry only when opening a stream. Enumeration can
+		// use the last snapshot, but coordinate delivery needs fresh bounds.
+		let geometry = self.shares.geometry(self.pipewire);
 		control::check()?;
 		let geometry = geometry.map_err(|error| {
 			DesktopError::invalid_coordinate_frame(format!(
@@ -391,7 +400,7 @@ impl Backend for WaylandBackend {
 		_caps: &CaptureCaps,
 		selector: Option<&DisplaySelector>,
 	) -> CoreResult<(RgbaImage, FrameGeometry)> {
-		let (image, geometry) = self.cast.capture(self.pipewire)?;
+		let (image, geometry) = self.shares.capture(self.pipewire)?;
 		self.displays = vec![geometry.display()];
 		let explicit = target.display_selector();
 		let selected = selector
@@ -564,7 +573,7 @@ mod tests {
 		WaylandBackend {
 			display:           DisplaySelector::All,
 			pipewire:          Err("libpipewire-0.3.so.0 could not be loaded (not installed)"),
-			cast:              capture::Cast::default(),
+			shares:            capture::share::Shares::PerCapture,
 			ax:                None,
 			ax_error:          None,
 			input:             None,

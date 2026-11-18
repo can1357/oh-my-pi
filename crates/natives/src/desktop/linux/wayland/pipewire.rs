@@ -149,8 +149,7 @@ impl SpaHook {
 
 type Unused = Option<unsafe extern "C" fn()>;
 
-/// `struct pw_stream_events` at version 2, with the four callbacks capture
-/// uses.
+/// `struct pw_stream_events` at version 2, with the callbacks capture uses.
 #[repr(C)]
 pub(super) struct StreamEvents {
 	version:       u32,
@@ -169,25 +168,33 @@ pub(super) struct StreamEvents {
 
 impl StreamEvents {
 	pub(super) const fn new(
-		state_changed: unsafe extern "C" fn(*mut c_void, c_int, c_int, *const c_char),
 		param_changed: unsafe extern "C" fn(*mut c_void, u32, *const SpaPod),
-		remove_buffer: unsafe extern "C" fn(*mut c_void, *mut Buffer),
 		process: unsafe extern "C" fn(*mut c_void),
 	) -> Self {
 		Self {
 			version:       PW_VERSION_STREAM_EVENTS,
 			destroy:       None,
-			state_changed: Some(state_changed),
+			state_changed: None,
 			control_info:  None,
 			io_changed:    None,
 			param_changed: Some(param_changed),
 			add_buffer:    None,
-			remove_buffer: Some(remove_buffer),
+			remove_buffer: None,
 			process:       Some(process),
 			drained:       None,
 			command:       None,
 			trigger_done:  None,
 		}
+	}
+
+	/// The same table, also called when the stream changes state and when it
+	/// frees a buffer.
+	pub(super) const fn with_lifecycle(
+		self,
+		state_changed: unsafe extern "C" fn(*mut c_void, c_int, c_int, *const c_char),
+		remove_buffer: unsafe extern "C" fn(*mut c_void, *mut Buffer),
+	) -> Self {
+		Self { state_changed: Some(state_changed), remove_buffer: Some(remove_buffer), ..self }
 	}
 }
 
