@@ -20,6 +20,7 @@ import {
 	findReusableCdp,
 	gracefulKillTreeOnce,
 	pickElectronTarget,
+	pickRelayTargetId,
 	probeCdpStatus,
 	resolveSpawnArgs,
 	waitForCdp,
@@ -1673,6 +1674,66 @@ describe("probeCdpStatus", () => {
 			expect(status).toBeNull();
 		} finally {
 			await server.stop(true);
+		}
+	});
+});
+
+describe("pickRelayTargetId", () => {
+	async function serveRelay(entries: unknown[]): Promise<{ url: string; stop: () => Promise<void> }> {
+		const server = Bun.serve({
+			port: 0,
+			fetch(request) {
+				return new URL(request.url).pathname.endsWith("/json")
+					? Response.json(entries)
+					: new Response("not found", { status: 404 });
+			},
+		});
+		return { url: `http://127.0.0.1:${server.port}`, stop: () => server.stop(true) };
+	}
+
+	test("returns the matching page id without a browser or an attachment", async () => {
+		const relay = await serveRelay([
+			{ id: "PAGE_A.1", type: "page", url: "https://example.com/other", title: "Other", active: "false" },
+			{ id: "PAGE_A.2", type: "page", url: "https://example.com/report", title: "Quarterly report", active: "true" },
+		]);
+		try {
+			await expect(pickRelayTargetId(relay.url, { matcher: "quarterly" })).resolves.toBe("PAGE_A.2");
+		} finally {
+			await relay.stop();
+		}
+	});
+
+	test("prefers an exact target id over a URL substring on another page", async () => {
+		const relay = await serveRelay([
+			{ id: "PAGE_A.1", type: "page", url: "https://example.com/PAGE_A.2", title: "First" },
+			{ id: "PAGE_A.2", type: "page", url: "about:blank", title: "" },
+		]);
+		try {
+			await expect(pickRelayTargetId(relay.url, { matcher: "PAGE_A.2" })).resolves.toBe("PAGE_A.2");
+		} finally {
+			await relay.stop();
+		}
+	});
+
+	test("refuses a discarded match and names the recovery", async () => {
+		const relay = await serveRelay([
+			{ id: "PAGE_A.1", type: "page", url: "https://example.com/report", title: "Report", discarded: "true" },
+		]);
+		try {
+			await expect(pickRelayTargetId(relay.url, { matcher: "report" })).rejects.toThrow(
+				'The tab matching "report" was discarded by Chrome. Click it to reload, then retry.',
+			);
+		} finally {
+			await relay.stop();
+		}
+	});
+
+	test("explains when the relay lists no page to adopt", async () => {
+		const relay = await serveRelay([]);
+		try {
+			await expect(pickRelayTargetId(relay.url, { matcher: "report" })).rejects.toThrow("lists no page to adopt");
+		} finally {
+			await relay.stop();
 		}
 	});
 });
