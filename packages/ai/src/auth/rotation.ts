@@ -258,7 +258,7 @@ export class RateLimits implements LimitsApi {
 		siblings: readonly { credential: AuthCredential; index: number }[],
 		probe: { baseUrl?: string; signal?: AbortSignal },
 	): Promise<boolean> {
-		const reports = await raceSignal(
+		const reports = await raceWithSignal(
 			Promise.all(
 				siblings
 					.filter(sibling => sibling.credential.type === "oauth")

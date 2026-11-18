@@ -37,6 +37,8 @@
 - Improved authentication broker compatibility across client and broker versions by tolerating unknown credential, usage, and observed-usage fields and values.
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
+- Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
+- Added an optional abort message to `raceWithSignal`, so it reports the same abort reason as the published `raceSignal` alias that already took one ([#15308](https://github.com/can1357/oh-my-pi/pull/15308) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.22.2] - 2026-11-18
 
@@ -232,7 +234,6 @@
 
 - Added edit execution context support for Cursor handlers, allowing integrations to identify frames that materialize native file edits and detect when server-side edits have settled.
 - Exported Responses replay utilities so callers can determine which turns are sent as native payload items when estimating or trimming context.
-- Added an optional abort message to `raceWithSignal`, so it reports the same abort reason as the published `raceSignal` alias that already took one ([#15308](https://github.com/can1357/oh-my-pi/pull/15308) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ### Fixed
 
