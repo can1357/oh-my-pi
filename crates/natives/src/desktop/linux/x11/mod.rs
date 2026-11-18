@@ -106,6 +106,10 @@ impl Backend for X11Backend {
 		self.input.takeover_admitted()
 	}
 
+	fn close(&mut self) -> CoreResult<()> {
+		self.input.close()
+	}
+
 	fn capture(
 		&mut self,
 		target: &Target,

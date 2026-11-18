@@ -458,6 +458,11 @@ impl Mpx {
 		})
 	}
 
+	/// Restores the temporary text keycodes bound on this pair's keyboard.
+	pub(super) fn finish_text(&mut self) -> CoreResult<()> {
+		self.text_mapping.finish()
+	}
+
 	pub(super) fn type_text(&mut self, target: Window, text: &str) -> CoreResult<()> {
 		self.begin(false)?;
 		let mut keymap = self.keyboard_keymap()?;

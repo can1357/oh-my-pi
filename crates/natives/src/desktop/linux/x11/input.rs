@@ -181,6 +181,13 @@ impl X11Input {
 		})
 	}
 
+	/// Restores the session's temporary text keycodes, on the core keyboard
+	/// and on its MPX pair's, reporting any that could not be restored.
+	pub(crate) fn close(&mut self) -> CoreResult<()> {
+		let pair = self.mpx.as_mut().map_or(Ok(()), Mpx::finish_text);
+		self.text_mapping.finish().and(pair)
+	}
+
 	pub(crate) fn pointer(
 		&mut self,
 		target: &Target,
