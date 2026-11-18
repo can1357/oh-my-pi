@@ -5,7 +5,7 @@
 ### Fixed
 
 - In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
-- The saved-reset picker lists the selected account's resets (id, title, what each clears) and spends nothing on an account whose resets clear different limits, showing the command that spends each by name ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
+- The saved-reset picker lists the selected account's resets (id, title, what each clears) and, for an account whose resets clear different limits, shows each reset as its own row with what it clears and whether it is offered next; only the offered reset can be confirmed ([#19652](https://github.com/can1357/oh-my-pi/pull/19652) by [@Xytronix](https://github.com/Xytronix))
 
 
 ## [18.22.2] - 2026-11-18
