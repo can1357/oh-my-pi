@@ -16046,7 +16046,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (plan.actions.length === 0) {
 				const adoptedId = await this.#adoptRecentReset(statuses, coordinator);
 				if (adoptedId !== undefined) return { restored: true, restoredCredentialIds: [adoptedId] };
-				if ("held" in plan) this.#noticeHeldClaudeResets(plan.held, coordinator);
+			}
+			// A held grant is reported whatever else this pass spends, fails to spend or asks consent for.
+			if ("held" in plan) this.#noticeHeldClaudeResets(plan.held, coordinator);
+			if (plan.actions.length === 0) {
 				let retryAfterMs: number | undefined;
 				if (provider === "anthropic" && Object.values(modes).includes("yes")) {
 					for (const status of statuses) {

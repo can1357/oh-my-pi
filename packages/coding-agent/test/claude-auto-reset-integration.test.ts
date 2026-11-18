@@ -5,6 +5,7 @@ import type {
 	ResetCreditTarget,
 	SessionRestrictionLease,
 	UsageReport,
+	UsageResetCredit,
 } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
@@ -415,6 +416,63 @@ describe("Claude saved-reset trigger integration", () => {
 					),
 			);
 		expect(recovered).toBe(true);
+	});
+
+	it("tells the user why it held the account's wider reset while it restores another account", async () => {
+		const farExpiry = new Date(Date.now() + 20 * 24 * HOUR).toISOString();
+		/** Blocked by the 5h window only; the weekly window has room. */
+		const fiveHourBlocked = (metadata: UsageReport["metadata"]): UsageReport => {
+			const report = claudeReport(0.5);
+			report.metadata = metadata;
+			for (const limit of report.limits) {
+				if (limit.id === "anthropic:5h") limit.amount = { usedFraction: 1, unit: "percent" };
+			}
+			return report;
+		};
+		const grant = (id: string, clears: string[]): UsageResetCredit => ({
+			id,
+			title: "Claude saved reset",
+			program: "cedar_ember",
+			remainingCount: 1,
+			usable: true,
+			requiresLimit: true,
+			clears,
+			blocking: ["anthropic:5h"],
+			usedFractions: { "anthropic:5h": 1 },
+			expiresAt: farExpiry,
+			status: "available",
+		});
+		const held: ResetCreditAccountStatus = {
+			...claudeStatus(true),
+			report: fiveHourBlocked({ accountId: ACCOUNT_ID, email: EMAIL, orgId: ORG_ID }),
+			nextCreditId: "wide-reset",
+			credits: [grant("wide-reset", ["anthropic:5h", "anthropic:7d"])],
+		};
+		const other: ResetCreditAccountStatus = {
+			...claudeStatus(true),
+			credentialId: 22,
+			accountId: "claude-other",
+			email: "other@example.com",
+			orgId: "org-other",
+			active: false,
+			report: fiveHourBlocked({ accountId: "claude-other", email: "other@example.com", orgId: "org-other" }),
+			nextCreditId: "five-hour-reset",
+			credits: [grant("five-hour-reset", ["anthropic:5h"])],
+		};
+		const { session, targets } = buildSession({ report: null, status: held, streamErrorFirst: true });
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async request =>
+			request?.provider === "anthropic" ? [held, other] : [],
+		);
+		const notices = vi.spyOn(session, "emitNotice");
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("restore another account while this one's reset is held");
+		await session.waitForIdle();
+
+		expect(targets.map(target => target.credentialId)).toEqual([22]);
+		expect(notices.mock.calls.some(([, message]) => message.includes(`anthropic/${CREDENTIAL_ID}:wide-reset`))).toBe(
+			true,
+		);
 	});
 
 	it("continues the task using live reset evidence when broker usage polling is unavailable", async () => {
