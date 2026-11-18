@@ -113,6 +113,32 @@ impl Control {
 		perform_action(&self.element, if up { "AXIncrement" } else { "AXDecrement" })
 	}
 
+	/// Where a press on this web slider's track stands for a release at
+	/// `(x, y)`: the point moved inside its frame along the track and to the
+	/// middle across it, when the slider itself (or its thumb) is what `pid`
+	/// hit-tests there. The hit test also [publishes](Self::publish) the
+	/// slider's value.
+	pub(crate) fn track_point(&self, pid: libc::pid_t, x: f64, y: f64) -> Option<(f64, f64)> {
+		let at = track_point(self.steps?, self.vertical, x, y)?;
+		let hit = pressed_at(pid, at.0, at.1)?;
+		let hit = if hit.role() == Some("AXValueIndicator") {
+			copy_element(&hit.element, "AXParent")?
+		} else {
+			hit.element
+		};
+		(*hit == *self.element).then_some(at)
+	}
+
+	/// Hit-tests `pid` at `(x, y)`, on this slider, so Chromium publishes its
+	/// value. On macOS 26.5, Chrome 154 and Electron 33 kept the `AXValue` a
+	/// range input had before a background drag or press changed it until an
+	/// accessibility hit test reached the slider, then published the page's
+	/// value within 300 ms (21/21); a hit test elsewhere in the page did not
+	/// (0/6), nor did waiting 2 s, hovering, focusing it or `AXScrollToVisible`.
+	pub(crate) fn publish(pid: libc::pid_t, x: f64, y: f64) {
+		pressed_at(pid, x, y);
+	}
+
 	/// Movement along the control's track; perpendicular motion cannot move it.
 	pub(crate) const fn movement(&self, dx: f64, dy: f64) -> f64 {
 		if self.vertical { dy.abs() } else { dx.abs() }
@@ -140,6 +166,25 @@ fn thumb_distance(frame: AxBounds, thumb: AxBounds, vertical: bool, x: f64, y: f
 	Some(if vertical { -distance } else { distance })
 }
 
+/// `(x, y)` clamped a pixel inside `frame` along its track, and at the
+/// middle of the frame across it; `None` for a frame too short to press.
+fn track_point(frame: AxBounds, vertical: bool, x: f64, y: f64) -> Option<(f64, f64)> {
+	let (start, length) = if vertical {
+		(frame.y, frame.height)
+	} else {
+		(frame.x, frame.width)
+	};
+	if length <= 2.0 {
+		return None;
+	}
+	let along = if vertical { y } else { x }.clamp(start + 1.0, start + length - 1.0);
+	Some(if vertical {
+		(frame.x + frame.width / 2.0, along)
+	} else {
+		(along, frame.y + frame.height / 2.0)
+	})
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -149,6 +194,19 @@ mod tests {
 		let frame = AxBounds { x: 0.0, y: 0.0, width: 100.0, height: 16.0 };
 		let thumb = AxBounds { x: 90.0, y: 0.0, width: 10.0, height: 16.0 };
 		assert_eq!(thumb_distance(frame, thumb, false, 150.0, 8.0), Some(0.0));
+	}
+
+	#[test]
+	fn a_press_for_a_release_past_the_track_lands_just_inside_its_end() {
+		let frame = AxBounds { x: 10.0, y: 20.0, width: 300.0, height: 22.0 };
+		assert_eq!(track_point(frame, false, 400.0, 90.0), Some((309.0, 31.0)));
+		assert_eq!(track_point(frame, false, 160.0, 25.0), Some((160.0, 31.0)));
+		let column = AxBounds { x: 10.0, y: 20.0, width: 22.0, height: 180.0 };
+		assert_eq!(track_point(column, true, 0.0, -5.0), Some((21.0, 21.0)));
+		assert_eq!(
+			track_point(AxBounds { x: 0.0, y: 0.0, width: 2.0, height: 9.0 }, false, 1.0, 1.0),
+			None
+		);
 	}
 
 	#[test]
