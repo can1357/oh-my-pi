@@ -145,7 +145,7 @@ describe("tool guard", () => {
 
 		expect(await guard.check(tool("read", "read"), { path: "/etc/hosts" }, "read")).toBeUndefined();
 		expect(await guard.check(bash, { command: "git status && ls -la src | head -5 2>&1" }, "exec")).toBeUndefined();
-		expect(await guard.check(bash, { command: "grep -rn foo . > notes.txt" }, "exec")).toBeUndefined();
+		expect(await guard.check(bash, { command: "grep -rn foo . > /dev/null 2>&1" }, "exec")).toBeUndefined();
 		expect(await guard.check(write, { path: path.join(cwd, "src/a.ts") }, "write")).toBeUndefined();
 		expect(await guard.check(tool("web_search", "exec"), { query: "x" }, "exec")).toBeUndefined();
 		expect(judge.requests).toHaveLength(0);
@@ -153,8 +153,9 @@ describe("tool guard", () => {
 		// The same tools reach the judge once a call can change something outside the working directory.
 		await guard.check(write, { path: "/etc/hosts" }, "write");
 		await guard.check(bash, { command: "echo x > /etc/hosts" }, "exec");
+		await guard.check(bash, { command: "grep -rn foo . > notes.txt" }, "exec");
 		await guard.check(bash, { command: "cd .. && mkdir out" }, "exec");
-		expect(judge.requests).toHaveLength(3);
+		expect(judge.requests).toHaveLength(4);
 	});
 
 	it("classifies only reading commands as read-only", () => {
@@ -166,7 +167,7 @@ describe("tool guard", () => {
 			"timeout 5 rg x",
 			"sort -n data.txt",
 		]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(true);
+			expect(isReadOnlyCommand(command)).toBe(true);
 		}
 		for (const command of [
 			"rm -rf build",
@@ -195,7 +196,7 @@ describe("tool guard", () => {
 			"sort -o /etc/passwd data.txt",
 			"sort -uo out data.txt",
 		]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+			expect(isReadOnlyCommand(command)).toBe(false);
 		}
 	});
 
@@ -208,52 +209,90 @@ describe("tool guard", () => {
 			"set -k; git diff GIT_EXTERNAL_DIFF=/tmp/x.sh",
 			"printf -v PATH /tmp/attacker; git status",
 		]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+			expect(isReadOnlyCommand(command)).toBe(false);
 		}
 		// Error and trace flags change nothing a command reads.
-		expect(isReadOnlyCommand("set -euo pipefail; git status", cwd)).toBe(true);
-		expect(isReadOnlyCommand("printf '%s\\n' -v", cwd)).toBe(true);
+		expect(isReadOnlyCommand("set -euo pipefail; git status")).toBe(true);
+		expect(isReadOnlyCommand("printf '%s\\n' -v")).toBe(true);
 	});
 
 	it("treats `>&file` as a write to the file and `>&N` as a descriptor copy", () => {
-		expect(isReadOnlyCommand("echo overwritten >&/etc/important.conf", cwd)).toBe(false);
-		expect(isReadOnlyCommand("echo overwritten 1>& /etc/important.conf", cwd)).toBe(false);
-		expect(isReadOnlyCommand("echo ok >&2 2>&1 >&-", cwd)).toBe(true);
-		expect(isReadOnlyCommand("echo ok >&notes.txt", cwd)).toBe(true);
+		expect(isReadOnlyCommand("echo overwritten >&/etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("echo overwritten 1>& /etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("echo ok >&notes.txt")).toBe(false);
+		expect(isReadOnlyCommand("echo ok >&2 2>&1 >&-")).toBe(true);
 	});
 
 	it("treats a read-write redirect `<>file` as a write to the file", () => {
-		expect(isReadOnlyCommand("cat 3<>/etc/important.conf", cwd)).toBe(false);
-		expect(isReadOnlyCommand("cat <> /etc/important.conf", cwd)).toBe(false);
-		expect(isReadOnlyCommand("cat 3<>notes.txt < input.txt", cwd)).toBe(true);
+		expect(isReadOnlyCommand("cat 3<>/etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("cat <> /etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("cat 3<>notes.txt")).toBe(false);
+		expect(isReadOnlyCommand("cat < input.txt")).toBe(true);
 	});
 
-	it("places a new file under a symlinked directory where the link points", () => {
+	it("judges every redirect to a file, keeping only /dev/null and descriptor copies read-only", () => {
+		for (const command of [
+			'echo ok "x">/tmp/outside/f',
+			'echo x >"/etc/passwd"',
+			"echo x > out.txt",
+			"echo x >> sub/log.txt",
+			"git status 2> errors.txt",
+			"echo x >| out.txt",
+			"cat <in.txt>out.txt",
+			"echo x > /dev/stderr",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		for (const command of ["git status 2>&1", "git status >/dev/null 2>&1", "echo ok >&2", "git diff 2>/dev/null"]) {
+			expect(isReadOnlyCommand(command)).toBe(true);
+		}
+	});
+
+	it("judges writes through symlinks whatever their target", () => {
 		const outside = TempDir.createSync("@omp-tool-guard-outside-");
 		try {
-			fs.symlinkSync(outside.path(), path.join(cwd, "link"));
-			fs.mkdirSync(path.join(cwd, "sub"));
-			expect(isReadOnlyCommand("echo data > link/newfile", cwd)).toBe(false);
-			expect(isReadOnlyCommand("touch link/new/deeper", cwd)).toBe(false);
-			expect(isReadOnlyCommand("echo data > sub/newfile", cwd)).toBe(true);
+			fs.symlinkSync(path.join(outside.path(), "new"), path.join(cwd, "link2"));
+			fs.mkdirSync(path.join(outside.path(), "sub"));
+			fs.symlinkSync(path.join(outside.path(), "sub"), path.join(cwd, "link"));
+			for (const command of [
+				"echo x > link2",
+				"echo x > link/../escaped",
+				"tee link2",
+				"touch link/../escaped",
+				"mkdir link/new",
+			]) {
+				expect(isReadOnlyCommand(command)).toBe(false);
+			}
 		} finally {
 			outside.removeSync();
 		}
 	});
 
+	it("judges any command that changes directory", () => {
+		for (const command of [
+			"command cd /tmp && echo hi > made",
+			"builtin cd /tmp; ls",
+			"ls | cd /tmp",
+			"pushd /tmp && ls",
+			"git status; popd",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+	});
+
 	it("judges tree when it writes an output file", () => {
 		for (const command of ["tree -o /etc/important.conf .", "tree -ao /etc/important.conf .", "tree -R -H . /srv"]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+			expect(isReadOnlyCommand(command)).toBe(false);
 		}
-		expect(isReadOnlyCommand("tree -a -L 2 --noreport src", cwd)).toBe(true);
+		expect(isReadOnlyCommand("tree -a -L 2 --noreport src")).toBe(true);
 	});
 
 	it("judges uniq when it writes its output operand", () => {
 		for (const command of ["uniq data.txt /etc/important.conf", "uniq -f 1 data.txt /etc/x", "uniq -cw 3 - /etc/x"]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+			expect(isReadOnlyCommand(command)).toBe(false);
 		}
 		for (const command of ["uniq -c data.txt", "uniq -f 1 data.txt", "sort data.txt | uniq -d"]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(true);
+			expect(isReadOnlyCommand(command)).toBe(true);
 		}
 	});
 

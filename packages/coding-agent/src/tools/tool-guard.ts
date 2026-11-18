@@ -8,8 +8,8 @@
  * a call aborted while it is judged never runs.
  *
  * Calls that cannot do harm never reach the judge: read-tier tools, writes inside the working
- * directory, shell commands made only of reading commands, and web search. The design, wording and
- * thresholds come from nace-ai/intern's System 1 guard (`guard.py`, Apache-2.0).
+ * directory, shell commands made only of reading commands that write no file, and web search. The
+ * design, wording and thresholds come from nace-ai/intern's System 1 guard (`guard.py`, Apache-2.0).
  */
 import * as os from "node:os";
 import * as path from "node:path";
@@ -95,16 +95,16 @@ const UNJUDGED_TOOLS = wordTable("web_search task");
 /** Commands that only read, print or compute. */
 const READ_ONLY_COMMANDS = wordTable(
 	"cat head tail ls pwd echo printf wc grep egrep fgrep which whereis type file stat du df cut tr nl diff cmp " +
-		"basename dirname realpath readlink date whoami id uname hostname true false cd test [ column jq comm paste " +
-		"fold rev seq md5sum sha1sum sha256sum shasum md5 sleep uniq pushd popd tree pdfinfo",
+		"basename dirname realpath readlink date whoami id uname hostname true false test [ column jq comm paste " +
+		"fold rev seq md5sum sha1sum sha256sum shasum md5 sleep uniq tree pdfinfo",
 );
 /** `tree` options that write files: `-o FILE`, also inside a cluster (`-ao FILE`), and `-R`, which reruns tree with `-o 00Tree.html` in each directory. */
 const TREE_WRITES = /^-[^-]*[oR]/;
 /** `set` flags that change only how the shell stops on errors and traces, with `-o` naming one of {@link SET_NAMED_OPTIONS}. */
 const SET_FLAGS = /^[-+][euxv]*o?$/;
 const SET_NAMED_OPTIONS = wordTable("pipefail errexit nounset xtrace verbose");
-/** Commands that write only where they are told: read-only when every target is inside the working directory. */
-const LOCAL_WRITERS = wordTable("tee mkdir touch");
+/** Directory changes: the rest of the command runs somewhere the call does not show, so it is always judged. */
+const DIRECTORY_CHANGES = wordTable("cd pushd popd");
 const GIT_READS = wordTable(
 	"status log diff show rev-parse ls-files blame describe shortlog grep ls-tree cat-file merge-base rev-list " +
 		"show-ref whatchanged version help",
@@ -116,7 +116,8 @@ const FIND_ACTIONS = wordTable("-exec -execdir -ok -okdir -delete -fprint -fprin
 /** Prefixes that run the rest of the line as the command; reads stay reads under the first group. */
 const READ_WRAPPERS = wordTable("time nice timeout command");
 const SCRIPT_WRAPPERS = wordTable("time nice timeout command sudo doas env nohup exec");
-const SAFE_REDIRECT_TARGETS = wordTable("/dev/null /dev/stdout /dev/stderr");
+/** The one redirect target that writes nothing; every other file target is a write. */
+const SAFE_REDIRECT_TARGETS = wordTable("/dev/null");
 
 const SHELLS = wordTable("sh bash zsh dash ksh ash fish");
 const INTERPRETER = /^(?:python[\d.]*|perl|ruby|node|php|pwsh)$/;
@@ -189,23 +190,6 @@ function resolveWord(word: string, base: string): string | undefined {
 	if (word === "~" || word.startsWith("~/")) return path.join(os.homedir(), word.slice(1));
 	if (word.startsWith("~")) return undefined;
 	return path.resolve(base, word);
-}
-
-/** Where a shell command runs and which writes keep it read-only. */
-interface ShellScope {
-	/** The directory the command starts in. */
-	base: string;
-	/** The working directory writes may land in. */
-	root: string;
-	/** False once the command changes directory: relative targets can no longer be placed. */
-	localWrites: boolean;
-}
-
-function insideRoot(word: string, scope: ShellScope): boolean {
-	if (!scope.localWrites) return false;
-	const target = resolveWord(word, scope.base);
-	// A missing target resolves through its deepest existing parent, so `link/new` lands where `link` points.
-	return target !== undefined && pathIsWithin(scope.root, target, { throughMissing: true });
 }
 
 /** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`). */
@@ -299,8 +283,22 @@ function readOnlyArguments(name: string, args: string[]): boolean {
 	}
 }
 
-/** Whether one simple command leaves everything outside the working directory as it was. */
-function readOnlySegment(text: string, scope: ShellScope): boolean {
+/** Whether `raw` holds a `>` outside quotes (`echo ok "x">f`): a redirection inside a word. */
+function unquotedRedirect(raw: string): boolean {
+	let quote: string | undefined;
+	for (let i = 0; i < raw.length; i++) {
+		const char = raw[i];
+		if (char === "\\" && quote !== "'") i++;
+		else if (quote !== undefined) {
+			if (char === quote) quote = undefined;
+		} else if (char === "'" || char === '"') quote = char;
+		else if (char === ">") return true;
+	}
+	return false;
+}
+
+/** Whether one simple command only reads, prints or computes, writing no file. */
+function readOnlySegment(text: string): boolean {
 	const tokens = lexShellCommand(text);
 	const words: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
@@ -323,16 +321,16 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 				if (duplicates && /^(?:\d+|-)$/.test(word.value)) continue;
 				target = word.value;
 			}
-			if (!inTable(SAFE_REDIRECT_TARGETS, target) && !insideRoot(target, scope)) return false;
+			if (!inTable(SAFE_REDIRECT_TARGETS, target)) return false;
 			continue;
 		}
+		// A `>` inside a word (`echo ok "x">f`, `cat <in>out`) is a redirection this scanner does not place.
+		if (unquotedRedirect(token.raw) || inTable(DIRECTORY_CHANGES, token.value)) return false;
 		const input = /^\d*<(.*)$/.exec(token.raw);
 		if (input) {
 			if (input[1] === "" && tokens[i + 1]?.kind === "separator") i += 2;
 			continue;
 		}
-		// An unquoted `>` inside a word (`echo a>b`) is a redirection this scanner does not place.
-		if (/^[^'"]*>/.test(token.raw)) return false;
 		words.push(token.value);
 	}
 	const command = unwrapCommand(words, READ_WRAPPERS);
@@ -343,9 +341,6 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
 	if (inTable(READ_ONLY_COMMANDS, name)) return readOnlyArguments(name, args);
-	if (inTable(LOCAL_WRITERS, name)) {
-		return args.filter(arg => !arg.startsWith("-")).every(arg => insideRoot(arg, scope));
-	}
 	switch (name) {
 		case "find":
 			return !args.some(arg => inTable(FIND_ACTIONS, arg));
@@ -365,15 +360,13 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 }
 
 /**
- * Whether a shell command is made only of commands that read, print or compute, writing nowhere but
- * the working directory. Syntax the scanner cannot follow (substitutions, heredocs, groups) is not.
+ * Whether a shell command is made only of commands that read, print or compute, redirecting only to
+ * `/dev/null` or another descriptor. Syntax the scanner cannot follow (substitutions, heredocs, groups)
+ * is not, nor is any directory change.
  */
-export function isReadOnlyCommand(command: string, cwd: string, root: string = cwd): boolean {
+export function isReadOnlyCommand(command: string): boolean {
 	const segments = extractFlatShellCommandSegments(command);
-	if (segments.length === 0) return false;
-	const changesDirectory = segments.some(segment => /^(?:cd|pushd|popd)\b/.test(segment.text));
-	const scope: ShellScope = { base: cwd, root, localWrites: !changesDirectory };
-	return segments.every(segment => readOnlySegment(segment.text, scope));
+	return segments.length > 0 && segments.every(segment => readOnlySegment(segment.text));
 }
 
 /** The file a simple command runs as code, as written; undefined for code in the call or a module. */
@@ -461,8 +454,7 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	if (call.toolName === "bash") {
 		const command = stringArg(call.args, "command");
 		if (command === undefined) return true;
-		const runIn = stringArg(call.args, "cwd");
-		return !isReadOnlyCommand(command, runIn ? path.resolve(cwd, runIn) : cwd, cwd);
+		return !isReadOnlyCommand(command);
 	}
 	if (call.tier === "write") {
 		const targets = call.targets ?? [];
