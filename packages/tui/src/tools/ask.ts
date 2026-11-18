@@ -5,27 +5,20 @@ import type { NativeChild, NativeNode } from "../native/node";
 import { OwnerMemo } from "../native/memo";
 import { noteText, resultText } from "./native-view";
 
-import { type Component, replaceTabs, Text, truncateToWidth, visibleWidth } from "../index";
+import { type Component, replaceTabs, Text, visibleWidth } from "../index";
 
 import type { RenderResultOptions } from "./renderer";
 
 import type { Theme } from "../theme/theme";
 
 import { renderStatusLine } from "../render";
-import { framedToolCard, type ToolCardSection } from "../render/tool-card";
+import { framedToolCard } from "../render/tool-card";
 import { wrapPrefixedLine } from "../render/hanging-wrap";
 
-import { formatStatusIcon, formatTitle, PREVIEW_LIMITS } from "../render/render-utils";
+import { formatStatusIcon, PREVIEW_LIMITS } from "../render/render-utils";
 
-import { type FormAnswer, fieldQuestions, OTHER_LABEL, type OptionNote } from "../html-form/data";
-import {
-	type ChoiceField,
-	type FormField,
-	type HtmlForm,
-	parseHtmlForm,
-	spansText,
-	type TextField,
-} from "../html-form/parse";
+import { type FormAnswer, fieldQuestions, type OptionNote } from "../html-form/data";
+import { type HtmlForm, parseHtmlForm } from "../html-form/parse";
 
 /** Answers and selected-option notes displayed for an ask tool result. */
 export interface AskToolDetails {
@@ -138,69 +131,6 @@ function capLines(uiTheme: Theme, lines: string[], limit: number, indent: string
 	];
 }
 
-/** Option rows of a choice field with its preselected state marked, capped unless expanded. */
-function choiceFieldLines(uiTheme: Theme, field: ChoiceField, width: number, expanded: boolean): string[] {
-	const limit = expanded ? field.options.length : PREVIEW_LIMITS.COLLAPSED_ITEMS;
-	const out: string[] = [];
-	for (const option of field.options.slice(0, limit)) {
-		const marker = uiTheme.fg(option.checked ? "success" : "dim", optionMarker(uiTheme, field.multi, option.checked));
-		const color = option.disabled ? "dim" : option.checked ? "toolOutput" : "muted";
-		const prefix = ` ${marker} `;
-		const label = oneLine(spansText(option.label)) || oneLine(option.value);
-		out.push(...wrapPrefixedLine(prefix, " ".repeat(visibleWidth(prefix)), uiTheme.fg(color, label), width));
-	}
-	const hidden = field.options.length - limit;
-	if (hidden > 0) out.push(`   ${uiTheme.fg("dim", `… ${formatCount("more option", hidden)}`)}`);
-	else if (field.other)
-		out.push(` ${uiTheme.fg("dim", `${optionMarker(uiTheme, field.multi, false)} ${OTHER_LABEL}…`)}`);
-	return out;
-}
-
-/** Input rows of a text field: its prefilled value, else its placeholder dimmed, behind an input bar. */
-function textFieldLines(uiTheme: Theme, field: TextField, width: number, expanded: boolean): string[] {
-	const prefix = `   ${uiTheme.fg("border", uiTheme.boxRound.vertical)} `;
-	const inner = Math.max(1, width - visibleWidth(prefix));
-	const shown = field.type === "password" ? "•".repeat(Math.min(field.value.length, 12)) : clean(field.value);
-	const lines = shown
-		? shown.split("\n").map(line => `${prefix}${uiTheme.fg("toolOutput", truncateToWidth(line, inner))}`)
-		: [`${prefix}${uiTheme.fg("dim", truncateToWidth(oneLine(field.placeholder), inner))}`];
-	return capLines(uiTheme, lines, expanded ? PREVIEW_LIMITS.EXPANDED_LINES : PREVIEW_LIMITS.COLLAPSED_LINES, "   ");
-}
-
-/** Pending form summary: one card section per fieldset, each field's question over its options or input. */
-function formSections(
-	uiTheme: Theme,
-	form: HtmlForm,
-	questions: ReadonlyMap<FormField, string>,
-	width: number,
-	expanded: boolean,
-): ToolCardSection[] {
-	const sections: ToolCardSection[] = [];
-	for (const section of form.sections) {
-		const title = oneLine(spansText(section.title));
-		const content: string[] = title
-			? wrapPrefixedLine(" ", " ", uiTheme.bold(uiTheme.fg("accent", title)), width)
-			: [];
-		for (const block of section.blocks) {
-			if (block.kind !== "field") continue;
-			const field = block.field;
-			const question = oneLine(questions.get(field) ?? field.name);
-			// A fieldset's lone group answers its legend; the title already says it.
-			if (question && question !== title) {
-				const required = field.required ? uiTheme.fg("error", " *") : "";
-				content.push(...wrapPrefixedLine(" ", " ", `${uiTheme.fg("text", question)}${required}`, width));
-			}
-			content.push(
-				...(field.kind === "choice"
-					? choiceFieldLines(uiTheme, field, width, expanded)
-					: textFieldLines(uiTheme, field, width, expanded)),
-			);
-		}
-		if (content.length > 0) sections.push({ content, separator: sections.length > 0 });
-	}
-	return sections;
-}
-
 /** Answer rows: a success check before the answer with continuation rows beneath it, or a dim placeholder. */
 function answerLines(uiTheme: Theme, shown: string, width: number, expanded: boolean): string[] {
 	if (shown === "") return [`   ${uiTheme.fg("dim", NO_ANSWER)}`];
@@ -294,19 +224,9 @@ export const askToolRenderer = {
 		return askResultMemo.get(result, [], () => describeAskResult(result, args));
 	},
 	mergeCallAndResult: true,
-	renderCall(args: AskRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
-		// Call args are untrusted (partially streamed or model-mangled); the parser tolerates truncated markup.
-		const form = argsForm(args);
-		const questions = form ? fieldQuestions(form) : undefined;
-		const named = form?.fields.filter(field => field.name).length ?? 0;
-		const footerMeta = named > 0 ? uiTheme.fg("dim", formatCount("field", named)) : undefined;
-		return framedToolCard(uiTheme, ({ contentWidth }) => ({
-			header: formatTitle("Ask", uiTheme),
-			sections: form && questions ? formSections(uiTheme, form, questions, contentWidth, options.expanded) : [],
-			footerMeta,
-			phase: "pending",
-			borderColor: "borderMuted",
-		}));
+	renderCall(): undefined {
+		// The ask panel over the composer owns the questions while they wait; the transcript shows the answers.
+		return undefined;
 	},
 
 	renderResult(

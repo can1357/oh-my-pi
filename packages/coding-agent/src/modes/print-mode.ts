@@ -313,7 +313,7 @@ async function runPrintModeCore(
 	let costCapRefusalBeforeTurn = session.costCapRefusal;
 	// The print-mode-dispatched commands. Only commands whose runtime hooks
 	// are real in the headless runtime belong here: each runs a session API
-	// (`/mcp reauth` engine, `session.compact`, `session.handoff`,
+	// (`/mcp reauth` engine, `session.compact`,
 	// `session.retry`). Commands whose hooks would be stubs
 	// (`/reload-plugins` and friends) stay undispatched, and so does
 	// `/stats`: its dashboard server is in-process (`Bun.serve` inside this
@@ -402,7 +402,7 @@ async function runPrintModeCore(
 			// hidden behind a sibling account that quietly answers the prompt, a run must
 			// say when it crossed its cost thresholds, a memory failure must not pass
 			// as an answer that used memories, and Spotlight must say when it lost its
-			// credential and fell back to unranked cuts.
+			// credential or Cloud access and fell back to unranked cuts.
 			writeStderrLine(event.source === COST_GATE_NOTICE_SOURCE ? event.message : `Warning: ${event.message}`);
 		} else if (event.type === "auto_retry_start") {
 			// Text mode shows only `Working...` while a turn runs; a turn stuck retrying

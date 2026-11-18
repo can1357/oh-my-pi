@@ -31,7 +31,12 @@ import {
 	lookupMcpOAuthCredentialForServer,
 	removeManagedMcpOAuthCredential,
 } from "./oauth-credentials";
-import { MCPOAuthFlow, type MCPStoredOAuthCredential, mcpOAuthCredentialId } from "./oauth-flow";
+import {
+	MCPOAuthClientIdRequiredError,
+	MCPOAuthFlow,
+	type MCPStoredOAuthCredential,
+	mcpOAuthCredentialId,
+} from "./oauth-flow";
 import type { AuthStorage } from "../session/auth-storage";
 import type { MCPAuthChallenge, MCPAuthConfig, MCPServerConfig } from "./types";
 
@@ -622,6 +627,9 @@ export async function runMcpOAuthFlow(opts: McpOAuthFlowRunOptions): Promise<OAu
 		if (cancellationRequested) {
 			throw new MCPOAuthCancelledError();
 		}
+
+		// Already a complete diagnostic; its "HTTP 403" must not hit the generic remap below.
+		if (error instanceof MCPOAuthClientIdRequiredError) throw error;
 
 		const errorMsg = error instanceof Error ? error.message : String(error);
 

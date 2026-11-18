@@ -24,7 +24,7 @@ import type { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import type { CustomToolContext } from "../../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
-import type { ArtifactManager } from "../../session/artifacts";
+import type { ArtifactManagerApi } from "../../session/artifacts";
 import type { BlobPutOptions, BlobPutResult } from "../../session/blob-store";
 import type { SessionEntry, SessionHeader, SessionTreeNode, UsageStatistics } from "../../session/session-entries";
 import type { ReadonlySessionManager } from "../../session/session-manager";
@@ -46,8 +46,8 @@ export interface WireSessionView {
 	readonly leafId: string | null;
 	readonly header: SessionHeader | null;
 	readonly ensureOnDisk: () => Promise<void>;
-	readonly allocateArtifactPath: (toolType: string) => Promise<{ id?: string; path?: string }>;
-	readonly saveArtifact: (content: string, toolType: string) => Promise<string | undefined>;
+	readonly allocateArtifactPath: () => Promise<{ id?: string; path?: string }>;
+	readonly saveArtifact: (content: string) => Promise<string | undefined>;
 	readonly getArtifactPath: (id: string) => Promise<string | null>;
 	readonly putBlob: (data: Uint8Array, options?: BlobPutOptions) => Promise<BlobPutResult>;
 }
@@ -121,12 +121,12 @@ export class ToolContextSessionView implements ReadonlySessionManager {
 		return this.#wire.ensureOnDisk();
 	}
 
-	allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
-		return this.#wire.allocateArtifactPath(toolType);
+	allocateArtifactPath(): Promise<{ id?: string; path?: string }> {
+		return this.#wire.allocateArtifactPath();
 	}
 
-	saveArtifact(content: string, toolType: string): Promise<string | undefined> {
-		return this.#wire.saveArtifact(content, toolType);
+	saveArtifact(content: string): Promise<string | undefined> {
+		return this.#wire.saveArtifact(content);
 	}
 
 	getArtifactPath(id: string): Promise<string | null> {
@@ -141,7 +141,7 @@ export class ToolContextSessionView implements ReadonlySessionManager {
 		throw new CrossThreadSessionReadError("putBlobSync");
 	}
 
-	getArtifactManager(): ArtifactManager | null {
+	getArtifactManager(): ArtifactManagerApi {
 		throw new CrossThreadSessionReadError("getArtifactManager");
 	}
 
@@ -198,8 +198,8 @@ function wireSessionView(manager: ReadonlySessionManager): WireSessionView {
 		leafId: manager.getLeafId(),
 		header: manager.getHeader(),
 		ensureOnDisk: () => manager.ensureOnDisk(),
-		allocateArtifactPath: toolType => manager.allocateArtifactPath(toolType),
-		saveArtifact: (content, toolType) => manager.saveArtifact(content, toolType),
+		allocateArtifactPath: () => manager.allocateArtifactPath(),
+		saveArtifact: content => manager.saveArtifact(content),
 		getArtifactPath: id => manager.getArtifactPath(id),
 		putBlob: (data, options) => manager.putBlob(Buffer.from(data.buffer, data.byteOffset, data.byteLength), options),
 	};

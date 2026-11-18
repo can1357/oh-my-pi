@@ -128,11 +128,14 @@ function failedCompletion(usage: ai.Usage): ai.AssistantMessage {
 	};
 }
 
-/** The `model_usage` journal entries title generation wrote. */
+/** The `model_usage` journal entries title generation wrote: the fork's and the title model's. */
 function titleUsageEntries(manager: SessionManager): ModelUsageEntry[] {
 	return manager
 		.getEntries()
-		.filter((entry): entry is ModelUsageEntry => entry.type === "model_usage" && entry.purpose === "title");
+		.filter(
+			(entry): entry is ModelUsageEntry =>
+				entry.type === "model_usage" && (entry.purpose === "title" || entry.purpose === "title-fork"),
+		);
 }
 
 /** Resolves on the session's next title change. */
@@ -162,6 +165,9 @@ describe("title usage accounting", () => {
 		// The fork runs on the session's own model, here the side mock.
 		expect(entries[0]?.provider).toBe("mock");
 		expect(entries[0]?.model).toBe("mock-model");
+		// It reads the conversation it branched from, so only its reply is journaled.
+		expect(entries[0]?.purpose).toBe("title-fork");
+		expect(entries[0]?.completion).toEqual({ reply: CARD_REPLY });
 		// The fork is off-transcript: the side reply is not a session message, so its
 		// spend can only come from the usage journal.
 		expect(
@@ -179,9 +185,9 @@ describe("title usage accounting", () => {
 		const main = createMockModel({ responses: [{ content: ["unused"] }] });
 		const side = createMockModel({ handler: { content: ["unused"] } });
 		const target = await createSession(main, side, { "title.generator": "tiny" }, { autoTitle: false });
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(
-			titleCompletion("<title>Fix flaky park tests</title>", TITLE_USAGE),
-		);
+		const completeSimple = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(titleCompletion("<title>Fix flaky park tests</title>", TITLE_USAGE));
 
 		const title = await target.generateTitle(FIRST_MESSAGE);
 
@@ -189,9 +195,32 @@ describe("title usage accounting", () => {
 		const entries = titleUsageEntries(target.sessionManager);
 		expect(entries).toHaveLength(1);
 		expect(entries[0]?.usage).toEqual(TITLE_USAGE);
+		// Journaled as sent and as replied, under the purpose that names the static title prompt.
+		const sent = completeSimple.mock.calls[0]?.[1].messages[0]?.content;
+		if (typeof sent !== "string") throw new Error("Expected the title request to send a text user turn");
+		expect(sent).toContain(FIRST_MESSAGE);
+		expect(entries[0]?.purpose).toBe("title");
+		expect(entries[0]?.completion).toEqual({ prompt: sent, reply: "<title>Fix flaky park tests</title>" });
 		expect(target.sessionManager.getUsageStatistics().totalTokens).toBe(TITLE_USAGE.totalTokens);
 		// The tiny model bypasses the metered session stream, so the title charges the cost gate itself.
 		expect(target.costGate.spent).toBeCloseTo(TITLE_USAGE.cost.total, 10);
+	});
+
+	it("journals a billed title attempt whose message came back without content", async () => {
+		const main = createMockModel({ responses: [{ content: ["unused"] }] });
+		const side = createMockModel({ handler: { content: ["unused"] } });
+		const target = await createSession(main, side, { "title.generator": "tiny" }, { autoTitle: false });
+		// Proxied providers can drop `content` from the message they hand back; the attempt was still billed.
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			...titleCompletion("", TITLE_USAGE),
+			content: undefined,
+		} as never);
+
+		expect(await target.generateTitle(FIRST_MESSAGE)).toBeNull();
+
+		const [entry] = titleUsageEntries(target.sessionManager);
+		expect(entry?.usage).toEqual(TITLE_USAGE);
+		expect(entry?.completion?.reply).toBe("");
 	});
 
 	it("drops a stale session's title usage and charges only the session that started it", async () => {
@@ -264,10 +293,10 @@ describe("title usage accounting", () => {
 		const entries = titleUsageEntries(target.sessionManager);
 		// The failed fork's error message carries usage; it is journaled once,
 		// followed by the fallback's own title and card requests.
-		expect(entries.map(entry => [entry.stopReason, entry.usage.totalTokens])).toEqual([
-			["error", FORK_USAGE.totalTokens],
-			["stop", TITLE_USAGE.totalTokens],
-			["stop", TITLE_USAGE.totalTokens],
+		expect(entries.map(entry => [entry.purpose, entry.stopReason, entry.usage.totalTokens])).toEqual([
+			["title-fork", "error", FORK_USAGE.totalTokens],
+			["title", "stop", TITLE_USAGE.totalTokens],
+			["title", "stop", TITLE_USAGE.totalTokens],
 		]);
 		expect(target.sessionManager.getUsageStatistics().totalTokens).toBe(
 			MAIN_USAGE.totalTokens + FORK_USAGE.totalTokens + TITLE_USAGE.totalTokens * 2,

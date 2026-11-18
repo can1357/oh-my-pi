@@ -80,9 +80,9 @@ describe("read URL: a reader's short-line markdown is not taken for navigation",
 			getSessionFile: () => path.join(cwd, "session.jsonl"),
 			getArtifactsDir: () => artifactsDir,
 			getSessionSpawns: () => null,
-			allocateOutputArtifact: async toolType => ({
+			allocateOutputArtifact: async () => ({
 				id: "test",
-				path: path.join(artifactsDir, `test.${toolType}.log`),
+				path: path.join(artifactsDir, `test.log`),
 			}),
 			settings: Settings.isolated({ "fetch.enabled": true }),
 			fetch,

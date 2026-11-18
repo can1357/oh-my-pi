@@ -6,7 +6,7 @@
  * (cwd, live pids, exit code, artifact) and live output.
  */
 import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
-import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import type { Component } from "../tui";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
@@ -234,7 +234,7 @@ export class JobsSheet implements Component {
 				detail.cwd && `cwd ${detail.cwd}`,
 				detail.pids.length > 0 && `pid ${detail.pids.join(", ")}`,
 				detail.exitCode !== undefined && `exit ${detail.exitCode}`,
-				detail.artifactId && `artifact://${detail.artifactId}`,
+				detail.artifactId && spillUrl(detail.artifactId),
 			]);
 			if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
 			if (detail.widget && widgetHasData(detail.widget)) {
@@ -463,7 +463,7 @@ function describeDetail(
 		detail?.cwd ? { k: "Directory", v: [span(detail.cwd, "path")] } : undefined,
 		pids.length > 0 && { k: pids.length > 1 ? "PIDs" : "PID", v: [span(pids.join(", "), "num")] },
 		exit !== undefined && { k: "Exit code", v: [span(String(exit), exit === 0 ? "success" : "error")] },
-		detail?.artifactId ? { k: "Full output", v: [span(`artifact://${detail.artifactId}`, "mono")] } : undefined,
+		detail?.artifactId ? { k: "Full output", v: [span(spillUrl(detail.artifactId), "mono")] } : undefined,
 	]);
 	const children = compact<NativeChild>([
 		row(

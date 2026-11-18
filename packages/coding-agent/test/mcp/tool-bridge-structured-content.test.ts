@@ -179,7 +179,7 @@ describe("MCP bridge structuredContent", () => {
 			expect((value.details as MCPToolDetails).structuredContent).toEqual(structuredContent);
 			expect(value.hasError).toBe(true);
 			expect(value.text).not.toContain(structuredContent.pages[0]!.rows[0]!.body);
-			expect(value.text).toContain(`artifact://${artifactId}`);
+			expect(value.text).toContain(`local://${artifactId}.log`);
 
 			const message = {
 				role: "toolResult" as const,
