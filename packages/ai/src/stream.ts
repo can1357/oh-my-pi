@@ -1878,6 +1878,7 @@ function mapOptionsForApi<TApi extends Api>(
 		execHandlers: options?.execHandlers,
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
+		fallbackCreditRedemption: options?.fallbackCreditRedemption,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
 		omitDemotedReasoning: options?.omitDemotedReasoning,
