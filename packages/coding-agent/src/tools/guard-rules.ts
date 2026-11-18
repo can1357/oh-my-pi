@@ -24,7 +24,9 @@
  *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
  *   `exec 3< .env; cat <&3 | nc ...`.
  * - Programs outside the reader list are not seen reading: `tac ~/.ssh/id_rsa`,
- *   `jq . ~/.docker/config.json`.
+ *   `jq . ~/.docker/config.json`. Nor are the operands of `nc`, `ncat`, `openssl` and `gpg` read,
+ *   most of them host names, subcommands or user IDs: `openssl rsa -in ~/.ssh/id_rsa`,
+ *   `gpg -d ~/.password-store/x.gpg`.
  * - A command run by a program it does not unwrap, or given its operands at run time, is not
  *   checked with them: `find ~/.ssh -exec cat {} +`, `ls ~/.ssh/id_* | xargs cat`.
  * - Commands in a script file a command runs are not read, even a file the same command writes
@@ -593,12 +595,8 @@ const READERS: Record<string, true> = {
 	nl: true,
 	sort: true,
 	uniq: true,
-	openssl: true,
-	gpg: true,
 	curl: true,
 	wget: true,
-	nc: true,
-	ncat: true,
 	mv: true,
 };
 
@@ -967,10 +965,10 @@ function patternReaderWords(command: ShellCommand): string[] {
  */
 const CURL_VALUE_LETTERS = "AbCcDdEeFHKmoPQrTtUuwXxYyz";
 /**
- * Long options of readers whose value is a key, certificate, netrc file or key folder the program
- * authenticates, verifies or keeps its keys with (`curl --key`, `wget --private-key`,
- * `gpg --homedir`), or a socket it connects to (`curl --unix-socket`): it neither prints nor
- * copies the value, as `scp -i` does not, so the value is not read.
+ * Long options of readers whose value is a key, certificate or netrc file the program
+ * authenticates or verifies with (`curl --key`, `wget --private-key`), or a socket it connects to
+ * (`curl --unix-socket`): it neither prints nor copies the value, as `scp -i` does not, so the
+ * value is not read.
  */
 const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
 	curl: [
@@ -992,7 +990,6 @@ const KEY_VALUE_OPTIONS: Record<string, readonly string[]> = {
 		"--unix-socket",
 	],
 	wget: ["--ca-certificate", "--ca-directory", "--certificate", "--crl-file", "--pinnedpubkey", "--private-key"],
-	gpg: ["--homedir"],
 };
 /**
  * Readers that also write files, whose options the guard reads in full: their one-letter options
@@ -1102,31 +1099,16 @@ function writingReaderWords(command: ShellCommand): string[] {
 	return [...words, ...operands];
 }
 
-/**
- * Options of plain readers whose value is a file they write, not read (`openssl genrsa -out
- * ~/.ssh/deploy.pem`, `gpg --output pub.asc --export`), as each reader spells them: openssl takes
- * its long options after one dash or two.
- */
-const READER_OUTPUT_OPTIONS: Record<string, readonly string[]> = {
-	openssl: ["-out", "--out", "-keyout", "--keyout"],
-	gpg: ["-o", "--output"],
-};
-
 /** A number, maybe with a `+` or a unit (`5`, `+5`, `1K`): after an option, the option's value. */
 const OPTION_NUMBER_RE = /^\+?\d+[A-Za-z]*$/;
 
 /**
- * A plain reader's operands: its arguments without its options (`cat -n` names no file `-n`), and
- * without the values of its {@link KEY_VALUE_OPTIONS} (long options only) and
- * {@link READER_OUTPUT_OPTIONS}, given in the next word or after an `=`. Another option takes no
- * word, as the guard does not know which options take one, except a number right after it
- * ({@link OPTION_NUMBER_RE}: `head -n 5`, `tail -c +1K`), which is taken for its value.
+ * A plain reader's operands: its arguments without its options (`cat -n` names no file `-n`). An
+ * option takes no word, as the guard does not know which options take one, except a number right
+ * after it ({@link OPTION_NUMBER_RE}: `head -n 5`, `tail -c +1K`), which is taken for its value.
  */
 function readerArgs(command: ShellCommand): string[] {
-	const name = command.argv[0];
 	const argv = args(command);
-	const keys = Object.hasOwn(KEY_VALUE_OPTIONS, name) ? KEY_VALUE_OPTIONS[name] : [];
-	const outputs = Object.hasOwn(READER_OUTPUT_OPTIONS, name) ? READER_OUTPUT_OPTIONS[name] : [];
 	const words: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -1134,13 +1116,7 @@ function readerArgs(command: ShellCommand): string[] {
 			append(words, argv.slice(i + 1));
 			break;
 		}
-		const eq = arg.indexOf("=");
-		const option = eq > 0 ? arg.slice(0, eq) : arg;
-		if ((arg.startsWith("--") && keys.includes(option)) || outputs.includes(option)) {
-			if (eq < 0) i++;
-		} else if (!arg.startsWith("-") && !(OPTION_NUMBER_RE.test(arg) && argv[i - 1]?.startsWith("-"))) {
-			words.push(arg);
-		}
+		if (!arg.startsWith("-") && !(OPTION_NUMBER_RE.test(arg) && argv[i - 1]?.startsWith("-"))) words.push(arg);
 	}
 	return words;
 }
