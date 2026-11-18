@@ -520,6 +520,7 @@ describe("wait", () => {
 				throw new Error("Daemon list request timed out");
 			},
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 		} as unknown as DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(hungBroker);
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
@@ -539,6 +540,7 @@ describe("wait", () => {
 					return { op: "list", daemons: [] };
 				},
 				onCompletion: () => () => {},
+				onNotify: () => () => {},
 			} as unknown as DaemonBrokerClient;
 			vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
 		});

@@ -19,7 +19,13 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams, shellBuiltins } from "@oh-my-pi/pi-natives";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
+import {
+	compileNotifyPattern,
+	type NotifyPattern,
+	OutputNotifier,
+	raceJobSettlement,
+	resolveAutoBackgroundWaitMs,
+} from "../async";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
@@ -458,6 +464,7 @@ const bashSchemaWithAsync = type({
 	"cwd?": "string",
 	"pty?": "boolean",
 	"async?": "boolean",
+	"notify?": "string",
 });
 
 const bashSchemaWithService = type({
@@ -465,6 +472,7 @@ const bashSchemaWithService = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": "string",
 	"pty?": "boolean",
+	"notify?": "string",
 	"name?": "string <= 48",
 	"ready?": type({
 		"log?": "string",
@@ -480,6 +488,7 @@ const bashSchemaWithAsyncAndService = type({
 	"cwd?": "string",
 	"pty?": "boolean",
 	"async?": "boolean",
+	"notify?": "string",
 	"name?": "string <= 48",
 	"ready?": type({
 		"log?": "string",
@@ -502,6 +511,11 @@ export interface BashToolInput {
 	name?: string;
 	ready?: ServiceReady;
 	async?: boolean;
+	/**
+	 * Regex; each output line it matches is reported while the command runs. Without `name` the command
+	 * runs as a background job, as `async` does; with `name` the service reports.
+	 */
+	notify?: string;
 	pty?: boolean;
 }
 
@@ -1210,6 +1224,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		intent?: string;
 		/** The call that started the job. */
 		toolCallId: string;
+		/** Output lines to report while the job runs; see {@link BashToolInput.notify}. */
+		notify?: NotifyPattern;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -1270,6 +1286,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					});
 					await reported;
 				};
+				// `#execute` refused the call when this session has no notify channel.
+				const notifier =
+					options.notify && this.session.openAsyncNotify
+						? new OutputNotifier(
+								options.notify,
+								outputTap,
+								this.session.openAsyncNotify({
+									id: jobId,
+									type: "bash",
+									command: options.command,
+									pattern: options.notify.source,
+									running: () => manager.getJob(jobId)?.status === "running",
+								}),
+							)
+						: undefined;
+				// A cancelled job reports nothing more, even while its command is still shutting down.
+				if (notifier) runSignal.addEventListener("abort", () => notifier.stop(), { once: true });
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const wallTimeStart = performance.now();
 				try {
@@ -1297,7 +1330,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						}).shellFilesystem(),
 						artifactPath,
 						artifactId,
-						onChunk: chunk => outputTap.append(chunk),
+						onChunk: chunk => {
+							outputTap.append(chunk);
+							notifier?.poll();
+						},
 						onPreview: text => {
 							void report(text, { output: text, async: { state: "running", jobId, type: "bash" } });
 						},
@@ -1319,6 +1355,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						pids = NO_PIDS;
 						liveTrace = undefined;
 						outputTap.close();
+						// The result that follows carries the job's last output, matches included.
+						notifier?.stop();
 					});
 					if (result.artifactError) latestProgressDetails = { meta: { artifactError: result.artifactError } };
 					const wallTimeMs = performance.now() - wallTimeStart;
@@ -1429,6 +1467,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			name: rawName,
 			ready: rawReady,
 			async: rawAsync,
+			notify: rawNotify,
 			pty,
 		}: BashToolInput,
 		ran: { cwd?: string; cdSeparator?: ";" },
@@ -1470,18 +1509,21 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 		// Mode selection runs on normalized fields: a caller that materializes
 		// every optional argument with empty or placeholder values still asked
-		// for a plain command. Only `async: true` is an async request, a blank
-		// `name` is no service name, and service-only fields with nothing in
-		// them are not a service request.
+		// for a plain command. Only `async: true` or a `notify` regex is an async
+		// request, a blank `name` is no service name, and service-only fields
+		// with nothing in them are not a service request.
 		const name = blankToUndefined(rawName);
 		const ready = normalizeReady(rawReady);
-		const asyncRequested = rawAsync === true;
+		const notifySource = blankToUndefined(rawNotify);
+		// `notify` reports output while the command runs: a service does that as it is, and anything
+		// else starts in the background as `async` does.
+		const asyncRequested = rawAsync === true || (notifySource !== undefined && name === undefined);
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
 			if (rawTimeout !== undefined)
 				pendingNotices.push("Ignored timeout: service-only; readiness follows ready.timeout.");
-			if (asyncRequested)
+			if (rawAsync === true)
 				pendingNotices.push("Ignored async: service-only; a service start is asynchronous already.");
 		} else if (ready !== undefined && (ready.log !== undefined || ready.port !== undefined)) {
 			// Host/timeout only configure a readiness condition; neither requests one.
@@ -1492,6 +1534,20 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (name === undefined && asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
+		if (
+			notifySource !== undefined &&
+			!(name === undefined ? this.session.openAsyncNotify : this.session.queueServiceNotify)
+		) {
+			throw new ToolError("notify is unavailable in this session.");
+		}
+		// Compiled before anything runs: a bad regex fails the call instead of a job that never reports.
+		// A service's regex is checked by `startService`.
+		const notify = name === undefined && notifySource !== undefined ? compileNotifyPattern(notifySource) : undefined;
+		// Tells the model which output reaches it before the command ends.
+		const notifyNotice =
+			notifySource === undefined
+				? undefined
+				: `Output lines matching /${notifySource}/ arrive as follow-ups while it runs.`;
 
 		const interception = this.#interception(rawCommand, command, name, ctx?.toolNames ?? []);
 		if (interception) throw new ToolError(interception);
@@ -1561,12 +1617,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					cwd: commandCwd,
 					pty: pty ?? true,
 					ready,
+					notify: notifySource,
 					env: sessionEnv,
 				},
 				signal,
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
 			);
 			const daemon = service.daemon;
+			// A broker from an older omp starts the service and ignores the regex.
+			const notifyLine = service.notifyArmed
+				? notifyNotice
+				: notifySource === undefined
+					? undefined
+					: `Ignored notify: this project's service broker is from an older omp, so ${name}'s output is not reported; read proc://${name} for it.`;
 			if (service.readyInterrupted) {
 				// A queued message arrived mid-wait: return so it injects promptly.
 				// The broker keeps starting the service, inspectable via proc://.
@@ -1574,7 +1637,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					content: [
 						{
 							type: "text",
-							text: `${name}: starting${daemon.pid === undefined ? "" : ` pid=${daemon.pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.`,
+							text: `${name}: starting${daemon.pid === undefined ? "" : ` pid=${daemon.pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.${notifyLine ? `\n${notifyLine}` : ""}`,
 						},
 					],
 					details: { service: { name, state: daemon.state, ready: false, timedOut: false, pid: daemon.pid } },
@@ -1589,6 +1652,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				);
 			if (daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
 			lines.push(...pendingNotices);
+			if (notifyLine) lines.push(notifyLine);
 			const log = await serviceLogs(this.session, name, signal);
 			if (log) lines.push(log);
 			return {
@@ -1635,10 +1699,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				sessionEnv,
 				intent: this.session.getToolCallIntent?.(toolCallId),
 				toolCallId,
+				notify,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
-				notices: pendingNotices,
+				notices: notifyNotice ? [...pendingNotices, notifyNotice] : pendingNotices,
 				trace: job.getLatestTrace(),
 			});
 		}
