@@ -30,8 +30,7 @@ import {
 	resolveAutoBackgroundWaitMs,
 } from "../async";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
-import { shellPathMap, shellProcessCommand } from "../exec/shell-process";
-import type { ShellPathMap } from "../exec/shell-process-protocol";
+import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import {
@@ -1002,7 +1001,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	/**
 	 * Run `command` as a shell process on a pseudo-terminal the user drives: the session's shell
-	 * (its exports, functions and aliases, and the host files `paths` puts behind its URL paths)
+	 * (its exports, functions and aliases, and the host files `mounts` puts behind its URL paths)
 	 * leading a terminal of its own, so its programs own that terminal.
 	 */
 	async #runOnTerminal(
@@ -1017,18 +1016,20 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			sessionEnv: Record<string, string>;
 			timeoutMs: number | undefined;
 			signal: AbortSignal | undefined;
-			paths: ShellPathMap;
+			/** `urlmap` commands for the session's URL paths ({@link shellMounts}). */
+			mounts: string;
 			artifactPath: string | undefined;
 			artifactId: string | undefined;
 		},
 	): Promise<BashInteractiveResult> {
 		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
-		const source = seed.script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
+		const script = run.mounts + seed.script;
+		const source = script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
 		try {
-			if (source !== undefined) await fs.promises.writeFile(source, seed.script, { mode: 0o600 });
+			if (source !== undefined) await fs.promises.writeFile(source, script, { mode: 0o600 });
 			return await runInteractiveBashPty(ui, {
 				command: run.command,
-				...shellProcessCommand({ command: run.command, paths: run.paths, source, cwd: run.urlCwd }),
+				...shellProcessCommand({ command: run.command, source, cwd: run.urlCwd }),
 				cwd: run.hostCwd,
 				env: { ...seed.env, ...run.sessionEnv },
 				timeoutMs: run.timeoutMs,
@@ -1748,8 +1749,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					ready,
 					notify: notifySource,
 					env: { ...seed.env, ...sessionEnv },
-					paths: shellPathMap(sessionResolveContext(this.session), approvalTier),
-					seed: seed.script,
+					seed: (await shellMounts(sessionResolveContext(this.session), approvalTier)) + seed.script,
 				},
 				signal,
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
@@ -2267,7 +2267,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					sessionEnv,
 					timeoutMs,
 					signal,
-					paths: shellPathMap(sessionResolveContext(this.session, { signal }), approvalTier),
+					mounts: await shellMounts(sessionResolveContext(this.session, { signal }), approvalTier),
 					artifactPath,
 					artifactId,
 				})

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
 - Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
 - Session files record what jev and title requests asked and answered: `model_usage` entries carry the request time, a judgment's answers with the state id that joins `judgment-cache.db`, and a title request's prompt and reply (no prompt text is repeated); local-model titles now leave an entry and fork titles are journaled as `title-fork`

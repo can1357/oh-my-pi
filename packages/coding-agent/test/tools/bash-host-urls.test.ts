@@ -213,8 +213,11 @@ describe("bash internal URLs outside the embedded shell", () => {
 		);
 		expect(args.at(-2)).toBe("--");
 		expect(args).toContain(SHELL_PROCESS_SELECTOR);
-		expect(args[args.indexOf(SHELL_PROCESS_SELECTOR) + 1]).toBe("--paths");
-		expect(JSON.parse(args[args.indexOf(SHELL_PROCESS_SELECTOR) + 2])).toMatchObject({ local: localRoot });
+		// What backs them is in the script the process sources, not on its command line.
+		expect(args[args.indexOf(SHELL_PROCESS_SELECTOR) + 1]).toBe("--source");
+		expect(await fs.promises.readFile(args[args.indexOf(SHELL_PROCESS_SELECTOR) + 2], "utf-8")).toContain(
+			`urlmap 'local://' '${localRoot}'`,
+		);
 	});
 
 	it.skipIf(ptyUnavailable)("runs a pty command on the files its URLs alias", async () => {

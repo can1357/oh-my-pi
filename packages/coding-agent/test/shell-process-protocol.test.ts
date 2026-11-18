@@ -1,21 +1,11 @@
-/**
- * The command line a shell process is started with: what it runs, and the host
- * locations behind the URL paths it may open.
- */
+/** The command line a shell process is started with. */
 import { describe, expect, it } from "bun:test";
 import { parseShellProcessArgs, shellProcessArgs } from "../src/exec/shell-process-protocol";
 
 describe("shell process arguments", () => {
 	it("round-trip a spec whose command looks like the worker's own flags", () => {
 		const spec = {
-			command: "--paths {}; echo '--' --source x",
-			paths: {
-				local: "/sessions/a b/local",
-				localReadOnly: true as const,
-				artifacts: "/sessions/a b",
-				skills: { review: "/skills/review/SKILL.md", "plugin/lint": "/plugins/p/lint/SKILL.md" },
-				attachments: { "attachment://1": "/blobs/ab cd.png" },
-			},
+			command: "--source x; echo '--' --cwd y",
 			source: "/tmp/seed with space.sh",
 			cwd: "local://work dir",
 		};
@@ -29,9 +19,7 @@ describe("shell process arguments", () => {
 		expect(parseShellProcessArgs([])).toBeUndefined();
 		expect(parseShellProcessArgs(["echo", "hi"])).toBeUndefined();
 		expect(parseShellProcessArgs(["--", "echo", "hi"])).toBeUndefined();
-		expect(parseShellProcessArgs(["--paths", "--", "echo hi"])).toBeUndefined();
-		expect(parseShellProcessArgs(["--paths", "not json", "--", "echo hi"])).toBeUndefined();
-		expect(parseShellProcessArgs(["--paths", '{"skills":{"a":1}}', "--", "echo hi"])).toBeUndefined();
-		expect(parseShellProcessArgs(["--paths", '{"memory":"/x"}', "--", "echo hi"])).toBeUndefined();
+		expect(parseShellProcessArgs(["--source", "--", "echo hi"])).toBeUndefined();
+		expect(parseShellProcessArgs(["--paths", "{}", "--", "echo hi"])).toBeUndefined();
 	});
 });

@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
+import { shellMounts } from "../../src/exec/shell-process";
 import { resolveLocalRoot } from "../../src/internal-urls";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import * as brokerClients from "../../src/launch/client";
@@ -66,6 +67,8 @@ describe("service shell process", () => {
 			// No directory on the search path has a jq: the one that runs is omp's. The last
 			// line holds the service open until it is stopped.
 			const sum = `PATH='${empty}'; jq '.a | add' local://data.json; echo "status $?"`;
+			// What the bash tool hands a service: the mounts behind the session's URL paths.
+			const mounts = await shellMounts({ localProtocolOptions }, "exec");
 			try {
 				vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
 
@@ -75,14 +78,13 @@ describe("service shell process", () => {
 					pty: false,
 					env: { GREETING: "hello" },
 					ready: { log: "on pipes", timeout: 60 },
-					paths: { local: localRoot },
+					seed: mounts,
 				});
 				const terminal = await startService(session, {
 					name: "terminal",
 					command: `${sum}; [ -t 0 ] && [ -t 1 ] && echo "on a terminal"; read hold`,
 					ready: { log: "on a terminal", timeout: 60 },
-					paths: { local: localRoot },
-					seed: "shopt -s expand_aliases\n",
+					seed: `${mounts}shopt -s expand_aliases\n`,
 				});
 				const [pipedLogs, terminalLogs] = await Promise.all([
 					serviceLogs(session, "piped"),

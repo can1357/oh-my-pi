@@ -4,12 +4,14 @@
  * A named service and a `pty` command run in the embedded engine as a process
  * of their own: the command line {@link shellProcessCommand} builds re-enters
  * this build with the worker selector. The engine there has no session, so the
- * file-backed URL schemes its command may name travel with it as a
- * {@link ShellPathMap} ({@link shellPathMap}): `local://`, `skill://`,
- * `artifact://` and `attachment://`. Every other scheme is missing there.
+ * file-backed URL schemes its command may name are mounted by the script it
+ * sources first ({@link shellMounts}): `local://`, `skill://`, `artifact://`
+ * and `attachment://`. Every other scheme is missing there.
  */
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type { ToolTier } from "@oh-my-pi/pi-agent-core";
-import { SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
+import { isEnoent, SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
 import { getActiveSkills } from "../extensibility/skills";
 import { LocalProtocolHandler, resolveLocalRoot } from "../internal-urls/local-protocol";
 import { artifactsDirsFromRegistry } from "../internal-urls/registry-helpers";
@@ -17,7 +19,8 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import type { ResolveContext } from "../internal-urls/types";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { TIER_RANK } from "../tools/approval";
-import { type ShellPathMap, type ShellProcessSpec, shellProcessArgs } from "./shell-process-protocol";
+import { quotePosixArgument } from "../utils/shell-quote";
+import { type ShellProcessSpec, shellProcessArgs } from "./shell-process-protocol";
 
 /** The program and arguments that run `spec` as a shell process of this build. */
 export function shellProcessCommand(spec: ShellProcessSpec): { application: string; args: string[] } {
@@ -25,33 +28,62 @@ export function shellProcessCommand(spec: ShellProcessSpec): { application: stri
 	return { application, args: [...entry, SHELL_PROCESS_SELECTOR, ...shellProcessArgs(spec)] };
 }
 
-/**
- * The host locations behind the URL paths a shell process started for
- * `context`'s session may open, from the sources the scheme handlers read.
- * `tier` is what its command was approved at: `local://` is read-only when
- * writing it needs more.
- */
-export function shellPathMap(context: ResolveContext, tier: ToolTier): ShellPathMap {
-	const map: ShellPathMap = {};
-	const localOptions = LocalProtocolHandler.resolveOptions(context);
-	if (localOptions) {
-		map.local = resolveLocalRoot(localOptions);
-		const decision = InternalUrlRouter.instance().writeTier("local://", undefined, context.session);
-		const refused = typeof decision !== "string" && decision.policy === "deny";
-		if (refused || TIER_RANK[typeof decision === "string" ? decision : decision.tier] > TIER_RANK[tier]) {
-			map.localReadOnly = true;
+/** One `urlmap` command mounting `host` at `url`. */
+function mount(flags: string, url: string, host: string): string {
+	return `urlmap ${flags}${quotePosixArgument(url)} ${quotePosixArgument(host)}\n`;
+}
+
+/** The artifact files of `dirs` by id, an earlier directory's winning, as `artifact://N` resolves them. */
+async function artifactFiles(dirs: readonly string[]): Promise<Map<string, string>> {
+	const files = new Map<string, string>();
+	for (const dir of dirs) {
+		let names: string[];
+		try {
+			names = await fs.readdir(dir);
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			throw error;
+		}
+		for (const name of names) {
+			const id = /^(\d+)\./.exec(name)?.[1];
+			if (id !== undefined && !files.has(id)) files.set(id, path.join(dir, name));
 		}
 	}
-	// The calling session's own artifacts first, as `artifact://N` resolves them.
-	const artifacts = context.localProtocolOptions?.getArtifactsDir?.() ?? artifactsDirsFromRegistry()[0];
-	if (artifacts) map.artifacts = artifacts;
+	return files;
+}
+
+/**
+ * The script that mounts, in a shell process started for `context`'s session,
+ * the host entries behind the URL paths it may open, from the sources the
+ * scheme handlers read: the `local://` root, each skill's directory and
+ * instruction file, and the artifacts and attachments that exist now. `tier`
+ * is what its command was approved at: `local://` is read-only when writing
+ * it needs more.
+ */
+export async function shellMounts(context: ResolveContext, tier: ToolTier): Promise<string> {
+	let script = "";
+	const localOptions = LocalProtocolHandler.resolveOptions(context);
+	if (localOptions) {
+		const root = resolveLocalRoot(localOptions);
+		// The session scratch root always exists, like a mount point.
+		await fs.mkdir(root, { recursive: true });
+		const decision = InternalUrlRouter.instance().writeTier("local://", undefined, context.session);
+		const refused = typeof decision !== "string" && decision.policy === "deny";
+		const readOnly = refused || TIER_RANK[typeof decision === "string" ? decision : decision.tier] > TIER_RANK[tier];
+		script += mount(readOnly ? "-r " : "", "local://", root);
+	}
 	for (const skill of context.skills ?? getActiveSkills()) {
-		map.skills ??= {};
-		map.skills[skill.name] = skill.filePath;
+		// A namespaced skill (`<plugin>/<name>`) spans two URL segments.
+		const url = `skill://${skill.name.split("/").map(encodeURIComponent).join("/")}`;
+		script += mount("-r ", url, skill.baseDir);
+		script += mount("-r -e ", url, skill.filePath);
 	}
+	// The calling session's own artifacts first.
+	const pinned = context.localProtocolOptions?.getArtifactsDir?.();
+	const artifacts = await artifactFiles(artifactsDirsFromRegistry(pinned ? { preferredDir: pinned } : undefined));
+	for (const [id, file] of artifacts) script += mount("-r -e ", `artifact://${id}`, file);
 	for (const attachment of context.session?.getImageAttachments?.() ?? []) {
-		map.attachments ??= {};
-		map.attachments[attachment.uri] = attachment.sourcePath;
+		script += mount("-r -e ", attachment.uri, attachment.sourcePath);
 	}
-	return map;
+	return script;
 }

@@ -8,8 +8,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { PtySession } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { shellProcessCommand } from "../src/exec/shell-process";
-import type { ShellPathMap, ShellProcessSpec } from "../src/exec/shell-process-protocol";
+import { shellMounts, shellProcessCommand } from "../src/exec/shell-process";
+import type { ShellProcessSpec } from "../src/exec/shell-process-protocol";
+import type { Skill } from "../src/extensibility/skills";
+import type { ToolSession } from "../src/tools";
 import { quotePosixArgv } from "../src/utils/shell-quote";
 
 /** Run `spec` as a shell process on pipes, feeding it `stdin`. */
@@ -144,11 +146,33 @@ describe("shell process on pipes", () => {
 });
 
 describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
-	/** Host files behind every scheme a shell process can open, and the map naming them. */
-	async function fixture(root: string): Promise<{ paths: ShellPathMap; local: string; skill: string }> {
-		const local = path.join(root, "session", "local");
+	const skillAt = (name: string, dir: string): Skill => ({
+		name,
+		description: name,
+		filePath: path.join(dir, "SKILL.md"),
+		baseDir: dir,
+		source: "test",
+	});
+
+	/** The script `shellMounts` writes for a session with `artifacts` as its directory, saved under `root`. */
+	async function mountScript(root: string, artifacts: string, skills: Skill[]): Promise<string> {
+		const session = {
+			getImageAttachments: () => [{ uri: "attachment://1", sourcePath: path.join(artifacts, "image.png") }],
+		} as unknown as ToolSession;
+		const script = await shellMounts(
+			{ localProtocolOptions: { getArtifactsDir: () => artifacts, getSessionId: () => "session" }, skills, session },
+			"exec",
+		);
+		const source = path.join(root, `mounts-${skills.length}.sh`);
+		await fs.writeFile(source, script);
+		return source;
+	}
+
+	/** Host files behind every scheme a shell process can open, and the script mounting them. */
+	async function fixture(root: string): Promise<{ source: string; local: string; skill: string }> {
 		const artifacts = path.join(root, "session");
-		const skill = path.join(root, "skills", "review");
+		const local = path.join(artifacts, "local");
+		const skill = path.join(root, "skills", "review it");
 		const plugin = path.join(root, "plugins", "lint");
 		await Promise.all([
 			fs.mkdir(path.join(local, "sub"), { recursive: true }),
@@ -166,46 +190,38 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 			fs.writeFile(path.join(plugin, "SKILL.md"), "# Lint\n"),
 			fs.writeFile(path.join(plugin, "rules.txt"), "no-tabs\n"),
 		]);
-		return {
-			paths: {
-				local,
-				artifacts,
-				skills: { review: path.join(skill, "SKILL.md"), "plugin/lint": path.join(plugin, "SKILL.md") },
-				attachments: { "attachment://1": path.join(artifacts, "image.png") },
-			},
-			local,
-			skill,
-		};
+		const source = await mountScript(root, artifacts, [skillAt("review", skill), skillAt("plugin/lint", plugin)]);
+		return { source, local, skill };
 	}
 
-	it("reads, lists and writes local:// in its root, creating a root that does not exist yet", async () => {
+	it("reads, lists and writes local:// in its root, which exists even before anything was written", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-local-");
-		const { paths, local } = await fixture(await fs.realpath(tempDir.path()));
-		const fresh = path.join(local, "..", "fresh-root");
+		const root = await fs.realpath(tempDir.path());
+		const { source, local } = await fixture(root);
+		const fresh = path.join(root, "fresh-session");
 
 		const used = await run({
 			command: "cat local://x.txt; ls local://; echo new > local://sub/out.txt; cat local://sub/./out.txt",
-			paths,
+			source,
 		});
-		const entered = await run({ command: "echo here > made.txt", paths, cwd: "local://sub" });
-		const created = await run({ command: "ls local://; echo status=$?", paths: { local: fresh } });
+		const entered = await run({ command: "echo here > made.txt", source, cwd: "local://sub" });
+		const created = await run({ command: "ls local://; echo status=$?", source: await mountScript(root, fresh, []) });
 
 		expect(used).toEqual({ stdout: "local-x\nsub\nx.txt\nnew\n", stderr: "", exitCode: 0 });
 		expect(await fs.readFile(path.join(local, "sub", "out.txt"), "utf-8")).toBe("new\n");
 		expect(entered.exitCode).toBe(0);
 		expect(await fs.readFile(path.join(local, "sub", "made.txt"), "utf-8")).toBe("here\n");
 		expect(created.stdout).toBe("status=0\n");
-		expect((await fs.stat(fresh)).isDirectory()).toBe(true);
 	}, 60_000);
 
 	it("reads a skill's instructions at its bare name and runs the files beside them", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-skill-");
-		const { paths } = await fixture(await fs.realpath(tempDir.path()));
+		const { source } = await fixture(await fs.realpath(tempDir.path()));
 
 		const skill = await run({
 			command:
 				"cat skill://review; skill://review/scripts/a.sh direct; /bin/sh skill://review/scripts/a.sh by-sh; cat skill://plugin/lint skill://plugin/lint/rules.txt",
-			paths,
+			source,
 		});
 
 		expect(skill).toEqual({
@@ -217,16 +233,23 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 
 	it("refuses every write to skill://, artifact:// and a read-only local://", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-ro-");
-		const { paths, local, skill } = await fixture(await fs.realpath(tempDir.path()));
+		const root = await fs.realpath(tempDir.path());
+		const { source, local, skill } = await fixture(root);
+		// What `shellMounts` writes for a command approved below the tier `local://` writes need.
+		const readOnlySource = path.join(root, "read-only.sh");
+		await fs.writeFile(
+			readOnlySource,
+			(await fs.readFile(source, "utf-8")).replace("urlmap 'local://'", "urlmap -r 'local://'"),
+		);
 
 		const immutable = await run({
 			command:
 				"echo x > skill://review/SKILL.md; echo write=$?; rm skill://review/scripts/a.sh; echo rm=$?; echo x >> artifact://7; echo append=$?; mv local://x.txt skill://review/x.txt; echo mv=$?",
-			paths,
+			source,
 		});
 		const readOnly = await run({
 			command: "echo x > local://new.txt; echo write=$?; cat local://x.txt",
-			paths: { ...paths, localReadOnly: true },
+			source: readOnlySource,
 		});
 
 		expect(immutable.stdout).toBe("write=1\nrm=1\nappend=1\nmv=1\n");
@@ -242,26 +265,26 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 
 	it("reads artifact://N from the file named N.* and attachment://N from its image file", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-artifact-");
-		const { paths } = await fixture(await fs.realpath(tempDir.path()));
+		const { source } = await fixture(await fs.realpath(tempDir.path()));
 
-		const found = await run({ command: "cat artifact://7 artifact://7:raw; cat attachment://1", paths });
-		const missing = await run({ command: "cat artifact://8; echo status=$?", paths });
+		const found = await run({ command: "cat artifact://7; cat attachment://1", source });
+		const missing = await run({ command: "cat artifact://8; echo status=$?", source });
 
-		expect(found).toEqual({ stdout: "artifact-seven\nartifact-seven\npng-bytes", stderr: "", exitCode: 0 });
+		expect(found).toEqual({ stdout: "artifact-seven\npng-bytes", stderr: "", exitCode: 0 });
 		expect(missing.stdout).toBe("status=1\n");
 		expect(missing.stderr).toContain("artifact://8: No such file or directory");
 	}, 60_000);
 
 	it("finds nothing above a scheme's root and nothing under a scheme it has no files for", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-escape-");
-		const { paths } = await fixture(await fs.realpath(tempDir.path()));
+		const { source } = await fixture(await fs.realpath(tempDir.path()));
 
 		const escaped = await run({
 			command:
 				"cat local://../x.txt; echo up=$?; cat local://sub/../../x.txt; echo deep=$?; cat local://%2e%2e/x.txt; echo encoded=$?",
-			paths,
+			source,
 		});
-		const unmapped = await run({ command: "cat memory://x; echo memory=$?; ls skill://; echo root=$?", paths });
+		const unmapped = await run({ command: "cat memory://x; echo memory=$?; ls skill://; echo root=$?", source });
 
 		expect(escaped.stdout).toBe("up=1\ndeep=1\nencoded=1\n");
 		expect(escaped.stderr).not.toContain("outside");
@@ -271,11 +294,11 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 
 	it("hands an external program the host file behind a URL, and any other URL as written", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-external-");
-		const { paths, local, skill } = await fixture(await fs.realpath(tempDir.path()));
+		const { source, local, skill } = await fixture(await fs.realpath(tempDir.path()));
 
 		const external = await run({
 			command: `/bin/cat local://x.txt; /bin/sh -c 'printf "%s\\n" "$@"' sh local://x.txt skill://review https://example.com/a memory://x`,
-			paths,
+			source,
 		});
 
 		expect(external).toEqual({
@@ -283,6 +306,39 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 			stderr: "",
 			exitCode: 0,
 		});
+	}, 60_000);
+
+	it("runs its command without mounts when the script it was started with is gone", async () => {
+		using tempDir = TempDir.createSync("@omp-shell-process-gone-");
+		const { source } = await fixture(await fs.realpath(tempDir.path()));
+		await fs.rm(source);
+
+		const relaunched = await run({ command: "cat local://x.txt; echo status=$?; echo ran", source });
+
+		expect(relaunched.stdout).toBe("status=1\nran\n");
+		expect(relaunched.exitCode).toBe(0);
+	}, 60_000);
+
+	it("keeps its command line short however many skills the session has", async () => {
+		using tempDir = TempDir.createSync("@omp-shell-process-many-");
+		const root = await fs.realpath(tempDir.path());
+		const last = path.join(root, "skills", "skill-1999");
+		await fs.mkdir(last, { recursive: true });
+		await fs.writeFile(path.join(last, "SKILL.md"), "# Last of two thousand\n");
+		const skills = Array.from({ length: 2000 }, (_, index) =>
+			skillAt(`skill-${index}`, path.join(root, "skills", `skill-${index}`)),
+		);
+		const source = await mountScript(root, path.join(root, "session"), skills);
+		const spec = { command: "cat skill://skill-1999; urlmap | wc -l", source };
+
+		const { args } = shellProcessCommand(spec);
+		const result = await run(spec);
+
+		// The mounts alone are past what one Windows command line holds (about 32K characters).
+		expect((await fs.stat(source)).size).toBeGreaterThan(64_000);
+		expect(args.join(" ").length).toBeLessThan(2000);
+		expect(result.stdout.replace(/ +/g, "")).toBe("#Lastoftwothousand\n4002\n");
+		expect(result.exitCode).toBe(0);
 	}, 60_000);
 });
 

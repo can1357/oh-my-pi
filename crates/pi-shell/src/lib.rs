@@ -37,6 +37,7 @@ pub mod bash;
 pub mod extras;
 pub mod git;
 pub mod host;
+pub mod mounts;
 pub mod session;
 pub mod sys;
 pub mod testkit;

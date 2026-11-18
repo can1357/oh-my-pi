@@ -16,6 +16,7 @@ mod env_cwd;
 mod process_control;
 mod redirections;
 mod session;
+mod urlmap;
 
 /// The standard streams of a command a test runs on a session directly;
 /// `None` is the null device.

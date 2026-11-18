@@ -12,6 +12,8 @@
 //! - `git` (with `PI_SMART_GIT` or `PI_GIT_GUARD`): the [`crate::git`] layers
 //!   on a worker thread, then the git binary found on `PATH`, by absolute path
 //!   so it never resolves back to the tool.
+//! - `urlmap`: the session's URL mounts ([`crate::mounts`]), which live with
+//!   its filesystem rather than in any utility.
 //! - pi's extras that run command lines (`env`, `ifne`, `xargs`, `find`): the
 //!   utility runs on the session's runtime, and each command it runs is a
 //!   subshell of the caller ([`crate::extras`] for the other extras).
@@ -32,6 +34,7 @@ mod extra;
 mod git;
 mod nohup;
 mod timeout;
+mod urlmap;
 
 use std::{collections::VecDeque, sync::Arc, task::Waker, time::Duration};
 
@@ -53,22 +56,23 @@ const NOHUP: ToolRef = ToolRef(2);
 const GIT: ToolRef = ToolRef(3);
 /// Every extra that runs command lines; `argv[0]` names it.
 const EXTRA: ToolRef = ToolRef(4);
+const URLMAP: ToolRef = ToolRef(5);
 
 /// The switch that hands `nohup` to the system binary.
 const NOHUP_OFF: &str = "PI_DISABLE_NOHUP_BUILTIN";
 
 /// The commands pi adds to bash's own builtins, sorted.
 ///
-/// `timeout`, `nohup` and the extras [`ExtrasGate`] offers, in a shell whose
-/// starting environment turns on the switches `on` names ([`flag_on`] of
-/// their values). Not `git`, whose layers wrap the binary. omp's bash tool
-/// lists them to the model.
+/// `timeout`, `urlmap`, `nohup` and the extras [`ExtrasGate`] offers, in a
+/// shell whose starting environment turns on the switches `on` names
+/// ([`flag_on`] of their values). Not `git`, whose layers wrap the binary.
+/// omp's bash tool lists them to the model.
 pub fn builtins(on: impl Fn(&str) -> bool) -> Vec<&'static str> {
 	let extras = ExtrasGate::from_switches(&on);
 	let mut names: Vec<&'static str> = pi_builtins::extras::extras()
 		.filter(|&(name, kind)| extras.allows(name, kind))
 		.map(|(name, _)| name)
-		.chain(["timeout"])
+		.chain(["timeout", "urlmap"])
 		.chain((!on(NOHUP_OFF)).then_some("nohup"))
 		.collect();
 	names.sort_unstable();
@@ -130,6 +134,7 @@ impl ToolConfig {
 	pub fn lookup(&self, name: &BStr) -> Option<ToolRef> {
 		match name.as_bytes() {
 			b"timeout" => Some(TIMEOUT),
+			b"urlmap" => Some(URLMAP),
 			b"nohup" if self.nohup => Some(NOHUP),
 			b"git" if self.git.any() => Some(GIT),
 			_ if self.extras.runs_commands(name) => Some(EXTRA),
@@ -286,15 +291,17 @@ enum Tool {
 	Nohup(nohup::Nohup),
 	Git(git::Git),
 	Extra(extra::Extra),
+	Urlmap(urlmap::Urlmap),
 }
 
 impl Tool {
-	fn start(call: ToolCall) -> Option<Self> {
+	fn start(call: ToolCall, config: &ToolConfig) -> Option<Self> {
 		Some(match call.tool {
 			TIMEOUT => Self::Timeout(timeout::Timeout::new(call)),
 			NOHUP => Self::Nohup(nohup::Nohup::new(call)),
 			GIT => Self::Git(git::Git::new(call)),
 			EXTRA => Self::Extra(extra::Extra::new(call)),
+			URLMAP => Self::Urlmap(urlmap::Urlmap::new(&call, config)),
 			_ => return None,
 		})
 	}
@@ -306,6 +313,7 @@ impl Tool {
 			Self::Nohup(t) => t.advance(api, turn),
 			Self::Git(t) => t.advance(api, turn),
 			Self::Extra(t) => t.advance(api, turn),
+			Self::Urlmap(t) => t.advance(api),
 		}
 	}
 
@@ -316,6 +324,7 @@ impl Tool {
 			Self::Timeout(t) => &mut t.child,
 			Self::Nohup(t) => &mut t.child,
 			Self::Git(t) => &mut t.child,
+			Self::Urlmap(t) => &mut t.child,
 			Self::Extra(t) => return t.on_done(run, status, signal),
 		};
 		child.on_done(run, status)
@@ -327,6 +336,7 @@ impl Tool {
 			Self::Nohup(t) => &t.child,
 			Self::Git(t) => &t.child,
 			Self::Extra(t) => &t.child,
+			Self::Urlmap(t) => &t.child,
 		}
 	}
 
@@ -342,7 +352,7 @@ impl Tool {
 	fn deadline(&self) -> Option<u64> {
 		match self {
 			Self::Timeout(t) => t.deadline(),
-			Self::Nohup(_) | Self::Git(_) | Self::Extra(_) => None,
+			Self::Nohup(_) | Self::Git(_) | Self::Extra(_) | Self::Urlmap(_) => None,
 		}
 	}
 }
@@ -461,7 +471,7 @@ impl ToolCalls {
 	/// Start the callout `id` the engine returned.
 	pub fn on_call(&mut self, shell: &mut Shell, cx: &mut Cx<'_>, id: CallId, call: ToolCall) {
 		let name = call.argv.first().cloned().unwrap_or_default();
-		if let Some(tool) = Tool::start(call) {
+		if let Some(tool) = Tool::start(call, &self.config) {
 			self.active.push((id, tool));
 			self.poll(shell, cx);
 		} else {
@@ -607,7 +617,7 @@ mod tests {
 			.expect("runtime");
 		let candidates: Vec<&str> = pi_builtins::extras::extras()
 			.map(|(name, _)| name)
-			.chain(["timeout", "nohup"])
+			.chain(["timeout", "nohup", "urlmap"])
 			.collect();
 		for pairs in [&[][..], &[("PI_DISABLE_UUTILS_BUILTINS", "1"), (NOHUP_OFF, "true")], &[
 			("PI_DISABLE_UUTILS_DESTRUCTIVE", "1"),

@@ -33,6 +33,7 @@ use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
 	git::is_git_repo_location_var,
 	minimizer,
+	mounts::Mounts,
 	output_decode::CaptureDecoder,
 	session::{
 		Children, Image, LatestImage, RunOptions, RunOutcome, RunStdio, Session, SessionConfig,
@@ -246,6 +247,8 @@ pub struct Shell {
 	active:      ActiveSession,
 	/// The shell is this process's own ([`Shell::for_process`]).
 	process:     bool,
+	/// The URL mounts of the session (`urlmap`); a fork starts with a copy.
+	mounts:      Mounts,
 }
 
 impl Shell {
@@ -305,6 +308,7 @@ impl Shell {
 			config,
 			active: ActiveSession::default(),
 			process: false,
+			mounts: Mounts::default(),
 		}
 	}
 
@@ -318,10 +322,12 @@ impl Shell {
 	#[must_use]
 	pub fn fork(&self) -> Self {
 		let latest = self.active.lock().as_ref().map(|active| active.image.get());
-		Self::with_config(ShellConfig {
+		let mut fork = Self::with_config(ShellConfig {
 			seed: latest.or_else(|| self.config.seed.clone()),
 			..self.config.clone()
-		})
+		});
+		fork.mounts = self.mounts.snapshot();
+		fork
 	}
 
 	/// Carry what `fork`, a [`Shell::fork`] of this shell whose command
@@ -373,6 +379,7 @@ impl Shell {
 			self.active.clone(),
 			self.config.clone(),
 			self.process,
+			self.mounts.clone(),
 			run_config,
 			on_chunk,
 			&mut cancel_token,
@@ -551,6 +558,7 @@ async fn run_shell_session(
 	active: ActiveSession,
 	config: ShellConfig,
 	process: bool,
+	mounts: Mounts,
 	run_config: ShellRunConfig,
 	on_chunk: Option<Sender<String>>,
 	ct: &mut CancelToken,
@@ -567,7 +575,7 @@ async fn run_shell_session(
 			let core = if let Some(core) = &mut *session_guard {
 				core
 			} else {
-				let core = create_session_as(&config, Some(&tokio_cancel), process).await?;
+				let core = create_session_as(&config, Some(&tokio_cancel), process, mounts).await?;
 				*active.lock() = Some(SessionHandles::of(&core.session));
 				session_guard.insert(core)
 			};
@@ -921,19 +929,24 @@ async fn create_session_for_run(
 	config: &ShellConfig,
 	cancel_token: Option<&CancellationToken>,
 ) -> Result<ShellSessionCore> {
-	create_session_as(config, cancel_token, false).await
+	create_session_as(config, cancel_token, false, Mounts::default()).await
 }
 
-/// [`create_session_for_run`]; with `process`, the session of a process's own
-/// shell ([`Shell::for_process`]).
+/// [`create_session_for_run`] with `mounts` in front of its filesystem; with
+/// `process`, the session of a process's own shell ([`Shell::for_process`]).
 async fn create_session_as(
 	config: &ShellConfig,
 	cancel_token: Option<&CancellationToken>,
 	process: bool,
+	mounts: Mounts,
 ) -> Result<ShellSessionCore> {
 	let cancel = cancel_token.cloned().unwrap_or_default();
 	let runtime = tokio::runtime::Handle::current();
-	let slot = VfsFs::new(config.filesystem.with_cancellation(cancel.clone()), runtime.clone());
+	let slot = VfsFs::with_mounts(
+		config.filesystem.with_cancellation(cancel.clone()),
+		runtime.clone(),
+		mounts,
+	);
 	let vars = session_vars(config);
 	let has_env_var = vars.contains_key("env");
 	let env = vars

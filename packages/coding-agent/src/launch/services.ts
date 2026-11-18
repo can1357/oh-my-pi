@@ -8,7 +8,6 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { compileNotifyPattern } from "../async/notify";
 import { shellProcessCommand } from "../exec/shell-process";
-import type { ShellPathMap } from "../exec/shell-process-protocol";
 import { isUrlPath } from "../internal-urls/url-filesystem";
 import { type DaemonBrokerClient, DaemonBrokerTimeoutError, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
@@ -36,11 +35,15 @@ export interface ServiceStart {
 	notify?: string;
 	/** Overlay on the configured shell env; wins over it. */
 	env?: Record<string, string>;
-	/** Host locations behind the URL paths the command names (`local://…`, a URL `cwd`). */
-	paths?: ShellPathMap;
-	/** Script the service's shell sources first: the functions and aliases of the session starting it. */
+	/**
+	 * Script the service's shell sources first: the mounts behind the URL paths its command may
+	 * name (`local://…`, a URL `cwd`), then the functions and aliases of the session starting it.
+	 */
 	seed?: string;
 }
+
+/** The script a service's shell sources, in the service's record directory. */
+const SERVICE_SEED_FILE = "shell.sh";
 
 const serviceStateKey = Symbol("ownedServices");
 interface ServiceSession extends ToolSession {
@@ -58,11 +61,14 @@ function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof s
 	});
 }
 
-/** Write the script `name`'s shell sources at each start, beside the broker's records of it. */
+/**
+ * Write the script `name`'s shell sources at each start into the broker's record of the service,
+ * where a relaunch finds it again and which is removed with the service's records.
+ */
 async function writeServiceSeed(session: ToolSession, name: string, seed: string): Promise<string> {
-	const dir = path.join(getDaemonRuntimeDir(await canonicalProjectDir(session.cwd)), "seeds");
+	const dir = path.join(getDaemonRuntimeDir(await canonicalProjectDir(session.cwd)), "daemons", name);
 	await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-	const file = path.join(dir, `${name}.sh`);
+	const file = path.join(dir, SERVICE_SEED_FILE);
 	await fs.writeFile(file, seed, { mode: 0o600 });
 	return file;
 }
@@ -285,16 +291,14 @@ export async function startService(
 	}
 	if (params.notify) compileNotifyPattern(params.notify);
 	const shell = session.settings.getShellConfig();
-	// The service is a shell process: the bash tool's shell, with omp's utilities and the host
-	// files behind the session's URL paths. A URL directory is entered by that shell; the process
-	// starts on the host.
+	// The service is a shell process: the bash tool's shell, with omp's utilities and the mounts
+	// its script makes. A URL directory is entered by that shell; the process starts on the host.
 	const urlCwd = params.cwd !== undefined && isUrlPath(params.cwd) ? params.cwd : undefined;
 	const source = params.seed ? await writeServiceSeed(session, params.name, params.seed) : undefined;
 	const spec: DaemonSpec = {
 		name: params.name,
 		...shellProcessCommand({
 			command: `${shell.prefix ? `${shell.prefix} ` : ""}${params.command}`,
-			paths: params.paths,
 			source,
 			cwd: urlCwd,
 		}),
