@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added radare2 as a third `dsm` backend alongside IDA and Ghidra, with the same open, view, exec, annotate, save and close actions, managed radare2 projects, and a free scriptable option for binary analysis ([#19612](https://github.com/can1357/oh-my-pi/pull/19612) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
 
 ### Breaking Changes
 
