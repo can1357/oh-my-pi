@@ -1377,6 +1377,7 @@ pub struct CustomMessage {
 	pub timestamp: Option<f64>,
 	pub details: Option<Value>,
 	pub attribution: Option<Attribution>,
+	pub exclude_from_context: Option<bool>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -1405,6 +1406,9 @@ impl Serialize for CustomMessage {
 		if let Some(value) = &self.attribution {
 			map.serialize_entry("attribution", value)?;
 		}
+		if let Some(value) = &self.exclude_from_context {
+			map.serialize_entry("excludeFromContext", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"role" if self.role.is_some() => continue,
@@ -1414,6 +1418,7 @@ impl Serialize for CustomMessage {
 				"timestamp" if self.timestamp.is_some() => continue,
 				"details" if self.details.is_some() => continue,
 				"attribution" if self.attribution.is_some() => continue,
+				"excludeFromContext" if self.exclude_from_context.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -1433,6 +1438,7 @@ impl<'de> Deserialize<'de> for CustomMessage {
 			timestamp: take(&mut extra, "timestamp"),
 			details: take(&mut extra, "details"),
 			attribution: take(&mut extra, "attribution"),
+			exclude_from_context: take(&mut extra, "excludeFromContext"),
 			extra,
 		})
 	}
@@ -3661,6 +3667,24 @@ impl CacheWarmingPhase {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CacheWarmingMethod {
+	#[serde(rename = "prewarm")]
+	Prewarm,
+	#[serde(rename = "replay")]
+	Replay,
+}
+
+impl CacheWarmingMethod {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Prewarm => "prewarm",
+			Self::Replay => "replay",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CacheWarmingOutcome {
 	#[serde(rename = "hit")]
 	Hit,
@@ -3837,7 +3861,7 @@ pub struct AutoCompactionEndEvent {
 	pub skipped: Option<bool>,
 }
 
-/// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+/// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManualCompactionStartEvent {
 	/// The `/compact <mode>` subcommand, when one was given.
@@ -3888,6 +3912,7 @@ pub struct AutoRetryEndEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheWarmingStartEvent {
 	pub phase: CacheWarmingPhase,
+	pub method: CacheWarmingMethod,
 	pub provider: String,
 	pub model: String,
 }
@@ -3896,6 +3921,7 @@ pub struct CacheWarmingStartEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheWarmingEndEvent {
 	pub phase: CacheWarmingPhase,
+	pub method: CacheWarmingMethod,
 	pub provider: String,
 	pub model: String,
 	pub outcome: CacheWarmingOutcome,
@@ -4013,7 +4039,7 @@ pub enum RpcAgentEvent {
 	ToolExecutionEnd(ToolExecutionEndEvent),
 	AutoCompactionStart(AutoCompactionStartEvent),
 	AutoCompactionEnd(AutoCompactionEndEvent),
-	/// A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted.
+	/// A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle.
 	ManualCompactionStart(ManualCompactionStartEvent),
 	/// Outcome of the compaction announced by the matching `manual_compaction_start`.
 	ManualCompactionEnd(ManualCompactionEndEvent),

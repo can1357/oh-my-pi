@@ -2,15 +2,32 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Database } from "bun:sqlite";
 import * as path from "node:path";
 import type { ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, ChoiceQuestion, ImageContent, Model, NoulQuestion } from "@oh-my-pi/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	ChoiceQuestion,
+	ImageContent,
+	Model,
+	NoulQuestion,
+	ScoreQuestion,
+} from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { cfgJudgmentAttemptTimeoutMs, cfgModelRoles } from "@oh-my-pi/pi-coding-agent/config/model-settings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ChainJudge, hasNativeJudge, JudgmentCache, journalJudgmentUsage } from "@oh-my-pi/pi-coding-agent/judgment";
+import {
+	ChainJudge,
+	hasNativeJudge,
+	JudgmentCache,
+	journalJudgmentUsage,
+	nativeJudgeRejection,
+	onJudgeRejection,
+} from "@oh-my-pi/pi-coding-agent/judgment";
+import type { ModelUsageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { FindTool, isFindEnabled } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import { encodeRawPng } from "@oh-my-pi/pi-coding-agent/utils/png-encode";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -506,6 +523,34 @@ describe("ChainJudge", () => {
 		expect(manager.getBranch().filter(entry => entry.type === "model_usage")).toHaveLength(0);
 	});
 
+	it("journals an answered on-device judgment once, with zero usage", async () => {
+		const settings = Settings.isolated({ modelRoles: { judge: `${LOCAL.provider}/${LOCAL.id}` } });
+		const registry = makeRegistry([LOCAL]);
+		vi.spyOn(tinyModelClient, "complete").mockResolvedValue("hard");
+		const manager = SessionManager.inMemory();
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "auto-thinking",
+			onUsage: journalJudgmentUsage(manager),
+		});
+
+		const result = await judge.judge({ state: "refactor the scheduler", questions: { bucket: BUCKET_QUESTION } });
+
+		expect(result.answers.bucket.choice).toBe("hard");
+		const usage = manager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage).toHaveLength(1);
+		expect(usage[0]).toMatchObject({
+			purpose: "auto-thinking",
+			role: "judge",
+			api: "local-inference",
+			model: LOCAL.id,
+			usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } },
+			stopReason: "stop",
+		});
+		expect(usage[0]).not.toHaveProperty("judgment");
+	});
+
 	it("falls back from a failed native judge only to another native judge", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
@@ -544,7 +589,7 @@ describe("ChainJudge", () => {
 		expect(online).not.toHaveBeenCalled();
 	});
 
-	it("fails instead of degrading to a prompted model, and skips a rejected account on later calls", async () => {
+	it("fails instead of degrading to a prompted model, and skips a rejected account for the session", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },
 			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
@@ -557,15 +602,35 @@ describe("ChainJudge", () => {
 			);
 		const online = vi.spyOn(ai, "completeSimple");
 		const onUsage = vi.fn();
+		const onRejection = vi.fn();
+		onJudgeRejection(registry, onRejection);
 		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
+		expect(hasNativeJudge(settings, registry)).toBe(true);
 
 		await expect(
 			new ChainJudge({ settings, registry, purpose: "test", sessionModel: ONLINE, onUsage }).judge(request),
 		).rejects.toThrow("402");
+		// Billing does not recover on a timer: hours later the route is still skipped, and judge-gated tools stay off.
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 6 * 60 * 60 * 1000);
 		await expect(new ChainJudge({ settings, registry, purpose: "test", onUsage }).judge(request)).rejects.toThrow(
-			"rejected the account recently",
+			"rejected the account (402) recently",
 		);
 
+		expect(onRejection).toHaveBeenCalledTimes(1);
+		expect(hasNativeJudge(settings, registry)).toBe(false);
+		expect(nativeJudgeRejection(settings, registry)).toBe("typesafe/jev-preview rejected the account (402)");
+		const findSession = {
+			cwd: process.cwd(),
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings,
+			modelRegistry: registry,
+		};
+		expect(isFindEnabled(findSession)).toBe(false);
+		await expect(new FindTool(findSession).execute("x", { query: "renames", grep_keywords: [] })).rejects.toThrow(
+			"find is disabled for this session: judge typesafe/jev-preview rejected the account (402). Use grep.",
+		);
 		expect(typesafeCalls).toHaveBeenCalledTimes(1);
 		expect(online).not.toHaveBeenCalled();
 		expect(onUsage).toHaveBeenCalledTimes(1);
@@ -1496,6 +1561,87 @@ describe("ChainJudge", () => {
 		} finally {
 			cache.close();
 		}
+	});
+
+	it("journals a native judgment by reference: state id, headline answers, and cached count", async () => {
+		using tempDir = TempDir.createSync("@omp-judgment-journal-");
+		const dbPath = path.join(tempDir.path(), "judgment-cache.db");
+		const cache = JudgmentCache.open(dbPath);
+		const settings = Settings.isolated({ modelRoles: { judge: "typesafe/jev-preview" } });
+		const registry = makeRegistry([JEV_PREVIEW], { typesafe: "ts-key" });
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				const body = JSON.parse(String(init?.body)) as {
+					state: unknown;
+					questions: Record<string, { type: string }>;
+				};
+				if (body.state === "rejected state") return new Response("rejected", { status: 400 });
+				const answers: Record<string, unknown> = {};
+				for (const id in body.questions) {
+					const type = body.questions[id]!.type;
+					if (type === "choice") {
+						answers[id] = { type, choice: "high", probabilities: { low: 0.1, high: 0.9 }, confidence: 0.8 };
+					} else if (type === "score") {
+						// Jev echoes the criteria as a legend; the journal must not repeat that prompt text.
+						answers[id] = {
+							type,
+							score: 1.7,
+							confidence: 0.31,
+							legend: { "0": "bad", "1": "ok", "2": "good" },
+							probabilities: { "0": 0.1, "1": 0.2, "2": 0.7 },
+						};
+					} else answers[id] = { type, noul: id === "a" ? 0.9 : 0.2 };
+				}
+				return Response.json({ model: "jev-1.13.0", answers, usage: { input_tokens: 10 } });
+			}),
+		);
+		const manager = SessionManager.inMemory();
+		const judge = new ChainJudge({
+			settings,
+			registry,
+			purpose: "find",
+			onUsage: journalJudgmentUsage(manager),
+			cache,
+		});
+		const noul = (instructions: string): NoulQuestion => ({ type: "noul", instructions });
+		const grade: ScoreQuestion = { type: "score", instructions: "Grade it.", criteria: ["bad", "ok", "good"] };
+		const state = { file: "a.ts", body: "x" };
+
+		await judge.judge({ state, questions: { a: noul("A?"), level: TIER_QUESTION, grade } });
+		// `a` is cached by now: only `c` is billed, so only `c` is journaled.
+		await judge.judge({ state, questions: { a: noul("A?"), c: noul("C?") } });
+		await expect(judge.judge({ state: "rejected state", questions: { a: noul("A?") } })).rejects.toThrow();
+
+		const journal = manager.getBranch().filter((entry): entry is ModelUsageEntry => entry.type === "model_usage");
+		expect(journal.map(entry => [entry.stopReason, entry.judgment?.answers, entry.judgment?.cached])).toEqual([
+			["stop", { a: 0.9, level: ["high", 0.8], grade: [1.7, 0.31] }, undefined],
+			["stop", { c: 0.2 }, 1],
+			["error", {}, undefined],
+		]);
+		for (const entry of journal) expect(entry.duration).toBeGreaterThanOrEqual(0);
+
+		// Both requests about one state carry the same id: the cache's `states.id`, under which the
+		// state text and every rendered question live exactly once.
+		const stateId = journal[0]!.judgment!.state;
+		expect(journal[1]!.judgment!.state).toBe(stateId);
+		expect(journal[2]!.judgment!.state).not.toBe(stateId);
+		cache.close();
+		using db = new Database(dbPath, { readonly: true });
+		expect(db.query<{ state: string }, [string]>("SELECT state FROM states WHERE id = ?").get(stateId)?.state).toBe(
+			JSON.stringify({ body: "x", file: "a.ts" }),
+		);
+		expect(
+			db
+				.query<{ name: string; instruction: string }, [string]>(
+					"SELECT name, instruction FROM oracle WHERE state = ? ORDER BY name",
+				)
+				.all(stateId),
+		).toEqual([
+			{ name: "a", instruction: "A?" },
+			{ name: "c", instruction: "C?" },
+			{ name: "grade", instruction: "Grade it." },
+			{ name: "level", instruction: TIER_QUESTION.instructions },
+		]);
 	});
 
 	it("shares TypeSafe Jev image cache entries across ignored detail values", async () => {

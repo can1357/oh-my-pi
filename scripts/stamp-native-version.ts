@@ -2,7 +2,7 @@
 /**
  * Post-link release stamp for pi_natives addons.
  *
- * `crates/pi-natives/src/lib.rs` links a fixed-size placeholder
+ * `crates/natives/src/lib.rs` links a fixed-size placeholder
  * (`PI_NATIVES_VERSION_STAMP:` + NUL padding, {@link VERSION_STAMP_SIZE} bytes)
  * that `__piNativesBuildVersion()` reads at runtime. This tool writes
  * `package.json#version` into that slot after the build, so a version bump

@@ -633,7 +633,11 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 					throw new ToolError("attach requires pid or port");
 				}
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
-				const adapter = selectAttachAdapter(commandCwd, params.adapter, params.port);
+				const adapter = await selectAttachAdapter(commandCwd, params.adapter, {
+					pid: params.pid,
+					port: params.port,
+					host: params.host,
+				});
 				if (!adapter) {
 					if (params.adapter) {
 						const command = getAdapterConfigs(commandCwd)[params.adapter]?.command ?? params.adapter;

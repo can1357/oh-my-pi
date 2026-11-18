@@ -31,7 +31,7 @@ async function dashboard(scope: SpotlightAgentScope = "all"): Promise<SpotlightD
 	return buildSpotlightDashboard(await initDb(), { cutoff: null, bucketMs: DAY }, scope);
 }
 
-/** A shaped read of `file` lines 100-200 that hid lines 120-178 behind artifact://0. */
+/** A shaped read of `file` lines 100-200 that hid lines 120-178 behind local://0.log. */
 function shortenedRead(b: SpotlightSessionBuilder, saved = 2000): string {
 	const [id] = b.request({
 		cacheRead: 10_000,
@@ -39,13 +39,13 @@ function shortenedRead(b: SpotlightSessionBuilder, saved = 2000): string {
 		calls: [{ name: "read", args: { path: "src/a.ts:100-200" } }],
 	});
 	b.result(id, {
-		text: "100\tconst a = 1;\n… [120-178] (read artifact://0:21-79)\n179\tconst z = 2;",
+		text: "100\tconst a = 1;\n… [120-178] (read local://0.log:21-79)\n179\tconst z = 2;",
 		shape: {
 			inTokens: saved + 1000,
 			outTokens: 1000,
 			costUsd: 0.002,
 			original: {
-				url: "artifact://0",
+				url: "local://0.log",
 				lines: 101,
 				start: 100,
 				path: "src/a.ts",
@@ -74,8 +74,8 @@ function heldOutRead(b: SpotlightSessionBuilder, file: string, saved = 3000): st
 			inTokens: saved + 1000,
 			outTokens: 1000,
 			costUsd: 0.001,
-			holdout: { shapedUrl: "artifact://9" },
-			original: { url: "artifact://8", lines: 60, path: file, kept: [[1, 10]] },
+			holdout: { shapedUrl: "local://9.log" },
+			original: { url: "local://8.log", lines: 60, path: file, kept: [[1, 10]] },
 		},
 	});
 	return id;
@@ -88,7 +88,7 @@ function unchangedRead(b: SpotlightSessionBuilder, file: string, inTokens: numbe
 	return id;
 }
 
-/** A shortened `cargo test -p tern` that hid lines 11-50 behind artifact://1. */
+/** A shortened `cargo test -p tern` that hid lines 11-50 behind local://1.log. */
 function shortenedBash(b: SpotlightSessionBuilder, shape: { holdout?: boolean } = {}): string {
 	const [id] = b.request({
 		cacheRead: 11_000,
@@ -96,12 +96,12 @@ function shortenedBash(b: SpotlightSessionBuilder, shape: { holdout?: boolean } 
 		calls: [{ name: "bash", args: { command: "cargo test -p tern" } }],
 	});
 	b.result(id, {
-		text: shape.holdout ? "running 40 tests\n".repeat(50) : "running 40 tests\n… [11-50] (read artifact://1:11-50)",
+		text: shape.holdout ? "running 40 tests\n".repeat(50) : "running 40 tests\n… [11-50] (read local://1.log:11-50)",
 		shape: {
 			inTokens: 1500,
 			outTokens: 300,
-			original: { url: "artifact://1", lines: 50, kept: [[1, 10]] },
-			...(shape.holdout ? { holdout: { shapedUrl: "artifact://2" } } : {}),
+			original: { url: "local://1.log", lines: 50, kept: [[1, 10]] },
+			...(shape.holdout ? { holdout: { shapedUrl: "local://2.log" } } : {}),
 		},
 	});
 	return id;
@@ -130,15 +130,15 @@ describe("Spotlight recovery detection", () => {
 			calls: [{ name: "bash", args: { command: "cargo test -p tern" } }],
 		});
 		b.result(cargo, {
-			text: "running 40 tests\n… [11-50] (read artifact://1:11-50)",
+			text: "running 40 tests\n… [11-50] (read local://1.log:11-50)",
 			shape: {
 				inTokens: 1500,
 				outTokens: 300,
-				original: { url: "artifact://1", lines: 50, kept: [[1, 10]] },
+				original: { url: "local://1.log", lines: 50, kept: [[1, 10]] },
 			},
 		});
 		call(b, "bash", { command: "ls -la" }); // unrelated command
-		const dive = call(b, "read", { path: "artifact://1:10-40" }, "x".repeat(400));
+		const dive = call(b, "read", { path: "local://1.log:10-40" }, "x".repeat(400));
 		const rerun = call(b, "bash", { command: "cargo test -p tern | grep FAILED" }, "y".repeat(80));
 
 		const [rg] = b.request({
@@ -151,7 +151,7 @@ describe("Spotlight recovery detection", () => {
 			shape: {
 				inTokens: 900,
 				outTokens: 100,
-				original: { url: "artifact://2", lines: 60, kept: [[1, 1]] },
+				original: { url: "local://2.log", lines: 60, kept: [[1, 1]] },
 			},
 		});
 		for (let i = 0; i < 12; i++) call(b, "eval", { language: "py", code: `step(${i})` });
@@ -198,7 +198,7 @@ describe("Spotlight recovery detection", () => {
 				inTokens: 3000,
 				outTokens: 1000,
 				original: {
-					url: "artifact://0",
+					url: "local://0.log",
 					lines: 101,
 					start: 100,
 					path: "src/a.ts",
@@ -225,12 +225,12 @@ describe("Spotlight list reads", () => {
 	function listRead(b: SpotlightSessionBuilder): string {
 		const [id] = b.request({ cacheRead: 10_000, calls: [{ name: "read", args: { path: "a.py;b.py" } }] });
 		b.result(id, {
-			text: "a.py\n…\nb.py\n… [20-40] (read artifact://0:30-50)",
+			text: "a.py\n…\nb.py\n… [20-40] (read local://0.log:30-50)",
 			shape: {
 				inTokens: 3000,
 				outTokens: 1000,
 				original: {
-					url: "artifact://0",
+					url: "local://0.log",
 					lines: 60,
 					kept: [
 						[1, 29],
@@ -291,7 +291,7 @@ describe("Spotlight holdout", () => {
 		call(b, "eval", { language: "py", code: "print(1)" });
 		call(b, "read", { path: "src/h.ts:30-40" });
 		// The held-out result's original artifact was never shown: reading it recovers nothing.
-		call(b, "read", { path: "artifact://8" });
+		call(b, "read", { path: "local://8.log" });
 		await write("holdout.jsonl", b);
 
 		const stats = await dashboard();
@@ -474,7 +474,7 @@ describe("Spotlight cut economics", () => {
 			cacheRead: 12_000,
 			cost: 0.08,
 			calls: [
-				{ name: "read", args: { path: "artifact://0:21-79" } },
+				{ name: "read", args: { path: "local://0.log:21-79" } },
 				{ name: "bash", args: { command: "cargo test -p tern | grep FAILED" } },
 			],
 		});
@@ -524,7 +524,7 @@ describe("Spotlight fetch-back gaps", () => {
 			shape: {
 				inTokens: 900,
 				outTokens: 100,
-				original: { url: "artifact://5", lines: 40, kept: [[1, 2]] },
+				original: { url: "local://5.log", lines: 40, kept: [[1, 2]] },
 			},
 		});
 		for (let i = 0; i < 12; i++) call(b, "eval", { language: "py", code: `wait(${i})` });
@@ -579,7 +579,7 @@ describe("Spotlight generic tools", () => {
 			shape: {
 				inTokens: 900,
 				outTokens: 400,
-				original: { url: "artifact://2", lines: 30, kept: [[1, 2]] },
+				original: { url: "local://2.log", lines: 30, kept: [[1, 2]] },
 			},
 		});
 		const [grep] = b.request({
@@ -587,13 +587,13 @@ describe("Spotlight generic tools", () => {
 			calls: [{ name: "grep", args: { i: "where is it", pattern: "fetchBack", path: "src" } }],
 		});
 		b.result(grep, {
-			text: "src/a.ts:12: fetchBack\n… [21-120] (read artifact://3:21-120)",
+			text: "src/a.ts:12: fetchBack\n… [21-120] (read local://3.log:21-120)",
 			shape: {
 				inTokens: 2400,
 				plainTokens: 2400,
 				outTokens: 400,
 				steps: ["dump"],
-				original: { url: "artifact://3", lines: 120, kept: [[1, 20]] },
+				original: { url: "local://3.log", lines: 120, kept: [[1, 20]] },
 			},
 		});
 		call(b, "grep", { i: "unrelated", pattern: "TODO", path: "docs" });
@@ -603,7 +603,7 @@ describe("Spotlight generic tools", () => {
 			{ i: "narrow it down", pattern: "fetchBack", path: "src", glob: "*.ts" },
 			"x".repeat(200),
 		);
-		const dive = call(b, "read", { path: "artifact://3:30-60" }, "y".repeat(400));
+		const dive = call(b, "read", { path: "local://3.log:30-60" }, "y".repeat(400));
 		const [search] = b.request({ cacheRead: 12_000, calls: [{ name: "web_search", args: { query: "jaccard" } }] });
 		b.result(search, { text: "results", shape: { inTokens: 300, plainTokens: 300, outTokens: 300 } });
 		await write("generic.jsonl", b);
@@ -961,12 +961,12 @@ describe("Spotlight ingest", () => {
 			cacheWrite: 500,
 			calls: [{ name: "bash", args: { command: "make" } }],
 		});
-		const text = "built\n… [3-40] (read artifact://4:3-40)";
+		const text = "built\n… [3-40] (read local://4.log:3-40)";
 		const shape = {
 			inTokens: 1200,
 			outTokens: 200,
 			costUsd: 0.0031,
-			original: { url: "artifact://4", lines: 40, kept: [[1, 2]] as [number, number][] },
+			original: { url: "local://4.log", lines: 40, kept: [[1, 2]] as [number, number][] },
 		};
 		b.shapeEntry(id, shape, text);
 		const head = b.text();
@@ -974,7 +974,7 @@ describe("Spotlight ingest", () => {
 		await syncAllSessions({ workers: 1 });
 
 		b.resultMessage(id, { text, shape });
-		const dive = call(b, "read", { path: "artifact://4:3-40" });
+		const dive = call(b, "read", { path: "local://4.log:3-40" });
 		await fs.appendFile(file, b.text().slice(head.length));
 
 		const stats = await dashboard();
@@ -984,6 +984,25 @@ describe("Spotlight ingest", () => {
 		expect(row.hiddenLines).toBe(38);
 		expect(row.savedTokens).toBe(1000);
 		expect(row.recoveries.map(r => [r.kind, r.toolCallId])).toEqual([["artifact", dive]]);
+	});
+
+	it("credits a read of a pre-`local://` transcript's `artifact://N` to the result that named it", async () => {
+		const b = new SpotlightSessionBuilder(T0).header("/repo").marker();
+		b.user("go");
+		const [id] = b.request({
+			cacheRead: 10_000,
+			cacheWrite: 500,
+			calls: [{ name: "bash", args: { command: "make" } }],
+		});
+		b.result(id, {
+			text: "built\n… [3-40] (read artifact://4:3-40)",
+			shape: { inTokens: 1200, outTokens: 200, original: { url: "artifact://4", lines: 40, kept: [[1, 2]] } },
+		});
+		const dive = call(b, "read", { path: "artifact://4:3-40" });
+		await write("legacy.jsonl", b);
+
+		const stats = await dashboard();
+		expect(stats.recent[0]?.recoveries.map(r => [r.kind, r.toolCallId])).toEqual([["artifact", dive]]);
 	});
 
 	it("does not count a fork's copied results twice", async () => {

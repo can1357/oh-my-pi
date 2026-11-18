@@ -923,7 +923,7 @@ describe("DebugTool launch validation", () => {
 	});
 
 	it("validates missing attach targets before adapter discovery", async () => {
-		const selectAttachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(null);
+		const selectAttachSpy = spyOn(dapModule, "selectAttachAdapter").mockResolvedValue(null);
 		const session: ToolSession = {
 			cwd: process.cwd(),
 			hasUI: false,
@@ -943,7 +943,7 @@ describe("DebugTool launch validation", () => {
 			name: "pico-openocd",
 			attachDefaults: { target: ":3334" },
 		};
-		const selectAttachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(adapter);
+		const selectAttachSpy = spyOn(dapModule, "selectAttachAdapter").mockResolvedValue(adapter);
 		const sessionAttachSpy = spyOn(dapModule.dapSessionManager, "attach").mockImplementation(async opts => {
 			throw Object.assign(new Error("captured attach"), { capturedOptions: opts });
 		});
@@ -960,7 +960,11 @@ describe("DebugTool launch validation", () => {
 			await expect(tool.execute("call", { action: "attach", adapter: "pico-openocd" })).rejects.toThrow(
 				/captured attach/,
 			);
-			expect(selectAttachSpy).toHaveBeenCalledWith(process.cwd(), "pico-openocd", undefined);
+			expect(selectAttachSpy).toHaveBeenCalledWith(process.cwd(), "pico-openocd", {
+				pid: undefined,
+				port: undefined,
+				host: undefined,
+			});
 			expect(sessionAttachSpy).toHaveBeenCalledTimes(1);
 			const [opts] = sessionAttachSpy.mock.calls[0]!;
 			expect(opts.adapter).toBe(adapter);
@@ -974,7 +978,7 @@ describe("DebugTool launch validation", () => {
 	});
 
 	it("throws targeted 'python not found in PATH' when adapter:'debugpy' is unresolvable for attach", async () => {
-		const attachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(null);
+		const attachSpy = spyOn(dapModule, "selectAttachAdapter").mockResolvedValue(null);
 		try {
 			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-debugpy-attach-"));
 			try {

@@ -36,7 +36,7 @@ function sink(): ShapeSink & { saved: Map<string, string> } {
 	return {
 		saved,
 		async save(text: string, _label: ShapedTool) {
-			const url = `artifact://${saved.size + 1}`;
+			const url = `local://${saved.size + 1}.log`;
 			saved.set(url, text);
 			return url;
 		},
@@ -576,7 +576,7 @@ describe("spotlight shaping", () => {
 		const input = bash("bin/migrate", ["Applying migrations to staging", ...first, "Done: 5 applied"].join("\n"));
 		const collapsed = [
 			"Applying migrations to staging",
-			"… [5 lines as shown before: read artifact://1:2-6]",
+			"… [5 lines as shown before: read local://1.log:2-6]",
 			"Done: 5 applied",
 		].join("\n");
 		// The collapse would save tokens, just not enough.
@@ -619,7 +619,7 @@ describe("spotlight shaping", () => {
 		expect([...store.saved.values()]).toContain(page);
 
 		for (const [path, stat] of [
-			["artifact://3", "pageBacks"],
+			["local://3.log", "pageBacks"],
 			["skill://deploy", "wholeReads"],
 		] as const) {
 			const kept = await shapeResult(
@@ -656,7 +656,7 @@ describe("spotlight shaping", () => {
 		expect(out.text).toBe(
 			[
 				"Applying migrations to staging",
-				"… [14 lines as shown before: read artifact://1:2-15]",
+				"… [14 lines as shown before: read local://1.log:2-15]",
 				"Done: 14 applied, 0 failed",
 			].join("\n"),
 		);
@@ -698,10 +698,10 @@ describe("spotlight shaping", () => {
 		expect(out.text).toBe(
 			[
 				"Applying migrations to staging",
-				"… [6 lines as shown before: read artifact://1:2-7]",
-				"… [7 lines as shown before: read artifact://1:8-14]",
+				"… [6 lines as shown before: read local://1.log:2-7]",
+				"… [7 lines as shown before: read local://1.log:8-14]",
 				"took 52ms",
-				"… [6 lines as shown before: read artifact://1:16-21]",
+				"… [6 lines as shown before: read local://1.log:16-21]",
 				"Done: 19 applied, 0 failed",
 			].join("\n"),
 		);
@@ -728,9 +728,9 @@ describe("spotlight shaping", () => {
 		);
 
 		const lines = out.text.split("\n");
-		expect(lines[0]).toBe("… [24 lines as shown before: read artifact://1:1-24]");
+		expect(lines[0]).toBe("… [24 lines as shown before: read local://1.log:1-24]");
 		expect(lines[1]).toBe(first[24]);
-		expect(store.saved.get("artifact://1")?.split("\n").slice(0, 24)).toEqual(first.slice(0, 24));
+		expect(store.saved.get("local://1.log")?.split("\n").slice(0, 24)).toEqual(first.slice(0, 24));
 	});
 
 	it("cuts output repeating one line shape to the lines that differ and its ends, naming the shape it hid", async () => {
@@ -991,14 +991,14 @@ describe("spotlight shaping", () => {
 		const store = sink();
 
 		const out = await shapeResult(
-			{ ...bash("bin/migrate", again.join("\n")), artifact: "artifact://42" },
+			{ ...bash("bin/migrate", again.join("\n")), artifact: "local://42.log" },
 			context(),
 			scorer(() => 0.5),
 			state,
 			store,
 		);
 
-		expect(out.text.split("\n")[1]).toBe("… [30 lines as shown before: read artifact://42:2-31]");
+		expect(out.text.split("\n")[1]).toBe("… [30 lines as shown before: read local://42.log:2-31]");
 		expect(store.saved.size).toBe(0);
 	});
 
@@ -1024,7 +1024,7 @@ describe("spotlight shaping", () => {
 
 		expect(out.text.split("\n")).toEqual([
 			"Applying migrations to staging",
-			"… [30 lines as shown before: read artifact://1:2-31]",
+			"… [30 lines as shown before: read local://1.log:2-31]",
 			"Done: 30 applied, 0 failed",
 		]);
 	});
@@ -1138,7 +1138,7 @@ describe("spotlight shaping", () => {
 		expect(out.text).toContain("E       AssertionError: assert 1 == 3");
 		expect(out.text).toContain("FAILED tests/test_api.py::test_retry_after - AssertionError: assert 1 == 3");
 		expect(out.text).toContain("========================= 1 failed, 80 passed in 2.31s =========================");
-		const gap = /… \[(\d+) lines: read (artifact:\/\/\d+):(\d+)-(\d+)\]/.exec(out.text);
+		const gap = /… \[(\d+) lines: read (local:\/\/\d+\.log):(\d+)-(\d+)\]/.exec(out.text);
 		expect(gap).not.toBeNull();
 		const [, count, url, a, b] = gap ?? [];
 		const hidden = (store.saved.get(url) ?? "").split("\n").slice(Number(a) - 1, Number(b));

@@ -14,6 +14,7 @@ import {
 	type UsageProvider,
 	type UsageReport,
 	type UsageWindow,
+	usageSubscriptionPlan,
 } from "../usage";
 import { isRecord } from "../utils";
 import { waitForRetry } from "../utils/retry-wait";
@@ -412,6 +413,31 @@ interface ClaudeProfile {
 		uuid?: string;
 		email?: string;
 	};
+	organization?: {
+		organization_type?: string;
+		rate_limit_tier?: string;
+	};
+}
+
+const CLAUDE_ORGANIZATION_PLANS: Readonly<Record<string, string>> = {
+	claude_max: "Max",
+	claude_pro: "Pro",
+	claude_team: "Team",
+	claude_enterprise: "Enterprise",
+};
+
+/**
+ * Subscription plan label for a `/profile` response: "Max 5x" / "Max 20x" from
+ * the rate-limit tier (the $100 and $200 Max plans), else the organization
+ * type ("Max", "Pro", "Team", "Enterprise"). Undefined when the profile names
+ * no recognised plan.
+ */
+export function claudeProfilePlan(profile: unknown): string | undefined {
+	if (!isRecord(profile) || !isRecord(profile.organization)) return undefined;
+	const { rate_limit_tier: tier, organization_type: type } = profile.organization;
+	const maxMultiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1] : undefined;
+	if (maxMultiplier) return `Max ${maxMultiplier.toLowerCase()}`;
+	return typeof type === "string" ? CLAUDE_ORGANIZATION_PLANS[type.toLowerCase()] : undefined;
 }
 
 function extractProfileIdentity(profile: ClaudeProfile | null): { accountId?: string; email?: string } {
@@ -733,8 +759,13 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	};
 	let accountId = result.metadata?.accountId ?? credential.accountId;
 	let email = result.metadata?.email ?? credential.email;
-	if ((!accountId || !email) && !params.signal?.aborted) {
-		const profileIdentity = extractProfileIdentity(await fetchProfile(baseUrl, headers, ctx, params.signal));
+	// Fetched every time: the plan can change under a long-lived credential
+	// (upgrade, downgrade), and `/usage` never reports it. A failed probe keeps
+	// the plan the previous report carried.
+	const profile = await fetchProfile(baseUrl, headers, ctx, params.signal);
+	const plan = claudeProfilePlan(profile) ?? usageSubscriptionPlan(ctx.previousReport);
+	if (!accountId || !email) {
+		const profileIdentity = extractProfileIdentity(profile);
 		accountId ??= profileIdentity.accountId;
 		email ??= profileIdentity.email;
 	}
@@ -753,6 +784,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		...(accountId ? { accountId } : {}),
 		...(email ? { email } : {}),
 		...(credential.orgId ? { orgId: credential.orgId } : {}),
+		...(plan ? { subscriptionPlan: plan } : {}),
 	};
 	return result;
 }
@@ -1048,8 +1080,9 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 	 *
 	 * Legacy and shared quota errors also leave account-wide blocks. A
 	 * complete report with every reported quota healthy can heal that scope; a
-	 * report with a single shared window can heal it only when that window's
-	 * reset matches the stored block deadline.
+	 * report with a single shared window can heal it, and a tier block a spent
+	 * shared wall caused, only when that window's reset matches the stored
+	 * block deadline.
 	 */
 	healableBlockScopes(report) {
 		const sharedLimits = report.limits.filter(limit => limit.scope.shared === true);
@@ -1059,20 +1092,6 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			limits: report.limits.filter(limit => limit.scope.shared === true || limit.scope.tier !== undefined),
 			healthy: report.metadata?.source === "ratelimit-headers" ? false : undefined,
 		};
-		// The endpoint returns a report as soon as one window parses, and a tier
-		// 429 can be caused by a shared wall. A payload missing a shared gate
-		// leaves the block's cause unknown. One exception: a report exposing a
-		// single shared window may heal the account-wide block only when that
-		// window's reset is the exact deadline that created the block; without
-		// that match, the missing window could still be the cap behind the 429.
-		// If both windows were spent, the stored deadline is the later reset, so
-		// an early recovery of that window can still lift a block the other
-		// window holds; the next 429 restores it.
-		if (!claudeReportCoversSharedGates(report)) {
-			if (sharedLimits.length !== 1) return [];
-			// Only shared windows are matched against the block deadline.
-			return [{ ...globalScope, resetMatchRequired: true }];
-		}
 		// A tier block is judged by the scoped weekly rows that gate its family
 		// (see `scopedWeeklyGates`), plus the shared walls. A payload with no
 		// scoped row leaves nothing this report can judge, so no tier scope is
@@ -1084,6 +1103,26 @@ export const claudeRankingStrategy: CredentialRankingStrategy = {
 			const gates = labelled.length > 0 ? labelled : scopedWeeklyLimits;
 			if (gates.length === 0) continue;
 			tierScopes.push({ blockScope: `tier:${tier}`, limits: [...sharedLimits, ...gates] });
+		}
+		// The endpoint returns a report as soon as one window parses, and a tier
+		// 429 can be caused by a shared wall. A payload missing a shared gate
+		// leaves the block's cause unknown. One exception: a report exposing a
+		// single shared window may heal a block only when that window's reset is
+		// the exact deadline that created the block; without that match, the
+		// missing window could still be the cap behind the 429. A tier 429 behind
+		// that shared wall stores the same deadline, so its tier scope heals by
+		// the same match once its own weekly row has room. If both windows were
+		// spent, the stored deadline is the later reset, so an early recovery of
+		// that window can still lift a block the other window holds; the next
+		// 429 restores it.
+		if (!claudeReportCoversSharedGates(report)) {
+			if (sharedLimits.length !== 1) return [];
+			// Only shared windows are matched against the block deadline.
+			return [globalScope, ...tierScopes].map(scope => ({
+				...scope,
+				healthy: globalScope.healthy,
+				resetMatchRequired: true,
+			}));
 		}
 		return [globalScope, ...tierScopes];
 	},

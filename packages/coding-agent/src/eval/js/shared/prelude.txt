@@ -52,30 +52,29 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const res = await globalThis.__omp_call_tool__("read", { path });
 		return res && typeof res === "object" && "text" in res ? res.text : res;
 	};
+	// Delegated reads ask for `:raw`, which the bridge returns whole: no row prefixes, pages or cut lines.
+	// Web URLs keep their reader text; `:raw` there means the original HTML.
+	const rawReadPath = path =>
+		/^https?:\/\//i.test(path) || /:raw(?::|$)/i.test(path) ? path : `${path}:raw`;
 
 
 	const read = async (path, opts, ...rest) => {
 		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
-		if (typeof path === "string" && /^artifact:\/\/\d+$/i.test(path)) {
-			if (typeof options.limit === "number" && options.limit <= 0) return "";
-			const text = callHelper("hasRoot", path) ? await callHelper("read", path, options) : undefined;
+		if (!shouldDelegateRead(path)) {
+			const text = await callHelper("read", path, options);
 			if (text !== undefined) return text;
-			// Another session's, or no artifacts dir was injected: the read tool searches every registered one.
-			// A bounded raw read locates the file without inlining it; a bare `:raw` read refuses files over 50 KB.
-			const located = await globalThis.__omp_call_tool__("read", { path: `${path}:raw:1-1` });
-			const filePath = located?.details?.resolvedPath;
-			// Once located, the file is read like this session's artifacts and plain paths: read() is no read-tool policy gate.
-			if (typeof filePath === "string") return callHelper("read", filePath, options);
-			// An extension's replacement `read` may name no file: its own text for the selected lines is the answer.
-			return readToolText(withReadLineSelector(`${path}:raw`, options));
 		}
-		if (shouldDelegateRead(path)) {
-			const toolPath = withReadLineSelector(path, options);
-			return toolPath === null ? "" : readToolText(toolPath);
-		}
-		return callHelper("read", path, options);
+		// Protocol paths and directories (whose listing it renders) go through the read tool.
+		const toolPath = withReadLineSelector(rawReadPath(path), options);
+		return toolPath === null ? "" : readToolText(toolPath);
 	};
-	const write = async (path, data) => callHelper("writeFile", path, data);
+	const write = async (path, data) => {
+		// Schemes without an on-disk root (agent://, out://, ssh://, …) go through the write tool.
+		if (!shouldDelegateRead(path)) return callHelper("writeFile", path, data);
+		if (typeof data !== "string") throw new TypeError(`write() to ${path} expects string data`);
+		await globalThis.__omp_call_tool__("write", { path, content: data });
+		return path;
+	};
 	const env = (key, value) => callHelper("env", key, value);
 
 	// `sh` runs a command on the embedded bash engine (see `eval/shell-bridge.ts`) and resolves to its output.

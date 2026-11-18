@@ -6,8 +6,9 @@
  * call's context, and the relevance rubric. `noul` probabilities are absolute, so chunks are comparable with each
  * other and the merged ranking needs no rescaling.
  *
- * The chunk size is measured, not tuned here: 48 lines per request keeps the relevant lines at the top, while 96
- * flattens every score to the same prior on a 900-line read.
+ * The chunk size is hosted jev's cap of 32 questions a request, so every chunk is one request that sends its state
+ * once. Measured on a 900-line read, 48 lines per request kept the relevant lines at the top while 96 flattened every
+ * score to the same prior, so the cap sits on the sharp side.
  */
 import type { AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import {
@@ -21,10 +22,10 @@ import {
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { Settings } from "../config/settings";
 import type { ModelRegistry } from "../config/model-registry";
-import type { JudgmentUsageLedger } from "../judgment";
 import { journalJudgmentUsage, resolveJudge } from "../judgment";
 import { sharedJudgmentCache } from "../judgment/cache";
 import type { CostGateApi } from "../session/cost-gate";
+import type { ModelUsageLedger } from "../session/model-usage-journal";
 import type { SpotlightRequestParams } from "@oh-my-pi/pi-tui/chat/spotlight";
 import questionFile from "../prompts/judge/shape.json" with { type: "json" };
 import { logger } from "@oh-my-pi/pi-utils";
@@ -35,15 +36,18 @@ const QUESTIONS = judgeQuestions(questionFile);
 
 /**
  * What a line has to be, to reach the agent. It rides the state rather than each question: a request carries up to
- * 48 questions, and repeating the rubric on every one costs more than the lines themselves.
+ * 32 questions, and repeating the rubric on every one costs more than the lines themselves.
  */
 const LINE_CRITERIA = {
 	no: "Routine or incidental for this call: imports, braces and boilerplate, unrelated code, header prose, lines a passing run repeats.",
 	yes: "The agent needs this line for its current call: it names, defines, reports or decides something the intent, the agent's text or the task is about, such as an error, the asked-for symbol, a failing assertion, a changed value, the line that explains the ones around it.",
 } as const;
 
-/** Items one judge request ranks: 48 keeps a cut sharp, 96 scores every line the same. */
-export const JUDGE_CHUNK_ITEMS = 48;
+/**
+ * Items one judge request ranks: hosted jev takes at most 32 questions a request and splits a larger chunk into more
+ * requests that each resend the whole state.
+ */
+export const JUDGE_CHUNK_ITEMS = 32;
 /**
  * Judge requests this scorer keeps in flight, across every chunk of every stage of one result: `scoreLines` fans one
  * `score` call out per 32 KB chunk, so a per-call cap would multiply.
@@ -93,7 +97,7 @@ export interface SpotlightScorerSession {
 	getActiveModel?: () => Model | undefined;
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	costGate?: CostGateApi;
-	sessionManager?: Partial<JudgmentUsageLedger>;
+	sessionManager?: Partial<ModelUsageLedger>;
 }
 
 /** How a {@link JudgeScorer} spends its budget. */
