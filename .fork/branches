@@ -4,5 +4,5 @@ feat/resume-by-title-01a1da62-source-88c8dc4
 feat/goal-park-guard-eb29a2c7-source-88c8dc4
 feat/extension-ctx-restart-source-88c8dc4
 fix/skip-underscore-extension-files
-fix/eval-names-top-level-only
+fix/eval-names-top-level-only-rebased
 fix/force-cli-verify
