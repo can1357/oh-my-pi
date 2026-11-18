@@ -9,9 +9,11 @@
 ### Added
 
 - `btwMode` theme color, defined in every bundled theme, and a `btw` kind for the composer mode chip (role `omp.editor.btw-ask`)
+- `RuntimeChildrenOptions.nativeDock` takes `{ component, feature }` entries, docked only on terminals whose `hello` advertises that feature
 - Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 ### Changed
 
+- On a Tern host with the tray, a running `wait` card starts folded (the tray already shows those jobs live); it can still be unfolded, and once settled it reads as before. Describe hooks get `RenderResultOptions.tray`, and a `NativeToolView` can ask to start `folded`
 - Asks (`HtmlFormDialog`, `AskDialogComponent`) stack every question, the focused one open and the rest folded to their answer or up to four option pills, instead of question tabs, a Review tab and pages: in rows a scrolling panel (`chrome/ask-fold.ts`), natively one inline card (`native/ask-card.ts`, role `omp.ask.card`) whose pills a click picks, gliding between folded and open (`transition: "layout"`), without Hide. Both take `skipNotice`, `claimKeys` and `releaseKeys` (Esc and Tab past the last stop call it) and expose `keyHints()` for the host's composer in place of their rows footer, cap their rows panel at `terminal.rows - ASK_RESERVED_ROWS`, and no longer take `inputGuard` (`AskDialogInputGuard` is gone: the host keeps a draft's keys in the composer); `HtmlFormDialog.givenAnswers()` reports what changed from the defaults. Folded choices keep their options in view as pills, the chosen ones marked. The ask tool's pending call paints nothing in rows
 - `CustomEditor.faint` draws the rows composer faint (an ask above it holds the keys), `Editor.onUpFromTop` lets the host take ↑ on the first line; `StatusLineComponent.setAwaitingAnswer` turns the brand's spinner into a question mark
 - The composer's `ask` state (`ComposerNativeState.ask`): while an ask waits above it the placeholder says typing there skips it, it folds to its compact row away from the keys (`NativeEditorLayout.folded`, the composer `col`'s `folded`), and a draft that would skip it gets a `skips ask` chip and Skip & send

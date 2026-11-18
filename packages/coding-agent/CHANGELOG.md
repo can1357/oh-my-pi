@@ -16,6 +16,7 @@
 - `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
 - Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
 - A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
+- In Tern, running subagents and background jobs show as a tray of live cards over the composer instead of the agents/jobs pill: each card shows what its agent or job is doing, a click looks closer (Open, Stop or Cancel, Dismiss), finished agents fold into one done card, and the agents-hub key moves focus into the tray
 - The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
 - Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session
 - `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.

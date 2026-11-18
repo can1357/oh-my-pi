@@ -797,12 +797,12 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.btw.inject")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleBtwInjectKey());
 		}
-		const hubKeys = new Set([
-			...this.ctx.keybindings.getKeys("app.agents.hub"),
-			...this.ctx.keybindings.getKeys("app.session.observe"),
-		]);
+		const agentsHubKeys = new Set(this.ctx.keybindings.getKeys("app.agents.hub"));
+		const hubKeys = new Set([...agentsHubKeys, ...this.ctx.keybindings.getKeys("app.session.observe")]);
 		for (const key of hubKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
+			this.ctx.editor.setCustomKeyHandler(key, () =>
+				this.ctx.showAgentHub(agentsHubKeys.has(key) ? { trayFirst: true } : undefined),
+			);
 		}
 
 		// Double-tap left arrow on an empty editor: opens the agent hub from the
@@ -819,7 +819,7 @@ export class InputController {
 			}
 			if (this.#detectLeftDoubleTap()) {
 				hintUsage.record("agents");
-				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true });
+				this.ctx.showAgentHub({ requireContent: true, armCloseTap: true, trayFirst: true });
 			}
 		};
 		// The native composer's viewing header: an ancestor crumb, or back to main.
