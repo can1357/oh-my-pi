@@ -212,6 +212,7 @@
 ### Added
 
 - Every saved-reset spend attempt, automatic or from `/usage reset` and `omp usage reset`, now writes an info line `reset spend` to the omp log with the provider, account, credential and credit id, governing window, trigger (`blocked`, `sweep` or `manual`), planner reason and outcome code, so the log shows which process spent an account's reset and why
+- Every saved-reset spend attempt, automatic or from `/usage reset` and `omp usage reset`, now writes an info line `reset spend` to the omp log with the provider, account, credential and credit id, governing window, trigger (`blocked`, `sweep` or `manual`), planner reason and outcome code, so the log shows which process spent an account's reset and why ([#19626](https://github.com/can1357/oh-my-pi/pull/19626) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
