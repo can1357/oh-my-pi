@@ -782,6 +782,9 @@ async function wrappedExecute(
 	let result: AgentToolResult;
 	try {
 		own = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+		// A program parses the result: elision markers and notices would corrupt its payload, so it
+		// gets the tool's own result with truncation left structured in `details.meta`.
+		if (context?.programmatic) return own;
 
 		// Spill large results to artifact, truncate to tail
 		result = await spillLargeResultToArtifact(own, this.name, context);
