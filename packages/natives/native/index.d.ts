@@ -317,7 +317,7 @@ export declare class FileLock {
   /**
    * Whether any handle, in any process including this one, holds `path`.
    *
-   * Observes without locking or opening the lock: a `connect(2)` probe on
+   * Observes without locking or opening the lock: an `F_OFD_GETLK` query on
    * Linux, an `F_GETLK` query on other Unix platforms, a `\BaseNamedObjects`
    * directory listing on Windows. A concurrent `tryAcquire()` never meets it.
    */
