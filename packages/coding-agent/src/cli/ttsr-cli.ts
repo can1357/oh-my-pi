@@ -98,6 +98,10 @@ interface RuleMatchDetail {
 	skippedAst?: string;
 	/** Judged-rule question; the CLI never calls the judge, so it cannot trigger here. */
 	question?: string;
+	/** `before` for a gate: its question is judged on each in-scope tool call before the call runs. */
+	gate?: Rule["gate"];
+	/** What a judge failure does to the call or output. */
+	onJudgeError?: Rule["onJudgeError"];
 	agents?: string[];
 }
 
@@ -257,6 +261,8 @@ async function evaluate(
 			matched: { regex, ast },
 			defined: { regex: rule.condition ?? [], ast: rule.astCondition ?? [] },
 			question: rule.question,
+			gate: rule.gate,
+			onJudgeError: rule.onJudgeError,
 			agents: rule.agents,
 		};
 		if (!astEligible && (rule.astCondition ?? []).length > 0) {
@@ -493,7 +499,9 @@ function renderRuleDetail(detail: RuleMatchDetail, hit: boolean): void {
 		condParts.push(chalk.dim(`astCondition: ${detail.skippedAst}`));
 	}
 	if (detail.question) {
-		condParts.push(chalk.dim(`question (judged at runtime, not tested): ${detail.question}`));
+		const when = detail.gate === "before" ? "judged before each call runs" : "judged at runtime";
+		condParts.push(chalk.dim(`question (${when}, not tested): ${detail.question}`));
+		if (detail.onJudgeError) condParts.push(chalk.dim(`onJudgeError: ${detail.onJudgeError}`));
 	}
 	const condLabel = condParts.length > 0 ? condParts.join("  ") : chalk.dim("no active conditions");
 	const provider = detail.sourceProvider ? chalk.dim(` [${detail.sourceProvider}]`) : "";
@@ -513,6 +521,8 @@ async function runList(json: boolean, cwd: string): Promise<void> {
 					condition: r.condition ?? [],
 					astCondition: r.astCondition ?? [],
 					question: r.question,
+					gate: r.gate,
+					onJudgeError: r.onJudgeError,
 					scope: r.scope ?? [],
 					globs: r.globs ?? [],
 					agents: r.agents ?? [],
@@ -534,6 +544,8 @@ async function runList(json: boolean, cwd: string): Promise<void> {
 		if ((rule.condition ?? []).length > 0) condParts.push(`condition: ${rule.condition!.join(", ")}`);
 		if ((rule.astCondition ?? []).length > 0) condParts.push(`astCondition: ${rule.astCondition!.join(", ")}`);
 		if (rule.question) condParts.push(`question: ${rule.question}`);
+		if (rule.gate) condParts.push(`gate: ${rule.gate}`);
+		if (rule.onJudgeError) condParts.push(`onJudgeError: ${rule.onJudgeError}`);
 		if ((rule.scope ?? []).length > 0) condParts.push(`scope: ${rule.scope!.join(", ")}`);
 		if ((rule.globs ?? []).length > 0) condParts.push(`globs: ${rule.globs!.join(", ")}`);
 		if ((rule.agents ?? []).length > 0) condParts.push(`agents: ${rule.agents!.join(", ")}`);
