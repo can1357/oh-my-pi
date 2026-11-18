@@ -80,6 +80,10 @@
 - Increased provider stream watchdog defaults from 5 to 15 minutes, preventing slow one-shot completions from being interrupted prematurely.
 - Extended Gemini reasoning-stream protection to allow longer planning sequences before interruption.
 
+### Changed
+
+- Isolated the `antigravity-cli` ACP child working directory in an empty managed workspace by default (`isolateWorkspace` / `antigravityIsolateWorkspace`, env `PI_AGY_ISOLATE_WORKSPACE`), preventing `agy` from indexing large host repositories into memory while host tools continue executing in the real session directory ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
+
 ### Fixed
 
 - Broker-backed credential stores now detect a login the broker stores but does not serve and keep it in the local `agent.db` (`HybridAuthCredentialStore`) instead of losing it on the next snapshot; a broker-only `RemoteAuthCredentialStore` fails the upload with `AuthBrokerUnservedProviderError`.
