@@ -32,6 +32,7 @@ import {
 	type AriaSnapshotOptions,
 	type AriaSnapshotPayload,
 	assertSelectorString,
+	assertWaitSelector,
 	buildAriaSnapshotPayloadScript,
 } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
@@ -43,7 +44,7 @@ import {
 	pushStateInPage,
 	reloadInPage,
 } from "../navigation";
-import { DEFAULT_STYLE_PROPERTIES } from "../queries";
+import { DEFAULT_STYLE_PROPERTIES, isFunctionSource } from "../queries";
 import type {
 	HarContentPolicy,
 	NetworkPattern,
@@ -1042,12 +1043,14 @@ export class CmuxTab implements InProcessRunTab {
 	}
 
 	async waitFor(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
+		assertWaitSelector("tab.waitFor", selector);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		await this.#waitForSelector(selector, timeoutMs);
 		return new CmuxElementHandle(this, selector);
 	}
 
 	async waitForSelector(selector: string, opts?: { timeout?: number }): Promise<CmuxElementHandle> {
+		assertWaitSelector("tab.waitForSelector", selector);
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		await this.#waitForSelector(selector, timeoutMs);
 		return new CmuxElementHandle(this, selector);
@@ -1803,19 +1806,31 @@ export class CmuxTab implements InProcessRunTab {
 
 	async waitForFunction(
 		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
-		opts: { timeout?: number; polling?: number } | undefined,
+		opts?: { timeout?: number; polling?: number },
 		...args: unknown[]
+	): Promise<unknown> {
+		return await this.pollFunction("tab.waitForFunction()", fn, opts, args);
+	}
+
+	/** Poll a page predicate until it is truthy; a string holding a function is called with `args`. */
+	async pollFunction(
+		label: string,
+		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
+		opts: { timeout?: number; polling?: number } | undefined,
+		args: unknown[],
 	): Promise<unknown> {
 		const timeoutMs = opts?.timeout ?? this.#runContext?.timeoutMs ?? 30_000;
 		const signal = this.#runContext?.signal;
 		const pollingMs = typeof opts?.polling === "number" ? opts.polling : 200;
 		const deadline = Date.now() + timeoutMs;
+		const script = typeof fn === "string" && isFunctionSource(fn) ? `(${fn}\n)(...${JSON.stringify(args)})` : fn;
 		while (Date.now() <= deadline) {
-			const value = typeof fn === "string" ? await this.#evalScript<unknown>(fn) : await this.evaluate(fn, ...args);
+			const value =
+				typeof script === "string" ? await this.#evalScript<unknown>(script) : await this.evaluate(script, ...args);
 			if (value) return value;
 			await untilAborted(signal, () => Bun.sleep(pollingMs));
 		}
-		throw new ToolError(`page.waitForFunction() timed out after ${timeoutMs}ms`);
+		throw new ToolError(`${label} timed out after ${timeoutMs}ms`);
 	}
 
 	async #evalScript<R>(script: string, timeoutMs?: number): Promise<R> {
@@ -2474,7 +2489,7 @@ class CmuxPageFacade {
 		opts?: { timeout?: number; polling?: number },
 		...args: unknown[]
 	): Promise<unknown> {
-		return await this.#tab.waitForFunction(fn, opts, ...args);
+		return await this.#tab.pollFunction("page.waitForFunction()", fn, opts, args);
 	}
 
 	async waitForResponse(

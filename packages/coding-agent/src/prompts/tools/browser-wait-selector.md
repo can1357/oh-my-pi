@@ -1,0 +1,1 @@
+{{#if function}}{{call}}(fn) waits for a selector string, not a function. To wait until a condition holds, use {{owner}}.waitForFunction(fn, { timeout }).{{else}}{{call}}({{selector}}) waits for a selector string, not a number of milliseconds. Wait for what should change instead: {{owner}}.waitForSelector(selector) or {{owner}}.waitForFunction(fn), with { timeout } in ms.{{/if}}
