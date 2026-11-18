@@ -61,6 +61,7 @@ macro_rules! for_each_extra {
 			async_utility [feature = "util.fd"] "fd" fd::FdCli;
 			utility [all(feature = "util.file", any(unix, windows))] "file" file::FileCli;
 			async_utility [feature = "util.find"] "find" find::Find;
+			async_utility [all(feature = "util.flock", any(unix, windows))] "flock" flock::Flock;
 			utility [feature = "util.fold"] "fold" fold::Fold;
 			async_utility [feature = "util.grep"] "grep" grep::Grep;
 			async_utility [feature = "util.rg"] "rg" rg::Rg;

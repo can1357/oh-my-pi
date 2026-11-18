@@ -132,6 +132,8 @@ mod fd;
 mod file;
 #[cfg(feature = "util.find")]
 mod find;
+#[cfg(all(feature = "util.flock", any(unix, windows)))]
+mod flock;
 #[cfg(feature = "util.fold")]
 mod fold;
 #[cfg(feature = "util.grep")]

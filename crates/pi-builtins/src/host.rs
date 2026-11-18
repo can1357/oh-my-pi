@@ -631,7 +631,8 @@ impl ShellPaths {
 		}
 	}
 
-	fn file(&self, fd: i32) -> Option<&OpenFile> {
+	/// The shell's open descriptor `fd`; `None` when it is closed.
+	pub fn file(&self, fd: i32) -> Option<&OpenFile> {
 		self.descriptors
 			.iter()
 			.find(|(shell_fd, _)| *shell_fd == fd)

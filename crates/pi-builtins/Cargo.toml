@@ -251,6 +251,7 @@ default = ["utils"]
 # Needs the codecs `-z` decodes with: unix and windows targets.
 "util.file" = []
 "util.find" = []
+"util.flock" = []
 "util.fold" = []
 "util.grep" = ["util.bre"]
 "util.head" = []
@@ -353,6 +354,7 @@ utils = [
   "util.fd",
   "util.file",
   "util.find",
+  "util.flock",
   "util.fold",
   "util.grep",
   "util.head",

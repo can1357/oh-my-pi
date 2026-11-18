@@ -20,6 +20,7 @@
 - `open` and `xdg-open` are now shell builtins on macOS, Linux and Windows (with `start` on Windows): an internal URL such as `local://report.html` opens the file behind it, every macOS `open` option works (`-a`, `-b`, `-e`, `-t`, `-f`, `-F`, `-W`, `-R`, `-n`, `-g`, `-j`, `-h`, `-s`, `-u`, `--args`, `--env`, `--stdin`/`--stdout`/`--stderr`, `--arch`), and a session with no desktop gets a short error instead of hanging
 - `file` runs in the bash tool's shell as a builtin, so it identifies internal URLs (`file local://report.pdf`, `artifact://N`, `skill://…`) as well as paths, and works on Windows where there is no `file` program
 - `direnv` is now a bash-tool builtin: `.envrc`/`.env` files are evaluated inside the embedded shell with direnv's stdlib, `direnv exec DIR cmd…` runs the command in-shell with the loaded environment (builtins and internal URIs keep working), and `allow`/`deny`/`export`/`status`/`hook`/`reload`/`prune`/`edit`/`fetchurl` share the real direnv's allow list and config, so it works without direnv installed
+- In-process `flock` shell builtin matching util-linux (`flock FILE CMD…`, `flock FILE -c CMD`, `flock N` on the shell's own descriptors, `--fd N CMD`; `-s`/`-x`/`-u`/`-n`/`-w`/`-E`/`-o`/`-F`/`--fcntl`/`--start`/`--length`/`--verbose`), so lock scripts behave the same on macOS, Linux and Windows.
 
 ### Changed
 
