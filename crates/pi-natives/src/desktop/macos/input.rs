@@ -2042,7 +2042,7 @@ const DRAG_RELEASE_GAP: Duration = Duration::from_millis(50);
 /// Key pacing for a device that samples HID report state, which loses a key
 /// transition shorter than its report interval; a search field that reacts
 /// to every key needs more than one interval.
-const REPORT_KEY_GAP: Duration = Duration::from_millis(120);
+const REPORT_KEY_GAP: Duration = Duration::from_millis(60);
 /// Press length, and pointer settle, of a tap on such a device.
 const TAP_HOLD: Duration = Duration::from_millis(60);
 /// How long raising an occluded target may take to become visible to
