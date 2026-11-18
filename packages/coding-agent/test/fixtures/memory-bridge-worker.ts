@@ -5,6 +5,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { hindsightBackend } from "../../src/hindsight/backend";
+import type { HindsightMessage } from "../../src/hindsight/content";
 import type { HindsightSessionStateApi } from "../../src/hindsight/state";
 import { mnemopiBackend } from "../../src/mnemopi/backend";
 import type { MnemopiSessionStateApi } from "../../src/mnemopi/state";
@@ -44,6 +45,8 @@ export interface MnemopiChildReport {
 /** Worker-side operations the test drives; each crosses to main as an async function. */
 export interface MemoryProbe {
 	hindsightChild(parent: HindsightSessionStateApi, fact: string, query: string): Promise<HindsightChildReport>;
+	/** Runs a worker child's compaction recall over `messages`; returns what it recalled. */
+	hindsightCompaction(parent: HindsightSessionStateApi, messages: HindsightMessage[]): Promise<string | undefined>;
 	mnemopiChild(parent: MnemopiSessionStateApi, fact: string): Promise<MnemopiChildReport>;
 	mnemopiForget(id: string): Promise<string>;
 }
@@ -106,6 +109,28 @@ function buildProbe(): MemoryProbe {
 			};
 			await session.dispose();
 			return report;
+		},
+		hindsightCompaction: async (parent, messages) => {
+			const settings = Settings.isolated({
+				"memory.backend": "hindsight",
+				"hindsight.apiUrl": "http://hindsight.invalid",
+			});
+			const session = childSession(settings);
+			await hindsightBackend.start({
+				session,
+				settings,
+				modelRegistry,
+				agentDir: "/tmp",
+				taskDepth: 1,
+				parentHindsightSessionState: parent,
+			});
+			const alias = session.getHindsightSessionState();
+			if (!alias) throw new Error("hindsight alias was not installed");
+			try {
+				return await alias.recallForCompaction(messages);
+			} finally {
+				await session.dispose();
+			}
 		},
 		mnemopiChild: async (parent, fact) => {
 			const settings = Settings.isolated({ "memory.backend": "mnemopi" });

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,7 +7,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
-import { HindsightApi } from "../../src/hindsight/client";
+import { HindsightApi, HindsightError } from "../../src/hindsight/client";
 import { loadHindsightConfig } from "../../src/hindsight/config";
 import { HindsightSessionState } from "../../src/hindsight/state";
 import type { MnemopiBackendConfig } from "../../src/mnemopi/config";
@@ -40,6 +40,12 @@ function mnemopiConfig(dbPath: string): MnemopiBackendConfig {
 		llmMode: "none",
 	};
 }
+
+const T0 = Date.parse("2026-01-01T00:00:00.000Z");
+/** The first pause after a failed recall: the shipped default of `hindsight.recallCooldownMs`. */
+const FIRST_PAUSE_MS = 60_000;
+const PROMPT = "Where is the deploy host?";
+const COMPACTION_MESSAGES = [{ role: "user", content: "what did we decide?" }];
 
 describe("memory thread service", () => {
 	let tempDir = "";
@@ -97,6 +103,7 @@ describe("memory thread service", () => {
 	}, 30_000);
 
 	afterEach(async () => {
+		setSystemTime();
 		link?.close("test done");
 		link = undefined;
 		await worker?.terminate();
@@ -105,6 +112,28 @@ describe("memory thread service", () => {
 		await parentSession.dispose();
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
+
+	/** Main's primary state with the shipped pause settings, over a client whose every recall times out. */
+	function timingOutParent() {
+		const client = new HindsightApi({ baseUrl: "http://hindsight.invalid" });
+		const recall = vi
+			.spyOn(client, "recall")
+			.mockRejectedValue(new HindsightError("recall request timed out after 1s"));
+		const parent = new HindsightSessionState({
+			sessionId: "parent-session",
+			client,
+			bankId: "main-bank",
+			config: loadHindsightConfig(
+				Settings.isolated({
+					"hindsight.apiUrl": "http://hindsight.invalid",
+					"hindsight.mentalModelsEnabled": false,
+				}),
+			),
+			session: parentSession,
+			banksSet: new Set(),
+		});
+		return { parent, recall };
+	}
 
 	it("routes a worker Hindsight alias's retains, bank confirmation, and recalls through main's client and bank set", async () => {
 		const client = new HindsightApi({ baseUrl: "http://hindsight.invalid" });
@@ -163,6 +192,43 @@ describe("memory thread service", () => {
 		// Aliases never auto-recall or auto-retain on the parent's behalf.
 		expect(parent.lastRetainedTurn).toBe(0);
 		parent.dispose();
+	});
+
+	it("a worker alias's compaction recall waits out the primary's pause", async () => {
+		const { parent, recall } = timingOutParent();
+		try {
+			setSystemTime(T0);
+			expect(await parent.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+			expect(recall).toHaveBeenCalledTimes(1);
+
+			setSystemTime(T0 + 30_000);
+			expect(await probe.hindsightCompaction(parent, COMPACTION_MESSAGES)).toBeUndefined();
+			expect(recall).toHaveBeenCalledTimes(1);
+		} finally {
+			parent.dispose();
+		}
+	});
+
+	it("a worker alias's failure after the primary's pause counts as one more failure in a row", async () => {
+		const { parent, recall } = timingOutParent();
+		try {
+			setSystemTime(T0);
+			expect(await parent.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+			const aliasFailedAt = T0 + FIRST_PAUSE_MS + 1_000;
+			setSystemTime(aliasFailedAt);
+			expect(await probe.hindsightCompaction(parent, COMPACTION_MESSAGES)).toBeUndefined();
+			expect(recall).toHaveBeenCalledTimes(2);
+
+			// The second failure in a row pauses for two minutes, not one.
+			setSystemTime(aliasFailedAt + 2 * FIRST_PAUSE_MS - 1_000);
+			expect(await parent.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+			expect(recall).toHaveBeenCalledTimes(2);
+			setSystemTime(aliasFailedAt + 2 * FIRST_PAUSE_MS + 1_000);
+			expect(await parent.beforeAgentStartPrompt(PROMPT)).toBeUndefined();
+			expect(recall).toHaveBeenCalledTimes(3);
+		} finally {
+			parent.dispose();
+		}
 	});
 
 	it("lands a worker Mnemopi alias's writes in main's live banks and reads them back", async () => {

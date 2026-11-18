@@ -1,9 +1,11 @@
 /**
  * Worker-side proxies of the main thread's memory objects. A subagent alias built on a
- * worker reads its parent through these, so retains, recalls, bank confirmations, and
- * Mnemopi writes land in main's live client, bank set, and SQLite banks.
+ * worker reads its parent through these, so retains, recalls, bank confirmations, the
+ * recall pause, and Mnemopi writes land in main's live client, bank set, pause, and
+ * SQLite banks.
  */
 import type { RecallResult } from "@oh-my-pi/pi-mnemopi";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { HindsightBankSet } from "../../hindsight/bank";
 import type {
 	BankProfileResponse,
@@ -33,6 +35,7 @@ import type {
 	UpdateDocumentOptions,
 } from "../../hindsight/client";
 import type { HindsightConfig } from "../../hindsight/config";
+import type { RecallSkip, RecallWait, RecallWaitOutcome } from "../../hindsight/recall-wait";
 import type { HindsightSessionStateApi } from "../../hindsight/state";
 import type { MnemopiBackendConfig } from "../../mnemopi/config";
 import type {
@@ -47,7 +50,7 @@ import type {
 	MnemopiScopedMemoryHit,
 	MnemopiSessionStateApi,
 } from "../../mnemopi/state";
-import type { RemoteObject } from "../rpc";
+import { type RemoteObject, RpcClosedError, RpcTimeoutError } from "../rpc";
 import type {
 	HindsightClientProtocol,
 	HindsightSessionStateProtocol,
@@ -166,14 +169,53 @@ export class RemoteHindsightBankSet implements HindsightBankSet {
 	}
 }
 
+/**
+ * Main's pause after a failed automatic recall of one parent state; each call runs
+ * synchronously on main, on main's clock. When the link is closed or main does not reply
+ * in time, `skip` reports no pause, so the recall runs, and the outcome may go unrecorded;
+ * after a timeout, main may still run the queued `record` call and record it late. Each
+ * logs one warning.
+ */
+export class RemoteRecallWait implements RecallWait {
+	readonly #remote: RemoteObject<HindsightSessionStateProtocol>;
+
+	constructor(remote: RemoteObject<HindsightSessionStateProtocol>) {
+		this.#remote = remote;
+	}
+
+	skip(): RecallSkip | undefined {
+		try {
+			return this.#remote.callSync("recallWait.skip");
+		} catch (error) {
+			if (!(error instanceof RpcClosedError || error instanceof RpcTimeoutError)) throw error;
+			logger.warn("Hindsight: recall pause not read from the main thread; the recall runs", {
+				error: error.message,
+			});
+			return undefined;
+		}
+	}
+
+	record(outcome: RecallWaitOutcome): number | undefined {
+		try {
+			return this.#remote.callSync("recallWait.record", outcome);
+		} catch (error) {
+			if (!(error instanceof RpcClosedError || error instanceof RpcTimeoutError)) throw error;
+			logger.warn("Hindsight: recall outcome not recorded on the main thread", { error: error.message });
+			return undefined;
+		}
+	}
+}
+
 /** A main-thread parent Hindsight state, as seen from a worker; fields read main's current values. */
 export class RemoteHindsightSessionState implements HindsightSessionStateApi {
 	readonly #remote: RemoteObject<HindsightSessionStateProtocol>;
 	readonly banksSet: RemoteHindsightBankSet;
+	readonly recallWait: RemoteRecallWait;
 
 	constructor(remote: RemoteObject<HindsightSessionStateProtocol>) {
 		this.#remote = remote;
 		this.banksSet = new RemoteHindsightBankSet(remote);
+		this.recallWait = new RemoteRecallWait(remote);
 	}
 
 	get client(): HindsightClientApi {

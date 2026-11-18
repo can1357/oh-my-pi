@@ -248,6 +248,17 @@ export const cfgHindsightRecallTimeoutMs = register({
 	default: 30_000,
 });
 
+/**
+ * First pause (ms) after a failed automatic recall. Each further failure doubles it, up to
+ * 30 minutes, or up to this value when it is larger. `0` or less turns it off.
+ */
+export const cfgHindsightRecallCooldownMs = register({
+	id: "hindsight.recallCooldownMs",
+	env: { name: "HINDSIGHT_RECALL_COOLDOWN_MS", parse: parseEnvInteger },
+	type: "number",
+	default: 60_000,
+});
+
 export const cfgHindsightRetainTimeoutMs = register({
 	id: "hindsight.retainTimeoutMs",
 	env: { name: "HINDSIGHT_RETAIN_TIMEOUT_MS", parse: parseEnvInteger },
