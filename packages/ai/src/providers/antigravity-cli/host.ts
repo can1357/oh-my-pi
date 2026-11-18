@@ -37,7 +37,7 @@ import {
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
-import { quotaError } from "./quota";
+import { isQuotaNoticePrefix, quotaError, quotaErrorFromText } from "./quota";
 import type { StepWriter } from "./step-writer";
 
 const AGENT_NAME = "bridge";
@@ -164,6 +164,7 @@ export class AgyHost implements ProviderSessionState {
 	readonly #turns = new Set<Turn>();
 	#loading: object | undefined;
 	#contextTokens = 0;
+	#noticeBuffer: string | undefined;
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
 
@@ -651,12 +652,16 @@ export class AgyHost implements ProviderSessionState {
 			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
 			return errorOutput("Tool call rejected; no execution occurred.");
 		}
-		const quota = quotaError(step.writer.output);
+		const quota =
+			quotaError(step.writer.output) ??
+			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer) : undefined);
 		if (quota) {
+			this.#noticeBuffer = undefined;
 			step.writer.discardText();
 			this.#fail(quota);
 			return errorOutput(quota.message);
 		}
+		this.#flushNotice();
 		const validation = validateJsonSchemaValue(tool.inputSchema, args);
 		if (!validation.success) return errorOutput(describeToolArguments(tool, args, validation));
 		if (!isRecord(args)) return errorOutput(describeToolArguments(tool, args));
@@ -698,6 +703,29 @@ export class AgyHost implements ProviderSessionState {
 		return result.promise;
 	}
 
+	/** Hold text that may be the official quota notice until the turn is classified. */
+	#bufferNotice(text: string, writer: StepWriter | undefined): void {
+		if (this.#noticeBuffer !== undefined) {
+			this.#noticeBuffer += text;
+			if (isQuotaNoticePrefix(this.#noticeBuffer)) return;
+			writer?.text(this.#noticeBuffer);
+			this.#noticeBuffer = undefined;
+			return;
+		}
+		if (isQuotaNoticePrefix(text)) {
+			this.#noticeBuffer = text;
+			return;
+		}
+		writer?.text(text);
+	}
+
+	#flushNotice(): void {
+		const buffered = this.#noticeBuffer;
+		if (buffered === undefined) return;
+		this.#noticeBuffer = undefined;
+		this.#step?.writer.text(buffered);
+	}
+
 	#onUpdate(notification: SessionNotification): void {
 		if (this.#loading || !this.#turn || notification.sessionId !== this.#conversation?.id || this.#turn.cancelling)
 			return;
@@ -705,10 +733,13 @@ export class AgyHost implements ProviderSessionState {
 		const writer = this.#step?.aborted ? undefined : this.#step?.writer;
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
-				if (update.content.type === "text") writer?.text(update.content.text);
+				if (update.content.type === "text") this.#bufferNotice(update.content.text, writer);
 				return;
 			case "agent_thought_chunk":
-				if (update.content.type === "text") writer?.thinking(update.content.text);
+				if (update.content.type === "text") {
+					this.#flushNotice();
+					writer?.thinking(update.content.text);
+				}
 				return;
 			case "usage_update":
 				this.#contextTokens = update.used;
@@ -737,6 +768,15 @@ export class AgyHost implements ProviderSessionState {
 			return;
 		}
 		const writer = step.writer;
+		const quota =
+			quotaError(writer.output) ??
+			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer) : undefined);
+		if (quota) {
+			this.#noticeBuffer = undefined;
+			writer.discardText();
+			this.#fail(quota);
+			return;
+		}
 		if (
 			!writer.output.content.some(
 				block => (block.type === "text" && block.text.trim().length > 0) || block.type === "toolCall",
@@ -745,12 +785,7 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
 			return;
 		}
-		const quota = quotaError(writer.output);
-		if (quota) {
-			writer.discardText();
-			this.#fail(quota);
-			return;
-		}
+		this.#flushNotice();
 		writer.usage(this.#contextTokens, response.usage);
 		const digest = transcriptDigest([...step.messages, writer.output]);
 		let checkpoint: AntigravityCliCheckpoint | undefined;
@@ -772,6 +807,7 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	#fail(error: unknown): void {
+		this.#noticeBuffer = undefined;
 		this.#ledger = undefined;
 		const step = this.#step;
 		if (step) {

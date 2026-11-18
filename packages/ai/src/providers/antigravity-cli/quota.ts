@@ -28,6 +28,12 @@ function quotaResetDate(month: string, day: string, year: string, hours: string,
 	return date;
 }
 
+/** True while text can still become the official quota notice. */
+export function isQuotaNoticePrefix(text: string): boolean {
+	const normalized = text.replace(/\r\n?/gu, "\n").trimStart();
+	return QUOTA_NOTICE_PREFIX.startsWith(normalized) || normalized.startsWith(QUOTA_NOTICE_PREFIX);
+}
+
 /** Parse the official Antigravity quota notice; a new reset wording still counts as exhaustion. */
 export function quotaExhaustion(text: string, now = Date.now()): { resetAt?: string } | undefined {
 	const notice = text.replace(/\r\n?/gu, "\n").trim();
@@ -56,9 +62,14 @@ export function quotaExhaustion(text: string, now = Date.now()): { resetAt?: str
 }
 
 /** Build the quota error from a step's visible text, if it contains the official notice. */
-export function quotaError(output: AssistantMessage): Error | undefined {
-	const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+/** Turn a quota notice into the provider error, when the text carries one. */
+export function quotaErrorFromText(text: string): Error | undefined {
 	const quota = quotaExhaustion(text);
 	if (!quota) return undefined;
 	return new Error(`Antigravity quota exceeded${quota.resetAt ? `; reset at ${quota.resetAt}` : ""}`);
+}
+
+export function quotaError(output: AssistantMessage): Error | undefined {
+	const text = output.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("");
+	return quotaErrorFromText(text);
 }

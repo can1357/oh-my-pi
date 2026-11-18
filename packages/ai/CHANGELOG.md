@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity CLI turns that end with the official quota notice now fail with a quota error and the reset time instead of being delivered as a normal assistant reply. ([#19421](https://github.com/can1357/oh-my-pi/pull/19421) by [@SenCha930511](https://github.com/SenCha930511))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
@@ -62,9 +66,6 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
-### Fixed
-
-- Antigravity CLI turns that end with the official quota notice now fail with a quota error and the reset time instead of being delivered as a normal assistant reply. ([#19421](https://github.com/can1357/oh-my-pi/pull/19421) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 

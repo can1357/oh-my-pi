@@ -302,6 +302,21 @@ describe("AgyHost stateful steps", () => {
 			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
 		});
 	});
+	it("does not stream the quota notice before failing", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Usage Limit Reached");
+		fake.text("\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done.catch(() => undefined);
+		expect(run.writer.output.content).toEqual([]);
+		expect(run.stream.queue.some(event => event.type === "text_delta" && event.delta.includes("Usage Limit"))).toBe(
+			false,
+		);
+	});
+
 	it("fails a turn that ends with the official quota notice", async () => {
 		const state = await fixture();
 		const run = step(state.host, [user("hello")]);
