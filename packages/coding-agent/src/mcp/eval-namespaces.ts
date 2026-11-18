@@ -354,7 +354,7 @@ export interface MCPNamespaceResource {
 	path?: string;
 }
 
-/** Call result that carries media or resources beside its text. */
+/** Call result with both text and structured data, media, or resources. */
 export interface MCPNamespaceResult {
 	text: string;
 	structured?: Record<string, unknown>;
@@ -365,7 +365,7 @@ export interface MCPNamespaceResult {
 	resources?: MCPNamespaceResource[];
 }
 
-/** What a namespace method resolves to: structured content, else text, else a {@link MCPNamespaceResult}. */
+/** A namespace method's text, structured data, or envelope for mixed content. */
 export type MCPNamespaceValue = string | Record<string, unknown> | MCPNamespaceResult;
 
 function contentText(content: readonly unknown[]): string {
@@ -390,10 +390,9 @@ async function saveLocal(label: string, data: string, mimeType: unknown, local: 
 }
 
 /**
- * Script value of one namespace call. The server's structured content when it
- * sent some, else its text; a result that also carries images, audio or
- * resources becomes a {@link MCPNamespaceResult}, with media and binary
- * resources saved under `local://mcp/`.
+ * Script value of one namespace call. Text-only and structured-only results
+ * stay bare. Mixed text and structured data, or any media or resources, use
+ * an envelope with media and binary resources saved under `local://mcp/`.
  *
  * @throws {ToolError} with the tool's error text when the call failed.
  */
@@ -433,7 +432,9 @@ export async function mcpNamespaceValue(
 	}
 	const text = contentText(content);
 	const structured = isRecord(details.structuredContent) ? details.structuredContent : undefined;
-	if (images.length === 0 && audio.length === 0 && resources.length === 0) return structured ?? text;
+	if (images.length === 0 && audio.length === 0 && resources.length === 0 && (!structured || !text)) {
+		return structured ?? text;
+	}
 	const value: MCPNamespaceResult = { text };
 	if (structured) value.structured = structured;
 	if (images.length > 0) value.images = images;

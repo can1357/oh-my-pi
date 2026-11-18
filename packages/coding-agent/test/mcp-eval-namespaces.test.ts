@@ -156,15 +156,42 @@ describe("mcpNamespaceValue", () => {
 		return { getArtifactsDir: () => dir, getSessionId: () => "session" };
 	};
 
-	it("resolves to structured content, else text, when the result carries no media or resources", async () => {
+	it("keeps text-only and structured-only results bare", async () => {
 		const local = localOptions();
-		const text = {
-			content: [{ type: "text" as const, text: "plain" }],
-			details: { rawContent: [{ type: "text", text: "plain" }] },
-		};
-		expect(await mcpNamespaceValue("github.search", text, local)).toBe("plain");
-		const structured = { ...text, details: { ...text.details, structuredContent: { hits: 2 } } };
-		expect(await mcpNamespaceValue("github.search", structured, local)).toEqual({ hits: 2 });
+		expect(
+			await mcpNamespaceValue("github.search", { content: [{ type: "text", text: "plain" }] }, local),
+		).toBe("plain");
+		expect(
+			await mcpNamespaceValue(
+				"github.search",
+				{
+					content: [{ type: "text", text: '{"hits":2}' }],
+					details: { rawContent: [], structuredContent: { hits: 2 } },
+				},
+				local,
+			),
+		).toEqual({ hits: 2 });
+	});
+
+	it("preserves every server text block alongside a structured summary", async () => {
+		const value = await mcpNamespaceValue(
+			"roblox_studio.script_grep",
+			{
+				content: [{ type: "text", text: "model-facing summary" }],
+				details: {
+					rawContent: [
+						{ type: "text", text: "Player:4: local speed = 16" },
+						{ type: "text", text: "Camera:9: local speed = 8" },
+					],
+					structuredContent: { count: 2 },
+				},
+			},
+			localOptions(),
+		);
+		expect(value).toEqual({
+			text: "Player:4: local speed = 16\n\nCamera:9: local speed = 8",
+			structured: { count: 2 },
+		});
 	});
 
 	it("saves images and binary resources under local:// and maps resource links", async () => {
