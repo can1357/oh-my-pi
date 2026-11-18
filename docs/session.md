@@ -240,8 +240,13 @@ identified by `purpose`.
   before parsing, or the tool arguments as JSON when the call answered through
   a forced tool call. Either side is left out, never truncated, when it exceeds
   4,000 characters (a diff, a transcript). Calls whose result the session
-  already stores (`compaction`, `branch-summary`, `handoff`, `web-search`,
-  `image-gen`, `image-describe`) journal usage and timing only.
+  already stores (`compaction:<method>`, `branch-summary`, `web-search`,
+  `image-gen`, `image-describe`) journal usage and timing only. Compaction
+  purposes name the method that made the request: `compaction:remote`
+  (provider-native compaction, including OpenAI `/responses/compact` and V2
+  streaming), `compaction:soft` (local summary requests), `compaction:handoff`
+  (the handoff document); an advisor compacting its own history journals
+  `compaction:advisor`.
 
 An on-device model call that produced output is journaled with zero usage, so
 its count and `duration` are still visible.

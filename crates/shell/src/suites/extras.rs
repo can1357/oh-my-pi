@@ -14,8 +14,8 @@ use std::{
 
 use async_trait::async_trait;
 use bstr::BString;
-use parking_lot::Mutex;
 use omp_vfs::{FileHandle, FileSystem, FileType, Metadata, OpenOptions, Permissions, ReadDir};
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::{

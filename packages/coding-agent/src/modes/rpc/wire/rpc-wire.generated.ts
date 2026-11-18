@@ -822,6 +822,8 @@ export type AutoCompactionAction = "context-full" | "remote" | "handoff" | "shak
 
 export type CacheWarmingPhase = "streaming" | "idle";
 
+export type CacheWarmingMethod = "prewarm" | "replay";
+
 export type CacheWarmingOutcome = "hit" | "miss" | "error" | "aborted";
 
 export type NotifyType = "info" | "warning" | "error";
@@ -969,6 +971,7 @@ export interface AutoRetryEndEvent {
 export interface CacheWarmingStartEvent {
 	type: "cache_warming_start";
 	phase: CacheWarmingPhase;
+	method: CacheWarmingMethod;
 	provider: string;
 	model: string;
 }
@@ -977,6 +980,7 @@ export interface CacheWarmingStartEvent {
 export interface CacheWarmingEndEvent {
 	type: "cache_warming_end";
 	phase: CacheWarmingPhase;
+	method: CacheWarmingMethod;
 	provider: string;
 	model: string;
 	outcome: CacheWarmingOutcome;

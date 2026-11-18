@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [19.0.0] - 2026-11-18
+
+### Fixed
+
+- Fixed web search cards without a synthesized answer displaying raw numbered result lists; they now show a concise excerpt for each source instead.
+
 ## [18.22.0] - 2026-11-16
 
 ### Fixed

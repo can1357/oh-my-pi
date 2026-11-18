@@ -414,7 +414,6 @@ async fn run_command_capture(
 /// [`run_command_capture`] that fails once the run outlasts `limit`. The
 /// limit starts when the lock is held: in a single-process `cargo test`,
 /// the wait behind slower shell tests took up the limit of a fast one.
-#[cfg(unix)]
 async fn run_command_capture_within(
 	limit: Duration,
 	command: &str,
@@ -428,7 +427,6 @@ async fn run_command_capture_within(
 
 /// Runs `command` and collects its streamed output; the caller holds
 /// [`shell_test_lock`].
-#[cfg(unix)]
 async fn capture_unlocked(
 	command: &str,
 	cwd: Option<&std::path::Path>,

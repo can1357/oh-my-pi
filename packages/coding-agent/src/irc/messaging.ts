@@ -22,7 +22,7 @@ export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 /** Send a direct message or, from a top-level agent only, a broadcast; delivery never waits for a reply. */
 export async function executeSend(
 	deps: { registry: AgentRegistryApi; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string; progress?: boolean },
+	params: { to: string; message: string; progress?: boolean; remote?: boolean },
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, sessionFileHint } = deps;
 	const to = params.to.trim();
@@ -41,7 +41,7 @@ export async function executeSend(
 			{ op: "send", from: senderId, to },
 		);
 	// Restore parked recipients only when needed; never delay delivery to a live peer.
-	if (!isBroadcast && sessionFileHint) {
+	if (!isBroadcast && sessionFileHint && !params.remote) {
 		const recipient = registry.get(to);
 		if (!recipient || recipient.status === "parked") await ensurePersistedRoster(registry, sessionFileHint);
 	}
@@ -54,6 +54,7 @@ export async function executeSend(
 				from: senderId,
 				to: target,
 				body: message,
+				localOnly: !params.remote,
 				...(isBroadcast ? { broadcast: true } : {}),
 				...(params.progress ? { progress: true } : {}),
 			}),

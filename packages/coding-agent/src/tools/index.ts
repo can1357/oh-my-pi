@@ -22,7 +22,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
-import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { DaemonCompletionEvent } from "../daemon/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManagerApi, MCPToolScope } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -32,6 +32,7 @@ import type { CallContext, SpotlightSession } from "../spotlight/types";
 import type { AgentLifecycleApi } from "../registry/agent-lifecycle";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { ArtifactManagerApi } from "../session/artifacts";
+import type { PromptCacheEntry } from "../session/cache-warmer";
 import type { AsyncNotifyEntry, AsyncNotifySource } from "../session/async-notify";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CostGateApi } from "../session/cost-gate";
@@ -392,6 +393,10 @@ export interface ToolSession {
 	getAgentId?: () => string | null;
 	/** Parent cache identity for sibling sharing; the child stores it independently of its initial model, and each request consumes it only when its own model opts in. */
 	getPromptCacheKey?: () => string | undefined;
+	/** Prompt cache entry the session's latest main-loop request wrote, while still current (see `AgentSession.promptCacheEntry`). */
+	getPromptCacheEntry?: () => PromptCacheEntry | undefined;
+	/** Whether something besides the current turn starts this agent's next one (see `AgentSession.hasWakeAfterTurn`). */
+	hasWakeAfterTurn?: () => boolean;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
@@ -570,8 +575,8 @@ export interface ToolSession {
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
-	/** Queue a broker supervised-process completion for the owning session. */
-	queueLaunchCompletion?(notification: DaemonCompletionNotification): Promise<void>;
+	/** Queue a daemon service completion for the owning session. */
+	queueLaunchCompletion?(notification: DaemonCompletionEvent): Promise<void>;
 	/**
 	 * Opens the channel for the `notify` matches of a background job this session started: each batch
 	 * sent through it reaches the session as a notice, delivered like the job's result. Absent where
@@ -580,7 +585,7 @@ export interface ToolSession {
 	openAsyncNotify?(job: AsyncNotifySource): (batch: NotifyBatch) => void;
 	/**
 	 * Queue one batch of `notify` matches from a supervised service this session owns (`entry.owner`),
-	 * as it arrives from the launch broker. Absent where no session can take the notices; `bash` then
+	 * as it arrives from the daemon. Absent where no session can take the notices; `bash` then
 	 * refuses `notify` on a service.
 	 */
 	queueServiceNotify?(entry: AsyncNotifyEntry): void;
