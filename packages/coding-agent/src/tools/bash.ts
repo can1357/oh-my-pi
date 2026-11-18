@@ -56,14 +56,13 @@ import {
 	extractLiteralAndChainSegments,
 	isShellEnvironmentAssignment,
 	type LiteralShellCommandSegment,
-	type ShellLineEnd,
 	tokenizeShellSegments,
 	withoutLeadingEnvironmentAssignments,
 } from "./shell-tokenize";
 import {
 	bindGuardProbeScope,
 	callProbeBudget,
-	checkShellGuard,
+	findPipelineGuardHits,
 	findShellGuardHit,
 	type GuardHit,
 	type GuardScope,
@@ -836,27 +835,21 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) &&
 			!segmentCritical.some(Boolean);
 		if (wholeChainOnlyCritical) return null;
-		// The segments and the whole chain are checks for this call: their probes share the budget of
-		// the call's approval paths, so the rows ask nothing the gate already asked.
+		// Each segment is one pipeline of the guard's parse of the whole chain, checked from the directory
+		// the segments before it leave, after the commands known to have succeeded before it. A hit no
+		// segment can carry (`size_limit`), or a parse with more pipelines than segments, leaves the chain
+		// to the plain command row. The rows are checks for this call: their probes share the budget of
+		// the call's approval paths, so they ask nothing the gate already asked.
 		const budget = callProbeBudget();
-		const scope = this.#guardScope(cwd);
-		// The whole chain first: a `git stash pop` anywhere in it may run before any segment, so each
-		// segment is checked with the chain's count of them.
-		const whole = cfgToolsGuardRules.get(this.session.settings)
-			? checkShellGuard(command, scope, { budget })
-			: undefined;
-		// Each segment is checked where the ones before it leave the shell (after their `cd`s, with
-		// their `git stash`es known to have succeeded), as the whole chain checks it.
-		let after: ShellLineEnd | undefined;
-		const segmentGuards = segments.map((segment): GuardHit | undefined => {
-			if (!whole) return undefined;
-			const check = checkShellGuard(segment.text, scope, { budget, after, releases: whole.releases });
-			after = check.end;
-			return check.hit;
-		});
-		// A guard rule only the whole chain breaks (brace lists past the size limit only together) has
-		// no segment to name.
-		if (!segmentGuards.some(Boolean) && whole?.hit) return null;
+		const segmentGuards = cfgToolsGuardRules.get(this.session.settings)
+			? findPipelineGuardHits(command, this.#guardScope(cwd), { budget })
+			: [];
+		if (
+			segmentGuards.length > segments.length ||
+			(!segmentGuards.some(Boolean) && this.#guardHit(command, cwd, { budget }))
+		) {
+			return null;
+		}
 
 		let chainUntainted = true;
 		const rows: string[] = [];

@@ -382,7 +382,7 @@ export const cfgToolsGuardRules = register({
 		group: "Approvals",
 		label: "Guard Rules",
 		description:
-			"Ask before top-level bash commands that read credentials, send secrets over the network, discard uncommitted git work, or kill omp, and before read/grep of credential files, the way critical commands ask. A best-effort convenience, not a security boundary: nested commands (bash -c, eval, substitutions, groups) are not checked. No effect under yolo unless a tools.approval policy applies",
+			"Ask before top-level bash commands that read credentials, send secrets over the network, discard uncommitted git work, or kill omp, and before read/grep of credential files, the way critical commands ask. A best-effort convenience, not a security boundary: commands nested in bash -c, eval or a compound command are not checked, and checking stops at the first substitution, group or heredoc. No effect under yolo unless a tools.approval policy applies",
 	},
 });
 

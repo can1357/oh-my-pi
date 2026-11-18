@@ -2,10 +2,10 @@
 // derived from `src/intern/guard.py` of nace-ai/intern (https://github.com/nace-ai/intern, v0.30.1,
 // commit e1bbd096f9), Copyright Nace AI, licensed under the Apache License, Version 2.0
 // (http://www.apache.org/licenses/LICENSE-2.0). Modified for omp: rewritten in TypeScript, reading
-// only top-level commands, with `cd` and `&&`-chain tracking and quote-aware heredocs. See
+// only top-level commands up to the first nested part, with `cd` and `&&`-chain tracking. See
 // packages/coding-agent/THIRD-PARTY-NOTICES.txt.
 // It reads shell text best-effort for the opt-in guard rules and is not a security boundary: it
-// reads into no nested script, and values it cannot know (most variables) stay unexpanded.
+// stops at the first nested part, and values it cannot know (most variables) stay unexpanded.
 
 import * as path from "node:path";
 
@@ -962,15 +962,15 @@ export function readShellWord(text: string): { value: string; rest: string } | "
 
 /**
  * The longest directory, in characters, {@link parseShellCommands} follows a command line into: the
- * one it starts in, or one a `cd`, `pushd`, `popd`, `env -C`, `sudo -D` or `tar -C` changes to. Past
- * it the directory is unknown, so relative paths after it are not resolved. Every later path is
- * resolved against the directory, so following longer ones would cost the directory's length per
- * path, and a chain of changes one step deeper each the square of the command's length.
+ * one it starts in, or one a `cd`, `pushd` or `popd` changes to. Past it the directory is unknown, so
+ * relative paths after it are not resolved. Every later path is resolved against the directory, so
+ * following longer ones would cost the directory's length per path, and a chain of changes one step
+ * deeper each the square of the command's length.
  */
 const SHELL_MAX_DIRECTORY = 1024;
 
 /** `dir`, or `undefined` (unknown) when it is longer than {@link SHELL_MAX_DIRECTORY}. */
-export function boundedDirectory(dir: string | undefined): string | undefined {
+function boundedDirectory(dir: string | undefined): string | undefined {
 	return dir !== undefined && dir.length > SHELL_MAX_DIRECTORY ? undefined : dir;
 }
 
@@ -979,20 +979,19 @@ export interface ShellCommand {
 	/**
 	 * Arguments after quote removal and wrapper unwrapping; `argv[0]` is the program's basename.
 	 * Empty for a command that is only redirections (`< file`) and for one whose program the guard
-	 * does not read (`env -S '...'`). A nested region in a word stands as {@link NESTED}, so a path
-	 * with one is unknown.
+	 * does not read (`env -S '...'`).
 	 */
 	argv: string[];
 	/** Variable assignments the command runs with: its `NAME=value` prefixes and those `env` and `sudo` set, in order. */
 	assignments: string[];
 	/** Targets of `<` and `<>` input redirections. */
 	reads: string[];
-	/** Whether an earlier stage of its pipeline, or an input redirection (`<`, `<>`, `<&`, a heredoc, a here-string), gives it input. */
+	/** Whether an earlier stage of its pipeline, or an input redirection (`<`, `<>`, `<&`), gives it input. */
 	fedInput: boolean;
 	/**
 	 * Directory the program runs in: where the shell is after the `cd`, `pushd` and `popd` before the
-	 * command, moved by a wrapper's directory option (`env -C`, `sudo -D`). `undefined` when the
-	 * guard cannot tell (`cd "$dir"`), so relative paths are not resolved.
+	 * command. `undefined` when the guard cannot tell (`cd "$dir"`), or when a wrapper's directory
+	 * option (`env -C`, `sudo -D`) moves the program, so relative paths are not resolved.
 	 */
 	cwd: string | undefined;
 	/**
@@ -1028,60 +1027,41 @@ export interface SucceededLink {
 	readonly before: SucceededLink | undefined;
 }
 
-/**
- * Where a command line leaves the shell for a command joined to it by `&&`: the directories its
- * `cd`s leave, and what is known to have succeeded when that command starts.
- */
-export interface ShellLineEnd {
-	readonly dirs: ShellDirectories;
-	readonly succeeded: SucceededLink | undefined;
-}
-
 /** Where a command line runs: its starting directory and the home `~` and `$HOME` expand to. */
 export interface ShellScope {
 	cwd: string;
 	home: string;
-	/**
-	 * Where an earlier command line joined to this one by `&&` left the shell (its {@link ShellLine.end}):
-	 * the line starts there, not at `cwd`, after what that one leaves known to have succeeded.
-	 */
-	after?: ShellLineEnd;
 }
 
 /** A command line as {@link parseShellCommands} reads it. */
 export interface ShellLine {
-	/** Its top-level simple commands, by pipeline. */
+	/**
+	 * Its top-level simple commands up to its first nested part, one entry per pipeline, in order,
+	 * empty for one with no simple command (`a=1`, `{ ...; }`).
+	 */
 	pipelines: ShellCommand[][];
 	/**
 	 * Whether it has a part the guard does not read as commands, where commands can run unseen: a
-	 * `( )` group, a compound command or function definition, a substitution, process substitution
-	 * or `${ }` (see {@link NESTED}), a heredoc (whose body runs its substitutions unless quoted), or
-	 * an `env -S` string. A line the guard stops reading partway has one of these where it stopped.
+	 * nested part, where reading stops ({@link nestedAt}: a substitution, any `(`, a heredoc), a
+	 * compound command or function definition, or an `env -S` string.
 	 */
 	nested: boolean;
-	/** Where it leaves the shell. */
-	end: ShellLineEnd;
 }
 
-/** `$HOME` or `$PWD` (also in braces) at the start of a word. */
-const LEADING_DIRECTORY_RE = /^\$(?:\{(HOME|PWD)\}|(HOME|PWD)\b)/;
+/** `$HOME` (also in braces) at the start of a word. */
+const LEADING_HOME_RE = /^\$(?:\{HOME\}|HOME\b)/;
 
 /**
- * The absolute path a shell word names, resolved lexically against `cwd`. `~`, and `$HOME` or `$PWD`
- * at the start of the word, expand; any other expansion makes the path unknown (`undefined`), and so
- * does a relative path, or `$PWD`, when `cwd` is unknown. Expanding only a leading one keeps a word
- * of many (`$PWD$PWD...`) from growing past the word and one directory.
+ * The absolute path a shell word names, resolved lexically against `cwd`. `~`, and `$HOME` at the
+ * start of the word, expand; any other expansion makes the path unknown (`undefined`), `$PWD` too,
+ * and so does a relative path when `cwd` is unknown. Expanding only a leading `$HOME` keeps a word of
+ * many (`$HOME$HOME...`) from growing past the word and one directory.
  */
 export function resolveShellWordPath(word: string, cwd: string | undefined, home: string): string | undefined {
-	let expanded = word;
-	const leading = LEADING_DIRECTORY_RE.exec(word);
-	if (leading) {
-		const dir = (leading[1] ?? leading[2]) === "HOME" ? home : cwd;
-		if (dir === undefined) return undefined;
-		expanded = dir + word.slice(leading[0].length);
-	}
+	const leading = LEADING_HOME_RE.exec(word);
+	let expanded = leading ? home + word.slice(leading[0].length) : word;
 	if (expanded === "~" || expanded.startsWith("~/")) expanded = home + expanded.slice(1);
-	if (!expanded || expanded.includes("$") || expanded.includes(NESTED) || expanded.startsWith("~")) return undefined;
+	if (!expanded || expanded.includes("$") || expanded.startsWith("~")) return undefined;
 	if (cwd === undefined) return path.isAbsolute(expanded) ? path.resolve(expanded) : undefined;
 	return path.resolve(cwd, expanded);
 }
@@ -1123,14 +1103,6 @@ export function shellPositionalArgs(argv: readonly string[]): string[] {
 	return out;
 }
 
-/**
- * What a nested region of a word stands as: a `$( )`, backtick or `$(( ))` substitution, a `<( )` or
- * `>( )` process substitution, an array literal's `( )`, or a `${ }` expansion other than `${HOME}`
- * and `${PWD}`. The guard does not read into it, and a NUL character, which no path holds, makes
- * the word's path unknown.
- */
-const NESTED = "\0";
-
 // Longest first, so `&&` is never read as two `&`.
 const SHELL_OPERATORS = [
 	"&&",
@@ -1144,22 +1116,18 @@ const SHELL_OPERATORS = [
 	">>",
 	">|",
 	">&",
-	"<<<",
-	"<<-",
-	"<<",
 	"<&",
 	"<>",
 	"|",
 	";",
 	"&",
 	"\n",
-	"(",
 	")",
 	">",
 	"<",
 ];
 /** The characters an operator starts with, so ordinary characters skip the operator lookup. */
-const OPERATOR_STARTS = "&|;<>()\n";
+const OPERATOR_STARTS = "&|;<>)\n";
 const SHELL_PIPES: Record<string, true> = { "|": true, "|&": true };
 const SHELL_REDIRECTS: Record<string, true> = {
 	"&>>": true,
@@ -1167,9 +1135,6 @@ const SHELL_REDIRECTS: Record<string, true> = {
 	">>": true,
 	">|": true,
 	">&": true,
-	"<<<": true,
-	"<<-": true,
-	"<<": true,
 	"<&": true,
 	"<>": true,
 	">": true,
@@ -1177,9 +1142,6 @@ const SHELL_REDIRECTS: Record<string, true> = {
 };
 /** Redirections that give a command input. */
 const SHELL_INPUT_REDIRECTS: Record<string, true> = {
-	"<<<": true,
-	"<<-": true,
-	"<<": true,
 	"<&": true,
 	"<>": true,
 	"<": true,
@@ -1201,9 +1163,6 @@ const COMPOUND_CLOSERS: Record<string, string> = {
 	while: "done",
 	until: "done",
 };
-
-/** An assignment word whose value is an array literal when a `(` follows (`files=(`, `a+=(`). */
-const ARRAY_ASSIGNMENT_RE = /^[A-Za-z_]\w*(?:\[[^\]]*\])?\+?=$/;
 
 /** The one-letter escapes of a `$'...'` string. */
 const ANSI_C_ESCAPES: Record<string, string> = {
@@ -1264,264 +1223,28 @@ function readAnsiCString(text: string, start: number): { value: string; end: num
 	return { value, end: i };
 }
 
-/** A heredoc whose body starts after the current line. */
-interface PendingHeredoc {
-	delimiter: string;
-	/** Set for `<<-`, which strips each line's leading tabs. */
-	stripTabs: boolean;
-}
-
 /**
- * Skips the bodies of `heredocs`, opened on the line that ends just before `start`, and returns where
- * the text goes on, or `undefined` when a delimiter line never comes: bash then ends the heredoc at
- * the end of the text. Inside a substitution (`substitution`), a line that starts with the delimiter
- * and has a `)` after it ends the heredoc too, as in bash, and the text goes on right after the
- * delimiter (`EOF)`).
+ * A `${ }` expansion that is one plain word up to its first `}`, as bash reads it: no quote,
+ * escape, blank, operator, `$` or brace inside (`${HOME}`, `${name:-x}`).
  */
-function skipHeredocBodies(
-	text: string,
-	start: number,
-	heredocs: readonly PendingHeredoc[],
-	substitution: boolean,
-): number | undefined {
-	let pos = start;
-	for (const { delimiter, stripTabs } of heredocs) {
-		for (;;) {
-			if (pos >= text.length) return undefined;
-			const newline = text.indexOf("\n", pos);
-			let at = pos;
-			if (stripTabs) while (text[at] === "\t") at++;
-			const line = text.slice(at, newline < 0 ? text.length : newline);
-			pos = newline < 0 ? text.length : newline + 1;
-			if (line === delimiter) break;
-			if (substitution && line.startsWith(delimiter) && line.includes(")", delimiter.length)) {
-				return at + delimiter.length;
-			}
-		}
-	}
-	return pos;
-}
-
-/** The characters that end a heredoc delimiter word. */
-const DELIMITER_END_RE = /[ \t\n;&|()<>]/;
-
-/** Reads the delimiter word after `<<` or `<<-` from `start`: its text without quotes and escapes, and where it ends. */
-function readDelimiter(text: string, start: number): { delimiter: string; end: number } {
-	let i = start;
-	while (text[i] === " " || text[i] === "\t") i++;
-	let delimiter = "";
-	while (i < text.length && !DELIMITER_END_RE.test(text[i])) {
-		const ch = text[i];
-		if (ch === "'" || ch === '"') {
-			const close = text.indexOf(ch, i + 1);
-			const end = close < 0 ? text.length : close;
-			delimiter += text.slice(i + 1, end);
-			i = end + 1;
-		} else if (ch === "\\" && i + 1 < text.length) {
-			delimiter += text[i + 1];
-			i += 2;
-		} else {
-			delimiter += ch;
-			i++;
-		}
-	}
-	return { delimiter, end: i };
-}
-
-/** Commands inside a nested region, up to the `)` that closes them: a `$( )`, `<( )`, `>( )` or array literal body. */
-interface CommandsFrame {
-	kind: "commands";
-	/** `(` not closed yet. */
-	parens: number;
-	/** `case` commands not closed yet: inside one, a pattern's `)` closes nothing. */
-	cases: number;
-	/** The plain word being read, {@link NESTED} once part of it is quoted or nested. */
-	word: string;
-	heredocs: PendingHeredoc[];
-}
-
-/** A part of a nested region {@link skipRegion} reads past; a `${ }` is `quoted` inside double quotes, where a `'` is a plain character. */
-type RegionFrame =
-	| CommandsFrame
-	| { kind: "arithmetic"; parens: number }
-	| { kind: "double" }
-	| { kind: "parameter"; quoted: boolean }
-	| { kind: "backtick" };
-
-function commandsFrame(): CommandsFrame {
-	return { kind: "commands", parens: 0, cases: 0, word: "", heredocs: [] };
-}
+const PLAIN_PARAMETER_RE = /\$\{[^\s'"`\\$&|;<>(){}]*\}/y;
 
 /**
- * The nested region that starts at `i`, if one does: its first part and where that starts. `quoted`
- * inside double quotes, where `<( )` and `>( )` are plain text and a `${ }` reads `'` plainly.
+ * Whether a nested part, where the guard stops reading, starts at `i` of a command line (`quoted`
+ * inside double quotes): a `$( )` or backtick substitution, a `${ }` other than a plain one
+ * ({@link PLAIN_PARAMETER_RE}), and outside double quotes any `(` (a group, `<( )`, `>( )`, `(( ))`,
+ * an array literal, a function definition) or `<<` (a heredoc or here-string).
  */
-function regionStart(text: string, i: number, quoted: boolean): { frame: RegionFrame; from: number } | undefined {
-	const ch = text[i];
-	const next = text[i + 1];
-	if (ch === "`") return { frame: { kind: "backtick" }, from: i + 1 };
-	if (ch === "$" && next === "(") {
-		if (text[i + 2] === "(") return { frame: { kind: "arithmetic", parens: 0 }, from: i + 3 };
-		return { frame: commandsFrame(), from: i + 2 };
-	}
-	if (ch === "$" && next === "{") return { frame: { kind: "parameter", quoted }, from: i + 2 };
-	if (!quoted && (ch === "<" || ch === ">") && next === "(") return { frame: commandsFrame(), from: i + 2 };
-	return undefined;
-}
-
-/** Counts the plain word a commands frame just finished: `case` opens a case, `esac` closes one. */
-function endRegionWord(frame: CommandsFrame): void {
-	if (frame.word === "case") frame.cases++;
-	else if (frame.word === "esac" && frame.cases > 0) frame.cases--;
-	frame.word = "";
+function nestedAt(text: string, i: number, quoted: boolean): boolean {
+	if (text[i] === "`" || text.startsWith("$(", i)) return true;
+	if (!quoted && (text[i] === "(" || text.startsWith("<<", i))) return true;
+	PLAIN_PARAMETER_RE.lastIndex = i;
+	return text.startsWith("${", i) && !PLAIN_PARAMETER_RE.test(text);
 }
 
 /**
- * Where a nested region ends, read from `start` past its opening as `first`: the index after its
- * closing character, or `undefined` when the guard cannot tell, as for an unclosed quote,
- * substitution or heredoc, or a `<<` in arithmetic, which bash reads as a heredoc when the text is
- * a command substitution after all. Nothing in it is read as commands: quotes, escapes, comments,
- * heredoc bodies, `case` patterns and inner regions are followed only to find the end. It keeps a
- * stack instead of recursing, so no depth of nesting runs out of stack.
- */
-function skipRegion(text: string, start: number, first: RegionFrame): number | undefined {
-	const frames: RegionFrame[] = [first];
-	let i = start;
-	// Opens the inner region at `i`, if one starts there; `quoted` inside double quotes.
-	const open = (quoted: boolean): boolean => {
-		const inner = regionStart(text, i, quoted);
-		if (inner) {
-			frames.push(inner.frame);
-			i = inner.from;
-		}
-		return inner !== undefined;
-	};
-	// Skips the `'...'` or `$'...'` string at `i`; false when it never closes.
-	const quote = (): boolean => {
-		if (text[i] === "$") {
-			i += 2;
-			while (i < text.length && text[i] !== "'") i += text[i] === "\\" ? 2 : 1;
-		} else {
-			const close = text.indexOf("'", i + 1);
-			i = close < 0 ? text.length : close;
-		}
-		i++;
-		return i <= text.length;
-	};
-	while (i < text.length) {
-		const frame = frames[frames.length - 1];
-		const ch = text[i];
-		const quoteStart = ch === "'" || (ch === "$" && text[i + 1] === "'");
-		if (frame.kind === "backtick") {
-			if (ch === "`") frames.pop();
-			i += ch === "\\" ? 2 : 1;
-		} else if (ch === "\\") {
-			i += 2;
-			if (frame.kind === "commands") frame.word = NESTED;
-		} else if (frame.kind === "double") {
-			if (ch === '"') {
-				frames.pop();
-				i++;
-			} else if (!open(true)) {
-				i++;
-			}
-		} else if (frame.kind === "parameter") {
-			if (ch === "}") {
-				frames.pop();
-				i++;
-			} else if (ch === '"') {
-				frames.push({ kind: "double" });
-				i++;
-			} else if (quoteStart && !frame.quoted) {
-				if (!quote()) return undefined;
-			} else if (!open(frame.quoted)) {
-				i++;
-			}
-		} else if (quoteStart) {
-			if (!quote()) return undefined;
-			if (frame.kind === "commands") frame.word = NESTED;
-		} else if (ch === '"') {
-			frames.push({ kind: "double" });
-			i++;
-			if (frame.kind === "commands") frame.word = NESTED;
-		} else if (frame.kind === "arithmetic") {
-			if (open(false)) continue;
-			if (text.startsWith("<<", i)) return undefined;
-			i++;
-			if (ch === "(") {
-				frame.parens++;
-			} else if (ch === ")" && frame.parens > 0) {
-				frame.parens--;
-			} else if (ch === ")" && text[i] === ")") {
-				frames.pop();
-				i++;
-			} else if (ch === ")") {
-				// `$((cmd) ...)`: a command substitution whose body starts with a subshell, just closed.
-				frames[frames.length - 1] = commandsFrame();
-			}
-		} else if (open(false)) {
-			frame.word = NESTED;
-		} else if (ch === "#" && frame.word === "") {
-			const newline = text.indexOf("\n", i);
-			i = newline < 0 ? text.length : newline;
-		} else if (text.startsWith("<<<", i)) {
-			endRegionWord(frame);
-			i += 3;
-		} else if (text.startsWith("<<", i)) {
-			endRegionWord(frame);
-			const stripTabs = text[i + 2] === "-";
-			const read = readDelimiter(text, i + (stripTabs ? 3 : 2));
-			frame.heredocs.push({ delimiter: read.delimiter, stripTabs });
-			i = read.end;
-		} else if (ch === "\n") {
-			endRegionWord(frame);
-			i++;
-			if (frame.heredocs.length > 0) {
-				const next = skipHeredocBodies(text, i, frame.heredocs, true);
-				if (next === undefined) return undefined;
-				frame.heredocs = [];
-				i = next;
-			}
-		} else if (ch === "(" || ch === ")" || /[ \t;&|<>]/.test(ch)) {
-			endRegionWord(frame);
-			i++;
-			if (frame.cases > 0) continue;
-			if (ch === "(") frame.parens++;
-			else if (ch === ")" && frame.parens > 0) frame.parens--;
-			else if (ch === ")") frames.pop();
-		} else {
-			frame.word += ch;
-			i++;
-		}
-		if (frames.length === 0) return i;
-	}
-	return undefined;
-}
-
-/** `${HOME}` and `${PWD}`, which a word keeps as written for {@link resolveShellWordPath} to expand. */
-const KEPT_EXPANSION_RE = /\$\{(?:HOME|PWD)\}/y;
-
-/**
- * The nested region a word has at `i`, if one starts there: what it stands for in the word
- * ({@link NESTED}, or `${HOME}` and `${PWD}` as written), and the index after it, `undefined` when
- * the guard cannot tell where it ends ({@link skipRegion}).
- */
-function nestedRegion(
-	text: string,
-	i: number,
-	quoted: boolean,
-): { value: string; end: number | undefined } | undefined {
-	KEPT_EXPANSION_RE.lastIndex = i;
-	const kept = KEPT_EXPANSION_RE.exec(text)?.[0];
-	if (kept !== undefined) return { value: kept, end: i + kept.length };
-	const region = regionStart(text, i, quoted);
-	return region && { value: NESTED, end: skipRegion(text, region.from, region.frame) };
-}
-
-/**
- * Reads a double-quoted string from `start`, just past its opening quote: its value, with each nested
- * region as {@link nestedRegion} gives it, and the index after its closing quote, `undefined` when a
- * nested region in it does not end.
+ * Reads a double-quoted string from `start`, just past its opening quote: its value and the index
+ * after its closing quote, `undefined` at a nested part ({@link nestedAt}).
  */
 function readDouble(text: string, start: number): { value: string; after: number | undefined } {
 	let value = "";
@@ -1534,14 +1257,8 @@ function readDouble(text: string, start: number): { value: string; after: number
 			i += 2;
 			continue;
 		}
-		const region = nestedRegion(text, i, true);
-		if (!region) {
-			value += text[i++];
-			continue;
-		}
-		value += region.value;
-		if (region.end === undefined) return { value, after: undefined };
-		i = region.end;
+		if (nestedAt(text, i, true)) return { value, after: undefined };
+		value += text[i++];
 	}
 	return { value, after: i + 1 };
 }
@@ -1559,13 +1276,11 @@ interface LexedToken {
 }
 
 /**
- * The words and operators of a command line; a quoted word is never an operator. Heredoc bodies are
- * skipped where their line ends, and nested regions are not read into ({@link NESTED}): a `( )`
- * right after an assignment word is an array literal, and `((` where a command starts is an
- * arithmetic command. When the guard cannot tell where a nested region ends, lexing stops in it,
- * and the rest of the line is not read.
+ * The words and operators of a command line up to its first nested part ({@link nestedAt}), and
+ * whether it has one (`cut`): from there on nothing is read, not even the rest of the word it is
+ * in. A quoted word is never an operator.
  */
-function lexCommandLine(text: string): LexedToken[] {
+function lexCommandLine(text: string): { tokens: LexedToken[]; cut: boolean } {
 	const out: LexedToken[] = [];
 	let word = "";
 	let started = false;
@@ -1574,16 +1289,11 @@ function lexCommandLine(text: string): LexedToken[] {
 	let bareTilde = false;
 	// Whether the word has an unquoted `{`, which can start a brace list the shell expands.
 	let bareBrace = false;
-	// Set after `<<`/`<<-`: the next word is a heredoc delimiter.
-	let delimiter: { stripTabs: boolean } | undefined;
-	const pending: PendingHeredoc[] = [];
 	const flush = () => {
 		if (started) {
 			const token: LexedToken = { text: word, operator: false, quoted };
 			if (word.startsWith("~") && !bareTilde) token.literalTilde = true;
 			if (!bareBrace && word.includes("{")) token.literalBraces = true;
-			if (delimiter) pending.push({ delimiter: word, stripTabs: delimiter.stripTabs });
-			delimiter = undefined;
 			out.push(token);
 		}
 		word = "";
@@ -1592,20 +1302,11 @@ function lexCommandLine(text: string): LexedToken[] {
 		bareTilde = false;
 		bareBrace = false;
 	};
-	// Whether a word here starts a command: after an operator other than a redirection, or a reserved word a command follows.
-	const commandPosition = () => {
-		const last = out.at(-1);
-		if (!last) return true;
-		if (last.operator) return !Object.hasOwn(SHELL_REDIRECTS, last.text);
-		return !last.quoted && COMMAND_PREFIXES.includes(last.text);
-	};
 	let i = 0;
 	while (i < text.length) {
 		const ch = text[i];
-		// A carriage return belongs to its word, except in a CRLF line end. A heredoc delimiter keeps
-		// even that one, as in bash: a CRLF body ends at a line that ends in one too.
+		// A carriage return belongs to its word, except in a CRLF line end.
 		if (ch === " " || ch === "\t" || (ch === "\r" && text[i + 1] === "\n")) {
-			if (ch === "\r" && delimiter && started) word += ch;
 			flush();
 			i++;
 			continue;
@@ -1643,28 +1344,14 @@ function lexCommandLine(text: string): LexedToken[] {
 		}
 		if (ch === '"') {
 			const double = readDouble(text, i + 1);
+			if (double.after === undefined) return { tokens: out, cut: true };
 			word += double.value;
 			started = true;
 			quoted = true;
-			if (double.after === undefined) break;
 			i = double.after;
 			continue;
 		}
-		let region: { value: string; end: number | undefined } | undefined;
-		if (!started && text.startsWith("((", i) && commandPosition()) {
-			region = { value: NESTED, end: skipRegion(text, i + 2, { kind: "arithmetic", parens: 0 }) };
-		} else if (ch === "(" && started && !quoted && ARRAY_ASSIGNMENT_RE.test(word)) {
-			region = { value: NESTED, end: skipRegion(text, i + 1, commandsFrame()) };
-		} else {
-			region = nestedRegion(text, i, false);
-		}
-		if (region) {
-			word += region.value;
-			started = true;
-			if (region.end === undefined) break;
-			i = region.end;
-			continue;
-		}
+		if (nestedAt(text, i, false)) return { tokens: out, cut: true };
 		if (ch === "#" && !started) {
 			const end = text.indexOf("\n", i);
 			i = end < 0 ? text.length : end;
@@ -1685,37 +1372,26 @@ function lexCommandLine(text: string): LexedToken[] {
 			started = false;
 		}
 		flush();
-		delimiter = undefined;
 		out.push({ text: operator, operator: true, quoted: false });
 		i += operator.length;
-		if (operator === "<<" || operator === "<<-") delimiter = { stripTabs: operator === "<<-" };
-		if (operator === "\n" && pending.length > 0) {
-			const next = skipHeredocBodies(text, i, pending, false);
-			pending.length = 0;
-			if (next === undefined) break;
-			i = next;
-		}
 	}
 	flush();
-	return out;
+	return { tokens: out, cut: false };
 }
 
 /** For a `case`: whether its subject, a clause's patterns, or a clause's commands come next. */
 type CasePart = "subject" | "patterns" | "commands";
 
-/** A compound command or `( )` group open in a {@link CompoundSkipper}. */
+/** A compound command open in a {@link CompoundSkipper}. */
 interface OpenCompound {
 	closer: string;
 	part?: CasePart;
-	/** Set on a `(` where a function's body is due: the `()` after its name when a `)` follows at once. */
-	header?: boolean;
 }
 
 /**
- * Follows a compound command (`{ }`, `if`, a loop, `case`, `[[ ]]`), a `( )` group, or a function
- * definition (`name()`, `function name`, `function name()`, then its body) to its end without
- * reading into it: only the reserved words and parentheses that open and close it are tracked, so
- * no command in it is checked.
+ * Follows a compound command (`{ }`, `if`, a loop, `case`, `[[ ]]`) or a function definition
+ * (`function name`, then its body) to its end without reading into it: only the reserved words
+ * that open and close it are tracked, so no command in it is checked.
  */
 class CompoundSkipper {
 	readonly #open: OpenCompound[] = [];
@@ -1725,13 +1401,8 @@ class CompoundSkipper {
 	#name = false;
 	#atCommand = true;
 	#redirect = false;
-	/** Whether it can change the shell's directory: a `{ }`, `if`, loop or `case`, not a subshell, `[[ ]]` or function definition. */
+	/** Whether it can change the shell's directory: a `{ }`, `if`, loop or `case`, not a `[[ ]]` or function definition. */
 	changesShell = false;
-
-	/** `functionBody`: it starts at the `(` after a function's name. */
-	constructor(functionBody: boolean) {
-		if (functionBody) this.#function = "body";
-	}
 
 	/** Whether the command has ended. */
 	get done(): boolean {
@@ -1741,15 +1412,6 @@ class CompoundSkipper {
 	add(token: LexedToken): void {
 		const top = this.#open.at(-1);
 		const word = token.operator || token.quoted ? undefined : token.text;
-		if (top?.header) {
-			top.header = false;
-			if (token.operator && token.text === ")") {
-				this.#open.pop();
-				this.#atCommand = true;
-				return;
-			}
-			this.#function = "inBody";
-		}
 		if (top?.closer === "]]") {
 			if (word === "]]") this.#close();
 			return;
@@ -1771,11 +1433,7 @@ class CompoundSkipper {
 			const op = token.text;
 			this.#redirect = Object.hasOwn(SHELL_REDIRECTS, op);
 			this.#atCommand = !this.#redirect;
-			if (op === "(") {
-				this.#push(")");
-			} else if (op === ")" && top?.closer === ")") {
-				this.#close();
-			} else if (top?.part === "commands" && (op === ";;" || op === ";&" || op === ";;&")) {
+			if (top?.part === "commands" && (op === ";;" || op === ";&" || op === ";;&")) {
 				top.part = "patterns";
 			} else if (this.#function === "body" && this.#open.length === 0 && op !== "\n" && !this.#redirect) {
 				// A function whose body does not follow its name: bash rejects it.
@@ -1809,13 +1467,8 @@ class CompoundSkipper {
 	}
 
 	#push(closer: string, part?: CasePart): void {
-		if (this.done) this.changesShell = closer !== ")" && closer !== "]]";
-		const due = this.#function === "body" && this.#open.length === 0;
-		if (due && closer === ")") {
-			this.#open.push({ closer, header: true });
-			return;
-		}
-		if (due) this.#function = "inBody";
+		if (this.done) this.changesShell = closer !== "]]";
+		if (this.#function === "body" && this.#open.length === 0) this.#function = "inBody";
 		this.#open.push({ closer, part });
 	}
 
@@ -1903,15 +1556,15 @@ const WRAPPER_ASSIGNMENT_RE = /^[^=-][^=]*=/;
 /** A simple command's words with its wrappers peeled off ({@link unwrapShellCommand}). */
 interface UnwrappedCommand {
 	argv: string[];
-	chdirs: string[];
+	moved: boolean;
 	assignments: string[];
 }
 
 /**
  * The command a wrapper chain runs in `words` (`sudo env X=1 timeout 5 rm ...` runs `rm ...`), after
  * the shell's own assignments (an identifier name only: bash runs `A-B=1 cmd` as a command named
- * `A-B=1`) and a `!`, with the directories a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS})
- * moves it to, in order, and the variable assignments it runs with, the shell's own and those env
+ * `A-B=1`) and a `!`, whether a wrapper's directory option ({@link SHELL_WRAPPER_CHDIRS}) moves it
+ * to another directory, and the variable assignments it runs with, the shell's own and those env
  * and sudo set ({@link WRAPPER_ASSIGNMENT_RE}), in order. A long option may be abbreviated, as getopt
  * allows (`--us root`); in a bundle of short options (`-nu root`), the first that takes a value takes
  * the rest of the word, or the next word when it ends the bundle. `undefined` when env runs the
@@ -1923,7 +1576,7 @@ function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefi
 	for (; i < words.length && (SHELL_ASSIGNMENT.test(words[i]) || words[i] === "!"); i++) {
 		if (words[i] !== "!") assignments.push(words[i]);
 	}
-	const chdirs: string[] = [];
+	let moved = false;
 	let wrapper: string | undefined;
 	while (i < words.length) {
 		const name = path.posix.basename(words[i]);
@@ -1952,17 +1605,13 @@ function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefi
 				) {
 					return undefined;
 				}
-				const dir = eq < 0 ? words[i + 1] : attachedValue(arg.slice(eq + 1));
-				if (chdir && flag.length >= chdir.shortest.length && chdir.long.startsWith(flag) && dir !== undefined) {
-					chdirs.push(dir);
-				}
+				moved ||= chdir !== undefined && flag.length >= chdir.shortest.length && chdir.long.startsWith(flag);
 				if (eq < 0 && valued.some(option => option.startsWith(arg))) i++;
 			} else if (options && arg.startsWith("-") && arg.length > 1) {
 				let k = 1;
 				while (k < arg.length && !valued.includes(`-${arg[k]}`)) k++;
 				if (name === "env" && arg[k] === ENV_SPLIT_OPTION.letter) return undefined;
-				const dir = k === arg.length - 1 ? words[i + 1] : attachedValue(arg.slice(k + 1));
-				if (chdir && arg[k] === chdir.letter && dir !== undefined) chdirs.push(dir);
+				moved ||= chdir !== undefined && arg[k] === chdir.letter;
 				if (k === arg.length - 1) i++;
 			} else if (positional > 0) {
 				positional--;
@@ -1974,17 +1623,17 @@ function unwrapShellCommand(words: readonly string[]): UnwrappedCommand | undefi
 	const argv = words.slice(i);
 	// `env` alone prints the environment.
 	if (argv.length === 0 && wrapper !== undefined) argv.push(wrapper);
-	return { argv, chdirs, assignments };
+	return { argv, moved, assignments };
 }
 
 /** Directories `pushd` saved, the one `popd` returns to first; what is below them is unknown. */
-export interface DirectoryStack {
+interface DirectoryStack {
 	readonly dir: string | undefined;
 	readonly below: DirectoryStack | undefined;
 }
 
 /** Where the shell is as a command line runs, each `undefined` where the guard cannot tell. */
-export interface ShellDirectories {
+interface ShellDirectories {
 	readonly cwd: string | undefined;
 	/** `OLDPWD`, where `cd -` goes. */
 	readonly previous: string | undefined;
@@ -2037,25 +1686,18 @@ function changeDirectory(command: ShellCommand, dirs: ShellDirectories, home: st
  * The pipelines of an and-or list run left to right, each after the status of what ran before it:
  * after `&&` only when that succeeded, after `||` only when it failed. A pipeline after `&&`
  * therefore runs only once the pipeline before it ran and succeeded, unless that one followed an
- * `||` and may have been skipped; one after `||` follows a failure, which leaves only what had
- * succeeded before the list. A pipeline's status is its last stage's, and a negated (`!`) one
- * succeeds when that fails, so it adds nothing; nor does one that ends in a compound command, whose
- * commands the guard does not read.
+ * `||` and may have been skipped; one after `||` follows a failure, after which nothing is known to
+ * have succeeded. A pipeline's status is its last stage's, and a negated (`!`) one succeeds when
+ * that fails, so it adds nothing; nor does one that ends in a compound command, whose commands the
+ * guard does not read.
  */
 class SucceededCommands {
-	/** Succeeded before the command line started. */
-	readonly #base: SucceededLink | undefined;
 	/** Known to have succeeded when the current pipeline starts. */
 	#chain: SucceededLink | undefined;
 	/** The current pipeline follows an `||`: it may not have run. */
 	#afterOr = false;
 	/** What the pipeline that just ended leaves known if it ran and succeeded, until the operator after it says. */
 	#ended: SucceededLink | undefined;
-
-	constructor(initial: SucceededLink | undefined) {
-		this.#base = initial;
-		this.#chain = initial;
-	}
 
 	get current(): SucceededLink | undefined {
 		return this.#chain;
@@ -2066,18 +1708,13 @@ class SucceededCommands {
 		this.#ended = !negated && last && last.argv.length > 0 ? { command: last, before: this.#chain } : undefined;
 	}
 
-	/** What the next pipeline starts after once the and-or list so far has succeeded, as `&&` makes it. */
-	get settled(): SucceededLink | undefined {
-		return !this.#afterOr && this.#ended ? this.#ended : this.#chain;
-	}
-
 	/** The operator after a pipeline: `&&`, `||`, or one that ends the and-or list (`;`, a newline, `&`). */
 	operator(operator: string): void {
 		if (operator === "&&") {
-			this.#chain = this.settled;
+			if (!this.#afterOr && this.#ended) this.#chain = this.#ended;
 			this.#afterOr = false;
 		} else {
-			this.#chain = this.#base;
+			this.#chain = undefined;
 			this.#afterOr = operator === "||";
 		}
 		this.#ended = undefined;
@@ -2116,30 +1753,25 @@ function markLiteral(literal: Set<string>, bare: Set<string>, word: string, quot
 /**
  * The simple command `segment` runs from `cwd`, as `unwrapped` unwraps it, after the commands
  * `succeeded`, or `undefined` when it runs none that reads anything; `piped` when an earlier
- * pipeline stage feeds it. The program runs where a wrapper's directory option moves it (`env -C`).
+ * pipeline stage feeds it. The program runs in an unknown directory when a wrapper's directory
+ * option moves it (`env -C`).
  */
 function shellCommand(
 	segment: Segment,
 	unwrapped: UnwrappedCommand | undefined,
 	cwd: string | undefined,
-	home: string,
 	piped: boolean,
 	succeeded: SucceededLink | undefined,
 ): ShellCommand | undefined {
 	const argv = unwrapped?.argv ?? [];
 	if (argv.length === 0 && segment.reads.length === 0) return undefined;
 	if (argv.length > 0 && argv[0].includes("/")) argv[0] = path.posix.basename(argv[0]);
-	let programCwd = cwd;
-	for (const dir of unwrapped?.chdirs ?? []) {
-		const word = segment.literalTildes.has(dir) ? `./${dir}` : dir;
-		programCwd = boundedDirectory(resolveShellWordPath(word, programCwd, home));
-	}
 	return {
 		argv,
 		assignments: unwrapped?.assignments ?? [],
 		reads: segment.reads,
 		fedInput: piped || segment.input,
-		cwd: programCwd,
+		cwd: unwrapped?.moved ? undefined : cwd,
 		shellCwd: cwd,
 		succeeded,
 		literalTildes: segment.literalTildes,
@@ -2148,30 +1780,26 @@ function shellCommand(
 }
 
 /**
- * The top-level simple commands of a command line, by pipeline, for the guard rules. Follows quotes
+ * The top-level simple commands of a command line, by pipeline, for the guard rules: one entry per
+ * pipeline, in order, empty for one with no simple command (`a=1`, `{ ...; }`). Follows quotes
  * (`$'...'` and `$"..."` included), escapes, comments, `;`/`&&`/`||`/`|` chains (continued on the
- * next line after `|`, `&&` or `||`), redirections, heredocs (skipped as data), wrappers (`sudo`,
- * `env`, `timeout`, `xargs`, `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the
- * command in), and `cd`, `cd -`, `pushd` and `popd` between commands. It reads into nothing nested:
- * a `( )` group, a compound command (`{ }`, `if`, a loop, `case`, `[[ ]]`, `(( ))`) or a function
- * definition is a pipeline stage with no command in it; a substitution, process substitution or
- * `${ }` stays in its word as {@link NESTED}; `bash -c`, `eval` and `env -S` strings and scripts
- * fed to a shell are arguments like any other. After a `{ }`, `if`, loop or `case`, or an `eval`
- * or `source`, each of which can change the directory, the directory is unknown. It is a
- * tokenizer, not a shell: variables other than a leading `$HOME` or `$PWD`, aliases, and calls to
- * functions are not followed. Also tracks which commands are known to have succeeded before each
- * one ({@link ShellCommand.succeeded}), whether the line has a part it does not read
- * ({@link ShellLine.nested}), and where the line leaves the shell, starting where `scope.after`
- * says an earlier line joined to it by `&&` left it.
+ * next line after `|`, `&&` or `||`), redirections, wrappers (`sudo`, `env`, `timeout`, `xargs`,
+ * `nohup`, `nice`, ..., with the directory `env -C` or `sudo -D` runs the command in unknown), and
+ * `cd`, `cd -`, `pushd` and `popd` between commands. It reads into nothing nested: a compound command
+ * (`{ }`, `if`, a loop, `case`, `[[ ]]`) or a function definition is a pipeline stage with no
+ * command in it, and it stops at the first nested part ({@link nestedAt}: a substitution, any `(`,
+ * a heredoc), leaving out the command that part is in, whose words after it are unknown; `bash -c`,
+ * `eval` and `env -S` strings and scripts fed to a shell are arguments like any other. After a
+ * `{ }`, `if`, loop or `case`, or an `eval` or `source`, each of which can change the directory, the
+ * directory is unknown. It is a tokenizer, not a shell: variables other than a leading `$HOME`,
+ * aliases, and calls to functions are not followed. Also tracks which commands are known to have
+ * succeeded before each one ({@link ShellCommand.succeeded}), and whether the line has a part it
+ * does not read ({@link ShellLine.nested}).
  */
 export function parseShellCommands(command: string, scope: ShellScope): ShellLine {
 	const pipelines: ShellCommand[][] = [];
-	let dirs: ShellDirectories = scope.after?.dirs ?? {
-		cwd: boundedDirectory(scope.cwd),
-		previous: undefined,
-		stack: undefined,
-	};
-	const done = new SucceededCommands(scope.after?.succeeded);
+	let dirs: ShellDirectories = { cwd: boundedDirectory(scope.cwd), previous: undefined, stack: undefined };
+	const done = new SucceededCommands();
 	let nested = false;
 	let segment = new Segment();
 	let skipper: CompoundSkipper | undefined;
@@ -2199,7 +1827,7 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 			const unwrapped = unwrapShellCommand(segment.words);
 			// An `env -S` string, which the guard does not split.
 			if (!unwrapped) nested = true;
-			last = shellCommand(segment, unwrapped, dirs.cwd, scope.home, stages > 1, done.current);
+			last = shellCommand(segment, unwrapped, dirs.cwd, stages > 1, done.current);
 			if (last) pipeline.push(last);
 			changesShell = false;
 		}
@@ -2210,7 +1838,7 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 		afterTime = false;
 	};
 	const endPipeline = () => {
-		if (pipeline.length > 0) pipelines.push(pipeline);
+		if (stages > 0) pipelines.push(pipeline);
 		if (stages === 1 && last && Object.hasOwn(DIRECTORY_CHANGERS, last.argv[0])) {
 			dirs = changeDirectory(last, dirs, scope.home);
 		} else if (stages === 1 && (changesShell || (last && Object.hasOwn(SHELL_EVALUATORS, last.argv[0])))) {
@@ -2223,7 +1851,8 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 		changesShell = false;
 		negated = false;
 	};
-	for (const token of lexCommandLine(command)) {
+	const { tokens, cut } = lexCommandLine(command);
+	for (const token of tokens) {
 		if (token.operator && token.text === "\n" && continued) continue;
 		continued = token.operator && Object.hasOwn(SHELL_CONTINUATIONS, token.text);
 		if (skipper && !skipper.done) {
@@ -2232,11 +1861,9 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 		}
 		const op = token.operator ? token.text : undefined;
 		// After a compound command come its redirections, up to the operator that ends it.
-		if (skipper && (op === undefined || op === "(" || Object.hasOwn(SHELL_REDIRECTS, op))) continue;
+		if (skipper && (op === undefined || Object.hasOwn(SHELL_REDIRECTS, op))) continue;
 		if (op === undefined) {
 			segment.used = true;
-			// A substitution, process substitution or `${ }`.
-			if (token.text.includes(NESTED)) nested = true;
 			if (token.text.startsWith("~")) {
 				markLiteral(segment.literalTildes, segment.bareTildes, token.text, token.literalTilde === true);
 			}
@@ -2256,7 +1883,7 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 				(Object.hasOwn(COMPOUND_CLOSERS, reserved) || reserved === "function")
 			) {
 				nested = true;
-				skipper = new CompoundSkipper(false);
+				skipper = new CompoundSkipper();
 				skipper.add(token);
 				continue;
 			}
@@ -2267,15 +1894,8 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 		} else if (Object.hasOwn(SHELL_REDIRECTS, op)) {
 			segment.used = true;
 			segment.input ||= Object.hasOwn(SHELL_INPUT_REDIRECTS, op);
-			// A heredoc's body is not read, and one whose delimiter is not quoted runs its substitutions.
-			if (op === "<<" || op === "<<-") nested = true;
 			redirect = op;
 			atCommand = false;
-		} else if (op === "(") {
-			// A `( )` group, or the `()` after a function's name: a lone word before it.
-			nested = true;
-			skipper = new CompoundSkipper(!atCommand && segment.words.length === 1);
-			skipper.add(token);
 		} else {
 			endStage();
 			if (!Object.hasOwn(SHELL_PIPES, op)) {
@@ -2284,7 +1904,7 @@ export function parseShellCommands(command: string, scope: ShellScope): ShellLin
 			}
 		}
 	}
-	endStage();
+	if (!cut) endStage();
 	endPipeline();
-	return { pipelines, nested, end: { dirs, succeeded: done.settled } };
+	return { pipelines, nested: nested || cut };
 }

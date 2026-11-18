@@ -7,6 +7,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
+import { GuardProbeBudget } from "@oh-my-pi/pi-coding-agent/tools/guard-rules";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -148,8 +149,8 @@ describe("bash guard rules", () => {
 		]) {
 			expect({ command, rule: ruleOf(bashApproval(cwd, command)) }).toEqual({ command, rule: undefined });
 		}
-		// A top-level command beside a nested one is still checked.
-		expect(ruleOf(bashApproval(cwd, 'echo "$(date)"; cat ~/.ssh/id_rsa'))).toBe("credential_read");
+		// A top-level command before a nested one is still checked.
+		expect(ruleOf(bashApproval(cwd, 'cat ~/.ssh/id_rsa; echo "$(date)"'))).toBe("credential_read");
 		for (const guardRules of [true, false]) {
 			const settings = { "tools.guardRules": guardRules };
 			expect(ruleOf(bashApproval(cwd, "bash -c 'rm -rf /'", {}, settings))).toBe("critical_pattern");
@@ -270,18 +271,51 @@ describe("discard_changes", () => {
 		}
 	});
 
-	it("does not look into a ( ) group, and keeps the shell where it was after one", () => {
-		const clean = TempDir.createSync("@omp-guard-clean-");
+	it("does not probe where it cannot place the directory a git command runs in", () => {
+		fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+		fs.mkdirSync(path.join(repo, "sub"));
+		const ask = spyOn(GuardProbeBudget.prototype, "ask");
 		try {
-			fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
-			// The reset runs in the clean directory, so it destroys nothing.
-			expect(bashApproval(clean.path(), `(cd ${repo}; true); git reset --hard`)).toBe("exec");
-			// The reset runs in the dirty repo, not where the subshell went.
-			expect(ruleOf(bashApproval(repo, `(cd ${clean.path()}); git reset --hard`))).toBe("discard_changes");
-			// A reset inside the group is not seen.
-			expect(bashApproval(clean.path(), `(cd ${repo} && git reset --hard)`)).toBe("exec");
+			for (const command of [
+				'cd "$WORK" && git reset --hard',
+				"env -C . git reset --hard",
+				"sudo -D . git checkout .",
+				// `$PWD` is not expanded, in a `cd` or a `-C`.
+				"cd $PWD && git reset --hard",
+				`git -C "$PWD/sub" checkout .`,
+			]) {
+				expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
+			}
+			expect(ask).not.toHaveBeenCalled();
+			// An absolute `-C` names its directory wherever the command runs.
+			expect(ruleOf(bashApproval(repo, `env -C /tmp git -C ${repo} reset --hard`))).toBe("discard_changes");
+			expect(ask).toHaveBeenCalled();
 		} finally {
-			clean.removeSync();
+			ask.mockRestore();
+		}
+	});
+
+	it("reads no further than the first nested part: a discard at or after it neither fires nor probes", () => {
+		fs.writeFileSync(path.join(repo, "a.txt"), "two\n");
+		const ask = spyOn(GuardProbeBudget.prototype, "ask");
+		try {
+			for (const command of [
+				"echo $(date); git reset --hard",
+				"git reset --hard $(git rev-parse HEAD)",
+				'git stash && echo "`date`" && git checkout .',
+				"(cd /tmp); git reset --hard",
+				"(git reset --hard)",
+				"cat <<EOF\nx\nEOF\ngit reset --hard",
+				`echo $(date); pkill -P ${process.ppid}`,
+			]) {
+				expect({ command, decision: bashApproval(repo, command) }).toEqual({ command, decision: "exec" });
+			}
+			expect(ask).not.toHaveBeenCalled();
+			// The same discard before the cut is read, probed and asks.
+			expect(ruleOf(bashApproval(repo, "git reset --hard; echo $(date)"))).toBe("discard_changes");
+			expect(ask).toHaveBeenCalled();
+		} finally {
+			ask.mockRestore();
 		}
 	});
 
@@ -501,6 +535,18 @@ describe("tools.guardRules", () => {
 		const tool = new BashTool(createSession(temp.path(), { "bash.allowCompoundCommands": true }));
 		const rows = tool.formatApprovalDetails({ command: "cat ~/.ssh/id_rsa && echo done" });
 		expect(rows.some(row => row.includes("cat ~/.ssh/id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
+	});
+
+	it("names a segment's rule as the whole chain breaks it, after the `cd` of the segments before it", () => {
+		const allowCompound = { "bash.allowCompoundCommands": true };
+		const fromHome = new BashTool(createSession(os.homedir(), allowCompound));
+		// From home a lone `cat .npmrc` reads `~/.npmrc`; after `cd /tmp` it reads `/tmp/.npmrc`.
+		const rows = fromHome.formatApprovalDetails({ command: "cd /tmp && cat .npmrc" });
+		expect(rows.some(row => row.includes("cat .npmrc"))).toBe(true);
+		expect(rows.some(row => row.includes("credential_read"))).toBe(false);
+		const tool = new BashTool(createSession(temp.path(), allowCompound));
+		const sshRows = tool.formatApprovalDetails({ command: "cd ~/.ssh && cat id_rsa" });
+		expect(sshRows.some(row => row.includes("cat id_rsa") && row.endsWith("(credential_read)"))).toBe(true);
 	});
 
 	it("decides a call whose `cwd` execution rejects instead of throwing", () => {

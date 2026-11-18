@@ -98,6 +98,7 @@ import {
 import {
 	expandPath,
 	formatPathRelativeToCwd,
+	normalizePathLikeInput,
 	probeLiteralPathExists,
 	resolveReadPathAsync,
 	specialFileKind,
@@ -1214,9 +1215,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
 		// Execution reads a `;`, `,` or whitespace list part by part, as grep searches its roots, so the
-		// guard rules check every part, not only the whole string.
+		// guard rules check every part, not only the whole string. Each is checked trimmed and unquoted:
+		// a list part is, and a missing path with trailing blanks (`.netrc `) is found by suffix match.
 		const targets = cfgToolsGuardRules.get(this.session.settings)
-			? approvalRootCandidates(readPath).map(part => splitImageQuestionTarget(part).path)
+			? approvalRootCandidates(readPath).map(part => splitImageQuestionTarget(normalizePathLikeInput(part)).path)
 			: [];
 		const urlTier = InternalUrlRouter.instance().readTier(readPath);
 		if (urlTier !== "read") return fileToolApproval(urlTier, targets, this.session.cwd);

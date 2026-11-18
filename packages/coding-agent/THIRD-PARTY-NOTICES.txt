@@ -115,9 +115,12 @@ commit e1bbd096f97d434b22851d525ea0cf9e029107d1), used under the Apache License
 Modified for omp: rewritten in TypeScript; a rule hit returns an approval
 override instead of refusing the call, and the rules are opt-in
 (tools.guardRules); credential locations include omp's own credential stores;
-the git working-tree check runs through @oh-my-pi/pi-natives/vcs without
-repository-configured programs; the parser reads only top-level commands,
-tracks cd and && chains, and skips heredoc bodies.
+discard_changes and kills_harness fire only when a read-only probe (a git
+working-tree check through @oh-my-pi/pi-natives/vcs that runs no
+repository-configured program, or pgrep) shows that uncommitted work would be
+lost or omp itself signalled, and a git stash earlier in the same && chain
+counts as keeping the work; the parser reads only top-level commands, tracks cd
+and && chains, and stops at the first nested part or heredoc.
 
 BUNDLED NPM PACKAGES
 ====================
