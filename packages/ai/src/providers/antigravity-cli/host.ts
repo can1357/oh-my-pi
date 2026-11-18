@@ -319,6 +319,11 @@ export class AgyHost implements ProviderSessionState {
 				} else {
 					pending?.expiry.cancel();
 					if (plan.input.length > 0) {
+						if (plan.toolResult) {
+							const combined = [...plan.input.flatMap(inputBlocks), ...toolResultBlocks(plan.toolResult)];
+							const overBudget = checkPromptBudget(combined, model);
+							if (overBudget) throw new Error(overBudget);
+						}
 						const previous = this.#turn;
 						this.#prompt(model, plan.input.flatMap(inputBlocks));
 						// The old prompt settling proves agy accepted the steer before the held tool resumes.

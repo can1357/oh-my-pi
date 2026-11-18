@@ -347,6 +347,17 @@ describe("AgyHost prompt budgets", () => {
 		expect(state.fake.closed).toBe(true);
 	});
 
+	it("rejects a parked tool result and steering input that together exceed the budget", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const large = "b".repeat(100_000);
+		const next = step(state.host, [...state.messages, result(state.first.writer.output, large), user(large)]);
+		await expect(next.done).rejects.toThrow("safe single-step budget is 188000 bytes");
+		expect(state.fake.promptHistory).toHaveLength(1);
+		expect((await state.output).isError).toBe(true);
+		expect(state.fake.closed).toBe(true);
+	});
+
 	it("sends an under-budget replay unchanged", async () => {
 		const state = await fixture();
 		const body = "c".repeat(ACP_STEP_TEXT_BYTES);

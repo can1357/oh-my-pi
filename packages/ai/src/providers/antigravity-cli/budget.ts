@@ -25,7 +25,10 @@ export function toolResultBlocks(result: Pick<ToolResultMessage, "content">): To
 }
 
 /** Actionable error for a prompt the server would reject, or undefined when it fits. */
-export function checkPromptBudget(blocks: readonly ContentBlock[], model: Pick<Model, "id">): string | undefined {
+export function checkPromptBudget(
+	blocks: readonly (ContentBlock | ToolResultBlock)[],
+	model: Pick<Model, "id">,
+): string | undefined {
 	const { textBytes, imageBytes } = measureBlocks(blocks);
 	if (textBytes > ACP_STEP_TEXT_BYTES)
 		return `Maximum context length exceeded: Antigravity CLI model ${model.id} would send ${textBytes} bytes of text in one step; the safe single-step budget is ${ACP_STEP_TEXT_BYTES} bytes. Compact the conversation and retry. No history or current request was sent or silently truncated.`;
