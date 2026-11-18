@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AuthStorage.sessions.takeSwitchReason()` returns, once, which rule moved the session off its previous OAuth account (`unavailable`, `blocked`, `plan`, `cold`, `reserve`, `allowance-spent`, `reclaim`, `released` or `pinned`) ([#19623](https://github.com/can1357/oh-my-pi/pull/19623) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

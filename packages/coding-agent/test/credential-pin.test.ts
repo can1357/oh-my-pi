@@ -211,12 +211,35 @@ describe("credential pins", () => {
 		const accountA = accounts.find(account => account.accountId === "account-a");
 		storage.sessions.pin("anthropic", sessionId, accountA!.credentialId);
 
-		recordCredentialPin(storage, manager, sessionId, "anthropic");
-		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		expect(recordCredentialPin(storage, manager, sessionId, "anthropic")).toBeUndefined();
+		expect(recordCredentialPin(storage, manager, sessionId, "anthropic")).toBeUndefined();
 
 		const entries = manager.getBranch().filter(entry => entry.type === "credential_pin");
 		expect(entries).toHaveLength(1);
 		const identity = storage.oauth.identity("anthropic", sessionId);
 		expect(manager.getCredentialPins().get("anthropic")?.hash).toBe(credentialPinHash("anthropic", identity!));
+	});
+
+	test("recording another account reports the switch with both labels and the routing rule", () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionId = manager.getSessionId();
+		const accounts = storage.oauth.accounts("anthropic", sessionId);
+		const accountA = accounts.find(account => account.accountId === "account-a");
+		const accountB = accounts.find(account => account.accountId === "account-b");
+		storage.sessions.pin("anthropic", sessionId, accountA!.credentialId);
+		recordCredentialPin(storage, manager, sessionId, "anthropic");
+		const pinA = manager.getBranch().find(entry => entry.type === "credential_pin");
+		storage.sessions.pin("anthropic", sessionId, accountB!.credentialId);
+
+		expect(recordCredentialPin(storage, manager, sessionId, "anthropic")).toEqual({
+			event: { provider: "anthropic", from: "a@example.com", to: "b@example.com", reason: "pinned" },
+			fromCredentialId: accountA!.credentialId,
+			toCredentialId: accountB!.credentialId,
+		});
+
+		// `/tree` back to a branch pinned to A: the session still runs on B, so the
+		// switch shows again, but no routing moved it this time.
+		manager.branch(pinA!.id);
+		expect(recordCredentialPin(storage, manager, sessionId, "anthropic")?.event.reason).toBeUndefined();
 	});
 });
