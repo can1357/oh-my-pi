@@ -138,6 +138,15 @@ describe("Antigravity CLI credential ownership", () => {
 		await stageAgyCredentials(otherKey, otherAccount);
 		expect((await exportAgyCredentials(account)).access).toBe("new-access");
 		expect((await exportAgyCredentials(otherAccount)).access).toBe("second-access");
+		const newerKey = JSON.stringify({
+			...JSON.parse(apiKey),
+			token: "refreshed-access",
+			expiresAt: grant.expires + 60_000,
+		});
+		await stageAgyCredentials(newerKey, account);
+		expect((await exportAgyCredentials(account)).access).toBe("refreshed-access");
+		await stageAgyCredentials(JSON.stringify({ ...JSON.parse(apiKey), token: "stale-pre-refresh-access" }), account);
+		expect((await exportAgyCredentials(account)).access).toBe("refreshed-access");
 	});
 
 	it("renders broker credentials with the local structured policy before staging", async () => {

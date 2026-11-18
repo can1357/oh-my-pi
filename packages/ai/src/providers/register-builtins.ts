@@ -16,6 +16,7 @@ import {
 } from "../utils/idle-iterator";
 import type * as BedrockProvider from "./amazon-bedrock";
 import type * as CursorProvider from "./cursor";
+import { setSharedAgyMainThreadAcquirer } from "./antigravity-cli-state";
 
 type ProviderStream<TApi extends Api> = (
 	model: Model<TApi>,
@@ -311,10 +312,17 @@ export const streamDevin = createLazyProviderStream(
 	mod => mod.streamDevin,
 );
 
+const loadAntigravityCli = () => import("./antigravity-cli");
+
 /** Stream the Antigravity CLI (`agy acp`) through the shared watchdog. */
-export const streamAntigravityCli = createLazyProviderStream(
-	() => import("./antigravity-cli"),
-	mod => mod.streamAntigravityCli,
+export const streamAntigravityCli = createLazyProviderStream(loadAntigravityCli, mod => mod.streamAntigravityCli);
+
+setSharedAgyMainThreadAcquirer(
+	async request => {
+		const mod = await loadAntigravityCli();
+		return mod.acquireSharedPoolLease(request);
+	},
+	{ fallback: true },
 );
 
 /** Stream Apple's on-device Foundation Model through the shared watchdog. */

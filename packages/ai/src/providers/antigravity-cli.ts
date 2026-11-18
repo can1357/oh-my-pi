@@ -9,14 +9,30 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Context, Model, StreamFunction, StreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { agyGeminiDir } from "./antigravity-cli/binary";
-import { agyCredentialKey, agyCredentialVersion, stageAgyCredentials } from "./antigravity-cli/credentials";
+import type { SharedAgyBridgeLease, SharedAgyBridgeRequest } from "./antigravity-cli-state";
+import {
+	agyCredentialKey,
+	agyCredentialVersion,
+	parseAgyApiKey,
+	stageAgyCredentials,
+} from "./antigravity-cli/credentials";
 import { AgyHost } from "./antigravity-cli/host";
+import { sharedAgyPool } from "./antigravity-cli/shared-pool";
 import { StepWriter } from "./antigravity-cli/step-writer";
+
+/** Acquire a lease on the main-thread shared `agy` pool for bridged worker sessions. */
+export function acquireSharedPoolLease(request: SharedAgyBridgeRequest): Promise<SharedAgyBridgeLease> {
+	return sharedAgyPool.acquire(request);
+}
 
 /** Per-request settings supported by the ACP transport. */
 export interface AntigravityCliOptions extends StreamOptions {
 	/** Selected model's native `thought_level`. */
 	reasoning?: Effort;
+	/** Share `agy acp` processes across sessions with matching credentials and tools (default: `true`). */
+	shareProcess?: boolean;
+	/** Pass an empty managed workspace directory to `agy` instead of `cwd` (default: `true`). */
+	isolateWorkspace?: boolean;
 }
 
 interface RetainedHost {
@@ -56,11 +72,15 @@ async function runStep(
 	const account = agyCredentialKey(options.apiKey);
 	const directory = path.join(agyGeminiDir(), account);
 	await stageAgyCredentials(options.apiKey, directory);
+	const credentials = parseAgyApiKey(options.apiKey);
 	const stepOptions = {
 		cwd: options.cwd,
 		reasoning: options.reasoning,
 		signal: options.signal,
 		credentialVersion: agyCredentialVersion(options.apiKey),
+		credentialExpires: credentials.expires,
+		shareProcess: options.shareProcess,
+		isolateWorkspace: options.isolateWorkspace,
 	};
 	const sessions = options.providerSessionState;
 	const key = `antigravity-acp:${account}:${options.sessionId ?? "default"}`;

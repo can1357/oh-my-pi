@@ -2,14 +2,11 @@
  * One stateful agy ACP conversation across omp's per-step stream calls.
  * MCP tool calls park between steps. A deadline cancels and drains the ACP
  * prompt before releasing its MCP response; the actual late result is sent
- * only in a subsequent prompt. Failed drains kill the process and reseed.
+ * only in a subsequent prompt. Failed drains close the transport and reseed.
  */
-import * as path from "node:path";
-import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	type ContentBlock,
-	ClientSideConnection,
-	ndJsonStream,
 	type PromptResponse,
 	RequestError,
 	type SessionConfigOption,
@@ -26,20 +23,26 @@ import type {
 } from "../../types";
 import { normalizeSchemaForMCP, toolWireSchema } from "../../utils/schema";
 import { type JsonSchemaValidationResult, validateJsonSchemaValue } from "../../utils/schema/json-schema-validator";
-import agentDefinition from "./agent.md" with { type: "text" };
-import { resolveAgyBinary } from "./binary";
+import { resolveAntigravityCliIsolateWorkspace, resolveAntigravityCliShareProcess } from "../antigravity-cli-state";
 import {
 	conversationStorePath,
 	deleteConversation,
 	forkConversation,
 	readConversationCheckpoint,
 } from "./conversation-store";
-import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
+import {
+	type AgyScheduler,
+	type AgyTimer,
+	type AgyTransport,
+	ensureEmptyWorkspace,
+	scheduleTimer,
+	spawnAgyCliProcess,
+	withTimeout,
+} from "./process";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
+import { acquireSharedAgyTransport, type SharedAgyPool } from "./shared-pool";
 import type { StepWriter } from "./step-writer";
-
-const AGENT_NAME = "bridge";
 const STARTUP_TIMEOUT_MS = 60_000;
 const ANNOUNCEMENT_TIMEOUT_MS = 2_000;
 // Leave enough time to force-stop a process that never acknowledges cancellation.
@@ -54,28 +57,13 @@ export interface AgyStepOptions {
 	signal?: AbortSignal;
 	/** Non-secret credential revision; a changed revision restarts agy's native token cache. */
 	credentialVersion?: string;
+	/** Credential expiry timestamp (epoch ms) so pre-refresh callers do not downgrade rotated hosts. */
+	credentialExpires?: number;
+	/** Share `agy acp` processes across sessions with matching credentials and tools (default: `true`). */
+	shareProcess?: boolean;
+	/** Pass an empty managed workspace directory to `agy` instead of `cwd` (default: `true`). */
+	isolateWorkspace?: boolean;
 }
-
-/** ACP operations required by the host; injectable without module or environment mutation. */
-export type AgyConnection = Pick<
-	ClientSideConnection,
-	| "initialize"
-	| "newSession"
-	| "loadSession"
-	| "closeSession"
-	| "setSessionConfigOption"
-	| "prompt"
-	| "cancel"
-	| "signal"
->;
-
-/** Owned process/connection resources. close must terminate the transport and is idempotent. */
-export interface AgyTransport {
-	connection: AgyConnection;
-	exited: Promise<number>;
-	close(): void;
-}
-
 /** Arguments for the production transport or an isolated test transport. */
 export interface AgyTransportOptions {
 	geminiDir: string;
@@ -86,17 +74,12 @@ export interface AgyTransportOptions {
 	onUpdate(notification: SessionNotification): void;
 }
 
-/** A scheduled host deadline; cancellation must be idempotent. */
-export interface AgyTimer {
-	cancel(): void;
-}
-
-/** Clock seam keeps lifecycle tests isolated from global timers. */
-export type AgyScheduler = (delayMs: number, callback: () => void) => AgyTimer;
-
 /** Dependency seam for deterministic ACP lifecycle tests, not an alternative inference API. */
 export interface AgyHostOptions {
 	startTransport?: (options: AgyTransportOptions) => Promise<AgyTransport>;
+	sharedPool?: SharedAgyPool;
+	shareProcess?: boolean;
+	isolateWorkspace?: boolean;
 	holdLimitMs?: number;
 	cancelTimeoutMs?: number;
 	announcementTimeoutMs?: number;
@@ -106,8 +89,10 @@ export interface AgyHostOptions {
 
 interface AgyProcess extends AgyTransport {
 	token: object;
+	shared: boolean;
 	toolsKey: string;
 	credentialVersion?: string;
+	credentialExpires?: number;
 	tools: ReadonlyMap<string, McpToolDefinition>;
 	cwd: string;
 	onClosed(): void;
@@ -115,6 +100,7 @@ interface AgyProcess extends AgyTransport {
 
 interface Conversation {
 	id: string;
+	cwd: string;
 	systemKey: string;
 	loaded: boolean;
 	/** omp model id the conversation was last configured for. */
@@ -153,12 +139,21 @@ interface Turn {
 	cancellation?: Promise<void>;
 }
 
-/** Owns one ACP process and its live ledger; callers must retain it between tool steps. */
+/** Owns one ACP session lease (shared or dedicated) and its live ledger across tool steps. */
 export class AgyHost implements ProviderSessionState {
 	readonly #geminiDir: string;
-	readonly #options: Required<AgyHostOptions>;
-	readonly #ownedConversations = new Set<string>();
+	readonly #customStartTransport: ((options: AgyTransportOptions) => Promise<AgyTransport>) | undefined;
+	readonly #sharedPool: SharedAgyPool | undefined;
+	readonly #defaultShareProcess: boolean | undefined;
+	readonly #defaultIsolateWorkspace: boolean | undefined;
+	readonly #options: Required<
+		Pick<
+			AgyHostOptions,
+			"holdLimitMs" | "cancelTimeoutMs" | "announcementTimeoutMs" | "startupTimeoutMs" | "schedule"
+		>
+	>;
 	readonly #exits = new Set<Promise<number>>();
+	readonly #ownedConversations = new Set<string>();
 	#process: AgyProcess | undefined;
 	#conversation: Conversation | undefined;
 	#ledger: Ledger | undefined;
@@ -174,8 +169,11 @@ export class AgyHost implements ProviderSessionState {
 	/** geminiDir is the account-scoped agy configuration and conversation directory. */
 	constructor(geminiDir: string, options: AgyHostOptions = {}) {
 		this.#geminiDir = geminiDir;
+		this.#customStartTransport = options.startTransport;
+		this.#sharedPool = options.sharedPool;
+		this.#defaultShareProcess = options.shareProcess;
+		this.#defaultIsolateWorkspace = options.isolateWorkspace;
 		this.#options = {
-			startTransport: options.startTransport ?? startTransport,
 			holdLimitMs: options.holdLimitMs ?? HOLD_LIMIT_MS,
 			cancelTimeoutMs: options.cancelTimeoutMs ?? CANCEL_TIMEOUT_MS,
 			announcementTimeoutMs: options.announcementTimeoutMs ?? ANNOUNCEMENT_TIMEOUT_MS,
@@ -223,19 +221,27 @@ export class AgyHost implements ProviderSessionState {
 		try {
 			if (options.signal?.aborted) onAbort();
 			step.controller.signal.throwIfAborted();
-			const cwd = options.cwd ?? process.cwd();
+			const useShared =
+				!this.#customStartTransport &&
+				resolveAntigravityCliShareProcess(options.shareProcess ?? this.#defaultShareProcess);
+			const cwd = resolveAntigravityCliIsolateWorkspace(options.isolateWorkspace ?? this.#defaultIsolateWorkspace)
+				? await this.#setup(ensureEmptyWorkspace(this.#geminiDir))
+				: (options.cwd ?? process.cwd());
 			const tools = (context.tools ?? []).map(toMcpTool);
 			const toolsKey = stableStringifyJson(tools);
 			const system = (context.systemPrompt ?? []).join("\n\n");
 			const systemKey = system;
 			let plan = planTurn(context.messages, this.#ledger);
+			const credentialChanged = this.#credentialChanged(options);
 			const parkedTurnMoves =
 				this.#pending?.state !== "detached" &&
 				this.#pending !== undefined &&
-				(this.#process?.toolsKey !== toolsKey ||
-					this.#process.cwd !== cwd ||
-					this.#process.credentialVersion !== options.credentialVersion ||
-					this.#conversation?.systemKey !== systemKey ||
+				(this.#process?.shared !== useShared ||
+					this.#process.toolsKey !== toolsKey ||
+					credentialChanged ||
+					(!this.#process.shared && this.#process.cwd !== cwd) ||
+					this.#conversation?.cwd !== cwd ||
+					this.#conversation.systemKey !== systemKey ||
 					this.#conversation.model !== model.id ||
 					this.#conversation.requestedEffort !== options.reasoning);
 			if (
@@ -246,17 +252,28 @@ export class AgyHost implements ProviderSessionState {
 			}
 			if (plan.kind !== "resume") await this.#setup(this.#abandonTurn());
 			if (
-				this.#process?.toolsKey !== toolsKey ||
-				this.#process.cwd !== cwd ||
-				this.#process.credentialVersion !== options.credentialVersion
+				!this.#process ||
+				this.#process.shared !== useShared ||
+				this.#process.toolsKey !== toolsKey ||
+				credentialChanged ||
+				(!this.#process.shared && this.#process.cwd !== cwd)
 			) {
-				await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
+				await this.#startProcess(
+					tools,
+					toolsKey,
+					cwd,
+					step,
+					options.credentialVersion,
+					options.credentialExpires,
+					useShared,
+				);
 			}
 			let loadId: string | undefined;
 			if (plan.kind === "resume") {
 				const conversation = this.#conversation;
 				if (!conversation) throw new Error("Antigravity CLI conversation was lost");
-				if (!conversation.loaded || conversation.systemKey !== systemKey) loadId = conversation.id;
+				if (!conversation.loaded || conversation.cwd !== cwd || conversation.systemKey !== systemKey)
+					loadId = conversation.id;
 			} else if (plan.kind === "restore") {
 				let forkId: string | undefined;
 				try {
@@ -276,7 +293,15 @@ export class AgyHost implements ProviderSessionState {
 					if (step.controller.signal.aborted) throw error;
 					// A store can outlive an incompatible native CLI version. Do not reuse a partial load.
 					this.#stopProcess();
-					await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
+					await this.#startProcess(
+						tools,
+						toolsKey,
+						cwd,
+						step,
+						options.credentialVersion,
+						options.credentialExpires,
+						useShared,
+					);
 					plan = { kind: "fresh", replay: [...context.messages] };
 				}
 			}
@@ -289,6 +314,7 @@ export class AgyHost implements ProviderSessionState {
 				this.#ownedConversations.add(created.sessionId);
 				this.#conversation = {
 					id: created.sessionId,
+					cwd,
 					systemKey,
 					loaded: true,
 					agyModels: modelValues(created.configOptions),
@@ -377,12 +403,26 @@ export class AgyHost implements ProviderSessionState {
 		return this.#process;
 	}
 
+	#credentialChanged(options: AgyStepOptions): boolean {
+		if (!this.#process || this.#process.credentialVersion === options.credentialVersion) return false;
+		if (
+			this.#process.credentialExpires !== undefined &&
+			options.credentialExpires !== undefined &&
+			options.credentialExpires < this.#process.credentialExpires
+		) {
+			return false;
+		}
+		return true;
+	}
+
 	async #startProcess(
 		tools: McpToolDefinition[],
 		toolsKey: string,
 		cwd: string,
 		step: ActiveStep,
 		credentialVersion: string | undefined,
+		credentialExpires: number | undefined,
+		useShared: boolean,
 	): Promise<void> {
 		const detached = this.#pending?.state === "detached" ? this.#pending : undefined;
 		const ledger = this.#ledger;
@@ -392,28 +432,52 @@ export class AgyHost implements ProviderSessionState {
 			this.#ledger = ledger;
 		}
 		const token = {};
-		const starting = this.#options.startTransport({
-			geminiDir: this.#geminiDir,
-			cwd,
-			tools,
-			signal: step.controller.signal,
-			onCall: async (name, args, id) => {
-				try {
-					return await this.#onToolCall(token, name, args, id);
-				} catch (error) {
-					if (this.#process?.token === token) this.#fail(error);
-					return errorOutput("Tool transport failed; the turn was stopped.");
-				}
-			},
-			onUpdate: update => {
-				if (this.#process?.token !== token) return;
-				try {
-					this.#onUpdate(update);
-				} catch (error) {
-					this.#fail(error);
-				}
-			},
-		});
+		const onCall: McpCallHandler = async (name, args, id) => {
+			try {
+				return await this.#onToolCall(token, name, args, id);
+			} catch (error) {
+				if (this.#process?.token === token) this.#fail(error);
+				return errorOutput("Tool transport failed; the turn was stopped.");
+			}
+		};
+		const onUpdate = (update: SessionNotification) => {
+			if (this.#process?.token !== token) return;
+			try {
+				this.#onUpdate(update);
+			} catch (error) {
+				this.#fail(error);
+			}
+		};
+		const starting = this.#customStartTransport
+			? this.#customStartTransport({
+					geminiDir: this.#geminiDir,
+					cwd,
+					tools,
+					signal: step.controller.signal,
+					onCall,
+					onUpdate,
+				})
+			: useShared
+				? acquireSharedAgyTransport(
+						{
+							geminiDir: this.#geminiDir,
+							credentialVersion,
+							credentialExpires,
+							tools,
+							signal: step.controller.signal,
+							onCall,
+							onUpdate,
+						},
+						this.#sharedPool,
+					)
+				: startTransport({
+						geminiDir: this.#geminiDir,
+						cwd,
+						tools,
+						signal: step.controller.signal,
+						onCall,
+						onUpdate,
+					});
 		void starting.then(
 			transport => {
 				if (step.controller.signal.aborted) transport.close();
@@ -426,12 +490,17 @@ export class AgyHost implements ProviderSessionState {
 			exited: transport.exited,
 			close: () => transport.close(),
 			token,
+			shared: useShared,
 			toolsKey,
-			credentialVersion,
+			credentialVersion: transport.credentialVersion ?? credentialVersion,
+			credentialExpires: transport.credentialExpires ?? credentialExpires,
 			tools: new Map(tools.map(tool => [tool.name, tool])),
 			cwd,
 			onClosed: () => {
-				if (this.#process === agy) this.#fail(new Error("Antigravity CLI ACP connection closed"));
+				const reason = agy.connection.signal.reason;
+				if (this.#process === agy) {
+					this.#fail(reason instanceof Error ? reason : new Error("Antigravity CLI ACP connection closed"));
+				}
 			},
 		};
 		this.#process = agy;
@@ -468,7 +537,6 @@ export class AgyHost implements ProviderSessionState {
 			turn.response.reject(error);
 		}
 		this.#turns.clear();
-		this.#releasePending()?.settle(errorOutput("Tool call cancelled: the host stopped this turn."));
 		for (const waiter of this.#announcementWaiters) waiter.finish(false);
 		this.#announced.clear();
 		if (this.#conversation) this.#conversation.loaded = false;
@@ -476,6 +544,7 @@ export class AgyHost implements ProviderSessionState {
 			agy.connection.signal.removeEventListener("abort", agy.onClosed);
 			agy.close();
 		}
+		this.#releasePending()?.settle(errorOutput("Tool call cancelled: the host stopped this turn."));
 	}
 
 	async #unloadConversation(): Promise<void> {
@@ -504,6 +573,7 @@ export class AgyHost implements ProviderSessionState {
 				throw new Error("Antigravity CLI load was interrupted");
 			this.#conversation = {
 				id,
+				cwd,
 				systemKey,
 				loaded: true,
 				agyModels: modelValues(loaded.configOptions),
@@ -786,76 +856,23 @@ export class AgyHost implements ProviderSessionState {
 	}
 }
 
-/** Production ACP subprocess. Every resource is closed if spawning or setup throws. */
 async function startTransport(options: AgyTransportOptions): Promise<AgyTransport> {
-	const binary = await resolveAgyBinary();
-	options.signal.throwIfAborted();
-	if (!$which("nc")) throw new Error("Antigravity CLI needs nc (netcat) on PATH for its tool bridge");
-	await writeAgentDefinition(options.geminiDir);
-	options.signal.throwIfAborted();
 	let closeProcess: (() => void) | undefined;
-	const bridge = new McpBridge(options.tools, options.onCall, () => closeProcess?.());
+	const bridge = new McpBridge(options.tools, options.onCall, { onDisconnect: () => closeProcess?.() });
 	try {
-		const child = Bun.spawn(
-			[
-				binary,
-				"acp",
-				"--agent",
-				AGENT_NAME,
-				"--gemini-dir",
-				options.geminiDir,
-				"--ide-mcp-port",
-				String(bridge.port),
-				"--dangerously-skip-permissions",
-			],
-			{
-				cwd: options.cwd,
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "ignore",
-				env: { ...Bun.env, ...agyCredentialEnv(), AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
-			},
-		);
-		let closed = false;
-		const close = () => {
-			if (closed) return;
-			closed = true;
-			bridge.close();
-			child.kill("SIGKILL");
-		};
-		closeProcess = close;
-		try {
-			const input = new WritableStream<Uint8Array>({
-				write: async chunk => {
-					child.stdin.write(chunk);
-					await child.stdin.flush();
-				},
-				close: async () => {
-					await child.stdin.end();
-				},
-			});
-			const connection = new ClientSideConnection(
-				() => ({
-					requestPermission: () => ({ outcome: { outcome: "cancelled" } }),
-					sessionUpdate: options.onUpdate,
-				}),
-				ndJsonStream(input, child.stdout),
-			);
-			return { connection, exited: child.exited, close };
-		} catch (error) {
-			close();
-			throw error;
-		}
+		const proc = await spawnAgyCliProcess({
+			geminiDir: options.geminiDir,
+			cwd: options.cwd,
+			bridge,
+			signal: options.signal,
+			onUpdate: options.onUpdate,
+		});
+		closeProcess = proc.close;
+		return { connection: proc.connection, exited: proc.exited, close: proc.close };
 	} catch (error) {
 		bridge.close();
 		throw error;
 	}
-}
-
-async function writeAgentDefinition(geminiDir: string): Promise<void> {
-	const file = Bun.file(path.join(geminiDir, "config", "agents", `${AGENT_NAME}.md`));
-	if ((await file.exists()) && (await file.text()) === agentDefinition) return;
-	await Bun.write(file, agentDefinition);
 }
 
 function systemMeta(system: string): Record<string, unknown> {
@@ -960,19 +977,4 @@ function mapAgyError(error: unknown): Error {
 		return new Error("Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.");
 	}
 	return error instanceof Error ? error : new Error(String(error));
-}
-
-function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {
-	const timer = setTimeout(callback, delayMs);
-	return { cancel: () => clearTimeout(timer) };
-}
-
-async function withTimeout<T>(operation: Promise<T>, ms: number, message: string, schedule: AgyScheduler): Promise<T> {
-	const timeout = Promise.withResolvers<never>();
-	const timer = schedule(ms, () => timeout.reject(new Error(message)));
-	try {
-		return await Promise.race([operation, timeout.promise]);
-	} finally {
-		timer.cancel();
-	}
 }

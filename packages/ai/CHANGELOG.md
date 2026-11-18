@@ -7,6 +7,11 @@
 - `prewarm` stream option: Anthropic Messages sends the request as built, non-streaming with `max_tokens: 0`, to refresh its prompt cache without billing output; it refuses budget thinking, forced tool choice and structured output before sending
 - Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
 - Added `retryUnreachableBroker` (default on) and `onBrokerRetry` to `discoverAuthStorage`, so a host chooses whether startup retries an unreachable broker and can show that it is waiting ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+- Shared `agy acp` processes and IDE MCP bridges across concurrent `antigravity-cli` sessions with matching credentials and tool sets (`shareProcess` / `antigravityShareProcess`, env `PI_AGY_SHARE_PROCESS`), with per-conversation MCP call routing, credential-rotation retirement, and unreferenced idle shutdown ([#19329](https://github.com/can1357/oh-my-pi/pull/19329) by [@0xprincess](https://github.com/0xprincess))
+
+### Changed
+
+- Isolated the `antigravity-cli` ACP child working directory in an empty managed workspace by default (`isolateWorkspace` / `antigravityIsolateWorkspace`, env `PI_AGY_ISOLATE_WORKSPACE`), preventing `agy` from indexing large host repositories into memory while host tools continue executing in the real session directory ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
 
 ### Fixed
 

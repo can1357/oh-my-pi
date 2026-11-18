@@ -28,6 +28,7 @@
 - Skill descriptions and MCP namespace hints generated in the background show a progress row above the composer (`Optimizing skills 3/12`, `Optimizing MCP: github`), ending in `ready` or the reason it failed
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 - CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+- Shared `antigravity-cli` `agy acp` processes across concurrent sessions and subagent worker threads with matching credentials and tool sets, configurable via `providers.antigravity-cli.shareProcess` (`PI_AGY_SHARE_PROCESS`) ([#19329](https://github.com/can1357/oh-my-pi/pull/19329) by [@0xprincess](https://github.com/0xprincess))
 
 ### Changed
 
@@ -36,6 +37,7 @@
 - Skill descriptions and MCP namespace hints are generated once per machine instead of once per omp process: while one window asks the model, the others wait for its answer and their progress rows follow along
 - Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
 - A reply wait or a subagent's wait for its parent blocks up to the session's prompt-cache lifetime less a minute (4m to 30m) once it is back-to-back, instead of always 4m
+- Isolated the `antigravity-cli` ACP workspace directory by default and added `providers.antigravity-cli.isolateWorkspace` (`PI_AGY_ISOLATE_WORKSPACE`) to opt out when debugging native `agy` workspace behavior ([#19328](https://github.com/can1357/oh-my-pi/pull/19328) by [@0xprincess](https://github.com/0xprincess))
 
 ### Fixed
 

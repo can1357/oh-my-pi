@@ -1,20 +1,19 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { conversationStorePath } from "@oh-my-pi/pi-ai/providers/antigravity-cli/conversation-store";
+import { configureAntigravityCliIsolateWorkspace } from "@oh-my-pi/pi-ai/providers/antigravity-cli-state";
 import {
 	AgyHost,
 	describeToolArguments,
-	type AgyConnection,
 	type AgyHostOptions,
-	type AgyScheduler,
 	type AgyStepOptions,
-	type AgyTransport,
 	type AgyTransportOptions,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
+import type { AgyConnection, AgyScheduler, AgyTransport } from "@oh-my-pi/pi-ai/providers/antigravity-cli/process";
 import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -86,6 +85,7 @@ class FakeAgy implements AgyTransport {
 	readonly promptHistory: FakePrompt[] = [];
 	readonly loads: string[] = [];
 	readonly created: string[] = [];
+	readonly newSessionCwds: string[] = [];
 	readonly configurations: string[] = [];
 	readonly abort = new AbortController();
 	readonly exit = Promise.withResolvers<number>();
@@ -126,7 +126,8 @@ class FakeAgy implements AgyTransport {
 		this.connection = {
 			signal: this.abort.signal,
 			initialize: async () => ({ protocolVersion: 1 }),
-			newSession: async () => {
+			newSession: async params => {
+				this.newSessionCwds.push(params.cwd);
 				this.currentId = crypto.randomUUID();
 				this.created.push(this.currentId);
 				return { sessionId: this.currentId, configOptions };
@@ -199,6 +200,7 @@ class FakeAgy implements AgyTransport {
 
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => {
+	configureAntigravityCliIsolateWorkspace(undefined);
 	for (const dispose of cleanup.splice(0).reverse()) await dispose();
 });
 
@@ -871,5 +873,63 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Done.");
 		prompt.response.resolve({ stopReason: "end_turn" });
 		await first.done;
+	});
+	it("passes an empty managed workspace directory to agy by default and honors opt-outs", async () => {
+		const previousEnv = process.env.PI_AGY_ISOLATE_WORKSPACE;
+		delete process.env.PI_AGY_ISOLATE_WORKSPACE;
+		try {
+			const state = await fixture();
+			const repoDir = path.join(state.dir, "large-repo");
+			await mkdir(repoDir, { recursive: true });
+
+			const isolatedRun = step(state.host, [user("hello")], {}, undefined, { cwd: repoDir });
+			const isolatedFake = await state.started.next();
+			const isolatedPrompt = await isolatedFake.prompts.next();
+			isolatedFake.text("Done.");
+			isolatedPrompt.response.resolve({ stopReason: "end_turn" });
+			await isolatedRun.done;
+
+			const expectedWorkspace = path.join(state.dir, "empty-workspace");
+			expect(isolatedFake.options.cwd).toBe(expectedWorkspace);
+			expect(isolatedFake.newSessionCwds).toEqual([expectedWorkspace]);
+			if (process.platform !== "win32") {
+				const info = await stat(expectedWorkspace);
+				expect(info.mode & 0o777).toBe(0o700);
+			}
+
+			const directRun = step(state.host, [user("direct")], {}, undefined, { cwd: repoDir, isolateWorkspace: false });
+			const directFake = await state.started.next();
+			const directPrompt = await directFake.prompts.next();
+			directFake.text("Direct.");
+			directPrompt.response.resolve({ stopReason: "end_turn" });
+			await directRun.done;
+			expect(directFake.options.cwd).toBe(repoDir);
+			expect(directFake.newSessionCwds).toEqual([repoDir]);
+
+			if (process.platform !== "win32") {
+				await chmod(expectedWorkspace, 0o755);
+				const tightenedRun = step(state.host, [user("re-isolated")], {}, undefined, { cwd: repoDir });
+				const tightenedFake = await state.started.next();
+				const tightenedPrompt = await tightenedFake.prompts.next();
+				tightenedFake.text("Tightened.");
+				tightenedPrompt.response.resolve({ stopReason: "end_turn" });
+				await tightenedRun.done;
+				const tightenedInfo = await stat(expectedWorkspace);
+				expect(tightenedInfo.mode & 0o777).toBe(0o700);
+			}
+
+			process.env.PI_AGY_ISOLATE_WORKSPACE = "0";
+			const envState = await fixture();
+			const envRun = step(envState.host, [user("env")], {}, undefined, { cwd: repoDir });
+			const envFake = await envState.started.next();
+			const envPrompt = await envFake.prompts.next();
+			envFake.text("Env.");
+			envPrompt.response.resolve({ stopReason: "end_turn" });
+			await envRun.done;
+			expect(envFake.options.cwd).toBe(repoDir);
+		} finally {
+			if (previousEnv === undefined) delete process.env.PI_AGY_ISOLATE_WORKSPACE;
+			else process.env.PI_AGY_ISOLATE_WORKSPACE = previousEnv;
+		}
 	});
 });

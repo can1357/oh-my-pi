@@ -29,6 +29,22 @@ export type McpCallHandler = (
 	conversationId: string | undefined,
 ) => Promise<McpToolOutput>;
 
+/** Optional connection and conversation-id validation settings for {@link McpBridge}. */
+export interface McpBridgeOptions {
+	onDisconnect?: () => void;
+	/** Require a string `antigravity.google/conversation_id` on every `tools/call`. */
+	requireConversationId?: boolean;
+	/** Reject `tools/call` with `-32602` when the conversation id does not belong to an active session. */
+	validateConversationId?: (conversationId: string) => boolean;
+}
+
+/** Validate tool name uniqueness and index definitions by name. */
+export function validateMcpTools(tools: readonly McpToolDefinition[]): Map<string, McpToolDefinition> {
+	const byName = new Map(tools.map(tool => [tool.name, tool]));
+	if (byName.size !== tools.length) throw new Error("Duplicate Antigravity CLI tool name");
+	return byName;
+}
+
 interface Connection {
 	buffer: string;
 	decoder: TextDecoder;
@@ -46,11 +62,11 @@ export class McpBridge {
 	readonly #server: TCPSocketListener<Connection>;
 	readonly #sockets = new Set<Socket<Connection>>();
 	#closed = false;
+	#unreferenced = false;
 
 	/** Start listening immediately on an ephemeral IPv4 loopback port. */
-	constructor(tools: readonly McpToolDefinition[], onCall: McpCallHandler, onDisconnect?: () => void) {
-		const byName = new Map(tools.map(tool => [tool.name, tool]));
-		if (byName.size !== tools.length) throw new Error("Duplicate Antigravity CLI tool name");
+	constructor(tools: readonly McpToolDefinition[], onCall: McpCallHandler, options: McpBridgeOptions = {}) {
+		const byName = validateMcpTools(tools);
 		this.#server = Bun.listen<Connection>({
 			hostname: "127.0.0.1",
 			port: 0,
@@ -68,6 +84,7 @@ export class McpBridge {
 						return;
 					}
 					this.#sockets.add(socket);
+					if (this.#unreferenced) socket.unref();
 				},
 				data: (socket, chunk) => {
 					if (socket.data.closed) return;
@@ -83,14 +100,14 @@ export class McpBridge {
 					) {
 						const line = socket.data.buffer.slice(0, newline).trim();
 						socket.data.buffer = socket.data.buffer.slice(newline + 1);
-						if (line) handleLine(socket, line, tools, byName, onCall);
+						if (line) handleLine(socket, line, tools, byName, onCall, options);
 					}
 				},
 				close: socket => {
 					socket.data.closed = true;
 					socket.data.ended.resolve();
 					const owned = this.#sockets.delete(socket);
-					if (owned && !this.#closed) onDisconnect?.();
+					if (owned && !this.#closed) options.onDisconnect?.();
 				},
 				error: socket => {
 					socket.terminate();
@@ -98,6 +115,22 @@ export class McpBridge {
 			},
 		});
 		this.port = this.#server.port;
+	}
+
+	/** Keep the listener and connected client socket referenced on the event loop. */
+	ref(): void {
+		if (!this.#unreferenced) return;
+		this.#unreferenced = false;
+		this.#server.ref();
+		for (const socket of this.#sockets) socket.ref();
+	}
+
+	/** Allow the process event loop to drain naturally while an idle backend waits for reuse. */
+	unref(): void {
+		if (this.#unreferenced) return;
+		this.#unreferenced = true;
+		this.#server.unref();
+		for (const socket of this.#sockets) socket.unref();
 	}
 
 	/** Idempotently stop listening, release waiting replies and terminate all connections. */
@@ -120,6 +153,7 @@ function handleLine(
 	tools: readonly McpToolDefinition[],
 	byName: ReadonlyMap<string, McpToolDefinition>,
 	onCall: McpCallHandler,
+	options: McpBridgeOptions,
 ): void {
 	let request: unknown;
 	try {
@@ -171,8 +205,19 @@ function handleLine(
 			}
 			const meta = isRecord(params._meta) ? params._meta : {};
 			const conversationId = meta["antigravity.google/conversation_id"];
-			if (conversationId !== undefined && typeof conversationId !== "string") {
+			if (
+				(conversationId === undefined && options.requireConversationId) ||
+				(conversationId !== undefined && typeof conversationId !== "string")
+			) {
 				reply({ error: { code: -32602, message: "Invalid conversation id" } });
+				return;
+			}
+			if (
+				conversationId !== undefined &&
+				options.validateConversationId &&
+				!options.validateConversationId(conversationId)
+			) {
+				reply({ error: { code: -32602, message: "Unknown conversation id" } });
 				return;
 			}
 			socket.data.requests.add(id);
