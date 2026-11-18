@@ -1053,11 +1053,13 @@ class DaemonBroker {
 			}
 		}
 		this.#markReady(record);
-		// Output printed while the owner is away is neither reported nor counted
-		// against the notifier's allowance.
-		if (record.notify && this.#notifySocket(record)) {
+		// Output printed while the owner is away is read past, so it is neither
+		// reported nor counted against the notifier's allowance, and a line it cut
+		// short is not later joined to the next one.
+		if (record.notify) {
 			record.notify.tap.append(text);
-			record.notify.notifier.poll();
+			if (this.#notifySocket(record)) record.notify.notifier.poll();
+			else record.notify.notifier.skip();
 		}
 	}
 

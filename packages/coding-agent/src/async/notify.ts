@@ -79,9 +79,10 @@ export interface OutputNotifierOptions {
 /**
  * Matches a growing {@link JobTextSource} against a {@link NotifyPattern} and
  * emits the matching lines in batches. The owner calls {@link poll} after each
- * append, then {@link finish} once the process exits with nothing else to report
- * its last output, or {@link stop} once that output is reported elsewhere or the
- * process is cancelled.
+ * append ({@link skip} while nobody can receive a notice), then {@link finish}
+ * once the process exits with nothing else to report its last output, or
+ * {@link stop} once that output is reported elsewhere or the process is
+ * cancelled.
  */
 export class OutputNotifier {
 	readonly #matcher: LineMatcher;
@@ -114,6 +115,17 @@ export class OutputNotifier {
 		if (this.#stopped) return;
 		this.#collect(this.#reader.read(false).lines);
 		if (this.#lines.length > 0) this.#timer ??= setTimeout(() => this.#flush(), NOTIFY_BATCH_MS);
+	}
+
+	/**
+	 * Read past the complete lines that arrived since the last call without matching them: output
+	 * nobody is there to receive is neither reported nor counted. Reading it, rather than leaving it
+	 * out of the source, keeps line boundaries: a line cut short here is not later joined to the
+	 * start of another.
+	 */
+	skip(): void {
+		if (this.#stopped) return;
+		this.#reader.read(false);
 	}
 
 	/**

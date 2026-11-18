@@ -138,6 +138,24 @@ describe("OutputNotifier", () => {
 		expect(batches).toHaveLength(1);
 	});
 
+	it("keeps line boundaries across output it read past while nobody could receive it", () => {
+		vi.useFakeTimers();
+		const tap = new TextTap("out", "test output");
+		const batches: NotifyBatch[] = [];
+		const notifier = new OutputNotifier(compileNotifyPattern("ERROR"), tap, batch => batches.push(batch));
+		const print = (text: string, receiving: boolean): void => {
+			tap.append(text);
+			if (receiving) notifier.poll();
+			else notifier.skip();
+		};
+		// A line cut short when the owner leaves ends while it is away; another starts then.
+		print("ERROR first-ha", true);
+		print("lf\nERROR while away\nERROR la", false);
+		print("te\nERROR second\n", true);
+		vi.advanceTimersByTime(200);
+		expect(batches).toEqual([{ lines: ["ERROR late", "ERROR second"], omitted: 0, stopped: false }]);
+	});
+
 	it("drops matches it has not sent yet once stopped", () => {
 		vi.useFakeTimers();
 		const { notifier, batches, feed } = watch("ERROR");
