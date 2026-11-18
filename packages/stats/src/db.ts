@@ -158,6 +158,13 @@ const SPOTLIGHT_TOGGLE_BACKFILL_KEY = "spotlight_v6_toggle";
 // `tokensAfter` only since this date, so older cursors stay put.
 const SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY = "snapcompact_compactions_v1";
 const SNAPCOMPACT_COMPACTIONS_SINCE_MS = Date.parse("2026-08-20T00:00:00Z");
+// `messages.purpose` is filled by the parser from `model_usage` entries, which
+// rows ingested before the column existed stored as anonymous assistant rows;
+// their transcripts are re-parsed once, which also picks up the
+// `duration`/`ttft` newer entries carry. Sessions journal `model_usage` only
+// since this date, so older cursors stay put.
+const MODEL_USAGE_PURPOSE_BACKFILL_KEY = "model_usage_purpose_v1";
+const MODEL_USAGE_SINCE_MS = Date.parse("2026-08-31T00:00:00Z");
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -222,6 +229,7 @@ export async function initDb(): Promise<Database> {
 			cost_unpriced INTEGER NOT NULL DEFAULT 0,
 			agent_type TEXT NOT NULL DEFAULT 'main',
 			service_tier TEXT,
+			purpose TEXT,
 			UNIQUE(session_file, entry_id)
 		);
 
@@ -468,6 +476,12 @@ export async function initDb(): Promise<Database> {
 	if (!messageColumns.some(column => column.name === "cost_unpriced")) {
 		db.run("ALTER TABLE messages ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
 	}
+	// Off-transcript model calls (`model_usage` entries) keep their raw purpose;
+	// assistant messages stay NULL. Rows ingested before this column existed are
+	// all NULL until the `model_usage_purpose_v1` re-parse below rewrites them.
+	if (!messageColumns.some(column => column.name === "purpose")) {
+		db.run("ALTER TABLE messages ADD COLUMN purpose TEXT");
+	}
 	// Token-usage-by-agent: each message is classified main / subagent / advisor
 	// from its transcript path. A brand-new table gets the column from CREATE
 	// TABLE and the parser labels rows at insert time; a pre-existing table gets
@@ -567,6 +581,7 @@ export async function initDb(): Promise<Database> {
 	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
 	reparseModifiedSince(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
 	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
+	reparseModifiedSince(db, MODEL_USAGE_PURPOSE_BACKFILL_KEY, MODEL_USAGE_SINCE_MS);
 	ensureRollupSchema(db);
 	return db;
 }
@@ -810,7 +825,8 @@ function backfillNoCacheInputCosts(database: Database): void {
  * re-parse. The next sync rebuilds those files from byte zero, replacing their
  * parser-filled rows. Keys: {@link SPOTLIGHT_BACKFILL_KEY} (the Spotlight
  * tables are new), {@link SPOTLIGHT_TOGGLE_BACKFILL_KEY} (the experiment became
- * a toggle), {@link SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY} (the table is new).
+ * a toggle), {@link SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY} (the table is new),
+ * {@link MODEL_USAGE_PURPOSE_BACKFILL_KEY} (`messages.purpose` is new).
  */
 function reparseModifiedSince(database: Database, key: string, sinceMs: number): void {
 	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);
@@ -1182,7 +1198,10 @@ export function completeSessionSync(reconcile: boolean): void {
  * first-write-wins across the lineage. Same-file re-syncs still hit the
  * `ON CONFLICT(session_file, entry_id)` upsert below, which re-derives the
  * stored cost (orchestration-aware) and keeps `premium_requests` monotonic, so
- * a forced re-parse repairs historical `premium_requests` and cost fix-ups.
+ * a forced re-parse repairs historical `premium_requests` and cost fix-ups. It
+ * also rewrites the parser-derived `purpose`, `duration` and `ttft`, so a row
+ * stored by a build that did not read them from `model_usage` entries is
+ * repaired by the same re-parse.
  */
 export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 	if (!db) return 0;
@@ -1216,9 +1235,13 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			"cost_unpriced",
 			"agent_type",
 			"service_tier",
+			"purpose",
 		],
 		identity: ["entry_id", "timestamp"],
 		upsert: `ON CONFLICT(session_file, entry_id) DO UPDATE SET
+			duration = excluded.duration,
+			ttft = excluded.ttft,
+			purpose = excluded.purpose,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
@@ -1263,6 +1286,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 					unpriced ? 1 : 0,
 					s.agentType,
 					s.serviceTier ?? null,
+					s.purpose ?? null,
 				],
 			);
 		}
@@ -1320,6 +1344,7 @@ function rowToMessageStats(row: any): MessageStats {
 			},
 		},
 		agentType: (row.agent_type as AgentType) ?? "main",
+		purpose: (row.purpose as string | null) ?? null,
 		serviceTier: (row.service_tier as ServiceTier | null) ?? null,
 		costUnpriced: row.cost_unpriced === 1,
 	};

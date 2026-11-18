@@ -2,7 +2,7 @@
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, Kv, KvGrid, Note, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
-import { detailsRecord, isRecord, normalizeWs, num, resultTextOf, str, truncate } from "../util";
+import { detailsRecord, isRecord, normalizeWs, num, replaceTabs, resultTextOf, str, truncate } from "../util";
 
 function getDomain(url: string): string {
 	try {
@@ -24,6 +24,29 @@ function formatAge(seconds: unknown): string {
 	return `${Math.floor(d / 365)}y ago`;
 }
 
+/** Most excerpt lines shown under a source when the provider returned no synthesized answer. */
+const EXCERPT_LINES = 3;
+/** Longest excerpt line, in characters. */
+const EXCERPT_LINE_CHARS = 160;
+
+/**
+ * A source's page excerpt as display lines: tabs expanded, whitespace runs
+ * collapsed, lines without a letter or digit (blank lines, code fences, rules)
+ * dropped, capped at {@link EXCERPT_LINES} lines of {@link EXCERPT_LINE_CHARS}.
+ */
+function excerptLines(snippet: unknown): string[] {
+	const text = str(snippet);
+	if (!text) return [];
+	const lines: string[] = [];
+	for (const raw of text.split(/\r?\n/)) {
+		const line = normalizeWs(replaceTabs(raw));
+		if (!/[\p{L}\p{N}]/u.test(line)) continue;
+		lines.push(truncate(line, EXCERPT_LINE_CHARS));
+		if (lines.length === EXCERPT_LINES) break;
+	}
+	return lines;
+}
+
 function Summary({ args }: ToolRenderProps): ReactNode {
 	const query = str(args.query);
 	const recency = str(args.recency);
@@ -39,11 +62,21 @@ function Summary({ args }: ToolRenderProps): ReactNode {
 	);
 }
 
-function SourceRow({ source, index }: { source: Record<string, unknown>; index: number }): ReactNode {
+function SourceRow({
+	source,
+	index,
+	excerpt,
+}: {
+	source: Record<string, unknown>;
+	index: number;
+	/** Show the source's page excerpt under it (no synthesized answer to read instead). */
+	excerpt?: boolean;
+}): ReactNode {
 	const url = str(source.url) ?? "";
 	const title = str(source.title)?.trim() || url || "Untitled";
 	const domain = url ? getDomain(url) : "";
 	const age = formatAge(source.ageSeconds) || (str(source.publishedDate) ?? "");
+	const lines = excerpt ? excerptLines(source.snippet) : [];
 	return (
 		<Row k={String(index + 1)}>
 			{url ? (
@@ -55,6 +88,11 @@ function SourceRow({ source, index }: { source: Record<string, unknown>; index: 
 			)}
 			{domain && <span className="tv-faint"> ({domain})</span>}
 			{age && <span className="tv-muted"> · {age}</span>}
+			{lines.map((line, i) => (
+				<span key={i} className="tv-excerpt">
+					{line}
+				</span>
+			))}
 		</Row>
 	);
 }
@@ -73,6 +111,9 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	const authMode = response ? str(response.authMode) : null;
 	const sources: Record<string, unknown>[] =
 		response && Array.isArray(response.sources) ? response.sources.filter(isRecord) : [];
+	// Without a synthesized answer the result text is the model-facing numbered listing of these
+	// same sources: show each source's excerpt in its row instead of that text.
+	const answerless = response !== null && !str(response.answer)?.trim() && sources.length > 0;
 
 	let providerInfo = model && provider ? `${model} @ ${provider}` : (model ?? provider ?? "");
 	if (providerInfo && authMode) {
@@ -110,11 +151,11 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 				</KvGrid>
 			)}
 			{errorMsg && !resultTextOf(result) && <Note tone="err">{errorMsg}</Note>}
-			<ResultText result={result} maxLines={14} lang="markdown" />
+			{!answerless && <ResultText result={result} maxLines={14} lang="markdown" />}
 			{sources.length > 0 && (
 				<div className="tv-list">
 					{sources.map((source, i) => (
-						<SourceRow key={str(source.url) ?? i} source={source} index={i} />
+						<SourceRow key={str(source.url) ?? i} source={source} index={i} excerpt={answerless} />
 					))}
 				</div>
 			)}

@@ -83,7 +83,8 @@
 		"statusLineOutput": 133,
 		"statusLineCost": 133,
 		"statusLineSubagents": "teal",
-		"pythonMode": "yellow"
+		"pythonMode": "yellow",
+		"btwMode": "teal"
 	},
 	"export": {
 		"pageBg": "#f8f8f8",

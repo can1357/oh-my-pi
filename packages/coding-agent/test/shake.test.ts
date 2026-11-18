@@ -148,7 +148,7 @@ describe("AgentSession shake", () => {
 			const [tr] = branchToolResults();
 			expect(tr.prunedAt).toBeGreaterThan(0);
 			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
-			expect(text).toContain(`artifact://${result.artifactId}`);
+			expect(text).toContain(`local://${result.artifactId}.log`);
 			expect(text).toContain("shaken");
 		});
 
@@ -166,7 +166,7 @@ describe("AgentSession shake", () => {
 			expect(result.artifactId).toBeUndefined();
 			const [toolResult] = branchToolResults();
 			expect(toolResult.content).toEqual([{ type: "text", text: expect.stringContaining("[shaken ~") }]);
-			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("artifact://") }]);
+			expect(toolResult.content).not.toEqual([{ type: "text", text: expect.stringContaining("local://") }]);
 			saveArtifact.mockRestore();
 			allocateArtifactPath.mockRestore();
 		});
@@ -197,7 +197,7 @@ describe("AgentSession shake", () => {
 			expect(placeholder?.type).toBe("text");
 			if (placeholder?.type !== "text") throw new Error("Expected shake placeholder text");
 			expect(placeholder.text).toContain("shaken");
-			expect(placeholder.text).toContain(`artifact://${result.artifactId}`);
+			expect(placeholder.text).toContain(`local://${result.artifactId}.log`);
 			expect(mixedResult.content[1]).toBe(image);
 			expect(mixedResult.content[1]).toEqual(imageSnapshot);
 
@@ -1042,12 +1042,12 @@ describe("AgentSession shake", () => {
 		}
 
 		it("rescue config never re-elides artifact recovery reads, by path or by source meta", async () => {
-			seedArtifactRecoveryResult("R".repeat(4000), { path: "artifact://0" });
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "local://0.log" });
 			seedArtifactRecoveryResult(
 				"F".repeat(4000),
 				{ path: "/tmp/artifacts/3.shake.log" },
 				{
-					meta: { source: { type: "internal", value: "artifact://3" } },
+					meta: { source: { type: "internal", value: "local://3.log" } },
 				},
 			);
 			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
@@ -1059,7 +1059,7 @@ describe("AgentSession shake", () => {
 
 		it("rescue config still elides ordinary oversized results", async () => {
 			seedHeavyToolResult("B".repeat(4000));
-			seedArtifactRecoveryResult("R".repeat(4000), { path: "artifact://0" });
+			seedArtifactRecoveryResult("R".repeat(4000), { path: "local://0.log" });
 			const result = await session.shake("elide", { config: RESCUE_SHAKE_CONFIG });
 			expect(result.toolResultsDropped).toBe(1);
 			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);

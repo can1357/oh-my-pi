@@ -1,6 +1,6 @@
 """Toolchain and rule building the Apple Foundation Models bridge dylib.
 
-`applefm_bridge` runs crates/pi-natives/src/applefm/build-bridge.sh with the
+`applefm_bridge` runs crates/natives/src/applefm/build-bridge.sh with the
 toolchain resolved for `//bazel/toolchains/swift:toolchain_type`:
 
     mac exec hosts    the host Xcode / Command Line Tools Swift that the
@@ -75,7 +75,7 @@ def _applefm_bridge_impl(ctx):
 
 applefm_bridge = rule(
     implementation = _applefm_bridge_impl,
-    doc = "The bridge.swift dylib the pi-natives addon embeds, or an empty file without a toolchain.",
+    doc = "The bridge.swift dylib the omp-natives addon embeds, or an empty file without a toolchain.",
     attrs = {
         "out": attr.string(mandatory = True),
         "script": attr.label(mandatory = True, allow_single_file = [".sh"]),

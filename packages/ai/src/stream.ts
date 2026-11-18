@@ -1888,6 +1888,7 @@ function mapOptionsForApi<TApi extends Api>(
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
+		prewarm: options?.prewarm,
 		...simpleProviderOptions,
 	};
 

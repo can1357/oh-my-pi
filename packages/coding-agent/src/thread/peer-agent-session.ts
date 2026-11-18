@@ -120,6 +120,10 @@ export class PeerAgentSession implements AgentSessionHandle {
 		return this.#field("ircWakesPending");
 	}
 
+	get hasPendingWake(): boolean {
+		return this.#field("hasPendingWake");
+	}
+
 	get messages(): AgentMessage[] {
 		return mainBridge().remote.callSync("readMessages", this);
 	}
