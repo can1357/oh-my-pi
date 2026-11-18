@@ -1,12 +1,13 @@
 /**
  * Loopback NDJSON MCP server for agy's official --ide-mcp-port bridge.
- * Tools are listed once per process as mcp_ide-tools_<name>. MCP progress does
- * not extend agy's 180s timeout; the host cancels and drains parked turns first.
+ * Tools are advertised as mcp_ide-tools_<name> and can be replaced on a live connection, which then
+ * announces notifications/tools/list_changed. MCP progress does not extend agy's 180s timeout; the host
+ * cancels and drains parked turns first.
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { Socket, TCPSocketListener } from "bun";
 
-/** One fixed tool advertised over MCP tools/list. */
+/** One tool advertised over MCP tools/list. */
 export interface McpToolDefinition {
 	name: string;
 	description: string;
@@ -39,18 +40,32 @@ interface Connection {
 
 const PROTOCOL_VERSION = "2025-06-18";
 const MAX_FRAME_BYTES = 32 * 1024 * 1024;
+const TOOLS_CHANGED = `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" })}\n`;
+const TOOLS_CHANGED_BYTES = Buffer.byteLength(TOOLS_CHANGED);
 
-/** Fixed-tool TCP server scoped to one agy process; close also terminates connected sockets. */
+/** Live tool set shared with every connection; updateTools swaps it without restarting agy. */
+interface ToolSet {
+	tools: readonly McpToolDefinition[];
+	byName: ReadonlyMap<string, McpToolDefinition>;
+}
+
+function toolSet(tools: readonly McpToolDefinition[]): ToolSet {
+	const byName = new Map(tools.map(tool => [tool.name, tool]));
+	if (byName.size !== tools.length) throw new Error("Duplicate Antigravity CLI tool name");
+	return { tools: [...tools], byName };
+}
+
+/** Mutable-tool TCP server scoped to one agy process; close also terminates connected sockets. */
 export class McpBridge {
 	readonly port: number;
 	readonly #server: TCPSocketListener<Connection>;
 	readonly #sockets = new Set<Socket<Connection>>();
+	readonly #toolSet: ToolSet;
 	#closed = false;
 
 	/** Start listening immediately on an ephemeral IPv4 loopback port. */
 	constructor(tools: readonly McpToolDefinition[], onCall: McpCallHandler, onDisconnect?: () => void) {
-		const byName = new Map(tools.map(tool => [tool.name, tool]));
-		if (byName.size !== tools.length) throw new Error("Duplicate Antigravity CLI tool name");
+		this.#toolSet = toolSet(tools);
 		this.#server = Bun.listen<Connection>({
 			hostname: "127.0.0.1",
 			port: 0,
@@ -83,7 +98,7 @@ export class McpBridge {
 					) {
 						const line = socket.data.buffer.slice(0, newline).trim();
 						socket.data.buffer = socket.data.buffer.slice(newline + 1);
-						if (line) handleLine(socket, line, tools, byName, onCall);
+						if (line) handleLine(socket, line, this.#toolSet, onCall);
 					}
 				},
 				close: socket => {
@@ -100,6 +115,27 @@ export class McpBridge {
 		this.port = this.#server.port;
 	}
 
+	/** The tool list served by tools/list; a closed bridge keeps its final list. */
+	get tools(): readonly McpToolDefinition[] {
+		return this.#toolSet.tools;
+	}
+
+	/** Replace the advertised tools and announce the change to every live connection; a closed bridge keeps its final list. */
+	updateTools(tools: readonly McpToolDefinition[]): void {
+		if (this.#closed) return;
+		const next = toolSet(tools);
+		this.#toolSet.tools = next.tools;
+		this.#toolSet.byName = next.byName;
+		for (const socket of this.#sockets) {
+			if (socket.data.closed) continue;
+			try {
+				if (socket.write(TOOLS_CHANGED) !== TOOLS_CHANGED_BYTES) socket.terminate();
+			} catch {
+				socket.terminate();
+			}
+		}
+	}
+
 	/** Idempotently stop listening, release waiting replies and terminate all connections. */
 	close(): void {
 		if (this.#closed) return;
@@ -114,13 +150,7 @@ export class McpBridge {
 	}
 }
 
-function handleLine(
-	socket: Socket<Connection>,
-	line: string,
-	tools: readonly McpToolDefinition[],
-	byName: ReadonlyMap<string, McpToolDefinition>,
-	onCall: McpCallHandler,
-): void {
+function handleLine(socket: Socket<Connection>, line: string, toolSet: ToolSet, onCall: McpCallHandler): void {
 	let request: unknown;
 	try {
 		request = JSON.parse(line);
@@ -144,7 +174,7 @@ function handleLine(
 			reply({
 				result: {
 					protocolVersion: typeof params.protocolVersion === "string" ? params.protocolVersion : PROTOCOL_VERSION,
-					capabilities: { tools: {} },
+					capabilities: { tools: { listChanged: true } },
 					serverInfo: { name: "tools", version: "1.0.0" },
 				},
 			});
@@ -153,11 +183,11 @@ function handleLine(
 			reply({ result: {} });
 			return;
 		case "tools/list":
-			reply({ result: { tools } });
+			reply({ result: { tools: toolSet.tools } });
 			return;
 		case "tools/call": {
 			const name = typeof params.name === "string" ? params.name : undefined;
-			const tool = name ? byName.get(name) : undefined;
+			const tool = name ? toolSet.byName.get(name) : undefined;
 			if (!tool) {
 				reply({
 					error: { code: -32602, message: name ? `Unknown tool: ${name.slice(0, 128)}` : "Unknown tool" },

@@ -15,7 +15,7 @@ import {
 	type AgyTransport,
 	type AgyTransportOptions,
 } from "@oh-my-pi/pi-ai/providers/antigravity-cli/host";
-import type { McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
+import type { McpToolDefinition, McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 import { StepWriter } from "@oh-my-pi/pi-ai/providers/antigravity-cli/step-writer";
 import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -90,6 +90,8 @@ class FakeAgy implements AgyTransport {
 	readonly abort = new AbortController();
 	readonly exit = Promise.withResolvers<number>();
 	readonly exited = this.exit.promise;
+	readonly toolUpdates: McpToolDefinition[][] = [];
+	updateTools: ((tools: readonly McpToolDefinition[]) => void) | undefined;
 	readonly connection: AgyConnection;
 	closed = false;
 	cancelMode: "ack" | "hold" | "reject" = "ack";
@@ -101,6 +103,9 @@ class FakeAgy implements AgyTransport {
 
 	constructor(options: AgyTransportOptions) {
 		this.options = options;
+		this.updateTools = tools => {
+			this.toolUpdates.push([...tools]);
+		};
 		const configOptions: SessionConfigOption[] = [
 			{
 				id: "thought_level",
@@ -422,8 +427,8 @@ describe("AgyHost stateful steps", () => {
 		await next.done;
 	});
 
-	it("restarts on tool-set changes and carries the actual result and historical images into the reseed", async () => {
-		const state = await parked();
+	it("restarts a parked turn on a tool-set change and carries the actual result and historical images into the reseed", async () => {
+		const state = await parked({ warmToolList: true });
 		const image = { type: "image" as const, data: "aW1hZ2U=", mimeType: "image/png" };
 		const toolResult = result(state.first.writer.output);
 		toolResult.content.push(image);
@@ -433,6 +438,8 @@ describe("AgyHost stateful steps", () => {
 		const restarted = await state.started.next();
 		const prompt = await restarted.prompts.next();
 		expect(state.fake.closed).toBe(true);
+		expect(state.instances).toHaveLength(2);
+		expect(state.fake.toolUpdates).toHaveLength(0);
 		expect(restarted.options.tools).toHaveLength(2);
 		expect(prompt.request.prompt).toContainEqual(image);
 		restarted.text("Image received.");
@@ -440,7 +447,7 @@ describe("AgyHost stateful steps", () => {
 		await next.done;
 	});
 
-	it("reloads completed conversation state on a tool-set change without leaking replay chunks", async () => {
+	it("reloads completed conversation state after a credential change without leaking replay chunks", async () => {
 		const state = await fixture();
 		const first = step(state.host, [user("hello")]);
 		const fake = await state.started.next();
@@ -450,12 +457,91 @@ describe("AgyHost stateful steps", () => {
 		await first.done;
 		const id = state.host.conversationId;
 		if (!id) throw new Error("Completed turn lost its conversation");
-		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], { tools: [] });
+		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], {}, undefined, {
+			credentialVersion: "rotated",
+		});
 		const restarted = await state.started.next();
 		const continuation = await restarted.prompts.next();
 		expect(restarted.loads).toEqual([id]);
 		expect(continuation.request.prompt).toEqual([{ type: "text", text: "continue" }]);
 		expect(second.writer.output.content).toEqual([]);
+		restarted.text("Continued.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+	});
+
+	it("restarts on a tool-set change unless warm tool-list reuse is enabled", async () => {
+		const state = await fixture();
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const initial = await fake.prompts.next();
+		fake.text("Hello.");
+		initial.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], {
+			tools: [...tools, { name: "write", description: "Write", parameters: type({ text: "string" }) }],
+		});
+		const restarted = await state.started.next();
+		const continuation = await restarted.prompts.next();
+		expect(restarted).not.toBe(fake);
+		expect(fake.closed).toBe(true);
+		expect(fake.toolUpdates).toHaveLength(0);
+		expect(restarted.options.tools).toHaveLength(2);
+		expect(continuation.request.prompt).toEqual([{ type: "text", text: "continue" }]);
+		restarted.text("Continued.");
+		continuation.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+	});
+
+	it("replaces the tool set on an idle warm transport instead of restarting", async () => {
+		const state = await fixture({ warmToolList: true });
+		const first = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const initial = await fake.prompts.next();
+		fake.text("Hello.");
+		initial.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const write: Tool = { name: "write", description: "Write", parameters: type({ text: "string" }) };
+		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], {
+			tools: [...tools, write],
+		});
+		const continuation = await fake.prompts.next();
+		expect(state.instances).toHaveLength(1);
+		expect(fake.closed).toBe(false);
+		expect(fake.loads).toEqual([]);
+		expect(fake.toolUpdates.map(update => update.map(tool => tool.name))).toEqual([["read", "write"]]);
+		expect(continuation.request.prompt).toEqual([{ type: "text", text: "continue" }]);
+		void fake.call("write", { text: "body" });
+		await second.done;
+		expect(second.writer.output.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: "write" }));
+	});
+
+	it("restarts when the transport cannot replace its tool set", async () => {
+		const started = new Queue<FakeAgy>();
+		const state = await fixture({
+			warmToolList: true,
+			startTransport: async input => {
+				const fake = new FakeAgy(input);
+				fake.updateTools = undefined;
+				started.push(fake);
+				return fake;
+			},
+		});
+		const first = step(state.host, [user("hello")]);
+		const fake = await started.next();
+		const initial = await fake.prompts.next();
+		fake.text("Hello.");
+		initial.response.resolve({ stopReason: "end_turn" });
+		await first.done;
+		const second = step(state.host, [user("hello"), first.writer.output, user("continue")], {
+			tools: [...tools, { name: "write", description: "Write", parameters: type({ text: "string" }) }],
+		});
+		const restarted = await started.next();
+		expect(restarted).not.toBe(fake);
+		expect(fake.closed).toBe(true);
+		expect(restarted.options.tools).toHaveLength(2);
+		const continuation = await restarted.prompts.next();
+		expect(continuation.request.prompt).toEqual([{ type: "text", text: "continue" }]);
 		restarted.text("Continued.");
 		continuation.response.resolve({ stopReason: "end_turn" });
 		await second.done;
@@ -486,7 +572,9 @@ describe("AgyHost stateful steps", () => {
 		fake.text("Remembered.");
 		initial.response.resolve({ stopReason: "end_turn" });
 		await first.done;
-		const second = step(state.host, [user("remember image"), first.writer.output, user("continue")], { tools: [] });
+		const second = step(state.host, [user("remember image"), first.writer.output, user("continue")], {}, undefined, {
+			credentialVersion: "rotated",
+		});
 		const reloader = await state.started.next();
 		reloader.failLoad = true;
 		const reseeded = await state.started.next();

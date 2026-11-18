@@ -5,7 +5,7 @@
  * only in a subsequent prompt. Failed drains kill the process and reseed.
  */
 import * as path from "node:path";
-import { $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { $env, $which, isRecord, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import {
 	type ContentBlock,
 	ClientSideConnection,
@@ -74,6 +74,8 @@ export interface AgyTransport {
 	connection: AgyConnection;
 	exited: Promise<number>;
 	close(): void;
+	/** Replace the advertised tools on a live process; transports without it are restarted instead. */
+	updateTools?(tools: readonly McpToolDefinition[]): void;
 }
 
 /** Arguments for the production transport or an isolated test transport. */
@@ -102,6 +104,11 @@ export interface AgyHostOptions {
 	announcementTimeoutMs?: number;
 	startupTimeoutMs?: number;
 	schedule?: AgyScheduler;
+	/**
+	 * Replace the live process's tools instead of restarting when the tool set changes. Off by default:
+	 * agy's re-list after notifications/tools/list_changed is not yet confirmed against a live session.
+	 */
+	warmToolList?: boolean;
 }
 
 interface AgyProcess extends AgyTransport {
@@ -176,6 +183,7 @@ export class AgyHost implements ProviderSessionState {
 			announcementTimeoutMs: options.announcementTimeoutMs ?? ANNOUNCEMENT_TIMEOUT_MS,
 			startupTimeoutMs: options.startupTimeoutMs ?? STARTUP_TIMEOUT_MS,
 			schedule: options.schedule ?? scheduleTimer,
+			warmToolList: warmToolListEnabled(options.warmToolList),
 		};
 		if (
 			this.#options.holdLimitMs <= 0 ||
@@ -224,6 +232,8 @@ export class AgyHost implements ProviderSessionState {
 			const system = (context.systemPrompt ?? []).join("\n\n");
 			const systemKey = system;
 			let plan = planTurn(context.messages, this.#ledger);
+			// A live turn or parked call keeps the tool set it started with.
+			const toolSetHeld = this.#turn !== undefined || this.#pending !== undefined;
 			const parkedTurnMoves =
 				this.#pending?.state !== "detached" &&
 				this.#pending !== undefined &&
@@ -240,11 +250,19 @@ export class AgyHost implements ProviderSessionState {
 				plan = planTurn(context.messages, undefined);
 			}
 			if (plan.kind !== "resume") await this.#setup(this.#abandonTurn());
-			if (
-				this.#process?.toolsKey !== toolsKey ||
-				this.#process.cwd !== cwd ||
-				this.#process.credentialVersion !== options.credentialVersion
-			) {
+			const warm = this.#process;
+			if (warm && warm.cwd === cwd && warm.credentialVersion === options.credentialVersion) {
+				if (warm.toolsKey !== toolsKey) {
+					const updateTools = this.#options.warmToolList ? warm.updateTools : undefined;
+					if (toolSetHeld || !updateTools) {
+						await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
+					} else {
+						updateTools(tools);
+						warm.toolsKey = toolsKey;
+						warm.tools = new Map(tools.map(tool => [tool.name, tool]));
+					}
+				}
+			} else {
 				await this.#startProcess(tools, toolsKey, cwd, step, options.credentialVersion);
 			}
 			let loadId: string | undefined;
@@ -418,6 +436,7 @@ export class AgyHost implements ProviderSessionState {
 		const agy: AgyProcess = {
 			connection: transport.connection,
 			exited: transport.exited,
+			updateTools: transport.updateTools?.bind(transport),
 			close: () => transport.close(),
 			token,
 			toolsKey,
@@ -825,7 +844,7 @@ async function startTransport(options: AgyTransportOptions): Promise<AgyTranspor
 				}),
 				ndJsonStream(input, child.stdout),
 			);
-			return { connection, exited: child.exited, close };
+			return { connection, exited: child.exited, close, updateTools: tools => bridge.updateTools(tools) };
 		} catch (error) {
 			close();
 			throw error;
@@ -924,6 +943,13 @@ function mapAgyError(error: unknown): Error {
 		return new Error("Antigravity CLI is not signed in. Run /login and choose Antigravity CLI.");
 	}
 	return error instanceof Error ? error : new Error(String(error));
+}
+
+/** Warm tool-list reuse stays opt-in until agy is confirmed to re-list after tools/list_changed. */
+function warmToolListEnabled(requested: boolean | undefined): boolean {
+	if (requested !== undefined) return requested;
+	const value = $env.OMP_ACP_WARM_TOOL_LIST?.trim().toLowerCase();
+	return value === "1" || value === "true";
 }
 
 function scheduleTimer(delayMs: number, callback: () => void): AgyTimer {

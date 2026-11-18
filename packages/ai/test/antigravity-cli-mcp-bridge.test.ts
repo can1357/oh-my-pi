@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { connect, type Socket } from "node:net";
-import { McpBridge, type McpToolOutput } from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
+import {
+	McpBridge,
+	type McpToolDefinition,
+	type McpToolOutput,
+} from "@oh-my-pi/pi-ai/providers/antigravity-cli/mcp-bridge";
 
 interface Reply {
 	id: number;
 	result?: unknown;
 	error?: { code: number; message: string };
+}
+
+interface Notification {
+	jsonrpc: "2.0";
+	method: string;
+	params?: unknown;
 }
 
 const cleanups: (() => void)[] = [];
@@ -18,6 +28,8 @@ async function client(port: number) {
 	const ready = Promise.withResolvers<void>();
 	const closed = Promise.withResolvers<void>();
 	const replies = new Map<number, PromiseWithResolvers<Reply>>();
+	const notifications: Notification[] = [];
+	const notificationWaiters: PromiseWithResolvers<Notification>[] = [];
 	let buffer = "";
 	socket.setEncoding("utf8");
 	socket.on("connect", ready.resolve);
@@ -28,9 +40,15 @@ async function client(port: number) {
 		for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
 			const line = buffer.slice(0, end);
 			buffer = buffer.slice(end + 1);
-			const reply: Reply = JSON.parse(line);
-			replies.get(reply.id)?.resolve(reply);
-			replies.delete(reply.id);
+			const message = JSON.parse(line) as Reply | Notification;
+			if ("method" in message) {
+				const waiter = notificationWaiters.shift();
+				if (waiter) waiter.resolve(message);
+				else notifications.push(message);
+				continue;
+			}
+			replies.get(message.id)?.resolve(message);
+			replies.delete(message.id);
 		}
 	});
 	cleanups.push(() => socket.destroy());
@@ -39,6 +57,14 @@ async function client(port: number) {
 	return {
 		socket,
 		closed: closed.promise,
+		notifications,
+		nextNotification(): Promise<Notification> {
+			const queued = notifications.shift();
+			if (queued) return Promise.resolve(queued);
+			const deferred = Promise.withResolvers<Notification>();
+			notificationWaiters.push(deferred);
+			return deferred.promise;
+		},
 		request(method: string, params?: unknown, fragmented = false): Promise<Reply> {
 			const id = ++nextId;
 			const deferred = Promise.withResolvers<Reply>();
@@ -66,6 +92,17 @@ const tools = [
 		},
 	},
 ];
+
+const write: McpToolDefinition = {
+	name: "write",
+	description: "Write",
+	inputSchema: {
+		type: "object",
+		properties: { text: { type: "string" } },
+		required: ["text"],
+		additionalProperties: false,
+	},
+};
 
 describe("McpBridge", () => {
 	it("rejects unknown tools and forwards argument validation to the host", async () => {
@@ -176,5 +213,71 @@ describe("McpBridge", () => {
 		await peer.closed;
 		result.resolve({ content: [{ type: "text", text: "late" }] });
 		bridge.close();
+	});
+
+	it("advertises tool list changes on initialize", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		const reply = await peer.request("initialize", { protocolVersion: "2025-06-18" });
+		expect(reply.result).toMatchObject({ capabilities: { tools: { listChanged: true } } });
+	});
+
+	it("announces the replaced tool set to the connected client", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		await peer.request("ping");
+		const changed = peer.nextNotification();
+		bridge.updateTools([...tools, write]);
+		expect(await changed).toEqual({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+		expect((await peer.request("tools/list")).result).toEqual({ tools: [...tools, write] });
+	});
+	it("lists and validates the updated tool set on the same connection", async () => {
+		const called: string[] = [];
+		const bridge = new McpBridge(tools, async name => {
+			called.push(name);
+			return { content: [] };
+		});
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
+		bridge.updateTools([...tools, write]);
+		expect((await peer.request("tools/list")).result).toEqual({ tools: [...tools, write] });
+		expect((await peer.request("tools/call", { name: "write", arguments: { text: "body" } })).result).toEqual({
+			content: [],
+		});
+		bridge.updateTools([]);
+		expect((await peer.request("tools/list")).result).toEqual({ tools: [] });
+		expect((await peer.request("tools/call", { name: "read", arguments: { path: "a" } })).error?.code).toBe(-32602);
+		expect(called).toEqual(["write"]);
+	});
+
+	it("rejects duplicate tool names on construction and update", async () => {
+		const duplicate: McpToolDefinition = { name: "read", description: "Other read", inputSchema: {} };
+		expect(() => new McpBridge([...tools, duplicate], async () => ({ content: [] }))).toThrow(
+			"Duplicate Antigravity CLI tool name",
+		);
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		expect(() => bridge.updateTools([...tools, duplicate])).toThrow("Duplicate Antigravity CLI tool name");
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
+		expect(peer.notifications).toEqual([]);
+	});
+
+	it("keeps the final tool list when updated after close", async () => {
+		const bridge = new McpBridge(tools, async () => ({ content: [] }));
+		cleanups.push(() => bridge.close());
+		const peer = await client(bridge.port);
+		expect((await peer.request("tools/list")).result).toEqual({ tools });
+		bridge.close();
+		await peer.closed;
+		// A duplicate name throws on a live bridge and a valid list replaces it, so the closed guard
+		// must skip both: the list served by tools/list stays the pre-close list.
+		const duplicate: McpToolDefinition = { name: "read", description: "Other read", inputSchema: {} };
+		bridge.updateTools([...tools, duplicate]);
+		bridge.updateTools([write]);
+		expect(bridge.tools).toEqual(tools);
 	});
 });

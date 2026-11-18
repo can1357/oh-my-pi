@@ -15,6 +15,10 @@
 - `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
 
+### Changed
+
+- The Antigravity CLI ACP bridge advertises and sends `notifications/tools/list_changed` when its tool set changes, and reusing the warm agy process instead of restarting is opt-in with `warmToolList` or `OMP_ACP_WARM_TOOL_LIST=1` until a live agy session is confirmed to re-list ([#19430](https://github.com/can1357/oh-my-pi/pull/19430) by [@SenCha930511](https://github.com/SenCha930511))
+
 ### Fixed
 
 - Fixed shutting down or cancelling an omp session making every other session sharing the agent directory see its OAuth accounts as depleted for 5 minutes; still-valid tokens are also served during shutdown ([#19607](https://github.com/can1357/oh-my-pi/issues/19607))
