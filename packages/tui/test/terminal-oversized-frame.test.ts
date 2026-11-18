@@ -56,6 +56,57 @@ describe("ProcessTerminal oversized-frame backlog (#10430)", () => {
 		setTerminalHeadless(prevHeadless);
 	});
 
+	it("forwards stream drain events and invalidates queued callbacks across stop/restart", () => {
+		const terminal = new ProcessTerminal();
+		const previousListeners = new Set(process.stdout.listeners("drain"));
+		terminal.start(
+			() => {},
+			() => {},
+			undefined,
+			{ deferInput: true },
+		);
+		try {
+			const oldDrain = process.stdout.listeners("drain").find(listener => !previousListeners.has(listener))!;
+			expect(oldDrain).toBeDefined();
+			const listener = vi.fn();
+			const unsubscribe = terminal.onOutputDrain(listener);
+			process.stdout.emit("drain");
+			expect(listener).not.toHaveBeenCalled();
+
+			Object.defineProperty(process.stdout, "writableLength", { value: 0, configurable: true });
+			process.stdout.emit("drain");
+			expect(listener).toHaveBeenCalledTimes(1);
+			unsubscribe();
+			process.stdout.emit("drain");
+			expect(listener).toHaveBeenCalledTimes(1);
+
+			const oldUnsubscribe = terminal.onOutputDrain(listener);
+			terminal.stop();
+			expect(process.stdout.listeners("drain")).not.toContain(oldDrain);
+			terminal.start(
+				() => {},
+				() => {},
+				undefined,
+				{ deferInput: true },
+			);
+			const currentListener = vi.fn();
+			terminal.onOutputDrain(currentListener);
+			oldDrain();
+			expect(currentListener).not.toHaveBeenCalled();
+			process.stdout.emit("drain");
+			expect(currentListener).toHaveBeenCalledTimes(1);
+			expect(listener).toHaveBeenCalledTimes(1);
+
+			terminal.onOutputDrain(listener);
+			oldUnsubscribe();
+			process.stdout.emit("drain");
+			expect(listener).toHaveBeenCalledTimes(2);
+		} finally {
+			terminal.stop();
+		}
+		expect(process.stdout.listeners("drain")).toEqual([...previousListeners]);
+	});
+
 	it("does not self-terminate when a single frame overflows the backlog cap", () => {
 		const terminal = new ProcessTerminal();
 		terminal.start(

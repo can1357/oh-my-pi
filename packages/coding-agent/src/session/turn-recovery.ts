@@ -21,6 +21,7 @@ import { calculateRateLimitBackoffMs, isBillingCapUsageLimit, parseRateLimitReas
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { shouldDropTruncatedThinkingOnlyAssistant } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { fallbackCreditTargets } from "@oh-my-pi/pi-catalog/compat/fallback-credit";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
@@ -118,6 +119,8 @@ const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const GENERIC_ABORT_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+/** Bounds best-effort usage-limit bookkeeping so a stalled report or sibling probe cannot hold the terminal agent_end event. */
+const USAGE_LIMIT_BOOKKEEPING_TIMEOUT_MS = 3_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
@@ -472,6 +475,12 @@ export class TurnRecovery {
 	 * with how the previous one was routed.
 	 */
 	#fallbackRoutedFor: string | undefined;
+	/**
+	 * Session whose requests leave other models' reasoning out instead of
+	 * replaying it as text, after a `reasoning_extraction` refusal of a request
+	 * that carried it. Anchored like {@link #fallbackRoutedFor}.
+	 */
+	#demotedReasoningOmittedFor: string | undefined;
 	/** Memoized bootstrap answer, for the window before anything has served. */
 	#bootstrapCache:
 		| { model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
@@ -576,6 +585,9 @@ export class TurnRecovery {
 			this.#lastServed = { ...this.#lastServed, sessionId };
 		}
 		this.#reanchorFallbackRouting(previousSessionId);
+		if (this.#demotedReasoningOmittedFor === previousSessionId) {
+			this.#demotedReasoningOmittedFor = sessionId;
+		}
 	}
 
 	#reanchorFallbackRouting(previousSessionId: string): boolean {
@@ -617,6 +629,18 @@ export class TurnRecovery {
 	/** Whether the active fallback captured request-scoped after-success restoration. */
 	hasRequestScopedRetryFallback(): boolean {
 		return this.#activeRetryFallback?.restoreAfterSuccess === true;
+	}
+
+	/**
+	 * Whether a request to `model` leaves other models' reasoning out of its
+	 * input: this session turned it off after a refusal, and `model`'s
+	 * classifier refuses reasoning replayed as text.
+	 */
+	omitsDemotedReasoning(model: Model): boolean {
+		return (
+			this.#demotedReasoningOmittedFor === this.#host.sessionManager.getSessionId() &&
+			resolveCatalogPolicy(model).classifierCotExtraction === true
+		);
 	}
 
 	/**
@@ -979,27 +1003,46 @@ export class TurnRecovery {
 			const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 			const retryAfterMs = parsedRetryAfterMs ?? calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
-				const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
-					activeModel.provider,
-					this.#host.sessionId(),
-					{
+				// This runs on the agent_end path: a stalled usage report or
+				// sibling probe must never hold the run's terminal event. Bound the
+				// bookkeeping and treat a timeout as "no usage report", so the
+				// retry policy falls back to the retry-after hint.
+				const bookkeepingTimeout = AbortSignal.timeout(USAGE_LIMIT_BOOKKEEPING_TIMEOUT_MS);
+				try {
+					const outcome = await this.#host.modelRegistry.authStorage.limits.markReached(
+						activeModel.provider,
+						this.#host.sessionId(),
+						{
+							retryAfterMs,
+							// Provider-stated timing only when the error text parsed;
+							// the 30-minute fallback is a guess.
+							providerTimed: parsedRetryAfterMs !== undefined,
+							baseUrl: activeModel.baseUrl,
+							modelId: activeModel.id,
+							signal: bookkeepingTimeout,
+						},
+					);
+					return {
+						switchedCredential: outcome.switched,
 						retryAfterMs,
-						// Provider-stated timing only when the error text parsed;
-						// the 30-minute fallback is a guess.
-						providerTimed: parsedRetryAfterMs !== undefined,
-						baseUrl: activeModel.baseUrl,
-						modelId: activeModel.id,
-					},
-				);
-				return {
-					switchedCredential: outcome.switched,
-					retryAfterMs,
-					retryAtMs: outcome.retryAtMs,
-					blockedUntilMs: outcome.blockedUntilMs,
-					priorBlockedUntilMs: outcome.priorBlockedUntilMs,
-					priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
-					reportResetAtMs: outcome.reportResetAtMs,
-				};
+						retryAtMs: outcome.retryAtMs,
+						blockedUntilMs: outcome.blockedUntilMs,
+						priorBlockedUntilMs: outcome.priorBlockedUntilMs,
+						priorBlockedUntilTimed: outcome.priorBlockedUntilTimed,
+						reportResetAtMs: outcome.reportResetAtMs,
+					};
+				} catch (error) {
+					if (!bookkeepingTimeout.aborted) throw error;
+					return {
+						switchedCredential: false,
+						retryAfterMs,
+						retryAtMs: undefined,
+						blockedUntilMs: undefined,
+						priorBlockedUntilMs: undefined,
+						priorBlockedUntilTimed: undefined,
+						reportResetAtMs: undefined,
+					};
+				}
 			})();
 			this.#usageLimitOutcomes.set(message, recorded);
 		}
@@ -2753,9 +2796,10 @@ export class TurnRecovery {
 	 * model is not worth retrying, yet a DIFFERENT model is a fresh chance, so
 	 * the chain is consulted before the error becomes final. Skips failures a
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
-	 * errors are not model faults), context overflow (compaction's job),
-	 * classifier refusals (chain consult is handled on the retryable path with
-	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+	 * errors are not model faults), context overflow the live context actually
+	 * exhibits (compaction's job), classifier refusals (chain consult is handled
+	 * on the retryable path with `pinFallback`), and turns that already emitted
+	 * replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -2778,7 +2822,11 @@ export class TurnRecovery {
 		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
 		const contextWindow = model.contextWindow ?? 0;
 		const textAmbiguousOverflow = AIError.isTextAmbiguousContextOverflow(id, message, contextWindow);
-		if (!textAmbiguousOverflow && AIError.isContextOverflow(message, contextWindow)) {
+		if (
+			!textAmbiguousOverflow &&
+			AIError.isContextOverflow(message, contextWindow) &&
+			!this.#overflowTextContradictedByFit(message, model, contextWindow)
+		) {
 			return false;
 		}
 		if (this.#hasReplayUnsafeOutput(message)) return false;
@@ -2786,6 +2834,25 @@ export class TurnRecovery {
 		return this.retryFallbackChainKeys(currentSelector).some(
 			role => this.findRetryFallbackCandidates(role, currentSelector).length > 0,
 		);
+	}
+
+	/**
+	 * An overflow known only from error text while the live context fits the
+	 * model's usable window. The provider rejected the request for another
+	 * reason (e.g. a local server's memory guard saying "prompt too large"), so
+	 * compaction cannot help but a different model can.
+	 */
+	#overflowTextContradictedByFit(message: AssistantMessage, model: Model, contextWindow: number): boolean {
+		if (contextWindow <= 0) return false;
+		if (AIError.isUsageBackedContextOverflow(message, contextWindow)) return false;
+		// Judge the text alone: a provider that attached the overflow flag itself keeps compaction.
+		const textEvidence = {
+			stopReason: message.stopReason,
+			errorMessage: message.errorMessage,
+			errorStatus: message.errorStatus,
+		};
+		if (!AIError.isContextOverflow(textEvidence)) return false;
+		return this.#host.contextFitsModel(model, message);
 	}
 
 	/**
@@ -2938,7 +3005,8 @@ export class TurnRecovery {
 		// form (account resets, retry-after-ms, legacy retry-after /
 		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
 		// can never shadow a longer retry signal carried in the same message.
-		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
+		const model = this.#host.model();
+		return extractProviderRetryHint(model?.provider, errorMessage, model?.baseUrl);
 	}
 
 	/**
@@ -3214,6 +3282,7 @@ export class TurnRecovery {
 					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
 						error: errorMessage,
 						modelId: currentModel.id,
+						baseUrl: currentModel.baseUrl,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,
 					})
@@ -3314,7 +3383,29 @@ export class TurnRecovery {
 			return maxDelayMs > 0 && waitMs > maxDelayMs && !waitForUsageReset;
 		};
 
-		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
+		// A `reasoning_extraction` refusal of a request that replayed other models'
+		// reasoning as text: resend it once on this model without that reasoning,
+		// and leave it out for the rest of the session, before walking the chain.
+		// A refusal of a request that carried none would only be refused again.
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const stripDemotedReasoning =
+			classifierRefusal &&
+			!retryBudgetExhausted &&
+			message.stopDetails?.category === "reasoning_extraction" &&
+			(message.demotedReasoningBlocks ?? 0) > 0 &&
+			currentModel !== undefined &&
+			resolveCatalogPolicy(currentModel).classifierCotExtraction === true &&
+			this.#demotedReasoningOmittedFor !== sessionId;
+		if (stripDemotedReasoning) {
+			this.#demotedReasoningOmittedFor = sessionId;
+			delayMs = 0;
+			logger.info("Classifier refused other models' reasoning replayed as text; retrying without it", {
+				model: `${currentModel.provider}/${currentModel.id}`,
+				demotedReasoningBlocks: message.demotedReasoningBlocks,
+			});
+		}
+
+		if (!staleOpenAIResponsesReplayError && !switchedCredential && !stripDemotedReasoning && currentSelector) {
 			// Classifier-refusal walks visit each model at most once instead
 			// of using the same-model retry budget as their bound.
 			const refusalWalkKey = this.#refusalWalkKey(currentSelector);
@@ -3410,7 +3501,12 @@ export class TurnRecovery {
 				this.#genericAbortStreak = 0;
 			}
 		}
-		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
+		if (
+			(classifierRefusal || accountPolicyDenial) &&
+			!switchedCredential &&
+			!switchedModel &&
+			!stripDemotedReasoning
+		) {
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
@@ -3764,6 +3860,8 @@ export class TurnRecovery {
 	 * A restored session deliberately omits failed assistant turns from provider
 	 * context. In that case, the persisted display transcript remains the source
 	 * of truth for whether the current branch has a retryable failed tail.
+	 * `prunedTerminalFailure` retains a live failure omitted from both histories;
+	 * its context is already ready for continuation and must not be stripped again.
 	 *
 	 * When the failure is a fully failed/aborted tool batch with complete
 	 * arguments (see {@link toolReplayStart}), the retry strips the failed
@@ -3774,11 +3872,11 @@ export class TurnRecovery {
 	 *
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
-	async retry(): Promise<boolean> {
+	async retry(prunedTerminalFailure?: AssistantMessage): Promise<boolean> {
 		if (this.#host.isStreaming() || this.#host.isCompacting() || this.isRetrying) return false;
 
 		const messages = this.#host.agent.state.messages;
-		const activeTurnEnd = retryableAssistantTurnEnd(messages);
+		const activeTurnEnd = prunedTerminalFailure ? undefined : retryableAssistantTurnEnd(messages);
 		if (activeTurnEnd !== undefined) {
 			const replayStart = toolReplayStart(messages);
 			if (replayStart !== undefined) {
@@ -3792,7 +3890,7 @@ export class TurnRecovery {
 					...messages.slice(conversationEnd(messages)),
 				]);
 			}
-		} else {
+		} else if (!prunedTerminalFailure) {
 			// A restored session already dropped the failed assistant turn (and its
 			// paired synthetic tool results) from provider context, so the persisted
 			// display transcript is the source of truth for a retryable failed tail.

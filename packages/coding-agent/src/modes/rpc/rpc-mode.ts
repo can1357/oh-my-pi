@@ -2157,7 +2157,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					inputGate.commitSessionChange(command);
 					// `branch` leaves a live run streaming to its normal yield; new/switch detach it.
 					if (command.type !== "branch" && command.type !== "fork") promptResults.abortOpen();
-					// The detached run publishes no terminal agent_end to settle on.
+					// The detached run publishes no agent_end to settle on.
 					void settleWatcher.check();
 					await emitAvailableCommandsUpdate();
 				}
@@ -2274,7 +2274,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					queuedMessageCount: session.queuedMessageCount,
-					hasPendingAsyncWork: session.hasPendingAsyncWork(),
+					hasPendingAsyncWork: session.wakeSources !== undefined,
 					// A scheduled goal continuation will start a turn: not settled.
 					isSettled: isSessionSettled(session, goalTurnScheduled),
 					queuedMessages: {
@@ -2769,6 +2769,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// Track whether onAuth has fired. Providers that require interactive
 				// input before a browser URL cannot be satisfied headlessly; after
 				// onAuth, prompt input is the pasted OAuth code/redirect URL path.
+				// The login-warning acceptance is the exception: a plain yes/no the host can show.
 				let authEmitted = false;
 				try {
 					await session.modelRegistry.authStorage.oauth.login(command.providerId, {
@@ -2793,7 +2794,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 										"which is not supported in RPC mode. Use the terminal UI to log in.",
 								);
 							}
-							if (!authEmitted) {
+							if (!authEmitted && !prompt.riskAcknowledgement) {
 								// onPrompt called before any auth URL — provider requires
 								// interactive input that cannot be satisfied headlessly.
 								return Promise.reject(

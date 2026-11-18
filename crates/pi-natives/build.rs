@@ -28,6 +28,13 @@ fn main() {
 	napi_build::setup();
 	build_syntax_set();
 	build_oauth_callback_helper();
+	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+		// Bind references to the addon's own exports (src/bundled_libc.rs, the
+		// wasm C API) within it. Bazel builds hide those exports instead
+		// (BUILD.bazel's :exports_map), which a cargo link cannot: GNU ld
+		// rejects a second anonymous version script beside rustc's.
+		println!("cargo:rustc-cdylib-link-arg=-Wl,-Bsymbolic");
+	}
 	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
 		// Without an explicit install name, ld64 records cargo's build-dir path,
 		// which varies per build (and per Nix sandbox).

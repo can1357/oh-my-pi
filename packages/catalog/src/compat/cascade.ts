@@ -78,6 +78,12 @@ interface IndexedRule {
 	dimensions: number;
 	hasExactEffortsRule: boolean;
 	order: number;
+	/** `exact` model selector values, compared with the raw model id. */
+	exactModels?: ReadonlySet<string>;
+	/** `glob` and `token` model selectors, compared with the lowercased id. */
+	patternModels?: readonly CompiledSelector[];
+	/** This rule ranked at model-selector exactness 0, 1 and 2; shared by every target. */
+	ranked: readonly RankedRule[];
 }
 
 interface RuleIndex {
@@ -85,13 +91,21 @@ interface RuleIndex {
 	byClass: Map<string, IndexedRule[]>;
 	byProvider: Map<string, IndexedRule[]>;
 	byClassProvider: Map<string, Map<string, IndexedRule[]>>;
+	/**
+	 * Rules passing every selector except `models`, in rule order, per identity
+	 * key (every target fact except the model id). Lives on the index, so a new
+	 * rule set starts with an empty memo.
+	 */
+	plans?: LRUCache<string, readonly IndexedRule[]>;
 }
 
 interface PreparedTarget {
 	target: ResolveTarget;
-	revision: Revision | undefined;
+	/** Parsed `target.revision`; `null` when absent or unparsable. Computed on first use. */
+	revision?: Revision | null;
 	modelLower: string;
-	modelTokens: readonly string[];
+	/** Computed on first use; only `token` selectors read it. */
+	modelTokens?: readonly string[];
 }
 
 interface RankedRule {
@@ -100,6 +114,8 @@ interface RankedRule {
 }
 
 let ruleIndex: RuleIndex | undefined;
+/** Nesting depth of {@link bypassCascadeMemoForTesting}. */
+let cascadeMemoBypassDepth = 0;
 
 function appendRule(map: Map<string, IndexedRule[]>, key: string, rule: IndexedRule): void {
 	const bucket = map.get(key);
@@ -121,21 +137,38 @@ function buildRuleIndex(cascade: CompiledCascade): RuleIndex {
 			if (!parsed) throw new Error(`invalid compiled revision term in ${compiled.source}`);
 			return { op: term.op, revision: parsed } satisfies RevisionTerm;
 		});
+		const priority = compiled.priority ?? 0;
+		const dimensions =
+			Number(compiled.class !== undefined) +
+			Number(compiled.providers !== undefined) +
+			Number(compiled.apis !== undefined) +
+			Number(compiled.upstreams !== undefined) +
+			Number(compiled.family !== undefined) +
+			Number(compiled.revision !== undefined) +
+			Number(compiled.models !== undefined);
+		const ranked: RankedRule[] = [];
 		const rule: IndexedRule = {
 			compiled,
 			revision,
-			priority: compiled.priority ?? 0,
-			dimensions:
-				Number(compiled.class !== undefined) +
-				Number(compiled.providers !== undefined) +
-				Number(compiled.apis !== undefined) +
-				Number(compiled.upstreams !== undefined) +
-				Number(compiled.family !== undefined) +
-				Number(compiled.revision !== undefined) +
-				Number(compiled.models !== undefined),
+			priority,
+			dimensions,
 			hasExactEffortsRule: compiled.thinking !== undefined && "efforts" in compiled.thinking,
 			order,
+			ranked,
 		};
+		for (let exactness = 0; exactness <= 2; exactness++) {
+			ranked.push({ rule, rank: [exactness, dimensions, priority] });
+		}
+		if (compiled.models !== undefined) {
+			const exact = new Set<string>();
+			const patterns: CompiledSelector[] = [];
+			for (const selector of compiled.models) {
+				if (selector.kind === "exact") exact.add(selector.value);
+				else patterns.push(selector);
+			}
+			if (exact.size > 0) rule.exactModels = exact;
+			if (patterns.length > 0) rule.patternModels = patterns;
+		}
 		if (compiled.class === undefined) {
 			if (compiled.providers === undefined) {
 				index.globals.push(rule);
@@ -163,8 +196,8 @@ function getRuleIndex(): RuleIndex {
 	return ruleIndex;
 }
 
-function rankRelevantRules(index: RuleIndex, prepared: PreparedTarget): RankedRule[] {
-	const { target } = prepared;
+/** Rules bucketed under the target's class and provider, merged back into rule order. */
+function relevantRules(index: RuleIndex, target: ResolveTarget): IndexedRule[] {
 	const buckets = [
 		index.globals,
 		index.byClass.get(target.class),
@@ -172,7 +205,7 @@ function rankRelevantRules(index: RuleIndex, prepared: PreparedTarget): RankedRu
 		index.byClassProvider.get(target.class)?.get(target.provider),
 	];
 	const positions = [0, 0, 0, 0];
-	const ranked: RankedRule[] = [];
+	const relevant: IndexedRule[] = [];
 	while (true) {
 		let nextBucket = -1;
 		let nextOrder = Number.POSITIVE_INFINITY;
@@ -183,21 +216,75 @@ function rankRelevantRules(index: RuleIndex, prepared: PreparedTarget): RankedRu
 				nextOrder = candidate.order;
 			}
 		}
-		if (nextBucket < 0) return ranked;
-		const rule = buckets[nextBucket]![positions[nextBucket]++];
-		const rank = rankRule(rule, prepared);
-		if (rank) ranked.push({ rule, rank });
+		if (nextBucket < 0) return relevant;
+		relevant.push(buckets[nextBucket]![positions[nextBucket]++]);
 	}
 }
 
+/** Ranks every relevant rule against the target from scratch: the unmemoized reference path. */
+function rankRelevantRules(index: RuleIndex, prepared: PreparedTarget): RankedRule[] {
+	const ranked: RankedRule[] = [];
+	for (const rule of relevantRules(index, prepared.target)) {
+		const rank = rankRule(rule, prepared);
+		if (rank) ranked.push({ rule, rank });
+	}
+	return ranked;
+}
+
+/**
+ * Distinct identity keys held per rule set. A catalog-wide pass sees a few
+ * thousand (provider, api, class, family, revision) combinations at most;
+ * each entry is an array of shared rule references.
+ */
+const IDENTITY_PLANS_MAX = 4096;
+
+/** Every target fact a rule's non-model selectors (and its bucket) can read. */
+function identityKey(target: ResolveTarget): string {
+	return (
+		keyPart(target.provider) +
+		keyPart(target.api) +
+		keyPart(target.upstream) +
+		keyPart(target.class) +
+		keyPart(target.family) +
+		keyPart(target.revision)
+	);
+}
+
+/**
+ * Same ranking as {@link rankRelevantRules}, with the identity selectors
+ * evaluated once per identity key: thousands of one provider's models sharing
+ * an identity only match `models` selectors per target.
+ */
+function rankPlannedRules(index: RuleIndex, prepared: PreparedTarget): RankedRule[] {
+	const plans = (index.plans ??= new LRUCache<string, readonly IndexedRule[]>({ max: IDENTITY_PLANS_MAX }));
+	const key = identityKey(prepared.target);
+	let plan = plans.get(key);
+	if (plan === undefined) {
+		const matched: IndexedRule[] = [];
+		for (const rule of relevantRules(index, prepared.target)) {
+			if (identityMatches(rule, prepared)) matched.push(rule);
+		}
+		plan = matched;
+		plans.set(key, plan);
+	}
+	const ranked: RankedRule[] = [];
+	for (const rule of plan) {
+		const exactness = modelExactness(rule, prepared);
+		if (exactness >= 0) ranked.push(rule.ranked[exactness]);
+	}
+	return ranked;
+}
+
 function prepareTarget(target: ResolveTarget): PreparedTarget {
-	const modelLower = target.model.toLowerCase();
-	return {
-		target,
-		revision: target.revision === undefined ? undefined : parseRevision(target.revision),
-		modelLower,
-		modelTokens: modelLower.split(/[^a-z0-9]+/),
-	};
+	return { target, modelLower: target.model.toLowerCase() };
+}
+
+function targetRevision(prepared: PreparedTarget): Revision | null {
+	if (prepared.revision !== undefined) return prepared.revision;
+	const { revision } = prepared.target;
+	const parsed = (revision === undefined ? undefined : parseRevision(revision)) ?? null;
+	prepared.revision = parsed;
+	return parsed;
 }
 
 function selectorMatches(selector: CompiledSelector, target: PreparedTarget): boolean {
@@ -207,24 +294,44 @@ function selectorMatches(selector: CompiledSelector, target: PreparedTarget): bo
 		case "glob":
 			return globMatch(selector.value, target.modelLower);
 		case "token":
-			return target.modelTokens.includes(selector.value);
+			return (target.modelTokens ??= target.modelLower.split(/[^a-z0-9]+/)).includes(selector.value);
 	}
+}
+
+/** Whether every selector except `models` admits the target. */
+function identityMatches(rule: IndexedRule, prepared: PreparedTarget): boolean {
+	const { compiled } = rule;
+	const { target } = prepared;
+	if (compiled.apis !== undefined && !compiled.apis.includes(target.api)) return false;
+	if (
+		compiled.upstreams !== undefined &&
+		(target.upstream === undefined || !compiled.upstreams.includes(target.upstream))
+	)
+		return false;
+	if (compiled.family !== undefined && compiled.family !== target.family) return false;
+	if (rule.revision !== undefined) {
+		const revision = targetRevision(prepared);
+		if (!revision || !revisionSatisfies(revision, rule.revision)) return false;
+	}
+	return true;
+}
+
+/** Best `models` selector match: 2 exact, 1 glob or token, 0 without selectors, -1 when none matches. */
+function modelExactness(rule: IndexedRule, prepared: PreparedTarget): number {
+	if (rule.compiled.models === undefined) return 0;
+	if (rule.exactModels?.has(prepared.target.model)) return 2;
+	if (rule.patternModels) {
+		for (const selector of rule.patternModels) {
+			if (selectorMatches(selector, prepared)) return 1;
+		}
+	}
+	return -1;
 }
 
 /** `(exactness, dimensions, priority)` when the rule matches, else undefined. */
 function rankRule(rule: IndexedRule, prepared: PreparedTarget): readonly [number, number, number] | undefined {
 	const { compiled } = rule;
-	const { target } = prepared;
-	if (compiled.apis !== undefined && !compiled.apis.includes(target.api)) return undefined;
-	if (
-		compiled.upstreams !== undefined &&
-		(target.upstream === undefined || !compiled.upstreams.includes(target.upstream))
-	)
-		return undefined;
-	if (compiled.family !== undefined && compiled.family !== target.family) return undefined;
-	if (rule.revision !== undefined && (!prepared.revision || !revisionSatisfies(prepared.revision, rule.revision))) {
-		return undefined;
-	}
+	if (!identityMatches(rule, prepared)) return undefined;
 	let exactness = 0;
 	if (compiled.models !== undefined) {
 		let best = -1;
@@ -341,6 +448,9 @@ function cloneAxes(axes: ResolvedAxes): ResolvedAxes {
  * @throws AmbiguousOverlapError when equal-rank rules contest one axis.
  */
 export function resolveCascade(target: ResolveTarget): ResolvedAxes {
+	if (cascadeMemoBypassDepth > 0) {
+		return cloneAxes(resolveRanked(target, rankRelevantRules(getRuleIndex(), prepareTarget(target))));
+	}
 	const key = targetKey(target);
 	const cached = resolveCache.get(key);
 	if (cached) {
@@ -348,9 +458,23 @@ export function resolveCascade(target: ResolveTarget): ResolvedAxes {
 		// canonical graph must never escape to those consumers.
 		return cloneAxes(cached);
 	}
-	const resolved = resolveOverIndex(getRuleIndex(), target);
+	const resolved = resolveRanked(target, rankPlannedRules(getRuleIndex(), prepareTarget(target)));
 	resolveCache.set(key, resolved);
 	return cloneAxes(resolved);
+}
+
+/**
+ * Runs `fn` with every bundled-rule lookup ranked from scratch, skipping the
+ * per-target and per-identity memos: the reference that memoized resolution
+ * must equal by value. For tests.
+ */
+export function bypassCascadeMemoForTesting<T>(fn: () => T): T {
+	cascadeMemoBypassDepth++;
+	try {
+		return fn();
+	} finally {
+		cascadeMemoBypassDepth--;
+	}
 }
 
 /**
@@ -358,7 +482,7 @@ export function resolveCascade(target: ResolveTarget): ResolvedAxes {
  * mutable rule data. Bundled target lookups use {@link resolveCascade}.
  */
 export function resolveCascadeRules(cascade: CompiledCascade, target: ResolveTarget): ResolvedAxes {
-	return cloneAxes(resolveOverIndex(buildRuleIndex(cascade), target));
+	return cloneAxes(resolveRanked(target, rankRelevantRules(buildRuleIndex(cascade), prepareTarget(target))));
 }
 
 /**
@@ -372,7 +496,12 @@ export function resolveCascadeRules(cascade: CompiledCascade, target: ResolveTar
  */
 export function hasModelScopedEffortsRule(target: ResolveTarget): boolean {
 	const winners: WinnerTable = {};
-	for (const { rule, rank } of rankRelevantRules(getRuleIndex(), prepareTarget(target))) {
+	const prepared = prepareTarget(target);
+	const ranked =
+		cascadeMemoBypassDepth > 0
+			? rankRelevantRules(getRuleIndex(), prepared)
+			: rankPlannedRules(getRuleIndex(), prepared);
+	for (const { rule, rank } of ranked) {
 		contest(winners, rule.compiled.thinking, rank, rule, target);
 	}
 	const winner = winners.efforts?.rule.compiled;
@@ -385,8 +514,8 @@ export function hasModelScopedEffortsRule(target: ResolveTarget): boolean {
 	);
 }
 
-function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes {
-	const ranked = rankRelevantRules(index, prepareTarget(target));
+/** Contest the target's ranked rules (in rule order) per axis. */
+function resolveRanked(target: ResolveTarget, ranked: readonly RankedRule[]): ResolvedAxes {
 	let reasoning = target.reasoning === true;
 	if (!reasoning) {
 		const upgrade: WinnerTable = {};

@@ -1,7 +1,7 @@
 import { colorLuma, relativeLuminance } from "@oh-my-pi/pi-utils/color";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
+import { bgAnsi, colorToAnsi, fgAnsi, isLightLuma, resolveToHex } from "./color";
 import {
 	ANSI_COLOR_INDEX,
 	type AnsiColor,
@@ -187,6 +187,10 @@ export class Theme {
 	readonly #hexBgColors: Record<ThemeBg, string>;
 	/** Foreground SGR per `terminal.ansi` index; slots the theme omits use the terminal's palette. */
 	readonly #ansiFgColors: readonly string[];
+	/** Hex per `terminal.ansi` index the theme declares; undefined where it leaves the slot to the terminal. */
+	readonly #ansiHexes: readonly (string | undefined)[];
+	/** Hex of the background the theme was made for (`terminal.background`, else `statusLineBg`). */
+	readonly surfaceHex: string;
 	/** Lazily resolved `fgResolved` ANSI per color; colors and mode are fixed per instance. */
 	readonly #resolvedFgColors = new Map<ThemeColor, string>();
 	/** Lazily built, frozen `sessionAccentInputs`; every input it reads is fixed per instance. */
@@ -211,10 +215,11 @@ export class Theme {
 		symbolOverrides: Partial<Record<SymbolKey, string>>,
 		spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>> = {},
 		ansiPalette: ReadonlyArray<string | number> = [],
+		terminalBackground?: string | number,
 	) {
 		this.statusLineLuminance = colorLuma(bgColors.statusLineBg);
 		this.#statusLineContrastLuminance = relativeLuminance(bgColors.statusLineBg);
-		const slIsLight = this.statusLineLuminance !== undefined && this.statusLineLuminance > 0.5;
+		const slIsLight = isLightLuma(this.statusLineLuminance);
 
 		this.#fgColors = {} as Record<ThemeColor, string>;
 		this.#hexFgColors = {} as Record<ThemeColor, string>;
@@ -234,12 +239,20 @@ export class Theme {
 			this.#hexFgColors[key] ??= "";
 		}
 		this.#ansiFgColors = Array.from({ length: 16 }, (_, index) => fgAnsi(ansiPalette[index] ?? index, mode));
+		this.#ansiHexes = Array.from({ length: 16 }, (_, index) => {
+			const value = ansiPalette[index];
+			return value === undefined || value === "" ? undefined : resolveToHex(value, slIsLight);
+		});
 		this.#bgColors = {} as Record<ThemeBg, string>;
 		this.#hexBgColors = {} as Record<ThemeBg, string>;
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
 			this.#bgColors[key] = bgAnsi(value, mode);
 			this.#hexBgColors[key] = resolveToHex(value, slIsLight);
 		}
+		this.surfaceHex =
+			terminalBackground !== undefined && terminalBackground !== ""
+				? resolveToHex(terminalBackground, slIsLight)
+				: this.getBgHex("statusLineBg");
 		// Build symbol map from preset + overrides
 		const baseSymbols = SYMBOL_PRESETS[symbolPreset];
 		this.#symbols = { ...baseSymbols };
@@ -257,7 +270,7 @@ export class Theme {
 
 	/** True when the active theme has a light status-line background. */
 	get isLight(): boolean {
-		return this.statusLineLuminance !== undefined && this.statusLineLuminance > 0.5;
+		return isLightLuma(this.statusLineLuminance);
 	}
 
 	/**
@@ -283,6 +296,11 @@ export class Theme {
 		const hex = this.#hexBgColors[color];
 		if (hex === undefined) throw new Error(`Unknown theme background color: ${color}`);
 		return hex || (this.isLight ? "#ffffff" : "#000000");
+	}
+
+	/** Hex of slot `color` of the theme's `terminal.ansi` palette, or undefined when the theme leaves it to the terminal. */
+	getAnsiHex(color: AnsiColor): string | undefined {
+		return this.#ansiHexes[ANSI_COLOR_INDEX[color]];
 	}
 
 	/**
@@ -357,7 +375,8 @@ export class Theme {
 	/**
 	 * True when the theme paints `color` with a real foreground — i.e. the token
 	 * exists and is not the empty string (terminal default, `\x1b[39m`). Optional
-	 * tokens absent from the theme JSON are also false. Callers use this to keep
+	 * tokens absent from the theme JSON are also false, except `mdExtensionLink`, which
+	 * `createTheme` derives from `mdLink` and `text`. Callers use this to keep
 	 * terminal-default behavior byte-for-byte when an optional token is unset.
 	 */
 	hasColor(color: ThemeColor): boolean {

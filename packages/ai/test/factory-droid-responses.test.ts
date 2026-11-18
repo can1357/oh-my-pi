@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { streamFactoryDroid } from "../src/providers/factory-droid";
-import type { Context, Tool, ToolResultMessage } from "../src/types";
+import type { Context, ProviderSessionState, Tool, ToolResultMessage } from "../src/types";
 import { type CapturedRequest, captureFetch, factoryModel, responsesChunks, workosJwt } from "./helpers/factory-droid";
 
 /**
@@ -79,6 +79,40 @@ describe("Factory Droid responses wire", () => {
 		expect(request.body.reasoning).toEqual({ effort: "none" });
 		expect(request.body.include).toBeUndefined();
 	});
+
+	it.each([
+		["gpt-6-luna", "openai", true],
+		["gpt-6-luna", "bedrock_openai", false],
+		["gpt-6-astra", "snowflake", false],
+	] as const)(
+		"%s via %s carries a mid-session effort change as configuration_update: %p",
+		async (id, upstream, carried) => {
+			const model = factoryModel(id, [upstream]);
+			const ctx: Context = context();
+			const states = new Map<string, ProviderSessionState>();
+			const captured: CapturedRequest[] = [];
+			const turn = (reasoning: Effort) =>
+				streamFactoryDroid(model, ctx, {
+					apiKey: WORKOS_TOKEN_WITH_USER,
+					fetch: captureFetch(captured, responsesChunks("GPT_OK")),
+					sessionId: "sess-1",
+					providerSessionState: states,
+					reasoning,
+				}).result();
+			ctx.messages.push(await turn(Effort.Low), { role: "user", content: "again", timestamp: 2 });
+			await turn(Effort.High);
+
+			const second = captured[1].body;
+			const items = (second.input as Record<string, unknown>[]).filter(item => item.type === "configuration_update");
+			if (carried) {
+				expect(second.reasoning).toMatchObject({ effort: "low" });
+				expect(items).toEqual([{ type: "configuration_update", reasoning: { effort: "high" } }]);
+			} else {
+				expect(second.reasoning).toMatchObject({ effort: "high" });
+				expect(items).toEqual([]);
+			}
+		},
+	);
 });
 
 /** A Responses turn that reasons (with encrypted content) and then calls Read. */

@@ -235,17 +235,22 @@ const unsubscribe = session.subscribe(event => {
 - `config_warnings_changed`
 - `advisor_cost_changed` / `advisor_yielded`
 
-`agent_end` includes `messages`, optional telemetry fields, and
-`isTerminal?: boolean`. When `isTerminal` is `false`, maintenance or async
-delivery will resume the session before its true final settle. Subscribers that
-use `agent_end` as a completion signal MUST wait for `isTerminal !== false`.
-Treat an absent field as terminal for compatibility with older runtimes.
+`agent_end` includes `messages` and optional telemetry fields. It fires exactly
+once per run, when the run is over: nothing is streaming, no continuation is
+scheduled, and no background job, child agent or queued message can resume it.
+A model loop that stops while the run goes on emits `agent_pause` instead
+(`messages`, `yielded`, `awaiting`): `yielded: false` means the session
+continues the model's own work (retry, compaction continuation, stop-time
+reminder); `yielded: true` means the agent finished its turn and the run waits
+on queued input, a peer message, a background job or a child agent, with
+`awaiting: true` when only that outside work can resume it. Use
+`session.isRunActive`, `session.wakeSources` and `session.waitForRunEnd()` to
+inspect or await the run.
 
-`yielded?: boolean` distinguishes an agent that finished its work from one
-continuing through retry, compaction, or stop-time reminders.
-`awaitingAsyncWork?: boolean` marks a non-terminal end whose only possible wake
-is a background-job result; that wake is not guaranteed if the job is cancelled
-or its delivery is suppressed.
+The RPC and JSON print streams, the collab wire and the extension `agent_end`
+keep their per-loop shape: every stopped loop is an `agent_end`, with
+`isTerminal: false` (RPC/JSON/collab) or `willContinue: true` (extensions) while
+the run goes on.
 
 ## Prompt lifecycle
 

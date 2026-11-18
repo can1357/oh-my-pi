@@ -241,7 +241,7 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		let onEvent: ((event: LiveServerEvent) => void) | undefined;
 		// bun's spyOn types a class export's implementation as `never`; the controller only needs
 		// a constructible stand-in, so a plain function (not an arrow: it is called with `new`) suffices.
-		const transportSpy = vi.spyOn(liveTransport, "CodexLiveTransport") as unknown as {
+		const transportSpy = vi.spyOn(liveTransport, "LiveTransport") as unknown as {
 			mockImplementation(implementation: (options: LiveTransportOptions) => object): void;
 		};
 		transportSpy.mockImplementation(function (options: LiveTransportOptions) {
@@ -258,6 +258,7 @@ describe("LiveSessionController with a caller-owned peer", () => {
 		const phases: string[] = [];
 		const agentSession = {
 			modelRegistry: { authStorage: {} },
+			settings: Settings.isolated(),
 			sessionId: "s1",
 			subscribe: () => () => {},
 			sendCustomMessage: async (message: { content: string }) => {

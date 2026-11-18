@@ -2,18 +2,99 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
+### Added
+
+- Added the native Kiro provider: sign in with AWS IAM Identity Center, AWS Builder ID, Google, GitHub, or a Kiro API key (`KIRO_API_KEY`), stream responses with reasoning, tool calls, and images, and report Kiro credits in `/usage` ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Added a `definitive` option to `OAuthError`; `isDefinitiveOAuthFailure` now takes the error object and disables a credential marked definitive without matching its message ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+- `buildAnthropicSearchHeaders` takes `extraBetas`, request-specific betas sent beside the web search beta ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `omitDemotedReasoning` to `StreamOptions`: an Anthropic request leaves out other models' reasoning that it would otherwise replay as text, and a refused request reports how many such blocks it carried in `demotedReasoningBlocks` ([#10407](https://github.com/can1357/oh-my-pi/issues/10407)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Added support for request-specific Anthropic beta headers through the `extraBetas` option in `buildAnthropicSearchHeaders`.
+- Added `omitDemotedReasoning` to `StreamOptions`, allowing Anthropic requests to omit other models' reasoning that would otherwise be replayed as text; refused requests report the omitted block count in `demotedReasoningBlocks`.
+- Usage reports can now include the credential ID used by API-key or OAuth credentials, and `AuthStorage.sessions.sticky` provides a read-only lookup for the credential serving a session.
+- Added `riskAcknowledgement` to `OAuthPrompt`, allowing hosts to display login-warning acceptance text even when they decline input before the authorization URL is shown.
+- `remoteCompaction: { api: "anthropic-messages", enabled: true }` opts an Anthropic model at a gateway `baseUrl` outside the known deployments into on-demand compaction; `enabled` alone keeps such a gateway excluded, and a reroute away from the configured endpoint still has to reach a known deployment. `isBuiltinApi()` tells a built-in request adapter from an extension's custom api ([#19580](https://github.com/can1357/oh-my-pi/pull/19580) by [@ryanskidmore](https://github.com/ryanskidmore))
+
 ### Changed
 
-- Changed Vertex AI Gemini requests to the `v1beta1` API (the Google Gen AI SDK's default), the only version where Vertex resumes long Gemini 4 answers ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
+- OpenAI Codex requests now track the latest compatible `@openai/codex` client version automatically, with an optional `PI_AI_CODEX_CLIENT_VERSION` override, so newly available Codex models can be used without updating omp.
+- Updated OpenAI Codex request formatting and ChatGPT token-refresh reporting to match Codex CLI 0.169.
+- Updated Claude Code and Gemini CLI client version identifiers to 2.1.326 and 0.68.0, respectively.
 
 ### Fixed
 
-- Fixed Gemini 4 (Argon, Carbon and Hydrogen) answers longer than one 65,536-token output segment failing with finish reason `CONTINUATION`: Google, Vertex AI, Gemini CLI and Antigravity requests now resume the generation, retrying transient failures, and stream it as one reply ([#19081](https://github.com/can1357/oh-my-pi/pull/19081) by [@eggpeat](https://github.com/eggpeat))
-- Fixed Cursor models receiving context a hook appends after the prompt (such as claude-mem's memory) as the user's message, with the real prompt moved into history; the prompt stays the run's message, and the turn's server records replay on the next turn ([#19156](https://github.com/can1357/oh-my-pi/pull/19156) by [@anzhen-tech](https://github.com/anzhen-tech))
-- Fixed a Google Antigravity Gemini 4 Argon block never healing when the quota summary reports no Argon bucket (for example after a plan change): a fresh usage report now lifts it while the shared Gemini quota has headroom, instead of leaving the account unusable for Argon until the old weekly reset ([#19123](https://github.com/can1357/oh-my-pi/pull/19123) by [@wolfiesch](https://github.com/wolfiesch))
-- Fixed a corrupt AWS event-stream frame length (Amazon Bedrock) making the decoder wait for and buffer the bogus length instead of failing the stream ([#19031](https://github.com/can1357/oh-my-pi/pull/19031) by [@Xytronix](https://github.com/Xytronix))
-- Fixed Claude accounts staying blocked after recovery when `/usage` reports only one shared usage window ([#19090](https://github.com/can1357/oh-my-pi/pull/19090) by [@jeffscottward](https://github.com/jeffscottward))
-- Fixed Kimi and DeepSeek on OpenRouter writing "reasoning unavailable" as their own reasoning after a model switch: earlier turns now replay the previous model's thinking instead of that placeholder.
+- OAuth accounts refreshed through an auth broker keep their stored routing metadata (such as an API endpoint) in the key built for the request, instead of losing it after the first refresh ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Fenced (```thinking) reasoning with very long unbroken lines no longer slows down as it streams ([#19493](https://github.com/can1357/oh-my-pi/pull/19493) by [@H4vC](https://github.com/H4vC))
+- Fixed Anthropic requests that replay a signed server-compaction block still asking for a message thread, which the API refuses (`thread_unsupported_request`), so every such request first paid a rejected round trip before resending without the thread ([#19473](https://github.com/can1357/oh-my-pi/pull/19473) by [@alphastorm](https://github.com/alphastorm))
+- Anthropic requests whose connection drops before any response now say how long after the request started it dropped and whether the request body was still uploading or had all been written to the socket, with its size, instead of a bare "Connection error." ([#18624](https://github.com/can1357/oh-my-pi/pull/18624) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic requests dropping the reasoning of earlier non-Claude turns signed in under another credential, or kept through a compaction; it is now replayed like other models' reasoning ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed OpenAI Decisions usage accounting for gateways that report `prompt_tokens` and `completion_tokens` instead of `input_tokens` and `output_tokens`.
+- Improved streaming performance for fenced thinking content containing very long unbroken lines.
+- Fixed Anthropic requests replaying signed server-compaction blocks with unsupported thread metadata, avoiding a rejected request before retrying.
+- Improved diagnostics for Anthropic connections that drop before a response by reporting elapsed time, upload state, and request size.
+- Fixed Anthropic conversations losing reasoning from earlier non-Claude turns or turns retained through compaction.
+- Fixed credential rotation and retry timing for custom providers using the Zhipu Coding Plan endpoint so Beijing-time quota resets are honored.
+- Fixed Claude Fable and Mythos usage-limit errors so rotation selects a sibling account with available quota when possible.
+- Invalid Antigravity CLI tool arguments now return validation errors and the expected schema to the model instead of ending the turn.
+- Abandoned Antigravity CLI login directories without credentials are automatically cleaned up after 24 hours.
+- Improved reliability of managed Antigravity CLI downloads on slow connections and provided more useful progress and timeout errors.
+- Fixed Antigravity CLI host tools with mixed-type union schemas being published incorrectly, allowing subagents to submit results.
+- Fixed Codex assistant messages in the `partial_answer` phase losing their phase when stored and replayed.
+
+## [18.22.0] - 2026-11-16
+
+### Fixed
+
+- Fixed slow streaming of Gemma tool calls with large arguments.
+
+## [18.21.0] - 2026-11-16
+
+### Added
+
+- Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+
+## [18.20.3] - 2026-11-16
+
+### Breaking Changes
+
+- Removed the public `isXdDevicePath` export from `providers/cursor-pi-args`. Ranged reads of `xd://` documents now use the standard line-selector behavior.
+
+### Fixed
+
+- Fixed rate-limit handling for Mistral and other OpenAI-compatible providers so requests with no available allowance fail immediately with an actionable error suggesting a model or plan change.
+- Fixed Anthropic OAuth requests for pooled Claude accounts to report accurate device and account information, including after credentials are rotated during a request.
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added the Antigravity CLI ACP provider with managed installation, Google sign-in, refreshable distributed credentials, host tools, and retained conversations across tool steps and history changes.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
+- Added `setUnpausedProviders()` to `@oh-my-pi/pi-ai/oauth`, allowing applications to re-enable providers paused by authentication rules; loaded credential pools and extension logins recognize the change on their next read.
+
+### Changed
+
+- Updated Vertex AI Gemini requests to use the v1beta1 API, restoring support for long Gemini responses.
+- Improved Google Antigravity quota recovery so Gemini 4 Argon access can resume after quota or plan changes when shared Gemini capacity is available.
+- Improved Amazon Bedrock region selection to honor a configured regional endpoint before falling back to `us-east-1`.
+
+### Fixed
+
+- Fixed Gemini 4 responses that exceed a single output segment across Google, Vertex AI, Gemini CLI, and Antigravity, ensuring long responses continue generating and are delivered as one complete reply.
+- Fixed Cursor conversations so hook-added prompt content remains in the current user message and conversation context is correctly preserved across turns.
+- Fixed Amazon Bedrock streaming so malformed responses fail promptly and interrupted responses are retried rather than treated as complete.
+- Fixed Claude account recovery when usage reports contain only one shared usage window.
+- Fixed OpenRouter conversations with Kimi and DeepSeek so reasoning context is preserved when switching models.
+- Fixed Xiaomi MiMo Token Plan authentication to use the correct regional endpoint, including for models loaded from bundled or cached configuration.
+- Fixed Perplexity sign-in in the login flow and setup wizard, including email-code and browser-based SSO authentication.
+- Stopped native judges from retrying gateway errors caused by exhausted upstream credentials while retaining retries for other transient 502 errors.
+- Fixed simple completion and authenticated gateway chat routes so supported providers receive stop-sequence and frequency-penalty settings.
+- Fixed Muse sessions after credential changes, key rotation, or idle resume so subsequent turns can continue normally.
 
 ## [18.20.0] - 2026-11-12
 
@@ -2130,83 +2211,4 @@
 - Fixed empty provider responses (such as from Cloud Code Assist API) being treated as non-retryable, allowing session retries and model-fallback chains to engage.
 - Fixed OpenAI Codex watchdog timeouts bypassing transport and session retries by ensuring each request attempt has an independent timeout signal.
 
-## [16.5.1] - 2026-07-14
-
-### Added
-
-- Added Cursor OAuth and access-token usage reporting to `omp usage` via Cursor's account usage endpoint.
-
-### Fixed
-
-- Fixed OpenAI Responses `content_filter` terminal events being auto-retried as provider finish errors, ensuring content-filtered turns remain hard failures without triggering a retry loop.
-- Improved credential rotation on usage and account-quota failures to cycle through all eligible credentials instead of stopping early, while maintaining rate-limit backoffs and safety guards.
-- Fixed GLM tool call parsing to correctly handle and recover from missing or mistyped argument closers, preventing subsequent arguments from being swallowed.
-- Fixed Anthropic credential management and usage routing for users with multiple organizations under a single email. Credentials, OAuth refreshes, usage reports, and active sessions are now correctly partitioned and isolated by organization, preventing subscriptions from overwriting or merging with each other.
-- Fixed OpenAI and Codex response finalization to preserve streamed text when receiving empty content on completion. ([#5146])
-- Fixed OpenAI Chat Completions request parsing to correctly accept assistant tool-call replay messages with null content. ([#5121])
-- Fixed session-sticky OAuth credential mappings remaining active after credential changes, ensuring sessions correctly reselect accounts after login or logout. ([#4982])
-- Fixed concurrent reasoning summaries to ignore legacy streaming events under cutoff contracts.
-- Fixed Codex saved-reset redemption to apply to the selected OpenAI account in multi-account configurations. ([#5054])
-- Updated the OAuth completion page to instruct users to close the tab manually when the browser blocks automatic window closing. ([#4855])
-- Fixed Cursor `max_mode` requests to correctly send max-mode metadata on both model payload fields. ([#4797])
-- Fixed configuration discovery to support both nested and flat YAML formats for `auth.broker.url` and `auth.broker.token` keys. ([#4734])
-
-## [16.5.0] - 2026-07-13
-
-### Added
-
-- Added diagnostic response headers to auth-gateway inference endpoints, including request IDs (x-request-id/request-id), LiteLLM model metadata (x-litellm-model-id/x-litellm-model-api-base), and performance/cost metrics (x-litellm-response-cost, x-litellm-response-duration-ms, openai-processing-ms) on non-streaming responses.
-
-### Changed
-
-- Updated Google and Google Vertex providers to always use streamGenerateContent requests.
-
-### Fixed
-
-- Fixed empty provider responses (such as from Cloud Code Assist API) being classified as non-retryable, allowing session retries and model-fallback chains to engage instead of failing the turn.
-
-### Removed
-
-- Removed automatic /interactions chaining for follow-up turns in Google provider calls, along with the useInteractionsApi, storeInteraction, and previousInteractionId stream options.
-
-## [16.4.6] - 2026-07-12
-
-### Added
-
-- Added asynchronous `invalidateUsageCache` method to clear cached usage reports
-- Added support for cross-service usage cache invalidation between AuthStorage and AuthBroker
-
-### Fixed
-
-- Fixed OAuth credential resolution returning "No API key found" when every plan-eligible OpenAI Codex account was rate-limit blocked and the only unblocked account failed the model's plan gate: resolution now runs a last-resort ladder that first yields a plan-fitting account regardless of usage blocks (so callers get real usage-limit retry semantics), then tries every account with the plan filter dropped before reporting no credential
-
-## [16.4.5] - 2026-07-11
-
-### Fixed
-
-- Fixed an issue in GLM tool calling where missing or malformed argument closers (such as `<arg_value>` mistyped as `</arg_key>`) caused subsequent arguments to be swallowed or merged into a single field, affecting both in-band and native tool calling.
-
-## [16.4.3] - 2026-07-11
-
-### Fixed
-
-- Fixed auth database upgrades from schema v5 by creating the OAuth credential refresh-lease table before lease statements are prepared.
-- Fixed an issue in the Responses API where empty tool results were incorrectly serialized with a "(see attached image)" placeholder, causing models to look for non-existent attachments.
-- Fixed OpenAI Responses server non-streaming envelopes to always include the required "incomplete_details" field, using null for completed responses.
-- Preserved Cloud Code Assist tool schemas when mixed-type unions carry branch-local validation descriptions.
-
-## [16.4.2] - 2026-07-10
-
-### Fixed
-
-- Fixed compatibility with xAI by automatically downgrading OpenAI-specific tool calls and image detail settings during message history replays.
-- Fixed a race condition in shared SQLite OAuth token refreshes by implementing durable credential ownership and compare-and-set persistence to prevent stale refresh failures.
-- Fixed OpenAI Codex requests to include the required version header for newly gated models.
-
-## [16.4.1] - 2026-07-10
-
-### Changed
-
-- Enforced `all_turns` reasoning context for all Responses Lite requests
-
-Older entries are archived in [packages/ai/CHANGELOG.md@da26a9c5c00c](https://github.com/can1357/oh-my-pi/blob/da26a9c5c00c5d8186d1873ac7a81460037aaa17/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@6d3c42d33f26](https://github.com/can1357/oh-my-pi/blob/6d3c42d33f261e22588fbb7a96bff5af83a2e90e/packages/ai/CHANGELOG.md).

@@ -265,6 +265,17 @@ export const streamGoogleVertex = createLazyProviderStream(
 	mod => mod.streamGoogleVertex,
 );
 
+/**
+ * Stream Kiro with provider-owned timeout handling. Loaded on first use like
+ * every other built-in provider in this table (see `createLazyProviderStream`):
+ * a static import would pull the Kiro transport into every process's startup.
+ */
+export const streamKiro = createLazyProviderStream(
+	() => import("./kiro/stream"),
+	(mod): ProviderStream<"kiro-api"> => mod.streamKiro,
+	PROVIDER_HANDLED_STREAM_TIMEOUTS,
+);
+
 /** Stream Codex with provider-owned timeout handling. */
 export const streamOpenAICodexResponses = createLazyProviderStream(
 	() => import("./openai-codex-responses"),
@@ -298,6 +309,12 @@ export const streamCursor = createLazyProviderStream(
 export const streamDevin = createLazyProviderStream(
 	() => import("./devin"),
 	mod => mod.streamDevin,
+);
+
+/** Stream the Antigravity CLI (`agy acp`) through the shared watchdog. */
+export const streamAntigravityCli = createLazyProviderStream(
+	() => import("./antigravity-cli"),
+	mod => mod.streamAntigravityCli,
 );
 
 /** Stream Apple's on-device Foundation Model through the shared watchdog. */

@@ -51,6 +51,7 @@ import { resolveProviderModelReference } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
 	type AuthBrokerClientConfig,
+	applyUnpausedProviders,
 	loadEffectiveAuthAccountPolicyConfig,
 	resolveAuthBrokerConfig,
 	resolveEffectiveSettings,
@@ -380,6 +381,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// in sdk.ts. The gateway never touches local SQLite.
 	const accountPool = await loadAuthBrokerAccountPool();
 	const settings = await resolveEffectiveSettings();
+	applyUnpausedProviders(settings);
 	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);
@@ -720,12 +722,13 @@ function pickProbeCandidates(provider: string): Model<Api>[] {
 
 /**
  * Compose the apiKey bytes a provider's chat endpoint expects, given a
- * post-refresh probe credential. Mirrors `getOAuthApiKey` for the providers
- * that require a structured blob; otherwise returns the raw access token /
- * API key.
+ * post-refresh probe credential. A key the provider's `getApiKey` hook built
+ * is sent as-is; otherwise mirrors `getOAuthApiKey` for the providers that
+ * require a structured blob, or returns the raw access token / API key.
  */
 function composeProbeApiKey(provider: string, credential: CompletionProbeInput["credential"]): string {
 	if (credential.type === "api_key") return credential.apiKey;
+	if (credential.apiKey !== undefined) return credential.apiKey;
 	// Structured providers expect a JSON credential blob (`{ token, projectId, … }`) rather than the raw token.
 	if (authPolicyFor(provider)?.apiKeyFormat !== "structured") return credential.accessToken;
 	return JSON.stringify({
@@ -795,6 +798,7 @@ export function createStrictCompletionProbe(): CompletionProbe {
 		const oauthIdentity =
 			input.credential.type === "oauth"
 				? {
+						accountId: input.credential.accountId,
 						orgId: input.credential.orgId,
 						region: input.credential.region,
 						inferenceRegion: input.credential.inferenceRegion,
@@ -856,6 +860,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 
 	const accountPool = await loadAuthBrokerAccountPool();
 	const settings = await resolveEffectiveSettings();
+	applyUnpausedProviders(settings);
 	const { accountPolicies, defaultReservePct } = await loadEffectiveAuthAccountPolicyConfig({ settings });
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);

@@ -20,8 +20,9 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
  * - `fail-open`: answers `open` with a `failed` error.
  * - `fail-navigation`: reports a `failed` load for every `goto`.
  * - `ignore-eof`: keeps running after its input ended.
+ * - `late-welcome`: holds its welcome until {@link FakeHost.welcome} lets it answer.
  */
-export type FakeHostMode = "ok" | "exit-on-hello" | "fail-open" | "fail-navigation" | "ignore-eof";
+export type FakeHostMode = "ok" | "exit-on-hello" | "fail-open" | "fail-navigation" | "ignore-eof" | "late-welcome";
 
 /** A fake engine directory. */
 export interface FakeHost {
@@ -35,6 +36,8 @@ export interface FakeHost {
 	pid(): Promise<number>;
 	/** Whether a host process saw the end of its input. */
 	sawEndOfInput(): Promise<boolean>;
+	/** Let a `late-welcome` host answer the greeting it holds. */
+	welcome(): Promise<void>;
 	remove(): Promise<void>;
 }
 
@@ -51,13 +54,26 @@ const send = message => {
 	process.stdout.write(Buffer.concat([head, body]));
 };
 const events = new Map();
+// The events call with wait each block holds, as the host does: { id, after }.
+const waiting = new Map();
 let nextBlock = 1;
+const eventsAfter = (block, after) => {
+	const list = events.get(block) ?? [];
+	return { ok: { events: list.filter(event => event.seq > (after ?? 0)), next: list.length, dropped: 0 } };
+};
+const answerWaiting = block => {
+	const held = waiting.get(block);
+	if (!held) return;
+	waiting.delete(block);
+	send({ id: held.id, browser: eventsAfter(block, held.after) });
+};
 const push = (block, event) => {
 	const list = events.get(block) ?? [];
 	list.push({ seq: list.length + 1, ...event });
 	events.set(block, list);
+	answerWaiting(block);
 };
-function answer(op) {
+function answer(op, id) {
 	switch (op.op) {
 		case "open": {
 			if (mode === "fail-open") return { error: { kind: "failed", message: "no display to create a view on" } };
@@ -66,8 +82,14 @@ function answer(op) {
 			return { ok: { block, url: "about:blank" } };
 		}
 		case "events": {
-			const list = events.get(op.block) ?? [];
-			return { ok: { events: list.filter(event => event.seq > (op.after ?? 0)), next: list.length, dropped: 0 } };
+			// A new call answers the held one with what it has.
+			answerWaiting(op.block);
+			const result = eventsAfter(op.block, op.after);
+			if (op.wait && result.ok.events.length === 0) {
+				waiting.set(op.block, { id, after: op.after });
+				return null;
+			}
+			return result;
 		}
 		case "state":
 			return {
@@ -110,10 +132,18 @@ process.stdin.on("data", chunk => {
 		buffered = buffered.subarray(4 + length);
 		if (message.hello) {
 			if (mode === "exit-on-hello") process.exit(3);
-			send({ welcome: { ops: ["browser", "dom", "console", "network"] } });
+			const welcome = () => send({ welcome: { ops: ["browser", "dom", "console", "network"] } });
+			if (mode !== "late-welcome") welcome();
+			else {
+				const held = setInterval(() => {
+					if (!fs.existsSync(path.join(dir, "welcome"))) return;
+					clearInterval(held);
+					welcome();
+				}, 10);
+			}
 		} else if (message.browser) {
 			fs.appendFileSync(path.join(dir, "requests.jsonl"), JSON.stringify(message.browser) + "\n");
-			const result = answer(message.browser);
+			const result = answer(message.browser, message.id);
 			if (result) send({ id: message.id, browser: result });
 		}
 	}
@@ -147,6 +177,9 @@ export async function createFakeHost(mode: FakeHostMode = "ok"): Promise<FakeHos
 		requests: async () => Bun.JSONL.parse((await read("requests.jsonl")) ?? "") as Array<Record<string, unknown>>,
 		pid: async () => Number(await read("pid")),
 		sawEndOfInput: async () => (await read("eof")) !== null,
+		welcome: async () => {
+			await Bun.write(path.join(dir, "welcome"), "");
+		},
 		remove: async () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		},

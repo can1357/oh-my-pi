@@ -125,7 +125,12 @@ export async function discoverCustomCommands(
 			continue;
 		}
 		for (const entry of entries) {
-			if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+			if (entry.name.startsWith(".")) continue;
+			// A plain `readdir(withFileTypes)` reports a symlink as a link rather than the
+			// type it points at, so linking a shared command package into the commands dir
+			// would drop it silently. Match the skill loader and the hook loader and accept
+			// links here; the index.* probe below narrows it back to a real directory.
+			if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
 			const commandDir = path.join(commandsDir, entry.name);
 
 			for (const filename of indexCandidates) {

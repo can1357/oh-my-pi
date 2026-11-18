@@ -56,11 +56,13 @@ const KNOWN_APIS = [
 	"google-generative-ai",
 	"google-gemini-cli",
 	"google-vertex",
+	"kiro-api",
 	"ollama-chat",
 	"cursor-agent",
 	"gitlab-duo-agent",
 	"devin-agent",
 	"factory-droid-agent",
+	"antigravity-acp",
 	"apple-foundation-models",
 ] as const satisfies readonly KnownApi[];
 type _MissingKnownApis = Exclude<KnownApi, (typeof KNOWN_APIS)[number]>;

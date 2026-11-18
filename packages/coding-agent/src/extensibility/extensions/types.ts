@@ -133,6 +133,7 @@ import type {
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionBranchEvent,
+	SessionClearEvent,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionCompactingResult,
@@ -264,7 +265,7 @@ export interface ExtensionUIDialogOptions {
 	 *  trailing options (e.g. "Other"/"Done" actions) keep the plain cursor.
 	 *  Defaults to all options when `selectionMarker` is set. */
 	markableCount?: number;
-	/** Allow image pastes in rich ask-dialog custom-answer and note prompts. */
+	/** Allow image pastes in rich ask-dialog custom-answer and note prompts, and in `formDialog` option notes. */
 	acceptImages?: boolean;
 }
 
@@ -824,7 +825,8 @@ export interface ExtensionContext {
 	/**
 	 * Answer the open interactive plan review as if the operator picked `choice` in it.
 	 * `refine` needs non-empty `input.feedback`, which is sent as the next planning prompt.
-	 * `save` writes the plan under its default file name without the path prompt.
+	 * `save` writes the plan under its default file name without the path prompt; the review
+	 * stays open and still takes an answer (no `plan_review_resolved`).
 	 * Approvals execute the plan as it is when picked (in-overlay edits, else the plan
 	 * file), which may differ from the `planContent` that `plan_review_requested` reported.
 	 * `input.role` selects an approval's execution tier, matched against `plan_review_requested`'s
@@ -1163,6 +1165,7 @@ export type {
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
 	SessionBranchReason,
+	SessionClearEvent,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
@@ -1449,7 +1452,10 @@ export interface ToolApprovalResolvedEvent {
 
 /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
-/** A choice as displayed in the interactive plan review, delivered in display order by `plan_review_requested`. */
+/**
+ * A choice of the interactive plan review, delivered in order by `plan_review_requested`. The overlay
+ * shows `refine` only while the plan has comments; it is always answerable with feedback.
+ */
 export interface PlanReviewOption {
 	id: PlanReviewChoice;
 	label: string;
@@ -1884,6 +1890,7 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>,
 	): void;
 	on(event: "session_switch", handler: ExtensionHandler<SessionSwitchEvent>): void;
+	on(event: "session_clear", handler: ExtensionHandler<SessionClearEvent>): void;
 	on(
 		event: "session_before_branch",
 		handler: ExtensionHandler<SessionBeforeBranchEvent, SessionBeforeBranchResult>,
@@ -2318,8 +2325,8 @@ export interface ProviderModelConfig {
 	 * Must be a kind the api serves, as in `models.yml`.
 	 */
 	kind?: Model["kind"];
-	/** Whether the model supports extended thinking at all. */
-	reasoning: boolean;
+	/** Reviewed thinking capability; omitted when request-time discovery should determine support. */
+	reasoning?: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */
 	thinking?: Model["thinking"];
 	/** Supported input types. */
