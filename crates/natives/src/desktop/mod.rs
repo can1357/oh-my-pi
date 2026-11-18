@@ -1012,14 +1012,15 @@ impl Worker {
 			Target::Window(_) => {
 				let window = self.window(target)?;
 				geometry.validate_window(Some(&window))?;
+				let (part_x, part_y, part_width, part_height) = geometry.window_part(&window);
 				DesktopDisplay {
 					id:           window.id,
 					name:         format!("{} — {}", window.app, window.title),
-					x:            window.x,
-					y:            window.y,
-					width:        window.width,
-					height:       window.height,
-					scale:        f64::from(source_width) / f64::from(window.width.max(1)),
+					x:            part_x,
+					y:            part_y,
+					width:        part_width,
+					height:       part_height,
+					scale:        f64::from(source_width) / f64::from(part_width.max(1)),
 					pixel_x:      0,
 					pixel_y:      0,
 					pixel_width:  source_width,

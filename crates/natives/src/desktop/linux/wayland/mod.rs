@@ -82,15 +82,22 @@ impl PortalGeometry {
 		}
 	}
 
-	/// Convert a window's logical bounds (global compositor coordinates) into a
-	/// pixel crop rectangle within the captured buffer.
+	/// The part of a window (logical bounds in global compositor coordinates)
+	/// on the captured monitor: its pixel crop rectangle within the captured
+	/// buffer, and the frame mapping those pixels to that part. A window running
+	/// past the monitor's edge is clipped to it, and the frame covers only the
+	/// visible part. Pixel edges come from the clipped logical edges, so the
+	/// monitor's own edges land exactly on the buffer's under fractional scale.
 	///
 	/// # Errors
 	/// `CaptureFailed` when the toolkit could not report the window's global
 	/// position (native Wayland clients answer with window-relative `0,0`, which
-	/// would crop whatever sits at the monitor's top-left), or when the window
-	/// lies outside the captured monitor.
-	fn window_crop(&self, window: &AtSpiWindow) -> CoreResult<(u32, u32, u32, u32)> {
+	/// would crop whatever sits at the monitor's top-left), or when no part of
+	/// the window lies on the captured monitor.
+	fn window_crop(
+		&self,
+		window: &AtSpiWindow,
+	) -> CoreResult<((u32, u32, u32, u32), FrameGeometry)> {
 		let AtSpiWindow { window, position_known } = window;
 		if !position_known {
 			return Err(DesktopError::capture_failed(format!(
@@ -106,26 +113,30 @@ impl PortalGeometry {
 				window.id
 			))
 		};
-		let scale_x = f64::from(self.pixel_width) / f64::from(self.logical_width.max(1));
-		let scale_y = f64::from(self.pixel_height) / f64::from(self.logical_height.max(1));
-		let rel_x = window.x - self.logical_x;
-		let rel_y = window.y - self.logical_y;
-		if rel_x < 0 || rel_y < 0 {
+		let left = i64::from(window.x).max(i64::from(self.logical_x));
+		let top = i64::from(window.y).max(i64::from(self.logical_y));
+		let right = (i64::from(window.x) + i64::from(window.width))
+			.min(i64::from(self.logical_x) + i64::from(self.logical_width));
+		let bottom = (i64::from(window.y) + i64::from(window.height))
+			.min(i64::from(self.logical_y) + i64::from(self.logical_height));
+		if left >= right || top >= bottom {
 			return Err(outside());
 		}
-		let px_x = (f64::from(rel_x) * scale_x).round() as u32;
-		let px_y = (f64::from(rel_y) * scale_y).round() as u32;
-		if px_x >= self.pixel_width || px_y >= self.pixel_height {
+		let pixel = |edge: i64, origin: i32, logical: u32, pixels: u32| {
+			let offset = (edge - i64::from(origin)) as f64;
+			(offset * f64::from(pixels) / f64::from(logical)).round() as u32
+		};
+		let px_left = pixel(left, self.logical_x, self.logical_width, self.pixel_width);
+		let px_top = pixel(top, self.logical_y, self.logical_height, self.pixel_height);
+		let px_right = pixel(right, self.logical_x, self.logical_width, self.pixel_width);
+		let px_bottom = pixel(bottom, self.logical_y, self.logical_height, self.pixel_height);
+		if px_right <= px_left || px_bottom <= px_top {
 			return Err(outside());
 		}
-		let px_width = (f64::from(window.width) * scale_x).round().max(1.0) as u32;
-		let px_height = (f64::from(window.height) * scale_y).round().max(1.0) as u32;
-		let width = px_width.min(self.pixel_width - px_x);
-		let height = px_height.min(self.pixel_height - px_y);
-		if width == 0 || height == 0 {
-			return Err(outside());
-		}
-		Ok((px_x, px_y, width, height))
+		let (width, height) = (px_right - px_left, px_bottom - px_top);
+		let part = (left as i32, top as i32, (right - left) as u32, (bottom - top) as u32);
+		let frame = FrameGeometry::for_window_part(window, part, width, height);
+		Ok(((px_left, px_top, width, height), frame))
 	}
 }
 
@@ -392,9 +403,8 @@ impl Backend for WaylandBackend {
 							DesktopError::window_not_found(format!("Wayland window {id} not found"))
 						})
 					})?;
-				let (x, y, width, height) = geometry.window_crop(&entry)?;
+				let ((x, y, width, height), frame) = geometry.window_crop(&entry)?;
 				let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
-				let frame = FrameGeometry::for_window(&entry.window, cropped.width(), cropped.height());
 				Ok((cropped, frame))
 			},
 		}
@@ -916,7 +926,7 @@ mod tests {
 	#[test]
 	fn window_crop_scales_logical_bounds_to_buffer_pixels() {
 		let geometry = PortalGeometry::new(Some((0, 0)), Some((1280, 1440)), 2560, 2880);
-		let crop = geometry
+		let (crop, _) = geometry
 			.window_crop(&portal_window(100, 200, 300, 400, true))
 			.expect("window inside monitor");
 		assert_eq!(crop, (200, 400, 600, 800));
@@ -925,13 +935,76 @@ mod tests {
 	#[test]
 	fn window_crop_rejects_window_outside_monitor() {
 		let geometry = PortalGeometry::new(Some((0, 0)), Some((1280, 1440)), 2560, 2880);
-		for window in [portal_window(2000, 0, 100, 100, true), portal_window(-10, 0, 100, 100, true)]
+		for window in [portal_window(2000, 0, 100, 100, true), portal_window(-100, 0, 100, 100, true)]
 		{
 			let err = geometry
 				.window_crop(&window)
 				.expect_err("window outside monitor");
 			assert!(err.message.contains("outside the selected portal monitor"), "{err}");
 		}
+	}
+
+	#[test]
+	fn window_crop_clips_window_to_monitor_and_frames_the_visible_part() {
+		// Monitors left of and above the primary, at 1x and 1.5x; windows run
+		// past the right, bottom, bottom-right and top-left edges. Rows: window,
+		// visible part, pixel crop.
+		let cases = [
+			((-1920, -1080, 1920, 1080), 1920, 1080, [
+				((-101, -980, 400, 200), (-101, -980, 101, 200), (1819, 100, 101, 200)),
+				((-1820, -51, 400, 200), (-1820, -51, 400, 51), (100, 1029, 400, 51)),
+				((-101, -51, 400, 200), (-101, -51, 101, 51), (1819, 1029, 101, 51)),
+				((-2221, -1131, 400, 200), (-1920, -1080, 99, 149), (0, 0, 99, 149)),
+			]),
+			((-1280, -720, 1280, 720), 1920, 1080, [
+				((-101, -621, 400, 200), (-101, -621, 101, 200), (1769, 149, 151, 300)),
+				((-1179, -51, 400, 200), (-1179, -51, 400, 51), (152, 1004, 600, 76)),
+				((-101, -51, 400, 200), (-101, -51, 101, 51), (1769, 1004, 151, 76)),
+				((-1381, -821, 400, 200), (-1280, -720, 299, 99), (0, 0, 449, 149)),
+			]),
+		];
+		for ((origin_x, origin_y, logical_width, logical_height), pixel_width, pixel_height, rows) in
+			cases
+		{
+			let geometry = PortalGeometry::new(
+				Some((origin_x, origin_y)),
+				Some((logical_width, logical_height)),
+				pixel_width,
+				pixel_height,
+			);
+			let scale = f64::from(pixel_width) / f64::from(logical_width);
+			for (bounds, visible, expected_crop) in rows {
+				let (x, y, width, height) = bounds;
+				let entry = portal_window(x, y, width, height, true);
+				let (crop, frame) = geometry
+					.window_crop(&entry)
+					.unwrap_or_else(|err| panic!("{bounds:?}: {err}"));
+				assert_eq!(crop, expected_crop, "{bounds:?}");
+				assert_eq!(frame.window_part(&entry.window), visible, "{bounds:?}");
+				assert!(frame.validate_window(Some(&entry.window)).is_ok(), "{bounds:?}");
+				// The crop's last pixel shows the monitor point at its buffer
+				// pixel.
+				let (px, py) = (f64::from(crop.2 - 1), f64::from(crop.3 - 1));
+				let (lx, ly) = frame.map_point(px, py, Some(&entry.window)).unwrap();
+				let expected_x = f64::from(origin_x) + (f64::from(crop.0) + px) / scale;
+				let expected_y = f64::from(origin_y) + (f64::from(crop.1) + py) / scale;
+				assert!(
+					(lx - expected_x).abs() < 0.5 && (ly - expected_y).abs() < 0.5,
+					"{bounds:?}: ({lx}, {ly}) != ({expected_x}, {expected_y})"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn window_crop_accepts_fractional_scale_rounding_at_monitor_edges() {
+		let geometry = PortalGeometry::new(Some((-1280, -720)), Some((1280, 720)), 1920, 1080);
+		let window = portal_window(-279, -219, 279, 219, true);
+		let (crop, frame) = geometry
+			.window_crop(&window)
+			.expect("fully contained window at the monitor edges");
+		assert_eq!(crop, (1502, 752, 418, 328));
+		assert_eq!(frame.window_part(&window.window), (-279, -219, 279, 219));
 	}
 
 	#[test]
