@@ -72,9 +72,11 @@ export interface AgentSessionDisposeOptions {
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
 	 * instead of the generic `"dispose"` used for normal programmatic disposal
-	 * (`/quit`, test teardown, subagent completion). `EXIT` (also a subagent cut
-	 * off by its owner's shutdown) additionally records a turn still in flight as
-	 * interrupted, so `omp --restore` goes on with it.
+	 * (`/quit`, test teardown, subagent completion). A reason that ends the process
+	 * under the turn (`EXIT`, also a subagent cut off by its owner's shutdown;
+	 * `SIGTERM`/`SIGHUP` from the host, such as a terminal restarting; a fatal
+	 * error) additionally records a turn still in flight as interrupted, so
+	 * `omp --restore` goes on with it. `SIGINT` and `MANUAL` stop it, as a quit does.
 	 */
 	reason?: postmortem.Reason;
 }

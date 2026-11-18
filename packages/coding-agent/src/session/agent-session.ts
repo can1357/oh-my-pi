@@ -1026,6 +1026,22 @@ function isEvalActivity(message: AgentMessage): boolean {
 	);
 }
 
+/**
+ * Whether a dispose for `reason` ends the process under a running turn (an exit, the
+ * host's SIGTERM or SIGHUP, a crash) rather than the user stopping it (a quit, Ctrl+C,
+ * manual cleanup); see {@link AgentSessionDisposeOptions.reason}.
+ */
+function cutsTurnOff(reason: postmortem.Reason | undefined): boolean {
+	switch (reason) {
+		case undefined:
+		case postmortem.Reason.MANUAL:
+		case postmortem.Reason.SIGINT:
+			return false;
+		default:
+			return true;
+	}
+}
+
 export class AgentSession implements SettingsScope, AgentViewSession {
 	/**
 	 * Cross-thread identity token (`${homeThreadId}:${snowflake}`), unique per
@@ -7076,9 +7092,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#fallbackExtensionTimers?.clearAll();
 		this.abortRetry();
 		this.abortCompaction();
-		// A process exit cuts a turn still in flight off instead of stopping it:
-		// label it as interrupted so `omp --restore` goes on with it.
-		const abortReason = options.reason === postmortem.Reason.EXIT ? INTERRUPTED_TURN_ERROR : undefined;
+		// A process ending under a turn still in flight cuts it off instead of
+		// stopping it: label it as interrupted so `omp --restore` goes on with it.
+		const abortReason = cutsTurnOff(options.reason) ? INTERRUPTED_TURN_ERROR : undefined;
 		const postPromptDrain = this.#cancelPostPromptTasks(abortReason);
 		this.agent.abort(abortReason);
 		try {
