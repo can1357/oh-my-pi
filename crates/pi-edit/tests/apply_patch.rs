@@ -176,6 +176,25 @@ fn matcher_paths_entries_and_file_ops_follow_the_envelope() {
 	]);
 }
 
+#[test]
+fn a_hunk_line_mentioning_the_end_marker_keeps_the_rest_of_its_section() {
+	let engine = ApplyPatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let body = "*** Update File: src/lib.rs\n@@\n-    // handles \"*** End Patch\" lines\n-    // \
+	            Copyright 2026 Acme\n+    // handles envelope ends";
+	for input in [
+		format!("*** Begin Patch\n{body}\n*** End Patch"),
+		format!("<<'EOF'\n*** Begin Patch\n{body}\n*** End Patch\nEOF\n"),
+	] {
+		let args = pi_edit::stream_json::ArgSnapshot {
+			input: Some(input),
+			complete: true,
+			..Default::default()
+		};
+		let inspection = engine.inspect(&args);
+		assert_eq!(inspection.sections, [("src/lib.rs".into(), body.into())]);
+	}
+}
+
 #[tokio::test]
 async fn streaming_preview_keeps_body_rows_in_input_order() {
 	let mut workspace = common::Workspace::new(EditMode::ApplyPatch);

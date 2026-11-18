@@ -505,6 +505,26 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 		.collect()
 }
 
+/// Byte offset where the envelope's file sections end: the start of the
+/// closing `*** End Patch` line when it is the last line (inside an optional
+/// heredoc wrapper), the way `parse_with_options` reads the envelope, else the
+/// end of the input. Marker text inside a hunk line never ends a section.
+fn envelope_body_end(input: &str) -> usize {
+	let mut text = input.trim_end();
+	let last_line = |text: &str| text.rfind('\n').map_or(0, |at| at + 1);
+	if matches!(js_trim(input).split('\n').next(), Some("<<EOF" | "<<'EOF'" | "<<\"EOF\""))
+		&& js_trim(&text[last_line(text)..]) == "EOF"
+	{
+		text = text[..last_line(text)].trim_end();
+	}
+	let line = last_line(text);
+	if js_trim(&text[line..]) == END_PATCH_MARKER {
+		line
+	} else {
+		input.len()
+	}
+}
+
 fn inspect_entries(input: &str) -> Inspection {
 	let headers = ENVELOPE_PATH
 		.captures_iter(input)
@@ -518,16 +538,14 @@ fn inspect_entries(input: &str) -> Inspection {
 		.iter()
 		.map(|(path, _)| path.clone())
 		.collect::<Vec<_>>();
+	let body_end = envelope_body_end(input);
 	let mut sections = Vec::new();
 	for (index, (path, start)) in headers.iter().enumerate() {
 		let end = headers
 			.get(index + 1)
-			.map_or(input.len(), |(_, next)| *next);
-		let section = &input[*start..end];
-		let section = section
-			.find(END_PATCH_MARKER)
-			.map_or(section, |at| &section[..at]);
-		super::push_section(&mut sections, path, section.trim());
+			.map_or(body_end, |(_, next)| *next)
+			.max(*start);
+		super::push_section(&mut sections, path, input[*start..end].trim());
 	}
 	let entries = parse_apply_patch(input)
 		.or_else(|_| parse_apply_patch_streaming(input))
