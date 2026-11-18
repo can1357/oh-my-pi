@@ -175,6 +175,10 @@ export class DisasmWorker {
 	#exitCode: number | null = null;
 	/** Set once `open` (or a re-adopted worker's `status`) succeeded. */
 	#opened = false;
+	/** Re-attached by {@link adopt}: it may hold unsaved edits from before the daemon restart. */
+	#adopted = false;
+	/** {@link resume} in progress or settled; undefined until it is called. */
+	#resumed: Promise<void> | undefined;
 	#closing: Promise<void> | null = null;
 	/** Whether the worker reported unsaved changes in its last successful response. */
 	#dirty = false;
@@ -305,6 +309,7 @@ export class DisasmWorker {
 		);
 		worker.#idbPath = state.idbPath;
 		worker.#info = state.info;
+		worker.#adopted = true;
 		return worker;
 	}
 
@@ -362,7 +367,12 @@ export class DisasmWorker {
 	 * Recover a re-adopted worker's state: `status` queues behind whatever it is still running
 	 * (possibly the initial open). Unsaved `exec` edits cannot be ruled out, so a close saves.
 	 */
-	async resume(): Promise<void> {
+	resume(): Promise<void> {
+		this.#resumed ??= this.#resume();
+		return this.#resumed;
+	}
+
+	async #resume(): Promise<void> {
 		const status = await this.request<StatusResult>("status", {});
 		if (!status.open) {
 			await this.kill();
@@ -370,6 +380,21 @@ export class DisasmWorker {
 		}
 		this.#execSinceSave = true;
 		this.#markOpen(status);
+	}
+
+	/**
+	 * Wait for a {@link resume} in progress to settle, bounded by the connect budget: long enough
+	 * for the worker to reconnect and answer `status` unless it is still running a long request.
+	 */
+	async settleResume(): Promise<void> {
+		const resumed = this.#resumed;
+		if (!resumed) return;
+		const budget = delay(CONNECT_TIMEOUT_MS);
+		try {
+			await Promise.race([resumed.catch(() => undefined), budget.promise]);
+		} finally {
+			budget.cancel();
+		}
 	}
 
 	#markOpen(opened: OpenResult): void {
@@ -406,6 +431,11 @@ export class DisasmWorker {
 	/** Whether the database finished opening. */
 	get opened(): boolean {
 		return this.#opened;
+	}
+
+	/** Whether this worker was re-attached after a daemon restart ({@link adopt}). */
+	get adopted(): boolean {
+		return this.#adopted;
 	}
 
 	/** Whether the worker process has not been seen exiting yet. */

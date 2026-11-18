@@ -24,14 +24,18 @@ import {
 	type TextPredictCalls,
 	type TextPredictMethod,
 	type TextPredictOpenParams,
+	type TextPredictReply,
 } from "../../predict/protocol";
 import { smolLmWeightsReady } from "../../predict/smollm-weights";
 import { openSqliteReadConnection } from "../../tools/sqlite-reader";
 import type { DaemonModule, ModuleUnit } from "../module";
 import type { UnitPolicy } from "../protocol";
 
-/** Bumped on incompatible changes to {@link TextPredictOpenParams} or {@link TextPredictCalls}. */
-const PREDICT_MODULE_VERSION = 1;
+/**
+ * Bumped on incompatible changes to {@link TextPredictOpenParams},
+ * {@link TextPredictCalls}, or {@link TextPredictReply}.
+ */
+const PREDICT_MODULE_VERSION = 2;
 /** Idle window after the last lease and call before the unit flushes and stops. */
 const IDLE_MS = 15 * 60_000;
 /**
@@ -300,12 +304,20 @@ class PredictUnit implements ModuleUnit {
 		this.#resolveExited({ reason });
 	}
 
-	/** Serve one `call`; counted as in-flight work for the idle timer. */
-	async call(method: string, params: unknown): Promise<unknown> {
+	/**
+	 * Serve one `call`; counted as in-flight work for the idle timer. Request
+	 * and engine failures resolve as `{ ok: false }`; only a stopped unit throws.
+	 */
+	async call(
+		method: string,
+		params: unknown,
+	): Promise<TextPredictReply<TextPredictCalls[TextPredictCallMethod]["result"]>> {
 		if (this.#stopped) throw new Error("predict unit stopped");
 		this.#inFlight++;
 		try {
-			return await this.#handle(method, isRecord(params) ? params : {});
+			return { ok: true, value: await this.#handle(method, isRecord(params) ? params : {}) };
+		} catch (error) {
+			return { ok: false, error: error instanceof Error ? error.message : String(error) };
 		} finally {
 			this.#inFlight--;
 		}

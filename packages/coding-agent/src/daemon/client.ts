@@ -397,8 +397,12 @@ class DaemonConnection implements DaemonClient {
 	readonly #preservedOwners = new Set<string>();
 	/** Owners whose pending completions the daemon may drop. */
 	readonly #unsubscribes = new Set<string>();
-	/** Owners whose pending completions the daemon should redeliver on this connection. */
-	readonly #replays = new Set<string>();
+	/**
+	 * Owners whose pending completions the daemon should redeliver on this connection, each with
+	 * the sequence of its latest request: an answer only clears the requests its `subscribe` carried.
+	 */
+	readonly #replays = new Map<string, number>();
+	#replaySeq = 0;
 	readonly #seenCompletionIds = new Set<string>();
 	readonly #inFlightCompletionIds = new Set<string>();
 	readonly #subscriptionId = crypto.randomUUID();
@@ -569,7 +573,7 @@ class DaemonConnection implements DaemonClient {
 		sink: (event: DaemonCompletionEvent) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void {
 		this.#unsubscribes.delete(owner);
-		if (this.#preservedOwners.delete(owner)) this.#replays.add(owner);
+		if (this.#preservedOwners.delete(owner)) this.#requestReplay(owner);
 		this.#completionSinks.set(owner, sink);
 		this.#updateRef();
 		this.#publishSubscription();
@@ -779,7 +783,8 @@ class DaemonConnection implements DaemonClient {
 	#publishSubscription(): void {
 		if (this.#closed) return;
 		const unsubscribes = [...this.#unsubscribes];
-		const replays = [...this.#replays];
+		const requested = [...this.#replays];
+		const replays = requested.map(([owner]) => owner);
 		void this.request({
 			op: "subscribe",
 			subscriptionId: this.#subscriptionId,
@@ -792,7 +797,10 @@ class DaemonConnection implements DaemonClient {
 				for (const owner of unsubscribes) {
 					if (!this.#completionSinks.has(owner)) this.#unsubscribes.delete(owner);
 				}
-				for (const owner of replays) this.#replays.delete(owner);
+				// A replay asked for while this request was in flight still needs its own.
+				for (const [owner, seq] of requested) {
+					if (this.#replays.get(owner) === seq) this.#replays.delete(owner);
+				}
 			},
 			() => this.#scheduleReconnect(),
 		);
@@ -811,13 +819,17 @@ class DaemonConnection implements DaemonClient {
 
 	/** Ask for `owner`'s pending completions again after a sink failed on one. */
 	#scheduleReplay(owner: string): void {
-		this.#replays.add(owner);
+		this.#requestReplay(owner);
 		if (this.#replayTimer) return;
 		this.#replayTimer = setTimeout(() => {
 			this.#replayTimer = undefined;
 			this.#publishSubscription();
 		}, COMPLETION_RETRY_MS);
 		this.#replayTimer.unref();
+	}
+
+	#requestReplay(owner: string): void {
+		this.#replays.set(owner, ++this.#replaySeq);
 	}
 
 	/** Sinks that expect events: while any exists the connection keeps the process alive. */

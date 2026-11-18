@@ -137,6 +137,12 @@ class InferUnit implements ModuleUnit {
 	#child: ManagedChild | undefined;
 	#stderrTail = "";
 	#inFlight = new Map<string, InFlight>();
+	/**
+	 * Reaper timers of `embed` requests whose tunnel closed while the current
+	 * child still runs them, keyed by child-side id. Nobody awaits the answer,
+	 * but a wedged child must still die at the original deadline.
+	 */
+	#orphanedReapers = new Map<string, NodeJS.Timeout>();
 	#tunnels = new Set<TunnelState>();
 	#nextId = 0;
 	#stopped = false;
@@ -182,10 +188,11 @@ class InferUnit implements ModuleUnit {
 				this.#tunnels.delete(state);
 				// Nobody reads these answers, and a request the child never answers must
 				// not keep the unit busy forever; late replies find no entry and are dropped.
+				// An embed's reaper keeps running: the child may be wedged on it.
 				for (const [id, entry] of this.#inFlight) {
 					if (entry.tunnel !== state) continue;
-					clearTimeout(entry.timer);
 					this.#inFlight.delete(id);
+					if (entry.timer) this.#orphanedReapers.set(id, entry.timer);
 				}
 			},
 		);
@@ -197,6 +204,7 @@ class InferUnit implements ModuleUnit {
 		const child = this.#child;
 		this.#child = undefined;
 		child?.kill("SIGKILL");
+		this.#clearOrphanedReapers();
 		this.#failAll(`${this.label} stopped: ${reason}`);
 		if (child) await child.exited.catch(() => undefined);
 		this.#end({ reason });
@@ -258,7 +266,15 @@ class InferUnit implements ModuleUnit {
 		}
 		if (typeof message.id !== "string") return;
 		const entry = this.#inFlight.get(message.id);
-		if (!entry) return;
+		if (!entry) {
+			// The child answered an orphaned embed: it is not wedged on it after all.
+			const reaper = this.#orphanedReapers.get(message.id);
+			if (reaper && TERMINAL_REPLIES[message.type] === true) {
+				clearTimeout(reaper);
+				this.#orphanedReapers.delete(message.id);
+			}
+			return;
+		}
 		if (TERMINAL_REPLIES[message.type] === true) {
 			this.#inFlight.delete(message.id);
 			clearTimeout(entry.timer);
@@ -269,6 +285,7 @@ class InferUnit implements ModuleUnit {
 	#onChildExit(child: ManagedChild, exitCode: number | undefined, signal: number | undefined): void {
 		if (child !== this.#child) return;
 		this.#child = undefined;
+		this.#clearOrphanedReapers();
 		const status = signal !== undefined ? `signal ${signal}` : `code ${exitCode ?? "?"}`;
 		const tail = this.#stderrTail.trim().slice(-500);
 		this.#failAll(`${this.label} exited with ${status}${tail ? `: ${tail}` : ""}`);
@@ -286,8 +303,15 @@ class InferUnit implements ModuleUnit {
 		this.#child = undefined;
 		logger.warn("infer: embed request timed out; killing worker", { unit: this.#unitId, pid: child.pid });
 		child.kill("SIGKILL");
+		this.#clearOrphanedReapers();
 		this.#failAll(`${this.label} request timed out`);
 		this.#ctx.changed(this.#unitId);
+	}
+
+	/** The child running the orphaned embeds is gone; their reapers have nothing left to kill. */
+	#clearOrphanedReapers(): void {
+		for (const timer of this.#orphanedReapers.values()) clearTimeout(timer);
+		this.#orphanedReapers.clear();
 	}
 
 	#failAll(error: string): void {

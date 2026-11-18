@@ -19,6 +19,7 @@ import {
 	type TextPredictCalls,
 	type TextPredictMethod,
 	type TextPredictOpenParams,
+	type TextPredictReply,
 	textPredictKey,
 } from "./protocol";
 import { getSmolLmModelDir, prefetchSmolLmWeights } from "./smollm-weights";
@@ -140,19 +141,27 @@ class TextPredictionClient {
 		timeoutMs: number,
 	): Promise<TextPredictCalls[M]["result"]> {
 		const session = await this.#open();
+		const signal = AbortSignal.timeout(timeoutMs);
+		let reply: TextPredictReply<TextPredictCalls[M]["result"]>;
 		try {
-			return await session.daemon.call<TextPredictCalls[M]["result"]>(TEXT_PREDICT_KIND, method, params, {
-				unit: session.unitId,
-				signal: AbortSignal.timeout(timeoutMs),
-			});
+			reply = await session.daemon.call<TextPredictReply<TextPredictCalls[M]["result"]>>(
+				TEXT_PREDICT_KIND,
+				method,
+				params,
+				{ unit: session.unitId, signal },
+			);
 		} catch (error) {
-			// The unit may have stopped (idle, daemon replaced): reopen on the next call.
-			if (this.#session === session) {
+			// Engine errors arrive as `{ ok: false }` replies, so a rejection means the
+			// unit or connection is gone (idle stop, daemon replaced): reopen on the
+			// next call. Our own timeout says nothing about the unit; keep it.
+			if (!signal.aborted && this.#session === session) {
 				this.#session = undefined;
 				if (session.lease) session.daemon.release(session.lease).catch(() => {});
 			}
 			throw error;
 		}
+		if (!reply.ok) throw new Error(`text-predict ${method}: ${reply.error}`);
+		return reply.value;
 	}
 
 	#open(): Promise<PredictSession> {

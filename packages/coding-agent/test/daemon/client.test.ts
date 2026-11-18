@@ -197,13 +197,13 @@ describe("daemon client", () => {
 		try {
 			// Requests on one connection are handled in order: the subscription is in place after this.
 			await client.request({ op: "ping" });
+			// Leased: an unleased `idleMs: 0` unit is stopped as idle at once, and a stopped unit reports no completion.
 			await client.open({
 				kind: "proc",
 				scope: GLOBAL_SCOPE,
 				key: "completes",
 				owner: "owner-reconnect",
 				proc: shProc("exit 3"),
-				lease: false,
 			});
 			await waitFor(() => deliveries.length >= 1, "first completion delivery");
 			// Crash the daemon with the completion unacked and no request in flight.

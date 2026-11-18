@@ -459,13 +459,31 @@ export async function modeService(
 		throw new Error(`${name} is omp's project-shared browser and cannot be detached`);
 	// A session-held service lives on a lease and `mode` takes none: hold one first, or the
 	// daemon's idle policy (idleMs 0) stops the service the moment it turns session-held.
-	if (mode === "session")
-		await request(
-			session,
-			{ op: "open", ...ref, owner: serviceOwner(session) ?? undefined, awaitReady: false },
-			signal,
-		);
-	const { unit } = await request(session, { op: "mode", unit: ref, mode }, signal);
+	const lease =
+		mode === "session"
+			? (
+					await request(
+						session,
+						{ op: "open", ...ref, owner: serviceOwner(session) ?? undefined, awaitReady: false },
+						signal,
+					)
+				).lease
+			: undefined;
+	let unit: UnitSnapshot;
+	try {
+		({ unit } = await request(session, { op: "mode", unit: ref, mode }, signal));
+	} catch (error) {
+		// The service did not turn session-held: the lease taken for it would pin it until this connection closes.
+		if (lease !== undefined) {
+			await request(session, { op: "release", lease }).catch(releaseError =>
+				logger.debug("Failed to release a service lease after a failed mode change", {
+					service: name,
+					error: releaseError instanceof Error ? releaseError.message : String(releaseError),
+				}),
+			);
+		}
+		throw error;
+	}
 	track(session, unit);
 	return unit;
 }

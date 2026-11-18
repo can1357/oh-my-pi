@@ -173,7 +173,11 @@ class DisasmUnit implements ModuleUnit {
 		await worker.request("save", {}, { timeoutMs: FLUSH_TIMEOUT_MS });
 	}
 
-	/** Close the worker (saving unsaved changes; killing it mid-open), let pending requests answer, then close tunnels. */
+	/**
+	 * Close the worker (saving unsaved changes; killing it mid-open), let pending requests answer, then
+	 * close tunnels. A re-adopted worker is never killed merely for being unopened: it may hold edits
+	 * from before the daemon restart.
+	 */
 	stop(reason: string): Promise<void> {
 		this.#stopping ??= this.#stop(reason);
 		return this.#stopping;
@@ -183,7 +187,12 @@ class DisasmUnit implements ModuleUnit {
 		const worker = this.#worker;
 		if (worker) {
 			try {
+				// Give a re-adopted worker its reconnect + `status` first.
+				if (!worker.opened && worker.adopted) await worker.settleResume();
 				if (worker.opened) await worker.close({ save: worker.needsSave });
+				// Still answering a long pre-restart request: the save queues behind it, and `close`
+				// kills the worker only when it cannot be reached.
+				else if (worker.adopted && worker.running) await worker.close({ save: true });
 				else await worker.kill();
 			} catch (error) {
 				logger.warn(`${this.#backend.label} close failed`, { id: this.#params.loc.id, error: errorMessage(error) });

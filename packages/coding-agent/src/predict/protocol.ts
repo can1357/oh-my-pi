@@ -54,3 +54,10 @@ export interface TextPredictCalls {
 }
 
 export type TextPredictCallMethod = keyof TextPredictCalls;
+
+/**
+ * What every `call` resolves to. Engine and request failures come back as
+ * `{ ok: false }`, so a rejected `call` only ever means the transport or the
+ * unit is gone.
+ */
+export type TextPredictReply<R> = { ok: true; value: R } | { ok: false; error: string };

@@ -19,6 +19,7 @@ import {
 	type TextPredictCallMethod,
 	type TextPredictCalls,
 	type TextPredictOpenParams,
+	type TextPredictReply,
 	textPredictKey,
 } from "../../src/predict/protocol";
 
@@ -96,15 +97,25 @@ describe("daemon predict module", () => {
 		return unit;
 	}
 
-	function call<M extends TextPredictCallMethod>(
+	function reply<M extends TextPredictCallMethod>(
+		unit: ModuleUnit,
+		method: M,
+		params: TextPredictCalls[M]["params"],
+	): Promise<TextPredictReply<TextPredictCalls[M]["result"]>> {
+		const snapshot = { id: "predict-unit" } as UnitSnapshot;
+		return predictModule.call!(CONTEXT, method, params, CLIENT, { snapshot, unit }) as Promise<
+			TextPredictReply<TextPredictCalls[M]["result"]>
+		>;
+	}
+
+	async function call<M extends TextPredictCallMethod>(
 		unit: ModuleUnit,
 		method: M,
 		params: TextPredictCalls[M]["params"],
 	): Promise<TextPredictCalls[M]["result"]> {
-		const snapshot = { id: "predict-unit" } as UnitSnapshot;
-		return predictModule.call!(CONTEXT, method, params, CLIENT, { snapshot, unit }) as Promise<
-			TextPredictCalls[M]["result"]
-		>;
+		const result = await reply(unit, method, params);
+		if (!result.ok) throw new Error(result.error);
+		return result.value;
 	}
 
 	async function suggestion(unit: ModuleUnit): Promise<string | undefined> {
@@ -147,6 +158,18 @@ describe("daemon predict module", () => {
 		expect(await suggestion(taughtUnit)).toBe("orbit");
 		expect(await suggestion(freshUnit)).not.toBe("orbit");
 		expect(textPredictKey(taught)).not.toBe(textPredictKey(fresh));
+	});
+
+	it("returns engine and request failures as `{ ok: false }` instead of rejecting", async () => {
+		const unit = await openUnit(await agentDir("errors"));
+		const snapshot = { id: "predict-unit" } as UnitSnapshot;
+		const raw = (method: string, params: unknown) =>
+			predictModule.call!(CONTEXT, method, params, CLIENT, { snapshot, unit });
+		expect(await raw("complete", { method: "ngram", before: BEFORE })).toEqual({
+			ok: false,
+			error: "predict: prefix must be a string",
+		});
+		expect(await raw("rewind", {})).toEqual({ ok: false, error: "predict: unknown call rewind" });
 	});
 
 	it.each(["flush", "stop"] as const)(

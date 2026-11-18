@@ -276,8 +276,9 @@ export class DaemonStore {
 			.run(key, value);
 	}
 
+	/** Finalize every statement and release the connection's fds now; throws when SQLite cannot close it. */
 	close(): void {
-		this.#db.close();
+		this.#db.close(true);
 	}
 
 	#collectEnvs(): void {
