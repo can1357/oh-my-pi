@@ -29,6 +29,7 @@ import {
 	raceJobSettlement,
 	resolveAutoBackgroundWaitMs,
 } from "../async";
+import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { InternalUrlRouter } from "../internal-urls";
@@ -535,6 +536,14 @@ export interface BashToolInput {
 	pty?: boolean;
 }
 
+const PTY_BOARD_COMMAND_MAX = 60;
+
+/** A pty command as one board-label line of at most {@link PTY_BOARD_COMMAND_MAX} chars. */
+function ptyBoardCommand(command: string): string {
+	const line = command.replace(/\s+/gu, " ").trim();
+	return line.length > PTY_BOARD_COMMAND_MAX ? `${line.slice(0, PTY_BOARD_COMMAND_MAX - 1)}…` : line;
+}
+
 /**
  * Treats a blank string as an unset field.
  *
@@ -1025,6 +1034,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
 		const script = run.mounts + seed.script;
 		const source = script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
+		// Set from the pty's start callback; a holder keeps the type from narrowing to `undefined`.
+		const board: { entry?: BoardEntry } = {};
 		try {
 			if (source !== undefined) await fs.promises.writeFile(source, script, { mode: 0o600 });
 			return await runInteractiveBashPty(ui, {
@@ -1036,8 +1047,19 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				signal: run.signal,
 				artifactPath: run.artifactPath,
 				artifactId: run.artifactId,
+				onStart: pid => {
+					board.entry = registerOnBoard({
+						kind: "external",
+						scope: { kind: "session", id: run.sessionId || `process-${process.pid}` },
+						key: `pty:${pid}`,
+						label: `pty: ${ptyBoardCommand(run.command)}`,
+						pid,
+					});
+				},
 			});
 		} finally {
+			// Resolves only after the pty program exited.
+			board.entry?.dispose();
 			if (source !== undefined) await fs.promises.rm(source, { force: true });
 		}
 	}
