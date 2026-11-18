@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Subagent completion probes ask for the task's progress by its deliverables instead of the agent's own current step, and side requests to Claude (probes, `/btw`) no longer copy thinking that is still streaming into their history as plain text
 - Composer predictions (`composer.predictions`) are on by default: after each completed turn the active model suggests your next message as ghost text in the empty composer (one extra billed request per turn, counted in /stats); turn it off in `/settings` → Interaction → "Composer Predictions"
 - Tool-call intent tracing is off by default in print (`-p`), RPC, ACP, and SDK sessions; set `tools.intentTracing: true` or `PI_INTENT_TRACING=1` to turn it on there
 - Commit draft `show()` now prints each run of lines from one unit under a single `1a ✓ Main` header instead of repeating the unit, mark, and owner on every line
