@@ -66,6 +66,11 @@ export interface ModelPickerCallbacks {
 	 * picker shortcut again). Session-only: the host applies a runtime override.
 	 */
 	onPickTask?: (model: Model, selector: string) => void;
+	/**
+	 * The picker is closing on the current model's row with the slider moved: keep `level`
+	 * (clamped to that model) as the session's thinking level. {@link onCancel} follows.
+	 */
+	onKeepThinking?: (level: ConfiguredThinkingLevel) => void;
 	/** The picker was dismissed. */
 	onCancel: () => void;
 }
@@ -280,7 +285,13 @@ export class ModelPickerComponent implements Component {
 				thinkingLevel === undefined ? { overContext } : { overContext, thinkingLevel },
 			);
 		};
-		this.#browser.onCancel = () => callbacks.onCancel();
+		this.#browser.onCancel = () => {
+			const selected = this.#browser.getSelected();
+			const kept =
+				selected && selected.selector === this.#currentSelector ? this.#pendingThinking(selected.model) : undefined;
+			if (kept !== undefined) callbacks.onKeepThinking?.(kept);
+			callbacks.onCancel();
+		};
 		this.#browser.onQueryChange = query => this.#syncItemsForQuery(query);
 
 		// Hydrate synchronously from the current registry snapshot so the first

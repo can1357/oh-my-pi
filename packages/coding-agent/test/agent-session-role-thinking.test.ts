@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -12,6 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
 import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -739,6 +741,40 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 		expect(session.thinkingLevel).toBe(provisional);
 		expect(session.autoResolvedThinkingLevel()).toBeUndefined();
+	});
+
+	it("settles auto on the running level when a run starts without a user turn", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const mock = createMockModel({ provider: "anthropic", handler: async () => ({ content: ["ack"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		sessionSettings = Settings.isolated({ "compaction.enabled": false });
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+		});
+		const classifierSpy = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Low);
+		expect(thinkingLevelWord(session)).toBe(AUTO_THINKING);
+
+		// An IRC wake runs the agent without a user turn to classify. The composer
+		// must show the level it runs at, not auto as pending.
+		await session.sendCustomMessage(
+			{ customType: "irc:incoming", content: "ping", display: false },
+			{ triggerTurn: true },
+		);
+		await session.waitForIdle();
+
+		const provisional = resolveProvisionalAutoLevel(model);
+		expect(classifierSpy).not.toHaveBeenCalled();
+		expect(session.agent.state.thinkingLevel).toBe(provisional);
+		expect(thinkingLevelWord(session)).toBe(provisional);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
 
 	it("maps ultrathink prompts to the model's highest supported level, clamped below max", async () => {

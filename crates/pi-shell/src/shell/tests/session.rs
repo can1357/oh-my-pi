@@ -744,7 +744,7 @@ async fn live_background_job_count_tracks_external_background_jobs() {
 	// An external background process is tracked while it runs.
 	shell
 		.run(
-			ShellRunOptions { command: "sh -c 'sleep 30' &".into(), ..Default::default() },
+			ShellRunOptions { command: "/bin/sh -c 'sleep 30' &".into(), ..Default::default() },
 			None,
 			CancelToken::default(),
 		)
@@ -766,7 +766,10 @@ async fn timeout_spares_background_jobs_of_earlier_commands() {
 	let shell = Shell::new(None);
 	shell
 		.run(
-			ShellRunOptions { command: "sh -c 'sleep 30' & early=$!".into(), ..Default::default() },
+			ShellRunOptions {
+				command: "/bin/sh -c 'sleep 30' & early=$!".into(),
+				..Default::default()
+			},
 			None,
 			CancelToken::default(),
 		)
@@ -775,7 +778,10 @@ async fn timeout_spares_background_jobs_of_earlier_commands() {
 
 	let timed_out = shell
 		.run(
-			ShellRunOptions { command: "sh -c 'sleep 30' & sleep 30".into(), ..Default::default() },
+			ShellRunOptions {
+				command: "/bin/sh -c 'sleep 30' & sleep 30".into(),
+				..Default::default()
+			},
 			None,
 			CancelToken::new(Some(300)),
 		)
@@ -1682,7 +1688,7 @@ async fn embedded_external_command_runs_in_its_own_session() {
 	let shell_handle = tokio::spawn(async move {
 		// `printf '%d\n' "$$"` then `sleep 0.5`. Long enough for our `getsid`.
 		let exec = session
-			.run_test("sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &stdio)
+			.run_test("/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &stdio)
 			.await
 			.expect("run_test");
 		drop(stdio);
@@ -1745,7 +1751,7 @@ async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() 
 		shell
 			.run(
 				ShellRunOptions {
-					command: "sh cleanup.sh & sleep 30".into(),
+					command: "/bin/sh cleanup.sh & sleep 30".into(),
 					cwd: Some(cwd),
 					..Default::default()
 				},
@@ -1864,7 +1870,7 @@ async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
 		shell
 			.run(
 				ShellRunOptions {
-					command: "sh cleanup.sh".into(),
+					command: "/bin/sh cleanup.sh".into(),
 					cwd: Some(cwd),
 					..Default::default()
 				},
@@ -1908,7 +1914,7 @@ async fn termination_returns_early_after_the_child_exits() {
 		shell
 			.run(
 				ShellRunOptions {
-					command: "sh -c ': > ready; exec sleep 30'".into(),
+					command: "/bin/sh -c ': > ready; exec sleep 30'".into(),
 					cwd: Some(cwd),
 					..Default::default()
 				},
@@ -1952,7 +1958,7 @@ async fn cancelling_one_run_spares_a_concurrent_runs_child() {
 		shell_b
 			.run(
 				ShellRunOptions {
-					command: "sh -c 'printf \"ready\\n\"; sleep 30'".into(),
+					command: "/bin/sh -c 'printf \"ready\\n\"; sleep 30'".into(),
 					..Default::default()
 				},
 				Some(tx_b),
@@ -1984,7 +1990,7 @@ async fn cancelling_one_run_spares_a_concurrent_runs_child() {
 		shell_a
 			.run(
 				ShellRunOptions {
-					command: "sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
+					command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
 					..Default::default()
 				},
 				Some(tx_a),
@@ -2045,7 +2051,7 @@ async fn cancelling_while_sourcing_snapshot_kills_snapshot_foreground_child() {
 	let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
 	std::fs::write(
 		&snapshot_path,
-		format!("sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
+		format!("/bin/sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
 	)
 	.expect("write snapshot file");
 
@@ -2189,7 +2195,7 @@ async fn embedded_pipeline_stage_runs_in_its_own_session() {
 		// leads the pipeline's process group, while the second stage is the
 		// join-or-detach process that would EPERM without the wiring fix.
 		let exec = session
-			.run_test("sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | sh -c cat", &stdio)
+			.run_test("/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | /bin/sh -c cat", &stdio)
 			.await
 			.expect("run_test");
 		drop(stdio);
@@ -2694,4 +2700,46 @@ async fn pipe_tap_forwards_every_byte_and_counts_them() {
 	assert_eq!(read.data.len(), written.min(1 << 20));
 	assert!(read.data.ends_with(format!("\n{LAST}\n").as_bytes()));
 	assert!(!read.open);
+}
+
+/// A process's own shell ([`Shell::for_process`]) is the bash tool's shell on
+/// the process's streams: pi's utilities run ahead of `PATH`, and an external
+/// stays in the process's group instead of leading a session of its own, so
+/// it shares the terminal the process leads.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn process_shell_runs_pi_utilities_and_keeps_externals_in_its_group() {
+	let _guard = shell_test_lock().lock().await;
+	let root = tempfile::tempdir().expect("output directory");
+	let empty = root.path().join("empty");
+	std::fs::create_dir(&empty).expect("empty search path");
+	let (sum, group) = (root.path().join("sum"), root.path().join("group"));
+	// Nothing reaches the test's own streams: every command redirects.
+	let command = format!(
+		"PATH={}; echo '{{\"a\":[40,2]}}' | jq '.a | add' > {}; /bin/sh -c '/bin/ps -o pgid= -p $$' \
+		 > {} 2>&1",
+		quote_arg(&empty.to_string_lossy()),
+		quote_arg(&sum.to_string_lossy()),
+		quote_arg(&group.to_string_lossy()),
+	);
+	let shell = Shell::for_process(ShellOptions::default());
+
+	let result = time::timeout(
+		Duration::from_secs(20),
+		shell.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default()),
+	)
+	.await
+	.expect("process shell timed out")
+	.expect("process shell run");
+
+	assert_eq!(result.exit_code, Some(0));
+	assert_eq!(std::fs::read_to_string(&sum).expect("jq output"), "42\n");
+	// SAFETY: `getpgrp` only reads this process's group id.
+	let own_group = unsafe { libc::getpgrp() };
+	let child_group: i32 = std::fs::read_to_string(&group)
+		.expect("ps output")
+		.trim()
+		.parse()
+		.expect("a process group id");
+	assert_eq!(child_group, own_group);
 }

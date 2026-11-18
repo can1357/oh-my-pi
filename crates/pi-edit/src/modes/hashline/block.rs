@@ -4,19 +4,23 @@
 use std::{
 	borrow::Cow,
 	collections::{HashMap, VecDeque},
+	path::Path,
 	sync::{LazyLock, Mutex},
 };
 
-use pi_ast::block::{BlockRangeOptions, block_range_at};
+use pi_ast::{
+	SupportLang,
+	block::{BlockRangeOptions, block_range_at},
+};
 use xxhash_rust::xxh64::xxh64;
 
 use super::{
 	apply::STRUCTURAL_CLOSER_RE,
 	messages::{
-		AbsoluteRangeOp, BlockDiagnosticSuggestions, BlockOp, block_single_line_message,
-		block_unresolved_message, insert_after_block_closer_lowered_warning,
-		insert_after_block_unresolved_lowered_warning, paste_after_block_closer_lowered_warning,
-		paste_after_block_unresolved_lowered_warning,
+		AbsoluteRangeOp, BlockCoverage, BlockDiagnosticSuggestions, BlockOp,
+		block_single_line_message, block_unresolved_message,
+		insert_after_block_closer_lowered_warning, insert_after_block_unresolved_lowered_warning,
+		paste_after_block_closer_lowered_warning, paste_after_block_unresolved_lowered_warning,
 	},
 	types::{
 		Anchor, BlockMode, BlockOpKind, BlockResolution, BlockSpan, Cursor, Edit, ParsedRange,
@@ -187,7 +191,8 @@ pub fn resolve_block_edits<'e>(
 					range_op,
 					Some(&lines),
 					&suggestions,
-					register.as_deref()
+					register.as_deref(),
+					block_coverage(path),
 				)
 			)));
 		};
@@ -294,6 +299,17 @@ pub fn resolve_block_edits<'e>(
 		}
 	}
 	Ok(Cow::Owned(resolved))
+}
+
+/// How far block locators reach in `path`'s language.
+fn block_coverage(path: &str) -> BlockCoverage {
+	match SupportLang::from_path(Path::new(path)) {
+		None => BlockCoverage::NoGrammar,
+		Some(SupportLang::Vue | SupportLang::Svelte | SupportLang::Astro) => {
+			BlockCoverage::NoEmbedded
+		},
+		Some(_) => BlockCoverage::Full,
+	}
 }
 
 /// Resolve the enclosing syntax block at a 1-indexed line, memoized by content

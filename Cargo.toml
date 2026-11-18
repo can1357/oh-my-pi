@@ -16,6 +16,7 @@ members = [
    "crates/pi-vfs",
    "crates/pi-voice",
    "crates/pi-walker",
+   "crates/pi-watch",
    "crates/vendor/cfg_aliases",
    "crates/vendor/grep-searcher",
    "crates/vendor/jaq-core",
@@ -266,6 +267,7 @@ pi-shell = { path = "crates/pi-shell" }
 pi-predict = { path = "crates/pi-predict" }
 pi-voice = { path = "crates/pi-voice" }
 pi-walker = { path = "crates/pi-walker" }
+pi-watch = { path = "crates/pi-watch" }
 pi-vcs = { path = "crates/pi-vcs" }
 pi-vfs = { path = "crates/pi-vfs" }
 pi-builtins = { path = "crates/pi-builtins" }

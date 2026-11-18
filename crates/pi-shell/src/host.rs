@@ -23,6 +23,7 @@ use std::{
 
 use bstr::{BStr, BString, ByteSlice};
 use parking_lot::Mutex;
+use pi_builtins::extras::SpeechHost;
 
 use crate::{
 	bash::{
@@ -35,6 +36,7 @@ use crate::{
 	tools::{SpawnLog, ToolConfig},
 };
 
+mod loopback;
 mod urls;
 
 /// Time between TERM and KILL when a running external is abandoned (a cancel
@@ -113,6 +115,18 @@ impl StdStreams {
 		let slots = Arc::clone(&self.slots.lock());
 		let stdout = slots[1].lock();
 		stdout.as_ref()?.dup().ok()
+	}
+
+	/// Whether the run's stdin and stderr are both terminals: a shell
+	/// reading its commands there is interactive.
+	fn on_terminal(&self) -> bool {
+		let slots = Arc::clone(&self.slots.lock());
+		[0, 2].into_iter().all(|index| {
+			slots[index]
+				.lock()
+				.as_ref()
+				.is_some_and(|file| file.kind() == FileKind::Tty)
+		})
 	}
 
 	/// Remove every stream, closing the files installed last.
@@ -433,16 +447,27 @@ impl PiHost {
 	/// Externals lead their own sessions; one abandoned while running (a
 	/// cancel) gets TERM, then KILL after [`TERM_GRACE`].
 	pub fn new(fs: Box<dyn Fs + Send>, runtime: tokio::runtime::Handle) -> Self {
+		Self::with_sessions(fs, runtime, Sessions::Detach)
+	}
+
+	/// [`Self::new`], with externals placed as `sessions` says:
+	/// [`Sessions::Inherit`] for a process that is the shell of its own
+	/// terminal ([`Session::for_process`](crate::session::Session::for_process)).
+	pub fn with_sessions(
+		fs: Box<dyn Fs + Send>,
+		runtime: tokio::runtime::Handle,
+		sessions: Sessions,
+	) -> Self {
 		Self {
 			fs,
 			launcher: Launcher {
 				spawner:  NativeSpawner::new(SpawnConfig {
-					grace:    TERM_GRACE,
-					sessions: Sessions::Detach,
+					grace: TERM_GRACE,
+					sessions,
 					// The session driver is an async task: exits wake its waker
 					// from waiter threads.
-					exits:    Exits::Thread,
-					umask:    None,
+					exits: Exits::Thread,
+					umask: None,
 				}),
 				streams:  StdStreams::default(),
 				observer: None,
@@ -503,6 +528,12 @@ impl PiHost {
 		self.tools.reported_error.set(flag);
 	}
 
+	/// Set the speech synthesizer `say` speaks through for the commands run
+	/// from now on; `None` leaves it the system's.
+	pub fn set_speech(&self, speech: Option<Arc<dyn SpeechHost>>) {
+		self.tools.speech.set(speech);
+	}
+
 	/// The standard streams the shell's fds 0, 1 and 2 forward to.
 	pub const fn streams(&self) -> &StdStreams {
 		&self.launcher.streams
@@ -532,8 +563,9 @@ impl PiHost {
 impl crate::bash::Host for PiHost {
 	/// pi's order ([`crate::extras`]): the engine's intrinsics (`suspend`
 	/// withheld), the tools (`timeout`, `nohup`, `git`, the extras that run
-	/// command lines), the other extras, then `PATH`. A name with a slash is
-	/// only ever a path; `exec` searches `PATH` without asking.
+	/// command lines), the other extras, the shells the engine runs itself
+	/// (`sh`, `bash`, `zsh`: [`loopback`]), then `PATH`. A name with a slash
+	/// is only ever a path; `exec` searches `PATH` without asking.
 	fn resolve(&mut self, name: &BStr, mode: ModeId, why: ResolveCtx) -> Resolved {
 		if why.has_slash {
 			return Resolved::NotFound;
@@ -548,18 +580,39 @@ impl crate::bash::Host for PiHost {
 		if let Some(tool) = self.tools.lookup(name) {
 			return Resolved::Tool(tool);
 		}
-		self
-			.tools
-			.native_extra(name)
-			.map_or(Resolved::NotFound, Resolved::Native)
+		if let Some(native) = self.tools.native_extra(name) {
+			return Resolved::Native(native);
+		}
+		if crate::sys::shebang::is_self_shell(name) {
+			return Resolved::SelfShell;
+		}
+		Resolved::NotFound
 	}
 
 	/// On Windows, a utility written in the syntax of the System32 program it
 	/// shadows (`find /c /v ""`, `sort /r`, `timeout /t 5`, `whoami /all`)
 	/// goes to `PATH`'s program of that name ([`crate::cmd_dialect`]).
+	/// Elsewhere, an extra given an option it does not implement (`ps --forest`,
+	/// `tar --hard-dereference`) goes to `PATH`'s program, which may have it;
+	/// with none there the extra runs and reports the option. Windows' `PATH`
+	/// programs of those names are System32's, a different command language.
+	/// A shell command line the engine's own shell does not stand in for
+	/// (`bash -i`, restricted mode) goes to `PATH`'s shell
+	/// ([`loopback::needs_program`]).
 	fn defers_to_path(&mut self, name: &BStr, argv: &[BString]) -> bool {
-		cfg!(windows)
-			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default())
+		if crate::sys::shebang::is_self_shell(name) {
+			return loopback::needs_program(argv, self.launcher.streams.on_terminal());
+		}
+		(cfg!(windows)
+			&& crate::cmd_dialect::speaks_shadowed_program(name, argv.get(1..).unwrap_or_default()))
+			|| (!cfg!(windows)
+				&& pi_builtins::extras::lacks_option(
+					&name.to_str_lossy(),
+					argv
+						.iter()
+						.map(|arg| arg.to_str_lossy().into_owned())
+						.collect(),
+				))
 	}
 
 	/// Runs the extra `cmd` names on the runtime ([`crate::extras::ExtraTask`]),
@@ -592,12 +645,15 @@ impl crate::bash::Host for PiHost {
 
 	/// Spawns through the process-group spawner. With a pi-vfs filesystem,
 	/// an external sees no URL it cannot open: a `scheme://` program,
-	/// argument (bare, or attached to an option name: `--root=skill://x`) or
-	/// working directory the filesystem backs with a host file is handed over
-	/// as that file, and the child's `PWD` names the host directory. A
-	/// working directory backed by nothing, or one the filesystem refuses to
-	/// change, refuses the command, as does a URL the provider cannot
-	/// resolve. Only a spawn that names a URL asks the provider, and it
+	/// argument (bare, or attached to an option: `--root=skill://x`,
+	/// `-oskill://x`, `@skill://x`), environment value or working directory
+	/// the filesystem backs with a host file is handed over as that file,
+	/// and the child's `PWD` names the host directory. A working directory
+	/// backed by nothing, or one the filesystem refuses to change, refuses
+	/// the command, as does a program the provider cannot resolve; an
+	/// argument or environment value it cannot resolve stays as written, and
+	/// `omp` is handed every one as written ([`urls`]). Only a spawn that
+	/// names a URL asks the provider, and it
 	/// awaits the answer: the returned future owns a copy of the names and
 	/// the spawn's descriptors, and launches (routing, observer and all)
 	/// only after the resolution succeeded, so dropping it earlier spawns

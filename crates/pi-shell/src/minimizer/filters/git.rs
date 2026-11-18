@@ -53,10 +53,17 @@ pub(crate) fn filter_for(
 	let cleaned = primitives::strip_ansi(input);
 	let text = match ctx.subcommand {
 		Some("status") if is_status_machine_format(ctx.command) => cleaned,
+		Some("status")
+			if is_status_short_format(ctx.command)
+				&& cleaned.len() <= primitives::WHOLE_OUTPUT_BYTES =>
+		{
+			cleaned
+		},
 		Some("status") => condense_status(&cleaned),
 		// Word diffs carry no per-line `+`/`-` prefix, so they cannot be counted.
 		Some("diff" | "show") if prints_word_patch(ctx.command) => cleaned,
 		Some("diff") if has_token(ctx.command, "--summary") => cleaned,
+		Some("diff") if is_stat_format(ctx.command) && exit_code != 0 => cleaned,
 		Some("diff") if is_stat_format(ctx.command) => condense_diff_stat(&cleaned),
 		Some("diff")
 			if diff_listing_mode(ctx.command).is_none()
@@ -180,6 +187,14 @@ fn is_status_machine_format(command: &str) -> bool {
 	})
 }
 
+/// `git status -s`/`--short` (alone or clustered, `-sb`): the agent asked for
+/// the one-line-per-path records themselves.
+fn is_status_short_format(command: &str) -> bool {
+	command.split_whitespace().any(|part| {
+		part == "--short" || part.starts_with('-') && !part.starts_with("--") && part.contains('s')
+	})
+}
+
 fn is_stat_format(command: &str) -> bool {
 	command
 		.split_whitespace()
@@ -254,16 +269,28 @@ fn diff_listing_mode(command: &str) -> Option<DiffListingMode> {
 	}
 }
 
+/// Bound an explicitly requested `--name-only`/`--name-status`/`--numstat`
+/// listing. It comes back whole up to [`primitives::WHOLE_OUTPUT_BYTES`]; above
+/// that, the first [`DIFF_LISTING_LIMIT`] entries are kept. Git's `warning:`
+/// lines (e.g. CRLF conversion notices) are not files and are not counted.
 fn compact_diff_listing(input: &str, mode: DiffListingMode) -> String {
+	if input.len() <= primitives::WHOLE_OUTPUT_BYTES {
+		return input.to_string();
+	}
 	let mut entries = Vec::new();
+	let mut warnings = 0usize;
 	for line in input.lines() {
 		if line.is_empty() {
+			continue;
+		}
+		if line.starts_with("warning: ") {
+			warnings += 1;
 			continue;
 		}
 		if !is_diff_listing_line(mode, line) {
 			return input.to_string();
 		}
-		entries.push(line.to_string());
+		entries.push(line);
 	}
 
 	if entries.len() <= DIFF_LISTING_LIMIT {
@@ -277,6 +304,9 @@ fn compact_diff_listing(input: &str, mode: DiffListingMode) -> String {
 		out.push('\n');
 	}
 	let _ = writeln!(out, "[…{} files elided…]", entries.len() - DIFF_LISTING_LIMIT);
+	if warnings > 0 {
+		let _ = writeln!(out, "[…{warnings} git warning lines elided…]");
+	}
 	out
 }
 
@@ -450,7 +480,7 @@ fn parse_short_status_line(line: &str, summary: &mut StatusSummary) -> bool {
 	}
 	if status == "??" {
 		summary.untracked += 1;
-	} else if status.contains('U') {
+	} else if status.contains('U') || matches!(status, "AA" | "DD") {
 		summary.conflicts += 1;
 	} else {
 		let bytes = status.as_bytes();
@@ -466,9 +496,9 @@ fn parse_short_status_line(line: &str, summary: &mut StatusSummary) -> bool {
 }
 
 fn is_short_status(status: &str) -> bool {
-	status
-		.bytes()
-		.all(|byte| matches!(byte, b' ' | b'M' | b'A' | b'D' | b'R' | b'C' | b'U' | b'?' | b'!'))
+	status.bytes().all(|byte| {
+		matches!(byte, b' ' | b'M' | b'T' | b'A' | b'D' | b'R' | b'C' | b'U' | b'?' | b'!')
+	})
 }
 
 fn parse_long_status_line(
@@ -494,6 +524,7 @@ fn parse_long_status_line(
 	for (prefix, label, staged) in [
 		("modified:", "M", in_staged),
 		("deleted:", "D", in_staged),
+		("typechange:", "T", in_staged),
 		("new file:", "A", true),
 		("renamed:", "R", true),
 		("both modified:", "UU", false),
@@ -1318,15 +1349,15 @@ fn condense_commit(input: &str, exit_code: i32) -> String {
 		let mut stat = None;
 		for line in input.lines() {
 			let trimmed = line.trim();
-			if hash.is_none()
-				&& let Some(found) = parse_commit_hash(trimmed)
-			{
-				hash = Some(found);
+			if hash.is_none() {
+				hash = parse_commit_hash(trimmed);
 				continue;
 			}
 			// Default `git commit` success prints a "N files changed, …" stat line
 			// below the "[branch hash] msg" line; fold it back into the summary so
-			// the files/insertions signal survives the condense.
+			// the files/insertions signal survives the condense. Only lines after
+			// the commit line count: pre-commit hooks print their own tallies
+			// before it.
 			if stat.is_none() {
 				stat = parse_stat_summary(trimmed);
 			}
@@ -1353,10 +1384,16 @@ fn condense_commit(input: &str, exit_code: i32) -> String {
 	condense_noisy_output(input)
 }
 
+/// The commit id from git's `[branch hash] subject` line (also `[branch
+/// (root-commit) hash]` and `[detached HEAD hash]`). Hook output such as
+/// lint-staged's `[STARTED] Preparing…` or `[Component] message` has no branch
+/// word before a hex id, so it is not a commit line.
 fn parse_commit_hash(line: &str) -> Option<&str> {
 	let rest = line.strip_prefix('[')?;
 	let (prefix, _message) = rest.split_once(']')?;
-	prefix.split_whitespace().last()
+	let mut words = prefix.split_whitespace();
+	let hash = words.next_back()?;
+	(words.next().is_some() && is_short_hex(hash)).then_some(hash)
 }
 
 fn is_push_progress(line: &str) -> bool {
@@ -1488,7 +1525,13 @@ fn condense_pull(input: &str, exit_code: i32) -> String {
 	condense_noisy_output(input)
 }
 
+/// Bound an explicitly requested `--stat`: whole up to
+/// [`primitives::WHOLE_OUTPUT_BYTES`], the summary line plus the first 20
+/// entries above that.
 fn condense_diff_stat(input: &str) -> String {
+	if input.len() <= primitives::WHOLE_OUTPUT_BYTES {
+		return input.to_string();
+	}
 	let mut entries = Vec::new();
 	let mut summary = None;
 	for line in input.lines() {
@@ -1521,30 +1564,32 @@ fn condense_diff_stat(input: &str) -> String {
 	out
 }
 
+/// Parse git's diffstat summary line, `N file(s) changed[, I insertion(s)(+)][,
+/// D deletion(s)(-)]`. The whole line must match: hook and formatter output
+/// such as `7 files left unchanged` or `Checking changed files` is not a stat.
 fn parse_stat_summary(line: &str) -> Option<(&str, &str, &str)> {
-	// Parse "N file(s) changed, I insertion(s)(+), D deletion(s)(-)"
-	// or variants with only insertions or only deletions.
-	if !line.contains("file") || !line.contains("changed") {
-		return None;
-	}
-	let mut files = "";
+	let mut segments = line.split(", ");
+	let files = stat_count(segments.next()?, "file changed", "files changed")?;
 	let mut inserted = "0";
 	let mut deleted = "0";
-
-	for segment in line.split(", ") {
-		if segment.contains("file") && segment.contains("changed") {
-			files = segment.split_whitespace().next().unwrap_or("");
-		} else if segment.contains("insertion") {
-			inserted = segment.split_whitespace().next().unwrap_or("0");
-		} else if segment.contains("deletion") {
-			deleted = segment.split_whitespace().next().unwrap_or("0");
+	for segment in segments {
+		if let Some(count) = stat_count(segment, "insertion(+)", "insertions(+)") {
+			inserted = count;
+		} else {
+			deleted = stat_count(segment, "deletion(-)", "deletions(-)")?;
 		}
 	}
-
-	if files.is_empty() {
-		return None;
-	}
 	Some((files, inserted, deleted))
+}
+
+/// The count of a `<count> <noun>` diffstat segment whose noun is `singular`
+/// or `plural`.
+fn stat_count<'a>(segment: &'a str, singular: &str, plural: &str) -> Option<&'a str> {
+	let (count, noun) = segment.split_once(' ')?;
+	(!count.is_empty()
+		&& count.bytes().all(|byte| byte.is_ascii_digit())
+		&& (noun == singular || noun == plural))
+		.then_some(count)
 }
 
 fn condense_fetch(input: &str, exit_code: i32) -> String {
@@ -1838,28 +1883,34 @@ mod tests {
 	}
 
 	#[test]
-	fn short_status_is_compacted() {
+	fn short_status_within_whole_budget_is_returned_whole() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = test_ctx(Some("status"), "git status --short", &cfg);
-		let input = " M src/main.rs\nM  Cargo.toml\n?? scratch.txt\nUU conflicted.rs\n";
-		let out = filter(&ctx, input, 0);
-		assert!(out.changed);
+		let input =
+			"## main...origin/main [ahead 2]\n M src/main.rs\nM  Cargo.toml\n?? scratch.txt\n";
+		for command in ["git status --short", "git status -sb", "git status -s --branch"] {
+			let ctx = test_ctx(Some("status"), command, &cfg);
+			let out = filter(&ctx, input, 0);
+			assert!(!out.changed, "{command}");
+			assert_eq!(out.text, input);
+		}
+	}
+
+	#[test]
+	fn short_status_rows_are_counted() {
+		let input = " M src/main.rs\nM  Cargo.toml\n?? scratch.txt\nUU conflicted.rs\nAA \
+		             both-added.ts\nDD both-deleted.ts\n T .envrc\n";
 		assert_eq!(
-			out.text,
-			"staged 1, unstaged 1, untracked 1, conflicts 1\nM src/main.rs\nM Cargo.toml\n?? \
-			 scratch.txt\nUU conflicted.rs\n"
+			condense_status(input),
+			"staged 1, unstaged 2, untracked 1, conflicts 3\nM src/main.rs\nM Cargo.toml\n?? \
+			 scratch.txt\nUU conflicted.rs\nAA both-added.ts\nDD both-deleted.ts\nT .envrc\n"
 		);
 	}
 
 	#[test]
 	fn short_status_with_branch_preserves_branch_summary() {
-		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = test_ctx(Some("status"), "git status -sb", &cfg);
 		let input = "## main...origin/main [ahead 2]\n M src/main.rs\n";
-		let out = filter(&ctx, input, 0);
-		assert!(out.changed);
 		assert_eq!(
-			out.text,
+			condense_status(input),
 			"branch main...origin/main [ahead 2]\nstaged 0, unstaged 1, untracked 0\nM src/main.rs\n",
 		);
 	}
@@ -1886,12 +1937,8 @@ mod tests {
 
 	#[test]
 	fn short_status_ignored_rows_do_not_count_dirty() {
-		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = test_ctx(Some("status"), "git status --short --ignored", &cfg);
 		let input = " M src/main.rs\n!! ignored.log\n";
-		let out = filter(&ctx, input, 0);
-		assert!(out.changed);
-		assert_eq!(out.text, "staged 0, unstaged 1, untracked 0\nM src/main.rs\n");
+		assert_eq!(condense_status(input), "staged 0, unstaged 1, untracked 0\nM src/main.rs\n");
 	}
 
 	#[test]
@@ -2372,12 +2419,13 @@ mod tests {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("diff"), "git diff --word-diff --name-only", &cfg);
 		let mut input = String::new();
-		for idx in 0..40 {
-			let _ = writeln!(input, "src/file{idx}.rs");
+		for idx in 0..1000 {
+			let _ = writeln!(input, "src/some/nested/directory/file{idx}.rs");
 		}
+		assert!(input.len() > primitives::WHOLE_OUTPUT_BYTES);
 		let out = filter(&ctx, &input, 0);
 		assert!(out.changed, "{}", out.text);
-		assert!(!out.text.contains("src/file39.rs"), "{}", out.text);
+		assert!(!out.text.contains("src/some/nested/directory/file999.rs"), "{}", out.text);
 	}
 
 	#[test]
@@ -2439,7 +2487,7 @@ mod tests {
 	}
 
 	#[test]
-	fn diff_stat_is_summarized() {
+	fn diff_stat_within_whole_budget_is_returned_whole() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("diff"), "git diff --stat", &cfg);
 		let input = "\
@@ -2449,17 +2497,43 @@ mod tests {
  3 files changed, 448 insertions(+), 100 deletions(-)
 ";
 		let out = filter(&ctx, input, 0);
+		assert!(!out.changed);
+		assert_eq!(out.text, input);
+	}
+
+	#[test]
+	fn diff_stat_over_budget_is_summarized() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff --stat", &cfg);
+		let mut input = String::new();
+		for idx in 0..500 {
+			let _ = writeln!(input, " src/module-{idx}/handler.rs | 14 ++++++++++++--");
+		}
+		input.push_str(" 500 files changed, 6000 insertions(+), 1000 deletions(-)\n");
+		assert!(input.len() > primitives::WHOLE_OUTPUT_BYTES);
+		let out = filter(&ctx, &input, 0);
 		assert!(out.changed);
-		assert!(out.text.starts_with("git diff --stat: 3 files +448 -100\n"));
 		assert!(
 			out.text
-				.contains("crates/pi-shell/src/minimizer/filters/git.rs")
-		);
-		assert!(
+				.starts_with("git diff --stat: 500 files +6000 -1000\n"),
+			"{}",
 			out.text
-				.contains("packages/coding-agent/test/bash-executor.test.ts")
 		);
-		assert!(!out.text.contains("3 files changed"));
+		assert!(out.text.contains("src/module-0/handler.rs"));
+		assert!(out.text.contains("[…480 files elided…]"));
+	}
+
+	#[test]
+	fn diff_name_only_within_whole_budget_is_returned_whole() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("diff"), "git diff --name-only HEAD~1", &cfg);
+		let mut input = String::new();
+		for idx in 0..60 {
+			let _ = writeln!(input, "src/file-{idx}.rs");
+		}
+		let out = filter(&ctx, &input, 0);
+		assert!(!out.changed);
+		assert_eq!(out.text, input);
 	}
 
 	#[test]
@@ -2467,20 +2541,26 @@ mod tests {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("diff"), "git diff --name-only HEAD~1", &cfg);
 		let mut input = String::new();
-		for idx in 0..26 {
-			input.push_str("src/file-");
-			input.push_str(&idx.to_string());
-			input.push_str(".rs\n");
+		for idx in 0..800 {
+			let _ = writeln!(input, "src/some/nested/directory/file-{idx}.rs");
+			if idx % 20 == 0 {
+				let _ = writeln!(
+					input,
+					"warning: in the working copy of 'src/some/nested/directory/file-{idx}.rs', LF \
+					 will be replaced by CRLF the next time Git touches it"
+				);
+			}
 		}
 
 		let out = filter(&ctx, &input, 0);
 
 		assert!(out.changed);
-		assert!(out.text.starts_with("git diff --name-only: 26 files\n"));
-		assert!(out.text.contains("src/file-0.rs\n"));
-		assert!(out.text.contains("src/file-19.rs\n"));
-		assert!(!out.text.contains("src/file-20.rs\n"));
-		assert!(out.text.contains("[…6 files elided…]"));
+		assert!(out.text.starts_with("git diff --name-only: 800 files\n"), "{}", out.text);
+		assert!(out.text.contains("src/some/nested/directory/file-0.rs\n"));
+		assert!(out.text.contains("src/some/nested/directory/file-19.rs\n"));
+		assert!(!out.text.contains("src/some/nested/directory/file-20.rs\n"));
+		assert!(out.text.contains("[…780 files elided…]"));
+		assert!(out.text.contains("[…40 git warning lines elided…]"));
 	}
 
 	#[test]
@@ -2488,7 +2568,7 @@ mod tests {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("diff"), "git diff --name-status HEAD~1", &cfg);
 		let mut input = String::new();
-		for idx in 0..24 {
+		for idx in 0..1200 {
 			input.push_str(if idx % 3 == 0 {
 				"R100\told-"
 			} else {
@@ -2501,15 +2581,16 @@ mod tests {
 			}
 			input.push_str(".rs\n");
 		}
+		assert!(input.len() > primitives::WHOLE_OUTPUT_BYTES);
 
 		let out = filter(&ctx, &input, 0);
 
 		assert!(out.changed);
-		assert!(out.text.starts_with("git diff --name-status: 24 files\n"));
+		assert!(out.text.starts_with("git diff --name-status: 1200 files\n"));
 		assert!(out.text.contains("R100\told-0.rs\tnew-0.rs\n"));
 		assert!(out.text.contains("M\tpath-1.rs\n"));
-		assert!(!out.text.contains("path-20.rs\n"));
-		assert!(out.text.contains("[…4 files elided…]"));
+		assert!(!out.text.contains("\tpath-20.rs\n"));
+		assert!(out.text.contains("[…1180 files elided…]"));
 	}
 
 	#[test]
@@ -2540,24 +2621,19 @@ mod tests {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = test_ctx(Some("diff"), "git diff --numstat HEAD~1", &cfg);
 		let mut input = String::new();
-		for idx in 0..22 {
-			input.push_str(&(idx + 1).to_string());
-			input.push('\t');
-			input.push_str(&(idx % 7).to_string());
-			input.push('\t');
-			input.push_str("src/file-");
-			input.push_str(&idx.to_string());
-			input.push_str(".rs\n");
+		for idx in 0..1000 {
+			let _ = writeln!(input, "{}\t{}\tsrc/file-{idx}.rs", idx + 1, idx % 7);
 		}
+		assert!(input.len() > primitives::WHOLE_OUTPUT_BYTES);
 
 		let out = filter(&ctx, &input, 0);
 
 		assert!(out.changed);
-		assert!(out.text.starts_with("git diff --numstat: 22 files\n"));
+		assert!(out.text.starts_with("git diff --numstat: 1000 files\n"));
 		assert!(out.text.contains("1\t0\tsrc/file-0.rs\n"));
 		assert!(out.text.contains("20\t5\tsrc/file-19.rs\n"));
-		assert!(!out.text.contains("src/file-20.rs\n"));
-		assert!(out.text.contains("[…2 files elided…]"));
+		assert!(!out.text.contains("\tsrc/file-20.rs\n"));
+		assert!(out.text.contains("[…980 files elided…]"));
 	}
 
 	#[test]
@@ -2609,6 +2685,34 @@ mod tests {
 		let input = "[main 1a2b3c4] msg\n 3 files changed, 10 insertions(+), 2 deletions(-)\n";
 		let out = filter(&ctx, input, 0);
 		assert_eq!(out.text, "ok 1a2b3c4 (3 files +10 -2)\n");
+	}
+
+	#[test]
+	fn commit_summary_ignores_hook_output() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = test_ctx(Some("commit"), "git commit -m msg", &cfg);
+		let input = "\
+[STARTED] Preparing lint-staged...
+[COMPLETED] Running tasks for staged files...
+Checking changed files
+7 files left unchanged
+[feat/quiz 5ad1a685] feat(quiz): add card
+ 4 files changed, 76 insertions(+)
+";
+		let out = filter(&ctx, input, 0);
+		assert_eq!(out.text, "ok 5ad1a685 (4 files +76 -0)\n");
+	}
+
+	#[test]
+	fn stat_summary_parse_is_anchored() {
+		assert_eq!(
+			parse_stat_summary("2 files changed, 2 insertions(+), 1 deletion(-)"),
+			Some(("2", "2", "1"))
+		);
+		assert_eq!(parse_stat_summary("1 file changed, 3 deletions(-)"), Some(("1", "0", "3")));
+		assert_eq!(parse_stat_summary("7 files left unchanged"), None);
+		assert_eq!(parse_stat_summary("Checking changed files"), None);
+		assert_eq!(parse_stat_summary("1 file changed, but formatting failed"), None);
 	}
 
 	#[test]

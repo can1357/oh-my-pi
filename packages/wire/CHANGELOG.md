@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the layout-transition props every node takes: `transition: "layout"`, `transitionMs` and `motionKey`.
+
 ## [18.22.0] - 2026-11-16
 
 ### Added

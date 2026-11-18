@@ -28,6 +28,13 @@ use crate::error::EditError;
 const MAX_EXPANDED_RANGE_LINES: u32 = 100_000;
 pub(super) static UNIFIED_HUNK_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
+/// A row shaped like a hunk header (`PUT …`, `CUT …`, `REM`, `MV …`) or a
+/// tagged file header (`[path#TAG]`). Reaching the body as a bare row, it is a
+/// header that failed to parse, never content.
+static HEADER_SHAPED_RE: LazyLock<Regex> = LazyLock::new(|| {
+	Regex::new(r"^\s*(?:(?:PUT|CUT|REM|MV)(?:\s|$)|\[[^\]]+#[0-9A-Fa-f]{4}\]\s*$)")
+		.expect("valid regex")
+});
 
 /// Inverted concrete range with metadata for source-aware enrichment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,10 +263,8 @@ impl Executor {
 		} else {
 			self.flush_pending()?;
 		}
-		if matches!(self.file_op, Some(FileOp::Rem)) && !self.edits.is_empty() {
-			return Err(ParseFailure::Other(
-				"`REM` deletes the whole file and cannot be combined with line ops.".into(),
-			));
+		if matches!(self.file_op, Some(FileOp::Rem)) && !only_cuts(&self.edits) {
+			return Err(ParseFailure::Other(REM_TAKES_NO_BODY.into()));
 		}
 		self.normalize_overlaps()?;
 		Ok(Parsed { edits: self.edits, file_op: self.file_op, warnings: self.warnings })
@@ -272,7 +277,7 @@ impl Executor {
 				"only one file-level op (`REM` or `MV`) per section. Merge them under one header.",
 			);
 		}
-		if matches!(op, FileOp::Rem) && !self.edits.is_empty() {
+		if matches!(op, FileOp::Rem) && !only_cuts(&self.edits) {
 			return fail_at(line_num, REM_TAKES_NO_BODY);
 		}
 		self.file_op = Some(op);
@@ -329,6 +334,9 @@ impl Executor {
 			}
 			if let Some(message) = bodyless_message(&pending.target, pending.had_colon) {
 				return fail_at(line_num, message);
+			}
+			if HEADER_SHAPED_RE.is_match(text) {
+				return fail_at(line_num, &messages::malformed_header_row_message(text));
 			}
 			let minus = text.trim_start().starts_with('-');
 			if !minus {
@@ -691,6 +699,16 @@ fn bodyless_message(target: &BlockTarget, had_colon: bool) -> Option<&'static st
 	} else {
 		None
 	}
+}
+/// Whether `edits` only delete lines without writing any: bodyless `CUT`s
+/// (and empty `PUT`s read as cuts), the only line ops `REM` admits.
+fn only_cuts(edits: &[Edit]) -> bool {
+	edits.iter().all(|edit| {
+		matches!(
+			edit,
+			Edit::Cut { .. } | Edit::Delete { .. } | Edit::Block { mode: Some(BlockMode::Cut), .. }
+		)
+	})
 }
 fn complete_bodyless(pending: &Pending) -> bool {
 	matches!(pending.target, BlockTarget::Cut { .. } | BlockTarget::CutBlock { .. })

@@ -15,7 +15,7 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
-import type { TspEditorDecoration, TspEditorProps, TspText, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspEditorProps, TspMark, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
@@ -78,6 +78,8 @@ export interface NativeEditorLayout {
 	readonly role: string;
 	/** Tone of the root (`pending` while a turn runs). */
 	readonly tone?: TspTone;
+	/** Mark of the root: `drop` dims a composer the keys are away from (an ask waits above it). */
+	readonly mark?: TspMark;
 	readonly children: readonly NativeChild[];
 	/** Keypath of the `editor` node inside the root (the autocomplete's caret anchor). */
 	readonly caret: string;
@@ -813,7 +815,13 @@ export class Editor implements Component, Focusable {
 	#nativeDecor?: { text: string; generation: number; decor: readonly TspEditorDecoration[] | undefined };
 	#nativeEditor?: { props: TspEditorProps; node: NativeNode };
 	#nativeOverlay?: { list: SelectList; caret: string; node: NativeNode };
-	#nativeRoot?: { role: string; tone: TspTone | undefined; children: readonly NativeChild[]; node: NativeNode };
+	#nativeRoot?: {
+		role: string;
+		tone: TspTone | undefined;
+		mark: TspMark | undefined;
+		children: readonly NativeChild[];
+		node: NativeNode;
+	};
 
 	// Store last layout width for cursor navigation
 	#lastLayoutWidth: number = 80;
@@ -2097,11 +2105,21 @@ export class Editor implements Component, Focusable {
 			this.#nativeOverlay = undefined;
 		}
 		const root = this.#nativeRoot;
-		if (root && root.role === layout.role && root.tone === layout.tone && sameItems(root.children, children)) {
+		if (
+			root &&
+			root.role === layout.role &&
+			root.tone === layout.tone &&
+			root.mark === layout.mark &&
+			sameItems(root.children, children)
+		) {
 			return root.node;
 		}
-		const described = col(children, layout.tone ? { role: layout.role, tone: layout.tone } : { role: layout.role });
-		this.#nativeRoot = { role: layout.role, tone: layout.tone, children, node: described };
+		const described = col(children, {
+			role: layout.role,
+			...(layout.tone ? { tone: layout.tone } : {}),
+			...(layout.mark ? { mark: layout.mark } : {}),
+		});
+		this.#nativeRoot = { role: layout.role, tone: layout.tone, mark: layout.mark, children, node: described };
 		return described;
 	}
 

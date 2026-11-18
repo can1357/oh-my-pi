@@ -65,6 +65,32 @@ function textsOf(root: NativeNode): string[] {
 	return [...own, ...(root.c ?? []).flatMap(child => (isNode(child) ? textsOf(child) : []))];
 }
 
+/** `root` and every node under it, depth first. */
+function allNodes(root: NativeNode): NativeNode[] {
+	return [root, ...(root.c ?? []).flatMap(child => (isNode(child) ? allNodes(child) : []))];
+}
+
+function byRole(root: NativeNode, role: string): NativeNode[] {
+	return allNodes(root).filter(node => node.p?.role === role);
+}
+
+/** A text node's text, plain or spans. */
+function labelOf(node: NativeNode): string {
+	if (node.k !== "text" || !node.p) return "";
+	return "text" in node.p && node.p.text !== undefined
+		? node.p.text
+		: (node.p.spans ?? []).map(item => item.t).join("");
+}
+
+function labelsOf(nodes: readonly NativeNode[]): string[] {
+	return nodes.map(labelOf);
+}
+
+/** Every text node's text under `root`, plain or spans. */
+function textsOrLabels(root: NativeNode): string[] {
+	return allNodes(root).flatMap(node => (node.k === "text" ? [labelOf(node)] : []));
+}
+
 const DB_FORM = `<form>
 <fieldset><legend>Database</legend>
 <p>Which store should <code>ledger</code> use?</p>
@@ -292,6 +318,17 @@ describe("html form", () => {
 			form.dispose();
 		});
 
+		it("checks the focused box when Enter leaves an empty checkbox group", () => {
+			const { form } = dialog(`<form><fieldset><legend>Pick</legend>
+<label><input type="checkbox" name="t" value="a"> A</label>
+<label><input type="checkbox" name="t" value="b"> B</label>
+</fieldset></form>`);
+			form.handleInput(DOWN);
+			form.handleInput(ENTER);
+			expect(form.data().t).toEqual(["b"]);
+			form.dispose();
+		});
+
 		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
 			const { form } = dialog(DB_FORM);
 			form.handleInput("n");
@@ -318,15 +355,15 @@ describe("html form", () => {
 			form.dispose();
 		});
 
-		it("opens native menu notes on the exact shown row and ignores stale tabs", () => {
+		it("opens native menu notes on the exact shown row and ignores rows of a folded field", () => {
 			const { form } = dialog(DB_FORM);
-			form.handleNativeEvent({ type: "action", key: "body0/f0/o1", act: "note", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "body/g0/q0/f0/o1", act: "note", mods: [] });
 			expect(form.debugState().noteEdit).toBe("db=pg");
 			form.handleInput("native reason");
 			form.handleInput(ENTER);
 			expect(form.data().db).toBe("sqlite");
-			form.handleNativeEvent({ type: "select", key: "head/tabs", item: "t1" });
-			form.handleNativeEvent({ type: "action", key: "body0/f0/o0", act: "note", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "x", act: "open:1", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "body/g0/q0/f0/o0", act: "note", mods: [] });
 			expect(form.debugState().noteEdit).toBeUndefined();
 			expect(form.debugState().focus).toBe("extras=ci");
 			form.dispose();
@@ -485,10 +522,10 @@ describe("html form", () => {
 			form.handleInput(NOTE_KEY);
 			expect(form.acceptsImages).toBe(true);
 			expect(form.pasteText).toBeDefined();
-			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
+			form.handleInput("\x1bh"); // Alt+H hides
 			expect(form.acceptsImages).toBe(false);
 			expect(form.pasteText).toBeUndefined();
-			form.handleNativeEvent({ type: "action", key: "", act: "show", mods: [] });
+			form.handleInput("\x1bh");
 			expect(form.acceptsImages).toBe(true);
 			expect(form.pasteText).toBeDefined();
 			form.dispose();
@@ -553,7 +590,7 @@ describe("html form", () => {
 			form.handleInput("kept ");
 			const settle = form.beginPaste();
 			form.handleInput(ENTER);
-			form.handleNativeEvent({ type: "action", key: "", act: "hide", mods: [] });
+			form.handleInput("\x1bh"); // Alt+H hides
 			expect(form.beginPaste()("refused")).toBe(false);
 			const marker = form.attachImage(IMAGE, DIMS);
 			expect(settle(marker)).toBe(true);
@@ -1054,191 +1091,138 @@ describe("html form", () => {
 			form.dispose();
 		});
 
-		it("natively: one tab per question with Next, and Submit on the Review tab sends the answers", () => {
-			const { form, onSubmit } = dialog(DB_FORM);
-			let root = form.describe(CX);
-			expect(root.p).toMatchObject({ role: "omp.editor.ask" });
-			const tabs = findPath(root, node => node.k === "tabs")!;
-			// The Database tab shows only its own question.
-			expect(findPath(root, node => node.k === "list" && node.key === "f1")).toBeUndefined();
-			const radios = findPath(root, node => node.k === "list" && node.key === "f0")!;
-			form.handleNativeEvent({ type: "select", key: radios, item: "o1" });
-			form.handleNativeEvent({ type: "action", key: "actions/next", act: "next", mods: [] });
-			root = form.describe(CX);
-			const checks = findPath(root, node => node.k === "list" && node.key === "f1")!;
-			form.handleNativeEvent({ type: "select", key: checks, item: "o0" }); // un-check CI
-			form.handleNativeEvent({ type: "select", key: tabs, item: "review" });
-			expect(findPath(form.describe(CX), node => node.k === "kv")).toBeDefined();
-			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith({ db: "pg", extras: [], region: "us", workers: 4, notes: "" }, []);
-		});
-
-		it("natively: Submit shows only on the last question tab (and Review) and sends from there", () => {
-			const { form, onSubmit } = dialog(DB_FORM);
-			// First question tab: Next only.
-			expect(findPath(form.describe(CX), node => node.key === "submit")).toBeUndefined();
-			form.handleNativeEvent({ type: "action", key: "actions/next", act: "next", mods: [] });
+		it("natively: stacks every question; the focused one opens, the rest fold to their answer", () => {
+			const { form } = dialog(DB_FORM);
 			const root = form.describe(CX);
-			expect(findPath(root, node => node.k === "kv")).toBeUndefined(); // last question tab, not Review
-			expect(findPath(root, node => node.key === "submit")).toBeDefined();
-			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
-			expect(onSubmit).toHaveBeenCalledWith(
-				{ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" },
-				[],
-			);
+			expect(root.p).toMatchObject({ role: "omp.ask.card" });
+			expect(allNodes(root).some(node => node.k === "tabs")).toBe(false);
+			expect(labelsOf(byRole(root, "omp.ask.card.progress"))).toEqual(["4 of 5 answered"]);
+			// Database holds focus: its radios are rows. Extras folds field by field.
+			expect(findPath(root, node => node.k === "list" && node.key === "f0")).toBeDefined();
+			expect(findPath(root, node => node.k === "list" && node.key === "f1")).toBeUndefined();
+			const folds = byRole(root, "omp.ask.fold");
+			expect(folds.map(fold => labelsOf(byRole(fold, "omp.ask.fold.question"))[0])).toEqual([
+				"Extras",
+				"Region",
+				"Workers",
+				"Notes",
+			]);
+			// An answered choice shows only what was picked; a text answer its value; an empty one its placeholder.
+			expect(labelsOf(byRole(folds[0]!, "omp.ask.pill"))).toEqual(["✓ CI"]);
+			expect(labelsOf(byRole(folds[1]!, "omp.ask.pill"))).toEqual(["✓ US"]);
+			expect(labelsOf(byRole(folds[2]!, "omp.ask.fold.answer"))).toEqual(["4"]);
+			expect(labelsOf(byRole(folds[3]!, "omp.ask.fold.well"))).toEqual(["anything else"]);
+			expect(byRole(root, "omp.ask.skip")).toEqual([]);
 		});
 
-		it("natively: a tab is checked only after the user leaves it with valid answers, not for preselected ones", () => {
-			const { form } = dialog(DB_FORM);
-			const checked = () => {
-				const root = form.describe(CX);
-				const path = findPath(root, node => node.k === "tabs")!;
-				let tabs: NativeNode = root;
-				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
-				const items = (tabs.k === "tabs" ? tabs.p?.items : undefined) ?? [];
-				return items.flatMap(tab =>
-					"id" in tab && typeof tab.label !== "string" && tab.label[0]?.t === "✓ " ? [tab.id] : [],
-				);
-			};
-			// Both questions start with valid preselected answers, yet neither has been visited.
-			expect(checked()).toEqual([]);
-			form.handleInput(TAB); // Database → Extras
-			expect(checked()).toEqual(["t0"]);
+		it("natively: an unanswered fold shows its first four options, cut to twenty cells, then +N", () => {
+			const radios = [
+				"Behind a feature flag for a week",
+				"Default on",
+				"Next minor",
+				"After a soak",
+				"Never",
+				"Ask me",
+			]
+				.map((label, index) => `<label><input type="radio" name="when" value="v${index}"> ${label}</label>`)
+				.join("");
+			const { form } = dialog(`<form><label>Owner <input name="owner"></label><p>Rollout?</p>${radios}</form>`);
+			const [fold] = byRole(form.describe(CX), "omp.ask.fold");
+			const pills = byRole(fold!, "omp.ask.pill");
+			expect(labelsOf(pills)).toEqual(["Behind a feature fl…", "Default on", "Next minor", "After a soak"]);
+			expect(pills[0]!.p).toMatchObject({ title: "Behind a feature flag for a week" });
+			expect(labelsOf(byRole(fold!, "omp.ask.pill.more"))).toEqual(["+2"]);
 		});
 
-		it("natively: ↑/↓ cross into the next tab past its last stop; ←/→ turn tabs", () => {
+		it("natively: a pill on a folded question picks it without moving focus", () => {
 			const { form } = dialog(DB_FORM);
-			const activeTab = () => {
-				const root = form.describe(CX);
-				const path = findPath(root, node => node.k === "tabs")!;
-				let tabs: NativeNode = root;
-				for (const key of path.split("/")) tabs = (tabs.c ?? []).filter(isNode).find(child => child.key === key)!;
-				return tabs.p && "active" in tabs.p ? tabs.p.active : undefined;
-			};
+			const pick = (act: string) => form.handleNativeEvent({ type: "action", key: "x", act, mods: [] });
+			pick("open:2"); // Region
+			pick("pick:0:1"); // Postgres, from the folded Database question
+			pick("pick:1:1"); // Docker joins CI
+			expect(form.data()).toMatchObject({ db: "pg", extras: ["ci", "docker"] });
+			expect(form.debugState().focus).toBe("region");
+			pick("pick:0:9"); // no such option
+			expect(form.data()).toMatchObject({ db: "pg" });
+		});
+
+		it("natively: ↓ past a question's last row opens the next; PgDn past the last folds all for Submit", () => {
+			const { form, onSubmit } = dialog(DB_FORM);
+			const open = () => byRole(form.describe(CX), "omp.ask.open")[0];
+			const first = open()!.reveal;
 			setNativeRendering(true);
 			try {
-				expect(activeTab()).toBe("t0");
 				for (let press = 0; press < 3; press++) form.handleInput(DOWN); // Postgres, Other, then CI
-				expect(activeTab()).toBe("t1");
-				form.handleInput("\x1b[D"); // ←
-				expect(activeTab()).toBe("t0");
-				form.handleInput(RIGHT);
-				form.handleInput(RIGHT);
-				expect(activeTab()).toBe("review");
-				form.handleInput("\x1b[D");
-				expect(activeTab()).toBe("t1");
+				expect(form.debugState().focus).toBe("extras=ci");
+				expect(findPath(form.describe(CX), node => node.k === "list" && node.key === "f1")).toBeDefined();
+				expect(open()!.reveal).not.toEqual(first);
+				form.handleInput("\x1b[6~"); // PgDn
+				expect(open()).toBeUndefined();
+				expect(form.debugState().focus).toBe("submit");
+				form.handleInput("\x1b[5~"); // PgUp
+				expect(form.debugState().focus).toBe("extras=ci");
+				form.handleInput("\x1b[6~");
+				form.handleInput(ENTER);
+				expect(onSubmit).toHaveBeenCalledWith(
+					{ db: "sqlite", extras: ["ci"], region: "us", workers: 4, notes: "" },
+					[],
+				);
 			} finally {
 				setNativeRendering(false);
 			}
 		});
 
-		it("natively: each question after the fieldsets gets its own tab, with the context before it", () => {
+		it("natively: Submit with a bad answer opens that question with its error", () => {
+			const { form, onSubmit } = dialog(DB_FORM);
+			form.handleNativeEvent({ type: "action", key: "x", act: "open:3", mods: [] });
+			form.handleInput("9"); // 94 workers, over the max of 8
+			form.handleNativeEvent({ type: "action", key: "x", act: "open:0", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "actions/submit", act: "submit", mods: [] });
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(form.debugState().focus).toBe("workers");
+			const root = form.describe(CX);
+			expect(byRole(root, "omp.ask.open").flatMap(node => byRole(node, "omp.ask.error"))).toHaveLength(1);
+		});
+
+		it("natively: each question keeps the context before it, shown only while it is open", () => {
 			const { form } = dialog(`<form>
 				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label><label><input type="radio" name="length" value="long"> Long</label></fieldset>
-				<fieldset><legend>Languages</legend><label><input type="checkbox" name="languages" value="ts"> TypeScript</label><label><input type="checkbox" name="languages" value="py"> Python</label></fieldset>
 				<label>Editor <select name="editor"><option value="vscode">VS Code</option><option value="zed">Zed</option></select></label>
 				<p>How urgent is it?</p>
 				<label>Priority <input type="number" name="priority" value="3"></label>
 			</form>`);
+			const open = (field: number) => {
+				form.handleNativeEvent({ type: "action", key: "x", act: `open:${field}`, mods: [] });
+				return byRole(form.describe(CX), "omp.ask.open").flatMap(textsOrLabels);
+			};
+			expect(open(1)).not.toContain("How urgent is it?");
+			expect(open(2)).toContain("How urgent is it?");
+			expect(textsOrLabels(form.describe(CX))).toContain("Editor");
+		});
+
+		it("natively: a folded question's caption is not drawn again above it", () => {
+			const { form } = dialog(`<form><fieldset><legend>Plan</legend>
+				<p>Which plan?</p><label><input type="radio" name="plan" value="basic" checked> Basic</label><label><input type="radio" name="plan" value="pro"> Pro</label>
+				<p>Which region?</p><label><input type="radio" name="region" value="us" checked> US</label><label><input type="radio" name="region" value="eu"> EU</label>
+			</fieldset></form>`);
+			const texts = textsOrLabels(form.describe(CX));
+			expect(texts.filter(entry => entry === "Which plan?")).toHaveLength(1);
+			expect(texts.filter(entry => entry === "Which region?")).toHaveLength(1);
+		});
+
+		it("natively: the skip notice warns under the questions and dims them", () => {
+			// Initialized with a placeholder, assigned when the notice appears:
+			// a single `const` would hide the first, notice-less render.
+			let notice: string | undefined = undefined;
+			const { form } = dialog(DB_FORM, { skipNotice: () => notice });
+			expect(byRole(form.describe(CX), "omp.ask.skip")).toEqual([]);
+			notice = "Sending your message skips these questions";
 			const root = form.describe(CX);
-			const tabs = findPath(root, node => node.k === "tabs")!;
-			let strip: NativeNode = root;
-			for (const key of tabs.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.k === "tabs" ? strip.p?.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "t2", "t3", "review"]);
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
-			const editorTab = form.describe(CX);
-			expect(textsOf(editorTab)).toContain("Editor");
-			expect(textsOf(editorTab)).not.toContain("How urgent is it?");
-			// The Priority input's well, clickable while another field has focus.
-			expect(
-				findPath(editorTab, node => !!node.p && "actions" in node.p && node.p.actions?.click === "edit:3"),
-			).toBeUndefined();
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t3" });
-			const priorityTab = textsOf(form.describe(CX));
-			expect(priorityTab).toEqual(expect.arrayContaining(["How urgent is it?", "Priority"]));
-			expect(priorityTab).not.toContain("Editor");
+			expect(labelsOf(byRole(root, "omp.ask.skip"))).toEqual(["⚠ Sending your message skips these questions"]);
+			expect(byRole(root, "omp.ask.card.body")[0]!.p).toMatchObject({ mark: "drop" });
 		});
 
-		it("natively: text between a loose group's options stays on the group's tab", () => {
-			const { form } = dialog(`<form>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
-				<p>Premium includes backups</p>
-				<label><input type="radio" name="plan" value="premium"> Premium</label>
-				<label>Notes <input name="notes"></label>
-			</form>`);
-			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
-			expect(textsOf(form.describe(CX))).toContain("Premium includes backups");
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
-			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Notes"]));
-			expect(textsOf(form.describe(CX))).not.toContain("Premium includes backups");
-		});
-
-		it("natively: a field between a loose group's options keeps the context before it", () => {
-			const { form } = dialog(`<form>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-				<label><input type="radio" name="plan" value="basic" checked> Basic</label>
-				<p>Choose a compliant region</p>
-				<label>Region <select name="region"><option value="us">US</option><option value="eu">EU</option></select></label>
-				<label><input type="radio" name="plan" value="premium"> Premium</label>
-			</form>`);
-			const tabs = findPath(form.describe(CX), node => node.k === "tabs")!;
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t1" });
-			expect(textsOf(form.describe(CX))).not.toContain("Choose a compliant region");
-			form.handleNativeEvent({ type: "select", key: tabs, item: "t2" });
-			expect(textsOf(form.describe(CX))).toEqual(expect.arrayContaining(["Choose a compliant region", "Region"]));
-		});
-
-		it("natively: a loose field with only disabled options shares the next tab, so the focused field stays shown", () => {
-			const { form } = dialog(`<form>
-				<label><input type="checkbox" name="locked" disabled> Locked</label>
-				<label>Name <input name="name"></label>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-			</form>`);
-			const root = form.describe(CX);
-			const path = findPath(root, node => node.k === "tabs")!;
-			let strip: NativeNode = root;
-			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.k === "tabs" ? strip.p?.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
-			// The shared tab is named after Name, the question the keyboard reaches.
-			const first = items[0];
-			expect(first && "label" in first && typeof first.label !== "string" ? first.label[0]?.t : "").toBe("Name");
-			// Focus opens on Name, the first control the keyboard reaches; the shown tab holds it.
-			expect(textsOf(root)).toContain("Name");
-		});
-
-		it("natively: a fieldset without a legend stays one tab", () => {
-			const { form } = dialog(`<form>
-				<fieldset><legend>Length</legend><label><input type="radio" name="length" value="short" checked> Short</label></fieldset>
-				<fieldset><label>Name <input name="name"></label><label>Email <input name="email"></label></fieldset>
-			</form>`);
-			const root = form.describe(CX);
-			const path = findPath(root, node => node.k === "tabs")!;
-			let strip: NativeNode = root;
-			for (const key of path.split("/")) strip = (strip.c ?? []).filter(isNode).find(child => child.key === key)!;
-			const items = (strip.k === "tabs" ? strip.p?.items : undefined) ?? [];
-			expect(items.map(item => ("id" in item ? item.id : ""))).toEqual(["t0", "t1", "review"]);
-		});
-
-		it("natively: the form sits in the card's shrinking, scrolling list and the action bar stays outside it", () => {
-			const options = Array.from({ length: 40 }, (_, index) => `<option value="${index}">Option ${index}</option>`);
-			const { form } = dialog(
-				`<form><p>Context</p><select name="pick" multiple>${options.join("")}</select><textarea name="notes"></textarea></form>`,
-			);
-			const root = form.describe(CX);
-			const children = (root.c ?? []).filter(isNode);
-			expect(children.some(child => child.k === "tabs" || child.key === "head")).toBe(false);
-			// Tern's stylesheet lets an `omp.ask.options` list shrink and scroll inside the 60vh card;
-			// a capped `col` would only clip.
-			const scroller = children.find(child => child.k === "list" && child.p?.role === "omp.ask.options");
-			expect((scroller?.c ?? []).filter(isNode).map(child => child.p?.role)).toEqual(["omp.ask.form"]);
-			expect(children.at(-1)?.p).toMatchObject({ role: "omp.actions" });
-		});
-
-		it("hides to one row and back, by key in rows and by Hide/Show natively; answers survive", () => {
+		it("hides to one row and back by key in rows; natively the key leaves the card alone", () => {
 			const { form, onCancel } = dialog(DB_FORM);
 			form.handleInput("\x1bh"); // Alt+H
 			expect(form.render(100)).toHaveLength(1);
@@ -1246,15 +1230,20 @@ describe("html form", () => {
 			form.handleInput(ENTER); // shows it again
 			expect(form.render(100).length).toBeGreaterThan(1);
 			expect(form.data()).toMatchObject({ db: "sqlite" });
-			form.handleNativeEvent({ type: "action", key: "actions/hide", act: "hide", mods: [] });
-			expect(form.describe(CX).p).toMatchObject({ role: "omp.editor.ask.hidden" });
-			form.handleNativeEvent({ type: "action", key: "actions/show", act: "show", mods: [] });
-			expect(form.describe(CX).p).toMatchObject({ role: "omp.editor.ask" });
+			setNativeRendering(true);
+			try {
+				form.handleInput("\x1bh");
+				expect(form.describe(CX).p).toMatchObject({ role: "omp.ask.card" });
+				form.handleInput(DOWN);
+				expect(form.debugState().focus).toBe("db=pg");
+			} finally {
+				setNativeRendering(false);
+			}
 			form.handleInput(ESC);
 			expect(onCancel).toHaveBeenCalled();
 		});
 
-		it("natively: docks in the composer's place, and only the focused text field is a live editor", async () => {
+		it("natively: sits in the transcript, and only the focused text field is a live editor", async () => {
 			const form = new HtmlFormDialog(
 				parseHtmlForm(
 					`${DB_FORM.replace("</form>", "")}<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table><pre>x = 1</pre><ul><li>one</li></ul></form>`,
@@ -1264,7 +1253,7 @@ describe("html form", () => {
 			const provider: TerminalFrameProvider & NativeSurfaceProvider = {
 				renderFrame: () => ({ viewport: [] }),
 				acknowledgeHistory: () => {},
-				describeSurface: () => ({ main: [], dock: [form] }),
+				describeSurface: () => ({ main: [form], dock: [] }),
 			};
 			const harness = await TspHarness.start(tui => {
 				tui.setFrameProvider(provider);
@@ -1272,15 +1261,11 @@ describe("html form", () => {
 			});
 			try {
 				expect(harness.errors).toEqual([]);
-				const root = harness.region("dock")!.c?.find(node => node.p?.role === "omp.editor.ask");
-				expect(root).toBeDefined();
-				// The tab's scroller and the Database radios inside it.
-				expect(harness.findAll(node => node.k === "list" && node.p?.role === "omp.ask.options")).toHaveLength(2);
+				expect(harness.findAll(node => node.p?.role === "omp.ask.card")).toHaveLength(1);
 				// Focus is on a radio: no editor node, so the terminal keeps sending keys to the form.
 				expect(harness.findAll(node => node.k === "input" || node.k === "editor")).toEqual([]);
-				expect(harness.findAll(node => node.p?.role === "omp.ask.well")).toEqual([]);
-				// Clicking the workers well (field 3) focuses it: its tab opens and it becomes the one live input.
-				form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
+				// Opening Workers (field 3) makes it the one live input.
+				form.handleNativeEvent({ type: "action", key: "x", act: "open:3", mods: [] });
 				await harness.render();
 				const inputs = harness.findAll(node => node.k === "input");
 				expect(inputs.map(node => (node.p && "text" in node.p ? node.p.text : undefined))).toEqual(["4"]);
@@ -1325,7 +1310,7 @@ describe("html form", () => {
 			expect(typed).toEqual([]);
 		});
 
-		it("natively: clicking a text well hands the keys over even while a composer draft owns typing", () => {
+		it("natively: opening a text field hands the keys over even while a composer draft owns typing", () => {
 			const typed: string[] = [];
 			const { form } = dialog(DB_FORM, {
 				inputGuard: {
@@ -1334,7 +1319,7 @@ describe("html form", () => {
 					hint: "typing edits your prompt",
 				},
 			});
-			form.handleNativeEvent({ type: "action", key: "x", act: "edit:3", mods: [] });
+			form.handleNativeEvent({ type: "action", key: "x", act: "open:3", mods: [] });
 			form.handleInput("5");
 			expect(form.data()).toMatchObject({ workers: 54 });
 			expect(typed).toEqual([]);

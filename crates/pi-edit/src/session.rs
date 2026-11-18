@@ -527,10 +527,15 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 		.preview;
 		let mut lines: Vec<&str> = vec![header];
 		lines.extend(file.before_preview.iter().map(String::as_str));
-		let moved = file
-			.move_to
-			.as_ref()
-			.map(|m| format!("Moved to {}", m.display));
+		let moved = file.move_to.as_ref().map(|m| {
+			// DEST resolves from cwd, not from the source's directory: name a
+			// move out of that directory absolutely so it cannot be misread.
+			if m.absolute.parent() == file.absolute.parent() {
+				format!("Moved to {}", m.display)
+			} else {
+				format!("Moved to {}", m.absolute.display())
+			}
+		});
 		if let Some(moved) = &moved {
 			lines.push(moved);
 		}

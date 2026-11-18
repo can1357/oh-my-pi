@@ -175,6 +175,13 @@ pub struct VcsShowResult {
 	pub data:      Buffer,
 	pub truncated: bool,
 }
+/// Worktree content of one repo-relative path, for
+/// [`VcsGitRepo::worktree_to_git`].
+#[napi(object)]
+pub struct VcsWorktreeContent {
+	pub path: String,
+	pub data: Uint8Array,
+}
 /// Diff generation options.
 #[napi(object)]
 #[derive(Default)]
@@ -1068,6 +1075,25 @@ impl VcsGitRepo {
 		blocking("vcs.showBlob", self.inner.clone(), signal, move |r| {
 			r.show_blob(&spec, max_bytes.map(|v| v as usize))
 				.map(Into::into)
+		})
+	}
+
+	/// Convert worktree content to the blob `git add` would store per path
+	/// (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
+	/// Git LFS), in input order.
+	#[napi]
+	pub fn worktree_to_git(
+		&self,
+		entries: Vec<VcsWorktreeContent>,
+		signal: Option<Unknown>,
+	) -> Promise<Vec<Buffer>> {
+		let entries: Vec<(String, Vec<u8>)> = entries
+			.into_iter()
+			.map(|entry| (entry.path, entry.data.to_vec()))
+			.collect();
+		blocking("vcs.worktreeToGit", self.inner.clone(), signal, move |r| {
+			r.worktree_to_git(entries)
+				.map(|blobs| blobs.into_iter().map(Buffer::from).collect())
 		})
 	}
 

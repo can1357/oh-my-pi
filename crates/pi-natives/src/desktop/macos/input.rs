@@ -28,7 +28,7 @@ use super::{
 	},
 	ax,
 	capture::{self, MacCapture},
-	keymap::{Keymap, Keystroke, is_keypad},
+	keymap::{Keymap, Keystroke, RETURN, TAB, is_keypad},
 	process::{self, RemoteScreen},
 	release::{self, Route},
 	release_guard, route, skylight,
@@ -2042,7 +2042,7 @@ const DRAG_RELEASE_GAP: Duration = Duration::from_millis(50);
 /// Key pacing for a device that samples HID report state, which loses a key
 /// transition shorter than its report interval; a search field that reacts
 /// to every key needs more than one interval.
-const REPORT_KEY_GAP: Duration = Duration::from_millis(120);
+const REPORT_KEY_GAP: Duration = Duration::from_millis(60);
 /// Press length, and pointer settle, of a tap on such a device.
 const TAP_HOLD: Duration = Duration::from_millis(60);
 /// How long raising an occluded target may take to become visible to
@@ -3544,12 +3544,25 @@ fn remote_layout<S>(
 	})
 }
 
-/// `text` as Unicode payloads on virtual key 0, grapheme by grapheme.
+/// `text` as Unicode payloads on virtual key 0, grapheme by grapheme. Line
+/// breaks and tabs go out as their own keys: an application that reads the key
+/// code (web content in a background window) would type key 0's `a` for them.
 fn unicode_keys(text: &str) -> Vec<TypedKey<'_>> {
-	graphemes_str(text)
-		.flat_map(unicode_runs)
-		.map(TypedKey::Unicode)
-		.collect()
+	let mut keys = Vec::new();
+	for grapheme in graphemes_str(text) {
+		let code = match grapheme {
+			"\r" | "\n" | "\r\n" => Some(RETURN),
+			"\t" => Some(TAB),
+			_ => None,
+		};
+		match code {
+			Some(code) => {
+				keys.push(TypedKey::Layout(Keystroke { code, shift: false, option: false }, grapheme));
+			},
+			None => keys.extend(unicode_runs(grapheme).map(TypedKey::Unicode)),
+		}
+	}
+	keys
 }
 
 /// The layout keys that type `text` into `window`, from `stroke`'s lookup.
@@ -5078,6 +5091,26 @@ mod tests {
 			flags.contains(CGEventFlags::MaskAlternate),
 			String::from_utf16_lossy(&units[..length]),
 		)
+	}
+
+	#[test]
+	fn unicode_text_sends_line_breaks_and_tabs_as_their_keys() {
+		let keys = unicode_keys("a\nb\r\n\tc");
+		let codes: Vec<_> = keys
+			.iter()
+			.map(|key| match key {
+				TypedKey::Layout(stroke, text) => (Some(stroke.code), *text),
+				TypedKey::Unicode(text) => (None, *text),
+			})
+			.collect();
+		assert_eq!(codes, [
+			(None, "a"),
+			(Some(36), "\n"),
+			(None, "b"),
+			(Some(36), "\r\n"),
+			(Some(48), "\t"),
+			(None, "c"),
+		]);
 	}
 
 	#[test]

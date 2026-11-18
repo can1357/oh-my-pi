@@ -8,8 +8,11 @@ import {
 	MUX_CONNECT_METHOD,
 	MUX_PING_METHOD,
 	MUX_RESTART_METHOD,
+	MUX_SERVER_EXITED_METHOD,
 	type MuxConnectParams,
 	type MuxConnectResult,
+	type MuxServerExit,
+	parseMuxServerExit,
 } from "../src/lsp/mux/protocol";
 import { LspMuxServer } from "../src/lsp/mux/server";
 import { FileChangeType, type FileEvent } from "../src/lsp/types";
@@ -281,6 +284,17 @@ describe("LspMuxServer", () => {
 		expect(replacement.connected.pid).not.toBe(second.connected.pid);
 	}, 10_000);
 
+	it("tells a link its server's real exit code and stderr before closing it", async () => {
+		const { client } = await link();
+		await initialize(client);
+		const closed = client.waitForClose();
+		client.notify("test/crash");
+		const exit = await client.nextNotification<MuxServerExit>(MUX_SERVER_EXITED_METHOD);
+		await closed;
+		expect(exit.code).toBe(3);
+		expect(exit.stderr).toContain("Unknown binary 'rust-analyzer'");
+	}, 10_000);
+
 	it("removes the workspace folders a session added before reusing its server", async () => {
 		const first = await link();
 		await initialize(first.client);
@@ -375,4 +389,17 @@ describe("LspMuxServer", () => {
 		await Bun.sleep(600);
 		expect((await state(client)).watchedFileChanges).toEqual([]);
 	}, 10_000);
+});
+
+describe("parseMuxServerExit", () => {
+	it("reads the exit frame at the end of a link's bytes", () => {
+		const body = JSON.stringify({
+			jsonrpc: "2.0",
+			method: MUX_SERVER_EXITED_METHOD,
+			params: { code: 1, stderr: "boom" },
+		});
+		const tail = `{"jsonrpc":"2.0","method":"window/logMessage"}Content-Length: ${body.length}\r\n\r\n${body}`;
+		expect(parseMuxServerExit(tail)).toEqual({ code: 1, stderr: "boom" });
+		expect(parseMuxServerExit("Content-Length: 2\r\n\r\n{}")).toBeUndefined();
+	});
 });

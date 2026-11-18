@@ -124,14 +124,49 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(refused.text).toContain("read-only working directory");
 	});
 
-	it("fails the command when a URL argument names nothing the provider knows", async () => {
-		const { text, isError } = await run(`'${process.execPath}' -e "console.log('ran')" skill://nope/tool.js`);
+	it("hands a program a URL argument the provider cannot resolve as written", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
 
-		expect(isError).toBe(true);
-		expect(text).not.toContain("ran\n");
-		// Unix maps the provider's ENOENT to the native errno (its message is the
-		// OS's); other platforms keep the provider message. Both name the URL.
-		expect(text).toContain("cannot resolve skill://nope/tool.js");
+		// An identifier or message text that only looks like a path is the program's own.
+		const { text, isError } = await run(
+			`'${process.execPath}' '${script}' skill://nope/tool.js 'artifact://12; local://data.txt is the evidence'`,
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain("skill://nope/tool.js\nartifact://12; local://data.txt is the evidence\n");
+	});
+
+	it.skipIf(process.platform === "win32")("hands omp every URL as written, selectors included", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
+		await fs.writeFile(path.join(tempDir, "omp"), `#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`, {
+			mode: 0o755,
+		});
+
+		const { text, isError } = await run(`PATH="$PWD:$PATH" omp read local://data.txt:1-1 --from=local://data.txt`);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain("read\nlocal://data.txt:1-1\n--from=local://data.txt\n");
+	});
+
+	it("resolves URLs attached to an option, behind curl's @, and in the environment", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).concat(process.env.BODY).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
+		const data = path.join(localRoot, "data.txt");
+
+		const { text, isError } = await run(
+			`BODY=local://data.txt '${process.execPath}' '${script}' -olocal://data.txt @local://data.txt body=@local://data.txt`,
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain(`-o${data}\n@${data}\nbody=@${data}\n${data}\n`);
 	});
 
 	it("starts an external program in the directory a URL working directory aliases", async () => {

@@ -150,39 +150,41 @@ fn check_apply(source: &str, case_name: &str, call: &Value) {
 			path: call["path"].as_str(),
 			on_empty_paste,
 		});
+	// The whole outcome in fixture shape, so a mismatch shows every field.
+	let outcome = match &result {
+		Ok(actual) => json!({ "expect": {
+			"text": actual.text,
+			"firstChangedLine": actual.first_changed_line,
+			"warnings": actual.warnings,
+		} }),
+		Err(error) => json!({ "error": error.to_string() }),
+	};
 	match (result, call["error"].as_str()) {
 		(Ok(actual), None) => {
 			let expected = &call["expect"];
-			assert_eq!(
-				actual.text,
-				expected["text"].as_str().expect("expected text"),
-				"{source}: {case_name}: applied text for {input:?}"
-			);
-			assert_eq!(
-				actual.first_changed_line.map(u64::from),
-				expected["firstChangedLine"].as_u64(),
-				"{source}: {case_name}: first changed line for {input:?}"
-			);
 			let expected_warnings = expected
 				.get("warnings")
 				.cloned()
 				.unwrap_or_else(|| json!([]));
-			assert_eq!(
-				json!(actual.warnings),
-				expected_warnings,
-				"{source}: {case_name}: apply warnings for {input:?}"
+			assert!(
+				actual.text == expected["text"].as_str().expect("expected text")
+					&& actual.first_changed_line.map(u64::from) == expected["firstChangedLine"].as_u64()
+					&& json!(actual.warnings) == expected_warnings,
+				"{source}: {case_name}: apply outcome for {input:?}\nactual: {outcome}"
 			);
 		},
-		(Err(error), Some(expected)) => assert_eq!(
-			error.to_string(),
-			legacy_error(expected),
-			"{source}: {case_name}: apply error for {input:?}"
+		(Err(error), Some(expected)) => assert!(
+			error.to_string() == legacy_error(expected),
+			"{source}: {case_name}: apply error for {input:?}\nactual: {outcome}"
 		),
-		(Err(error), None) => {
-			panic!("{source}: {case_name}: unexpected apply error for {input:?}: {error}")
+		(Err(_), None) => {
+			panic!("{source}: {case_name}: unexpected apply error for {input:?}\nactual: {outcome}")
 		},
-		(Ok(actual), Some(expected)) => {
-			panic!("{source}: {case_name}: expected apply error {expected:?}, got {:?}", actual.text)
+		(Ok(_), Some(expected)) => {
+			panic!(
+				"{source}: {case_name}: expected apply error {expected:?} for {input:?}\nactual: \
+				 {outcome}"
+			)
 		},
 	}
 }
@@ -194,6 +196,23 @@ fn legacy_parser_and_applier_cases_match_byte_for_byte() {
 	pi_ast::language::wasm_grammars::LUA.register(tree_sitter_lua::LANGUAGE.into());
 	let mut covered_names = 0_usize;
 	let mut calls = 0_usize;
+	// Every mismatch is collected, so one run reports all of them.
+	let mut failures = Vec::new();
+	let mut run = |check: &dyn Fn()| {
+		if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)) {
+			failures.push(
+				panic
+					.downcast_ref::<String>()
+					.cloned()
+					.or_else(|| {
+						panic
+							.downcast_ref::<&str>()
+							.map(|message| (*message).to_owned())
+					})
+					.unwrap_or_default(),
+			);
+		}
+	};
 	for fixture_name in FIXTURES {
 		let root = fixture(fixture_name);
 		let source = root["source"].as_str().expect("fixture source");
@@ -202,14 +221,20 @@ fn legacy_parser_and_applier_cases_match_byte_for_byte() {
 			let case_name = case["name"].as_str().expect("case name");
 			for call in case["parse"].as_array().into_iter().flatten() {
 				calls += 1;
-				check_parse(source, case_name, call);
+				run(&|| check_parse(source, case_name, call));
 			}
 			for call in case["apply"].as_array().into_iter().flatten() {
 				calls += 1;
-				check_apply(source, case_name, call);
+				run(&|| check_apply(source, case_name, call));
 			}
 		}
 	}
+	assert!(
+		failures.is_empty(),
+		"{} fixture call(s) failed:\n\n{}",
+		failures.len(),
+		failures.join("\n\n")
+	);
 	assert!(
 		covered_names >= 249,
 		"expected at least the assigned 249 named TS cases, found {covered_names}"
@@ -1458,24 +1483,18 @@ fn hashline_streaming_preview_cases_preserve_partial_and_final_contracts() {
 	let nested_tag = recovered.snapshot("nested/a.ts", text_a, None);
 	let batch =
 		preview_for(&recovered, format!("[a.ts#{nested_tag}]\nPUT 1-1:\n+const a = 99;"), false);
-	assert_eq!(batch.files.len(), 1, "{}", scenarios["path-recovery-stream"]);
-	assert!(batch.files[0].error.is_none());
-	assert!(
-		batch.files[0]
-			.diff
-			.as_deref()
-			.is_some_and(|diff| diff.contains("const a = 99;"))
-	);
+	assert!(batch.files.is_empty(), "{}", scenarios["path-recovery-stream"]);
 
 	let batch =
 		preview_for(&recovered, format!("[a.ts#{nested_tag}]\nPUT 1-1:\n+const a = 99;\n"), true);
 	assert_eq!(batch.files.len(), 1, "{}", scenarios["path-recovery-final"]);
-	assert!(batch.files[0].error.is_none());
 	assert!(
 		batch.files[0]
-			.diff
+			.error
 			.as_deref()
-			.is_some_and(|diff| diff.contains("const a = 99;"))
+			.is_some_and(|error| error.contains("File not found: a.ts. Hash #")),
+		"{}",
+		scenarios["path-recovery-final"]
 	);
 
 	let batch = preview_for(&recovered, "[missing.ts#FFFF]\nPUT 1-1:\n+x\n".into(), true);

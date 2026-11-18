@@ -332,7 +332,10 @@ async fn discover(
 		include,
 		hidden: true,
 		gitignore: true,
-		any_file: lang.is_some(),
+		lang: lang
+			.map(ops::resolve_supported_lang)
+			.transpose()
+			.map_err(|err| Error::from_reason(err.to_string()))?,
 		..Default::default()
 	};
 	search::discover(fs, &root, &opts)

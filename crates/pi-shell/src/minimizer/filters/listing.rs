@@ -30,6 +30,65 @@ fn context_has_nul_output(command: &str, program: &str) -> bool {
 	})
 }
 
+/// Whether a `grep`/`rg` command asks for a layout the grouped summary cannot
+/// represent: context lines (`-A`/`-B`/`-C`/`-NUM`, `--passthru`), whose
+/// `file-N-text` rows and `--` separators do not parse as matches, or an
+/// explicit output format (`--json`, `--vimgrep`, `--column`, byte offsets,
+/// counts, file lists, only-matching).
+///
+/// Short-option clusters are scanned up to the first non-letter (`-nC2`,
+/// `-A3`); a false positive only costs the compaction.
+fn grep_requests_verbatim_layout(command: &str) -> bool {
+	command.split_whitespace().any(|tok| {
+		if let Some(long) = tok.strip_prefix("--") {
+			let name = long.split_once('=').map_or(long, |(name, _)| name);
+			return matches!(
+				name,
+				"context"
+					| "after-context"
+					| "before-context"
+					| "passthru"
+					| "passthrough"
+					| "json"
+					| "vimgrep"
+					| "column"
+					| "byte-offset"
+					| "count"
+					| "count-matches"
+					| "files-with-matches"
+					| "files-without-match"
+					| "files"
+					| "only-matching"
+			);
+		}
+		let Some(short) = tok.strip_prefix('-') else {
+			return false;
+		};
+		short.starts_with(|ch: char| ch.is_ascii_digit())
+			|| short
+				.chars()
+				.take_while(char::is_ascii_alphabetic)
+				.any(|ch| matches!(ch, 'A' | 'B' | 'C' | 'b' | 'c' | 'l' | 'L' | 'o'))
+	})
+}
+
+/// Whether an `ls` command asks for the long format (`-l`, `-g`, `-o`, `-n`,
+/// `--format=long|verbose`). The agent wants the metadata columns, so the
+/// names-only summary must not replace them.
+fn ls_requests_long_format(command: &str) -> bool {
+	command.split_whitespace().any(|tok| {
+		if let Some(long) = tok.strip_prefix("--") {
+			return matches!(long, "format=long" | "format=verbose");
+		}
+		tok.strip_prefix('-').is_some_and(|short| {
+			short
+				.chars()
+				.take_while(char::is_ascii_alphabetic)
+				.any(|ch| matches!(ch, 'l' | 'g' | 'o' | 'n'))
+		})
+	})
+}
+
 fn find_outputs_paths_only(command: &str) -> bool {
 	!command.split_whitespace().any(|word| {
 		matches!(
@@ -56,13 +115,21 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 	} else {
 		match ctx.program {
 			"grep" | "rg" => {
-				if context_has_nul_output(ctx.command, ctx.program) {
+				if context_has_nul_output(ctx.command, ctx.program)
+					|| grep_requests_verbatim_layout(ctx.command)
+				{
 					cleaned
 				} else if legacy {
-					compact_grep_output_legacy(&cleaned)
+					compact_grep_output_legacy(ctx.program, &cleaned)
 				} else {
-					compact_grep_output(&cleaned)
+					compact_grep_output(ctx.program, &cleaned)
 				}
+			},
+			"ls"
+				if ls_requests_long_format(ctx.command)
+					&& cleaned.len() <= primitives::WHOLE_OUTPUT_BYTES =>
+			{
+				cleaned
 			},
 			"ls" => compact_ls_output(&cleaned).unwrap_or_else(|| compact_listing_output(&cleaned)),
 			"tree" => compact_listing_output(&cleaned),
@@ -110,7 +177,7 @@ struct GrepMatch {
 /// Legacy pre-PR behavior for grep/rg output: passthrough when
 /// `match_count <= 12 && grouped.len() <= 3` (or no recognized matches).
 /// Retained for the `legacy_filters_active` kill-switch.
-fn compact_grep_output_legacy(input: &str) -> String {
+fn compact_grep_output_legacy(program: &str, input: &str) -> String {
 	let mut grouped: BTreeMap<String, Vec<GrepMatch>> = BTreeMap::new();
 	let mut ungrouped = Vec::new();
 
@@ -130,10 +197,22 @@ fn compact_grep_output_legacy(input: &str) -> String {
 		return primitives::group_by_file(input, 12);
 	}
 
-	compact_grep_grouped(&grouped, &ungrouped, match_count)
+	compact_grep_grouped(program, &grouped, &ungrouped, match_count)
 }
 
-fn compact_grep_output(input: &str) -> String {
+/// Group `file:line:text` matches by file, capping matches per file and files
+/// shown.
+///
+/// The output comes back verbatim when it is small enough to read whole
+/// ([`primitives::WHOLE_OUTPUT_BYTES`]), when every match is in one file
+/// (grouping adds nothing), or when any line is neither a `file:line:text`
+/// match nor a `grep:`/`rg:` diagnostic: single-file output without file
+/// names, `-l` lists and `file:text` rows have no shape the summary can
+/// represent, and guessing one turns timestamps and `::` paths into file names.
+fn compact_grep_output(program: &str, input: &str) -> String {
+	if input.len() <= primitives::WHOLE_OUTPUT_BYTES {
+		return input.to_string();
+	}
 	let mut grouped: BTreeMap<String, Vec<GrepMatch>> = BTreeMap::new();
 	let mut ungrouped = Vec::new();
 
@@ -143,25 +222,36 @@ fn compact_grep_output(input: &str) -> String {
 				.entry(file.to_string())
 				.or_default()
 				.push(GrepMatch { line_no: line_no.to_string(), text: collapse_match_text(text) });
-		} else if !line.trim().is_empty() {
+		} else if is_grep_diagnostic(program, line) {
 			ungrouped.push(line.to_string());
+		} else if !line.trim().is_empty() {
+			return input.to_string();
 		}
 	}
 
-	let match_count: usize = grouped.values().map(Vec::len).sum();
-	if grouped.is_empty() {
-		return primitives::group_by_file(input, 12);
+	if grouped.len() <= 1 {
+		return input.to_string();
 	}
+	let match_count: usize = grouped.values().map(Vec::len).sum();
+	compact_grep_grouped(program, &grouped, &ungrouped, match_count)
+}
 
-	compact_grep_grouped(&grouped, &ungrouped, match_count)
+/// `grep: dir: Is a directory`, `rg: ./x: Permission denied`, `Binary file x
+/// matches`: diagnostics interleaved with matches, kept after the summary.
+fn is_grep_diagnostic(program: &str, line: &str) -> bool {
+	line
+		.strip_prefix(program)
+		.is_some_and(|rest| rest.starts_with(": "))
+		|| line.starts_with("Binary file ")
 }
 
 fn compact_grep_grouped(
+	program: &str,
 	grouped: &BTreeMap<String, Vec<GrepMatch>>,
 	ungrouped: &[String],
 	match_count: usize,
 ) -> String {
-	let mut out = format!("grep: {match_count} matches in {} files\n", grouped.len());
+	let mut out = format!("{program}: {match_count} matches in {} files\n", grouped.len());
 	let mut shown_matches = 0usize;
 	let mut shown_files = 0usize;
 	for (file, matches) in grouped {
@@ -209,11 +299,13 @@ fn compact_grep_grouped(
 
 fn split_grep_line(line: &str) -> Option<(&str, &str, &str)> {
 	let (file, rest) = line.split_once(':')?;
-	if file.is_empty() || file.starts_with(' ') {
+	// A numeric "file" is a line number of single-file output whose text
+	// holds a colon (`41:12:00:03 request failed`).
+	if file.is_empty() || file.starts_with(' ') || file.bytes().all(|byte| byte.is_ascii_digit()) {
 		return None;
 	}
 	let (line_no, text) = rest.split_once(':')?;
-	if !line_no.chars().all(|ch| ch.is_ascii_digit()) {
+	if line_no.is_empty() || !line_no.bytes().all(|byte| byte.is_ascii_digit()) {
 		return None;
 	}
 	Some((file, line_no, text.trim_start()))
@@ -1251,27 +1343,12 @@ mod tests {
 		assert_eq!(out.text, input);
 	}
 
-	// migrated for always-group: see T1a (minimizer-filter-remediation).
-	// Previously asserted passthrough-style `group_by_file` output. The
-	// Tier 1 unconditional grouping path now produces the `grep: N matches
-	// in M files` header even for small inputs.
-	#[test]
-	fn groups_grep_by_file() {
-		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = ctx("rg", &cfg);
-		let out = filter(&ctx, "a.rs:1:foo\na.rs:2:bar\n", 0);
-		assert!(out.text.starts_with("grep: 2 matches in 1 files"), "{:?}", out.text);
-		assert!(out.text.contains("a.rs:"));
-		assert!(out.text.contains("1: foo"));
-		assert!(out.text.contains("2: bar"));
-	}
-
 	#[test]
 	fn compacts_large_grep_output_with_summary() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = ctx("grep", &cfg);
 		let mut input = String::new();
-		for idx in 0..20 {
+		for idx in 0..200 {
 			input.push_str("src/file");
 			input.push_str(&idx.to_string());
 			input.push_str(
@@ -1279,9 +1356,28 @@ mod tests {
 			);
 		}
 		let out = filter(&ctx, &input, 0);
-		assert!(out.text.starts_with("grep: 20 matches in 20 files"));
+		assert!(out.text.starts_with("grep: 200 matches in 200 files"));
 		assert!(out.text.contains("17: pub fn run(...) -> Result<()> {"));
-		assert!(out.text.contains("matches in 8 files elided…]"));
+		assert!(out.text.contains("matches in 188 files elided…]"));
+	}
+
+	#[test]
+	fn rg_summary_is_labeled_rg() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = ctx("rg", &cfg);
+		let input = synthesize_grep(20, 10);
+		let out = filter(&ctx, &input, 0);
+		assert!(out.text.starts_with("rg: 200 matches in 10 files"), "{:?}", out.text);
+	}
+
+	#[test]
+	fn split_grep_line_requires_line_number() {
+		assert_eq!(split_grep_line("src/a.rs:12:foo"), Some(("src/a.rs", "12", "foo")));
+		// A context row: `file-13-    if Instant::now()` splits at `::` into an
+		// empty line number.
+		assert_eq!(split_grep_line("src/a.rs-13-    if Instant::now() {"), None);
+		assert_eq!(split_grep_line("src/a.rs:foo"), None);
+		assert_eq!(split_grep_line("41:12:00:03 request failed"), None);
 	}
 
 	#[test]
@@ -1467,6 +1563,22 @@ mod tests {
 		assert!(out.text.contains("src/module0/ file0.rs file1.rs"));
 		assert!(out.text.contains("[…1 noisy paths elided…]"));
 		assert!(!out.text.contains("target/debug"));
+	}
+
+	#[test]
+	fn explicit_long_ls_listing_passes_through() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::from("total 928\n");
+		for idx in 0..40 {
+			let size = 1024 * (idx + 1);
+			let _ = writeln!(input, "-rw-r--r--  1 user staff {size} 2 feb 21:35 file{idx}.rs");
+		}
+		for cmd in ["ls -la src", "/bin/ls -lah", "ls --format=long"] {
+			let ctx = ctx_command("ls", cmd, &cfg);
+			let out = filter(&ctx, &input, 0);
+			assert!(!out.changed, "long listing must pass through: {cmd}");
+			assert_eq!(out.text, input);
+		}
 	}
 
 	#[test]
@@ -1767,39 +1879,72 @@ mod tests {
 	}
 
 	#[test]
-	fn grep_small_1m1f_always_groups() {
-		// 1 match in 1 file. Pre-PR: passthrough. Post: grouped header.
+	fn grep_output_under_whole_output_budget_passes_through() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = ctx("grep", &cfg);
-		let input = synthesize_grep(1, 1);
+		let ctx = ctx_command("grep", "grep -rn handler src", &cfg);
+		let input = synthesize_grep(10, 3);
+		assert!(input.len() > 1_000 && input.len() <= primitives::WHOLE_OUTPUT_BYTES);
 		let out = filter(&ctx, &input, 0);
-		assert!(out.text.contains("grep: 1 matches in 1 files"));
+		assert!(!out.changed);
+		assert_eq!(out.text, input);
 	}
 
 	#[test]
-	fn grep_medium_3m1f_always_groups() {
-		// 3 matches in 1 file. Pre-PR: passthrough (was within thresholds).
-		// Post: grouped header.
+	fn grep_single_file_output_passes_through() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
-		let ctx = ctx("grep", &cfg);
-		let input = synthesize_grep(3, 1);
+		let ctx = ctx_command("rg", "rg -n -H handler src/module0/file0.rs", &cfg);
+		let input = synthesize_grep(300, 1);
+		assert!(input.len() > primitives::WHOLE_OUTPUT_BYTES);
 		let out = filter(&ctx, &input, 0);
-		assert!(
-			out.text.contains("grep: 3 matches in 1 files"),
-			"expected always-group header, got: {}",
-			out.text
-		);
+		assert!(!out.changed);
+		assert_eq!(out.text, input);
 	}
 
 	#[test]
-	fn grep_large_100m10f_savedratio_threshold() {
-		// 100 matches × 10 files: pre-existing grouping path. SavedRatio
-		// must be substantial (≥0.50 from m3 acceptance; we assert ≥0.50).
+	fn grep_context_output_passes_through() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for idx in 0..400 {
+			let ln = idx * 10;
+			let _ = writeln!(input, "{}-    let deadline = Instant::now() + timeout;", ln + 1);
+			let _ = writeln!(input, "{}:    if Instant::now() > deadline {{", ln + 2);
+			let _ = writeln!(input, "{}-        return Err(Error::Timeout);", ln + 3);
+			input.push_str("--\n");
+		}
+		for cmd in [
+			"rg -n -C2 Instant src/poll.rs",
+			"grep -nA1 -B1 Instant src/poll.rs",
+			"rg -n --context=1 Instant",
+		] {
+			let ctx = ctx_command("rg", cmd, &cfg);
+			let out = filter(&ctx, &input, 0);
+			assert!(!out.changed, "context output must pass through: {cmd}");
+			assert_eq!(out.text, input, "context output must pass through: {cmd}");
+		}
+	}
+
+	#[test]
+	fn grep_output_without_file_names_passes_through() {
+		// Single-file output: `N:text`, where timestamps must not become file
+		// names.
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = ctx_command("rg", "rg -n ERROR app.log", &cfg);
+		let mut input = String::new();
+		for idx in 0..400 {
+			let _ = writeln!(input, "{idx}:2026-11-18 10:00:{:02} ERROR request failed", idx % 60);
+		}
+		let out = filter(&ctx, &input, 0);
+		assert!(!out.changed);
+		assert_eq!(out.text, input);
+	}
+
+	#[test]
+	fn grep_large_200m10f_savedratio_threshold() {
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = ctx("grep", &cfg);
-		let input = synthesize_grep(10, 10);
+		let input = synthesize_grep(20, 10);
 		let out = filter(&ctx, &input, 0);
-		assert!(out.text.starts_with("grep: 100 matches in 10 files"));
+		assert!(out.text.starts_with("grep: 200 matches in 10 files"));
 		let r = ratio(&input, &out.text);
 		assert!(r >= 0.50, "savedRatio={r}");
 	}
@@ -1871,7 +2016,7 @@ mod tests {
 		let out = filter(&ctx, &input, 0);
 		// Legacy path: group_by_file primitive style for inputs at/below
 		// 12 matches × 3 files. Compare against direct invocation.
-		let expected = compact_grep_output_legacy(&primitives::strip_ansi(&input));
+		let expected = compact_grep_output_legacy("grep", &primitives::strip_ansi(&input));
 		assert_eq!(out.text, expected);
 		assert!(
 			!out.text.starts_with("grep: 2 matches"),

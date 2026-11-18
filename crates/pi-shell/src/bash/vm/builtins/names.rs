@@ -356,6 +356,11 @@ fn kinds(
 	std_path: bool,
 ) -> Result<Vec<Kind>, Need> {
 	let mut found = Vec::new();
+	// The name is a shell the host runs in-engine
+	// ([`Resolved::SelfShell`]): it means the program `PATH` has (what
+	// `chsh -s "$(command -v zsh)"` and `[ -x "$(command -v bash)" ]`
+	// ask for), and a builtin only when there is none.
+	let mut self_shell = false;
 	if !path_only {
 		// Aliases count only while alias expansion is on.
 		if ctx.option(OptId::ExpandAliases)?
@@ -396,9 +401,15 @@ fn kinds(
 				}
 			},
 			Resolved::Intrinsic(_) => {},
-			Resolved::Tool(_) | Resolved::Native(_) | Resolved::Device(_) | Resolved::SelfShell => {
+			Resolved::Tool(_) | Resolved::Native(_) | Resolved::Device(_) => {
 				if !special {
 					found.push(Kind::Builtin);
+				}
+			},
+			Resolved::SelfShell => {
+				self_shell = !special;
+				if let Some(h) = hashed(ctx, name)? {
+					found.push(Kind::Hashed(h));
 				}
 			},
 			Resolved::External(p) => found.push(match hashed(ctx, name)? {
@@ -429,6 +440,13 @@ fn kinds(
 		if let ProbeResult::Path(Some(p)) = ctx.probe(Probe::Path { name: name.into(), path })? {
 			found.push(Kind::File(p));
 		}
+	}
+	if self_shell
+		&& !found
+			.iter()
+			.any(|k| matches!(k, Kind::File(_) | Kind::Hashed(_)))
+	{
+		found.push(Kind::Builtin);
 	}
 	Ok(found)
 }

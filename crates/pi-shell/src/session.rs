@@ -71,6 +71,7 @@ use std::{
 
 use bstr::{BString, ByteSlice};
 use parking_lot::Mutex;
+use pi_builtins::extras::SpeechHost;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -81,7 +82,7 @@ use crate::{
 		store::{BlobSlot, Key, MiscKey, Record, Table},
 	},
 	host::{PiHost, SpawnObserver, TERM_GRACE},
-	sys::OutputDecoding,
+	sys::{OutputDecoding, Sessions},
 	tools::{ToolCalls, ToolConfig},
 	vfs::VfsFs,
 };
@@ -142,6 +143,9 @@ pub struct RunOptions {
 	/// Set when a utility reports an error its exit status hides (`jq`
 	/// after a failing input that is not the last).
 	pub reported_error: Option<Arc<AtomicBool>>,
+	/// The application's speech synthesizer, which `say` speaks through;
+	/// `None` leaves `say` to the system's.
+	pub speech:         Option<Arc<dyn SpeechHost>>,
 	/// The command's stdout and stderr are one pipe whose reader takes its
 	/// bytes as shell text: what externals write there is decoded per
 	/// program by the host's output decoding
@@ -166,6 +170,7 @@ impl RunOptions {
 			cwd:            None,
 			pipe_tap:       None,
 			reported_error: None,
+			speech:         None,
 			text_capture:   false,
 			events:         None,
 		}
@@ -180,6 +185,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("cwd", &self.cwd)
 			.field("pipe_tap", &self.pipe_tap.is_some())
 			.field("reported_error", &self.reported_error)
+			.field("speech", &self.speech)
 			.field("events", &self.events.is_some())
 			.finish()
 	}
@@ -536,7 +542,20 @@ impl Session {
 	///
 	/// [`SessionError::Create`] when the engine refuses the initial state.
 	pub fn new(config: SessionConfig) -> Result<Self, SessionError> {
-		Self::start(config, None)
+		Self::start(config, None, Sessions::Detach)
+	}
+
+	/// [`Session::new`] for a process that exists to run this shell (a
+	/// service, a command on a pseudo-terminal the process leads): externals
+	/// stay in the process's session and process group
+	/// ([`Sessions::Inherit`]), so they share its controlling terminal and
+	/// the signals the terminal sends its foreground group.
+	///
+	/// # Errors
+	///
+	/// [`SessionError::Create`] when the engine refuses the initial state.
+	pub fn for_process(config: SessionConfig) -> Result<Self, SessionError> {
+		Self::start(config, None, Sessions::Inherit)
 	}
 
 	/// Start a shell from `image` (a fork of the session it came from): its
@@ -550,17 +569,21 @@ impl Session {
 	///
 	/// [`SessionError::Restore`] when the engine refuses the image.
 	pub fn restore(config: SessionConfig, image: &Image) -> Result<Self, SessionError> {
-		Self::start(config, Some(image))
+		Self::start(config, Some(image), Sessions::Detach)
 	}
 
-	fn start(config: SessionConfig, image: Option<&Image>) -> Result<Self, SessionError> {
+	fn start(
+		config: SessionConfig,
+		image: Option<&Image>,
+		sessions: Sessions,
+	) -> Result<Self, SessionError> {
 		let SessionConfig { env, cwd, fs, vfs, runtime, output_decoding } = config;
 		let (jobs, rx) = flume::unbounded();
 		let children = Children::default();
 		let bell = Arc::new(Bell::default());
 		let waker = Waker::from(Arc::clone(&bell));
 		let tools = ToolConfig::from_env(&env, vfs.clone(), runtime.clone());
-		let mut host = PiHost::new(fs, runtime.clone());
+		let mut host = PiHost::with_sessions(fs, runtime.clone(), sessions);
 		if output_decoding.is_some() {
 			host.set_output_decoding(output_decoding);
 		}
@@ -820,7 +843,7 @@ impl Driver {
 			match self.jobs.try_recv() {
 				Ok(Request::Run(job)) => self.run(job).await,
 				Ok(Request::LiveJobs(reply)) => {
-					let _ = reply.send(self.shell.live_external_jobs());
+					let _ = reply.send(self.shell.live_external_jobs(&mut self.store));
 				},
 				Err(flume::TryRecvError::Disconnected) => break,
 				Err(flume::TryRecvError::Empty) => self.idle_turn().await,
@@ -845,8 +868,9 @@ impl Driver {
 	/// Run one job to completion and send its outcome.
 	async fn run(&mut self, job: Job) {
 		let Job { options, stdio, cancel, reply } = job;
-		let RunOptions { command, env, cwd, pipe_tap, reported_error, text_capture, events } =
+		let RunOptions { command, env, cwd, pipe_tap, reported_error, speech, text_capture, events } =
 			options;
+		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
 		// A command owns its observer generation, even when successive
 		// observers request identical event masks.

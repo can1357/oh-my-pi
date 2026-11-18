@@ -1,6 +1,7 @@
 import { afterAll, describe, expect, it } from "bun:test";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { isEvalTimeoutControlEvent } from "@oh-my-pi/pi-coding-agent/eval/bridge-timeout";
 import { PYTHON_PRELUDE } from "@oh-my-pi/pi-coding-agent/eval/py/prelude";
 import {
 	disposePyToolBridge,
@@ -319,8 +320,10 @@ asyncio.run(check_intent())
 				args: { path: "foo.ts" },
 			});
 			expect(res.status).toBe(200);
-			expect(statusEvents).toHaveLength(1);
-			expect(statusEvents[0]!.op).toBe("read");
+			// Timeout pause/resume control events surround the tool's own status.
+			expect(statusEvents.filter(event => !isEvalTimeoutControlEvent(event)).map(event => event.op)).toEqual([
+				"read",
+			]);
 		} finally {
 			unregister();
 		}

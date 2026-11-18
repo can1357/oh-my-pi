@@ -299,6 +299,7 @@ function serveBus(bridge: MainSessionBridge): RpcServe<IrcBus, IrcBusProtocol> {
 				options,
 			),
 		take: (bus, agentId, from) => bus.take(agentId, from),
+		park: (bus, msg) => bus.park(msg),
 		unreadCount: (bus, agentId) => bus.unreadCount(agentId),
 		recordReply: (bus, from, to) => bus.recordReply(from, to),
 	};

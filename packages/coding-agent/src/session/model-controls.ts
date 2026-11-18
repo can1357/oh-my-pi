@@ -45,7 +45,7 @@ import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE } from "./session-entries";
+import { EPHEMERAL_MODEL_CHANGE_ROLE, PREWALK_MODEL_CHANGE_ROLE, TEMPORARY_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -389,7 +389,7 @@ export class ModelControls {
 					? PREWALK_MODEL_CHANGE_ROLE
 					: options?.ephemeral
 						? EPHEMERAL_MODEL_CHANGE_ROLE
-						: "temporary",
+						: TEMPORARY_MODEL_CHANGE_ROLE,
 			);
 			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 		}
@@ -767,6 +767,18 @@ export class ModelControls {
 			this.setThinkingLevel(floor);
 		}
 		return true;
+	}
+
+	/**
+	 * Settle auto on the level a starting run thinks at when no classification
+	 * resolved it (IRC wakes, resumed runs, agent-originated and synthetic turns),
+	 * so readers stop showing auto as pending while the agent runs at a concrete
+	 * level. The next user turn still reclassifies.
+	 */
+	settleAutoThinkingLevel(): void {
+		if (!this.#autoThinking || this.#autoResolvedLevel !== undefined) return;
+		const effort = toReasoningEffort(this.#thinkingLevel);
+		if (effort !== undefined) this.#resolveAutoThinkingLevel(effort);
 	}
 
 	/** Publish `effort` as the turn's auto resolution; the transcript records only a changed level. */

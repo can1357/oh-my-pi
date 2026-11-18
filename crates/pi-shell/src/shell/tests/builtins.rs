@@ -336,14 +336,19 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"dd",
 		"df",
 		"diff",
+		"direnv",
 		"dirname",
 		"du",
+		"entr",
 		"env",
 		#[cfg(unix)]
 		"errno",
 		"fd",
+		"file",
 		"find",
+		"flock",
 		"fold",
+		"fswatch",
 		"grep",
 		"head",
 		"hostname",
@@ -362,6 +367,8 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"nl",
 		"nproc",
 		"od",
+		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+		"open",
 		"paste",
 		"printenv",
 		"readlink",
@@ -370,6 +377,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"rm",
 		"rmdir",
 		"rsync",
+		"say",
 		"sd",
 		"sed",
 		"seq",
@@ -382,6 +390,8 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"shasum",
 		"sort",
 		"sponge",
+		#[cfg(windows)]
+		"start",
 		"stat",
 		"strings",
 		"tac",
@@ -395,10 +405,13 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"uname",
 		"uniq",
 		"uptime",
+		"watchexec",
 		"wc",
 		"which",
 		"whoami",
 		"xargs",
+		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+		"xdg-open",
 		"yes",
 	];
 	let mut names: Vec<&'static str> = pi_builtins::extras::extras()
@@ -1508,8 +1521,8 @@ async fn umask_is_scoped_to_the_shell() {
 	let before = host_umask();
 	let dir = tempfile::tempdir().expect("temp dir");
 	let (result, output) = execute_captured(format!(
-		"cd '{}' && umask 077 && : > redirect && touch builtin && sh -c ': > external' && mkdir \
-		 made && (umask 000) && umask",
+		"cd '{}' && umask 077 && : > redirect && touch builtin && /bin/sh -c ': > external' && \
+		 mkdir made && (umask 000) && umask",
 		dir.path().display()
 	))
 	.await;
@@ -1610,7 +1623,7 @@ async fn shebangless_background_script_with_fifo_stdin() {
 #[tokio::test(flavor = "multi_thread")]
 async fn external_command_receives_extra_file_descriptor() {
 	let (result, output) =
-		execute_captured("sh -c 'printf descriptor-output >&3' 3>&1".into()).await;
+		execute_captured("/bin/sh -c 'printf descriptor-output >&3' 3>&1".into()).await;
 	assert_eq!(result.exit_code, Some(0), "{output}");
 	assert_eq!(output, "descriptor-output");
 }
@@ -1667,17 +1680,17 @@ async fn uutils_xargs_children_feed_pipeline_and_report_failure() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_signal_death_reports_125() {
 	let (result, output) =
-		execute_captured("echo x | xargs sh -c 'kill -9 $$' 2>&1 >/dev/null".into()).await;
+		execute_captured("echo x | xargs /bin/sh -c 'kill -9 $$' 2>&1 >/dev/null".into()).await;
 	assert_eq!(result.exit_code, Some(125), "{output}");
-	assert!(output.contains("xargs: sh: terminated by signal 9"), "{output}");
+	assert!(output.contains("xargs: /bin/sh: terminated by signal 9"), "{output}");
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_signal_death_stops_sequential_commands() {
 	let (result, output) = execute_captured(
-		"printf 'first\\nsecond\\n' | xargs -n1 sh -c 'if [ \"$1\" = first ]; then kill -9 $$; else \
-		 echo unexpected; fi' _"
+		"printf 'first\\nsecond\\n' | xargs -n1 /bin/sh -c 'if [ \"$1\" = first ]; then kill -9 $$; \
+		 else echo unexpected; fi' _"
 			.into(),
 	)
 	.await;
@@ -1701,13 +1714,13 @@ async fn xargs_exit_137_is_not_signal_death() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_parallel_signal_death_stops_scheduling() {
 	let (result, output) = execute_captured(
-		"printf 'first\\nsecond\\nthird\\n' | xargs -n1 -P2 sh -c 'case \"$1\" in first) sleep 1;; \
-		 second) kill -9 $$;; third) echo unexpected;; esac' _"
+		"printf 'first\\nsecond\\nthird\\n' | xargs -n1 -P2 /bin/sh -c 'case \"$1\" in first) sleep \
+		 1;; second) kill -9 $$;; third) echo unexpected;; esac' _"
 			.into(),
 	)
 	.await;
 	assert_eq!(result.exit_code, Some(125), "{output}");
-	assert!(output.contains("xargs: sh: terminated by signal 9"), "{output}");
+	assert!(output.contains("xargs: /bin/sh: terminated by signal 9"), "{output}");
 	assert!(!output.contains("unexpected"), "{output}");
 }
 
@@ -1715,13 +1728,13 @@ async fn xargs_parallel_signal_death_stops_scheduling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_unlimited_parallel_observes_signal_before_next_launch() {
 	let (result, output) = execute_captured(
-		"{ printf 'first\\nsecond\\n'; sleep 1; printf 'third\\n'; } | xargs -n1 -P0 sh -c 'if [ \
-		 \"$1\" = first ]; then kill -9 $$; else echo unexpected; fi' _"
+		"{ printf 'first\\nsecond\\n'; sleep 1; printf 'third\\n'; } | xargs -n1 -P0 /bin/sh -c 'if \
+		 [ \"$1\" = first ]; then kill -9 $$; else echo unexpected; fi' _"
 			.into(),
 	)
 	.await;
 	assert_eq!(result.exit_code, Some(125), "{output}");
-	assert!(output.contains("xargs: sh: terminated by signal 9"), "{output}");
+	assert!(output.contains("xargs: /bin/sh: terminated by signal 9"), "{output}");
 	assert!(!output.contains("unexpected"), "{output}");
 }
 
@@ -1899,4 +1912,53 @@ async fn windows_switch_syntax_runs_the_shadowed_system_program() {
 		.filter(|l| !l.is_empty())
 		.collect();
 	assert_eq!(lines, ["3", "banana split", "GET /api/users", "."]);
+}
+
+/// A host synthesizer that records what `say` asks it to speak.
+#[derive(Debug, Default)]
+struct RecordingSpeech(parking_lot::Mutex<Vec<crate::SpeechRequest>>);
+
+type SpeechFuture<T> = std::pin::Pin<Box<dyn Future<Output = std::io::Result<T>> + Send>>;
+
+impl crate::SpeechHost for RecordingSpeech {
+	fn voices(&self, _required: bool) -> SpeechFuture<Option<Vec<crate::SpeechVoice>>> {
+		Box::pin(async { Ok(Some(Vec::new())) })
+	}
+
+	fn speak(&self, request: crate::SpeechRequest) -> SpeechFuture<crate::SpeechOutcome> {
+		self.0.lock().push(request);
+		Box::pin(async { Ok(crate::SpeechOutcome::Spoken) })
+	}
+}
+
+/// The speech synthesizer handed to a run is the one `say` speaks through,
+/// wherever the command runs it: directly, at the end of a pipeline, in a
+/// subshell and from `xargs`. Without it `say` would use the system's voice
+/// instead of the one the user set up.
+#[tokio::test(flavor = "multi_thread")]
+async fn say_speaks_through_the_speech_host_of_its_run() {
+	let _guard = shell_test_lock().lock().await;
+	let speech = Arc::new(RecordingSpeech::default());
+	let shell = Shell::new(None);
+	let command = "say -r 200 hi && echo piped | say && (say subshell) && echo xargs | xargs say";
+	let result = shell
+		.run(
+			ShellRunOptions {
+				command: command.into(),
+				speech: Some(Arc::clone(&speech) as Arc<dyn crate::SpeechHost>),
+				..Default::default()
+			},
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("run say");
+	assert_eq!(result.exit_code, Some(0));
+	let requests = speech.0.lock();
+	let spoken: Vec<&str> = requests
+		.iter()
+		.map(|request| request.text.as_str())
+		.collect();
+	assert_eq!(spoken, ["hi", "piped\n", "subshell", "xargs"]);
+	assert_eq!(requests[0].rate, Some(200));
 }

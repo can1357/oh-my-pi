@@ -16,6 +16,7 @@ import type { Settings } from "../config/settings";
 import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
+import { journalCompletion } from "./model-usage-journal";
 import type { SessionManager } from "./session-manager";
 
 import { cfgCompactionHandoffSaveToDisk } from "./context-settings";
@@ -171,6 +172,8 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
+			// The document is committed as its own entry; only the spend needs journaling.
+			const journal = journalCompletion(this.#host.sessionManager, { purpose: "handoff", usageOnly: true });
 			const rawHandoffText = await generateHandoffFromContext(
 				obfuscateProviderContext(this.#host.obfuscator(), handoffContext),
 				model,
@@ -178,7 +181,10 @@ export class SessionHandoff {
 					streamOptions: handoffStreamOptions,
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
 						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-						return stream.result();
+						const message = await stream.result();
+						// One call per provider attempt, so a retried or failed one is billed too.
+						journal?.(message);
+						return message;
 					},
 					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
 					// Honor the user's /model thinking selection on the handoff path.

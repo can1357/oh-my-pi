@@ -1901,7 +1901,8 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					return Some(Flow::Discard(1));
 				},
 			};
-			let ExecState { argv, arrayref, .. } = st(vp);
+			let detached = vp.lineage.detached;
+			let ExecState { argv, arrayref, exec_as, .. } = st(vp);
 			match resolved {
 				Resolved::Intrinsic(IntrinsicId::Command)
 					if argv.len() > 1
@@ -1966,9 +1967,13 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 					break Target::External(absolute(&vp.cwd, &name));
 				},
 				Resolved::NotFound => break Target::Search,
+				// A shell that replaces this one (zsh's `exec` precommand) or
+				// has to outlive it (a detached tree, `nohup`) is the program
+				// on `PATH`: a nested shell ends with the shell it runs in.
+				Resolved::SelfShell if exec_as.is_some() || detached => break Target::Search,
 				// Written for the program the host's command shadows: `PATH`
 				// first ([`Host::defers_to_path`](crate::bash::Host::defers_to_path)).
-				Resolved::Tool(_) | Resolved::Native(_)
+				Resolved::Tool(_) | Resolved::Native(_) | Resolved::SelfShell
 					if via != Via::Builtin && cx.host.defers_to_path(BStr::new(&argv[0]), argv) =>
 				{
 					break Target::Search;
@@ -2088,22 +2093,29 @@ fn lookup(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, op: Op, typeset: bool
 				// hook handles it; `exec` keeps its not-found handling (a
 				// process image cannot be a native).
 				let exec = sc.exec.as_ref().expect("exec");
-				let target =
-					if exec.exec_as.is_none() && cx.host.defers_to_path(BStr::new(&name), &exec.argv) {
-						// A deferred command whose shadowed program `PATH` lacks:
-						// the host's own command after all.
-						let rctx = ResolveCtx { has_slash: false, via: Via::Plain };
-						cx.host
-							.resolve(BStr::new(&name), exec::mode_of(vp), rctx)
-							.into()
-					} else if exec.exec_as.is_none()
-						&& !has_not_found_hook(cx, vp)
-						&& let Some(native) = cx.host.fallback(BStr::new(&name))
-					{
-						Target::Native(native)
-					} else {
-						Target::NotFound
-					};
+				let rctx = ResolveCtx { has_slash: false, via: Via::Plain };
+				let target = if exec.exec_as.is_none()
+					&& cx.host.defers_to_path(BStr::new(&name), &exec.argv)
+				{
+					// A deferred command whose shadowed program `PATH` lacks:
+					// the host's own command after all.
+					cx.host
+						.resolve(BStr::new(&name), exec::mode_of(vp), rctx)
+						.into()
+				} else if exec.exec_as.is_none()
+					&& vp.lineage.detached
+					&& cx.host.resolve(BStr::new(&name), exec::mode_of(vp), rctx) == Resolved::SelfShell
+				{
+					// A detached tree's shell `PATH` lacks: the engine's own.
+					Target::SelfShell
+				} else if exec.exec_as.is_none()
+					&& !has_not_found_hook(cx, vp)
+					&& let Some(native) = cx.host.fallback(BStr::new(&name))
+				{
+					Target::Native(native)
+				} else {
+					Target::NotFound
+				};
 				sc.exec.as_mut().expect("exec").target = Some(target);
 				None
 			},

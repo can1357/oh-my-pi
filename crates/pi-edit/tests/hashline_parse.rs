@@ -545,6 +545,21 @@ fn parses_file_ops_and_rejects_invalid_combinations() {
 	);
 }
 
+/// A bare row shaped like an op or a tagged file header is a header that
+/// failed to parse; it used to be auto-prefixed and written into the file.
+#[test]
+fn rejects_header_shaped_bare_rows_instead_of_writing_them() {
+	for (input, row) in [
+		("PUT 2.=3:\n+a\nPUT 789*=821:\n+b", "line 3: \"PUT 789*=821:\""),
+		("PUT >2:\nnew\n  [docs/b.md#2C2B]\nmore", "line 3: \"  [docs/b.md#2C2B]\""),
+	] {
+		let error = parse_patch(input).unwrap_err().to_string();
+		assert!(error.starts_with(row), "{input:?}: {error}");
+		assert!(error.contains("prefix it with `+`"), "{input:?}: {error}");
+	}
+	assert_eq!(parse_patch("PUT >2:\nnew\nrow").unwrap().edits.len(), 2);
+}
+
 #[test]
 fn input_splits_sections_and_normalizes_tags() {
 	let patch = Patch::parse(
@@ -693,9 +708,6 @@ fn section_reports_anchor_scope_and_sorted_lines() {
 	let section = &patch.sections[0];
 	assert!(section.has_anchor_scoped_edit().unwrap());
 	assert_eq!(section.collect_anchor_lines().unwrap(), [2, 5, 6]);
-	let rebased = section.with_path("b.ts");
-	assert_eq!(rebased.path, "b.ts");
-	assert_eq!(rebased.edits().unwrap(), section.edits().unwrap());
 }
 
 #[test]

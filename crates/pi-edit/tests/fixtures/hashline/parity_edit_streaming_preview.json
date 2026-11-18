@@ -12,8 +12,8 @@
 		{ "name": "yields no preview (not an error) before the first payload byte arrives", "scenario": "empty-body" },
 		{ "name": "hashline: digests stripped `+` body rows only, never headers or op lines", "scenario": "digest" },
 		{ "name": "hashline: grammar-only payload digests to empty, missing input to undefined", "scenario": "empty-digest" },
-		{ "name": "streaming: recovers the bare header onto its nested file instead of blanking", "scenario": "path-recovery-stream" },
-		{ "name": "args-complete: recovers the bare header for the final Myers diff too", "scenario": "path-recovery-final" },
+		{ "name": "streaming: a bare header never rebinds onto a same-named working-tree file", "scenario": "path-recovery-stream" },
+		{ "name": "args-complete: the final preview names the file the tag was issued for", "scenario": "path-recovery-final" },
 		{ "name": "no unique basename+tag match: surfaces the read error instead of recovering", "scenario": "path-recovery-miss" }
 	]
 }

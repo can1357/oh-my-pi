@@ -48,7 +48,7 @@ async fn candidates(
 		hidden: true,
 		gitignore: true,
 		node_modules,
-		any_file: lang.is_some(),
+		lang: lang.map(|lang| SupportLang::from_alias(lang).expect("known language")),
 		..Default::default()
 	};
 	discover(fs, root, &opts).await.expect("discovery succeeds")
@@ -311,6 +311,18 @@ async fn discovery_keeps_only_known_languages_unless_one_is_explicit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn explicit_language_walk_skips_other_languages() {
+	let tree = temp_tree(&[
+		("a.tsx", "const a = <b />;\n"),
+		("b.ts", "const b = 1;\n"),
+		("buffer.h", "int x;\n"),
+		("style.css", "a { color: red; }\n"),
+	]);
+	let found = candidates(&Fs::native(), &tree.root, None, Some("tsx")).await;
+	assert_eq!(displays(&found), ["a.tsx", "b.ts"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn rewrite_handles_mixed_language_tree_per_file() {
 	let tree = temp_tree(&[("a.ts", "const f = (x) => x;\n"), ("b.rs", "fn main() {}\n")]);
 	// The arrow pattern only matches TypeScript; the Rust file is searched in
@@ -361,6 +373,17 @@ async fn rewrite_does_not_partially_write_when_render_fails() {
 	assert!(matches!(result, Err(Error::Invalid(_))), "overlapping edits must fail");
 	assert_eq!(fs::read_to_string(tree.root.join("a.ts")).unwrap(), "const a = bar;\n");
 	assert_eq!(fs::read_to_string(tree.root.join("b.ts")).unwrap(), "const b = foo(bar);\n");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rewrite_preview_reports_the_overlap_a_write_would_hit() {
+	let tree = temp_tree(&[("a.ts", "const a = bar;\n"), ("b.ts", "const b = foo(bar);\n")]);
+	let rules = rules(&[("bar", "baz"), ("foo($X)", "qux($X)")]);
+	let result = rewrite_tree(&tree, &rewrite_spec(&rules, Some("ts"), Mode::Preview), None).await;
+	assert!(
+		matches!(&result, Err(Error::Invalid(message)) if message.contains("b.ts: overlapping replacements")),
+		"a preview must surface the overlap"
+	);
 }
 
 #[test]

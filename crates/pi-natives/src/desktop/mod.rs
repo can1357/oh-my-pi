@@ -51,6 +51,9 @@ use crate::task;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_mins(3);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Captures of a window that keeps changing size between its capture and the
+/// check of its frame.
+const WINDOW_CAPTURE_ATTEMPTS: usize = 3;
 /// How long the display stays awake after the last desktop request, unless an
 /// agent turn holds it (see [`DisplayAwake::hold_until_released`]). Releasing
 /// the assertion restarts the OS display-sleep countdown, so the display can
@@ -929,20 +932,48 @@ impl Worker {
 		token: &OperationToken,
 	) -> CoreResult<DesktopCapture> {
 		let selector = target.display_selector();
-		// Bracket the acquisition: a lock on either side marks the frame, so a
-		// later unlock during encoding cannot pass lock-screen pixels as the app.
-		let locked_before = self.backend()?.screen_state(None).locked;
-		let (image, mut geometry) = self.backend()?.capture(target, caps, selector.as_ref())?;
-		let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
-		let source_width = image.width();
-		let source_height = image.height();
-		let layout = self.backend()?.displays()?;
-		geometry.record_layout(&layout)?;
-		let image = apply_capture_caps(image, &mut geometry, caps)?;
+		let mut attempt = 1;
+		let (image, geometry, displays, screen_locked, source_width, source_height) = loop {
+			// Bracket the acquisition: a lock on either side marks the frame, so a
+			// later unlock during encoding cannot pass lock-screen pixels as the
+			// app.
+			let locked_before = self.backend()?.screen_state(None).locked;
+			let (image, mut geometry) = self.backend()?.capture(target, caps, selector.as_ref())?;
+			let screen_locked = locked_before || self.backend()?.screen_state(None).locked;
+			let source_width = image.width();
+			let source_height = image.height();
+			let layout = self.backend()?.displays()?;
+			geometry.record_layout(&layout)?;
+			let image = apply_capture_caps(image, &mut geometry, caps)?;
+			match self.capture_metadata(target, &geometry, &layout, source_width, source_height) {
+				Ok(displays) => {
+					break (image, geometry, displays, screen_locked, source_width, source_height);
+				},
+				// A window that appeared, animated or resized while it was
+				// captured: the pixels match a size it no longer has, so capture it
+				// again rather than fail the capture itself.
+				Err(error)
+					if error.code == ErrorCode::InvalidCoordinateFrame
+						&& matches!(target, Target::Window(_))
+						&& attempt < WINDOW_CAPTURE_ATTEMPTS =>
+				{
+					attempt += 1;
+					token.check()?;
+				},
+				Err(error)
+					if error.code == ErrorCode::InvalidCoordinateFrame
+						&& matches!(target, Target::Window(_)) =>
+				{
+					return Err(DesktopError::invalid_coordinate_frame(format!(
+						"target window kept changing size while it was captured \
+						 ({WINDOW_CAPTURE_ATTEMPTS} attempts); capture it again once it settles"
+					)));
+				},
+				Err(error) => return Err(error),
+			}
+		};
 		let width = image.width();
 		let height = image.height();
-		let displays =
-			self.capture_metadata(target, &geometry, &layout, source_width, source_height)?;
 		token.check()?;
 		let png = encode_png(image)?;
 		token.check()?;
@@ -3052,6 +3083,9 @@ mod capture_tests {
 		menu_control:           bool,
 		/// What a drag is made as instead of input; `None` posts it.
 		drag_selection:         Option<AxTextSelection>,
+		/// Captures after which the window grows 8 px wider, as one that animates
+		/// while it is captured.
+		grow_on_capture:        u32,
 	}
 
 	impl FakeWaylandBackend {
@@ -3161,6 +3195,7 @@ mod capture_tests {
 				#[cfg(target_os = "macos")]
 				input_lookups: Arc::new(Mutex::new(0)),
 				drag_selection: None,
+				grow_on_capture: 0,
 			}
 		}
 	}
@@ -3415,6 +3450,10 @@ mod capture_tests {
 					});
 					let geometry =
 						FrameGeometry::for_window(&self.window, image.width(), image.height());
+					if self.grow_on_capture > 0 {
+						self.grow_on_capture -= 1;
+						self.window.width += 8;
+					}
 					Ok((image, geometry))
 				},
 				Target::Window(id) => {
@@ -4954,6 +4993,37 @@ mod capture_tests {
 			worker.process(&request, &token).expect("unchecked press");
 		}
 		assert_eq!(clicks.lock().len(), 4);
+	}
+
+	#[test]
+	fn a_window_resized_while_captured_is_captured_again() {
+		let backend = FakeWaylandBackend { grow_on_capture: 1, ..FakeWaylandBackend::new() };
+		let captures = Arc::clone(&backend.captures);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let Ok(Response::Capture(capture)) =
+			worker.process(&capture_request(Target::Window(WAYLAND_ID.to_string())), &token)
+		else {
+			panic!("the second capture must succeed")
+		};
+		assert_eq!(capture.source_width, 72, "the capture matches the window's new size");
+		assert_eq!(*captures.lock(), 2);
+	}
+
+	#[test]
+	fn a_window_that_keeps_resizing_fails_the_capture_after_three_tries() {
+		let backend = FakeWaylandBackend { grow_on_capture: 10, ..FakeWaylandBackend::new() };
+		let captures = Arc::clone(&backend.captures);
+		let mut worker = worker_with(backend);
+		let token = CancellationSource::default().token();
+		let Err(error) =
+			worker.process(&capture_request(Target::Window(WAYLAND_ID.to_string())), &token)
+		else {
+			panic!("a window that never settles fails")
+		};
+		assert_eq!(error.code, ErrorCode::InvalidCoordinateFrame);
+		assert!(error.message.contains("kept changing size"), "{}", error.message);
+		assert_eq!(*captures.lock(), WINDOW_CAPTURE_ATTEMPTS as u8);
 	}
 
 	fn capture_request(target: Target) -> Request {

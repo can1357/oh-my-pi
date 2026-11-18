@@ -9,6 +9,7 @@ import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overla
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { TspHarness } from "./native/tsp-harness";
 
@@ -67,6 +68,86 @@ function ask(onSubmit = vi.fn(), onCancel = vi.fn()): AskDialogComponent {
 	return new AskDialogComponent(QUESTIONS, { onSubmit, onCancel, onPrompt: async () => undefined });
 }
 
+/** Every described node matching `predicate`, depth first. */
+function all(root: NativeNode, predicate: (node: NativeNode) => boolean): NativeNode[] {
+	const out: NativeNode[] = [];
+	for (const child of root.c ?? []) {
+		if (!isNode(child)) continue;
+		if (predicate(child)) out.push(child);
+		out.push(...all(child, predicate));
+	}
+	return out;
+}
+
+/** A question with more options than a fold shows, and a multi-select. */
+const WIDE: ExtensionAskDialogQuestion[] = [
+	QUESTIONS[0]!,
+	{
+		id: "region",
+		question: "Which region?",
+		options: ["us-east-1", "us-west-2", "eu-west-1", "a very long region label", "ap-south-1", "sa-east-1"].map(
+			label => ({ label }),
+		),
+	},
+	{ id: "checks", question: "Which checks?", multi: true, options: [{ label: "lint" }, { label: "test" }] },
+];
+
+/** The open question's key. */
+function openKey(dialog: AskDialogComponent): string | undefined {
+	return find(dialog.describe(CX), node => node.p?.role === "omp.ask.open")?.node.key;
+}
+
+/** The open question's reveal counter. */
+function revealOf(dialog: AskDialogComponent): number {
+	const open = find(dialog.describe(CX), node => node.p?.role === "omp.ask.open")?.node as
+		| { reveal?: { n: number } }
+		| undefined;
+	if (!open?.reveal) throw new Error("no open question");
+	return open.reveal.n;
+}
+
+function progress(dialog: AskDialogComponent): string | undefined {
+	const head = find(dialog.describe(CX), node => node.p?.role === "omp.ask.card.progress")?.node.p as
+		| { spans: { t: string }[] }
+		| undefined;
+	return head?.spans[0]?.t;
+}
+
+function pillNodes(dialog: AskDialogComponent, key: string): { node: NativeNode; path: string }[] {
+	const fold = find(dialog.describe(CX), node => node.p?.role === "omp.ask.fold" && node.key === key);
+	if (!fold) return [];
+	const out: { node: NativeNode; path: string }[] = [];
+	const walk = (root: NativeNode, path: string): void => {
+		for (const [index, child] of (root.c ?? []).entries()) {
+			if (!isNode(child)) continue;
+			const childPath = `${path}/${child.key ?? index}`;
+			if (child.p?.role === "omp.ask.pill" || child.p?.role === "omp.ask.pill.more")
+				out.push({ node: child, path: childPath });
+			walk(child, childPath);
+		}
+	};
+	walk(fold.node, fold.path);
+	return out;
+}
+
+/** A folded question's pill labels, `+N` included. */
+function pills(dialog: AskDialogComponent, key: string): string[] {
+	return pillNodes(dialog, key).map(pill => String((pill.node.p as { text?: string }).text));
+}
+
+function clickPill(dialog: AskDialogComponent, key: string, label: string): void {
+	const pill = pillNodes(dialog, key).find(entry => (entry.node.p as { text?: string }).text === label);
+	if (!pill) throw new Error(`no ${label} pill on ${key}`);
+	const act = (pill.node.p as { actions: { click: string } }).actions.click;
+	dialog.handleNativeEvent({ type: "action", key: pill.path, act, mods: [] });
+}
+
+function press(dialog: AskDialogComponent, act: string): void {
+	const button = find(dialog.describe(CX), node => node.p?.role === "omp.btn" && node.key === act);
+	if (!button) throw new Error(`no ${act} button`);
+	dialog.handleNativeEvent({ type: "action", key: button.path, act, mods: [] });
+}
+
 describe("dialogs under a native surface", () => {
 	beforeAll(async () => {
 		const dark = await getThemeByName("dark");
@@ -82,74 +163,145 @@ describe("dialogs under a native surface", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 	});
 
-	it("ask: the action bar's Submit answers exactly as Enter does, question by question", () => {
-		const viaKeys = vi.fn();
-		const keyed = ask(viaKeys);
-		keyed.handleInput(ENTER);
-		keyed.handleInput(DOWN);
-		keyed.handleInput(ENTER);
-		keyed.handleInput(ENTER);
-
-		const viaPointer = vi.fn();
-		const pointed = ask(viaPointer);
-		const press = (act: string) => {
-			const button = find(pointed.describe(CX), node => node.p?.role === "omp.btn" && node.key === act);
-			if (!button) throw new Error(`no ${act} button`);
-			pointed.handleNativeEvent({ type: "action", key: button.path, act, mods: [] });
-		};
-		press("submit");
-		pointed.handleInput(DOWN);
-		press("submit");
-		// Review tab: Submit sends the answers.
-		press("submit");
-
-		expect(viaKeys).toHaveBeenCalledTimes(1);
-		expect(viaPointer.mock.calls).toEqual(viaKeys.mock.calls);
-		expect(
-			viaPointer.mock.calls[0]?.[0].results.map((r: { selectedOptions: string[] }) => r.selectedOptions),
-		).toEqual([["Park them"], ["No"]]);
+	it("ask: one inline card; the first question opens, the others fold to their question over option pills", () => {
+		const dialog = new AskDialogComponent(WIDE, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: async () => undefined,
+		});
+		const root = dialog.describe(CX);
+		expect(root.p?.role).toBe("omp.ask.card");
+		expect(progress(dialog)).toBe("0 of 3 answered");
+		expect(openKey(dialog)).toBe("q0");
+		expect(find(root, node => node.p?.role === "omp.ask.options")?.node.key).toBe("q0");
+		// Four pills, labels cut at 20 cells, then `+N`.
+		expect(pills(dialog, "q1")).toEqual(["us-east-1", "us-west-2", "eu-west-1", "a very long region…", "+2"]);
+		expect(pills(dialog, "q2")).toEqual(["lint", "test"]);
+		// No tabs, Review, Next or Hide natively.
+		expect(find(root, node => node.k === "tabs")).toBeUndefined();
+		const buttons = all(root, node => node.p?.role === "omp.btn").map(button => button.key);
+		expect(buttons).toEqual(["note", "cancel", "submit"]);
 	});
 
-	it("ask: tab and option events reach the dialog through its described keypaths", () => {
+	it("ask: a pill picks from a folded question without opening it; once answered only the chosen pills show", () => {
+		const dialog = new AskDialogComponent(WIDE, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: async () => undefined,
+		});
+		const reveal = revealOf(dialog);
+		clickPill(dialog, "q1", "eu-west-1");
+		expect(pills(dialog, "q1")).toEqual(["✓ eu-west-1"]);
+		expect(openKey(dialog)).toBe("q0");
+		expect(revealOf(dialog)).toBe(reveal);
+		expect(progress(dialog)).toBe("1 of 3 answered");
+		// A multi-select flips its pills: on, then off again (back to every option).
+		clickPill(dialog, "q2", "test");
+		expect(pills(dialog, "q2")).toEqual(["✓ test"]);
+		clickPill(dialog, "q2", "✓ test");
+		expect(pills(dialog, "q2")).toEqual(["lint", "test"]);
+		// A click on the fold opens it.
+		const fold = find(dialog.describe(CX), node => node.p?.role === "omp.ask.fold" && node.key === "q1")!;
+		dialog.handleNativeEvent({ type: "action", key: fold.path, act: "open:1", mods: [] });
+		expect(openKey(dialog)).toBe("q1");
+		expect(revealOf(dialog)).toBe(reveal + 1);
+	});
+
+	it("ask: ↓ past the last row opens the next question at its first row, ↑ goes back to its last; ←/→ open neighbours", () => {
+		const dialog = ask();
+		const selected = () =>
+			(
+				find(dialog.describe(CX), node => node.p?.role === "omp.ask.options")?.node.p as
+					| { selected?: string }
+					| undefined
+			)?.selected;
+		setNativeRendering(true);
+		try {
+			const reveal = revealOf(dialog);
+			// The recommended row, then Block and Other.
+			dialog.handleInput(DOWN);
+			dialog.handleInput(DOWN);
+			expect([openKey(dialog), selected()]).toEqual(["q0", "other"]);
+			dialog.handleInput(DOWN);
+			expect([openKey(dialog), selected()]).toEqual(["q1", "option:0"]);
+			expect(revealOf(dialog)).toBe(reveal + 1);
+			dialog.handleInput(UP);
+			expect([openKey(dialog), selected()]).toEqual(["q0", "other"]);
+			dialog.handleInput(RIGHT);
+			dialog.handleInput(RIGHT);
+			expect(openKey(dialog)).toBe("q1");
+			dialog.handleInput(LEFT);
+			expect(openKey(dialog)).toBe("q0");
+			// Hide does nothing natively.
+			dialog.handleInput("\x1bh");
+			expect(openKey(dialog)).toBe("q0");
+		} finally {
+			setNativeRendering(false);
+		}
+	});
+
+	it("ask: Submit and Enter on the last question send every answer, else open the first unanswered question", () => {
 		const onSubmit = vi.fn();
 		const dialog = ask(onSubmit);
-		const tabs = find(dialog.describe(CX), node => node.k === "tabs");
-		dialog.handleNativeEvent({ type: "select", key: tabs!.path, item: "1" });
-		const options = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
-		expect(options?.node.key).toBe("q1");
-		dialog.handleNativeEvent({ type: "activate", key: options!.path, item: "option:0" });
-		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
-		expect(onSubmit.mock.calls[0]?.[0].results[1].selectedOptions).toEqual(["Yes"]);
+		setNativeRendering(true);
+		try {
+			dialog.handleInput(RIGHT);
+			press(dialog, "submit");
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(openKey(dialog)).toBe("q0");
+			// Enter picks the highlighted (recommended) answer and opens the next question.
+			dialog.handleInput(ENTER);
+			expect(openKey(dialog)).toBe("q1");
+			dialog.handleInput(ENTER);
+			expect(
+				onSubmit.mock.calls[0]?.[0].results.map((r: { selectedOptions: string[] }) => r.selectedOptions),
+			).toEqual([["Park them"], ["Yes"]]);
+
+			// Enter on the last question with an earlier one unanswered opens it; Submit there sends the rest unanswered.
+			const partial = vi.fn();
+			const other = ask(partial);
+			other.handleInput(RIGHT);
+			other.handleInput(ENTER);
+			expect(partial).not.toHaveBeenCalled();
+			expect(openKey(other)).toBe("q0");
+			press(other, "submit");
+			expect(
+				partial.mock.calls[0]?.[0].results.map((r: { selectedOptions: string[] }) => r.selectedOptions),
+			).toEqual([[], ["Yes"]]);
+		} finally {
+			setNativeRendering(false);
+		}
 	});
 
-	it("ask: Next after a cancelled Other moves on to the review instead of reopening the editor", async () => {
-		const onPrompt = vi.fn(async () => undefined);
-		const dialog = new AskDialogComponent(QUESTIONS, { onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt });
-		dialog.handleInput(ENTER);
+	it("ask: a click on an open answer picks it and opens the next question; a custom answer folds to its text", async () => {
+		const onPrompt = vi.fn(async () => "my own words");
+		const onSubmit = vi.fn();
+		const dialog = new AskDialogComponent(QUESTIONS, { onSubmit, onCancel: vi.fn(), onPrompt });
 		const options = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
 		dialog.handleNativeEvent({ type: "activate", key: options!.path, item: "other" });
-		// The dialog awaits this same promise first, so its cancel handling has run once it settles.
+		// The dialog awaits this same promise first, so its answer handling has run once it settles.
 		await onPrompt.mock.results[0]?.value;
-		expect(onPrompt).toHaveBeenCalledTimes(1);
-		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
-		expect(onPrompt).toHaveBeenCalledTimes(1);
-		const answers = find(dialog.describe(CX), node => node.p?.role === "omp.ask.answers")?.node.p as
-			| { items: { k: string; v: { t: string }[] }[] }
-			| undefined;
-		expect(answers?.items.map(entry => [entry.k, entry.v.map(part => part.t).join("")])).toEqual([
-			["policy", "Park them"],
-			["flag", "Unanswered"],
+		expect(openKey(dialog)).toBe("q1");
+		const answer = find(dialog.describe(CX), node => node.p?.role === "omp.ask.fold.answer")?.node.p as {
+			spans: { t: string }[];
+		};
+		expect(answer.spans.map(part => part.t).join("")).toBe("Other: “my own words”");
+		const next = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
+		expect(next?.node.key).toBe("q1");
+		dialog.handleNativeEvent({ type: "activate", key: next!.path, item: "option:1" });
+		expect(onSubmit.mock.calls[0]?.[0].results.map((r: { customInput?: string }) => r.customInput)).toEqual([
+			"my own words",
+			undefined,
 		]);
 	});
 
-	it("ask: docks in place of the composer instead of a modal sheet over the transcript", async () => {
-		// A modal bottom sheet hid the transcript rows explaining the question and blocked scrolling.
+	it("ask: sits in the transcript as a card, not a modal sheet", async () => {
 		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this decision") };
 		const dialog = ask();
 		const provider: TerminalFrameProvider & NativeSurfaceProvider = {
 			renderFrame: () => ({ viewport: [] }),
 			acknowledgeHistory: () => {},
-			describeSurface: () => ({ main: [transcript], dock: [dialog] }),
+			describeSurface: () => ({ main: [transcript, dialog], dock: [] }),
 		};
 		const harness = await TspHarness.start(tui => {
 			tui.setFrameProvider(provider);
@@ -158,69 +310,68 @@ describe("dialogs under a native surface", () => {
 		try {
 			expect(harness.errors).toEqual([]);
 			expect(harness.region("layer")?.c ?? []).toEqual([]);
-			const dock = harness.region("dock")!;
-			// Framed as the prompt composer (an `omp.editor.*` root role), so Tern draws the composer's shell.
-			const root = dock.c?.find(node => node.p?.role === "omp.editor.ask");
-			expect(root?.c?.some(node => node.p?.role === "omp.ask.options")).toBe(true);
+			const card = harness.find(node => node.p?.role === "omp.ask.card");
+			expect(card).toBeDefined();
+			expect(JSON.stringify(harness.region("main"))).toContain(card!.id);
 			expect(harness.findAll(node => node.k === "overlay")).toEqual([]);
 		} finally {
 			harness.stop();
 		}
 	});
 
-	it("ask: a chosen answer is marked apart from the highlighted row; answered tabs and the review say what was chosen", () => {
+	it("ask: a chosen answer is marked apart from the highlighted row", () => {
 		const dialog = ask();
 		const item = (key: string) => find(dialog.describe(CX), node => node.k === "item" && node.key === key)?.node.p;
 		// The highlighted (recommended) row is not chosen until Enter.
 		expect(item("option:1")?.tone).toBeUndefined();
-		dialog.handleInput(ENTER);
-		dialog.handleInput(LEFT);
+		setNativeRendering(true);
+		try {
+			dialog.handleInput(ENTER);
+			dialog.handleInput(LEFT);
+		} finally {
+			setNativeRendering(false);
+		}
 		expect(item("option:1")?.tone).toBe("accent");
 		expect(item("option:0")?.tone).toBeUndefined();
-		const items = (kind: string) =>
-			(find(dialog.describe(CX), node => node.k === kind)?.node.p as { items?: unknown } | undefined)?.items;
-		const tabs = items("tabs") as { label: { t: string }[] }[];
-		expect(tabs.map(tab => tab.label.map(part => part.t).join(""))).toEqual(["✓ policy", "flag", "Review"]);
-		dialog.handleInput(RIGHT);
-		dialog.handleInput(RIGHT);
-		const answers = items("kv") as { k: string; v: { t: string }[] }[];
-		expect(answers.map(entry => [entry.k, entry.v.map(part => part.t).join("")])).toEqual([
-			["policy", "Park them"],
-			["flag", "Unanswered"],
-		]);
 	});
 
-	it("ask: Skip cancels like Esc; the recommended option loses its suffix for the badge", () => {
+	it("ask: Cancel cancels like Esc; the recommended option loses its suffix for the badge", () => {
 		const onCancel = vi.fn();
 		const dialog = ask(vi.fn(), onCancel);
 		const recommended = find(dialog.describe(CX), node => node.k === "item" && node.key === "option:1");
 		expect(recommended?.node.p).toMatchObject({ label: [{ t: "Park them" }], value: [{ t: "Recommended" }] });
-		dialog.handleNativeEvent({ type: "action", key: "x", act: "cancel", mods: [] });
+		press(dialog, "cancel");
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
 
-	it("ask: hiding (Alt+H or Hide) never answers; Enter or Show restores the same pending question", () => {
+	it("ask: the skip notice dims the questions and warns while the composer draft would skip the ask", () => {
+		let notice: string | undefined = "Sending your draft skips this question";
+		const dialog = new AskDialogComponent(
+			QUESTIONS,
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: async () => undefined },
+			{ skipNotice: () => notice },
+		);
+		const skip = () =>
+			find(dialog.describe(CX), node => node.p?.role === "omp.ask.skip")?.node.p as
+				| { spans: { t: string }[] }
+				| undefined;
+		const body = () => find(dialog.describe(CX), node => node.p?.role === "omp.ask.card.body")?.node.p;
+		expect(skip()?.spans[0]?.t).toBe("⚠ Sending your draft skips this question");
+		expect(body()?.mark).toBe("drop");
+		notice = undefined;
+		expect(skip()).toBeUndefined();
+		expect(body()?.mark).toBeUndefined();
+	});
+
+	it("ask: hiding (Alt+H) never answers; Enter restores the same pending question", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
 		const dialog = ask(onSubmit, onCancel);
-		const options = () => find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
-		const press = (act: string) => {
-			const button = find(dialog.describe(CX), node => node.p?.role === "omp.btn" && node.key === act);
-			if (!button) throw new Error(`no ${act} button`);
-			dialog.handleNativeEvent({ type: "action", key: button.path, act, mods: [] });
-		};
-
-		press("hide");
-		expect(options()).toBeUndefined();
-		expect(dialog.render(80)).toHaveLength(1);
-		// A Submit click left over from the expanded bar must not answer the hidden question.
-		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
-		dialog.handleInput(ENTER);
-		expect(options()).toBeDefined();
 
 		dialog.handleInput("\x1bh");
 		expect(dialog.render(80)).toHaveLength(1);
-		press("show");
+		dialog.handleInput(ENTER);
+		expect(dialog.render(80).length).toBeGreaterThan(1);
 		expect(onSubmit).not.toHaveBeenCalled();
 		expect(onCancel).not.toHaveBeenCalled();
 
@@ -250,8 +401,6 @@ describe("dialogs under a native surface", () => {
 		const line = () => stripVTControlCharacters(dialog.render(200).join("\n"));
 
 		dialog.handleInput("\x1bh");
-		// A Submit delivered after Hide is stale: it must not hand input to the question.
-		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
 		expect(line()).not.toContain("/⏎ show");
 		dialog.handleInput(ENTER);
 		expect(routed).toEqual([ENTER]);
@@ -503,6 +652,31 @@ describe("dialogs under a native surface", () => {
 		}
 	});
 
+	it("approval: native details sit in a capped scroller, compact or expanded, and Page Down scrolls it, so the choices and action bar stay on screen", () => {
+		const content = Array.from({ length: 60 }, (_, i) => `line ${i} ${"x".repeat(80)}`).join("\n");
+		const dialog = new ApprovalDialogComponent(
+			"Allow tool: write\nPath: RULES.md · Content: line 0 …",
+			{ onApprove: vi.fn(), onDeny: vi.fn() },
+			{ fullPrompt: `Allow tool: write\nPath: RULES.md\nContent:\n${content}` },
+		);
+		// Tern scrolls a `list` capped by `max.lines`; a `col` capped by `max.h` only clips.
+		const scroller = () => {
+			const list = find(
+				dialog.describe(),
+				node => node.k === "list" && find(node, child => child.p?.role === "omp.approval.details") !== undefined,
+			)!;
+			const details = find(list.node, node => node.p?.role === "omp.approval.details")!.node;
+			return { max: list.node.k === "list" ? list.node.p?.max : undefined, scroll: details.scroll };
+		};
+		const cap = { lines: PREVIEW_LIMITS.COLLAPSED_ITEMS };
+		expect(scroller().max).toEqual(cap);
+		expect(dialog.toggleDetails()).toBe(true);
+		expect(scroller().max).toEqual(cap);
+		const before = scroller().scroll?.n ?? 0;
+		dialog.handleInput("\x1b[6~");
+		expect(scroller().scroll).toEqual({ by: "page-down", n: before + 1 });
+	});
+
 	it("approval: an expired timeout denies (never approves) and reports the timeout", async () => {
 		const denied = Promise.withResolvers<void>();
 		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn(() => denied.resolve()) };
@@ -605,6 +779,10 @@ describe("dialogs under a native surface", () => {
 		const longDialog = new ApprovalDialogComponent(longPrompt, { onApprove: vi.fn(), onDeny: vi.fn() });
 		const longRendered = stripVTControlCharacters(longDialog.render(80).join("\n"));
 		expect(longRendered).toContain("? rm -rf / (critical pattern)");
+		// Natively the capped scroller opens at its top, so that row reveals itself on mount instead.
+		const longRows = find(longDialog.describe(), node => node.p?.role === "omp.approval.details")!.node.c ?? [];
+		const revealed = longRows.filter(isNode).filter(row => row.reveal !== undefined);
+		expect(revealed.map(row => ({ key: row.key, reveal: row.reveal }))).toEqual([{ key: "9", reveal: "nearest" }]);
 
 		// Marker-shaped lines outside a bare `Command:` block (a multi-line command, code) stay plain accent text.
 		const spoof = new ApprovalDialogComponent(
@@ -636,7 +814,8 @@ describe("dialogs under a native surface", () => {
 		try {
 			expect(harness.errors).toEqual([]);
 			const root = harness.region("dock")!.c?.find(node => node.p?.role === "omp.editor.ask.approval");
-			const details = root?.c?.find(node => node.p?.role === "omp.approval.details");
+			const scroller = root?.c?.find(node => node.k === "list");
+			const details = scroller?.c?.find(node => node.p?.role === "omp.approval.details");
 			expect(details?.c?.map(node => node.p)).toEqual([
 				expect.objectContaining({ text: "Path: /tmp/out.txt", truncate: "end" }),
 			]);

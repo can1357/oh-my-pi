@@ -313,4 +313,9 @@ export const ShellFsResolve = {
 	Logical: "logical",
 	None: "none",
 };
+export const ShellSpeechOp = {
+	Voices: "voices",
+	Speak: "speak",
+	Cancel: "cancel",
+};
 // --- end generated native exports ---

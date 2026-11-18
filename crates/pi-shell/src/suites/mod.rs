@@ -2,5 +2,6 @@
 //! session.
 
 mod extras;
+mod loopback;
 mod tools;
 mod vfs;

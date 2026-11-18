@@ -181,6 +181,8 @@ export interface InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams, until {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	/** Natively (Tern), the ask waiting for answers, inline at the transcript's end above the composer. */
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	/** Whether the status/working row rendered lines in the latest frame; the band composer's editor top gap collapses only then. */
@@ -694,6 +696,8 @@ export interface InteractiveModeContext {
 	handleTanCommand(work: string, images?: ImageContent[]): Promise<boolean>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
+	/** Natively (Tern), gives the keys to the ask waiting inline above the composer; false when none waits. */
+	focusInlineAsk(): boolean;
 	/** The composer talks to a `/btw` note (Tern): plain drafts go to its topic as follow-ups. */
 	readonly isBtwFocused: boolean;
 	/** Sends a draft to the focused `/btw` note's topic; false when no follow-up started. */

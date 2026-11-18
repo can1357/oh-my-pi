@@ -68,12 +68,12 @@ pub trait Host {
 		None
 	}
 	/// Whether a command [`Host::resolve`] answered with the host's own
-	/// ([`Resolved::Tool`] or [`Resolved::Native`]) is looked up on `PATH`
-	/// instead, because `argv` is written for the program of that name the
-	/// host's command shadows (on Windows, `find /c /v ""` is cmd's `FIND`,
-	/// not GNU `find`). When `PATH` has no such program, the host's command
-	/// runs after all. `false` (the default): the host's command always
-	/// wins.
+	/// ([`Resolved::Tool`], [`Resolved::Native`] or [`Resolved::SelfShell`])
+	/// is looked up on `PATH` instead, because `argv` is written for the
+	/// program of that name the host's command shadows (on Windows, `find /c
+	/// /v ""` is cmd's `FIND`, not GNU `find`; `bash -i` is the user's own
+	/// bash). When `PATH` has no such program, the host's command runs after
+	/// all. `false` (the default): the host's command always wins.
 	fn defers_to_path(&mut self, _name: &BStr, _argv: &[BString]) -> bool {
 		false
 	}
@@ -284,7 +284,11 @@ pub enum Resolved {
 	Native(NativeRef),
 	/// Device command; same [`Task`] shape, the host decides routing.
 	Device(NativeRef),
-	/// `bash`/`sh`/`zsh` run in-engine as a fresh-state subshell.
+	/// `bash`/`sh`/`zsh` run in-engine as a fresh-state subshell. Whatever
+	/// the host answers, the engine looks the name up on `PATH` first when
+	/// the shell replaces the caller (zsh's `exec` precommand) or runs in a
+	/// detached tree ([`Lineage::detached`]), and `type`/`command -v` report
+	/// the program `PATH` has.
 	SelfShell,
 	/// External program at this absolute path.
 	External(BString),

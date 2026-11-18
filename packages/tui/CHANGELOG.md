@@ -15,11 +15,28 @@
 - Native history search now exposes forward/backward scope cycling and refreshes its scope title, query highlights and rows even when sources reuse result arrays ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed rapid successive Escape keys on Windows failing to reach interrupt and backtracking handlers when the console host relays them as text records ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+### Changed
+
+- Native asks (`HtmlFormDialog`, `AskDialogComponent`) describe one inline card (`native/ask-card.ts`, role `omp.ask.card`) instead of a tabbed sheet in the composer's place: every question stacked, the focused one open and the rest folded to their answer or up to four option pills a click picks, gliding between the two (`transition: "layout"`); no question tabs, Review, Next or Hide natively. Both take `skipNotice`, `claimKeys` and `releaseKeys`; `HtmlFormDialog.givenAnswers()` reports what changed from the defaults
+- The composer's `ask` state (`ComposerNativeState.ask`): while an ask waits above it the placeholder says typing there skips it, it dims away from the keys (`NativeEditorLayout.mark`), and a draft that would skip it gets a `skips ask` chip and Skip & send
+- Model search treats `provider/model` specially: the text before `/` prefixes the provider (an exact provider first), the rest searches that provider's model ids, and those rows list ahead of other matches — `ol/` now shows Ollama models first instead of recent `…-sol` models
+
+### Fixed
+
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
+- Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
+- Enter on a checkbox group with nothing checked checks the focused box before moving on
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
 
 - `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+- Added the `async-notify` transcript block, which shows the output lines a running background job or service reported
 
 ### Changed
 
