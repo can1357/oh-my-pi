@@ -89,7 +89,7 @@ export function isHiddenFrame(value: unknown): value is HiddenFrame {
 	);
 }
 
-/** Hello capability of an extension that answers `findDownload` (it holds Chrome's `downloads` permission). */
+/** Hello capability of an extension that answers `findDownload`, advertised only while the browser exposes the `downloads` API. */
 export const DOWNLOADS_PROTOCOL_VERSION = 1;
 /**
  * Whether a relay or extension reported a well-formed omp release version.
@@ -153,7 +153,7 @@ export type ExtToRelayMessage =
 			ompVersion?: string;
 			/** {@link EXTENSION_RELOAD_PROTOCOL_VERSION} when the extension reloads itself on `reload`. Absent in older extensions. */
 			reloadProtocol?: number;
-			/** {@link DOWNLOADS_PROTOCOL_VERSION} when the extension answers `findDownload`. Absent in older extensions. */
+			/** {@link DOWNLOADS_PROTOCOL_VERSION} when the extension answers `findDownload`. Absent in older extensions, and when a degraded worker runs without the browser's `downloads` API. */
 			downloadsProtocol?: number;
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
