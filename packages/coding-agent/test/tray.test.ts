@@ -245,24 +245,6 @@ describe("tray items", () => {
 		expect(done?.item === "done" && done.entries[0]?.name).toBe("Old");
 	});
 
-	it("titles a /tan clone by its job's label, its generated id being no name", () => {
-		const f = fixture();
-		f.refs.push({ ...ref("Tan-0190a1b2c3d4e5f6", "running"), displayName: "tan" });
-		f.agentJobs.set(
-			"Tan-0190a1b2c3d4e5f6",
-			job("Tan-0190a1b2c3d4e5f6", {
-				type: "task",
-				agentId: "Tan-0190a1b2c3d4e5f6",
-				label: "/tan fix the flaky test",
-				request: "fix the flaky test",
-			}),
-		);
-		expect(buildTrayItems(input(f), new TrayMemory())[0]).toMatchObject({
-			name: "/tan fix the flaky test",
-			type: "tan",
-		});
-	});
-
 	it("hides agent cards and the done card under display.pinnedAgents off, keeping the jobs", () => {
 		const f = fixture();
 		f.sessions.push(observed("Running", "active"));

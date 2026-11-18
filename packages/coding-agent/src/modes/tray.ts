@@ -352,11 +352,10 @@ function agentStats(progress: AgentProgress | undefined): string {
 /**
  * What a card calls agent `id`: its id, the unique name the agent was spawned
  * under (the registry's display name is its type, shared by every agent of
- * that type). A `/tan` clone's id is a generated handle, so it goes by its
- * job's label (`/tan <its request>`).
+ * that type).
  */
-function agentTitle(id: string, job: AsyncJob | undefined): string {
-	return line(job?.request !== undefined ? job.label : id, TRUNCATE_LENGTHS.TITLE);
+function agentTitle(id: string): string {
+	return line(id, TRUNCATE_LENGTHS.TITLE);
 }
 
 /** The agent's type when it says more than its name: the registry's display name, else what spawned it. */
@@ -444,7 +443,7 @@ function agentItem(
 	} else if (memory.dismissed.has(key) || agentResultReached(job, input.consumed)) {
 		return undefined;
 	}
-	const name = agentTitle(id, job);
+	const name = agentTitle(id);
 	const type = agentType(id, session, ref, name);
 	const doing = agentDoing(status, session, ref, job);
 	const tools = session?.progress?.toolCount;
@@ -549,7 +548,7 @@ function doneEntry(input: TrayInput, ref: AgentRecordLike, session: ObservableSe
 	const outcome = progress?.recentOutput.find(part => part.trim()) ?? ref.activity ?? "";
 	return {
 		id: ref.id,
-		name: agentTitle(ref.id, input.agentJob(ref.id)),
+		name: agentTitle(ref.id),
 		status,
 		meta,
 		line: outcome ? line(firstLine(outcome)) : "",
@@ -574,7 +573,7 @@ function doneItem(
 	const entries = done.slice(0, TRAY_DONE_LIST_LIMIT).map(ref => doneEntry(input, ref, sessions.get(ref.id)));
 	const key = JSON.stringify(entries);
 	if (memory.doneEntries?.key !== key) memory.doneEntries = { key, entries };
-	const names = done.map(ref => agentTitle(ref.id, input.agentJob(ref.id)));
+	const names = done.map(ref => agentTitle(ref.id));
 	const shown = names.slice(0, TRAY_DONE_NAMES).join(", ");
 	const summary = names.length > TRAY_DONE_NAMES ? `${shown} +${names.length - TRAY_DONE_NAMES}` : shown;
 	const name = `${done.length} done`;

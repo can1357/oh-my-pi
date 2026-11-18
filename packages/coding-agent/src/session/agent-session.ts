@@ -289,6 +289,7 @@ import { prewarmSubagentWorker } from "../thread/subagent-worker";
 import { SubagentSpawnSignal } from "../thread/subagent-spawn-signal";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { AgentDefinition } from "../task/types";
+import type { AgentOutputManager } from "../task/output-manager";
 import type { ModelMention } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { ModelMentionRegistry, type ResolvedModelMention } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
@@ -3485,6 +3486,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	get asyncJobManager(): AsyncJobManagerApi | undefined {
 		return this.#asyncJobManager;
+	}
+
+	/**
+	 * Allocator of the ids this session's subagents nest under in its artifacts
+	 * directory; `/tan` claims clone ids from it so a tan and a task subagent
+	 * never share an id (and so a transcript file).
+	 */
+	get agentOutputManager(): AgentOutputManager | undefined {
+		return this.#evalToolSession?.agentOutputManager;
 	}
 
 	getAgentId(): string | undefined {
