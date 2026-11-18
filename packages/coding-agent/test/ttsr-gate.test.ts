@@ -315,12 +315,19 @@ describe("TTSR gate rules", () => {
 			controller.signal,
 		);
 
-		expect(
-			await checked.then(
-				() => "settled",
+		// Nothing here waits on I/O or a timer: by the next event-loop turn the check has settled, unless
+		// it hangs on prefiltering the abort did not end.
+		const nextTurn = Promise.withResolvers<string>();
+		setImmediate(() => nextTurn.resolve("still pending"));
+		const outcome = await Promise.race([
+			checked.then(
+				refusal => (refusal === undefined ? "ran" : "refused"),
 				() => "rejected",
 			),
-		).toBe("rejected");
+			nextTurn.promise,
+		]);
+
+		expect(outcome).toBe("rejected");
 		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(0);
 	});
 
@@ -445,14 +452,9 @@ describe("TTSR gate rules", () => {
 		const wrapped = new ExtensionToolWrapper(patcher, runner) as ExtensionToolWrapper<any>;
 		const toolCall = { batchId: "batch-1", index: 0, total: 1, toolCalls: [{ id: "call-1", name: "apply_patch" }] };
 
-		const error = await wrapped
-			.execute("call-1", RM, undefined, undefined, { settings, toolCall } as AgentToolContext)
-			.then(
-				() => undefined,
-				(err: unknown) => err,
-			);
-
-		expect((error as Error).message).toContain("no-rm-patch guidance");
+		await expect(
+			wrapped.execute("call-1", RM, undefined, undefined, { settings, toolCall } as AgentToolContext),
+		).rejects.toThrow("no-rm-patch guidance");
 		expect(execute).not.toHaveBeenCalled();
 	});
 
