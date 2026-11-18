@@ -29,6 +29,8 @@ interface ResetFixture {
 		resetProbeFailing?: boolean;
 		/** Organization `/api/oauth/profile` reports for a credential stored without one. */
 		profileOrgId?: string;
+		/** Profile requests answered 503 before `profileOrgId` is served. */
+		profileFailures?: number;
 		postGate?: Promise<void>;
 		postArrived?: () => void;
 		usageGate?: Promise<void>;
@@ -67,6 +69,10 @@ async function fixture(): Promise<ResetFixture> {
 				return Response.json(state.response, { status: state.responseStatus });
 			}
 			if (url.pathname === "/api/oauth/profile" && state.profileOrgId) {
+				if (state.profileFailures) {
+					state.profileFailures--;
+					return new Response("profile unavailable", { status: 503 });
+				}
 				return Response.json({ organization: { uuid: state.profileOrgId } });
 			}
 			if (url.pathname === "/api/oauth/usage") {
@@ -219,8 +225,16 @@ describe("Claude saved reset account safety", () => {
 		]);
 		const [orgless] = f.storage.oauth.accounts("anthropic");
 		if (!orgless) throw new Error("Expected the org-less credential");
-		f.state.profileOrgId = "org-b";
 		const orgTarget = { ...f.target, credentialId: orgless.credentialId, accountId: "shared-account" };
+		// Discovery cannot resolve its organization: a later resolution at spend time is unchecked, so nothing is spent.
+		f.state.profileOrgId = "org-b";
+		f.state.profileFailures = 1;
+		const unresolved = await f.storage.resets.redeem({
+			target: { ...orgTarget, orgId: "org-a" },
+			baseUrlResolver: f.baseUrlResolver,
+		});
+		expect(unresolved.code).toBe("organization_unavailable");
+		expect(f.posts.length).toBe(1);
 		const elsewhere = await f.storage.resets.redeem({
 			target: { ...orgTarget, orgId: "org-a" },
 			baseUrlResolver: f.baseUrlResolver,
