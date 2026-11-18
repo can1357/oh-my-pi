@@ -5,7 +5,7 @@
 ### Added
 
 - `ShellRunResult` carries `endedByExit`: true when `exit` or an armed `set -e` cut the run short with commands still left to run (whatever followed the abort did not run); a trailing `exit` at the end of the input, which ends the run where the input's end would have, is not reported ([#18879](https://github.com/can1357/oh-my-pi/issues/18879), [#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
-- The `endedByExit` notice no longer tells forked or one-off shells that options like `set -e` stay set in the session: only the session shell keeps them ([#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
+- The `endedByExit` notice warns that options like `set -e` stay set only when the run's state is retained in the session, including state adopted from an overlapping fork ([#18899](https://github.com/can1357/oh-my-pi/pull/18899) by [@Bensonluo](https://github.com/Bensonluo))
 ## [18.22.2] - 2026-11-18
 
 ### Added

@@ -556,7 +556,7 @@ export interface BashResult {
 	workingDir?: string;
 	/** Whether `exit` or an armed `set -e` cut the run short with commands still left to run: whatever followed the abort did not run. A trailing `exit` at the end of the input is not reported. */
 	endedByExit?: boolean;
-	/** Whether the run did not own the session's persistent shell (an overlapping call's fork, or a fresh shell after the persistent one was quarantined): its state changes do not persist to later calls. */
+	/** Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is. */
 	ephemeralShell?: boolean;
 	images?: ImageContent[];
 	/** The embedded shell's final `ShellTrace` of the run; only when the caller asked for one. */

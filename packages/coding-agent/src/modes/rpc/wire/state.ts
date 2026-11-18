@@ -186,7 +186,7 @@ export const stateDefs = {
 		),
 		"ephemeralShell?": doc(
 			"boolean",
-			"Whether the run did not own the session's persistent shell (an overlapping call's fork, or a fresh shell after the persistent one was quarantined): its state changes do not persist to later calls.",
+			"Whether the run's state was not retained in the session's persistent shell after cleanup. A fork adopted into a retained session is not ephemeral; an unadopted fork or a released shell is.",
 		),
 		"images?": "ImageContent[]",
 		"trace?": doc(

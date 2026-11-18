@@ -13,6 +13,7 @@ mod callstack;
 mod command;
 mod control;
 mod exec;
+mod exit_options;
 pub use exec::ExitCause;
 mod expand;
 mod fdprobe;
@@ -525,8 +526,9 @@ pub struct Kernel {
 	/// meaningful only together with [`Kernel::exited`]. Not imaged.
 	pub exited_cut_short:   bool,
 	/// First attribution captured for a root run, before cleanup unwinds
-	/// its frames. Not imaged, like `exited_cut_short`; never drives execution.
-	pub exit_report:        Option<(RunId, exec::ExitCause)>,
+	/// its frames. `None` as a cause records a non-exit control transfer.
+	/// Not imaged; never drives execution.
+	pub exit_report:        Option<(RunId, Option<exec::ExitCause>)>,
 	/// Signal deaths of external programs replacing a submitted run, pending
 	/// its completion report; callouts do not survive frame restoration.
 	pub exec_signals:       HashMap<RunId, i32>,
@@ -2594,7 +2596,7 @@ impl Shell {
 			.k
 			.exit_report
 			.filter(|(id, _)| *id == run)
-			.map(|(_, cause)| cause)
+			.and_then(|(_, cause)| cause)
 	}
 
 	/// The signal that killed an external replacing `run`, if any. Ask

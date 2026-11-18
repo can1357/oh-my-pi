@@ -577,10 +577,9 @@ jobs:
            env:
               OMP_TEST_CONCURRENCY: "4"
               OMP_TEST_SHARD: ${{ matrix.shard }}
-              # The CI addon is built from source: the exit-attribution
-              # fields must be present, so the end-to-end guards run
-              # instead of skipping like on a prebuilt addon.
-              OMP_REQUIRE_EXIT_FLAG: "1"
+              # Non-PR runs build this checkout's addon and must expose the
+              # flag. PRs may restore an older main/npm addon without it.
+              OMP_REQUIRE_EXIT_FLAG: ${{ github.event_name != 'pull_request' && '1' || '' }}
            run: bun run ci:test:coding-agent:native
 
    test_workspace:

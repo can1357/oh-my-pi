@@ -164,9 +164,9 @@ export interface BashResult extends OutputSummary {
 	 */
 	endedByExit?: boolean;
 	/**
-	 * True when the run did not own the session's persistent shell (an
-	 * overlapping call's fork, or a fresh shell after the persistent one was
-	 * quarantined): its state changes do not persist to later calls.
+	 * True when the run's state was not retained in the session's persistent
+	 * shell after cleanup. A fork adopted into a retained session is not
+	 * ephemeral; an unadopted fork or a released shell is.
 	 */
 	ephemeralShell?: boolean;
 	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
@@ -1120,7 +1120,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			// Finalize attribution after output cleanup and shell release:
 			// either can yield while the owning session is left or released.
 			// Inspect actual retention rather than predicting that decision.
-			completedResult.ephemeralShell = shellSession === undefined || shellSessions.get(sessionKey) !== shellSession;
+			const stateShell = shellSession ?? (completedResult.fork?.carried ? busyShell : undefined);
+			completedResult.ephemeralShell = stateShell === undefined || shellSessions.get(sessionKey) !== stateShell;
 		}
 	}
 }

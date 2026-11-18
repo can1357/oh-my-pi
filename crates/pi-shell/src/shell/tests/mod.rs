@@ -14,6 +14,7 @@ mod builtins;
 mod env_cwd;
 mod exit_classification;
 mod exit_continuations;
+mod exit_final_gate;
 mod exit_review_matrix;
 mod process_control;
 mod redirections;

@@ -2,7 +2,7 @@
 //! ordinary/`command`, root/child); script input (source/alias, commands/
 //! comments/blanks/continuations); RETURN unwind (function/source, eval,
 //! saved success/failure, unreachable suffix, caller &&/||/unconditional);
-//! parked expansion (no-fork/value/fork, word/assignment/redirection).
+//! parked expansion (no-fork/value/fork, simple/compound/header operations).
 
 use super::*;
 
@@ -143,6 +143,12 @@ async fn exit_classification_review_parked_substitution_keeps_parent_work() {
 			format!("printf '%s' \"{substitution}\""),
 			format!("x=\"{substitution}\""),
 			format!("printf never >\"{substitution}\""),
+			format!("[[ -n \"{substitution}\" ]]"),
+			format!("[[ x == x && -n \"{substitution}\" ]]"),
+			format!("(( 1 + 0{substitution} ))"),
+			format!("case \"{substitution}\" in esac"),
+			format!("for x in \"{substitution}\"; do :; done"),
+			format!("{{ :; }} >\"/dev/null{substitution}\""),
 			format!("printf '%s %s' \"{substitution}\" \"${{ printf never >&2; }}\""),
 			format!("f() {{ printf '%s' \"{substitution}\"; }}; f"),
 			format!("printf '%s' \"${{ printf '%s' \"{substitution}\"; }}\""),
@@ -151,6 +157,24 @@ async fn exit_classification_review_parked_substitution_keeps_parent_work() {
 			assert_eq!(result.exit_code, Some(0), "{command}");
 			assert!(output.is_empty(), "abandoned expansion produced output: {command}");
 			assert!(result.ended_by_exit, "parent command has not executed: {command}");
+		}
+	}
+	for (command, expected_status) in [
+		("[[ -n \"SUB\" ]]", 1),
+		("[[ x == x && -n \"SUB\" ]]", 1),
+		("(( 1 + 0SUB ))", 0),
+		("case \"SUB\" in esac", 0),
+		("for x in \"SUB\"; do :; done", 0),
+		("{ :; } >\"/dev/nullSUB\"", 0),
+	] {
+		// Returning normally yields an empty expansion, then the owning
+		// operation actually completes: these outcomes do not use the walker.
+		for substitution in ["${ return 0; }", "${| return 0; }"] {
+			let command = command.replace("SUB", substitution);
+			let (result, output) = run_case(&command).await;
+			assert_eq!(result.exit_code, Some(expected_status), "{command}");
+			assert!(output.is_empty(), "{command}");
+			assert!(!result.ended_by_exit, "{command}");
 		}
 	}
 	for (command, expected_output) in [
@@ -163,5 +187,25 @@ async fn exit_classification_review_parked_substitution_keeps_parent_work() {
 		assert_eq!(result.exit_code, Some(0), "{command}");
 		assert_eq!(output, expected_output, "{command}");
 		assert!(!result.ended_by_exit, "non-aborting substitution: {command}");
+	}
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exit_classification_parked_header_does_not_replay_a_completed_body() {
+	let _guard = shell_test_lock().lock().await;
+	for value in [false, true] {
+		let opener = if value { "${|" } else { "${" };
+		for second_header in [false, true] {
+			for suffix in ["", "; printf tail"] {
+				let condition = if second_header { "i == 1" } else { "1" };
+				let expansion = format!("{opener} if (({condition})); then exit 0; fi; }}");
+				let command =
+					format!("for ((i=0; i<2+0{expansion}; i++)); do printf body; done{suffix}");
+				let (result, output) = run_case(&command).await;
+				assert_eq!(result.exit_code, Some(0), "{command}");
+				assert_eq!(output, if second_header { "body" } else { "" }, "{command}");
+				assert_eq!(result.ended_by_exit, !second_header || !suffix.is_empty(), "{command}");
+			}
+		}
 	}
 }

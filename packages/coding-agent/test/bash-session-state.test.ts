@@ -219,7 +219,7 @@ it("says so when exit or an armed set -e ends the call before its remaining stat
 	}
 });
 
-it("does not promise options persist when the aborted call ran in a forked session shell", async () => {
+it("does not promise options persist when an aborted fork's state is not adopted", async () => {
 	const firstRunStarted = Promise.withResolvers<void>();
 	let finishFirst!: (result: ShellRunResult) => void;
 	__test.run = (_shell, request) => {
@@ -235,8 +235,8 @@ it("does not promise options persist when the aborted call ran in a forked sessi
 		const tool = bashTool();
 		const first = run(tool, "echo BLOCK-FIRST-CALL");
 		await firstRunStarted.promise;
-		// The first call owns the persistent session; this one overlaps it
-		// and runs in a fork, so its options die with it.
+		// This cold owner has no published state yet, so the overlapping
+		// fork's state cannot be adopted back into it.
 		const aborted = await run(tool, "set -e; false; echo never-ran");
 		expect(aborted.text).toContain("Ran in a copy of the busy session shell");
 		expect(aborted.text).toContain("Stopped by `exit` or an armed `set -e`");
@@ -322,6 +322,55 @@ it.each(["keep", "leave", "release"] as const)(
 		}
 	},
 );
+
+// Matrix: cold/warm owner (adoption rejected/accepted), retained/released
+// destination, and explicit exit/errexit. State is changed by the real native
+// shell; only the new flag is supplied for older addons.
+it.each([false, true])("attributes overlapping fork state by adoption and retention (warm: %s)", async warm => {
+	for (const retained of [false, true]) {
+		for (const explicit of [false, true]) {
+			const options = { sessionKey: cwd, minimize: false };
+			releaseShellSessions(cwd);
+			if (warm) await executeBash("true", options);
+			const started = Promise.withResolvers<void>();
+			const finishOwner = Promise.withResolvers<ShellRunResult>();
+			let disposeFork = false;
+			__test.run = async (shell, request, onChunk) => {
+				if (request.command === "# hold owner") {
+					started.resolve();
+					return finishOwner.promise;
+				}
+				const result = await shell.run(request, onChunk);
+				disposeFork = true;
+				return { ...result, endedByExit: true };
+			};
+			const dispose = OutputSink.prototype.dispose;
+			const spy = vi.spyOn(OutputSink.prototype, "dispose").mockImplementation(async function (this: OutputSink) {
+				if (disposeFork && !retained) releaseShellSessions(cwd);
+				await dispose.call(this);
+			});
+			const owner = executeBash("# hold owner", options);
+			try {
+				await started.promise;
+				const interruption = explicit ? "exit 3" : "false";
+				const result = await executeBash(`PI_REVIEW_FORK=kept; set -e; ${interruption}; printf never`, options);
+				expect(result.exitCode).toBe(explicit ? 3 : 1);
+				expect(result.output).toBe("");
+				expect(result.fork?.carried).toBe(warm);
+				expect(result.endedByExit).toBe(true);
+				expect(result.ephemeralShell).toBe(!(warm && retained));
+			} finally {
+				spy.mockRestore();
+				__test.run = undefined;
+				finishOwner.resolve(nativeResult());
+				await owner;
+			}
+			const state = await executeBash('printf "%s:%s" "$PI_REVIEW_FORK" "$-"', options);
+			expect(state.output.startsWith("kept:")).toBe(warm && retained);
+			expect(state.output.split(":")[1].includes("e")).toBe(warm && retained);
+		}
+	}
+});
 
 // Probe the raw native result shape on a natural end, not the behavior being tested.
 const hasNativeExitFlag = Object.hasOwn(await new Shell().run({ command: "true" }), "endedByExit");

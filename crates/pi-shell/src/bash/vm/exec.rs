@@ -426,10 +426,8 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 						unwind(&mut k.root, cx.store, vp, i);
 					}
 				} else if vp.parent.is_some() && in_function_scope(k, cx, vp) {
-					{
-						let unrun = top_frame(vp).pc + 1;
-						exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
-					}
+					let unrun = top_frame(vp).pc + 1;
+					exit_shell(k, vp, cx, status, unrun, None);
 				} else {
 					let line = line_of(vp, op.node);
 					let diag =
@@ -484,9 +482,11 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			finish_cancel(&mut k.root, cx.store, vp, cancellation.expect("checked"));
 			continue;
 		}
-		let errexit = errexit_failed
-			&& (errexit_on(k, cx, vp)
-				|| (unit.mode.dialect() == Dialect::Zsh && zsh_errreturn_exits(k, cx, vp)));
+		let armed_errexit = errexit_failed && errexit_on(k, cx, vp);
+		let errexit = armed_errexit
+			|| (errexit_failed
+				&& unit.mode.dialect() == Dialect::Zsh
+				&& zsh_errreturn_exits(k, cx, vp));
 		if failed_command && start_trap(k, vp, cx, TrapKey::Err) {
 			set_trap_line(vp, err_line);
 			for frame in &mut vp.frames[..fi.saturating_add(1)] {
@@ -494,14 +494,17 @@ pub fn run_slice(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, slice: u32, op
 			}
 			if errexit {
 				mark_trap_exit(vp);
+				if !armed_errexit {
+					// ERR_RETURN has already committed the run to end, even
+					// if its trap later invokes `exit` during cleanup.
+					capture_exit_report(k, vp, cx, vp.status, 0, None, false);
+				}
 			}
 		} else if errexit {
 			let status = vp.status;
 			// `pc` advanced past the failed op already: its continuation is here.
-			{
-				let unrun = top_frame(vp).pc;
-				exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
-			}
+			let unrun = top_frame(vp).pc;
+			exit_shell(k, vp, cx, status, unrun, armed_errexit.then_some(ExitCause::Exit));
 		} else if errreturn_failed && unit.mode.dialect() == Dialect::Zsh && zsh_errreturn(k, cx, vp)
 		{
 			// zsh `ERR_RETURN`: a failed command returns from the function
@@ -575,11 +578,9 @@ fn zsh_return_flow(
 		}
 	} else {
 		// zsh `bin_break`: `return` outside a function or `.` file leaves
-		// a non-interactive shell (`zexit`).
-		{
-			let unrun = top_frame(vp).pc + 1;
-			exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
-		}
+		// a non-interactive shell (`zexit`), without explicit exit/errexit.
+		let unrun = top_frame(vp).pc + 1;
+		exit_shell(k, vp, cx, status, unrun, None);
 	}
 }
 
@@ -691,14 +692,38 @@ impl WalkStatus {
 	}
 }
 
-/// What the continuation of one frame does when the exit had not happened:
-/// either it runs another command (unrun input), or it falls off the unit's
-/// end, leaving the frame's outgoing status behind (`Unknown` when the
-/// paths out disagree or pin no single value).
+/// What a frame's continuation does without the interruption: either it
+/// runs another command, or leaves outgoing status/transfer paths to resume
+/// in its caller. Keep the paths separate when their control transfers differ.
 #[derive(Debug)]
 enum FrameExit {
 	RunsInput,
-	Exits(WalkStatus),
+	Exits(Vec<WalkEnd>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum WalkTransfer {
+	Error,
+	Return(i32),
+	Break { n: u32, cont: bool },
+	Exit(i32),
+}
+
+impl From<TryEnd> for WalkTransfer {
+	fn from(end: TryEnd) -> Self {
+		match end {
+			TryEnd::Error => Self::Error,
+			TryEnd::Return(n) => Self::Return(n),
+			TryEnd::Break { n, cont } => Self::Break { n, cont },
+			TryEnd::Exit(n) => Self::Exit(n),
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct WalkEnd {
+	status:   WalkStatus,
+	transfer: Option<WalkTransfer>,
 }
 
 /// The walk mirrors record lifetime, not loop execution. `cleanup` is
@@ -709,6 +734,39 @@ struct WalkRecord {
 	status:  WalkStatus,
 	end:     u32,
 	cleanup: Option<bool>,
+	always:  bool,
+	start:   u32,
+	pending: Option<WalkTransfer>,
+}
+
+/// Resume the transfer saved by an always-list, not its abandoned suffix.
+/// Like `run_always`/`zsh_break`, unwind records until cleanup or the target
+/// loop is reached. A continue's next iteration is old input, so use the
+/// same structural loop exit as `LoopBack`.
+fn walk_transfer(
+	loops: &mut Vec<WalkRecord>,
+	mut end: WalkTransfer,
+	status: WalkStatus,
+) -> Result<u32, WalkTransfer> {
+	while let Some(mut rec) = loops.pop() {
+		if let Some(cleaned) = rec.cleanup {
+			if !rec.always && !cleaned {
+				rec.pending = Some(end);
+				let start = rec.start;
+				loops.push(rec);
+				return Ok(start);
+			}
+		} else if let WalkTransfer::Break { n, cont } = end {
+			if n <= 1 {
+				rec.status = status;
+				let target = rec.end;
+				loops.push(rec);
+				return Ok(target);
+			}
+			end = WalkTransfer::Break { n: n - 1, cont };
+		}
+	}
+	Err(end)
 }
 
 /// Walk the submitted continuation, preserving branch statuses but treating
@@ -722,6 +780,7 @@ fn frame_continuation(
 	status: WalkStatus,
 	runtime_loops: &[LoopRec],
 	cleanup_runs: bool,
+	transfer: Option<WalkTransfer>,
 ) -> FrameExit {
 	let ops = &unit.ops;
 	// Keep the complete record stack in the key: equal top records can
@@ -730,20 +789,41 @@ fn frame_continuation(
 	let seed: Vec<WalkRecord> = runtime_loops
 		.iter()
 		.map(|rec| {
-			let cleanup = matches!(rec.kind, LoopKind::Try { .. });
+			let (cleanup, always, pending) = match rec.kind {
+				LoopKind::Try { always, pending } => {
+					(Some(cleanup_runs), always, pending.map(Into::into))
+				},
+				_ => (None, false, None),
+			};
 			WalkRecord {
-				status:  WalkStatus::of(rec.status),
-				end:     if cleanup { rec.cont } else { rec.exit },
-				cleanup: cleanup.then_some(cleanup_runs),
+				status: WalkStatus::of(rec.status),
+				end: if cleanup.is_some() {
+					rec.cont
+				} else {
+					rec.exit
+				},
+				cleanup,
+				always,
+				start: rec.exit,
+				pending,
 			}
 		})
 		.collect();
-	let mut stack = vec![(from as u32, status, seed)];
-	let mut outcomes: Vec<WalkStatus> = Vec::new();
-	while let Some((index, status, mut loops)) = stack.pop() {
+	let mut stack = vec![(from as u32, status, seed, transfer)];
+	let mut outcomes = Vec::new();
+	while let Some((mut index, status, mut loops, transfer)) = stack.pop() {
+		if let Some(end) = transfer {
+			match walk_transfer(&mut loops, end, status) {
+				Ok(target) => index = target,
+				Err(end) => {
+					outcomes.push(WalkEnd { status, transfer: Some(end) });
+					continue;
+				},
+			}
+		}
 		let i = index as usize;
 		if i >= ops.len() {
-			outcomes.push(status);
+			outcomes.push(WalkEnd { status, transfer: None });
 			continue;
 		}
 		if !visited.insert((index, status, loops.clone())) {
@@ -754,28 +834,31 @@ fn frame_continuation(
 		// unit with the status it carries (a function returning to its
 		// caller, or a script reaching its end).
 		if matches!(op.code, Opcode::End | Opcode::SubExit | Opcode::Abort) {
-			outcomes.push(status);
+			outcomes.push(WalkEnd { status, transfer: None });
 			continue;
 		}
-		// Entering an always-list snapshots the try-list's outgoing status
-		// into the try record (runtime `always_enter`), and the region's
-		// end restores it (runtime `always_end`). When the record is one
-		// the exit already interrupted — the try was in progress — the
-		// whole region has actually run (mandatory cleanup fires on the
-		// exit path), so none of it is unrun input and the walk skips
-		// ahead. A record the walk itself opened stands for a construct
-		// the continuation would enter: its commands are ordinary unrun
-		// input, walked normally.
+		// Mandatory cleanup already executed on the exit path is not
+		// unrun input, but its saved control transfer still resumes.
 		if op.code == Opcode::AlwaysEnter
 			&& let Some(top) = loops.last_mut()
 		{
 			top.status = status;
+			top.always = true;
 			if top.cleanup == Some(true) {
-				let end = top.end;
-				loops.pop();
-				stack.push((end, status, loops));
+				let rec = loops.pop().expect("checked above");
+				stack.push((rec.end, status, loops, rec.pending));
 				continue;
 			}
+		}
+		if op.code == Opcode::AlwaysEnd && loops.last().is_some_and(|rec| rec.cleanup.is_some()) {
+			let rec = loops.pop().expect("checked above");
+			let status = match rec.pending {
+				Some(WalkTransfer::Return(n) | WalkTransfer::Exit(n)) => WalkStatus::of(n),
+				Some(WalkTransfer::Error) if rec.status == WalkStatus::Zero => WalkStatus::NonZero,
+				_ => rec.status,
+			};
+			stack.push((index + 1, status, loops, rec.pending));
+			continue;
 		}
 		// A not-yet-started compound or spawn is submitted work too;
 		// do not scan a spawn's child descriptors as parent bytecode.
@@ -787,30 +870,17 @@ fn frame_continuation(
 		let status = match op.code {
 			Opcode::Not => status.negate(),
 			Opcode::SetStatus => WalkStatus::of(op.a as i32),
-			// An arithmetic or `[[ ]]` evaluation leaves a runtime value the
-			// walk cannot know: both branch directions stay reachable.
 			Opcode::Arith | Opcode::CondTest => WalkStatus::Unknown,
-			// A loop exit restores the innermost record's saved status —
-			// exactly what the runtime does (`loop_enter` seeds zero,
-			// `loop_note` re-records the body's outgoing status at each
-			// `LoopNote`/`LoopBack`, and the frame's live records seed the
-			// walk). Whatever the loop's test machinery changed in between
-			// is discarded; a record-less path restores zero.
 			Opcode::LoopExit => loops.pop().map_or(WalkStatus::Zero, |r| r.status),
-			// Leaving an always-list restores the try-list's snapshot,
-			// including an exit from inside an already-running always-list.
-			Opcode::AlwaysEnd => loops.pop().map_or(status, |r| r.status),
 			_ => status,
 		};
-		// Complete only the interrupted iteration. Both while-style
-		// LoopBack and arithmetic-for LoopNote preserve the body status
-		// and land at the loop exit, never replaying old input or trying
-		// to prove termination from a condition/step expression.
+		// Complete only the interrupted iteration, preserving its body
+		// status; never replay a loop head/body to predict termination.
 		if matches!(op.code, Opcode::LoopNote | Opcode::LoopBack)
 			&& let Some(top) = loops.last_mut()
 		{
 			top.status = status;
-			stack.push((top.end, status, loops));
+			stack.push((top.end, status, loops, None));
 			continue;
 		}
 		match op.code {
@@ -820,13 +890,23 @@ fn frame_continuation(
 				} else {
 					ops.get(i + 1).map_or(index + 1, |next| next.a)
 				};
-				loops.push(WalkRecord { status: WalkStatus::Zero, end, cleanup: None });
+				loops.push(WalkRecord {
+					status: WalkStatus::Zero,
+					end,
+					cleanup: None,
+					always: false,
+					start: 0,
+					pending: None,
+				});
 			},
 			Opcode::TryEnter => {
 				loops.push(WalkRecord {
 					status:  WalkStatus::Zero,
 					end:     op.b,
 					cleanup: Some(false),
+					always:  false,
+					start:   op.a,
+					pending: None,
 				});
 			},
 			_ => {},
@@ -836,12 +916,6 @@ fn frame_continuation(
 			WalkStatus::NonZero => Some(false),
 			WalkStatus::Unknown => None,
 		};
-		// (jump target when the op can leave the linear flow, whether the
-		// next op also runs). Unconditional jumps lose the fall-through;
-		// terminators have neither.
-		// Unknown tests keep both branches for a first header: its body
-		// may not have started. After a completed iteration, the live
-		// record proves that walking the body would replay old input.
 		let repeats_body = |target: u32| {
 			ops.get(target as usize)
 				.is_some_and(|op| op.code == Opcode::LoopExit)
@@ -850,14 +924,8 @@ fn frame_continuation(
 					.any(|rec| rec.exit == target && rec.iterations > 0)
 		};
 		let (target, falls_through) = match op.code {
-			// A backward jump is iteration machinery, not new input. Its
-			// structural exit follows it even for an omitted condition.
 			Opcode::Jmp if op.a < index => (Some(loops.last().map_or(index + 1, |r| r.end)), false),
 			Opcode::Jmp => (Some(op.a), false),
-			// The loop-back is iteration machinery, not unrun input: the
-			// next iteration's head would have run, not been skipped, and
-			// the loop's exit landing follows it in program order.
-			Opcode::LoopBack => (None, true),
 			Opcode::BrOk => match branch_zero {
 				Some(true) => (Some(op.a), false),
 				Some(false) => (None, true),
@@ -870,26 +938,19 @@ fn frame_continuation(
 				None if repeats_body(op.a) => (Some(op.a), false),
 				None => (Some(op.a), true),
 			},
+			Opcode::ForNext if repeats_body(op.a) => (Some(op.a), false),
 			Opcode::ForNext => (Some(op.a), true),
 			Opcode::CaseArm | Opcode::Redir => (Some(op.b), true),
 			_ => (None, true),
 		};
 		if let Some(target) = target {
-			stack.push((target, status, loops.clone()));
+			stack.push((target, status, loops.clone(), None));
 		}
 		if falls_through {
-			stack.push((index + 1, status, loops));
+			stack.push((index + 1, status, loops, None));
 		}
 	}
-	let all_zero = !outcomes.is_empty() && outcomes.iter().all(|s| *s == WalkStatus::Zero);
-	let all_nonzero = !outcomes.is_empty() && outcomes.iter().all(|s| *s == WalkStatus::NonZero);
-	FrameExit::Exits(if all_zero {
-		WalkStatus::Zero
-	} else if all_nonzero {
-		WalkStatus::NonZero
-	} else {
-		WalkStatus::Unknown
-	})
+	FrameExit::Exits(outcomes)
 }
 
 /// Whether `exit`/`set -e` fired with commands still left to run: any frame
@@ -910,49 +971,51 @@ fn exit_cut_short(
 	top_from: u32,
 	status: i32,
 	cleanup_runs: bool,
-	pipefail: bool,
+	options: &[super::exit_options::WalkOptions],
 	mut child_status: impl FnMut(Vpid) -> Option<i32>,
 ) -> bool {
-	// Frames unwind inner → outer, and the status a caller's continuation
-	// tests is the one the callee would have left behind: a `!` pipeline or
-	// a status-setting composite inside the function flips what the `&&`
-	// after the call sees.
-	let mut status = WalkStatus::of(status);
-	// DEBUG/ERR/signal traps resume the victim at its parked op; ordinary
-	// function/eval/source calls resume after their completed call. Expansion
-	// frames also park the parent op (NoFork, zsh hooks and math functions),
-	// as identified by its pending substitution rather than its frame kind.
-	let resumes_in_place = |kind: &FrameKind| {
-		matches!(kind, FrameKind::Script {
-			what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_), .. },
-			..
-		})
-	};
-	let mut resume_at_pc = false;
-	let mut unwind_to = None;
-	for (index, frame) in vp.frames.iter().enumerate().rev() {
-		// A RETURN trap already committed these frames to unwind. Neither
-		// their current bytecode nor their unparsed text will run again.
-		if unwind_to.is_some_and(|keep| index >= keep) {
+	let initial = WalkEnd { status: WalkStatus::of(status), transfer: None };
+	let mut states = vec![(vp.frames.len(), initial, false)];
+	let mut visited = HashSet::new();
+	while let Some((count, mut end, resume_at_pc)) = states.pop() {
+		if !visited.insert((count, end, resume_at_pc)) {
 			continue;
 		}
-		unwind_to = None;
-		if let FrameKind::Script { src, pos, aux, .. } = &frame.kind {
-			let pending = aux
-				.as_deref()
-				.and_then(|a| a.pending.as_ref())
-				.map_or(&[][..], |p| p.0.as_slice());
-			if script_has_command(pending.iter().chain(src[pos.0 as usize..].iter()).copied()) {
+		let Some(index) = count.checked_sub(1) else {
+			continue;
+		};
+		let frame = &vp.frames[index];
+		let current_options =
+			options
+				.get(index)
+				.copied()
+				.unwrap_or(super::exit_options::WalkOptions {
+					pipefail:        false,
+					localloops:      false,
+					continueonerror: false,
+				});
+		let outcomes = if let Some(unit) = frame.unit.as_ref() {
+			let expanding = end.transfer.is_none()
+				&& frame.scratch.as_ref().is_some_and(|sc| {
+					matches!(
+						sc.sub,
+						Some(
+							PendingSub::NoFork { .. } | PendingSub::Here { .. } | PendingSub::Math { .. }
+						)
+					)
+				});
+			// An interrupted expansion still owns unfinished work; only a
+			// loop header belongs to the structural iteration machinery.
+			if expanding
+				&& unit.ops.get(frame.pc as usize).is_some_and(|op| {
+					op.code != Opcode::Arith
+						|| unit
+							.nodes
+							.get(op.node as usize)
+							.is_none_or(|n| n.kind != NodeKind::ArithFor)
+				}) {
 				return true;
 			}
-		}
-		if let Some(unit) = frame.unit.as_ref() {
-			let expanding = frame.scratch.as_ref().is_some_and(|sc| {
-				matches!(
-					sc.sub,
-					Some(PendingSub::NoFork { .. } | PendingSub::Here { .. } | PendingSub::Math { .. })
-				)
-			});
 			let from = if index + 1 == vp.frames.len() {
 				top_from as usize
 			} else if resume_at_pc || expanding {
@@ -960,18 +1023,16 @@ fn exit_cut_short(
 			} else if let Some(op) = unit.ops.get(frame.pc as usize)
 				&& op.code == Opcode::Spawn
 			{
-				// The caller of an inline lastpipe stage resumes at the
-				// descriptor's end. Under pipefail, a successful last stage
-				// also depends on earlier stages; unfinished ones are unknown.
-				if pipefail
-					&& status != WalkStatus::NonZero
+				if end.transfer.is_none()
+					&& current_options.pipefail
+					&& end.status != WalkStatus::NonZero
 					&& let Some(sc) = &frame.scratch
 				{
 					for &(vpid, saved) in &sc.children {
 						let prior = saved
 							.or_else(|| child_status(vpid))
 							.map_or(WalkStatus::Unknown, WalkStatus::of);
-						status = match (status, prior) {
+						end.status = match (end.status, prior) {
 							(WalkStatus::NonZero, _) | (_, WalkStatus::NonZero) => WalkStatus::NonZero,
 							(WalkStatus::Zero, WalkStatus::Zero) => WalkStatus::Zero,
 							_ => WalkStatus::Unknown,
@@ -982,20 +1043,89 @@ fn exit_cut_short(
 			} else {
 				frame.pc as usize + 1
 			};
-			match frame_continuation(unit, from, status, &frame.loops, cleanup_runs) {
+			match frame_continuation(unit, from, end.status, &frame.loops, cleanup_runs, end.transfer)
+			{
 				FrameExit::RunsInput => return true,
-				FrameExit::Exits(out) => status = out,
+				FrameExit::Exits(outcomes) => outcomes,
 			}
-		}
-		resume_at_pc = resumes_in_place(&frame.kind);
-		// A trap restores the interrupted status even when its carrier
-		// has no unit (zsh function traps run above an empty script).
-		if let FrameKind::Script {
-			what: ScriptKind::Trap { status: kept, return_target, .. }, ..
-		} = &frame.kind
-		{
-			status = WalkStatus::of(*kept);
-			unwind_to = *return_target;
+		} else {
+			vec![end]
+		};
+		for mut end in outcomes {
+			// Check incremental source only on paths that would read it.
+			// A return/error already committed this frame to unwind.
+			let reads_source = end.transfer.is_none()
+				|| (end.transfer == Some(WalkTransfer::Error)
+					&& current_options.continueonerror
+					&& matches!(frame.kind, FrameKind::Script { what: ScriptKind::Run, .. }));
+			if reads_source && let FrameKind::Script { src, pos, aux, .. } = &frame.kind {
+				let pending = aux
+					.as_deref()
+					.and_then(|a| a.pending.as_ref())
+					.map_or(&[][..], |p| p.0.as_slice());
+				if script_has_command(pending.iter().chain(src[pos.0 as usize..].iter()).copied()) {
+					return true;
+				}
+			}
+			match end.transfer {
+				Some(WalkTransfer::Return(_))
+					if matches!(
+						frame.kind,
+						FrameKind::Function { .. }
+							| FrameKind::NoFork
+							| FrameKind::Script { what: ScriptKind::Source, .. }
+					) =>
+				{
+					end.transfer = None;
+				},
+				Some(WalkTransfer::Error)
+					if matches!(frame.kind, FrameKind::Script {
+						what: ScriptKind::Eval
+							| ScriptKind::Source
+							| ScriptKind::Trap { .. }
+							| ScriptKind::Code(_)
+							| ScriptKind::Hook,
+						..
+					}) =>
+				{
+					end.transfer = None;
+				},
+				Some(WalkTransfer::Break { .. }) => {
+					let function = matches!(frame.kind, FrameKind::Function { .. });
+					if function
+						&& index
+							.checked_sub(1)
+							.and_then(|i| options.get(i))
+							.is_some_and(|o| o.localloops)
+					{
+						end.transfer = None;
+					} else if !function
+						&& !matches!(
+							frame.kind,
+							FrameKind::NoFork
+								| FrameKind::Stage
+								| FrameKind::Script { what: ScriptKind::Eval, .. }
+						) {
+						continue;
+					}
+				},
+				Some(WalkTransfer::Exit(_)) => continue,
+				_ => {},
+			}
+			let resume_at_pc = matches!(frame.kind, FrameKind::Script {
+				what: ScriptKind::Trap { key: TrapKey::Debug | TrapKey::Err | TrapKey::Signal(_), .. },
+				..
+			});
+			let mut next = index;
+			if let FrameKind::Script {
+				what: ScriptKind::Trap { status: kept, return_target, .. },
+				..
+			} = &frame.kind
+			{
+				end.status = WalkStatus::of(*kept);
+				next = next.min(return_target.unwrap_or(next));
+			}
+			states.push((next, end, resume_at_pc));
 		}
 	}
 	false
@@ -1029,17 +1159,21 @@ pub(super) fn capture_exit_report(
 	cx: &mut Cx<'_>,
 	status: i32,
 	top_unrun: u32,
-	cause: ExitCause,
+	cause: impl Into<Option<ExitCause>>,
 	cleanup_runs: bool,
 ) {
+	let cause = cause.into();
 	if vp.parent.is_none()
 		&& let Some(run) = vp.runs.front()
 		&& k.exit_report.is_none_or(|(id, _)| id != run.id)
 	{
 		k.exit_report = Some((run.id, cause));
-		k.exited_cut_short = cause == ExitCause::Exit && {
-			let pipefail = state::option(&mut k.root, cx.store, vp, OptId::Pipefail).unwrap_or(false);
-			exit_cut_short(vp, top_unrun, status, cleanup_runs, pipefail, |vpid| {
+		k.exited_cut_short = cause == Some(ExitCause::Exit) && {
+			let options = super::exit_options::by_frame(k, vp, cx).unwrap_or_else(|err| {
+				k.fail(err);
+				Vec::new()
+			});
+			exit_cut_short(vp, top_unrun, status, cleanup_runs, &options, |vpid| {
 				k.proc_state(cx.store, vpid)
 					.and_then(|state| state.exited())
 			})
@@ -1056,7 +1190,7 @@ fn exit_shell(
 	cx: &mut Cx<'_>,
 	status: i32,
 	top_unrun: u32,
-	cause: ExitCause,
+	cause: impl Into<Option<ExitCause>>,
 ) {
 	// zsh `zexit` while its hooks run: the hook calls end, the status is the
 	// new one.
@@ -5647,10 +5781,8 @@ pub fn zsh_return(k: &mut Kernel, vp: &mut Vproc, cx: &mut Cx<'_>, status: i32) 
 	if let Some(i) = target {
 		zsh_leave(k, vp, cx, i);
 	} else {
-		{
-			let unrun = top_frame(vp).pc + 1;
-			exit_shell(k, vp, cx, status, unrun, ExitCause::Exit);
-		}
+		let unrun = top_frame(vp).pc + 1;
+		exit_shell(k, vp, cx, status, unrun, None);
 	}
 }
 
@@ -6036,31 +6168,35 @@ mod tests {
 
 	#[test]
 	fn exit_classification_parked_expansions_resume_parent_command() {
-		// NoFork/Here/Math leave the parent Exec unfinished. Ordinary
-		// completed calls resume after it; a forked substitution owns no
-		// frames in this vproc. Do not infer resumption from the child's
-		// kind: zsh math calls use ordinary function frames.
-		for (pending, expected) in [
-			(None, false),
-			(Some(PendingSub::Fork { vpid: Vpid(2), capture: Capture::default() }), false),
-			(Some(PendingSub::NoFork { capture: Capture::default(), value: false }), true),
-			(Some(PendingSub::NoFork { capture: Capture::default(), value: true }), true),
-			(Some(PendingSub::Here { status: 0 }), true),
-			(Some(PendingSub::Math { status: 1, slot: Slot::Words }), true),
-		] {
-			let mut vp =
-				Vproc::new(Vpid(1), None, FdTable::default(), BString::from("/"), None, false);
-			let unit = Arc::new(ir::asm::asm("0 Exec\n1 End").unwrap());
-			let mut parent = Frame::new(Some(Arc::clone(&unit)), 0, FrameKind::Subshell);
-			parent.scratch = Some(Box::new(Scratch { sub: pending, ..Default::default() }));
-			vp.frames.push(parent);
-			vp.frames
-				.push(Frame::new(Some(unit), 0, FrameKind::Function {
-					name:     BString::from("callee"),
-					zsh:      true,
-					autoload: false,
-				}));
-			assert_eq!(exit_cut_short(&vp, 1, 0, false, false, |_| None), expected);
+		// NoFork/Here/Math leave their owning operation unfinished, whether
+		// a simple command or an already-entered compound. Ordinary calls
+		// resume after it; forked substitutions own no frames in this vproc.
+		// zsh math calls use ordinary function frames, not a special kind.
+		for operation in
+			["Exec", "CondTest", "Arith", "CaseWord", "Redir b=1", "ForIn", "Repeat", "CallAnon"]
+		{
+			for (pending, expected) in [
+				(None, false),
+				(Some(PendingSub::Fork { vpid: Vpid(2), capture: Capture::default() }), false),
+				(Some(PendingSub::NoFork { capture: Capture::default(), value: false }), true),
+				(Some(PendingSub::NoFork { capture: Capture::default(), value: true }), true),
+				(Some(PendingSub::Here { status: 0 }), true),
+				(Some(PendingSub::Math { status: 1, slot: Slot::Words }), true),
+			] {
+				let mut vp =
+					Vproc::new(Vpid(1), None, FdTable::default(), BString::from("/"), None, false);
+				let unit = Arc::new(ir::asm::asm(&format!("0 {operation}\n1 End")).unwrap());
+				let mut parent = Frame::new(Some(Arc::clone(&unit)), 0, FrameKind::Subshell);
+				parent.scratch = Some(Box::new(Scratch { sub: pending, ..Default::default() }));
+				vp.frames.push(parent);
+				vp.frames
+					.push(Frame::new(Some(unit), 0, FrameKind::Function {
+						name:     BString::from("callee"),
+						zsh:      true,
+						autoload: false,
+					}));
+				assert_eq!(exit_cut_short(&vp, 1, 0, false, &[], |_| None), expected, "{operation}");
+			}
 		}
 	}
 
@@ -6124,7 +6260,7 @@ mod tests {
 							}));
 					}
 					assert_eq!(
-						exit_cut_short(&vp, 1, 1 - kept, true, false, |_| None),
+						exit_cut_short(&vp, 1, 1 - kept, true, &[], |_| None),
 						kept == 0,
 						"{key:?}, kept={kept}, text={text}"
 					);
@@ -6154,8 +6290,8 @@ mod tests {
 			}];
 			assert!(
 				matches!(
-					frame_continuation(&unit, 1, WalkStatus::NonZero, &runtime, true),
-					FrameExit::Exits(WalkStatus::Zero)
+					frame_continuation(&unit, 1, WalkStatus::NonZero, &runtime, true, None),
+					FrameExit::Exits(out) if !out.is_empty() && out.iter().all(|end| end.status == WalkStatus::Zero && end.transfer.is_none())
 				),
 				"{enter}"
 			);

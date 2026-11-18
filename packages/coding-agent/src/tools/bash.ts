@@ -595,8 +595,8 @@ const ENDED_BY_EXIT_NOTICE =
 	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run, and options like `set -e` stay set in this session until unset.";
 
 /**
- * The forked variant of {@link ENDED_BY_EXIT_NOTICE}: a forked run's options
- * die with it, so the notice must not promise they stay set in the session.
+ * The unretained-state variant of {@link ENDED_BY_EXIT_NOTICE}: options in
+ * an unadopted fork or released shell cannot affect later session calls.
  */
 const ENDED_BY_EXIT_EPHEMERAL_NOTICE =
 	"Stopped by `exit` or an armed `set -e` before the command finished: the rest of this call did not run.";
@@ -1023,7 +1023,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (fork?.jobs) notices.push(FORK_JOBS_NOTICE);
 		// `exit`/errexit ending the run early looks like an ordinary non-zero
 		// exit from its output alone; say that the remaining input never ran.
-		// A forked/one-off shell's options die with it: no persistence promise.
+		// Only state retained in the session (directly or by adoption) persists.
 		if ("endedByExit" in result && result.endedByExit) {
 			notices.push(
 				"ephemeralShell" in result && result.ephemeralShell ? ENDED_BY_EXIT_EPHEMERAL_NOTICE : ENDED_BY_EXIT_NOTICE,
