@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { CHATGPT_TOKEN_SHARING_SCOPE } from "@oh-my-pi/pi-ai/providers/openai-chatgpt-sharing";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -9,6 +10,8 @@ function accessToken(scope: string): string {
 	const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
 	return `${encode({ alg: "RS256" })}.${encode({ aud: "https://api.openai.com/v1", scope })}.sig`;
 }
+
+const sharingToken = () => accessToken(`openid ${CHATGPT_TOKEN_SHARING_SCOPE} offline_access`);
 
 function sse(text: string, responseId: string): Response {
 	const events = [
@@ -83,7 +86,7 @@ afterEach(() => {
 
 describe("openai-responses with a ChatGPT token-sharing credential", () => {
 	it("never stores, never chains, and omits the fields the route rejects", async () => {
-		const [first, second] = await twoTurns(accessToken("openid chatgpt.tokens.use.direct offline_access"), true);
+		const [first, second] = await twoTurns(sharingToken(), true);
 
 		for (const body of [first, second]) {
 			expect(body?.store).toBe(false);
@@ -114,7 +117,7 @@ describe("openai-responses with a ChatGPT token-sharing credential", () => {
 
 	it("shapes the request when the token comes from OPENAI_API_KEY rather than options", async () => {
 		const previous = Bun.env.OPENAI_API_KEY;
-		Bun.env.OPENAI_API_KEY = accessToken("openid chatgpt.tokens.use.direct offline_access");
+		Bun.env.OPENAI_API_KEY = sharingToken();
 		try {
 			const [first, second] = await twoTurns(undefined, true);
 

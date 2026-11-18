@@ -186,6 +186,14 @@ describe("OpenAI ChatGPT token-sharing login", () => {
 				/different account/,
 			);
 		});
+
+		it("does not accept a shared workspace id as proof of the account when no email confirms it", async () => {
+			const withoutEmail: OAuthCredentials = { ...saved, accountId: "acct_workspace_1", email: undefined };
+
+			await expect(login({ saved: [withoutEmail], answer: "1", workspaceId: "acct_workspace_1" })).rejects.toThrow(
+				/could not be confirmed/,
+			);
+		});
 	});
 });
 

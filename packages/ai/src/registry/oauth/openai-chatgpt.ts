@@ -19,7 +19,6 @@ import type { FetchImpl } from "../../types";
 import { throwIfCancelled } from "../engine/common";
 import type { LoginHook, RefreshHook } from "../hooks/types";
 import { type CallbackResult, OAuthCallbackFlow } from "./callback-server";
-import { getTokenProfile } from "./openai-codex";
 import { generatePKCE } from "./pkce";
 import accountPrompt from "./prompts/openai-chatgpt-account.md" with { type: "text" };
 import type { OAuthController, OAuthCredentials } from "./types";
@@ -315,18 +314,27 @@ class OpenAIChatGPTFlow extends OAuthCallbackFlow {
 		}
 		const claims = await verifyOpenAIChatGPTIdToken(idToken, clientId, this.#nonce, this.#fetch, signal);
 		throwIfCancelled(signal);
-		const profile = getTokenProfile(access, idToken);
+		// Identity comes from the verified ID-token claims only: the access token's payload is not signature-checked.
+		const authClaim = claims["https://api.openai.com/auth"];
+		const workspaceId = isRecord(authClaim) ? stringField(authClaim.chatgpt_account_id) : undefined;
+		const profileClaim = claims["https://api.openai.com/profile"];
 		// `sub` is verified non-empty, so every login has a stable identity even without a workspace claim.
-		const accountId = profile.accountId ?? stringField(claims.sub);
-		const email = profile.email ?? stringField(claims.email)?.trim().toLowerCase();
+		const accountId = workspaceId ?? stringField(claims.sub);
+		const email = (
+			stringField(claims.email) ?? (isRecord(profileClaim) ? stringField(profileClaim.email) : undefined)
+		)
+			?.trim()
+			.toLowerCase();
 		// A returning sign-in must be the account that was selected, whichever account the browser signed in as. Compare
-		// the identity login stores (workspace id, else subject) and, where both sides know it, the email.
+		// the identity login stores (workspace id, else subject) and, where both sides know it, the email. A workspace id
+		// is shared by every member, so it cannot tell teammates apart: then the email has to confirm the account.
 		if (this.#saved) {
+			const emailsKnown = Boolean(email && this.#saved.email);
 			const sameAccount = accountId === this.#saved.accountId;
-			const sameEmail = !email || !this.#saved.email || email === this.#saved.email;
-			if (!sameAccount || !sameEmail) {
+			const sameEmail = !emailsKnown || email === this.#saved.email;
+			if (!sameAccount || !sameEmail || (workspaceId !== undefined && !emailsKnown)) {
 				throw new AIError.OAuthError(
-					"ChatGPT signed in a different account than the one selected. Choose that account again, or add a new one.",
+					"ChatGPT signed in a different account than the one selected, or it could not be confirmed. Choose that account again, or add a new one.",
 					{ kind: "validation", provider: PROVIDER },
 				);
 			}
