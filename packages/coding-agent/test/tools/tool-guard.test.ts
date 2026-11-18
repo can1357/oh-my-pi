@@ -168,6 +168,8 @@ describe("tool guard", () => {
 			"time git status",
 			"git stash list",
 			"git tag",
+			"git grep foo",
+			"git log --oneline --stat",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(true);
 		}
@@ -200,10 +202,24 @@ describe("tool guard", () => {
 			// GNU time writes its report to a file; rg runs programs to fill a hyperlink's host; bare git stash pushes.
 			"time --output=/etc/important.conf git status",
 			"time -o/etc/important.conf cat notes.txt",
-			"nice time -ao /etc/x ls",
+			"nice time -ao/etc/x ls",
 			"rg --hostname-bin=/tmp/x.sh --hyperlink-format=default foo",
 			"git stash",
 			"git stash -v",
+			// Listing actions belong to stash and remote; `git tag list` creates a tag named `list`.
+			"git tag list",
+			"git tag show",
+			"git tag get-url",
+			// getopt and git accept any unambiguous prefix of a long option.
+			"sort --out=/etc/x f",
+			"sort --o /etc/x f",
+			"sort --comp=/tmp/x f",
+			"git grep --op='rm -rf ~' x",
+			"git grep --open=vi x",
+			"git log --out=/etc/hosts",
+			"git diff --ext",
+			"git log -p --textc",
+			"file --comp magic",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(false);
 		}
