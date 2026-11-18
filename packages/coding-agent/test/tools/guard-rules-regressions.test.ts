@@ -834,7 +834,6 @@ describe("guard rule regressions", () => {
 		for (const command of [
 			`${"cd a;".repeat(25_000)}cat x`,
 			`${"pushd a;".repeat(16_000)}cat x`,
-			`${"cd $PWD$PWD; ".repeat(64)}cat x`,
 		]) {
 			expect({ command: command.slice(0, 16), decision: bashApproval(cwd, command) }).toEqual({
 				command: command.slice(0, 16),
@@ -842,10 +841,23 @@ describe("guard rule regressions", () => {
 			});
 		}
 		expect(performance.now() - started).toBeLessThan(1_000);
-		// Directory changes that stay short are followed however many there are, a leading `$PWD` too.
+		// Directory changes that stay short are followed however many there are.
 		expect(bashApproval(cwd, `${"cd a; cd ..; ".repeat(10_000)}cat README.md`)).toBe("exec");
 		expect(ruleOf(bashApproval(cwd, `${"cd a; cd ..; ".repeat(100)}cd ~/.ssh; cat id_rsa`))).toBe("credential_read");
-		expect(ruleOf(bashApproval(cwd, "cd ~/.ssh && cd $PWD && cat id_rsa"))).toBe("credential_read");
+	});
+
+	it("does not expand `$PWD`, which the shell expands before a wrapper or tar changes the directory", () => {
+		for (const command of [
+			"env -C ~/.ssh cat $PWD/x",
+			"cd /tmp && sudo -D ~/.ssh cat $PWD/id_rsa",
+			"cd /tmp && tar -C ~/.ssh -czf - $PWD/id_rsa",
+			// A path starting with `$PWD` is unknown wherever it is.
+			"cd ~/.ssh && cat $PWD/id_rsa",
+			`cd ~/.ssh && cat \${PWD}/id_rsa`,
+			"cd ~/.ssh && cd $PWD && cat id_rsa",
+		]) {
+			expect({ command, decision: bashApproval(cwd, command) }).toEqual({ command, decision: "exec" });
+		}
 	});
 
 	it("decides a command with more words than a call can spread in time linear in their number", () => {

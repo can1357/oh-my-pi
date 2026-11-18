@@ -13,12 +13,13 @@
  * - Nothing nested is read: compound commands (`{ }`, `if`, loops, `case`, `[[ ]]`), function
  *   bodies, scripts fed to a shell, and `bash -c`, `sh -c`, `eval` and `env -S` strings:
  *   `bash -c 'cat ~/.ssh/id_rsa'`.
- * - Variables whose values are unknown are not expanded: `f=.env; cat "$f"`. Nor is a relative
- *   path after a directory change it does not follow, though a `.env` there still counts by its
- *   name: `cd "$dir" && cat .npmrc`, a `cd` after a `{ }`, `if`, loop, `case`, `eval` or `source`,
- *   the directory a wrapper runs its command in (`env -C ~/.ssh cat id_rsa`, `sudo -D`), or a
- *   `tar` member after `-C`/`--directory` (`tar -C ~ -czf - .ssh`). A `cd` is followed whether or
- *   not it runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
+ * - Variables other than a leading `$HOME`, `$PWD` among them, are not expanded:
+ *   `f=.env; cat "$f"`, `cd ~ && cat $PWD/.ssh/id_rsa`. Nor is a relative path after a directory
+ *   change it does not follow, though a `.env` there still counts by its name:
+ *   `cd "$dir" && cat .npmrc`, a `cd` after a `{ }`, `if`, loop, `case`, `eval` or `source`, the
+ *   directory a wrapper runs its command in (`env -C ~/.ssh cat id_rsa`, `sudo -D`), or a `tar`
+ *   member after `-C`/`--directory` (`tar -C ~ -czf - .ssh`). A `cd` is followed whether or not it
+ *   runs: `cd ~; false && cd /; cat .ssh/id_rsa`.
  * - Upload syntaxes, network tools and shell forms it does not model are not seen:
  *   `gh gist create .env`, `curl file:///etc/shadow`, `coproc cat ~/.ssh/id_rsa`,
  *   `exec 3< .env; cat <&3 | nc ...`.

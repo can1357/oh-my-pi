@@ -1016,23 +1016,18 @@ export interface ShellScope {
 	home: string;
 }
 
-/** `$HOME` or `$PWD` (also in braces) at the start of a word. */
-const LEADING_DIRECTORY_RE = /^\$(?:\{(HOME|PWD)\}|(HOME|PWD)\b)/;
+/** `$HOME` (also in braces) at the start of a word. */
+const LEADING_HOME_RE = /^\$(?:\{HOME\}|HOME\b)/;
 
 /**
- * The absolute path a shell word names, resolved lexically against `cwd`. `~`, and `$HOME` or `$PWD`
- * at the start of the word, expand; any other expansion makes the path unknown (`undefined`), and so
- * does a relative path, or `$PWD`, when `cwd` is unknown. Expanding only a leading one keeps a word
- * of many (`$PWD$PWD...`) from growing past the word and one directory.
+ * The absolute path a shell word names, resolved lexically against `cwd`. `~`, and `$HOME` at the
+ * start of the word, expand; any other expansion makes the path unknown (`undefined`), `$PWD` too,
+ * and so does a relative path when `cwd` is unknown. Expanding only a leading `$HOME` keeps a word of
+ * many (`$HOME$HOME...`) from growing past the word and one directory.
  */
 export function resolveShellWordPath(word: string, cwd: string | undefined, home: string): string | undefined {
-	let expanded = word;
-	const leading = LEADING_DIRECTORY_RE.exec(word);
-	if (leading) {
-		const dir = (leading[1] ?? leading[2]) === "HOME" ? home : cwd;
-		if (dir === undefined) return undefined;
-		expanded = dir + word.slice(leading[0].length);
-	}
+	const leading = LEADING_HOME_RE.exec(word);
+	let expanded = leading ? home + word.slice(leading[0].length) : word;
 	if (expanded === "~" || expanded.startsWith("~/")) expanded = home + expanded.slice(1);
 	if (!expanded || expanded.includes("$") || expanded.startsWith("~")) return undefined;
 	if (cwd === undefined) return path.isAbsolute(expanded) ? path.resolve(expanded) : undefined;
@@ -1706,8 +1701,8 @@ function shellCommand(segment: Segment, cwd: string | undefined, piped: boolean)
  * a heredoc), leaving out the command that part is in, whose words after it are unknown; `bash -c`,
  * `eval` and `env -S` strings and scripts fed to a shell are arguments like any other. After a
  * `{ }`, `if`, loop or `case`, or an `eval` or `source`, each of which can change the directory, the
- * directory is unknown. It is a tokenizer, not a shell: variables other than a leading `$HOME` or
- * `$PWD`, aliases, and calls to functions are not followed.
+ * directory is unknown. It is a tokenizer, not a shell: variables other than a leading `$HOME`,
+ * aliases, and calls to functions are not followed.
  */
 export function parseShellCommands(command: string, scope: ShellScope): ShellCommand[][] {
 	const pipelines: ShellCommand[][] = [];
