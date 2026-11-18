@@ -26,6 +26,7 @@ import {
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { withResolvedHeaders } from "@oh-my-pi/pi-ai/utils/model-headers";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
@@ -283,6 +284,7 @@ export async function requestCompactionV2Streaming(
 		codexAccessPrograms?: boolean;
 	},
 ): Promise<CompactionV2Response> {
+	model = await withResolvedHeaders(model, signal);
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
 	if (isBedrockOpenAIUrl(model.baseUrl)) {
 		({
