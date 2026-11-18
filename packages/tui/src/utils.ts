@@ -173,6 +173,31 @@ export function wrapLiteralLine(line: string, width: number): string[] {
 	return rows;
 }
 
+const TRUNCATION_ELLIPSIS_RESET = "\x1b[0m…";
+const SGR_BG_STATE = /\x1b\[(?:0|49|4[0-7]|10[0-7]|48;[0-9;]+)m/g;
+
+/**
+ * Native truncation closes styling with a full reset before its ellipsis. On a
+ * tinted row that reset also drops the background, so the ellipsis loses the
+ * row's fill. Re-open the background active in the kept prefix, keeping native
+ * padding after the ellipsis untouched.
+ */
+function preserveTruncatedBackground(text: string, truncated: string): string {
+	if (truncated === text) return truncated; // the row fit: any ellipsis is literal input
+	const marker = TRUNCATION_ELLIPSIS_RESET;
+	const at = truncated.lastIndexOf(marker);
+	if (at < 0) return truncated;
+	const suffix = truncated.slice(at + marker.length);
+	if (!/^ *$/.test(stripTerminalSequences(suffix))) return truncated;
+	const prefix = truncated.slice(0, at);
+	let background: string | undefined;
+	for (const match of prefix.matchAll(SGR_BG_STATE)) {
+		background = match[0] === "\x1b[0m" || match[0] === "\x1b[49m" ? undefined : match[0];
+	}
+	if (background === undefined) return truncated;
+	return `${prefix}\x1b[0m${background}…\x1b[49m${suffix}`;
+}
+
 export function truncateToWidth(
 	text: string,
 	maxWidth: number,
@@ -187,13 +212,14 @@ export function truncateToWidth(
 	if (!pad && !text.includes("\x1b]66") && text.length * 3 <= maxWidth) {
 		return text;
 	}
-	return nativeTruncateToWidth(
+	const truncated = nativeTruncateToWidth(
 		text,
 		maxWidth,
 		(typeof ellipsisKind === "string" ? Ellipsis.Omit : ellipsisKind) ?? Ellipsis.Unicode,
 		pad ?? false,
 		DEFAULT_TAB_WIDTH,
 	);
+	return preserveTruncatedBackground(text, truncated);
 }
 
 export function wrapTextWithAnsi(text: string, width: number): string[] {

@@ -40,6 +40,21 @@ describe("truncateToWidth", () => {
 		expect(visibleWidth(truncated)).toBeLessThanOrEqual(10);
 		expect(truncated.endsWith("\x1b[0m")).toBe(true);
 	});
+
+	it("keeps native padding after the ellipsis on a background-tinted row", () => {
+		const output = truncateToWidth(`\x1b[41m${"界".repeat(6)}`, 8, Ellipsis.Unicode, true);
+
+		expect(visibleWidth(output)).toBe(8);
+		expect(output).toContain("\x1b[41m…");
+	});
+
+	it("leaves a literal ellipsis in an already-fitting row untouched", () => {
+		const text = `\x1b[41mfoo\x1b[0m…bar${"\x1b[38;2;1;2;3m".repeat(20)}`;
+
+		const output = truncateToWidth(text, 80, Ellipsis.Unicode);
+
+		expect(output).toBe(text);
+	});
 });
 
 describe("visibleWidth", () => {
