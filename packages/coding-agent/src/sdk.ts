@@ -40,7 +40,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { syncOpenAIResponsesHistoryTexts } from "@oh-my-pi/pi-ai/utils";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { $env } from "@oh-my-pi/pi-utils/env";
+import { $env, isInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
@@ -469,6 +469,16 @@ const cfgToolCallSwitches = combine({
 	intentTracing: cfgToolsIntentTracing,
 	abortOnFabricatedResult: cfgToolsAbortOnFabricatedResult,
 });
+
+/**
+ * Whether tool calls carry {@link INTENT_FIELD}: an explicit `tools.intentTracing` (any settings layer
+ * or `PI_INTENT_TRACING`) wins; unset, it follows {@link isInteractiveHost} — on in the interactive TUI
+ * and its subagents, whose transcript and task progress show intents, off in print, RPC, ACP, and SDK
+ * processes, where the field only costs tokens.
+ */
+function intentTracingActive(settings: Settings): boolean {
+	return cfgToolsIntentTracing.isConfigured(settings) ? cfgToolsIntentTracing.get(settings) : isInteractiveHost();
+}
 
 /** Settings skill and file slash-command discovery reads (foreign sources gated by the provider lists). */
 const cfgSkillsAndCommandsDiscovery = combine({
@@ -4592,7 +4602,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				skillsSettings: cfgSkills.get(settings),
 				inlineToolDescriptors,
 				nativeTools,
-				intentField: cfgToolsIntentTracing.get(settings) ? INTENT_FIELD : undefined,
+				intentField: intentTracingActive(settings) ? INTENT_FIELD : undefined,
 				// Spotlight ranks output against the call's intent: experiment sessions ask what each call's output is for.
 				intentGuidance: spotlightExperiment ? SPOTLIGHT_INTENT_GUIDANCE : undefined,
 				// task.eager steers the top-level agent only; subagents keep the model's own delegation policy.
@@ -5146,7 +5156,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformAssistantMessagePreservesToolCalls: true,
 			resolveFallbackTool: resolveDeviceTool,
 			suggestFallbackToolNames: suggestDeviceToolNames,
-			intentTracing: cfgToolsIntentTracing.get(settings),
+			intentTracing: intentTracingActive(settings),
 			intentDescription: spotlightExperiment ? SPOTLIGHT_INTENT_DESCRIPTION : undefined,
 			pruneToolDescriptions: resolveInlineToolDescriptors(),
 			// Per request against the model actually requested, so `tools.format`
@@ -5598,8 +5608,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Agent-level tool-call switches: the loop snapshots them per prompt run, so a
 		// change applies from the next run without splitting one response's schema/strip.
 		// The prompt listener above republishes the intent-field guidance.
-		cfgToolCallSwitches.listen(session, ({ intentTracing, abortOnFabricatedResult }) => {
-			agent.intentTracing = intentTracing;
+		cfgToolCallSwitches.listen(session, ({ abortOnFabricatedResult }) => {
+			agent.intentTracing = intentTracingActive(settings);
 			agent.abortOnFabricatedToolResult = abortOnFabricatedResult;
 		});
 		// Tool-gating settings add or remove the tools they gate and refresh the
