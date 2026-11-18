@@ -336,7 +336,7 @@
 - CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
-- A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, a drag that leaves a web slider part-way names the value it reached, and a drag whose slider or scroll bar did not move now fails with `InputFailed` instead of reporting success ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
+- macOS background drags no longer report success when their slider or scroll bar did not move. A web slider is stepped toward the release only when its direction can be established; otherwise `InputFailed` names arrow keys or accessibility actions as recovery routes. A slider the pointer moved is left there and the result names its value ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 

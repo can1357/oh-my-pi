@@ -2370,7 +2370,13 @@ fn background_pointer(
 	let timeout = menu_watch(window, &event, background, menu.is_some(), || {
 		presses_menu_control(&event, pid, menu_pid)
 	})?;
-	refuse_drag_source(window, &event, |x, y| ax::open_menu::role_at(to, x, y))?;
+	let pressed = match &event {
+		PointerEvent::Drag { .. } | PointerEvent::Hold { .. } => {
+			left_press(&event).and_then(|(x, y)| ax::drag_control::pressed_at(to, x, y))
+		},
+		_ => None,
+	};
+	refuse_drag_source(window, &event, |_, _| pressed.as_ref().and_then(|pressed| pressed.role()))?;
 	let before = match timeout {
 		Some(_) => Some(capture::menu_windows(menu_pid).ok_or_else(|| {
 			DesktopError::background_unavailable(format!(
@@ -2396,6 +2402,7 @@ fn background_pointer(
 				event,
 				entry_front,
 				(to, to_wid),
+				pressed,
 				prepared,
 				in_overlay,
 				visit,
@@ -2602,10 +2609,10 @@ const DRAG_TRACKING_ROLES: [&str; 5] =
 /// (1 in 2 on an 11-point path). Which elements begin such a session is up to
 /// each application, so only the known trackers are let through; a drag across
 /// native text has already been made as a selection ([`drag_selection`]).
-fn refuse_drag_source(
+fn refuse_drag_source<'a>(
 	window: &DesktopWindow,
 	event: &PointerEvent,
-	role_at: impl FnOnce(f64, f64) -> Option<String>,
+	role_at: impl FnOnce(f64, f64) -> Option<&'a str>,
 ) -> CoreResult<()> {
 	let (x, y) = match event {
 		PointerEvent::Hold { x, y, button: MouseButton::Left, .. } => (*x, *y),
@@ -2617,10 +2624,7 @@ fn refuse_drag_source(
 		_ => return Ok(()),
 	};
 	let role = role_at(x, y);
-	if role
-		.as_deref()
-		.is_some_and(|role| DRAG_TRACKING_ROLES.contains(&role))
-	{
+	if role.is_some_and(|role| DRAG_TRACKING_ROLES.contains(&role)) {
 		return Ok(());
 	}
 	let element = role.map_or_else(
@@ -2755,6 +2759,7 @@ fn background_gesture(
 	event: PointerEvent,
 	entry_front: EntryFront,
 	(to, to_wid): (libc::pid_t, u32),
+	pressed: Option<ax::drag_control::Pressed>,
 	prepared: bool,
 	in_overlay: bool,
 	visit: skylight::TargetVisit<'_>,
@@ -2820,10 +2825,7 @@ fn background_gesture(
 				return Err(DesktopError::input_failed("drag path must contain at least two points"));
 			}
 			// The control a left drag starts on, read before anything posts.
-			let tracked = matches!(button, MouseButton::Left)
-				.then(|| ax::drag_control::pressed_at(to, path[0].x, path[0].y))
-				.flatten()
-				.and_then(|pressed| pressed.control());
+			let tracked = pressed.and_then(|pressed| pressed.control());
 			let (start, end) = (path[0], path[path.len() - 1]);
 			let proof =
 				prepare_press(source, pid, wid, window, button, &keys, entry_front, in_overlay, visit)?;
@@ -2838,8 +2840,15 @@ fn background_gesture(
 				role: &control.role,
 				before,
 				range: control.range,
-				toward_max: control.toward_max(end.x - start.x, end.y - start.y),
-				moved: (end.x - start.x).hypot(end.y - start.y) >= 1.0,
+				target: control.frame.zip(control.range).map(|(frame, range)| {
+					let target = slider_value_at(frame, range, control.vertical, end);
+					if control.vertical && control.role == "AXScrollBar" {
+						range.0 + range.1 - target
+					} else {
+						target
+					}
+				}),
+				moved: control.movement(end.x - start.x, end.y - start.y) >= 1.0,
 			};
 			let steppable = control.steps.zip(control.range);
 			match drag_check(&drag, !keys.is_empty(), steppable.is_some()) {
@@ -2876,15 +2885,7 @@ fn background_gesture(
 						},
 						AfterWebDrag::Short(at) => at,
 						AfterWebDrag::Unsure => {
-							return Err(DesktopError::input_failed(format!(
-								"the drag reached window {} ({}), but its outcome could not be confirmed: \
-								 the {} it started on still reads {before} after the release, so no \
-								 change was observed, and it was not stepped on: that value is far from \
-								 the one under the point pressed, so the {} may run the other way. Read \
-								 the target before retrying; takeover (takeover: true) drags it with the \
-								 pointer",
-								window.id, window.app, control.role, control.role,
-							)));
+							return Err(slider_direction_refusal(window, &control.role, before));
 						},
 					};
 					let thumb = control.distance_to(end.x, end.y);
@@ -3435,9 +3436,9 @@ struct TrackedDrag<'a> {
 	before:     f64,
 	/// Its `AXMinValue` and `AXMaxValue`, when it publishes both.
 	range:      Option<(f64, f64)>,
-	/// The path ends toward the control's maximum.
-	toward_max: bool,
-	/// The path ends at least a pixel from where it started.
+	/// The value under the release on the control's straight-line scale.
+	target:     Option<f64>,
+	/// The path ends at least a pixel along its track from where it started.
 	moved:      bool,
 }
 
@@ -3456,13 +3457,10 @@ enum DragCheck {
 }
 
 fn drag_check(drag: &TrackedDrag<'_>, keys_held: bool, steppable: bool) -> DragCheck {
-	// Pushed against the end of its range it already sits at, it cannot change.
-	let pinned = drag.range.is_some_and(|(min, max)| {
-		if drag.toward_max {
-			drag.before >= max
-		} else {
-			drag.before <= min
-		}
+	// A track press can move a slider even when it starts at its maximum.
+	// Web sliders may run the other way: their thumb is checked after release.
+	let pinned = !steppable && drag.range.zip(drag.target).is_some_and(|((min, max), target)| {
+		(drag.before >= max && target >= max) || (drag.before <= min && target <= min)
 	});
 	if !drag.moved || pinned {
 		DragCheck::Done
@@ -3567,11 +3565,21 @@ enum AfterWebDrag {
 	/// The page took none of the drag's moves: it is stepped on from this
 	/// value, where it was or the value under the press.
 	Short(f64),
-	/// The page took neither the press nor the moves, and the value it reads
-	/// is far from the one under the point pressed: the slider may run the
-	/// other way (right to left), so the value under the path's end is not
-	/// known.
+	/// No thumb position establishes the direction, and the press did not
+	/// establish it either: stepping could move a reversed slider to the
+	/// mirrored value.
 	Unsure,
+}
+
+fn slider_direction_refusal(window: &DesktopWindow, role: &str, before: f64) -> DesktopError {
+	DesktopError::input_failed(format!(
+		"the drag reached window {} ({}), but its outcome could not be confirmed: the {role} \
+		 still reads {before} after the release. It was not stepped on because it exposes no \
+		 thumb position and its direction could not be established. Read the target before \
+		 retrying; focus the slider and press arrow keys, or use its AXIncrement/AXDecrement \
+		 accessibility actions; takeover (takeover: true) drags it with the pointer",
+		window.id, window.app,
+	))
 }
 
 /// After a background drag on a slider a web page draws, whether to step it
@@ -3597,8 +3605,7 @@ fn after_web_drag(
 			return match distance() {
 				Some(distance) if distance.abs() <= SLIDER_POSITION_TOLERANCE => AfterWebDrag::Done,
 				Some(_) => AfterWebDrag::Short(before),
-				None if (pressed - before).abs() > (max - min) / 2.0 => AfterWebDrag::Unsure,
-				None => AfterWebDrag::Short(before),
+				None => AfterWebDrag::Unsure,
 			};
 		},
 		Followed::Moved(at) => at,
@@ -3606,7 +3613,12 @@ fn after_web_drag(
 	match distance() {
 		Some(distance) if distance.abs() <= SLIDER_POSITION_TOLERANCE => AfterWebDrag::Done,
 		Some(_) => AfterWebDrag::Short(at),
-		None if (at - pressed).abs() <= press_tolerance => AfterWebDrag::Short(at),
+		None
+			if (at - pressed).abs() <= press_tolerance
+				&& (at - (min + max - pressed)).abs() > press_tolerance =>
+		{
+			AfterWebDrag::Short(at)
+		},
 		None => AfterWebDrag::Left(at),
 	}
 }
@@ -3685,29 +3697,35 @@ fn step_slider_geometry(
 		if distance.abs() <= SLIDER_POSITION_TOLERANCE {
 			return Ok(());
 		}
+		let before = value().ok_or_else(|| failure(None))?;
 		check().map_err(sent_refusal)?;
 		let up = distance > 0.0;
 		step(up).map_err(|_| failure(value()))?;
-		let Some(next) = settle(0.0, SLIDER_POSITION_TOLERANCE, &mut position, &mut wait) else {
+		let after = held(before, &mut value, &mut wait);
+		let Some(next) = position() else {
 			return Err(failure(value()));
 		};
 		if next.abs() <= SLIDER_POSITION_TOLERANCE {
 			return Ok(());
 		}
-		if next == distance {
+		// A sub-pixel step may change AXValue without changing AXPosition.
+		if next == distance && !matches!(after, Followed::Moved(_)) {
 			return Err(failure(value()));
 		}
-		if (next > 0.0) != up {
-			if next.abs() > distance.abs() {
-				check().map_err(sent_refusal)?;
-				step(!up).map_err(|_| failure(value()))?;
-				let Some(corrected) = settle(distance, 0.0, &mut position, &mut wait) else {
-					return Err(failure(value()));
-				};
-				if corrected != distance {
-					return Err(failure(value()));
-				}
+		let crossed = (next > 0.0) != up;
+		if next.abs() > distance.abs() {
+			let before = value().ok_or_else(|| failure(None))?;
+			check().map_err(sent_refusal)?;
+			step(!up).map_err(|_| failure(value()))?;
+			held(before, &mut value, &mut wait);
+			let Some(corrected) = position() else {
+				return Err(failure(value()));
+			};
+			if (corrected - distance).abs() > SLIDER_POSITION_TOLERANCE || !crossed {
+				return Err(failure(value()));
 			}
+		}
+		if crossed {
 			return Ok(());
 		}
 		distance = next;
@@ -7362,6 +7380,7 @@ mod tests {
 				event.clone(),
 				EntryFront(Some(9)),
 				(7592, 556),
+				None,
 				false,
 				false,
 				skylight::TargetVisit::none(),
@@ -9240,14 +9259,14 @@ mod tests {
 			// Finder's icons and rows, a table cell, and anything unread can
 			// begin a drag-and-drop session.
 			for role in [Some("AXImage"), Some("AXRow"), Some("AXCell"), Some("AXWebArea"), None] {
-				let error = refuse_drag_source(&window, &event, |_, _| role.map(str::to_string))
+				let error = refuse_drag_source(&window, &event, |_, _| role)
 					.expect_err("refused before posting");
 				assert_eq!(error.code.as_str(), "BackgroundUnavailable", "{role:?}");
 				assert!(error.message.contains("nothing was sent"), "{}", error.message);
 				assert!(!error.message.contains("takeover"), "{}", error.message);
 			}
 			for role in DRAG_TRACKING_ROLES {
-				refuse_drag_source(&window, &event, |_, _| Some(role.to_string())).expect(role);
+				refuse_drag_source(&window, &event, |_, _| Some(role)).expect(role);
 			}
 		}
 		// The point read is where the press goes down.
@@ -9258,7 +9277,7 @@ mod tests {
 		});
 		assert_eq!(at, Some((3.0, 4.0)));
 		// Other gestures pay no hit-test.
-		let unread = |_, _| -> Option<String> { panic!("not hit-tested") };
+		let unread = |_, _| -> Option<&str> { panic!("not hit-tested") };
 		refuse_drag_source(&window, &drag(MouseButton::Middle), unread).expect("middle drag");
 		refuse_drag_source(&window, &hold(MouseButton::Middle), unread).expect("middle hold");
 		let click = PointerEvent::Click {
@@ -9543,31 +9562,122 @@ mod tests {
 
 	#[test]
 	fn a_drag_on_a_control_publishing_its_position_is_judged_only_when_it_could_move() {
-		let drag = |role, before, toward_max, moved| TrackedDrag {
-			role,
+		let drag = |before, target, moved| TrackedDrag {
+			role: "AXSlider",
 			before,
 			range: Some((0.0, 100.0)),
-			toward_max,
+			target: Some(target),
 			moved,
 		};
-		let slider = |before, toward_max| drag("AXSlider", before, toward_max, true);
-		// A web slider with no key held is stepped on; with a key held, or a
-		// slider that takes no steps, its value is only read back.
-		assert_eq!(drag_check(&slider(0.0, true), false, true), DragCheck::StepOn);
-		assert_eq!(drag_check(&slider(0.0, true), true, true), DragCheck::Confirm);
-		assert_eq!(drag_check(&slider(0.0, true), false, false), DragCheck::Confirm);
-		// Pushed against the end it sits at, or not moved at all, a control
-		// cannot change: done without a read, as on main, web slider or not.
-		for steppable in [false, true] {
-			assert_eq!(drag_check(&slider(100.0, true), false, steppable), DragCheck::Done);
-			assert_eq!(drag_check(&slider(0.0, false), false, steppable), DragCheck::Done);
-			assert_eq!(
-				drag_check(&drag("AXSlider", 40.0, true, false), false, steppable),
-				DragCheck::Done
-			);
-		}
-		// At the other end, a drag away from it should have moved it.
-		assert_eq!(drag_check(&slider(100.0, false), false, false), DragCheck::Confirm);
+		assert_eq!(drag_check(&drag(0.0, 75.0, true), false, true), DragCheck::StepOn);
+		assert_eq!(drag_check(&drag(0.0, 75.0, true), true, true), DragCheck::Confirm);
+		assert_eq!(drag_check(&drag(0.0, 75.0, true), false, false), DragCheck::Confirm);
+		// Native sliders at the release's limit, or with no motion along
+		// their track, need no change. A web slider's direction is not known.
+		assert_eq!(drag_check(&drag(100.0, 100.0, true), false, false), DragCheck::Done);
+		assert_eq!(drag_check(&drag(0.0, 0.0, true), false, false), DragCheck::Done);
+		assert_eq!(drag_check(&drag(100.0, 100.0, true), false, true), DragCheck::StepOn);
+		assert_eq!(drag_check(&drag(40.0, 75.0, false), false, false), DragCheck::Done);
+		assert_eq!(drag_check(&drag(100.0, 0.0, true), false, false), DragCheck::Confirm);
+	}
+
+	#[test]
+	fn a_track_press_away_from_the_thumb_is_not_pinned_at_the_old_limit() {
+		let frame = AxBounds { x: 0.0, y: 0.0, width: 100.0, height: 16.0 };
+		// The thumb is at 100, but the press at 20% and release at 30%
+		// should move it down, despite the pointer moving right.
+		let drag = TrackedDrag {
+			role: "AXSlider",
+			before: 100.0,
+			range: Some((0.0, 100.0)),
+			target: Some(slider_value_at(frame, (0.0, 100.0), false, CGPoint::new(30.0, 8.0))),
+			moved: true,
+		};
+		assert_eq!(drag_check(&drag, false, false), DragCheck::Confirm);
+		assert_eq!(drag_check(&drag, false, true), DragCheck::StepOn);
+	}
+
+	#[test]
+	fn an_unchanged_slider_with_no_thumb_does_not_guess_its_direction_in_the_middle() {
+		// On a reversed slider, 40 is at 60%: neither the old half-range
+		// guard nor an increment of AXValue establishes its direction.
+		assert_eq!(
+			after_web_drag(40.0, 60.0, (0.0, 100.0), 1.0, || None, || Some(40.0), |_| {}),
+			AfterWebDrag::Unsure,
+		);
+		let error = slider_direction_refusal(&background_window("Chromium"), "AXSlider", 40.0);
+		assert_eq!(error.code, ErrorCode::InputFailed);
+		assert!(error.message.contains("AXIncrement/AXDecrement"));
+		assert!(error.message.contains("arrow keys"));
+	}
+
+	#[test]
+	fn a_geometry_step_away_from_the_release_is_undone_before_failing() {
+		let at = Cell::new(40.0);
+		let steps = std::cell::RefCell::new(Vec::new());
+		let outcome = step_slider_geometry(
+			&background_window("WebKit"),
+			60.0,
+			20.0,
+			|| Ok(()),
+			|up| {
+				steps.borrow_mut().push(up);
+				at.set(at.get() + if up { 1.0 } else { -1.0 });
+				Ok(())
+			},
+			|| Some(at.get()),
+			|| Some(20.0 + at.get() - 40.0),
+			|_| {},
+		);
+		assert_eq!(outcome.unwrap_err().code, ErrorCode::InputFailed);
+		assert_eq!(at.get(), 40.0);
+		assert_eq!(steps.into_inner(), [true, false]);
+	}
+
+	#[test]
+	fn a_geometry_step_waits_only_until_the_changed_value_holds() {
+		let at = Cell::new(0.0);
+		let waits = Cell::new(0);
+		step_slider_geometry(
+			&background_window("WebKit"),
+			20.0,
+			20.0,
+			|| Ok(()),
+			|up| {
+				assert!(up);
+				at.set(at.get() + 10.0);
+				Ok(())
+			},
+			|| Some(at.get()),
+			|| Some(20.0 - at.get()),
+			|gap| {
+				assert_eq!(gap, TRACKED_POLL);
+				waits.update(|waits| waits + 1);
+			},
+		)
+		.unwrap();
+		assert_eq!(waits.get(), 2);
+	}
+
+	#[test]
+	fn sub_pixel_geometry_steps_still_advance_when_the_value_changes() {
+		let at = Cell::new(0.0_f64);
+		step_slider_geometry(
+			&background_window("WebKit"),
+			8.0,
+			6.0,
+			|| Ok(()),
+			|up| {
+				assert!(up);
+				at.set(at.get() + 0.25);
+				Ok(())
+			},
+			|| Some(at.get()),
+			|| Some(6.0 - at.get().floor()),
+			|_| {},
+		)
+		.unwrap();
+		assert_eq!(at.get(), 2.0);
 	}
 
 	#[test]
@@ -9578,7 +9688,7 @@ mod tests {
 			role: "AXSlider",
 			before,
 			range: Some((0.0, 100.0)),
-			toward_max: true,
+			target: Some(100.0),
 			moved: true,
 		};
 		// `reads` are the control's values after the release, in order; the

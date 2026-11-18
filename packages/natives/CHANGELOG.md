@@ -111,6 +111,7 @@
 ### Fixed
 
 - Fixed macOS background drags returning as done when the slider or scroll bar they started on did not move, and a drag on a web page's slider doing nothing: such a drag now throws `InputFailed` saying no change was observed, and a web slider the page left where it was is stepped on to the straight-line value under the drag's end; a web slider the pointer moved is left there, and `drag` resolves with a `note` naming its value ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed macOS background drags reporting success when their slider or scroll bar did not move. Web sliders left short are stepped toward the release only when their thumb position or a value-changing track press establishes the direction; otherwise `InputFailed` names the recovery route. Geometry steps confirm value changes without waiting for fifteen unchanged positions, and undo a step that moves away from the release ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 

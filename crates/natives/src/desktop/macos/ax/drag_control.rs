@@ -26,6 +26,10 @@ pub(crate) fn pressed_at(pid: libc::pid_t, x: f64, y: f64) -> Option<Pressed> {
 }
 
 impl Pressed {
+	pub(crate) fn role(&self) -> Option<&str> {
+		self.role.as_deref()
+	}
+
 	/// The control whose value the press moves, and that value: the element
 	/// itself, or for a value indicator (a slider's knob, a scroll bar's
 	/// thumb) its control. `None` unless it is a slider or scroll bar
@@ -44,7 +48,8 @@ impl Pressed {
 				.or_else(|| (role == "AXScrollBar").then_some((0.0, 1.0)));
 			let vertical =
 				copy_string(&element, "AXOrientation").as_deref() == Some("AXVerticalOrientation");
-			let steps = (role == "AXSlider" && text_surface(&element) == TextSurface::Web)
+			let web = text_surface(&element) == TextSurface::Web;
+			let steps = (role == "AXSlider" && web)
 				.then(|| {
 					let actions = copy_strings_from_action_names(&element).ok()?;
 					let steps = ["AXIncrement", "AXDecrement"]
@@ -53,7 +58,8 @@ impl Pressed {
 					steps.then(|| bounds(&element)).flatten()
 				})
 				.flatten();
-			Some((Control { element, role, range, vertical, steps }, value))
+			let frame = (!web).then(|| bounds(&element)).flatten();
+			Some((Control { element, role, range, vertical, frame, steps }, value))
 		})
 	}
 }
@@ -77,6 +83,8 @@ pub(crate) struct Control {
 	/// `AXMinValue` and `AXMaxValue`, when it publishes both.
 	pub(crate) range:    Option<(f64, f64)>,
 	pub(crate) vertical: bool,
+	/// A native control's frame, whose scale follows its orientation.
+	pub(crate) frame:    Option<AxBounds>,
 	/// For a slider a web page draws that takes `AXIncrement` and
 	/// `AXDecrement`, its frame: a page may take none of a background drag's
 	/// moves, so a drag that leaves it short is stepped on.
@@ -105,16 +113,9 @@ impl Control {
 		perform_action(&self.element, if up { "AXIncrement" } else { "AXDecrement" })
 	}
 
-	/// Whether a pointer moving by `(dx, dy)` moves the control toward its
-	/// maximum: rightward on a horizontal slider or scroll bar, up on a
-	/// vertical slider (its maximum is at the top), down on a vertical scroll
-	/// bar.
-	pub(crate) fn toward_max(&self, dx: f64, dy: f64) -> bool {
-		match (self.role == "AXScrollBar", self.vertical) {
-			(_, false) => dx > 0.0,
-			(false, true) => dy < 0.0,
-			(true, true) => dy > 0.0,
-		}
+	/// Movement along the control's track; perpendicular motion cannot move it.
+	pub(crate) fn movement(&self, dx: f64, dy: f64) -> f64 {
+		if self.vertical { dy.abs() } else { dx.abs() }
 	}
 }
 
