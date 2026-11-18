@@ -943,6 +943,17 @@ describe("Antigravity CLI error text", () => {
 		expect(redactSensitiveText("exit code=1, state=ready")).toBe("exit code=1, state=ready");
 	});
 
+	it("masks opaque code and state values in bare and quoted forms", () => {
+		expect(redactSensitiveText("code=4/0AbCdEfGhIjKlMnOp state=opaque-state-value-123")).toBe("code=*** state=***");
+		expect(redactSensitiveText('{"code":"1234567890abcdef","state":"1234567890abcdef"}')).toBe(
+			'{"code":"***","state":"***"}',
+		);
+		expect(redactSensitiveText("code=RESOURCE_EXHAUSTED code=FAILED_PRECONDITION code=ERR_BAD_RESPONSE")).toBe(
+			"code=RESOURCE_EXHAUSTED code=FAILED_PRECONDITION code=ERR_BAD_RESPONSE",
+		);
+		expect(redactSensitiveText("exit code=1, state=ready")).toBe("exit code=1, state=ready");
+	});
+
 	it("masks bare pairs in a cause chain", () => {
 		const mapped = mapAgyError(new Error("token=live-token", { cause: new Error("password=live-pass") }));
 		expect(mapped.message).toBe("token=***");

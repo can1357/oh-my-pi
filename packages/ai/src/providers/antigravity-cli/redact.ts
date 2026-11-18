@@ -43,11 +43,18 @@ const BARE_OAUTH_PAIR = new RegExp(
 	`\\b(${OAUTH_PAIR_KEYS.join("|")})(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^\\s,;&)"'}\\]]+)`,
 	"gi",
 );
-const AMBIGUOUS_BARE_PAIR = new RegExp(
-	`\\b(code|state)(\\s*[:=]\\s*)("[^"]{16,}"|'[^']{16,}'|[A-Za-z0-9._~-]{16,})`,
+const QUOTED_AMBIGUOUS_PAIR = new RegExp(
+	`((?:["'])(?:code|state)(?:["'])\\s*:\\s*)("(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*')`,
 	"gi",
 );
+const AMBIGUOUS_BARE_PAIR = new RegExp(`\\b(code|state)(\\s*[:=]\\s*)("[^"]*"|'[^']*'|[^\\s,;&)"'}\\]]+)`, "gi");
 const BEARER_TOKEN = /\b(Bearer\s+)\S+/gi;
+
+/** A long value that is not an ALL_CAPS diagnostic constant is treated as an OAuth grant. */
+function isOpaqueSecret(value: string): boolean {
+	if (value.length < 16) return false;
+	return !/^[A-Z][A-Z0-9_]*$/u.test(value);
+}
 
 /** Masks `scheme://user:password@` without scanning the scheme as a backtracking prefix. */
 function redactUrlUserinfo(text: string): string {
@@ -65,6 +72,12 @@ export function redactSensitiveText(text: string | undefined | null): string {
 		.replace(QUOTED_OAUTH_PAIR, `$1"${MASK}"`)
 		.replace(SENSITIVE_QUERY_PARAM, `$1${MASK}`)
 		.replace(BARE_OAUTH_PAIR, `$1$2${MASK}`)
-		.replace(AMBIGUOUS_BARE_PAIR, `$1$2${MASK}`)
+		.replace(QUOTED_AMBIGUOUS_PAIR, (match, prefix: string, quoted: string) =>
+			isOpaqueSecret(quoted.slice(1, -1)) ? `${prefix}"${MASK}"` : match,
+		)
+		.replace(AMBIGUOUS_BARE_PAIR, (match, key: string, separator: string, value: string) => {
+			const unquoted = value.startsWith('"') || value.startsWith("'") ? value.slice(1, -1) : value;
+			return isOpaqueSecret(unquoted) ? `${key}${separator}${MASK}` : match;
+		})
 		.replace(BEARER_TOKEN, `$1${MASK}`);
 }
