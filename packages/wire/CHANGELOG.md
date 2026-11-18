@@ -5,6 +5,7 @@
 ### Added
 
 - Added the layout-transition props every node takes: `transition: "layout"`, `transitionMs` and `motionKey`.
+- Added `folded` on a dock composer's `col`: the terminal folds the composer to its compact row while it is set.
 
 ## [18.22.0] - 2026-11-16
 

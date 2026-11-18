@@ -130,15 +130,22 @@ function pillNodes(dialog: AskDialogComponent, key: string): { node: NativeNode;
 	return out;
 }
 
+/** A pill's label, `✓ ` before a chosen (pressed) one. */
+function pillLabel(pill: NativeNode): string {
+	const p = pill.k === "button" ? pill.p : undefined;
+	return `${p?.on ? "✓ " : ""}${p?.text ?? ""}`;
+}
+
 /** A folded question's pill labels, `+N` included. */
 function pills(dialog: AskDialogComponent, key: string): string[] {
-	return pillNodes(dialog, key).map(pill => String((pill.node.p as { text?: string }).text));
+	return pillNodes(dialog, key).map(pill => pillLabel(pill.node));
 }
 
 function clickPill(dialog: AskDialogComponent, key: string, label: string): void {
-	const pill = pillNodes(dialog, key).find(entry => (entry.node.p as { text?: string }).text === label);
+	const pill = pillNodes(dialog, key).find(entry => pillLabel(entry.node) === label);
 	if (!pill) throw new Error(`no ${label} pill on ${key}`);
-	const act = (pill.node.p as { actions: { click: string } }).actions.click;
+	const act = pill.node.k === "button" ? pill.node.p?.actions?.click : undefined;
+	if (typeof act !== "string") throw new Error(`${label} pill has no click action`);
 	dialog.handleNativeEvent({ type: "action", key: pill.path, act, mods: [] });
 }
 
@@ -183,7 +190,7 @@ describe("dialogs under a native surface", () => {
 		expect(buttons).toEqual(["note", "cancel", "submit"]);
 	});
 
-	it("ask: a pill picks from a folded question without opening it; once answered only the chosen pills show", () => {
+	it("ask: a pill picks from a folded question without opening it; the pick shows marked among its options", () => {
 		const dialog = new AskDialogComponent(WIDE, {
 			onSubmit: vi.fn(),
 			onCancel: vi.fn(),
@@ -191,13 +198,13 @@ describe("dialogs under a native surface", () => {
 		});
 		const reveal = revealOf(dialog);
 		clickPill(dialog, "q1", "eu-west-1");
-		expect(pills(dialog, "q1")).toEqual(["✓ eu-west-1"]);
+		expect(pills(dialog, "q1")).toEqual(["us-east-1", "us-west-2", "✓ eu-west-1", "a very long region…", "+2"]);
 		expect(openKey(dialog)).toBe("q0");
 		expect(revealOf(dialog)).toBe(reveal);
 		expect(progress(dialog)).toBe("1 of 3 answered");
-		// A multi-select flips its pills: on, then off again (back to every option).
+		// A multi-select flips its pills: on, then off again.
 		clickPill(dialog, "q2", "test");
-		expect(pills(dialog, "q2")).toEqual(["✓ test"]);
+		expect(pills(dialog, "q2")).toEqual(["lint", "✓ test"]);
 		clickPill(dialog, "q2", "✓ test");
 		expect(pills(dialog, "q2")).toEqual(["lint", "test"]);
 		// A click on the fold opens it.
@@ -282,10 +289,9 @@ describe("dialogs under a native surface", () => {
 		// The dialog awaits this same promise first, so its answer handling has run once it settles.
 		await onPrompt.mock.results[0]?.value;
 		expect(openKey(dialog)).toBe("q1");
-		const answer = find(dialog.describe(CX), node => node.p?.role === "omp.ask.fold.answer")?.node.p as {
-			spans: { t: string }[];
-		};
-		expect(answer.spans.map(part => part.t).join("")).toBe("Other: “my own words”");
+		const answer = find(dialog.describe(CX), node => node.p?.role === "omp.ask.fold.answer")?.node;
+		const spans = answer?.k === "text" ? answer.p?.spans : undefined;
+		expect(spans?.map(part => part.t).join("")).toBe("Other: “my own words”");
 		const next = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
 		expect(next?.node.key).toBe("q1");
 		dialog.handleNativeEvent({ type: "activate", key: next!.path, item: "option:1" });
@@ -335,11 +341,28 @@ describe("dialogs under a native surface", () => {
 		expect(item("option:0")?.tone).toBeUndefined();
 	});
 
-	it("ask: Cancel cancels like Esc; the recommended option loses its suffix for the badge", () => {
+	it("ask: Esc hands the keys to the composer, the keyless Cancel cancels; the recommended option loses its suffix for the badge", () => {
 		const onCancel = vi.fn();
-		const dialog = ask(vi.fn(), onCancel);
-		const recommended = find(dialog.describe(CX), node => node.k === "item" && node.key === "option:1");
+		const releaseKeys = vi.fn();
+		const dialog = new AskDialogComponent(
+			QUESTIONS,
+			{ onSubmit: vi.fn(), onCancel, onPrompt: async () => undefined },
+			{ releaseKeys },
+		);
+		const card = dialog.describe(CX);
+		const recommended = find(card, node => node.k === "item" && node.key === "option:1");
 		expect(recommended?.node.p).toMatchObject({ label: [{ t: "Park them" }], value: [{ t: "Recommended" }] });
+		const cancel = find(card, node => node.key === "cancel")?.node;
+		expect(cancel?.p).toMatchObject({ title: "Cancel without answering" });
+		expect(cancel?.p).not.toHaveProperty("keys");
+		setNativeRendering(true);
+		try {
+			dialog.handleInput("\x1b");
+		} finally {
+			setNativeRendering(false);
+		}
+		expect(releaseKeys).toHaveBeenCalledTimes(1);
+		expect(onCancel).not.toHaveBeenCalled();
 		press(dialog, "cancel");
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
@@ -382,34 +405,6 @@ describe("dialogs under a native surface", () => {
 			["Park them"],
 			["Yes"],
 		]);
-	});
-
-	it("ask: hidden while a draft owns input, Enter stays with the draft and only the hide key restores", () => {
-		let draft = "half-typed";
-		const routed: string[] = [];
-		const dialog = new AskDialogComponent(
-			QUESTIONS,
-			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: async () => undefined },
-			{
-				inputGuard: {
-					isBlocked: () => draft.length > 0,
-					handleInput: key => routed.push(key),
-					hint: "typing edits your prompt",
-				},
-			},
-		);
-		const line = () => stripVTControlCharacters(dialog.render(200).join("\n"));
-
-		dialog.handleInput("\x1bh");
-		expect(line()).not.toContain("/⏎ show");
-		dialog.handleInput(ENTER);
-		expect(routed).toEqual([ENTER]);
-		expect(dialog.render(200)).toHaveLength(1);
-
-		draft = "";
-		expect(line()).toContain("/⏎ show");
-		dialog.handleInput("\x1bh");
-		expect(dialog.render(200).length).toBeGreaterThan(1);
 	});
 
 	it("approval: Enter and the follow-up chord are ignored until armed; then Enter takes the highlighted choice", () => {
