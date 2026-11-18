@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- `artifact://N` is gone: truncated tool output and shaped originals are now `local://N.log` files at the session's `local://` root, readable, listable and completable like any other `local://` file. Old sessions' `artifact://` links are not migrated
 - SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
 
 ### Added

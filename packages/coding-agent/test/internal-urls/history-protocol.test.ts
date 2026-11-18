@@ -55,9 +55,9 @@ function makeToolSession(
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "artifacts"),
-		allocateOutputArtifact: async toolType => ({
+		allocateOutputArtifact: async () => ({
 			id: "history-read",
-			path: path.join(cwd, "artifacts", `history-read.${toolType}.log`),
+			path: path.join(cwd, "artifacts", `history-read.log`),
 		}),
 		settings: Settings.isolated(),
 		...overrides,

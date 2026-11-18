@@ -1122,7 +1122,6 @@ const KNOWN_SCHEMES = new Set([
 	"ws",
 	"wss",
 	"agent",
-	"artifact",
 	"attachment",
 	"cfg",
 	"conflict",

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Full-output references and the `[raw output: …]` footer name spills as `local://N.log` instead of `artifact://N`
+
 ### Added
 
 - Custom message payloads accept `excludeFromContext`, kept through normalization and when a saved entry is restored ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))

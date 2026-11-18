@@ -8,7 +8,7 @@ import { materializeReadUrlToFile } from "@oh-my-pi/pi-coding-agent/tools/fetch"
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, spillFileName } from "@oh-my-pi/pi-utils";
 
 const ATOM = `<?xml version="1.0"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>Sample</title><entry><title>One</title><id>1</id><updated>2024-01-01T00:00:00Z</updated><content>body</content></entry></feed>`;
 const JSON_BODY = `{"alpha":1,"beta":[2,3]}`;
@@ -23,9 +23,9 @@ function makeSession(testDir: string): ToolSession {
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
-		allocateOutputArtifact: async toolType => {
+		allocateOutputArtifact: async () => {
 			const id = String(nextArtifactId++);
-			return { id, path: path.join(artifactsDir, `${id}.${toolType}.log`) };
+			return { id, path: path.join(artifactsDir, `${id}.log`) };
 		},
 		settings: Settings.isolated({ "fetch.enabled": true }),
 	};
@@ -257,7 +257,7 @@ describe("raw URL response bytes", () => {
 		const preview = await tool.execute("raw-preview", { path: `${origin}/body:raw` });
 		const artifactId = preview.details?.meta?.truncation?.artifactId;
 		expect(artifactId).toBeDefined();
-		const artifactPath = path.join(testDir, "session", `${artifactId}.read.log`);
+		const artifactPath = path.join(testDir, "session", spillFileName(artifactId ?? ""));
 		expect(await Bun.file(artifactPath).text()).toBe(body);
 
 		const materialized = await materializeReadUrlToFile(session, { path: `${origin}/body`, raw: true });

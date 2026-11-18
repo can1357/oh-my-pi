@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Spotlight recovery counts reads of `local://N.log` spills; older sessions' `artifact://N` reads still count
+
 ### Added
 
 - The Overview's Token mix now shows off-transcript model calls (title generation, job captions, judge queries, cache warming, …) as their own categories beside the agents in the By source bar (formerly By agent), each with its request count, tokens and share

@@ -79,10 +79,10 @@ pub fn should_minimize(command: &str, config: &MinimizerConfig) -> bool {
 ///
 /// When a filter actually rewrites the text, the returned
 /// [`MinimizerOutput`] carries the original buffer in `original_text` so the
-/// JS session layer can persist it via its `ArtifactManager` and splice an
-/// `artifact://<id>` reference back into the visible text before showing it
-/// to the agent. The minimizer itself never formats the reference — ids are
-/// assigned by the session store, not content-addressed.
+/// JS session layer can persist it as a session spill and splice the spill's
+/// URL back into the visible text before showing it to the agent. The
+/// minimizer itself never formats the reference — ids are assigned by the
+/// session store, not content-addressed, and only the JS layer spells the URL.
 #[must_use]
 pub fn apply(
 	command: &str,

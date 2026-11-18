@@ -248,7 +248,6 @@ export type SessionHostProtocol = {
 	flushSession: RpcMethod<[], void>;
 	ensureOnDisk: RpcMethod<[], void>;
 	getArtifactPath: RpcMethod<[id: string], string | null>;
-	getArtifactContent: RpcMethod<[id: string], string | null>;
 	resume: RpcMethod<[], void>;
 	retry: RpcMethod<[], boolean>;
 	abortRetry: RpcMethod<[], void>;

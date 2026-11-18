@@ -878,7 +878,8 @@ describe("html form", () => {
 				const screen = () => view.term.getViewport().join("\n");
 				expect(view.form.debugState()).toMatchObject({ focus: "ok=on" });
 				expect(view.form.debugState().scroll).toBeGreaterThan(0);
-				expect(screen()).toContain("▣ first");
+				// Nothing follows the option, so no offset clears the first picture: it is a frame naming it.
+				expect(screen()).toContain("│ │ ▣ first");
 				expect(screen()).not.toContain("[Image");
 				expect(view.term.graphicsPlacements()).toHaveLength(1);
 				// ↑ on the question's only option: its head (the first picture) is cut off, so the body scrolls up.
@@ -887,6 +888,16 @@ describe("html form", () => {
 				expect(view.form.debugState()).toMatchObject({ scroll: 0, focus: "ok=on" });
 				expect(screen()).toContain("▣ second");
 				expect(screen()).not.toContain("[Image");
+			});
+
+			it("scrolls past a picture the body would cut at its top while the focused row stays in view", async () => {
+				const more = ["a", "b", "c", "d"].map(name => `<label>${name} <input type="text" name="${name}"></label>`);
+				const view = await kittyForm(TWO_PICTURES.replace("</form>", `${more.join("")}</form>`), { pictures: 2 });
+				const screen = view.term.getViewport().join("\n");
+				expect(view.form.debugState()).toMatchObject({ focus: "ok=on" });
+				expect(screen).not.toContain("▣ first");
+				expect(screen).toContain("OK");
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
 			});
 
 			it("deletes a picture the budget evicted and sent again when the form closes", async () => {

@@ -19,7 +19,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { PipeStreams, shellBuiltins } from "@oh-my-pi/pi-natives";
-import { $which, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $which, isEnoent, logger, prompt, spillUrl } from "@oh-my-pi/pi-utils";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
@@ -447,7 +447,7 @@ function resolveBashPatternDecision(
 
 async function saveBashOriginalArtifact(session: ToolSession, originalText: string): Promise<string | undefined> {
 	try {
-		const alloc = await session.allocateOutputArtifact?.("bash-original");
+		const alloc = await session.allocateOutputArtifact?.();
 		if (!alloc?.path || !alloc.id) return undefined;
 		await Bun.write(alloc.path, originalText);
 		return alloc.id;
@@ -1166,7 +1166,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// bypass the sink (client-bridge terminals, minimizer misses). When the
 		// sink spilled, its artifact already holds the full raw stream — reuse
 		// that id instead of saving a second (already-truncated) copy, so the
-		// `[raw output: artifact://N]` footer and the truncation notice agree.
+		// `[raw output: local://N.log]` footer and the truncation notice agree.
 		const inlineCap = {
 			maxBytes: resolveInlineByteCapBudget(this.session.settings),
 			saveArtifact: result.artifactError
@@ -1247,7 +1247,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			text,
 			plain: built + formatOutputNotice(outputMeta().truncationFromSummary(result, { direction: "tail" }).get()),
 			plainWidthCut: whole && widthCut,
-			artifact: whole ? `artifact://${result.artifactId}` : undefined,
+			artifact: whole && result.artifactId ? spillUrl(result.artifactId) : undefined,
 			command,
 			exitCode: result.exitCode,
 			source: command,
@@ -1401,7 +1401,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						: undefined;
 				// A cancelled job reports nothing more, even while its command is still shutting down.
 				if (notifier) runSignal.addEventListener("abort", () => notifier.stop(), { once: true });
-				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.()) ?? {};
 				const wallTimeStart = performance.now();
 				try {
 					const result = await executeBash(options.command, {
@@ -2237,7 +2237,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 
 		// Allocate artifact for truncated output storage
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.()) ?? {};
 
 		const interactiveUi = canUseInteractiveBashPty(pty === true, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {

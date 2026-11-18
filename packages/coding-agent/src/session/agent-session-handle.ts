@@ -183,8 +183,6 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	putBlobSync(data: Buffer, options?: BlobPutOptions): BlobPutResult;
 	/** Path of a session artifact, or null when it is gone. */
 	getArtifactPath(id: string): Promise<string | null>;
-	/** In-memory content of a session artifact (non-persistent sessions), or null; a worker-homed session answers asynchronously. */
-	getArtifactContent(id: string): string | null | Promise<string | null>;
 }
 
 /** TTSR rule source the TUI's link resolver reads. */

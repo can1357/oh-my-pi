@@ -11,7 +11,9 @@
  * back through {@link HtmlFormDialog.handleNativeEvent}, a pill picking its
  * option without opening the question. Rows draw it in a fixed-height panel
  * ({@link DIALOG_HEIGHT_RATIO} of the terminal at most) that scrolls to keep the
- * focused row in view, with the open question's head when it fits.
+ * focused row in view, with the open question's head when it fits, and past a
+ * picture it would cut at an edge when it can; one it must cut, which a terminal
+ * can't draw in part, is a dim frame naming it.
  *
  * Keys: ↑/↓ move between choices and fields, crossing from a question's last
  * row into the next, Tab/Shift+Tab jump fields, Space toggles (or opens a
@@ -377,6 +379,59 @@ function buildGroups(form: HtmlForm): { intro: FormPart[]; groups: QuestionGroup
 	});
 	groups.at(-1)?.parts.push(...lead);
 	return { intro, groups };
+}
+
+/**
+ * `offset` moved so fewer pictures straddle an edge of a body `rows` tall (a picture draws only whole;
+ * a cut one draws as a frame): among the offsets that put a picture's top or bottom on an edge, the one
+ * cutting the fewest, nearest `offset`, that keeps rows `keep` (the focused stop) in view and stays at
+ * or above `limit` (where ↑ peeks up from). `offset` itself when none cuts fewer.
+ */
+function clearPictureEdges(
+	offset: number,
+	rows: number,
+	max: number,
+	pictures: readonly PlacedPicture[],
+	keep: { start: number; end: number } | undefined,
+	limit: number,
+): number {
+	const cuts = (at: number): number =>
+		pictures.filter(
+			picture => (picture.start < at && at < picture.end) || (picture.start < at + rows && at + rows < picture.end),
+		).length;
+	const own = cuts(offset);
+	let best = offset;
+	let fewest = own;
+	for (const picture of pictures) {
+		for (const at of [picture.start, picture.end, picture.end - rows, picture.start - rows]) {
+			if (own === 0 || at < 0 || at > Math.min(max, limit)) continue;
+			if (keep && (keep.start < at || (keep.end > at + rows && keep.start !== at))) continue;
+			const count = cuts(at);
+			const nearer = Math.abs(at - offset) < Math.abs(best - offset);
+			if (count < fewest || (count === fewest && fewest < own && nearer)) {
+				best = at;
+				fewest = count;
+			}
+		}
+	}
+	return best;
+}
+
+/**
+ * The rows a picture the body cuts off draws instead of nothing: a dim frame naming it over its
+ * `visible` rows, open on each side the body cuts (`cut`), so its place reads as a picture to scroll to.
+ */
+function cutPictureRows(alt: string, visible: number, width: number, cut: { top: boolean; bottom: boolean }): string[] {
+	const name = `▣ ${alt}`;
+	if (visible <= 1) return [theme.fg("dim", truncateToWidth(name, width, Ellipsis.Unicode))];
+	// A column short of the body so the frame doesn't run into the scrollbar.
+	const inner = Math.max(0, width - 3);
+	const fill = (text: string, pad: string) => text + pad.repeat(Math.max(0, inner - visibleWidth(text)));
+	const label = truncateToWidth(cut.top ? ` ${name}` : `─ ${name} `, inner, Ellipsis.Unicode);
+	const rows = [cut.top ? `│${fill(label, " ")}│` : `╭${fill(label, "─")}╮`];
+	for (let row = 1; row < visible - 1; row++) rows.push(`│${" ".repeat(inner)}│`);
+	rows.push(cut.bottom ? `│${" ".repeat(inner)}│` : `╰${"─".repeat(inner)}╯`);
+	return rows.map(row => theme.fg("dim", row));
 }
 
 /** Interactive dialog over an {@link HtmlForm}; see the module docs for layout and keys. */
@@ -1512,8 +1567,10 @@ export class HtmlFormDialog implements Component, Focusable {
 	 * dropdown over them, and a scrollbar while the column overflows.
 	 *
 	 * The offset moves as little as keeps the focused stop's rows in view (its top when it is taller than
-	 * the body), then up to the open question's head when that fits along. While ↑ peeks at a cut-off
-	 * head (`#peek`) it stays put. An open note keeps rows under its option for the editor.
+	 * the body), then up to the open question's head when that fits along, then to the nearest offset
+	 * that cuts fewer pictures ({@link clearPictureEdges}). While ↑ peeks at a cut-off head (`#peek`) it
+	 * keeps the peeked offset, or one above where the body was that cuts fewer. An open note keeps rows
+	 * under its option for the editor.
 	 */
 	#renderBody(layout: Layout, rows: number, width: number): string[] {
 		const { lines, focus, head } = layout;
@@ -1528,6 +1585,11 @@ export class HtmlFormDialog implements Component, Focusable {
 		// Like the dropdown, the note editor covers the rows under its option rather than pushing them.
 		const noteRow = this.#noteEditor ? layout.noteRow : undefined;
 		if (noteRow !== undefined) offset = Math.max(offset, noteRow - Math.max(0, rows - 3));
+		else {
+			// ↑ peeking toward the head moves the body up at least a row, never back down.
+			const limit = this.#peek ? Math.max(offset, (this.#view?.offset ?? offset) - 1) : max;
+			offset = clearPictureEdges(offset, rows, max, layout.pictures, this.#peek ? undefined : focus, limit);
+		}
 		this.#scrollOffset = offset;
 		this.#view = { focus: this.#focus, offset, rows, head };
 		const shown = lines.slice(offset, offset + rows);
@@ -1536,15 +1598,15 @@ export class HtmlFormDialog implements Component, Focusable {
 			const top = picture.start - offset;
 			const bottom = picture.end - offset;
 			if (bottom <= 0 || top >= rows) continue;
-			// Drawn only whole, so only shown pictures take image slots and none draws past the body's edge.
-			const drawn = top >= 0 && bottom <= rows ? picture.component.render(layout.width) : undefined;
-			for (let row = Math.max(0, top); row < Math.min(rows, bottom); row++) {
-				shown[row] = drawn
-					? (drawn[row - top] ?? "")
-					: row === Math.max(0, top)
-						? theme.fg("dim", truncateToWidth(`▣ ${picture.alt}`, layout.width, Ellipsis.Unicode))
-						: "";
-			}
+			// Drawn only whole, so only shown pictures take image slots and none draws past the body's edge;
+			// a cut one is a frame naming it.
+			const from = Math.max(0, top);
+			const to = Math.min(rows, bottom);
+			const drawn =
+				top >= 0 && bottom <= rows
+					? picture.component.render(layout.width)
+					: cutPictureRows(picture.alt, to - from, layout.width, { top: top < 0, bottom: bottom > rows });
+			for (let row = from; row < to; row++) shown[row] = drawn[row - from] ?? "";
 		}
 		if (noteRow !== undefined) {
 			const active = this.#noteEditor!;

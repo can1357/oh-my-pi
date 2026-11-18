@@ -72,7 +72,7 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
-import { isRecord, logger, prompt, Snowflake, toError, withLoopPhase } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, Snowflake, spillUrl, toError, withLoopPhase } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { writeArtifact } from "./artifacts";
 import { cfgOffline } from "../config/auxiliary-model-policy";
@@ -981,7 +981,7 @@ export class SessionMaintenance {
 	 *   tokens that stay billed. Kept blocks are reported through
 	 *   {@link ShakeResult.thinkingBlocksKept}.
 	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
-	 *   with short placeholders that embed an `artifact://` recovery link.
+	 *   with short placeholders that embed a `local://N.log` recovery link.
 	 *
 	 * Mutates the branch in place, persists via `rewriteEntries`, replays the
 	 * rebuilt context through the agent, and tears down provider sessions that
@@ -1095,7 +1095,7 @@ export class SessionMaintenance {
 
 		let reservedArtifact: { id?: string; path?: string } = {};
 		try {
-			reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
+			reservedArtifact = await this.#host.sessionManager.allocateArtifactPath();
 		} catch {
 			if (opts.requireArtifact) throw new Error("shake could not save a recovery artifact");
 		}
@@ -1220,7 +1220,7 @@ export class SessionMaintenance {
 
 	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {
 		if (artifactId) {
-			return `[shaken ~${region.tokens} tokens — recover: artifact://${artifactId} (region ${index + 1})]`;
+			return `[shaken ~${region.tokens} tokens — recover: ${spillUrl(artifactId)} (region ${index + 1})]`;
 		}
 		return `[shaken ~${region.tokens} tokens]`;
 	}
@@ -1237,7 +1237,7 @@ export class SessionMaintenance {
 	/** Persist the shake artifact, using the session manager's in-memory fallback when needed. */
 	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
 		try {
-			return await this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions), "shake");
+			return await this.#host.sessionManager.saveArtifact(this.#shakeArtifactText(regions));
 		} catch {
 			return undefined;
 		}
@@ -4664,7 +4664,7 @@ export class SessionMaintenance {
 	 * bigger than the band and `findCutPoint` cannot cut inside one message.
 	 *
 	 * Tier 1 — `shake("elide")` reaches INSIDE that tail: heavy tool-result /
-	 * block content is offloaded to one `artifact://` blob behind a recoverable
+	 * block content is offloaded to one `local://N.log` spill behind a recoverable
 	 * placeholder. Skipped when this pass already ran a shake (`skipElide`).
 	 * Tier 2 — `dropImages()`: the manual `/shake images` remedy, automated.
 	 * Image blocks are stripped from the branch; unlike elided text they are NOT

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `spillUrl`, `parseSpillUrl` and `spillUrlIds` format and parse a session spill's `local://N.log` URL
+
 ### Fixed
 
 - Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL

@@ -183,7 +183,6 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 			fs.writeFile(path.join(local, "x.txt"), "local-x\n"),
 			// Beside the local root: what a `..` out of it would reach.
 			fs.writeFile(path.join(artifacts, "x.txt"), "outside\n"),
-			fs.writeFile(path.join(artifacts, "7.bash.log"), "artifact-seven\n"),
 			fs.writeFile(path.join(artifacts, "image.png"), "png-bytes"),
 			fs.writeFile(path.join(skill, "SKILL.md"), "# Review\n"),
 			fs.writeFile(path.join(skill, "scripts", "a.sh"), '#!/bin/sh\necho "ran-script $1"\n', { mode: 0o755 }),
@@ -231,7 +230,7 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 		});
 	}, 60_000);
 
-	it("refuses every write to skill://, artifact:// and a read-only local://", async () => {
+	it("refuses every write to skill:// and a read-only local://", async () => {
 		using tempDir = TempDir.createSync("@omp-shell-process-ro-");
 		const root = await fs.realpath(tempDir.path());
 		const { source, local, skill } = await fixture(root);
@@ -244,7 +243,7 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 
 		const immutable = await run({
 			command:
-				"echo x > skill://review/SKILL.md; echo write=$?; rm skill://review/scripts/a.sh; echo rm=$?; echo x >> artifact://7; echo append=$?; mv local://x.txt skill://review/x.txt; echo mv=$?",
+				"echo x > skill://review/SKILL.md; echo write=$?; rm skill://review/scripts/a.sh; echo rm=$?; mv local://x.txt skill://review/x.txt; echo mv=$?",
 			source,
 		});
 		const readOnly = await run({
@@ -252,9 +251,9 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 			source: readOnlySource,
 		});
 
-		expect(immutable.stdout).toBe("write=1\nrm=1\nappend=1\nmv=1\n");
-		// Each of the four names the refusal: a move across filesystems falls back to a copy, refused too.
-		expect(immutable.stderr.match(/Read-only file system/g)?.length).toBe(4);
+		expect(immutable.stdout).toBe("write=1\nrm=1\nmv=1\n");
+		// Each of the three names the refusal: a move across filesystems falls back to a copy, refused too.
+		expect(immutable.stderr.match(/Read-only file system/g)?.length).toBe(3);
 		expect(await fs.readFile(path.join(skill, "SKILL.md"), "utf-8")).toBe("# Review\n");
 		expect(await fs.readFile(path.join(skill, "scripts", "a.sh"), "utf-8")).toContain("ran-script");
 		expect(await fs.readFile(path.join(local, "x.txt"), "utf-8")).toBe("local-x\n");
@@ -263,16 +262,18 @@ describe.skipIf(process.platform === "win32")("shell process URL paths", () => {
 		expect(await fs.exists(path.join(local, "new.txt"))).toBe(false);
 	}, 60_000);
 
-	it("reads artifact://N from the file named N.* and attachment://N from its image file", async () => {
-		using tempDir = TempDir.createSync("@omp-shell-process-artifact-");
-		const { source } = await fixture(await fs.realpath(tempDir.path()));
+	it("reads a spill through the local:// mount and attachment://N from its image file", async () => {
+		using tempDir = TempDir.createSync("@omp-shell-process-spill-");
+		const { source, local } = await fixture(await fs.realpath(tempDir.path()));
+		// Written after the mount script: spills land in the mounted root, not per-id mounts.
+		await fs.writeFile(path.join(local, "7.log"), "spill-seven\n");
 
-		const found = await run({ command: "cat artifact://7; cat attachment://1", source });
-		const missing = await run({ command: "cat artifact://8; echo status=$?", source });
+		const found = await run({ command: "cat local://7.log; cat attachment://1", source });
+		const missing = await run({ command: "cat local://8.log; echo status=$?", source });
 
-		expect(found).toEqual({ stdout: "artifact-seven\npng-bytes", stderr: "", exitCode: 0 });
+		expect(found).toEqual({ stdout: "spill-seven\npng-bytes", stderr: "", exitCode: 0 });
 		expect(missing.stdout).toBe("status=1\n");
-		expect(missing.stderr).toContain("artifact://8: No such file or directory");
+		expect(missing.stderr).toContain("local://8.log: No such file or directory");
 	}, 60_000);
 
 	it("finds nothing above a scheme's root and nothing under a scheme it has no files for", async () => {
