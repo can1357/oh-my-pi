@@ -229,6 +229,26 @@ describe("kiroRankingStrategy", () => {
 		expect(await selectedAccount(parseKiroUsage(livePayload({ ...spent, bonus: false }))!)).toBe("fallback");
 	});
 
+	it("keeps a spent plan with purchased add-on credits serving and counts one purchase once", async () => {
+		const payload = livePayload({ used: 638, limit: 638, bonus: false });
+		// The service lists one purchase in both `addOnMetadata.addOns` and the legacy `overageCredits`.
+		const purchase = { currentUsage: 4.5, usageLimit: 250, expiresAt: BONUS_EXPIRES_S };
+		Object.assign(payload.usageBreakdownList[0]!, {
+			addOnMetadata: { addOnTotalUsage: 4.5, addOnTotalLimit: 250, addOns: [purchase] },
+			overageCredits: [purchase],
+		});
+		const report = parseKiroUsage(payload)!;
+		expect(report.limits.map(limit => [limit.id, limit.status, limit.amount.remaining])).toEqual([
+			["kiro:credits", "warning", 0],
+			["kiro:add-on:0", "ok", 245.5],
+		]);
+		expect(await selectedAccount(report)).toBe("preferred");
+		// The legacy list alone still counts when the current projection is absent.
+		const legacy = livePayload({ used: 638, limit: 638, bonus: false });
+		Object.assign(legacy.usageBreakdownList[0]!, { overageCredits: [purchase] });
+		expect(parseKiroUsage(legacy)?.limits.map(limit => limit.id)).toEqual(["kiro:credits", "kiro:add-on:0"]);
+	});
+
 	it("does not count a bonus grant that expired after the report was fetched", () => {
 		const report = parseKiroUsage(livePayload({ used: 638, limit: 638 }))!;
 		const stale: UsageReport = {

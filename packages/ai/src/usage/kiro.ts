@@ -24,6 +24,7 @@ import { buildUsageAmount, DAY_MS, HOUR_MS, parsePositiveTimestamp, usageStatus 
 const PROVIDER_ID = "kiro";
 const PLAN_LIMIT_ID = "kiro:credits";
 const BONUS_LIMIT_PREFIX = "kiro:bonus:";
+const ADD_ON_LIMIT_PREFIX = "kiro:add-on:";
 const OVERAGE_LIMIT_ID = "kiro:overage";
 const MONTH_MS = 30 * DAY_MS;
 
@@ -68,11 +69,38 @@ function precise(record: Record<string, unknown>, key: string): number | undefin
 const text = (value: unknown): string | undefined =>
 	typeof value === "string" && value.trim() ? value.trim() : undefined;
 
+/** A prepaid credit grant (bonus or purchased add-on): it expires rather than resetting monthly. */
+function grantLimit(
+	kind: "bonus" | "add-on",
+	index: number,
+	label: string,
+	used: number,
+	limit: number,
+	expiresAt: number | undefined,
+): UsageLimit {
+	const window: UsageWindow = {
+		id: `${kind}-${index}`,
+		label: kind === "bonus" ? "Bonus" : "Add-on",
+		resetLabel: "expires",
+		...(expiresAt !== undefined ? { resetsAt: expiresAt } : {}),
+	};
+	const amount = credits(used, limit);
+	return {
+		id: `${kind === "bonus" ? BONUS_LIMIT_PREFIX : ADD_ON_LIMIT_PREFIX}${index}`,
+		label,
+		scope: { provider: PROVIDER_ID, windowId: window.id, shared: true },
+		window,
+		amount,
+		status: usageStatus(amount.usedFraction),
+	};
+}
+
 /**
  * Parse a `GetUsageLimits` response: the plan credits, one limit per active
- * bonus grant, and the overage credits when overage billing is enabled. A spent
- * plan with bonus or overage left is a `warning`, not exhausted. Null when the
- * response has no readable credit breakdown.
+ * bonus grant and per unexpired purchased add-on, and the overage credits when
+ * overage billing is enabled. A spent plan with bonus, add-on or overage left
+ * is a `warning`, not exhausted. Null when the response has no readable credit
+ * breakdown.
  */
 export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageReport | null {
 	if (!isRecord(payload) || !Array.isArray(payload.usageBreakdownList)) return null;
@@ -96,22 +124,27 @@ export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageR
 		const used = toNumber(entry.currentUsage);
 		const limit = toNumber(entry.usageLimit);
 		if (used === undefined || limit === undefined || limit <= 0) continue;
+		const label = text(entry.displayName) ?? "Bonus credits";
+		bonuses.push(grantLimit("bonus", bonuses.length, label, used, limit, parsePositiveTimestamp(entry.expiresAt)));
+	}
+
+	// Purchased credits. `addOnMetadata.addOns` and the legacy `overageCredits`
+	// list project the same purchases, so only one of them is read.
+	const addOnMetadata = isRecord(credit.addOnMetadata) ? credit.addOnMetadata : undefined;
+	const purchases = Array.isArray(addOnMetadata?.addOns)
+		? addOnMetadata.addOns
+		: Array.isArray(credit.overageCredits)
+			? credit.overageCredits
+			: [];
+	const addOns: UsageLimit[] = [];
+	for (const entry of purchases) {
+		if (!isRecord(entry)) continue;
+		const used = precise(entry, "currentUsage");
+		const limit = precise(entry, "usageLimit");
 		const expiresAt = parsePositiveTimestamp(entry.expiresAt);
-		const window: UsageWindow = {
-			id: `bonus-${bonuses.length}`,
-			label: "Bonus",
-			resetLabel: "expires",
-			...(expiresAt !== undefined ? { resetsAt: expiresAt } : {}),
-		};
-		const amount = credits(used, limit);
-		bonuses.push({
-			id: `${BONUS_LIMIT_PREFIX}${bonuses.length}`,
-			label: text(entry.displayName) ?? "Bonus credits",
-			scope: { provider: PROVIDER_ID, windowId: window.id, shared: true },
-			window,
-			amount,
-			status: usageStatus(amount.usedFraction),
-		});
+		if (used === undefined || limit === undefined || limit <= 0) continue;
+		if (expiresAt !== undefined && expiresAt <= fetchedAt) continue;
+		addOns.push(grantLimit("add-on", addOns.length, "Add-on credits", used, limit, expiresAt));
 	}
 
 	const overageUsed = precise(credit, "currentOverages") ?? 0;
@@ -124,8 +157,11 @@ export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageR
 	const planAmount = credits(planUsed, planLimit);
 	const planSpent = planAmount.usedFraction === 1;
 	const bonusLeft = bonuses.some(bonus => bonus.status !== "exhausted");
+	const addOnLeft = addOns.some(addOn => addOn.status !== "exhausted");
+	const grantLeft = bonusLeft || addOnLeft;
 	let planStatus: UsageStatus = usageStatus(planAmount.usedFraction);
-	if (planSpent && (bonusLeft || (overageEnabled && overageUsed < overageCap))) planStatus = "warning";
+	if (planSpent && (grantLeft || (overageEnabled && overageUsed < overageCap))) planStatus = "warning";
+	const drawingOn = [bonusLeft && "bonus", addOnLeft && "add-on"].filter(Boolean).join(" and ");
 	const limits: UsageLimit[] = [
 		{
 			id: PLAN_LIMIT_ID,
@@ -134,14 +170,15 @@ export function parseKiroUsage(payload: unknown, fetchedAt = Date.now()): UsageR
 			window: monthly,
 			amount: planAmount,
 			status: planStatus,
-			...(planSpent && bonusLeft ? { notes: ["Plan credits used up; drawing on bonus credits"] } : {}),
+			...(planSpent && grantLeft ? { notes: [`Plan credits used up; drawing on ${drawingOn} credits`] } : {}),
 		},
 		...bonuses,
+		...addOns,
 	];
 
 	if (overageEnabled) {
 		const amount = credits(overageUsed, overageCap);
-		const notes = planSpent && !bonusLeft ? ["Free credits used up; drawing paid overage"] : [];
+		const notes = planSpent && !grantLeft ? ["Free credits used up; drawing paid overage"] : [];
 		const charges = toNumber(credit.overageCharges);
 		const rate = toNumber(credit.overageRate);
 		if (charges !== undefined) {
@@ -210,11 +247,12 @@ export const kiroUsageProvider: UsageProvider = {
 };
 
 /**
- * Gates and measures Kiro accounts by their free allowance: plan credits plus
- * unexpired bonus grants. Paid overage is never allowance, so an account with
- * only overage left ranks behind siblings with free credits but stays a
- * `warning` (not blocked) and still serves alone. Drain ranking stays on the
- * monthly plan meter; Kiro has no short window, so it maps to `secondary`.
+ * Gates and measures Kiro accounts by their prepaid allowance: plan credits
+ * plus unexpired bonus grants and purchased add-ons. Paid overage is never
+ * allowance, so an account with only overage left ranks behind siblings with
+ * prepaid credits but stays a `warning` (not blocked) and still serves alone.
+ * Drain ranking stays on the monthly plan meter; Kiro has no short window, so
+ * it maps to `secondary`.
  */
 export const kiroRankingStrategy: CredentialRankingStrategy = {
 	scopeLimits(report) {
@@ -224,9 +262,9 @@ export const kiroRankingStrategy: CredentialRankingStrategy = {
 		let used = 0;
 		let limit = 0;
 		for (const entry of report.limits) {
-			const isBonus = entry.id.startsWith(BONUS_LIMIT_PREFIX);
-			if (!isBonus && entry !== plan) continue;
-			if (isBonus && (entry.window?.resetsAt ?? Number.POSITIVE_INFINITY) <= now) continue;
+			const isGrant = entry.id.startsWith(BONUS_LIMIT_PREFIX) || entry.id.startsWith(ADD_ON_LIMIT_PREFIX);
+			if (!isGrant && entry !== plan) continue;
+			if (isGrant && (entry.window?.resetsAt ?? Number.POSITIVE_INFINITY) <= now) continue;
 			const { used: entryUsed, limit: entryLimit } = entry.amount;
 			if (entryUsed === undefined || entryLimit === undefined || entryLimit <= 0) continue;
 			used += Math.min(entryUsed, entryLimit);

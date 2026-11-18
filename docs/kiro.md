@@ -35,7 +35,7 @@ Each `/login kiro` adds an account, like every other provider, so logging the sa
 
 Each OAuth login gets a random login id, and its identity key is `account:<login id>`. Use that key in account pools, or match it in `auth.accountPolicies` with `account: { accountId: "<login id>" }`. A `ksk_…` API key has no identity key.
 
-`/usage` shows each account's monthly plan credits with the reset date, active bonus credits with their expiry, and overage credits when overage billing is enabled in your Kiro account. With several accounts, requests prefer accounts with free credits left; accounts that can only draw overage are used last.
+`/usage` shows each account's monthly plan credits with the reset date, active bonus and purchased add-on credits with their expiry, and overage credits when overage billing is enabled in your Kiro account. With several accounts, requests prefer accounts with plan, bonus, or add-on credits left; accounts that can only draw overage are used last.
 
 ## Logout and re-login
 
