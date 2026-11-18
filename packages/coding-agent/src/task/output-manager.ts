@@ -2,9 +2,9 @@
  * Session-scoped manager for agent output IDs.
  *
  * Keeps every subagent output id unique within a session without polluting the
- * common case with bookkeeping. A requested name is used verbatim the first
- * time it appears; only a *repeated* name gets a numeric suffix to disambiguate
- * it (e.g. "Anna", "Anna-2", "Anna-3"). When a parent prefix is configured, ids
+ * common case with bookkeeping. Digit-only names get an `Agent` prefix so
+ * `agent://` can distinguish them from process IDs. Repeated names get a
+ * numeric suffix (e.g. "Anna", "Anna-2", "Anna-3"). With a parent prefix, ids
  * are nested under it (e.g. "Anna.Bob") so hierarchical outputs stay grouped.
  *
  * This enables reliable agent:// URL resolution and prevents artifact
@@ -18,8 +18,7 @@ export const PINNED_HUD_TOGGLE_ID = "@omp:toggle-pinned-hud";
 /**
  * Manages agent output ID allocation to ensure uniqueness.
  *
- * The first allocation of a given name keeps the name as-is; subsequent
- * allocations of the same name get a `-2`, `-3`, … suffix. On resume, scans
+ * Repeated allocations of a name get a `-2`, `-3`, … suffix. On resume, scans
  * existing output and child-session files so prior state is never overwritten.
  */
 export class AgentOutputManager {
@@ -115,6 +114,6 @@ export class AgentOutputManager {
 	 */
 	async allocate(id: string): Promise<string> {
 		await this.#ensureInitialized();
-		return this.#allocateUnique(id);
+		return this.#allocateUnique(/^\d+$/.test(id) ? `Agent${id}` : id);
 	}
 }

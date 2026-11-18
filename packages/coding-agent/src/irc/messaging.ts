@@ -2,6 +2,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
+import { parsePeerAddress } from "./mesh-protocol";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { canSpawnAtDepth } from "../task/types";
@@ -41,7 +42,7 @@ export async function executeSend(
 			{ op: "send", from: senderId, to },
 		);
 	// Restore parked recipients only when needed; never delay delivery to a live peer.
-	if (!isBroadcast && sessionFileHint) {
+	if (!isBroadcast && sessionFileHint && !parsePeerAddress(to)) {
 		const recipient = registry.get(to);
 		if (!recipient || recipient.status === "parked") await ensurePersistedRoster(registry, sessionFileHint);
 	}

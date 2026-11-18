@@ -7,6 +7,8 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import { formatDuration, prompt } from "@oh-my-pi/pi-utils";
 import { IrcBus } from "../irc/bus";
+import { agentMesh } from "../irc/mesh";
+import { parsePeerAddress } from "../irc/mesh-protocol";
 import waitDescription from "../prompts/tools/wait.md" with { type: "text" };
 import waitIdleTemplate from "../prompts/tools/wait-idle.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -129,11 +131,16 @@ function pendingReplies(messaging: WaitMessaging): PendingReplies {
 	const asked = new Set<string>();
 	for (const { to, sentAt, promised } of IrcBus.global().unansweredSends(senderId, since)) {
 		asked.add(to);
+		const peer = parsePeerAddress(to);
+		if (peer && agentMesh().peer(peer.pid)) {
+			// Another instance's agent: its state is not visible here, so a live instance can still answer.
 		const session = registry.get(to)?.session;
 		if (session && registry.awaits.blocksOn(to, senderId, sentAt)) replies.blocked.push(to);
 		else if (session && registry.awaits.blocksOn(to, USER_AWAIT_ID, sentAt)) replies.onUser.push(to);
 		else if (session && (promised || session.isStreaming || session.hasQueuedIrcFrom(senderId)))
 			replies.from.push(to);
+			continue;
+		}
 		else replies.stopped.push(to);
 	}
 	const parent = liveParent(messaging);

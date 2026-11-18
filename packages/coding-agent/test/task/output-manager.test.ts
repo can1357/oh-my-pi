@@ -19,6 +19,14 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Bob")).toBe("Bob");
 	});
 
+	it("prefixes numeric names before checking for collisions with existing outputs", async () => {
+		using tmp = TempDir.createSync("@omp-output-manager-");
+		await Bun.write(path.join(tmp.path(), "Agent123.md"), "prior output");
+		const mgr = new AgentOutputManager(() => tmp.path());
+
+		expect(await mgr.allocate("123")).toBe("Agent123-2");
+	});
+
 	it("nests ids under a parent prefix and still suffixes repeats", async () => {
 		const mgr = new AgentOutputManager(() => null, { parentPrefix: "Anna" });
 

@@ -1,5 +1,6 @@
 /** Every in-daemon module, in `caps` order. `server.ts` registers these at startup. */
 import type { DaemonModule } from "../module";
+import { agentsModule } from "./agents";
 import { blobModule } from "./blob";
 import { disasmModule } from "./disasm";
 import { inferModule } from "./infer";
@@ -14,4 +15,5 @@ export const DAEMON_MODULES: readonly DaemonModule[] = [
 	inferModule,
 	speechModule,
 	predictModule,
+	agentsModule,
 ];

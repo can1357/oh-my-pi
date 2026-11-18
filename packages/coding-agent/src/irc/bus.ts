@@ -14,6 +14,8 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { type AgentLifecycleApi, AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, type AgentRegistryApi, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
+import { agentMesh } from "./mesh";
+import { parsePeerAddress } from "./mesh-protocol";
 
 interface IrcWaiter {
 	filter: IrcWaitFilter;
@@ -238,6 +240,12 @@ export class IrcBus implements IrcBusApi {
 
 	async #deliver(message: IrcMessage): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
+		const peer = ref ? undefined : parsePeerAddress(message.to);
+		if (peer && peer.pid !== process.pid) {
+			// Another omp instance in this project: the mesh forwards it, and the
+			// recipient's own bus decides how it lands.
+			return agentMesh().send(peer, message.from, message.body, message.progress);
+		}
 		if (!ref) {
 			return {
 				to: message.to,

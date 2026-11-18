@@ -1,1 +1,1 @@
-agent://<id>: latest completed output (status + progress while unpublished); nested IDs dotted, /key/index JSON path; write = message{{#unless subagent}}, agent://all broadcast only{{/unless}}.
+agent://<id>: latest completed output (status + progress while unpublished); nested IDs dotted, /key/index JSON path; write = message{{#unless subagent}}, agent://all broadcast only{{/unless}}. Other omp instances in this folder: agent://peers lists them; agent://<pid> is one's main agent, agent://<pid>/<id> its subagent (read + write).
