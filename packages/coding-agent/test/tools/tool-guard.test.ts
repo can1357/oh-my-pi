@@ -176,6 +176,15 @@ describe("tool guard", () => {
 			"time git status",
 			"git stash list",
 			"git tag",
+			"git grep foo",
+			"git log --oneline --stat",
+			// An exact long name wins over a longer option it begins: `--text` is `-a`, not `--textconv`.
+			"git diff --text",
+			"git grep --text foo",
+			"git --no-pager --git-dir=.git log",
+			"git config --get user.name",
+			"git config -l",
+			"git config --global --show-origin --get core.pager",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(true);
 		}
@@ -208,10 +217,39 @@ describe("tool guard", () => {
 			// GNU time writes its report to a file; rg runs programs to fill a hyperlink's host; bare git stash pushes.
 			"time --output=/etc/important.conf git status",
 			"time -o/etc/important.conf cat notes.txt",
-			"nice time -ao /etc/x ls",
+			"nice time -ao/etc/x ls",
 			"rg --hostname-bin=/tmp/x.sh --hyperlink-format=default foo",
 			"git stash",
 			"git stash -v",
+			// Listing actions belong to stash and remote; `git tag list` creates a tag named `list`.
+			"git tag list",
+			"git tag show",
+			"git tag get-url",
+			// getopt and git accept any unambiguous prefix of a long option.
+			"sort --out=/etc/x f",
+			"sort --o /etc/x f",
+			"sort --comp=/tmp/x f",
+			"git grep --op='rm -rf ~' x",
+			"git grep --open=vi x",
+			"git log --out=/etc/hosts",
+			"git diff --ext",
+			"git log -p --textc",
+			"file --comp magic",
+			// `-O` runs a pager inside a short-option cluster too.
+			"git grep -iO'rm -rf ~' foo",
+			"git grep -nOvi foo",
+			// A global option's value is not the subcommand; an unknown global option is judged.
+			"git --attr-source status push origin main",
+			"git --shallow-file log reset --hard",
+			"git --frobnicate status",
+			// Legacy `git config` stops reading options at the first operand, so a trailing `-l` lists nothing.
+			"git config --global core.pager vi -l",
+			"git config --global core.fsmonitor /tmp/x.sh --get",
+			// An option with a value takes `--get` as it: these set core.fsmonitor and core.pager.
+			"git config --comment --get core.fsmonitor /tmp/x.sh",
+			"git config --global --comment --get core.pager vi",
+			"git config --com --get core.fsmonitor /tmp/x.sh",
+			"git config -f --get core.pager vi",
 		]) {
 			expect(isReadOnlyCommand(command)).toBe(false);
 		}

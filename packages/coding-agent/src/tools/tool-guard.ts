@@ -114,8 +114,14 @@ const GIT_READS = wordTable(
 		"show-ref whatchanged version help",
 );
 const GIT_BRANCH_LISTING = wordTable("-a -r -v -vv --all --remotes --list --show-current --merged --no-merged");
-/** Git global options that take a value as the next word. */
-const GIT_VALUE_OPTIONS = wordTable("-C -c --git-dir --work-tree --namespace");
+/** Git global options that take a value as the next word or after `=`. */
+const GIT_VALUE_OPTIONS = wordTable("-C --git-dir --work-tree --namespace --attr-source --shallow-file");
+/** Git global options without a value; any other (`-c`, `--config-env`, `--exec-path`) is judged. */
+const GIT_GLOBAL_FLAGS = wordTable(
+	"-p --paginate -P --no-pager --bare --no-replace-objects --literal-pathspecs --no-literal-pathspecs " +
+		"--glob-pathspecs --noglob-pathspecs --icase-pathspecs --no-optional-locks --no-advice --no-lazy-fetch " +
+		"-v --version -h --help --html-path --man-path --info-path",
+);
 const FIND_ACTIONS = wordTable("-exec -execdir -ok -okdir -delete -fprint -fprint0 -fprintf -fls");
 /** Prefixes that run the rest of the line as the command; reads stay reads under the first group. */
 const READ_WRAPPERS = wordTable("time nice timeout command");
@@ -226,18 +232,40 @@ function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 	}
 }
 
-/** Read-subcommand options that write a file or run a program: `--output=F`, `git grep -O<cmd>`, external diff and textconv drivers. */
-const GIT_EXEC_OPTION = /^(?:--output|-O|--open-files-in-pager|--ext-diff|--textconv)/;
+/**
+ * Whether `arg` names one of the long `options`, alone or with `=VALUE`. getopt and git take any unambiguous
+ * prefix (`--out` for `--output`), so every prefix counts, as does a longer name (`--output-directory`), except
+ * a name in `exact`: a real option that wins over the longer one it begins (`--text` beside `--textconv`).
+ */
+function longOption(arg: string, options: readonly string[], exact: readonly string[] = []): boolean {
+	if (!arg.startsWith("--")) return false;
+	const name = arg.split("=", 1)[0];
+	if (name.length <= 2 || exact.includes(name)) return false;
+	return options.some(option => name.startsWith(option) || option.startsWith(name));
+}
+
+/** Read-subcommand options that write a file or run a program: `--output=F`, external diff and textconv drivers, `git grep --open-files-in-pager`. */
+const GIT_EXEC_OPTIONS = ["--output", "--open-files-in-pager", "--ext-diff", "--textconv"];
+/** `git grep -O[CMD]`, also inside a cluster (`-iO`), runs a pager on the matching files. */
+const GIT_PAGER_FLAG = /^-[^-]*O/;
+/** Legacy `git config` actions that read a value or list them. */
+const GIT_CONFIG_READS = wordTable("--get --get-all --get-regexp --get-urlmatch --get-color --get-colorbool --list -l");
+/** Legacy `git config` scope, display and type flags without a value; any other (`--comment`, `-f`, `--blob`, `--type`, `--default`) may take the next word as its value. */
+const GIT_CONFIG_FLAGS = wordTable(
+	"--global --system --local --worktree --includes --no-includes --null -z --name-only --show-origin " +
+		"--show-scope --show-names --bool --int --bool-or-int --bool-or-str --path --expiry-date --fixed-value",
+);
 
 function readOnlyGit(args: string[]): boolean {
 	let i = 0;
 	while (i < args.length && args[i].startsWith("-")) {
 		const option = args[i];
-		// Config set on the command line (`-c diff.external=x`) or another exec path can run anything.
-		if (option.startsWith("-c") || option.startsWith("--config-env") || option.startsWith("--exec-path")) {
+		const name = option.split("=", 1)[0];
+		// Command-line config or another exec path can run anything, and an unknown option may take the next word.
+		if (inTable(GIT_VALUE_OPTIONS, option)) i++;
+		else if (!inTable(GIT_GLOBAL_FLAGS, option) && !(name !== option && inTable(GIT_VALUE_OPTIONS, name))) {
 			return false;
 		}
-		if (inTable(GIT_VALUE_OPTIONS, option)) i++;
 		i++;
 	}
 	const sub = args[i];
@@ -245,18 +273,29 @@ function readOnlyGit(args: string[]): boolean {
 	const positional = rest.filter(arg => !arg.startsWith("-"));
 	const flags = rest.filter(arg => arg.startsWith("-"));
 	if (sub === undefined) return true;
-	if (flags.some(flag => GIT_EXEC_OPTION.test(flag))) return false;
+	if (flags.some(flag => GIT_PAGER_FLAG.test(flag) || longOption(flag, GIT_EXEC_OPTIONS, ["--text"]))) return false;
 	if (inTable(GIT_READS, sub)) return true;
 	if (sub === "branch") return positional.length === 0 && flags.every(flag => inTable(GIT_BRANCH_LISTING, flag));
 	if (sub === "remote" || sub === "stash" || sub === "tag") {
 		const action = positional[0];
-		// A bare `git stash` (or `git stash -v`) is `git stash push`; bare `git remote` and `git tag` list.
-		const listing = action === "show" || action === "list" || (action === undefined && sub !== "stash");
+		// A bare `git stash` (or `git stash -v`) is `git stash push`; bare `git remote` and `git tag` list,
+		// while `git tag NAME` creates a tag, so only stash and remote have listing actions.
+		const listing =
+			action === undefined
+				? sub !== "stash"
+				: sub !== "tag" && (action === "show" || action === "list" || action === "get-url");
+		return listing && flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list");
+	}
+	if (sub === "config") {
+		// Legacy `git config` stops reading options at the first operand (`--global KEY VALUE -l` sets KEY), and an
+		// option with a value takes the next word, `--get` too (`--comment --get KEY VALUE` sets KEY).
+		const operand = rest.findIndex(arg => !arg.startsWith("-"));
+		const options = operand === -1 ? rest : rest.slice(0, operand);
 		return (
-			(listing || action === "get-url") && flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list")
+			options.some(arg => inTable(GIT_CONFIG_READS, arg)) &&
+			options.every(arg => inTable(GIT_CONFIG_READS, arg) || inTable(GIT_CONFIG_FLAGS, arg))
 		);
 	}
-	if (sub === "config") return rest.some(arg => arg.startsWith("--get") || arg === "--list" || arg === "-l");
 	return sub === "reflog" && (positional[0] === undefined || positional[0] === "show");
 }
 
@@ -286,9 +325,8 @@ function readOnlyDate(args: string[]): boolean {
 		const arg = args[i];
 		if (arg === "--") return args.slice(i + 1).every(operand => operand.startsWith("+"));
 		if (arg.startsWith("--")) {
-			// getopt accepts any unambiguous prefix of a long option (`--se` for `--set`).
 			const name = arg.split("=", 1)[0];
-			if ("--set".startsWith(name)) return false;
+			if (longOption(arg, ["--set"])) return false;
 			if (name === arg && DATE_VALUE_OPTIONS.some(option => option.startsWith(name))) i++;
 		} else if (arg.length > 1 && arg.startsWith("-")) {
 			for (let j = 1; j < arg.length; j++) {
@@ -336,8 +374,7 @@ function readOnlyArguments(name: string, args: string[]): boolean {
 		case "hostname":
 			return args.every(arg => HOSTNAME_DISPLAY.test(arg));
 		case "file":
-			// `--co` is the shortest prefix getopt takes for `--compile`.
-			return !args.some(arg => FILE_COMPILE.test(arg) || (arg.length > 3 && "--compile".startsWith(arg)));
+			return !args.some(arg => FILE_COMPILE.test(arg) || longOption(arg, ["--compile"]));
 		default:
 			return true;
 	}
@@ -399,7 +436,9 @@ function readOnlySegment(text: string): boolean {
 	const prefix = words.slice(0, words.length - command.length);
 	if (prefix.some(isShellEnvironmentAssignment)) return false;
 	// GNU time writes its report to a file with `-o FILE`, `-oFILE` or `--output=FILE`.
-	if (prefix.includes("time") && prefix.some(word => /^-[a-zA-Z]*o|^--o/.test(word))) return false;
+	if (prefix.includes("time") && prefix.some(word => /^-[a-zA-Z]*o/.test(word) || longOption(word, ["--output"]))) {
+		return false;
+	}
 	const name = command[0];
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
@@ -409,11 +448,9 @@ function readOnlySegment(text: string): boolean {
 			return !args.some(arg => inTable(FIND_ACTIONS, arg));
 		case "rg":
 			// `--pre` and `--hostname-bin` run a program of the caller's choosing.
-			return !args.some(arg => arg.startsWith("--pre") || arg.startsWith("--hostname-bin"));
+			return !args.some(arg => longOption(arg, ["--pre", "--hostname-bin"]));
 		case "sort":
-			return !args.some(
-				arg => /^-[a-zA-Z]*o/.test(arg) || arg.startsWith("--output") || arg.startsWith("--compress-program"),
-			);
+			return !args.some(arg => /^-[a-zA-Z]*o/.test(arg) || longOption(arg, ["--output", "--compress-program"]));
 		case "set":
 			return readOnlySet(args);
 		case "git":
