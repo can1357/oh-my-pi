@@ -1,0 +1,91 @@
+module completions {
+
+  def "nu-complete watchexec completions" [] {
+    [ "bash" "elvish" "fish" "nu" "powershell" "zsh" ]
+  }
+
+  def "nu-complete watchexec wrap_process" [] {
+    [ "group" "session" "none" ]
+  }
+
+  def "nu-complete watchexec on_busy_update" [] {
+    [ "queue" "do-nothing" "restart" "signal" ]
+  }
+
+  def "nu-complete watchexec emit_events_to" [] {
+    [ "environment" "stdio" "file" "json-stdio" "json-file" "none" ]
+  }
+
+  def "nu-complete watchexec filter_fs_events" [] {
+    [ "access" "create" "remove" "rename" "modify" "metadata" ]
+  }
+
+  def "nu-complete watchexec screen_clear" [] {
+    [ "clear" "reset" ]
+  }
+
+  def "nu-complete watchexec color" [] {
+    [ "auto" "always" "never" ]
+  }
+
+  # Execute commands when watched files change
+  export extern watchexec [
+    ...program: string        # Command (program and arguments) to run on changes
+    --manual                  # Show the manual page
+    --completions: string@"nu-complete watchexec completions" # Generate a shell completions script
+    --only-emit-events        # Only emit events to stdout, run no commands
+    -1                        # Testing only: exit Watchexec after the first run and return the command's exit code
+    --shell: string           # Use a different shell
+    -n                        # Shorthand for '--shell=none'
+    --no-environment          # Deprecated shorthand for '--emit-events=none'
+    --env(-E): string         # Add env vars to the command
+    --no-process-group        # Don't use a process group
+    --wrap-process: string@"nu-complete watchexec wrap_process" # Configure how the process is wrapped
+    --stop-signal: string     # Signal to send to stop the command
+    --stop-timeout: string    # Time to wait for the command to exit gracefully
+    --delay-run: string       # Sleep before running the command
+    --workdir: path           # Set the working directory
+    --socket: string          # Provide a socket to the command
+    --on-busy-update(-o): string@"nu-complete watchexec on_busy_update" # What to do when receiving events while the command is running
+    --restart(-r)             # Restart the process if it's still running
+    --signal(-s): string      # Send a signal to the process when it's still running
+    --map-signal: string      # Translate signals from the OS to signals to send to the command
+    --debounce(-d): string    # Time to wait for new events before taking action
+    --stdin-quit              # Exit when stdin closes
+    --postpone(-p)            # Wait until first change before running command
+    --poll: string            # Poll for filesystem changes
+    --emit-events-to: string@"nu-complete watchexec emit_events_to" # Configure event emission
+    --watch(-w): path         # Watch a specific file or directory
+    --watch-non-recursive(-W): path # Watch a specific directory, non-recursively
+    --watch-file(-F): path    # Watch files and directories from a file
+    --no-vcs-ignore           # Don't load gitignores
+    --no-project-ignore       # Don't load project-local ignores
+    --no-global-ignore        # Don't load global ignores
+    --no-default-ignore       # Don't use internal default ignores
+    --no-discover-ignore      # Don't discover ignore files at all
+    --ignore-nothing          # Don't ignore anything at all
+    --exts(-e): string        # Filename extensions to filter to
+    --filter(-f): string      # Filename patterns to filter to
+    --filter-file: path       # Files to load filters from
+    --project-origin: path    # Set the project origin
+    --filter-prog(-j): string # Filter programs
+    --ignore(-i): string      # Filename patterns to filter out
+    --ignore-file: path       # Files to load ignores from
+    --fs-events: string@"nu-complete watchexec filter_fs_events" # Filesystem events to filter to
+    --no-meta                 # Don't emit fs events for metadata changes
+    --verbose(-v)             # Set diagnostic log level
+    --log-file: path          # Write diagnostic logs to a file
+    --print-events            # Print events that trigger actions
+    --clear(-c): string@"nu-complete watchexec screen_clear" # Clear screen before running command
+    --notify(-N)              # Alert when commands start and end
+    --color: string@"nu-complete watchexec color" # When to use terminal colours
+    --timings                 # Print how long the command took to run
+    --quiet(-q)               # Don't print starting and stopping messages
+    --bell                    # Ring the terminal bell on command completion
+    --help(-h)                # Print help (see more with '--help')
+    --version(-V)             # Print version
+  ]
+
+}
+
+export use completions *

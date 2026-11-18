@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
@@ -37,6 +38,17 @@ export function formatResultPath(filePath: string, isDirectory: boolean, basePat
 		return formatPathRelativeToCwd(resolveSearchResultPath(basePath, cleanPath), cwd);
 	}
 	return formatPathRelativeToCwd(basePath, cwd);
+}
+
+/**
+ * Base a native search/rewrite target's result paths resolve against: a file
+ * target reports its own name, so its results join onto its directory; a
+ * directory (or URL) target reports paths below itself.
+ */
+export async function targetResultBase(basePath: string): Promise<string> {
+	if (InternalUrlRouter.instance().canHandle(basePath)) return basePath;
+	const stat = await fs.stat(basePath).catch(() => undefined);
+	return stat?.isFile() ? path.dirname(basePath) : basePath;
 }
 
 /**

@@ -15,9 +15,9 @@
  * - `"event-bus"` — worker emits forward to main's bus; worker listeners
  *   subscribe on main. Frames for channels main has no listener on are dropped
  *   in the worker (see `RemoteEventBus`).
- * - `"artifact-manager"` — ids and paths are allocated on main (sync
- *   `allocateId`), so ids stay unique across the tree; workers write the
- *   content to the same paths. `dir` and the reserved-id scan stay main's.
+ * - `"artifact-manager"` — spill ids and their files are claimed on main
+ *   (`allocatePath`), so ids stay unique across the tree; workers write the
+ *   content to the same paths. `dir`, `sessionDir` and the id scan stay main's.
  * - `"agent-storage"` — main's open agent.db. Worker settings mirrors return it
  *   from `getStorage()` (seeded by `./settings`), so model usage, MCP tool
  *   cache, fetch credentials, startup verdicts and perf samples read and write
@@ -102,10 +102,9 @@ function serveEventBus(peer: WorkerPeer): RpcServe<EventBus, EventBusProtocol> {
 
 const serveArtifactManager: RpcServe<ArtifactManager, ArtifactManagerProtocol> = {
 	dir: manager => manager.dir,
-	allocateId: manager => manager.allocateId(),
-	allocatePath: (manager, toolType) => manager.allocatePath(toolType),
+	sessionDir: manager => manager.sessionDir,
+	allocatePath: manager => manager.allocatePath(),
 	exists: (manager, id) => manager.exists(id),
-	listFiles: manager => manager.listFiles(),
 	getPath: (manager, id) => manager.getPath(id),
 };
 

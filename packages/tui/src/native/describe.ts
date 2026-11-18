@@ -77,6 +77,14 @@ export function withHidden(described: NativeNode, hidden: boolean): NativeNode {
 }
 
 /**
+ * `described` keyed `key` among its siblings and carrying `key` as its `motionKey`, so the nearest
+ * `transition: "layout"` container glides it when it moves, resizes, appears or leaves.
+ */
+export function withMotion(described: NativeNode, key: string): NativeNode {
+	return node(described.k, { ...described.p, motionKey: key } as TspProps, described.c, key);
+}
+
+/**
  * A described tree as the node tree a prop carries (a `hovercard`): plain
  * nodes only, since nothing reconciles inside a prop; component children
  * (which describe themselves per frame) are left out.

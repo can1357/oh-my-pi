@@ -45,6 +45,16 @@ describe("/compact dispatch (ACP)", () => {
 		}
 	});
 
+	it("treats mode names in /handoff arguments as focus rather than as a different compaction mode", async () => {
+		const h = acpRuntime();
+		await executeAcpBuiltinSlashCommand("/handoff soft failure", h.runtime);
+		await executeAcpBuiltinSlashCommand("/compact handoff soft failure", h.runtime);
+		expect(h.compact.mock.calls).toEqual([
+			["soft failure", { mode: "handoff" }],
+			["soft failure", { mode: "handoff" }],
+		]);
+	});
+
 	it("splits a mode from its focus instructions", async () => {
 		const h = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/compact soft focus on the parser", h.runtime);

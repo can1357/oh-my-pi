@@ -6556,6 +6556,112 @@ describe("lsp regressions", () => {
 		expect(output).toContain("typescript-language-server (ready)");
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"status reports a rustup proxy whose toolchain lacks the component",
+		async () => {
+			const cargoHome = TempDir.createSync("@omp-cargo-home-");
+			const previousCargoHome = process.env.CARGO_HOME;
+			try {
+				const proxy = path.join(cargoHome.path(), "bin", "rust-analyzer");
+				fs.mkdirSync(path.dirname(proxy), { recursive: true });
+				fs.writeFileSync(
+					proxy,
+					"#!/bin/sh\necho \"error: Unknown binary 'rust-analyzer' in official toolchain 'stable'\" >&2\nexit 1\n",
+					{ mode: 0o755 },
+				);
+				process.env.CARGO_HOME = cargoHome.path();
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+					servers: {
+						"rust-analyzer": {
+							command: "rust-analyzer",
+							resolvedCommand: proxy,
+							fileTypes: [".rs"],
+							rootMarkers: ["Cargo.toml"],
+						},
+					},
+					idleTimeoutMs: undefined,
+				});
+				vi.spyOn(lspClient, "getActiveClients").mockReturnValue([]);
+
+				const tool = new LspTool(makeLspSession(cargoHome.path()));
+				const result = await tool.execute("status-rustup", { action: "status" });
+				const output = result.content
+					.filter(block => block.type === "text")
+					.map(block => block.text)
+					.join("\n");
+
+				expect(output).toContain("rust-analyzer (unusable: error: Unknown binary 'rust-analyzer'");
+			} finally {
+				if (previousCargoHome === undefined) delete process.env.CARGO_HOME;
+				else process.env.CARGO_HOME = previousCargoHome;
+				configCache.delete(cargoHome.path());
+				vi.restoreAllMocks();
+				cargoHome.removeSync();
+			}
+		},
+	);
+
+	it("routes position actions to a server that advertises them and explains when none does", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-capability-routing-");
+		try {
+			const file = path.join(tempDir.path(), "app.py");
+			await Bun.write(file, "def target():\n    return 1\n");
+			const ruff: ServerConfig = { command: "ruff", fileTypes: [".py"], rootMarkers: [] };
+			const pyright: ServerConfig = { command: "pyright", fileTypes: [".py"], rootMarkers: [] };
+			const makeClient = (config: ServerConfig, serverCapabilities: LspClient["serverCapabilities"]): LspClient => ({
+				name: config.command,
+				cwd: tempDir.path(),
+				config,
+				proc: { stdin: { write() {}, flush: async () => {} } } as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				publishedDiagnostics: new Map(),
+				pulledDiagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+				serverCapabilities,
+			});
+			const clients = new Map([
+				[ruff, makeClient(ruff, { codeActionProvider: true })],
+				[pyright, makeClient(pyright, { referencesProvider: true })],
+			]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config => clients.get(config)!);
+			vi.spyOn(lspClient, "reconcileFileFromDisk").mockResolvedValue(false);
+			const requests: string[] = [];
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (client, method) => {
+				requests.push(`${client.name} ${method}`);
+				if (client.name === "ruff") throw new lspClient.LspResponseError(-32601, undefined, "Unknown request");
+				return [];
+			});
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const references = { action: "references", file, line: 1, symbol: "target" } as const;
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { ruff, pyright }, idleTimeoutMs: undefined });
+			configCache.delete(tempDir.path());
+			await tool.execute("routed", references);
+			expect(requests).toContain("pyright textDocument/references");
+			expect(requests).not.toContain("ruff textDocument/references");
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { ruff }, idleTimeoutMs: undefined });
+			configCache.delete(tempDir.path());
+			const text = textResult(await tool.execute("unsupported", references));
+			expect(text).toContain("No configured language server for .py supports references");
+			expect(text).toContain("ruff: does not implement textDocument/references");
+		} finally {
+			configCache.delete(tempDir.path());
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
 	it("reload * invalidates the per-cwd config cache so newly written .omp/lsp.json is observed", async () => {
 		// #3546: `getConfig` caches the first `loadConfig` result per cwd
 		// permanently. Creating `.omp/lsp.json` after the first LSP call left

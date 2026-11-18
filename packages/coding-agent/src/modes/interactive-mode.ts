@@ -52,6 +52,10 @@ import {
 	latestJobWidget,
 } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AsyncJobManagerApi } from "../async/job-manager";
+import { stopAgentRun } from "../async/job-control";
+import { IrcBus } from "../irc/bus";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { collectTrayInput, Tray } from "./tray";
 import type { JobWidgetRegistry } from "../job-widgets/types";
 import { sameItems } from "@oh-my-pi/pi-tui/native/memo";
 import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh-my-pi/pi-tui/chrome/segment-track";
@@ -172,9 +176,9 @@ import {
 	canAutoCreateWorktree,
 	planWorktreeExit,
 	removeExitWorktrees,
-	type SessionWorktree,
 	type WorktreeExitPlan,
 } from "../session/session-worktree";
+import type { SessionWorktree } from "../worktree/backend";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -569,6 +573,8 @@ const COMPOSER_STATUS_PERSIST_DELAY_MS = 1_000;
 /** Status-line slot of the link-hint mode prompt; the `omp:` prefix keeps it apart from extension keys. */
 const LINK_HINT_STATUS_KEY = "omp:link-hints";
 const DEFAULT_WORKING_MESSAGE = "Working…";
+/** The composer's hint while an ask waits above it. */
+const ASK_COMPOSER_HINT = "↑ answer the questions above, or type here to skip them";
 /** Native working-message shimmer under a session accent: the hue itself is the terminal's `accent`. */
 const NATIVE_ACCENT_SHIMMER: ShimmerPalette = { low: "dim", mid: "accent", high: "accent", bold: true };
 
@@ -786,8 +792,9 @@ class HudPillsRow implements Component {
 		return [];
 	}
 
-	describe(): NativeNode {
-		return this.mode.describeHudPills();
+	/** A host with the tray shows running work there instead: the row describes nothing. */
+	describe(cx: DescribeContext): NativeNode {
+		return cx.feature("tray") ? TRAY_HOST_HUD : this.mode.describeHudPills();
 	}
 
 	/** A click on the agents segment opens the agent hub; one on the jobs segment, the jobs sheet. */
@@ -797,6 +804,9 @@ class HudPillsRow implements Component {
 		else if (event.act === "jobs.open") this.mode.showJobsSheet();
 	}
 }
+
+/** The HUD pills row on a host that draws the tray: hidden, as with nothing running. */
+const TRAY_HOST_HUD: NativeNode = row([], { role: "omp.hud", justify: "end", hidden: true });
 
 /** A described counter segment with the count it shows, so an unchanged count reuses the node. */
 interface RunningSegment {
@@ -963,6 +973,14 @@ function describeRunningSegment(spec: RunningSegmentSpec, running: number): Nati
 		],
 		spec.key,
 	);
+}
+
+/** The ask waiting above the composer; in rows a blank row parts it from the working row under it. */
+class AskContainer extends AnchoredLiveContainer {
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
+		return lines.length > 0 ? [...lines, ""] : lines;
+	}
 }
 
 class StatusHudContainer extends AnchoredLiveContainer {
@@ -1399,6 +1417,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	chatContainer: TranscriptContainer;
 	/** `!`/`$` runs started while the agent streams; {@link flushPendingBashComponents} moves them into the transcript. */
 	pendingShellContainer: Container;
+	askContainer: Container;
 	pendingMessagesContainer: Container;
 	/** Judge-batch and automatic-download progress rows above the working line. */
 	progressHudContainer: Container;
@@ -1529,6 +1548,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[] = [];
 	pythonComponent: EvalExecutionComponent | undefined = undefined;
 	isPythonMode = false;
+	isBtwMode = false;
 	streamingComponent: AssistantMessageComponent | undefined = undefined;
 	streamingMessage: AssistantMessage | undefined = undefined;
 	lastAssistantUsage: Usage | undefined = undefined;
@@ -1591,7 +1611,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * loader recreated by a focus switch keeps the real elapsed time.
 	 */
 	#workingStartedAt = 0;
-	#statusHudNative: { children: readonly Component[]; todo: NativeNode | undefined; node: NativeNode } | undefined;
+	#statusHudNative:
+		| {
+				children: readonly Component[];
+				todo: NativeNode | undefined;
+				caption: NativeNode | undefined;
+				counts: NativeNode | undefined;
+				node: NativeNode;
+		  }
+		| undefined;
 	/**
 	 * The todo HUD, rebuilt with its ANSI rows; undefined while hidden. A
 	 * terminal with `checklist` gets the whole plan as a HUD checklist, others
@@ -1678,11 +1706,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 		);
 		this.#syncJobWidgetsListener();
-		// A subagent's task job draws a widget too, though it counts as no
-		// background job: its widget alone keeps the segment and hover card up.
-		const widgets = this.session.getRunningJobWidgets();
-		const runningJobs = Math.max(this.statusLine.runningBackgroundJobCount(), widgets.length);
-		this.#jobsSegment = jobsSegment(this.#jobsSegment, runningJobs, widgets);
+		// Background jobs only: a job that runs an agent is that agent's, so
+		// neither it nor its widget counts here; the agents segment has it.
+		const background = new Set<string>();
+		for (const job of this.session.getAsyncJobSnapshot()?.running ?? []) {
+			if (job.agentId === undefined) background.add(job.id);
+		}
+		const widgets = this.session.getRunningJobWidgets().filter(entry => background.has(entry.id));
+		this.#jobsSegment = jobsSegment(this.#jobsSegment, background.size, widgets);
 		const segments: NativeChild[] = [];
 		if (this.#agentsSegment) segments.push(this.#agentsSegment.node);
 		if (this.#jobsSegment) segments.push(this.#jobsSegment.node);
@@ -1703,20 +1734,96 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * retry and compaction loaders describe themselves as the working row;
 	 * other rows describe themselves) in an `omp.hud.status` column, then the
 	 * todo HUD, so the todo holds its place as the turn starts and ends.
-	 * Nothing to show describes the empty HUD.
+	 * Nothing to show describes the empty HUD. On a host with the tray, the
+	 * row is the tray's header: its counts go before the todo, and while the
+	 * main agent is idle its caption stands in for the status rows.
 	 */
 	describeStatusHud(children: readonly Component[], cx: DescribeContext): NativeNode {
 		const hud = this.#todoHudNative;
 		const todo = hud && (cx.supports("checklist") ? hud.checklist : hud.fallback);
+		const onTrayHost = cx.feature("tray");
+		if (onTrayHost) {
+			this.#tray.setOnHost(true);
+			this.#syncTrayJobsListener();
+		} else if (this.#tray.onHost) {
+			this.#releaseTray();
+		}
+		const { caption, counts } = this.#tray.header(children.length === 0);
 		const memo = this.#statusHudNative;
-		if (memo && memo.todo === todo && sameItems(memo.children, children)) return memo.node;
+		if (
+			memo &&
+			memo.todo === todo &&
+			memo.caption === caption &&
+			memo.counts === counts &&
+			sameItems(memo.children, children)
+		)
+			return memo.node;
 		const parts: NativeChild[] = [];
 		if (children.length > 0) parts.push(node("col", { role: "omp.hud.status" }, children.slice(), "status"));
+		else if (caption) parts.push(caption);
+		if (counts) parts.push(counts);
 		if (todo) parts.push(todo);
 		const described =
 			parts.length === 0 ? EMPTY_HUD : row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" });
-		this.#statusHudNative = { children: children.slice(), todo, node: described };
+		this.#statusHudNative = { children: children.slice(), todo, caption, counts, node: described };
 		return described;
+	}
+	/**
+	 * Repaint the tray when a job starts, reports output, settles, or has its
+	 * result consumed, following the root job manager. Only a host with the
+	 * tray subscribes.
+	 */
+	#syncTrayJobsListener(): void {
+		this.#syncJobWidgetsListener();
+		const manager = this.session.asyncJobManager;
+		if (this.#trayJobsListener?.manager === manager) return;
+		this.#trayJobsListener?.unsubscribe();
+		this.#trayJobsListener = manager
+			? { manager, unsubscribe: manager.onJobsChanged(() => this.#scheduleTraySync()) }
+			: undefined;
+	}
+	/** Coalesce tray repaints (as the observer's), repainting only when a card or the closer look changed. */
+	#scheduleTraySync(): void {
+		if (this.#traySyncTimer) return;
+		this.#traySyncTimer = setTimeout(() => {
+			this.#traySyncTimer = undefined;
+			if (this.#trayShown() && this.#tray.refresh()) this.ui.requestRender();
+		}, SUBAGENT_OBSERVER_UI_COALESCE_MS);
+		this.#traySyncTimer.unref?.();
+	}
+	/** Whether a native host with the tray is drawing this session. */
+	#trayShown(): boolean {
+		return this.#tray.onHost && isNativeRendering();
+	}
+	/** Off a tray host: no job listener, no pending tray repaint. */
+	#releaseTray(): void {
+		this.#tray.setOnHost(false);
+		this.#trayJobsListener?.unsubscribe();
+		this.#trayJobsListener = undefined;
+		if (this.#traySyncTimer) {
+			clearTimeout(this.#traySyncTimer);
+			this.#traySyncTimer = undefined;
+		}
+	}
+	/** The agents-hub key on a host showing tray cards moves focus into the tray; false when it shows none. */
+	#focusTray(): boolean {
+		return this.#trayShown() && this.#tray.focus();
+	}
+	/** Stop agent `id` for good from the tray, as cancelling its task job from the jobs sheet does. */
+	#stopTrayAgent(id: string): void {
+		const remote = this.collabGuest?.hubRemote;
+		if (remote) {
+			remote.kill(id);
+			return;
+		}
+		const scope = { agentRegistry: AgentRegistry.global(), agentLifecycle: () => AgentLifecycleManager.global() };
+		stopAgentRun(scope, this.session.asyncJobManager, id).then(
+			outcome => {
+				if (outcome.status !== "cancelled") this.showWarning(outcome.message);
+				this.ui.requestRender();
+			},
+			(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+		);
 	}
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -2090,6 +2197,33 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** A scrollback replay is rendering. */
 	#replaying = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
+	/** The tray's state and dock component; idle unless a native host advertises `tray`. */
+	readonly #tray: Tray = new Tray({
+		input: () =>
+			collectTrayInput({
+				observers: this.#observerRegistry,
+				refs: getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global()).list(),
+				manager: this.session.asyncJobManager,
+				snapshot: () => this.session.getAsyncJobSnapshot({ recentLimit: Number.POSITIVE_INFINITY }),
+				irc: IrcBus.existing(),
+				showAgents: cfgDisplayPinnedAgents.get(settings) !== "off",
+			}),
+		focusAgent: id => {
+			this.focusAgentSession(id).catch((error: unknown) =>
+				this.showError(error instanceof Error ? error.message : String(error)),
+			);
+		},
+		showAgentHub: () => this.showAgentHub(),
+		showJobsSheet: () => this.showJobsSheet(),
+		stopAgent: id => this.#stopTrayAgent(id),
+		cancelJob: id => {
+			this.session.cancelAsyncJob(id);
+		},
+		requestRender: () => this.ui.requestRender(),
+	});
+	/** The root job manager the tray repaints on, and how to stop listening to it. */
+	#trayJobsListener: { manager: AsyncJobManagerApi; unsubscribe: () => void } | undefined;
+	#traySyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
@@ -2146,6 +2280,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
+		this.editor.faint = () => this.#extensionUiController.askHoldsKeys();
+		this.editor.onUpFromTop = () => this.#extensionUiController.focusAsk();
 		this.editor.predictions = () => this.#eventController.composerPrediction.choices;
 		this.editor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		this.editor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
@@ -2228,10 +2364,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			onNativeRenderingChange(() => {
 				if ((this.viewSession.extensionRunner?.getLinkSchemes().length ?? 0) > 0) this.#redrawExtensionLinks();
+				// Rows draw no tray: stop the work that feeds it until a tray host describes again.
+				if (!isNativeRendering()) this.#releaseTray();
 			}),
 		);
+		this.#eventBusUnsubscribers.push(() => {
+			this.#releaseTray();
+			this.#tray.dispose();
+		});
 		this.chatContainer = new TranscriptContainer();
 		this.pendingShellContainer = new AnchoredLiveContainer();
+		this.askContainer = new AskContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
 		this.progressHudContainer.addChild(this.#judgmentBatchProgressHud);
@@ -2574,6 +2717,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				// Judge batches and automatic downloads stay editor-anchored and update
 				// independently of transcript output, directly above the working/throughput/title row.
 				this.progressHudContainer,
+				// The ask waiting for answers, over the working row and the composer, a blank row under it
+				// (natively it flows at the transcript's end).
+				this.askContainer,
 				// Working loader / transient status sits below the sticky todo + subagent
 				// HUDs, just above the editor's hook-widget top margin — so it reads next to
 				// the prompt while keeping the one-line gap above the editor (the band
@@ -2595,6 +2741,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// in. Classify every new root that can collapse on its own.
 				transientChrome: [
 					this.editorContainer,
+					this.askContainer,
 					this.attachmentChipsContainer,
 					this.reportContainer,
 					this.pendingShellContainer,
@@ -2632,6 +2779,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.deferredCommandContainer,
 					this.progressHudContainer,
 					this.statusContainer,
+					{ component: this.#tray, feature: "tray" },
 					this.pendingMessagesContainer,
 					this.editorTopGapContainer,
 					this.hookWidgetContainerAbove,
@@ -2640,7 +2788,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				],
 				// Deferred shell runs are transcript output: natively they flow at its
 				// end, where they stay when they move in, not pinned over the composer.
-				nativeTail: [this.pendingShellContainer],
+				// An ask waiting for answers follows them, right above the composer.
+				nativeTail: [this.pendingShellContainer, this.askContainer],
 			},
 		);
 		this.ui.setFocus(this.editor);
@@ -4802,6 +4951,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPythonMode) {
 			this.editor.borderColor = theme.getPythonModeBorderColor();
+		} else if (this.isBtwMode) {
+			this.editor.borderColor = theme.getBtwModeBorderColor();
 		} else if (vimMode === "visual" || vimMode === "visual-line") {
 			this.editor.borderColor = (str: string) => theme.fg("warning", str);
 		} else if (vimMode === "normal" || vimMode === "replace") {
@@ -4901,7 +5052,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				? { kind: "bash", excluded: draft.startsWith("!!") }
 				: this.isPythonMode
 					? { kind: "python", excluded: draft.startsWith("$$") }
-					: undefined,
+					: this.isBtwMode
+						? { kind: "btw", excluded: false }
+						: undefined,
 			thinking: thinkingLevelWord(this.viewSession),
 			thinkingInModel: cfgStatusLineCompactThinkingLevel.get(settings),
 			rate: this.#nativeTokenRate(),
@@ -4914,6 +5067,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					: undefined,
 			viewing: this.#viewingLineage(),
 			btw: this.#btwController.isFocused(),
+			ask: this.#extensionUiController.composerAsk(),
 			title: this.sessionManager.getSessionName(),
 		};
 	}
@@ -4936,6 +5090,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Placeholder for the empty composer; see `COMPOSER_HINTS` for the registered hints. */
 	#composerHint(): string | undefined {
+		// An ask above holding the keys: its key hints; the keys here: what typing does.
+		const ask = this.#extensionUiController.composerAsk();
+		if (ask) return this.#extensionUiController.askKeyHints() ?? ASK_COMPOSER_HINT;
 		return resolveComposerHint({
 			runningAgents: this.#runningSubagentCount,
 			focusedOnAgent: this.focusedAgentId !== undefined,
@@ -5239,7 +5396,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const descriptionsChanged = this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey;
 		if (descriptionsChanged) this.#renderTodoList();
 		const hudChanged = this.#renderSubagentList();
-		if (badgeChanged || descriptionsChanged || hudChanged) this.ui.requestRender();
+		const trayChanged = this.#trayShown() && this.#tray.refresh();
+		if (badgeChanged || descriptionsChanged || hudChanged || trayChanged) this.ui.requestRender();
 	}
 
 	#cancelObserverUiSyncTimer(): void {
@@ -8394,7 +8552,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		await postmortem.drainStdout();
 		if (process.platform !== "win32") {
 			try {
-				execReplace(cmd); // never returns on success
+				const env: Record<string, string> = {};
+				for (const key in process.env) {
+					const value = process.env[key];
+					if (value !== undefined) env[key] = value;
+				}
+				execReplace(cmd[0], cmd, env, []); // never returns on success
 			} catch (err) {
 				process.stderr.write(`${chalk.red(`Restart exec failed: ${err instanceof Error ? err.message : err}`)}\n`);
 			}
@@ -8575,6 +8738,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
 		nextEditor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		nextEditor.placeholder = () => this.#composerHint();
+		nextEditor.faint = () => this.#extensionUiController.askHoldsKeys();
+		nextEditor.onUpFromTop = () => this.#extensionUiController.focusAsk();
 		nextEditor.predictions = () => this.#eventController.composerPrediction.choices;
 		nextEditor.onPredictionAccepted = index => this.#eventController.composerPrediction.accepted(index);
 		nextEditor.onPredictionShown = () => this.#eventController.composerPrediction.shown();
@@ -9358,7 +9523,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			if (
 				cfgWorktreeOnStart.get(this.settings) === "off" ||
-				!(await canAutoCreateWorktree(this.sessionManager.getCwd()))
+				!(await canAutoCreateWorktree(this.sessionManager.getCwd(), this.settings))
 			)
 				return;
 			if (
@@ -9526,6 +9691,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showAgentHub(options?: AgentHubOpenOptions): void {
+		if (options?.trayFirst && this.#focusTray()) return;
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 
@@ -9559,10 +9725,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		options?: Pick<CompactOptions, "internalGuidance" | "readerModel">,
 	): Promise<CompactionOutcome> {
 		return this.#commandController.handleCompactCommand(customInstructions, mode, beforeFlush, options);
-	}
-
-	handleHandoffCommand(customInstructions?: string): Promise<void> {
-		return this.#commandController.handleHandoffCommand(customInstructions);
 	}
 
 	handleShakeCommand(mode: ShakeMode): Promise<void> {
@@ -9745,6 +9907,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleBtwEscape(): boolean {
 		return this.#btwController.handleEscape();
+	}
+
+	focusAsk(): boolean {
+		return this.#extensionUiController.focusAsk();
 	}
 
 	get isBtwFocused(): boolean {
