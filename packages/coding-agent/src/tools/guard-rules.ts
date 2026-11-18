@@ -747,7 +747,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 	let entries = false;
 	let dir: string | undefined = command.cwd;
 	const changeDir = (word: string) => {
-		dir = dir === undefined ? undefined : boundedDirectory(resolveCommandWordPath(command, word, dir, home));
+		dir = boundedDirectory(resolveCommandWordPath(command, word, dir, home));
 	};
 	let i = 0;
 	// An old-style first word (`tar cfC x.tar ~ .ssh`): each letter that takes a value takes the next word.
@@ -769,7 +769,8 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 		} else if (options && arg.startsWith("--")) {
 			const eq = arg.indexOf("=");
 			const flag = eq > 0 ? arg.slice(0, eq) : arg;
-			const value = eq > 0 ? arg.slice(eq + 1) : undefined;
+			// The shell expands no `~` in a value attached to its option (`--directory=~/x`).
+			const value = eq > 0 ? attachedValue(arg.slice(eq + 1)) : undefined;
 			// GNU tar takes any unambiguous abbreviation: `--dir`, `--direc`.
 			if (flag.length >= 5 && "--directory".startsWith(flag)) {
 				const target = value ?? argv[++i];
@@ -788,7 +789,7 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 				entries ||= TAR_ENTRY_LETTERS.includes(arg[k]);
 			}
 			if (k === arg.length) continue;
-			const value = k + 1 < arg.length ? arg.slice(k + 1) : argv[++i];
+			const value = k + 1 < arg.length ? attachedValue(arg.slice(k + 1)) : argv[++i];
 			if (value === undefined) continue;
 			if (arg[k] === "C") changeDir(value);
 			else if (arg[k] !== TAR_EXCLUDE_LETTER) words.push(value);
