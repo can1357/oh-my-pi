@@ -27,14 +27,8 @@ async function signIdToken(claims: Record<string, unknown>): Promise<string> {
 type TokenOverrides = {
 	scope?: string;
 	nonce?: (issued: string) => string;
-	/** Accounts already stored, and the answer typed to the account prompt. */
-	saved?: OAuthCredentials[];
-	answer?: string;
-	/** `client_id` echoed on the redirect: a value, or null for a re-authorization callback that omits it. */
+	/** `client_id` echoed on the redirect: a value, or null for a redirect that omits it. */
 	redirectClientId?: string | null;
-	/** What the ID token says about the signed-in account. */
-	sub?: string;
-	email?: string;
 	/** `chatgpt_account_id` claim (a workspace id), as stored accountId carries when the token has one. */
 	workspaceId?: string;
 };
@@ -46,8 +40,6 @@ async function login(overrides: TokenOverrides = {}) {
 	let authUrl = new URL("http://unset");
 	const requests: { url: string; form: URLSearchParams }[] = [];
 	const ctrl: OAuthController = {
-		storedCredentials: overrides.saved,
-		onPrompt: async () => overrides.answer ?? "",
 		onAuth: info => {
 			authUrl = new URL(info.url);
 		},
@@ -70,10 +62,10 @@ async function login(overrides: TokenOverrides = {}) {
 				const idToken = await signIdToken({
 					iss: ISSUER,
 					aud: "agent_client_1",
-					sub: overrides.sub ?? "user-123",
+					sub: "user-123",
 					exp: Math.floor(Date.now() / 1000) + 600,
 					nonce: overrides.nonce ? overrides.nonce(nonce) : nonce,
-					email: overrides.email ?? "Dev@Example.com",
+					email: "Dev@Example.com",
 					...(overrides.workspaceId
 						? { "https://api.openai.com/auth": { chatgpt_account_id: overrides.workspaceId } }
 						: {}),
@@ -129,71 +121,14 @@ describe("OpenAI ChatGPT token-sharing login", () => {
 		await expect(login({ nonce: issued => `${issued}-replayed` })).rejects.toThrow(/nonce/);
 	});
 
-	describe("with a saved account", () => {
-		const saved: OAuthCredentials = {
-			access: "old",
-			refresh: "old-refresh",
-			expires: 0,
-			oauthClientId: "agent_client_1",
-			email: "dev@example.com",
-			accountId: "user-123",
-		};
+	it("rejects a redirect that carries no issued client id", async () => {
+		await expect(login({ redirectClientId: null })).rejects.toThrow(/client ID/);
+	});
 
-		it("re-authorizes the chosen account with its client id instead of registering a new agent", async () => {
-			const { result, requests, authUrl } = await login({ saved: [saved], answer: "1", redirectClientId: null });
+	it("identifies the account by the workspace id when the verified token has one", async () => {
+		const { result } = await login({ workspaceId: "acct_workspace_1" });
 
-			expect(authUrl.searchParams.get("client_id")).toBe("agent_client_1");
-			expect(authUrl.searchParams.get("agent_name_hint")).toBeNull();
-			expect(authUrl.searchParams.get("login_hint")).toBe("dev@example.com");
-			expect(requests.find(request => request.url === TOKEN_URL)?.form.get("client_id")).toBe("agent_client_1");
-			expect(result).toMatchObject({ oauthClientId: "agent_client_1", accountId: "user-123" });
-		});
-
-		it("registers a new agent when the account prompt is left empty", async () => {
-			const { authUrl } = await login({ saved: [saved], answer: "" });
-
-			expect(authUrl.searchParams.get("client_id")).toBe("dynamic_agent_client");
-			expect(authUrl.searchParams.get("agent_name_hint")).toBe("Oh My Pi");
-		});
-
-		it("rejects a callback that swaps the saved account's client", async () => {
-			await expect(login({ saved: [saved], answer: "1", redirectClientId: "agent_client_2" })).rejects.toThrow(
-				/different client/,
-			);
-		});
-
-		it("accepts a saved account whose stored identity is a workspace id, as earlier logins stored it", async () => {
-			const workspaceSaved: OAuthCredentials = { ...saved, accountId: "acct_workspace_1" };
-
-			const { result } = await login({ saved: [workspaceSaved], answer: "1", workspaceId: "acct_workspace_1" });
-
-			expect(result.accountId).toBe("acct_workspace_1");
-		});
-
-		it("rejects a sign-in that landed on another account than the selected one", async () => {
-			await expect(login({ saved: [saved], answer: "1", sub: "someone-else" })).rejects.toThrow(/different account/);
-			await expect(
-				login({
-					saved: [{ ...saved, accountId: "acct_workspace_1" }],
-					answer: "1",
-					workspaceId: "acct_workspace_2",
-				}),
-			).rejects.toThrow(/different account/);
-		});
-
-		it("rejects a sign-in whose email differs even when the stored identity matches", async () => {
-			await expect(login({ saved: [saved], answer: "1", email: "other@example.com" })).rejects.toThrow(
-				/different account/,
-			);
-		});
-
-		it("does not accept a shared workspace id as proof of the account when no email confirms it", async () => {
-			const withoutEmail: OAuthCredentials = { ...saved, accountId: "acct_workspace_1", email: undefined };
-
-			await expect(login({ saved: [withoutEmail], answer: "1", workspaceId: "acct_workspace_1" })).rejects.toThrow(
-				/could not be confirmed/,
-			);
-		});
+		expect(result.accountId).toBe("acct_workspace_1");
 	});
 });
 

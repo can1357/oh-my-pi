@@ -13,8 +13,10 @@ import {
 	getProjectDir,
 	logger,
 	normalizePathForComparison,
+	prompt,
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	discoverAdvisorConfigs,
@@ -70,8 +72,10 @@ import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pi
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
+import type { LoginDialogComponent as LoginDialog } from "@oh-my-pi/pi-tui/overlays/login-dialog";
+import savedAccountsPrompt from "../../prompts/login/saved-accounts.md" with { type: "text" };
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
-import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { matchSessionPinAccounts, toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
@@ -2223,6 +2227,7 @@ export class SelectorController {
 		this.ctx.ui.setFocus(dialog);
 		this.ctx.ui.requestRender();
 		try {
+			if (await this.#switchToSavedAccount(dialog, getOAuthCredentialProvider(providerId))) return true;
 			const identity = await this.ctx.session.modelRegistry.authStorage.oauth.login(providerId as OAuthProvider, {
 				signal: dialog.signal,
 				onBrowserSession: captureBrowserSession,
@@ -2231,7 +2236,7 @@ export class SelectorController {
 					// opens the browser best-effort.
 					dialog.showAuth(info.url, info.instructions, info.launchUrl);
 				},
-				onPrompt: prompt => dialog.showPrompt(prompt),
+				onPrompt: request => dialog.showPrompt(request),
 				onProgress: (message: string) => {
 					dialog.showProgress(message);
 				},
@@ -2274,6 +2279,18 @@ export class SelectorController {
 				),
 			);
 			block.addChild(new Text(theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`), 1, 0));
+			if (identity?.replacedConnections) {
+				block.addChild(
+					new Text(
+						theme.fg(
+							"dim",
+							`Replaced ${identity.replacedConnections} saved connection(s) of the same account. The old app stays listed in ChatGPT settings; remove it there.`,
+						),
+						1,
+						0,
+					),
+				);
+			}
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {
@@ -2287,6 +2304,53 @@ export class SelectorController {
 		} finally {
 			restoreEditor();
 		}
+	}
+
+	/**
+	 * Providers that keep one registration per sign-in (`client-scoped-identity`) list their saved accounts before the
+	 * browser opens: a number pins that account to this session with no sign-in, Enter goes on to a new sign-in.
+	 * Returns true when an account was picked.
+	 */
+	async #switchToSavedAccount(dialog: Pick<LoginDialog, "showPrompt">, provider: string): Promise<boolean> {
+		if (authPolicyFor(provider)?.clientScopedIdentity !== true) return false;
+		const storage = this.ctx.session.modelRegistry.authStorage;
+		const sessionId = this.ctx.session.sessionId;
+		await storage.credentials.reload();
+		const accounts = toSessionPinAccounts(storage.oauth.accounts(provider, sessionId));
+		if (accounts.length === 0) return false;
+		const answer = (
+			await dialog.showPrompt({
+				message: prompt.render(savedAccountsPrompt, {
+					accounts: accounts.map(account => ({
+						number: account.position + 1,
+						label: account.label,
+						active: account.active,
+					})),
+				}),
+				allowEmpty: true,
+			})
+		).trim();
+		if (answer === "") return false;
+		const matches = matchSessionPinAccounts(accounts, answer);
+		const account = matches[0];
+		if (!account || matches.length > 1) {
+			throw new Error(
+				matches.length > 1
+					? `"${answer}" matches several saved accounts; enter the account number.`
+					: `No saved account matches "${answer}".`,
+			);
+		}
+		if (!storage.sessions.pin(provider, sessionId, account.credentialId)) {
+			throw new Error(`${account.label} is no longer available.`);
+		}
+		const block = new TranscriptBlock();
+		block.addChild(
+			new Text(theme.fg("success", `${theme.status.success} Switched this session to ${account.label}`), 1, 0),
+		);
+		this.ctx.present(block);
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
+		return true;
 	}
 
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {

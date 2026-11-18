@@ -12,7 +12,7 @@
  * the ChatGPT subscription instead of an API key.
  */
 import type { webcrypto } from "node:crypto";
-import { getInstallId, isRecord, prompt, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { getInstallId, isRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
 import * as AIError from "../../error";
 import { CHATGPT_TOKEN_SHARING_SCOPE } from "../../providers/openai-chatgpt-sharing";
 import type { FetchImpl } from "../../types";
@@ -20,7 +20,6 @@ import { throwIfCancelled } from "../engine/common";
 import type { LoginHook, RefreshHook } from "../hooks/types";
 import { type CallbackResult, OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
-import accountPrompt from "./prompts/openai-chatgpt-account.md" with { type: "text" };
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const PROVIDER = "openai";
@@ -52,23 +51,17 @@ function stringField(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-/**
- * Authorization URL; exported for regression tests. Without `clientId` it registers a new agent client
- * (`agent_name_hint`); with a saved one it re-authorizes that account, as OpenAI documents.
- */
+/** Authorization URL; exported for regression tests. Every sign-in registers a new agent client (`agent_name_hint`). */
 export function createOpenAIChatGPTAuthorizationUrl(args: {
 	redirectUri: string;
 	state: string;
 	nonce: string;
 	challenge: string;
 	hostId: string;
-	clientId?: string;
-	loginHint?: string;
 }): string {
 	return `${AUTHORIZE_URL}?${new URLSearchParams({
-		client_id: args.clientId ?? REGISTRATION_CLIENT_ID,
-		...(args.clientId ? {} : { agent_name_hint: AGENT_NAME }),
-		...(args.loginHint ? { login_hint: args.loginHint } : {}),
+		client_id: REGISTRATION_CLIENT_ID,
+		agent_name_hint: AGENT_NAME,
 		ext_agent_host_id: args.hostId,
 		response_type: "code",
 		redirect_uri: args.redirectUri,
@@ -206,32 +199,11 @@ class OpenAIChatGPTFlow extends OAuthCallbackFlow {
 	#fetch: FetchImpl;
 	#verifier = "";
 	#nonce = "";
-	/** Saved account being signed in to again; undefined registers a new one. */
-	#saved: OAuthCredentials | undefined;
 
 	constructor(ctrl: OAuthController) {
 		// The agent client is registered per sign-in, so any loopback port is a valid redirect.
 		super(ctrl, { preferredPort: 0, callbackPath: CALLBACK_PATH, callbackHostname: "127.0.0.1" });
 		this.#fetch = ctrl.fetch ?? fetch;
-	}
-
-	/** Asks which saved ChatGPT account to sign in to again (or whether to add a new one). */
-	async selectAccount(): Promise<void> {
-		const saved = (this.ctrl.storedCredentials ?? []).filter(credential => credential.oauthClientId);
-		if (saved.length === 0 || !this.ctrl.onPrompt) return;
-		const accounts = saved.map((credential, index) => ({
-			number: index + 1,
-			label: credential.email ?? "ChatGPT account",
-		}));
-		const answer = (
-			await this.ctrl.onPrompt({ message: prompt.render(accountPrompt, { accounts }), allowEmpty: true })
-		).trim();
-		throwIfCancelled(this.ctrl.signal);
-		if (answer === "") return;
-		this.#saved = saved[Number(answer) - 1];
-		if (!this.#saved) {
-			throw new AIError.OAuthError("Invalid ChatGPT account selection", { kind: "validation", provider: PROVIDER });
-		}
 	}
 
 	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
@@ -246,8 +218,6 @@ class OpenAIChatGPTFlow extends OAuthCallbackFlow {
 				challenge: pkce.challenge,
 				// One host id per omp install, so repeated sign-ins resolve to the same registered host.
 				hostId: `urn:uuid:${getInstallId()}`,
-				clientId: this.#saved?.oauthClientId,
-				loginHint: this.#saved?.email,
 			}),
 			instructions:
 				"Complete login in your browser and allow token sharing. If the browser cannot reach this machine, paste the final redirect URL when prompted.",
@@ -261,15 +231,7 @@ class OpenAIChatGPTFlow extends OAuthCallbackFlow {
 		callback?: CallbackResult,
 	): Promise<OAuthCredentials> {
 		const signal = this.ctrl.signal;
-		const savedClientId = this.#saved?.oauthClientId;
-		// A re-authorization callback may omit the client id, but must never swap it for another one.
-		if (savedClientId && callback?.clientId && callback.clientId !== savedClientId) {
-			throw new AIError.OAuthError("ChatGPT returned a different client than the saved account. Log in again.", {
-				kind: "validation",
-				provider: PROVIDER,
-			});
-		}
-		const clientId = savedClientId ?? callback?.clientId;
+		const clientId = callback?.clientId;
 		if (!clientId) {
 			throw new AIError.OAuthError(
 				"ChatGPT sign-in did not return a client ID. Paste the full redirect URL, or log in again.",
@@ -325,20 +287,6 @@ class OpenAIChatGPTFlow extends OAuthCallbackFlow {
 		)
 			?.trim()
 			.toLowerCase();
-		// A returning sign-in must be the account that was selected, whichever account the browser signed in as. Compare
-		// the identity login stores (workspace id, else subject) and, where both sides know it, the email. A workspace id
-		// is shared by every member, so it cannot tell teammates apart: then the email has to confirm the account.
-		if (this.#saved) {
-			const emailsKnown = Boolean(email && this.#saved.email);
-			const sameAccount = accountId === this.#saved.accountId;
-			const sameEmail = !emailsKnown || email === this.#saved.email;
-			if (!sameAccount || !sameEmail || (workspaceId !== undefined && !emailsKnown)) {
-				throw new AIError.OAuthError(
-					"ChatGPT signed in a different account than the one selected, or it could not be confirmed. Choose that account again, or add a new one.",
-					{ kind: "validation", provider: PROVIDER },
-				);
-			}
-		}
 		return {
 			access,
 			refresh,
@@ -352,11 +300,7 @@ class OpenAIChatGPTFlow extends OAuthCallbackFlow {
 }
 
 /** `login "custom" hook="openai-chatgpt"`. */
-export const loginOpenAIChatGPTHook: LoginHook = async ctrl => {
-	const flow = new OpenAIChatGPTFlow(ctrl);
-	await flow.selectAccount();
-	return flow.login();
-};
+export const loginOpenAIChatGPTHook: LoginHook = ctrl => new OpenAIChatGPTFlow(ctrl).login();
 
 /** `refresh hook="openai-chatgpt-refresh"`: replays the client id registered at login. */
 export const refreshOpenAIChatGPTHook: RefreshHook = async (credentials, signal) => {

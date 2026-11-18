@@ -22,6 +22,7 @@
 - `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - `/login` lists "OpenAI (Sign in with ChatGPT)": sign in with your ChatGPT account to run OpenAI models on its subscription through the regular OpenAI API instead of an API key; omp registers as an agent and asks you to allow token sharing ([#19686](https://github.com/can1357/oh-my-pi/pull/19686) by [@xeonise](https://github.com/xeonise))
+- `/login` for "OpenAI (Sign in with ChatGPT)" lists your saved ChatGPT accounts first: a number switches the session to that account with no sign-in, Enter signs in again, and signing in as an account that is already saved replaces its old connection instead of adding a second one ([#19686](https://github.com/can1357/oh-my-pi/pull/19686) by [@xeonise](https://github.com/xeonise))
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 
 ### Changed

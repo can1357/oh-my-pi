@@ -122,8 +122,6 @@ export interface OAuthController {
 	onBrowserSession?(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
-	/** OAuth credentials already stored for this provider, for logins that re-authorize one of them. */
-	storedCredentials?: readonly OAuthCredentials[];
 }
 
 export interface OAuthLoginCallbacks extends OAuthController {

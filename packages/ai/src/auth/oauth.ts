@@ -1,3 +1,4 @@
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "../registry";
@@ -99,9 +100,6 @@ export class OAuthAccounts implements OAuthApi {
 			onBrowserSession: ctrl.onBrowserSession,
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
-			storedCredentials: this.#deps.pool
-				.list(def.storeCredentialsAs ?? provider)
-				.flatMap(row => (row.credential.type === "oauth" ? [row.credential] : [])),
 		});
 		if (typeof result === "string") {
 			// Some flows (e.g. ollama) return "" to signal that no key was entered.
@@ -123,14 +121,41 @@ export class OAuthAccounts implements OAuthApi {
 		// Use pool.upsertOAuth to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#deps.pool.upsertOAuth(def.storeCredentialsAs ?? provider, newCredential);
+		const storageProvider = def.storeCredentialsAs ?? provider;
+		await this.#deps.pool.upsertOAuth(storageProvider, newCredential);
+		const replaced = await this.#supersedeSameAccount(storageProvider, newCredential);
 		return {
 			type: "oauth",
 			email: newCredential.email,
 			accountId: newCredential.accountId,
 			orgId: newCredential.orgId,
 			orgName: newCredential.orgName,
+			...(replaced > 0 ? { replacedConnections: replaced } : {}),
 		};
+	}
+
+	/**
+	 * A client-scoped provider (`client-scoped-identity`) keeps one row per issued client, so signing in again as an
+	 * account that is already saved would leave both registrations in the pool and count one allowance twice. The fresh
+	 * registration supersedes the saved rows of the same account (same account id and email); other accounts and rows
+	 * without a client id stay. Returns how many rows were replaced.
+	 */
+	async #supersedeSameAccount(provider: string, fresh: OAuthCredential): Promise<number> {
+		// A workspace id is shared by every member, so without the email nothing tells teammates apart.
+		if (authPolicyFor(provider)?.clientScopedIdentity !== true || !fresh.oauthClientId || !fresh.email) return 0;
+		const stale = this.#deps.pool
+			.entries(provider)
+			.filter(({ credential: saved }) => {
+				if (saved.type !== "oauth" || !saved.oauthClientId || saved.oauthClientId === fresh.oauthClientId)
+					return false;
+				return saved.accountId === fresh.accountId && saved.email === fresh.email;
+			})
+			.map(entry => entry.id);
+		let replaced = 0;
+		for (const id of stale) {
+			if (await this.#deps.pool.removeById(provider, id)) replaced += 1;
+		}
+		return replaced;
 	}
 
 	/**

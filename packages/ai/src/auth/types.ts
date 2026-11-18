@@ -585,6 +585,8 @@ export interface OAuthLoginIdentity {
 	accountId?: string;
 	orgId?: string;
 	orgName?: string;
+	/** Saved connections of the same account that this sign-in superseded (providers with client-scoped identity). */
+	replacedConnections?: number;
 }
 
 /** Failure while resolving access to one OAuth account. */
