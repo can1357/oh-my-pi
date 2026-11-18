@@ -15,7 +15,7 @@
  */
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage, AgentTool, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, ToolTier } from "@oh-my-pi/pi-agent-core";
 import {
 	type Answer,
 	type JudgeOptions,
@@ -174,7 +174,7 @@ export interface ToolGuardHost {
 	 */
 	hostPressure?(): Promise<HostPressure | undefined>;
 	/** Judges the call against the session's TTSR gate rules. */
-	gate?(tool: AgentTool, args: unknown, toolCallId: string, signal?: AbortSignal): Promise<GateVerdict>;
+	gate?(call: ToolGuardCall, signal?: AbortSignal): Promise<GateVerdict>;
 }
 
 /** What a session's TTSR gate rules made of one tool call. */
@@ -587,7 +587,7 @@ export class ToolGuard {
 			this.#endedBy = undefined;
 		}
 		// Rule gates never consult the judge breaker below: a failing judge must not open them.
-		const gate = await this.#host.gate?.(tool, args, toolCall.toolCallId, signal);
+		const gate = await this.#host.gate?.(toolCall, signal);
 		if (gate?.refusal !== undefined) {
 			logger.warn("tool guard: a rule gate refused a call", { tool: tool.name });
 			return this.#refused(toolCall.toolCallId, gate.refusal);

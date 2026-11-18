@@ -14,9 +14,10 @@ import {
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
-import { logger, prompt, relativePathWithinRoot, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, relativePathWithinRoot, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
+import type { ToolGuardCall } from "../extensibility/extensions/runner";
 import {
 	JUDGED_RULE_THRESHOLD,
 	judgeRuleProbabilities,
@@ -60,6 +61,9 @@ interface TtsrContinueOptions {
 	onSkip?: (reason: TtsrContinueSkipReason) => void;
 	onError?: () => void;
 }
+
+/** What a gate judges of one call: its tool, arguments and id, and the name the model called it by. */
+export type GatedCall = Pick<ToolGuardCall, "toolCallId" | "tool" | "args" | "name">;
 
 /** Capabilities the TTSR coordinator borrows from its owning session. */
 export interface TtsrCoordinatorHost {
@@ -632,15 +636,21 @@ export class TtsrCoordinator {
 
 	/**
 	 * Judges a call against `gate: before` rules before it runs: the refusal shown in place of its
-	 * result, or none to run it, and whether any gate rule covered the call at all. When the judge is
-	 * off, fails, outlasts `ttsr.gateTimeoutMs`, answers no number or can read only part of the call,
-	 * each rule's `onJudgeError` decides. Rejects when `signal` aborts the wait: an aborted call is
+	 * result, or none to run it, and whether any gate rule covered the call at all. The call keeps the
+	 * name the model called the tool by, which rule scopes name. When the judge is off, fails,
+	 * outlasts `ttsr.gateTimeoutMs`, answers no number or can read only part of the call, each rule's
+	 * `onJudgeError` decides. Rejects when `signal` aborts the gate at any point: an aborted call is
 	 * neither refused nor run.
 	 */
-	async gateToolCall(tool: AgentTool, args: unknown, toolCallId: string, signal?: AbortSignal): Promise<GateVerdict> {
+	async gateToolCall(call: GatedCall, signal?: AbortSignal): Promise<GateVerdict> {
 		const manager = this.#manager;
 		if (!manager?.hasGateRules()) return { covered: false };
-		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: call.toolCallId,
+			name: call.name ?? call.tool.name,
+			arguments: isRecord(call.args) ? call.args : {},
+		};
 		const settings = this.#host.settings;
 		// Read from the operator layers only; a project layer does not set the gate's wait.
 		const timeout = AbortSignal.timeout(gateTimeoutMs(settings.grantAuthority?.() ?? settings));
@@ -648,6 +658,9 @@ export class TtsrCoordinator {
 		const verdicts = await Promise.all(
 			this.#inspector.gateOutputs(toolCall).map(output => this.#gateOutput(manager, output, signal, deadline)),
 		);
+		// Prefiltering or a judge-less rule settles without waiting on the signal: an abort in
+		// between still rejects.
+		signal?.throwIfAborted();
 		const covered = verdicts.some(verdict => verdict !== undefined);
 		const refused = verdicts.find(verdict => verdict?.rule !== undefined);
 		if (!refused?.rule) return { covered };
@@ -677,7 +690,7 @@ export class TtsrCoordinator {
 		signal: AbortSignal | undefined,
 		deadline: AbortSignal,
 	): Promise<{ output: TtsrOutput; rule?: Rule; unjudged?: boolean; truncated?: boolean } | undefined> {
-		const candidates = await manager.gateCandidates(output.content, output.context);
+		const candidates = await untilAborted(signal, () => manager.gateCandidates(output.content, output.context));
 		if (candidates.length === 0) return undefined;
 		const judge = this.#host.ruleJudge();
 		let judged: RuleProbabilities | undefined;

@@ -86,7 +86,7 @@ function guardOver(coordinator: TtsrCoordinator, settings: Settings, stops: stri
 		stop: reason => {
 			stops.push(reason);
 		},
-		gate: (tool, args, toolCallId, signal) => coordinator.gateToolCall(tool, args, toolCallId, signal),
+		gate: (call, signal) => coordinator.gateToolCall(call, signal),
 	});
 }
 
@@ -99,7 +99,7 @@ describe("TTSR gate rules", () => {
 		const { judge, requests } = fakeJudge({ [DELETES]: 0.9 });
 		const { coordinator } = setup([gateRule("no-rm", {})], judge, Settings.isolated());
 
-		const { refusal } = await coordinator.gateToolCall(bash, RM, "call-1");
+		const { refusal } = await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" });
 
 		expect(refusal).toContain("no-rm guidance");
 		expect(requests).toHaveLength(1);
@@ -110,7 +110,7 @@ describe("TTSR gate rules", () => {
 		const { judge, requests } = fakeJudge({ [DELETES]: 0.69 });
 		const { coordinator } = setup([gateRule("no-rm", {})], judge, Settings.isolated());
 
-		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toEqual({ covered: true });
+		expect(await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).toEqual({ covered: true });
 		expect(requests).toHaveLength(1);
 	});
 
@@ -120,8 +120,12 @@ describe("TTSR gate rules", () => {
 		const allowing = setup([gateRule("no-rm", {})], stuckJudge, settings);
 
 		const started = Date.now();
-		const { refusal } = await blocking.coordinator.gateToolCall(bash, RM, "call-1");
-		const { refusal: allowed } = await allowing.coordinator.gateToolCall(bash, RM, "call-2");
+		const { refusal } = await blocking.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" });
+		const { refusal: allowed } = await allowing.coordinator.gateToolCall({
+			tool: bash,
+			args: RM,
+			toolCallId: "call-2",
+		});
 
 		expect(Date.now() - started).toBeLessThan(2_000);
 		expect(refusal).toContain("no-rm guidance");
@@ -134,7 +138,7 @@ describe("TTSR gate rules", () => {
 		// A project value can hide an invalid operator value from load-time validation.
 		vi.spyOn(cfgTtsrGateTimeoutMs, "get").mockReturnValue(-5);
 
-		const { refusal } = await coordinator.gateToolCall(bash, RM, "call-1");
+		const { refusal } = await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" });
 
 		expect(refusal).toContain("no-rm guidance");
 		expect(requests).toHaveLength(1);
@@ -144,16 +148,24 @@ describe("TTSR gate rules", () => {
 		const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], failingJudge, Settings.isolated());
 		const allowing = setup([gateRule("no-rm", {})], failingJudge, Settings.isolated());
 
-		expect((await blocking.coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
-		expect((await allowing.coordinator.gateToolCall(bash, RM, "call-2")).refusal).toBeUndefined();
+		expect(
+			(await blocking.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).refusal,
+		).toContain("no-rm guidance");
+		expect(
+			(await allowing.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-2" })).refusal,
+		).toBeUndefined();
 	});
 
 	it("[gate-05] with judged rules off, onJudgeError block refuses and allow runs", async () => {
 		const blocking = setup([gateRule("no-rm", { onJudgeError: "block" })], undefined, Settings.isolated());
 		const allowing = setup([gateRule("no-rm", { onJudgeError: "allow" })], undefined, Settings.isolated());
 
-		expect((await blocking.coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
-		expect((await allowing.coordinator.gateToolCall(bash, RM, "call-2")).refusal).toBeUndefined();
+		expect(
+			(await blocking.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).refusal,
+		).toContain("no-rm guidance");
+		expect(
+			(await allowing.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-2" })).refusal,
+		).toBeUndefined();
 	});
 
 	it("[gate-08] never judges a gate rule after the output completes", async () => {
@@ -176,8 +188,12 @@ describe("TTSR gate rules", () => {
 		const { judge, requests } = fakeJudge({ [DELETES]: 0.9 });
 		const { coordinator } = setup([gateRule("no-rm", { repeatMode: "once" })], judge, Settings.isolated());
 
-		expect((await coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
-		expect((await coordinator.gateToolCall(bash, RM, "call-2")).refusal).toContain("no-rm guidance");
+		expect((await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).refusal).toContain(
+			"no-rm guidance",
+		);
+		expect((await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-2" })).refusal).toContain(
+			"no-rm guidance",
+		);
 		expect(requests).toHaveLength(2);
 	});
 
@@ -207,7 +223,9 @@ describe("TTSR gate rules", () => {
 		await coordinator.settleJudgments();
 		expect(requests).toHaveLength(0);
 
-		expect((await coordinator.gateToolCall(bash, RM, "call-1")).refusal).toContain("no-rm guidance");
+		expect((await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).refusal).toContain(
+			"no-rm guidance",
+		);
 		expect(requests).toHaveLength(1);
 	});
 
@@ -277,11 +295,40 @@ describe("TTSR gate rules", () => {
 		expect(stops).toEqual([]);
 	});
 
+	it.each([
+		{ found: "a blocking rule", tool: "bash", stuck: false },
+		{ found: "no rule", tool: "edit", stuck: false },
+		{ found: "nothing yet", tool: "bash", stuck: true },
+	])("[gate-23] neither refuses nor runs a call aborted while prefiltering finds $found", async ({ tool, stuck }) => {
+		const settings = Settings.isolated();
+		const rule = gateRule("no-rm", { onJudgeError: "block", scope: [`tool:${tool}`] });
+		const { coordinator, manager, events } = setup([rule], undefined, settings);
+		const controller = new AbortController();
+		const prefilter = manager.gateCandidates.bind(manager);
+		vi.spyOn(manager, "gateCandidates").mockImplementation(async (content, context) => {
+			controller.abort();
+			return stuck ? Promise.withResolvers<never>().promise : prefilter(content, context);
+		});
+
+		const checked = guardOver(coordinator, settings).check(
+			{ toolCallId: "call-1", tool: bash, args: RM, tier: "exec" },
+			controller.signal,
+		);
+
+		expect(
+			await checked.then(
+				() => "settled",
+				() => "rejected",
+			),
+		).toBe("rejected");
+		expect(events.filter(event => event.type === "ttsr_triggered")).toHaveLength(0);
+	});
+
 	it("[gate-14] refuses through the tool wrapper without running the tool", async () => {
 		const { judge } = fakeJudge({ [DELETES]: 0.9 });
 		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
 		const { coordinator } = setup([gateRule("no-rm", {})], judge, settings);
-		const { refusal: expected } = await coordinator.gateToolCall(bash, RM, "call-1");
+		const { refusal: expected } = await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" });
 		const runner = new ExtensionRunner(
 			[],
 			new ExtensionRuntime(),
@@ -381,6 +428,34 @@ describe("TTSR gate rules", () => {
 		expect(stops).toEqual(["The tool guard refused 3 tool calls in a row; the run stopped."]);
 	});
 
+	it("[gate-22] judges a call under the wire name it arrived by, as rule scopes name it", async () => {
+		const { judge } = fakeJudge({ [DELETES]: 0.9 });
+		const settings = Settings.isolated({ "tools.approvalMode": "yolo" });
+		const { coordinator } = setup([gateRule("no-rm-patch", { scope: ["tool:apply_patch"] })], judge, settings);
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			"/work",
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		runner.setToolGuard(guardOver(coordinator, settings));
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+		const patcher = { ...bash, name: "edit", customWireName: "apply_patch", approval: "write", execute } as AgentTool;
+		const wrapped = new ExtensionToolWrapper(patcher, runner) as ExtensionToolWrapper<any>;
+		const toolCall = { batchId: "batch-1", index: 0, total: 1, toolCalls: [{ id: "call-1", name: "apply_patch" }] };
+
+		const error = await wrapped
+			.execute("call-1", RM, undefined, undefined, { settings, toolCall } as AgentToolContext)
+			.then(
+				() => undefined,
+				(err: unknown) => err,
+			);
+
+		expect((error as Error).message).toContain("no-rm-patch guidance");
+		expect(execute).not.toHaveBeenCalled();
+	});
+
 	it("[gate-18] judges the whole edit call, so a file it deletes beside an added line cannot slip past", async () => {
 		const edit = applyPatchTool();
 		const DELETES_FILE = "Does this call delete a file?";
@@ -392,11 +467,11 @@ describe("TTSR gate rules", () => {
 		});
 		const { coordinator } = setup([rule], contentJudge("Delete File: secrets.env"), Settings.isolated(), [edit]);
 
-		const { refusal } = await coordinator.gateToolCall(
-			edit,
-			patchAddingLineAnd("*** Delete File: secrets.env"),
-			"call-1",
-		);
+		const { refusal } = await coordinator.gateToolCall({
+			tool: edit,
+			args: patchAddingLineAnd("*** Delete File: secrets.env"),
+			toolCallId: "call-1",
+		});
 
 		expect(refusal).toContain("no-delete guidance");
 	});
@@ -415,7 +490,11 @@ describe("TTSR gate rules", () => {
 		});
 		const { coordinator } = setup([rule], contentJudge("secrets.env"), Settings.isolated(), [edit]);
 
-		const verdict = await coordinator.gateToolCall(edit, patchAddingLineAnd(...sections), "call-1");
+		const verdict = await coordinator.gateToolCall({
+			tool: edit,
+			args: patchAddingLineAnd(...sections),
+			toolCallId: "call-1",
+		});
 
 		expect(verdict.covered).toBe(true);
 		expect(verdict.refusal).toContain("env-files guidance");
@@ -427,9 +506,15 @@ describe("TTSR gate rules", () => {
 		const allowing = setup([gateRule("no-rm", {})], judge, Settings.isolated());
 		const padded = { command: `cat <<'EOF' >/dev/null\n${"filler ".repeat(40_000)}EOF\nrm -rf /srv/data` };
 
-		expect((await blocking.coordinator.gateToolCall(bash, padded, "call-1")).refusal).toContain("no-rm guidance");
-		expect((await allowing.coordinator.gateToolCall(bash, padded, "call-2")).refusal).toBeUndefined();
-		expect((await blocking.coordinator.gateToolCall(bash, RM, "call-3")).refusal).toBeUndefined();
+		expect(
+			(await blocking.coordinator.gateToolCall({ tool: bash, args: padded, toolCallId: "call-1" })).refusal,
+		).toContain("no-rm guidance");
+		expect(
+			(await allowing.coordinator.gateToolCall({ tool: bash, args: padded, toolCallId: "call-2" })).refusal,
+		).toBeUndefined();
+		expect(
+			(await blocking.coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-3" })).refusal,
+		).toBeUndefined();
 	});
 
 	it("asks nothing and runs a call outside the gate's scope, globs or prefilter", async () => {
@@ -444,7 +529,9 @@ describe("TTSR gate rules", () => {
 			Settings.isolated(),
 		);
 
-		expect(await coordinator.gateToolCall(bash, RM, "call-1")).toEqual({ covered: false });
+		expect(await coordinator.gateToolCall({ tool: bash, args: RM, toolCallId: "call-1" })).toEqual({
+			covered: false,
+		});
 		expect(requests).toHaveLength(0);
 	});
 

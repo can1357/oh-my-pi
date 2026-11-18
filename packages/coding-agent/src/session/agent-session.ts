@@ -2774,7 +2774,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				stop: reason => {
 					void this.abort({ reason });
 				},
-				gate: (tool, args, toolCallId, signal) => this.#ttsr.gateToolCall(tool, args, toolCallId, signal),
+				gate: (call, signal) => this.#ttsr.gateToolCall(call, signal),
 			}),
 		);
 		this.agent.setOnBeforeYield(() => this.#ttsr.settleJudgments());

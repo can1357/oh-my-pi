@@ -155,6 +155,8 @@ export interface ToolGuardCall {
 	tier: ToolTier;
 	/** The user approved this call in a prompt. */
 	prompted?: boolean;
+	/** The name the model called the tool by: its custom wire name (`apply_patch`) when it used that; else `tool.name`. */
+	name?: string;
 }
 
 /**

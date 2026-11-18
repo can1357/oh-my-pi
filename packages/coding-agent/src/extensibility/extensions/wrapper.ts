@@ -513,6 +513,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// 3. The tool guard: rule gates judge every call; its harm judge screens only calls the approval
 		// gate let through on its own, since a call the user just approved in a prompt was asked for.
 		// An abort while a gate waits on its judge rejects: the call neither runs nor counts as refused.
+		// The model's name for the call, which rule scopes match: a custom wire name (`apply_patch`) when it used one.
+		const batchCall = context?.toolCall?.toolCalls[context.toolCall.index];
+		const calledName =
+			batchCall?.id === toolCallId && batchCall.name === this.tool.customWireName ? batchCall.name : this.tool.name;
 		let refusal: string | undefined;
 		try {
 			refusal = await this.runner.runToolGuard?.(
@@ -522,6 +526,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					args: resolvedArgs,
 					tier: resolved.tier,
 					prompted: approvalCheck.required,
+					name: calledName,
 				},
 				signal,
 			);
