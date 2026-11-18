@@ -37,6 +37,7 @@ import {
 import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
+import { isQuotaNoticePrefix, quotaError, quotaErrorFromText } from "./quota";
 import type { StepWriter } from "./step-writer";
 
 const AGENT_NAME = "bridge";
@@ -163,6 +164,7 @@ export class AgyHost implements ProviderSessionState {
 	readonly #turns = new Set<Turn>();
 	#loading: object | undefined;
 	#contextTokens = 0;
+	#noticeBuffer: { text: string; writer: StepWriter } | undefined;
 	#announced = new Map<string, number>();
 	#announcementWaiters = new Set<{ name: string; finish(announced: boolean): void }>();
 
@@ -650,6 +652,15 @@ export class AgyHost implements ProviderSessionState {
 			if (this.#process === agy) this.#fail(new Error("Antigravity CLI requested a tool outside the active step"));
 			return errorOutput("Tool call rejected; no execution occurred.");
 		}
+		const quota =
+			quotaError(step.writer.output) ??
+			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer.text) : undefined);
+		if (quota) {
+			this.#noticeBuffer = undefined;
+			this.#fail(quota);
+			return errorOutput(quota.message);
+		}
+		this.#flushNotice();
 		const validation = validateJsonSchemaValue(tool.inputSchema, args);
 		if (!validation.success) return errorOutput(describeToolArguments(tool, args, validation));
 		if (!isRecord(args)) return errorOutput(describeToolArguments(tool, args));
@@ -691,6 +702,34 @@ export class AgyHost implements ProviderSessionState {
 		return result.promise;
 	}
 
+	/** Hold text that may be the official quota notice until the turn is classified. */
+	#bufferNotice(text: string, writer: StepWriter | undefined): void {
+		if (!writer || writer.done) return;
+		if (this.#noticeBuffer !== undefined) {
+			if (this.#noticeBuffer.writer !== writer) {
+				this.#noticeBuffer = undefined;
+			} else {
+				this.#noticeBuffer.text += text;
+				if (isQuotaNoticePrefix(this.#noticeBuffer.text)) return;
+				writer.text(this.#noticeBuffer.text);
+				this.#noticeBuffer = undefined;
+				return;
+			}
+		}
+		if (isQuotaNoticePrefix(text)) {
+			this.#noticeBuffer = { text, writer };
+			return;
+		}
+		writer.text(text);
+	}
+
+	#flushNotice(): void {
+		const buffered = this.#noticeBuffer;
+		if (buffered === undefined) return;
+		this.#noticeBuffer = undefined;
+		buffered.writer.text(buffered.text);
+	}
+
 	#onUpdate(notification: SessionNotification): void {
 		if (this.#loading || !this.#turn || notification.sessionId !== this.#conversation?.id || this.#turn.cancelling)
 			return;
@@ -698,10 +737,13 @@ export class AgyHost implements ProviderSessionState {
 		const writer = this.#step?.aborted ? undefined : this.#step?.writer;
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
-				if (update.content.type === "text") writer?.text(update.content.text);
+				if (update.content.type === "text") this.#bufferNotice(update.content.text, writer);
 				return;
 			case "agent_thought_chunk":
-				if (update.content.type === "text") writer?.thinking(update.content.text);
+				if (update.content.type === "text") {
+					this.#flushNotice();
+					writer?.thinking(update.content.text);
+				}
 				return;
 			case "usage_update":
 				this.#contextTokens = update.used;
@@ -730,6 +772,15 @@ export class AgyHost implements ProviderSessionState {
 			return;
 		}
 		const writer = step.writer;
+		const quota =
+			quotaError(writer.output) ??
+			(this.#noticeBuffer !== undefined ? quotaErrorFromText(this.#noticeBuffer.text) : undefined);
+		if (quota) {
+			this.#noticeBuffer = undefined;
+			this.#fail(quota);
+			return;
+		}
+		this.#flushNotice();
 		if (
 			!writer.output.content.some(
 				block => (block.type === "text" && block.text.trim().length > 0) || block.type === "toolCall",
@@ -759,6 +810,7 @@ export class AgyHost implements ProviderSessionState {
 	}
 
 	#fail(error: unknown): void {
+		this.#noticeBuffer = undefined;
 		this.#ledger = undefined;
 		const step = this.#step;
 		if (step) {

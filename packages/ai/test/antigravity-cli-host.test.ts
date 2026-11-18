@@ -21,6 +21,8 @@ import type { AssistantMessage, Context, Message, Tool, ToolResultMessage } from
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ContentBlock, PromptRequest, PromptResponse, SessionConfigOption } from "@oh-my-pi/pi-utils/acp";
+import { matchesUsageLimitText } from "../src/error";
+import { extractProviderRetryHint } from "../src/utils/retry-after";
 
 const model = buildModel({
 	api: "antigravity-acp",
@@ -299,6 +301,101 @@ describe("AgyHost stateful steps", () => {
 			additionalProperties: false,
 			properties: { data: { anyOf: [{ type: "object" }, { type: "string" }] } },
 		});
+	});
+	it("delivers text that only resembles the quota notice prefix", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Usage Limit Reached");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done;
+		expect(run.writer.output.content).toEqual([{ type: "text", text: "Usage Limit Reached" }]);
+	});
+
+	it("drops a late text chunk between steps", async () => {
+		const state = await parked();
+		state.fake.text("Usage");
+		const second = step(state.host, [...state.messages, result(state.first.writer.output)]);
+		await state.output;
+		state.fake.text("Next file.");
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		await second.done;
+		const text = second.writer.output.content.find(block => block.type === "text");
+		expect(text).toMatchObject({ type: "text", text: "Next file." });
+	});
+
+	it("keeps streamed normal text when a quota notice ends the turn", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Working on it.");
+		fake.text(
+			"Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.",
+		);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const failure = await run.done.then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		expect(failure).toBeInstanceOf(Error);
+		expect(failure instanceof Error ? failure.message : "").toMatch(/quota exceeded/);
+		const text = run.writer.output.content.find(block => block.type === "text");
+		expect(text).toMatchObject({ type: "text", text: "Working on it." });
+	});
+
+	it("does not stream the quota notice before failing", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text("Usage Limit Reached");
+		fake.text("\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.");
+		prompt.response.resolve({ stopReason: "end_turn" });
+		await run.done.catch(() => undefined);
+		expect(run.writer.output.content).toEqual([]);
+		expect(run.stream.queue.some(event => event.type === "text_delta" && event.delta.includes("Usage Limit"))).toBe(
+			false,
+		);
+	});
+
+	it("fails a turn that ends with the official quota notice", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("hello")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.text(
+			"Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.",
+		);
+		prompt.response.resolve({ stopReason: "end_turn" });
+		const error = await run.done.catch(reason => reason);
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(message).toMatch(/quota exceeded.*reset at/);
+		expect(extractProviderRetryHint("antigravity-cli", message)).toBeGreaterThan(0);
+		expect(matchesUsageLimitText(message)).toBe(true);
+		expect(run.writer.output.content.some(block => block.type === "text")).toBe(false);
+		expect(fake.closed).toBe(true);
+	});
+	it("rejects a tool call after the official quota notice", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("read")]);
+		const fake = await state.started.next();
+		await fake.prompts.next();
+		fake.text(
+			"Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 2 hours.",
+		);
+		const output = await fake.call("read", { path: "a" }, fake.currentId);
+		expect(output.isError).toBe(true);
+		expect(textOf(output.content)).toContain("quota exceeded");
+		const error = await run.done.catch(reason => reason);
+		expect(error).toBeInstanceOf(Error);
+		const message = (error as Error).message;
+		expect(extractProviderRetryHint("antigravity-cli", message)).toBeGreaterThan(0);
+		expect(run.writer.output.content.some(block => block.type === "text")).toBe(false);
+		expect(run.writer.output.content.some(block => block.type === "toolCall")).toBe(false);
+		expect(fake.closed).toBe(true);
 	});
 	it("parks and resumes multiple serial tool steps under exactly one ACP prompt", async () => {
 		const state = await parked();
