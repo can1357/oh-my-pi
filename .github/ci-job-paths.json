@@ -5,7 +5,7 @@
     "remote": ["scripts/remote-verify.sh", "scripts/remote-verify-runner.sh", ".github/actions/buildbuddy-*/**"],
     "mac_native": [".github/workflows/macos-verification.yml", ".github/actions/macos-*/**", "scripts/ci-macos-objective.sh", "scripts/ssh-loopback-fixture.sh", "scripts/check-python-examples.py"],
     "mac_controls": [".github/workflows/ci.yml", ".github/workflows/macos-verification.yml", ".github/actions/macos-*/**", "scripts/macos_*.py", "scripts/ci-macos-objective.sh"],
-    "policy": ["AGENTS.md", ".claude/**", "*.md", ".github/workflows/**", ".github/rulesets/**", ".github/ci-paths.txt", ".github/ci-rust-paths.txt", ".github/labeler.yml", ".github/dependabot.yml", "scripts/macos_*.py", "scripts/test_*.py", "scripts/check-ci-paths.py", "scripts/check-editing-discipline.py"],
+    "policy": ["AGENTS.md", ".claude/**", "*.md", ".github/workflows/**", ".github/rulesets/**", ".github/ci-paths.txt", ".github/ci-rust-paths.txt", ".github/labeler.yml", ".github/dependabot.yml", "scripts/macos_*.py", "scripts/test_*.py", "scripts/package_macos_evidence.py", "scripts/check-ci-paths.py", "scripts/check-editing-discipline.py"],
     "perf_core": [".cargo/**", ".config/**", "Cargo.toml", "Cargo.lock", "**/Cargo.toml", "rust-toolchain.toml", "crates/**", "examples/**", "fixtures/**", "justfile"]
   },
   "workflows": {

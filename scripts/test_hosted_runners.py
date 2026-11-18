@@ -72,7 +72,7 @@ class HostedRunnerPolicy(unittest.TestCase):
 
     def test_manual_package_uses_the_hosted_mac_and_keeps_its_buildbuddy_cache(self):
         package = (ROOT / ".github/workflows/package-macos.yml").read_text()
-        self.assertEqual(dict(CI_PATHS.runs_on(package.splitlines())), {"package": "macos-15"})
+        self.assertEqual(dict(CI_PATHS.runs_on(package.splitlines())), {"package": "macos-15", "publish": "ubuntu-24.04"})
         self.assertIn("secrets.BUILDBUDDY_ORG_API_KEY", package)
         self.assertIn("sccache + BuildBuddy GCS cache active", package)
 
