@@ -21,6 +21,7 @@
 
 - In Tern, a "Background job output" notice shows the job's output lines beneath one header, in full, instead of one info-icon row per line cut at 110 columns
 - In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+- Web search results without a synthesized answer (e.g. Parallel) list each source once with a short cleaned excerpt instead of rendering the model-facing numbered listing as markdown
 - Fixed long tool-approval prompts in Tern growing past the window and pushing the choices and Approve/Deny buttons off screen; the details now scroll within a few rows, as in the terminal view ([#19617](https://github.com/can1357/oh-my-pi/pull/19617) by [@c-w-z](https://github.com/c-w-z))
 - Table charts read `402.7 → 13.3 µs` with the unit on both sides; the change factor was off by the unit's scale (30,278,195× instead of 30×)
 - Enter on a checkbox group with nothing checked checks the focused box before moving on

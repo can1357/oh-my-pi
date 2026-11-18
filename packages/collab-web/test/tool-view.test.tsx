@@ -308,3 +308,29 @@ describe("ToolView ask renderer", () => {
 		expect(html).toContain("at least one named control");
 	});
 });
+
+describe("ToolView web_search renderer", () => {
+	it("shows each source's cleaned excerpt instead of the numbered listing when there is no answer", () => {
+		const html = renderToStaticMarkup(
+			<ToolView
+				name="web_search"
+				defaultOpen
+				args={{ query: "bun expect" }}
+				result={{
+					content: [{ type: "text", text: "[1] Src One\n    https://example.com/a\n    LISTING_ONLY_MARKER" }],
+					details: {
+						response: {
+							provider: "parallel",
+							sources: [
+								{ title: "Src One", url: "https://example.com/a", snippet: "\n  first\t excerpt\n```\nsecond" },
+							],
+						},
+					},
+				}}
+			/>,
+		);
+
+		expect(html).not.toContain("LISTING_ONLY_MARKER");
+		expect(html).toContain('<span class="tv-excerpt">first excerpt</span><span class="tv-excerpt">second</span>');
+	});
+});
