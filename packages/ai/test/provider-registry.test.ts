@@ -67,8 +67,9 @@ describe("provider registry auth surface", () => {
 		expect(ids).toContain("exa");
 		expect(ids).toContain("umans");
 		expect(ids).toContain("llama.cpp");
-		// openai has no interactive login flow.
-		expect(ids).not.toContain("openai");
+		// openai signs in with ChatGPT; groq is env-only and has no interactive login flow.
+		expect(ids).toContain("openai");
+		expect(ids).not.toContain("groq");
 	});
 
 	test("paste-code login set is derived from pasteCodeFlow", () => {

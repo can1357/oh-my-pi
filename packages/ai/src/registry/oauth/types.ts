@@ -42,6 +42,12 @@ export type OAuthCredentials = {
 	/** Kiro profile ARN the login routes by; absent for Builder ID. Embeds the AWS account id, so never displayed. */
 	kiroProfileArn?: string;
 	/**
+	 * OAuth client the grant was issued to, for providers that register a client per
+	 * sign-in (OpenAI ChatGPT token sharing). Refresh must replay it; a row without it
+	 * cannot refresh and needs a new login.
+	 */
+	oauthClientId?: string;
+	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an
 	 * absolute grant lifetime (Anthropic expires the whole refresh-token
@@ -116,6 +122,8 @@ export interface OAuthController {
 	onBrowserSession?(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
+	/** OAuth credentials already stored for this provider, for logins that re-authorize one of them. */
+	storedCredentials?: readonly OAuthCredentials[];
 }
 
 export interface OAuthLoginCallbacks extends OAuthController {

@@ -54,7 +54,7 @@ export function decodeJwt<T = Record<string, unknown>>(token: string): T | null 
  * from — one account email can hold several (e.g. a personal Pro plan plus a
  * Team seat). `chatgpt_plan_type` may only be present on the `id_token`.
  */
-function getTokenProfile(
+export function getTokenProfile(
 	accessToken: string,
 	idToken?: string,
 ): { accountId?: string; email?: string; planType?: string } {

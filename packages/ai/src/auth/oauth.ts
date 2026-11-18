@@ -99,6 +99,9 @@ export class OAuthAccounts implements OAuthApi {
 			onBrowserSession: ctrl.onBrowserSession,
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
+			storedCredentials: this.#deps.pool
+				.list(def.storeCredentialsAs ?? provider)
+				.flatMap(row => (row.credential.type === "oauth" ? [row.credential] : [])),
 		});
 		if (typeof result === "string") {
 			// Some flows (e.g. ollama) return "" to signal that no key was entered.

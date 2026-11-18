@@ -173,6 +173,7 @@ export type LoginProviderId =
 	| "nvidia"
 	| "ollama"
 	| "ollama-cloud"
+	| "openai"
 	| "openai-codex"
 	| "openai-codex-device"
 	| "opencode-go"

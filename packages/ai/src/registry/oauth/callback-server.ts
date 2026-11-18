@@ -39,7 +39,8 @@ const IPV6_COMPANION_ATTEMPTS = 4;
  */
 const LAUNCH_PATH = "/launch";
 
-export type CallbackResult = { code: string; state: string };
+/** Authorization-code callback; `clientId` is the `client_id` the authorization server echoed (dynamic client registration). */
+export type CallbackResult = { code: string; state: string; clientId?: string };
 
 /**
  * Subset of {@link Bun.Server} this flow depends on, so a `localhost` flow can
@@ -146,7 +147,7 @@ function parseNativeCallback(input: string, redirectUri: string, expectedState: 
 		throw new AIError.OAuthError("OAuth application callback omitted the authorization code", {
 			kind: "device-auth",
 		});
-	return { code, state };
+	return { code, state, clientId: callback.searchParams.get("client_id") ?? undefined };
 }
 
 /**
@@ -210,9 +211,15 @@ export abstract class OAuthCallbackFlow {
 	 * @param code - Authorization code from callback
 	 * @param state - CSRF state token
 	 * @param redirectUri - The actual redirect URI used (must match authorization request)
+	 * @param callback - The accepted callback, for flows that need its extra parameters (`clientId`)
 	 * @returns OAuth credentials
 	 */
-	abstract exchangeToken(code: string, state: string, redirectUri: string): Promise<OAuthCredentials>;
+	abstract exchangeToken(
+		code: string,
+		state: string,
+		redirectUri: string,
+		callback?: CallbackResult,
+	): Promise<OAuthCredentials>;
 
 	/**
 	 * Generate CSRF state token. Override if provider needs custom state generation.
@@ -318,7 +325,7 @@ export abstract class OAuthCallbackFlow {
 			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
 			this.#throwIfCancelled();
 
-			return await this.exchangeToken(callback.code, state, redirectUri);
+			return await this.exchangeToken(callback.code, state, redirectUri, callback);
 		} finally {
 			this.#pendingAuthUrl = undefined;
 			receiverAbort.abort("OAuth login finished");
@@ -579,7 +586,11 @@ export abstract class OAuthCallbackFlow {
 		if (resultState.ok) {
 			const resolve = this.#callbackResolve;
 			queueMicrotask(() => {
-				resolve?.({ code: resultState.code, state: resultState.state });
+				resolve?.({
+					code: resultState.code,
+					state: resultState.state,
+					clientId: url.searchParams.get("client_id") ?? undefined,
+				});
 			});
 		} else if (error && (!expectedState || state === expectedState)) {
 			// The redirect carries our state nonce, so it came from the genuine
@@ -642,7 +653,7 @@ export abstract class OAuthCallbackFlow {
 							const parsed = parseCallbackInput(input);
 							if (!parsed.code) return null;
 							if (expectedState && parsed.state && parsed.state !== expectedState) return null;
-							return { code: parsed.code, state: parsed.state ?? "" };
+							return { code: parsed.code, state: parsed.state ?? "", clientId: parsed.clientId };
 						}),
 					]);
 					if (result) return result;
@@ -662,7 +673,7 @@ export abstract class OAuthCallbackFlow {
 /**
  * Parse a redirect URL or code string to extract code and state.
  */
-export function parseCallbackInput(input: string): { code?: string; state?: string } {
+export function parseCallbackInput(input: string): { code?: string; state?: string; clientId?: string } {
 	const value = input.trim();
 	if (!value) return {};
 
@@ -670,6 +681,7 @@ export function parseCallbackInput(input: string): { code?: string; state?: stri
 		const url = new URL(value);
 		return {
 			code: url.searchParams.get("code") ?? undefined,
+			clientId: url.searchParams.get("client_id") ?? undefined,
 			state: url.searchParams.get("state") ?? undefined,
 		};
 	} catch {
@@ -680,6 +692,7 @@ export function parseCallbackInput(input: string): { code?: string; state?: stri
 		const params = new URLSearchParams(value.replace(/^[?#]/, ""));
 		return {
 			code: params.get("code") ?? undefined,
+			clientId: params.get("client_id") ?? undefined,
 			state: params.get("state") ?? undefined,
 		};
 	}

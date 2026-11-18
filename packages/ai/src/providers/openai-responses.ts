@@ -80,6 +80,7 @@ import {
 } from "./openai-reasoning-fallback";
 import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import { OpenAIResponsesRequestRejection } from "./openai-request-error";
+import { applyChatGPTTokenSharingParams, isChatGPTTokenSharingKey } from "./openai-chatgpt-sharing";
 import type {
 	Tool as OpenAITool,
 	ReasoningEffort,
@@ -548,6 +549,8 @@ function isOpenAIResponsesStatefulEnabled(
 	options: OpenAIResponsesOptions | undefined,
 	model: Model<"openai-responses">,
 ): boolean {
+	// Token sharing admits neither stored responses nor `previous_response_id`.
+	if (isChatGPTTokenSharingKey(options?.apiKey)) return false;
 	// Chaining forces `store: true`, so a storing host whose storage is off
 	// must never chain — not even when the caller asks for it.
 	if (model.compat.storeResponses === true && !storesResponsesServerSide(model, options)) return false;
@@ -808,9 +811,11 @@ const streamOpenAIResponsesOnce = (
 			const resolvedBaseUrl = (baseUrl ?? "https://api.openai.com/v1").replace(/\/+$/, "");
 			const requestUrl = `${resolvedBaseUrl}/responses`;
 			let transportSessions = providerSessionState?.transports;
-			attemptContext.mode ??= resolveResponsesWebSocketPreference(model, options?.preferWebsockets)
-				? "websocket"
-				: "sse";
+			// Token sharing is HTTP/SSE only: the route never stores a response, so a socket cannot chain.
+			attemptContext.mode ??=
+				!isChatGPTTokenSharingKey(apiKey) && resolveResponsesWebSocketPreference(model, options?.preferWebsockets)
+					? "websocket"
+					: "sse";
 			const idleTimeoutMs =
 				options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
 			const firstEventTimeoutMs =
@@ -2015,6 +2020,7 @@ export function buildParams(
 
 	applyOpenAIExtraBody(params, options?.extraBody);
 	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
+	if (isChatGPTTokenSharingKey(options?.apiKey)) applyChatGPTTokenSharingParams(params);
 
 	let trailingScaffoldingItems = 0;
 	if (options?.forceReasoningOff && model.compat.requiresReasoningOffJuiceInstruction) {

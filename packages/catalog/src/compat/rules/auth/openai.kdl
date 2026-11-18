@@ -1,3 +1,8 @@
 auth "openai" {
-	name "OpenAI"
+	name "OpenAI (Sign in with ChatGPT)"
+	// ChatGPT token sharing: omp registers as an agent and the grant bills the
+	// ChatGPT subscription against the regular OpenAI API. The per-login client id,
+	// ID-token verification and refresh live in `@oh-my-pi/pi-ai/src/registry/oauth/openai-chatgpt.ts`.
+	login "custom" hook="openai-chatgpt"
+	refresh hook="openai-chatgpt-refresh"
 }
