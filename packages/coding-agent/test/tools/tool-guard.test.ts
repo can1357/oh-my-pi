@@ -206,11 +206,13 @@ describe("tool guard", () => {
 			"PATH=/tmp/attacker git status",
 			"unset GIT_DIR; git status",
 			"set -k; git diff GIT_EXTERNAL_DIFF=/tmp/x.sh",
+			"printf -v PATH /tmp/attacker; git status",
 		]) {
 			expect(isReadOnlyCommand(command, cwd)).toBe(false);
 		}
 		// Error and trace flags change nothing a command reads.
 		expect(isReadOnlyCommand("set -euo pipefail; git status", cwd)).toBe(true);
+		expect(isReadOnlyCommand("printf '%s\\n' -v", cwd)).toBe(true);
 	});
 
 	it("treats `>&file` as a write to the file and `>&N` as a descriptor copy", () => {
@@ -218,6 +220,12 @@ describe("tool guard", () => {
 		expect(isReadOnlyCommand("echo overwritten 1>& /etc/important.conf", cwd)).toBe(false);
 		expect(isReadOnlyCommand("echo ok >&2 2>&1 >&-", cwd)).toBe(true);
 		expect(isReadOnlyCommand("echo ok >&notes.txt", cwd)).toBe(true);
+	});
+
+	it("treats a read-write redirect `<>file` as a write to the file", () => {
+		expect(isReadOnlyCommand("cat 3<>/etc/important.conf", cwd)).toBe(false);
+		expect(isReadOnlyCommand("cat <> /etc/important.conf", cwd)).toBe(false);
+		expect(isReadOnlyCommand("cat 3<>notes.txt < input.txt", cwd)).toBe(true);
 	});
 
 	it("places a new file under a symlinked directory where the link points", () => {
@@ -238,6 +246,15 @@ describe("tool guard", () => {
 			expect(isReadOnlyCommand(command, cwd)).toBe(false);
 		}
 		expect(isReadOnlyCommand("tree -a -L 2 --noreport src", cwd)).toBe(true);
+	});
+
+	it("judges uniq when it writes its output operand", () => {
+		for (const command of ["uniq data.txt /etc/important.conf", "uniq -f 1 data.txt /etc/x", "uniq -cw 3 - /etc/x"]) {
+			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+		}
+		for (const command of ["uniq -c data.txt", "uniq -f 1 data.txt", "sort data.txt | uniq -d"]) {
+			expect(isReadOnlyCommand(command, cwd)).toBe(true);
+		}
 	});
 
 	it("lets the call through when the judge fails or answers malformed", async () => {

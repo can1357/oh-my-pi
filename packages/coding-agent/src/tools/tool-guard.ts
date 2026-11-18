@@ -271,6 +271,34 @@ function readOnlySet(args: string[]): boolean {
 	return true;
 }
 
+/** `uniq` options whose value is the next word (`-f 1`, `-cw 3`, `--skip-chars 2`). */
+const UNIQ_VALUE_OPTION = /^(?:-[a-zA-Z]*[fsw]|--(?:skip-fields|skip-chars|check-chars))$/;
+
+/** Whether a reading command's arguments keep it reading: `tree -o`/`-R` write files, `printf -v` assigns a variable, `uniq IN OUT` writes OUT. */
+function readOnlyArguments(name: string, args: string[]): boolean {
+	switch (name) {
+		case "tree":
+			return !args.some(arg => TREE_WRITES.test(arg));
+		case "printf":
+			return !args[0]?.startsWith("-v");
+		case "uniq": {
+			let operands = 0;
+			for (let i = 0; i < args.length; i++) {
+				const arg = args[i];
+				if (arg === "--") {
+					operands += args.length - i - 1;
+					break;
+				}
+				if (UNIQ_VALUE_OPTION.test(arg)) i++;
+				else if (arg === "-" || !arg.startsWith("-")) operands++;
+			}
+			return operands <= 1;
+		}
+		default:
+			return true;
+	}
+}
+
 /** Whether one simple command leaves everything outside the working directory as it was. */
 function readOnlySegment(text: string, scope: ShellScope): boolean {
 	const tokens = lexShellCommand(text);
@@ -278,7 +306,8 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
 		if (token.kind !== "word") continue;
-		const redirect = /^(\d*)(>>?|>\|)(.*)$/.exec(token.raw);
+		// `<>` opens its file for reading and writing, creating it.
+		const redirect = /^(\d*)(>>?|>\||<>)(.*)$/.exec(token.raw);
 		if (redirect) {
 			let target = redirect[3];
 			if (target === "") {
@@ -313,7 +342,7 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 	const name = command[0];
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
-	if (inTable(READ_ONLY_COMMANDS, name)) return !(name === "tree" && args.some(arg => TREE_WRITES.test(arg)));
+	if (inTable(READ_ONLY_COMMANDS, name)) return readOnlyArguments(name, args);
 	if (inTable(LOCAL_WRITERS, name)) {
 		return args.filter(arg => !arg.startsWith("-")).every(arg => insideRoot(arg, scope));
 	}
@@ -563,7 +592,7 @@ export class ToolGuard {
 	readonly #host: ToolGuardHost;
 	#consecutive = 0;
 	#total = 0;
-	/** Non-synthetic user messages when the counts last restarted; one more starts a new run. */
+	/** Requests (non-synthetic user messages and user-invoked `/skill` prompts) when the counts last restarted; one more starts a new run. */
 	#runKey: number | undefined;
 	/** Judgments in a row that failed or timed out. */
 	#judgeFailures = 0;
