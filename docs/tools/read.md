@@ -25,7 +25,7 @@
 ## Registration / Visibility
 
 - Metadata: `strict = true`, `loadMode = "essential"`. Approval normally uses the internal scheme's read tier; PDF page screenshots require `"exec"`.
-- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors, which lists executable views only when IDA is available.
+- The model-facing prompt renders hashline guidance from the live display mode; it names the special sources and links `xd://read/sources` for their selectors. Bare executable reads return metadata; explicit analysis views use the selected disassembler backend.
 
 ## Inputs
 
@@ -162,12 +162,12 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 - Other file entries are UTF-8 decoded. Unsupported binary entries return `[Cannot read binary archive entry '...' (...)]` instead of bytes.
 - Text archive entries are paginated in memory as immutable resources (no hashline anchors) and accept [JSON queries](#json-queries).
 
-### Executables and IDA databases
+### Executables and disassembler databases
 
-- When IDA is available, ELF/PE/Mach-O binaries (including extensionless files) and IDA database files open an IDA-backed overview and function list instead of a binary-file notice.
-- Views: `:<func|0xaddr>` for pseudocode, `:<func>:asm`, `:imports`, `:exports`, `:strings`, and `:xrefs:<func|0xaddr>`. Append line selectors to page the rendered view (`bin:main:10-40`).
-- Universal Mach-O reads use the host-architecture slice by default; `bin:@x86_64:main` selects another slice.
-- Views are immutable generated text and do not seed hashline edits. First use may open or create an IDA database; `:raw` bypasses the view path.
+- ELF/PE/Mach-O binaries (including extensionless executables) return on-disk format metadata when read without a view selector. Bare IDA `.i64`/`.idb` files also return metadata; neither read opens an analysis database or downloads a backend.
+- Explicit views opt into analysis with the selected `disassembler.backend`: `:overview`, `:<func|0xaddr>` for pseudocode, `:<func>:asm`, `:imports`, `:exports`, `:strings`, and `:xrefs:<func|0xaddr>`. Append line selectors to page generated views (`bin:main:10-40`). See [`dsm`](./dsm.md) for backend configuration and Eval scripting at `xd://eval/dsm`.
+- Universal Mach-O reads use the host-architecture slice by default; `bin:@x86_64` selects another slice without analysis, and `bin:@x86_64:main` explicitly analyzes it.
+- Views are immutable generated text and do not seed hashline edits. `:raw` bypasses the view path. When analysis is disabled or unavailable, bare metadata reads still work but explicit views fail with backend guidance.
 
 ### Video
 
@@ -387,7 +387,7 @@ Notes: ...
 - Missing local/archive/sqlite paths first attempt unique suffix resolution; if no unique match or guarded recovery exists they error. Explicit semicolon lists fan out after literal/archive/SQLite precedence, including when the combined filename is too long; each member keeps its selectors and errors. A single overlong filename retains its filesystem error. Permission and I/O errors do not trigger missing-path recovery.
 - Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
-- Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
+- Probable binary local files return a notice unless `:raw` was requested or they are recognized executables/databases (metadata-only bare reads; explicit analysis selectors require an available disassembler backend).
 - Binary archive entries return a text notice without throwing, unless a JSON selector is attached (JSON selectors on directory, PDF, or binary archive entries throw a `ToolError`).
 - Document conversion failure returns a text notice.
 - Image oversize/unsupported/invalid cases throw.
