@@ -40,6 +40,7 @@ import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh
 import type { Settings } from "..";
 import type { ToolSession } from "./index";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { BUILTIN_TOOL_NAMES, isMCPToolName } from "./builtin-names";
 import type { XdevDispatch } from "./xdev";
 
 import { REPORT_ISSUE_DEVICE_NAME, REPORT_ISSUE_DEVICE_PATH } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
@@ -123,10 +124,43 @@ function normalizeGrievance(rawTool: string, rawReport: string): { tool: string;
 	return { tool: truncateHeadBytes(tool, MAX_TOOL_BYTES).text, report: `${tool}\n${report}` };
 }
 
+const JSON_TOOL_KEYS = ["tool", "toolName", "tool_name", "name"] as const;
+const JSON_REPORT_KEYS = ["report", "description", "issue", "error", "message", "problem", "details", "body"] as const;
+
+function firstString(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+	for (const key of keys) {
+		const value = record[key];
+		if (typeof value === "string" && value.trim()) return value.trim();
+	}
+	return undefined;
+}
+
+/** A JSON body (`{"tool": "read", "description": "…"}`), as agents write to every other device. */
+function parseJsonReportBody(body: string): { tool: string; report: string } | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return undefined;
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
+	}
+	const record = parsed as Record<string, unknown>;
+	const tool = firstString(record, JSON_TOOL_KEYS);
+	const report = firstString(record, JSON_REPORT_KEYS);
+	if (!tool || !report) throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
+	return normalizeGrievance(tool, report);
+}
+
 function parseReportIssueBody(text: string): { tool: string; report: string } {
 	const body = text.trim();
 	if (!body) {
 		throw new ToolError(`Empty report. ${reportIssueDeviceUsage()}`);
+	}
+	if (body.startsWith("{") || body.startsWith("[")) {
+		const json = parseJsonReportBody(body);
+		if (json) return json;
 	}
 	const firstNewline = body.indexOf("\n");
 	if (firstNewline >= 0) {
@@ -143,6 +177,27 @@ function parseReportIssueBody(text: string): { tool: string; report: string } {
 		if (tool && report) return normalizeGrievance(tool, report);
 	}
 	throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
+}
+
+const BUILTIN_TOOL_NAME_SET: ReadonlySet<string> = new Set(BUILTIN_TOOL_NAMES);
+
+/**
+ * Where the reported tool comes from, so the collector can route third-party reports:
+ * `builtin`, `eval:<namespace>`, `mcp:<server>`, `extension`, or `unknown` (CLIs, guesses).
+ */
+function resolveToolSource(session: ToolSession, tool: string): string {
+	const name = tool.replace(/^xd:\/\//, "").replace(/^proxy_/, "");
+	const registered = session.getToolByName?.(name);
+	const server =
+		registered && "mcpServerName" in registered && typeof registered.mcpServerName === "string"
+			? registered.mcpServerName
+			: undefined;
+	if (server) return `mcp:${server}`;
+	if (isMCPToolName(name)) return "mcp";
+	if (BUILTIN_TOOL_NAME_SET.has(name)) return "builtin";
+	const namespace = name.split(".")[0];
+	if (session.getAdvertisedEvalPreludes?.().some(prelude => prelude.name === namespace)) return `eval:${namespace}`;
+	return registered ? "extension" : "unknown";
 }
 
 /**
@@ -306,7 +361,8 @@ export function openAutoQaDb(): Database | null {
 				report TEXT NOT NULL,
 				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 				pushed INTEGER NOT NULL DEFAULT 0,
-				push_error TEXT
+				push_error TEXT,
+				source TEXT
 			);
 		`);
 		// Legacy DBs (May 2026) predate `created_at`. ALTER TABLE only accepts
@@ -320,6 +376,8 @@ export function openAutoQaDb(): Database | null {
 		}
 		const hasPushError = db.prepare("SELECT 1 FROM pragma_table_info('grievances') WHERE name = 'push_error'").get();
 		if (!hasPushError) db.exec("ALTER TABLE grievances ADD COLUMN push_error TEXT;");
+		const hasSource = db.prepare("SELECT 1 FROM pragma_table_info('grievances') WHERE name = 'source'").get();
+		if (!hasSource) db.exec("ALTER TABLE grievances ADD COLUMN source TEXT;");
 		db.exec(`
 			CREATE INDEX IF NOT EXISTS grievances_pushed_created_at_idx
 			ON grievances (pushed, created_at, id);
@@ -441,6 +499,8 @@ interface GrievanceRow {
 	version: string;
 	tool: string;
 	report: string;
+	/** Tool provenance ({@link resolveToolSource}); null for rows recorded before it existed. */
+	source: string | null;
 }
 
 /** Cap on collector error text kept for logs, `FlushResult`, and `push_error`. */
@@ -467,7 +527,7 @@ type BatchOutcome =
 
 async function performFlush(db: Database, config: PushConfig, options: FlushOptions = {}): Promise<FlushResult> {
 	const selectStmt = db.prepare(
-		"SELECT id, model, version, tool, report FROM grievances WHERE pushed = 0 ORDER BY id ASC LIMIT ?",
+		"SELECT id, model, version, tool, report, source FROM grievances WHERE pushed = 0 ORDER BY id ASC LIMIT ?",
 	);
 	// Planning snapshot — fires once so progress reporters can size their bar.
 	// Mid-flight inserts are NOT folded in (the worker drains them too, but
@@ -493,7 +553,11 @@ async function performFlush(db: Database, config: PushConfig, options: FlushOpti
 			// Normalized on the way out so rows recorded before record-time
 			// clamping and redaction existed neither poison every batch nor
 			// ship the user's home directory.
-			entries: batch.map(row => ({ ...row, ...normalizeGrievance(row.tool, row.report) })),
+			entries: batch.map(({ source, ...row }) => ({
+				...row,
+				...normalizeGrievance(row.tool, row.report),
+				...(source ? { source } : {}),
+			})),
 		});
 		const headers: Record<string, string> = { "content-type": "application/json" };
 		if (config.token) headers.authorization = `Bearer ${config.token}`;
@@ -637,14 +701,15 @@ export function __awaitAutoQaRecordPipelineForTests(): Promise<void> {
 function recordToolIssue(session: ToolSession, tool: string, report: string): void {
 	const canonicalTool = tool.startsWith("proxy_") ? tool.slice("proxy_".length) : tool;
 	const model = session.getActiveModelString?.() ?? "unknown";
+	const source = resolveToolSource(session, canonicalTool);
 	lastRecordPipeline = (async () => {
 		try {
 			if (!$flag("PI_AUTO_QA_PUSH") && !(await resolveAutoQaConsent(session.settings))) return;
 			const db = openAutoQaDb();
 			if (!db) return;
 			db.prepare(
-				"INSERT INTO grievances (model, version, tool, report, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-			).run(model, VERSION, canonicalTool, report);
+				"INSERT INTO grievances (model, version, tool, report, source, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+			).run(model, VERSION, canonicalTool, report, source);
 			await flushGrievances(db, session.settings);
 		} catch (error) {
 			logger.debug("autoqa consent pipeline failed", { error: String(error) });

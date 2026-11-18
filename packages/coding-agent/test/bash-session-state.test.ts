@@ -3,7 +3,7 @@
  * functions, options) is visible to the next call through the default
  * auto-background path, including after a call moved to the background and
  * after a call that exited non-zero. That `exit` and errexit keep the native
- * session is pinned in `crates/pi-shell` (`exit_and_errexit_keep_session_state`):
+ * session is pinned in `crates/shell` (`exit_and_errexit_keep_session_state`):
  * pull-request CI runs these tests against main's native addon.
  */
 import { afterEach, beforeEach, expect, it } from "bun:test";

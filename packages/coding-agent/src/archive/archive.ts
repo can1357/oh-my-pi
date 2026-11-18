@@ -103,12 +103,13 @@ const SHORT_ID_LENGTH = 13;
 /** Recent projects, newest activity first. */
 export async function archiveProjects(limit: number): Promise<ArchiveView<ArchiveProject[]>> {
 	const projects = await listRecentProjects(limit);
+	const latest = await withExactMessageCounts(projects.map(project => project.latest));
 	const recaps = latestRecaps(projects.map(project => project.latest.id));
-	const records = projects.map(project => ({
+	const records = projects.map((project, index) => ({
 		path: project.cwd,
 		sessions: project.sessionCount,
 		lastActive: project.latest.modified.toISOString(),
-		latest: toArchiveSession(project.latest, recaps.get(project.latest.id)),
+		latest: toArchiveSession(latest[index], recaps.get(project.latest.id)),
 	}));
 	if (records.length === 0) return { text: "No projects with sessions yet.", records };
 	const lines = ["Recent projects, newest first:"];
@@ -124,7 +125,9 @@ export async function archiveProjects(limit: number): Promise<ArchiveView<Archiv
 
 /** Newest non-empty sessions of one project (`cwd`) or of every project. */
 export async function archiveSessions(cwd: string | undefined, limit: number): Promise<ArchiveView<ArchiveSession[]>> {
-	const sessions = await listRecentSessions({ limit, sessionDir: cwd ? sessionDirForCwd(cwd) : undefined });
+	const sessions = await withExactMessageCounts(
+		await listRecentSessions({ limit, sessionDir: cwd ? sessionDirForCwd(cwd) : undefined }),
+	);
 	const recaps = latestRecaps(sessions.map(session => session.id));
 	const records = sessions.map(session => toArchiveSession(session, recaps.get(session.id)));
 	if (records.length === 0) return { text: `No sessions ${scopeLabel(cwd)}.`, records };
@@ -149,8 +152,9 @@ export async function archiveSessions(cwd: string | undefined, limit: number): P
  */
 export async function archiveSession(idOrFile: string, limit: number): Promise<ArchiveView<ArchiveSessionDetail>> {
 	const file = path.isAbsolute(idOrFile) ? idOrFile : await resolveSessionFile(idOrFile);
-	const info = await readSessionInfo(file);
-	if (!info) throw new ToolError(`Not a readable session file: ${shortenPath(file)}`);
+	const read = await readSessionInfo(file);
+	if (!read) throw new ToolError(`Not a readable session file: ${shortenPath(file)}`);
+	const [info] = await withExactMessageCounts([read]);
 	const recaps = listSessionRecaps({ sessionIds: [info.id] })
 		.map(toArchiveRecap)
 		.reverse();
@@ -228,6 +232,41 @@ async function resolveSessionFile(idPrefix: string): Promise<string> {
 		return name.slice(name.lastIndexOf("_") + 1);
 	});
 	throw new ToolError(`"${idPrefix}" matches ${files.length} sessions (${ids.join(", ")}); use a longer prefix.`);
+}
+
+/** A message record starts its line; the file's first line counts through a synthetic leading newline. */
+const MESSAGE_RECORD_LINE = Buffer.from('\n{"type":"message"');
+const messageCountCache = new Map<string, { size: number; mtimeMs: number; count: number }>();
+
+/** Message records in a whole session file; listings only parse a bounded prefix. Cached by size and mtime. */
+async function countSessionMessages(file: string, size: number, mtimeMs: number): Promise<number> {
+	const cached = messageCountCache.get(file);
+	if (cached && cached.size === size && cached.mtimeMs === mtimeMs) return cached.count;
+	let count = 0;
+	// The previous chunk's last bytes, so a record line split across chunks still matches once.
+	let carry: Buffer = Buffer.from("\n");
+	for await (const chunk of Bun.file(file).stream()) {
+		const window = Buffer.concat([carry, chunk]);
+		for (let at = window.indexOf(MESSAGE_RECORD_LINE); at !== -1; at = window.indexOf(MESSAGE_RECORD_LINE, at + 1)) {
+			count++;
+		}
+		carry = window.subarray(Math.max(0, window.length - (MESSAGE_RECORD_LINE.length - 1)));
+	}
+	messageCountCache.set(file, { size, mtimeMs, count });
+	return count;
+}
+
+async function withExactMessageCounts(sessions: SessionInfo[]): Promise<SessionInfo[]> {
+	return await Promise.all(
+		sessions.map(async session => {
+			try {
+				const messageCount = await countSessionMessages(session.path, session.size, session.modified.getTime());
+				return { ...session, messageCount };
+			} catch {
+				return session;
+			}
+		}),
+	);
 }
 
 /** Newest recap per session id. */

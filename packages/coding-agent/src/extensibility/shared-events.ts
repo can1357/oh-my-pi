@@ -19,7 +19,7 @@ import type { Rule } from "../capability/rule";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry } from "../session/session-entries";
-import type { CacheWarmingAction } from "../session/cache-warmer";
+import type { CacheWarmingAction, CacheWarmingRentMethod } from "../session/cache-warmer";
 import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 
 // ============================================================================
@@ -441,15 +441,29 @@ export interface SessionBeforeSwitchResult {
 }
 
 /**
- * Fired before each prompt-cache warming refresh with the warmer's economics
- * filled in. Return `{ action }` to override whether the refresh is sent.
+ * Fired before each prompt-cache warming decision with the warmer's economics
+ * filled in. Return `{ action }` to override whether a refresh is sent, the
+ * wait is bridged with compaction, or warming stops.
  */
 export interface CacheWarmingDecisionEvent {
 	type: "cache_warming_decision";
-	/** Price of this refresh: a cache read of the prompt plus one output token. */
+	/**
+	 * How the refresh would be sent: "prewarm" (`max_tokens: 0`, no output billed) or "replay" (one-token
+	 * replay cut off at its first output). Absent when the request cannot be refreshed without changing its
+	 * cache key.
+	 */
+	method?: CacheWarmingRentMethod;
+	/** Price of this refresh: a cache read of the prompt, plus the expected billed output for a replay. */
 	warmCost: number;
-	/** Extra price of the next real request if the cache entry is lost. */
+	/** Extra price of the next real request if the cache entry is lost: re-writing the prompt instead of reading it. */
 	missCost: number;
+	/**
+	 * Price of bridging the wait with compaction instead (reading the prompt, generating the summary,
+	 * re-writing the compacted context). Absent when compaction is not an option for this wait.
+	 */
+	compactCost?: number;
+	/** Refresh spend since the last real request. */
+	spentCost: number;
 	/** Estimated chance that a real request arrives before the entry expires. */
 	continuationProbability: number;
 	/** The warmer's own decision. */
@@ -458,7 +472,11 @@ export interface CacheWarmingDecisionEvent {
 
 /** Return type for `cache_warming_decision` handlers. */
 export interface CacheWarmingDecisionEventResult {
-	/** Override whether this refresh is sent. "stop" ends warming until the next real request. */
+	/**
+	 * Override the decision. "warm" needs a `method`; "compact" needs `compactCost` and a decision at least a
+	 * minute before the entry expires; an override the warmer cannot carry out leaves its own decision standing.
+	 * "stop" ends warming until the next real request.
+	 */
 	action?: CacheWarmingAction;
 }
 

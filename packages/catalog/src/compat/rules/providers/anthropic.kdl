@@ -13,6 +13,13 @@ provider "anthropic" {
 		short 300
 		long 3600
 	}
+	// `max_tokens: 0` reads the prompt, writes or refreshes the cache at its
+	// breakpoints, and returns usage with empty content and no output billed;
+	// the cache warmer refreshes with it instead of a one-token replay.
+	// Rejected with streaming, budget thinking, forced tool_choice, structured
+	// outputs, and inside Message Batches. First-party endpoint only.
+	// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+	prompt-cache-prewarm #true
 
 	// Curated Anthropic models that are live or limited-availability on the
 	// first-party `/v1/models` endpoint but that stencil.so has not catalogued
