@@ -5,9 +5,14 @@
  * "No API key for provider" while the stored credential was still valid.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { CredentialRankingStrategy, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import { removeWithRetries } from "../../utils/src/temp";
 
 const ENV_KEYS = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 
@@ -60,6 +65,85 @@ describe("AuthStorage transient OAuth refresh failure", () => {
 		expect((await auth.keys.getWithCredential("anthropic", "session"))?.apiKey).toBe("fresh-access");
 		expect(refresh).toHaveBeenCalledTimes(2);
 	});
+
+	it.each(["preflight", "request", "signal"] as const)(
+		"does not strand a peer's healthy account when a %s refresh is abandoned",
+		async stage => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-aborted-refresh-"));
+			const dbPath = path.join(dir, "agent.db");
+			let peer: AuthStorage | undefined;
+			try {
+				const store: AuthCredentialStore = await SqliteAuthCredentialStore.open(dbPath);
+				storage = new AuthStorage(store, {
+					usageProviderResolver: () => undefined,
+					rankingStrategyResolver: () => undefined,
+				});
+				const credential = { ...expiredOAuth(), accountId: "account-1" };
+				await storage.credentials.set("anthropic", [
+					stage === "request" ? { ...credential, expires: Date.now() + 3_600_000 } : credential,
+				]);
+				const [row] = storage.credentials.list("anthropic");
+				if (!row) throw new Error("missing OAuth credential");
+				if (stage === "request") {
+					store.prepareForRequest = async id => {
+						store.updateAuthCredential(id, credential);
+						return true;
+					};
+				}
+				const report: UsageReport = {
+					provider: "anthropic",
+					fetchedAt: Date.now(),
+					limits: [
+						{
+							id: "five-hour",
+							label: "five-hour",
+							scope: { provider: "anthropic" },
+							window: { id: "five-hour", label: "five-hour", resetsAt: Date.now() + 60_000 },
+							amount: { usedFraction: 0.2, unit: "percent" },
+							status: "ok",
+						},
+					],
+				};
+				const strategy: CredentialRankingStrategy = {
+					findWindowLimits: usage => ({ primary: usage.limits[0] }),
+					scopeLimits: usage => usage.limits,
+					windowDefaults: { primaryMs: 60_000, secondaryMs: 60_000 },
+				};
+				peer = new AuthStorage(await SqliteAuthCredentialStore.open(dbPath), {
+					usageProviderResolver: () => ({ id: "anthropic", fetchUsage: async () => report }),
+					rankingStrategyResolver: () => strategy,
+				});
+				await peer.credentials.reload();
+				const healthOptions = { modelId: "claude-opus-5-5", reserveFraction: 0.01 };
+				expect((await peer.health.model("anthropic", healthOptions)).state).toBe("healthy");
+
+				const controller = new AbortController();
+				const refresh = vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(() => {
+					if (stage === "signal") controller.abort();
+					return Promise.reject(
+						stage === "request"
+							? new DOMException("credential refresh aborted", "AbortError")
+							: stage === "signal"
+								? new Error("refresh stopped by caller")
+								: new AIError.AbortError("OAuth refresh stopped during shutdown"),
+					);
+				});
+				const resolved = await storage.keys.getWithCredential("anthropic", "shutdown-session", {
+					signal: controller.signal,
+				});
+				if (stage !== "signal") expect(resolved).toBeUndefined();
+				expect(refresh).toHaveBeenCalled();
+
+				expect(peer.blocks.list([row.id])).toEqual([]);
+				expect((await peer.health.model("anthropic", healthOptions)).state).toBe("healthy");
+			} finally {
+				peer?.close();
+				storage?.close();
+				storage = undefined;
+				await removeWithRetries(dir);
+			}
+		},
+	);
 
 	it("lets availability probes treat a transient refresh failure as unavailable", async () => {
 		const auth = await open();

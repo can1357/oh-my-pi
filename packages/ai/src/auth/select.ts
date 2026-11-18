@@ -51,6 +51,15 @@ import {
 /** Temporary block after a transient OAuth refresh failure. */
 export const OAUTH_REFRESH_FAILURE_BACKOFF_MS = 5 * 60 * 1000;
 
+/** A cancelled attempt says nothing about the shared credential's health. */
+function isCancelledRefresh(error: unknown, signal?: AbortSignal): boolean {
+	return (
+		signal?.aborted === true ||
+		AIError.is(AIError.classify(error), AIError.Flag.Abort) ||
+		(error instanceof Error && error.name === "AbortError")
+	);
+}
+
 /** OAuth bearer and credential chosen for a request, with its durable row id when available. */
 export type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential; credentialId?: number };
 
@@ -864,6 +873,10 @@ export class CredentialSelector {
 						if (rowId !== undefined) this.#deps.pool.replaceById(provider, rowId, updated);
 					}
 				} catch (error) {
+					if (isCancelledRefresh(error, options?.signal)) {
+						preflightFailures.add(candidate);
+						return;
+					}
 					// A failed preflight already exercised the provider refresh path.
 					// Do not replay the same refresh token in the final candidate pass.
 					const errorMsg = String(error);
@@ -1192,6 +1205,7 @@ export class CredentialSelector {
 			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
+			if (isCancelledRefresh(error, options?.signal)) return undefined;
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
