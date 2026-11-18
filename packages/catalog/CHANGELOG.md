@@ -6,6 +6,11 @@
 
 - Added `lfm3-1.7b` to the `local` provider's authored seeds, so `local/lfm3-1.7b` resolves as a selectable model (for example `modelRoles.memory`) ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
 - Added `unsupported "<backend>" reason="…"` to the seed-row grammar and `seedBackendRefusals(provider, modelId)` to read it, so a reviewed backend restriction on a local model is authored in `rules/providers/local.kdl` instead of per-model TypeScript ([#17258](https://github.com/can1357/oh-my-pi/issues/17258), [#17647](https://github.com/can1357/oh-my-pi/pull/17647) by [@thejjw](https://github.com/thejjw))
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
 - Added Kiro to the model catalog with automatic discovery of every model available to the signed-in Kiro account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Added Factory Droid's Claude Fable 5.2, Gemini 4 Carbon (with its launch credit promotion, half the input rate until 2026-12-01) and Kimi K3.1 Pro, each listed once the account's feature flag enables it, and GPT Image 2.6 and GPT Image 2.6 Flare ahead of GPT Image 2.5 in the `image` role's Factory defaults ([#19191](https://github.com/can1357/oh-my-pi/pull/19191) by [@will-bogusz](https://github.com/will-bogusz))
 - Added `writeModelCacheAsync()` and `forEachInSlices()`: model refreshes now build and cache discovered models in slices that yield to the event loop; `writeModelCache()` returns its outcome and no longer rewrites a provider whose rows are unchanged
