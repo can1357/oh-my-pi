@@ -13,14 +13,19 @@ import {
 	MUX_PING_METHOD,
 	MUX_PING_RESULT,
 	MUX_RESTART_METHOD,
+	MUX_SERVER_EXIT_STDERR_BYTES,
+	MUX_SERVER_EXITED_METHOD,
 	type MuxConnectParams,
 	type MuxConnectResult,
+	type MuxServerExit,
 	muxServerKey,
 } from "./protocol";
 
 const SERVER_LINGER_MS = 5 * 60 * 1_000;
 const MUX_IDLE_MS = 15 * 60 * 1_000;
 const SHUTDOWN_BUDGET_MS = 2_000;
+/** How long a link told its server exited may stay half-closed before the mux drops it. */
+const EXITED_LINK_CLOSE_MS = 2_000;
 
 type RpcMessage = LspJsonRpcRequest | LspJsonRpcResponse | LspJsonRpcNotification;
 
@@ -253,7 +258,7 @@ export class LspMuxServer {
 			const key = muxServerKey(params);
 			let server = [...this.#servers].find(candidate => candidate.key === key && candidate.sessions.size === 0);
 			if (server && server.proc.exitCode !== null) {
-				this.#serverExited(server);
+				this.#serverExited(server, server.proc.exitCode);
 				server = undefined;
 			}
 			let spawned = false;
@@ -417,8 +422,8 @@ export class LspMuxServer {
 		this.#servers.add(server);
 		void this.#readServer(server);
 		server.proc.exited.then(
-			() => this.#serverExited(server),
-			() => this.#serverExited(server),
+			code => this.#serverExited(server, code),
+			() => this.#serverExited(server, server.proc.exitCode ?? -1),
 		);
 		return server;
 	}
@@ -674,13 +679,25 @@ export class LspMuxServer {
 		if (this.#sessions.size === 0) this.#armMuxIdle();
 	}
 
-	#serverExited(server: ServerInstance): void {
+	#serverExited(server: ServerInstance, code: number): void {
 		server.stopping = true;
 		server.watchedFiles?.close();
 		this.#servers.delete(server);
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
 		server.pending.clear();
-		for (const session of Array.from(server.sessions)) session.connection.destroy();
+		// A bare close reads as a clean exit on the client; tell each link the real code and
+		// stderr first, then end it so that last frame is written before the close.
+		const exit: MuxServerExit = {
+			code,
+			stderr: server.proc.peekStderr().slice(-MUX_SERVER_EXIT_STDERR_BYTES),
+		};
+		const frame = encodeMessageFrame({ jsonrpc: "2.0", method: MUX_SERVER_EXITED_METHOD, params: exit });
+		for (const session of Array.from(server.sessions)) {
+			const { connection } = session;
+			connection.send(frame);
+			connection.end();
+			setTimeout(() => connection.destroy(), EXITED_LINK_CLOSE_MS).unref();
+		}
 		server.sessions.clear();
 	}
 
@@ -713,7 +730,7 @@ export class LspMuxServer {
 		try {
 			server.proc.kill();
 		} catch {
-			this.#serverExited(server);
+			this.#serverExited(server, server.proc.exitCode ?? -1);
 		}
 	}
 
