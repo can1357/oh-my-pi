@@ -9,7 +9,7 @@ import {
 	queryBlobBrokerProbe,
 	queryBlobBrokerPurge,
 	queryBlobBrokerStatus,
-} from "../blob-broker/daemon";
+} from "../blob-broker/service";
 import {
 	type BlobDestinationId,
 	type BlobDestinationMetadata,

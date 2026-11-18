@@ -1,6 +1,6 @@
 /**
  * Default tab width (display / tab expansion) and per-file width from `.editorconfig`.
- * Mirrors former `pi-natives` `indent` + `text` default-tab-width behavior (no N-API).
+ * Mirrors former `omp-natives` `indent` + `text` default-tab-width behavior (no N-API).
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -72,7 +72,7 @@ function fixUnclosedBraces(pattern: string): string {
 	return pattern;
 }
 
-/** Match `crates/pi-natives/src/glob_util.rs` `build_glob_pattern`. */
+/** Match `crates/natives/src/glob_util.rs` `build_glob_pattern`. */
 function buildGlobPattern(globStr: string, recursive: boolean): string {
 	const normalized = globStr.replace(/\\/g, "/");
 	const pattern =

@@ -39,7 +39,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
-import { spawnDetached } from "../subprocess/shared-worker";
+import { spawnDetached } from "../subprocess/detached";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import {
 	canSelfUpdate,

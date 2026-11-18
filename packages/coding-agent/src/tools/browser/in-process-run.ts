@@ -5,6 +5,7 @@
  * facades in scope. Guest promise rejections are attributed to the run whose
  * guest file appears in their stack.
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
@@ -54,6 +55,8 @@ export interface InProcessRunTab {
 	setRunContext(context: InProcessRunContext): void;
 	/** Forget finished run `context`; a later run's context stays (a run can end after its call gave up on it). */
 	clearRunContext(context: InProcessRunContext): void;
+	/** Dispose the tab's runtime, so a run that never settled stops holding this process's realm. */
+	discardRuntime(): void;
 }
 
 /** Inputs of {@link runInProcessTab}. */
@@ -130,6 +133,24 @@ function rememberRunFile(filename: string): void {
 
 postmortem.interceptUnhandledRejections(consumeRunRejection);
 
+/**
+ * Every in-process run executes in this process's one realm, where only one `JsRuntime` may run at a time: runs of
+ * different tabs (`Promise.all` over tabs, parallel subagents) take turns here instead of failing. The tail settles
+ * once the latest queued run has had its turn.
+ */
+let runQueueTail: Promise<void> = Promise.resolve();
+/** Set inside a run: a run its code starts (through a tool call) cannot wait for its own turn to end. */
+const insideRun = new AsyncLocalStorage<true>();
+
+/** Queue for a turn: `ready` settles when every earlier run has finished; call `release` when this one has. */
+function queueRunTurn(): { ready: Promise<void>; release: () => void } {
+	if (insideRun.getStore()) return { ready: Promise.resolve(), release: () => {} };
+	const previous = runQueueTail;
+	const turn = Promise.withResolvers<void>();
+	runQueueTail = previous.then(() => turn.promise);
+	return { ready: previous, release: () => turn.resolve() };
+}
+
 /** Run `opts.code` against `tab`'s facades in this process. */
 export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOptions): Promise<RunResultOk> {
 	const deadline = Date.now() + opts.timeoutMs;
@@ -201,7 +222,10 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 	if (signal.aborted) onAbort();
 	else signal.addEventListener("abort", onAbort, { once: true });
 
+	const turn = queueRunTurn();
 	try {
+		// The wait for this run's turn counts against its budget; a cancel or timeout ends it.
+		await Promise.race([turn.ready, cancelRejection]);
 		const runtime = tab.ensureRuntime(opts.snapshot);
 		// setCwd is non-exclusive; setRunScope/run still assert same-realm ownership.
 		// Keep both inside try so a concurrent in-process eval/browser run surfaces as
@@ -255,21 +279,28 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 		let returnValue: unknown;
 		let runError: unknown;
 		let runFailed = false;
+		let runSettled = false;
 		try {
-			returnValue = await withBrowserPromiseCombinatorTracking(
-				rejectionOwner,
-				recordFloatingFailure,
-				async () =>
-					await Promise.race([
-						runtime.run(opts.code, filename, hooks, { runId, cwd: opts.snapshot.cwd }),
-						cancelRejection,
-						floatingFailure,
-					]),
-			);
+			returnValue = await withBrowserPromiseCombinatorTracking(rejectionOwner, recordFloatingFailure, async () => {
+				const running = insideRun.run(true, () =>
+					runtime.run(opts.code, filename, hooks, { runId, cwd: opts.snapshot.cwd }),
+				);
+				running.then(
+					() => {
+						runSettled = true;
+					},
+					() => {
+						runSettled = true;
+					},
+				);
+				return await Promise.race([running, cancelRejection, floatingFailure]);
+			});
 		} catch (error) {
 			runFailed = true;
 			runError = error;
 		}
+		// Code still running past its cancel or timeout holds the realm: drop its runtime so other tabs can run.
+		if (!runSettled) tab.discardRuntime();
 		runAc.abort(runEndedError);
 		// Let rejection callbacks run while this run can still own guest-created promises.
 		await Bun.sleep(0);
@@ -290,6 +321,7 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 		}
 		return { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots };
 	} finally {
+		turn.release();
 		clearTimeout(timeoutTimer);
 		runActive = false;
 		uninstallRejectionInterceptor();

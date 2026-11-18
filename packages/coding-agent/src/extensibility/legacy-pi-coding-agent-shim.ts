@@ -1623,6 +1623,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 				entry.details,
 				entry.timestamp,
 				entry.attribution,
+				entry.excludeFromContext,
 			),
 		];
 	}

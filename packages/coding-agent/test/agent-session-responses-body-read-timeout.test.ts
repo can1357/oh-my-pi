@@ -263,9 +263,9 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			await runPrompt(harness);
 			expect(harness.requests).toHaveLength(2);
 			expect(Buffer.byteLength(harness.requests[1]!)).toBeLessThan(Buffer.byteLength(harness.requests[0]!));
-			expect(harness.requests[1]).toContain("artifact://");
+			expect(harness.requests[1]).toMatch(/local:\/\/\d+\.log/);
 			expect(harness.requests[1]).not.toContain("data:image/png");
-			const artifactId = /artifact:\/\/([^\s)]+)/.exec(harness.requests[1]!)?.[1];
+			const artifactId = /local:\/\/(\d+)\.log/.exec(harness.requests[1]!)?.[1];
 			expect(artifactId).toBeDefined();
 			const artifactPath = await harness.sessionManager.getArtifactPath(artifactId!);
 			expect(artifactPath).not.toBeNull();
@@ -324,7 +324,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			expect(harness.requests[1]).toContain(NATIVE_REPLAY_BULK);
 			expect(harness.requests[2]).toContain(NATIVE_REPLAY_BULK);
 			expect(harness.requests[2]).not.toContain("historical tool result");
-			const artifactId = /artifact:\/\/([^\s)]+)/.exec(harness.requests[2] ?? "")?.[1];
+			const artifactId = /local:\/\/(\d+)\.log/.exec(harness.requests[2] ?? "")?.[1];
 			expect(artifactId).toBeDefined();
 			const artifactPath = await harness.sessionManager.getArtifactPath(artifactId!);
 			expect(artifactPath).not.toBeNull();
@@ -352,10 +352,10 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 				await runPrompt(harness);
 				expect(harness.requests).toHaveLength(expectedRequests);
 				if (changedRetry) {
-					expect(harness.requests[2]).toContain("artifact://");
+					expect(harness.requests[2]).toMatch(/local:\/\/\d+\.log/);
 					expect(harness.session.agent.state.messages.at(-1)).toMatchObject({ stopReason: "stop" });
 				} else {
-					expect(harness.requests[1]).not.toContain("artifact://");
+					expect(harness.requests[1]).not.toMatch(/local:\/\/\d+\.log/);
 					assertTerminalErrorState(harness);
 				}
 			} finally {
@@ -432,7 +432,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			for (let index = 0; index < DEFAULT_SHAKE_CONFIG.minSavings + 128; index++) {
 				toolResultText += ` item-${index}`;
 				const tokens = harness.session.agent.tokenizer.countTokens([toolResultText]);
-				const placeholder = `[shaken ~${tokens} tokens — recover: artifact://${artifactId} (region 1)]`;
+				const placeholder = `[shaken ~${tokens} tokens — recover: local://${artifactId}.log (region 1)]`;
 				const actualSavings = tokens - harness.session.agent.tokenizer.countTokens(placeholder);
 				if (
 					tokens - legacyPlaceholderEstimate >= DEFAULT_SHAKE_CONFIG.minSavings &&
@@ -500,7 +500,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			await runPrompt(harness);
 			expect(harness.requests).toHaveLength(2);
 			assertTerminalErrorState(harness);
-			expect(harness.requests[1]).toContain("artifact://");
+			expect(harness.requests[1]).toMatch(/local:\/\/\d+\.log/);
 		} finally {
 			await harness.cleanup();
 		}
@@ -551,10 +551,10 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			await harness.session.prompt("next independent prompt");
 			await harness.session.waitForIdle();
 			expect(harness.requests).toHaveLength(4);
-			expect(harness.requests[1]).toContain("artifact://");
+			expect(harness.requests[1]).toMatch(/local:\/\/\d+\.log/);
 			expect(harness.requests[2]).toContain("independent historical tool result");
 			expect(harness.requests[3]).not.toContain("independent historical tool result");
-			expect(harness.requests[3]).toContain("artifact://");
+			expect(harness.requests[3]).toMatch(/local:\/\/\d+\.log/);
 			expect(harness.session.agent.state.messages.at(-1)).toMatchObject({
 				role: "assistant",
 				stopReason: "stop",
@@ -610,12 +610,12 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			expect(probeCalls).toBe(2);
 			expect(harness.requests).toHaveLength(5);
 			// First recovery elided the seeded history; the mid-prompt bulk did not exist yet.
-			expect(harness.requests[1]).toContain("artifact://");
+			expect(harness.requests[1]).toMatch(/local:\/\/\d+\.log/);
 			expect(harness.requests[1]).not.toContain("historical tool result");
 			expect(harness.requests[3]).toContain("MIDPROMPT_BULK_SENTINEL");
 			// Second recovery elided only the new tool-result bulk.
 			expect(harness.requests[4]).not.toContain("MIDPROMPT_BULK_SENTINEL");
-			expect(harness.requests[4]).toContain("artifact://");
+			expect(harness.requests[4]).toMatch(/local:\/\/\d+\.log/);
 			expect(harness.requests[4]).toContain("ASSISTANT_PROGRESS_SENTINEL");
 			expect(harness.session.agent.state.messages.at(-1)).toMatchObject({
 				role: "assistant",
@@ -724,7 +724,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			await harness.session.waitForIdle();
 
 			const activeAfterAbort = harness.session.agent.state.messages;
-			expect(activeAfterAbort.some(message => messageContainsText(message, "artifact://"))).toBe(true);
+			expect(activeAfterAbort.some(message => messageContainsText(message, "local://"))).toBe(true);
 			expect(activeAfterAbort.some(message => messageContainsText(message, "historical tool result"))).toBe(false);
 			expect(activeAfterAbort.some(message => messageContainsText(message, "historical fenced context"))).toBe(true);
 			const sessionFile = harness.sessionManager.getSessionFile();
@@ -736,7 +736,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 						.getBranch()
 						.some(
 							entry =>
-								entry.type === "message" && messageContainsText(entry.message as AgentMessage, "artifact://"),
+								entry.type === "message" && messageContainsText(entry.message as AgentMessage, "local://"),
 						),
 				).toBe(true);
 			} finally {
@@ -746,7 +746,7 @@ describe("AgentSession Responses request-body timeout recovery", () => {
 			await harness.session.prompt("next");
 			await harness.session.waitForIdle();
 			expect(harness.requests).toHaveLength(2);
-			expect(harness.requests[1]).toContain("artifact://");
+			expect(harness.requests[1]).toMatch(/local:\/\/\d+\.log/);
 			expect(harness.requests[1]).toContain("historical fenced context");
 			expect(harness.requests[1]).not.toContain("historical tool result");
 			expect(harness.session.agent.state.messages.at(-1)).toMatchObject({

@@ -111,7 +111,7 @@ Shared fields for every transport:
 
 Disable instructions when a server's guidance conflicts with your tool policy or adds unwanted context to every request, including subagent requests. If no connected server contributes instructions, the MCP Server Instructions section is omitted entirely. `instructions` does not distinguish connections: when two entries under different names describe the same endpoint, only the higher-priority entry is kept, together with its own `instructions` value, so set the option on the entry that wins (see `/mcp list`). A changed value applies to an already-connected server after `/mcp reload`.
 
-`OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
+`OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the default (10 minutes for tool calls, 30 seconds otherwise); invalid values are logged and ignored.
 
 Claude marketplace plugins follow [Claude Code's per-server timeout rule](https://code.claude.com/docs/en/mcp): their `.mcp.json` values are milliseconds, and values below `1000` are ignored with a discovery warning so OMP's normal timeout fallback applies. This restriction does not change OMP-native configurations, where `0` still disables timeouts.
 

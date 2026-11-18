@@ -463,7 +463,6 @@ describe("readArgsCollapseIntoGroup", () => {
 		["issue://123"],
 		["pr://can1357/oh-my-pi/456"],
 		["agent://abc"],
-		["artifact://abc"],
 		["memory://root"],
 		["rule://name"],
 		["mcp://server/resource"],

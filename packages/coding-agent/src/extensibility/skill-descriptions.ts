@@ -22,6 +22,7 @@ import {
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { CostCapError, type CostGateApi } from "../session/cost-gate";
+import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
 import { Semaphore } from "../task/parallel";
 import type { Skill } from "./skills";
@@ -54,6 +55,7 @@ class SkillDescriptionLengthError extends Error {}
  * the inherited `default` when `smol` is unset, then the built-in chain — before a configured `tiny`.
  * Never uses the session's foreground model. `getCostGate` returns the session tree's gate per request,
  * following it across new sessions and switches; each provider attempt is admitted and metered there.
+ * `usageLedger` is the session whose prompt asked for the compression; each attempt is journaled there.
  */
 export function createSkillDescriptionCompressor(
 	registry: ModelRegistry,
@@ -62,6 +64,7 @@ export function createSkillDescriptionCompressor(
 		sessionId?: string;
 		getTelemetry?: () => AgentTelemetry | undefined;
 		getCostGate?: () => CostGateApi | undefined;
+		usageLedger?: Partial<ModelUsageLedger>;
 	} = {},
 ): SkillDescriptionCompressor {
 	const select = (): Model<Api> | undefined => {
@@ -113,6 +116,7 @@ export function createSkillDescriptionCompressor(
 				refused.abort(error);
 				throw error;
 			};
+			const journal = journalCompletion(options.usageLedger, { purpose: "skill-description" });
 			let response: AssistantMessage;
 			try {
 				response = await instrumentedCompleteSimple(
@@ -129,7 +133,10 @@ export function createSkillDescriptionCompressor(
 						signal: AbortSignal.any([AbortSignal.timeout(30_000), refused.signal]),
 						beforeDispatch: gate ? refuseAttempt : undefined,
 						fetch: gate ? transportFetch(model, undefined, refuseAttempt) : undefined,
-						onAttempt: message => gate?.record(message.usage.cost.total),
+						onAttempt: message => {
+							gate?.record(message.usage.cost.total);
+							journal?.(message, request);
+						},
 					},
 					{ telemetry: options.getTelemetry?.(), oneshotKind: "skill_description" },
 				);

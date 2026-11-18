@@ -324,7 +324,7 @@ function populateCapabilityDetails(
 /** Persist over-cap computer run output as a session artifact; mirrors the browser run save path. */
 async function saveComputerOutputArtifact(session: ToolSession, fullText: string): Promise<string | undefined> {
 	try {
-		const alloc = await session.allocateOutputArtifact?.("computer-original");
+		const alloc = await session.allocateOutputArtifact?.();
 		if (!alloc?.path || !alloc.id) return undefined;
 		await Bun.write(alloc.path, fullText);
 		return alloc.id;

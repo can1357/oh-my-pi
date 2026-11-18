@@ -83,11 +83,17 @@ export const handleTerraform: SpecialHandler = async (
 			return await handleModuleUrl(url, namespace, name, provider, timeout, signal, fetchedAt);
 		}
 
-		// Match provider URL: /providers/{namespace}/{type}
-		const providerMatch = parsed.pathname.match(/^\/providers\/([^/]+)\/([^/]+)/);
+		// Match provider URL: /providers/{namespace}/{type}[/{version}[/docs[/{category}/{slug}]]]
+		const providerMatch = parsed.pathname.match(
+			/^\/providers\/([^/]+)\/([^/]+)(?:\/([^/]+)(?:\/docs(?:\/([^/]+)\/([^/]+))?)?)?\/?$/,
+		);
 		if (providerMatch) {
-			const [, namespace, type] = providerMatch;
-			return await handleProviderUrl(url, namespace, type, timeout, signal, fetchedAt);
+			const [, namespace, type, version, category, slug] = providerMatch;
+			const pinned = version === undefined || version === "latest" ? undefined : version;
+			if (category && slug) {
+				return await handleProviderDocUrl(url, namespace, type, pinned, category, slug, timeout, signal, fetchedAt);
+			}
+			return await handleProviderUrl(url, namespace, type, pinned, timeout, signal, fetchedAt);
 		}
 
 		return null;
@@ -212,24 +218,62 @@ async function handleModuleUrl(
 	return buildResult(md, { url, method: "terraform", fetchedAt, notes: ["Fetched via Terraform Registry API"] });
 }
 
-async function handleProviderUrl(
+/** The provider's registry record at `version` (the latest when undefined), with its docs index. */
+async function loadProvider(
+	namespace: string,
+	type: string,
+	version: string | undefined,
+	timeout: number,
+	signal: AbortSignal | undefined,
+): Promise<TerraformProvider | null> {
+	const apiUrl = `https://registry.terraform.io/v1/providers/${namespace}/${type}${version ? `/${version}` : ""}`;
+	const result = await loadPage(apiUrl, { timeout, signal, headers: { Accept: "application/json" } });
+	if (!result.ok) return null;
+	return tryParseJson<TerraformProvider>(result.content);
+}
+
+/** One provider doc page (`/docs/resources/x`, `/docs/data-sources/x`, guides…) as its Markdown source. */
+async function handleProviderDocUrl(
 	url: string,
 	namespace: string,
 	type: string,
+	version: string | undefined,
+	category: string,
+	slug: string,
 	timeout: number,
 	signal: AbortSignal | undefined,
 	fetchedAt: string,
 ): Promise<RenderResult | null> {
-	const apiUrl = `https://registry.terraform.io/v1/providers/${namespace}/${type}`;
-	const result = await loadPage(apiUrl, {
+	const provider = await loadProvider(namespace, type, version, timeout, signal);
+	const doc = provider?.docs?.find(entry => entry.category === category && entry.slug === slug);
+	if (!provider || !doc) return null;
+	const result = await loadPage(`https://registry.terraform.io/v2/provider-docs/${doc.id}`, {
 		timeout,
 		signal,
 		headers: { Accept: "application/json" },
 	});
-
 	if (!result.ok) return null;
+	const content = tryParseJson<{ data?: { attributes?: { content?: string } } }>(result.content)?.data?.attributes
+		?.content;
+	if (!content) return null;
+	return buildResult(content, {
+		url,
+		method: "terraform",
+		fetchedAt,
+		notes: [`Fetched ${provider.namespace}/${provider.name} ${provider.version} docs via Terraform Registry API`],
+	});
+}
 
-	const provider = tryParseJson<TerraformProvider>(result.content);
+async function handleProviderUrl(
+	url: string,
+	namespace: string,
+	type: string,
+	version: string | undefined,
+	timeout: number,
+	signal: AbortSignal | undefined,
+	fetchedAt: string,
+): Promise<RenderResult | null> {
+	const provider = await loadProvider(namespace, type, version, timeout, signal);
 	if (!provider) return null;
 
 	let md = `# ${provider.namespace}/${provider.name}\n\n`;
@@ -264,7 +308,7 @@ async function handleProviderUrl(
 		for (const [category, docs] of categories) {
 			md += `### ${category.charAt(0).toUpperCase() + category.slice(1)} (${docs.length})\n\n`;
 			for (const doc of docs.slice(0, 15)) {
-				md += `- [${doc.title}](https://registry.terraform.io/providers/${namespace}/${type}/latest/docs/${doc.category}/${doc.slug})\n`;
+				md += `- [${doc.title}](https://registry.terraform.io/providers/${namespace}/${type}/${version ?? "latest"}/docs/${doc.category}/${doc.slug})\n`;
 			}
 			if (docs.length > 15) {
 				md += `\n[…${docs.length - 15} documents elided…]\n`;

@@ -510,7 +510,7 @@ function drawBars(spec: ChartSpec): Layer {
 	};
 	// A transition prints each row's move after its figures (`8 → 2  −6`), one style for every row.
 	const moves = paired && spec.transition ? pairMoves(series[0]!, series[1]!) : undefined;
-	// Peers on a log axis (`pi-walker` vs `Go` from 2 to 462) part by their ratio: each row prints it (`4.1×`).
+	// Peers on a log axis (`omp-xfs` vs `Go` from 2 to 462) part by their ratio: each row prints it (`4.1×`).
 	const ratios =
 		paired && !spec.transition && logSpread(values)
 			? categories.map((_, at) => {
