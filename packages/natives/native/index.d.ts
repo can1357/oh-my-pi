@@ -242,7 +242,8 @@ export declare class EditStore {
   recordSnapshot(absolutePath: string, text: string, seenLines?: Array<number> | undefined | null): string
   /**
    * Read `absolutePath` from disk and record it; null when the file is
-   * unreadable or larger than 4 MiB.
+   * unreadable or larger than 64 MiB. Past 4 MiB only the tag is returned:
+   * no snapshot is retained.
    */
   recordSnapshotFile(absolutePath: string, seenLines?: Array<number> | undefined | null): string | null
   /** Merge displayed lines into the snapshot tagged `tag`. */
@@ -886,6 +887,12 @@ export declare class VcsGitRepo {
   submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
   /** Read blob bytes. */
   showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /**
+   * Convert worktree content to the blob `git add` would store per path
+   * (EOL/`text` attributes, `core.autocrlf`, `ident`, clean filters such as
+   * Git LFS), in input order.
+   */
+  worktreeToGit(entries: Array<VcsWorktreeContent>, signal?: unknown | undefined | null): Promise<Array<Buffer>>
   /** Read commit and patch bytes. */
   showCommit(rev: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
   /** Local LFS media directory. */
@@ -2550,6 +2557,11 @@ export interface GrepOptions {
   hidden?: boolean
   /** Respect .gitignore files (default: true). */
   gitignore?: boolean
+  /**
+   * Follow descendant symbolic links with cycle detection (default: false).
+   * The filesystem provider is responsible for enforcing mount containment.
+   */
+  followLinks?: boolean
   /** Maximum number of matches to return. */
   maxCount?: number
   /** Skip first N matches. */
@@ -4552,6 +4564,15 @@ export interface VcsWorktreeAddOptions {
 export interface VcsWorktreeAddResult {
   clonedWith?: IsoBackendKind
   cloneError?: string
+}
+
+/**
+ * Worktree content of one repo-relative path, for
+ * [`VcsGitRepo::worktree_to_git`].
+ */
+export interface VcsWorktreeContent {
+  path: string
+  data: Uint8Array
 }
 
 /** One worktree listing row. */
