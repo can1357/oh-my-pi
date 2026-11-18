@@ -32,7 +32,10 @@ export interface HelperContext {
  * onto the global scope.
  */
 export interface HelperBundle {
-	/** Resolves to `undefined` when `artifact://<id>` is not in this session's artifacts dir; the prelude then asks the read tool. */
+	/**
+	 * Resolves to `undefined` for a directory, or for `artifact://<id>` not in this session's artifacts dir; the prelude
+	 * then asks the read tool.
+	 */
 	read(rawPath: string, options?: HelperOptions): Promise<string | undefined>;
 	writeFile(rawPath: string, data: unknown): Promise<string>;
 	env(key?: string, value?: string): string | Record<string, string> | undefined;
@@ -190,9 +193,7 @@ async function resolveRegularFile(
 	if (filePath === undefined) return undefined;
 	const file = Bun.file(filePath);
 	const stat = await file.stat();
-	if (stat.isDirectory()) {
-		throw new ToolError(`Directory paths are not supported by read(): ${filePath}`);
-	}
+	if (stat.isDirectory()) return undefined;
 	return { filePath, file, size: stat.size };
 }
 
