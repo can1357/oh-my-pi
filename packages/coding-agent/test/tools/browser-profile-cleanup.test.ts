@@ -158,8 +158,11 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 		}
 	});
 
-	it("removes the handle's profile directory when the headless browser is disposed", async () => {
+	it("kills an owned-profile browser without a graceful close and removes its profile on dispose", async () => {
 		const dir = await makeProfileDir();
+		// Stands in for a Chromium whose graceful shutdown never finishes.
+		const chromium = Bun.spawn([process.execPath, "-e", "await Bun.sleep(60_000)"]);
+		let closeCalls = 0;
 		const handle = {
 			key: "headless:1",
 			kind: { kind: "headless", headless: true },
@@ -167,15 +170,23 @@ describe("headless Chromium profile cleanup (issue #7058)", () => {
 			userDataDir: dir,
 			browser: {
 				connected: true,
-				process: () => ({ pid: 4242 }),
-				close: () => Promise.resolve(),
+				process: () => ({ pid: chromium.pid }),
+				close: () => {
+					closeCalls++;
+					return Promise.withResolvers<void>().promise;
+				},
 			},
 			stealth: { browserSession: null, override: null },
 		} as unknown as BrowserHandle;
 
-		await releaseBrowser(handle, { kill: false });
-
-		expect(fs.existsSync(dir)).toBe(false);
+		try {
+			await releaseBrowser(handle, { kill: false });
+			await chromium.exited;
+			expect(closeCalls).toBe(0);
+			expect(fs.existsSync(dir)).toBe(false);
+		} finally {
+			chromium.kill("SIGKILL");
+		}
 	});
 });
 

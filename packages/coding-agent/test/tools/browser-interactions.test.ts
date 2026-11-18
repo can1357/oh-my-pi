@@ -192,7 +192,10 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser fill aborts", () => {
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser input cut off mid-gesture", () => {
 	// `blockNow(ms)` blocks the page's main thread in its own script right after the current call answers; with
 	// `blockMs` set, the next mousedown or keydown handler blocks instead. Either way omp's input waits on the page
-	// for 9 s, past the 8 s per-op ceiling of a 10 s cell, and the cell's cleanup returns once the page answers.
+	// for BLOCK_MS, past the 2 s per-op ceiling of a BLOCKED_CELL_S cell (`resolveOpTimeouts`: the budget less 1 s),
+	// and the cell's cleanup returns once the page answers, inside that budget.
+	const BLOCKED_CELL_S = 3;
+	const BLOCK_MS = 2_500;
 	const gestureHtml = `<!doctype html>
 <button id="target" style="position:absolute;left:20px;top:20px;width:120px;height:40px">Target</button>
 <div id="from" style="position:absolute;left:20px;top:100px;width:60px;height:60px"></div>
@@ -211,6 +214,21 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 	// Input a cut-off call would still have sent arrives within a few round trips of the page answering; the
 	// page's log is read after that, as the user's next look at the page would be.
 	const readLog = "await wait(500); return await tab.evaluate(() => window.log);";
+
+	// A tab held open for the whole describe keeps its browser alive, so closing each test's tab does not shut
+	// Chromium down for the next test to relaunch.
+	const keeperTab = `gesture-keeper-${crypto.randomUUID()}`;
+	let closeKeeper = async (): Promise<unknown> => undefined;
+	beforeAll(async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "gesture-keeper" };
+		await prelude.invoke({ action: "open", name: keeperTab, url: "about:blank" }, context);
+		closeKeeper = () => prelude.invoke({ action: "close", name: keeperTab, kill: true }, context);
+	});
+	afterAll(async () => {
+		await closeKeeper().catch(() => undefined);
+	});
 
 	async function withGestureTab(
 		toolCallId: string,
@@ -237,7 +255,10 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("a click that timed out on a page busy in its own script does not click its target once the page answers", async () => {
 		await withGestureTab("late-click", async run => {
-			const outcome = await run(`await tab.evaluate(() => blockNow(9000)); ${attempt("tab.clickAt(80, 40)")}`);
+			const outcome = await run(
+				`await tab.evaluate(() => blockNow(${BLOCK_MS})); ${attempt("tab.clickAt(80, 40)")}`,
+				BLOCKED_CELL_S,
+			);
 			expect(outcome).toMatch(/^tab\.clickAt\(\) timed out after \d+ms/);
 			// The press was already on its way; it is released off the target, so the button never sees a click.
 			expect(await run(readLog)).toEqual(["down", "up"]);
@@ -246,8 +267,8 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("an already-dispatched release can click after timeout, but no later click in the sequence is sent", async () => {
 		await withGestureTab("cut-release", async run => {
-			await run("await tab.evaluate(() => { window.blockUpMs = 9000; });");
-			expect(await run(attempt("tab.clickAt(80, 40, { count: 2 })"))).toMatch(
+			await run(`await tab.evaluate(() => { window.blockUpMs = ${BLOCK_MS}; });`);
+			expect(await run(attempt("tab.clickAt(80, 40, { count: 2 })"), BLOCKED_CELL_S)).toMatch(
 				/^tab\.clickAt\(\) timed out after \d+ms/,
 			);
 			// Chrome already owns the first release; cancellation cannot recall it, but prevents the second press.
@@ -258,8 +279,10 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("a drag cut off with the button down releases it off the page, so the next click works", async () => {
 		await withGestureTab("cut-drag", async run => {
-			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
-			expect(await run(attempt(`tab.drag("#from", "#to")`))).toMatch(/^tab\.drag\(\) timed out after \d+ms/);
+			await run(`await tab.evaluate(() => { window.blockMs = ${BLOCK_MS}; });`);
+			expect(await run(attempt(`tab.drag("#from", "#to")`), BLOCKED_CELL_S)).toMatch(
+				/^tab\.drag\(\) timed out after \d+ms/,
+			);
 			expect(await run(readLog)).toEqual(["down", "up"]);
 			expect(await run(attempt(`tab.click("#target")`))).toBe("done");
 		});
@@ -273,8 +296,8 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 		"a key combo through %s cut off with its modifier down sends no further key and releases the modifier",
 		async (_label, call, modifier) => {
 			await withGestureTab("cut-press", async run => {
-				await run("await tab.evaluate(() => { window.blockMs = 9000; });");
-				expect(await run(attempt(call))).toMatch(/ timed out after \d+ms/);
+				await run(`await tab.evaluate(() => { window.blockMs = ${BLOCK_MS}; });`);
+				expect(await run(attempt(call), BLOCKED_CELL_S)).toMatch(/ timed out after \d+ms/);
 				expect(await run(readLog)).toEqual([`keydown:${modifier}`, `keyup:${modifier}`]);
 			});
 		},
@@ -283,8 +306,8 @@ addEventListener("keyup", event => log.push("keyup:" + event.key), true);
 
 	test("a tab.mouseDown whose own deadline passed, caught by the code, still releases the button", async () => {
 		await withGestureTab("caught-down", async run => {
-			await run("await tab.evaluate(() => { window.blockMs = 9000; });");
-			expect(await run(`await tab.mouseMove(80, 40); ${attempt("tab.mouseDown()")}`)).toMatch(
+			await run(`await tab.evaluate(() => { window.blockMs = ${BLOCK_MS}; });`);
+			expect(await run(`await tab.mouseMove(80, 40); ${attempt("tab.mouseDown()")}`, BLOCKED_CELL_S)).toMatch(
 				/^tab\.mouseDown\(\) timed out after \d+ms/,
 			);
 			expect(await run(readLog)).toEqual(["down", "up"]);
