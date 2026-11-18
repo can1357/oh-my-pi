@@ -302,7 +302,8 @@ fn stays_on_v1_unless_limits_match_exactly() {
 		let (client, _events, mut server) = connect(ready, Vec::new());
 		assert_eq!(client.protocol_version(), 1);
 		let probe = thread::spawn(move || {
-			// The first frame after ready is the caller's command, not negotiate_protocol.
+			// The first frame after ready is the caller's command, not
+			// negotiate_protocol.
 			let frame = server.expect("get_last_assistant_text");
 			server.respond(&frame, json!({"text": null}));
 		});
@@ -603,7 +604,8 @@ fn cancelled_host_tool_sends_nothing_more() {
 	finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
 	thread::sleep(Duration::from_millis(50));
 	let script = thread::spawn(move || {
-		// The next frame is the probe, not an update or result for the cancelled call.
+		// The next frame is the probe, not an update or result for the cancelled
+		// call.
 		let frame = server.expect("get_last_assistant_text");
 		server.respond(&frame, json!({"text": "probe"}));
 	});
@@ -856,7 +858,8 @@ fn host_uri_request_errors() {
 		uri_request(&mut server, "u4", "delete", "docs://x"),
 		json!({"type": "host_uri_result", "id": "u4", "isError": true, "error": "Unsupported host URI operation: delete"})
 	);
-	// Malformed requests are ignored: the next frame answers the following request.
+	// Malformed requests are ignored: the next frame answers the following
+	// request.
 	server
 		.send(&json!({"type": "host_uri_request", "id": 5, "operation": "read", "url": "docs://x"}));
 	assert_eq!(
@@ -1082,7 +1085,8 @@ fn process_alive(pid: libc::pid_t) -> bool {
 fn spawn_stubborn_group(name: &str) -> (Client, libc::pid_t, libc::pid_t) {
 	let pid_file = std::env::temp_dir().join(format!("omp-rpc-{name}-{}", std::process::id()));
 	let _ = std::fs::remove_file(&pid_file);
-	// The leader neither reads stdin nor obeys SIGTERM, so teardown must escalate.
+	// The leader neither reads stdin nor obeys SIGTERM, so teardown must
+	// escalate.
 	let script = r#"trap "" TERM; sleep 30 >/dev/null 2>&1 & echo $! > "$0"; printf '{"type":"ready"}\n'; exec sleep 60"#;
 	let mut process = std::process::Command::new("sh");
 	process.arg("-c").arg(script).arg(&pid_file);

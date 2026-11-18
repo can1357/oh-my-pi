@@ -16,5 +16,9 @@ serde_json = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
-# Standalone crate: not a member of the repository's root workspace.
-[workspace]
+# Empty, not `workspace = true`: this crate is held to default clippy and zero
+# rustc warnings like the other non-opted-in members. Most of it is the
+# `bun run gen:rpc` output in src/wire.rs, and the hand-written half is sample
+# client code the workspace's pedantic/nursery policy would rewrite wholesale
+# (283 findings when it was tried). Opting in is its own change.
+[lints]
