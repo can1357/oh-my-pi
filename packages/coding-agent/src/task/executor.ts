@@ -98,6 +98,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { type CostCapRefusal, CostCapError, type CostGateApi } from "../session/cost-gate";
 import { INTERRUPTED_TURN_ERROR } from "../session/exit-diagnostics";
 import { SKILL_PROMPT_MESSAGE_TYPE, usageContextTokens } from "../session/messages";
+import type { CompletionJournal } from "../session/model-usage-journal";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -498,6 +499,11 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	/** Active parent provider, independent of whether parent-model auth fallback is allowed. */
 	parentActiveProvider?: string;
+	/**
+	 * Journals the tiny-model label request on the spawning session. A reporter rather than the
+	 * session's ledger: a function still reaches the parent when the run is placed in a worker.
+	 */
+	journalTaskLabel?: CompletionJournal;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1336,6 +1342,8 @@ interface RunMonitorArgs {
 	settings?: Settings;
 	parentActiveModelPattern?: string;
 	parentActiveProvider?: string;
+	/** See {@link ExecutorOptions.journalTaskLabel}. */
+	journalTaskLabel?: CompletionJournal;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -1826,6 +1834,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			abortSignal,
 			args.parentActiveModelPattern,
 			args.parentActiveProvider,
+			args.journalTaskLabel,
 		)
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
@@ -4789,6 +4798,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		settings,
 		parentActiveModelPattern: options.parentActiveModelPattern,
 		parentActiveProvider: options.parentActiveProvider,
+		journalTaskLabel: options.journalTaskLabel,
 		modelOverride,
 		modelRole,
 		modelRoute: options.modelRoute,

@@ -451,6 +451,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						telemetryConfig: this.session.getTelemetry?.(),
 						sessionId: this.session.getSessionId?.() ?? undefined,
 						costGate: this.session.costGate,
+						usageLedger: this.session.sessionManager,
 					},
 					signal,
 				);

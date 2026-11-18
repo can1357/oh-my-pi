@@ -32,6 +32,7 @@ import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
+import { journalCompletion } from "../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../session/role-models";
 import { resolveReadPath, specialFileKind } from "./path-utils";
 
@@ -361,13 +362,33 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								ctx.modelRegistry.resolveModelHeaders(carrier, headerSignal),
 						}
 					: undefined;
+				// The tool result's `details.usage` is display-only: session totals never sum it, so the request is
+				// journaled here. Usage only: the result already names the images. The context types its manager
+				// read-only; the session manager behind it journals, a worker child's snapshot view is skipped.
+				const journal = journalCompletion(ctx.sessionManager, {
+					purpose: "image-gen",
+					role: "image",
+					usageOnly: true,
+				});
 				try {
+					const started = performance.now();
 					const result = await generateImage(resolvedModel, request, {
 						apiKey,
 						fetch: ctx.fetch ?? fetch,
 						signal: requestSignal,
 						carrier: resolvedCarrier,
 						sessionId,
+					});
+					journal?.({
+						role: "assistant",
+						content: [],
+						api: model.api,
+						provider: model.provider,
+						model: result.model ?? model.id,
+						usage: result.usage,
+						stopReason: "stop",
+						timestamp: Date.now(),
+						duration: Math.round(performance.now() - started),
 					});
 					return buildToolResult(model, result, params.image_size);
 				} catch (error) {

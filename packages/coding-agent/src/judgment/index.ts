@@ -67,11 +67,12 @@ import {
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import type { CostGateApi } from "../session/cost-gate";
-import type { SessionManager } from "../session/session-manager";
+import type { JudgmentRecord, JudgmentRecordAnswer } from "../session/session-entries";
+import { isModelUsageLedger, type ModelUsageLedger } from "../session/model-usage-journal";
 import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
-import { type JudgmentCache, sharedJudgmentCache } from "./cache";
+import { type JudgmentCache, judgmentStateId, sharedJudgmentCache } from "./cache";
 
 export * from "./cache";
 
@@ -87,6 +88,10 @@ export interface JudgmentUsage {
 	usage: Usage;
 	stopReason: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	/** Wall time of the provider request in milliseconds. */
+	duration?: number;
+	/** What a native judge was asked and answered; prompted backends report usage only. */
+	judgment?: JudgmentRecord;
 }
 
 export interface JudgeDeps {
@@ -100,7 +105,8 @@ export interface JudgeDeps {
 	purpose: string;
 	/**
 	 * Receives every billed attempt exactly once — failed ones included, cache
-	 * hits never. Wire {@link journalJudgmentUsage} here to bill the session.
+	 * hits never — and every answered on-device completion with zero usage.
+	 * Wire {@link journalJudgmentUsage} here to bill the session.
 	 */
 	onUsage?: (usage: JudgmentUsage) => void;
 	/** Host telemetry; every attempt, cache hits included, emits one `judgment` span. */
@@ -134,15 +140,6 @@ interface PreparedImages {
 	fitted?: FittedImage[];
 }
 
-/** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
-export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId">;
-
-function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is JudgmentUsageLedger {
-	return (
-		manager.appendModelUsage !== undefined && manager.getSessionId !== undefined && manager.getLeafId !== undefined
-	);
-}
-
 /**
  * Build a {@link JudgeDeps.onUsage} that journals every billed judgment attempt
  * as a `model_usage` entry beneath the session leaf at record time, so
@@ -150,8 +147,8 @@ function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is Judgme
  * the session changes are dropped by the ledger. Returns `undefined` when the
  * journal cannot record usage.
  */
-export function journalJudgmentUsage(manager: Partial<JudgmentUsageLedger> | undefined): JudgeDeps["onUsage"] {
-	if (!manager || !isUsageLedger(manager)) return undefined;
+export function journalJudgmentUsage(manager: Partial<ModelUsageLedger> | undefined): JudgeDeps["onUsage"] {
+	if (!isModelUsageLedger(manager)) return undefined;
 	const sessionId = manager.getSessionId();
 	return usage => {
 		manager.appendModelUsage(usage, { sessionId, parentId: manager.getLeafId() });
@@ -787,7 +784,9 @@ export class ChainJudge implements Judge {
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (model.api === "local-inference") {
+			return new TextJudge(new LocalTextBackend(model.id, attempt => this.#report(attempt)));
+		}
 		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
@@ -815,6 +814,7 @@ export class ChainJudge implements Judge {
 					usage: attempt.usage,
 					stopReason: attempt.stopReason,
 					errorMessage: attempt.errorMessage,
+					duration: attempt.duration,
 					startedAt: attempt.timestamp,
 				}),
 		});
@@ -829,15 +829,18 @@ class LocalTextBackend implements TextBackend {
 	readonly guardState = false;
 	readonly model: string;
 	readonly #reasoning: boolean;
+	readonly #report: (attempt: JudgmentAttempt) => void;
 
-	constructor(modelId: string) {
+	constructor(modelId: string, report: (attempt: JudgmentAttempt) => void) {
 		this.model = modelId;
+		this.#report = report;
 		this.#reasoning = getTinyLocalModelSpec(modelId)?.reasoning === true;
 	}
 
 	async complete(judgment: TextPrompt, options: JudgeOptions): Promise<TextCompletion> {
 		// Sub-2B models answer a bare user message as a question (or echo the
 		// system prompt); one merged turn ending in `Answer:` keeps them classifying.
+		const startedAt = Date.now();
 		const text = await tinyModelClient.complete(
 			this.model,
 			prompt.render(localPromptTemplate, { system: judgment.system, state: judgment.user }),
@@ -847,6 +850,18 @@ class LocalTextBackend implements TextBackend {
 			},
 		);
 		if (!text) throw new Error(`judgment: local model ${this.model} returned no output`);
+		// On-device work bills nothing. An empty result may never have reached the worker, so only a
+		// produced answer is reported.
+		this.#report({
+			role: "judge",
+			api: this.api,
+			provider: this.provider,
+			model: this.model,
+			usage: tokenUsage(0, 0),
+			stopReason: "stop",
+			duration: Date.now() - startedAt,
+			startedAt,
+		});
 		return { text };
 	}
 }
@@ -870,11 +885,35 @@ function withCandidateSignal(judge: Judge, parent: AbortSignal | undefined): Jud
 	};
 }
 
+/** `answers` reduced to the headline values a `model_usage` entry journals. */
+function journaledAnswers(answers: Readonly<Record<string, Answer>>): Record<string, JudgmentRecordAnswer> {
+	const journaled: Record<string, JudgmentRecordAnswer> = {};
+	for (const id in answers) {
+		const answer = answers[id];
+		switch (answer.type) {
+			case "noul":
+				journaled[id] = answer.noul;
+				break;
+			case "choice":
+				journaled[id] = [answer.choice, answer.confidence];
+				break;
+			case "score":
+				journaled[id] = [answer.score, answer.confidence];
+				break;
+			case "box":
+				journaled[id] = [answer.box.top, answer.box.bottom, answer.box.left, answer.box.right, answer.confidence];
+				break;
+		}
+	}
+	return journaled;
+}
+
 /**
  * Native judgment backend. Questions already answered about the same state
  * under this model come from `cache`; only the rest reach the provider (none
  * when every answer is cached). Each call reports exactly one attempt — failed
- * requests included so the ledger shows why a judgment errored. Most judgment
+ * requests included so the ledger shows why a judgment errored — carrying the
+ * state's identity and the answers the provider produced. Most judgment
  * APIs report tokens only, so a response without a billed amount is priced from
  * the catalog model; a route that bills (OpenRouter) keeps its reported cost.
  * Attempts and results carry the catalog id, not the wire id the judge sends.
@@ -924,9 +963,18 @@ function nativeJudge(
 				questions,
 				cachedQuestions: questions - pendingCount,
 			};
+			// Journaled with the attempt's usage; a failed request has no answers to add.
+			const judgment: JudgmentRecord = {
+				state: cached?.stateId ?? judgmentStateId(cacheRequest),
+				answers: {},
+				...(pendingCount < questions ? { cached: questions - pendingCount } : {}),
+			};
 			let fresh: JudgmentResult | undefined;
+			// Provider round trip only; a judgment answered wholly from the cache sends nothing.
+			let duration = 0;
 			if (pendingCount > 0 || questions === 0) {
 				let partial = tokenUsage(0, 0);
+				const sentAt = Date.now();
 				try {
 					fresh = await judge.judge(
 						{
@@ -949,14 +997,24 @@ function nativeJudge(
 						usage: partial,
 						stopReason: isAbortOrTimeout(error) ? "aborted" : "error",
 						errorMessage: error instanceof Error ? error.message : String(error),
+						duration: Date.now() - sentAt,
+						judgment,
 					});
 					throw error;
 				}
+				duration = Date.now() - sentAt;
 				if (fresh.usage.cost.total === 0) calculateCost(model, fresh.usage);
 				if (cache && cached) cache.record(cacheModel, cached, pending, fresh);
 			}
 			const usage = fresh?.usage ?? tokenUsage(0, 0);
-			report({ ...attempt, usage, stopReason: "stop", responseModel: fresh?.model });
+			report({
+				...attempt,
+				usage,
+				stopReason: "stop",
+				responseModel: fresh?.model,
+				duration,
+				judgment: fresh ? { ...judgment, answers: journaledAnswers(fresh.answers) } : judgment,
+			});
 			const answers: Record<string, Answer> = {};
 			for (const id in request.questions) {
 				const answer = known[id] ?? fresh?.answers[id];

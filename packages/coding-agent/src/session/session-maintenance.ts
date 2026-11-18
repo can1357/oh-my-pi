@@ -64,6 +64,7 @@ import type {
 	Model,
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai";
+import { completeSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { replaysNativeResponsesHistory } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { openAIResponsesReplaysNativeHistory } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
@@ -106,6 +107,7 @@ import {
 	isUserAuthoredMessage,
 	stripImagesFromMessage,
 } from "./messages";
+import { journalCompletion } from "./model-usage-journal";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -3787,6 +3789,8 @@ export class SessionMaintenance {
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
+		// The summary lands on the compaction entry; only the spend needs journaling.
+		const journal = journalCompletion(this.#host.sessionManager, { purpose: "compaction", usageOnly: true });
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
@@ -3844,7 +3848,10 @@ export class SessionMaintenance {
 						// #3751).
 						completeImpl: async (requestModel, requestContext, requestOptions) => {
 							const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-							return stream.result();
+							const message = await stream.result();
+							// One call per provider attempt, so a retried or failed one is billed too.
+							journal?.(message);
+							return message;
 						},
 					},
 				);
@@ -5942,6 +5949,8 @@ export class SessionMaintenance {
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
 				let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
+				// The summary lands on the compaction entry; only the spend needs journaling.
+				const journal = journalCompletion(this.#host.sessionManager, { purpose: "compaction", usageOnly: true });
 				codexCompaction = createCodexCompactionContext({
 					trigger: "auto",
 					reason: "context_limit",
@@ -6006,6 +6015,12 @@ export class SessionMaintenance {
 									// retry too — the budgets would multiply and each outer
 									// wait would stack on top of an inner backoff.
 									oneshotRetry: false,
+									// The default transport, wrapped so every provider attempt is journaled.
+									completeImpl: async (requestModel, requestContext, requestOptions) => {
+										const message = await completeSimple(requestModel, requestContext, requestOptions);
+										journal?.(message);
+										return message;
+									},
 								},
 							);
 							break;

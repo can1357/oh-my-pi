@@ -641,7 +641,11 @@ export class SelectorController {
 	 */
 	async showGitTui(revision?: string): Promise<void> {
 		try {
-			await showGitOverlay(this.ctx.ui, { cwd: getProjectDir(), revision });
+			await showGitOverlay(this.ctx.ui, {
+				cwd: getProjectDir(),
+				revision,
+				usageLedger: this.ctx.sessionManager,
+			});
 		} catch (error) {
 			this.ctx.showStatus(error instanceof Error ? error.message : String(error));
 		}

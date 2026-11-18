@@ -499,6 +499,7 @@ import {
 	type SessionDumpLiveState,
 } from "./session-dump-format";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
+import { completionRecord, journalCompletion } from "./model-usage-journal";
 import type { BranchSummaryEntry, NewSessionOptions, SessionEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
@@ -6590,6 +6591,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					usage: message.usage,
 					stopReason: message.stopReason,
 					errorMessage: message.errorMessage,
+					duration: message.duration,
+					ttft: message.ttft,
 					...(refresh ? { cacheRefresh: refresh } : {}),
 				},
 				{ sessionId: this.sessionId, parentId: this.sessionManager.getLeafId() },
@@ -12125,7 +12128,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}),
 			// Journaled where the billed message exists, so a fork that ends in a
 			// provider error still records its spend before rejecting.
-			onUsage: message => this.#reportTitleUsage(usageOwner, message),
+			onUsage: message => this.#reportTitleUsage(usageOwner, "title-fork", message),
 			signal: AbortSignal.any([signal, AbortSignal.timeout(TITLE_FORK_TIMEOUT_MS)]),
 		})
 			.then(
@@ -12328,9 +12331,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				customSystemPrompt ?? this.#titleSystemPrompt,
 				titleSignal,
 				parentSessionId,
-				message => {
+				(message, prompt) => {
 					costGate.record(message.usage.cost.total);
-					this.#reportTitleUsage(usageOwner, message);
+					this.#reportTitleUsage(usageOwner, "title", message, prompt);
 				},
 			),
 		);
@@ -12339,22 +12342,33 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/**
-	 * Journal a title request's billed usage as a `model_usage` entry on the
-	 * branch it ran from, so `/usage`, `getUsageStatistics()`, and `omp stats`
-	 * count title spend. Titles are cosmetic: a stale session owner or a failed
-	 * journal write is logged and dropped rather than failing the title.
+	 * Journal a title request as a `model_usage` entry on the branch it ran
+	 * from: its billed usage, so `/usage`, `getUsageStatistics()`, and
+	 * `omp stats` count title spend, and what it was sent and replied. The
+	 * title model (`title`) records its `prompt`; the fork (`title-fork`) has
+	 * none, since it reads the conversation at `owner.parentId`. Titles are
+	 * cosmetic: a stale session owner or a failed journal write is logged and
+	 * dropped rather than failing the title.
 	 */
-	#reportTitleUsage(owner: { sessionId: string; parentId: string | null }, message: AssistantMessage): void {
+	#reportTitleUsage(
+		owner: { sessionId: string; parentId: string | null },
+		purpose: "title" | "title-fork",
+		message: AssistantMessage,
+		prompt?: string,
+	): void {
 		try {
 			this.sessionManager.appendModelUsage(
 				{
-					purpose: "title",
+					purpose,
 					api: message.api,
 					provider: message.provider,
 					model: message.model,
 					usage: message.usage,
 					stopReason: message.stopReason,
 					errorMessage: message.errorMessage,
+					duration: message.duration,
+					ttft: message.ttft,
+					completion: completionRecord(prompt, message),
 				},
 				owner,
 			);
@@ -14106,6 +14120,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const history = args.history && (await this.#prepareSideHistory(args.history, args.signal));
 		assertEphemeralTurnReady();
 		const cacheSessionId = this.sessionId;
+		// Created with the snapshot so the entry sits on the leaf the turn read.
+		const usageReporter =
+			args.onUsage ?? (args.purpose ? journalCompletion(this.sessionManager, { purpose: args.purpose }) : undefined);
 		const snapshot = this.#buildEphemeralSnapshot(
 			args.promptText,
 			history,
@@ -14185,7 +14202,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Reported where the provider settles the request, before any later step can throw it away.
 		const reportUsage = (message: AssistantMessage) => {
 			try {
-				args.onUsage?.(message);
+				usageReporter?.(message);
 			} catch (error) {
 				logger.debug("ephemeral-turn: usage reporter failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -15302,6 +15319,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (!apiKey) {
 				throw new Error(`No API key for ${model.provider}`);
 			}
+			// The summary is stored as a branch summary entry; only the spend needs journaling.
+			const journal = journalCompletion(this.sessionManager, { purpose: "branch-summary", usageOnly: true });
 			const result = await generateBranchSummary(entriesToSummarize, {
 				model,
 				apiKey: this.#modelRegistry.resolver(model, this.sessionId),
@@ -15315,7 +15334,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				// path above (chatgpt-codex review on #3751).
 				completeImpl: async (requestModel, requestContext, requestOptions) => {
 					const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
-					return stream.result();
+					const message = await stream.result();
+					// One call per provider attempt, so a retried or failed one is billed too.
+					journal?.(message);
+					return message;
 				},
 			});
 			this.#branchSummaryAbortController = undefined;

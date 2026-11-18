@@ -7,7 +7,8 @@
 
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { type Api, type AssistantMessage, type AuthStorage, type Model, tokenUsage } from "@oh-my-pi/pi-ai";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../../config/auxiliary-model-policy";
@@ -18,6 +19,7 @@ import { settings, type Settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext } from "../../extensibility/custom-tools/types";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
+import { journalCompletion, type ModelUsageLedger } from "../../session/model-usage-journal";
 import { resolveConfiguredModelTarget } from "../../session/role-models";
 import { discoverAuthStorage } from "../../sdk";
 import type { ToolSession } from "../../tools";
@@ -169,6 +171,40 @@ interface ExecuteSearchOptions {
 	sessionModel?: Model<Api>;
 	settings?: Settings;
 	signal?: AbortSignal;
+	/** Session journal each provider response's usage is billed to; unjournaled when omitted. */
+	usageLedger?: Partial<ModelUsageLedger>;
+}
+
+/**
+ * A provider response's token usage as an assistant message for the session's usage journal, or
+ * `undefined` when the provider reported neither input nor output tokens. Search usage carries no
+ * cache breakdown and no billed amount, so the cost is the catalog price of the reported tokens:
+ * per-search fees are not in it, and a search-only engine without token rates prices at zero.
+ */
+function searchUsageMessage(
+	model: Model<Api>,
+	response: SearchResponse,
+	duration: number,
+): AssistantMessage | undefined {
+	const reported = response.usage;
+	if (!reported || (reported.inputTokens === undefined && reported.outputTokens === undefined)) return undefined;
+	const usage = tokenUsage(reported.inputTokens, reported.outputTokens);
+	// A provider's total can count token classes (reasoning, cached input) the split leaves out.
+	if (reported.totalTokens !== undefined && reported.totalTokens > usage.totalTokens) {
+		usage.totalTokens = reported.totalTokens;
+	}
+	calculateCost(model, usage);
+	return {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: response.provider,
+		model: response.model ?? model.id,
+		usage,
+		stopReason: "stop",
+		timestamp: Date.now(),
+		duration,
+	};
 }
 
 function isHostedPlaceholder(model: Model<Api>): boolean {
@@ -280,6 +316,8 @@ async function executeSearch(
 	const scope = parsedQuery.hasConstraints ? scopeConstraints(parsedQuery) : undefined;
 	/** Engines that answered, but with nothing inside the query's scope directives. */
 	const scopeMisses: { id: SearchResponse["provider"]; label: string }[] = [];
+	// The tool result holds the text; this is the only place a search's tokens reach session totals.
+	const journal = journalCompletion(options.usageLedger, { purpose: "web-search", usageOnly: true });
 	for (const candidate of expanded) {
 		if (cfgOffline.get(options.settings ?? settings)) {
 			const activeProvider = options.sessionModel?.provider;
@@ -340,6 +378,7 @@ async function executeSearch(
 			availableProviderCount++;
 			lastProvider = provider;
 
+			const sentAt = Date.now();
 			const response = await provider.search({
 				query: params.query,
 				parsedQuery,
@@ -359,6 +398,9 @@ async function executeSearch(
 				sessionId,
 				antigravityEndpointMode,
 			});
+			// Before any rejection below: a response a later check discards was still billed.
+			const billed = searchUsageMessage(model, response, Date.now() - sentAt);
+			if (billed) journal?.(billed);
 
 			// A host that silently drops the hosted search tool still answers from the
 			// model's weights; without sources that answer is not a search result.
@@ -575,6 +617,7 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 			sessionModel: this.#session.getActiveModel?.(),
 			settings: this.#session.settings,
 			signal,
+			usageLedger: this.#session.sessionManager,
 		});
 	}
 }

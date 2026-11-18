@@ -679,6 +679,12 @@ export interface EphemeralTurnOptions {
 	 * off-transcript callers can journal the spend. A throw is logged, never surfaced.
 	 */
 	onUsage?: (message: AssistantMessage) => void;
+	/**
+	 * Names the turn in the session journal (`recap`, `btw`). When set and no
+	 * `onUsage` is given, every billed attempt is written as a `model_usage` entry
+	 * with its reply; the prompt is left out, since the turn reads the conversation.
+	 */
+	purpose?: string;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
 	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */

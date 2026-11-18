@@ -67,6 +67,7 @@ import {
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type ModelUsageEntry,
+	type ModelUsageRecord,
 	lastSelfSelectedLeafId,
 	type NewSessionOptions,
 	type ResetBoundaryEntry,
@@ -3641,10 +3642,7 @@ export class SessionManager {
 
 	/** Record usage on its initiating branch without moving a successor branch or session. */
 	appendModelUsage(
-		usage: Pick<
-			ModelUsageEntry,
-			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage" | "cacheRefresh"
-		>,
+		usage: ModelUsageRecord,
 		owner: { sessionId: string; parentId: string | null },
 	): string | undefined {
 		if (this.#sessionId !== owner.sessionId || (owner.parentId !== null && !this.#index.has(owner.parentId))) {

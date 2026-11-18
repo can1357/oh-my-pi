@@ -9,6 +9,7 @@
 ### Fixed
 
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
+- Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
 - Session files record what jev and title requests asked and answered: `model_usage` entries carry the request time, a judgment's answers with the state id that joins `judgment-cache.db`, and a title request's prompt and reply (no prompt text is repeated); local-model titles now leave an entry and fork titles are journaled as `title-fork`
 - `ssh://` files can be edited with hashline edits; read now shows their `[PATH#TAG]` header
 - The shell's built-in `ast-grep`/`sg` supports `scan` (`--rule`, `--inline-rules`, `sgconfig.yml` rule and utility directories, `--filter`, `--json`, report styles, `-U` fixes), `outline`, `run --kind` and `--debug-query`, and `-l cpp` now searches C headers
