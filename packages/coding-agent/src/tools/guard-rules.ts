@@ -730,19 +730,22 @@ const TAR_ENTRY_OPTIONS: Record<string, string> = {
 
 /**
  * The words a `tar` command reads, with every member after a `-C`/`--directory` resolved against
- * that directory, as tar does; each `-C` is relative to the one before it. A member's braces are
- * expanded before it is resolved, as the shell expands them before tar sees the member
- * (`{/etc/shadow,x}`, `{~/.ssh,~/.aws}`). Option values stay as written, and exclusions are left
- * out. A member after a directory the guard cannot resolve (an unresolvable `-C`, or one longer
- * than {@link SHELL_MAX_DIRECTORY}) is resolved against nothing there: an absolute one still
- * counts, and so does a `.env` by its name, while a relative one is left out, as is a member it
- * cannot resolve against a directory it knows. An extraction, listing or deletion (`x`, `t`,
- * `--delete`) reads only the archive and the member lists: its members name entries of the
- * archive, not files.
+ * that directory, as tar does: each `-C` is relative to the one before it, and one that names an
+ * absolute or home directory (`-C /etc`, `-C ~`) moves the members after it there even when the
+ * directory before it is unknown. A member's braces are expanded before it is resolved, as the
+ * shell expands them before tar sees the member (`{/etc/shadow,x}`, `{~/.ssh,~/.aws}`). Option
+ * values stay as written, and exclusions are left out. A member after a directory the guard cannot
+ * resolve (an unresolvable `-C`, or one longer than {@link SHELL_MAX_DIRECTORY}) is resolved
+ * against nothing there: an absolute one still counts, while a relative one is left out, as is a
+ * member it cannot resolve against a directory it knows; a `.env` among them comes back by name,
+ * to count by that name alone as the directory it is in is unknown. An extraction, listing or
+ * deletion (`x`, `t`, `--delete`) reads only the archive and the member lists: its members name
+ * entries of the archive, not files.
  */
-function tarReadWords(command: ShellCommand, home: string): string[] {
+function tarReadWords(command: ShellCommand, home: string): { words: string[]; byName: string[] } {
 	const argv = args(command);
 	const words: string[] = [];
+	const byName: string[] = [];
 	const members: string[] = [];
 	let entries = false;
 	let dir: string | undefined = command.cwd;
@@ -798,18 +801,20 @@ function tarReadWords(command: ShellCommand, home: string): string[] {
 			for (const expanded of shellBraces(command, arg)) {
 				const word = literalTilde ? `./${expanded}` : expanded;
 				// From a directory the guard cannot resolve, no relative member is resolved against it;
-				// an absolute one still counts, and so does a `.env`, by its name wherever it is.
+				// an absolute one still counts, and a `.env` comes back to count by its name alone.
 				const member: string | undefined =
 					dir !== undefined
 						? resolveShellWordPath(word, dir, home)
-						: path.isAbsolute(word) || ABSOLUTE_EXPANSION_RE.test(word) || namesDotenv(path.basename(word))
+						: path.isAbsolute(word) || ABSOLUTE_EXPANSION_RE.test(word)
 							? word
 							: undefined;
 				if (member !== undefined) members.push(member);
+				else if (dir === undefined && namesDotenv(path.basename(word))) byName.push(word);
 			}
 		}
 	}
-	return entries ? words : [...words, ...members];
+	if (entries) return { words, byName: [] };
+	return { words: [...words, ...members], byName };
 }
 
 /**
@@ -1166,16 +1171,32 @@ function readerArgs(command: ShellCommand): string[] {
 const URL_RE = /^[a-z][a-z\d+.-]*:\/\//i;
 
 /**
+ * The words a reading command reads files from, and the members a `tar` returns by name alone
+ * ({@link tarReadWords}).
+ */
+interface ReadWords {
+	/** The files the command reads, as written or resolved, each checked against the credential locations. */
+	words: string[];
+	/**
+	 * A `.env` member of a `tar` whose directory the guard cannot place: it counts by its name in a
+	 * pipeline ({@link sentSecret}), and is never resolved from the shell's directory, which tar
+	 * does not read it from.
+	 */
+	byName: string[];
+}
+
+/**
  * The words a reading command reads files from: a copy's local sources, a search's operands after
  * its pattern, the files a download reads (`curl -K`, `wget -i`) but not where it saves, any other
  * reader's operands; never `-` (standard input) or a URL. The value of an option that names a key
  * it authenticates with is not read ({@link KEY_VALUE_OPTIONS}).
  */
-function readWords(command: ShellCommand, home: string): string[] {
+function readWords(command: ShellCommand, home: string): ReadWords {
 	const name = command.argv[0];
 	let words: string[];
+	let byName: string[] = [];
 	if (name === "tar") {
-		words = tarReadWords(command, home);
+		({ words, byName } = tarReadWords(command, home));
 	} else if (Object.hasOwn(COPY_VALUE_OPTIONS, name)) {
 		words = copyOperands(command)
 			.slice(0, -1)
@@ -1187,7 +1208,7 @@ function readWords(command: ShellCommand, home: string): string[] {
 	} else {
 		words = Object.hasOwn(READERS, name) ? readerArgs(command) : [];
 	}
-	return words.filter(word => word !== "-" && !URL_RE.test(word));
+	return { words: words.filter(word => word !== "-" && !URL_RE.test(word)), byName };
 }
 
 // -- credential_read ---------------------------------------------------------------------------------
@@ -1229,8 +1250,10 @@ function credentialRead(command: ShellCommand, credentials: CredentialIndex): Gu
 		return hit("credential_read", "it exports private keys");
 	}
 	// Its arguments are read from where it runs, its `<` redirections from where the shell opens them.
+	// A `tar` member whose directory the guard cannot place is left out here: it is no credential
+	// read by its name ({@link ReadWords.byName}).
 	const sources = [
-		{ words: readWords(command, credentials.home), cwd: command.cwd },
+		{ words: readWords(command, credentials.home).words, cwd: command.cwd },
 		{ words: command.reads, cwd: command.shellCwd },
 	];
 	for (const { words, cwd } of sources) {
@@ -1421,10 +1444,13 @@ function firstSecret(
  */
 function secretOutput(command: ShellCommand, credentials: CredentialIndex): string | undefined {
 	if (dumpsEnvironment(command)) return "the environment";
-	const words = command.argv[0] === "source" ? args(command) : readWords(command, credentials.home);
+	const { words, byName } =
+		command.argv[0] === "source" ? { words: args(command), byName: [] } : readWords(command, credentials.home);
 	return (
 		firstSecret(command, command.reads, command.shellCwd, credentials) ??
-		firstSecret(command, words, command.cwd, credentials)
+		firstSecret(command, words, command.cwd, credentials) ??
+		// A member whose directory the guard cannot place counts by its name, from no directory.
+		firstSecret(command, byName, undefined, credentials)
 	);
 }
 
