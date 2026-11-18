@@ -4802,6 +4802,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			this.#runToolCallIds = new Set(event.resumedToolCallIds);
 			this.#prunedTerminalFailure = undefined;
 			this.#advisors.onPrimaryAgentStart();
+			this.#models.settleAutoThinkingLevel();
 			// The previous loop's end lost the race to this start: announce its pause first,
 			// so every subscriber sees it before the next loop.
 			if (this.#loopEnd) this.#pauseLoop(this.#loopEnd);

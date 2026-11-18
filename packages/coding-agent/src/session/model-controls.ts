@@ -769,6 +769,18 @@ export class ModelControls {
 		return true;
 	}
 
+	/**
+	 * Settle auto on the level a starting run thinks at when no classification
+	 * resolved it (IRC wakes, resumed runs, agent-originated and synthetic turns),
+	 * so readers stop showing auto as pending while the agent runs at a concrete
+	 * level. The next user turn still reclassifies.
+	 */
+	settleAutoThinkingLevel(): void {
+		if (!this.#autoThinking || this.#autoResolvedLevel !== undefined) return;
+		const effort = toReasoningEffort(this.#thinkingLevel);
+		if (effort !== undefined) this.#resolveAutoThinkingLevel(effort);
+	}
+
 	/** Publish `effort` as the turn's auto resolution; the transcript records only a changed level. */
 	#resolveAutoThinkingLevel(effort: Effort): void {
 		const shouldPersistResolution = this.#thinkingLevel !== effort;
