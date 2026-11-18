@@ -310,3 +310,28 @@ export interface AdvisorMessageDetails {
 
 /** Custom message type for supervised process completions. */
 export const LAUNCH_COMPLETION_MESSAGE_TYPE = "launch-completion";
+
+/** Custom message type for output a running background job or service was asked to report (`notify` on `bash`). */
+export const ASYNC_NOTIFY_MESSAGE_TYPE = "async-notify";
+
+/** One background job's or service's share of an `async-notify` message. */
+export interface AsyncNotifyReport {
+	/** The job's id or the service's name, as `proc://` takes it. */
+	id: string;
+	type: "bash" | "service";
+	/** Source of its `notify` regex. */
+	pattern: string;
+	/** Matching output lines, oldest first. */
+	lines: string[];
+	/** Matching lines left out of `lines`. */
+	omitted: number;
+	/** Whether it was still running when the notice was built. */
+	running: boolean;
+	/** It matched too often: this is its last notice. */
+	stopped: boolean;
+}
+
+/** Details payload on the `async-notify` custom message drawn in the transcript. */
+export interface AsyncNotifyDetails {
+	reports: AsyncNotifyReport[];
+}

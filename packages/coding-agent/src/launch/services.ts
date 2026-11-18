@@ -5,6 +5,7 @@ import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { compileNotifyPattern } from "../async/notify";
 import { type DaemonBrokerClient, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import { DAEMON_OUTPUT_PATTERN_FLAGS, type DaemonOperation, type DaemonRpcResult } from "./protocol";
@@ -27,6 +28,8 @@ export interface ServiceStart {
 	cwd?: string;
 	pty?: boolean;
 	ready?: ServiceReady;
+	/** Regex; each output line it matches is reported to the owning session while the service runs. */
+	notify?: string;
 	/** Overlay on the configured shell env; wins over it. */
 	env?: Record<string, string>;
 }
@@ -91,7 +94,23 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 		}
 		return session.queueLaunchCompletion?.(notification);
 	});
+	const unsubscribeNotify = client.onNotify(owner, notification => {
+		const { daemon } = notification;
+		// The match proves the service live: track it, so `running` answers even before this session lists its services.
+		track(session, daemon);
+		session.queueServiceNotify?.({
+			id: daemon.name,
+			type: "service",
+			pattern: notification.pattern,
+			running: () => serviceState(session).owned.get(daemon.name)?.id === daemon.id,
+			owner,
+			lines: notification.lines,
+			omitted: notification.omitted,
+			stopped: notification.stopped,
+		});
+	});
 	session.registerDisposeCallback?.(() => {
+		unsubscribeNotify();
 		unsubscribe({ preservePending: true });
 		clients.delete(client);
 		serviceState(session).owned.clear();
@@ -100,6 +119,8 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 	session.registerSessionChangeCallback?.(() => {
 		// The previous session stays resumable (`/resume`, fork parent), so keep its
 		// completions queued in the broker for replay when that session id re-subscribes.
+		// Its services' `notify` matches are not kept: they reach it again once it does.
+		unsubscribeNotify();
 		unsubscribe({ preservePending: true });
 		clients.delete(client);
 		serviceState(session).owned.clear();
@@ -217,7 +238,8 @@ function serviceDirectory(cwd: string | undefined, sessionCwd: string): string {
  * `readyInterrupt` ends only the readiness wait, after the broker acknowledged
  * the launch: the call then resolves `readyInterrupted` with the launched
  * snapshot while the service keeps starting. Validation, connection, and launch
- * failures still reject.
+ * failures still reject. `notifyArmed` is false for a `notify` regex the broker
+ * did not take: one from an older omp ignores it.
  */
 export async function startService(
 	session: ToolSession,
@@ -228,6 +250,7 @@ export async function startService(
 	daemon: DaemonSnapshot;
 	readyTimedOut: boolean;
 	readyInterrupted: boolean;
+	notifyArmed: boolean;
 }> {
 	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
@@ -243,6 +266,7 @@ export async function startService(
 			throw new ToolError(`Invalid readiness regex: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
+	if (params.notify) compileNotifyPattern(params.notify);
 	const shell = session.settings.getShellConfig();
 	const spec: DaemonSpec = {
 		name: params.name,
@@ -259,6 +283,7 @@ export async function startService(
 					timeoutMs: Math.round(Math.max(0.05, Math.min(3_600, ready.timeout ?? 30)) * 1_000),
 				}
 			: undefined,
+		notify: params.notify,
 		restart: "no",
 		persist: cfgLaunchPersist.get(session.settings),
 		detached: false,
@@ -276,6 +301,7 @@ export async function startService(
 	);
 	if (result.op !== "start") throw new Error("Unexpected daemon start response");
 	const launched = result.daemon;
+	const notifyArmed = result.notifyArmed === true;
 	// A legacy broker ignores `awaitReady` and already waited: its result is
 	// ready, terminal, or timed out, so the wait phase is skipped.
 	if (
@@ -285,7 +311,7 @@ export async function startService(
 		launched.readyAt !== undefined ||
 		TERMINAL_STATES[launched.state]
 	)
-		return { daemon: launched, readyTimedOut: result.readyTimedOut, readyInterrupted: false };
+		return { daemon: launched, readyTimedOut: result.readyTimedOut, readyInterrupted: false, notifyArmed };
 	const timeoutMs = Math.max(0, spec.ready.timeoutMs - (Date.now() - launched.startedAt));
 	try {
 		const waited = await request(
@@ -299,10 +325,11 @@ export async function startService(
 			daemon: waited.daemon,
 			readyTimedOut: waited.timedOut && !TERMINAL_STATES[waited.daemon.state],
 			readyInterrupted: false,
+			notifyArmed,
 		};
 	} catch (error) {
 		if (readyInterrupt.aborted && !signal?.aborted)
-			return { daemon: launched, readyTimedOut: false, readyInterrupted: true };
+			return { daemon: launched, readyTimedOut: false, readyInterrupted: true, notifyArmed };
 		throw error;
 	}
 }

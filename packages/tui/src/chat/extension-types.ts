@@ -76,7 +76,7 @@ export interface AssistantTextRendering {
  * - `message`: a session message drawn as its own block, `id` the decimal `message.timestamp`
  *   (shared by messages recorded in the same millisecond).
  *   `custom` messages with `customType` `"advisor"`, `"skill-prompt"`, `"lsp-late-diagnostic"`,
- *   `"async-result"` or `"launch-completion"`, and `!`/`$` runs (`bashExecution`,
+ *   `"async-result"`, `"async-notify"` or `"launch-completion"`, and `!`/`$` runs (`bashExecution`,
  *   `pythonExecution`). A `!`/`$` run still going has a provisional message and id; it is asked
  *   again with the recorded message once the session records the run. In Tern, late diagnostics
  *   an edit/write card takes are drawn with that card instead, so an `"lsp-late-diagnostic"`

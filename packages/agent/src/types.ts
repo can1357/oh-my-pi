@@ -345,8 +345,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	hasIrcInterrupts?: () => boolean | Promise<boolean>;
 	/**
-	 * Peeks whether a background completion (finished job, exited supervised
-	 * process) is queued for aside injection at the next boundary.
+	 * Peeks whether a background notice (finished job, exited supervised
+	 * process, output a running job was asked to report) is queued for aside
+	 * injection at the next boundary.
 	 *
 	 * Same rules as {@link hasIrcInterrupts}: non-consuming, only cuts
 	 * *interruptible* waits short, in either interruptMode. Without

@@ -17,6 +17,8 @@ import type { TranscriptBlock, TranscriptPresentation, TranscriptPresenter } fro
 import type { LateDiagnosticsFile } from "./late-diagnostics-message";
 import {
 	type AdvisorMessageDetails,
+	ASYNC_NOTIFY_MESSAGE_TYPE,
+	type AsyncNotifyDetails,
 	type BashExecutionMessage,
 	type CustomMessage,
 	type HookMessage,
@@ -469,6 +471,15 @@ function blockHead(block: WrappedTranscriptBlock): BlockHead {
 			const ids = jobs.map(job => job.jobId ?? "unknown").join(", ");
 			const title = jobs.length === 1 ? "Background job completed" : `${jobs.length} background jobs completed`;
 			return { ...plainHead("job", "omp.activity", title, ids), glyph: theme.fg("success", theme.status.success) };
+		}
+		case ASYNC_NOTIFY_MESSAGE_TYPE: {
+			const reports = (message.details as AsyncNotifyDetails | undefined)?.reports ?? [];
+			const lines = reports.reduce((sum, report) => sum + report.lines.length + report.omitted, 0);
+			const target = `${reports.map(report => report.id).join(", ")} · ${countOf(lines, "line")}`;
+			return {
+				...plainHead("job", "omp.activity", "Background output", target),
+				glyph: theme.fg("accent", theme.status.info),
+			};
 		}
 		case LAUNCH_COMPLETION_MESSAGE_TYPE: {
 			const daemons = (message.details as { daemons?: DaemonSnapshot[] } | undefined)?.daemons ?? [];

@@ -890,13 +890,20 @@ export class Draft {
 			units.forEach(([, unitOps], unitIndex) => {
 				for (const op of unitOps) unitOf.set(op.id, `${hunkIndex + 1}${unitLetter(unitIndex)}`);
 			});
+			// Consecutive lines sharing unit, mark, and owner print under one header.
+			let header: string | undefined;
 			for (const op of hunk.ops) {
 				const mark = file.selected.has(op.id) ? "✓" : status[op.id] === "review" ? "?" : "·";
 				const owner =
 					op.by.startsWith("~") && op.hint && file.classification?.likely.has(op.id)
 						? `${actorName(op.by)}, during ${op.hint}'s call`
 						: actorName(op.by);
-				lines.push(`  ${unitOf.get(op.id)} ${mark} ${op.kind}${displayLine(op.text)}    ← ${owner}`);
+				const next = `  ${unitOf.get(op.id)} ${mark} ${owner}`;
+				if (next !== header) {
+					header = next;
+					lines.push(header);
+				}
+				lines.push(`    ${op.kind}${displayLine(op.text)}`);
 			}
 			const reasons = new Set(
 				hunk.ops.flatMap(op => {

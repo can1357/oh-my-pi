@@ -113,8 +113,11 @@ export function taskAgentHandles(
 /** Longest command a completion header quotes before eliding its middle. */
 const COMMAND_IDENTITY_MAX_CHARS = 400;
 
-/** A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct. */
-function commandIdentity(command: string): string {
+/**
+ * A bash command on one line, middle elided past the cap so commands differing only at the end stay distinct.
+ * Names the job in the notices that report on it: its completion and its `notify` matches.
+ */
+export function commandIdentity(command: string): string {
 	const oneLine = command.trim().replace(/\r\n|\r|\n/g, "\\n");
 	if (oneLine.length <= COMMAND_IDENTITY_MAX_CHARS) return oneLine;
 	const keep = COMMAND_IDENTITY_MAX_CHARS / 2;

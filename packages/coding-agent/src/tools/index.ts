@@ -3,6 +3,7 @@ import type { ToolConversationState } from "./tool-state";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManagerApi } from "../async/job-manager";
+import type { NotifyBatch } from "../async/notify";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
@@ -31,6 +32,7 @@ import type { CallContext, SpotlightSession } from "../spotlight/types";
 import type { AgentLifecycleApi } from "../registry/agent-lifecycle";
 import type { AgentRegistryApi } from "../registry/agent-registry";
 import type { ArtifactManagerApi } from "../session/artifacts";
+import type { AsyncNotifyEntry, AsyncNotifySource } from "../session/async-notify";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CostGateApi } from "../session/cost-gate";
 import type { CustomMessage } from "../session/messages";
@@ -570,6 +572,18 @@ export interface ToolSession {
 	queueDeferredMessage?(message: CustomMessage): void;
 	/** Queue a broker supervised-process completion for the owning session. */
 	queueLaunchCompletion?(notification: DaemonCompletionNotification): Promise<void>;
+	/**
+	 * Opens the channel for the `notify` matches of a background job this session started: each batch
+	 * sent through it reaches the session as a notice, delivered like the job's result. Absent where
+	 * no session can take the notices; `bash` then refuses `notify`.
+	 */
+	openAsyncNotify?(job: AsyncNotifySource): (batch: NotifyBatch) => void;
+	/**
+	 * Queue one batch of `notify` matches from a supervised service this session owns (`entry.owner`),
+	 * as it arrives from the launch broker. Absent where no session can take the notices; `bash` then
+	 * refuses `notify` on a service.
+	 */
+	queueServiceNotify?(entry: AsyncNotifyEntry): void;
 	/** Register cleanup that runs when this session is disposed; returns a handle that removes the cleanup. */
 	registerDisposeCallback?(callback: () => void): (() => void) | void;
 	/** Register cleanup that runs when this ToolSession adopts a different session ID. */

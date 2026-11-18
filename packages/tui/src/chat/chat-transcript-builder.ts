@@ -18,7 +18,7 @@ import type { AdvisorMessageDetails } from "./messages";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "./messages";
 import { chatTranscriptDisplayPreferences as displayPreferences } from "./display-preferences";
 import type { AssistantTextRenderer, MessageRenderer } from "./extension-types";
-import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "./messages";
+import { ASYNC_NOTIFY_MESSAGE_TYPE, LAUNCH_COMPLETION_MESSAGE_TYPE } from "./messages";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
@@ -37,6 +37,7 @@ import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	buildAsyncNotifyBlock,
 	buildAsyncResultComponent,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
@@ -672,6 +673,10 @@ export class ChatTranscriptBuilder {
 		}
 		if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {
 			this.container.addChild(buildLaunchCompletionBlock(message));
+			return;
+		}
+		if (message.customType === ASYNC_NOTIFY_MESSAGE_TYPE) {
+			this.container.addChild(buildAsyncNotifyBlock(message));
 			return;
 		}
 		if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {

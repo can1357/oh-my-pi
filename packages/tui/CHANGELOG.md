@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+- Added the `async-notify` transcript block, which shows the output lines a running background job or service reported
+
+### Changed
+
+- On Windows, terminal output is written off the JS thread, so input and rendering stay responsive while the console drains a large repaint
+
+### Fixed
+
+- On Windows, omp no longer freezes when the terminal stops reading its output (a hung Windows Terminal, a paused ssh client); it keeps running and catches up once the terminal reads again
+
 ## [18.22.1] - 2026-11-17
 
 ### Added

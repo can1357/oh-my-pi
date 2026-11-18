@@ -27,6 +27,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 
+import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
@@ -548,6 +549,11 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
+
+	// The user waits on this process (startup, typing, redraws), not on its
+	// workers: on macOS its main thread runs above the default class a busy
+	// machine's builds compete in.
+	if (isProcessEntry) raiseInteractiveQos();
 
 	if (resolvedArgv[0] === "--license") {
 		// Command boundary: bundled notices are read only when requested.
