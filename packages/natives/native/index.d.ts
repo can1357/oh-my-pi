@@ -4315,6 +4315,20 @@ export interface VcsDiscardCheck {
    */
   merge?: boolean
   /**
+   * Tracked changes: the tree-ish the command checks the files out of
+   * when it is neither the index nor `HEAD` (`git reset --hard <commit>`,
+   * `git checkout -f <branch>`): also count the untracked, not ignored
+   * files it overwrites. A name that resolves to nothing is looked up
+   * among the remote-tracking branches, as `git switch` guesses a new
+   * branch.
+   */
+  source?: string
+  /**
+   * Tracked changes: a `git stash` ran before the command, so count only
+   * the untracked files `source` overwrites.
+   */
+  trackedStashed?: boolean
+  /**
    * A `git stash -u` ran before the command: count only the ignored files
    * the untracked preview leaves, as the stash keeps the untracked ones.
    */

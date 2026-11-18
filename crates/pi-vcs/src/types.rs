@@ -363,10 +363,10 @@ pub struct TrackedCheck {
 	/// Only changes the work tree holds beyond the index: the command
 	/// overwrites the work tree but leaves the index alone (`git checkout .`,
 	/// `git restore .`), which keeps staged changes.
-	pub worktree_only: bool,
+	pub worktree_only:   bool,
 	/// Pathspecs the command restores, relative to the directory the check
 	/// runs in; empty for the whole work tree.
-	pub pathspecs:     Vec<String>,
+	pub pathspecs:       Vec<String>,
 	/// `git reset --merge`: it reverts the staged changes, conflicted paths
 	/// included, and refuses while a path has a staged change and a work-tree
 	/// modification (then it loses nothing). Counts the staged changes only;
