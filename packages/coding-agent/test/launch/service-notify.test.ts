@@ -286,6 +286,63 @@ describe("service notify", () => {
 		}
 	}, 30_000);
 
+	it("does not report what a detached service printed while its owner was away, only what it prints after", async () => {
+		using tempDir = TempDir.createSync("@omp-service-notify-away-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const previousTitle = process.title;
+		// The first client writes the token the broker reads at startup.
+		const first = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const broker = await startBroker(projectDir, runtimeDir);
+		// Prints a line for each trigger file the test creates, then marks it printed; exits on its own
+		// should the test fail before stopping it.
+		const spec: DaemonSpec = {
+			name: "detached",
+			application: process.execPath,
+			args: [
+				"-e",
+				"const fs = require('fs'); setTimeout(() => process.exit(0), 30_000); const steps = [['away', 'ERROR while away'], ['back', 'ERROR after return']]; setInterval(() => { for (const step of steps) if (!step[2] && fs.existsSync(step[0])) { console.log(step[1]); fs.writeFileSync('printed-' + step[0], ''); step[2] = true; } }, 20)",
+			],
+			env: {},
+			cwd: projectDir,
+			pty: false,
+			notify: "ERROR",
+			restart: "no",
+			persist: true,
+			detached: true,
+		};
+		first.onCompletion("owner", () => undefined);
+		await first.request({ op: "start", spec, owner: "owner" });
+		first.close();
+		// Past one 100 ms read of the log, so the broker has stopped reading it before the service
+		// prints: the line then waits unread until the owner is back.
+		await Bun.sleep(300);
+		await Bun.write(path.join(projectDir, "away"), "");
+		while (!(await Bun.file(path.join(projectDir, "printed-away")).exists())) await Bun.sleep(20);
+
+		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const lines: string[] = [];
+		const reported = Promise.withResolvers<void>();
+		client.onCompletion("owner", () => undefined);
+		client.onNotify("owner", notification => {
+			lines.push(...notification.lines);
+			reported.resolve();
+		});
+		try {
+			await client.request({ op: "ping" });
+			await Bun.write(path.join(projectDir, "back"), "");
+			await reported.promise;
+			expect(lines).toEqual(["ERROR after return"]);
+		} finally {
+			await client.request({ op: "stop", name: "detached", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker.finished;
+			process.title = previousTitle;
+		}
+	}, 30_000);
+
 	it("never sends a match to a client that did not say it reads them", async () => {
 		using tempDir = TempDir.createSync("@omp-service-notify-legacy-");
 		const projectDir = path.join(tempDir.path(), "project");

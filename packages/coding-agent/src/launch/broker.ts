@@ -117,8 +117,10 @@ interface ManagedDaemon {
 	/**
 	 * Reports output lines matching `spec.notify` to the owner. Armed per launch;
 	 * absent without a regex, once the launch ends, and once it matched too often.
+	 * `watching`: a loop reads a freshly launched detached daemon's log for it (see
+	 * `#watchNotify`).
 	 */
-	notify?: { tap: TextTap; notifier: OutputNotifier };
+	notify?: { tap: TextTap; notifier: OutputNotifier; watching: boolean };
 	restartTimer?: NodeJS.Timeout;
 	consecutiveFailures: number;
 	completionCapable: boolean;
@@ -626,11 +628,16 @@ class DaemonBroker {
 					this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
 					await this.#setRecordCompletionCapability(owner, true);
 					const previous = this.#ownerSockets.get(owner);
+					// An owner coming back: what its detached services printed while nobody
+					// read their logs is read past while it is still unregistered, so it is
+					// not reported now.
+					if (previous?.socket !== socket) await this.#skipUnwatchedOutput(owner);
 					this.#ownerSockets.set(owner, {
 						socket,
 						subscriptionId: request.completionSubscriptionId,
 						notifyEvents: request.notifyEvents === true,
 					});
+					for (const record of this.#unwatchedNotify(owner)) this.#watchNotify(record);
 					if (previous?.socket === socket && !replayOwners.has(owner)) continue;
 					for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
 						socket.send(JSON.stringify(completion));
@@ -835,15 +842,7 @@ class DaemonBroker {
 			if (record.spec.detached) await this.#launchDetached(record, generation);
 			else if (record.spec.pty) await this.#launchPty(record, generation);
 			else this.#launchPipe(record, generation);
-			// A detached daemon writes its log itself: nothing but a poll sees the lines as they land.
-			if (record.spec.detached && record.notify) {
-				void this.#monitorDetached(record, generation).catch(error => {
-					logger.warn("Failed to poll detached daemon output", {
-						name: record.snapshot.name,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				});
-			}
+			this.#watchNotify(record);
 			if (record.spec.ready?.port !== undefined) void this.#pollPort(record, generation, record.spec.ready);
 			this.#markReady(record);
 		} catch (error) {
@@ -1080,7 +1079,7 @@ class DaemonBroker {
 				batch => this.#publishNotify(record, pattern, batch),
 				{ refill: false },
 			);
-			return { tap, notifier };
+			return { tap, notifier, watching: false };
 		} catch (error) {
 			logger.warn("Daemon notify regex does not compile", {
 				name: record.spec.name,
@@ -1142,19 +1141,81 @@ class DaemonBroker {
 		if (generation === record.generation && !settledState(record.snapshot.state)) {
 			record.notify = this.#armNotify(record);
 		}
-		await this.#monitorDetached(record, generation);
+		await this.#monitorRecoveredDetached(record, generation);
 	}
 
 	/**
-	 * Poll a detached daemon until its launch settles: a recovered one has no exit
-	 * to await, and one with a `notify` regex must be read as it writes.
+	 * Poll a recovered detached daemon until it settles: no process handle reports
+	 * its exit. Each read also feeds its `notify` matches.
 	 */
-	async #monitorDetached(record: ManagedDaemon, generation: number): Promise<void> {
+	async #monitorRecoveredDetached(record: ManagedDaemon, generation: number): Promise<void> {
 		while (!this.#shuttingDown && generation === record.generation && !settledState(record.snapshot.state)) {
 			await Bun.sleep(100);
 			if (this.#shuttingDown || generation !== record.generation) return;
 			await this.#refreshDetached(record);
 		}
+	}
+
+	/**
+	 * Read a freshly launched detached daemon's log every 100 ms while its owner can
+	 * receive its `notify` matches: the daemon writes the log itself, so nothing
+	 * else sees the lines as they land. The loop ends once the owner goes away or
+	 * the notices end; a returning owner starts it again (`#handleLine`). A
+	 * recovered daemon is read by {@link #monitorRecoveredDetached} instead.
+	 */
+	#watchNotify(record: ManagedDaemon): void {
+		const notify = record.notify;
+		if (!record.spec.detached || !record.process || !notify || notify.watching || !this.#notifySocket(record)) return;
+		notify.watching = true;
+		const generation = record.generation;
+		const watched = (): boolean =>
+			record.notify === notify &&
+			generation === record.generation &&
+			!this.#shuttingDown &&
+			!settledState(record.snapshot.state) &&
+			this.#notifySocket(record) !== undefined;
+		void (async () => {
+			try {
+				for (;;) {
+					await Bun.sleep(100);
+					if (!watched()) return;
+					await this.#refreshDetached(record);
+				}
+			} finally {
+				// Cleared in the same tick the loop decides to stop, so a returning owner restarts it.
+				notify.watching = false;
+			}
+		})().catch(error => {
+			logger.warn("Failed to read detached daemon output", {
+				name: record.snapshot.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	}
+
+	/** Freshly launched detached daemons of `owner` with `notify` armed whose log no loop reads. */
+	#unwatchedNotify(owner: string): ManagedDaemon[] {
+		return [...this.#records.values()].filter(
+			record =>
+				record.snapshot.owner === owner &&
+				record.spec.detached &&
+				record.process !== undefined &&
+				record.notify?.watching === false,
+		);
+	}
+
+	/** Read past what `owner`'s unwatched detached daemons wrote; called while `owner` is unregistered, so nothing is reported. */
+	async #skipUnwatchedOutput(owner: string): Promise<void> {
+		await Promise.all(
+			this.#unwatchedNotify(owner).map(record =>
+				this.#readDetachedOutput(record, record.generation).catch(error => {
+					logger.warn("Failed to read detached daemon output", {
+						name: record.snapshot.name,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}),
+			),
+		);
 	}
 
 	async #pollPort(record: ManagedDaemon, generation: number, ready: DaemonReadySpec): Promise<void> {
