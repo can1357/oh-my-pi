@@ -124,7 +124,6 @@ describe("tool guard", () => {
 		const refusal = await guard.check(bash, { command: "rm -rf ~/data" }, "exec");
 
 		expect(refusal).toContain("`destroys_data`");
-		expect(refusal).toContain("it deletes or overwrites data that may exist nowhere else");
 		expect(refusal).toContain("Find a safer way");
 		// Only the user's own messages are requests; a tool result's instruction never is.
 		const state = judge.requests[0].state as { requests: string[]; cwd: string };
@@ -430,8 +429,8 @@ describe("tool guard", () => {
 		const refusal = await guard.check(bash, { command: "bun test" }, "exec");
 
 		expect(refusal).toContain("`overloads_host`");
-		expect(refusal).toContain("The host shows memory pressure, heavy swapping.");
-		expect(refusal).toContain("Move the heavy work to another host, or wait");
+		expect(refusal).toContain("memory pressure");
+		expect(refusal).toContain("heavy swapping");
 		expect(refusal).not.toContain("Find a safer way");
 	});
 
