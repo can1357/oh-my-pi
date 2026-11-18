@@ -5,10 +5,12 @@
 ### Fixed
 
 - Compaction keeps reasoning cut off by the output-token cap together with the prompt it answers, and context estimates count that reasoning while it replays ([#18064](https://github.com/can1357/oh-my-pi/pull/18064) by [@SergioHC95](https://github.com/SergioHC95))
+
+## [19.0.0] - 2026-11-18
+
 ### Added
 
-- `CustomMessage` and `custom_message` entries accept `excludeFromContext`: such a message is never sent to the model, and compaction and branch summaries skip it ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
-- `Agent.continue()` delivers a queued steer or follow-up when only messages flagged `excludeFromContext` trail the last assistant reply; `isExcludedFromContext()`, `lastContextIndex()` and `lastContextMessage()` are exported ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+- Added support for excluding custom messages from model context and compaction or branch summaries, while allowing queued steering and follow-up messages to continue correctly after excluded messages.
 
 ## [18.22.1] - 2026-11-17
 
