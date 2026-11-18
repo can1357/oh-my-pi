@@ -22,7 +22,7 @@ import {
 	resolveSeedsForScope,
 	tryLoadMentalModelsBlock,
 } from "./mental-models";
-import { RecallFailureWait, recallSkippedNotice } from "./recall-wait";
+import { RecallFailureWait, type RecallWait, recallSkippedNotice } from "./recall-wait";
 import { countUserTurns, extractMessages } from "./transcript";
 import { type DrainResult, HindsightOutbox, type RetainInput } from "./outbox";
 
@@ -37,13 +37,11 @@ const MENTAL_MODEL_LOAD_TIMED_OUT = Symbol("mental-model-load-timed-out");
 interface RecallOutcome {
 	context: string | null;
 	ok: boolean;
-	/** Cause of a failure whose generation is current, as its notice shows it. */
-	failure?: string;
 }
 /**
- * What a subagent alias reads from its parent state: the routing it copies and the
- * snippets the developer prompt shows. A subagent worker holds a remote implementation
- * whose client and bank set are main's live ones.
+ * What a subagent alias reads from its parent state: the routing it copies, the snippets
+ * the developer prompt shows, and the recall pause it shares. A subagent worker holds a
+ * remote implementation whose client, bank set and recall pause are main's live ones.
  */
 export interface HindsightSessionStateApi {
 	readonly client: HindsightClientApi;
@@ -55,6 +53,11 @@ export interface HindsightSessionStateApi {
 	readonly banksSet: HindsightBankSet;
 	readonly lastRecallSnippet?: string;
 	readonly mentalModelsSnippet?: string;
+	/**
+	 * The pause after a failed automatic recall, which this state and its subagent aliases
+	 * share. An alias of a parent without one keeps a pause of its own.
+	 */
+	readonly recallWait?: RecallWait;
 }
 
 export interface HindsightSessionStateOptions {
@@ -75,9 +78,11 @@ export interface HindsightSessionStateOptions {
 	hasRecalledForFirstTurn?: boolean;
 	/**
 	 * When set, this entry is a subagent alias that reuses the parent's bank,
-	 * scope, config, client, and banksSet. Aliases skip auto-recall and
-	 * auto-retain — those run on the parent only — but the recall/retain/reflect
-	 * tools resolve via the alias so they persist to the same bank as the parent.
+	 * scope, config, client, and banksSet. Aliases run no first-turn recall and
+	 * no auto-retain — those run on the parent only — and their compaction
+	 * recall shares the parent's pause after a failed recall. The
+	 * recall/retain/reflect tools resolve via the alias so they persist to the
+	 * same bank as the parent.
 	 */
 	aliasOf?: HindsightSessionStateApi;
 }
@@ -270,8 +275,10 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	#recallGeneration = 0;
-	/** Pause after a failed automatic recall (`hindsight.recallCooldownMs`). */
-	readonly #recallWait: RecallFailureWait;
+	/** Pause after a failed automatic recall (`hindsight.recallCooldownMs`); an alias holds its parent's. */
+	readonly recallWait: RecallWait;
+	/** The failure record whose first skip this state already announced. */
+	#shownFailureId: number | undefined;
 	/** Cached `<mental_models>` block injected into developer instructions. */
 	mentalModelsSnippet?: string;
 	/** When the current bootstrap/boundary load settled; gates the first-turn race. */
@@ -284,7 +291,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 	mentalModelsLoadPromise?: Promise<void>;
 	#mentalModelsLoadGeneration = 0;
 	unsubscribe?: () => void;
-	/** Alias states delegate persistence config to a primary parent state. */
+	/** Alias states delegate persistence config to a primary parent state and share its recall pause. */
 	aliasOf?: HindsightSessionStateApi;
 	readonly retainQueue: HindsightRetainQueue;
 
@@ -298,7 +305,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		this.config = options.config;
 		this.session = options.session;
 		this.banksSet = options.banksSet;
-		this.#recallWait = new RecallFailureWait(this.config.recallCooldownMs);
+		this.recallWait = options.aliasOf?.recallWait ?? new RecallFailureWait(this.config.recallCooldownMs);
 		this.lastRetainedTurn = options.lastRetainedTurn ?? 0;
 		this.#lastRetainedMessageIndex = 0;
 		this.#cachedTranscript = "";
@@ -355,8 +362,16 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		await this.retainQueue.flush();
 	}
 
+	/**
+	 * The automatic recall, of the first turn and of compaction. It records the outcome in
+	 * {@link recallWait}: an answer ends the pause. A failure of the current generation starts
+	 * a pause, or a doubled one when an earlier pause has ended; a failure while a pause runs
+	 * changes nothing. An aborted recall and a stale failure record nothing. The `recall` tool
+	 * calls the client directly and does not use it.
+	 */
 	async recallForContext(query: string, signal?: AbortSignal): Promise<RecallOutcome> {
 		const generation = this.#recallGeneration;
+		let context: string | null = null;
 		try {
 			const response = await this.client.recall(this.bankId, query, {
 				budget: this.config.recallBudget,
@@ -368,34 +383,39 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 			});
 			if (signal?.aborted) return { context: null, ok: false };
 			const results = response.results ?? [];
-			if (results.length === 0) return { context: null, ok: true };
-			const formatted = formatMemories(results);
-			const block = `<memories>\n${this.config.recallPromptPreamble}\n\n${formatted}\n</memories>`;
-			return { context: block, ok: true };
+			if (results.length > 0) {
+				const formatted = formatMemories(results);
+				context = `<memories>\n${this.config.recallPromptPreamble}\n\n${formatted}\n</memories>`;
+			}
 		} catch (err) {
 			// A cancelled turn (Esc) is not a failure.
 			if (signal?.aborted) return { context: null, ok: false };
 			const errorText = err instanceof Error ? err.message : String(err);
 			// A conversation reset or session switch since the request makes its failure stale.
 			const failure = this.#recallGeneration === generation ? memoryNoticeErrorText(errorText) : undefined;
-			const retryAt = failure !== undefined ? this.#recallWait.retryAtAfterFailure(Date.now()) : undefined;
+			const retryAt = failure !== undefined ? this.recallWait.record({ ok: false, failure }) : undefined;
 			const retryAfter = retryAt !== undefined ? new Date(retryAt).toISOString() : undefined;
 			logger.warn("Hindsight: recall failed", { bankId: this.bankId, error: errorText, retryAfter });
-			if (failure === undefined) return { context: null, ok: false };
-			this.session.emitNotice("warning", `Memory recall failed: ${failure}`, HINDSIGHT_NOTICE_SOURCE);
-			return { context: null, ok: false, failure };
+			if (failure !== undefined) {
+				this.session.emitNotice("warning", `Memory recall failed: ${failure}`, HINDSIGHT_NOTICE_SOURCE);
+			}
+			return { context: null, ok: false };
 		}
+		// Outside the `try`, so nothing the record does reads as a failed recall.
+		this.recallWait.record({ ok: true });
+		return { context, ok: true };
 	}
 
 	/**
-	 * Whether an automatic recall waits out a recent failure; the first skip of each failure
-	 * logs and notifies, later ones stay quiet.
+	 * Whether an automatic recall waits out a recent failure. The first skip of each failure
+	 * record logs and notifies in this state's session, later ones stay quiet; an alias
+	 * shares the record but announces its first skip in its own session.
 	 */
 	#skipRecallAfterFailure(): boolean {
-		const now = Date.now();
-		const skip = this.#recallWait.skip(now);
+		const skip = this.recallWait.skip();
 		if (!skip) return false;
-		if (skip.first) {
+		if (skip.failure.id !== this.#shownFailureId) {
+			const now = Date.now();
 			const cause = skip.failure.error;
 			logger.warn("Hindsight: recall skipped after a recent failure", {
 				bankId: this.bankId,
@@ -405,6 +425,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 				error: cause,
 			});
 			this.session.emitNotice("warning", recallSkippedNotice(skip.retryAt, cause, now), HINDSIGHT_NOTICE_SOURCE);
+			this.#shownFailureId = skip.failure.id;
 		}
 		return true;
 	}
@@ -553,8 +574,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
-		const { context, ok, failure } = await this.recallForContext(truncated, signal);
-		this.#recallWait.record({ ok, failure }, Date.now());
+		const { context, ok } = await this.recallForContext(truncated, signal);
 		if (!ok) return undefined;
 
 		return {
@@ -594,8 +614,7 @@ export class HindsightSessionState implements HindsightSessionStateApi {
 
 		const query = composeRecallQuery(lastUser.content, messages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, lastUser.content, this.config.recallMaxQueryChars);
-		const { context, ok, failure } = await this.recallForContext(truncated, signal);
-		this.#recallWait.record({ ok, failure }, Date.now());
+		const { context } = await this.recallForContext(truncated, signal);
 		return context ?? undefined;
 	}
 

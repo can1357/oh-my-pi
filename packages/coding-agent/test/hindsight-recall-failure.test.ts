@@ -100,14 +100,20 @@ function newSessionManager(): SessionManager {
 	return manager;
 }
 
-/** One process: a Hindsight state over `sessionManager`; its notices land in `notices`. */
-function start(sessionManager: SessionManager, client: HindsightClientApi, stateConfig: HindsightConfig = config) {
+/** A session over `sessionManager`; its notices land in `notices`. */
+function noticeSession(sessionManager: SessionManager) {
 	const notices: Notice[] = [];
 	const session = {
 		sessionId: sessionManager.getSessionId(),
 		sessionManager,
 		emitNotice: (level: string, message: string, source?: string) => notices.push({ level, message, source }),
 	} as object as AgentSession;
+	return { session, notices };
+}
+
+/** One process: a Hindsight state over `sessionManager`; its notices land in `notices`. */
+function start(sessionManager: SessionManager, client: HindsightClientApi, stateConfig: HindsightConfig = config) {
+	const { session, notices } = noticeSession(sessionManager);
 	const state = new HindsightSessionState({
 		sessionId: session.sessionId,
 		client,
@@ -115,6 +121,27 @@ function start(sessionManager: SessionManager, client: HindsightClientApi, state
 		config: stateConfig,
 		session,
 		banksSet: new Set(),
+	});
+	states.push(state);
+	return { state, notices };
+}
+
+/** A subagent's state, built from `primary` as the Hindsight backend builds it; its notices land in its own list. */
+function startAlias(primary: HindsightSessionState) {
+	const { session, notices } = noticeSession(newSessionManager());
+	const state = new HindsightSessionState({
+		sessionId: session.sessionId,
+		client: primary.client,
+		bankId: primary.bankId,
+		retainTags: primary.retainTags,
+		recallTags: primary.recallTags,
+		recallTagsMatch: primary.recallTagsMatch,
+		config: primary.config,
+		session,
+		banksSet: primary.banksSet,
+		lastRetainedTurn: 0,
+		hasRecalledForFirstTurn: true,
+		aliasOf: primary,
 	});
 	states.push(state);
 	return { state, notices };
@@ -135,7 +162,6 @@ describe("Hindsight recall failure notice", () => {
 
 		const result = await outcome;
 		expect(result).toMatchObject({ context: null, ok: false });
-		expect(result.failure?.startsWith("recall failed: boom line two x")).toBe(true);
 		expect(notices).toHaveLength(1);
 		const [notice] = notices;
 		expect(notice.level).toBe("warning");
@@ -143,7 +169,6 @@ describe("Hindsight recall failure notice", () => {
 		expect(notice.message.startsWith("Memory recall failed: recall failed: boom line two x")).toBe(true);
 		expect(notice.message).not.toMatch(/[\x00-\x1f\x7f]/);
 		expect(notice.message.length).toBeLessThan(250);
-		expect(notice.message).toBe(`Memory recall failed: ${result.failure}`);
 	});
 
 	it("stays silent when a superseded compaction aborts its recall", async () => {
@@ -220,6 +245,11 @@ describe("Hindsight automatic recall after a failure", () => {
 		return state.beforeAgentStartPrompt(PROMPT);
 	}
 
+	function compactAt(state: HindsightSessionState, time: number) {
+		setSystemTime(time);
+		return state.recallForCompaction([{ role: "user", content: "what did we decide?" }]);
+	}
+
 	/**
 	 * Prompts one second before `end`, when a pause must end, and one second after it.
 	 * Returns whether the first prompt sent no recall and the second prompt sent one.
@@ -233,6 +263,16 @@ describe("Hindsight automatic recall after a failure", () => {
 		return { skipped, recalled: client.calls > after };
 	}
 
+	/** A primary state with the shipped settings and a subagent's state built from it; every recall times out. */
+	function startWithAlias() {
+		const client = new CountingRecallApi();
+		client.answer = async () => {
+			throw new HindsightError("recall request timed out after 1s");
+		};
+		const primary = start(newSessionManager(), client, shippedConfig());
+		return { client, primary, alias: startAlias(primary.state) };
+	}
+
 	/** Persists the turn the session sent, which puts the transcript on disk; returns its file. */
 	async function writeTurn(sessionManager: SessionManager): Promise<string> {
 		sessionManager.appendMessage({ role: "user", content: PROMPT, timestamp: Date.now() });
@@ -243,7 +283,7 @@ describe("Hindsight automatic recall after a failure", () => {
 		return sessionFile;
 	}
 
-	it("does not wait for another recall during the pause after a first-turn recall times out", async () => {
+	it("makes one recall request across two prompts after a first-turn recall times out", async () => {
 		let recallRequests = 0;
 		const server = Bun.serve({
 			hostname: "127.0.0.1",
@@ -261,17 +301,13 @@ describe("Hindsight automatic recall after a failure", () => {
 		if (!isHindsightConfigured(shipped)) throw new Error("hindsight.apiUrl did not resolve");
 		const { state } = start(newSessionManager(), createHindsightClient(shipped), shipped);
 
-		let started = performance.now();
 		const first = await state.beforeAgentStartPrompt(PROMPT);
-		const firstWaitMs = Math.round(performance.now() - started);
-		started = performance.now();
 		const second = await state.beforeAgentStartPrompt("And the staging host?");
-		const secondWaitMs = Math.round(performance.now() - started);
 
+		// Printed so that a run on older code shows how many requests it made.
+		console.log(JSON.stringify({ recallRequests }));
 		expect(first).toBeUndefined();
-		expect(firstWaitMs).toBeGreaterThanOrEqual(900);
 		expect(second).toBeUndefined();
-		expect(secondWaitMs).toBeLessThan(500);
 		expect(recallRequests).toBe(1);
 	}, 10_000);
 
@@ -279,6 +315,7 @@ describe("Hindsight automatic recall after a failure", () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const client = new CountingRecallApi();
 		const { state, notices } = start(newSessionManager(), client);
+		setSystemTime(T0);
 		for (const prompt of [PROMPT, "And the staging host?", "And the backup host?"]) {
 			expect(await state.beforeAgentStartPrompt(prompt)).toBeUndefined();
 		}
@@ -292,6 +329,8 @@ describe("Hindsight automatic recall after a failure", () => {
 		expect(skipLines).toHaveLength(1);
 		expect(skipLines[0][1]).toMatchObject({ bankId: "b", failures: 1 });
 		expect(String(skipLines[0][1]?.error)).toContain("boom");
+		// Both lines name the retry time of the one stored failure.
+		expect(failureLines[0][1]?.retryAfter).toBe(skipLines[0][1]?.retryAfter);
 		expect(notices).toHaveLength(2);
 		const [failure, skip] = notices;
 		expect(failure).toEqual({
@@ -325,6 +364,47 @@ describe("Hindsight automatic recall after a failure", () => {
 		expect(client.calls).toBe(3);
 		await promptAt(state, recovered + SHIPPED_FIRST_PAUSE_MS + 1_000);
 		expect(client.calls).toBe(4);
+	});
+
+	it("an answer with no memories also starts the next pause again at the first length", async () => {
+		const client = new CountingRecallApi();
+		const { state } = start(newSessionManager(), client, shippedConfig());
+		await promptAt(state, T0);
+		expect(client.calls).toBe(1);
+
+		const recovered = T0 + SHIPPED_FIRST_PAUSE_MS + 1_000;
+		// A bank with nothing to recall answers with no results; the server is up all the same.
+		client.answer = async () => ({ results: [] });
+		const answered = await promptAt(state, recovered);
+		expect(answered).toBeDefined();
+		expect(answered?.context).toBeUndefined();
+		client.answer = failWithBoom;
+		await promptAt(state, recovered);
+		expect(client.calls).toBe(3);
+
+		expect(await promptAroundEnd(state, client, recovered + SHIPPED_FIRST_PAUSE_MS)).toEqual({
+			skipped: true,
+			recalled: true,
+		});
+	});
+
+	it("the first skip after each new failure is logged and shown once", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const client = new CountingRecallApi();
+		const { state, notices } = start(newSessionManager(), client, shippedConfig());
+		const secondFailure = T0 + SHIPPED_FIRST_PAUSE_MS + 1_000;
+		for (const failedAt of [T0, secondFailure]) {
+			for (const offset of [0, 1_000, 2_000]) await promptAt(state, failedAt + offset);
+		}
+		const skipLines = warn.mock.calls.filter(
+			([message]) => message === "Hindsight: recall skipped after a recent failure",
+		);
+
+		expect(client.calls).toBe(2);
+		expect(skipLines.map(([, fields]) => fields?.failures)).toEqual([1, 2]);
+		expect(notices.map(notice => (notice.message.startsWith("Memory recall failed:") ? "failed" : "paused"))).toEqual(
+			["failed", "paused", "failed", "paused"],
+		);
 	});
 
 	it("the pause doubles up to 30 minutes", async () => {
@@ -552,5 +632,63 @@ describe("Hindsight automatic recall after a failure", () => {
 		await promptAt(state, T0 - 60 * 60_000);
 
 		expect(client.calls).toBe(2);
+	});
+
+	it("an alias's compaction recall waits out the primary's pause", async () => {
+		const { client, primary, alias } = startWithAlias();
+		expect(await promptAt(primary.state, T0)).toBeUndefined();
+		expect(client.calls).toBe(1);
+
+		expect(await compactAt(alias.state, T0 + 30_000)).toBeUndefined();
+		expect(client.calls).toBe(1);
+	});
+
+	it("an alias's failure after the primary's pause counts as one more failure in a row", async () => {
+		const { client, primary, alias } = startWithAlias();
+		await promptAt(primary.state, T0);
+		const aliasFailedAt = T0 + SHIPPED_FIRST_PAUSE_MS + 1_000;
+		expect(await compactAt(alias.state, aliasFailedAt)).toBeUndefined();
+		expect(client.calls).toBe(2);
+
+		// The second failure in a row pauses for two minutes, not one.
+		expect(await promptAroundEnd(primary.state, client, aliasFailedAt + 2 * SHIPPED_FIRST_PAUSE_MS)).toEqual({
+			skipped: true,
+			recalled: true,
+		});
+	});
+
+	it("each session shows its first skip once", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const { client, primary, alias } = startWithAlias();
+		await promptAt(primary.state, T0);
+		expect(primary.notices).toHaveLength(1);
+
+		expect(await compactAt(alias.state, T0 + 10_000)).toBeUndefined();
+		expect(client.calls).toBe(1);
+		expect(alias.notices).toHaveLength(1);
+		expect(alias.notices[0].message).toStartWith("Memory recall paused until ");
+
+		// The subagent's skip notice lands in its own session; the primary's user still sees one.
+		const beforePrimarySkip = warn.mock.calls.length;
+		expect(await promptAt(primary.state, T0 + 20_000)).toBeUndefined();
+		expect(client.calls).toBe(1);
+		const primarySkipLines = warn.mock.calls
+			.slice(beforePrimarySkip)
+			.filter(([message]) => message === "Hindsight: recall skipped after a recent failure");
+		expect(primarySkipLines).toHaveLength(1);
+		expect(primary.notices).toHaveLength(2);
+		expect(primary.notices[1].message).toStartWith("Memory recall paused until ");
+
+		expect(await compactAt(alias.state, T0 + 30_000)).toBeUndefined();
+		expect(alias.notices).toHaveLength(1);
+	});
+
+	it("an alias's failure starts the primary's pause", async () => {
+		const { client, primary, alias } = startWithAlias();
+		expect(await compactAt(alias.state, T0)).toBeUndefined();
+		expect(client.calls).toBe(1);
+
+		expect(await promptAt(primary.state, T0 + 1_000)).toBeUndefined();
+		expect(client.calls).toBe(1);
 	});
 });

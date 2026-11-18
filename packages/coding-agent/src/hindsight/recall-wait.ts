@@ -9,8 +9,9 @@
  * An automatic recall that answers ends the pause, and the next pause starts again at
  * `recallCooldownMs`. The `recall` tool neither waits for the pause nor ends it.
  *
- * The pause is kept in memory for the running session state, so a new process starts
- * without one.
+ * The pause belongs to a primary session state and to the subagent aliases started from it,
+ * on this thread or on a worker: an alias's compaction recall waits it out, and its outcome
+ * counts as the primary's would. It is kept in memory, so a new process starts without one.
  */
 import { formatDuration } from "@oh-my-pi/pi-utils";
 
@@ -20,8 +21,10 @@ const MAX_PAUSE_MS = 30 * 60 * 1000;
 /** Latest epoch ms a date can hold; a later retry cannot be represented, and such a pause never ends anyway. */
 const MAX_DATE_MS = 8.64e15;
 
-/** The last failed automatic recall of a state. */
+/** The last failed automatic recall of a primary state and its aliases. */
 export interface RecallFailure {
+	/** A number its {@link RecallFailureWait} gives each new record; each state announces a record's first skip once. */
+	id: number;
 	/** When the recall failed, epoch ms. */
 	at: number;
 	/** Failed automatic recalls in a row, up to this one. */
@@ -35,8 +38,27 @@ export interface RecallSkip {
 	failure: RecallFailure;
 	/** When automatic recall may run again, epoch ms. */
 	retryAt: number;
-	/** First skip of this failure: announce it. */
-	first: boolean;
+}
+
+/** An automatic recall's outcome as a {@link RecallWait} records it. */
+export interface RecallWaitOutcome {
+	ok: boolean;
+	failure?: string;
+}
+
+/**
+ * The pause of a primary session state, which its subagent aliases share. The clock is read
+ * where the record lives, so a worker alias's calls run on the main thread's clock.
+ */
+export interface RecallWait {
+	/** The failure that holds off an automatic recall now; undefined when the recall may run. */
+	skip(): RecallSkip | undefined;
+	/**
+	 * Records an automatic recall's outcome: `ok` for an answer, `failure` (its cause) for a
+	 * failure. Returns when automatic recall may run again after a failure it keeps, epoch ms;
+	 * undefined after an answer or with the pause off.
+	 */
+	record(outcome: RecallWaitOutcome): number | undefined;
 }
 
 /** When automatic recall may run again after `failure`, epoch ms. */
@@ -51,20 +73,6 @@ function isWaiting(failure: RecallFailure, cooldownMs: number, now: number): boo
 }
 
 /**
- * The record after an automatic recall failed at `now`: `previous` unchanged while its wait
- * still runs (the recall was in flight when another failed), else one more consecutive failure.
- */
-function nextFailure(
-	previous: RecallFailure | undefined,
-	cooldownMs: number,
-	now: number,
-	error: string,
-): RecallFailure {
-	if (previous && isWaiting(previous, cooldownMs, now)) return previous;
-	return { at: now, failures: (previous?.failures ?? 0) + 1, error };
-}
-
-/**
  * Notice for the first automatic recall skipped after a failure; automatic recall may run
  * again at `retryAt`, epoch ms. `cause` must already be cleaned for display.
  */
@@ -74,51 +82,48 @@ export function recallSkippedNotice(retryAt: number, cause: string, now: number)
 }
 
 /**
- * The last failed automatic recall of one state, kept in memory. A conversation reset or
- * session switch keeps it: the server's health is not conversation state.
+ * The last failed automatic recall of a primary session state, kept in memory and shared with
+ * the subagent aliases started from it. A conversation reset or session switch keeps it: the
+ * server's health is not conversation state.
  */
-export class RecallFailureWait {
+export class RecallFailureWait implements RecallWait {
 	readonly #cooldownMs: number;
 	#failure: RecallFailure | undefined;
-	/** The failure whose skip was already announced. */
-	#announced: RecallFailure | undefined;
+	/** The number of the last failure record. */
+	#lastId = 0;
 
 	/** `cooldownMs` is `hindsight.recallCooldownMs`, the first pause; `0`, less or `NaN` turns the pause off. */
 	constructor(cooldownMs: number) {
 		this.#cooldownMs = cooldownMs > 0 ? cooldownMs : 0;
 	}
 
-	/** The failure that holds off an automatic recall at `now`; undefined when the recall may run. */
-	skip(now: number): RecallSkip | undefined {
+	skip(): RecallSkip | undefined {
 		const failure = this.#failure;
-		if (!failure || !isWaiting(failure, this.#cooldownMs, now)) return undefined;
-		const first = this.#announced !== failure;
-		this.#announced = failure;
-		return { failure, retryAt: retryAtAfter(failure, this.#cooldownMs), first };
+		if (!failure || !isWaiting(failure, this.#cooldownMs, Date.now())) return undefined;
+		return { failure, retryAt: retryAtAfter(failure, this.#cooldownMs) };
 	}
 
 	/**
-	 * When automatic recall may run again if a recall fails at `now`, epoch ms; undefined
-	 * when `recallCooldownMs` is `0` or less.
+	 * A failure starts a pause, or a doubled one when the previous pause has ended. A failure
+	 * during a running pause changes nothing, and the end of that pause is returned. An
+	 * answered recall (`ok`) ends the pause, also one that a conversation reset made stale, so
+	 * the next failure starts again at the first pause. An aborted recall has neither and
+	 * records nothing.
 	 */
-	retryAtAfterFailure(now: number): number | undefined {
+	record(outcome: RecallWaitOutcome): number | undefined {
 		if (this.#cooldownMs <= 0) return undefined;
-		return retryAtAfter(nextFailure(this.#failure, this.#cooldownMs, now, ""), this.#cooldownMs);
-	}
-
-	/**
-	 * Records an automatic recall's outcome. A failure (`failure`, its cause) starts a pause,
-	 * or a doubled one when the previous pause has ended. A failure during a running pause
-	 * changes nothing. An answered recall (`ok`) ends the pause, also one that a conversation
-	 * reset made stale, so the next failure starts again at the first pause. An aborted recall,
-	 * or a failure that a reset made stale, has neither and records nothing.
-	 */
-	record(outcome: { ok: boolean; failure?: string }, now: number): void {
-		if (this.#cooldownMs <= 0) return;
-		if (outcome.failure !== undefined) {
-			this.#failure = nextFailure(this.#failure, this.#cooldownMs, now, outcome.failure);
-		} else if (outcome.ok) {
-			this.#failure = undefined;
+		if (outcome.failure === undefined) {
+			if (outcome.ok) this.#failure = undefined;
+			return undefined;
 		}
+		const now = Date.now();
+		const previous = this.#failure;
+		// A recall that was in flight when another failed keeps the running pause.
+		const failure: RecallFailure =
+			previous && isWaiting(previous, this.#cooldownMs, now)
+				? previous
+				: { id: ++this.#lastId, at: now, failures: (previous?.failures ?? 0) + 1, error: outcome.failure };
+		this.#failure = failure;
+		return retryAtAfter(failure, this.#cooldownMs);
 	}
 }

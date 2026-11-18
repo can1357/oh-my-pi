@@ -6,7 +6,7 @@
 
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
-- When the Hindsight server does not respond, later prompts no longer each wait out the recall timeout: automatic recall pauses for `hindsight.recallCooldownMs` (also `HINDSIGHT_RECALL_COOLDOWN_MS`, default 1 minute, doubling up to 30 minutes), and a notice says when it tries again. `0` turns the pause off ([#19594](https://github.com/can1357/oh-my-pi/pull/19594) by [@sjawhar](https://github.com/sjawhar))
+- Fixed each prompt waiting out the Hindsight recall timeout while the server does not respond: automatic recall now pauses for `hindsight.recallCooldownMs` (default 1 minute, doubling up to 30 minutes) ([#19594](https://github.com/can1357/oh-my-pi/pull/19594) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
