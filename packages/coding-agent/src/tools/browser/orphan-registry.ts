@@ -1,5 +1,5 @@
 /**
- * Durable ownership registry for targets in the project-shared broker-owned
+ * Durable ownership registry for targets in the project-shared daemon-owned
  * Chromium (`omp.browser.headless`/`omp.browser.headed`).
  *
  * The shared browser outlives any single omp process, but tab ownership is
@@ -8,7 +8,7 @@
  * in-process map dies with it and the pages it opened stay open in the shared
  * Chromium forever, accumulating into multi-GB orphan targets (issue #10022).
  *
- * This module records, on disk under the broker runtime dir, which OS process
+ * This module records, on disk under the daemon runtime dir, which OS process
  * created each shared-browser page target. Any live omp process can then reap
  * targets whose owning process is gone. It only ever touches OMP-owned
  * shared-browser targets — user-owned connected/relay/spawned browsers have no
@@ -125,7 +125,7 @@ export async function forgetSharedTarget(scope: SharedTargetScope, targetId: str
 
 /**
  * Drop every target this process still claims in `scope`. For when the whole
- * shared browser is confirmed gone — the broker reported its daemon in a
+ * shared browser is confirmed gone — the daemon reported its browser unit in a
  * terminal state after a stop — which takes the targets that could not be
  * closed with it; the records are dead weight that would otherwise be
  * rewritten on every later write until this process exits. Only call this on
