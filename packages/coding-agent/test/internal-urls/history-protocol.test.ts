@@ -30,6 +30,7 @@ import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgCompactionExperimentalContextManagement } from "@oh-my-pi/pi-coding-agent/session/context-settings";
+import { resourceText } from "../helpers/resource-text";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
@@ -440,7 +441,7 @@ describe("history:// protocol", () => {
 		expect(output?.type).toBe("text");
 		if (output?.type !== "text") throw new Error("Expected text output");
 		// A raw range keeps each line's terminator, so consecutive ranges concatenate to the source.
-		expect(output.text).toBe(`${resource.content.split("\n").slice(0, 2).join("\n")}\n`);
+		expect(output.text).toBe(`${resourceText(resource).split("\n").slice(0, 2).join("\n")}\n`);
 	});
 
 	it("resolves agent ids case-insensitively", async () => {
