@@ -678,18 +678,20 @@ export class SessionMaintenance {
 	 *  frame cap, reasoning policy) and by each reader model that resolves to it (`null`: the reader reads the
 	 *  frames it already gets). */
 	readonly #shapedViews = new WeakMap<CompactionEntry, Map<string, Promise<snapcompact.ArchiveView | null>>>();
-	/** Each archive's settled re-shaped views by reader key ({@link #shapedViewKey}), for synchronous counts. */
-	readonly #settledShapedViews = new WeakMap<CompactionEntry, Map<string, snapcompact.ArchiveView>>();
-	/** Reader keys some archive has a settled re-shaped view for, so counts for other readers skip the lookup. */
-	readonly #shapedReaderKeys = new Set<string>();
+	/** Settled re-shaped views by reader key ({@link #shapedViewKey}), then by the compaction entry each
+	 *  re-shapes, with the summary message local counts read for it ({@link #messagesAsRead}). */
+	readonly #settledShapedViews = new Map<
+		string,
+		Map<CompactionEntry, { view: snapcompact.ArchiveView; message?: CompactionSummaryMessage }>
+	>();
 	/** The compaction entry behind each archive summary message, once found. */
 	readonly #summaryEntries = new WeakMap<CompactionSummaryMessage, CompactionEntry>();
 	/** The entry list on which no archive backed each summary message, so lookups on it are not repeated. */
 	readonly #archivelessSummaries = new WeakMap<CompactionSummaryMessage, readonly SessionEntry[]>();
 	/** Whether each legendless archive summary message may replay reasoning ({@link #mayReplayThinking}). */
 	readonly #replaysThinking = new WeakMap<CompactionSummaryMessage, boolean>();
-	/** Reader copies that read an archive as text in place of its frames. */
-	readonly #textCopies = new WeakSet<AgentMessage>();
+	/** Reader copies whose frames are not the original's: a text view, or frames re-shaped for one reader. */
+	readonly #redrawnCopies = new WeakSet<AgentMessage>();
 	/** Reader copies of archive summary messages keyed by the original message, then by {@link ArchiveReader.key},
 	 *  so repeated swaps keep one identity. */
 	readonly #readerSummaries = new WeakMap<
@@ -5288,8 +5290,7 @@ export class SessionMaintenance {
 	): AgentMessage[] {
 		if (!model) return messages;
 		const reader = archiveReader(model);
-		const shapedKey = reader.withoutFrames ? undefined : this.#shapedViewKey(model);
-		const shaped = shapedKey !== undefined && this.#shapedReaderKeys.has(shapedKey);
+		const settled = reader.withoutFrames ? undefined : this.#settledShapedViews.get(this.#shapedViewKey(model));
 		let read: AgentMessage[] | undefined;
 		messages.forEach((message, index) => {
 			if (message.role !== "compactionSummary") return;
@@ -5300,16 +5301,32 @@ export class SessionMaintenance {
 				const view = entry && this.#viewWithoutFrames(entry, reader, model);
 				wanted = view ? this.#readerMessage(original, view, reader) : original;
 			} else if (!reader.withoutFrames) {
-				const entry = shaped && mayHoldArchive(original) ? this.#archiveEntry(original, entries) : undefined;
-				const view = entry && this.#settledShapedViews.get(entry)?.get(shapedKey!);
-				if (view) wanted = this.#readerMessage(original, view, reader);
-				else if (this.#textCopies.has(message)) wanted = original;
+				// A copy redrawn for another reader goes back to the original unless this reader has its own.
+				const shaped =
+					settled && mayHoldArchive(original) ? this.#settledShapedSummary(original, settled, reader) : undefined;
+				if (shaped) wanted = shaped;
+				else if (this.#redrawnCopies.has(message)) wanted = original;
 			}
 			if (wanted === message) return;
 			read ??= messages.slice();
 			read[index] = wanted;
 		});
 		return read ?? messages;
+	}
+
+	/** The summary message counts read for `original` from `settled`, one reader's settled re-shaped views,
+	 *  built once per compaction entry: rebuilt contexts carry a fresh `original` each time. */
+	#settledShapedSummary(
+		original: CompactionSummaryMessage,
+		settled: Map<CompactionEntry, { view: snapcompact.ArchiveView; message?: CompactionSummaryMessage }>,
+		reader: ArchiveReader,
+	): CompactionSummaryMessage | undefined {
+		for (const [entry, slot] of settled) {
+			if (entry.summary !== original.summary || new Date(entry.timestamp).getTime() !== original.timestamp) continue;
+			slot.message ??= this.#readerMessage(original, slot.view, reader, true);
+			return slot.message;
+		}
+		return undefined;
 	}
 
 	/** The compaction entry among `entries` whose snapcompact archive `message` was built from; an entry list
@@ -5345,7 +5362,8 @@ export class SessionMaintenance {
 				if (reader.excludeThinking && this.#mayReplayThinking(message)) {
 					view = await this.#viewWithoutThinking(entry, model);
 				}
-				view = (await this.#viewInShape(entry, model, view?.archive)) ?? view;
+				const shaped = await this.#viewInShape(entry, model, view?.archive);
+				if (shaped) return this.#readerMessage(message, shaped, reader, true);
 			}
 		} else if (reader.excludeThinking && snapcompact.summaryIncludesThinking(message.summary)) {
 			// No archive behind it (e.g. archive text a summarizer folded into a plain
@@ -5363,6 +5381,7 @@ export class SessionMaintenance {
 		message: CompactionSummaryMessage,
 		view: snapcompact.ArchiveView,
 		reader: ArchiveReader,
+		redrawn = reader.withoutFrames,
 	): CompactionSummaryMessage {
 		let cache = this.#readerSummaries.get(message);
 		if (!cache) {
@@ -5381,7 +5400,7 @@ export class SessionMaintenance {
 		};
 		cache.set(reader.key, { view, message: readerMessage });
 		this.#originalSummaries.set(readerMessage, message);
-		if (reader.withoutFrames) this.#textCopies.add(readerMessage);
+		if (redrawn) this.#redrawnCopies.add(readerMessage);
 		return readerMessage;
 	}
 
@@ -5591,13 +5610,12 @@ export class SessionMaintenance {
 		}
 		const settled = await view;
 		if (!settled) return undefined;
-		let settledViews = this.#settledShapedViews.get(entry);
+		let settledViews = this.#settledShapedViews.get(readerKey);
 		if (!settledViews) {
 			settledViews = new Map();
-			this.#settledShapedViews.set(entry, settledViews);
+			this.#settledShapedViews.set(readerKey, settledViews);
 		}
-		settledViews.set(readerKey, settled);
-		this.#shapedReaderKeys.add(readerKey);
+		if (settledViews.get(entry)?.view !== settled) settledViews.set(entry, { view: settled });
 		return settled;
 	}
 
