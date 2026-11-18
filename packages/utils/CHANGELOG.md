@@ -4,6 +4,17 @@
 
 ### Added
 
+- `spillUrl`, `parseSpillUrl` and `spillUrlIds` format and parse a session spill's `local://N.log` URL
+
+### Fixed
+
+- Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL
+- Opening an archive no longer fails because one unrelated member exceeds the 64 MiB extraction limit; the limit applies when that member is read
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
 - Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
 
 ## [18.21.0] - 2026-11-16

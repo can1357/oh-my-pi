@@ -25,10 +25,18 @@ declare module "@oh-my-pi/pi-agent-core" {
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
+		/** Set by the tool wrapper on the context a call runs with once the user approved that call in
+		 *  a prompt. A device call (`xd://`) the call dispatches inherits it, and while the device input
+		 *  flows through unchanged the tool guard does not screen what the user approved again. */
+		promptApproved?: boolean;
 		/** Set by the Cursor exec bridge, whose read frames compose `:raw` only to
 		 *  drop line gutters. `read` then still returns image files as images
 		 *  instead of their bytes decoded as text, which Cursor rejects (#15630). */
 		rawImages?: boolean;
+		/** Set by eval's tool bridge: a program, not a model, consumes the result. The tool wrapper
+		 *  then neither spills the result to an artifact nor appends display notices (truncation
+		 *  stays structured in `details.meta`), and `read` returns `:raw` selections whole. */
+		programmatic?: boolean;
 		/** Set while the session runs the Spotlight experiment: the tool wrapper passes the final result of each of
 		 *  the agent's own calls (`toolCall` lists it under the tool's name) through it. */
 		spotlightShape?: CalledToolShaper;

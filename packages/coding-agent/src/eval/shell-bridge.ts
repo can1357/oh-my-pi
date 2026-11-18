@@ -13,9 +13,12 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { executeBash } from "../exec/bash-executor";
 import { cfgBashGitGuard } from "../exec/settings";
+import { sessionResolveContext } from "../internal-urls/context";
+import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
+import { sessionShellSpeech } from "../tts/shell-speech";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `sh` helper across both runtimes. */
@@ -67,6 +70,13 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 		minimize: false,
 		gitGuard: cfgBashGitGuard.get(session.settings),
 		ovnfs: ovnfsCommand(session.settings),
+		// Builtins read internal URLs (`cat local://x`, `local://3.log`) like the bash tool's; read tier,
+		// and without reply/write sinks handler-written URLs refuse writes.
+		filesystem: new InternalUrlFilesystem({
+			context: sessionResolveContext(session, { signal }),
+			tier: "read",
+		}).shellFilesystem(),
+		speech: sessionShellSpeech(session),
 		// The sink's inline window is a bounded preview; collect the whole stream instead.
 		chunkThrottleMs: 0,
 		onChunk: chunk => {

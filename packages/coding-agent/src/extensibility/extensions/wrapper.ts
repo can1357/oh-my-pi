@@ -511,9 +511,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		}
 
 		// 3. The tool guard: rule gates judge every call; its harm judge screens only calls the approval
-		// gate let through on its own, since a call the user just approved in a prompt was asked for.
-		// An abort while a gate waits on its judge rejects: the call neither runs nor counts as refused.
-		// The model's name for the call, which rule scopes match: a custom wire name (`apply_patch`) when it used one.
+		// gate let through on its own. A call the user just approved in a prompt was asked for, and so
+		// is a device call (`xd://`) whose carrier call the user approved; its device input flows through
+		// unchanged. An abort while a gate waits on its judge rejects: the call neither runs nor counts as
+		// refused. The model's name for the call, which rule scopes match: a custom wire name
+		// (`apply_patch`) when it used one.
+		const userApproved = approvalCheck.required || (xdevBypass && context?.promptApproved === true);
 		const batchCall = context?.toolCall?.toolCalls[context.toolCall.index];
 		const calledName =
 			batchCall?.id === toolCallId && batchCall.name === this.tool.customWireName ? batchCall.name : this.tool.name;
@@ -525,7 +528,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					tool: this.tool,
 					args: resolvedArgs,
 					tier: resolved.tier,
-					prompted: approvalCheck.required,
+					prompted: userApproved,
 					name: calledName,
 				},
 				signal,
@@ -538,6 +541,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			cancelPreflight();
 			throw new Error(refusal);
 		}
+		const runContext = approvalCheck.required && context ? { ...context, promptApproved: true } : context;
 
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;
@@ -550,7 +554,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// a runner exists.
 			result = await this.runner.runScoped(() =>
 				withFileMutationSession(this.runner.sessionId, () =>
-					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, runContext),
 				),
 			);
 		} catch (err) {

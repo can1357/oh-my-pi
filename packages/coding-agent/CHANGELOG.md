@@ -2,11 +2,307 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- SDK: `createAgentSession`'s `cacheWarming` option is a mode cap (`"off" | "streaming" | "idle"`, the lower of it and `providers.cacheWarming` applies) instead of a boolean; pass `"off"` where you passed `false`
+- `artifact://N` is gone: truncated tool output and shaped originals are now `local://N.log` files at the session's `local://` root, readable, listable and completable like any other `local://` file. Old sessions' `artifact://` links are not migrated
+- SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
+- One per-user daemon now owns every shared background process (services, language servers, disassembler databases, blob exposure, local models, speech, text prediction) instead of a broker per project plus separate hosts; daemons and services started by older versions are not adopted
+- `omp ps` lists global, project and session units from that one daemon: `--global <service>` is gone, `--json` prints one `{daemon, reports}` object, and `dsm://` handles no longer carry `?project=`
+
 ### Added
 
 - Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls approval allowed, such as deletions outside the working directory, force pushes, or uploads, and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - On Linux the tool guard also refuses heavy work (installs, builds, test suites) started while the host is strained by memory pressure, swapping, CPU saturation, I/O stalls, or a nearly full disk, and suggests moving it to another host or waiting ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
 - Added pre-execution TTSR gate rules: a `question` rule with `gate: before` is judged on each in-scope tool call before it runs and a yes refuses it; `onJudgeError` covers judge failures, and judged-rule requests count toward the cost cap ([#19670](https://github.com/can1357/oh-my-pi/pull/19670) by [@Xytronix](https://github.com/Xytronix))
+- Added an opt-in tool guard (`tools.guard.enabled`) that asks the judge model about risky tool calls and refuses those the user did not ask for ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
+- On Linux the tool guard also refuses heavy work started while the host is strained ([#19292](https://github.com/can1357/oh-my-pi/pull/19292) by [@Xytronix](https://github.com/Xytronix))
+- Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
+- `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
+- Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
+- A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
+- In Tern, running subagents and background jobs show as a tray of live cards over the composer instead of the agents/jobs pill: each card shows what its agent or job is doing, a click looks closer (Open, Stop or Cancel, Dismiss), finished agents fold into one done card, and the agents-hub key moves focus into the tray
+- The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
+- Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session
+- `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
+- `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
+- Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+
+### Changed
+
+- Cache warming refreshes first-party Anthropic entries with a `max_tokens: 0` pre-warm that bills no output, replaying for the rest of the session where the endpoint rejects it, and prices replays with the output this session's replays were actually billed
+- Task subagents keep their prompt cache warm through long tool calls (`streaming` mode; still off when `providers.cacheWarming` is `off`)
+- Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
+- A reply wait or a subagent's wait for its parent blocks up to the session's prompt-cache lifetime less a minute (4m to 30m) once it is back-to-back, instead of always 4m
+
+### Fixed
+
+- An agent that promised another a later reply, or whose subagent waits for its next message, and ends its turn with nothing left to wake it gets one notice naming each waiter (what it asked, what was promised, for how long) instead of leaving it blocked until someone notices
+- `wait` returns at once, naming the agent, when one that promised the caller a reply (or the caller's parent) is idle with nothing to wake it, or when any agent it would block on (asked agent, parent, or subagent whose result it waits for) is itself waiting on the caller, with the chain it waits through (e.g. "`B` is waiting on you (via `C`)"); a top-level session's wait no longer says to end the turn while an agent is blocked on it and nothing else will wake it
+- Resuming a session with supervised process exits or `proc://` service results from before the unified daemon no longer crashes with `undefined is not an object (evaluating 'text.includes')`
+- The model switcher's thinking slider shows the level auto settled on (as the status line does) instead of `Auto`, in subagents and any session running on auto
+- `/tan` tells a running agent about the tangent at its next step, as a `<tangent-notice>` naming the tangent's handle and work, instead of only after its turn ends
+- The Tern jobs pill counts and lists background jobs only; a subagent's task job and its widget no longer show up as a running job beside the agents count
+- `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
+- `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
+- Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
+- Compaction spend is journaled per method (`compaction:remote`, `compaction:soft`, `compaction:handoff`), and OpenAI remote compaction requests are now recorded too, so `omp stats` shows what each method costs and whether it read the prompt cache
+- Session files record what jev and title requests asked and answered: `model_usage` entries carry the request time, a judgment's answers with the state id that joins `judgment-cache.db`, and a title request's prompt and reply (no prompt text is repeated); local-model titles now leave an entry and fork titles are journaled as `title-fork`
+- `ssh://` files can be edited with hashline edits; read now shows their `[PATH#TAG]` header
+- The shell's built-in `ast-grep`/`sg` supports `scan` (`--rule`, `--inline-rules`, `sgconfig.yml` rule and utility directories, `--filter`, `--json`, report styles, `-U` fixes), `outline`, `run --kind` and `--debug-query`, and `-l cpp` now searches C headers
+- Auto-QA reports record where the reported tool comes from (builtin, `eval:<namespace>`, `mcp:<server>`, extension, unknown)
+- `goal` tool `pause` op stops autonomous continuation while blocked on the user
+- Lsp references and rename warn about textual occurrences the server missed, and definition/references flag locations that do not mention the symbol (with clangd's missing compile_commands.json called out)
+- BMP and TIFF images are transcoded to PNG and read inline like PNG/JPEG
+- Turns the provider refuses (e.g. `reasoning_extraction`) are kept in the session file as a `provider_refusal` entry with the category, explanation, usage and whatever streamed before the refusal; the entry never reaches later requests
+- `say` now works in the bash tool on every platform. It speaks through omp's text-to-speech when that is set up (speech vocalization on, a `speech` model role, or the local TTS model installed) and through the system voice otherwise (macOS `say`, `spd-say`/`espeak-ng`/`espeak` on Linux, SAPI on Windows). It takes macOS `say`'s options (`-v` including `-v '?'`, `-r`, `-o` with `--file-format`/`--data-format`/`--channels`/`--bit-rate`/`--quality`, `-f`, `-i`, `--progress`, `-a`, `-n`), reads text from arguments, a file or stdin, and accepts internal URLs such as `local://notes.md` for `-f` and `-o`.
+- `open` and `xdg-open` are now shell builtins on macOS, Linux and Windows (with `start` on Windows): an internal URL such as `local://report.html` opens the file behind it, every macOS `open` option works (`-a`, `-b`, `-e`, `-t`, `-f`, `-F`, `-W`, `-R`, `-n`, `-g`, `-j`, `-h`, `-s`, `-u`, `--args`, `--env`, `--stdin`/`--stdout`/`--stderr`, `--arch`), and a session with no desktop gets a short error instead of hanging
+- `file` runs in the bash tool's shell as a builtin, so it identifies internal URLs (`file local://report.pdf`, `artifact://N`, `skill://…`) as well as paths, and works on Windows where there is no `file` program
+- `direnv` is now a bash-tool builtin: `.envrc`/`.env` files are evaluated inside the embedded shell with direnv's stdlib, `direnv exec DIR cmd…` runs the command in-shell with the loaded environment (builtins and internal URIs keep working), and `allow`/`deny`/`export`/`status`/`hook`/`reload`/`prune`/`edit`/`fetchurl` share the real direnv's allow list and config, so it works without direnv installed
+- In-process `flock` shell builtin matching util-linux (`flock FILE CMD…`, `flock FILE -c CMD`, `flock N` on the shell's own descriptors, `--fd N CMD`; `-s`/`-x`/`-u`/`-n`/`-w`/`-E`/`-o`/`-F`/`--fcntl`/`--start`/`--length`/`--verbose`), so lock scripts behave the same on macOS, Linux and Windows.
+- `watchexec` runs in the bash tool's own shell as a builtin with watchexec 2.3.2's options, messages and event formats (`-w`/`-W`/`-F`, `-e`/`-f`/`-i`, ignore files, `-r`, `-s`, `-o`, `--stop-signal`/`--stop-timeout`, `-d`, `-p`, `--poll`, `--emit-events-to`, `--only-emit-events`, …), so it works where the program is not installed, its command can use builtins and `scheme://` paths, and a stopped watcher leaves no process behind.
+- `fswatch` is a bash-tool builtin (fswatch 1.22 command line and output: `-0`, `-1`, `-o`, `-x`/`-n`, `-t`/`-u`/`-f`, `--format`, `--batch-marker`, `-e`/`-i`/`-E`/`-I`, `--filter-from`, `--event`, `-l`, `-r`, `-m`/`-M`, `--fire-idle-event`, …) on FSEvents, inotify and ReadDirectoryChangesW, so file watches work where fswatch is not installed and as background jobs or services; `fswatch -1 -o` exits after the first batch and a path that does not exist yet is reported once it appears
+- The shell's `entr` builtin (entr 5.9: `-a`, `-c`, `-d`, `-n`, `-p`, `-r`, `-s`, `-x`, `-z`, `/_`) runs its utility inside the shell on native change notification, so `ls *.rs | entr -r cmd` works where entr is not installed, without a terminal, with `scheme://` paths in the list, and as a background job or service
+
+### Changed
+
+- `/handoff` now runs as `/compact handoff` in the background, keeping the current response and any new messages.
+- The `ask` tool's questions show in one scrolling list instead of one tab or page at a time: the question you're on is open and the others fold to your answer or a few options. The list sits above the composer, which stays (faint in the terminal, showing the questions' keys, and folded in Tern, where the list is a card at the end of the conversation whose options you can click): a draft you were typing keeps the keys, and Esc, Shift+Tab or Tab past Submit moves between the two, as ↑ on the composer's first line does (Esc in the composer stops the turn as before). While the questions wait, the status line shows a question mark instead of the spinner. Sending a message instead of answering skips the questions, and the model now gets whatever you answered before it. In the terminal the pending ask no longer adds a transcript entry repeating the form
+- Subagent completion probes ask for the task's progress by its deliverables instead of the agent's own current step, and side requests to Claude (probes, `/btw`) no longer copy thinking that is still streaming into their history as plain text
+- Composer predictions (`composer.predictions`) are on by default: after each completed turn the active model suggests your next message as ghost text in the empty composer (one extra billed request per turn, counted in /stats); turn it off in `/settings` → Interaction → "Composer Predictions"
+- Tool-call intent tracing is off by default in print (`-p`), RPC, ACP, and SDK sessions; set `tools.intentTracing: true` or `PI_INTENT_TRACING=1` to turn it on there
+- Commit draft `show()` now prints each run of lines from one unit under a single `1a ✓ Main` header instead of repeating the unit, mark, and owner on every line
+- The "Separate checkouts" guidance and the git guard's hint for a refused command now say how work comes back from an ovnfs checkout: `ovnfs land` puts its commits on the folder's branch with their files, `ovnfs pull` brings the folder's newer files in to resolve a conflict there, and `ovnfs rm` discards the rest. They no longer send agents through `apply --branch` and a fast-forward merge of their own, and point at `ovnfs help` for the rest (needs an ovnfs with `land`)
+- A shown composer prediction now stays after a `!!` or `$$` run, a follow-up queued during a run is sent when the run ends on such a row, and a retry or resume after one no longer sends the failed reply back to the model, since those runs are not sent to the model ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+- `wait` windows are now 5 s for a first idle wait and 4 min for every back-to-back one (the 10 s, 30 s and 60 s steps are gone)
+- A subagent's `wait` with nothing else to block on now blocks for its live parent's next message (ending at once when the parent is itself waiting on that subagent or on the user)
+- Subagents always get the `lsp` tool (broker-shared servers); `task.enableLsp` now only turns on LSP formatting/diagnostics for their edits
+- A `git worktree add` the bash tool runs as `omp worktree add` now says so in its result, and the CLI names what the clone left out
+- A bash call with `name` plus `async` or `timeout` and no readiness condition is refused instead of silently starting a service; `ready` without `log` or `port` is ignored with a notice instead of failing the start
+- The bash schema describes `name` and `ready` and carries the service-name pattern
+- Minimized bash output names the filter that summarized it and how to get verbatim output
+- Sessions without an interactive UI no longer offer `pty` for finite bash commands
+- Headed managed Chromium is reported as "omp's Chromium (in a window)" rather than "headless browser (visible)"
+- Hashline replacement bodies apply verbatim; a body row that repeats the line next to its range is no longer dropped — the edit applies when the file parses only with that row, and is otherwise rejected naming the repeated line
+- Hashline replacements that break the parse are rejected with the parse-restoring range (e.g. keep line N, use `PUT <N:`) instead of being applied with source rows silently retained or body rows dropped
+- `PUT >N:` gap inserts always land after line N; when the file parses only at the landing the body's indentation points to, the edit is rejected naming that landing instead of being moved
+- SQL, PowerShell, Bash, CSS/SCSS, HTML, Vue, Svelte, Astro, C, C++, Objective-C, Kotlin and Swift files get no tree-sitter syntax verdict after edits (their grammars report valid code as errors)
+- Unresolved `N*` block errors say when the file type has no grammar or the line sits in an embedded `<script>`/`<style>` section
+- A hashline header naming a missing working-tree path is rejected with the path its tag was issued for instead of being silently rebound to a same-named file (plan-sandbox files still rebind)
+- MCP tool calls default to a 10-minute deadline (handshakes and listings keep 30 s), never shorter than the wait the tool's own `timeout`/`timeout_ms`/`*_seconds` argument requests; without a configured timeout, progress notifications extend it up to one hour
+- A bare `:N` line selector now reads line N (with the usual 1-before/3-after context) in every read, grep and URL selector; `:N-` reads from line N onward, and every "Use :N- to continue" hint uses the open-ended form
+- Named services and `pty: true` commands now run in omp's own shell, as a process of their own, instead of your login shell: the in-process utilities (`jq`, `rg`, `sd`, `timeout`, `xargs`, …) resolve first, `local://`, `skill://`, `artifact://` and `attachment://` paths (a URL `cwd` included) resolve to the session's files, and the command starts from the session shell's exports, functions and aliases. A pty command's programs still own a real terminal (`/dev/tty`, Ctrl-C, resize)
+- `sh`, `bash` and `zsh` run by bare name in the bash tool (`bash -c '…'`, `bash script.sh`, `… | bash`, `bash -s`, also under `env`, `xargs`, `find -exec` and `timeout`) are child shells of the embedded engine instead of the system shell, so omp's built-in utilities and internal URLs (`local://`, `skill://`, …) work inside them; `/bin/bash`, `exec bash`, `nohup bash …` and interactive (`-i`) shells still run the system shell
+
+### Fixed
+
+- Commit drafts no longer show a committed block as deleted in one hunk and re-added in the next (left out vs. selected) when part of the work was committed earlier and the block sits among repeated lines such as `return;` or `}`; committing the preselection duplicated those lines
+- A `reasoning_extraction` refusal that cuts off a turn mid-stream is retried once on the same model instead of failing the turn (subagents died on it and needed a manual resume)
+- `omp --restore` goes on with a turn cut off by SIGTERM or SIGHUP (a terminal such as Tern restarting its panes) instead of leaving it at "Operation aborted"; only its subagents went on before
+- A subagent (or a resumed session) running on auto thinking without a user turn of its own, such as one woken by IRC, shows the level it thinks at in the composer and status line instead of auto as still pending
+- Agent Hub rows of a subagent whose model you switched no longer show a "temporary" role badge, which crowded the model out of narrow rows
+- ← in the model switcher (alt+p, `/switch`) steps the thinking level while viewing a subagent instead of being taken as the ←← gesture back to the main session
+- Closing the model switcher with Esc keeps a thinking level you moved on the current model instead of discarding it
+- The model switcher's thinking slider opens on the level the session (or the viewed subagent) runs at, and re-picking the current model keeps it, instead of swapping in the level its model role assigns
+- Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
+- Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+- Subagents whose agent model pattern (e.g. `@smol`) matches no available model now run on the parent's model instead of failing with "No model selected"; when no model resolves at all, the error names the agent and the `modelRoles`/`task.agentModelOverrides` setting to fix
+- `wait` called in the same tool batch as `task`/`bash` now waits on the job that call starts instead of returning "Nothing to wait for"
+- Messages written to a spawned agent that is still queued for a spawn slot or starting are held and delivered when it starts, instead of failing with "Unknown agent"; `proc://` lists such jobs as `queued`
+- `agent://parent` and miscased agent ids (e.g. `agent://main`) now reach the registered agent
+- A task's follow-up hint only offers `write agent://<id>` when the agent can actually be messaged
+- `yield` accepts `type: ["result"]` as the finalize marker, and the yield doc no longer names a literal `"section"` label
+- The spawn tip for a batch of mixed generic workers names each type (`sonic`, `task`) instead of calling them all one type
+- A workpool worker whose background job finishes after it submitted its items is no longer told to resubmit them, nor failed for not doing so
+- `proc://<id>/streams` on a service, an agent, or a job without `|` stages now says so and points at `proc://<id>`
+- Reading `agent://<id>` for a run that published an empty output shows the agent's status and progress instead of a blank result
+- Bare `history://current` (with or without line selectors) reads the session's own full history like `history://current/full` when no agent is named `current`
+- Killing a task job via `proc://<id>/kill` also kills its agent, so it no longer keeps working or restarts on a queued message; killed agents stay registered and resumable by message instead of turning into "Unknown agent"
+- `proc://<id>`, `proc://<id>/kill` and `wait` now say what became of a background job whose row was evicted (when it finished, whether its result was delivered, why it is gone) instead of "not found"
+- Clone-first `git worktree add` no longer copies the destination into itself or drags other worktrees along when the new worktree sits inside the checkout, and leaves untracked `.env` files out of the clone
+- A service with `ready.port` refuses to start when another process already listens on that port instead of reporting ready on the foreign listener
+- `ready.port` without `ready.host` probes both 127.0.0.1 and ::1, so `localhost` dev servers bound only to IPv6 become ready
+- Async bash jobs start from a copy of the session shell, so they see variables and functions earlier calls set
+- Services started from bash inherit the variables (PATH included) the session shell exported
+- A Codex-style `apply_patch <<'EOF' … EOF` bash call applies the patch through the apply_patch tool instead of failing with "command not found"
+- An async result follow-up links the raw output of minimized commands instead of re-saving the summarized text as "Full output"
+- A service start that times out at the broker reports the service's state instead of a bare "request timed out"
+- After the host slept, a running bash command is no longer reported timed out with "shell backend did not respond" well before its deadline
+- `sha256sum -c` and the other checksum checks hash files byte for byte, so CRLF files no longer FAIL on Windows
+- Builtins given an option they lack (`ps --forest`, `tar --hard-dereference`, …) run the host program of that name when PATH has one
+- Builtins on Windows can open process-substitution paths (`diff <(a) <(b)`)
+- `compgen` is available in the bash tool's shell
+- `tab.screenshot()` no longer hangs to the 20 s op timeout when the page's renderer stops drawing frames; it captures from the view after 1.5 s or fails within 5 s with a named error
+- Clicks whose handlers re-render or replace the element, change the DOM, submit a form or navigate are no longer reported as "not delivered"; an unconfirmed click now says to check the page before clicking again
+- `fill` inserts the whole value in one input instead of typing key by key, so newlines no longer press Enter, controlled inputs are replaced rather than appended to, and long text no longer times out
+- `tab.id(n).click()` and `tab.ref(...)` methods work inside `tab.run` without an extra `await`
+- `ariaSnapshot({compact: true})` (and Python keyword calls) treat a leading options object as options; a non-string selector error names options objects and points to `wait(ms)` in `tab.run`
+- URL waits and request filters treat a `*` at either end as spanning `/`, so `*title=X*` matches a full URL
+- `tab.requests()` redacts Cookie, Set-Cookie, Authorization and Proxy-Authorization header values (`tab.request(id)` keeps them); `browser.tabs()`/`browser.targets()` no longer print page URLs into cell output
+- RegExps and functions nested inside helper option objects (`requests({filter: /x/})`) reach the tab intact
+- `observe({selector})` lists the interactive elements under a plain div or section root instead of returning nothing or "Accessibility snapshot unavailable"; `p-button`-style custom element selectors are accepted
+- `uploadFile(selector, [paths])` accepts an array, and `scroll`/`wheel` accept `{x, y}` and reject non-numeric deltas
+- `frame.screenshot()` without a selector captures the whole frame; `frame.ariaSnapshot({...})` takes options first
+- `setDialogs` rejects policies other than "accept", "dismiss" or null instead of silently dismissing, and a dialog already answered by a raw Puppeteer handler no longer errors
+- `tab.route()` rejects unknown option keys such as `{action: "abort"}`, which previously registered a route that let every request through
+- `focus()` works on focusable SVG elements
+- `waitFor*` helpers without `{timeout}` wait up to the Eval cell's timeout, as documented (a selector matching nothing still fails fast)
+- `role/button[name="Save exact"]` is read as an exact-name match, like `[name="Save" exact]`
+- `browser.open({wait_until: "networkidle"})` is accepted and waits for network idle
+- `tab.press(selector, key)` and `frame.press(selector, key)` press the key on that element instead of throwing
+- Uploading a folder to a `webkitdirectory` input in a background tab omp opened brings that tab to the front so Chrome expands the folder
+- A new tab name on a CDP endpoint (`app` URL or `browser.cdpUrl`) opens its own page instead of adopting (and navigating) one already open there, so two names no longer drive the same page; `target` still borrows a page, and borrowing a page another tab already drives is refused
+- An endpoint with no pages yet no longer fails the open with "No page targets available"
+- A tab whose page connection went stale ("Attempted to use detached Frame", "Session closed") reattaches to the same page on a new worker and runs the call, instead of failing every call until closed; `browser.tabs()` drops tabs whose page closed outside omp
+- Reopening a managed Chromium tab without `headed` keeps it in the mode it opened in instead of failing as "bound to a different browser"
+- `browser.targets()` lists the pages of a CDP endpoint instead of refusing it
+- "Shared browser daemon unavailable" now says why (Chrome exited with its code and last output, never printed a DevTools endpoint, the profile was held by another omp, the broker refused) and where Chrome's log is
+- `viewport` on `open` and `tab.emulate()` honors Puppeteer's `deviceScaleFactor`, `isMobile` and `hasTouch` on Chromium (an `open` that would get WebKit opens Chromium), and `tab.emulate()` accepts `reducedMotion: "reduce" | "no-preference"` and `media: "screen" | "print"`; unknown emulate keys now throw instead of being ignored
+- The object `app` form of older releases (`{tern: false}`, `{relay: true, target}`, `{cdp_url}`, `{path, args}`) is read as the equivalent string `app`
+- `insecure` opens that would land on omp's WebKit browser (which always checks certificates) open managed Chromium instead, and a WebKit engine without TLS support falls back to Chromium for the open
+- An open whose automatic cmux split fails goes on to omp's own browser instead of failing
+- An open result names a Tern picture-in-picture that Tern sized smaller than the requested viewport
+- `clipboardCopy`/`clipboardPaste` work through the relay, and a paste after a shim-only `clipboardWrite` inserts that text
+- Relay `traceStart`/`profileStart` fail at once naming the missing Chrome debugger domain
+- Concurrent `tab.run`/helper calls on several WebKit, Tern or cmux tabs (Promise.all, parallel subagents) take turns instead of failing with "another same-realm JS runtime is running", and a run that never settles no longer blocks every other tab until restart
+- Windows app lookup and launch skip a Start-menu shortcut whose target cannot be read (drive not ready, inaccessible WindowsApps alias) instead of failing
+- A window screenshot taken while the window resizes captures it again instead of failing with InvalidCoordinateFrame
+- MacOS background typing sends line breaks and tabs as Return and Tab instead of a literal "a" in apps that read key codes
+- JavaScript `commit` drafts accept the positional arguments Python takes (`commit.draft("ParserFix")`, `d.only("a", "b")`, `d.take(path, "2a", "3")`, `d.commit(subject, ["- body"], { fixes })`) instead of throwing or dropping them; `print(d)` shows the summary
+- Python `commit` `only()`/`take()`/`drop()` accept a list of globs or units as well as separate arguments
+- `commit(..., amend=True)` reports the amended commit's real parent, all paths it changes, and the commit it replaced, instead of the replaced HEAD as parent
+- `d.show()` lists every file the draft summary puts under Review (e.g. binary files edited in scope) instead of "Nothing is partially selected or needs review"
+- Commit drafts compare and commit worktree content in its git form (`core.autocrlf`, `.gitattributes` `text`/`eol`, clean filters such as Git LFS), so CRLF checkouts no longer show whole-file rewrites or commit CRLF/smudged content
+- A commit draft in a session without a change journal (`--no-session`, in-memory) says nothing can be attributed instead of silently listing every change as not yours
+- A hashline body row that repeats a neighbouring line which another hunk in the same patch deletes (an `.await`, a closer) is kept instead of dropped
+- A hashline replacement that starts on the empty row after a trailing newline (`PUT 29.=29:` on a 28-line file) is rejected as out of range instead of appending its body
+- The post-edit syntax warning reports tree-sitter's error line, fires only when the error touches the edited lines, and no longer claims the edit was applied exactly as written
+- Hashline rows shaped like a mistyped op (`PUT 789*=821:`) or a tagged file header are rejected instead of being written into the file
+- A hashline section may `CUT` lines into a register before `REM`, so code can be moved out of a file that the same patch deletes
+- Hashline edits no longer apply to a file that only matches the tag by content (a sibling checkout or copied file under a relative header); the edit is rejected and names the file the tag was issued for
+- A partial read of a file you wrote no longer marks the rest of it as unseen for hashline edits
+- Lines shown through @file mentions count as displayed for hashline edits
+- Lines displayed before a file's snapshot was evicted from the session store count as displayed again when the same content is re-read
+- Files between 4 MiB and 64 MiB now get a `[PATH#TAG]` header from read/grep and can be edited with hashline
+- `MV` reports the absolute destination when a file moves out of its directory
+- The generated-file guard no longer blocks hand-written `*.mock.ts`/`*.mocks.js` files and PocketBase `*.pb.js` hooks without a generated marker
+- `write` keeps numbered content (TSV index columns, numbered notes) instead of stripping it as copied read prefixes unless the content carries a `[path#TAG]` header or repeats the file's displayed lines
+- An edit or write routed through an ACP editor that never reaches disk now fails instead of reporting success
+- `ast_edit` reports overlapping replacements at preview time and never applies some targets before another fails
+- `ast_edit`/`ast_grep` results for explicit file paths no longer show doubled paths like `session.html/session.html`
+- `ast_grep`/`ast_edit` with `lang` on a directory search only that language's files instead of parsing every file as it
+- The device-only `write` description no longer claims agent:// messages and proc:// kills are rejected
+- A lone carriage return (progress-bar logs) is no longer a line break for read and edit, so their line numbers match grep and editors and edits keep those characters
+- Python eval now prefers `python3` over `python` and rejects interpreters older than 3.9, naming the rejected version instead of failing in the runner
+- Python eval kernels run in UTF-8 mode (`PYTHONUTF8=1`), so `subprocess.run(..., text=True)` on Windows no longer returns `stdout=None` for UTF-8 output
+- Eval kernels replaced after a session switch or owner release now emit the kernel-loss notice instead of silently dropping state (Python and JS)
+- `%bun add` restarts a retained JS worker so the new package is importable in the next cell; imports of packages installed after the worker first looked now explain the stale resolver and suggest `reset`
+- Nested `tool.*` calls (bash, edit, write, …) from eval no longer count against the cell timeout and kill the JS VM; MCP calls stay bounded by the cell
+- `tool.edit(patchString)` and other FREEFORM tools accept their raw text from eval (JS and Python)
+- Python bridge helpers (`sh`, `read`, `tool.*`) work from `ThreadPoolExecutor` threads; calls after their cell ended get a clear error
+- Python `write()` routes `agent://`, `out://`, `ssh://` and other root-less schemes through the write tool (JS too) and no longer converts LF to CRLF on Windows
+- Messages whose images were dropped by the provider image budget now say how many images were omitted
+- The JS eval worker starts from a bundled `dist/cli.js` when the CLI was not the process entry (npm/nvm shims)
+- `%pip` explains how to get pip when the interpreter has neither ensurepip nor `uv`
+- Python cells keep running with a warning when the session cwd was moved or deleted
+- Eval `sh()` builtins resolve internal URLs (`cat local://x.md`, `artifact://N`) like the bash tool
+- Python prelude helpers no longer break when cell code rebinds `asyncio` or `inspect`
+- MCP timeout errors name the per-server `timeout` setting and `OMP_MCP_TIMEOUT_MS`
+- "MCP server not connected" errors include the last connect error and whether a reconnect is scheduled or suspended
+- MCP calls that fail on an expired HTTP session (`-32001 Unknown or expired session`) reconnect and retry once
+- `xd://report_issue` accepts JSON bodies (`{"tool": …, "description": …}`) instead of recording `{"tool"` as the tool name
+- `archive.sessions()`, `archive.projects()` and `archive.session()` report each session's full message count instead of a count from the first 4 KB
+- A broker-shared language server that dies now reports its real exit code and stderr (e.g. rustup's "Unknown binary 'rust-analyzer'") instead of "exited unexpectedly (code 0)"
+- `lsp status` reports a rustup proxy whose toolchain lacks the component as unusable, with rustup's message
+- Lsp position actions go to a server that advertises the method (e.g. pyright over ruff), and a file whose servers lack it gets "No configured language server for .py supports references" instead of "-32601 Unknown request"; workspace symbol search skips servers without workspace/symbol
+- Language servers whose root marker sits in a subdirectory of the session cwd (monorepo packages) now serve files under it, and "no language server" answers say which server is missing a binary or a root marker
+- Clangd handles .hh, .inl, .ipp, .tpp, .cppm and .ixx files
+- The lsp project-load wait ends after progress has been quiet briefly, not at the first gap between indexing phases; results note when the server is still indexing
+- Lsp `rename_file` keeps a bare `new_name` next to the source, syncs open documents before asking servers, and says when no server rewrote imports
+- Lsp `symbols` with a `file` filters by `query`; a `symbol` without `line` uses its first (or #Nth) occurrence in the file
+- Lsp diagnostics say "no issues from X" while another server is still pending, accept `;`-separated paths, and no longer crash with `e.status` outside the TUI
+- Lsp `code_actions` with `apply: true` and no `query` applies the only or preferred action, and a failing `codeAction/resolve` is reported instead of "no workspace edit"
+- Lsp results for a file in another checkout note when the server cannot load that checkout
+- Debug attach picks the adapter from the target (node → js-debug, python → debugpy; a port serving a V8 inspector → js-debug), a closing adapter's stderr is reported instead of "transport ended", and gdb's "notStopped" pause refusal is explained
+- Minimized `grep`/`rg` output now comes back verbatim when it is under 16 KB, all in one file, uses context (`-A`/`-B`/`-C`) or an explicit format (`--json`, `--vimgrep`, `-c`, `-l`, `-o`), or has lines that are not `file:line:text` matches, so context rows, timestamps and `::` paths are no longer read as file names
+- `ls -l`/`-la`/`--format=long` listings under 16 KB keep their metadata columns instead of being replaced by a names-only summary
+- The `git commit` summary takes its hash and file/insertion counts only from git's own commit and diffstat lines, not from hook output such as lint-staged `[STARTED]` or a formatter's "7 files left unchanged"
+- The `cargo test` summary reports the summed suite time instead of the last suite's, skips nested `cargo test` runs printed by tests, and counts `generated N warning(s) (run cargo fix …)` rollups
+- `aws` output requested with `--output` or `--query` is returned as-is instead of being reshaped into a table
+- `git status --short`, `git diff --stat` and `git diff --name-only/--name-status/--numstat` output under 16 KB is returned as-is; larger listings no longer count git `warning:` lines as files, and a failing `git diff --stat` keeps its error text
+- Minimized `git status` counts `AA`/`DD` as conflicts and keeps type-change (`T`) entries
+- Binaries whose names end in `_test`/`-tests` but print no GoogleTest banners are no longer summarized as "gtest: ok"
+- Custom Gradle tasks whose names contain "dependencies" are no longer summarized as "ok ✓ no dependencies"
+- Lint summaries keep tsc diagnostics in paths that contain parentheses, stop counting build-log rows (Vite asset sizes, `@scope/pkg check:` prefixes) as diagnostics, and group eslint stylish output from `npm`/`pnpm`/`yarn`/`bun` lint scripts
+- Todo `done`/`drop`/`rm` given `items` act on those tasks, and with no task, items or phase they fail instead of completing or deleting every task
+- The todo summary's "Active phase" is the phase holding the in-progress task
+- `ask` accepts a bare HTML string or the older `questions` list (rebuilt as a form) instead of failing
+- An `ask` form that times out with a required field still empty returns no answer instead of submitting empty values
+- Writing to `xd://propose` while plan mode is active no longer fails with "No plan is awaiting approval" when the host installed no proposal handler
+- `generate_image` fails when the provider returns no image, and returns images at the requested `image_size`
+- Github `pr_push` with `pr` pushes the branch `pr_checkout` created for that PR instead of the current branch
+- `pr://`/`issue://` and github view reads of an open issue or PR revalidate after 15 s instead of serving the cached state for the full soft TTL, so merges and closes show up
+- `:raw` line ranges keep their last line's terminator, so consecutive raw ranges (and comma-list raw windows) concatenate byte-for-byte to the source
+- Comma lists with `:raw` on each range (`file:1-32:raw,48-50:raw`) read as one raw list instead of splitting into separate paths
+- Eval `tool.<name>()` calls return the tool's whole result: no artifact spill, middle-elision marker or display notice inside the text (truncation stays structured in `details.meta`), so large MCP/xd JSON results parse
+- Eval `read()` of protocol paths (agent://, skill://, artifact:// selectors, …) returns the raw content whole, without row prefixes, page footers, 300-line pages or 50 KB line cuts; `read()` of a directory returns its listing instead of failing
+- A `;` list whose parts carry their own `?q=` filter (`a.json?q=.x;b.json?q=.y`) reads each file with its filter instead of failing with a jq syntax error
+- SQLite files without a `.db`/`.sqlite` name (`state.vscdb`, Chrome `History`) are recognized by their header for table listings, `:table` and `?q=` queries
+- Archive member reads route ZIP-container documents (`report.docx:word/document.xml`), return image members as images, and no longer treat a text `.lib` file as an `ar` archive
+- Archive listings past 500 entries name a `:N-` continuation instead of a nonexistent `limit=` parameter
+- Video reads find ffmpeg/ffprobe in Homebrew and WinGet bin dirs when they are missing from PATH, and a `:0` frame selector reaches the video reader
+- A URL whose trailing `:N` belongs to the URL (`…/A8:A1:59`, `?pid=diva2:2075459`) is read whole when the selector reading fails or starts past the end
+- Reading a web page renders the page itself; its RSS/Atom alternate is used only when the page renders to nothing, and comment and site-wide feeds are never taken for it
+- Terraform Registry provider doc URLs (`/providers/<ns>/<type>/<version>/docs/<category>/<slug>`) return that doc instead of the provider overview, honouring the version
+- Semantic Scholar API URLs and paper URLs without an id are read as fetched instead of failing with "Failed to extract paper ID"; pkg.go.dev standard-library packages are labelled module `std`; pub.dev package subpages (changelog, versions…) render as pages
+- GitHub issue and pull-request list URLs honour their `q` filter (state, labels, `sort:`) and `page`, and tree URLs say why GitHub could not list a directory, resolve branch names containing `/`, and show the file a tree URL names
+- `xd://eval/<topic>` reads in a session without the eval tool (reviewer subagents, nested reads) instead of failing with "has no doc topics"
+- `?q=<jq filter>` on an http(s) URL runs the filter over the JSON response instead of sending it to the server; a `q` that is no jq filter still goes to the server
+- `https://…/archive.zip:path/in/archive` reads that member (or lists that directory) of the downloaded archive instead of fetching the literal URL
+- A URL document whose download or conversion fails says why in the `[Binary content…]` notice itself, and binary downloads retry with other user agents when a site refuses one
+- `ssh://` directory reads work on hosts whose login shell is fish or csh
+- `ssh://` and other provider I/O failures keep the provider's message instead of a bare "Input/output error"
+- `find` turns itself off for the session (tool and its hints in grep/glob/bash/system prompt) once the native judges reject the account (401/402/403) or region (451); later calls fail fast with "find is disabled for this session: judge <route> rejected the account (402). Use grep." instead of paying 20–30 failing judge requests
+- Judge account (401/402/403) and region (451) rejections now last for the session instead of a 5-minute cooldown, and every judge-gated feature skips a rejected native judge
+- `find` hitting its 20 s deadline before verifying anything returns the unranked literal keyword matches instead of an error
+- `find` names http(s) URLs and `;` path lists as unsupported instead of "Path not found", and says when a scope has no eligible files
+- `web_search` enforces `site:`, `inurl:` and exclusion directives instead of relaxing them into off-site results; a search with no in-scope result returns an empty result, and off-scope citations are dropped
+- `web_search` skips an engine that answered HTTP 429 for 5 minutes instead of waiting on the rate limit every call, and labels a hosted model's answer as a synthesized answer
+- `grep` on a URL works in sessions without a session file, and reports a failed (404/blocked) fetch instead of "No matches found"
+- `grep` on `skill://` follows linked skill files and directories, as `read` does (needs rebuilt natives)
+- `grep` with no matches says when gitignored files under the scope would match
+- `grep` searches notebooks' cell text, with line numbers and edit anchors matching `read`
+- `glob` takes a `pattern` argument as the glob scoped under `path` instead of dropping it, rejects other unknown arguments, and bounds `limit` (1–200) in its schema
+- `glob` lists `.git` entries when the pattern names `.git`, descends nested `node_modules` under a `node_modules` base, and lists each missing path when none exist
+- `pty: true` commands, named services, and client-terminal commands now receive the real files behind internal URLs (`node local://f.mjs`, `cat local://x`, `< local://in`, `> local://log`, `--env-file=local://a.env`, `"$(cat local://prompt.txt)"`), the same as ordinary bash calls
+- External programs resolve internal URLs in more argument forms: `@local://body.json` (curl), `-F body=@local://b.md` (gh), `-olocal://out`, and environment values (`ENV_FILE=skill://x/.env cmd`, `env KEY=local://x cmd`, exported variables)
+- An internal-URL-looking argument that cannot be resolved (`bm read memory://notes/x`, `log.sh 'agent://A; artifact://12'`, prose that starts with a URL) reaches the program as written instead of failing the command with "cannot resolve … for an external command"
+- `omp` commands run from bash (`omp read 'skill://name:1-20'`, also behind `nice`/`npx`/`sudo`) receive their URL arguments untouched
+- Bash builtins now accept internal URIs that carry a read selector, as `read` does: `jq . artifact://12:raw` opens the artifact itself and `jq . artifact://12:raw:21-21`, `head local://log.txt:-50` or `cat agent://Id:5-9` read exactly those lines (they failed with "Invalid argument" or "Input/output error")
+- `jq: command not found` (and other in-process utilities missing) in named services and `pty: true` commands
+- `bash local://run.sh` and `sh skill://name/scripts/x.sh` run the script (with `$0` its real path, so it finds the files next to it) instead of failing with "No such file or directory"
+- `kill`, `timeout` and a cancelled command reach a child shell's `trap` handlers (and bash's `EXIT` trap) when the shell runs in the background, in a pipeline or under `timeout`
+
+### Removed
+
+- Hashline no longer re-indents replacement bodies that omit their base indent
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
+- Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
+- Added Kiro as a built-in provider: run `/login kiro`, pick Identity Center, Builder ID, or an API key, and choose a discovered `kiro/<model-id>` model. Each `/login kiro` adds an account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- Added Google and GitHub to `/login kiro`: approve a one-time code at `app.kiro.dev`, then sign in with that account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+- `/usage` and `omp usage` now show Kiro credits: the monthly plan credits with their reset date, active bonus credits with their expiry, and overage credits and charges when overage is enabled ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
+
+### Changed
+
+- Model registries in one process (SDK embedders, tests) now share discovered-model builds, so refreshing another registry skips rebuilding models an earlier one already built
+### Added
+
+- Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
 
 ### Fixed
 
@@ -14,10 +310,47 @@
 - Fixed the UI freezing while discovered models from large provider catalogs are merged: the merge now runs in slices that yield to the event loop
 - Fixed closing omp's headless browser taking about 7 s when Chromium never finishes a graceful shutdown (seen with Chrome for Testing 150 on macOS 27): a browser on an omp-created profile is now killed at once
 - Failed computer runs retain text and screenshots already produced in JavaScript and Python Eval, so agents can inspect partial actions without losing the error; direct computer calls also show the failure's name and message alongside partial output ([#19100](https://github.com/can1357/oh-my-pi/pull/19100) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Changed
-
-- Model registries in one process (SDK embedders, tests) now share discovered-model builds, so refreshing another registry skips rebuilding models an earlier one already built
+- Fixed Exa and Firecrawl web searches silently falling back to their keyless public endpoints when a configured credential failed to resolve (for example a failing `!command`); they now report the credential error
+- Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
+- Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the shell's `stat`, `diff` and `find` builtins ignoring `TZ` when printing file times; `find -ls` now prints times in the shell's time zone instead of UTC, and `find -newermt` reads dates like `Nov 15, 2023` in the shell's time zone ([#19482](https://github.com/can1357/oh-my-pi/pull/19482) by [@alphastorm](https://github.com/alphastorm))
+- With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
+- Fixed `/commit` and eval `commit` creating a single-parent commit during a merge; committing now refuses while a merge, cherry-pick, revert, rebase or `git am` is in progress or the index has unresolved conflicts ([#19474](https://github.com/can1357/oh-my-pi/pull/19474) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the `apply_patch` tool description calling it a shell command and forbidding absolute paths ([#19325](https://github.com/can1357/oh-my-pi/issues/19325), [#19468](https://github.com/can1357/oh-my-pi/pull/19468) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the shell's `rg` builtin ignoring `--glob` patterns that contain a slash ([#19476](https://github.com/can1357/oh-my-pi/pull/19476) by [@alphastorm](https://github.com/alphastorm))
+- Fixed eval `commit` `only(...)` failing when one of its paths or globs matched no changed file; unmatched ones are now reported ([#19472](https://github.com/can1357/oh-my-pi/pull/19472) by [@alphastorm](https://github.com/alphastorm))
+- Fixed a Tern browser block answering every later browser call with "Tab is busy: another call on this tab is still running" after a call whose page evaluation never returned, such as one cut off by a redirect; such a call now ends at its time limit or when cancelled, and the tab takes the next call
+- Fixed the browser tool reporting a JavaScript `confirm` or `prompt` as still open, and failing page calls on it, after the user clicked it away or another CDP client answered it ([#19481](https://github.com/can1357/oh-my-pi/pull/19481) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed `computer` `setValue` on a `<select>` in Chrome or an Electron app on macOS failing with an empty list of options; it now chooses the option the value names ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
+- A relay tab is no longer closed when another extension's frame, such as a password manager's autofill menu that undoes the relay clearing it, keeps Chrome refusing omp: the call fails saying what holds the tab, the tab stays open as the user left it, and the next call reattaches to it ([#19178](https://github.com/can1357/oh-my-pi/pull/19178) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the computer tool telling the model that only an X11 takeover can end with nothing sent because the user kept typing; a macOS takeover now waits for the user's pause too and reports `UserIntervened` the same way ([#19296](https://github.com/can1357/oh-my-pi/pull/19296) by [@will-bogusz](https://github.com/will-bogusz))
+- When the browser relay hides another extension's frame in a tab omp drives (a password manager's inline menu or save card), the call that ran into it, or a later one on that tab, now names the frame's page, the extension's id and the page's own title, and says the frame is hidden for the user too ([#19001](https://github.com/can1357/oh-my-pi/pull/19001) by [@will-bogusz](https://github.com/will-bogusz))
+- Anthropic web search now passes `site:`-scoped queries to Claude with the domain and path still in the text, and tells Claude to always search, so those lookups and queries it thought it could answer from memory no longer fail with "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Anthropic web search on models with a refusal fallback (Opus 5 and 5.5, Sonnet 5.5, Fable 5) has Anthropic retry a query the safety classifier declines on another Claude model, and reports a refusal or a failed search (`too_many_requests`, …) by name instead of "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
+- Subagents without an output schema (including eval `agent()` calls without `schema`) no longer get a `yield` tool; their final message is the result.
+- A `yield` without `data` no longer uses the subagent's last message as the result; it only finalizes incremental sections that were already submitted.
+- A `computer` key press that opens a macOS popup button's or menu button's menu in the background now fails listing the items and naming the press or click that chooses one, instead of leaving the menu open with your keyboard ([#19179](https://github.com/can1357/oh-my-pi/pull/19179) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Claude not seeing the reasoning of earlier Codex, Kimi, Grok and other non-Claude turns after a model switch, including turns kept through a compaction; it now gets that reasoning as text. When Claude refuses a turn with `Refusal (reasoning_extraction)` because of that carried reasoning, the turn is retried once without it, and the session stops sending it to Claude ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
+- After an Anthropic refusal, later turns no longer resend the refusal text with the tool calls it stopped: those calls now replay as "not executed" only, so one `reasoning_extraction` refusal stops making every following turn of the session likely to be refused too ([#19419](https://github.com/can1357/oh-my-pi/pull/19419) by [@flosrn](https://github.com/flosrn))
+- Fixed selective commits skipping updated submodule pointers; existing initialized gitlinks can now be reviewed and explicitly selected without committing changes inside the submodule ([#19556](https://github.com/can1357/oh-my-pi/pull/19556) by [@kim-dali](https://github.com/kim-dali))
+- Fixed git reads such as `/commit`'s status scan hanging when a background git process kept the output pipe open ([#19478](https://github.com/can1357/oh-my-pi/pull/19478) by [@alphastorm](https://github.com/alphastorm))
+- Fixed the browser falling back to Chromium on the first launch of a new WebKit engine build on macOS: the WebKit host now gets 60 seconds instead of 10 to answer its greeting while macOS scans the engine's binaries and libraries ([#19423](https://github.com/can1357/oh-my-pi/pull/19423) by [@shgew](https://github.com/shgew))
+- Fixed `--continue` opening a new empty session when the terminal's last session was started in another directory and closed before its first message; it now resumes the current directory's newest session ([#19495](https://github.com/can1357/oh-my-pi/issues/19495)).
+- Fixed a rejecting `pre-commit` hook's stdout (e.g. the `pre-commit` framework's per-hook report) missing from the error raised by the eval `commit` namespace and `omp commit` ([#19449](https://github.com/can1357/oh-my-pi/issues/19449))
+- `/commit` now shows the subject a commit-msg hook wrote onto the commit, instead of the subject from before the hook ran ([#19448](https://github.com/can1357/oh-my-pi/pull/19448) by [@eggpeat](https://github.com/eggpeat))
+- `^model` references followed by sentence punctuation now register their model agent instead of remaining literal ([#19445](https://github.com/can1357/oh-my-pi/pull/19445) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Selective commits in sparse checkouts no longer report paths outside the cone as unstaged deletions to commit hooks ([#19453](https://github.com/can1357/oh-my-pi/pull/19453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Custom providers pointing at the Zhipu Coding Plan endpoint now retry at the Beijing-time quota reset instead of waiting eight hours too long ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- `/copy` now copies what a mid-turn `out://` reply showed, instead of the reply tool's own "Shown to the user." result, and lists the reply's code blocks in the turn's blocks ([#19551](https://github.com/can1357/oh-my-pi/pull/19551) by [@bannert1337](https://github.com/bannert1337))
+- Fixed tools enabled during goal mode becoming unavailable after leaving it ([#19514](https://github.com/can1357/oh-my-pi/pull/19514) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Fixed the status-line usage segment showing another account's quota for multi-credential API-key providers such as `opencode-go`; it now follows the credential row the session router actually serves from ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
+- Fixed Objective-C message results and arm64 retain-register data flow in Ghidra analysis of Mach-O binaries, including previously analyzed cache-extracted frameworks ([#19558](https://github.com/can1357/oh-my-pi/pull/19558) by [@shgew](https://github.com/shgew)).
+- With a modal dialog open, browser `fill`, `type` and `press` aimed at a field behind it now fail naming what covers it, as `click` does, instead of typing into the dialog's button and reporting success (on Chromium tabs and Tern tabs without native DOM reads); `press` also refuses a disabled element (on Chromium tabs and Tern tabs without native DOM reads), and Chromium `drag` refuses a covered start or end ([#19524](https://github.com/can1357/oh-my-pi/pull/19524) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed RPC `login` refusing providers with an at-your-own-risk warning (`antigravity-cli`, `google-antigravity`): the warning now reaches the host as an `extension_ui_request` `input`, and login continues on "yes" and cancels on anything else ([#19523](https://github.com/can1357/oh-my-pi/issues/19523))
+- On Linux, file watching for language servers no longer puts an inotify watch on every directory under `node_modules` and `.git/objects`, which could use up the system's inotify watch limit and keep other programs such as systemd from adding watches ([#19459](https://github.com/can1357/oh-my-pi/issues/19459))
+- `/restart` now re-execs through the launcher omp was started by, so an open session moves onto an upgraded binary instead of re-running a retained old install ([#19529](https://github.com/can1357/oh-my-pi/pull/19529) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- RPC hosts now always receive a terminal `agent_end` after an over-quota 429: usage-limit bookkeeping is bounded so a stalled usage report can no longer hold the event ([#19411](https://github.com/can1357/oh-my-pi/issues/19411), [#19417](https://github.com/can1357/oh-my-pi/pull/19417) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+- Rex and other OSC 7501 terminals no longer play a success sound mid-run when a stale agent end arrives after another run has opened ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#19418](https://github.com/can1357/oh-my-pi/pull/19418) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.22.1] - 2026-11-17
 
@@ -27,11 +360,6 @@
 
 ### Added
 
-- Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
-- Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
-- Added Kiro as a built-in provider: run `/login kiro`, pick Identity Center, Builder ID, or an API key, and choose a discovered `kiro/<model-id>` model. Each `/login kiro` adds an account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
-- Added Google and GitHub to `/login kiro`: approve a one-time code at `app.kiro.dev`, then sign in with that account ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
-- `/usage` and `omp usage` now show Kiro credits: the monthly plan credits with their reset date, active bonus credits with their expiry, and overage credits and charges when overage is enabled ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix), based on [#14215](https://github.com/can1357/oh-my-pi/pull/14215) by [@ajdiyassin](https://github.com/ajdiyassin))
 - Added the `providers.webKeyless` setting, enabled by default, to control whether web search and URL reading may use keyless services. Disable it to restrict these operations to configured providers; individual `omp q --model web/<engine>` requests can still explicitly run a keyless engine.
 - Added configurable live voice endpoints and API keys through `live.endpoint` and `live.apiKey`. Live voice can now connect to any OpenAI Realtime WebRTC-compatible server without Codex or ChatGPT sign-in, including offline use, and `live.voice` accepts arbitrary voice names.
 - Computer `el.setValue()` now accepts finite safe integer and decimal numbers and writes them as text, while continuing to reject unsupported values such as booleans, objects, `NaN`, and `Infinity`.
@@ -86,47 +414,6 @@
 - Fixed browser interactions behind modal dialogs incorrectly reporting success; covered fields and disabled elements are now rejected, and covered drag endpoints are detected.
 - Fixed RPC login for providers that require an at-your-own-risk confirmation; the confirmation is now presented to the host and login proceeds only after approval.
 - On Linux, language-server file watching no longer consumes excessive inotify watches in `node_modules` and `.git/objects`.
-- Fixed Exa and Firecrawl web searches silently falling back to their keyless public endpoints when a configured credential failed to resolve (for example a failing `!command`); they now report the credential error
-- Fixed eval cells being able to call `yield` (directly or through `xd://yield`) without finishing the delegated task; eval now rejects `yield` and points to the direct tool ([#19470](https://github.com/can1357/oh-my-pi/pull/19470) by [@alphastorm](https://github.com/alphastorm))
-- Fixed service `ready.log` and wait patterns not matching `^` and `$` at line boundaries after earlier output ([#19471](https://github.com/can1357/oh-my-pi/pull/19471) by [@alphastorm](https://github.com/alphastorm))
-- Fixed the shell's `stat`, `diff` and `find` builtins ignoring `TZ` when printing file times; `find -ls` now prints times in the shell's time zone instead of UTC, and `find -newermt` reads dates like `Nov 15, 2023` in the shell's time zone ([#19482](https://github.com/can1357/oh-my-pi/pull/19482) by [@alphastorm](https://github.com/alphastorm))
-- With TTSR rules active, large `write` and `edit` calls no longer slow down as their arguments stream ([#19494](https://github.com/can1357/oh-my-pi/pull/19494) by [@H4vC](https://github.com/H4vC))
-- Fixed `/commit` and eval `commit` creating a single-parent commit during a merge; committing now refuses while a merge, cherry-pick, revert, rebase or `git am` is in progress or the index has unresolved conflicts ([#19474](https://github.com/can1357/oh-my-pi/pull/19474) by [@alphastorm](https://github.com/alphastorm))
-- Fixed the `apply_patch` tool description calling it a shell command and forbidding absolute paths ([#19325](https://github.com/can1357/oh-my-pi/issues/19325), [#19468](https://github.com/can1357/oh-my-pi/pull/19468) by [@alphastorm](https://github.com/alphastorm))
-- Fixed the shell's `rg` builtin ignoring `--glob` patterns that contain a slash ([#19476](https://github.com/can1357/oh-my-pi/pull/19476) by [@alphastorm](https://github.com/alphastorm))
-- Fixed eval `commit` `only(...)` failing when one of its paths or globs matched no changed file; unmatched ones are now reported ([#19472](https://github.com/can1357/oh-my-pi/pull/19472) by [@alphastorm](https://github.com/alphastorm))
-- Fixed a Tern browser block answering every later browser call with "Tab is busy: another call on this tab is still running" after a call whose page evaluation never returned, such as one cut off by a redirect; such a call now ends at its time limit or when cancelled, and the tab takes the next call
-- Fixed the browser tool reporting a JavaScript `confirm` or `prompt` as still open, and failing page calls on it, after the user clicked it away or another CDP client answered it ([#19481](https://github.com/can1357/oh-my-pi/pull/19481) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed `computer` `setValue` on a `<select>` in Chrome or an Electron app on macOS failing with an empty list of options; it now chooses the option the value names ([#19224](https://github.com/can1357/oh-my-pi/pull/19224) by [@will-bogusz](https://github.com/will-bogusz))
-- A relay tab is no longer closed when another extension's frame, such as a password manager's autofill menu that undoes the relay clearing it, keeps Chrome refusing omp: the call fails saying what holds the tab, the tab stays open as the user left it, and the next call reattaches to it ([#19178](https://github.com/can1357/oh-my-pi/pull/19178) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed the computer tool telling the model that only an X11 takeover can end with nothing sent because the user kept typing; a macOS takeover now waits for the user's pause too and reports `UserIntervened` the same way ([#19296](https://github.com/can1357/oh-my-pi/pull/19296) by [@will-bogusz](https://github.com/will-bogusz))
-- When the browser relay hides another extension's frame in a tab omp drives (a password manager's inline menu or save card), the call that ran into it, or a later one on that tab, now names the frame's page, the extension's id and the page's own title, and says the frame is hidden for the user too ([#19001](https://github.com/can1357/oh-my-pi/pull/19001) by [@will-bogusz](https://github.com/will-bogusz))
-- Anthropic web search now passes `site:`-scoped queries to Claude with the domain and path still in the text, and tells Claude to always search, so those lookups and queries it thought it could answer from memory no longer fail with "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
-- Anthropic web search on models with a refusal fallback (Opus 5 and 5.5, Sonnet 5.5, Fable 5) has Anthropic retry a query the safety classifier declines on another Claude model, and reports a refusal or a failed search (`too_many_requests`, …) by name instead of "returned no sources" ([#18125](https://github.com/can1357/oh-my-pi/pull/18125) by [@will-bogusz](https://github.com/will-bogusz))
-- Subagents without an output schema (including eval `agent()` calls without `schema`) no longer get a `yield` tool; their final message is the result.
-- A `yield` without `data` no longer uses the subagent's last message as the result; it only finalizes incremental sections that were already submitted.
-- A `computer` key press that opens a macOS popup button's or menu button's menu in the background now fails listing the items and naming the press or click that chooses one, instead of leaving the menu open with your keyboard ([#19179](https://github.com/can1357/oh-my-pi/pull/19179) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Claude not seeing the reasoning of earlier Codex, Kimi, Grok and other non-Claude turns after a model switch, including turns kept through a compaction; it now gets that reasoning as text. When Claude refuses a turn with `Refusal (reasoning_extraction)` because of that carried reasoning, the turn is retried once without it, and the session stops sending it to Claude ([#7241](https://github.com/can1357/oh-my-pi/issues/7241)) ([#17610](https://github.com/can1357/oh-my-pi/pull/17610) by [@will-bogusz](https://github.com/will-bogusz))
-- After an Anthropic refusal, later turns no longer resend the refusal text with the tool calls it stopped: those calls now replay as "not executed" only, so one `reasoning_extraction` refusal stops making every following turn of the session likely to be refused too ([#19419](https://github.com/can1357/oh-my-pi/pull/19419) by [@flosrn](https://github.com/flosrn))
-- Fixed selective commits skipping updated submodule pointers; existing initialized gitlinks can now be reviewed and explicitly selected without committing changes inside the submodule ([#19556](https://github.com/can1357/oh-my-pi/pull/19556) by [@kim-dali](https://github.com/kim-dali))
-- Fixed git reads such as `/commit`'s status scan hanging when a background git process kept the output pipe open ([#19478](https://github.com/can1357/oh-my-pi/pull/19478) by [@alphastorm](https://github.com/alphastorm))
-- Fixed the browser falling back to Chromium on the first launch of a new WebKit engine build on macOS: the WebKit host now gets 60 seconds instead of 10 to answer its greeting while macOS scans the engine's binaries and libraries ([#19423](https://github.com/can1357/oh-my-pi/pull/19423) by [@shgew](https://github.com/shgew))
-- Fixed `--continue` opening a new empty session when the terminal's last session was started in another directory and closed before its first message; it now resumes the current directory's newest session ([#19495](https://github.com/can1357/oh-my-pi/issues/19495)).
-- Fixed a rejecting `pre-commit` hook's stdout (e.g. the `pre-commit` framework's per-hook report) missing from the error raised by the eval `commit` namespace and `omp commit` ([#19449](https://github.com/can1357/oh-my-pi/issues/19449))
-- `/commit` now shows the subject a commit-msg hook wrote onto the commit, instead of the subject from before the hook ran ([#19448](https://github.com/can1357/oh-my-pi/pull/19448) by [@eggpeat](https://github.com/eggpeat))
-- `^model` references followed by sentence punctuation now register their model agent instead of remaining literal ([#19445](https://github.com/can1357/oh-my-pi/pull/19445) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Selective commits in sparse checkouts no longer report paths outside the cone as unstaged deletions to commit hooks ([#19453](https://github.com/can1357/oh-my-pi/pull/19453) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Custom providers pointing at the Zhipu Coding Plan endpoint now retry at the Beijing-time quota reset instead of waiting eight hours too long ([#19446](https://github.com/can1357/oh-my-pi/pull/19446) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- `/copy` now copies what a mid-turn `out://` reply showed, instead of the reply tool's own "Shown to the user." result, and lists the reply's code blocks in the turn's blocks ([#19551](https://github.com/can1357/oh-my-pi/pull/19551) by [@bannert1337](https://github.com/bannert1337))
-- Fixed tools enabled during goal mode becoming unavailable after leaving it ([#19514](https://github.com/can1357/oh-my-pi/pull/19514) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Fixed the status-line usage segment showing another account's quota for multi-credential API-key providers such as `opencode-go`; it now follows the credential row the session router actually serves from ([#19456](https://github.com/can1357/oh-my-pi/issues/19456)) ([#19492](https://github.com/can1357/oh-my-pi/pull/19492) by [@thekitaev](https://github.com/thekitaev)).
-- Fixed Objective-C message results and arm64 retain-register data flow in Ghidra analysis of Mach-O binaries, including previously analyzed cache-extracted frameworks ([#19558](https://github.com/can1357/oh-my-pi/pull/19558) by [@shgew](https://github.com/shgew)).
-- With a modal dialog open, browser `fill`, `type` and `press` aimed at a field behind it now fail naming what covers it, as `click` does, instead of typing into the dialog's button and reporting success (on Chromium tabs and Tern tabs without native DOM reads); `press` also refuses a disabled element (on Chromium tabs and Tern tabs without native DOM reads), and Chromium `drag` refuses a covered start or end ([#19524](https://github.com/can1357/oh-my-pi/pull/19524) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed RPC `login` refusing providers with an at-your-own-risk warning (`antigravity-cli`, `google-antigravity`): the warning now reaches the host as an `extension_ui_request` `input`, and login continues on "yes" and cancels on anything else ([#19523](https://github.com/can1357/oh-my-pi/issues/19523))
-- On Linux, file watching for language servers no longer puts an inotify watch on every directory under `node_modules` and `.git/objects`, which could use up the system's inotify watch limit and keep other programs such as systemd from adding watches ([#19459](https://github.com/can1357/oh-my-pi/issues/19459))
-- `/restart` now re-execs through the launcher omp was started by, so an open session moves onto an upgraded binary instead of re-running a retained old install ([#19529](https://github.com/can1357/oh-my-pi/pull/19529) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- RPC hosts now always receive a terminal `agent_end` after an over-quota 429: usage-limit bookkeeping is bounded so a stalled usage report can no longer hold the event ([#19411](https://github.com/can1357/oh-my-pi/issues/19411), [#19417](https://github.com/can1357/oh-my-pi/pull/19417) by [@yuzu-octopus](https://github.com/yuzu-octopus))
-- Rex and other OSC 7501 terminals no longer play a success sound mid-run when a stale agent end arrives after another run has opened ([#17307](https://github.com/can1357/oh-my-pi/issues/17307), [#19418](https://github.com/can1357/oh-my-pi/pull/19418) by [@yuzu-octopus](https://github.com/yuzu-octopus))
 
 ## [18.22.0] - 2026-11-16
 

@@ -1,4 +1,5 @@
 /** `bash` — shell command execution: prompt line with env prefix, badges, output tail. */
+import { parseSpillUrl, spillUrl } from "@oh-my-pi/pi-utils/spill-url";
 import type { ReactNode } from "react";
 import { Badge, Badges, InvalidArg, ResultImages, ResultText, Row } from "../parts";
 import type { ToolRenderer, ToolRenderProps } from "../types";
@@ -7,8 +8,8 @@ import { detailsRecord, display, isRecord, normalizeWs, num, resultTextOf, short
 /** Values safe to show unquoted in a `NAME=value` shell prefix. */
 const SHELL_SAFE = /^[\w@%+=:,./-]+$/;
 
-/** Footer appended by the bash tool when long output was spilled to an artifact. */
-const ARTIFACT_NOTICE = /\[raw output: artifact:\/\/([\w-]+)\]/;
+/** Footer appended by the bash tool when long output was spilled; the URL inside is a `local://N.log` spill. */
+const RAW_OUTPUT_NOTICE = /\[raw output: ([^\]\s]+)\]/;
 
 function envPrefix(env: Record<string, unknown>): string {
 	const parts: string[] = [];
@@ -50,7 +51,8 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 	const timeoutSeconds = num(args.timeout) ?? num(details?.timeoutSeconds);
 	const requestedTimeoutSeconds = num(details?.requestedTimeoutSeconds);
 	const job = asyncDetailsOf(details);
-	const artifactId = ARTIFACT_NOTICE.exec(resultTextOf(result))?.[1] ?? null;
+	const noticeUrl = RAW_OUTPUT_NOTICE.exec(resultTextOf(result))?.[1];
+	const spillId = noticeUrl === undefined ? undefined : parseSpillUrl(noticeUrl);
 
 	const stats: string[] = [];
 	if (wallTimeMs !== null) {
@@ -60,7 +62,7 @@ function Body({ args, result }: ToolRenderProps): ReactNode {
 		stats.push(`requested timeout ${requestedTimeoutSeconds}s clamped`);
 	}
 	if (job?.jobId) stats.push(`job ${job.jobId}`);
-	if (artifactId) stats.push(`artifact ${artifactId}`);
+	if (spillId !== undefined) stats.push(spillUrl(spillId));
 
 	return (
 		<>

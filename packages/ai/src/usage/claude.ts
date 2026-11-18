@@ -14,6 +14,7 @@ import {
 	type UsageProvider,
 	type UsageReport,
 	type UsageWindow,
+	usageSubscriptionPlan,
 } from "../usage";
 import { isRecord } from "../utils";
 import { waitForRetry } from "../utils/retry-wait";
@@ -412,6 +413,31 @@ interface ClaudeProfile {
 		uuid?: string;
 		email?: string;
 	};
+	organization?: {
+		organization_type?: string;
+		rate_limit_tier?: string;
+	};
+}
+
+const CLAUDE_ORGANIZATION_PLANS: Readonly<Record<string, string>> = {
+	claude_max: "Max",
+	claude_pro: "Pro",
+	claude_team: "Team",
+	claude_enterprise: "Enterprise",
+};
+
+/**
+ * Subscription plan label for a `/profile` response: "Max 5x" / "Max 20x" from
+ * the rate-limit tier (the $100 and $200 Max plans), else the organization
+ * type ("Max", "Pro", "Team", "Enterprise"). Undefined when the profile names
+ * no recognised plan.
+ */
+export function claudeProfilePlan(profile: unknown): string | undefined {
+	if (!isRecord(profile) || !isRecord(profile.organization)) return undefined;
+	const { rate_limit_tier: tier, organization_type: type } = profile.organization;
+	const maxMultiplier = typeof tier === "string" ? /max_(\d+x)/i.exec(tier)?.[1] : undefined;
+	if (maxMultiplier) return `Max ${maxMultiplier.toLowerCase()}`;
+	return typeof type === "string" ? CLAUDE_ORGANIZATION_PLANS[type.toLowerCase()] : undefined;
 }
 
 function extractProfileIdentity(profile: ClaudeProfile | null): { accountId?: string; email?: string } {
@@ -733,8 +759,13 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 	};
 	let accountId = result.metadata?.accountId ?? credential.accountId;
 	let email = result.metadata?.email ?? credential.email;
-	if ((!accountId || !email) && !params.signal?.aborted) {
-		const profileIdentity = extractProfileIdentity(await fetchProfile(baseUrl, headers, ctx, params.signal));
+	// Fetched every time: the plan can change under a long-lived credential
+	// (upgrade, downgrade), and `/usage` never reports it. A failed probe keeps
+	// the plan the previous report carried.
+	const profile = await fetchProfile(baseUrl, headers, ctx, params.signal);
+	const plan = claudeProfilePlan(profile) ?? usageSubscriptionPlan(ctx.previousReport);
+	if (!accountId || !email) {
+		const profileIdentity = extractProfileIdentity(profile);
 		accountId ??= profileIdentity.accountId;
 		email ??= profileIdentity.email;
 	}
@@ -753,6 +784,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 		...(accountId ? { accountId } : {}),
 		...(email ? { email } : {}),
 		...(credential.orgId ? { orgId: credential.orgId } : {}),
+		...(plan ? { subscriptionPlan: plan } : {}),
 	};
 	return result;
 }

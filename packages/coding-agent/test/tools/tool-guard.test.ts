@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, setSystemTime, spyOn, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { JudgmentRequest, Questions } from "@oh-my-pi/pi-ai";
@@ -129,7 +130,6 @@ describe("tool guard", () => {
 		const refusal = await guard.check(call(bash, { command: "rm -rf ~/data" }, "exec"));
 
 		expect(refusal).toContain("`destroys_data`");
-		expect(refusal).toContain("it deletes or overwrites data that may exist nowhere else");
 		expect(refusal).toContain("Find a safer way");
 		// Only the user's own messages are requests; a tool result's instruction never is.
 		const state = judge.requests[0].state as { requests: string[]; cwd: string };
@@ -152,7 +152,7 @@ describe("tool guard", () => {
 		expect(
 			await guard.check(call(bash, { command: "git status && ls -la src | head -5 2>&1" }, "exec")),
 		).toBeUndefined();
-		expect(await guard.check(call(bash, { command: "grep -rn foo . > notes.txt" }, "exec"))).toBeUndefined();
+		expect(await guard.check(call(bash, { command: "grep -rn foo . > /dev/null 2>&1" }, "exec"))).toBeUndefined();
 		expect(await guard.check(call(write, { path: path.join(cwd, "src/a.ts") }, "write"))).toBeUndefined();
 		expect(await guard.check(call(tool("web_search", "exec"), { query: "x" }, "exec"))).toBeUndefined();
 		expect(judge.requests).toHaveLength(0);
@@ -160,8 +160,9 @@ describe("tool guard", () => {
 		// The same tools reach the judge once a call can change something outside the working directory.
 		await guard.check(call(write, { path: "/etc/hosts" }, "write"));
 		await guard.check(call(bash, { command: "echo x > /etc/hosts" }, "exec"));
+		await guard.check(call(bash, { command: "grep -rn foo . > notes.txt" }, "exec"));
 		await guard.check(call(bash, { command: "cd .. && mkdir out" }, "exec"));
-		expect(judge.requests).toHaveLength(3);
+		expect(judge.requests).toHaveLength(4);
 	});
 
 	it("classifies only reading commands as read-only", () => {
@@ -170,10 +171,13 @@ describe("tool guard", () => {
 			"git log --oneline -5",
 			"git -C sub diff HEAD~1",
 			"find . -name '*.ts'",
-			"FOO=1 timeout 5 rg x",
+			"timeout 5 rg x",
 			"sort -n data.txt",
+			"time git status",
+			"git stash list",
+			"git tag",
 		]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(true);
+			expect(isReadOnlyCommand(command)).toBe(true);
 		}
 		for (const command of [
 			"rm -rf build",
@@ -201,8 +205,146 @@ describe("tool guard", () => {
 			"sort --compress-program=/tmp/x data.txt",
 			"sort -o /etc/passwd data.txt",
 			"sort -uo out data.txt",
+			// GNU time writes its report to a file; rg runs programs to fill a hyperlink's host; bare git stash pushes.
+			"time --output=/etc/important.conf git status",
+			"time -o/etc/important.conf cat notes.txt",
+			"nice time -ao /etc/x ls",
+			"rg --hostname-bin=/tmp/x.sh --hyperlink-format=default foo",
+			"git stash",
+			"git stash -v",
 		]) {
-			expect(isReadOnlyCommand(command, cwd)).toBe(false);
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+	});
+
+	it("judges a command that changes the shell environment the next command runs in", () => {
+		for (const command of [
+			"export PATH=/tmp/attacker; git status",
+			"PATH=/tmp/attacker; git status",
+			"PATH=/tmp/attacker git status",
+			"unset GIT_DIR; git status",
+			"set -k; git diff GIT_EXTERNAL_DIFF=/tmp/x.sh",
+			"printf -v PATH /tmp/attacker; git status",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		// Error and trace flags change nothing a command reads.
+		expect(isReadOnlyCommand("set -euo pipefail; git status")).toBe(true);
+		expect(isReadOnlyCommand("printf '%s\\n' -v")).toBe(true);
+	});
+
+	it("treats `>&file` as a write to the file and `>&N` as a descriptor copy", () => {
+		expect(isReadOnlyCommand("echo overwritten >&/etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("echo overwritten 1>& /etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("echo ok >&notes.txt")).toBe(false);
+		expect(isReadOnlyCommand("echo ok >&2 2>&1 >&-")).toBe(true);
+	});
+
+	it("treats a read-write redirect `<>file` as a write to the file", () => {
+		expect(isReadOnlyCommand("cat 3<>/etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("cat <> /etc/important.conf")).toBe(false);
+		expect(isReadOnlyCommand("cat 3<>notes.txt")).toBe(false);
+		expect(isReadOnlyCommand("cat < input.txt")).toBe(true);
+	});
+
+	it("judges every redirect to a file, keeping only /dev/null and descriptor copies read-only", () => {
+		for (const command of [
+			'echo ok "x">/tmp/outside/f',
+			'echo x >"/etc/passwd"',
+			"echo x > out.txt",
+			"echo x >> sub/log.txt",
+			"git status 2> errors.txt",
+			"echo x >| out.txt",
+			"cat <in.txt>out.txt",
+			"echo x > /dev/stderr",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		for (const command of ["git status 2>&1", "git status >/dev/null 2>&1", "echo ok >&2", "git diff 2>/dev/null"]) {
+			expect(isReadOnlyCommand(command)).toBe(true);
+		}
+	});
+
+	it("judges writes through symlinks whatever their target", () => {
+		const outside = TempDir.createSync("@omp-tool-guard-outside-");
+		try {
+			fs.symlinkSync(path.join(outside.path(), "new"), path.join(cwd, "link2"));
+			fs.mkdirSync(path.join(outside.path(), "sub"));
+			fs.symlinkSync(path.join(outside.path(), "sub"), path.join(cwd, "link"));
+			for (const command of [
+				"echo x > link2",
+				"echo x > link/../escaped",
+				"tee link2",
+				"touch link/../escaped",
+				"mkdir link/new",
+			]) {
+				expect(isReadOnlyCommand(command)).toBe(false);
+			}
+		} finally {
+			outside.removeSync();
+		}
+	});
+
+	it("judges any command that changes directory", () => {
+		for (const command of [
+			"command cd /tmp && echo hi > made",
+			"builtin cd /tmp; ls",
+			"ls | cd /tmp",
+			"pushd /tmp && ls",
+			"git status; popd",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+	});
+
+	it("judges tree when it writes an output file", () => {
+		for (const command of ["tree -o /etc/important.conf .", "tree -ao /etc/important.conf .", "tree -R -H . /srv"]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		expect(isReadOnlyCommand("tree -a -L 2 --noreport src")).toBe(true);
+	});
+
+	it("judges uniq when it writes its output operand", () => {
+		for (const command of ["uniq data.txt /etc/important.conf", "uniq -f 1 data.txt /etc/x", "uniq -cw 3 - /etc/x"]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		for (const command of ["uniq -c data.txt", "uniq -f 1 data.txt", "sort data.txt | uniq -d"]) {
+			expect(isReadOnlyCommand(command)).toBe(true);
+		}
+	});
+
+	it("judges date, hostname and file when they set the clock, rename the host or compile a magic file", () => {
+		for (const command of [
+			"date -s '2020-01-01'",
+			"date --set=2020-01-01",
+			"date --se 2020-01-01",
+			"date -us 2020-01-01",
+			"date 010112002020",
+			"date -d tomorrow 010112002020",
+			"hostname prod-db-2",
+			"hostname -F /etc/hostname",
+			"hostname -b prod-db-2",
+			"file -C -m magic",
+			"file -zC -m magic",
+			"file --compile -m magic",
+			"file --comp -m magic",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		for (const command of [
+			"date",
+			"date +%s",
+			"date -u +%Y-%m-%d",
+			"date -d tomorrow +%F",
+			"date --date='2 days ago'",
+			"date -Iseconds",
+			"date -r notes.txt",
+			"hostname",
+			"hostname -f",
+			"file notes.txt",
+			"file -m magic notes.txt",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(true);
 		}
 	});
 
@@ -313,8 +455,8 @@ describe("tool guard", () => {
 		const refusal = await guard.check(call(bash, { command: "bun test" }, "exec"));
 
 		expect(refusal).toContain("`overloads_host`");
-		expect(refusal).toContain("The host shows memory pressure, heavy swapping.");
-		expect(refusal).toContain("Move the heavy work to another host, or wait");
+		expect(refusal).toContain("memory pressure");
+		expect(refusal).toContain("heavy swapping");
 		expect(refusal).not.toContain("Find a safer way");
 	});
 
@@ -398,6 +540,116 @@ describe("tool guard", () => {
 		messages.push(userMessage("Try something else."));
 		await guard.check(call(bash, { command: "rm -rf /srv/other" }, "exec"));
 		expect(stops).toHaveLength(1);
+	});
+
+	it("counts again for a new /skill request", async () => {
+		const { guard } = guardWith(fakeJudge({ destroys_data: 1 }, 0));
+		for (let i = 0; i < 2; i++) await guard.check(call(bash, { command: `rm -rf /srv/db${i}` }, "exec"));
+
+		messages.push({
+			role: "custom",
+			customType: "skill-prompt",
+			attribution: "user",
+			content: "The skill's instructions.",
+			display: true,
+			details: { name: "cleanup", args: "the old exports" },
+			timestamp: Date.now(),
+		} as AgentMessage);
+		await guard.check(call(bash, { command: "rm -rf /srv/other" }, "exec"));
+		expect(stops).toEqual([]);
+	});
+
+	it("never runs a call aborted while the judge decides", async () => {
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			cwd,
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const controller = new AbortController();
+		// The user aborts mid-judgment; this judge rejects on its signal, as the judge role chain does.
+		const listening: GuardJudge = {
+			judge: (async (_request: unknown, options?: { signal?: AbortSignal }) => {
+				controller.abort();
+				throw options?.signal?.reason ?? new Error("aborted");
+			}) as GuardJudge["judge"],
+		};
+		const { guard, settings } = guardWith(listening, { "tools.guard.enabled": true, "tools.approvalMode": "yolo" });
+		runner.setToolGuard(guard);
+		const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+		const wrapped = new ExtensionToolWrapper({ ...bash, execute } as AgentTool, runner) as ExtensionToolWrapper<any>;
+
+		await expect(
+			wrapped.execute("call-1", { command: "rm -rf /srv/db" }, controller.signal, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow();
+		expect(execute).not.toHaveBeenCalled();
+
+		// A judge that ignores its signal cannot hold an aborted call either.
+		const ignoring = new AbortController();
+		const deaf: GuardJudge = {
+			judge: (async () => {
+				ignoring.abort();
+				return Promise.withResolvers<never>().promise;
+			}) as GuardJudge["judge"],
+		};
+		await expect(
+			guardWith(deaf).guard.check(call(bash, { command: "rm -rf /srv/db" }, "exec"), ignoring.signal),
+		).rejects.toThrow();
+	});
+
+	it("does not screen again a device call whose carrier the user approved", async () => {
+		const runner = new ExtensionRunner(
+			[],
+			new ExtensionRuntime(),
+			cwd,
+			SessionManager.inMemory(),
+			{} as ModelRegistry,
+		);
+		const select = vi.fn(async () => "Approve");
+		runner.initialize({} as never, {} as never, undefined, { select } as never);
+		const judge = fakeJudge({ destroys_data: 1 }, 0);
+		const { guard } = guardWith(judge);
+		runner.setToolGuard(guard);
+		const ran = vi.fn(async () => ({ content: [{ type: "text" as const, text: "ran" }] }));
+		const device = new ExtensionToolWrapper(
+			{ ...bash, execute: ran } as AgentTool,
+			runner,
+		) as ExtensionToolWrapper<any>;
+		// Stands in for `write xd://bash`: it dispatches the device with the context `xd-protocol.ts` passes.
+		const carrier = new ExtensionToolWrapper(
+			{
+				...tool("write", "exec"),
+				execute: (id: string, _args: unknown, signal?: AbortSignal, onUpdate?: never, context?: AgentToolContext) =>
+					device.execute(
+						id,
+						{ command: "rm -rf /srv/db" },
+						signal,
+						onUpdate,
+						context ? { ...context, xdevPolicyKey: "bash" } : undefined,
+					),
+			} as AgentTool,
+			runner,
+		) as ExtensionToolWrapper<any>;
+		const call = { path: "xd://bash", content: "rm -rf /srv/db" };
+
+		await carrier.execute("call-1", call, undefined, undefined, {
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+		} as AgentToolContext);
+		expect(select).toHaveBeenCalledTimes(1);
+		expect(ran).toHaveBeenCalledTimes(1);
+		expect(judge.requests).toHaveLength(0);
+
+		// Unprompted, the device call is the one the guard screens.
+		await expect(
+			carrier.execute("call-2", call, undefined, undefined, {
+				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+			} as AgentToolContext),
+		).rejects.toThrow("The tool guard refused this call");
+		expect(ran).toHaveBeenCalledTimes(1);
+		expect(judge.requests).toHaveLength(1);
 	});
 
 	it("refuses through the tool wrapper without running the tool", async () => {

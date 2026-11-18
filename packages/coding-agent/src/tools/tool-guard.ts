@@ -4,11 +4,12 @@
  * One judgment asks two questions over the session: a choice of what the call would do (`routine`, a
  * named risk, or `unclear`) and a yes/no on whether the user asked for it. The call is refused when
  * the named risks together reach `tools.guard.riskThreshold` and the asked probability stays below
- * `tools.guard.askedThreshold`. Any judge failure, timeout or malformed answer lets the call through.
+ * `tools.guard.askedThreshold`. Any judge failure, timeout or malformed answer lets the call through;
+ * a call aborted while it is judged never runs.
  *
  * Calls that cannot do harm never reach the judge: read-tier tools, writes inside the working
- * directory, shell commands made only of reading commands, and web search. The design, wording and
- * thresholds come from nace-ai/intern's System 1 guard (`guard.py`, Apache-2.0).
+ * directory, shell commands made only of reading commands that write no file, and web search. The
+ * design, wording and thresholds come from nace-ai/intern's System 1 guard (`guard.py`, Apache-2.0).
  *
  * Before that, the session's TTSR gate rules (`gate: before`) judge every call, including one the
  * user approved in a prompt, whether or not the guard is on.
@@ -98,11 +99,16 @@ const UNJUDGED_TOOLS = wordTable("web_search task");
 /** Commands that only read, print or compute. */
 const READ_ONLY_COMMANDS = wordTable(
 	"cat head tail ls pwd echo printf wc grep egrep fgrep which whereis type file stat du df cut tr nl diff cmp " +
-		"basename dirname realpath readlink date whoami id uname hostname true false cd test [ column jq comm paste " +
-		"fold rev seq md5sum sha1sum sha256sum shasum md5 sleep uniq set export unset pushd popd tree pdfinfo",
+		"basename dirname realpath readlink date whoami id uname hostname true false test [ column jq comm paste " +
+		"fold rev seq md5sum sha1sum sha256sum shasum md5 sleep uniq tree pdfinfo",
 );
-/** Commands that write only where they are told: read-only when every target is inside the working directory. */
-const LOCAL_WRITERS = wordTable("tee mkdir touch");
+/** `tree` options that write files: `-o FILE`, also inside a cluster (`-ao FILE`), and `-R`, which reruns tree with `-o 00Tree.html` in each directory. */
+const TREE_WRITES = /^-[^-]*[oR]/;
+/** `set` flags that change only how the shell stops on errors and traces, with `-o` naming one of {@link SET_NAMED_OPTIONS}. */
+const SET_FLAGS = /^[-+][euxv]*o?$/;
+const SET_NAMED_OPTIONS = wordTable("pipefail errexit nounset xtrace verbose");
+/** Directory changes: the rest of the command runs somewhere the call does not show, so it is always judged. */
+const DIRECTORY_CHANGES = wordTable("cd pushd popd");
 const GIT_READS = wordTable(
 	"status log diff show rev-parse ls-files blame describe shortlog grep ls-tree cat-file merge-base rev-list " +
 		"show-ref whatchanged version help",
@@ -114,7 +120,8 @@ const FIND_ACTIONS = wordTable("-exec -execdir -ok -okdir -delete -fprint -fprin
 /** Prefixes that run the rest of the line as the command; reads stay reads under the first group. */
 const READ_WRAPPERS = wordTable("time nice timeout command");
 const SCRIPT_WRAPPERS = wordTable("time nice timeout command sudo doas env nohup exec");
-const SAFE_REDIRECT_TARGETS = wordTable("/dev/null /dev/stdout /dev/stderr");
+/** The one redirect target that writes nothing; every other file target is a write. */
+const SAFE_REDIRECT_TARGETS = wordTable("/dev/null");
 
 const SHELLS = wordTable("sh bash zsh dash ksh ash fish");
 const INTERPRETER = /^(?:python[\d.]*|perl|ruby|node|php|pwsh)$/;
@@ -199,22 +206,6 @@ function resolveWord(word: string, base: string): string | undefined {
 	return path.resolve(base, word);
 }
 
-/** Where a shell command runs and which writes keep it read-only. */
-interface ShellScope {
-	/** The directory the command starts in. */
-	base: string;
-	/** The working directory writes may land in. */
-	root: string;
-	/** False once the command changes directory: relative targets can no longer be placed. */
-	localWrites: boolean;
-}
-
-function insideRoot(word: string, scope: ShellScope): boolean {
-	if (!scope.localWrites) return false;
-	const target = resolveWord(word, scope.base);
-	return target !== undefined && pathIsWithin(scope.root, target);
-}
-
 /** Leading assignments and read-only wrappers removed (`FOO=1 timeout 5 cat x` → `cat x`). */
 function unwrapCommand(words: string[], wrappers: WordTable): string[] {
 	let rest = words;
@@ -259,68 +250,172 @@ function readOnlyGit(args: string[]): boolean {
 	if (sub === "branch") return positional.length === 0 && flags.every(flag => inTable(GIT_BRANCH_LISTING, flag));
 	if (sub === "remote" || sub === "stash" || sub === "tag") {
 		const action = positional[0];
+		// A bare `git stash` (or `git stash -v`) is `git stash push`; bare `git remote` and `git tag` list.
+		const listing = action === "show" || action === "list" || (action === undefined && sub !== "stash");
 		return (
-			(action === undefined || action === "show" || action === "list" || action === "get-url") &&
-			flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list")
+			(listing || action === "get-url") && flags.every(flag => flag === "-v" || flag === "-l" || flag === "--list")
 		);
 	}
 	if (sub === "config") return rest.some(arg => arg.startsWith("--get") || arg === "--list" || arg === "-l");
 	return sub === "reflog" && (positional[0] === undefined || positional[0] === "show");
 }
 
-/** Whether one simple command leaves everything outside the working directory as it was. */
-function readOnlySegment(text: string, scope: ShellScope): boolean {
+/** Whether `set` only changes how the shell stops and traces (`set -euo pipefail`); `-a`, `-k` and positional `--` change what later commands see. */
+function readOnlySet(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const flags = args[i];
+		if (flags.length < 2 || !SET_FLAGS.test(flags)) return false;
+		if (flags.endsWith("o") && i + 1 < args.length && !inTable(SET_NAMED_OPTIONS, args[++i])) return false;
+	}
+	return true;
+}
+
+/** `uniq` options whose value is the next word (`-f 1`, `-cw 3`, `--skip-chars 2`). */
+const UNIQ_VALUE_OPTION = /^(?:-[a-zA-Z]*[fsw]|--(?:skip-fields|skip-chars|check-chars))$/;
+/** `date` long options whose value may be the next word (`--date tomorrow`). */
+const DATE_VALUE_OPTIONS = ["--date", "--file", "--reference", "--rfc-3339"];
+/** `hostname` flags that only print a name or address; an operand, `-F FILE` and `-b` set the name. */
+const HOSTNAME_DISPLAY =
+	/^(?:-[aAdfhiIsvVy]+|--(?:alias|all-fqdns|all-ip-addresses|domain|fqdn|help|ip-address|long|nis|short|verbose|version|yp))$/;
+/** `file -C`, also inside a cluster (`-zC`): compiles each magic file into a `.mgc` beside it. */
+const FILE_COMPILE = /^-[^-]*C/;
+
+/** Whether `date` only prints: no `-s`/`--set`, and every operand a `+FORMAT`, since a bare operand (`date 010112002020`) sets the clock. */
+function readOnlyDate(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--") return args.slice(i + 1).every(operand => operand.startsWith("+"));
+		if (arg.startsWith("--")) {
+			// getopt accepts any unambiguous prefix of a long option (`--se` for `--set`).
+			const name = arg.split("=", 1)[0];
+			if ("--set".startsWith(name)) return false;
+			if (name === arg && DATE_VALUE_OPTIONS.some(option => option.startsWith(name))) i++;
+		} else if (arg.length > 1 && arg.startsWith("-")) {
+			for (let j = 1; j < arg.length; j++) {
+				const flag = arg[j];
+				if (flag === "s") return false;
+				// `-d`, `-f`, `-r` (and BSD `-v`) take the rest of the cluster or the next word; `-I` an attached format.
+				if ("dfrv".includes(flag)) {
+					if (j === arg.length - 1) i++;
+					break;
+				}
+				if (flag === "I") break;
+			}
+		} else if (!arg.startsWith("+")) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Whether a reading command's arguments keep it reading: `tree -o`/`-R` write files, `printf -v` assigns a variable,
+ * `uniq IN OUT` writes OUT, `file -C` compiles magic files, `date -s` and `hostname NAME` reconfigure the host.
+ */
+function readOnlyArguments(name: string, args: string[]): boolean {
+	switch (name) {
+		case "tree":
+			return !args.some(arg => TREE_WRITES.test(arg));
+		case "printf":
+			return !args[0]?.startsWith("-v");
+		case "uniq": {
+			let operands = 0;
+			for (let i = 0; i < args.length; i++) {
+				const arg = args[i];
+				if (arg === "--") {
+					operands += args.length - i - 1;
+					break;
+				}
+				if (UNIQ_VALUE_OPTION.test(arg)) i++;
+				else if (arg === "-" || !arg.startsWith("-")) operands++;
+			}
+			return operands <= 1;
+		}
+		case "date":
+			return readOnlyDate(args);
+		case "hostname":
+			return args.every(arg => HOSTNAME_DISPLAY.test(arg));
+		case "file":
+			// `--co` is the shortest prefix getopt takes for `--compile`.
+			return !args.some(arg => FILE_COMPILE.test(arg) || (arg.length > 3 && "--compile".startsWith(arg)));
+		default:
+			return true;
+	}
+}
+
+/** Whether `raw` holds a `>` outside quotes (`echo ok "x">f`): a redirection inside a word. */
+function unquotedRedirect(raw: string): boolean {
+	let quote: string | undefined;
+	for (let i = 0; i < raw.length; i++) {
+		const char = raw[i];
+		if (char === "\\" && quote !== "'") i++;
+		else if (quote !== undefined) {
+			if (char === quote) quote = undefined;
+		} else if (char === "'" || char === '"') quote = char;
+		else if (char === ">") return true;
+	}
+	return false;
+}
+
+/** Whether one simple command only reads, prints or computes, writing no file. */
+function readOnlySegment(text: string): boolean {
 	const tokens = lexShellCommand(text);
 	const words: string[] = [];
 	for (let i = 0; i < tokens.length; i++) {
 		const token = tokens[i];
 		if (token.kind !== "word") continue;
-		const redirect = /^(\d*)(>>?|>\|)(.*)$/.exec(token.raw);
+		// `<>` opens its file for reading and writing, creating it.
+		const redirect = /^(\d*)(>>?|>\||<>)(.*)$/.exec(token.raw);
 		if (redirect) {
 			let target = redirect[3];
 			if (target === "") {
 				let next = i + 1;
 				const separator = tokens[next];
-				// `2>&1`: the lexer splits `&` off as a separator; a descriptor copy writes nothing.
-				if (separator?.kind === "separator" && separator.raw.trimStart().startsWith("&")) {
-					i = next + 1;
-					continue;
-				}
+				// The lexer splits `&` off as a separator: `>&1`, `>&-` copy or close a descriptor and write
+				// nothing, while Bash's `>&file` writes the file.
+				const duplicates = separator?.kind === "separator" && separator.raw.trimStart().startsWith("&");
 				if (separator?.kind === "separator") next++;
 				const word = tokens[next];
 				if (word?.kind !== "word") return false;
-				target = word.value;
 				i = next;
+				if (duplicates && /^(?:\d+|-)$/.test(word.value)) continue;
+				target = word.value;
 			}
-			if (!inTable(SAFE_REDIRECT_TARGETS, target) && !insideRoot(target, scope)) return false;
+			if (!inTable(SAFE_REDIRECT_TARGETS, target)) return false;
 			continue;
 		}
+		// A `>` inside a word (`echo ok "x">f`, `cat <in>out`) is a redirection this scanner does not place.
+		if (unquotedRedirect(token.raw) || inTable(DIRECTORY_CHANGES, token.value)) return false;
 		const input = /^\d*<(.*)$/.exec(token.raw);
 		if (input) {
 			if (input[1] === "" && tokens[i + 1]?.kind === "separator") i += 2;
 			continue;
 		}
-		// An unquoted `>` inside a word (`echo a>b`) is a redirection this scanner does not place.
-		if (/^[^'"]*>/.test(token.raw)) return false;
 		words.push(token.value);
 	}
 	const command = unwrapCommand(words, READ_WRAPPERS);
+	// An assignment (`PATH=/tmp/x git status`, `export PATH=...; git status`) changes which program a
+	// name runs or what it reads, for the command or for the rest of the shell.
+	const prefix = words.slice(0, words.length - command.length);
+	if (prefix.some(isShellEnvironmentAssignment)) return false;
+	// GNU time writes its report to a file with `-o FILE`, `-oFILE` or `--output=FILE`.
+	if (prefix.includes("time") && prefix.some(word => /^-[a-zA-Z]*o|^--o/.test(word))) return false;
 	const name = command[0];
 	if (name === undefined) return words.length === 0 || command.length === 0;
 	const args = command.slice(1);
-	if (inTable(READ_ONLY_COMMANDS, name)) return !(name === "tree" && args.includes("-o"));
-	if (inTable(LOCAL_WRITERS, name)) {
-		return args.filter(arg => !arg.startsWith("-")).every(arg => insideRoot(arg, scope));
-	}
+	if (inTable(READ_ONLY_COMMANDS, name)) return readOnlyArguments(name, args);
 	switch (name) {
 		case "find":
 			return !args.some(arg => inTable(FIND_ACTIONS, arg));
 		case "rg":
-			return !args.some(arg => arg.startsWith("--pre"));
+			// `--pre` and `--hostname-bin` run a program of the caller's choosing.
+			return !args.some(arg => arg.startsWith("--pre") || arg.startsWith("--hostname-bin"));
 		case "sort":
 			return !args.some(
 				arg => /^-[a-zA-Z]*o/.test(arg) || arg.startsWith("--output") || arg.startsWith("--compress-program"),
 			);
+		case "set":
+			return readOnlySet(args);
 		case "git":
 			return readOnlyGit(args);
 		default:
@@ -329,15 +424,13 @@ function readOnlySegment(text: string, scope: ShellScope): boolean {
 }
 
 /**
- * Whether a shell command is made only of commands that read, print or compute, writing nowhere but
- * the working directory. Syntax the scanner cannot follow (substitutions, heredocs, groups) is not.
+ * Whether a shell command is made only of commands that read, print or compute, redirecting only to
+ * `/dev/null` or another descriptor. Syntax the scanner cannot follow (substitutions, heredocs, groups)
+ * is not, nor is any directory change.
  */
-export function isReadOnlyCommand(command: string, cwd: string, root: string = cwd): boolean {
+export function isReadOnlyCommand(command: string): boolean {
 	const segments = extractFlatShellCommandSegments(command);
-	if (segments.length === 0) return false;
-	const changesDirectory = segments.some(segment => /^(?:cd|pushd|popd)\b/.test(segment.text));
-	const scope: ShellScope = { base: cwd, root, localWrites: !changesDirectory };
-	return segments.every(segment => readOnlySegment(segment.text, scope));
+	return segments.length > 0 && segments.every(segment => readOnlySegment(segment.text));
 }
 
 /** The file a simple command runs as code, as written; undefined for code in the call or a module. */
@@ -425,8 +518,7 @@ export function needsJudgement(call: GuardedCall, cwd: string): boolean {
 	if (call.toolName === "bash") {
 		const command = stringArg(call.args, "command");
 		if (command === undefined) return true;
-		const runIn = stringArg(call.args, "cwd");
-		return !isReadOnlyCommand(command, runIn ? path.resolve(cwd, runIn) : cwd, cwd);
+		return !isReadOnlyCommand(command);
 	}
 	if (call.tier === "write") {
 		const targets = call.targets ?? [];
@@ -563,7 +655,7 @@ export class ToolGuard {
 	 */
 	#endedBy: string | undefined;
 	#endedRun = 0;
-	/** Non-synthetic user messages when the counts last restarted; one more starts a new run. */
+	/** Requests (non-synthetic user messages and user-invoked `/skill` prompts) when the counts last restarted; one more starts a new run. */
 	#runKey: number | undefined;
 	/** Judgments in a row that failed or timed out. */
 	#judgeFailures = 0;
@@ -579,7 +671,10 @@ export class ToolGuard {
 		const { tool, args, tier } = toolCall;
 		const messages = this.#host.messages();
 		let runKey = 0;
-		for (const message of messages) if (userRole(message) && !message.synthetic) runKey++;
+		// A new request is a user message or a user-invoked `/skill` prompt (a custom message).
+		for (const message of messages) {
+			if (userRole(message) ? !message.synthetic : operatorTitleText(message) !== undefined) runKey++;
+		}
 		if (this.#runKey !== runKey) {
 			this.#runKey = runKey;
 			this.#consecutive = 0;
@@ -705,15 +800,18 @@ export class ToolGuard {
 				this.#host.hostPressure ? this.#host.hostPressure() : readHostPressure(cwd),
 			).catch(() => undefined);
 			if (pressure) state.host = summarizeHostPressure(pressure);
-			const { answers } = await this.#host.judge().judge(
-				{
-					state,
-					questions: {
-						risk: QUESTIONS.risk,
-						asked: renderQuestion(QUESTIONS.asked, { allowances: Boolean(allowances) }),
+			// A judge that ignores its signal still cannot hold the call past the deadline or an abort.
+			const { answers } = await untilAborted(deadline, () =>
+				this.#host.judge().judge(
+					{
+						state,
+						questions: {
+							risk: QUESTIONS.risk,
+							asked: renderQuestion(QUESTIONS.asked, { allowances: Boolean(allowances) }),
+						},
 					},
-				},
-				{ signal: deadline },
+					{ signal: deadline },
+				),
 			);
 			const verdict = guardVerdict(answers, {
 				risk: cfgToolGuardRiskThreshold.get(authority),
@@ -727,12 +825,13 @@ export class ToolGuard {
 			}
 			return verdict;
 		} catch (error) {
+			// A call the user aborted says nothing about the judge, and must not run.
+			if (signal?.aborted) throw error;
 			logger.debug("tool guard: judgment failed, call allowed", {
 				tool: call.toolName,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			// A call the user aborted says nothing about the judge.
-			if (!signal?.aborted) this.#recordJudgeFailure();
+			this.#recordJudgeFailure();
 			return undefined;
 		}
 	}

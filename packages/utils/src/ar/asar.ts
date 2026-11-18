@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { readUInt32LE, writeUInt32LE } from "./bytes";
 import { ArchiveError } from "./error";
-import { assertArchiveMemberSize, assertEntryCount, assertIndexSize } from "./limits";
+import { assertArchiveMemberSizeField, assertEntryCount, assertIndexSize } from "./limits";
 import { isRecord } from "../type-guards";
 import {
 	assertArchivePathBytes,
@@ -304,7 +304,7 @@ async function readAsarIndex(source: ByteSource, options: FormatReadOptions): Pr
 		if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) {
 			throw invalidAsar(`file '${entryLabel}' has an invalid size`);
 		}
-		assertArchiveMemberSize(size, entryPath, options.limits);
+		assertArchiveMemberSizeField(size, entryPath);
 		if (current.node.executable !== undefined && typeof current.node.executable !== "boolean") {
 			throw invalidAsar(`file '${entryLabel}' has a non-boolean executable flag`);
 		}
