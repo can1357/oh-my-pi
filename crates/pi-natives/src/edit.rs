@@ -281,7 +281,8 @@ impl EditStore {
 	}
 
 	/// Read `absolutePath` from disk and record it; null when the file is
-	/// unreadable or larger than 4 MiB.
+	/// unreadable or larger than 64 MiB. Past 4 MiB only the tag is returned:
+	/// no snapshot is retained.
 	#[napi]
 	pub fn record_snapshot_file(
 		&self,

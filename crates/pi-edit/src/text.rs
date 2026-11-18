@@ -35,19 +35,14 @@ pub fn detect_line_ending(content: &str) -> LineEnding {
 	}
 }
 
-/// Normalize every `\r\n` and lone `\r` to `\n`. Borrows when nothing changes.
+/// Normalize every `\r\n` to `\n`. A lone `\r` (progress-bar logs) stays
+/// content, as grep, `wc -l` and editors count lines. Borrows when nothing
+/// changes.
 pub fn normalize_to_lf(text: &str) -> std::borrow::Cow<'_, str> {
-	if !text.contains('\r') {
+	if !text.contains("\r\n") {
 		return std::borrow::Cow::Borrowed(text);
 	}
-	let mut out = String::with_capacity(text.len());
-	for line in xutf::lines_str(text, LineEnds::Universal) {
-		out.push_str(line.text());
-		if !line.end().is_empty() {
-			out.push('\n');
-		}
-	}
-	std::borrow::Cow::Owned(out)
+	std::borrow::Cow::Owned(text.replace("\r\n", "\n"))
 }
 
 /// Re-encode LF text with the requested line ending.
@@ -461,7 +456,7 @@ mod tests {
 
 	#[test]
 	fn lf_normalization_round_trips() {
-		assert_eq!(normalize_to_lf("a\r\nb\rc\n"), "a\nb\nc\n");
+		assert_eq!(normalize_to_lf("a\r\nb\rc\n"), "a\nb\rc\n");
 		assert_eq!(restore_line_endings("a\nb", LineEnding::CrLf), "a\r\nb");
 		assert_eq!(strip_bom("\u{FEFF}x"), (BOM, "x"));
 	}
@@ -469,7 +464,7 @@ mod tests {
 	#[test]
 	fn normalization_and_tab_conversion_preserve_line_shapes() {
 		assert!(matches!(normalize_to_lf("a\n"), std::borrow::Cow::Borrowed(_)));
-		assert_eq!(normalize_to_lf("\r\r\n界\r"), "\n\n界\n");
+		assert_eq!(normalize_to_lf("\r\r\n界\r"), "\r\n界\r");
 		assert_eq!(
 			convert_leading_tabs_to_spaces("\t\u{a0}x\r\n \tx\n\t \n\t\tz\n", 2),
 			"  x\r\n \tx\n\t \n    z\n"

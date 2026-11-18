@@ -1,20 +1,32 @@
-//! `ast-grep` / `sg` builtin: ast-grep 0.50's `run` command (structural
-//! search and rewrite) as an in-process shell utility on top of the `pi_ast`
-//! search engine, with ast-grep's piped (non-terminal) output: no colors and
-//! no file headings unless `--heading always`.
+//! `ast-grep` / `sg` builtin: ast-grep 0.50's `run` (structural search and
+//! rewrite), `scan` (YAML rules, `sgconfig.yml` projects) and `outline`
+//! (symbol outlines) commands as an in-process shell utility on top of the
+//! `pi_ast` search engine, with ast-grep's piped (non-terminal) output: no
+//! colors and no file headings unless `--heading always`.
 
 use std::{
 	collections::HashMap,
 	ffi::OsString,
 	fmt::Write as _,
 	io::{self, Write},
-	path::Path,
+	path::{Path, PathBuf},
 };
 
-use clap::{ArgAction, Parser, ValueEnum};
+use ast_grep_config::{
+	DeserializeEnv, Fixer, GlobalRules, LabelStyle, RuleCollection, RuleConfig, RuleCore,
+	SerializableRule, Severity, from_yaml_string,
+};
+use ast_grep_core::tree_sitter::LanguageExt;
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use codespan_reporting::{
+	diagnostic::{Diagnostic, Label as CodeLabel, Severity as CodeSeverity},
+	files::SimpleFile,
+	term::{self as codespan, DisplayStyle},
+};
 use futures::StreamExt;
 use pi_ast::{
-	SupportLang, ops,
+	SupportLang, debug, ops,
+	outline::{self, SymbolType},
 	search::{
 		self, Candidate, Captures, Change, Discover, Error as SearchError, MatchStrictness, Mode,
 		Page, Query, Rewrite, Span,
@@ -28,6 +40,11 @@ use crate::host::{AsyncUtility, Host};
 
 const DOC_SITE_HOST: &str = "https://ast-grep.github.io";
 const PATTERN_GUIDE: &str = "/guide/pattern-syntax.html";
+const ESQUERY_GUIDE: &str = "/reference/rule/esquery.html";
+const CONFIG_GUIDE: &str = "/guide/rule-config.html";
+const CONFIG_REFERENCE: &str = "/reference/sgconfig.html";
+const PROJECT_GUIDE: &str = "/guide/scan-project.html";
+const UTILITY_RULE: &str = "/guide/rule-config/utility-rule.html";
 const TOOL_OVERVIEW: &str = "/guide/tooling-overview.html#parse-code-from-stdin";
 const CLI_USAGE: &str = "/reference/cli.html";
 const PLAYGROUND: &str = "/playground.html";
@@ -35,24 +52,72 @@ const PLAYGROUND: &str = "/playground.html";
 /// Display path of code read from stdin.
 const STDIN_PATH: &str = "STDIN";
 
-/// ast-grep subcommands the builtin does not implement.
-const UNSUPPORTED_COMMANDS: &[&str] = &["scan", "test", "new", "lsp", "outline", "completions"];
+/// ast-grep's project configuration file name.
+const PROJECT_CONFIG: &str = "sgconfig.yml";
 
-/// Options of `run` that take a separate value, so their value is never read as a flag.
+/// The builtin's subcommands; any other first argument runs `run`.
+const COMMANDS: &[&str] = &["run", "scan", "outline", "help"];
+
+/// ast-grep subcommands the builtin does not implement.
+const UNSUPPORTED_COMMANDS: &[&str] = &["test", "new", "lsp", "completions"];
+
+/// Options that take a separate value, so their value is never read as a flag.
 const VALUE_OPTIONS: &[&str] = &[
-	"-p", "--pattern", "-r", "--rewrite", "-l", "--lang", "--selector", "--strictness", "--globs",
+	"-p", "--pattern", "-r", "--rewrite", "--rule", "-l", "--lang", "--selector", "--strictness", "--globs",
 	"-j", "--threads", "-A", "--after", "-B", "--before", "-C", "--context", "--color", "--heading",
-	"--no-ignore",
+	"--no-ignore", "-c", "--config", "-k", "--kind", "--inline-rules", "--filter", "--report-style",
+	"--max-results", "--items", "--type", "--match", "--view",
 ];
 
 /// Unsupported ast-grep options, by the spellings that select them.
-const UNSUPPORTED_OPTIONS: &[(&str, &[&str])] = &[
-	("--config", &["-c", "--config"]),
-	("--interactive", &["-i", "--interactive"]),
-	("--kind", &["-k", "--kind"]),
-	("--debug-query", &["--debug-query"]),
-	("--inspect", &["--inspect"]),
-];
+const UNSUPPORTED_OPTIONS: &[(&str, &[&str])] = &[("--interactive", &["-i", "--interactive"]), ("--inspect", &["--inspect"])];
+
+/// The first ast-grep feature `args` (the arguments after the program name)
+/// use that the builtin does not implement.
+fn unsupported_feature<'a>(args: impl IntoIterator<Item = Option<&'a str>>) -> Option<&'static str> {
+	let mut value_next = false;
+	let mut command_seen = false;
+	for arg in args {
+		if std::mem::take(&mut value_next) {
+			continue;
+		}
+		let Some(arg) = arg else {
+			continue;
+		};
+		if arg == "--" {
+			break;
+		}
+		if !command_seen && !arg.starts_with('-') {
+			command_seen = true;
+			if let Some(command) = UNSUPPORTED_COMMANDS.iter().find(|name| **name == arg) {
+				return Some(*command);
+			}
+			continue;
+		}
+		let name = arg.split_once('=').map_or(arg, |(name, _)| name);
+		if let Some((option, _)) = UNSUPPORTED_OPTIONS.iter().find(|(_, spellings)| spellings.contains(&name)) {
+			return Some(*option);
+		}
+		value_next = VALUE_OPTIONS.contains(&arg);
+	}
+	None
+}
+
+/// Index of the subcommand in `argv`, past global `-c`/`--config` options;
+/// `None` when the first other argument is not a subcommand.
+fn command_index(argv: &[OsString]) -> Option<usize> {
+	let mut index = 1;
+	while let Some(arg) = argv.get(index).and_then(|arg| arg.to_str()) {
+		if arg == "-c" || arg == "--config" {
+			index += 2;
+		} else if arg.starts_with("--config=") || (arg.starts_with("-c") && arg.len() > 2 && !arg.starts_with("--")) {
+			index += 1;
+		} else {
+			return COMMANDS.contains(&arg).then_some(index);
+		}
+	}
+	None
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,9 +126,44 @@ const UNSUPPORTED_OPTIONS: &[(&str, &[&str])] = &[
 	about = "Search and Rewrite code at large scale using AST pattern."
 )]
 pub(crate) struct AstGrep {
+	#[command(subcommand)]
+	command: Command,
+
+	/// Path to ast-grep root config, default is sgconfig.yml.
+	#[arg(short, long, global = true, value_name = "CONFIG_FILE")]
+	config: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+	/// Run one time search or rewrite in command line. (default command)
+	Run(Run),
+	/// Scan and rewrite code by configuration.
+	Scan(Scan),
+	/// Explore code structure for symbols, imports, exports, and members.
+	Outline(Outline),
+}
+
+#[derive(Args, Debug)]
+struct Run {
 	/// AST pattern to match.
-	#[arg(short, long, value_name = "PATTERN")]
-	pattern: String,
+	#[arg(short, long, value_name = "PATTERN", required_unless_present = "kind")]
+	pattern: Option<String>,
+
+	/// AST kind to match (an ESQuery-style selector).
+	#[arg(short, long, value_name = "KIND", conflicts_with_all = ["pattern", "selector", "strictness"])]
+	kind: Option<String>,
+
+	/// Print the query's tree-sitter tree to stderr; requires `--lang`.
+	#[arg(
+		long,
+		requires = "lang",
+		value_name = "FORMAT",
+		num_args(0..=1),
+		require_equals = true,
+		default_missing_value = "pattern"
+	)]
+	debug_query: Option<DebugFormat>,
 
 	/// AST kind to extract sub-part of pattern to match.
 	#[arg(long, value_name = "KIND")]
@@ -81,29 +181,8 @@ pub(crate) struct AstGrep {
 	#[arg(short, long, value_parser = parse_lang)]
 	lang: Option<SupportLang>,
 
-	/// The paths to search.
-	#[arg(default_value = ".")]
-	paths: Vec<String>,
-
-	/// Follow symbolic links.
-	#[arg(long)]
-	follow: bool,
-
-	/// Do not respect hidden file system or ignore files.
-	#[arg(long, action = ArgAction::Append, value_name = "FILE_TYPE")]
-	no_ignore: Vec<IgnoreFile>,
-
-	/// Enable search code from StdIn.
-	#[arg(long)]
-	stdin: bool,
-
-	/// Include or exclude file paths (`!` excludes).
-	#[arg(long, action = ArgAction::Append)]
-	globs: Vec<String>,
-
-	/// Set the approximate number of threads to use.
-	#[arg(short = 'j', long, default_value = "0", value_name = "NUM")]
-	threads: usize,
+	#[command(flatten)]
+	input: Input,
 
 	/// Apply all rewrite without confirmation.
 	#[arg(short = 'U', long)]
@@ -142,6 +221,47 @@ pub(crate) struct AstGrep {
 	/// Controls whether to print the file name as heading (`auto`: never, output is piped).
 	#[arg(long, default_value = "auto", value_name = "WHEN")]
 	heading: Heading,
+}
+
+/// Where a command reads code from (ast-grep's `InputArgs`).
+#[derive(Args, Debug)]
+struct Input {
+	/// The paths to search.
+	#[arg(default_value = ".")]
+	paths: Vec<String>,
+
+	/// Follow symbolic links.
+	#[arg(long)]
+	follow: bool,
+
+	/// Do not respect hidden file system or ignore files.
+	#[arg(long, action = ArgAction::Append, value_name = "FILE_TYPE")]
+	no_ignore: Vec<IgnoreFile>,
+
+	/// Enable search code from StdIn.
+	#[arg(long)]
+	stdin: bool,
+
+	/// Include or exclude file paths (`!` excludes).
+	#[arg(long, action = ArgAction::Append)]
+	globs: Vec<String>,
+
+	/// Set the approximate number of threads to use.
+	#[arg(short = 'j', long, default_value = "0", value_name = "NUM")]
+	threads: usize,
+}
+
+/// ast-grep's `--debug-query` formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum DebugFormat {
+	/// Print the query parsed in Pattern format
+	Pattern,
+	/// Print the query in tree-sitter AST format, only named nodes are shown
+	Ast,
+	/// Print the query in tree-sitter CST format, both named and unnamed nodes are shown
+	Cst,
+	/// Print the query in S-expression format
+	Sexp,
 }
 
 /// ast-grep's `--strictness` values.
@@ -387,6 +507,11 @@ fn apply_changes(source: &str, changes: &[Change]) -> String {
 /// new line-number columns.
 fn print_diff(out: &mut Vec<u8>, path: &str, old: &str, new: &str, context: usize) {
 	let _ = writeln!(out, "{path}");
+	print_diff_hunks(out, old, new, context);
+}
+
+/// The hunks of [`print_diff`], without the path line.
+fn print_diff_hunks(out: &mut Vec<u8>, old: &str, new: &str, context: usize) {
 	let old_tokens = line_tokens_str(old);
 	let new_tokens = line_tokens_str(new);
 	let runs = diff_line_tokens(&old_tokens, &new_tokens);
@@ -432,8 +557,11 @@ fn print_diff(out: &mut Vec<u8>, path: &str, old: &str, new: &str, context: usiz
 
 /// A JSON value with ast-grep's (serde struct) field order.
 enum Json {
+	Null,
 	Num(usize),
 	Str(String),
+	/// A serde value, written as `serde_json` writes it (rule metadata).
+	Value(serde_json::Value),
 	Obj(Vec<(&'static str, Json)>),
 	Map(Vec<(String, Json)>),
 	Arr(Vec<Json>),
@@ -443,8 +571,12 @@ impl Json {
 	/// Writes `self` like `serde_json::to_writer` (`pretty`: `to_writer_pretty`).
 	fn write(&self, out: &mut Vec<u8>, pretty: bool, level: usize) {
 		match self {
+			Self::Null => out.extend_from_slice(b"null"),
 			Self::Num(value) => {
 				let _ = write!(out, "{value}");
+			},
+			Self::Value(value) => {
+				let _ = serde_json::to_writer(&mut *out, value);
 			},
 			Self::Str(value) => {
 				let _ = serde_json::to_writer(&mut *out, value);
@@ -690,7 +822,65 @@ fn glob_selectors(globs: &[String]) -> Result<(Option<Selector>, Option<Selector
 	Ok((include, exclude))
 }
 
-impl AstGrep {
+impl Input {
+	/// Files below every operand, in operand order, displayed as ast-grep does;
+	/// walk failures are reported and skipped.
+	async fn candidates(&self, host: &mut Host, lang: Option<SupportLang>) -> Result<Vec<Candidate>, i32> {
+		let (include, exclude) = match glob_selectors(&self.globs) {
+			Ok(selectors) => selectors,
+			Err(error) => {
+				Report {
+					warning: false,
+					title:   "Cannot build glob from CLI flag",
+					help:    "The patterns in --globs is invalid. Please refer to doc and fix the error.",
+					link:    Some(CLI_USAGE),
+					cause:   Some(error),
+				}
+				.print(host);
+				return Err(9);
+			},
+		};
+		let ignores = |kind| self.no_ignore.contains(&kind);
+		let options = Discover {
+			include,
+			exclude,
+			hidden: ignores(IgnoreFile::Hidden),
+			gitignore: !ignores(IgnoreFile::Dot) && !ignores(IgnoreFile::Vcs),
+			node_modules: true,
+			follow_links: self.follow,
+			workers: (self.threads > 0).then_some(self.threads),
+			lang: None,
+		};
+		let vfs = host.vfs();
+		let mut candidates = Vec::new();
+		for operand in &self.paths {
+			let root = host.resolve(operand);
+			let root_is_dir = vfs.metadata(&root).await.is_ok_and(|meta| meta.is_dir());
+			match search::discover(&vfs, &root, &options).await {
+				Ok(found) => candidates.extend(
+					found
+						.into_iter()
+						.filter(|candidate| {
+							lang.is_none_or(|lang| {
+								SupportLang::from_path(&candidate.path).is_some_and(|found| found.parses_as(lang))
+							})
+						})
+						.map(|candidate| Candidate { display: display_path(operand, root_is_dir, &candidate), ..candidate }),
+				),
+				Err(SearchError::Stopped) => return Err(1),
+				Err(SearchError::Root { error, .. }) => {
+					let _ = writeln!(host.stderr, "ERROR: {operand}: {error}");
+				},
+				Err(error) => {
+					let _ = writeln!(host.stderr, "ERROR: {error}");
+				},
+			}
+		}
+		Ok(candidates)
+	}
+}
+
+impl Run {
 	fn context(&self) -> Context {
 		if self.context > 0 {
 			(self.context.into(), self.context.into())
@@ -732,65 +922,19 @@ impl AstGrep {
 		}
 	}
 
-	/// Files below every operand, in operand order, displayed as ast-grep does;
-	/// walk failures are reported and skipped.
-	async fn candidates(&self, host: &mut Host) -> Result<Vec<Candidate>, i32> {
-		let (include, exclude) = match glob_selectors(&self.globs) {
-			Ok(selectors) => selectors,
-			Err(error) => {
-				Report {
-					warning: false,
-					title:   "Cannot build glob from CLI flag",
-					help:    "The patterns in --globs is invalid. Please refer to doc and fix the error.",
-					link:    Some(CLI_USAGE),
-					cause:   Some(error),
-				}
-				.print(host);
-				return Err(9);
-			},
-		};
-		let ignores = |kind| self.no_ignore.contains(&kind);
-		let options = Discover {
-			include,
-			exclude,
-			hidden: ignores(IgnoreFile::Hidden),
-			gitignore: !ignores(IgnoreFile::Dot) && !ignores(IgnoreFile::Vcs),
-			node_modules: true,
-			follow_links: self.follow,
-			workers: (self.threads > 0).then_some(self.threads),
-			any_file: false,
-		};
-		let vfs = host.vfs();
-		let mut candidates = Vec::new();
-		for operand in &self.paths {
-			let root = host.resolve(operand);
-			let root_is_dir = vfs.metadata(&root).await.is_ok_and(|meta| meta.is_dir());
-			match search::discover(&vfs, &root, &options).await {
-				Ok(found) => candidates.extend(
-					found
-						.into_iter()
-						.filter(|candidate| self.lang.is_none_or(|lang| SupportLang::from_path(&candidate.path) == Some(lang)))
-						.map(|candidate| Candidate { display: display_path(operand, root_is_dir, &candidate), ..candidate }),
-				),
-				Err(SearchError::Stopped) => return Err(1),
-				Err(SearchError::Root { error, .. }) => {
-					let _ = writeln!(host.stderr, "ERROR: {operand}: {error}");
-				},
-				Err(error) => {
-					let _ = writeln!(host.stderr, "ERROR: {error}");
-				},
-			}
-		}
-		Ok(candidates)
-	}
-
 	/// Searches (and with `-r`, previews rewrites of) every file; returns
 	/// whether anything matched.
-	async fn search_paths(&self, host: &mut Host, out: &mut (dyn Write + Send), printer: &mut Printer) -> Result<bool, i32> {
-		let candidates = self.candidates(host).await?;
+	async fn search_paths(
+		&self,
+		host: &mut Host,
+		pattern: &str,
+		out: &mut (dyn Write + Send),
+		printer: &mut Printer,
+	) -> Result<bool, i32> {
+		let candidates = self.input.candidates(host, self.lang).await?;
 		let vfs = host.vfs();
 		let stop = CancellationToken::new();
-		let patterns = [self.pattern.clone()];
+		let patterns = [pattern.to_owned()];
 		let query = Query {
 			patterns:   &patterns,
 			lang:       self.lang.map(SupportLang::canonical_name),
@@ -798,7 +942,7 @@ impl AstGrep {
 			strictness: self.strictness(),
 			captures:   matches!(printer.mode, Output::Json(_)),
 		};
-		let rules = self.rewrite.as_ref().map(|template| [(self.pattern.clone(), template.clone())]);
+		let rules = self.rewrite.as_ref().map(|template| [(pattern.to_owned(), template.clone())]);
 		let rewrite = rules.as_ref().map(|rules| self.rewrite_spec(rules, Mode::Preview));
 		let mut any = false;
 		let mut finder = search::find(&vfs, candidates, &query);
@@ -837,10 +981,10 @@ impl AstGrep {
 	}
 
 	/// `-U` over files: rewrites every file in place and reports the count.
-	async fn apply_paths(&self, host: &mut Host) -> Result<usize, i32> {
-		let candidates = self.candidates(host).await?;
+	async fn apply_paths(&self, host: &mut Host, pattern: &str) -> Result<usize, i32> {
+		let candidates = self.input.candidates(host, self.lang).await?;
 		let vfs = host.vfs();
-		let rules = [(self.pattern.clone(), self.rewrite.clone().unwrap_or_default())];
+		let rules = [(pattern.to_owned(), self.rewrite.clone().unwrap_or_default())];
 		match search::rewrite(&vfs, candidates, &self.rewrite_spec(&rules, Mode::Write)).await {
 			Ok(edited) => Ok(edited.files.iter().map(|file| file.changes.len()).sum()),
 			Err(SearchError::Stopped) => Err(1),
@@ -848,20 +992,17 @@ impl AstGrep {
 		}
 	}
 
-	async fn run_stdin(&self, host: &mut Host, lang: SupportLang, out: &mut (dyn Write + Send), printer: &mut Printer) -> Result<bool, i32> {
-		let mut bytes = Vec::new();
-		let read = host.read_stdin_to_end(&mut bytes, usize::MAX).await.and_then(|_| {
-			String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))
-		});
-		let source = match read {
-			Ok(source) => source,
-			Err(error) => {
-				let _ = writeln!(host.stderr, "ERROR: {error}");
-				return Err(1);
-			},
-		};
+	async fn run_stdin(
+		&self,
+		host: &mut Host,
+		pattern: &str,
+		lang: SupportLang,
+		out: &mut (dyn Write + Send),
+		printer: &mut Printer,
+	) -> Result<bool, i32> {
+		let source = read_stdin(host).await?;
 		let stop = CancellationToken::new();
-		let patterns = [self.pattern.clone()];
+		let patterns = [pattern.to_owned()];
 		let query = Query {
 			patterns:   &patterns,
 			lang:       None,
@@ -879,7 +1020,7 @@ impl AstGrep {
 		}
 		let edit = match self.rewrite.as_ref() {
 			Some(template) => {
-				let rules = [(self.pattern.clone(), template.clone())];
+				let rules = [(pattern.to_owned(), template.clone())];
 				match search::rewrite_source(&source, lang, &self.rewrite_spec(&rules, Mode::Render), &stop) {
 					Ok(edit) => Some(edit),
 					Err(SearchError::Stopped) => return Err(1),
@@ -908,8 +1049,128 @@ impl AstGrep {
 		Ok(true)
 	}
 
+	/// `--kind`: every node the selector matches, per file (or stdin), printed
+	/// and rewritten like pattern matches.
+	async fn search_kind(
+		&self,
+		host: &mut Host,
+		kind: &str,
+		lang: Option<SupportLang>,
+		out: &mut (dyn Write + Send),
+		printer: &mut Printer,
+	) -> Result<bool, i32> {
+		let captures = matches!(printer.mode, Output::Json(_));
+		let mut matchers = KindMatchers::new();
+		if self.input.stdin {
+			let Some(lang) = lang else {
+				return Ok(false);
+			};
+			let source = read_stdin(host).await?;
+			self.compile_kind(host, &mut matchers, kind, lang)?;
+			let (matcher, fixer) = &matchers[&lang];
+			let found = match_rule(&source, lang, matcher, fixer.as_ref(), captures);
+			if found.spans.is_empty() {
+				return Ok(false);
+			}
+			if self.applies() {
+				let _ = writeln!(out, "{}", apply_changes(&source, found.changes.as_deref().unwrap_or_default()));
+				let _ = writeln!(host.stderr, "Applied {} changes", found.spans.len());
+				return Ok(true);
+			}
+			let mut buffer = Vec::new();
+			printer.file(&mut buffer, &found.view(STDIN_PATH, &source, lang));
+			let _ = out.write_all(&buffer);
+			return Ok(true);
+		}
+		let candidates = self.input.candidates(host, self.lang).await?;
+		let vfs = host.vfs();
+		let (mut any, mut applied) = (false, 0);
+		for candidate in candidates {
+			let Some(file_lang) = lang.or_else(|| SupportLang::from_path(&candidate.path)) else {
+				continue;
+			};
+			if !grammar_installed(file_lang) {
+				continue;
+			}
+			let Ok(source) = vfs.read_to_string(&candidate.path).await else {
+				continue;
+			};
+			self.compile_kind(host, &mut matchers, kind, file_lang)?;
+			let (matcher, fixer) = &matchers[&file_lang];
+			let found = match_rule(&source, file_lang, matcher, fixer.as_ref(), captures);
+			if found.spans.is_empty() {
+				continue;
+			}
+			any = true;
+			if self.applies() {
+				let changes = found.changes.as_deref().unwrap_or_default();
+				if let Err(error) = vfs.write(&candidate.path, apply_changes(&source, changes)).await {
+					let _ = writeln!(host.stderr, "ERROR: {}: {error}", candidate.display);
+					continue;
+				}
+				applied += changes.len();
+				continue;
+			}
+			let mut buffer = Vec::new();
+			printer.file(&mut buffer, &found.view(&candidate.display, &source, file_lang));
+			if out.write_all(&buffer).is_err() {
+				break;
+			}
+			let _ = host.flush_output().await;
+		}
+		if applied > 0 {
+			let _ = writeln!(host.stderr, "Applied {applied} changes");
+		}
+		Ok(any)
+	}
+
+	/// Compiles `kind` (and the rewrite) for `lang` once; a selector that does
+	/// not parse is reported (exit status 8).
+	fn compile_kind(&self, host: &mut Host, matchers: &mut KindMatchers, kind: &str, lang: SupportLang) -> Result<(), i32> {
+		if matchers.contains_key(&lang) {
+			return Ok(());
+		}
+		let matcher = kind_matcher(kind, lang).map_err(|cause| {
+			Report {
+				warning: false,
+				title:   "Cannot parse kind as a valid selector.",
+				help:    "Please refer to ast-grep's ESQuery selector guide.",
+				link:    Some(ESQUERY_GUIDE),
+				cause:   Some(cause),
+			}
+			.print(host);
+			8
+		})?;
+		let fixer = match &self.rewrite {
+			Some(template) => {
+				Some(Fixer::from_str(template, &lang).map_err(|error| parse_pattern_error(host, error.to_string()))?)
+			},
+			None => None,
+		};
+		matchers.insert(lang, (matcher, fixer));
+		Ok(())
+	}
+
+	/// `--debug-query`: the query's tree on stderr, as ast-grep prints it.
+	fn print_debug_query(&self, host: &mut Host, format: DebugFormat, lang: SupportLang) {
+		let Some(query) = self.pattern.as_deref().or(self.kind.as_deref()) else {
+			return;
+		};
+		if !grammar_installed(lang) {
+			return;
+		}
+		let text = match format {
+			DebugFormat::Pattern if self.pattern.is_some() => format!("Debug Pattern:\n{}", debug::dump_pattern(query, lang)),
+			DebugFormat::Pattern => return,
+			DebugFormat::Ast => format!("Debug AST:\n{}", debug::dump_tree(query, lang, true)),
+			DebugFormat::Cst => format!("Debug CST:\n{}", debug::dump_tree(query, lang, false)),
+			DebugFormat::Sexp => format!("Debug Sexp:\n{}", debug::dump_sexp(query, lang)),
+		};
+		let _ = writeln!(host.stderr, "{text}");
+	}
+
 	async fn execute(&self, host: &mut Host) -> Result<bool, i32> {
-		let lang = match (self.stdin, self.lang) {
+		let lang = match (self.input.stdin, self.lang) {
 			(true, None) => {
 				Report {
 					warning: false,
@@ -923,28 +1184,35 @@ impl AstGrep {
 			},
 			(_, lang) => lang,
 		};
+		if let (Some(format), Some(lang)) = (self.debug_query, lang) {
+			self.print_debug_query(host, format, lang);
+		}
+		let pattern = self.pattern.as_deref().unwrap_or_default();
 		let has_error = match lang {
-			Some(lang) => match ops::compile_pattern(&self.pattern, self.selector.as_deref(), &self.strictness(), lang) {
-				Ok(pattern) => pattern.has_error(),
-				Err(error) => return Err(parse_pattern_error(host, error.to_string())),
+			Some(lang) if self.kind.is_none() => {
+				match ops::compile_pattern(pattern, self.selector.as_deref(), &self.strictness(), lang) {
+					Ok(pattern) => pattern.has_error(),
+					Err(error) => return Err(parse_pattern_error(host, error.to_string())),
+				}
 			},
-			None => false,
+			_ => false,
 		};
 		let mut out = host.stdout_writer();
 		let mut printer = Printer { mode: self.output(), ctx: self.context(), matched: false };
 		let mut head = Vec::new();
 		printer.before(&mut head);
 		let _ = out.write_all(&head);
-		let matched = match lang {
-			Some(lang) if self.stdin => self.run_stdin(host, lang, &mut out, &mut printer).await?,
+		let matched = match (&self.kind, lang) {
+			(Some(kind), lang) => self.search_kind(host, kind, lang, &mut out, &mut printer).await?,
+			(None, Some(lang)) if self.input.stdin => self.run_stdin(host, pattern, lang, &mut out, &mut printer).await?,
 			_ if self.applies() => {
-				let applied = self.apply_paths(host).await?;
+				let applied = self.apply_paths(host, pattern).await?;
 				if applied > 0 {
 					let _ = writeln!(host.stderr, "Applied {applied} changes");
 				}
 				applied > 0
 			},
-			_ => self.search_paths(host, &mut out, &mut printer).await?,
+			_ => self.search_paths(host, pattern, &mut out, &mut printer).await?,
 		};
 		let mut tail = Vec::new();
 		printer.after(&mut tail);
@@ -966,42 +1234,982 @@ impl AstGrep {
 	}
 }
 
+/// Reads all of stdin as UTF-8; reports a failure on stderr (exit status 1).
+async fn read_stdin(host: &mut Host) -> Result<String, i32> {
+	let mut bytes = Vec::new();
+	let read = host.read_stdin_to_end(&mut bytes, usize::MAX).await.and_then(|_| {
+		String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))
+	});
+	read.map_err(|error| {
+		let _ = writeln!(host.stderr, "ERROR: {error}");
+		1
+	})
+}
+
+/// Whether `lang`'s grammar is available to parse with (linked in, or its
+/// on-demand WebAssembly grammar installed).
+fn grammar_installed(lang: SupportLang) -> bool {
+	lang.wasm_grammar().is_none_or(|grammar| grammar.is_installed())
+}
+
+/// `--kind` matchers and rewrites, compiled per language.
+type KindMatchers = HashMap<SupportLang, (RuleCore, Option<Fixer>)>;
+
+/// The rule a `--kind` selector stands for in `lang`.
+fn kind_matcher(kind: &str, lang: SupportLang) -> Result<RuleCore, String> {
+	let yaml = format!("kind: {}", serde_json::Value::String(kind.to_owned()));
+	let rule: SerializableRule = ast_grep_config::from_str(&yaml).map_err(|error| error.to_string())?;
+	let rule = DeserializeEnv::new(lang).deserialize_rule(rule).map_err(|error| error.to_string())?;
+	Ok(RuleCore::new(rule))
+}
+
+/// One source's matches of a rule, with their rewrites when it has a fixer.
+struct RuleMatches {
+	spans:    Vec<Span>,
+	captures: Vec<Captures>,
+	changes:  Option<Vec<Change>>,
+}
+
+impl RuleMatches {
+	fn view<'a>(&'a self, path: &'a str, source: &'a str, language: SupportLang) -> FileOutput<'a> {
+		FileOutput {
+			path,
+			source,
+			language,
+			matches: self
+				.spans
+				.iter()
+				.enumerate()
+				.map(|(index, span)| MatchRef { span, captures: self.captures.get(index) })
+				.collect(),
+			changes: self.changes.as_deref(),
+		}
+	}
+}
+
+/// Every match of `matcher` in `source`, outermost first, with `fixer`'s rewrites.
+fn match_rule(source: &str, lang: SupportLang, matcher: &RuleCore, fixer: Option<&Fixer>, captures: bool) -> RuleMatches {
+	let ast = lang.ast_grep(source);
+	let mut found = RuleMatches { spans: Vec::new(), captures: Vec::new(), changes: fixer.map(|_| Vec::new()) };
+	for matched in ast.root().find_all(matcher) {
+		let span = Span::of(matched.get_node());
+		if captures {
+			found.captures.push(Captures::of(&matched));
+		}
+		if let (Some(fixer), Some(changes)) = (fixer, found.changes.as_mut()) {
+			let edit = matched.replace_by(fixer);
+			changes.push(Change {
+				span:           span.clone(),
+				before:         matched.text().into_owned(),
+				after:          String::from_utf8_lossy(&edit.inserted_text).into_owned(),
+				deleted_length: edit.deleted_length,
+			});
+		}
+		found.spans.push(span);
+	}
+	found
+}
+
+/// ast-grep's scan `--report-style` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ReportStyle {
+	/// Output a richly formatted diagnostic, with source code previews.
+	Rich,
+	/// Output a condensed diagnostic, with a line number, severity, message and notes (if any).
+	Medium,
+	/// Output a short diagnostic, with a line number, severity, and message.
+	Short,
+}
+
+#[derive(Args, Debug)]
+struct Scan {
+	/// Scan the codebase with the single rule located at the path RULE_FILE.
+	#[arg(short, long, value_name = "RULE_FILE")]
+	rule: Option<String>,
+
+	/// Scan the codebase with rules defined by RULE_TEXT (separate rules with `---`).
+	#[arg(long, conflicts_with = "rule", value_name = "RULE_TEXT")]
+	inline_rules: Option<String>,
+
+	/// Scan the codebase with the rules whose id matches REGEX.
+	#[arg(long, value_name = "REGEX")]
+	filter: Option<String>,
+
+	/// Output warning/error messages in different styles.
+	#[arg(long, default_value = "rich", conflicts_with = "json")]
+	report_style: ReportStyle,
+
+	/// Output matches in structured JSON.
+	#[arg(
+		long,
+		value_name = "STYLE",
+		num_args(0..=1),
+		require_equals = true,
+		default_missing_value = "pretty"
+	)]
+	json: Option<JsonStyle>,
+
+	/// Include rule metadata in the json output.
+	#[arg(long, requires = "json")]
+	include_metadata: bool,
+
+	/// Apply all rewrite without confirmation.
+	#[arg(short = 'U', long)]
+	update_all: bool,
+
+	/// Only print the paths of files with at least one match.
+	#[arg(long, conflicts_with_all = ["json", "update_all"])]
+	files_with_matches: bool,
+
+	/// Show at most NUM results and stop running once the limit is reached.
+	#[arg(long, value_name = "NUM")]
+	max_results: Option<u16>,
+
+	/// Controls output color; the builtin always prints plain text.
+	#[arg(long = "color", default_value = "auto", value_name = "WHEN")]
+	_color: ColorArg,
+
+	/// Show NUM lines after each match.
+	#[arg(short = 'A', long, default_value = "0", conflicts_with = "context", value_name = "NUM")]
+	after: u16,
+
+	/// Show NUM lines before each match.
+	#[arg(short = 'B', long, default_value = "0", conflicts_with = "context", value_name = "NUM")]
+	before: u16,
+
+	/// Show NUM lines around each match.
+	#[arg(short = 'C', long, default_value = "0", value_name = "NUM")]
+	context: u16,
+
+	#[command(flatten)]
+	input: Input,
+}
+
+/// An `sgconfig.yml`: the rule and utility directories, relative to it.
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ProjectConfig {
+	#[serde(default)]
+	rule_dirs: Vec<PathBuf>,
+	#[serde(default)]
+	util_dirs: Option<Vec<PathBuf>>,
+}
+
+/// Prints an ast-grep error report and returns its exit status.
+fn fail(host: &mut Host, title: &str, help: &str, link: Option<&str>, cause: Option<String>, code: i32) -> i32 {
+	Report { warning: false, title, help, link, cause }.print(host);
+	code
+}
+
+/// The YAML files below `dir`, in path order.
+async fn yaml_files(host: &mut Host, dir: &Path) -> Result<Vec<PathBuf>, i32> {
+	let vfs = host.vfs();
+	let options = Discover { hidden: true, gitignore: true, ..Discover::default() };
+	match search::discover(&vfs, dir, &options).await {
+		Ok(found) => Ok(found
+			.into_iter()
+			.filter(|candidate| SupportLang::from_path(&candidate.path) == Some(SupportLang::Yaml))
+			.map(|candidate| candidate.path)
+			.collect()),
+		Err(error) => Err(fail(
+			host,
+			&format!("Cannot read rule directory {}", dir.display()),
+			"The rule directory cannot be read or traversed",
+			None,
+			Some(error.to_string()),
+			6,
+		)),
+	}
+}
+
+/// Parses every rule document of `text` (read from `name`).
+fn parse_rules(host: &mut Host, text: &str, name: &str, globals: &GlobalRules) -> Result<Vec<RuleConfig<SupportLang>>, i32> {
+	from_yaml_string(text, globals).map_err(|error| {
+		fail(
+			host,
+			&format!("Cannot parse rule {name}"),
+			"The file is not a valid ast-grep rule. Please refer to doc and fix the error.",
+			Some(CONFIG_GUIDE),
+			Some(error.to_string()),
+			8,
+		)
+	})
+}
+
+/// Reads `path`; reports `title` (exit status 6) when it cannot.
+async fn read_text(host: &mut Host, path: &Path, title: &str, help: &str) -> Result<String, i32> {
+	match host.vfs().read_to_string(path).await {
+		Ok(text) => Ok(text),
+		Err(error) => Err(fail(host, title, help, Some(CONFIG_GUIDE), Some(error.to_string()), 6)),
+	}
+}
+
+/// One scan finding, ready to print.
+struct Finding<'r> {
+	rule:     &'r RuleConfig<SupportLang>,
+	span:     Span,
+	captures: Captures,
+	message:  String,
+	/// `(range, primary, message)` per label.
+	labels:  Vec<(std::ops::Range<usize>, bool, Option<String>)>,
+	/// The rule's fix applied to this match.
+	change:  Option<Change>,
+}
+
+const fn severity_name(severity: &Severity) -> &'static str {
+	match severity {
+		Severity::Hint => "hint",
+		Severity::Info => "info",
+		Severity::Warning => "warning",
+		Severity::Error => "error",
+		Severity::Off => "off",
+	}
+}
+
+impl Scan {
+	fn context(&self) -> Context {
+		if self.context > 0 {
+			(self.context.into(), self.context.into())
+		} else {
+			(self.before.into(), self.after.into())
+		}
+	}
+
+	/// The rules to run and the directory their `files`/`ignores` globs are
+	/// relative to: `--rule`, `--inline-rules`, or the project's `ruleDirs`.
+	async fn load_rules(&self, host: &mut Host, config: Option<&str>) -> Result<(Vec<RuleConfig<SupportLang>>, PathBuf), i32> {
+		let cwd = host.resolve(".");
+		if let Some(rule) = &self.rule {
+			let path = host.resolve(rule);
+			let text = read_text(
+				host,
+				&path,
+				&format!("Cannot read rule {rule}"),
+				"The rule file either does not exist or cannot be opened.",
+			)
+			.await?;
+			let rules = parse_rules(host, &text, rule, &GlobalRules::default())?;
+			return Ok((rules, path.parent().map_or(cwd, Path::to_path_buf)));
+		}
+		if let Some(text) = &self.inline_rules {
+			return Ok((parse_rules(host, text, "INLINE_RULES", &GlobalRules::default())?, cwd));
+		}
+		let vfs = host.vfs();
+		let config_path = match config {
+			Some(config) => host.resolve(config),
+			None => {
+				let mut found = None;
+				for dir in cwd.ancestors() {
+					let candidate = dir.join(PROJECT_CONFIG);
+					if vfs.metadata(&candidate).await.is_ok_and(|meta| meta.is_file()) {
+						found = Some(candidate);
+						break;
+					}
+				}
+				let Some(found) = found else {
+					return Err(fail(
+						host,
+						"No ast-grep project configuration is found.",
+						"You need to create an ast-grep project for this command. Try `sg new` to create one.",
+						Some(PROJECT_GUIDE),
+						None,
+						3,
+					));
+				};
+				found
+			},
+		};
+		let text = read_text(
+			host,
+			&config_path,
+			"Cannot read configuration.",
+			"Please add an sgconfig.yml configuration file in the project root to run the scan command.",
+		)
+		.await?;
+		let project: ProjectConfig = ast_grep_config::from_str(&text).map_err(|error| {
+			fail(
+				host,
+				"Cannot parse configuration",
+				"The sgconfig.yml is not a valid configuration file. Please refer to doc and fix the error.",
+				Some(CONFIG_REFERENCE),
+				Some(error.to_string()),
+				8,
+			)
+		})?;
+		let root = config_path.parent().map_or(cwd, Path::to_path_buf);
+		let mut utils = Vec::new();
+		for dir in project.util_dirs.iter().flatten() {
+			for file in yaml_files(host, &root.join(dir)).await? {
+				let name = file.display().to_string();
+				let text = read_text(host, &file, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
+				utils.push(ast_grep_config::from_str(&text).map_err(|error| {
+					fail(host, &format!("Cannot parse rule {name}"), "The file is not a valid ast-grep rule. Please refer to doc and fix the error.", Some(CONFIG_GUIDE), Some(error.to_string()), 8)
+				})?);
+			}
+		}
+		let globals = DeserializeEnv::<SupportLang>::parse_global_utils(utils).map_err(|error| {
+			fail(
+				host,
+				"Error occurs when parsing global utility rules",
+				"Please check the YAML rules inside the rule directory",
+				Some(UTILITY_RULE),
+				Some(error.to_string()),
+				8,
+			)
+		})?;
+		let mut rules = Vec::new();
+		for dir in &project.rule_dirs {
+			for file in yaml_files(host, &root.join(dir)).await? {
+				let name = file.display().to_string();
+				let text = read_text(host, &file, &format!("Cannot read rule {name}"), "The rule file either does not exist or cannot be opened.").await?;
+				rules.extend(parse_rules(host, &text, &name, &globals)?);
+			}
+		}
+		Ok((rules, root))
+	}
+
+	/// The findings of `rules` in one source.
+	fn findings<'r>(source: &str, lang: SupportLang, rules: &[&'r RuleConfig<SupportLang>]) -> Vec<Finding<'r>> {
+		let ast = lang.ast_grep(source);
+		let mut findings = Vec::new();
+		for &rule in rules {
+			let fixer = rule.get_fixer().ok().and_then(|fixers| fixers.into_iter().next());
+			for matched in ast.root().find_all(&rule.matcher) {
+				let span = Span::of(matched.get_node());
+				let labels = rule
+					.get_labels(&matched)
+					.into_iter()
+					.map(|label| (label.range(), matches!(label.style, LabelStyle::Primary), label.message.map(str::to_owned)))
+					.collect();
+				let change = fixer.as_ref().map(|fixer| {
+					let edit = matched.replace_by(fixer);
+					Change {
+						span:           span.clone(),
+						before:         matched.text().into_owned(),
+						after:          String::from_utf8_lossy(&edit.inserted_text).into_owned(),
+						deleted_length: edit.deleted_length,
+					}
+				});
+				findings.push(Finding {
+					rule,
+					message: rule.get_message(&matched),
+					captures: Captures::of(&matched),
+					span,
+					labels,
+					change,
+				});
+			}
+		}
+		findings
+	}
+
+	/// Renders one file's findings in the selected output.
+	fn print_findings(&self, out: &mut Vec<u8>, path: &str, source: &str, lang: SupportLang, findings: &[Finding<'_>], first: &mut bool) {
+		if self.files_with_matches {
+			let _ = writeln!(out, "{path}");
+			return;
+		}
+		if let Some(style) = self.json {
+			for finding in findings {
+				match (style, *first) {
+					(JsonStyle::Pretty, true) => out.push(b'\n'),
+					(JsonStyle::Pretty, false) => out.extend_from_slice(b",\n"),
+					(JsonStyle::Compact, false) => out.push(b','),
+					_ => {},
+				}
+				*first = false;
+				let matched = MatchJson {
+					path,
+					source,
+					language: lang,
+					span: &finding.span,
+					captures: Some(&finding.captures),
+					replacement: finding.change.as_ref(),
+				};
+				let Json::Obj(mut fields) = matched.to_json(self.context()) else {
+					continue;
+				};
+				let rule = finding.rule;
+				fields.push(("ruleId", Json::Str(rule.id.clone())));
+				fields.push(("severity", Json::Str(severity_name(&rule.severity).to_owned())));
+				fields.push(("note", rule.note.clone().map_or(Json::Null, Json::Str)));
+				fields.push(("message", Json::Str(finding.message.clone())));
+				let labels: Vec<Json> = finding
+					.labels
+					.iter()
+					.map(|(range, primary, message)| {
+						let span = span_of_range(source, range.clone());
+						let mut label = vec![("text", Json::Str(source[range.clone()].to_owned())), ("range", range_json(&span))];
+						if let Some(message) = message {
+							label.push(("message", Json::Str(message.clone())));
+						}
+						label.push(("style", Json::Str(if *primary { "primary" } else { "secondary" }.to_owned())));
+						Json::Obj(label)
+					})
+					.collect();
+				if !labels.is_empty() {
+					fields.push(("labels", Json::Arr(labels)));
+				}
+				if self.include_metadata
+					&& let Some(metadata) = &rule.metadata
+					&& let Ok(value) = serde_json::to_value(metadata)
+				{
+					fields.push(("metadata", Json::Value(value)));
+				}
+				Json::Obj(fields).write(out, style == JsonStyle::Pretty, 0);
+				if style == JsonStyle::Stream {
+					out.push(b'\n');
+				}
+			}
+			return;
+		}
+		let file = SimpleFile::new(path.to_owned(), source);
+		let (before, after) = self.context();
+		let mut config = codespan::Config {
+			display_style: match self.report_style {
+				ReportStyle::Rich => DisplayStyle::Rich,
+				ReportStyle::Medium => DisplayStyle::Medium,
+				ReportStyle::Short => DisplayStyle::Short,
+			},
+			..codespan::Config::default()
+		};
+		config.start_context_lines = before;
+		config.end_context_lines = after;
+		let mut fixed_until = 0;
+		for finding in findings {
+			let rule = finding.rule;
+			let note = rule.note.as_deref();
+			let Some(change) = &finding.change else {
+				let severity = match rule.severity {
+					Severity::Error => CodeSeverity::Error,
+					Severity::Warning => CodeSeverity::Warning,
+					Severity::Info => CodeSeverity::Note,
+					Severity::Hint | Severity::Off => CodeSeverity::Help,
+				};
+				let labels = finding
+					.labels
+					.iter()
+					.map(|(range, primary, message)| {
+						let label = if *primary {
+							CodeLabel::primary((), range.clone())
+						} else {
+							CodeLabel::secondary((), range.clone())
+						};
+						match message {
+							Some(message) => label.with_message(message),
+							None => label,
+						}
+					})
+					.collect();
+				let diagnostic = Diagnostic::new(severity)
+					.with_code(&rule.id)
+					.with_message(&finding.message)
+					.with_notes(note.into_iter().map(str::to_owned).collect())
+					.with_labels(labels);
+				let _ = codespan::emit_to_io_write(out, &config, &file, &diagnostic);
+				continue;
+			};
+			// A rule with a fix shows the fix as a diff (ast-grep's `print_rule_diffs`).
+			if change.span.start < fixed_until {
+				continue;
+			}
+			fixed_until = change.span.end;
+			let level = match rule.severity {
+				Severity::Error => "error",
+				Severity::Warning => "warning",
+				Severity::Info => "note",
+				Severity::Hint | Severity::Off => "help",
+			};
+			if self.report_style == ReportStyle::Rich {
+				let _ = writeln!(out, "{path}");
+			} else {
+				let _ = write!(out, "{path}:{}:{}: ", change.span.start_pos.line + 1, change.span.start_pos.column + 1);
+			}
+			let _ = writeln!(out, "{level}[{}]: {}", rule.id, finding.message);
+			if self.report_style == ReportStyle::Rich {
+				let fixed = format!("{}{}{}", &source[..change.span.start], change.after, &source[change.span.end..]);
+				print_diff_hunks(out, source, &fixed, if before == 0 { 3 } else { before });
+			}
+			if self.report_style != ReportStyle::Short
+				&& let Some(note) = note
+			{
+				let _ = writeln!(out, "Note:\n{note}");
+			}
+		}
+	}
+
+	async fn execute(&self, host: &mut Host, config: Option<&str>) -> Result<bool, i32> {
+		let (mut rules, root) = self.load_rules(host, config).await?;
+		rules.retain(|rule| !matches!(rule.severity, Severity::Off));
+		if let Some(filter) = &self.filter {
+			let filter = regex::Regex::new(filter).map_err(|error| {
+				fail(host, "Cannot parse the rule filter", "--filter must be a valid regular expression.", Some(CLI_USAGE), Some(error.to_string()), 8)
+			})?;
+			rules.retain(|rule| filter.is_match(&rule.id));
+		}
+		if self.input.stdin {
+			let languages: Vec<SupportLang> = rules.iter().map(|rule| rule.language).collect();
+			let Some(&lang) = languages.first().filter(|lang| languages.iter().all(|other| other == *lang)) else {
+				return Err(fail(
+					host,
+					"Rules must use one language to scan code from StdIn.",
+					"Select rules of a single language with --rule, --inline-rules or --filter.",
+					Some(TOOL_OVERVIEW),
+					None,
+					3,
+				));
+			};
+			let source = read_stdin(host).await?;
+			let selected: Vec<&RuleConfig<SupportLang>> = rules.iter().collect();
+			let findings = Self::findings(&source, lang, &selected);
+			return self.report(host, vec![(STDIN_PATH.to_owned(), PathBuf::new(), source, lang, findings)]).await;
+		}
+		let collection = RuleCollection::try_new(rules).map_err(|error| {
+			fail(
+				host,
+				"Cannot parse glob pattern in config",
+				"The pattern in files/ignore is not a valid glob. Please refer to doc and fix the error.",
+				Some(CONFIG_GUIDE),
+				Some(error.to_string()),
+				9,
+			)
+		})?;
+		let candidates = self.input.candidates(host, None).await?;
+		let vfs = host.vfs();
+		let mut files = Vec::new();
+		let mut budget = self.max_results.map_or(usize::MAX, usize::from);
+		for candidate in candidates {
+			if budget == 0 {
+				break;
+			}
+			let relative = candidate.path.strip_prefix(&root).unwrap_or(Path::new(&candidate.display));
+			let rules = collection.for_path(relative);
+			let Some(lang) = rules.first().map(|rule| rule.language) else {
+				continue;
+			};
+			if !grammar_installed(lang) {
+				continue;
+			}
+			let Ok(source) = vfs.read_to_string(&candidate.path).await else {
+				continue;
+			};
+			let mut findings = Self::findings(&source, lang, &rules);
+			if findings.is_empty() {
+				continue;
+			}
+			findings.truncate(budget);
+			budget -= findings.len();
+			files.push((candidate.display, candidate.path, source, lang, findings));
+		}
+		self.report(host, files).await
+	}
+
+	/// Prints (or with `-U` applies) every file's findings; exit status 1
+	/// with ast-grep's report when an error-level rule matched.
+	async fn report(
+		&self,
+		host: &mut Host,
+		files: Vec<(String, PathBuf, String, SupportLang, Vec<Finding<'_>>)>,
+	) -> Result<bool, i32> {
+		let errors: usize = files
+			.iter()
+			.flat_map(|(.., findings)| findings)
+			.filter(|finding| matches!(finding.rule.severity, Severity::Error))
+			.count();
+		if self.update_all {
+			let vfs = host.vfs();
+			let mut applied = 0;
+			for (display, path, source, _, findings) in &files {
+				let mut changes: Vec<Change> = findings.iter().filter_map(|finding| finding.change.clone()).collect();
+				changes.sort_by_key(|change| change.span.start);
+				if changes.is_empty() {
+					continue;
+				}
+				let fixed = apply_changes(source, &changes);
+				if display == STDIN_PATH {
+					let _ = writeln!(host.stdout_writer(), "{fixed}");
+				} else if let Err(error) = vfs.write(path, fixed).await {
+					let _ = writeln!(host.stderr, "ERROR: {display}: {error}");
+					continue;
+				}
+				applied += changes.len();
+			}
+			if applied > 0 {
+				let _ = writeln!(host.stderr, "Applied {applied} changes");
+			}
+		} else {
+			let mut out = host.stdout_writer();
+			let mut buffer = Vec::new();
+			let array = matches!(self.json, Some(JsonStyle::Pretty | JsonStyle::Compact));
+			if array {
+				buffer.push(b'[');
+			}
+			let mut first = true;
+			for (display, _, source, lang, findings) in &files {
+				self.print_findings(&mut buffer, display, source, *lang, findings, &mut first);
+				if out.write_all(&buffer).is_err() {
+					break;
+				}
+				buffer.clear();
+			}
+			if array {
+				if self.json == Some(JsonStyle::Pretty) && !first {
+					buffer.push(b'\n');
+				}
+				buffer.extend_from_slice(b"]\n");
+			}
+			let _ = out.write_all(&buffer);
+			let _ = out.flush();
+			let _ = host.flush_output().await;
+		}
+		if errors > 0 && !self.update_all {
+			return Err(fail(
+				host,
+				&format!("{errors} error(s) found in code."),
+				"Scan succeeded and found error level diagnostics in the codebase.",
+				None,
+				None,
+				1,
+			));
+		}
+		Ok(true)
+	}
+}
+
+/// The span `range` covers in `source`, with line and character-column positions.
+fn span_of_range(source: &str, range: std::ops::Range<usize>) -> Span {
+	let position = |offset: usize| {
+		let before = &source[..offset];
+		let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+		pi_ast::search::Pos { line: before.matches('\n').count(), column: source[line_start..offset].chars().count() }
+	};
+	Span { start: range.start, end: range.end, start_pos: position(range.start), end_pos: position(range.end) }
+}
+
+/// ast-grep outline's `--items` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum OutlineItems {
+	/// Use `structure` for file or stdin input, `exports` when any directory is given.
+	Auto,
+	/// Top-level items defined locally in the file, excluding imports.
+	Structure,
+	/// Top-level items exported from the file or module.
+	Exports,
+	/// Top-level items imported from other files or modules.
+	Imports,
+	/// All top-level items, including imports and exports.
+	All,
+}
+
+/// ast-grep outline's `--view` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum OutlineView {
+	/// Use `digest` for file or stdin input, `names` when any directory is given.
+	Auto,
+	/// One grouped name line per symbol type for each file.
+	Names,
+	/// One source/signature line per top-level item.
+	Signatures,
+	/// Signatures plus compact member name digests.
+	Digest,
+	/// Signatures plus one source/signature line per direct member.
+	Expanded,
+}
+
+#[derive(Args, Debug)]
+struct Outline {
+	/// Specify the input language (required for stdin).
+	#[arg(short, long, value_parser = parse_lang)]
+	lang: Option<SupportLang>,
+
+	/// Output outline entries in structured JSON.
+	#[arg(
+		long,
+		value_name = "STYLE",
+		num_args(0..=1),
+		require_equals = true,
+		default_missing_value = "pretty"
+	)]
+	json: Option<JsonStyle>,
+
+	/// Controls output color; the builtin always prints plain text.
+	#[arg(long = "color", default_value = "auto", value_name = "WHEN")]
+	_color: ColorArg,
+
+	/// Select which top-level items to include.
+	#[arg(long, default_value = "auto", value_name = "ITEMS")]
+	items: OutlineItems,
+
+	/// Keep only top-level items with these comma-separated symbol types.
+	#[arg(long = "type", value_name = "TYPE[,TYPE...]")]
+	symbol_type: Option<String>,
+
+	/// Keep only top-level items matching this regex.
+	#[arg(long = "match", value_name = "REGEX")]
+	match_item: Option<String>,
+
+	/// Display only public members in member views.
+	#[arg(long)]
+	pub_members: bool,
+
+	/// Select the text presentation.
+	#[arg(long, default_value = "auto", value_name = "VIEW")]
+	view: OutlineView,
+
+	#[command(flatten)]
+	input: Input,
+}
+
+/// One file's outline as ast-grep's JSON prints it.
+#[derive(serde::Serialize)]
+struct OutlineFile<'a> {
+	path:     &'a str,
+	language: String,
+	items:    Vec<outline::Item>,
+}
+
+/// Names grouped by symbol type in [`SymbolType::ORDER`], each with its
+/// occurrence count.
+fn grouped_names<'a>(entries: impl Iterator<Item = &'a outline::Entry>) -> Vec<(SymbolType, Vec<(&'a str, usize)>)> {
+	let mut groups: Vec<(SymbolType, Vec<(&'a str, usize)>)> = SymbolType::ORDER.iter().map(|symbol| (*symbol, Vec::new())).collect();
+	for entry in entries {
+		let Some((_, names)) = groups.iter_mut().find(|(symbol, _)| *symbol == entry.symbol_type) else {
+			continue;
+		};
+		match names.iter_mut().find(|(name, _)| *name == entry.name) {
+			Some((_, count)) => *count += 1,
+			None => names.push((entry.name.as_str(), 1)),
+		}
+	}
+	groups.retain(|(_, names)| !names.is_empty());
+	groups
+}
+
+fn names_line(symbol: SymbolType, names: &[(&str, usize)]) -> String {
+	let names: Vec<String> = names
+		.iter()
+		.map(|(name, count)| if *count == 1 { (*name).to_owned() } else { format!("{name} ×{count}") })
+		.collect();
+	format!("{}: {}", symbol.name(), names.join(", "))
+}
+
+fn signature_or_name(entry: &outline::Entry) -> &str {
+	if entry.signature.is_empty() { &entry.name } else { &entry.signature }
+}
+
+impl Outline {
+	/// The outline of one source, filtered by `--items`, `--type` and `--match`.
+	fn items(&self, source: &str, lang: SupportLang, items: OutlineItems, view: OutlineView, types: Option<&[SymbolType]>, matcher: Option<&regex::Regex>) -> Vec<outline::Item> {
+		let mut found = outline::outline(source, lang);
+		found.retain(|item| match items {
+			OutlineItems::Structure => !item.is_import,
+			OutlineItems::Exports => item.is_exported,
+			OutlineItems::Imports => item.is_import,
+			OutlineItems::All | OutlineItems::Auto => true,
+		});
+		if let Some(types) = types {
+			found.retain(|item| types.contains(&item.entry.symbol_type));
+		}
+		if let Some(matcher) = matcher {
+			found.retain(|item| matcher.is_match(&item.entry.name) || matcher.is_match(&item.entry.signature));
+		}
+		for item in &mut found {
+			if !matches!(view, OutlineView::Digest | OutlineView::Expanded) {
+				item.members.clear();
+			} else if self.pub_members {
+				item.members.retain(|member| member.is_public);
+			}
+		}
+		found
+	}
+
+	fn print_text(out: &mut Vec<u8>, path: &str, items: &[outline::Item], view: OutlineView, first: bool) {
+		if !first {
+			out.push(b'\n');
+		}
+		let _ = writeln!(out, "{path}");
+		if items.is_empty() {
+			let _ = writeln!(out, "nothing found");
+			return;
+		}
+		let width = items
+			.iter()
+			.flat_map(|item| std::iter::once(&item.entry).chain(item.members.iter().map(|member| &member.entry)))
+			.map(|entry| entry.range.start.line + 1)
+			.max()
+			.unwrap_or(1)
+			.to_string()
+			.len();
+		if view == OutlineView::Names {
+			for (symbol, names) in grouped_names(items.iter().map(|item| &item.entry)) {
+				let _ = writeln!(out, "{}", names_line(symbol, &names));
+			}
+			return;
+		}
+		for item in items {
+			let _ = writeln!(out, "{:>width$}: {}", item.entry.range.start.line + 1, signature_or_name(&item.entry));
+			match view {
+				OutlineView::Digest => {
+					let public = item.members.iter().filter(|member| member.is_public);
+					let private = item.members.iter().filter(|member| !member.is_public);
+					for (symbol, names) in grouped_names(public.chain(private).map(|member| &member.entry)) {
+						let _ = writeln!(out, "{}{}", " ".repeat(width + 4), names_line(symbol, &names));
+					}
+				},
+				OutlineView::Expanded => {
+					for member in &item.members {
+						let _ = writeln!(out, "{:>width$}:   {}", member.entry.range.start.line + 1, signature_or_name(&member.entry));
+					}
+				},
+				_ => {},
+			}
+		}
+	}
+
+	async fn execute(&self, host: &mut Host) -> Result<bool, i32> {
+		if self.input.stdin && self.lang.is_none() {
+			return Err(fail(
+				host,
+				"Language must be specified for code from StdIn.",
+				"Please use `--lang` to specify the code language.",
+				Some(TOOL_OVERVIEW),
+				None,
+				3,
+			));
+		}
+		let types = match &self.symbol_type {
+			Some(raw) => {
+				let mut types = Vec::new();
+				for name in raw.split(',') {
+					let Some(symbol) = SymbolType::parse(name.trim()) else {
+						return Err(fail(host, &format!("Unknown outline symbol type `{}`", name.trim()), "Use a symbol type such as class, function, method or variable.", Some(CLI_USAGE), None, 2));
+					};
+					types.push(symbol);
+				}
+				Some(types)
+			},
+			None => None,
+		};
+		let matcher = match self.match_item.as_deref().map(regex::Regex::new).transpose() {
+			Ok(matcher) => matcher,
+			Err(error) => {
+				return Err(fail(host, "Cannot parse outline item matcher", "--match must be a valid regular expression.", Some(CLI_USAGE), Some(error.to_string()), 2));
+			},
+		};
+		let vfs = host.vfs();
+		let mut has_directory = false;
+		if !self.input.stdin {
+			for operand in &self.input.paths {
+				has_directory |= vfs.metadata(host.resolve(operand)).await.is_ok_and(|meta| meta.is_dir());
+			}
+		}
+		let items = match (self.items, has_directory) {
+			(OutlineItems::Auto, true) => OutlineItems::Exports,
+			(OutlineItems::Auto, false) => OutlineItems::Structure,
+			(items, _) => items,
+		};
+		let view = match (self.view, has_directory) {
+			(OutlineView::Auto, true) => OutlineView::Names,
+			(OutlineView::Auto, false) => OutlineView::Digest,
+			(view, _) => view,
+		};
+		let mut files: Vec<(String, SupportLang, Vec<outline::Item>)> = Vec::new();
+		if let (true, Some(lang)) = (self.input.stdin, self.lang) {
+			let source = read_stdin(host).await?;
+			if grammar_installed(lang) {
+				files.push((STDIN_PATH.to_owned(), lang, self.items(&source, lang, items, view, types.as_deref(), matcher.as_ref())));
+			}
+		} else {
+			for candidate in self.input.candidates(host, self.lang).await? {
+				let Some(lang) = self.lang.or_else(|| SupportLang::from_path(&candidate.path)) else {
+					continue;
+				};
+				if !grammar_installed(lang) {
+					continue;
+				}
+				let Ok(source) = vfs.read_to_string(&candidate.path).await else {
+					continue;
+				};
+				let found = self.items(&source, lang, items, view, types.as_deref(), matcher.as_ref());
+				if found.is_empty() && has_directory {
+					continue;
+				}
+				files.push((candidate.display, lang, found));
+			}
+		}
+		let mut out = host.stdout_writer();
+		let mut buffer = Vec::new();
+		match self.json {
+			None => {
+				for (index, (path, _, found)) in files.iter().enumerate() {
+					Self::print_text(&mut buffer, path, found, view, index == 0);
+				}
+				if files.is_empty() {
+					let _ = writeln!(buffer, "nothing found");
+				}
+			},
+			Some(style) => {
+				for (index, (path, lang, found)) in files.into_iter().enumerate() {
+					let file = OutlineFile { path: &path, language: lang.to_string(), items: found };
+					match style {
+						JsonStyle::Pretty => {
+							buffer.extend_from_slice(if index == 0 { b"[\n" } else { b",\n" });
+							let object = serde_json::to_string_pretty(&file).unwrap_or_default();
+							for line in object.lines() {
+								let _ = writeln!(buffer, "  {line}");
+							}
+						},
+						JsonStyle::Compact => {
+							buffer.push(if index == 0 { b'[' } else { b',' });
+							let _ = serde_json::to_writer(&mut buffer, &file);
+						},
+						JsonStyle::Stream => {
+							let _ = serde_json::to_writer(&mut buffer, &file);
+							buffer.push(b'\n');
+						},
+					}
+				}
+				match style {
+					JsonStyle::Pretty if buffer.is_empty() => buffer.extend_from_slice(b"[]\n"),
+					JsonStyle::Pretty => buffer.extend_from_slice(b"]\n"),
+					JsonStyle::Compact if buffer.is_empty() => buffer.extend_from_slice(b"[]\n"),
+					JsonStyle::Compact => buffer.extend_from_slice(b"]\n"),
+					JsonStyle::Stream => {},
+				}
+			},
+		}
+		let _ = out.write_all(&buffer);
+		let _ = out.flush();
+		let _ = host.flush_output().await;
+		Ok(true)
+	}
+}
+
 impl AsyncUtility for AstGrep {
 	const NAME: &'static str = "ast-grep";
 	const USAGE_ERROR: u8 = 2;
 
-	/// Drops the `run` subcommand and rejects ast-grep features the builtin
-	/// does not implement.
+	/// Rejects ast-grep features the builtin does not implement and makes
+	/// `run` the default command, as ast-grep does when no command is given.
 	fn rewrite_argv(mut argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
-		if let Some(command) = argv.get(1).and_then(|arg| arg.to_str()) {
-			if command == "run" {
-				argv.remove(1);
-			} else if UNSUPPORTED_COMMANDS.contains(&command) {
-				return Err(format!("{command} is not supported by the built-in ast-grep"));
-			}
+		if let Some(feature) = unsupported_feature(argv.iter().skip(1).map(|arg| arg.to_str())) {
+			return Err(format!("{feature} is not supported by the built-in ast-grep"));
 		}
-		let mut value_next = false;
-		for arg in argv.iter().skip(1) {
-			if std::mem::take(&mut value_next) {
-				continue;
-			}
-			let Some(arg) = arg.to_str() else {
-				continue;
-			};
-			if arg == "--" {
-				break;
-			}
-			let name = arg.split_once('=').map_or(arg, |(name, _)| name);
-			if let Some((option, _)) = UNSUPPORTED_OPTIONS.iter().find(|(_, spellings)| spellings.contains(&name)) {
-				return Err(format!("{option} is not supported by the built-in ast-grep"));
-			}
-			value_next = VALUE_OPTIONS.contains(&arg);
+		let first = argv.get(1).and_then(|arg| arg.to_str());
+		if command_index(&argv).is_none() && !matches!(first, Some("-h" | "--help" | "-V" | "--version")) {
+			argv.insert(1, "run".into());
 		}
 		Ok(argv)
 	}
 
 	async fn run(self, host: &mut Host) -> i32 {
-		match self.execute(host).await {
+		let config = self.config.as_deref();
+		let result = match &self.command {
+			Command::Run(run) => run.execute(host).await,
+			Command::Scan(scan) => scan.execute(host, config).await,
+			Command::Outline(outline) => outline.execute(host).await,
+		};
+		match result {
 			Ok(true) => 0,
 			Ok(false) => 1,
 			Err(code) => code,
@@ -1251,10 +2459,65 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn unsupported_features_exit_two() {
 		let tree = tree();
-		assert_eq!(run(&tree, &["scan"]).await, (2, String::new(), "ast-grep: scan is not supported by the built-in ast-grep\n".to_owned()));
+		assert_eq!(run(&tree, &["test"]).await, (2, String::new(), "ast-grep: test is not supported by the built-in ast-grep\n".to_owned()));
 		assert_eq!(
 			run(&tree, &["run", "-p", "foo", "--interactive", "a.rs"]).await,
 			(2, String::new(), "ast-grep: --interactive is not supported by the built-in ast-grep\n".to_owned())
 		);
+	}
+
+	const NO_FOO: &str = "id: no-foo\nlanguage: Rust\nseverity: error\nmessage: Avoid foo\nrule:\n  pattern: foo($$$A)\n";
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn scan_reports_inline_rule_matches_and_fails_on_errors() {
+		let tree = tree();
+		let (code, out, err) = run(&tree, &["scan", "--inline-rules", NO_FOO, "--report-style", "short", "a.rs", "b.rs"]).await;
+		assert_eq!(
+			(code, out.as_str()),
+			(1, "a.rs:2:13: error[no-foo]: Avoid foo\na.rs:4:13: error[no-foo]: Avoid foo\nb.rs:2:5: error[no-foo]: Avoid foo\n"),
+			"{err}"
+		);
+		assert!(err.starts_with("Error: 3 error(s) found in code."), "{err}");
+
+		let warning = NO_FOO.replace("severity: error", "severity: warning");
+		let (code, out, err) = run(&tree, &["scan", "--inline-rules", &warning, "b.rs"]).await;
+		assert_eq!(code, 0, "{err}");
+		assert!(out.starts_with("warning[no-foo]: Avoid foo\n"), "{out}");
+		assert!(out.contains("┌─ b.rs:2:5"), "{out}");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn scan_loads_rules_from_the_project_config() {
+		let tree = tree();
+		std::fs::write(tree.path().join("sgconfig.yml"), "ruleDirs:\n  - rules\n").unwrap();
+		std::fs::create_dir(tree.path().join("rules")).unwrap();
+		std::fs::write(tree.path().join("rules").join("no-foo.yml"), NO_FOO).unwrap();
+		let (code, out, err) = run(&tree, &["scan", "--report-style=short", "b.rs"]).await;
+		assert_eq!((code, out.as_str()), (1, "b.rs:2:5: error[no-foo]: Avoid foo\n"), "{err}");
+		let (code, out, err) = run(&tree, &["scan", "--json=compact", "b.rs"]).await;
+		assert_eq!(code, 1, "{err}");
+		assert!(out.contains(r#""ruleId":"no-foo","severity":"error","note":null,"message":"Avoid foo""#), "{out}");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn run_matches_an_esquery_kind() {
+		let tree = tree();
+		let (code, out, err) = run(&tree, &["run", "-k", "call_expression", "-l", "rust", "b.rs"]).await;
+		assert_eq!((code, out.as_str()), (0, "b.rs:2:    foo(3)\n"), "{err}");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn debug_query_prints_the_pattern_tree_to_stderr() {
+		let tree = tree();
+		let (code, _, err) = run(&tree, &["run", "-p", "foo($A)", "-l", "rust", "--debug-query=ast", "b.rs"]).await;
+		assert_eq!(code, 0, "{err}");
+		assert!(err.starts_with("Debug AST:\nsource_file (0,0)-"), "{err}");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn outline_prints_a_file_digest() {
+		let tree = tree();
+		assert_eq!(run(&tree, &["outline", "a.rs"]).await, (0, "a.rs\n1: fn main()\n".to_owned(), String::new()));
+		assert_eq!(run(&tree, &["outline", "--view", "names", "a.rs", "b.rs"]).await.1, "a.rs\nfunction: main\n\nb.rs\nfunction: g\n");
 	}
 }

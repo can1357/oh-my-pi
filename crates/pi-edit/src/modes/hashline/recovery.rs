@@ -12,9 +12,8 @@ use super::{
 	clipboard::has_clipboard_edit,
 	messages::{
 		RECOVERY_EXTERNAL_WARNING, RECOVERY_LINE_REMAP_WARNING, RECOVERY_SESSION_CHAIN_WARNING,
-		edit_broke_parse_warning,
 	},
-	syntax::node_chain,
+	syntax::{node_chain, parses_cleanly},
 	types::{Anchor, Cursor, Edit, ParsedRange, PasteTarget},
 };
 use crate::{
@@ -541,10 +540,8 @@ pub fn try_recover(
 	if applied.text == args.current_text {
 		return Ok(None);
 	}
-	if offset != 0
-		&& applied
-			.warnings
-			.contains(&edit_broke_parse_warning(applied.first_changed_line))
+	let path = args.path.to_str();
+	if offset != 0 && parses_cleanly(path, args.current_text) && !parses_cleanly(path, &applied.text)
 	{
 		return Ok(None);
 	}

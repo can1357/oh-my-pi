@@ -5539,8 +5539,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// change callbacks, so start a fresh one there. Stale hashline tags would
 		// otherwise surface as "issued in this session" in mismatch diagnostics
 		// (#13370), and conflict ids, already-shown diagnostics and repeat-read
-		// counts would leak into the new conversation. The tools keep their state
-		// on THIS session, not the AgentSession's own lazy mention store.
+		// counts would leak into the new conversation. The tools and @file
+		// mentions keep their state on THIS session.
 		session.registerSessionChangeCallback(() => {
 			toolSession.state = new ToolConversationState();
 		});
