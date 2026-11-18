@@ -32,7 +32,12 @@ import {
 	collectUnreportedAccounts,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/usage-accounts";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { ResetUsageSelectorComponent } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
+import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
@@ -2090,6 +2095,25 @@ describe("omp usage reset", () => {
 		expect(process.exitCode).toBe(0);
 	});
 
+	it("claims no coverage for Codex credits, whose listing does not report what they clear", async () => {
+		await runUsageCommand({ action: "reset", provider: "codex", noExtensions: true });
+		const creditLines = stripVTControlCharacters(stdout)
+			.split("\n")
+			.filter(line => /^\s+credit-(late|soon) /.test(line));
+		expect(creditLines).toHaveLength(2);
+		for (const line of creditLines) expect(line).not.toMatch(/clears/);
+		expect(consumes()).toEqual([]);
+	});
+
+	it("leaves Codex credits' coverage out of the JSON listing", async () => {
+		await runUsageCommand({ action: "reset", provider: "codex", json: true, noExtensions: true });
+		const listing: { accounts: Array<{ credits: Array<Record<string, unknown>> }> } = JSON.parse(stdout);
+		const credits = listing.accounts.flatMap(account => account.credits);
+		expect(credits.length).toBeGreaterThan(0);
+		for (const credit of credits) expect(credit.clears).toBeUndefined();
+		expect(consumes()).toEqual([]);
+	});
+
 	it("prints credential ids, credit ids and expiries as JSON", async () => {
 		const { team, spare, claude } = credentialIds();
 		await runUsageCommand({ action: "reset", json: true, noExtensions: true });
@@ -2359,10 +2383,54 @@ describe("omp usage reset", () => {
 			const full = lines.find(line => line.trimStart().startsWith("full-reset-2611 "));
 			const fable = lines.find(line => line.trimStart().startsWith("launch-2610-fable "));
 			expect(full).toContain("One full limit reset (November 2026)");
-			expect(full).toContain("Claude 5h + Claude weekly + Claude Fable weekly");
 			expect(fable).toContain("New model launch: one Fable reset");
-			expect(fable).toContain("Claude 5h + Claude Fable weekly");
+			// The full reset clears the shared weekly window; the Fable grant only the Fable cap.
+			const weekly = formatUsageResetWindow("anthropic:7d");
+			const fableWeekly = formatUsageResetWindow("anthropic:7d:fable");
+			expect(full).toContain(weekly);
+			expect(fable).toContain(fableWeekly);
+			expect(fable).not.toContain(weekly);
 			expect(consumes()).toEqual([]);
+		});
+
+		it("tells shared-weekly coverage from Fable-only coverage in the JSON listing", async () => {
+			await runUsageCommand({ action: "reset", provider: "claude", json: true, noExtensions: true });
+			const listing: { accounts: Array<{ credits: Array<{ id: string; clears?: string[] }> }> } = JSON.parse(stdout);
+			const clears = new Map(listing.accounts.flatMap(account => account.credits).map(c => [c.id, c.clears]));
+			expect(clears.get("full-reset-2611")).toContain("anthropic:7d");
+			expect(clears.get("launch-2610-fable")).toContain("anthropic:7d:fable");
+			expect(clears.get("launch-2610-fable")).not.toContain("anthropic:7d");
+			expect(consumes()).toEqual([]);
+		});
+
+		it("never spends from the /usage reset selector, which shows each grant's spend command instead", async () => {
+			await initTheme();
+			const { claude } = credentialIds();
+			const redeems: Promise<unknown>[] = [];
+			const ctx = createInteractiveModeContext({
+				session: {
+					listResetCredits: () => authStorage.resets.list({ provider: "anthropic" }),
+					redeemResetCredit: target => {
+						const redeem = authStorage.resets.redeem({ target });
+						redeems.push(redeem);
+						return redeem;
+					},
+				},
+				ui: { getFocused: () => null },
+			});
+			await new SelectorController(ctx).showResetUsageSelector();
+			const selector = ctx.editorContainer.children[0];
+			if (!(selector instanceof ResetUsageSelectorComponent)) throw new Error("expected the reset selector");
+
+			selector.handleInput("\r");
+			selector.handleInput("\r");
+			await Promise.all(redeems);
+
+			expect(redeems).toHaveLength(0);
+			expect(consumes()).toEqual([]);
+			const shown = stripVTControlCharacters(selector.render(400).join("\n"));
+			expect(shown).toContain(`/usage reset anthropic/${claude}:full-reset-2611`);
+			expect(shown).toContain(`/usage reset anthropic/${claude}:launch-2610-fable`);
 		});
 
 		it("refuses to pick one when no credit id is given, listing the command for each", async () => {

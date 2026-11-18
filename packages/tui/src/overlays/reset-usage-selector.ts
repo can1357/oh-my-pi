@@ -59,7 +59,7 @@ function accountPickerItem(account: ResetUsageAccount, id: string): TspPickerIte
 				: span("expired", "warning"),
 		];
 	}
-	return {
+	const item: TspPickerItem = {
 		id,
 		label: oneLine(account.label),
 		detail,
@@ -67,6 +67,25 @@ function accountPickerItem(account: ResetUsageAccount, id: string): TspPickerIte
 		facts,
 		...(reason ? { disabled: oneLine(reason) } : {}),
 	};
+	// Each credit's id, title and coverage on hover; an account needing a named reset says so.
+	if (account.creditLines?.length) item.title = account.creditLines.map(oneLine).join("\n");
+	if (account.creditChoice) {
+		item.badges = [{ text: "name the reset", tone: "warning", title: creditChoiceMessage(account) }];
+	}
+	return item;
+}
+
+/** Why nothing is spent on an account whose resets clear different limits, with each exact spend command. */
+function creditChoiceMessage(account: ResetUsageAccount): string {
+	const commands = (account.creditChoice ?? []).map(choice => oneLine(choice.command)).join(" or ");
+	return `${oneLine(account.label)} holds saved resets that clear different limits, so nothing was spent. Spend one by name: ${commands}.`;
+}
+
+/** One saved reset of an account whose resets clear different limits, with the command that spends exactly it. */
+export interface ResetUsageCreditChoice {
+	/** The reset's id, title, what it clears, usability and expiry. */
+	line: string;
+	command: string;
 }
 
 /** One account row with its redeemable rate-limit reset credits. */
@@ -93,12 +112,22 @@ export interface ResetUsageAccount {
 	credit?: UsageResetCreditDetail;
 	/** Every banked credit on the account, spendable now or not. */
 	credits?: readonly UsageResetCredit[];
+	/** One line per banked credit: id, title, what it clears when the provider reports it, usability, expiry. */
+	creditLines?: readonly string[];
+	/**
+	 * Set when the account holds resets that clear different limits. The provider spends only
+	 * the one it offers next, so the reset type is the user's call, made with the exact command;
+	 * the selector spends nothing on such an account.
+	 */
+	creditChoice?: readonly ResetUsageCreditChoice[];
 }
 
 /**
  * Account picker for `/usage reset`. Lists provider accounts with their saved
- * rate-limit reset counts; selecting one redeems a reset. Because a reset is a
- * scarce, irreversible credit, Enter requires a second press to confirm.
+ * rate-limit reset counts and the selected account's credits; selecting one redeems
+ * a reset. Because a reset is a scarce, irreversible credit, Enter requires a second
+ * press to confirm. An account whose resets clear different limits is never spent
+ * here: Enter shows the command that spends each one by name instead.
  */
 export class ResetUsageSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
@@ -188,6 +217,11 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 			);
 		}
 
+		// The selected account's credits, one per line: id, title, what each clears.
+		for (const line of this.#menu.selectedItem?.creditLines ?? []) {
+			this.#listContainer.addChild(new TruncatedText(theme.fg("dim", `    ${oneLine(line)}`), 0, 0));
+		}
+
 		const pending = items.find(item => this.#menu.isPending(item));
 		const hint = pending
 			? theme.fg("warning", oneLine(this.#confirmationMessage(pending)))
@@ -205,7 +239,10 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 
 	/** What a reset of `account` spends and covers, without key instructions. */
 	#confirmationNotes(account: ResetUsageAccount): { subject: string; notes: string[] } {
-		const subject = account.credit?.title ? `“${account.credit.title}”` : "1 saved reset";
+		const credit = account.credit;
+		const id = credit?.id ? oneLine(credit.id) : undefined;
+		const title = credit?.title ? `“${credit.title}”` : undefined;
+		const subject = title && id ? `${title} (${id})` : (title ?? (id ? `saved reset ${id}` : "1 saved reset"));
 		const notes: string[] = [];
 		if (account.credit?.program === "juniper_tide") {
 			notes.push("This resets Claude's 5h session limit only; weekly limits stay unchanged.");
@@ -266,6 +303,12 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 	#activateSelection(): void {
 		const account = this.#menu.selectedItem;
 		if (!account) return;
+		if (account.creditChoice) {
+			this.#menu.cancelConfirmation();
+			this.#statusMessage = creditChoiceMessage(account);
+			this.#updateList();
+			return;
+		}
 		if (account.redeemableCount <= 0) {
 			this.#statusMessage = account.unavailableReason
 				? `That account's saved resets are unavailable: ${account.unavailableReason}`
@@ -314,6 +357,7 @@ export class ResetUsageSelectorComponent extends OverlayPanel {
 				this.#nativeItems,
 				"list",
 			),
+			...(this.#menu.selectedItem?.creditLines ?? []).map(line => text([span(oneLine(line), "dim")])),
 			pending
 				? text([span(oneLine(this.#confirmationMessage(pending)), "warning")])
 				: (this.#nativeHints ??= hintsRow([
