@@ -18,6 +18,7 @@ import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import { ovnfsCommand } from "../task/settings";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
+import { sessionShellSpeech } from "../tts/shell-speech";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `sh` helper across both runtimes. */
@@ -75,6 +76,7 @@ export async function runEvalShell(args: unknown, options: EvalShellBridgeOption
 			context: sessionResolveContext(session, { signal }),
 			tier: "read",
 		}).shellFilesystem(),
+		speech: sessionShellSpeech(session),
 		// The sink's inline window is a bounded preview; collect the whole stream instead.
 		chunkThrottleMs: 0,
 		onChunk: chunk => {

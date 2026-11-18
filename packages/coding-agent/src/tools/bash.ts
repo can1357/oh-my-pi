@@ -106,6 +106,7 @@ import {
 import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
+import { sessionShellSpeech } from "../tts/shell-speech";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "@oh-my-pi/pi-tui/chat/spotlight";
@@ -1429,6 +1430,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							onWrite: noticeUrlWrites(notices),
 							toolCallId: options.toolCallId,
 						}).shellFilesystem(),
+						speech: sessionShellSpeech(this.session),
 						artifactPath,
 						artifactId,
 						onChunk: chunk => {
@@ -2302,6 +2304,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						onWrite: noticeUrlWrites(pendingNotices),
 						toolCallId,
 					}).shellFilesystem(),
+					speech: sessionShellSpeech(this.session),
 					artifactPath,
 					artifactId,
 					// Stream the sink's own inline view rather than re-buffering chunks.

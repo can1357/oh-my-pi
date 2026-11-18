@@ -272,6 +272,7 @@ default = ["utils"]
 "util.rmdir" = []
 # Needs processes and sockets: unix and windows targets.
 "util.rsync" = []
+"util.say" = []
 "util.sd" = []
 "util.sed" = ["util.bre"]
 "util.seq" = []
@@ -364,6 +365,7 @@ utils = [
   "util.rm",
   "util.rmdir",
   "util.rsync",
+  "util.say",
   "util.sd",
   "util.sed",
   "util.seq",

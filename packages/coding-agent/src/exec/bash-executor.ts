@@ -13,6 +13,7 @@ import {
 	Shell,
 	type ShellFilesystem,
 	type ShellRunResult,
+	type ShellSpeech,
 } from "@oh-my-pi/pi-natives";
 import { isShellTrace, type ShellTrace } from "@oh-my-pi/pi-wire";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -79,6 +80,8 @@ export interface BashExecutorOptions {
 	 * `cwd` included). External shells and processes never see it.
 	 */
 	filesystem?: ShellFilesystem;
+	/** Speech synthesizer the embedded shell's `say` speaks through when the session has one set up. */
+	speech?: ShellSpeech;
 	/**
 	 * Receives a copy of every byte crossing the command's pipes in the
 	 * embedded shell (`proc://<id>/streams`). The user-shell paths ignore it.
@@ -967,6 +970,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timeoutMs: nativeTimeoutMs,
 				signal: runAbortController.signal,
 				filesystem: options?.filesystem,
+				speech: options?.speech,
 				streams: options?.streams,
 				trace: runTrace,
 			},

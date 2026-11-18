@@ -1,5 +1,6 @@
 //! Embedded bash engine (pi-shell) shell execution exported via N-API.
 
+pub mod speech;
 pub mod vfs;
 
 use std::{
@@ -25,7 +26,7 @@ use pi_shell::{
 	execute_shell as core_execute_shell, minimizer,
 };
 
-use self::vfs::ShellFilesystem;
+use self::{speech::ShellSpeech, vfs::ShellFilesystem};
 use crate::task;
 
 /// Native non-executing visualization transformations.
@@ -267,6 +268,9 @@ pub struct ShellRunOptions<'env> {
 	/// Filesystem for this run only, replacing the session's; the session's
 	/// filesystem applies again to later runs.
 	pub filesystem: Option<ShellFilesystem>,
+	/// The application's speech synthesizer, which `say` speaks through when
+	/// it has one configured; absent leaves `say` to the system's.
+	pub speech:     Option<ShellSpeech>,
 	/// Receives a copy of every byte crossing the run's pipeline pipes.
 	pub streams:    Option<ClassInstance<'env, PipeStreams>>,
 	/// Folds the run's engine events into a live model of the command.
@@ -568,6 +572,7 @@ impl Shell {
 			filesystem: options.filesystem.map(ShellFilesystem::into_fs),
 			pipe_taps:  options.streams.map(|streams| Arc::clone(&streams.taps)),
 			trace:      options.trace.map(|trace| Arc::clone(&trace.inner)),
+			speech:     options.speech.map(ShellSpeech::into_host),
 		};
 		task::future(env, "shell.run", async move {
 			let (chunk_tx, drain_handle) = bridge_chunks(on_chunk);
@@ -1094,6 +1099,7 @@ mod tests {
 						filesystem: None,
 						pipe_taps:  None,
 						trace:      None,
+						speech:     None,
 					},
 					Some(tx),
 					CancelToken::default(),
@@ -1144,6 +1150,7 @@ mod tests {
 						filesystem: None,
 						pipe_taps:  None,
 						trace:      None,
+						speech:     None,
 					},
 					None,
 					cancel,
@@ -1185,6 +1192,7 @@ mod tests {
 						filesystem: None,
 						pipe_taps:  None,
 						trace:      None,
+						speech:     None,
 					},
 					Some(tx),
 					cancel,

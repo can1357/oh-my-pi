@@ -4126,6 +4126,11 @@ export interface ShellRunOptions {
    * filesystem applies again to later runs.
    */
   filesystem?: ShellFilesystem
+  /**
+   * The application's speech synthesizer, which `say` speaks through when
+   * it has one configured; absent leaves `say` to the system's.
+   */
+  speech?: ShellSpeech
   /** Receives a copy of every byte crossing the run's pipeline pipes. */
   streams?: PipeStreams
   /** Folds the run's engine events into a live model of the command. */
@@ -4149,6 +4154,72 @@ export interface ShellRunResult {
   minimized?: MinimizerResult
   /** Shell working directory after command completion. */
   workingDir?: string
+}
+
+/** The application's speech synthesizer, injected into a shell run. */
+export interface ShellSpeech {
+  /**
+   * Serves every request; failures are returned as `error` data rather
+   * than thrown.
+   */
+  handler: (error: Error | null, request: ShellSpeechRequest) => Promise<ShellSpeechResponse>
+}
+
+/** What a [`ShellSpeechRequest`] asks of the handler. */
+export declare enum ShellSpeechOp {
+  /** List the synthesizer's voices. */
+  Voices = 'voices',
+  /** Speak `text`, or synthesize it when `capture` is set. */
+  Speak = 'speak',
+  /** Stop the `speak` request with this `id`. */
+  Cancel = 'cancel'
+}
+
+/** One speech request. Only the fields documented for `op` are set. */
+export interface ShellSpeechRequest {
+  op: ShellSpeechOp
+  /** Identifies a `speak` request to a later `cancel`. */
+  id?: number
+  /** `speak`: the text. */
+  text?: string
+  /** `speak`: the voice asked for (`say -v`), verbatim. */
+  voice?: string
+  /** `speak`: the rate asked for, in words per minute (`say -r`). */
+  rate?: number
+  /** `speak`: return the audio as `samples` instead of playing it. */
+  capture?: boolean
+  /**
+   * `voices`, `speak`: answer even when no synthesizer is configured,
+   * because the system has none either.
+   */
+  required?: boolean
+}
+
+/** Handler answer. */
+export interface ShellSpeechResponse {
+  /**
+   * False when the application has no synthesizer configured and the
+   * request did not require one; nothing was spoken.
+   */
+  configured: boolean
+  /** `voices`: the voices. */
+  voices?: Array<ShellSpeechVoice>
+  /** `speak` with `capture`: mono samples in `-1..=1`. */
+  samples?: Float32Array
+  /** `speak` with `capture`: samples per second. */
+  sampleRate?: number
+  /** Why the request failed. */
+  error?: string
+}
+
+/** One voice of the application's synthesizer. */
+export interface ShellSpeechVoice {
+  /** The name `say -v` selects it by. */
+  name: string
+  /** Its locale, `en_US` style. */
+  locale: string
+  /** A line describing it. */
+  sample: string
 }
 
 /** Native non-executing visualization transformations. */

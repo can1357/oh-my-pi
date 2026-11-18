@@ -59,6 +59,7 @@ use tokio_util::sync::CancellationToken;
 use crate::openfile::DescriptorPath;
 use crate::{
 	openfile::{self, Fd, OpenFile},
+	speech::SpeechHost,
 	stdio::{AsyncOut, Source},
 };
 
@@ -203,6 +204,9 @@ pub(crate) struct Host {
 	/// Raised when the utility reports an error yet goes on; `None` when the
 	/// shell asked for no such report.
 	reported_error:        Option<Arc<AtomicBool>>,
+	/// The embedding application's speech synthesizer; `None` when it has
+	/// none.
+	speech:                Option<Arc<dyn SpeechHost>>,
 	/// The memory-backed stdout and stderr of an async utility; `None` for a
 	/// sync one, whose writers deliver on every write.
 	async_out:             Option<AsyncStreams>,
@@ -946,6 +950,12 @@ impl Host {
 	/// for no such report.
 	pub fn reported_error_flag(&self) -> Option<Arc<AtomicBool>> {
 		self.reported_error.clone()
+	}
+
+	/// The embedding application's speech synthesizer, for `say`; `None`
+	/// when the application has none.
+	pub fn speech(&self) -> Option<Arc<dyn SpeechHost>> {
+		self.speech.clone()
 	}
 
 	/// The async facade of the host filesystem, for utilities awaiting
@@ -2115,6 +2125,9 @@ pub struct Invocation {
 	/// Raised when the extra reports an error yet goes on (so a caller
 	/// minimizing output knows to keep it); `None` when nobody asks.
 	pub reported_error: Option<Arc<AtomicBool>>,
+	/// The embedding application's speech synthesizer, which `say` speaks
+	/// through; `None` leaves `say` to the system's.
+	pub speech:         Option<Arc<dyn SpeechHost>>,
 }
 
 impl Invocation {
@@ -2133,13 +2146,26 @@ impl Invocation {
 			cancel: None,
 			commands: None,
 			reported_error: None,
+			speech: None,
 		}
 	}
 
 	/// Opens the descriptors as shareable [`OpenFile`]s; `default_name` stands
 	/// in for an empty [`Invocation::name`].
 	pub(crate) fn open(self, default_name: &str) -> Opened {
-		let Self { name, argv, env, cwd, stdio, fds, fs, cancel, commands, reported_error } = self;
+		let Self {
+			name,
+			argv,
+			env,
+			cwd,
+			stdio,
+			fds,
+			fs,
+			cancel,
+			commands,
+			reported_error,
+			speech,
+		} = self;
 		Opened {
 			name: if name.is_empty() { default_name.to_string() } else { name },
 			argv,
@@ -2154,6 +2180,7 @@ impl Invocation {
 			cancel,
 			commands,
 			reported_error,
+			speech,
 		}
 	}
 }
@@ -2171,6 +2198,7 @@ pub(crate) struct Opened {
 	pub cancel:         Option<CancellationToken>,
 	pub commands:       Option<Box<dyn CommandRunner>>,
 	pub reported_error: Option<Arc<AtomicBool>>,
+	pub speech:         Option<Arc<dyn SpeechHost>>,
 }
 
 impl Opened {
@@ -2473,7 +2501,13 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 	let Spec { checks_stdout_path, owns_cancellation, async_io, .. } = spec;
 	let paths = invocation.paths();
 	let Opened {
-		name: invoked, env, stdio: [stdin, stdout, stderr_file], cancel: token, reported_error, ..
+		name: invoked,
+		env,
+		stdio: [stdin, stdout, stderr_file],
+		cancel: token,
+		reported_error,
+		speech,
+		..
 	} = invocation;
 	let (stdin, stdout, stderr_file) = match (or_null(stdin), or_null(stdout), or_null(stderr_file)) {
 		(Ok(stdin), Ok(stdout), Ok(stderr_file)) => (stdin, stdout, stderr_file),
@@ -2576,6 +2610,7 @@ fn build_host(invocation: Opened, spec: Spec) -> Result<Host, i32> {
 		sigpipe,
 		commands: None,
 		reported_error,
+		speech,
 		async_out,
 		stdin_source: None,
 	})
@@ -3069,6 +3104,7 @@ mod testing {
 				sigpipe,
 				commands:              None,
 				reported_error:        None,
+				speech:                None,
 				async_out,
 				stdin_source:          None,
 			};

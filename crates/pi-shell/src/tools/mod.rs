@@ -43,7 +43,7 @@ use crate::{
 		CallId, CallOutcome, ControlHandle, Cx, IoPoll, Lineage, NativeRef, RunId, Script, Shell,
 		ShellApi, ToolCall, ToolRef,
 	},
-	extras::{ExtrasGate, ReportedError},
+	extras::{ExtrasGate, ReportedError, Speech},
 	git::{GitLayers, flag_on},
 	vfs::VfsFs,
 };
@@ -96,6 +96,8 @@ pub struct ToolConfig {
 	pub runtime:        Option<tokio::runtime::Handle>,
 	/// The reported-error flag of the command in flight, for the extras.
 	pub reported_error: ReportedError,
+	/// The application's speech synthesizer, for `say`.
+	pub speech:         Speech,
 }
 
 impl ToolConfig {
@@ -120,6 +122,7 @@ impl ToolConfig {
 			extras: ExtrasGate::from_switches(on),
 			runtime: Some(runtime),
 			reported_error: ReportedError::default(),
+			speech: Speech::default(),
 		}
 	}
 

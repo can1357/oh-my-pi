@@ -71,6 +71,7 @@ use std::{
 
 use bstr::{BString, ByteSlice};
 use parking_lot::Mutex;
+use pi_builtins::extras::SpeechHost;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -142,6 +143,9 @@ pub struct RunOptions {
 	/// Set when a utility reports an error its exit status hides (`jq`
 	/// after a failing input that is not the last).
 	pub reported_error: Option<Arc<AtomicBool>>,
+	/// The application's speech synthesizer, which `say` speaks through;
+	/// `None` leaves `say` to the system's.
+	pub speech:         Option<Arc<dyn SpeechHost>>,
 	/// The command's stdout and stderr are one pipe whose reader takes its
 	/// bytes as shell text: what externals write there is decoded per
 	/// program by the host's output decoding
@@ -166,6 +170,7 @@ impl RunOptions {
 			cwd:            None,
 			pipe_tap:       None,
 			reported_error: None,
+			speech:         None,
 			text_capture:   false,
 			events:         None,
 		}
@@ -180,6 +185,7 @@ impl std::fmt::Debug for RunOptions {
 			.field("cwd", &self.cwd)
 			.field("pipe_tap", &self.pipe_tap.is_some())
 			.field("reported_error", &self.reported_error)
+			.field("speech", &self.speech)
 			.field("events", &self.events.is_some())
 			.finish()
 	}
@@ -862,8 +868,9 @@ impl Driver {
 	/// Run one job to completion and send its outcome.
 	async fn run(&mut self, job: Job) {
 		let Job { options, stdio, cancel, reply } = job;
-		let RunOptions { command, env, cwd, pipe_tap, reported_error, text_capture, events } =
+		let RunOptions { command, env, cwd, pipe_tap, reported_error, speech, text_capture, events } =
 			options;
+		self.host.set_speech(speech);
 		self.host.set_pipe_tap(pipe_tap);
 		// A command owns its observer generation, even when successive
 		// observers request identical event masks.

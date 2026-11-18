@@ -16,6 +16,7 @@
 - Lsp references and rename warn about textual occurrences the server missed, and definition/references flag locations that do not mention the symbol (with clangd's missing compile_commands.json called out)
 - BMP and TIFF images are transcoded to PNG and read inline like PNG/JPEG
 - Turns the provider refuses (e.g. `reasoning_extraction`) are kept in the session file as a `provider_refusal` entry with the category, explanation, usage and whatever streamed before the refusal; the entry never reaches later requests
+- `say` now works in the bash tool on every platform. It speaks through omp's text-to-speech when that is set up (speech vocalization on, a `speech` model role, or the local TTS model installed) and through the system voice otherwise (macOS `say`, `spd-say`/`espeak-ng`/`espeak` on Linux, SAPI on Windows). It takes macOS `say`'s options (`-v` including `-v '?'`, `-r`, `-o` with `--file-format`/`--data-format`/`--channels`/`--bit-rate`/`--quality`, `-f`, `-i`, `--progress`, `-a`, `-n`), reads text from arguments, a file or stdin, and accepts internal URLs such as `local://notes.md` for `-f` and `-o`.
 
 ### Changed
 

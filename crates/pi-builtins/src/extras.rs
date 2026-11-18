@@ -17,6 +17,7 @@ use super::*;
 pub use crate::{
 	host::{CommandRunner, CommandStatus, EnvChange, Invocation, ShellCommand},
 	openfile::Fd,
+	speech::{SpeechAudio, SpeechHost, SpeechOutcome, SpeechRequest, SpeechVoice},
 };
 #[allow(unused_imports, reason = "used by whichever table entries the enabled features compile")]
 use crate::host::{AsyncUtility, Process, Utility, run_async_utility, run_process, run_utility};
@@ -84,6 +85,7 @@ macro_rules! for_each_extra {
 			utility [feature = "util.rm"] "rm" rm::Rm;
 			utility [feature = "util.rmdir"] "rmdir" rmdir::Rmdir;
 			utility [all(feature = "util.rsync", any(unix, windows))] "rsync" rsync::Rsync;
+			async_utility [feature = "util.say"] "say" say::Say;
 			utility [feature = "util.sd"] "sd" sd::Sd;
 			utility [feature = "util.sed"] "sed" sed::Sed;
 			utility [feature = "util.seq"] "seq" seq::Seq;

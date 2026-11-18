@@ -23,6 +23,7 @@ use std::{
 
 use bstr::{BStr, BString, ByteSlice};
 use parking_lot::Mutex;
+use pi_builtins::extras::SpeechHost;
 
 use crate::{
 	bash::{
@@ -525,6 +526,12 @@ impl PiHost {
 	/// now on.
 	pub fn set_reported_error(&self, flag: Option<Arc<AtomicBool>>) {
 		self.tools.reported_error.set(flag);
+	}
+
+	/// Set the speech synthesizer `say` speaks through for the commands run
+	/// from now on; `None` leaves it the system's.
+	pub fn set_speech(&self, speech: Option<Arc<dyn SpeechHost>>) {
+		self.tools.speech.set(speech);
 	}
 
 	/// The standard streams the shell's fds 0, 1 and 2 forward to.

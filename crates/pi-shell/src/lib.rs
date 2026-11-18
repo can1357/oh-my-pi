@@ -66,6 +66,7 @@ pub use paths::{expand_to_long_path, get_short_path};
 // Re-exported for `pi-natives`: the builtins live in `pi-builtins`,
 // but the native layer only ever depends on the shell.
 pub use pi_builtins::{
+	extras::{SpeechAudio, SpeechHost, SpeechOutcome, SpeechRequest, SpeechVoice},
 	panic_scope_active, rayon_global_pool_available, set_rayon_global_pool_available,
 };
 pub use shell::{

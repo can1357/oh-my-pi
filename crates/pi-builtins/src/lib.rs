@@ -20,6 +20,8 @@ mod host;
 #[cfg(unix)]
 pub use host::read_process_umask;
 mod openfile;
+/// The embedding application's speech synthesizer, as `say` reaches it.
+mod speech;
 mod stdio;
 /// The shell's locale categories, shared by the locale-aware utilities.
 #[cfg(any(
@@ -198,6 +200,8 @@ mod rm;
 mod rmdir;
 #[cfg(all(feature = "util.rsync", any(unix, windows)))]
 mod rsync;
+#[cfg(feature = "util.say")]
+mod say;
 #[cfg(feature = "util.sd")]
 mod sd;
 #[cfg(feature = "util.sed")]

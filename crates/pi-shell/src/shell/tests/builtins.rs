@@ -370,6 +370,7 @@ async fn every_utility_builtin_is_registered_under_its_own_name() {
 		"rm",
 		"rmdir",
 		"rsync",
+		"say",
 		"sd",
 		"sed",
 		"seq",
@@ -1899,4 +1900,50 @@ async fn windows_switch_syntax_runs_the_shadowed_system_program() {
 		.filter(|l| !l.is_empty())
 		.collect();
 	assert_eq!(lines, ["3", "banana split", "GET /api/users", "."]);
+}
+
+/// A host synthesizer that records what `say` asks it to speak.
+#[derive(Debug, Default)]
+struct RecordingSpeech(parking_lot::Mutex<Vec<crate::SpeechRequest>>);
+
+type SpeechFuture<T> = std::pin::Pin<Box<dyn Future<Output = std::io::Result<T>> + Send>>;
+
+impl crate::SpeechHost for RecordingSpeech {
+	fn voices(&self, _required: bool) -> SpeechFuture<Option<Vec<crate::SpeechVoice>>> {
+		Box::pin(async { Ok(Some(Vec::new())) })
+	}
+
+	fn speak(&self, request: crate::SpeechRequest) -> SpeechFuture<crate::SpeechOutcome> {
+		self.0.lock().push(request);
+		Box::pin(async { Ok(crate::SpeechOutcome::Spoken) })
+	}
+}
+
+/// The speech synthesizer handed to a run is the one `say` speaks through,
+/// wherever the command runs it: directly, at the end of a pipeline, in a
+/// subshell and from `xargs`. Without it `say` would use the system's voice
+/// instead of the one the user set up.
+#[tokio::test(flavor = "multi_thread")]
+async fn say_speaks_through_the_speech_host_of_its_run() {
+	let _guard = shell_test_lock().lock().await;
+	let speech = Arc::new(RecordingSpeech::default());
+	let shell = Shell::new(None);
+	let command = "say -r 200 hi && echo piped | say && (say subshell) && echo xargs | xargs say";
+	let result = shell
+		.run(
+			ShellRunOptions {
+				command: command.into(),
+				speech: Some(Arc::clone(&speech) as Arc<dyn crate::SpeechHost>),
+				..Default::default()
+			},
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("run say");
+	assert_eq!(result.exit_code, Some(0));
+	let requests = speech.0.lock();
+	let spoken: Vec<&str> = requests.iter().map(|request| request.text.as_str()).collect();
+	assert_eq!(spoken, ["hi", "piped\n", "subshell", "xargs"]);
+	assert_eq!(requests[0].rate, Some(200));
 }

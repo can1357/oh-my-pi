@@ -20,6 +20,7 @@ use anyhow::{Error, Result};
 use bstr::{BString, ByteSlice};
 use bytes::Bytes;
 use flume::Sender;
+use pi_builtins::extras::SpeechHost;
 use pi_vfs::Fs;
 #[cfg(not(unix))]
 use tokio::io::AsyncReadExt as _;
@@ -165,6 +166,8 @@ struct ShellRunConfig {
 	pipe_taps:  Option<Arc<PipeTaps>>,
 	/// Folds the run's engine events.
 	trace:      Option<Arc<RunTrace>>,
+	/// The speech synthesizer `say` speaks through.
+	speech:     Option<Arc<dyn SpeechHost>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +183,9 @@ pub struct ShellRunOptions {
 	/// Folds the run's engine events into a live model of `command`
 	/// (built over the same command text).
 	pub trace:      Option<Arc<RunTrace>>,
+	/// The application's speech synthesizer, which `say` speaks through
+	/// when it has one configured; `None` leaves `say` to the system's.
+	pub speech:     Option<Arc<dyn SpeechHost>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -359,6 +365,7 @@ impl Shell {
 			filesystem: options.filesystem,
 			pipe_taps:  options.pipe_taps,
 			trace:      options.trace,
+			speech:     options.speech,
 		};
 		run_shell_session(
 			self.session.clone(),
@@ -435,6 +442,7 @@ pub async fn execute_shell(
 		filesystem: None,
 		pipe_taps: None,
 		trace: None,
+		speech: None,
 	};
 	run_shell_oneshot(config, run_config, on_chunk, cancel_token).await
 }
@@ -476,6 +484,7 @@ pub async fn execute_shell_streams(
 		filesystem: None,
 		pipe_taps:  None,
 		trace:      None,
+		speech:     None,
 	};
 	run_shell_oneshot_streams(config, run_config, streams, cancel_token).await
 }
@@ -1194,6 +1203,7 @@ impl CommandScope<'_> {
 				.as_ref()
 				.map(|taps| Arc::clone(taps) as Arc<dyn crate::bash::PipeTap>),
 			reported_error,
+			speech: self.options.speech.clone(),
 			text_capture: false,
 			events: self
 				.options
