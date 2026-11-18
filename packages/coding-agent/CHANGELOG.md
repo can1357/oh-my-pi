@@ -6,6 +6,7 @@
 
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+- Fixed `/mcp reauth` hiding a rejected MCP dynamic client registration (e.g. Figma's remote MCP) behind "Please check your client credentials"; it now shows the registration endpoint, HTTP status, response detail, and the `oauth.clientId` remedy ([#19641](https://github.com/can1357/oh-my-pi/issues/19641))
 
 ### Changed
 
