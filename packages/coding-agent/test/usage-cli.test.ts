@@ -47,6 +47,7 @@ function makeLimit(opts: {
 	tier?: string;
 	accountId?: string;
 	provider?: string;
+	modelId?: string;
 	notes?: string[];
 	shared?: boolean;
 	sharedGroup?: string;
@@ -60,6 +61,7 @@ function makeLimit(opts: {
 			windowId: opts.windowId,
 			tier: opts.tier,
 			accountId: opts.accountId,
+			...(opts.modelId !== undefined ? { modelId: opts.modelId } : {}),
 			...(opts.shared !== undefined ? { shared: opts.shared } : {}),
 			...(opts.sharedGroup !== undefined ? { shared: true, sharedGroup: opts.sharedGroup } : {}),
 		},
@@ -680,6 +682,32 @@ describe("usage JSON policy", () => {
 		};
 		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
 		expect(policy).toMatchObject({ state: "inside-reserve", remainingPct: 5 });
+	});
+
+	it("keeps a spent shared per-model meter out of the account-wide state", () => {
+		// Codex marks its Spark meter `shared` with a `modelId`; routing gates only Spark requests on it.
+		const report = makeReport("openai-codex", "spark-spent@example.test", [
+			makeLimit({ id: "openai-codex:primary", provider: "openai-codex", usedFraction: 0.4, shared: true }),
+			makeLimit({
+				id: "openai-codex:spark:primary",
+				label: "5 Hour (Spark)",
+				provider: "openai-codex",
+				usedFraction: 1,
+				tier: "spark",
+				modelId: "GPT-5.3-Codex-Spark",
+				shared: true,
+			}),
+		]);
+		const options: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: (_provider, identity) => ({ provider: "openai-codex", account: { email: identity.email } }),
+		};
+		const [policy] = annotateUsagePolicy([report], [], [], options).reports.map(entry => entry.policy);
+		expect(policy).toMatchObject({
+			state: "eligible",
+			remainingPct: 60,
+			scopedExhausted: ["openai-codex:spark:primary"],
+		});
 	});
 });
 

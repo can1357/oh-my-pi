@@ -692,10 +692,14 @@ function computePolicyDiagnostics(
 	// account-wide state from the most-consumed account-wide window. Rows
 	// outside those windows (a Claude Fable or Opus weekly counter) gate only
 	// their own models in AuthStorage, so they are listed separately instead.
-	// A `sharedGroup` row is one subpool's quota, not an account-wide window,
-	// and a provider that marks no account-wide window keeps every row.
+	// A `sharedGroup` row is one subpool's quota and a shared row naming a
+	// `modelId` is one model's meter (Codex Spark), not account-wide windows;
+	// a provider that marks no account-wide window keeps every row.
 	const reported = limits ?? [];
-	const accountWide = reported.filter(limit => limit.scope.shared === true && limit.scope.sharedGroup === undefined);
+	const accountWide = reported.filter(
+		limit =>
+			limit.scope.shared === true && limit.scope.sharedGroup === undefined && limit.scope.modelId === undefined,
+	);
 	const pool = accountWide.length > 0 ? accountWide : reported;
 	const scopedExhausted = reported
 		.filter(limit => !pool.includes(limit) && resolveStatus(limit) === "exhausted")
