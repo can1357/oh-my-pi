@@ -19,7 +19,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-colo
 import { summarizeLoopCondition } from "./loop";
 import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
-import { sanitizeStatusText } from "../chrome/shared";
+import { sanitizeInlineStatusText, sanitizeStatusText } from "../chrome/shared";
 import {
 	formatContextUsage,
 	getContextUsageLevel,
@@ -264,14 +264,19 @@ function brandTimer(elapsedMs: number): string {
 const statusSegment: StatusLineSegment = {
 	id: "status",
 	render(ctx) {
+		// Plain statuses take the accent colour, a styled one keeps its own. The dot between
+		// statuses is dim like the segment separators; it sets its own colour, so what
+		// follows it (and a status that closed its styling) is re-opened in the accent.
+		const accent = sessionAccentAnsi(ctx) ?? theme.getFgAnsi("accent");
+		const separator = `${theme.getFgAnsi("dim")}${theme.sep.dot}${accent}`;
 		let text = "";
 		for (const status of ctx.hookStatuses ?? []) {
-			const sanitized = sanitizeStatusText(status);
+			const sanitized = sanitizeInlineStatusText(status);
 			if (!sanitized) continue;
-			text += text ? `${theme.sep.dot}${sanitized}` : sanitized;
+			text += text ? separator + sanitized : sanitized;
 		}
 		return {
-			content: text ? accentFg(ctx, "accent", text) : "",
+			content: text ? `${accent}${text}\x1b[39m` : "",
 			visible: text.length > 0,
 		};
 	},

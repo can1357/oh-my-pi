@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { sanitizeHookStatusText, sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
+import { sanitizeHookStatusText, sanitizeInlineStatusText, sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 
 const ESCAPE_FIXTURE =
 	"prefix " +
@@ -74,5 +74,43 @@ describe("sanitizeHookStatusText", () => {
 		expect(sanitizeHookStatusText("\x1b[38;5;196m⠠\x1b[38;5;208m⠄\x1b[0m \x1b[2mcaveman level: \x1b[22mFULL")).toBe(
 			"\x1b[38;5;196m⠠\x1b[38;5;208m⠄\x1b[0m \x1b[2mcaveman level: \x1b[22mFULL\x1b[0m",
 		);
+	});
+});
+
+describe("sanitizeInlineStatusText", () => {
+	it("keeps foreground colour and closes it with an exact reset instead of a full one", () => {
+		expect(sanitizeInlineStatusText("\x1b[33mwarn\x1b[0m")).toBe("\x1b[33mwarn\x1b[39m");
+		expect(sanitizeInlineStatusText("\x1b[1;31mfail\x1b[0m")).toBe("\x1b[1;31mfail\x1b[22;39m");
+		expect(sanitizeInlineStatusText("\x1b[2mdim \x1b[0;32mok")).toBe("\x1b[2mdim \x1b[22;32mok\x1b[39m");
+	});
+
+	it("never emits a full reset or a background, so the bar's own survive", () => {
+		const result = sanitizeInlineStatusText("\x1b[41;48;5;196;38;5;10mok\x1b[49m \x1b[48;2;1;2;3;104;7mx\x1b[0m");
+		expect(result).toBe("\x1b[38;5;10mok \x1b[7mx\x1b[27;39m");
+	});
+
+	it("keeps 256-colour, truecolor, and colon-form foregrounds whole", () => {
+		expect(sanitizeInlineStatusText("\x1b[38;5;208ma\x1b[38;2;1;2;3mb\x1b[38:2::4:5:6mc")).toBe(
+			"\x1b[38;5;208ma\x1b[38;2;1;2;3mb\x1b[38:2::4:5:6mc\x1b[39m",
+		);
+	});
+
+	it("drops a truncated extended colour instead of misreading what follows", () => {
+		expect(sanitizeInlineStatusText("\x1b[38;9;31mx")).toBe("x");
+		expect(sanitizeInlineStatusText("\x1b[38;5mx")).toBe("x");
+	});
+
+	it("strips unsafe sequences inside styled text", () => {
+		const result = sanitizeInlineStatusText(
+			"\x1b[33m\x1b]8;;https://example.com\x07docs\x1b]8;;\x07\x1b[2J\x9b31m\x1bPdcs\x1b\\\x1b[0m",
+		);
+		expect(result).toBe("\x1b[33mdocs\x1b[39m");
+	});
+
+	it("matches sanitizeStatusText for unstyled input and once only a background was left", () => {
+		for (const input of [ESCAPE_FIXTURE, "  a\tb\r\nc  "]) {
+			expect(sanitizeInlineStatusText(input)).toBe(sanitizeStatusText(input));
+		}
+		expect(sanitizeInlineStatusText("\x1b[41m  plain  \x1b[49m")).toBe("plain");
 	});
 });

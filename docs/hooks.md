@@ -307,7 +307,7 @@ Hook status text set via `ctx.ui.setStatus(key, text)` is:
 
 - stored per key
 - sorted by key name
-- sanitized (ANSI/VT escape sequences stripped; control characters mapped to spaces; repeated spaces collapsed; trimmed)
+- sanitized (OSC/DCS/other ANSI/VT escape sequences stripped; control characters mapped to spaces; repeated spaces collapsed; trimmed). SGR foreground colours and text styles are kept; the `status` segment also drops background colours
 - joined and width-truncated for display
 
 ## Error propagation and fallback

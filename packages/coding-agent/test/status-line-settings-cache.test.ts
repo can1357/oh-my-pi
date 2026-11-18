@@ -284,6 +284,32 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(cleared).not.toContain("Tests passing");
 	});
 
+	it("keeps an extension's colour in the status segment without disturbing the bar", () => {
+		const settings: StatusLineSettings = {
+			preset: "custom",
+			leftSegments: ["pi", "status", "model"],
+			rightSegments: [],
+			separator: "powerline-thin",
+			showHookStatus: false,
+			sessionAccent: false,
+			segmentOptions: { model: { showThinkingLevel: false } },
+		};
+		const plainBar = makeComponent(settings);
+		plainBar.setHookStatus("build", "building");
+		const styledBar = makeComponent(settings);
+		styledBar.setHookStatus("build", "\x1b[33;41mbuilding\x1b[0m");
+
+		const plain = plainBar.getTopBorder(120).content;
+		const styled = styledBar.getTopBorder(120).content;
+		expect(plain).toContain(`${theme.getFgAnsi("accent")}building`);
+		expect(styled).toContain("\x1b[33mbuilding\x1b[39m");
+		expect(styled).not.toContain("\x1b[41m");
+		// A full reset inside the segment would wipe the bar's background for what follows.
+		expect(styled.split("\x1b[0m").length).toBe(plain.split("\x1b[0m").length);
+		expect(stripVTControlCharacters(styled)).toBe(stripVTControlCharacters(plain));
+		expect(visibleWidth(styledBar.getTopBorder(24).content)).toBeLessThanOrEqual(24);
+	});
+
 	it("does not mutate shared preset segment options during narrow renders", () => {
 		const before = { ...STATUS_LINE_PRESETS.default.segmentOptions?.path };
 		const component = makeComponent({ preset: "default", sessionAccent: false });
