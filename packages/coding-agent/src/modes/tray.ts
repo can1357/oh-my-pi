@@ -1395,7 +1395,8 @@ export interface TrayHost {
 	main(): TrayMain;
 	/** Focus agent `id`'s session, as the hub's Open transcript does. */
 	focusAgent(id: string): void;
-	showJobsSheet(): void;
+	/** The jobs sheet, on job `selected` when it lists it. */
+	showJobsSheet(selected?: string): void;
 	/** Stop agent `id` for good, as cancelling its task job does. */
 	stopAgent(id: string): void;
 	cancelJob(id: string): void;
@@ -1599,7 +1600,7 @@ export class Tray implements Component {
 					this.#host.focusAgent(item.ref);
 				} else if (item?.item === "job") {
 					this.#peekRef = undefined;
-					this.#host.showJobsSheet();
+					this.#host.showJobsSheet(item.ref);
 				} else if (ref && this.#doneEntry(ref)?.openable) {
 					this.#peekRef = undefined;
 					this.#host.focusAgent(ref);

@@ -453,7 +453,8 @@ describe("Tray", () => {
 		// Opening clears the closer look.
 		expect(tray.describe().p && Reflect.get(tray.describe().p!, "peek")).toBeUndefined();
 		tray.handleNativeEvent(action("tray.open", "bg_1"));
-		expect(host.showJobsSheet).toHaveBeenCalledTimes(1);
+		// The sheet opens on that job.
+		expect(host.showJobsSheet).toHaveBeenCalledWith("bg_1");
 		tray.handleNativeEvent(action("tray.peek", "done"));
 		tray.handleNativeEvent(action("tray.open", "done"));
 		// The closer look stays: the done card is opened row by row.

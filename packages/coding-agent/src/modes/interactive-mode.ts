@@ -2224,7 +2224,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showError(error instanceof Error ? error.message : String(error)),
 			);
 		},
-		showJobsSheet: () => this.showJobsSheet(),
+		showJobsSheet: selected => this.showJobsSheet(selected),
 		stopAgent: id => this.#stopTrayAgent(id),
 		cancelJob: id => {
 			this.session.cancelAsyncJob(id);
@@ -8868,26 +8868,30 @@ export class InteractiveMode implements InteractiveModeContext {
 	 *
 	 * It lists the viewed session's jobs and its subagents' as a tree. A focused
 	 * subagent view opens it without the Cancel action: the view only watches
-	 * that agent, as `/jobs kill` stays main-session only.
+	 * that agent, as `/jobs kill` stays main-session only. `selected` opens it
+	 * on that job (a tray card's), when the sheet lists it.
 	 */
-	showJobsSheet(): void {
+	showJobsSheet(selected?: string): void {
 		if (this.#jobsSheetHandle) return;
 		const session = this.viewSession;
 		if (!session.getAsyncJobTree()) {
 			this.showWarning("Async background jobs are unavailable in this session.");
 			return;
 		}
-		const sheet = new JobsSheet({
-			load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
-			inspect: id => session.inspectAsyncJob(id),
-			cancel: this.focusedAgentId
-				? undefined
-				: id => {
-						session.cancelAsyncJob(id);
-						this.ui.requestRender();
-					},
-			close: () => this.#hideJobsSheet(),
-		});
+		const sheet = new JobsSheet(
+			{
+				load: () => session.getAsyncJobTree() ?? { running: [], recent: [] },
+				inspect: id => session.inspectAsyncJob(id),
+				cancel: this.focusedAgentId
+					? undefined
+					: id => {
+							session.cancelAsyncJob(id);
+							this.ui.requestRender();
+						},
+				close: () => this.#hideJobsSheet(),
+			},
+			{ selected },
+		);
 		this.#jobsSheetHandle = this.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
 		this.#jobsSheetTimer = setInterval(() => this.ui.requestRender(), JOBS_SHEET_REFRESH_MS);
 		this.ui.setFocus(sheet);

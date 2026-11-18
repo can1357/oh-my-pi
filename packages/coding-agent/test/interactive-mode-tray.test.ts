@@ -12,7 +12,7 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { cfgDisplayPinnedAgents } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { asyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/async-job-views";
+import { asyncJobSnapshot, asyncJobTree } from "@oh-my-pi/pi-coding-agent/session/async-job-views";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
@@ -25,6 +25,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import type { Component } from "@oh-my-pi/pi-tui";
 import type { DescribeContext, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
@@ -342,6 +343,21 @@ describe("InteractiveMode tray", () => {
 
 		expect(children(bareJob).map(role)).toEqual(["omp.tray.head", "omp.tray.out"]);
 		expect(children(bareJob)[1]!.p).toMatchObject({ text: "two\nthree", wrap: "none" });
+	});
+
+	it("opens the jobs sheet on the job a tray card stands for, taking the keyboard", async () => {
+		await seed();
+		const cx = context(true);
+		spyOn(session, "getAsyncJobTree").mockImplementation(options => asyncJobTree(manager, undefined, options));
+		const shown = spyOn(mode.ui, "showOverlay");
+		const focus = spyOn(mode.ui, "setFocus");
+		const tray = trayOf(cx);
+		tray.component.handleNativeEvent?.({ type: "action", key: "", act: "tray.open", value: "bg_2", mods: [] });
+		const sheet = shown.mock.calls.at(-1)?.[0];
+		expect(sheet).toBeInstanceOf(JobsSheet);
+		const list = nodes(sheet!.describe!(cx)!).find(node => node.k === "list");
+		expect(list?.p && Reflect.get(list.p, "selected")).toBe("bg_2");
+		expect(focus).toHaveBeenLastCalledWith(sheet);
 	});
 
 	it("shows the closer look only for the card asked for, and drops it on an empty peek", async () => {
