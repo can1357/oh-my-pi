@@ -3425,6 +3425,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						const retryFallback: InitialRetryFallbackState = {
 							role: chainKey,
 							originalSelector,
+							originalModelIdentity: originalModel ? formatModelStringWithRouting(originalModel) : undefined,
 							originalThinkingLevel: parsedOriginal?.thinkingLevel,
 						};
 						return [
@@ -3706,6 +3707,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const retryFallback: InitialRetryFallbackState = {
 					role: chainKey,
 					originalSelector,
+					originalModelIdentity: originalModel ? formatModelStringWithRouting(originalModel) : undefined,
 					originalThinkingLevel: parsedOriginal?.thinkingLevel,
 				};
 				// `fallbackCandidates` is the default-availability pool, which ignores

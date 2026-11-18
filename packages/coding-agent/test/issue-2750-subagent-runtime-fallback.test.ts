@@ -136,11 +136,13 @@ describe("subagent runtime model resolution", () => {
 						activeModel = model("custom", "coding-router");
 						activeLevel = ThinkingLevel.Max;
 					}
-					await recovery.onAssistantSettledSuccessfully({
+					const servedTurn = {
 						role: "assistant",
 						content: [{ type: "text", text: "literal model produced this answer" }],
 						stopReason: "stop",
-					} as AssistantMessage);
+					} as AssistantMessage;
+					const fallbackSuccess = recovery.onAssistantMessageEnd(servedTurn);
+					await recovery.onAssistantSettledSuccessfully(servedTurn, fallbackSuccess);
 					// A newly armed model must not steal the settled answer's identity.
 					activeModel = model("custom", "unserved-candidate");
 				});

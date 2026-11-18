@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Bounded cooldown-expiry restoration to three failed restores per fallback episode. Successful primary output or explicit model selection ends the episode; cancellations preserve effort, attribution, and unused restore allowance. Restoration also handles noncanonical startup selectors and model-clamped fallback effort. Restored primaries honor their current effort-specific chains, and intrinsic Fast-to-Standard downgrades end automatic restoration. Fallback-success notices survive interrupted observers without being duplicated by overlapping callbacks ([#13065](https://github.com/can1357/oh-my-pi/pull/13065) by [@Deftera186](https://github.com/Deftera186))
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
 

@@ -351,9 +351,11 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		it("re-arms the recovery after an intervening turn that produced output", async () => {
 			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
 			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
-			await recovery.onAssistantSettledSuccessfully(
-				settledTurn([{ type: "toolCall", id: "call-progress", name: "bash", arguments: { command: "pwd" } }]),
-			);
+			const servedTurn = settledTurn([
+				{ type: "toolCall", id: "call-progress", name: "bash", arguments: { command: "pwd" } },
+			]);
+			const fallbackSuccess = recovery.onAssistantMessageEnd(servedTurn);
+			await recovery.onAssistantSettledSuccessfully(servedTurn, fallbackSuccess);
 			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
 		});
 
@@ -366,7 +368,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		it("does not re-arm on a settled turn that produced no output", async () => {
 			const recovery = new TurnRecovery(createHost(model, modelRegistry, { shakeSucceeds: true }));
 			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-retry");
-			await recovery.onAssistantSettledSuccessfully(settledTurn([]));
+			const emptyTurn = settledTurn([]);
+			const fallbackSuccess = recovery.onAssistantMessageEnd(emptyTurn);
+			await recovery.onAssistantSettledSuccessfully(emptyTurn, fallbackSuccess);
 			expect(await recovery.handleResponsesRequestBodyReadTimeout(timeoutTurn())).toBe("handled-terminal");
 		});
 	});

@@ -521,7 +521,7 @@ import { resolveWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
-import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
+import { type PendingRetryFallbackSuccess, TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
 
 export * from "./agent-session-events";
@@ -4768,6 +4768,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (event.type === "message_end" && event.message.role === "toolResult") {
 			this.#todo.onToolResult(event.message.toolName, event.message.isError);
 		}
+		let retryFallbackSuccess: PendingRetryFallbackSuccess | undefined;
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
 		// land in one tick its handler can run before this handler's post-emit
@@ -4775,6 +4776,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// toolUse) assistant message and skipping settle-only work.
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			this.#lastAssistantMessage = event.message;
+			retryFallbackSuccess = this.#recovery.onAssistantMessageEnd(event.message);
 			for (const block of event.message.content) {
 				if (block.type === "toolCall") this.#runToolCallIds.add(block.id);
 			}
@@ -5049,7 +5051,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
 					this.#skippedPostTurnSpeculationCompletion = this.#maintenance.speculationCompletion;
 				}
-				await this.#recovery.onAssistantSettledSuccessfully(assistantMsg);
+				await this.#recovery.onAssistantSettledSuccessfully(assistantMsg, retryFallbackSuccess);
 				// Broker deployments: report this request's burn so the broker can
 				// attribute token usage per install. No-op with a local auth store.
 				this.#modelRegistry.authStorage.usage.observe({
