@@ -10,8 +10,14 @@ import { type Component } from "../tui";
 import { formatBytes, formatCount, formatDuration } from "@oh-my-pi/pi-utils";
 import { span } from "../native/describe";
 import type { JobSnapshot } from "../tools/wait";
-import type { DaemonSnapshot } from "../tools/daemon";
-import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
+import { type PersistedSnapshot, serviceView } from "../tools/daemon";
+import {
+	type AsyncNotifyDetails,
+	type CustomMessage,
+	type FileMentionMessage,
+	resolveAbortLabel,
+	shouldRenderAbortReason,
+} from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
 import {
 	formatArtifactErrorNotice,
@@ -20,7 +26,13 @@ import {
 	type OutputMeta,
 } from "../tools/output-meta";
 import type { OutputArtifactError } from "../tools/streaming-output";
-import { formatStyledPath, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import {
+	formatStyledPath,
+	PREVIEW_LIMITS,
+	replaceTabs,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../render/render-utils";
 import { canonicalizeMessage } from "./thinking-display";
 import { ToolActivityContainer } from "../chrome/tool-activity";
 import { CustomMessageComponent } from "./custom-message";
@@ -143,13 +155,13 @@ function facts(values: readonly (string | undefined)[]): TspSpan[] {
 
 /**
  * Render a `launch-completion` custom message (terminal supervised-process
- * exits from the launch broker) as a transcript block of one compact
+ * exits reported by the daemon) as a transcript block of one compact
  * "Supervised process ..." row per daemon, matching background-job rows.
  */
 export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolActivityContainer {
-	const details = (message as CustomMessage<{ daemons?: DaemonSnapshot[] }>).details;
+	const details = (message as CustomMessage<{ daemons?: PersistedSnapshot[] }>).details;
 	const rows: TranscriptStatusRow[] = [];
-	const daemons = details?.daemons ?? [];
+	const daemons = (details?.daemons ?? []).map(serviceView);
 	if (daemons.length === 0 && typeof message.content === "string") {
 		rows.push({
 			parts: [{ text: `${theme.status.success} ${message.content}`, color: "dim" }],
@@ -178,6 +190,51 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 				message: [span(label), span(" "), span(daemon.name, "mono"), ...facts([exit, duration])],
 			},
 		});
+	}
+	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
+}
+
+/**
+ * Render an `async-notify` custom message (output a running background job or
+ * service was asked to report) as a transcript block: one "Background job
+ * output" / "Supervised process output" row per source with its first matching
+ * lines beneath (natively the notice's body: wrapped in full, no icon per line).
+ */
+export function buildAsyncNotifyBlock(message: CustomOrHookMessage): ToolActivityContainer {
+	const details = (message as CustomMessage<AsyncNotifyDetails>).details;
+	const rows: TranscriptStatusRow[] = [];
+	const detail = (text: string, color: "dim" | "warning"): TranscriptStatusRow => ({
+		parts: [{ text, color }],
+		indent: 3,
+		native: {
+			tone: color === "warning" ? "warning" : "info",
+			message: [span(text, color === "dim" ? "mono" : undefined)],
+		},
+	});
+	for (const report of details?.reports ?? []) {
+		const label = report.type === "service" ? "Supervised process output" : "Background job output";
+		const total = report.lines.length + report.omitted;
+		const tally = formatCount("line", total);
+		rows.push({
+			parts: [
+				{ text: `${theme.status.info} ${label}`, color: "accent" },
+				{ text: report.id, color: "accent" },
+				{ text: `(${tally})`, color: "dim" },
+			],
+			native: { tone: "info", message: [span(label), ...facts([report.id, tally])] },
+		});
+		const shown = report.lines.slice(0, PREVIEW_LIMITS.OUTPUT_EXPANDED);
+		for (const line of shown) {
+			const output = replaceTabs(line);
+			rows.push({
+				// Process output: an overlong line would break the text terminal's row; a native one wraps it.
+				parts: [{ text: truncateToWidth(output, TRUNCATE_LENGTHS.LINE), color: "dim" }],
+				indent: 3,
+				native: { tone: "info", body: true, message: [span(output, "mono")] },
+			});
+		}
+		if (total > shown.length) rows.push(detail(`… ${total - shown.length} more`, "dim"));
+		if (report.stopped) rows.push(detail("Matched too often: notify is off for it", "warning"));
 	}
 	return new ToolActivityContainer(new TranscriptStatusBlock(rows));
 }

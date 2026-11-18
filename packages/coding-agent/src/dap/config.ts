@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isRecord, logger, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, ptree, WhichCachePolicy } from "@oh-my-pi/pi-utils";
 import { hasRootMarkers, parseConfigContent, resolveCommand } from "../lsp/config";
 import { type ConfigFileAdapter, configFileSources } from "../utils/config-file-sources";
 import DEFAULTS from "./defaults.json" with { type: "json" };
@@ -371,13 +371,82 @@ export function selectLaunchAdapter(
 	return selectAutomaticLaunchAdapter(program, cwd, programKind, configs);
 }
 
-export function selectAttachAdapter(cwd: string, adapterName?: string, port?: number): DapResolvedAdapter | null {
+/** Attach target as the debug tool received it. */
+export interface DapAttachTarget {
+	pid?: number;
+	port?: number;
+	host?: string;
+}
+
+/** Adapter for the runtime a process runs, keyed on its executable name. */
+const RUNTIME_ADAPTERS: ReadonlyArray<readonly [RegExp, string]> = [
+	[/^(node|nodejs|deno|electron)(\.exe)?$/i, "js-debug-adapter"],
+	[/^python(\d+(\.\d+)*)?(\.exe)?$/i, "debugpy"],
+	[/^dotnet(\.exe)?$/i, "netcoredbg"],
+	[/^ruby(\.exe)?$/i, "rdbg"],
+	[/^php(\.exe)?$/i, "php-debug-adapter"],
+];
+
+const ATTACH_PROBE_TIMEOUT_MS = 1_000;
+
+/** Executable name of a running process, or undefined when it cannot be read. */
+async function processImageName(pid: number): Promise<string | undefined> {
+	try {
+		if (process.platform === "linux") {
+			return (await fs.promises.readFile(`/proc/${pid}/comm`, "utf-8")).trim() || undefined;
+		}
+		if (process.platform === "win32") return undefined;
+		const result = await ptree.exec(["ps", "-o", "comm=", "-p", String(pid)], {
+			allowNonZero: true,
+			signal: AbortSignal.timeout(ATTACH_PROBE_TIMEOUT_MS),
+		});
+		const image = result.stdout.trim();
+		return image ? path.basename(image) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Whether `host:port` serves a V8 inspector (node --inspect), which js-debug attaches to. */
+async function isV8Inspector(host: string, port: number): Promise<boolean> {
+	try {
+		const response = await fetch(`http://${host}:${port}/json/version`, {
+			signal: AbortSignal.timeout(ATTACH_PROBE_TIMEOUT_MS),
+		});
+		if (!response.ok) return false;
+		const body = (await response.json()) as Record<string, unknown>;
+		return typeof body["V8-Version"] === "string" || typeof body["Protocol-Version"] === "string";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Adapter for an attach. Without an explicit adapter it follows the target: the
+ * runtime of the process `pid` runs (node → js-debug, python → debugpy, …), or
+ * for a port, js-debug when it serves a V8 inspector and debugpy otherwise.
+ * Native targets fall back to gdb/lldb-dap.
+ */
+export async function selectAttachAdapter(
+	cwd: string,
+	adapterName?: string,
+	target: DapAttachTarget = {},
+): Promise<DapResolvedAdapter | null> {
 	if (adapterName) {
 		return resolveAdapter(adapterName, cwd);
 	}
 	const available = getAvailableAdapters(cwd);
-	if (port !== undefined) {
-		const debugpy = available.find(adapter => adapter.name === "debugpy");
+	const byName = (name: string) => available.find(adapter => adapter.name === name);
+	if (target.pid !== undefined) {
+		const image = await processImageName(target.pid);
+		const runtimeAdapter = image ? RUNTIME_ADAPTERS.find(([pattern]) => pattern.test(image))?.[1] : undefined;
+		const match = runtimeAdapter ? byName(runtimeAdapter) : undefined;
+		if (match) return match;
+	}
+	if (target.port !== undefined) {
+		const jsDebug = byName("js-debug-adapter");
+		if (jsDebug && (await isV8Inspector(target.host ?? "127.0.0.1", target.port))) return jsDebug;
+		const debugpy = byName("debugpy");
 		if (debugpy) return debugpy;
 	}
 	for (const preferred of EXTENSIONLESS_DEBUGGER_ORDER) {
