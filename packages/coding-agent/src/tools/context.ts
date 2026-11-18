@@ -29,6 +29,10 @@ declare module "@oh-my-pi/pi-agent-core" {
 		 *  drop line gutters. `read` then still returns image files as images
 		 *  instead of their bytes decoded as text, which Cursor rejects (#15630). */
 		rawImages?: boolean;
+		/** Set by eval's tool bridge: a program, not a model, consumes the result. The tool wrapper
+		 *  then neither spills the result to an artifact nor appends display notices (truncation
+		 *  stays structured in `details.meta`), and `read` returns `:raw` selections whole. */
+		programmatic?: boolean;
 		/** Set while the session runs the Spotlight experiment: the tool wrapper passes the final result of each of
 		 *  the agent's own calls (`toolCall` lists it under the tool's name) through it. */
 		spotlightShape?: CalledToolShaper;

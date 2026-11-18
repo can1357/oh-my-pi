@@ -16,7 +16,7 @@ function assistantCalls(toolCalls: Array<{ name: string; arguments: Record<strin
 	} as unknown as AgentMessage;
 }
 
-function createRuntimeHarness(messages: AgentMessage[]) {
+function createRuntimeHarness(messages: AgentMessage[], viewMessages: AgentMessage[] = messages) {
 	const setText = vi.fn();
 	const showStatus = vi.fn();
 	const showWarning = vi.fn();
@@ -29,6 +29,7 @@ function createRuntimeHarness(messages: AgentMessage[]) {
 		runtime: {
 			ctx: {
 				session: { messages },
+				viewSession: { messages: viewMessages },
 				editor: { setText },
 				showStatus,
 				showWarning,
@@ -56,6 +57,18 @@ describe("/copy slash command", () => {
 		expect(harness.showStatus).toHaveBeenCalledWith("Copied code block to clipboard");
 		expect(harness.showCopySelector).not.toHaveBeenCalled();
 		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("copies from the focused subagent's transcript, not the main session", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness(
+			[assistantText("main\n```ts\nconst main = 1;\n```")],
+			[assistantText("subagent\n```ts\nconst sub = 1;\n```")],
+		);
+
+		expect(await executeBuiltinSlashCommand("/copy code", harness.runtime)).toBe(true);
+
+		expect(copySpy).toHaveBeenCalledWith("const sub = 1;");
 	});
 
 	it("copies the last runnable command without opening the picker", async () => {

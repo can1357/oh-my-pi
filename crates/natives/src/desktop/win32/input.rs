@@ -1,0 +1,1906 @@
+use std::time::Duration;
+
+use enigo::{Axis, Button, Direction, Enigo, Mouse, Settings};
+use windows_sys::Win32::{
+	Foundation::HWND,
+	UI::{
+		Input::KeyboardAndMouse::{GetKeyboardLayout, HKL},
+		WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+	},
+};
+
+use super::{
+	super::{
+		backend::{DeliveryMode, ElementInput, Modifiers, MouseButton, PointerEvent},
+		control,
+		error::{CoreResult, DesktopError},
+		keys::{KeyDirection, KeyName, hold_keys as with_held_keys},
+		types::Target,
+	},
+	ax::Win32Ax,
+	window,
+};
+
+pub(super) fn create_global_input() -> CoreResult<Enigo> {
+	use windows_sys::Win32::UI::HiDpi::{
+		DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, SetThreadDpiAwarenessContext,
+	};
+
+	let _ = enigo::set_dpi_awareness();
+	// SAFETY: the constant is a valid DPI context. Backend initialization runs
+	// on the dedicated desktop worker, whose Win32 queries must stay physical
+	// even when the embedding process has already fixed a different DPI mode.
+	if unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE) }.is_null() {
+		return Err(DesktopError::input_failed(
+			"cannot enable physical desktop coordinates on the input worker",
+		));
+	}
+	Enigo::new(&Settings { open_prompt_to_get_permissions: false, ..Settings::default() }).map_err(
+		|error| DesktopError::input_failed(format!("Win32 input initialization failed: {error}")),
+	)
+}
+
+fn enigo_error(error: impl std::fmt::Display) -> DesktopError {
+	DesktopError::input_failed(format!("Win32 global input failed: {error}"))
+}
+
+/// Retains cleanup failures even when delivery itself already failed.
+fn completed(result: CoreResult<()>, cleanup: CoreResult<()>) -> CoreResult<()> {
+	match (result, cleanup) {
+		(Err(mut error), Err(cleanup)) => {
+			error.message.push_str("; cleanup also failed: ");
+			error.message.push_str(&cleanup.message);
+			Err(error)
+		},
+		(Err(error), _) | (_, Err(error)) => Err(error),
+		(Ok(()), Ok(())) => Ok(()),
+	}
+}
+
+const fn button_to_enigo(button: MouseButton) -> Button {
+	match button {
+		MouseButton::Left => Button::Left,
+		MouseButton::Right => Button::Right,
+		MouseButton::Middle => Button::Middle,
+	}
+}
+
+fn modifier_keys(modifiers: Modifiers) -> impl Iterator<Item = KeyName> {
+	[
+		modifiers.ctrl.then_some(KeyName::Ctrl),
+		modifiers.alt.then_some(KeyName::Alt),
+		modifiers.shift.then_some(KeyName::Shift),
+		modifiers.meta.then_some(KeyName::Meta),
+	]
+	.into_iter()
+	.flatten()
+}
+
+fn keyboard_layout(target: Option<HWND>) -> HKL {
+	super::keyboard::target_layout(
+		target,
+		// SAFETY: GetForegroundWindow has no preconditions.
+		|| unsafe { GetForegroundWindow() },
+		|hwnd| {
+			// SAFETY: Both calls accept scalar window/thread identifiers.
+			let layout =
+				unsafe { GetKeyboardLayout(GetWindowThreadProcessId(hwnd, std::ptr::null_mut())) };
+			(!layout.is_null()).then_some(layout)
+		},
+		// Console window threads expose no layout; retain the worker's mapping.
+		// SAFETY: Thread ID zero requests this thread's current layout.
+		|| unsafe { GetKeyboardLayout(0) },
+	)
+}
+
+fn global_button(input: &mut Enigo, button: MouseButton, direction: Direction) -> CoreResult<()> {
+	control::check()?;
+	input
+		.button(button_to_enigo(button), direction)
+		.map_err(enigo_error)
+}
+
+fn with_global_keys(
+	input: &mut Enigo,
+	keys: &[KeyName],
+	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
+) -> CoreResult<()> {
+	foreground::with_desktop_keys(keys, || operation(input))
+}
+
+fn with_global_modifiers(
+	input: &mut Enigo,
+	modifiers: Modifiers,
+	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
+) -> CoreResult<()> {
+	let mut keys = [KeyName::Shift; 4];
+	let mut count = 0;
+	for (index, key) in modifier_keys(modifiers).enumerate() {
+		keys[index] = key;
+		count = index + 1;
+	}
+	with_global_keys(input, &keys[..count], operation)
+}
+
+fn scroll_steps(delta: f64) -> i32 {
+	if delta.abs() < f64::EPSILON {
+		0
+	} else {
+		let magnitude = ((delta.abs() + 50.0) / 100.0).floor().max(1.0);
+		delta.signum() as i32 * magnitude.min(f64::from(i32::MAX)) as i32
+	}
+}
+
+fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
+	match event {
+		PointerEvent::Click { x, y, button, count, modifiers } => {
+			with_global_modifiers(input, modifiers, |input| {
+				foreground::move_pointer(x, y)?;
+				for _ in 0..count {
+					// A press is always released: a cancel stops the next press.
+					control::check()?;
+					let pressed = global_button(input, button, Direction::Press);
+					let released = control::cleanup(|| global_button(input, button, Direction::Release));
+					completed(pressed, released)?;
+				}
+				Ok(())
+			})
+		},
+		PointerEvent::Hold { x, y, button, keys, duration } => {
+			with_global_keys(input, &keys, |input| {
+				foreground::move_pointer(x, y)?;
+				control::bounded_hold(duration, |down| {
+					global_button(
+						input,
+						button,
+						if down {
+							Direction::Press
+						} else {
+							Direction::Release
+						},
+					)
+				})
+			})
+		},
+		PointerEvent::Move { x, y } => foreground::move_pointer(x, y),
+		PointerEvent::Drag { path, button, modifiers, mut keys } => {
+			control::add_modifiers(&mut keys, modifiers);
+			let Some(&(start_x, start_y)) = path.first() else {
+				return Err(DesktopError::input_failed("drag path is empty"));
+			};
+			with_global_keys(input, &keys, |input| {
+				foreground::move_pointer(start_x, start_y)?;
+				control::check()?;
+				let movement = global_button(input, button, Direction::Press).and_then(|()| {
+					path.iter().skip(1).try_for_each(|&(x, y)| {
+						control::wait(Duration::from_millis(16))?;
+						foreground::move_pointer(x, y)
+					})
+				});
+				let release = control::cleanup(|| global_button(input, button, Direction::Release));
+				completed(movement, release)
+			})
+		},
+		PointerEvent::Scroll { x, y, dx, dy } => {
+			foreground::move_pointer(x, y)?;
+			let horizontal = scroll_steps(dx);
+			let vertical = scroll_steps(dy);
+			if horizontal != 0 {
+				control::check()?;
+				input
+					.scroll(horizontal, Axis::Horizontal)
+					.map_err(enigo_error)?;
+			}
+			if vertical != 0 {
+				control::check()?;
+				input
+					.scroll(vertical, Axis::Vertical)
+					.map_err(enigo_error)?;
+			}
+			Ok(())
+		},
+	}
+}
+
+/// Presses `keys` and releases them. A shortcut fires on its last press, so a
+/// cancel once every key is down no longer fails the call.
+fn global_key_chord(input: &mut Enigo, keys: &[KeyName]) -> CoreResult<()> {
+	with_global_keys(input, keys, |_| Ok(()))
+}
+
+mod background {
+	use std::{ffi::c_void, time::Duration};
+
+	use windows_sys::Win32::{
+		Foundation::{ERROR_ACCESS_DENIED, GetLastError, HWND, LPARAM, POINT, WPARAM},
+		UI::{
+			Input::KeyboardAndMouse::{
+				IsWindowEnabled, MAPVK_VK_TO_VSC, MapVirtualKeyExW, VK_BACK, VK_CAPITAL, VK_CONTROL,
+				VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7,
+				VK_F8, VK_F9, VK_F10, VK_F11, VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18,
+				VK_F19, VK_F20, VK_F21, VK_F22, VK_F23, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_LWIN,
+				VK_MENU, VK_NEXT, VK_NUMLOCK, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SNAPSHOT,
+				VK_SPACE, VK_TAB, VK_UP, VkKeyScanExW,
+			},
+			WindowsAndMessaging::{
+				CS_DBLCLKS, GCL_STYLE, GetClassLongW, IsChild, IsWindow, PostMessageW,
+				SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
+				WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
+				WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONDBLCLK,
+				WM_RBUTTONDOWN, WM_RBUTTONUP,
+			},
+		},
+	};
+	use xutf::graphemes_str;
+
+	use super::{
+		CoreResult, DesktopError, KeyDirection, KeyName, Modifiers, MouseButton, PointerEvent,
+		control, with_held_keys,
+	};
+	use crate::desktop::win32::{
+		ax::Win32Ax,
+		delivery::{
+			EventKind, TargetTraits, TextUnit, is_chromium_class, non_client_drag_region,
+			posts_double_click, text_input_unsupported, text_units, would_be_silently_dropped,
+		},
+		window,
+	};
+
+	const MK_LBUTTON: usize = 0x0001;
+	const MK_RBUTTON: usize = 0x0002;
+	const MK_MBUTTON: usize = 0x0010;
+	const WHEEL_DELTA: i32 = 120;
+
+	/// Time between a posted button press and its release.
+	const CLICK_HOLD: Duration = Duration::from_millis(35);
+	/// Time between the clicks of a posted multi-click.
+	const CLICK_GAP: Duration = Duration::from_millis(80);
+	/// Time between posted drag moves.
+	const DRAG_STEP: Duration = Duration::from_millis(16);
+	/// Time between posted key transitions and typed characters.
+	pub(super) const KEY_GAP: Duration = Duration::from_millis(4);
+	/// Extra time after a posted Return while rich editors build a paragraph.
+	const ENTER_SETTLE: Duration = Duration::from_millis(20);
+
+	pub(super) fn hwnd(id: &str) -> CoreResult<HWND> {
+		let address = id
+			.parse::<usize>()
+			.map_err(|_| DesktopError::invalid_target(format!("invalid Win32 window id '{id}'")))?;
+		let hwnd = std::ptr::with_exposed_provenance_mut::<c_void>(address);
+		// SAFETY: IsWindow validates the opaque value before it is used.
+		if unsafe { IsWindow(hwnd) } == 0 {
+			return Err(DesktopError::window_not_found(format!(
+				"target window '{id}' is no longer present"
+			)));
+		}
+		Ok(hwnd)
+	}
+
+	/// Refuses higher-integrity targets and unreadable privilege state before
+	/// relying on a Win32 enqueue result.
+	pub(super) fn ensure_integrity(id: &str, root: HWND) -> CoreResult<()> {
+		// SAFETY: IsWindowEnabled validates the target handle.
+		if unsafe { IsWindowEnabled(root) } == 0 {
+			return Err(DesktopError::input_failed(format!(
+				"window {id} is disabled; target its active dialog instead"
+			)));
+		}
+		window::uipi_block(root).map_or(Ok(()), |reason| {
+			Err(DesktopError::permission_denied(format!(
+				"window {id} cannot receive synthetic input: {reason}"
+			)))
+		})
+	}
+
+	fn drop_reason(root: HWND, class: &str, kind: EventKind) -> Option<&'static str> {
+		would_be_silently_dropped(
+			TargetTraits {
+				class,
+				chromium_descendant: window::has_chromium_descendant(root),
+				foreground: window::owns_foreground(root),
+				xaml_host: window::is_xaml_host(root),
+			},
+			kind,
+		)
+	}
+
+	/// Refuses typed text that no delivery mode can land on `root`.
+	pub(super) fn ensure_text_supported(id: &str, root: HWND) -> CoreResult<()> {
+		let class = window::class_name(root);
+		text_input_unsupported(&class, cfg!(target_arch = "aarch64")).map_or(Ok(()), |reason| {
+			Err(DesktopError::input_failed(format!(
+				"window {id} ({class}) cannot take typed text: {reason}"
+			)))
+		})
+	}
+
+	fn refusal(id: &str, class: &str, kind: EventKind, reason: &str) -> DesktopError {
+		DesktopError::background_unavailable(format!(
+			"window {id} ({class}) drops background {} events: {reason}; no input was sent",
+			kind.name()
+		))
+	}
+
+	fn ensure_delivery(id: &str, root: HWND, kind: EventKind) -> CoreResult<()> {
+		ensure_integrity(id, root)?;
+		let class = window::class_name(root);
+		drop_reason(root, &class, kind)
+			.map_or(Ok(()), |reason| Err(refusal(id, &class, kind, reason)))
+	}
+
+	fn post(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> CoreResult<()> {
+		control::check()?;
+		// SAFETY: Win32 copies these scalar message parameters into the validated
+		// target's queue and retains no borrowed memory.
+		if unsafe { PostMessageW(hwnd, message, wparam, lparam) } != 0 {
+			Ok(())
+		} else {
+			// SAFETY: GetLastError has no preconditions and is read immediately.
+			let error = unsafe { GetLastError() };
+			let message = format!("PostMessageW failed with Win32 error {error}");
+			Err(if error == ERROR_ACCESS_DENIED {
+				DesktopError::permission_denied(message)
+			} else {
+				DesktopError::input_failed(message)
+			})
+		}
+	}
+
+	fn packed_point(x: i32, y: i32) -> CoreResult<LPARAM> {
+		let x = i16::try_from(x)
+			.map_err(|_| DesktopError::input_failed(format!("window x coordinate {x} exceeds i16")))?;
+		let y = i16::try_from(y)
+			.map_err(|_| DesktopError::input_failed(format!("window y coordinate {y} exceeds i16")))?;
+		let bits = u32::from(u16::from_ne_bytes(x.to_ne_bytes()))
+			| (u32::from(u16::from_ne_bytes(y.to_ne_bytes())) << 16);
+		Ok(i32::from_ne_bytes(bits.to_ne_bytes()) as isize)
+	}
+
+	/// Window, display and AX coordinates all use physical desktop pixels.
+	const fn screen_point(x: f64, y: f64) -> POINT {
+		POINT { x: x.round() as i32, y: y.round() as i32 }
+	}
+
+	/// Deepest child of `root` under a physical screen point, with the point in
+	/// that child's client coordinates.
+	fn child_under(root: HWND, point: POINT) -> CoreResult<(HWND, POINT)> {
+		window::deepest_child(root, point).ok_or_else(|| {
+			DesktopError::background_unavailable(
+				"cannot map this point into an enabled target client area; no input was sent",
+			)
+		})
+	}
+
+	/// Deepest child of `root` under a physical desktop coordinate, with the
+	/// packed client-coordinate `LPARAM` for that child.
+	fn child_at(root: HWND, x: f64, y: f64) -> CoreResult<(HWND, LPARAM)> {
+		let (child, client) = child_under(root, screen_point(x, y))?;
+		Ok((child, packed_point(client.x, client.y)?))
+	}
+
+	fn client_point(hwnd: HWND, x: f64, y: f64) -> CoreResult<LPARAM> {
+		let point = window::client_point(hwnd, screen_point(x, y)).ok_or_else(|| {
+			DesktopError::input_failed("cannot map physical coordinates to the target window's DPI")
+		})?;
+		packed_point(point.x, point.y)
+	}
+
+	/// `WM_NCHITTEST` code of `root` at a physical screen point, or `None` when
+	/// the window does not answer within 200 ms.
+	fn hit_test(root: HWND, point: POINT) -> Option<isize> {
+		let point = window::logical_screen_point(root, point)?;
+		let location = packed_point(point.x, point.y).ok()?;
+		let mut hit = 0;
+		// SAFETY: scalar message parameters and a writable result; the timeout
+		// and SMTO_ABORTIFHUNG bound the wait on an unresponsive window.
+		let answered = unsafe {
+			SendMessageTimeoutW(root, WM_NCHITTEST, 0, location, SMTO_ABORTIFHUNG, 200, &mut hit)
+		} != 0;
+		answered.then_some(hit as isize)
+	}
+
+	const fn mouse_messages(button: MouseButton) -> (u32, u32, u32, usize) {
+		match button {
+			MouseButton::Left => (WM_LBUTTONDOWN, WM_LBUTTONUP, WM_LBUTTONDBLCLK, MK_LBUTTON),
+			MouseButton::Right => (WM_RBUTTONDOWN, WM_RBUTTONUP, WM_RBUTTONDBLCLK, MK_RBUTTON),
+			MouseButton::Middle => (WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MBUTTONDBLCLK, MK_MBUTTON),
+		}
+	}
+
+	fn wheel_wparam(delta: i32) -> CoreResult<WPARAM> {
+		let delta = i16::try_from(delta).map_err(|_| {
+			DesktopError::input_failed(format!("scroll delta {delta} exceeds Win32 range"))
+		})?;
+		Ok(usize::from(u16::from_ne_bytes(delta.to_ne_bytes())) << 16)
+	}
+
+	/// Posts pointer input to the deepest child window under the point.
+	///
+	/// Toolkits that drop posted clicks still get a single unmodified left
+	/// click when UI Automation can invoke the control under the point, except
+	/// Chromium, whose Invoke reports success without acting.
+	pub(super) fn pointer(ax: &mut Win32Ax, id: &str, event: PointerEvent) -> CoreResult<()> {
+		control::check()?;
+		let root = hwnd(id)?;
+		ensure_integrity(id, root)?;
+		let kind = match event {
+			PointerEvent::Click { .. } | PointerEvent::Hold { .. } => EventKind::MouseClick,
+			PointerEvent::Move { .. } => EventKind::MouseMove,
+			PointerEvent::Drag { .. } => EventKind::MouseDrag,
+			PointerEvent::Scroll { .. } => EventKind::MouseScroll,
+		};
+		let class = window::class_name(root);
+		if let Some(reason) = drop_reason(root, &class, kind) {
+			if let PointerEvent::Click { x, y, button: MouseButton::Left, count: 1, modifiers } = event
+				&& modifiers == Modifiers::default()
+				&& !is_chromium_class(&class)
+				&& {
+					control::check()?;
+					ax.invoke_at_point(root, screen_point(x, y))?
+				} {
+				return Ok(());
+			}
+			return Err(refusal(id, &class, kind, reason));
+		}
+		match event {
+			PointerEvent::Click { x, y, button, count, modifiers } => {
+				let (target, point) = child_at(root, x, y)?;
+				ensure_delivery(id, target, kind)?;
+				let (down, up, double, button_flag) = mouse_messages(button);
+				ensure_unmodified(
+					target,
+					super::keyboard_layout(Some(target)),
+					super::modifier_keys(modifiers),
+				)?;
+				// SAFETY: GetClassLongW reads the class style of a live window.
+				let wants_double = unsafe { GetClassLongW(target, GCL_STYLE) } & CS_DBLCLKS != 0;
+				for index in 0..count {
+					if index > 0 {
+						control::wait(CLICK_GAP)?;
+					}
+					let press = if posts_double_click(index, wants_double) {
+						double
+					} else {
+						down
+					};
+					post(target, WM_MOUSEMOVE, 0, point)?;
+					post(target, press, button_flag, point)?;
+					let result = control::sent_gap_wait(CLICK_HOLD, index + 1 == count);
+					let release = control::cleanup(|| post(target, up, 0, point));
+					super::completed(result, release)?;
+				}
+				Ok(())
+			},
+			PointerEvent::Hold { x, y, button, keys, duration } => {
+				let (target, point) = child_at(root, x, y)?;
+				ensure_delivery(id, target, kind)?;
+				let (down, up, _, button_flag) = mouse_messages(button);
+				with_keys(target, &keys, || {
+					post(target, WM_MOUSEMOVE, 0, point)?;
+					control::bounded_hold(duration, |pressed| {
+						post(
+							target,
+							if pressed { down } else { up },
+							if pressed { button_flag } else { 0 },
+							point,
+						)
+					})
+				})
+			},
+			PointerEvent::Move { x, y } => {
+				let (target, point) = child_at(root, x, y)?;
+				ensure_delivery(id, target, kind)?;
+				post(target, WM_MOUSEMOVE, 0, point)
+			},
+			PointerEvent::Drag { path, button, modifiers, mut keys } => {
+				control::add_modifiers(&mut keys, modifiers);
+				let Some(&(x, y)) = path.first() else {
+					return Err(DesktopError::input_failed("drag path is empty"));
+				};
+				let start = screen_point(x, y);
+				let hit = hit_test(root, start).ok_or_else(|| {
+					DesktopError::background_unavailable(
+						"cannot establish the drag start region; no input was sent",
+					)
+				})?;
+				if let Some(region) = non_client_drag_region(hit) {
+					return Err(DesktopError::background_unavailable(format!(
+						"window {id} drag starts on its {region}, where only real pointer input drives \
+						 the system move/size loop; no input was sent"
+					)));
+				}
+				let (target, client) = child_under(root, start)?;
+				ensure_delivery(id, target, kind)?;
+				let start = packed_point(client.x, client.y)?;
+				let (down, up, _, button_flag) = mouse_messages(button);
+				with_keys(target, &keys, || {
+					post(target, WM_MOUSEMOVE, 0, start)?;
+					post(target, down, button_flag, start)?;
+					let mut end = start;
+					let movement = (|| {
+						control::wait(CLICK_HOLD)?;
+						let last = path.len().saturating_sub(2);
+						path
+							.iter()
+							.skip(1)
+							.enumerate()
+							.try_for_each(|(index, &(x, y))| {
+								control::check()?;
+								let next = client_point(target, x, y)?;
+								post(target, WM_MOUSEMOVE, button_flag, next)?;
+								end = next;
+								control::sent_gap_wait(DRAG_STEP, index == last)
+							})
+					})();
+					let release = control::cleanup(|| post(target, up, 0, end));
+					super::completed(movement, release)
+				})
+			},
+			PointerEvent::Scroll { x, y, dx, dy } => {
+				let point = screen_point(x, y);
+				// Wheel messages carry screen coordinates; unhandled wheel input
+				// bubbles from the child up its parent chain.
+				let (target, _) = child_under(root, point)?;
+				ensure_delivery(id, target, kind)?;
+				let point = window::logical_screen_point(target, point).ok_or_else(|| {
+					DesktopError::input_failed("cannot map wheel coordinates to the target's DPI")
+				})?;
+				let location = packed_point(point.x, point.y)?;
+				let horizontal = super::scroll_steps(dx).saturating_mul(WHEEL_DELTA);
+				let vertical = super::scroll_steps(dy).saturating_mul(-WHEEL_DELTA);
+				if horizontal != 0 {
+					post(target, WM_MOUSEHWHEEL, wheel_wparam(horizontal)?, location)?;
+				}
+				if vertical != 0 {
+					post(target, WM_MOUSEWHEEL, wheel_wparam(vertical)?, location)?;
+				}
+				Ok(())
+			},
+		}
+	}
+
+	pub(super) fn virtual_key(key: KeyName, layout: super::HKL) -> CoreResult<(u16, u8)> {
+		let value = match key {
+			KeyName::Ctrl => (VK_CONTROL, 0),
+			KeyName::Alt => (VK_MENU, 0),
+			KeyName::Shift => (VK_SHIFT, 0),
+			KeyName::Meta => (VK_LWIN, 0),
+			KeyName::Enter => (VK_RETURN, 0),
+			KeyName::Escape => (VK_ESCAPE, 0),
+			KeyName::Tab => (VK_TAB, 0),
+			KeyName::Space => (VK_SPACE, 0),
+			KeyName::Backspace => (VK_BACK, 0),
+			KeyName::Delete => (VK_DELETE, 0),
+			KeyName::Insert => (VK_INSERT, 0),
+			KeyName::Home => (VK_HOME, 0),
+			KeyName::End => (VK_END, 0),
+			KeyName::PageUp => (VK_PRIOR, 0),
+			KeyName::PageDown => (VK_NEXT, 0),
+			KeyName::Up => (VK_UP, 0),
+			KeyName::Down => (VK_DOWN, 0),
+			KeyName::Left => (VK_LEFT, 0),
+			KeyName::Right => (VK_RIGHT, 0),
+			KeyName::CapsLock => (VK_CAPITAL, 0),
+			KeyName::NumLock => (VK_NUMLOCK, 0),
+			KeyName::PrintScreen => (VK_SNAPSHOT, 0),
+			KeyName::F1 => (VK_F1, 0),
+			KeyName::F2 => (VK_F2, 0),
+			KeyName::F3 => (VK_F3, 0),
+			KeyName::F4 => (VK_F4, 0),
+			KeyName::F5 => (VK_F5, 0),
+			KeyName::F6 => (VK_F6, 0),
+			KeyName::F7 => (VK_F7, 0),
+			KeyName::F8 => (VK_F8, 0),
+			KeyName::F9 => (VK_F9, 0),
+			KeyName::F10 => (VK_F10, 0),
+			KeyName::F11 => (VK_F11, 0),
+			KeyName::F12 => (VK_F12, 0),
+			KeyName::F13 => (VK_F13, 0),
+			KeyName::F14 => (VK_F14, 0),
+			KeyName::F15 => (VK_F15, 0),
+			KeyName::F16 => (VK_F16, 0),
+			KeyName::F17 => (VK_F17, 0),
+			KeyName::F18 => (VK_F18, 0),
+			KeyName::F19 => (VK_F19, 0),
+			KeyName::F20 => (VK_F20, 0),
+			KeyName::F21 => (VK_F21, 0),
+			KeyName::F22 => (VK_F22, 0),
+			KeyName::F23 => (VK_F23, 0),
+			KeyName::F24 => (VK_F24, 0),
+			KeyName::Char(character) => {
+				let mut units = [0; char::MAX_LEN_UTF16];
+				let encoded = character.encode_utf16(&mut units);
+				if encoded.len() != 1 {
+					return Err(DesktopError::input_failed(format!(
+						"{character:?} has no Win32 virtual key"
+					)));
+				}
+				// SAFETY: VkKeyScanExW is a scalar lookup on this layout.
+				let mapped = unsafe { VkKeyScanExW(units[0], layout) };
+				if mapped == -1 {
+					return Err(DesktopError::input_failed(format!(
+						"{character:?} is absent from the receiving keyboard layout"
+					)));
+				}
+				let bytes = mapped.to_ne_bytes();
+				(u16::from(bytes[0]), bytes[1])
+			},
+		};
+		Ok(value)
+	}
+
+	/// Keys whose hardware scan code carries the `E0` extended prefix.
+	pub(super) const fn is_extended(vk: u16) -> bool {
+		matches!(
+			vk,
+			VK_INSERT
+				| VK_DELETE
+				| VK_HOME
+				| VK_END
+				| VK_PRIOR
+				| VK_NEXT
+				| VK_LEFT
+				| VK_RIGHT
+				| VK_UP
+				| VK_DOWN
+				| VK_LWIN
+				| VK_NUMLOCK
+				| VK_SNAPSHOT
+		)
+	}
+
+	struct KeyEmitter {
+		hwnd:   HWND,
+		layout: super::HKL,
+	}
+	impl KeyEmitter {
+		/// Only an established focus target may receive posted text/keys.
+		/// Falling back to the frame would report success for dropped input.
+		fn focused(root: HWND) -> CoreResult<Self> {
+			let hwnd = window::focused_descendant(root).ok_or_else(|| {
+				DesktopError::background_unavailable(
+					"no unambiguous focused control in the target window; no input was sent",
+				)
+			})?;
+			Ok(Self { hwnd, layout: super::keyboard_layout(Some(hwnd)) })
+		}
+
+		/// The control of window `id` (`root`) that background keys of `kind`
+		/// go to: `element` when it is one of `root`'s child windows, else the
+		/// focused control ([`Self::focused`]). Both windows must take `kind`.
+		fn to(id: &str, root: HWND, element: Option<HWND>, kind: EventKind) -> CoreResult<Self> {
+			ensure_delivery(id, root, kind)?;
+			let emitter = match element {
+				Some(hwnd) if hwnd != root => {
+					// SAFETY: IsChild validates both handles.
+					if unsafe { IsChild(root, hwnd) } == 0 {
+						return Err(DesktopError::invalid_target(format!(
+							"the element's control window is not inside window {id}"
+						)));
+					}
+					Self { hwnd, layout: super::keyboard_layout(Some(hwnd)) }
+				},
+				_ => Self::focused(root)?,
+			};
+			ensure_delivery(id, emitter.hwnd, kind)?;
+			Ok(emitter)
+		}
+
+		/// Posts one key transition. Background keys never hold a modifier
+		/// ([`ensure_unmodified`]), so Alt is never down and no transition is a
+		/// `WM_SYSKEY*` message.
+		fn transition(&self, vk: u16, down: bool) -> CoreResult<()> {
+			// SAFETY: MapVirtualKeyExW is a pure scalar lookup in the receiving
+			// layout.
+			let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, self.layout) } & 0xff;
+			let mut bits = 1u32 | (scan << 16);
+			if is_extended(vk) {
+				bits |= 1 << 24;
+			}
+			if !down {
+				bits |= (1 << 30) | (1 << 31);
+			}
+			post(
+				self.hwnd,
+				if down { WM_KEYDOWN } else { WM_KEYUP },
+				usize::from(vk),
+				i32::from_ne_bytes(bits.to_ne_bytes()) as isize,
+			)
+		}
+
+		fn emit(&mut self, key: KeyName, direction: KeyDirection) -> CoreResult<()> {
+			match direction {
+				KeyDirection::Press => self.key(key, true),
+				KeyDirection::Release => control::cleanup(|| self.key(key, false)),
+			}
+		}
+
+		fn key(&self, key: KeyName, down: bool) -> CoreResult<()> {
+			self.transition(virtual_key(key, self.layout)?.0, down)
+		}
+	}
+
+	/// Refuses background input holding a modifier before anything is posted:
+	/// see [`super::super::keyboard::posted_keys_dropped`]. Every key was
+	/// already resolved.
+	fn ensure_unmodified(
+		hwnd: HWND,
+		layout: super::HKL,
+		keys: impl IntoIterator<Item = KeyName>,
+	) -> CoreResult<()> {
+		super::super::keyboard::posted_keys_dropped(keys, layout, |key, layout| {
+			virtual_key(key, layout).map_or(0, |(_, implicit)| implicit)
+		})
+		.map_or(Ok(()), |reason| {
+			// Name the top-level window the caller selected, not the control.
+			let root = window::root(hwnd);
+			let class = window::class_name(root);
+			Err(DesktopError::background_unavailable(format!(
+				"window {} ({class}) drops background input that holds a modifier: {reason}; no input \
+				 was sent",
+				root as usize,
+			)))
+		})
+	}
+
+	fn with_keys(
+		hwnd: HWND,
+		keys: &[KeyName],
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		let mut emitter = KeyEmitter { hwnd, layout: super::keyboard_layout(Some(hwnd)) };
+		for &key in keys {
+			virtual_key(key, emitter.layout)?;
+		}
+		if !keys.is_empty() {
+			let class = window::class_name(hwnd);
+			let kind = if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
+				EventKind::KeyCombo
+			} else {
+				EventKind::Keystroke
+			};
+			if let Some(reason) = drop_reason(hwnd, &class, kind) {
+				let root = window::root(hwnd);
+				return Err(DesktopError::background_unavailable(format!(
+					"window {} ({}) drops held background keys: {reason}; no input was sent",
+					root as usize,
+					window::class_name(root),
+				)));
+			}
+		}
+		ensure_unmodified(hwnd, emitter.layout, keys.iter().copied())?;
+		with_held_keys(
+			&mut emitter,
+			keys.iter().copied(),
+			KeyEmitter::emit,
+			|_| {
+				control::check()?;
+				operation()
+			},
+			super::completed,
+		)
+	}
+
+	/// Presses `keys` in window `id` (in `element`, one of its control
+	/// windows, when given). A shortcut fires on its last press, so the gap
+	/// before the releases settles: a cancel then stops the next call.
+	pub(super) fn key_chord(id: &str, keys: &[KeyName], element: Option<HWND>) -> CoreResult<()> {
+		with_window_keys(id, keys, element, || {
+			control::settle(KEY_GAP);
+			Ok(())
+		})
+	}
+
+	/// Holds `keys` in window `id`: in `element`, one of its control windows,
+	/// when given, else in its focused control.
+	pub(super) fn hold_keys(
+		id: &str,
+		keys: &[KeyName],
+		duration: Duration,
+		element: Option<HWND>,
+	) -> CoreResult<()> {
+		with_window_keys(id, keys, element, || control::wait(duration))
+	}
+
+	fn with_window_keys(
+		id: &str,
+		keys: &[KeyName],
+		element: Option<HWND>,
+		held: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		control::check()?;
+		let root = hwnd(id)?;
+		let kind = if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
+			EventKind::KeyCombo
+		} else {
+			EventKind::Keystroke
+		};
+		let mut emitter = KeyEmitter::to(id, root, element, kind)?;
+		for &key in keys {
+			virtual_key(key, emitter.layout)?;
+		}
+		ensure_unmodified(emitter.hwnd, emitter.layout, keys.iter().copied())?;
+		with_held_keys(
+			&mut emitter,
+			keys.iter().copied(),
+			KeyEmitter::emit,
+			|_| held(),
+			super::completed,
+		)
+	}
+
+	/// Types `text` into window `id`: into `element`, one of its control
+	/// windows, when given, else into its focused control. Once the last
+	/// unit is out the waits after it settle: a cancel then stops the next
+	/// call, not this one.
+	pub(super) fn type_text(id: &str, text: &str, element: Option<HWND>) -> CoreResult<()> {
+		control::check()?;
+		let root = hwnd(id)?;
+		ensure_text_supported(id, root)?;
+		let emitter = KeyEmitter::to(id, root, element, EventKind::TextInput)?;
+		let mut left: usize = graphemes_str(text)
+			.map(|grapheme| text_units(grapheme).count())
+			.sum();
+		for grapheme in graphemes_str(text) {
+			control::check()?;
+			for unit in text_units(grapheme) {
+				left -= 1;
+				let sent = left == 0;
+				match unit {
+					TextUnit::Enter => {
+						emitter.transition(VK_RETURN, true)?;
+						let result = control::sent_gap_wait(KEY_GAP, sent);
+						let release = control::cleanup(|| emitter.transition(VK_RETURN, false));
+						super::completed(result, release)?;
+						control::sent_gap_wait(KEY_GAP + ENTER_SETTLE, sent)?;
+					},
+					TextUnit::Char(character) => {
+						let mut units = [0; char::MAX_LEN_UTF16];
+						for &unit in character.encode_utf16(&mut units).iter() {
+							post(emitter.hwnd, WM_CHAR, usize::from(unit), 1)?;
+						}
+						control::sent_gap_wait(KEY_GAP, sent)?;
+					},
+				}
+			}
+		}
+		Ok(())
+	}
+}
+
+mod foreground {
+	use std::{
+		ptr::null_mut,
+		time::{Duration, Instant},
+	};
+
+	use windows_sys::Win32::{
+		Foundation::{HWND, POINT},
+		System::Threading::{AttachThreadInput, GetCurrentThreadId},
+		UI::{
+			Input::KeyboardAndMouse::{
+				GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+				KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC,
+				MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+				MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+				MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+				MapVirtualKeyExW, SendInput, VK_RETURN,
+			},
+			WindowsAndMessaging::{
+				GA_ROOTOWNER, GetAncestor, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
+				GetWindowThreadProcessId, IsHungAppWindow, IsWindow, SM_CXVIRTUALSCREEN,
+				SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos,
+				WindowFromPoint,
+			},
+		},
+	};
+	use xutf::graphemes_str;
+
+	use super::{
+		CoreResult, DesktopError, KeyName, Modifiers, MouseButton, PointerEvent, background, control,
+	};
+	use crate::desktop::{
+		types::DesktopFocusReturn,
+		win32::{
+			delivery::{TextUnit, text_units},
+			window,
+		},
+	};
+
+	/// Time the target keeps the foreground after pointer input, so
+	/// retained-mode toolkits finish press/capture handling before focus and
+	/// cursor return.
+	const POINTER_SETTLE: Duration = Duration::from_millis(120);
+	/// Time the target keeps the foreground after keyboard input.
+	const KEY_SETTLE: Duration = Duration::from_millis(40);
+	/// Longest wait for Windows to confirm the target as foreground.
+	const ACTIVATION_TIMEOUT: Duration = Duration::from_millis(500);
+	/// Time between drag moves.
+	const DRAG_STEP: Duration = Duration::from_millis(16);
+	/// An unassigned virtual key sent behind typed text to see when the target
+	/// has read it: it types nothing, and Cua's Windows driver sends it
+	/// behind text the same way (the `AutoHotkey` documentation names it
+	/// as an unassigned key).
+	const DRAIN_KEY: u16 = 0xe8;
+	/// Longest wait for the target to read typed text before the foreground
+	/// is handed back.
+	const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+	/// Activates the target for foreground input and hands the foreground back
+	/// to the user's window once the target has consumed it.
+	struct ForegroundGuard {
+		previous: HWND,
+		target:   HWND,
+		settle:   Duration,
+		armed:    bool,
+	}
+
+	impl ForegroundGuard {
+		fn activate(id: &str, settle: Duration) -> CoreResult<Self> {
+			control::check()?;
+			let target = background::hwnd(id)?;
+			background::ensure_integrity(id, target)?;
+			// SAFETY: GetForegroundWindow has no preconditions.
+			let previous = unsafe { GetForegroundWindow() };
+			if previous.is_null() {
+				return Err(DesktopError::input_failed(
+					"cannot save the current foreground window; no input was sent",
+				));
+			}
+			let mut guard = Self { previous, target, settle, armed: true };
+			if previous != target {
+				let activation = (|| {
+					let _ = window::activate(target)?;
+					if !window::wait_for_foreground(target, ACTIVATION_TIMEOUT)? {
+						return Err(DesktopError::input_failed(format!(
+							"Windows refused to activate the exact target window {id}; no input was sent"
+						)));
+					}
+					control::wait(Duration::from_millis(20))
+				})();
+				if let Err(error) = activation {
+					return super::completed(Err(error), guard.restore()).map(|()| guard);
+				}
+			}
+			Ok(guard)
+		}
+
+		fn run(mut self, operation: impl FnOnce(HWND) -> CoreResult<()>) -> CoreResult<()> {
+			let result = control::check()
+				.and_then(|()| ensure_foreground(self.target))
+				.and_then(|()| operation(self.target));
+			// Preserve the target's consumption window after any delivery, even
+			// a partial one; a cancel during it leaves sent input reported sent.
+			control::settle(self.settle);
+			let restored = self.restore();
+			self.report(restored.is_ok());
+			super::completed(result, restored)
+		}
+
+		/// Records for the host where the takeover left the foreground, read
+		/// after restoration. Focus was handed back when the target had to be
+		/// activated and restoring the user's window succeeded; the front
+		/// process is read afterwards, so a window the user switched to since
+		/// shows as front.
+		#[allow(
+			clippy::needless_update,
+			reason = "fields only other backends fill stay at their default"
+		)]
+		fn report(&self, restored: bool) {
+			// SAFETY: GetForegroundWindow has no preconditions.
+			let front = unsafe { GetForegroundWindow() };
+			control::report_focus_return(DesktopFocusReturn {
+				handed_back: restored && self.previous != self.target,
+				previous_pid: window::process_id(self.previous),
+				front_pid: window::process_id(front),
+				..Default::default()
+			});
+		}
+
+		fn restore(&mut self) -> CoreResult<()> {
+			self.armed = false;
+			control::cleanup(|| {
+				// SAFETY: these functions validate scalar handles. Owned modal
+				// windows qualify for restoration, never for input targeting.
+				let current = unsafe { GetForegroundWindow() };
+				if current == self.previous {
+					return Ok(());
+				}
+				// SAFETY: GetAncestor validates the observed handle, including
+				// null.
+				let owner = unsafe { GetAncestor(current, GA_ROOTOWNER) };
+				if current != self.target && owner != self.target {
+					return Err(DesktopError::input_failed(
+						"foreground changed during takeover; left the newly active window untouched",
+					));
+				}
+				// SAFETY: IsWindow validates the previously observed handle.
+				if unsafe { IsWindow(self.previous) } == 0 {
+					return Err(DesktopError::input_failed(
+						"the previous foreground window no longer exists",
+					));
+				}
+				let _ = window::activate(self.previous)?;
+				window::wait_for_foreground(self.previous, ACTIVATION_TIMEOUT)?.ok_or_else(|| {
+					DesktopError::input_failed(
+						"Windows refused to restore the previous foreground window",
+					)
+				})
+			})
+		}
+	}
+
+	impl Drop for ForegroundGuard {
+		fn drop(&mut self) {
+			if self.armed {
+				// Unwinding fallback only; normal returns report restoration
+				// failures through run/restore instead of hiding them in Drop.
+				let _ = self.restore();
+			}
+		}
+	}
+
+	/// Returns the user's pointer to where it was once foreground pointer input,
+	/// which must travel the real cursor, has been consumed.
+	struct CursorGuard(Option<POINT>);
+
+	impl CursorGuard {
+		fn save() -> CoreResult<Self> {
+			let mut point = POINT { x: 0, y: 0 };
+			// SAFETY: `point` is writable for the call.
+			if unsafe { GetCursorPos(&mut point) } == 0 {
+				return Err(DesktopError::input_failed(
+					"cannot save the pointer position; no input was sent",
+				));
+			}
+			Ok(Self(Some(point)))
+		}
+
+		fn restore(&mut self) -> CoreResult<()> {
+			let Some(point) = self.0.take() else {
+				return Ok(());
+			};
+			// SAFETY: coordinates were returned by GetCursorPos.
+			if unsafe { SetCursorPos(point.x, point.y) } == 0 {
+				return Err(DesktopError::input_failed(
+					"Windows refused to restore the pointer position",
+				));
+			}
+			Ok(())
+		}
+	}
+
+	impl Drop for CursorGuard {
+		fn drop(&mut self) {
+			if let Some(point) = self.0 {
+				// SAFETY: scalar coordinates previously reported by GetCursorPos.
+				unsafe { SetCursorPos(point.x, point.y) };
+			}
+		}
+	}
+
+	/// Every delivery batch rechecks the exact HWND so user focus changes or
+	/// newly opened sibling/modal windows never become silent input targets.
+	fn send_to(target: HWND, events: &[INPUT]) -> CoreResult<()> {
+		control::check()?;
+		ensure_foreground(target)?;
+		send(events)
+	}
+
+	/// Check before activation-capable callbacks as well as input delivery:
+	/// element `SetFocus` must not undo a user switch during activation settle.
+	fn ensure_foreground(target: HWND) -> CoreResult<()> {
+		// SAFETY: GetForegroundWindow has no preconditions.
+		if unsafe { GetForegroundWindow() } != target {
+			return Err(DesktopError::input_failed(
+				"the exact target lost foreground; stopped sending takeover input",
+			));
+		}
+		Ok(())
+	}
+
+	fn send(events: &[INPUT]) -> CoreResult<()> {
+		control::check()?;
+		if events.is_empty() {
+			return Ok(());
+		}
+		// SAFETY: `events` is an initialized INPUT slice copied synchronously by
+		// Win32.
+		let sent =
+			unsafe { SendInput(events.len() as u32, events.as_ptr(), size_of::<INPUT>() as i32) };
+		if sent as usize == events.len() {
+			Ok(())
+		} else {
+			// Only release transitions actually inserted by this call. Never
+			// release uninserted modifiers or replay clicks/text after a short
+			// send.
+			let releases = pending_releases(&events[..(sent as usize).min(events.len())]);
+			let cleanup = control::cleanup(|| {
+				let mut cleanup = Ok(());
+				for release in releases.iter().rev() {
+					// SAFETY: release is one initialized INPUT copied synchronously.
+					if unsafe { SendInput(1, release, size_of::<INPUT>() as i32) } != 1 {
+						cleanup =
+							Err(DesktopError::input_failed("SendInput could not release inserted input"));
+					}
+				}
+				cleanup
+			});
+			super::completed(
+				Err(DesktopError::input_failed(format!(
+					"Win32 SendInput inserted {sent} of {} events; the action may be partially applied",
+					events.len()
+				))),
+				cleanup,
+			)
+		}
+	}
+
+	/// Reconstructs unmatched key/button downs from the accepted prefix.
+	/// Allocation occurs only after a short `SendInput`, never on successful
+	/// sends.
+	fn pending_releases(events: &[INPUT]) -> Vec<INPUT> {
+		let mut pending = Vec::new();
+		for event in events {
+			let Some((down, release)) = release_transition(event) else {
+				continue;
+			};
+			let previous = pending.iter().position(|held| same_release(held, &release));
+			if down {
+				if previous.is_none() {
+					pending.push(release);
+				}
+			} else if let Some(index) = previous {
+				pending.remove(index);
+			}
+		}
+		pending
+	}
+
+	fn release_transition(event: &INPUT) -> Option<(bool, INPUT)> {
+		// SAFETY: INPUT's type tag selects the initialized union member. All
+		// packets come from this module's typed keyboard/mouse constructors.
+		unsafe {
+			match event.r#type {
+				INPUT_KEYBOARD => {
+					let key = event.Anonymous.ki;
+					Some((
+						key.dwFlags & KEYEVENTF_KEYUP == 0,
+						keyboard_input(key.wVk, key.wScan, key.dwFlags | KEYEVENTF_KEYUP),
+					))
+				},
+				INPUT_MOUSE => {
+					let flags = event.Anonymous.mi.dwFlags;
+					for (down, up) in [
+						(MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+						(MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+						(MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+					] {
+						if flags & (down | up) != 0 {
+							return Some((flags & down != 0, mouse_event(up, 0)));
+						}
+					}
+					None
+				},
+				_ => None,
+			}
+		}
+	}
+
+	const fn same_release(left: &INPUT, right: &INPUT) -> bool {
+		if left.r#type != right.r#type {
+			return false;
+		}
+		// SAFETY: matching type tags select initialized members produced by
+		// release_transition; only keyboard and mouse packets enter pending.
+		unsafe {
+			if left.r#type == INPUT_KEYBOARD {
+				let a = left.Anonymous.ki;
+				let b = right.Anonymous.ki;
+				a.wVk == b.wVk && a.wScan == b.wScan && a.dwFlags == b.dwFlags
+			} else {
+				left.Anonymous.mi.dwFlags == right.Anonymous.mi.dwFlags
+			}
+		}
+	}
+
+	const fn mouse_event(flags: u32, data: u32) -> INPUT {
+		INPUT {
+			r#type:    INPUT_MOUSE,
+			Anonymous: INPUT_0 {
+				mi: MOUSEINPUT {
+					dx:          0,
+					dy:          0,
+					mouseData:   data,
+					dwFlags:     flags,
+					time:        0,
+					dwExtraInfo: 0,
+				},
+			},
+		}
+	}
+
+	/// Desktop-root input intentionally moves the real cursor without restoring
+	/// it. Enigo's Windows absolute move normalizes only to the primary display;
+	/// use the same virtual-desktop packet as window takeover on every monitor.
+	pub(super) fn move_pointer(x: f64, y: f64) -> CoreResult<()> {
+		send(&[move_event(x, y)?])
+	}
+
+	/// Absolute move to a physical desktop coordinate across the virtual
+	/// desktop.
+	fn move_event(x: f64, y: f64) -> CoreResult<INPUT> {
+		let (x, y) = (x.round() as i32, y.round() as i32);
+		// SAFETY: GetSystemMetrics has no preconditions.
+		let (origin_x, origin_y, width, height) = unsafe {
+			(
+				GetSystemMetrics(SM_XVIRTUALSCREEN),
+				GetSystemMetrics(SM_YVIRTUALSCREEN),
+				GetSystemMetrics(SM_CXVIRTUALSCREEN),
+				GetSystemMetrics(SM_CYVIRTUALSCREEN),
+			)
+		};
+		if width <= 1 || height <= 1 {
+			return Err(DesktopError::input_failed("Win32 virtual desktop geometry is unavailable"));
+		}
+		let nx = (((i64::from(x) - i64::from(origin_x)) * 65_535) / i64::from(width - 1))
+			.clamp(0, 65_535) as i32;
+		let ny = (((i64::from(y) - i64::from(origin_y)) * 65_535) / i64::from(height - 1))
+			.clamp(0, 65_535) as i32;
+		let mut event =
+			mouse_event(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK, 0);
+		event.Anonymous.mi.dx = nx;
+		event.Anonymous.mi.dy = ny;
+		Ok(event)
+	}
+
+	const fn button_flags(button: MouseButton) -> (u32, u32) {
+		match button {
+			MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+			MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+			MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+		}
+	}
+
+	pub(super) fn pointer(id: &str, event: PointerEvent) -> CoreResult<()> {
+		// Declared first so it drops last: the cursor returns after the
+		// foreground has been handed back.
+		let mut cursor = CursorGuard::save()?;
+		let foreground = match ForegroundGuard::activate(id, POINTER_SETTLE) {
+			Ok(foreground) => foreground,
+			Err(error) => {
+				// Activation sent no pointer input; do not overwrite movement
+				// the user made while Windows decided the focus request.
+				cursor.0 = None;
+				return Err(error);
+			},
+		};
+		let result = foreground.run(|target| pointer_active(target, event));
+		super::completed(result, cursor.restore())
+	}
+
+	fn pointer_active(target: HWND, event: PointerEvent) -> CoreResult<()> {
+		let (x, y) = match &event {
+			PointerEvent::Click { x, y, .. }
+			| PointerEvent::Hold { x, y, .. }
+			| PointerEvent::Move { x, y }
+			| PointerEvent::Scroll { x, y, .. } => (*x, *y),
+			PointerEvent::Drag { path, .. } => *path
+				.first()
+				.ok_or_else(|| DesktopError::input_failed("drag path is empty"))?,
+		};
+		let (x, y) = (x.round() as i32, y.round() as i32);
+		// SAFETY: WindowFromPoint takes a scalar physical screen point.
+		if window::root(unsafe { WindowFromPoint(POINT { x, y }) }) != target {
+			return Err(DesktopError::input_failed(
+				"the pointer location is occluded or outside the exact target; no pointer input was \
+				 sent",
+			));
+		}
+		match event {
+			PointerEvent::Click { x, y, button, count, modifiers } => {
+				let at = move_event(x, y)?;
+				let (down, up) = button_flags(button);
+				with_modifiers(target, modifiers, || {
+					(0..count).try_for_each(|_| {
+						send_to(target, &[at, mouse_event(down, 0), mouse_event(up, 0)])
+					})
+				})
+			},
+			PointerEvent::Hold { x, y, button, keys, duration } => {
+				let at = move_event(x, y)?;
+				let (down, up) = button_flags(button);
+				with_keys(Some(target), &keys, || {
+					send_to(target, &[at, mouse_event(down, 0)])?;
+					let held = control::wait(duration);
+					let released = control::cleanup(|| send(&[mouse_event(up, 0)]));
+					super::completed(held, released)
+				})
+			},
+			PointerEvent::Move { x, y } => send_to(target, &[move_event(x, y)?]),
+			PointerEvent::Drag { path, button, modifiers, mut keys } => {
+				control::add_modifiers(&mut keys, modifiers);
+				let Some(&(x, y)) = path.first() else {
+					return Err(DesktopError::input_failed("drag path is empty"));
+				};
+				let start = move_event(x, y)?;
+				let (down, up) = button_flags(button);
+				with_keys(Some(target), &keys, || {
+					send_to(target, &[start, mouse_event(down, 0)])?;
+					let movement = path.iter().skip(1).try_for_each(|&(x, y)| {
+						control::wait(DRAG_STEP)?;
+						send_to(target, &[move_event(x, y)?])
+					});
+					// Releases must still reach the system input state when
+					// focus changed or the operation was cancelled during a drag.
+					let release = control::cleanup(|| send(&[mouse_event(up, 0)]));
+					super::completed(movement, release)
+				})
+			},
+			PointerEvent::Scroll { x, y, dx, dy } => {
+				// Windows routes the wheel to the window under the cursor.
+				send_to(target, &[move_event(x, y)?])?;
+				let horizontal = super::scroll_steps(dx).saturating_mul(120);
+				let vertical = super::scroll_steps(dy).saturating_mul(-120);
+				if horizontal != 0 {
+					send_to(target, &[mouse_event(MOUSEEVENTF_HWHEEL, horizontal as u32)])?;
+				}
+				if vertical != 0 {
+					send_to(target, &[mouse_event(MOUSEEVENTF_WHEEL, vertical as u32)])?;
+				}
+				Ok(())
+			},
+		}
+	}
+
+	const fn keyboard_input(vk: u16, scan: u16, flags: u32) -> INPUT {
+		INPUT {
+			r#type:    INPUT_KEYBOARD,
+			Anonymous: INPUT_0 {
+				ki: KEYBDINPUT {
+					wVk:         vk,
+					wScan:       scan,
+					dwFlags:     flags,
+					time:        0,
+					dwExtraInfo: 0,
+				},
+			},
+		}
+	}
+
+	/// Virtual-key transition carrying the hardware scan code and extended
+	/// flag, for applications that read scan codes rather than virtual keys.
+	fn key_event(vk: u16, up: bool, layout: super::HKL) -> INPUT {
+		// SAFETY: MapVirtualKeyExW is a scalar lookup on this layout.
+		let scan = unsafe { MapVirtualKeyExW(u32::from(vk), MAPVK_VK_TO_VSC, layout) } as u16;
+		let mut flags = if up { KEYEVENTF_KEYUP } else { 0 };
+		if background::is_extended(vk) {
+			flags |= KEYEVENTF_EXTENDEDKEY;
+		}
+		keyboard_input(vk, scan, flags)
+	}
+
+	const fn unicode_event(unit: u16, up: bool) -> INPUT {
+		keyboard_input(
+			0,
+			unit,
+			if up {
+				KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+			} else {
+				KEYEVENTF_UNICODE
+			},
+		)
+	}
+
+	/// Sends each press separately so cancellation can interrupt a long chord,
+	/// then releases only transitions successfully inserted before it stopped.
+	/// Once every press is in, only `operation` can still be cancelled: a
+	/// chord's shortcut has fired by then.
+	fn holding(
+		target: Option<HWND>,
+		presses: &[INPUT],
+		releases: &[INPUT],
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		let mut held = 0;
+		let result = (|| {
+			for press in presses {
+				match target {
+					Some(target) => send_to(target, std::slice::from_ref(press))?,
+					None => send(std::slice::from_ref(press))?,
+				}
+				held += 1;
+			}
+			operation()
+		})();
+		let released = control::cleanup(|| {
+			let mut released = Ok(());
+			// Releases are the reverse of presses; skip the uninserted suffix.
+			for release in &releases[releases.len() - held..] {
+				released = super::completed(released, send(std::slice::from_ref(release)));
+			}
+			released
+		});
+		super::completed(result, released)
+	}
+
+	fn with_modifiers(
+		target: HWND,
+		modifiers: Modifiers,
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		let layout = super::keyboard_layout(Some(target));
+		let mut keys = Vec::with_capacity(4);
+		for key in super::modifier_keys(modifiers) {
+			keys.push(background::virtual_key(key, layout)?.0);
+		}
+		let presses = keys
+			.iter()
+			.map(|&vk| key_event(vk, false, layout))
+			.collect::<Vec<_>>();
+		let releases = keys
+			.iter()
+			.rev()
+			.map(|&vk| key_event(vk, true, layout))
+			.collect::<Vec<_>>();
+		holding(Some(target), &presses, &releases, operation)
+	}
+
+	/// Takeover chord for window `id`. `focus` runs once the user's foreground
+	/// window is saved and the target is in front: focusing an element brings
+	/// its window forward, so focusing it first would save the target as the
+	/// window to hand the foreground back to.
+	pub(super) fn key_chord(
+		id: &str,
+		keys: &[KeyName],
+		focus: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		with_foreground_keys(id, keys, focus, || Ok(()))
+	}
+
+	pub(super) fn hold_keys(id: &str, keys: &[KeyName], duration: Duration) -> CoreResult<()> {
+		with_foreground_keys(id, keys, || Ok(()), || control::wait(duration))
+	}
+
+	fn with_foreground_keys(
+		id: &str,
+		keys: &[KeyName],
+		focus: impl FnOnce() -> CoreResult<()>,
+		held: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
+			focus()?;
+			with_keys(Some(target), keys, held)
+		})
+	}
+
+	pub(super) fn with_desktop_keys(
+		keys: &[KeyName],
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		with_keys(None, keys, operation)
+	}
+
+	fn with_keys(
+		target: Option<HWND>,
+		keys: &[KeyName],
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		control::check()?;
+		// Focus may move to an embedded control on a different UI thread.
+		// Resolve every key there before holding() can send any input.
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let receiver = target.unwrap_or_else(|| unsafe { GetForegroundWindow() });
+		let receiver = window::focused_descendant(receiver).unwrap_or(receiver);
+		let layout = super::keyboard_layout(Some(receiver));
+		let mut virtual_keys = Vec::with_capacity(keys.len().saturating_mul(2));
+		for &key in keys {
+			control::check()?;
+			let (vk, implicit) = background::virtual_key(key, layout)?;
+			if implicit & 1 != 0 {
+				virtual_keys.push(background::virtual_key(KeyName::Shift, layout)?.0);
+			}
+			if implicit & 2 != 0 {
+				virtual_keys.push(background::virtual_key(KeyName::Ctrl, layout)?.0);
+			}
+			if implicit & 4 != 0 {
+				virtual_keys.push(background::virtual_key(KeyName::Alt, layout)?.0);
+			}
+			virtual_keys.push(vk);
+		}
+		let presses = virtual_keys
+			.iter()
+			.map(|&vk| key_event(vk, false, layout))
+			.collect::<Vec<_>>();
+		let releases = virtual_keys
+			.iter()
+			.rev()
+			.map(|&vk| key_event(vk, true, layout))
+			.collect::<Vec<_>>();
+		holding(target, &presses, &releases, operation)
+	}
+
+	fn text_events(unit: TextUnit, events: &mut [INPUT; 4], layout: super::HKL) -> &[INPUT] {
+		match unit {
+			TextUnit::Enter => {
+				events[0] = key_event(VK_RETURN, false, layout);
+				events[1] = key_event(VK_RETURN, true, layout);
+				&events[..2]
+			},
+			TextUnit::Char(character) => {
+				let mut units = [0; char::MAX_LEN_UTF16];
+				let units = character.encode_utf16(&mut units);
+				for (index, &unit) in units.iter().enumerate() {
+					events[index * 2] = unicode_event(unit, false);
+					events[index * 2 + 1] = unicode_event(unit, true);
+				}
+				&events[..units.len() * 2]
+			},
+		}
+	}
+
+	/// Bounded packets preserve short-send accounting without constructing an
+	/// uninterruptible `SendInput` batch proportional to the entire text.
+	pub(super) fn type_desktop(text: &str) -> CoreResult<()> {
+		send_text(None, text)
+	}
+
+	fn send_text(target: Option<HWND>, text: &str) -> CoreResult<()> {
+		let layout = super::keyboard_layout(target);
+		let mut events = [unicode_event(0, false); 4];
+		for grapheme in graphemes_str(text) {
+			control::check()?;
+			for unit in text_units(grapheme) {
+				let events = text_events(unit, &mut events, layout);
+				match target {
+					Some(target) => send_to(target, events)?,
+					None => send(events)?,
+				}
+			}
+		}
+		// Every unit is out: a cancel now stops the next call.
+		Ok(())
+	}
+
+	/// Waits until the thread that owns `root`'s focused control has read
+	/// every key sent so far: keys still queued when the foreground moves on
+	/// go to the next foreground window, so handing it back early sends the
+	/// end of long text to the user's window. While this thread shares the
+	/// target's input queue, `GetKeyState` follows the keys that thread has
+	/// read, so a key sent behind the text shows when it got there. The
+	/// focused control's thread is the one reading keys: a UWP frame's own
+	/// thread refuses to be joined. Every packet went while `root` was in
+	/// front, so when the foreground leaves it before or during the wait and
+	/// the text ends in a Return (`closing_return`), that Return is taken to
+	/// have moved it (it opened or closed a window) and nothing is reported;
+	/// otherwise, the end of the text may have gone to the new window. A
+	/// thread Windows reports as hung is not joined: sharing its input queue
+	/// would tie this thread to it, and it would not read the marker anyway.
+	/// Returns why the target was not seen reading the text: it could not be
+	/// waited for (hung, or not joinable), the wait ran out or was cancelled,
+	/// or the foreground left it.
+	fn drain(root: HWND, name: &str, closing_return: bool) -> Option<String> {
+		// SAFETY: GetForegroundWindow has no preconditions.
+		let in_front = || window::root(unsafe { GetForegroundWindow() }) == root;
+		let left = || {
+			(!closing_return).then(|| {
+				format!(
+					"the foreground left {name} before it had read all the typed text, so the rest may \
+					 have reached the window in front"
+				)
+			})
+		};
+		if !in_front() {
+			return left();
+		}
+		let reader = window::focused_descendant(root).unwrap_or(root);
+		// SAFETY: IsHungAppWindow only reads the window's responsiveness state.
+		if unsafe { IsHungAppWindow(reader) } != 0 {
+			return Some(format!(
+				"{name} is not responding, so omp could not wait for it to read the typed text; the \
+				 rest may reach whichever window is in front next"
+			));
+		}
+		// SAFETY: a null process-id pointer is permitted; Win32 validates the
+		// handle.
+		let target = unsafe { GetWindowThreadProcessId(reader, null_mut()) };
+		// SAFETY: no preconditions.
+		let own = unsafe { GetCurrentThreadId() };
+		// SAFETY: scalar thread ids; failure is reported and leaves nothing to
+		// undo.
+		if target == 0 || target == own || unsafe { AttachThreadInput(own, target, 1) } == 0 {
+			return Some(format!(
+				"could not wait for {name} to read the typed text (its input thread cannot be joined)"
+			));
+		}
+		// SAFETY: no preconditions.
+		let before = unsafe { GetKeyState(i32::from(DRAIN_KEY)) } & 1;
+		let layout = super::keyboard_layout(Some(reader));
+		let marker = [key_event(DRAIN_KEY, false, layout), key_event(DRAIN_KEY, true, layout)];
+		// The text is out, so the marker goes even after a cancel that came
+		// since; the wait below ends on it.
+		// SAFETY: `marker` is an initialized INPUT slice copied synchronously.
+		let sent =
+			unsafe { SendInput(marker.len() as u32, marker.as_ptr(), size_of::<INPUT>() as i32) };
+		let deadline = Instant::now() + DRAIN_TIMEOUT;
+		let unread = if sent as usize == marker.len() {
+			loop {
+				// SAFETY: no preconditions.
+				if unsafe { GetKeyState(i32::from(DRAIN_KEY)) } & 1 != before {
+					break None;
+				}
+				if !in_front() {
+					break left();
+				}
+				if control::check().is_err() {
+					break Some(format!(
+						"the call was cancelled before {name} had read all the typed text"
+					));
+				}
+				if Instant::now() >= deadline {
+					break Some(format!(
+						"{name} had not read all the typed text {} s after it was sent; the rest may \
+						 reach whichever window is in front next",
+						DRAIN_TIMEOUT.as_secs()
+					));
+				}
+				std::thread::sleep(Duration::from_millis(1));
+			}
+		} else {
+			Some(format!(
+				"could not wait for {name} to read the typed text (Windows refused the key marking \
+				 its end)"
+			))
+		};
+		// SAFETY: detaches the pair attached above.
+		unsafe { AttachThreadInput(own, target, 0) };
+		unread
+	}
+
+	/// Takeover text for window `id`; `focus` runs under the foreground guard
+	/// as in [`key_chord`]. The foreground goes back once the target has read
+	/// the text ([`drain`]); when that cannot be seen, the call succeeds with
+	/// the reason recorded by [`control::report_text_unconfirmed`].
+	pub(super) fn type_text(
+		id: &str,
+		text: &str,
+		focus: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		control::check()?;
+		background::ensure_text_supported(id, background::hwnd(id)?)?;
+		if text.is_empty() {
+			return Ok(());
+		}
+		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| {
+			focus()?;
+			send_text(Some(target), text)?;
+			let closing_return = text.ends_with(['\r', '\n']);
+			if let Some(reason) = drain(target, &format!("window {id}"), closing_return) {
+				control::report_text_unconfirmed(reason);
+			}
+			Ok(())
+		})
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use super::*;
+
+		#[test]
+		fn foreground_loss_skips_activation_capable_callback() {
+			use std::cell::Cell;
+
+			use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+			// SAFETY: neither foreground query has preconditions.
+			let previous = unsafe { GetForegroundWindow() };
+			// SAFETY: GetDesktopWindow has no preconditions.
+			let target = unsafe { GetDesktopWindow() };
+			assert_ne!(previous, target);
+			let called = Cell::new(false);
+			let guard = ForegroundGuard { previous, target, settle: Duration::ZERO, armed: true };
+			let result = guard.run(|_| {
+				called.set(true);
+				Ok(())
+			});
+			assert!(result.is_err());
+			assert!(!called.get(), "focus callbacks must not undo the user's window switch");
+			// SAFETY: GetForegroundWindow has no preconditions.
+			assert_eq!(unsafe { GetForegroundWindow() }, previous);
+		}
+
+		#[test]
+		fn cancellation_stops_packets_but_allows_cleanup_and_a_later_operation() {
+			let source = control::CancellationSource::default();
+			let token = source.token();
+			source.cancel();
+			control::with_token_for_test(&token, || {
+				let cancelled = token.check().unwrap_err().message;
+				assert_eq!(send(&[]).unwrap_err().message, cancelled);
+				assert_eq!(send_to(std::ptr::null_mut(), &[]).unwrap_err().message, cancelled);
+				control::cleanup(|| assert!(send(&[]).is_ok()));
+				assert_eq!(send(&[]).unwrap_err().message, cancelled);
+			});
+			control::with_token_for_test(&source.token(), || assert!(send(&[]).is_ok()));
+		}
+
+		#[test]
+		fn text_packets_keep_surrogates_and_return_transitions_together() {
+			let layout = std::ptr::null_mut();
+			let mut storage = [unicode_event(0, false); 4];
+			let emoji = text_events(TextUnit::Char('\u{1f600}'), &mut storage, layout);
+			assert_eq!(emoji.len(), 4);
+			let pending = pending_releases(&emoji[..3]);
+			assert_eq!(pending.len(), 1);
+			assert!(same_release(&pending[0], &unicode_event(0xde00, true)));
+			assert!(pending_releases(emoji).is_empty());
+
+			let enter = text_events(TextUnit::Enter, &mut storage, layout);
+			assert_eq!(enter.len(), 2);
+			let pending = pending_releases(&enter[..1]);
+			assert_eq!(pending.len(), 1);
+			assert!(same_release(&pending[0], &key_event(VK_RETURN, true, layout)));
+			assert!(pending_releases(enter).is_empty());
+		}
+
+		#[test]
+		fn short_click_releases_only_an_inserted_button_down() {
+			let click = [
+				mouse_event(MOUSEEVENTF_MOVE, 0),
+				mouse_event(MOUSEEVENTF_LEFTDOWN, 0),
+				mouse_event(MOUSEEVENTF_LEFTUP, 0),
+			];
+			assert!(pending_releases(&click[..1]).is_empty());
+			let pending = pending_releases(&click[..2]);
+			assert_eq!(pending.len(), 1);
+			assert!(same_release(&pending[0], &mouse_event(MOUSEEVENTF_LEFTUP, 0)));
+			assert!(pending_releases(&click).is_empty());
+		}
+
+		#[test]
+		fn short_unicode_batch_does_not_replay_completed_characters() {
+			let text = [
+				unicode_event(0x41, false),
+				unicode_event(0x41, true),
+				unicode_event(0xd83d, false),
+				unicode_event(0xd83d, true),
+				unicode_event(0xde00, false),
+				unicode_event(0xde00, true),
+			];
+			let pending = pending_releases(&text[..5]);
+			assert_eq!(pending.len(), 1);
+			assert!(same_release(&pending[0], &unicode_event(0xde00, true)));
+			assert!(pending_releases(&text).is_empty());
+		}
+
+		#[test]
+		fn short_chord_tracks_repeats_and_completed_releases() {
+			let ctrl_down = keyboard_input(0x11, 0x1d, 0);
+			let ctrl_up = keyboard_input(0x11, 0x1d, KEYEVENTF_KEYUP);
+			let letter_down = keyboard_input(0x41, 0x1e, 0);
+			let letter_up = keyboard_input(0x41, 0x1e, KEYEVENTF_KEYUP);
+			let chord = [ctrl_down, letter_down, letter_down, letter_up, ctrl_up];
+			let pending = pending_releases(&chord[..3]);
+			assert_eq!(pending.len(), 2);
+			assert!(same_release(&pending[1], &letter_up));
+			assert!(same_release(&pending[0], &ctrl_up));
+			let pending = pending_releases(&chord[..4]);
+			assert_eq!(pending.len(), 1);
+			assert!(same_release(&pending[0], &ctrl_up));
+			assert!(pending_releases(&chord).is_empty());
+		}
+	}
+}
+
+pub(super) fn pointer(
+	global: &mut Enigo,
+	ax: &mut Win32Ax,
+	target: &Target,
+	event: PointerEvent,
+	mode: DeliveryMode,
+) -> CoreResult<()> {
+	control::check()?;
+	match target {
+		Target::Desktop | Target::Display(_) => global_pointer(global, event),
+		Target::Window(id) if mode == DeliveryMode::Background => background::pointer(ax, id, event),
+		Target::Window(id) => foreground::pointer(id, event),
+	}
+}
+
+pub(super) fn type_text(target: &Target, text: &str, mode: DeliveryMode) -> CoreResult<()> {
+	control::check()?;
+	match target {
+		Target::Desktop | Target::Display(_) => foreground::type_desktop(text),
+		Target::Window(id) if mode == DeliveryMode::Background => {
+			background::type_text(id, text, None)
+		},
+		Target::Window(id) => foreground::type_text(id, text, || Ok(())),
+	}
+}
+
+pub(super) fn key_chord(
+	global: &mut Enigo,
+	target: &Target,
+	keys: &[KeyName],
+	mode: DeliveryMode,
+) -> CoreResult<()> {
+	control::check()?;
+	if keys.is_empty() {
+		return Err(DesktopError::input_failed("key chord is empty"));
+	}
+	match target {
+		Target::Desktop | Target::Display(_) => global_key_chord(global, keys),
+		Target::Window(id) if mode == DeliveryMode::Background => {
+			background::key_chord(id, keys, None)
+		},
+		Target::Window(id) => foreground::key_chord(id, keys, || Ok(())),
+	}
+}
+
+/// Background keyboard `input` for window `id` sent straight to `element`, a
+/// control window inside it, without moving the window's focus.
+pub(super) fn element_background(id: &str, element: HWND, input: &ElementInput) -> CoreResult<()> {
+	control::check()?;
+	match input {
+		ElementInput::Text(text) => background::type_text(id, text, Some(element)),
+		ElementInput::Chord(keys) if keys.is_empty() => {
+			Err(DesktopError::input_failed("key chord is empty"))
+		},
+		ElementInput::Chord(keys) => background::key_chord(id, keys, Some(element)),
+	}
+}
+
+/// Takeover keyboard `input` for window `id` into the element `focus` gives
+/// keyboard focus, run once the target is in front so the user's window is
+/// the one the foreground returns to.
+pub(super) fn element_foreground(
+	id: &str,
+	input: &ElementInput,
+	focus: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	control::check()?;
+	match input {
+		ElementInput::Text(text) => foreground::type_text(id, text, focus),
+		ElementInput::Chord(keys) if keys.is_empty() => {
+			Err(DesktopError::input_failed("key chord is empty"))
+		},
+		ElementInput::Chord(keys) => foreground::key_chord(id, keys, focus),
+	}
+}
+
+pub(super) fn hold_keys(
+	global: &mut Enigo,
+	target: &Target,
+	keys: &[KeyName],
+	duration: Duration,
+	mode: DeliveryMode,
+) -> CoreResult<()> {
+	control::check()?;
+	match target {
+		Target::Desktop | Target::Display(_) => {
+			with_global_keys(global, keys, |_| control::wait(duration))
+		},
+		Target::Window(id) if mode == DeliveryMode::Background => {
+			background::hold_keys(id, keys, duration, None)
+		},
+		Target::Window(id) => foreground::hold_keys(id, keys, duration),
+	}
+}
+
+/// Restores a minimized window and makes it the foreground window.
+pub(super) fn raise_window(id: &str) -> CoreResult<()> {
+	use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, ShowWindow};
+	control::check()?;
+	let hwnd = background::hwnd(id)?;
+	control::check()?;
+	// SAFETY: hwnd was validated; these functions do not retain borrowed state.
+	unsafe {
+		if IsIconic(hwnd) != 0 {
+			ShowWindow(hwnd, SW_RESTORE);
+		}
+	}
+	let _ = window::activate(hwnd)?;
+	window::wait_for_foreground(hwnd, Duration::from_millis(500))?.ok_or_else(|| {
+		DesktopError::input_failed(format!("Windows refused to raise window {id} (foreground lock)"))
+	})
+}

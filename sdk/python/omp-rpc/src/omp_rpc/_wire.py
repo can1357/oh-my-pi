@@ -156,6 +156,11 @@ _CACHE_WARMING_PHASE_VALUES: Final[frozenset[str]] = frozenset({"streaming", "id
 _decode_cache_warming_phase = cast("Decoder[CacheWarmingPhase]", literal(_CACHE_WARMING_PHASE_VALUES))
 
 
+CacheWarmingMethod: TypeAlias = Literal["prewarm", "replay"]
+_CACHE_WARMING_METHOD_VALUES: Final[frozenset[str]] = frozenset({"prewarm", "replay"})
+_decode_cache_warming_method = cast("Decoder[CacheWarmingMethod]", literal(_CACHE_WARMING_METHOD_VALUES))
+
+
 CacheWarmingOutcome: TypeAlias = Literal["hit", "miss", "error", "aborted"]
 _CACHE_WARMING_OUTCOME_VALUES: Final[frozenset[str]] = frozenset({"hit", "miss", "error", "aborted"})
 _decode_cache_warming_outcome = cast("Decoder[CacheWarmingOutcome]", literal(_CACHE_WARMING_OUTCOME_VALUES))
@@ -371,6 +376,7 @@ class CustomMessage(TypedDict):
     timestamp: float
     details: NotRequired[JsonValue]
     attribution: NotRequired[Attribution]
+    excludeFromContext: NotRequired[bool]
 
 
 class HookMessage(TypedDict):
@@ -667,7 +673,7 @@ class SessionState:
     message_count: int = 0
     queued_message_count: int = 0
     has_pending_async_work: bool = False
-    """Background jobs or deliveries can still inject a follow-up and wake the session."""
+    """Background jobs, their deliveries, child agents or queued peer messages can still wake the session."""
     is_settled: bool = False
     """Idle with nothing queued or pending; same predicate as `session_settled`."""
     queued_messages: QueuedMessagesState = field(default_factory=lambda: parse_queued_messages_state({"steering": [], "followUp": [], "liveSteered": 0}, "queuedMessages"))
@@ -711,6 +717,16 @@ class BashResult:
     images: tuple[ImageContent, ...] | None = None
     trace: JsonObject | None = None
     """The embedded shell's final `ShellTrace` of the run; only when the caller asked for one."""
+    fork: ShellForkOutcome | None = None
+    """Set when the command overlapped another one on the session's persistent shell and ran in a fork of it."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ShellForkOutcome:
+    carried: bool
+    """What the command set carried back into the session's shell; `false`: it stayed in the fork."""
+    jobs: bool
+    """It left background jobs running in the fork, where later commands' `jobs`, `wait` and `%N` miss them."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1101,7 +1117,7 @@ class AutoCompactionEndEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class ManualCompactionStartEvent:
-    """A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+    """A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."""
     type: Literal["manual_compaction_start"] = "manual_compaction_start"
     mode: str | None = None
     """The `/compact <mode>` subcommand, when one was given."""
@@ -1145,6 +1161,7 @@ class CacheWarmingStartEvent:
     """A prompt-cache refresh was handed to the provider."""
     type: Literal["cache_warming_start"] = "cache_warming_start"
     phase: CacheWarmingPhase
+    method: CacheWarmingMethod
     provider: str
     model: str
 
@@ -1154,6 +1171,7 @@ class CacheWarmingEndEvent:
     """Outcome of the refresh announced by the matching `cache_warming_start`."""
     type: Literal["cache_warming_end"] = "cache_warming_end"
     phase: CacheWarmingPhase
+    method: CacheWarmingMethod
     provider: str
     model: str
     outcome: CacheWarmingOutcome
@@ -2101,6 +2119,15 @@ def parse_bash_result(value: object, path: str = "BashResult") -> BashResult:
         working_dir=optional(payload, "workingDir", decode_str, path),
         images=optional(payload, "images", array(parse_image_content), path),
         trace=optional(payload, "trace", decode_json_object, path),
+        fork=optional(payload, "fork", parse_shell_fork_outcome, path),
+    )
+
+
+def parse_shell_fork_outcome(value: object, path: str = "ShellForkOutcome") -> ShellForkOutcome:
+    payload = expect_object(value, path)
+    return ShellForkOutcome(
+        carried=required(payload, "carried", decode_bool, path),
+        jobs=required(payload, "jobs", decode_bool, path),
     )
 
 
@@ -2592,6 +2619,7 @@ def parse_cache_warming_start_event(value: object, path: str = "CacheWarmingStar
     required(payload, "type", cast('Decoder[Literal["cache_warming_start"]]', literal(frozenset({"cache_warming_start"}))), path)
     return CacheWarmingStartEvent(
         phase=required(payload, "phase", _decode_cache_warming_phase, path),
+        method=required(payload, "method", _decode_cache_warming_method, path),
         provider=required(payload, "provider", decode_str, path),
         model=required(payload, "model", decode_str, path),
     )
@@ -2602,6 +2630,7 @@ def parse_cache_warming_end_event(value: object, path: str = "CacheWarmingEndEve
     required(payload, "type", cast('Decoder[Literal["cache_warming_end"]]', literal(frozenset({"cache_warming_end"}))), path)
     return CacheWarmingEndEvent(
         phase=required(payload, "phase", _decode_cache_warming_phase, path),
+        method=required(payload, "method", _decode_cache_warming_method, path),
         provider=required(payload, "provider", decode_str, path),
         model=required(payload, "model", decode_str, path),
         outcome=required(payload, "outcome", _decode_cache_warming_outcome, path),
@@ -3940,7 +3969,7 @@ class WireClient:
         return self._listen("auto_compaction_end", listener)
 
     def on_manual_compaction_start(self, listener: Callable[[ManualCompactionStartEvent], None]) -> Callable[[], None]:
-        """Subscribe to `manual_compaction_start`: A manual compaction (`compact` command, `/compact`, extension `ctx.compact()`) began; the live turn is already aborted."""
+        """Subscribe to `manual_compaction_start`: A manual compaction began. Handoff mode leaves live turns running and applies between turns or when idle."""
         return self._listen("manual_compaction_start", listener)
 
     def on_manual_compaction_end(self, listener: Callable[[ManualCompactionEndEvent], None]) -> Callable[[], None]:
@@ -4069,6 +4098,7 @@ __all__ = [
     "BtwRecordEvent",
     "BtwStatus",
     "CacheWarmingEndEvent",
+    "CacheWarmingMethod",
     "CacheWarmingMode",
     "CacheWarmingOutcome",
     "CacheWarmingPhase",
@@ -4175,6 +4205,7 @@ __all__ = [
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
+    "ShellForkOutcome",
     "SlashCommandInput",
     "SlashCommandSource",
     "SlashSubcommand",
@@ -4355,6 +4386,7 @@ __all__ = [
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
+    "parse_shell_fork_outcome",
     "parse_slash_command_input",
     "parse_slash_subcommand",
     "parse_subagent_event",

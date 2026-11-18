@@ -9,7 +9,7 @@ import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-ind
 import { resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { stripOuterDoubleQuotes } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, setAgentDir, spillFileName } from "@oh-my-pi/pi-utils";
 
 // -- helpers ----------------------------------------------------------------
 
@@ -19,6 +19,11 @@ function getHeader(entries: unknown[]): SessionHeader | undefined {
 	return entries.find(
 		(e): e is SessionHeader => typeof e === "object" && e !== null && "type" in e && (e as any).type === "session",
 	) as SessionHeader | undefined;
+}
+
+/** Where spill `id` lives under a session's artifacts dir: its `local://` root. */
+function spillPath(artifactsDir: string, id: string): string {
+	return path.join(artifactsDir, "local", spillFileName(id));
 }
 
 function hasAssistantEntry(entries: unknown[]): boolean {
@@ -114,8 +119,8 @@ describe("SessionManager.moveTo", () => {
 		const oldFile = session.getSessionFile()!;
 		const oldArtifacts = oldFile.slice(0, -6);
 		await fsp.mkdir(path.join(oldArtifacts, "child"), { recursive: true });
-		await Bun.write(path.join(oldArtifacts, "1.bash.log"), "saved output");
-		await Bun.write(path.join(oldArtifacts, "child", "2.bash.log"), "nested output");
+		await Bun.write(spillPath(oldArtifacts, "1"), "saved output");
+		await Bun.write(path.join(oldArtifacts, "child", "2.md"), "nested output");
 		const rename = fs.promises.rename.bind(fs.promises);
 		const link = fs.promises.link.bind(fs.promises);
 		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (from, to) => {
@@ -140,8 +145,8 @@ describe("SessionManager.moveTo", () => {
 		expect(fs.existsSync(oldFile)).toBe(false);
 		expect(fs.existsSync(oldArtifacts)).toBe(false);
 		expect(getHeader(await loadEntriesFromFile(newFile))?.cwd).toBe(cwdB);
-		expect(await Bun.file(path.join(newFile.slice(0, -6), "1.bash.log")).text()).toBe("saved output");
-		expect(await Bun.file(path.join(newFile.slice(0, -6), "child", "2.bash.log")).text()).toBe("nested output");
+		expect(await Bun.file(spillPath(newFile.slice(0, -6), "1")).text()).toBe("saved output");
+		expect(await Bun.file(path.join(newFile.slice(0, -6), "child", "2.md")).text()).toBe("nested output");
 		await session.close();
 	});
 
@@ -213,7 +218,7 @@ describe("SessionManager.moveTo", () => {
 		const oldFile = session.getSessionFile()!;
 		const oldArtifacts = oldFile.slice(0, -6);
 		await fsp.mkdir(oldArtifacts);
-		await Bun.write(path.join(oldArtifacts, "1.bash.log"), "saved output");
+		await Bun.write(spillPath(oldArtifacts, "1"), "saved output");
 		const destinationDir = path.join(testAgentDir, "destination");
 		const destinationFile = path.join(destinationDir, path.basename(oldFile));
 		const rename = fs.promises.rename.bind(fs.promises);
@@ -233,7 +238,7 @@ describe("SessionManager.moveTo", () => {
 		}
 		expect(session.getSessionFile()).toBe(oldFile);
 		expect(getHeader(await loadEntriesFromFile(oldFile))?.cwd).toBe(cwdA);
-		expect(await Bun.file(path.join(oldArtifacts, "1.bash.log")).text()).toBe("saved output");
+		expect(await Bun.file(spillPath(oldArtifacts, "1")).text()).toBe("saved output");
 		expect(await fsp.readdir(destinationDir)).toEqual([]);
 		await session.close();
 	});
@@ -425,7 +430,7 @@ describe("SessionManager.moveTo", () => {
 	it("moves artifact dir independently when session file does not exist", async () => {
 		const session = SessionManager.create(cwdA);
 		// Allocate an artifact — creates dir via ArtifactManager
-		const { path: artifactPath } = await session.allocateArtifactPath("bash");
+		const { path: artifactPath } = await session.allocateArtifactPath();
 		if (!artifactPath) throw new Error("Expected artifact path");
 
 		const oldArtifactDir = path.dirname(artifactPath);
@@ -444,6 +449,28 @@ describe("SessionManager.moveTo", () => {
 		const newFile = session.getSessionFile()!;
 		const newArtifactDir = newFile.slice(0, -6); // strip .jsonl
 		expect(fs.existsSync(newArtifactDir)).toBe(true);
+	});
+
+	it("keeps spills readable after a move and allocates new ids past them", async () => {
+		// Spills live at the session's `local://` root (`<session>/local/<N>.log`);
+		// a move carries them along, and the next spill must not reuse an id a
+		// moved file already holds.
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const firstId = (await session.saveArtifact("first spill"))!;
+		const secondId = (await session.saveArtifact("second spill"))!;
+
+		await session.moveTo(cwdB);
+
+		const movedDir = session.getSessionFile()!.slice(0, -6);
+		expect(await session.getArtifactPath(firstId)).toBe(spillPath(movedDir, firstId));
+		expect(await fsp.readFile(spillPath(movedDir, secondId), "utf8")).toBe("second spill");
+		const thirdId = (await session.saveArtifact("third spill"))!;
+		expect([firstId, secondId]).not.toContain(thirdId);
+		expect(await fsp.readFile(spillPath(movedDir, firstId), "utf8")).toBe("first spill");
+		expect(await fsp.readFile(spillPath(movedDir, thirdId), "utf8")).toBe("third spill");
 	});
 	it("does not orphan appends that race the session file rename", async () => {
 		const session = SessionManager.create(cwdA);
@@ -745,12 +772,12 @@ describe("SessionManager.moveTo", () => {
 		session.appendMessage(makeAssistantMessage());
 		await session.flush();
 		const homeArtifactsDir = session.getSessionFile()!.slice(0, -6);
-		const firstId = (await session.saveArtifact("first", "bash"))!;
+		const firstId = (await session.saveArtifact("first"))!;
 
 		await session.moveTo(cwdB);
 		const awayArtifactsDir = session.getSessionFile()!.slice(0, -6);
 		expect(fs.existsSync(homeArtifactsDir)).toBe(false);
-		const secondId = (await session.saveArtifact("second", "read"))!;
+		const secondId = (await session.saveArtifact("second"))!;
 		await fsp.mkdir(path.join(awayArtifactsDir, "Sub"));
 		await fsp.writeFile(path.join(awayArtifactsDir, "Sub", "away.md"), "written away");
 
@@ -758,26 +785,29 @@ describe("SessionManager.moveTo", () => {
 		await fsp.mkdir(path.join(homeArtifactsDir, "Sub"), { recursive: true });
 		await fsp.writeFile(path.join(homeArtifactsDir, "Sub", "home.md"), "written at home");
 		await fsp.writeFile(path.join(homeArtifactsDir, "SubagentA.md"), "stale summary");
+		await fsp.mkdir(path.join(homeArtifactsDir, "local"));
+		await fsp.writeFile(path.join(homeArtifactsDir, "local", "notes.md"), "model notes");
 
 		await session.moveTo(cwdA);
 
 		expect(session.getSessionFile()!.slice(0, -6)).toBe(homeArtifactsDir);
 		expect(fs.existsSync(awayArtifactsDir)).toBe(false);
-		expect(await session.getArtifactPath(firstId)).toBe(path.join(homeArtifactsDir, `${firstId}.bash.log`));
-		expect(await session.getArtifactPath(secondId)).toBe(path.join(homeArtifactsDir, `${secondId}.read.log`));
+		expect(await session.getArtifactPath(firstId)).toBe(spillPath(homeArtifactsDir, firstId));
+		expect(await session.getArtifactPath(secondId)).toBe(spillPath(homeArtifactsDir, secondId));
+		expect(await fsp.readFile(path.join(homeArtifactsDir, "local", "notes.md"), "utf8")).toBe("model notes");
 		expect((await fsp.readdir(path.join(homeArtifactsDir, "Sub"))).sort()).toEqual(["away.md", "home.md"]);
 		expect(await fsp.readFile(path.join(homeArtifactsDir, "SubagentA.md"), "utf8")).toBe("stale summary");
 	});
 
-	it("keeps both copies when a merged artifact name collides", async () => {
-		// Two buckets can each hold `0.bash.log` (ids are seeded per directory),
-		// and `artifact://0` resolves by `0.` prefix, so the merge must neither
+	it("keeps both copies when a merged spill name collides", async () => {
+		// Two buckets can each hold `local/0.log` (ids are seeded per directory),
+		// and `local://0.log` names one file, so the merge must neither
 		// overwrite the destination copy nor stack a renamed duplicate beside
 		// it: the colliding source entry stays where it was. Same for a nested
 		// name that exists on both sides.
 		const { session, homeArtifactsDir, awayArtifactsDir } = await sessionAwayFromHome();
-		const id = (await session.saveArtifact("written while away", "bash"))!;
-		await fsp.writeFile(path.join(homeArtifactsDir, `${id}.bash.log`), "written by a stale writer");
+		const id = (await session.saveArtifact("written while away"))!;
+		await Bun.write(spillPath(homeArtifactsDir, id), "written by a stale writer");
 		await fsp.writeFile(path.join(awayArtifactsDir, "unique.md"), "moves fine");
 		for (const dir of [homeArtifactsDir, awayArtifactsDir]) {
 			await fsp.mkdir(path.join(dir, "Sub"));
@@ -786,30 +816,13 @@ describe("SessionManager.moveTo", () => {
 
 		await session.moveTo(cwdA);
 
-		expect(await session.getArtifactPath(id)).toBe(path.join(homeArtifactsDir, `${id}.bash.log`));
-		expect(await fsp.readFile(path.join(homeArtifactsDir, `${id}.bash.log`), "utf8")).toBe(
-			"written by a stale writer",
-		);
-		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual([`${id}.bash.log`, "Sub", "unique.md"]);
+		expect(await session.getArtifactPath(id)).toBe(spillPath(homeArtifactsDir, id));
+		expect(await fsp.readFile(spillPath(homeArtifactsDir, id), "utf8")).toBe("written by a stale writer");
+		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual(["Sub", "local", "unique.md"]);
 		expect(await fsp.readFile(path.join(homeArtifactsDir, "Sub", "same.md"), "utf8")).toBe("home copy");
-		expect((await fsp.readdir(awayArtifactsDir)).sort()).toEqual([`${id}.bash.log`, "Sub"]);
-		expect(await fsp.readFile(path.join(awayArtifactsDir, `${id}.bash.log`), "utf8")).toBe("written while away");
+		expect((await fsp.readdir(awayArtifactsDir)).sort()).toEqual(["Sub", "local"]);
+		expect(await fsp.readFile(spillPath(awayArtifactsDir, id), "utf8")).toBe("written while away");
 		expect(await fsp.readdir(path.join(awayArtifactsDir, "Sub"))).toEqual(["same.md"]);
-	});
-
-	it("treats the same artifact id under a different tool suffix as a collision", async () => {
-		// `artifact://7` is resolved by the `7.` prefix, so `7.bash.log` arriving
-		// beside an existing `7.read.log` would make the lookup depend on readdir
-		// order. The id is the collision key, not the file name.
-		const { session, homeArtifactsDir, awayArtifactsDir } = await sessionAwayFromHome();
-		const id = (await session.saveArtifact("written while away", "bash"))!;
-		await fsp.writeFile(path.join(homeArtifactsDir, `${id}.read.log`), "written by a stale writer");
-
-		await session.moveTo(cwdA);
-
-		expect(await session.getArtifactPath(id)).toBe(path.join(homeArtifactsDir, `${id}.read.log`));
-		expect(await fsp.readdir(homeArtifactsDir)).toEqual([`${id}.read.log`]);
-		expect(await fsp.readdir(awayArtifactsDir)).toEqual([`${id}.bash.log`]);
 	});
 
 	it("finishes the merge and keeps the session at the destination when one entry cannot move", async () => {
@@ -818,7 +831,7 @@ describe("SessionManager.moveTo", () => {
 		// pointing away from the artifacts that already moved. The entry stays
 		// at the source and the rest of the merge completes.
 		const { session, homeArtifactsDir, awayArtifactsDir } = await sessionAwayFromHome();
-		const id = (await session.saveArtifact("written while away", "bash"))!;
+		const id = (await session.saveArtifact("written while away"))!;
 		await fsp.writeFile(path.join(awayArtifactsDir, "stuck.md"), "cannot move");
 		await fsp.writeFile(path.join(homeArtifactsDir, "stale.md"), "already here");
 		// Both the no-replace link and its exclusive-copy fallback refuse this one
@@ -843,28 +856,29 @@ describe("SessionManager.moveTo", () => {
 		}
 
 		expect(session.getSessionFile()!.slice(0, -6)).toBe(homeArtifactsDir);
-		expect(await session.getArtifactPath(id)).toBe(path.join(homeArtifactsDir, `${id}.bash.log`));
+		expect(await session.getArtifactPath(id)).toBe(spillPath(homeArtifactsDir, id));
 		expect(await fsp.readFile(path.join(homeArtifactsDir, "stale.md"), "utf8")).toBe("already here");
 		expect(await fsp.readdir(awayArtifactsDir)).toEqual(["stuck.md"]);
 	});
 
-	it("notices an artifact id a writer publishes after the destination was listed", async () => {
-		// The destination is listed before moving; a writer landing `1.read.log`
-		// after that listing does not collide by name with the source's
-		// `1.bash.log`, so both would arrive and `artifact://1` would depend on
-		// readdir order. The occupancy must be re-read before an id-bearing move.
+	it("notices a spill a writer publishes after the destination was listed", async () => {
+		// The destination's `local/` is listed before moving; a writer landing
+		// `local/<id>.log` after that listing must win over the source's copy,
+		// never be replaced by it.
 		const { session, homeArtifactsDir, awayArtifactsDir } = await sessionAwayFromHome();
-		const id = (await session.saveArtifact("written while away", "bash"))!;
-		await fsp.writeFile(path.join(homeArtifactsDir, "stale.md"), "already here");
+		const id = (await session.saveArtifact("written while away"))!;
+		const homeLocal = path.join(homeArtifactsDir, "local");
+		await fsp.mkdir(homeLocal);
+		await fsp.writeFile(path.join(homeLocal, "stale.md"), "already here");
 		const readdir = fs.promises.readdir.bind(fs.promises);
 		let published = false;
 		// The relocation only ever lists with `withFileTypes: true`; satisfy the
 		// overload set with that shape.
 		const listing = async (target: fs.PathLike, options: { withFileTypes: true }) => {
 			const entries = await readdir(target, options);
-			if (!published && path.resolve(target.toString()) === homeArtifactsDir) {
+			if (!published && path.resolve(target.toString()) === homeLocal) {
 				published = true;
-				await fsp.writeFile(path.join(homeArtifactsDir, `${id}.read.log`), "published after the listing");
+				await fsp.writeFile(spillPath(homeArtifactsDir, id), "published after the listing");
 			}
 			return entries;
 		};
@@ -875,9 +889,9 @@ describe("SessionManager.moveTo", () => {
 			readdirSpy.mockRestore();
 		}
 
-		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual([`${id}.read.log`, "stale.md"]);
-		expect(await session.getArtifactPath(id)).toBe(path.join(homeArtifactsDir, `${id}.read.log`));
-		expect(await fsp.readdir(awayArtifactsDir)).toEqual([`${id}.bash.log`]);
+		expect((await fsp.readdir(homeLocal)).sort()).toEqual([spillFileName(id), "stale.md"]);
+		expect(await fsp.readFile(spillPath(homeArtifactsDir, id), "utf8")).toBe("published after the listing");
+		expect(await fsp.readFile(spillPath(awayArtifactsDir, id), "utf8")).toBe("written while away");
 	});
 
 	it("does not merge through a symlink on either side", async () => {
@@ -886,7 +900,7 @@ describe("SessionManager.moveTo", () => {
 		// relocation failure, not a merge: the move fails and the session stays
 		// where it was.
 		const { session, homeArtifactsDir, awayArtifactsDir } = await sessionAwayFromHome();
-		const id = (await session.saveArtifact("written while away", "bash"))!;
+		const id = (await session.saveArtifact("written while away"))!;
 		const awaySessionFile = session.getSessionFile()!;
 		const elsewhere = path.join(testAgentDir, "elsewhere");
 		await fsp.mkdir(elsewhere);
@@ -898,7 +912,7 @@ describe("SessionManager.moveTo", () => {
 		await expect(session.moveTo(cwdA)).rejects.toThrow();
 		expect(await fsp.readdir(elsewhere)).toEqual(["unrelated.md"]);
 		expect(session.getSessionFile()).toBe(awaySessionFile);
-		expect(await session.getArtifactPath(id)).toBe(path.join(awayArtifactsDir, `${id}.bash.log`));
+		expect(await session.getArtifactPath(id)).toBe(spillPath(awayArtifactsDir, id));
 
 		// Source is a symlink and the destination is an occupied real directory.
 		await fsp.unlink(homeArtifactsDir);
@@ -917,13 +931,15 @@ describe("SessionManager.moveTo", () => {
 		// the move itself; once entries have moved it must not throw out of the
 		// merge, or the session file is rolled back away from them.
 		const { session, homeArtifactsDir, awayArtifactsDir } = await sessionAwayFromHome();
-		const id = (await session.saveArtifact("written while away", "bash"))!;
+		const id = (await session.saveArtifact("written while away"))!;
 		await fsp.writeFile(path.join(awayArtifactsDir, "unique.md"), "moves fine");
-		await fsp.writeFile(path.join(homeArtifactsDir, "stale.md"), "already here");
+		const homeLocal = path.join(homeArtifactsDir, "local");
+		await fsp.mkdir(homeLocal);
+		await fsp.writeFile(path.join(homeLocal, "stale.md"), "already here");
 		const readdir = fs.promises.readdir.bind(fs.promises);
 		let homeListings = 0;
 		const listing = async (target: fs.PathLike, options: { withFileTypes: true }) => {
-			if (path.resolve(target.toString()) === homeArtifactsDir && ++homeListings === 2) {
+			if (path.resolve(target.toString()) === homeLocal && ++homeListings === 2) {
 				throw Object.assign(new Error("EIO: i/o error"), { code: "EIO" });
 			}
 			return readdir(target, options);
@@ -936,8 +952,9 @@ describe("SessionManager.moveTo", () => {
 		}
 
 		expect(session.getSessionFile()!.slice(0, -6)).toBe(homeArtifactsDir);
-		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual(["stale.md", "unique.md"]);
-		expect(await fsp.readdir(awayArtifactsDir)).toEqual([`${id}.bash.log`]);
+		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual(["local", "unique.md"]);
+		expect(await fsp.readdir(homeLocal)).toEqual(["stale.md"]);
+		expect(await fsp.readdir(path.join(awayArtifactsDir, "local"))).toEqual([spillFileName(id)]);
 	});
 
 	it("keeps the no-replace guarantee when hard links are unavailable", async () => {
@@ -981,7 +998,7 @@ describe("SessionManager.moveTo", () => {
 
 		const oldFile = session.getSessionFile()!;
 		const oldArtifactsDir = oldFile.slice(0, -6);
-		await session.saveArtifact("keep me", "bash");
+		await session.saveArtifact("keep me");
 
 		const realRename = fs.promises.rename.bind(fs.promises);
 		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {

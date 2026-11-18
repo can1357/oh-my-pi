@@ -72,7 +72,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("main-world Puppeteer navigation waits", ()
 				await stale.dispose();
 			}
 		} finally {
-			await closeLaunchedBrowser(browser);
+			await closeLaunchedBrowser({ browser, userDataDir });
 			if (userDataDir) await removeUserDataDir(userDataDir);
 		}
 	});

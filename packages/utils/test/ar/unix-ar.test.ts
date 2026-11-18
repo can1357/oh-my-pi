@@ -5,7 +5,7 @@ import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { memoryByteSource } from "../../src/ar/source";
 import type { ArchiveIndexEntry } from "../../src/ar/types";
 import { readUnixAr, readUnixArEntriesFromBuffer, sniffUnixAr } from "../../src/ar/unix-ar";
-import { arFixture as fixture } from "./fixtures";
+import { arFixture as fixture, extractLargestMember } from "./fixtures";
 
 const decoder = new TextDecoder();
 
@@ -121,11 +121,9 @@ describe("Unix ar", () => {
 			"missing long-name table",
 		);
 
-		await expect(
-			readUnixAr(memoryByteSource(original), {
-				limits: { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 8 },
-			}),
-		).rejects.toThrow("too large to extract");
+		const memberLimits = { ...DEFAULT_ARCHIVE_LIMITS, maxMemberSize: 8 };
+		const memberIndex = await readUnixAr(memoryByteSource(original), { limits: memberLimits });
+		await expect(extractLargestMember("ar", memberIndex, memberLimits)).rejects.toThrow("too large to extract");
 		await expect(
 			readUnixAr(memoryByteSource(original), {
 				limits: { ...DEFAULT_ARCHIVE_LIMITS, maxPathBytes: 10 },

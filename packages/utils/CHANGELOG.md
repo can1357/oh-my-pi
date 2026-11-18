@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+### Added
+
+- `spillUrl`, `parseSpillUrl` and `spillUrlIds` format and parse a session spill's `local://N.log` URL
+- `postmortem.exitCleanlyOnStopSignals()` makes a long-running service exit 0 after its cleanup pass on SIGINT/SIGTERM instead of 130/143
+
+### Fixed
+
+- Windows shell discovery skips the WSL `bash.exe` launcher, so services no longer run in WSL
+- Opening an archive no longer fails because one unrelated member exceeds the 64 MiB extraction limit; the limit applies when that member is read
+- `OMP_LOG_LEVEL` now also limits what console-logging services such as `omp auth-broker serve` print to stdout; it applied only to the log file, so an `info` setting still let every debug line into the service's journal ([#19605](https://github.com/can1357/oh-my-pi/pull/19605) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.22.2] - 2026-11-18
+
+### Added
+
+- Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.21.0] - 2026-11-16
+
+### Fixed
+
+- Fixed bare URLs swallowing the following word when Korean, Japanese, or Chinese text follows a parenthesized URL without a space.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Fixed HTML-to-Markdown conversion for fetched and pasted HTML to preserve whitespace in inline elements, maintain code indentation in preformatted blocks, and avoid inserting stray blank lines between block elements.
+
 ## [18.20.2] - 2026-11-14
 
 ### Added

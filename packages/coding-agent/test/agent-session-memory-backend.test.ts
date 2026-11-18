@@ -187,6 +187,7 @@ describe("AgentSession memory backend lifecycle", () => {
 			model: model.id,
 			usage: response.usage,
 			stopReason: "stop",
+			completion: { prompt: "Sam works at Globex.", reply: "Sam works at Globex." },
 		});
 		expect(manager.getLeafId()).toBe(usage[0]!.id);
 	});
@@ -205,7 +206,8 @@ describe("AgentSession memory backend lifecycle", () => {
 
 		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
 
-		const usage = current.sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		// Both attempts hang off the leaf the request started on, so the second is a sibling, off the branch.
+		const usage = current.sessionManager.getEntries().filter(entry => entry.type === "model_usage");
 		expect(usage).toHaveLength(2);
 		expect(usage).toMatchObject([
 			{
@@ -259,12 +261,32 @@ describe("AgentSession memory backend lifecycle", () => {
 		]);
 	});
 
-	it("does not journal unbilled local-inference memory completions", async () => {
+	it("journals a local-inference memory completion once, with zero usage", async () => {
 		const model = getBundledModel("local", "qwen2.5-1.5b")!;
 		spyOn(tinyModelClient, "complete").mockResolvedValue("Sam works at Globex.");
 		const { current, complete } = await startMemoryCompletion([model]);
 
-		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
+		expect(await complete("Where does Sam work?")).toBe("Sam works at Globex.");
+
+		const usage = current.sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage).toHaveLength(1);
+		expect(usage[0]).toMatchObject({
+			purpose: "memory",
+			role: "memory",
+			provider: model.provider,
+			model: model.id,
+			usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0 } },
+			stopReason: "stop",
+			completion: { prompt: "Where does Sam work?", reply: "Sam works at Globex." },
+		});
+	});
+
+	it("journals nothing when the local memory worker produces no output", async () => {
+		const model = getBundledModel("local", "qwen2.5-1.5b")!;
+		spyOn(tinyModelClient, "complete").mockResolvedValue(null);
+		const { current, complete } = await startMemoryCompletion([model]);
+
+		expect(await complete("Where does Sam work?")).toBeNull();
 		expect(current.sessionManager.getBranch().filter(entry => entry.type === "model_usage")).toEqual([]);
 	});
 
@@ -467,12 +489,13 @@ describe("AgentSession memory backend lifecycle", () => {
 				output: text => {
 					output.push(text);
 				},
-				refreshCommands: () => {},
-				reloadPlugins: async () => {
+				// The last rescope step: a failure here exercises rollback after the memory rebind.
+				refreshCommands: () => {
 					if (current.sessionManager.getCwd() !== destinationCwd) return;
 					destinationDbPath = getMnemopiSessionState(current)!.memory.dbPath!;
 					if (rollback) throw new Error("destination plugin rescope failed");
 				},
+				reloadPlugins: async () => {},
 			});
 		} finally {
 			setProjectDir(originalProjectDir);

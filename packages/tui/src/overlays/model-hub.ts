@@ -877,18 +877,22 @@ export class ModelHubComponent implements Component {
 	}
 
 	/**
-	 * Push the active scope's items into the browser. While assigning a role,
-	 * the role's `accepts` predicate is re-applied here so a scope hop
-	 * (provider/all/recent) can never surface a model the role rejects — role
-	 * resolution and the runtime candidate pool filter the same way, so an
-	 * unaccepted pick would persist a selector that never resolves.
+	 * Push the active scope's items into the browser. While assigning a role or
+	 * a role-keyed fallback, the role's `accepts` predicate is re-applied here so
+	 * a scope hop (provider/all/recent) can never surface a model the role
+	 * rejects — role resolution and the runtime candidate pool filter the same
+	 * way, so an unaccepted pick would persist a selector that never resolves.
+	 * Model-keyed chains (`provider/model-id`, `provider/*`) have no role
+	 * predicate and stay unfiltered.
 	 */
 	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
 		const assigning = this.#assigning;
+		const role =
+			assigning?.kind === "role" || (assigning?.kind === "fallback" && !assigning.role.includes("/"))
+				? assigning.role
+				: undefined;
 		const scoped =
-			assigning?.kind === "role"
-				? items.filter(item => this.#settings.getRoleInfo(assigning.role).accepts(item.model))
-				: items;
+			role !== undefined ? items.filter(item => this.#settings.getRoleInfo(role).accepts(item.model)) : items;
 		this.#candidateItems = [...scoped];
 		this.#candidateCatalog = scoped === this.#availableItems ? this.#availableItems : undefined;
 		this.#applyModelKind();

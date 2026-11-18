@@ -1,5 +1,6 @@
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
-import { MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
+import { MODEL_MENTION_RE, modelMentionToken, resolveModelMentionToken } from "./model-mention-syntax";
 import { SYMBOL_PRESETS } from "../theme/symbols";
 import { type ThemeColor, theme } from "../theme/theme";
 
@@ -88,14 +89,15 @@ export function collapseModelMentions(
 	text: string,
 	chipFor: (selector: string) => { label: string; selector: string } | undefined,
 	register: (label: string, expansion: string) => void,
+	isKnown?: (selector: string) => boolean,
 ): string {
 	if (!text.includes("^") || !allowsModelMentions(text)) return text;
 	MODEL_MENTION_RE.lastIndex = 0;
 	return text.replace(MODEL_MENTION_RE, (match, delimiter: string, selector: string) => {
-		const chip = chipFor(selector);
-		if (chip === undefined) return match;
-		register(chip.label, modelMentionToken(chip.selector));
-		return `${delimiter}${chip.label}`;
+		const mention = resolveModelMentionToken(selector, chipFor, isKnown);
+		if (!mention) return match;
+		register(mention.value.label, modelMentionToken(mention.value.selector));
+		return `${delimiter}${mention.value.label}${mention.suffix}`;
 	});
 }
 
@@ -297,6 +299,16 @@ export function compactImageMarkers(
 		},
 	);
 	return { text: rewritten, keep: keep.map(n => n - 1) };
+}
+
+/** Drops images whose markers were deleted and renumbers the rest by appearance (path pastes attach out of order). */
+export function compactImageAttachments(
+	text: string,
+	images: ImageContent[],
+): { text: string; images: ImageContent[] } {
+	const compacted = compactImageMarkers(text, images.length, { byAppearance: true });
+	if (!compacted) return { text, images };
+	return { text: compacted.text, images: compacted.keep.map(index => images[index]!) };
 }
 
 /** Attachment kinds understood by placeholder renderers. */

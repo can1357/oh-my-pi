@@ -197,7 +197,6 @@ describe("integrations thread service", () => {
 			index: 0,
 			id: "probe-0",
 			extensionRoots: () => roots,
-			preparedSession: { fork: { sourceFile: "source.jsonl" }, promptSuffix: model => `suffix:${model}` },
 			localProtocolOptions: local,
 			customTools: [
 				{
@@ -213,7 +212,6 @@ describe("integrations thread service", () => {
 		const read = await probe.readOptions(bridgeIntegrationOptions(options));
 		expect(read).toEqual({
 			roots,
-			suffix: "suffix:model-x",
 			localRoot: resolveLocalRoot(local),
 			approvalTargets: ["a.txt"],
 		});

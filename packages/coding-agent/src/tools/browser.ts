@@ -1,11 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { getWebKitHostPath, isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
-import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
+import type { EvalPreludeContext, HostEvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { resolveCmuxKind } from "./browser/cmux/rpc";
-import { describeRelayTargets, listRelayTargets, type RelayTarget, resolveSpawnArgs } from "./browser/attach";
+import { CmuxUnavailableError, resolveCmuxKind } from "./browser/cmux/rpc";
+import { type CdpTarget, describeCdpTargets, listCdpTargets, resolveSpawnArgs } from "./browser/attach";
 import {
 	acquireBrowser,
 	browserKey,
@@ -17,6 +17,7 @@ import {
 	releaseBrowser,
 } from "./browser/registry";
 import { chromiumNeedsDownload, ensureChromiumExecutable } from "./browser/launch";
+import { type EmulationViewport, viewportSchema } from "./browser/emulation";
 import { sameAddress } from "./browser/navigation";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
@@ -26,11 +27,12 @@ import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
 import { ownsTerminal } from "./browser/terminal-owner";
 import { WebKitUnavailableError } from "./browser/webkit/host";
-import { ABKIT_VERSION, installWebKitEngine, webKitEngineToInstall } from "./browser/webkit/install";
+import { installWebKitEngine, webKitEngineToInstall } from "./browser/webkit/install";
 import { resolveWebKitKind, VIEWER_PLATFORMS } from "./browser/webkit/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { Viewport } from "puppeteer-core";
 import {
 	type AcquireTabResult,
 	acquireTab,
@@ -130,12 +132,8 @@ const browserSchema = type({
 	"target?": type("string").describe(
 		"URL/title substring picking the page to drive; inside Tern, adopts the user's browser block (or its id)",
 	),
-	"viewport?": {
-		width: "number",
-		height: "number",
-		"scale?": "number",
-	},
-	"wait_until?": type("'load' | 'domcontentloaded' | 'networkidle0' | 'networkidle2'").describe(
+	"viewport?": viewportSchema,
+	"wait_until?": type("'load' | 'domcontentloaded' | 'networkidle' | 'networkidle0' | 'networkidle2'").describe(
 		"navigation wait condition",
 	),
 	"dialogs?": type("'accept' | 'dismiss'").describe("auto-handle dialogs"),
@@ -177,7 +175,8 @@ interface BrowserPreludeDetails {
  * over the `browser.tern` setting to adopt a block; `headed` does not opt out),
  * a cmux surface, then omp's own browser ({@link ownBrowserKind}). `app: "auto"`
  * is that chain without the relay. Tern and cmux are automatic only while no
- * other omp owns the terminal. `app: "tern"` and `app: "webkit"` are explicit:
+ * other omp owns the terminal, and none of the user's own surfaces (relay, Tern,
+ * cmux) is automatic for a subagent. `app: "tern"` and `app: "webkit"` are explicit:
  * they throw when Tern or omp's WebKit host is unavailable.
  */
 export function resolveBrowserKind(
@@ -233,8 +232,9 @@ export function resolveBrowserKind(
 	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
 	// is a deliberate mode selection, while cdpUrl is a standing fallback
 	// endpoint. A configured endpoint is a default, not an override: an
-	// explicit app wins.
-	if (app !== "auto") {
+	// explicit app wins. A `/tan` clone (task depth 0) keeps its parent's defaults.
+	const subagent = (session.taskDepth ?? 0) > 0;
+	if (app !== "auto" && !subagent) {
 		const relayKind = resolveRelayKind(
 			{
 				settingEnabled: cfgBrowserRelay.get(session.settings),
@@ -250,22 +250,21 @@ export function resolveBrowserKind(
 	}
 	// Tern and cmux show the tab beside the omp drawn in that terminal. An omp started from that
 	// session's commands (`omp -p` from its bash tool, a script an eval cell runs) inherited the
-	// pane env, and its tabs would float over the other session's work.
+	// pane env, and its tabs would float over the other session's work. A subagent has no pane of
+	// its own either: its tabs would pile up over the parent's, so it skips both even when
+	// PI_BROWSER_TERN=1 or PI_BROWSER_CMUX=1 forces them for the parent.
 	const ownsPane = ownsTerminal(env);
-	// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
-	const ternKind = resolveTernKind(
-		{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
-		env,
-	);
-	if (ternKind) return ternKind;
-	const cmuxKind = resolveCmuxKind(
-		{
-			settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings),
-		},
-		env,
-	);
-	if (cmuxKind) {
-		return cmuxKind;
+	if (!subagent || params.target !== undefined) {
+		// `target` inside Tern names a browser block to adopt: an explicit request, like `app: "tern"`.
+		const ternKind = resolveTernKind(
+			{ settingEnabled: params.target !== undefined || (ownsPane && cfgBrowserTern.get(session.settings)) },
+			env,
+		);
+		if (ternKind) return ternKind;
+	}
+	if (!subagent) {
+		const cmuxKind = resolveCmuxKind({ settingEnabled: ownsPane && cfgBrowserCmux.get(session.settings) }, env);
+		if (cmuxKind) return cmuxKind;
 	}
 	return ownBrowserKind(params, session, env);
 }
@@ -311,7 +310,7 @@ function chromiumKind(
 }
 
 /** Create the enabled-only browser host prelude for one tool session. */
-export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinition {
+export function createBrowserPrelude(session: ToolSession): HostEvalPreludeDefinition {
 	// Eval-first-use boundary: source/declaration assets stay unloaded until a
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { createBrowserPreludeDefinition } = require("./browser/prelude-definition");
@@ -320,16 +319,17 @@ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinitio
 		status: describeBrowserCall,
 		// The documentation promises omp's own browser for an open without `app`; while
 		// the relay takes that open, the prompt names where `app: "auto"` goes instead.
-		relayFallback:
-			resolveBrowserKind({ action: "open" }, session).kind === "relay"
+		get relayFallback() {
+			return resolveBrowserKind({ action: "open" }, session).kind === "relay"
 				? resolveBrowserKind({ action: "open", app: "auto" }, session)
-				: undefined,
+				: undefined;
+		},
 	});
 }
 
 /** Status-tree line for a completed browser call: `open main https://…`, `main.id(5).click()`, `close all`. */
 function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknown>): string | undefined {
-	const parsed = browserSchema(parameters);
+	const parsed = browserSchema(withStringApp(parameters));
 	if (parsed instanceof type.errors) return undefined;
 	const name = parsed.name ?? DEFAULT_TAB_NAME;
 	switch (parsed.action) {
@@ -419,7 +419,7 @@ async function invokeBrowser(
 	parameters: unknown,
 	context: EvalPreludeContext,
 ): Promise<AgentToolResult<unknown>> {
-	const parsed = browserSchema(parameters);
+	const parsed = browserSchema(withStringApp(parameters));
 	if (parsed instanceof type.errors) {
 		throw new ToolError(`browser received invalid arguments: ${parsed.summary}`);
 	}
@@ -460,6 +460,42 @@ async function invokeBrowser(
 }
 
 /**
+ * `parameters` with an object `app` (`{tern: false}`, `{relay: true, target}`, `{cdp_url}`, `{path, args}`), the
+ * shape `app` had before it became one string, read as the string call that means the same: its `target` and
+ * `args` go top-level unless given there too.
+ */
+function withStringApp(parameters: unknown): unknown {
+	if (!isRecord(parameters) || !isRecord(parameters.app)) return parameters;
+	const legacy = parameters.app;
+	const { app: _, ...rest } = parameters;
+	const cdpUrl = legacy.cdp_url ?? legacy.cdpUrl;
+	let app: string | undefined;
+	if (typeof cdpUrl === "string") app = cdpUrl;
+	else if (typeof legacy.path === "string") app = legacy.path;
+	else if (legacy.relay === true) app = "relay";
+	else if (legacy.tern === true) app = "tern";
+	else if (legacy.tern === false) app = "own";
+	else if (legacy.relay === false) app = "auto";
+	const normalized: Record<string, unknown> = { ...rest };
+	if (app !== undefined) normalized.app = app;
+	const argv = legacy.args ?? legacy.argv;
+	if (normalized.argv === undefined && Array.isArray(argv)) normalized.argv = argv;
+	if (normalized.target === undefined && typeof legacy.target === "string") normalized.target = legacy.target;
+	return normalized;
+}
+
+/** An open's `viewport` as Puppeteer sizes a page. */
+function puppeteerViewport(viewport: EmulationViewport): Viewport {
+	return {
+		width: viewport.width,
+		height: viewport.height,
+		deviceScaleFactor: viewport.scale,
+		isMobile: viewport.isMobile,
+		hasTouch: viewport.hasTouch,
+	};
+}
+
+/**
  * Open (or reuse) a tab, falling back when the browser chosen automatically
  * cannot host it, and saying so in the result:
  * - A Tern PiP (not forced with `app: "tern"`) that Tern cannot show — no
@@ -469,6 +505,8 @@ async function invokeBrowser(
  * - omp's WebKit host (not forced with `app: "webkit"`) that cannot start,
  *   cannot open its first tab, or could not be downloaded
  *   ({@link installWebKitForOpen}) goes to managed Chromium.
+ * - A cmux surface (always an automatic choice) that fails to open goes to
+ *   omp's own browser.
  *
  * A tab that already fell back keeps its browser.
  */
@@ -485,9 +523,20 @@ async function openBrowser(
 	const autoTern = resolved.kind === "tern" && params.app !== "tern" && params.target === undefined;
 	const autoWebKit = params.app !== "webkit";
 	const existing = getTab(name);
+	// cmux is only ever chosen automatically; a live cmux tab under the name stays there.
+	const autoCmux = resolved.kind === "cmux" && existing?.kindTag !== "cmux";
+	const existingKind = existing?.browser.kind;
 	let kind = resolved;
 	if (autoTern && existing && existing.kindTag !== "tern") {
 		kind = existing.browser.kind;
+	} else if (
+		existingKind?.kind === "headless" &&
+		params.headed === undefined &&
+		(!params.insecure || existingKind.insecure) &&
+		(resolved.kind === "headless" || (resolved.kind === "webkit" && autoWebKit))
+	) {
+		// Reopening a managed Chromium tab without `headed` keeps the window mode it opened in.
+		kind = existingKind;
 	} else if (resolved.kind === "webkit" && autoWebKit && existing) {
 		// A tab that fell back to Chromium keeps it, as does one opened while the WebKit host was not installed.
 		const chromium = chromiumKind(params, session);
@@ -495,14 +544,29 @@ async function openBrowser(
 	}
 	const startedAt = performance.now();
 	/** Why each browser tried before `kind` could not take the open. */
-	const failures: Array<{ backend: "tern" | "webkit"; reason: string }> =
+	const failures: Array<{ backend: "tern" | "webkit" | "cmux"; reason: string }> =
 		webkitDownloadFailure === undefined ? [] : [{ backend: "webkit", reason: webkitDownloadFailure }];
+	// The WebKit engine always checks HTTPS certificates and has no mobile or touch emulation: such an open needs Chromium.
+	const chromiumOnly = params.insecure
+		? "it cannot ignore invalid HTTPS certificates (insecure)"
+		: params.viewport?.isMobile || params.viewport?.hasTouch
+			? "it cannot emulate a mobile or touch viewport"
+			: undefined;
+	if (kind.kind === "webkit" && chromiumOnly && !autoWebKit) {
+		throw new ToolError(`app: "webkit" cannot take this open: ${chromiumOnly}. Pass app: "chromium", or omit app.`);
+	}
 	for (;;) {
+		if (kind.kind === "webkit" && chromiumOnly) {
+			failures.push({ backend: "webkit", reason: chromiumOnly });
+			kind = chromiumKind(params, session);
+		}
 		const opened = kind.kind === "webkit" ? "omp's WebKit browser" : "Chromium";
 		const notes = failures.map(failure =>
 			failure.backend === "tern"
 				? `Tern cannot show a browser here (${failure.reason}); opened ${opened} instead. Pass app: "own" to skip Tern, or app: "tern" to require it.`
-				: `omp's WebKit browser could not start (${failure.reason}); opened Chromium instead. Pass app: "chromium" to skip it, or app: "webkit" to require it.`,
+				: failure.backend === "cmux"
+					? `cmux could not open a browser surface here (${failure.reason}); opened ${opened} instead. Pass app: "own" to skip cmux.`
+					: `omp's WebKit browser could not take this open (${failure.reason}); opened Chromium instead. Pass app: "chromium" to skip it, or app: "webkit" to require it.`,
 		);
 		const remainingMs = Math.max(1, timeoutMs - (performance.now() - startedAt));
 		try {
@@ -516,10 +580,13 @@ async function openBrowser(
 			} else if (kind.kind === "webkit" && autoWebKit && error instanceof WebKitUnavailableError) {
 				failures.push({ backend: "webkit", reason: error.message });
 				next = chromiumKind(params, session);
+			} else if (kind.kind === "cmux" && autoCmux && error instanceof CmuxUnavailableError) {
+				failures.push({ backend: "cmux", reason: error.message });
+				next = ownBrowserKind(params, session);
 			} else {
 				throw error;
 			}
-			// A Tern or WebKit tab under this name whose window or host went away still holds the
+			// A Tern, WebKit or cmux tab under this name whose window or host went away still holds the
 			// name: release that one (and only that one) so the next browser's tab can take it.
 			if (getTab(name)?.kindTag === kind.kind) {
 				await releaseTab(name, { kill: false, timeoutMs }).catch(() => false);
@@ -543,10 +610,10 @@ const failedWebKitUpdates = new Set<string>();
  * engine is downloaded for an open with `app: "webkit"`, or one that otherwise
  * ends at managed Chromium (headless, or visible where released engines ship a
  * viewer) while Chromium itself would first be downloaded: with no browser
- * installed, omp's own engine comes before Chrome for Testing. An outdated
- * engine is updated to {@link ABKIT_VERSION} before an open that would run it,
- * once per process. Like Chrome's download, it runs before the open's deadline
- * starts.
+ * installed, omp's own engine comes before Chrome for Testing. An installed
+ * engine is updated to ABKit's newest build before an open that would run it,
+ * checked once per process. Like Chrome's download, it runs before the open's
+ * deadline starts.
  *
  * Returns why an automatic download failed, for the open to go on to Chromium
  * saying so; for `app: "webkit"` a failed download throws. A failed update is
@@ -564,7 +631,7 @@ async function installWebKitForOpen(
 	});
 	if (pending === null) return undefined;
 	const { engineDir } = pending;
-	if (pending.outdated) {
+	if (pending.installed) {
 		if (failedWebKitUpdates.has(engineDir)) return undefined;
 		if (!explicit && resolveBrowserKind(params, session).kind !== "webkit") return undefined;
 		try {
@@ -574,7 +641,6 @@ async function installWebKitForOpen(
 			failedWebKitUpdates.add(engineDir);
 			logger.warn("Could not update omp's WebKit engine; running the installed one", {
 				engineDir,
-				version: ABKIT_VERSION,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
@@ -615,7 +681,7 @@ async function openOnKind(
 	const existing = getTab(name);
 	if (existing && browserKey(existing.browser.kind) !== browserKey(kind)) {
 		throw new ToolError(
-			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}). Close it first.`,
+			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}, not ${describeKind(kind)}). Close it first, or reopen it with the app and headed it was opened with.`,
 		);
 	}
 	// Chrome's extension debugger API exposes no Security domain, so the relay cannot honor the override.
@@ -656,13 +722,7 @@ async function openOnKind(
 		const browser = await untilAborted(openSignal, () =>
 			acquireBrowser(kind, {
 				cwd: session.cwd,
-				viewport: params.viewport
-					? {
-							width: params.viewport.width,
-							height: params.viewport.height,
-							deviceScaleFactor: params.viewport.scale,
-						}
-					: undefined,
+				viewport: params.viewport ? puppeteerViewport(params.viewport) : undefined,
 				signal: openSignal,
 			}),
 		);
@@ -705,14 +765,9 @@ async function openOnKind(
 			result = await untilAborted(openSignal, () =>
 				acquireTab(name, browser, {
 					url: params.url,
-					waitUntil: params.wait_until,
-					viewport: params.viewport
-						? {
-								width: params.viewport.width,
-								height: params.viewport.height,
-								deviceScaleFactor: params.viewport.scale,
-							}
-						: undefined,
+					// Playwright's `networkidle` (no connections for 500 ms) is Puppeteer's `networkidle0`.
+					waitUntil: params.wait_until === "networkidle" ? "networkidle0" : params.wait_until,
+					viewport: params.viewport ? puppeteerViewport(params.viewport) : undefined,
 					target: params.target,
 					timeoutMs,
 					deadlineStartMs: deadlineStart,
@@ -757,7 +812,7 @@ async function openOnKind(
 		if (title) opened += `, titled ${JSON.stringify(title)}`;
 		const lines = [
 			opened,
-			...(tab.backend === "tern" ? ternNotes(tab) : []),
+			...(tab.backend === "tern" ? ternNotes(tab, params.viewport) : []),
 			...notes,
 			result.note,
 			relayNotice,
@@ -774,10 +829,9 @@ async function openOnKind(
 }
 
 /**
- * The user's own pages `target` can adopt, from the browser an open with
- * `target` would drive: a Tern window's browser blocks, or the relay's
- * Chrome pages. The browser is acquired as an open does (the loopback relay
- * starts on demand) and released again.
+ * The pages `target` can adopt, from the browser an open with `target` would drive: a Tern window's browser
+ * blocks, the relay's Chrome pages, or the pages of an attached CDP endpoint. The relay and Tern are acquired as
+ * an open does (the loopback relay starts on demand) and released again; a CDP endpoint answers its `/json` list.
  */
 async function listTargets(
 	session: ToolSession,
@@ -788,25 +842,33 @@ async function listTargets(
 ): Promise<AgentToolResult<unknown>> {
 	// Resolve as an open naming a target: inside Tern that selects Tern even when the `browser.tern` setting is off.
 	const kind = resolveBrowserKind({ ...params, target: params.target ?? "" }, session);
-	if (kind.kind !== "tern" && kind.kind !== "relay") {
+	if (kind.kind !== "tern" && kind.kind !== "relay" && kind.kind !== "connected") {
 		throw new ToolError(
-			`No pages to adopt here (the browser would be ${describeKind(kind)}): targets exist only inside a Tern pane (its browser blocks) or with the omp relay (app: "relay" or the browser.relay setting).`,
+			`No pages to adopt here (the browser would be ${describeKind(kind)}): targets exist only inside a Tern pane (its browser blocks), with the omp relay (app: "relay" or the browser.relay setting), or at a CDP endpoint (app: "http://127.0.0.1:9222" or the browser.cdpUrl setting).`,
 		);
 	}
 	details.browser = kind.kind;
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const listSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
+		if (kind.kind === "connected") {
+			const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
+			const targets = await untilAborted(listSignal, () => listCdpTargets(cdpUrl, listSignal));
+			details.value = targets;
+			return toolResult(details)
+				.text(describeCdpTargets(targets, `Pages at ${cdpUrl}`))
+				.done();
+		}
 		const browser = await untilAborted(listSignal, () =>
 			acquireBrowser(kind, { cwd: session.cwd, signal: listSignal }),
 		);
 		holdBrowser(browser);
 		try {
-			let targets: TernTarget[] | RelayTarget[];
+			let targets: TernTarget[] | CdpTarget[];
 			let text: string;
 			if (kind.kind === "relay") {
-				targets = await untilAborted(listSignal, () => listRelayTargets(kind.cdpUrl, listSignal));
-				text = describeRelayTargets(targets);
+				targets = await untilAborted(listSignal, () => listCdpTargets(kind.cdpUrl, listSignal));
+				text = describeCdpTargets(targets, "Chrome pages via the relay");
 			} else if ("tern" in browser) {
 				const blocks = await listTernBlocks(browser.tern, { timeoutMs, signal: listSignal });
 				const taken = ternBlocksTaken();
@@ -913,7 +975,7 @@ async function runBrowser(
 /** Persist over-cap browser run output as a session artifact; mirrors the bash minimizer's save path. */
 async function saveBrowserOutputArtifact(session: ToolSession, fullText: string): Promise<string | undefined> {
 	try {
-		const alloc = await session.allocateOutputArtifact?.("browser-original");
+		const alloc = await session.allocateOutputArtifact?.();
 		if (!alloc?.path || !alloc.id) return undefined;
 		await Bun.write(alloc.path, fullText);
 		return alloc.id;
@@ -939,7 +1001,9 @@ function describeBrowser(tab: TabSession): string {
 	}
 	switch (handle.kind.kind) {
 		case "headless":
-			return `headless browser (${handle.kind.headless ? "hidden" : "visible"}${handle.sharedDaemon ? ", shared" : ""})`;
+			return handle.kind.headless
+				? `omp's headless Chromium${handle.sharedDaemon ? " (shared)" : ""}`
+				: `omp's Chromium (in a window${handle.sharedDaemon ? ", shared" : ""})`;
 		case "spawned":
 			return `spawned ${handle.kind.path} (pid ${handle.pid ?? "?"})`;
 		case "connected":
@@ -949,10 +1013,22 @@ function describeBrowser(tab: TabSession): string {
 	}
 }
 
-/** Where a Tern tab's page is for the user: whose block it is, and whether it is on screen. */
-function ternNotes(tab: TernTabSession): string[] {
+/** Where a Tern tab's page is for the user: whose block it is, whether it is on screen, and whether it got the size asked for. */
+function ternNotes(tab: TernTabSession, requested: { width: number; height: number } | undefined): string[] {
 	const notes: string[] = [];
 	const adopted = tab.ternTab.adopted;
+	// Tern sizes a PiP to fit its pane: the page may get less room than the open asked for.
+	const actual = tab.info.viewport;
+	if (
+		!adopted &&
+		requested &&
+		actual &&
+		(Math.abs(actual.width - requested.width) > 1 || Math.abs(actual.height - requested.height) > 1)
+	) {
+		notes.push(
+			`Tern sized the picture-in-picture ${Math.round(actual.width)}x${Math.round(actual.height)}, not the requested ${requested.width}x${requested.height}; pass app: "own" for a page at exactly that size.`,
+		);
+	}
 	if (adopted) {
 		notes.push(
 			`This is the user's own Tern browser block ${adopted.block} (${JSON.stringify(tab.info.title ?? "")} at ${tab.info.url}); closing the tab releases it to the user without closing it.`,
@@ -971,7 +1047,7 @@ function ternNotes(tab: TernTabSession): string[] {
 function describeKind(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
-			return `headless ${kind.headless ? "hidden" : "visible"}`;
+			return `managed Chromium (${kind.headless ? "headless" : "in a window"})`;
 		case "spawned":
 			return `spawned:${kind.path}`;
 		case "connected":

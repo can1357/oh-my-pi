@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the tray's props: `focus`, `peek`, `quiet` and `main` (`idle` / `working` / `waiting`) on `omp.tray`, `ref` on `omp.tray.done.item` rows, `item`, `ref`, `status`, `acted` and `look` on `omp.tray.card` (`ref` also on `omp.tray.peek`), and `state` on `omp.tray.ev` rows
+- Added the layout-transition props every node takes: `transition: "layout"`, `transitionMs` and `motionKey`.
+- Added `folded` on a dock composer's `col`: the terminal folds the composer to its compact row while it is set.
+
+## [18.22.0] - 2026-11-16
+
+### Added
+
+- Added optional picker icons for tooltips and accessible names, plus an option to control the placement of the search interface.
+- Added buttons, menu, and document component kinds, including menu-row action state changes and document text editing, commenting, and uncommenting events.
+
 ## [18.18.6] - 2026-11-09
 
 ### Added

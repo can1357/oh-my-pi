@@ -1779,10 +1779,11 @@ describe("Responses Lite remote compaction", () => {
 			strategy: "memento",
 		});
 		expect(captured?.body.input?.[0]).toEqual({ type: "additional_tools", role: "developer", tools: [] });
-		expect(captured?.body.input?.[1]).toEqual({
+		expect(captured?.body.input?.[1]).toMatchObject({
 			type: "message",
 			role: "developer",
 			content: [{ type: "input_text", text: "compact instructions" }],
+			internal_chat_message_metadata_passthrough: { content_item_kinds: ["model.base_instructions"] },
 		});
 	});
 
@@ -1828,10 +1829,11 @@ describe("Responses Lite remote compaction", () => {
 			strategy: "memento",
 		});
 		expect(captured?.body.input?.[0]).toEqual({ type: "additional_tools", role: "developer", tools: [] });
-		expect(captured?.body.input?.[1]).toEqual({
+		expect(captured?.body.input?.[1]).toMatchObject({
 			type: "message",
 			role: "developer",
 			content: [{ type: "input_text", text: "compact instructions" }],
+			internal_chat_message_metadata_passthrough: { content_item_kinds: ["model.base_instructions"] },
 		});
 		expect(captured?.body.input?.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
@@ -1959,7 +1961,11 @@ describe("Responses Lite remote compaction", () => {
 			expect(webSocket.sockets).toHaveLength(2);
 			expect(webSocket.sockets[0]?.sent).toHaveLength(1);
 			expect(webSocket.sockets[1]?.sent).toHaveLength(1);
-			expect(liveRequest?.instructions).toBe("You are a helpful assistant.");
+			expect(liveRequest?.instructions).toBeUndefined();
+			expect(Array.isArray(liveRequest?.input) ? liveRequest.input[0] : undefined).toMatchObject({
+				role: "developer",
+				content: [{ type: "input_text", text: "You are a helpful assistant." }],
+			});
 			expect(liveRequest?.parallel_tool_calls).toBeUndefined();
 			expect(compactionRequest?.type).toBe("response.create");
 			expect(compactionRequest?.instructions).toBeUndefined();
@@ -2378,6 +2384,52 @@ test("keeps the LiteLLM conversation session header on V1 compaction unless conf
 	expect(sessionHeaders).toEqual(["session-1", "run-42"]);
 });
 
+test("sends a registered model's resolved headers on V1 and V2 compaction", async () => {
+	// models.yml and extension providers keep their headers in `resolveHeaders` only.
+	const model = {
+		...makeOpenAiModel({
+			provider: "gateway",
+			baseUrl: "https://gateway.example/openai",
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		}),
+		headers: undefined,
+		resolveHeaders: async () => ({ "cf-access-token": "minted" }),
+	};
+	const tokens: (string | null)[] = [];
+	const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+
+	await requestOpenAiRemoteCompaction(model, "test-key", input, "instructions", undefined, {
+		fetch: async (_url, init) => {
+			tokens.push(new Headers(init?.headers).get("cf-access-token"));
+			return Response.json({ output: [{ type: "compaction_summary", summary: "compacted" }] });
+		},
+	});
+	await requestCompactionV2Streaming(
+		model,
+		"test-key",
+		buildCompactionV2Request(model, input, "instructions"),
+		undefined,
+		{
+			fetch: async (_url, init) => {
+				tokens.push(new Headers(init?.headers).get("cf-access-token"));
+				return sseResponse([
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", encrypted_content: "enc" },
+					},
+					{
+						type: "response.completed",
+						response: { usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } },
+					},
+				]);
+			},
+		},
+	);
+
+	expect(tokens).toEqual(["minted", "minted"]);
+});
+
 test("uses Azure request shape for Azure Responses remote compaction", async () => {
 	const previousDeploymentMap = Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP;
 	Bun.env.AZURE_OPENAI_DEPLOYMENT_NAME_MAP = "gpt-5-compact=azure-gpt-5-compact";
@@ -2674,6 +2726,52 @@ describe("compact() remote compaction failure handling", () => {
 		} finally {
 			server.stop(true);
 		}
+	});
+
+	test.each(["v1", "v2"])("reports the billed usage of each remote compaction request (%s)", async protocol => {
+		const streaming = protocol === "v2";
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+		const model = makeOpenAiModel({
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+			remoteCompaction: { enabled: true, v2StreamingEnabled: streaming },
+		});
+		const usage = {
+			input_tokens: 1_000,
+			input_tokens_details: { cached_tokens: 800, cache_write_tokens: 150 },
+			output_tokens: 40,
+			output_tokens_details: { reasoning_tokens: 30 },
+			total_tokens: 1_040,
+		};
+		const item = { type: "compaction", encrypted_content: "history" };
+		const fetchMock: FetchImpl = async () =>
+			streaming
+				? sseResponse([
+						{ type: "response.output_item.done", output_index: 0, item },
+						{ type: "response.completed", response: { usage } },
+					])
+				: Response.json({ output: [item], usage });
+		const reported: AssistantMessage[] = [];
+
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			onRemoteUsage: message => reported.push(message),
+		});
+
+		expect(reported).toHaveLength(1);
+		const [message] = reported;
+		expect([message.api, message.provider, message.model]).toEqual(["openai-responses", "openai", "gpt-5"]);
+		const { cost, ...tokens } = message.usage;
+		// Cached and cache-written input is billed apart from fresh input.
+		expect(tokens).toEqual({
+			input: 50,
+			output: 40,
+			cacheRead: 800,
+			cacheWrite: 150,
+			totalTokens: 1_040,
+			reasoningTokens: 30,
+		});
+		expect(cost.total).toBeCloseTo((50 * 2 + 800 * 0.2 + 150 * 2.5 + 40 * 10) / 1_000_000, 12);
 	});
 
 	test.each(["v1", "v2", "codex-v2"])(

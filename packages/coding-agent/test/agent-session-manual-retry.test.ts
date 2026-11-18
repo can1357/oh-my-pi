@@ -89,7 +89,7 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
 	});
 
-	it("retries retained reasoning after its automatic continuation allowance is exhausted", async () => {
+	it("pauses goal mode at the reasoning continuation cap and retries the retained reasoning", async () => {
 		const pendingTurns = INCOMPLETE_RECOVERY_MAX_RETRIES + 1;
 		const mock = createMockModel({
 			provider: "anthropic",
@@ -118,6 +118,31 @@ describe("AgentSession manual retry", () => {
 			}),
 			modelRegistry,
 		});
+		const now = Date.now();
+		session.setGoalModeState({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "reasoning-continuation-cap",
+				objective: "Finish the original task.",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+		const terminalFailure = Promise.withResolvers<AssistantMessage | undefined>();
+		session.subscribe(event => {
+			if (event.type === "agent_end") {
+				terminalFailure.resolve(
+					event.messages.find(
+						(message): message is AssistantMessage =>
+							message.role === "assistant" && message.stopReason === "error",
+					),
+				);
+			}
+		});
 
 		await session.prompt("Finish the original task.");
 		await session.waitForIdle();
@@ -127,6 +152,9 @@ describe("AgentSession manual retry", () => {
 				message => message.role === "assistant" && message.stopReason === "length",
 			),
 		).toHaveLength(pendingTurns);
+		expect(session.getGoalModeState()?.enabled).toBe(false);
+		expect(session.getGoalModeState()?.goal.status).toBe("paused");
+		expect((await terminalFailure.promise)?.errorMessage).toContain("reasoning continuation allowance is exhausted");
 
 		await expect(session.retry()).resolves.toBe(true);
 		await session.waitForIdle();
