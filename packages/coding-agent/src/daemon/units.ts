@@ -863,6 +863,32 @@ export class UnitTable {
 		return { unit: copySnapshot(entry.snapshot) };
 	}
 
+	/** Remove a unit `connection` registered; unknown units resolve quietly, anything else is refused. */
+	unregister(connection: UnitConnection, operation: Op<"unregister">): DaemonResults["unregister"] {
+		const ref = operation.unit;
+		let entry: UnitEntry | undefined;
+		if (typeof ref === "string") {
+			entry = this.#units.get(ref);
+		} else {
+			// External units stay out of the identity index: match the triple among registrations.
+			const wanted = identity(ref.kind, ref.scope, ref.key);
+			for (const candidate of this.#units.values()) {
+				if (candidate.externalConnection !== connection.client.connectionId) continue;
+				const { kind, scope, key } = candidate.snapshot;
+				if (identity(kind, scope, key) === wanted) {
+					entry = candidate;
+					break;
+				}
+			}
+		}
+		if (!entry) return { removed: false };
+		if (entry.externalConnection !== connection.client.connectionId) {
+			throw new Error(`Unit ${entry.snapshot.key} was not registered by this connection`);
+		}
+		this.#removeEntry(entry);
+		return { removed: true };
+	}
+
 	subscribe(connection: UnitConnection, operation: Op<"subscribe">): DaemonResults["subscribe"] {
 		const subscriptionId = operation.subscriptionId;
 		for (const owner of operation.unsubscribes ?? []) {

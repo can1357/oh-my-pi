@@ -36,6 +36,7 @@ import {
 	type OpenRequest,
 	type OpenResult,
 	type UnitRef,
+	type UnitScope,
 	type UnitSnapshot,
 } from "./protocol";
 
@@ -414,6 +415,11 @@ class DaemonConnection implements DaemonClient {
 	get welcome(): DaemonWelcome {
 		if (!this.#welcome) throw new Error("Daemon client is not connected");
 		return this.#welcome;
+	}
+
+	/** A live control connection exists right now; requests would not dial (or spawn) first. */
+	get connected(): boolean {
+		return !this.#closed && this.#link !== undefined && !this.#link.conn.closed;
 	}
 
 	/** Establish the first connection; rejects when the daemon cannot be reached. */
@@ -1000,6 +1006,7 @@ export function daemonClient(): Promise<DaemonClient> {
 		const client = new DaemonConnection({ spawn: true, upgrade: true, reconnect: true });
 		const pending = client.connect().then(() => client);
 		shared = pending;
+		pending.then(bindBoardEntries, () => {});
 		pending.catch(() => {
 			client.close();
 			if (shared === pending) shared = undefined;
@@ -1007,6 +1014,111 @@ export function daemonClient(): Promise<DaemonClient> {
 		cancelExitCleanup ??= postmortem.register("daemon-client", () => closeDaemonClient());
 	}
 	return shared;
+}
+
+/** What {@link registerOnBoard} lists: a process this omp process owns and the daemon only displays. */
+export interface BoardEntryInit {
+	kind: string;
+	scope: UnitScope;
+	key: string;
+	label: string;
+	pid: number;
+}
+
+/** A board listing from {@link registerOnBoard}. */
+export interface BoardEntry {
+	/** Take the listing off the board; idempotent. */
+	dispose(): void;
+}
+
+/** Registrations still wanted on the board, rebound whenever a shared client connects. */
+const boardEntries = new Set<BoardRegistration>();
+
+function bindBoardEntries(client: DaemonConnection): void {
+	for (const entry of boardEntries) entry.bind(client);
+}
+
+class BoardRegistration implements BoardEntry {
+	readonly #init: BoardEntryInit;
+	#client: DaemonConnection | undefined;
+	#unitId: string | undefined;
+	#attempt = 0;
+	#disposed = false;
+	#offReconnect: (() => void) | undefined;
+
+	constructor(init: BoardEntryInit) {
+		this.#init = init;
+	}
+
+	bind(client: DaemonConnection): void {
+		if (this.#disposed || this.#client === client) return;
+		this.#offReconnect?.();
+		this.#client = client;
+		this.#unitId = undefined;
+		// The daemon drops registrations with the connection; list the process again on the new one.
+		this.#offReconnect = client.onReconnect(() => {
+			this.#unitId = undefined;
+			this.#register(client);
+		});
+		this.#register(client);
+	}
+
+	dispose(): void {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		boardEntries.delete(this);
+		this.#offReconnect?.();
+		this.#offReconnect = undefined;
+		const client = this.#client;
+		const unitId = this.#unitId;
+		this.#unitId = undefined;
+		if (client && unitId !== undefined) unregisterBoardUnit(client, unitId);
+	}
+
+	#register(client: DaemonConnection): void {
+		// Never dial: a dropped connection re-registers from `onReconnect`.
+		if (!client.connected) return;
+		const attempt = ++this.#attempt;
+		const { kind, scope, key, label, pid } = this.#init;
+		client.request({ op: "register", kind, scope, key, label, pid }).then(
+			({ unit }) => {
+				if (this.#disposed || this.#client !== client || this.#attempt !== attempt) {
+					// The listing is no longer wanted (or was superseded): take it back off.
+					unregisterBoardUnit(client, unit.id);
+					return;
+				}
+				this.#unitId = unit.id;
+			},
+			(error: unknown) => logger.debug("Daemon board register failed", { key, error: toError(error).message }),
+		);
+	}
+}
+
+function unregisterBoardUnit(client: DaemonConnection, unitId: string): void {
+	// A closed connection already took its registrations with it.
+	if (!client.connected) return;
+	client
+		.request({ op: "unregister", unit: unitId })
+		.catch((error: unknown) =>
+			logger.debug("Daemon board unregister failed", { unitId, error: toError(error).message }),
+		);
+}
+
+/**
+ * List a process this omp process owns on the daemon board (an `external`
+ * unit) until {@link BoardEntry.dispose}. Fire-and-forget: it never spawns
+ * the daemon or waits for it. It uses the shared {@link daemonClient} only
+ * once that is connected, now or later in this process, and re-registers
+ * after reconnects. Failures are logged at debug level only.
+ */
+export function registerOnBoard(entry: BoardEntryInit): BoardEntry {
+	const registration = new BoardRegistration(entry);
+	boardEntries.add(registration);
+	shared?.then(
+		client => registration.bind(client),
+		() => {},
+	);
+	return registration;
 }
 
 /** Close the process-shared daemon connection; its leases end with it. */

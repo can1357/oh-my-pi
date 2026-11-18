@@ -120,6 +120,11 @@ export type DaemonOp =
 	| { op: "attach"; unit: UnitRef; channel?: string }
 	/** List a process this client owns on the board; removed when the connection closes. */
 	| { op: "register"; kind: string; scope: UnitScope; key: string; label: string; pid: number }
+	/**
+	 * Remove a unit this connection `register`ed. An unknown unit resolves with `removed: false`;
+	 * any other unit, including another connection's registration, is refused.
+	 */
+	| { op: "unregister"; unit: UnitRef }
 	/** Subscribe to completion/notify events for services owned by `owners`. */
 	| {
 			op: "subscribe";
@@ -160,6 +165,7 @@ export interface DaemonResults {
 	call: { result: unknown };
 	attach: { unit: UnitSnapshot };
 	register: { unit: UnitSnapshot };
+	unregister: { removed: boolean };
 	subscribe: Record<string, never>;
 	upgrade: { reexec: boolean };
 	shutdown: Record<string, never>;

@@ -377,6 +377,8 @@ class Daemon {
 				throw new Error("attach is handled before dispatch");
 			case "register":
 				return units.register(state, request);
+			case "unregister":
+				return units.unregister(state, request);
 			case "subscribe":
 				return units.subscribe(state, request);
 			case "upgrade":
