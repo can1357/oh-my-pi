@@ -1,12 +1,15 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { JobWidgetRegistry } from "@oh-my-pi/pi-coding-agent/job-widgets/types";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { cfgDisplayPinnedAgents } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { asyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/async-job-views";
@@ -26,6 +29,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const context = (tray: boolean): DescribeContext => ({
 	cols: 120,
@@ -120,7 +124,7 @@ describe("InteractiveMode tray", () => {
 	let eventBus: EventBus;
 	let manager: AsyncJobManager;
 	const pending: Array<() => void> = [];
-	const agentIds = ["TrayScan", "TrayReview", "TrayOld"];
+	const agentIds = ["TrayScan", "TrayReview", "TrayOld", "TrayNext"];
 	/** When TrayScan's current call started: 12s before {@link seed}, so the closer look times it. */
 	let callStart = 0;
 
@@ -181,10 +185,13 @@ describe("InteractiveMode tray", () => {
 		const registry = AgentRegistry.global();
 		registry.register({
 			id: "TrayScan",
-			displayName: "TrayScan",
+			// A task subagent's display name is its agent type.
+			displayName: "m2",
 			kind: "sub",
 			parentId: "Main",
 			session: null,
+			// Its transcript, so focusing can open it.
+			sessionFile: "/tmp/TrayScan.jsonl",
 			status: "running",
 		});
 		registry.register({
@@ -283,16 +290,36 @@ describe("InteractiveMode tray", () => {
 		]);
 		const [scan, review, done, widgetJob, bareJob] = cards;
 
-		expect(scan!.p).toMatchObject({ role: "omp.tray.card", status: "running", tone: "accent", acted: callStart });
+		expect(scan!.p).toMatchObject({
+			role: "omp.tray.card",
+			status: "running",
+			tone: "accent",
+			acted: callStart,
+			aria: "TrayScan, m2, running, read · Reading the config, 3 tools",
+		});
 		expect(children(scan).map(role)).toEqual(["omp.tray.head", "omp.tray.doing", "omp.tray.meta"]);
-		expect(children(children(scan)[0]).map(role)).toEqual(["omp.tray.dot", "omp.tray.name", "omp.tray.time"]);
+		const scanHead = children(children(scan)[0]);
+		// Its own name, not its type; the tool count beside the clock.
+		expect(scanHead.map(role)).toEqual(["omp.tray.dot", "omp.tray.name", "omp.tray.time", "omp.tray.tools"]);
+		expect(scanHead[1]!.p).toMatchObject({ text: "TrayScan" });
+		expect(scanHead[3]).toEqual({
+			k: "row",
+			p: { role: "omp.tray.tools", align: "center" },
+			c: [
+				{ k: "text", p: { spans: [{ t: "/", s: "dim" }, { t: "3" }], wrap: "none" }, key: "count" },
+				{ k: "icon", p: { name: "gear", tone: "muted" }, key: "icon" },
+			],
+			key: "tools",
+		});
 		expect(children(scan)[1]!.p).toMatchObject({
 			spans: [{ t: "read", s: "dim" }, { t: " · ", s: "dim" }, { t: "Reading the config" }],
 		});
 		expect(children(children(scan)[2]).map(node => node.p && Reflect.get(node.p, "text"))).toEqual([
 			"claude-sonnet-4-5 · low",
-			"3 tools · 22%",
+			"22%",
 		]);
+		// The status row carries only the caption: no counts.
+		expect(children(described[activity]!.node!).map(role)).toEqual(["omp.tray.caption"]);
 
 		expect(review!.p).toMatchObject({ status: "done", tone: "success" });
 		expect(children(review)[1]!.p).toMatchObject({ spans: [{ t: "Cross-check regressions" }] });
@@ -350,7 +377,7 @@ describe("InteractiveMode tray", () => {
 		});
 		expect(children(head)[2]!.p).toEqual({
 			role: "omp.tray.peek.meta",
-			text: "claude-sonnet-4-5 · low · 3 tools · 22%",
+			text: "m2 · claude-sonnet-4-5 · low · 3 tools · 22%",
 			wrap: "none",
 			truncate: "end",
 			grow: 1,
@@ -426,5 +453,254 @@ describe("InteractiveMode tray", () => {
 		mode.showAgentHub({ trayFirst: true });
 		expect(hub).toHaveBeenCalledTimes(1);
 		expect(trayOf(cx).node.p).toMatchObject({ focus: 1 });
+	});
+
+	it("turns the tray quiet and ungrouped once everything has finished, still reachable on the hub key", () => {
+		vi.useFakeTimers();
+		try {
+			const hub = spyOn(SelectorController.prototype, "showAgentHub").mockImplementation(() => {});
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: "TrayScan",
+				displayName: "m2",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				status: "running",
+			});
+			registry.register({
+				id: "TrayOld",
+				displayName: "m2",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				status: "idle",
+			});
+			setNativeRendering(true);
+			const cx = context(true);
+			// Live: the agent's card and the done card.
+			const live = children(trayOf(cx).node);
+			expect(live.map(card => card.p && Reflect.get(card.p, "item"))).toEqual(["agent", "done"]);
+			expect(trayOf(cx).node.p && Reflect.get(trayOf(cx).node.p!, "quiet")).toBeUndefined();
+			const scanKey = live[0]!.key;
+
+			const renders = spyOn(mode.ui, "requestRender");
+			// It finishes without a background job: nothing live is left.
+			registry.setStatus("TrayScan", "idle");
+			vi.advanceTimersByTime(100);
+			expect(renders).toHaveBeenCalled();
+			const quiet = trayOf(cx).node;
+			expect(quiet.p).toEqual({ role: "omp.tray", quiet: true, main: "idle" });
+			// Nothing grouped: each finished agent is its own card, the most recently active first, no done card.
+			const cards = children(quiet);
+			expect(
+				cards.map(card => [card.p && Reflect.get(card.p, "item"), card.p && Reflect.get(card.p, "ref")]),
+			).toEqual([
+				["agent", "TrayScan"],
+				["agent", "TrayOld"],
+			]);
+			// The same agent keeps its card's key across the regrouping.
+			expect(cards[0]!.key).toBe(scanKey);
+			// No caption in the idle status row over a quiet tray.
+			expect(dock(cx).some(entry => role(entry.node ?? undefined) === "omp.hud.activity")).toBe(false);
+
+			// The hub key asks Tern to show it: a focus bump, not the hub.
+			mode.showAgentHub({ trayFirst: true });
+			expect(hub).not.toHaveBeenCalled();
+			expect(trayOf(cx).node.p).toMatchObject({ quiet: true, focus: 1 });
+
+			// The next agent starting groups the finished ones into the done card again.
+			renders.mockClear();
+			registry.register({
+				id: "TrayNext",
+				displayName: "m2",
+				kind: "sub",
+				parentId: "Main",
+				session: null,
+				status: "running",
+			});
+			vi.advanceTimersByTime(100);
+			expect(renders).toHaveBeenCalled();
+			const back = trayOf(cx).node;
+			expect(back.p && Reflect.get(back.p, "quiet")).toBeUndefined();
+			expect(children(back).map(card => card.p && Reflect.get(card.p, "ref"))).toEqual(["TrayNext", "done"]);
+			const tray = trayOf(cx);
+			tray.component.handleNativeEvent?.({ type: "action", key: "", act: "tray.peek", value: "done", mods: [] });
+			const rows = children(children(children(trayOf(cx).node).at(-1))[1]);
+			expect(rows.map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["TrayScan", "TrayOld"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("leaves the agents-hub key inert on a tray host with no cards, unless the tray's agents are turned off", () => {
+		const hub = spyOn(SelectorController.prototype, "showAgentHub").mockImplementation(() => {});
+		setNativeRendering(true);
+		const cx = context(true);
+		expect(trayOf(cx).node.p).toMatchObject({ hidden: true });
+		mode.showAgentHub({ trayFirst: true });
+		expect(hub).not.toHaveBeenCalled();
+
+		cfgDisplayPinnedAgents.override(Settings.instance, "off");
+		mode.showAgentHub({ trayFirst: true });
+		expect(hub).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InteractiveMode tray: the main agent across a real turn", () => {
+	let tempDir: TempDir;
+	let auth: AuthStorage;
+	let session: AgentSession;
+	let mode: InteractiveMode;
+	const release: Array<() => void> = [];
+
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	afterEach(async () => {
+		for (const done of release.splice(0)) done();
+		AgentRegistry.global().unregister("TrayLive");
+		setNativeRendering(false);
+		vi.restoreAllMocks();
+		mode?.stop();
+		await session?.dispose();
+		auth?.close();
+		tempDir?.removeSync();
+	});
+
+	/** A gate the test opens: `wait()` blocks until `open()`, `reached` resolves once something waits on it. */
+	function gate() {
+		const reached = Promise.withResolvers<void>();
+		const opened = Promise.withResolvers<void>();
+		release.push(opened.resolve);
+		return {
+			reached: reached.promise,
+			open: opened.resolve,
+			wait: async (): Promise<void> => {
+				reached.resolve();
+				await opened.promise;
+			},
+		};
+	}
+
+	it("sends working while the model streams, waiting from the wait call until another call starts, then idle", async () => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-tray-main-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path(), overrides: { "startup.quiet": true } });
+		const firstCall = gate();
+		const waitCall = gate();
+		const secondCall = gate();
+		const bashCall = gate();
+		const thirdCall = gate();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					await firstCall.wait();
+					return { content: [{ type: "toolCall", id: "call-wait", name: "wait", arguments: {} }] };
+				},
+				async () => {
+					await secondCall.wait();
+					return { content: [{ type: "toolCall", id: "call-bash", name: "bash", arguments: {} }] };
+				},
+				async () => {
+					await thirdCall.wait();
+					return { content: ["done"] };
+				},
+			],
+		});
+		const bashTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Runs a command",
+			parameters: type({}),
+			execute: async () => {
+				await bashCall.wait();
+				return { content: [{ type: "text", text: "ok" }], details: {} };
+			},
+		};
+		const waitTool: AgentTool = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks on background work",
+			parameters: type({}),
+			execute: async () => {
+				await waitCall.wait();
+				return { content: [{ type: "text", text: "settled" }], details: {} };
+			},
+		};
+		auth = createInMemoryAuthStorage();
+		await auth.credentials.set(mock.model.provider, { type: "api_key", key: "test-key" });
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model: mock.model, systemPrompt: [], tools: [waitTool, bashTool] },
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false }),
+			modelRegistry: new ModelRegistry(auth, path.join(tempDir.path(), "models.yml")),
+		});
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		// A card, so the tray node is sent: a running agent only the registry knows.
+		AgentRegistry.global().register({
+			id: "TrayLive",
+			displayName: "TrayLive",
+			kind: "sub",
+			session: null,
+			status: "running",
+		});
+		setNativeRendering(true);
+		const cx = context(true);
+		const tray = (): NativeNode => {
+			for (const child of mode.composer.describeSurface(cx).dock) {
+				const described = (child as Component).describe?.(cx);
+				if (role(described ?? undefined) === "omp.tray") return described!;
+			}
+			throw new Error("no tray in the dock");
+		};
+		const main = (): unknown => tray().p && Reflect.get(tray().p!, "main");
+		const renders = spyOn(mode.ui, "requestRender");
+		/** The session hands its events to subscribers asynchronously: let them through. */
+		const delivered = async (): Promise<void> => {
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+		};
+		expect(main()).toBe("idle");
+
+		const prompt = session.prompt("go");
+		await firstCall.reached;
+		await delivered();
+		expect(main()).toBe("working");
+
+		renders.mockClear();
+		firstCall.open();
+		await waitCall.reached;
+		await delivered();
+		// The flip asks for a frame itself; no unrelated repaint is needed to send it.
+		expect(renders).toHaveBeenCalled();
+		expect(main()).toBe("waiting");
+
+		// The wait returns and the model thinks again: still waiting, as it mostly waits again.
+		waitCall.open();
+		await secondCall.reached;
+		await delivered();
+		expect(main()).toBe("waiting");
+
+		// Another kind of call ends it.
+		renders.mockClear();
+		secondCall.open();
+		await bashCall.reached;
+		await delivered();
+		expect(renders).toHaveBeenCalled();
+		expect(main()).toBe("working");
+
+		bashCall.open();
+		await thirdCall.reached;
+		thirdCall.open();
+		await prompt;
+		await session.waitForIdle();
+		await delivered();
+		expect(main()).toBe("idle");
 	});
 });
