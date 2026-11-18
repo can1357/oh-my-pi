@@ -843,7 +843,7 @@ enum KeyboardConflict {
 
 /// Background keyboard delivery to window `wid`: inside the self-activation
 /// guard, makes `wid` its application's key window, without the activating
-/// press when it already is ([`ActivatingPress::UnlessKey`]), then runs
+/// press when it already is ([`KeyPurpose::Keyboard`]), then runs
 /// `deliver` with the process to post the keys to and a check to run before
 /// every press. `entry_front` was read as the input began, before this reads
 /// the target's windows and focus ([`EntryFront`]).
@@ -892,7 +892,7 @@ fn with_background_keyboard<T>(
 			window,
 			entry_front,
 			in_overlay,
-			ActivatingPress::UnlessKey,
+			KeyPurpose::Keyboard,
 			visit,
 		)?;
 		let (to, focus) = await_key_destination(pid, wid, conflict)?;
@@ -1903,8 +1903,8 @@ fn keys_reach(
 /// Finder's inline rename field or a popover: the target then counts as the
 /// frontmost application's key window, and in a background application the
 /// activation goes out without the press, which would make `wid` key and so
-/// end that overlay's editing. `press` says whether the press also stays out
-/// when `wid` already is the application's key window ([`needs_press`]).
+/// end that overlay's editing. `purpose` identifies the input that needs the
+/// window key; keyboard input alone skips the press when it is already key.
 ///
 /// Returns whether the activation step ran. The user can bring the target app
 /// forward at any moment, which would turn the step into a key-window switch
@@ -1919,7 +1919,7 @@ pub(super) fn make_key_in_background(
 	window: &DesktopWindow,
 	entry_front: EntryFront,
 	focus_in_overlay: bool,
-	press: ActivatingPress,
+	purpose: KeyPurpose,
 	visit: skylight::TargetVisit<'_>,
 ) -> CoreResult<bool> {
 	let takes_keys =
@@ -1934,11 +1934,9 @@ pub(super) fn make_key_in_background(
 	still_behind_user(pid, wid, visit)?;
 	let is_key =
 		|| key_without_press(wid, ax::focused_window_id(pid), || ax::window_content(pid, window));
-	if !needs_press(press, focus_in_overlay, is_key) {
-		return Ok(true);
-	}
-	let (location, local) = activating_press(window);
+	let location = std::cell::LazyCell::new(|| activating_press(window));
 	let press = |event_type: CGEventType, number: i64| -> CoreResult<()> {
+		let (location, local) = *location;
 		let event = mouse_event(source, event_type, location, CGMouseButton::Left)?;
 		skylight::set_fields(&event, &[
 			(FIELD_MOUSE_EVENT_NUMBER, number),
@@ -1954,25 +1952,27 @@ pub(super) fn make_key_in_background(
 		skylight::set_window_location(&event, local)?;
 		skylight::post_activation(pid, &event)
 	};
-	press(CGEventType::LeftMouseDown, 1)?;
-	let release = control::cleanup(|| press(CGEventType::LeftMouseUp, 2));
-	skylight::after_cleanup(Ok(true), release)
+	activating_presses(purpose, focus_in_overlay, is_key, press)?;
+	Ok(true)
 }
 
-/// When [`make_key_in_background`] posts its activating press, the press
-/// that makes the target window key among its application's windows. A
-/// press, even one outside every control, lets the application order that
-/// window in front, over the user's.
+/// The input for which [`make_key_in_background`] prepares the window, which
+/// decides whether it posts the activating press: a press, even one outside
+/// every control, lets the application order that window in front, over the
+/// user's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ActivatingPress {
-	/// Every time: pointer input and menus, which go to the window under the
-	/// press or need it key whatever the application thought before.
-	Always,
-	/// Only while the target is not already its application's key window
-	/// ([`key_without_press`]): keys go to the process, which hands them to
-	/// that window once it believes it is active, so the activation event
-	/// alone delivers them.
-	UnlessKey,
+pub(super) enum KeyPurpose {
+	/// Keys, typed text and held keys: pressed only while the target is not
+	/// already its application's key window ([`key_without_press`]). Keys go
+	/// to the process, which hands them to that window once it believes it is
+	/// active, so the activation event alone delivers them.
+	Keyboard,
+	/// Pointer input, which goes to the window under the press: always
+	/// pressed.
+	Pointer,
+	/// Menus, which need the window key whatever the application thought
+	/// before: always pressed.
+	Menu,
 }
 
 /// Whether keys for window `wid` can go out without the activating press:
@@ -1988,22 +1988,28 @@ fn key_without_press(
 	focused == Some(wid) && matches!(content(), ax::WindowContent::Own)
 }
 
-/// Whether [`make_key_in_background`] posts the activating press for
-/// `press`: never into an overlay holding the focus (`focus_in_overlay`),
-/// and for [`ActivatingPress::UnlessKey`] only when `is_key`, the
-/// application's focused window read after the activation event and the
-/// check that the user did not come to the target, is not the target. It is
-/// read inside the same guard the keys are posted under, and the keys go out
-/// only once [`await_key_destination`] and then, before every press,
-/// [`keys_still_reach`] find the target still key, so a key window that
-/// changes after this read stops the keys rather than sending them to
+/// Posts the activating press before the caller prepares its input, never
+/// into an overlay holding the focus (`focus_in_overlay`), whose editing it
+/// would end, and for [`KeyPurpose::Keyboard`] only when `is_key` finds the
+/// target is not its application's key window. `is_key` reads the focused
+/// window after the activation event and the check that the user did not
+/// come to the target, inside the same guard the keys are posted under; the
+/// keys go out only once [`await_key_destination`] and then, before every
+/// press, [`keys_still_reach`] find the target still key, so a key window
+/// that changes after this read stops the keys rather than sending them to
 /// another window.
-fn needs_press(
-	press: ActivatingPress,
+fn activating_presses(
+	purpose: KeyPurpose,
 	focus_in_overlay: bool,
 	is_key: impl FnOnce() -> bool,
-) -> bool {
-	!focus_in_overlay && (press == ActivatingPress::Always || !is_key())
+	press: impl Fn(CGEventType, i64) -> CoreResult<()>,
+) -> CoreResult<()> {
+	if focus_in_overlay || (purpose == KeyPurpose::Keyboard && is_key()) {
+		return Ok(());
+	}
+	press(CGEventType::LeftMouseDown, 1)?;
+	let release = control::cleanup(|| press(CGEventType::LeftMouseUp, 2));
+	skylight::after_cleanup(Ok(()), release)
 }
 
 /// Tells background process `pid` it is active with window `wid` key, as
@@ -2302,7 +2308,7 @@ fn background_pointer(
 			window,
 			entry_front,
 			in_overlay,
-			ActivatingPress::Always,
+			KeyPurpose::Pointer,
 			visit,
 		)
 	};
@@ -3006,7 +3012,7 @@ fn prepare_press(
 				window,
 				entry_front,
 				in_overlay,
-				ActivatingPress::Always,
+				KeyPurpose::Pointer,
 				visit,
 			)
 		},
@@ -7162,41 +7168,80 @@ mod tests {
 	}
 
 	#[test]
-	fn keys_into_the_applications_key_window_skip_the_activating_press() {
-		// The press lets the application order its window over the user's;
-		// keys reach the key window through the activation event alone.
-		assert!(!needs_press(ActivatingPress::UnlessKey, false, || true));
-		assert!(key_without_press(7, Some(7), || ax::WindowContent::Own));
+	fn background_keyboard_posts_a_press_only_before_keys_for_another_key_window() {
+		let source = source().expect("event source");
+		for (focused, content, expected) in [
+			(Some(7), ax::WindowContent::Own, vec![CGEventType::KeyDown.0, CGEventType::KeyUp.0]),
+			(Some(8), ax::WindowContent::Own, vec![
+				CGEventType::LeftMouseDown.0,
+				CGEventType::LeftMouseUp.0,
+				CGEventType::KeyDown.0,
+				CGEventType::KeyUp.0,
+			]),
+			(Some(7), ax::WindowContent::Remote { pid: 900, window: 41 }, vec![
+				CGEventType::LeftMouseDown.0,
+				CGEventType::LeftMouseUp.0,
+				CGEventType::KeyDown.0,
+				CGEventType::KeyUp.0,
+			]),
+			(None, ax::WindowContent::Own, vec![
+				CGEventType::LeftMouseDown.0,
+				CGEventType::LeftMouseUp.0,
+				CGEventType::KeyDown.0,
+				CGEventType::KeyUp.0,
+			]),
+		] {
+			let events = std::cell::RefCell::new(Vec::new());
+			activating_presses(
+				KeyPurpose::Keyboard,
+				false,
+				|| key_without_press(7, focused, || content),
+				|kind, _| {
+					events.borrow_mut().push(kind.0);
+					Ok(())
+				},
+			)
+			.unwrap();
+			type_keys(
+				&source,
+				&unicode_keys("a"),
+				Duration::ZERO,
+				|| Ok(()),
+				|event| {
+					events.borrow_mut().push(CGEvent::r#type(Some(event)).0);
+					Ok(())
+				},
+			)
+			.unwrap();
+			assert_eq!(*events.borrow(), expected);
+		}
 	}
 
 	#[test]
-	fn keys_into_a_panel_another_process_draws_keep_the_activating_press() {
-		// TextEdit's Save sheet is focused, but openAndSavePanelService draws it
-		// and takes focus only once the sheet is key.
-		let panel = || ax::WindowContent::Remote { pid: 900, window: 41 };
-		assert!(!key_without_press(7, Some(7), panel));
-		assert!(!key_without_press(7, Some(8), || ax::WindowContent::Own));
-		assert!(!key_without_press(7, None, || ax::WindowContent::Own));
-	}
-
-	#[test]
-	fn keys_into_a_window_that_is_not_key_keep_the_activating_press() {
-		// Another window of the application is key: without the press the
-		// target never becomes key and the keys wait for it.
-		assert!(needs_press(ActivatingPress::UnlessKey, false, || false));
-	}
-
-	#[test]
-	fn pointer_input_and_menus_keep_the_activating_press_into_the_key_window() {
-		let read = std::cell::Cell::new(false);
-		assert!(needs_press(ActivatingPress::Always, false, || {
-			read.set(true);
-			true
-		}));
-		assert!(!read.get(), "the key window is read only for keys");
-		// An overlay holding the focus takes no press for either.
-		assert!(!needs_press(ActivatingPress::Always, true, || false));
-		assert!(!needs_press(ActivatingPress::UnlessKey, true, || false));
+	fn pointer_and_menu_preparation_press_unless_an_overlay_holds_focus() {
+		for (purpose, overlay, expected) in [
+			(KeyPurpose::Pointer, false, vec![
+				CGEventType::LeftMouseDown.0,
+				CGEventType::LeftMouseUp.0,
+			]),
+			(KeyPurpose::Menu, false, vec![CGEventType::LeftMouseDown.0, CGEventType::LeftMouseUp.0]),
+			(KeyPurpose::Pointer, true, vec![]),
+			(KeyPurpose::Menu, true, vec![]),
+			(KeyPurpose::Keyboard, true, vec![]),
+		] {
+			let events = std::cell::RefCell::new(Vec::new());
+			activating_presses(
+				purpose,
+				overlay,
+				|| panic!("key-window read is unnecessary"),
+				|kind, _| {
+					events.borrow_mut().push(kind.0);
+					Ok(())
+				},
+			)
+			.unwrap();
+			assert_eq!(*events.borrow(), expected);
+		}
 	}
 
 	#[test]

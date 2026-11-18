@@ -5,7 +5,7 @@ use objc2_core_foundation::{CFArray, CFNumber, CFRetained, CFString, CFType};
 
 use super::{
 	super::input::{
-		ActivatingPress, EntryFront, attached_under, await_key_window, make_key_in_background,
+		EntryFront, KeyPurpose, attached_under, await_key_window, make_key_in_background,
 		recheck_background, source,
 	},
 	FocusedWindow, KeyFocus, MacAx, copy_attribute, copy_attribute_result, copy_bool, copy_element,
@@ -261,7 +261,7 @@ fn with_window_menu<T>(
 				window,
 				entry_front,
 				overlay,
-				ActivatingPress::Always,
+				KeyPurpose::Menu,
 				visit,
 			)?;
 			// The user may have brought the app forward while its key window
