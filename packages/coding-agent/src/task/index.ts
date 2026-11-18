@@ -76,7 +76,6 @@ import {
 	cfgTaskBatch,
 	cfgTaskDisabledAgents,
 	cfgTaskEnableEffort,
-	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskMaxConcurrency,
@@ -544,7 +543,7 @@ export function buildSpecializationAdvisory(
 	return prompt
 		.render(taskSpecializationAdvisoryTemplate, {
 			count: generics.length,
-			agent: generics[0],
+			agents: [...new Set(generics)].map(name => `\`${name}\``).join(", "),
 			scoutAvailable,
 		})
 		.trim();
@@ -1012,7 +1011,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...this.#effortParams(params),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
-			enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
+			enableLsp: this.session.enableLsp ?? true,
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 		});
@@ -1505,14 +1504,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// nothing about the worktree itself: the runner keeps it when captured
 			// changes could not be written, and names that path in the result.
 			const isolated = spawnParams.isolated === true;
-			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
+			// A failed or killed run may never have written the transcript a revival
+			// reads, so a resumable-looking ref alone does not make it messageable.
+			const transcriptAvailable = await hasResolvableTranscript(agentId);
+			const ref = AgentRegistry.global().get(agentId);
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
 				isolated,
 				ircEnabled,
-				resumable: !isolated && isResumable(ref),
-				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+				resumable: !isolated && transcriptAvailable && (Boolean(ref?.session) || isResumable(ref)),
+				transcriptAvailable,
 			})}`;
 		};
 		return manager.register(
@@ -1887,7 +1889,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				acquiredAt: launchTiming?.acquiredAt,
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
-				enableLsp: (this.session.enableLsp ?? true) && cfgTaskEnableLsp.get(this.session.settings),
+				enableLsp: this.session.enableLsp ?? true,
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 				signal,

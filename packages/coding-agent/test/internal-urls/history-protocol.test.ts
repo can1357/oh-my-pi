@@ -339,6 +339,17 @@ describe("history:// protocol", () => {
 		expect(resource.sourcePath).toBeUndefined();
 	});
 
+	it("reads bare history://current as the caller's own branch when no agent is named current", async () => {
+		const resource = await InternalUrlRouter.instance().resolve("history://current", {
+			experimentalContextManagement: true,
+			getSessionBranch: currentBranchFixture,
+		});
+		expect(resource.content).toContain("latest raw request survives");
+		await expect(InternalUrlRouter.instance().resolve("history://current")).rejects.toThrow(
+			"experimentalContextManagement",
+		);
+	});
+
 	it("rejects current/full when disabled or without a caller-bound branch", async () => {
 		await expect(
 			InternalUrlRouter.instance().resolve("history://current/full", {
@@ -428,7 +439,8 @@ describe("history:// protocol", () => {
 
 		expect(output?.type).toBe("text");
 		if (output?.type !== "text") throw new Error("Expected text output");
-		expect(output.text).toBe(resource.content.split("\n").slice(0, 2).join("\n"));
+		// A raw range keeps each line's terminator, so consecutive ranges concatenate to the source.
+		expect(output.text).toBe(`${resource.content.split("\n").slice(0, 2).join("\n")}\n`);
 	});
 
 	it("resolves agent ids case-insensitively", async () => {

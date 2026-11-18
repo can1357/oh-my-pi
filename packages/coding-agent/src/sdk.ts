@@ -665,8 +665,11 @@ export interface CreateAgentSessionOptions {
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
-	/** Authenticated fallback selector for deferred subagent model patterns. */
-	modelPatternAuthFallback?: string;
+	/**
+	 * Parent model selector a subagent falls back to when its deferred patterns
+	 * resolve to no model, or to one without credentials.
+	 */
+	modelPatternParentFallback?: string;
 	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
 	modelPatternFallbackRole?: string;
 	/** Validated inherited retry chain for a deferred singleton pattern; empty explicitly disables fallbacks. */
@@ -3551,11 +3554,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					selectedExplicitThinkingLevel = true;
 				}
 				let authFallbackUsed = false;
-				if (options.modelPatternAuthFallback) {
+				if (options.modelPatternParentFallback) {
 					const primaryKey = await modelRegistry.getApiKey(primary.model);
 					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
 						const fallback = parseModelPattern(
-							options.modelPatternAuthFallback,
+							options.modelPatternParentFallback,
 							resolutionModels,
 							matchPreferences,
 						);
@@ -3631,6 +3634,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const hint =
 					deferredModelPatterns.length === 1 ? providerModelHint(deferredModelPatterns[0], allEnabledModels) : "";
 				modelFallbackMessage = `Model ${requested} not found${hint ? `.${hint}` : ""}`;
+				// A subagent whose own patterns match nothing runs on its parent's model
+				// rather than starting with none; the message names the substitution.
+				const parentFallback = options.modelPatternParentFallback
+					? parseModelPattern(options.modelPatternParentFallback, availableModels, matchPreferences)
+					: undefined;
+				if (parentFallback?.model) {
+					model = parentFallback.model;
+					if (parentFallback.explicitThinkingLevel) restoredSessionThinkingLevel = parentFallback.thinkingLevel;
+					adoptThinkingForModel(parentFallback.model);
+					void prewarmModelConnection(parentFallback.model);
+					modelFallbackMessage += `. Using parent model ${parentFallback.model.provider}/${parentFallback.model.id}`;
+				}
 			}
 		}
 

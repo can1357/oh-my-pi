@@ -170,6 +170,7 @@ import {
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
 	cfgTaskAgentAccountPools,
+	cfgTaskEnableLsp,
 } from "./settings";
 import {
 	cfgTierSubagent,
@@ -1233,6 +1234,17 @@ export function compactionThresholdSettings(
 			};
 }
 
+/**
+ * Settings a subagent's edits and writes skip LSP formatting and diagnostics
+ * under, unless `task.enableLsp` opts in: the per-edit writethrough is the cost
+ * that setting gates, while the `lsp` tool itself stays available on demand.
+ */
+export function subagentLspWritethroughSettings(settings: Settings): Readonly<Record<string, unknown>> | undefined {
+	return cfgTaskEnableLsp.get(settings)
+		? undefined
+		: { "lsp.formatOnWrite": false, "lsp.diagnosticsOnWrite": false, "lsp.diagnosticsOnEdit": false };
+}
+
 export function createSubagentSettings(
 	baseSettings: SubagentChainSettings,
 	overrides?: Readonly<Record<string, unknown>>,
@@ -1984,7 +1996,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				// reminder ladder demands a fresh yield. Guarded on the run signal:
 				// once the run is completing, late injections must not destabilize
 				// the settled classification.
-				if (yieldCalled && !abortSignal.aborted && isAsyncResultInjection(event.message)) {
+				// Workpool items are final once accepted (`yield` refuses a resubmission),
+				// so there is no fresh yield to demand.
+				if (
+					yieldCalled &&
+					!abortSignal.aborted &&
+					isAsyncResultInjection(event.message) &&
+					!activeSession?.getWorkPoolYieldItems().length
+				) {
 					yieldCalled = false;
 					yieldInvalidatedByAsync = true;
 					yieldAcceptedAt = undefined;
@@ -2911,6 +2930,7 @@ async function driveSessionToResult(
 							count: running.length,
 							multiple: running.length > 1,
 							jobs,
+							workPool: session.getWorkPoolYieldItems().length > 0,
 						});
 						try {
 							await dispatchPrompt(notice, { attribution: "agent", synthetic: true }, "async-pending notice");
@@ -4683,6 +4703,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 		settings,
 		{
 			...compactionThresholdSettings(options.compactionThresholdOverride),
+			...subagentLspWritethroughSettings(settings),
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
@@ -5147,7 +5168,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
-					modelPatternAuthFallback:
+					modelPatternParentFallback:
 						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
 					modelPatternFallbackRole:
 						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
@@ -5252,6 +5273,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					)
 				: undefined;
 			let session: AgentSession;
+			let modelFallbackMessage: string | undefined;
 			let sessionPromise: Promise<CreateAgentSessionResult> | undefined;
 			try {
 				sessionPromise = createAgentSession(
@@ -5266,7 +5288,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 						},
 					}),
 				);
-				({ session } = await awaitAbortable(sessionPromise));
+				({ session, modelFallbackMessage } = await awaitAbortable(sessionPromise));
 				// Stash the sibling family candidate once the child session exists,
 				// independent of its initial model, so a later model change (retry
 				// fallback, model switch) still finds it. Consumption is gated per
@@ -5308,10 +5330,26 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			// Neither the agent's patterns nor the parent's model resolved (the session
+			// says why): name the agent and the setting to fix instead of letting the
+			// first prompt fail with the generic `/login` error.
+			if (!session.model && modelFallbackMessage) {
+				const role = modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings);
+				const configure = [
+					...(role ? [`\`modelRoles.${role}\``] : []),
+					`\`task.agentModelOverrides.${agent.name}\``,
+				].join(" or ");
+				throw new Error(
+					`Agent \`${agent.name}\` has no usable model: ${modelFallbackMessage}. Configure ${configure}, or spawn another agent.`,
+				);
+			}
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			const registry = AgentRegistry.global();
 			registry.syncSessionStatus(id, session);
+			// Messages parked while this agent waited for a spawn slot or was starting.
+			const bus = IrcBus.global();
+			for (let parked = bus.take(id); parked; parked = bus.take(id)) await session.deliverIrcMessage(parked);
 			const runRef = registry.get(id);
 			if (runRef) {
 				// Agent Hub kills bypass this run's caller signal: lifecycle.release()

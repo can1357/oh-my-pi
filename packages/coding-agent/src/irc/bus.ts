@@ -72,6 +72,8 @@ export interface IrcBusApi {
 	): Promise<IrcMessage | null>;
 	/** Consume the oldest pending message for `agentId` (optionally from `from`). */
 	take(agentId: string, from?: string): IrcMessage | undefined;
+	/** Hold a direct message for a spawned agent that has not started yet; its run takes it on start. */
+	park(msg: Omit<IrcMessage, "id" | "ts">): IrcMessage;
 	/** Unread count for the local Agent Hub overlay. */
 	unreadCount(agentId: string): number;
 	/** Count a settled job of agent `from` owned by `to` as `from`'s reply to `to`. */
@@ -163,6 +165,21 @@ export class IrcBus implements IrcBusApi {
 			}
 		}
 		return receipt;
+	}
+
+	park(msg: Omit<IrcMessage, "id" | "ts">): IrcMessage {
+		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		const mark: SendMark = { ts: message.ts, seq: ++this.#sendSeq };
+		this.#enqueue(message);
+		// Counts as sent: a reply wait on the recipient blocks for its answer.
+		if (message.progress) {
+			this.#record(this.#lastProgress, message.from, message.to, mark);
+		} else {
+			this.#record(this.#lastSent, message.from, message.to, mark);
+			this.#record(this.#lastReply, message.from, message.to, mark);
+			this.#record(this.#lastDirect, message.from, message.to, mark);
+		}
+		return message;
 	}
 
 	#record(table: Map<string, Map<string, SendMark>>, from: string, to: string, mark: SendMark): void {

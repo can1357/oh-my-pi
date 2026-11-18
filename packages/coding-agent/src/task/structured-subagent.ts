@@ -78,7 +78,6 @@ import {
 	cfgTaskAgentModelOverrides,
 	cfgTaskAgentServiceTierOverrides,
 	cfgTaskDisabledAgents,
-	cfgTaskEnableLsp,
 	cfgTaskIsolationApply,
 	cfgTaskIsolationEnabled,
 	cfgTaskIsolationMerge,
@@ -633,9 +632,7 @@ export async function resolveEffectiveSubagentPolicy(
 		applyChanges:
 			request.isolation?.apply ??
 			(request.invocationKind === "task" ? cfgTaskIsolationApply.get(request.session.settings) : true),
-		enableLsp:
-			!planMode &&
-			(request.enableLsp ?? ((request.session.enableLsp ?? true) && cfgTaskEnableLsp.get(request.session.settings))),
+		enableLsp: !planMode && (request.enableLsp ?? request.session.enableLsp ?? true),
 		enableIrc:
 			!planMode &&
 			(request.enableIrc ??
