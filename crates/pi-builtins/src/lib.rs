@@ -44,6 +44,7 @@ mod quoting_style;
 	feature = "util.direnv",
 	feature = "util.du",
 	feature = "util.file",
+	feature = "util.fswatch",
 	feature = "util.ls",
 	feature = "util.rsync",
 	feature = "util.tar",
@@ -136,6 +137,8 @@ mod find;
 mod flock;
 #[cfg(feature = "util.fold")]
 mod fold;
+#[cfg(all(feature = "util.fswatch", any(unix, windows)))]
+mod fswatch;
 #[cfg(feature = "util.grep")]
 mod grep;
 #[cfg(feature = "util.head")]

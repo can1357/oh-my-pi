@@ -254,6 +254,8 @@ default = ["utils"]
 "util.find" = []
 "util.flock" = []
 "util.fold" = []
+# Needs change notification: unix and windows targets.
+"util.fswatch" = ["util.bre"]
 "util.grep" = ["util.bre"]
 "util.head" = []
 "util.hostname" = []
@@ -359,6 +361,7 @@ utils = [
   "util.find",
   "util.flock",
   "util.fold",
+  "util.fswatch",
   "util.grep",
   "util.head",
   "util.hostname",
