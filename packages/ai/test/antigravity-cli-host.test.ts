@@ -391,6 +391,24 @@ describe("AgyHost prompt budgets", () => {
 		expect(state.host.hasPendingTurn).toBe(false);
 	});
 
+	it("settles an oversized parked tool result and still steers the turn", async () => {
+		const state = await parked();
+		state.fake.autoSteer = false;
+		const oversized = result(state.first.writer.output, "a".repeat(ACP_STEP_TEXT_BYTES + 1));
+		const next = step(state.host, [...state.messages, oversized, user("continue")]);
+		const steering = await state.fake.prompts.next();
+		state.prompt.response.resolve({ stopReason: "end_turn" });
+		const settled = await state.output;
+		expect(settled.isError).toBe(true);
+		const [block] = settled.content;
+		if (block?.type !== "text") throw new Error("Expected a text tool error");
+		expect(block.text).toContain("safe single-step budget is 188000 bytes");
+		state.fake.text("Narrowing the tool output.");
+		steering.response.resolve({ stopReason: "end_turn" });
+		await next.done;
+		expect(next.writer.output.content).toEqual([{ type: "text", text: "Narrowing the tool output." }]);
+	});
+
 	it("settles an oversized parked tool-result image as an actionable error instead of sending it", async () => {
 		const state = await parked();
 		const oversized = result(state.first.writer.output);

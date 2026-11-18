@@ -318,9 +318,10 @@ export class AgyHost implements ProviderSessionState {
 					this.#prompt(model, [...lateToolResultPrompt(plan.toolResult), ...plan.input.flatMap(inputBlocks)]);
 				} else {
 					pending?.expiry.cancel();
+					const settled = plan.toolResult ? toolResultOutput(plan.toolResult, model) : undefined;
 					if (plan.input.length > 0) {
-						if (plan.toolResult) {
-							const combined = [...plan.input.flatMap(inputBlocks), ...toolResultBlocks(plan.toolResult)];
+						if (settled) {
+							const combined = [...plan.input.flatMap(inputBlocks), ...settled.content];
 							const overBudget = checkPromptBudget(combined, model);
 							if (overBudget) throw new Error(overBudget);
 						}
@@ -338,10 +339,10 @@ export class AgyHost implements ProviderSessionState {
 							);
 					}
 					if (pending?.drain) await this.#setup(pending.drain);
-					if (plan.toolResult) {
+					if (settled) {
 						if (this.#pending !== pending || !pending || pending.state !== "parked")
 							throw new Error("Antigravity CLI tool continuation was interrupted");
-						this.#releasePending()?.settle(toolResultOutput(plan.toolResult, model));
+						this.#releasePending()?.settle(settled);
 					}
 				}
 			} else {
