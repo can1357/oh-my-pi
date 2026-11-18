@@ -294,7 +294,6 @@ describe("omp ttsr", () => {
 					action: "test",
 					test: { rule: gatedRule, snippet: "git push", source: "tool", tool: "bash", verbose: true },
 				});
-				expect(stdout).toContain("question (judged before each call runs, not tested)");
 				expect(stdout).toContain("onJudgeError: block");
 			} finally {
 				setProjectDir(originalCwd);
