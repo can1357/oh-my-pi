@@ -4813,6 +4813,13 @@ mod grant_tests {
 		let error = run(&f, &args("test.user", false), true).expect_err("refused");
 		assert!(error.to_string().contains("user-layer only"), "{error}");
 		assert_eq!(stored(&f), 0);
+
+		// Nor does an absent user extension base change the answer.
+		std::fs::remove_dir_all(f.root.parent().expect("user extension base"))
+			.expect("remove the user extension base");
+		let error = run(&f, &args("test.user", false), true).expect_err("refused");
+		assert!(error.to_string().contains("user-layer only"), "{error}");
+		assert_eq!(stored(&f), 0);
 	}
 
 	/// A grant record the CLI must neither replace nor remove.
