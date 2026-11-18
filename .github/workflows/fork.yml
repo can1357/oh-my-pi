@@ -1,0 +1,43 @@
+name: fork
+
+# This branch (`fork`) holds only fork config: this caller, the carried topic
+# branches (.fork/branches) and recorded conflict resolutions (.fork/rr-cache).
+# `main` mirrors upstream and only ever fast-forwards; every topic branch is
+# cut from it, so each one is also a clean upstream pull request. Manage it with `fork`.
+on:
+  push:
+    branches: [fork]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when the latest release already ships this merge
+        type: boolean
+        default: false
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: zysys/github-workflows/.github/workflows/fork.yml@57352e0aac9de4021b65725a1c62a442a197239b # v2.0.0
+    permissions:
+      contents: write
+    with:
+      scripts_ref: 57352e0aac9de4021b65725a1c62a442a197239b
+      mirror: main
+      binary: omp
+      check: 'bun install --frozen-lockfile && bun run check:ts'
+      build: 'bun install --frozen-lockfile && bun scripts/bazel-natives.ts host && PI_BUILD_IDENTITY="$FORK_TAG" bun --cwd=packages/coding-agent run build'
+      artifact: packages/coding-agent/dist/omp
+      smoke: '"$BIN" --version && "$BIN" --help'
+      tools: 'bun@1.4.4 rust'
+      targets: >-
+        [{"target":"darwin-arm64","os":"macos-latest"},
+         {"target":"linux-x64","os":"ubuntu-22.04"}]
+      force: ${{ inputs.force || false }}
