@@ -190,6 +190,8 @@ describe("InteractiveMode tray", () => {
 			kind: "sub",
 			parentId: "Main",
 			session: null,
+			// Its transcript, so focusing can open it.
+			sessionFile: "/tmp/TrayScan.jsonl",
 			status: "running",
 		});
 		registry.register({
@@ -453,7 +455,7 @@ describe("InteractiveMode tray", () => {
 		expect(trayOf(cx).node.p).toMatchObject({ focus: 1 });
 	});
 
-	it("turns the tray quiet with a frame of its own once everything has finished, still reachable on the hub key", () => {
+	it("turns the tray quiet and ungrouped once everything has finished, still reachable on the hub key", () => {
 		vi.useFakeTimers();
 		try {
 			const hub = spyOn(SelectorController.prototype, "showAgentHub").mockImplementation(() => {});
@@ -477,21 +479,28 @@ describe("InteractiveMode tray", () => {
 			setNativeRendering(true);
 			const cx = context(true);
 			// Live: the agent's card and the done card.
-			expect(children(trayOf(cx).node).map(card => card.p && Reflect.get(card.p, "item"))).toEqual([
-				"agent",
-				"done",
-			]);
-
+			const live = children(trayOf(cx).node);
+			expect(live.map(card => card.p && Reflect.get(card.p, "item"))).toEqual(["agent", "done"]);
 			expect(trayOf(cx).node.p && Reflect.get(trayOf(cx).node.p!, "quiet")).toBeUndefined();
+			const scanKey = live[0]!.key;
 
 			const renders = spyOn(mode.ui, "requestRender");
-			// It finishes without a background job: nothing live is left, so it joins the done card.
+			// It finishes without a background job: nothing live is left.
 			registry.setStatus("TrayScan", "idle");
 			vi.advanceTimersByTime(100);
 			expect(renders).toHaveBeenCalled();
 			const quiet = trayOf(cx).node;
 			expect(quiet.p).toEqual({ role: "omp.tray", quiet: true, main: "idle" });
-			expect(children(quiet).map(card => card.p && Reflect.get(card.p, "item"))).toEqual(["done"]);
+			// Nothing grouped: each finished agent is its own card, the most recently active first, no done card.
+			const cards = children(quiet);
+			expect(
+				cards.map(card => [card.p && Reflect.get(card.p, "item"), card.p && Reflect.get(card.p, "ref")]),
+			).toEqual([
+				["agent", "TrayScan"],
+				["agent", "TrayOld"],
+			]);
+			// The same agent keeps its card's key across the regrouping.
+			expect(cards[0]!.key).toBe(scanKey);
 			// No caption in the idle status row over a quiet tray.
 			expect(dock(cx).some(entry => role(entry.node ?? undefined) === "omp.hud.activity")).toBe(false);
 
@@ -499,13 +508,8 @@ describe("InteractiveMode tray", () => {
 			mode.showAgentHub({ trayFirst: true });
 			expect(hub).not.toHaveBeenCalled();
 			expect(trayOf(cx).node.p).toMatchObject({ quiet: true, focus: 1 });
-			// Every finished agent is reachable from there.
-			const tray = trayOf(cx);
-			tray.component.handleNativeEvent?.({ type: "action", key: "", act: "tray.peek", value: "done", mods: [] });
-			const rows = children(children(children(trayOf(cx).node).at(-1))[1]);
-			expect(rows.map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["TrayScan", "TrayOld"]);
 
-			// The next agent starting brings the tray back.
+			// The next agent starting groups the finished ones into the done card again.
 			renders.mockClear();
 			registry.register({
 				id: "TrayNext",
@@ -517,7 +521,13 @@ describe("InteractiveMode tray", () => {
 			});
 			vi.advanceTimersByTime(100);
 			expect(renders).toHaveBeenCalled();
-			expect(trayOf(cx).node.p && Reflect.get(trayOf(cx).node.p!, "quiet")).toBeUndefined();
+			const back = trayOf(cx).node;
+			expect(back.p && Reflect.get(back.p, "quiet")).toBeUndefined();
+			expect(children(back).map(card => card.p && Reflect.get(card.p, "ref"))).toEqual(["TrayNext", "done"]);
+			const tray = trayOf(cx);
+			tray.component.handleNativeEvent?.({ type: "action", key: "", act: "tray.peek", value: "done", mods: [] });
+			const rows = children(children(children(trayOf(cx).node).at(-1))[1]);
+			expect(rows.map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["TrayScan", "TrayOld"]);
 		} finally {
 			vi.useRealTimers();
 		}

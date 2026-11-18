@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import {
 	buildTrayItems,
+	describeTrayCard,
 	runsInlineAgent,
 	Tray,
 	type TrayHost,
@@ -9,7 +10,6 @@ import {
 	type TrayMain,
 	TrayMainActivity,
 	TrayMemory,
-	trayQuiet,
 } from "@oh-my-pi/pi-coding-agent/modes/tray";
 import type { NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
@@ -122,7 +122,7 @@ function input(f: Fixture, now = 60_000): TrayInput {
 }
 
 function cards(f: Fixture, memory = new TrayMemory()): string[] {
-	return buildTrayItems(input(f), memory).map(item => `${item.item}:${item.ref}:${item.status}`);
+	return buildTrayItems(input(f), memory).items.map(item => `${item.item}:${item.ref}:${item.status}`);
 }
 
 function children(node: NativeNode | undefined): NativeNode[] {
@@ -162,7 +162,7 @@ describe("tray items", () => {
 		f.agentJobs.set("Delivered", job("Delivered", { type: "task", agentId: "Delivered", status: "completed" }));
 		f.consumed.add("Delivered");
 
-		const items = buildTrayItems(input(f), new TrayMemory());
+		const items = buildTrayItems(input(f), new TrayMemory()).items;
 		expect(items.map(item => `${item.item}:${item.ref}:${item.status}`)).toEqual([
 			"agent:Queued:queued",
 			"agent:Running:running",
@@ -201,14 +201,15 @@ describe("tray items", () => {
 	it("keeps every card while nothing is live, calling the tray quiet unless something runs or failed", () => {
 		const f = fixture();
 		const memory = new TrayMemory();
-		const quiet = (): boolean => trayQuiet(buildTrayItems(input(f), memory));
+		const quiet = (): boolean => buildTrayItems(input(f), memory).quiet;
 		f.refs.push(ref("Old", "idle"));
-		// Only the done card: still there, but quiet.
-		expect(cards(f, memory)).toEqual(["done:done:done"]);
+		// Only finished work: quiet, and the finished agent has its own card.
+		expect(cards(f, memory)).toEqual(["agent:Old:done"]);
 		expect(quiet()).toBe(true);
-		// Beside a running job it is not.
+		// Beside a running job it is not, and the finished agent folds into the done card.
 		f.jobs.push(job("bg_1"));
 		expect(quiet()).toBe(false);
+		expect(cards(f, memory)).toEqual(["done:done:done", "job:bg_1:running"]);
 
 		// A settled agent whose result still waits keeps its card once the job is done and delivered.
 		f.sessions.push({ ...observed("Scout", "completed"), lastUpdate: 90_000 });
@@ -216,14 +217,112 @@ describe("tray items", () => {
 		f.agentJobs.set("Scout", job("Scout", { type: "task", agentId: "Scout", status: "completed" }));
 		f.jobs[0] = job("bg_1", { status: "completed", endTime: 95_000, resultText: "ok" });
 		f.consumed.add("bg_1");
-		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done"]);
+		expect(cards(f, memory)).toEqual(["agent:Scout:done", "agent:Old:done"]);
 		expect(quiet()).toBe(true);
 
 		// A failure alone is worth the room.
 		f.jobs.push(job("bg_2", { status: "failed", endTime: 96_000, errorText: "boom" }));
 		expect(quiet()).toBe(false);
+		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done", "job:bg_2:failed"]);
 		memory.dismissed.add("job:bg_2");
 		expect(quiet()).toBe(true);
+	});
+
+	it("gives each finished agent its own settled card in a quiet tray, from the observer or from saved history", () => {
+		const f = fixture();
+		// Finished in this run, its result delivered: the observer knows its run and its last words.
+		f.sessions.push({
+			...observed("Fresh", "completed", {
+				durationMs: 30_000,
+				toolCount: 6,
+				contextTokens: 22_000,
+				contextWindow: 100_000,
+				cost: 0.12,
+				recentOutput: ["**Checker:** `✓ wrapper passes` (exit 0)"],
+			}),
+		});
+		f.refs.push({ ...ref("Fresh", "idle", 30), sessionFile: "/tmp/Fresh.jsonl" });
+		f.agentJobs.set("Fresh", job("Fresh", { type: "task", agentId: "Fresh", status: "completed" }));
+		f.consumed.add("Fresh");
+		// Failed, its result delivered: red, yet the tray stays quiet.
+		f.sessions.push(observed("Broke", "failed"));
+		f.refs.push({ ...ref("Broke", "idle", 20), sessionFile: "/tmp/Broke.jsonl" });
+		f.agentJobs.set(
+			"Broke",
+			job("Broke", { type: "task", agentId: "Broke", status: "failed", errorText: "boom\nstack" }),
+		);
+		f.consumed.add("Broke");
+		// Restored from disk: no observer session, only the registry's saved history.
+		f.refs.push({
+			...ref("Restored", "parked", 10),
+			sessionFile: "/tmp/Restored.jsonl",
+			activity: "```\n- **`NOTES.md`:** it now records the run\n```",
+			history: { agent: "m2", metrics: { tokens: 0, requests: 0, tools: 4, cost: 0, durationMs: 95_000 } },
+		});
+
+		const build = buildTrayItems(input(f), new TrayMemory());
+		expect(build.quiet).toBe(true);
+		expect(build.items.map(item => `${item.item}:${item.ref}:${item.status}`)).toEqual([
+			"agent:Fresh:done",
+			"agent:Broke:failed",
+			"agent:Restored:done",
+		]);
+		const [fresh, broke, restored] = build.items;
+		expect(fresh).toMatchObject({
+			acted: 30,
+			text: "Checker: ✓ wrapper passes (exit 0)",
+			tools: 6,
+			duration: 30_000,
+			stats: "22% · $0.120",
+			openable: true,
+		});
+		expect(broke).toMatchObject({ text: "boom" });
+		// Saved history: duration and tools; no tokens, context or cost known, so none is shown.
+		expect(restored).toMatchObject({
+			acted: 10,
+			type: "m2",
+			text: "NOTES.md: it now records the run",
+			tools: 4,
+			duration: 95_000,
+			stats: "",
+			aria: "Restored, m2, done, NOTES.md: it now records the run, 4 tools",
+		});
+		const card = describeTrayCard(restored!, 0);
+		expect(children(children(card)[0]).map(role)).toEqual([
+			"omp.tray.dot",
+			"omp.tray.name",
+			"omp.tray.time",
+			"omp.tray.tools",
+		]);
+		expect(children(children(card)[0])[2]!.p).toMatchObject({ age: 95_000, stopped: 95_000 });
+	});
+
+	it("shows the first 48 finished agents as cards in a quiet tray, the done card standing for the rest", () => {
+		const f = fixture();
+		for (let i = 0; i < 60; i++) f.refs.push(ref(`Agent${i}`, "idle", i));
+		const { items, quiet } = buildTrayItems(input(f), new TrayMemory());
+		expect(quiet).toBe(true);
+		expect(items).toHaveLength(49);
+		expect(items.slice(0, 2).map(item => item.ref)).toEqual(["Agent59", "Agent58"]);
+		const done = items.at(-1)!;
+		expect(done).toMatchObject({ item: "done", name: "12 more done", count: 12 });
+		expect(done.item === "done" && done.entries.map(entry => entry.id)).toEqual(
+			Array.from({ length: 12 }, (_, i) => `Agent${11 - i}`),
+		);
+	});
+
+	it("takes plain text from an agent's words: inline markup stripped, markup-only lines skipped", () => {
+		const f = fixture();
+		f.jobs.push(job("bg_1"));
+		const said = (activity: string): string => {
+			f.refs.splice(0, f.refs.length, { ...ref("Done", "idle"), activity });
+			const done = buildTrayItems(input(f), new TrayMemory()).items[0];
+			return done?.item === "done" ? done.entries[0]!.line : "";
+		};
+		expect(said("**Checker:** `✓ wrapper passes` (exit 0)…")).toBe("Checker: ✓ wrapper passes (exit 0)…");
+		expect(said("- **`NOTES.md`:** it now records…")).toBe("NOTES.md: it now records…");
+		expect(said("```ts\nconst job_manager_api = 1;\n```")).toBe("const job_manager_api = 1;");
+		expect(said("---\n> ## [Results](https://x.test) are _in_")).toBe("Results are in");
 	});
 
 	it("titles an agent's card with its id, keeping its type for the closer look and the aria", () => {
@@ -233,7 +332,7 @@ describe("tray items", () => {
 		);
 		// The registry's display name for a task subagent is its agent type.
 		f.refs.push({ ...ref("ScanAuth", "running"), displayName: "m2" }, { ...ref("Old", "idle"), displayName: "m2" });
-		const [card, done] = buildTrayItems(input(f), new TrayMemory());
+		const [card, done] = buildTrayItems(input(f), new TrayMemory()).items;
 		expect(card).toMatchObject({
 			name: "ScanAuth",
 			type: "m2",
@@ -258,7 +357,7 @@ describe("tray items", () => {
 		const f = fixture();
 		const memory = new TrayMemory();
 		const acted = (now: number): number | undefined => {
-			const item = buildTrayItems(input(f, now), memory).find(candidate => candidate.ref === "Scout");
+			const item = buildTrayItems(input(f, now), memory).items.find(candidate => candidate.ref === "Scout");
 			return item?.item === "agent" ? item.acted : undefined;
 		};
 		f.sessions.push(observed("Scout", "active", { currentTool: "read", currentToolStartMs: 41_000 }));
@@ -429,6 +528,42 @@ describe("Tray", () => {
 		tray.setOnHost(false);
 		expect(tray.caption(true)).toBeUndefined();
 		expect(tray.focus()).toBe(false);
+	});
+
+	it("looks closer at, opens and dismisses a finished agent's own card in a quiet tray", () => {
+		const f = fixture();
+		f.refs.push(
+			{ ...ref("Openable", "idle", 2), sessionFile: "/tmp/Openable.jsonl" },
+			{ ...ref("Advisor", "idle", 1), kind: "advisor" },
+		);
+		f.unopenable.add("Advisor");
+		const { host, tray } = setup(f);
+		expect(refs(tray.describe())).toEqual(["Openable", "Advisor"]);
+
+		tray.handleNativeEvent(action("tray.peek", "Openable"));
+		const look = children(tray.describe()).at(-1)!;
+		expect(look.p).toMatchObject({ role: "omp.tray.peek", ref: "Openable" });
+		expect(
+			children(children(look)[0])
+				.filter(node => node.k === "button")
+				.map(node => node.p && Reflect.get(node.p, "actions")),
+		).toEqual([{ click: "tray.open=Openable" }, { click: "tray.dismiss=Openable" }, { click: "tray.peek=" }]);
+		tray.handleNativeEvent(action("tray.open", "Openable"));
+		expect(host.focusAgent).toHaveBeenCalledWith("Openable");
+
+		// One nothing can open has no Open, and opening it does nothing.
+		tray.handleNativeEvent(action("tray.peek", "Advisor"));
+		expect(JSON.stringify(children(tray.describe()).at(-1))).not.toContain("tray.open=");
+		tray.handleNativeEvent(action("tray.open", "Advisor"));
+		expect(host.focusAgent).toHaveBeenCalledTimes(1);
+
+		// Dismissed, its card goes; the done card keeps it reachable.
+		tray.handleNativeEvent(action("tray.dismiss", "Openable"));
+		const after = tray.describe();
+		expect(refs(after)).toEqual(["Advisor", "done"]);
+		expect(JSON.stringify(children(after).find(node => node.p && Reflect.get(node.p, "ref") === "done"))).toContain(
+			'"1 more done"',
+		);
 	});
 
 	it("lists the done card's agents in its closer look, newest first, capped, each opening its transcript", () => {

@@ -18,6 +18,7 @@ import { sameItems, sameProps } from "@oh-my-pi/pi-tui/native/memo";
 import type { NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
 import { formatCost, modelChip } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { type AgentRecordLike, MAIN_AGENT_ID } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import { stripInlineMarkdown } from "@oh-my-pi/pi-tui/overlays/plan-toc";
 import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import {
 	previewLine,
@@ -55,6 +56,9 @@ const TRAY_DONE_NAMES = 3;
 /** Finished agents the done card's closer look lists before `+N earlier`. */
 const TRAY_DONE_LIST_LIMIT = 50;
 
+/** Finished agents a quiet tray shows as cards of their own; the done card stands for the rest. */
+const TRAY_QUIET_CARD_LIMIT = 48;
+
 /** Output lines a job card shows, and its closer look with and without a widget. */
 const TRAY_OUT_LINES = 2;
 const TRAY_PEEK_OUT_LINES = 3;
@@ -88,8 +92,10 @@ export interface TrayAgentItem extends TrayCardFace {
 	readonly stats: string;
 	/** Epoch ms its run clock counts from. */
 	readonly start: number;
-	/** Its run's length, once settled. */
+	/** Its run's length, once settled; a settled agent whose length nobody knows shows no clock. */
 	readonly duration: number | undefined;
+	/** Whether opening it can show its transcript. */
+	readonly openable: boolean;
 }
 
 /** A background job's card. */
@@ -264,6 +270,49 @@ function firstLine(value: string): string {
 	return value.split("\n").find(part => part.trim().length > 0) ?? "";
 }
 
+/** A code fence's opening or closing line. */
+const FENCE_LINE = /^\s{0,3}(`{3,}|~{3,})/;
+/** A thematic break (`---`, `***`, `___`). */
+const RULE_LINE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
+
+/**
+ * The first line of model-written markdown that says something, as plain
+ * text: fences and rules skipped, quote, heading and list markers dropped,
+ * inline markup stripped. Empty when no line has text.
+ */
+function plainLine(lines: readonly string[]): string {
+	for (const raw of lines) {
+		if (FENCE_LINE.test(raw) || RULE_LINE.test(raw)) continue;
+		const text = raw
+			.trim()
+			.replace(/^(>\s?)+/, "")
+			.replace(/^#{1,6}(\s+|$)/, "")
+			.replace(/^([-*+]|\d+[.)])(\s+|$)/, "")
+			.replace(/^\[[ xX]\](\s+|$)/, "");
+		const plain = stripInlineMarkdown(text, { keepIntrawordUnderscores: true });
+		if (plain) return line(plain);
+	}
+	return "";
+}
+
+/**
+ * What a finished agent last said: its newest output line (the observer keeps
+ * them newest first), else, for one restored from disk, its saved summary
+ * (while an agent runs the registry's `activity` is its latest gist, not a
+ * summary), else what it was asked to do.
+ */
+function outcomeLine(session: ObservableSession | undefined, ref: AgentRecordLike | undefined): string {
+	const progress = session?.progress;
+	const said = progress?.recentOutput.length
+		? plainLine(progress.recentOutput)
+		: session
+			? ""
+			: plainLine(ref?.activity?.split("\n") ?? []);
+	if (said) return said;
+	const asked = session?.description ?? progress?.description ?? progress?.assignment;
+	return asked ? plainLine(asked.split("\n")) : "";
+}
+
 /** A call's detail as the ANSI live preview words it: its own intent, else its arguments, paths shortened. */
 function callDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
 	if (intent) return previewLine(shortenEmbeddedPaths(replaceTabs(intent)), TRUNCATE_LENGTHS.CONTENT);
@@ -305,10 +354,8 @@ function agentDoing(
 		case "running":
 			// A revived agent's observer snapshot is its previous run's; the registry's gist is current.
 			return runningDoing(session?.status === "active" ? progress : undefined, ref?.activity);
-		case "done": {
-			const description = session?.description ?? progress?.description ?? progress?.assignment ?? "Done";
-			return { tool: "", text: line(firstLine(description)) };
-		}
+		case "done":
+			return { tool: "", text: outcomeLine(session, ref) || "Done" };
 		case "failed": {
 			const error = job?.errorText ?? progress?.retryFailure?.errorMessage ?? "Failed";
 			return { tool: "", text: line(firstLine(error)) };
@@ -471,6 +518,76 @@ function agentItem(
 		stats: agentStats(session?.progress),
 		start: remembered.start,
 		duration: remembered.duration,
+		openable: ref !== undefined && input.canOpen(ref),
+	};
+}
+
+/** How a finished agent ended, by its observer session and its registry ref. */
+function finishedStatus(
+	session: ObservableSession | undefined,
+	ref: AgentRecordLike | undefined,
+	job: AsyncJob | undefined,
+): "done" | "failed" | "stopped" {
+	if (session?.status === "failed" || job?.status === "failed") return "failed";
+	if (session?.status === "aborted" || ref?.status === "aborted") return "stopped";
+	return "done";
+}
+
+/**
+ * A finished agent's own card in a quiet tray, settled: its run from the
+ * observer, else from the registry's saved history, leaving out what neither
+ * knows. `acted` is its last activity, so a host orders these as the agent
+ * registry does.
+ */
+function finishedAgentItem(
+	input: TrayInput,
+	id: string,
+	session: ObservableSession | undefined,
+	ref: AgentRecordLike | undefined,
+): TrayAgentItem {
+	const job = input.agentJob(id);
+	const status = finishedStatus(session, ref, job);
+	const name = agentTitle(id);
+	const type = agentType(id, session, ref, name);
+	const text = status === "failed" ? agentDoing(status, session, ref, job).text : outcomeLine(session, ref);
+	const progress = session?.progress;
+	const metrics = ref?.history?.metrics;
+	const duration = progress?.durationMs || metrics?.durationMs || undefined;
+	const tools = progress?.toolCount || metrics?.tools || undefined;
+	const contextTokens = progress?.contextTokens ?? metrics?.contextTokens;
+	const contextWindow = progress?.contextWindow ?? metrics?.contextWindow;
+	const tokens = progress?.tokens || metrics?.tokens || 0;
+	const cost = progress?.cost || metrics?.cost || 0;
+	const stats = [
+		contextTokens !== undefined && contextWindow
+			? `${Math.round((contextTokens / contextWindow) * 100)}%`
+			: tokens > 0
+				? `${formatNumber(tokens)} tok`
+				: "",
+		cost > 0 ? formatCost(cost) : "",
+	]
+		.filter(Boolean)
+		.join(" · ");
+	const aria = [name, type, status, text, tools !== undefined ? formatCount("tool", tools) : ""];
+	const acted = ref?.lastActivity ?? session?.lastUpdate ?? 0;
+	return {
+		item: "agent",
+		key: `agent:${id}`,
+		ref: id,
+		name,
+		status,
+		aria: aria.filter(Boolean).join(", "),
+		acted,
+		unread: input.unread(id),
+		tool: "",
+		text,
+		type,
+		model: agentModel(session, ref),
+		tools,
+		stats,
+		start: acted - (duration ?? 0),
+		duration,
+		openable: ref !== undefined && input.canOpen(ref),
 	};
 }
 
@@ -545,27 +662,35 @@ function doneEntry(input: TrayInput, ref: AgentRecordLike, session: ObservableSe
 	]
 		.filter(Boolean)
 		.join(" · ");
-	const outcome = progress?.recentOutput.find(part => part.trim()) ?? ref.activity ?? "";
 	return {
 		id: ref.id,
 		name: agentTitle(ref.id),
 		status,
 		meta,
-		line: outcome ? line(firstLine(outcome)) : "",
+		line: outcomeLine(session, ref),
 		openable: input.canOpen(ref),
 	};
 }
 
-/** Finished agents without a card of their own, most recently active first. */
+/** Finished agents (not Main, not running) that have no card of their own, most recently active first. */
+function finishedRefs(input: TrayInput, carded: ReadonlySet<string>): AgentRecordLike[] {
+	return input.refs
+		.filter(ref => ref.id !== MAIN_AGENT_ID && ref.kind !== "main" && ref.status !== "running" && !carded.has(ref.id))
+		.sort((a, b) => b.lastActivity - a.lastActivity);
+}
+
+/**
+ * The card standing for finished agents `done` (most recently active first):
+ * every finished agent while anything runs, only those past a quiet tray's
+ * own cards (`more`) while nothing does.
+ */
 function doneItem(
 	input: TrayInput,
 	memory: TrayMemory,
-	carded: ReadonlySet<string>,
+	done: readonly AgentRecordLike[],
 	sessions: ReadonlyMap<string, ObservableSession>,
+	more: boolean,
 ): TrayDoneItem | undefined {
-	const done = input.refs
-		.filter(ref => ref.id !== MAIN_AGENT_ID && ref.kind !== "main" && ref.status !== "running" && !carded.has(ref.id))
-		.sort((a, b) => b.lastActivity - a.lastActivity);
 	if (done.length === 0) {
 		memory.doneEntries = undefined;
 		return undefined;
@@ -576,7 +701,7 @@ function doneItem(
 	const names = done.map(ref => agentTitle(ref.id));
 	const shown = names.slice(0, TRAY_DONE_NAMES).join(", ");
 	const summary = names.length > TRAY_DONE_NAMES ? `${shown} +${names.length - TRAY_DONE_NAMES}` : shown;
-	const name = `${done.length} done`;
+	const name = more ? `${done.length} more done` : `${done.length} done`;
 	return {
 		item: "done",
 		key: "done",
@@ -590,52 +715,92 @@ function doneItem(
 	};
 }
 
+/** One build of the tray. */
+export interface TrayBuild {
+	readonly items: TrayItem[];
+	/**
+	 * It holds only finished work: nothing queued, running, or failed and still
+	 * waiting to be delivered or dismissed. A host keeps a quiet tray out of
+	 * sight until the user asks for it.
+	 */
+	readonly quiet: boolean;
+}
+
 /**
- * The tray's cards in wire order: agents in the observer registry's order
- * (then running agents only the agent registry knows), the done card, then
- * the session's background jobs by start time.
+ * The tray's cards in wire order. While anything is live: agents in the
+ * observer registry's order (then running agents only the agent registry
+ * knows), the done card for every finished agent without a card, then the
+ * session's background jobs by start time. While nothing is (quiet),
+ * finished agents are not grouped: each gets its own settled card, most
+ * recently active first, up to {@link TRAY_QUIET_CARD_LIMIT}, and the done
+ * card stands only for the rest and for dismissed ones. A card keeps its key
+ * across the switch.
  */
-export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayItem[] {
-	const items: TrayItem[] = [];
+export function buildTrayItems(input: TrayInput, memory: TrayMemory): TrayBuild {
+	const agents: TrayItem[] = [];
+	const jobs: TrayItem[] = [];
 	const seen = new Set<string>();
+	const carded = new Set<string>();
+	const refs = new Map<string, AgentRecordLike>();
+	const sessions = new Map<string, ObservableSession>();
 	if (input.showAgents) {
-		const refs = new Map<string, AgentRecordLike>();
 		for (const ref of input.refs) refs.set(ref.id, ref);
-		const carded = new Set<string>();
+		for (const session of input.sessions) if (session.kind === "subagent") sessions.set(session.id, session);
 		const add = (id: string, session: ObservableSession | undefined): void => {
 			seen.add(id);
 			const item = agentItem(input, memory, id, session, refs.get(id));
 			if (!item) return;
-			items.push(item);
+			agents.push(item);
 			carded.add(id);
 		};
-		for (const session of input.sessions) if (session.kind === "subagent") add(session.id, session);
+		for (const session of sessions.values()) add(session.id, session);
 		for (const ref of input.refs) {
 			if (!seen.has(ref.id) && ref.kind === "sub" && ref.status === "running") add(ref.id, undefined);
 		}
-		const sessions = new Map<string, ObservableSession>();
-		for (const session of input.sessions) if (session.kind === "subagent") sessions.set(session.id, session);
-		const done = doneItem(input, memory, carded, sessions);
-		if (done) items.push(done);
 	} else {
 		memory.doneEntries = undefined;
 	}
 	for (const id of memory.agents.keys()) if (!seen.has(id)) memory.agents.delete(id);
-	const jobs = input.jobs.filter(job => !job.foreground && job.agentId === undefined);
-	jobs.sort((a, b) => a.startTime - b.startTime);
-	for (const job of jobs) {
+	const running = input.jobs.filter(job => !job.foreground && job.agentId === undefined);
+	running.sort((a, b) => a.startTime - b.startTime);
+	for (const job of running) {
 		const item = jobItem(input, memory, job);
-		if (item) items.push(item);
+		if (item) jobs.push(item);
 	}
-	return items;
-}
-
-/**
- * Whether the tray holds only finished work: nothing queued, running or
- * failed. A host keeps a quiet tray out of sight until the user asks for it.
- */
-export function trayQuiet(items: readonly TrayItem[]): boolean {
-	return !items.some(item => isLive(item.status) || item.status === "failed");
+	const quiet = ![...agents, ...jobs].some(item => isLive(item.status) || item.status === "failed");
+	if (!input.showAgents) return { items: [...agents, ...jobs], quiet };
+	if (!quiet) {
+		const done = doneItem(input, memory, finishedRefs(input, carded), sessions, false);
+		return { items: [...agents, ...(done ? [done] : []), ...jobs], quiet };
+	}
+	// Quiet: every finished agent, carded or not, as its own card, newest first; dismissed ones and
+	// those past the cap go to the done card.
+	const finished: {
+		id: string;
+		session: ObservableSession | undefined;
+		ref: AgentRecordLike | undefined;
+		at: number;
+	}[] = [];
+	for (const item of agents) {
+		const ref = refs.get(item.ref);
+		const session = sessions.get(item.ref);
+		finished.push({ id: item.ref, session, ref, at: ref?.lastActivity ?? session?.lastUpdate ?? 0 });
+	}
+	for (const ref of finishedRefs(input, carded)) {
+		finished.push({ id: ref.id, session: sessions.get(ref.id), ref, at: ref.lastActivity });
+	}
+	finished.sort((a, b) => b.at - a.at);
+	const cards: TrayItem[] = [];
+	const rest: AgentRecordLike[] = [];
+	for (const agent of finished) {
+		if (cards.length < TRAY_QUIET_CARD_LIMIT && !memory.dismissed.has(`agent:${agent.id}`)) {
+			cards.push(finishedAgentItem(input, agent.id, agent.session, agent.ref));
+		} else if (agent.ref) {
+			rest.push(agent.ref);
+		}
+	}
+	const done = doneItem(input, memory, rest, sessions, true);
+	return { items: [...cards, ...(done ? [done] : []), ...jobs], quiet };
 }
 
 /** Whether two builds show the same cards, in the same order, with the same faces. */
@@ -870,8 +1035,8 @@ export interface TrayAgentDetail {
 /** An agent's task and last operations, from its observer session. */
 export function trayAgentDetail(session: ObservableSession | undefined, now: number): TrayAgentDetail {
 	const progress = session?.progress;
-	const task = line(
-		firstLine(session?.description ?? progress?.description ?? progress?.assignment ?? progress?.task ?? ""),
+	const task = plainLine(
+		(session?.description ?? progress?.description ?? progress?.assignment ?? progress?.task ?? "").split("\n"),
 	);
 	if (!progress) return { task, tail: [] };
 	const current = session?.status === "active" ? progress.currentTool : undefined;
@@ -923,7 +1088,10 @@ function button(key: string, text: string, act: string, extra: Record<string, un
 function peekButtons(item: TrayItem): NativeNode[] {
 	const close = button("close", "", "tray.peek=", { icon: "x", aria: "Close", title: "Close" });
 	if (item.item === "done") return [close];
-	const buttons = [button("open", "Open", `tray.open=${item.ref}`, { keys: keyNames("enter") })];
+	const buttons: NativeNode[] = [];
+	if (item.item === "job" || item.openable) {
+		buttons.push(button("open", "Open", `tray.open=${item.ref}`, { keys: keyNames("enter") }));
+	}
 	if (isLive(item.status)) {
 		buttons.push(
 			button("stop", item.item === "agent" ? "Stop" : "Cancel", `tray.stop=${item.ref}`, { tone: "error" }),
@@ -1225,6 +1393,8 @@ export class Tray implements Component {
 	readonly #host: TrayHost;
 	readonly #memory = new TrayMemory();
 	#items: readonly TrayItem[] = [];
+	/** The last build's {@link TrayBuild.quiet}. */
+	#quiet = true;
 	/** Whether {@link #items} were built since the tray last described itself. */
 	#fresh = false;
 	/** True while the terminal advertises `tray`; everything else here idles until then. */
@@ -1270,9 +1440,10 @@ export class Tray implements Component {
 	/** Rebuild the cards; true when a card, their order or the closer look changed since the last build. */
 	refresh(): boolean {
 		const input = this.#host.input();
-		const items = buildTrayItems(input, this.#memory);
-		let changed = !sameFaces(this.#items, items);
+		const { items, quiet } = buildTrayItems(input, this.#memory);
+		let changed = !sameFaces(this.#items, items) || quiet !== this.#quiet;
 		this.#items = items;
+		this.#quiet = quiet;
 		this.#fresh = true;
 		const peeked = this.#peekRef === undefined ? undefined : items.find(item => item.ref === this.#peekRef);
 		if (!peeked) this.#peekRef = undefined;
@@ -1307,7 +1478,7 @@ export class Tray implements Component {
 		if (!this.#onHost) return undefined;
 		this.refresh();
 		// A quiet tray is out of sight: a caption over it would announce nothing.
-		if (!idle || this.#items.length === 0 || trayQuiet(this.#items)) return undefined;
+		if (!idle || this.#items.length === 0 || this.#quiet) return undefined;
 		const text = trayCaption(this.#items);
 		if (this.#caption?.text !== text) {
 			this.#caption = {
@@ -1363,7 +1534,7 @@ export class Tray implements Component {
 		const peek = peeked?.ref;
 		// No cards, no node to send: the hidden tray does not follow the main agent.
 		const main = children.length > 0 ? this.#host.main() : undefined;
-		const quiet = children.length > 0 && trayQuiet(this.#items);
+		const quiet = children.length > 0 && this.#quiet;
 		if (
 			root &&
 			root.focus === this.#focus &&
@@ -1402,6 +1573,7 @@ export class Tray implements Component {
 				// The done card opens nothing: its closer look lists the agents, and each row opens one.
 				if (item?.item === "done") return;
 				if (item?.item === "agent") {
+					if (!item.openable) return;
 					this.#peekRef = undefined;
 					this.#host.focusAgent(item.ref);
 				} else if (item?.item === "job") {
