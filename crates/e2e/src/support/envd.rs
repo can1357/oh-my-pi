@@ -9,6 +9,7 @@ use std::{
 
 use bytes::BytesMut;
 use flume::Receiver;
+use omp_driver::discovery::native::AdmittedNativeExtension;
 use omp_env::{
 	Admitter, BlobDownloadEvent, EnvClient, FramePipe, InProcessEnvTransport, in_process_frames,
 };
@@ -36,8 +37,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	DEFAULT_TIMEOUT, OwnedProcess, PythonExtension, Scratch, install_omp_binary_env, omp_binary,
-	within,
+	DEFAULT_TIMEOUT, OwnedProcess, PythonExtension, Scratch, granted::install_admitted,
+	install_omp_binary_env, omp_binary, within,
 };
 use crate::{Context as _, Result, error};
 
@@ -296,6 +297,12 @@ enum OpenKind {
 	SessionHost { owner: EnvClient },
 }
 
+#[derive(Clone, Copy)]
+enum Registered<'a> {
+	Fixture(&'a PythonExtension),
+	Admitted(&'a AdmittedNativeExtension),
+}
+
 /// Owner resources [`OpenKind::SessionHost`] keeps alive for the harness
 /// lifetime.
 struct SessionOwner {
@@ -381,7 +388,26 @@ impl InProcessEnvHarness {
 			state,
 			InProcessRoots::Scratch(scratch),
 			OpenKind::Local,
-			Some(extension),
+			Some(Registered::Fixture(extension)),
+			None,
+		)
+		.await
+	}
+
+	/// Opens the local authority over `scratch` with `extension`, one the
+	/// production driver admitted from a user extension root, registered behind
+	/// its CONTROL extension host.
+	pub async fn spawn_with_admitted_extension(
+		scratch: Scratch,
+		extension: &AdmittedNativeExtension,
+	) -> Result<Self> {
+		let (project, state) = (scratch.project().to_path_buf(), scratch.state().to_path_buf());
+		Self::open(
+			project,
+			state,
+			InProcessRoots::Scratch(scratch),
+			OpenKind::Local,
+			Some(Registered::Admitted(extension)),
 			None,
 		)
 		.await
@@ -404,7 +430,7 @@ impl InProcessEnvHarness {
 			state,
 			InProcessRoots::Scratch(scratch),
 			OpenKind::Project { docserver_socket },
-			Some(extension),
+			Some(Registered::Fixture(extension)),
 			None,
 		)
 		.await
@@ -446,7 +472,7 @@ impl InProcessEnvHarness {
 			state,
 			InProcessRoots::Scratch(scratch),
 			OpenKind::SessionHost { owner },
-			Some(extension),
+			Some(Registered::Fixture(extension)),
 			Some(SessionOwner { _server: owner_server, _connection: owner_connection }),
 		)
 		.await
@@ -469,13 +495,18 @@ impl InProcessEnvHarness {
 		state: PathBuf,
 		roots: InProcessRoots,
 		kind: OpenKind,
-		extension: Option<&PythonExtension>,
+		extension: Option<Registered<'_>>,
 		owner: Option<SessionOwner>,
 	) -> Result<Self> {
 		let (mut ext_host_config, con, convars) = open_inputs()?;
 		let binding = match extension {
-			Some(extension) => {
+			Some(Registered::Fixture(extension)) => {
 				let install = extension.install(&project, &state, SESSION_ID, SESSION_GENERATION)?;
+				ext_host_config.extensions.push(install.spec);
+				Some(install.binding)
+			},
+			Some(Registered::Admitted(extension)) => {
+				let install = install_admitted(extension, &state, SESSION_ID, SESSION_GENERATION)?;
 				ext_host_config.extensions.push(install.spec);
 				Some(install.binding)
 			},
@@ -529,7 +560,7 @@ impl InProcessEnvHarness {
 			.await
 			.context("opening session-host environment authority")?,
 		});
-		if let Some(extension) = extension {
+		if let Some(Registered::Fixture(extension)) = extension {
 			extension.verify(&server)?;
 		}
 		let shutdown = CancellationToken::new();

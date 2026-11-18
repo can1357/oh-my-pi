@@ -10,6 +10,8 @@ mod extension;
 #[cfg(unix)]
 mod gateway;
 #[cfg(unix)]
+mod granted;
+#[cfg(unix)]
 mod owned_groups;
 mod process;
 #[cfg(unix)]
@@ -32,6 +34,8 @@ pub use envd::{
 pub use extension::{ExtensionRegistrar, LiveComponent};
 #[cfg(unix)]
 pub use gateway::GatewayInference;
+#[cfg(unix)]
+pub use granted::{Admission, AgentsLease, OperatorHome, install_agents_owner};
 pub use process::{OwnedProcess, install_omp_binary_env, omp_binary};
 #[cfg(unix)]
 pub use process::{process_group_alive, wait_process_group_dead};
