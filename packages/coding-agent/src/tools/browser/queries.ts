@@ -276,40 +276,55 @@ export function enrichElementQueries<T extends ElementHandle>(
 	return enriched;
 }
 
+/**
+ * Call `check` every `interval` ms until it answers, and resolve with its answer; `undefined` means "not yet".
+ * A check the page's navigation interrupts counts as "not yet": the condition may hold on the page coming in.
+ */
+async function pollPage<T>(
+	check: () => Promise<T | undefined>,
+	opts: { timeout: number; interval: number; signal: AbortSignal },
+	timeoutMessage: string,
+): Promise<T> {
+	const deadline = Date.now() + opts.timeout;
+	while (Date.now() <= deadline) {
+		let answer: T | undefined;
+		try {
+			answer = await check();
+		} catch (error) {
+			if (opts.signal.aborted || !isNavigatedContextError(error)) throw error;
+			answer = undefined;
+		}
+		if (answer !== undefined) return answer;
+		await untilAborted(opts.signal, () => Bun.sleep(Math.min(opts.interval, Math.max(1, deadline - Date.now()))));
+	}
+	throw new ToolError(timeoutMessage);
+}
+
 /** Wait until text appears in the document body or a scoped element. */
 export async function waitForPageText(
 	page: Page,
 	text: string,
 	opts: { timeout: number; selector?: string; exact?: boolean; signal: AbortSignal },
 ): Promise<void> {
-	const deadline = Date.now() + opts.timeout;
-	while (Date.now() <= deadline) {
-		let content: string | null;
-		try {
-			if (opts.selector) {
-				content = await queryText(page, opts.selector, opts.signal);
-			} else {
-				content = (await untilAborted(opts.signal, () =>
-					page.evaluate(() => {
-						const pageGlobal = globalThis as unknown as {
-							document: { body?: { innerText?: string } };
-						};
-						return pageGlobal.document.body?.innerText ?? "";
-					}),
-				)) as string;
-			}
-		} catch (error) {
-			// The text may well be on the page a navigation is bringing in; read that one on the next poll.
-			if (opts.signal.aborted || !isNavigatedContextError(error)) throw error;
-			content = null;
-		}
-		if (content !== null) {
+	await pollPage(
+		async () => {
+			const content = opts.selector
+				? await queryText(page, opts.selector, opts.signal)
+				: ((await untilAborted(opts.signal, () =>
+						page.evaluate(() => {
+							const pageGlobal = globalThis as unknown as {
+								document: { body?: { innerText?: string } };
+							};
+							return pageGlobal.document.body?.innerText ?? "";
+						}),
+					)) as string);
+			if (content === null) return undefined;
 			const candidate = content.trim();
-			if (opts.exact ? candidate === text : candidate.includes(text)) return;
-		}
-		await untilAborted(opts.signal, () => Bun.sleep(Math.min(100, Math.max(1, deadline - Date.now()))));
-	}
-	throw new ToolError(`tab.waitForText(${JSON.stringify(text)}) timed out after ${opts.timeout}ms`);
+			return (opts.exact ? candidate === text : candidate.includes(text)) ? true : undefined;
+		},
+		{ timeout: opts.timeout, interval: 100, signal: opts.signal },
+		`tab.waitForText(${JSON.stringify(text)}) timed out after ${opts.timeout}ms`,
+	);
 }
 
 /** Options for {@link waitForPagePredicate}. */
@@ -318,13 +333,22 @@ export interface PagePredicateWaitOptions {
 	timeout: number;
 	/** Poll interval in ms (default 100, floor 10). */
 	polling?: number;
+	/** JSON values passed to a function predicate. */
+	args?: unknown[];
 	signal: AbortSignal;
 }
 
+/** Whether a source string is a function (`function …`, `async (…) => …`, `x => …`) rather than an expression. */
+export function isFunctionSource(source: string): boolean {
+	return /^\s*(?:async\b\s*)?(?:function\b|\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)/.test(source);
+}
+
 /**
- * Poll a page-world predicate (a function, or an expression's source) in `frame`'s main world, where the
- * page's own globals live, until it returns a truthy value, and resolve with that value. Polls on a timer
- * rather than animation frames, which a background tab does not run; a predicate that throws fails the wait.
+ * Poll a page-world predicate in `frame`'s main world, where the page's own globals live (the world
+ * `tab.evaluate` uses), until it returns a truthy value, and resolve with that value. A function, or a string
+ * holding one, is called with `args`; any other string is an expression. Truthiness is decided in the page, so
+ * a truthy value that cannot be copied out (a node, a function, a cyclic object) resolves the wait with `true`.
+ * Polls on a timer rather than animation frames, which a background tab does not run.
  */
 export async function waitForPagePredicate(
 	frame: Frame,
@@ -332,26 +356,38 @@ export async function waitForPagePredicate(
 	predicate: unknown,
 	opts: PagePredicateWaitOptions,
 ): Promise<unknown> {
-	if (!isPagePredicate(predicate)) {
+	if (typeof predicate !== "string" && typeof predicate !== "function") {
 		throw new ToolError(`${label} expects a function or an expression string; got ${typeof predicate}`);
 	}
-	const interval = Math.max(10, opts.polling ?? 100);
-	const deadline = Date.now() + opts.timeout;
-	while (Date.now() <= deadline) {
-		let value: unknown;
-		try {
-			value = await untilAborted(opts.signal, () => frame.mainRealm().evaluate(predicate));
-		} catch (error) {
-			// The condition may well hold on the page a navigation is bringing in; check that one on the next poll.
-			if (opts.signal.aborted || !isNavigatedContextError(error)) throw error;
-			value = undefined;
-		}
-		if (value) return value;
-		await untilAborted(opts.signal, () => Bun.sleep(Math.min(interval, Math.max(1, deadline - Date.now()))));
+	const source = String(predicate);
+	const call =
+		typeof predicate === "function" || isFunctionSource(source)
+			? `(${source}\n)(...${JSON.stringify(opts.args ?? [])})`
+			: `(${source}\n)`;
+	const script = `(async () => {
+	const value = await ${call};
+	if (!value) return { held: false };
+	if (typeof value !== "object" && typeof value !== "function") return { held: true, value };
+	if (typeof Node === "function" && value instanceof Node) return { held: true, value: true };
+	try {
+		const json = JSON.stringify(value);
+		return { held: true, value: json === undefined ? true : JSON.parse(json) };
+	} catch {
+		return { held: true, value: true };
 	}
-	throw new ToolError(`${label} timed out after ${opts.timeout}ms`);
-}
-
-function isPagePredicate(value: unknown): value is string | (() => unknown) {
-	return typeof value === "string" || typeof value === "function";
+})()`;
+	return await pollPage(
+		async () => {
+			let answer: { held: boolean; value?: unknown };
+			try {
+				answer = (await untilAborted(opts.signal, () => frame.mainRealm().evaluate(script))) as typeof answer;
+			} catch (error) {
+				if (opts.signal.aborted || isNavigatedContextError(error) || error instanceof ToolError) throw error;
+				throw new ToolError(`${label} threw a JavaScript exception:\n${(error as Error).message ?? String(error)}`);
+			}
+			return answer?.held ? answer.value : undefined;
+		},
+		{ timeout: opts.timeout, interval: Math.max(10, opts.polling ?? 100), signal: opts.signal },
+		`${label} timed out after ${opts.timeout}ms`,
+	);
 }

@@ -32,7 +32,7 @@ import {
 	formatA11ySummary,
 	normalizeA11yResult,
 } from "../a11y/audit";
-import { type AriaSnapshotOptions, parseAriaRefSelector } from "../aria/aria-snapshot";
+import { type AriaSnapshotOptions, assertWaitSelector, parseAriaRefSelector } from "../aria/aria-snapshot";
 import type {
 	BrowserCaptureResult,
 	BrowserConsoleEntry,
@@ -65,7 +65,7 @@ import type {
 } from "../network";
 import { normalizeAllowedDomains, urlMatcher } from "../network";
 import { resolveOpTimeouts, resolveWaitTimeout, ZERO_MATCH_FAIL_FAST_MS } from "../op-timeouts";
-import { DEFAULT_STYLE_PROPERTIES } from "../queries";
+import { DEFAULT_STYLE_PROPERTIES, isFunctionSource } from "../queries";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
 import {
 	enableReact,
@@ -1091,11 +1091,21 @@ export class TernTab implements InProcessRunTab {
 		throw new ToolError(`The ${this.product} page kit could not be installed in this document`);
 	}
 
-	/** Evaluate user code in the page world, surfacing page exceptions as ToolErrors. */
-	async #evalUser(label: string, fn: unknown, args: unknown[], frame: FramePath): Promise<unknown> {
+	/**
+	 * Evaluate user code in the page world, surfacing page exceptions as ToolErrors. A string is an expression or
+	 * statements, or with `callSource` a function's source, called with `args` like a function.
+	 */
+	async #evalUser(
+		label: string,
+		fn: unknown,
+		args: unknown[],
+		frame: FramePath,
+		callSource = false,
+	): Promise<unknown> {
 		try {
 			if (typeof fn === "function") return await this.#eval(fn.toString(), args, "page", frame);
 			if (typeof fn !== "string") throw new ToolError(`${label} expects a function or a source string`);
+			if (callSource) return await this.#eval(fn, args, "page", frame);
 			return await this.#eval(userSourceFunction(fn), [], "page", frame);
 		} catch (error) {
 			if (error instanceof TernError && error.kind === "js") {
@@ -2767,6 +2777,7 @@ export class TernTab implements InProcessRunTab {
 
 	/** Wait for a visible matching element and return its handle. */
 	async waitFor(selector: string, opts?: { timeout?: number }): Promise<TernElementHandle> {
+		assertWaitSelector("tab.waitFor", selector);
 		return await this.waitForIn(selector, opts, null);
 	}
 
@@ -2794,6 +2805,7 @@ export class TernTab implements InProcessRunTab {
 		selector: string,
 		opts?: { timeout?: number; visible?: boolean; hidden?: boolean },
 	): Promise<TernElementHandle | null> {
+		assertWaitSelector("tab.waitForSelector", selector);
 		return await this.waitForSelectorIn(selector, opts, null);
 	}
 
@@ -2889,18 +2901,32 @@ export class TernTab implements InProcessRunTab {
 		await this.#input(typeSteps(String(text), this.#mods));
 	}
 
-	/** Poll a page-world predicate (in `frame`, else the main frame) until it returns a truthy value. */
+	/** Poll a page-world predicate until it returns a truthy value. */
 	async waitForFunction(
 		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
+		opts?: { timeout?: number; polling?: number },
+		...args: unknown[]
+	): Promise<unknown> {
+		return await this.waitForFunctionIn(fn, opts, args, null, "tab.waitForFunction()");
+	}
+
+	/**
+	 * Poll a page-world predicate in `frame` (null: the main frame) until it returns a truthy value. A function,
+	 * or a string holding one, is called with `args`; any other string is an expression.
+	 */
+	async waitForFunctionIn(
+		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
 		opts: { timeout?: number; polling?: number } | undefined,
-		args: unknown[] = [],
-		frame: FramePath = null,
-		label = frame === null ? "tab.waitForFunction()" : "frame.waitForFunction()",
+		args: unknown[],
+		frame: FramePath,
+		label: string,
 	): Promise<unknown> {
 		const interval = typeof opts?.polling === "number" && opts.polling > 0 ? opts.polling : 100;
 		const deadline = Date.now() + resolveWaitTimeout(this.#cellMs, opts?.timeout);
+		// A string holding a function (Python's only way to pass one) is called, not returned as a truthy function.
+		const callSource = typeof fn === "string" && isFunctionSource(fn);
 		for (;;) {
-			const value = await this.#evalUser(label, fn, args, frame);
+			const value = await this.#evalUser(label, fn, args, frame, callSource);
 			if (value) return value;
 			if (Date.now() >= deadline) {
 				throw new ToolError(`${label} timed out after ${resolveWaitTimeout(this.#cellMs, opts?.timeout)}ms`);
@@ -4348,6 +4374,7 @@ export class TernFrame {
 
 	/** Wait for a visible element; reports whether it appeared. */
 	async waitFor(selector: string, options?: { timeout?: number }): Promise<boolean> {
+		assertWaitSelector("frame.waitFor", selector);
 		await this.#tab.waitForIn(selector, options, this.#path);
 		return true;
 	}
@@ -4357,6 +4384,7 @@ export class TernFrame {
 		selector: string,
 		options?: { timeout?: number; visible?: boolean; hidden?: boolean },
 	): Promise<boolean> {
+		assertWaitSelector("frame.waitForSelector", selector);
 		return (await this.#tab.waitForSelectorIn(selector, options, this.#path)) !== null;
 	}
 
@@ -4364,8 +4392,9 @@ export class TernFrame {
 	async waitForFunction(
 		fn: string | ((...args: unknown[]) => unknown | Promise<unknown>),
 		options?: { timeout?: number; polling?: number },
+		...args: unknown[]
 	): Promise<unknown> {
-		return await this.#tab.waitForFunction(fn, options, [], this.#path);
+		return await this.#tab.waitForFunctionIn(fn, options, args, this.#path, "frame.waitForFunction()");
 	}
 
 	/** Capture an element of the frame. */
@@ -4534,7 +4563,7 @@ export class TernPageFacade {
 		opts?: { timeout?: number; polling?: number },
 		...args: unknown[]
 	): Promise<unknown> {
-		return await this.#tab.waitForFunction(fn, opts, args, null, "page.waitForFunction()");
+		return await this.#tab.waitForFunctionIn(fn, opts, args, null, "page.waitForFunction()");
 	}
 
 	async waitForResponse(

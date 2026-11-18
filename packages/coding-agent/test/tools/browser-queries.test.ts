@@ -399,12 +399,26 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser semantic selectors and queries", (
 				{ timeout: 10_000, polling: 20 },
 			]),
 		).toBe("EXP-1");
-		expect(String(await rejectionOf(call("waitForFunction", ["window.__never", { timeout: 150 }])))).toContain(
+		// A string holding a function (Python's only way to pass one) is called, not taken as a truthy value.
+		expect(await call("waitForFunction", ["() => window.__job?.result", { timeout: 5_000 }])).toBe("EXP-1");
+		expect(await call("waitForFunction", ["(n) => n * 2", { timeout: 5_000 }, 21])).toBe(42);
+		expect(String(await rejectionOf(call("waitForFunction", ["() => window.__never", { timeout: 150 }])))).toContain(
 			"tab.waitForFunction() timed out after 150ms",
 		);
-		// A predicate handed to `waitFor` names the helper that takes one.
-		expect(String(await rejectionOf(call("waitFor", [{ __omp_fn: "() => true" }])))).toContain(
-			"tab.waitForFunction(fn",
+		// Truthiness is decided in the page: a value that cannot be copied out still ends the wait.
+		await call("evaluate", [
+			"setTimeout(() => { window.__cyclic = {}; window.__cyclic.self = window.__cyclic; }, 50), 0",
+		]);
+		expect(await call("waitForFunction", ["window.__cyclic", { timeout: 5_000 }])).toBe(true);
+		expect(String(await rejectionOf(call("waitForFunction", ["(() => { throw new Error('boom'); })()"])))).toContain(
+			"tab.waitForFunction() threw a JavaScript exception",
 		);
+		// A condition or a sleep handed to `waitFor` names the call and the helper that waits for it.
+		const predicateError = String(await rejectionOf(call("waitFor", [{ __omp_fn: "() => true" }])));
+		expect(predicateError).toContain("tab.waitFor(fn) waits for a selector string");
+		expect(predicateError).toContain("tab.waitForFunction(fn");
+		const sleepError = String(await rejectionOf(call("waitFor", [1000])));
+		expect(sleepError).toContain("tab.waitFor(1000) waits for a selector string, not a number of milliseconds");
+		expect(sleepError).toContain("tab.waitForSelector(selector)");
 	}, 60_000);
 });
