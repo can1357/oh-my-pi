@@ -21,6 +21,15 @@ provider "google" {
 			limits context=262144
 			supports-tools #false
 		}
+		// Gemini 4 Neon ($3/$15, $0.15 cached; 1M context, long decodes up to 262,144).
+		// Seeded ahead of stencil.so; upstream rows win dedup once published.
+		// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-neon
+		model "gemini-4-neon" name="Gemini 4 Neon" api="google-generative-ai" base-url="https://generativelanguage.googleapis.com/v1beta" {
+			reasoning #true
+			input "text" "image"
+			cost input=3 output=15 cache-read=0.15 cache-write=0
+			limits context=1048576 max-tokens=262144
+		}
 	}
 
 	class "unknown" {

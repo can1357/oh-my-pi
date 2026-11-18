@@ -16,6 +16,18 @@ provider "google-vertex" {
 	// replaces the provider checks in anthropic.ts request shaping.
 	supports-output-effort #false
 
+	// Gemini 4 Neon ($3/$15, $0.15 cached; 1M context, long decodes up to 262,144).
+	// Seeded ahead of stencil.so; upstream rows win dedup once published.
+	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-neon
+	seed api="google-vertex" base-url="https://{location}-aiplatform.googleapis.com" bundle="always" {
+		model "gemini-4-neon" name="Gemini 4 Neon" {
+			reasoning #true
+			input "text" "image"
+			cost input=3 output=15 cache-read=0.15 cache-write=0
+			limits context=1048576 max-tokens=262144
+		}
+	}
+
 	// Vertex rejects maxOutputTokens=65536 for the Gemini 2.5 Flash-Lite line
 	// with 400 "supported range is from 1 (inclusive) to 65536 (exclusive)";
 	// the 2.5 Flash/Pro siblings accept 65536 on the same endpoint (Pro does

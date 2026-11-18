@@ -89,8 +89,8 @@ class "gemini" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high"
 		}
-		// Gemini 4 Hydrogen adds an `xhigh` level (default `high`).
-		models "gemini-4-hydrogen" {
+		// Gemini 4 Hydrogen and Neon add an `xhigh` level (default `high`).
+		models "gemini-4-hydrogen" "gemini-4-neon" {
 			thinking-upgrade-neutral #true
 			thinking-efforts "low" "medium" "high" "xhigh"
 		}
@@ -107,7 +107,7 @@ class "gemini" {
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-hydrogen#long-decodes
 	// https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
 	on "google" "google-vertex" {
-		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" {
+		models "gemini-4-argon" "gemini-4-carbon" "gemini-4-hydrogen" "gemini-4-neon" {
 			limits-patch {
 				max-tokens 262144
 			}

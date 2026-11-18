@@ -118,12 +118,14 @@ describe("Google thinking headroom in maxOutputTokens", () => {
 	});
 });
 
-describe("Gemini 4 Hydrogen xhigh thinking level", () => {
-	// Google's SDK enum stops at HIGH; clamping xhigh to it silently drops Hydrogen's deepest tier.
+describe("Gemini 4 Hydrogen and Neon xhigh thinking level", () => {
+	// Google's SDK enum stops at HIGH; clamping xhigh to it silently drops their deepest tier.
 	it.each([
 		["google-generative-ai", bundled("google", "gemini-4-hydrogen")],
 		["google-vertex", bundled("google-vertex", "gemini-4-hydrogen")],
-	])("%s sends the documented xhigh level", async (_name, model) => {
+		["google-generative-ai", bundled("google", "gemini-4-neon")],
+		["google-vertex", bundled("google-vertex", "gemini-4-neon")],
+	])("%s (%s) sends the documented xhigh level", async (_name, model) => {
 		const config = await captureGenerationConfig(model, 512, { reasoning: Effort.XHigh });
 
 		expect(config?.thinkingConfig?.thinkingLevel).toBe("xhigh");

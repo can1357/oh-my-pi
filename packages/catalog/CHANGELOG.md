@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Gemini 4 Neon (`gemini-4-neon`) on Google and Vertex AI ($3/$15 per million tokens, $0.15 cached, 1M context, long decodes, and low/medium/high/xhigh thinking levels).
+
 ## [19.0.0] - 2026-11-18
 
 ### Added
