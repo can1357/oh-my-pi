@@ -2,13 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed the shell's `rm -r` failing with `Permission denied` on a Windows junction or directory symlink inside the tree; it is now removed without following it ([#19572](https://github.com/can1357/oh-my-pi/pull/19572) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-- Fixed the shell's built-in `cat`, `grep`, `comm` and `diff` on Windows failing on process substitution (`cat <(echo x)` reported `/dev/fd/63: No such file or directory`) ([#19574](https://github.com/can1357/oh-my-pi/pull/19574) by [@zhivko-kocev](https://github.com/zhivko-kocev))
-
-## [18.22.1] - 2026-11-17
-
 ### Breaking Changes
 
 - SDK: `createAgentSession`'s `cacheWarming` option is a mode cap (`"off" | "streaming" | "idle"`, the lower of it and `providers.cacheWarming` applies) instead of a boolean; pass `"off"` where you passed `false`
@@ -32,6 +25,8 @@
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
 - Fixed `/mcp reauth` hiding a rejected MCP dynamic client registration (e.g. Figma's remote MCP) behind "Please check your client credentials"; it now shows the registration endpoint, HTTP status, response detail, and the `oauth.clientId` remedy ([#19641](https://github.com/can1357/oh-my-pi/issues/19641))
+- Startup prints `Waiting for auth broker at <url> …` to stderr while it retries an unreachable auth broker, in CLI commands (`omp login`, `omp models`, `omp commit`, `omp usage`, …) and in interactive launches that start without the prepaint composer (`--model`, `--resume`, …) ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+- CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -68,6 +63,13 @@
 - `watchexec` runs in the bash tool's own shell as a builtin with watchexec 2.3.2's options, messages and event formats (`-w`/`-W`/`-F`, `-e`/`-f`/`-i`, ignore files, `-r`, `-s`, `-o`, `--stop-signal`/`--stop-timeout`, `-d`, `-p`, `--poll`, `--emit-events-to`, `--only-emit-events`, …), so it works where the program is not installed, its command can use builtins and `scheme://` paths, and a stopped watcher leaves no process behind.
 - `fswatch` is a bash-tool builtin (fswatch 1.22 command line and output: `-0`, `-1`, `-o`, `-x`/`-n`, `-t`/`-u`/`-f`, `--format`, `--batch-marker`, `-e`/`-i`/`-E`/`-I`, `--filter-from`, `--event`, `-l`, `-r`, `-m`/`-M`, `--fire-idle-event`, …) on FSEvents, inotify and ReadDirectoryChangesW, so file watches work where fswatch is not installed and as background jobs or services; `fswatch -1 -o` exits after the first batch and a path that does not exist yet is reported once it appears
 - The shell's `entr` builtin (entr 5.9: `-a`, `-c`, `-d`, `-n`, `-p`, `-r`, `-s`, `-x`, `-z`, `/_`) runs its utility inside the shell on native change notification, so `ls *.rs | entr -r cmd` works where entr is not installed, without a terminal, with `scheme://` paths in the list, and as a background job or service
+- Fixed `/mcp reauth` hiding a rejected MCP dynamic client registration (e.g. Figma's remote MCP) behind "Please check your client credentials"; it now shows the registration endpoint, HTTP status, response detail, and the `oauth.clientId` remedy ([#19641](https://github.com/can1357/oh-my-pi/issues/19641))
+- Fixed a provider routed through an auth gateway (`transport: pi-native` in `models.yml`) still listing models from the provider's own endpoint, sending the gateway key there; such providers now skip the provider's model discovery and keep their bundled and cached models ([#19646](https://github.com/can1357/oh-my-pi/pull/19646) by [@ray8828](https://github.com/ray8828))
+- Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login ([#19599](https://github.com/can1357/oh-my-pi/pull/19599) by [@will-bogusz](https://github.com/will-bogusz))
+- Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login; a requested stop now exits 0 ([#19599](https://github.com/can1357/oh-my-pi/pull/19599) by [@will-bogusz](https://github.com/will-bogusz))
+- `omp usage` judges an account's policy state and percent left by its account-wide windows, so a Claude account at 100% of its Fable weekly (or a Codex account with a spent Spark meter) with room left in its shared windows no longer shows as exhausted; the policy line names the spent row (`· Claude 7 Day (Fable) exhausted`) and `--json` lists its limit ids in `policy.scopedExhausted` ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the shell's `rm -r` failing with `Permission denied` on a Windows junction or directory symlink inside the tree; it is now removed without following it ([#19572](https://github.com/can1357/oh-my-pi/pull/19572) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Fixed the shell's built-in `cat`, `grep`, `comm` and `diff` on Windows failing on process substitution (`cat <(echo x)` reported `/dev/fd/63: No such file or directory`) ([#19574](https://github.com/can1357/oh-my-pi/pull/19574) by [@zhivko-kocev](https://github.com/zhivko-kocev))
 - After a `computer` letter key on a macOS popup button, `ax()`, `find` and `value()` show the option the letters chose instead of the one from before the key ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
@@ -292,15 +294,6 @@
 ### Removed
 
 - Hashline no longer re-indents replacement bodies that omit their base indent
-### Fixed
-
-- Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login ([#19599](https://github.com/can1357/oh-my-pi/pull/19599) by [@will-bogusz](https://github.com/will-bogusz))
-### Added
-
-- Startup prints `Waiting for auth broker at <url> …` to stderr while it retries an unreachable auth broker, in CLI commands (`omp login`, `omp models`, `omp commit`, `omp usage`, …) and in interactive launches that start without the prepaint composer (`--model`, `--resume`, …) ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-### Fixed
-
-- `omp usage` judges an account's policy state and percent left by its account-wide windows, so a Claude account at 100% of its Fable weekly (or a Codex account with a spent Spark meter) with room left in its shared windows no longer shows as exhausted; the policy line names the spent row (`· Claude 7 Day (Fable) exhausted`) and `--json` lists its limit ids in `policy.scopedExhausted` ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
