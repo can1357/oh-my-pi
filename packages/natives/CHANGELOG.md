@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Wayland pointer and keyboard calls on a desktop with no input route, such as Hyprland without a RemoteDesktop portal, asking for a screenshot first or opening a screen capture before refusing: every one now refuses at once with `PermissionDenied` naming the missing route
+- Fixed Wayland pointer and keyboard calls on a desktop with no input route, such as Hyprland without a RemoteDesktop portal, asking for a screenshot first or opening a screen capture before refusing: every one now refuses at once with `PermissionDenied` naming the missing route ([#19629](https://github.com/can1357/oh-my-pi/pull/19629) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
