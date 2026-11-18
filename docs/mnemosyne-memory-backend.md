@@ -50,6 +50,7 @@ The first-turn recall is part of the transcript's history and is stored in the s
 | `mnemopi.bank`                | unset              | Optional shared bank base name passed to `Mnemopi`; the coding-agent wrapper scopes from this base according to `mnemopi.scoping`. Unset → shared bank `default`; per-project modes derive a project bank from the working-directory basename plus a stable hash of its absolute path.                        |
 | `mnemopi.scoping`             | `per-project`      | Memory visibility mode: `global` = one shared bank, `per-project` = isolated project memory, `per-project-tagged` = project-local writes plus global recall visibility.                                                                                                                                       |
 | `mnemopi.autoRecall`          | `true`             | Recall memory on the first turn of a session.                                                                                                                                                                                                                                                                 |
+| `mnemopi.recallRelevance`     | `off`              | Asks the `judge` role if each memory the injection budget shows is relevant to the task, dropping any not answered `relevant` (`uncertain` included). `auto` judges only with a native backend, `on` with any model (an on-device judge may answer only some in 10 s). A failed check injects nothing.        |
 | `mnemopi.autoRetain`          | `true`             | Retain completed turns automatically.                                                                                                                                                                                                                                                                         |
 | `mnemopi.polyphonicRecall`    | `false`            | Fuse the standard ranking by reciprocal rank with vector, graph, fact and temporal voices, so memories linked in the episodic graph (by `mnemopi.proactiveLinking` or consolidation) or through consolidated extracted facts surface without a keyword match. `MNEMOPI_POLYPHONIC_RECALL` overrides when set. |
 | `mnemopi.enhancedRecall`      | `false`            | Cache recall results per query for up to 5 minutes. Entries are keyed on every recall option (limit, facts, channel, time, bank), similar queries only reuse entries with identical options, and any write to the bank drops the cache. `MNEMOPI_ENHANCED_RECALL` overrides when set.                         |
@@ -65,12 +66,16 @@ The first-turn recall is part of the transcript's history and is stored in the s
 | `mnemopi.embeddingModel`      | variant default    | Explicit embedding model id; overrides `mnemopi.embeddingVariant`. Precedence: this setting > `MNEMOPI_EMBEDDING_MODEL` env > variant default; a blank or `null` setting counts as unset.                                                                                                                     |
 | `mnemopi.embeddingApiUrl`     | env/default        | OpenAI-compatible embedding endpoint passed to `Mnemopi`.                                                                                                                                                                                                                                                     |
 | `mnemopi.embeddingApiKey`     | env/default        | Embedding API key passed to `Mnemopi`.                                                                                                                                                                                                                                                                        |
+| `mnemopi.embeddingQueryPrefix` | unset             | Text prepended to recall queries before embedding, for instruction-tuned embedders (Qwen3-Embedding, E5). Stored memories are embedded unchanged. `MNEMOPI_EMBEDDING_QUERY_PREFIX` applies when unset.                                                                                                         |
+| `mnemopi.embeddingInputType`  | `false`            | Send `input_type` with embedding API requests: `query` for recall queries, `passage` for stored memories. NVIDIA NIM asymmetric embedders (NeMo Retriever, `nv-embedqa-*`) reject requests without it.                                                                                                        |
 | `mnemopi.llmMode`             | `smol`             | `smol` resolves the `memory` model role and its retry chain; `remote` uses the settings below; `none` disables LLM calls.                                                                                                                                                                                     |
 | `mnemopi.llmBaseUrl`          | env/default        | OpenAI-compatible LLM endpoint for `llmMode: remote`.                                                                                                                                                                                                                                                         |
 | `mnemopi.llmApiKey`           | env/default        | LLM API key for `llmMode: remote`.                                                                                                                                                                                                                                                                            |
 | `mnemopi.llmModel`            | env/default        | LLM model id for `llmMode: remote`.                                                                                                                                                                                                                                                                           |
 
 When the embedding model changes, a bank rebuilds its stored embeddings on open. The bank embeds the whole corpus with the new model first and replaces the stored embeddings only after every batch succeeds, so a missing key, an unreachable endpoint, or a rejected request cannot erase the old ones; the next open tries again. Embedding API requests carry at most `MNEMOPI_EMBEDDING_BATCH_SIZE` texts (default `64`); set it to the provider's limit when that limit is lower, for example `10` for DashScope.
+
+A failed embedding API request (rejected key, unknown model, missing `input_type`, timeout) shows a session warning with the provider's response, once per endpoint, model, and status; print mode writes it to stderr. Recall keeps working on keywords alone until requests succeed.
 
 ## Scoping
 
@@ -150,6 +155,24 @@ new Mnemopi({
 	embeddingApiKey,
 });
 ```
+
+Asymmetric embedders embed a search query differently from the text it should find. Instruction-tuned models take a query prefix; NVIDIA NIM retrievers take `input_type`:
+
+```yaml
+mnemopi:
+   embeddingModel: Qwen/Qwen3-Embedding-8B
+   embeddingApiUrl: https://your-endpoint/v1
+   embeddingQueryPrefix: "Instruct: Given a question, retrieve stored memories that answer it\nQuery: "
+```
+
+```yaml
+mnemopi:
+   embeddingModel: nvidia/nv-embedqa-e5-v5
+   embeddingApiUrl: https://integrate.api.nvidia.com/v1
+   embeddingInputType: true
+```
+
+`embeddingQueryPrefix` only changes recall queries. Toggling `embeddingInputType` does not re-embed stored memories; a NIM retriever that requires it never stored vectors without it.
 
 Remote LLM:
 

@@ -1,7 +1,8 @@
 use std::{
-	cell::RefCell,
-	os::fd::OwnedFd,
-	rc::Rc,
+	ffi::c_void,
+	io,
+	os::fd::{IntoRawFd, OwnedFd},
+	ptr,
 	time::{Duration, Instant},
 };
 
@@ -10,10 +11,11 @@ use ashpd::desktop::{
 	screencast::{CursorMode, Screencast, SourceType},
 };
 use image::RgbaImage;
-use pipewire as pw;
-use pw::{properties::properties, spa};
 
-use super::portal::{read_token, store_token};
+use super::{
+	pipewire::{self, PipeWire, PixelFormat, Plane, SpaHook, SpaPod, StreamEvents, VideoFormat},
+	portal::{read_token, store_token},
+};
 use crate::desktop::{
 	control,
 	error::{CoreResult, DesktopError},
@@ -101,30 +103,20 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 	}
 }
 
-struct UserData {
-	format: spa::param::video::VideoInfoRaw,
-}
-
-fn rgba_from_buffer(
-	format: &spa::param::video::VideoInfoRaw,
-	data: &mut pw::spa::buffer::Data,
-) -> Result<RgbaImage, String> {
-	let size = format.size();
-	let width = size.width;
-	let height = size.height;
+fn rgba_from_buffer(format: VideoFormat, plane: &Plane<'_>) -> Result<RgbaImage, String> {
+	let VideoFormat { width, height, .. } = format;
 	if width == 0 || height == 0 {
 		return Err("PipeWire negotiated an empty frame".to_string());
 	}
-	let chunk = data.chunk();
-	let offset = chunk.offset() as usize;
-	let bytes = chunk.size() as usize;
-	let stride = chunk.stride();
+	let offset = plane.chunk.offset as usize;
+	let bytes = plane.chunk.size as usize;
+	let stride = plane.chunk.stride;
 	if stride <= 0 {
 		return Err(format!("PipeWire returned unsupported frame stride {stride}"));
 	}
 	let stride = stride as usize;
-	let source = data
-		.data()
+	let source = plane
+		.memory
 		.ok_or_else(|| "PipeWire frame buffer is not memory-mapped".to_string())?;
 	let end = offset
 		.checked_add(bytes)
@@ -133,13 +125,11 @@ fn rgba_from_buffer(
 	let source = source
 		.get(offset..end)
 		.ok_or_else(|| "PipeWire frame offset is outside the mapped buffer".to_string())?;
-	let pixel_size = match format.format() {
-		spa::param::video::VideoFormat::RGB | spa::param::video::VideoFormat::BGR => 3,
-		spa::param::video::VideoFormat::RGBA
-		| spa::param::video::VideoFormat::RGBx
-		| spa::param::video::VideoFormat::BGRA
-		| spa::param::video::VideoFormat::BGRx => 4,
-		other => return Err(format!("PipeWire negotiated unsupported pixel format {other:?}")),
+	let pixel = PixelFormat::from_spa(format.format)
+		.ok_or_else(|| format!("PipeWire negotiated unsupported pixel format {}", format.format))?;
+	let pixel_size = match pixel {
+		PixelFormat::Rgb | PixelFormat::Bgr => 3,
+		PixelFormat::Rgba | PixelFormat::Rgbx | PixelFormat::Bgra | PixelFormat::Bgrx => 4,
 	};
 	let row_bytes = (width as usize)
 		.checked_mul(pixel_size)
@@ -162,31 +152,31 @@ fn rgba_from_buffer(
 		for x in 0..width as usize {
 			let input = &row[x * pixel_size..];
 			let output = &mut rgba[(y * width as usize + x) * 4..];
-			match format.format() {
-				spa::param::video::VideoFormat::RGB
-				| spa::param::video::VideoFormat::RGBA
-				| spa::param::video::VideoFormat::RGBx => {
+			match pixel {
+				PixelFormat::Rgb | PixelFormat::Rgba | PixelFormat::Rgbx => {
 					output[..4].copy_from_slice(&[
 						input[0],
 						input[1],
 						input[2],
-						if pixel_size == 4 && format.format() == spa::param::video::VideoFormat::RGBA {
+						if pixel == PixelFormat::Rgba {
 							input[3]
 						} else {
 							255
 						},
 					]);
 				},
-				_ => output[..4].copy_from_slice(&[
-					input[2],
-					input[1],
-					input[0],
-					if pixel_size == 4 && format.format() == spa::param::video::VideoFormat::BGRA {
-						input[3]
-					} else {
-						255
-					},
-				]),
+				PixelFormat::Bgr | PixelFormat::Bgra | PixelFormat::Bgrx => {
+					output[..4].copy_from_slice(&[
+						input[2],
+						input[1],
+						input[0],
+						if pixel == PixelFormat::Bgra {
+							input[3]
+						} else {
+							255
+						},
+					]);
+				},
 			}
 		}
 	}
@@ -194,137 +184,226 @@ fn rgba_from_buffer(
 		.ok_or_else(|| "failed to construct PipeWire RGBA frame".to_string())
 }
 
-fn grab_pipewire_frame(node: u32, fd: OwnedFd, pixels: bool) -> CoreResult<CapturedFrame> {
+/// What the stream callbacks share with the loop waiting for a frame.
+struct Listener {
+	pw:     &'static PipeWire,
+	stream: *mut pipewire::Stream,
+	pixels: bool,
+	format: Option<VideoFormat>,
+	frame:  Option<CoreResult<CapturedFrame>>,
+}
+
+static STREAM_EVENTS: StreamEvents = StreamEvents::new(on_param_changed, on_process);
+
+unsafe extern "C" fn on_param_changed(data: *mut c_void, id: u32, param: *const SpaPod) {
+	if id != pipewire::SPA_PARAM_FORMAT || param.is_null() {
+		return;
+	}
+	// SAFETY: `data` is the stream's live `Listener`, and PipeWire calls back
+	// only from inside `pipewire::iterate`, while nothing else borrows it.
+	let listener = unsafe { &mut *data.cast::<Listener>() };
+	// SAFETY: PipeWire passes a valid POD for the duration of the call.
+	if let Some(format) = pipewire::parse_video_format(unsafe { pipewire::pod_bytes(param) }) {
+		listener.format = Some(format);
+	}
+}
+
+unsafe extern "C" fn on_process(data: *mut c_void) {
+	// SAFETY: as in `on_param_changed`.
+	let listener = unsafe { &mut *data.cast::<Listener>() };
+	if listener.frame.is_some() {
+		return;
+	}
+	let pw = listener.pw;
+	// SAFETY: `stream` is live while its listener is registered.
+	let buffer = unsafe { (pw.pw_stream_dequeue_buffer)(listener.stream) };
+	if buffer.is_null() {
+		return;
+	}
+	// SAFETY: `buffer` stays dequeued until it is queued back below.
+	if let Some(plane) = unsafe { pipewire::first_plane(buffer) } {
+		let format = listener
+			.format
+			.unwrap_or(VideoFormat { format: 0, width: 0, height: 0 });
+		listener.frame = Some(if format.width == 0 || format.height == 0 {
+			Err(DesktopError::capture_failed("PipeWire negotiated an empty frame"))
+		} else if listener.pixels {
+			rgba_from_buffer(format, &plane)
+				.map(|image| CapturedFrame {
+					image:  Some(image),
+					width:  format.width,
+					height: format.height,
+				})
+				.map_err(DesktopError::capture_failed)
+		} else {
+			// Validation needs the negotiated pixel extent, not a copy or
+			// conversion of the compositor's image buffer.
+			Ok(CapturedFrame { image: None, width: format.width, height: format.height })
+		});
+	}
+	// SAFETY: `buffer` was dequeued from this stream and is no longer read.
+	unsafe { (pw.pw_stream_queue_buffer)(listener.stream, buffer) };
+}
+
+/// The library objects of one capture, destroyed in reverse order of
+/// creation.
+struct Connection {
+	pw:        &'static PipeWire,
+	main_loop: *mut pipewire::MainLoop,
+	context:   *mut pipewire::Context,
+	core:      *mut pipewire::Core,
+	stream:    *mut pipewire::Stream,
+	hook:      *mut SpaHook,
+	listener:  *mut Listener,
+}
+
+impl Drop for Connection {
+	fn drop(&mut self) {
+		let pw = self.pw;
+		// SAFETY: each pointer is null or an object this connection created and
+		// still owns. Destroying the stream unlinks the hook, after which no
+		// callback can reach the listener.
+		unsafe {
+			if !self.stream.is_null() {
+				(pw.pw_stream_destroy)(self.stream);
+			}
+			if !self.hook.is_null() {
+				drop(Box::from_raw(self.hook));
+			}
+			if !self.listener.is_null() {
+				drop(Box::from_raw(self.listener));
+			}
+			if !self.core.is_null() {
+				(pw.pw_core_disconnect)(self.core);
+			}
+			if !self.context.is_null() {
+				(pw.pw_context_destroy)(self.context);
+			}
+			(pw.pw_main_loop_destroy)(self.main_loop);
+		}
+	}
+}
+
+fn grab_pipewire_frame(
+	pw: &'static PipeWire,
+	node: u32,
+	fd: OwnedFd,
+	pixels: bool,
+) -> CoreResult<CapturedFrame> {
 	control::check()?;
-	pw::init();
-	let mainloop = pw::main_loop::MainLoopRc::new(None)
-		.map_err(|err| DesktopError::capture_failed(format!("PipeWire main loop: {err}")))?;
-	let context = pw::context::ContextRc::new(&mainloop, None)
-		.map_err(|err| DesktopError::capture_failed(format!("PipeWire context: {err}")))?;
-	let core = context
-		.connect_fd_rc(fd, None)
-		.map_err(|err| DesktopError::capture_failed(format!("PipeWire remote: {err}")))?;
-	let stream = pw::stream::StreamBox::new(&core, "omp-computer-capture", properties! {
-		*pw::keys::MEDIA_TYPE => "Video",
-		*pw::keys::MEDIA_CATEGORY => "Capture",
-		*pw::keys::MEDIA_ROLE => "Screen",
-	})
-	.map_err(|err| DesktopError::capture_failed(format!("PipeWire stream: {err}")))?;
-	let result: Rc<RefCell<Option<CoreResult<CapturedFrame>>>> = Rc::new(RefCell::new(None));
-	let callback_result = Rc::clone(&result);
-	let _listener = stream
-		.add_local_listener_with_user_data(UserData { format: Default::default() })
-		.param_changed(|_, user, id, param| {
-			let Some(param) = param else {
-				return;
-			};
-			if id == spa::param::ParamType::Format.as_raw() {
-				let _ = user.format.parse(param);
-			}
-		})
-		.process(move |stream, user| {
-			if callback_result.borrow().is_some() {
-				return;
-			}
-			let Some(mut buffer) = stream.dequeue_buffer() else {
-				return;
-			};
-			let Some(data) = buffer.datas_mut().first_mut() else {
-				return;
-			};
-			let size = user.format.size();
-			let frame = if size.width == 0 || size.height == 0 {
-				Err(DesktopError::capture_failed("PipeWire negotiated an empty frame"))
-			} else if pixels {
-				rgba_from_buffer(&user.format, data)
-					.map(|image| CapturedFrame {
-						image:  Some(image),
-						width:  size.width,
-						height: size.height,
-					})
-					.map_err(DesktopError::capture_failed)
-			} else {
-				// Validation needs the negotiated pixel extent, not a copy or
-				// conversion of the compositor's image buffer.
-				Ok(CapturedFrame { image: None, width: size.width, height: size.height })
-			};
-			*callback_result.borrow_mut() = Some(frame);
-		})
-		.register()
-		.map_err(|err| DesktopError::capture_failed(format!("PipeWire listener: {err}")))?;
-	let object = spa::pod::object!(
-		spa::utils::SpaTypes::ObjectParamFormat,
-		spa::param::ParamType::EnumFormat,
-		spa::pod::property!(
-			spa::param::format::FormatProperties::MediaType,
-			Id,
-			spa::param::format::MediaType::Video
-		),
-		spa::pod::property!(
-			spa::param::format::FormatProperties::MediaSubtype,
-			Id,
-			spa::param::format::MediaSubtype::Raw
-		),
-		spa::pod::property!(
-			spa::param::format::FormatProperties::VideoFormat,
-			Choice,
-			Enum,
-			Id,
-			spa::param::video::VideoFormat::BGRx,
-			spa::param::video::VideoFormat::BGRx,
-			spa::param::video::VideoFormat::BGRA,
-			spa::param::video::VideoFormat::RGBx,
-			spa::param::video::VideoFormat::RGBA,
-			spa::param::video::VideoFormat::RGB,
-			spa::param::video::VideoFormat::BGR
-		),
-		spa::pod::property!(
-			spa::param::format::FormatProperties::VideoSize,
-			Choice,
-			Range,
-			Rectangle,
-			spa::utils::Rectangle { width: 1920, height: 1080 },
-			spa::utils::Rectangle { width: 1, height: 1 },
-			spa::utils::Rectangle { width: 16384, height: 16384 }
+	let failed =
+		|object: &str| DesktopError::capture_failed(format!("PipeWire {object}: creation failed"));
+	// SAFETY: pw_main_loop_new accepts null properties.
+	let main_loop = unsafe { (pw.pw_main_loop_new)(ptr::null()) };
+	if main_loop.is_null() {
+		return Err(failed("main loop"));
+	}
+	let mut connection = Connection {
+		pw,
+		main_loop,
+		context: ptr::null_mut(),
+		core: ptr::null_mut(),
+		stream: ptr::null_mut(),
+		hook: ptr::null_mut(),
+		listener: ptr::null_mut(),
+	};
+	// SAFETY: `main_loop` is live.
+	let pw_loop = unsafe { (pw.pw_main_loop_get_loop)(main_loop) };
+	// SAFETY: `pw_loop` is live; null properties are accepted.
+	connection.context = unsafe { (pw.pw_context_new)(pw_loop, ptr::null_mut(), 0) };
+	if connection.context.is_null() {
+		return Err(failed("context"));
+	}
+	// SAFETY: the context is live and takes the fd, closing it on disconnect or
+	// failure.
+	connection.core = unsafe {
+		(pw.pw_context_connect_fd)(connection.context, fd.into_raw_fd(), ptr::null_mut(), 0)
+	};
+	if connection.core.is_null() {
+		return Err(failed("remote"));
+	}
+	let items = [
+		pipewire::SpaDictItem { key: c"media.type".as_ptr(), value: c"Video".as_ptr() },
+		pipewire::SpaDictItem { key: c"media.category".as_ptr(), value: c"Capture".as_ptr() },
+		pipewire::SpaDictItem { key: c"media.role".as_ptr(), value: c"Screen".as_ptr() },
+	];
+	let dict =
+		pipewire::SpaDict { flags: 0, n_items: items.len() as u32, items: items.as_ptr() };
+	// SAFETY: `dict` and its strings outlive the call, which copies them. The
+	// stream takes ownership of the properties.
+	connection.stream = unsafe {
+		let properties = (pw.pw_properties_new_dict)(&raw const dict);
+		(pw.pw_stream_new)(connection.core, c"omp-computer-capture".as_ptr(), properties)
+	};
+	if connection.stream.is_null() {
+		return Err(failed("stream"));
+	}
+	connection.hook = Box::into_raw(Box::new(SpaHook::new()));
+	connection.listener = Box::into_raw(Box::new(Listener {
+		pw,
+		stream: connection.stream,
+		pixels,
+		format: None,
+		frame: None,
+	}));
+	let format = pipewire::enum_format();
+	let mut params = [format.as_ptr().cast::<SpaPod>()];
+	// SAFETY: the stream is live; the hook and listener stay allocated until
+	// `Connection::drop` has destroyed the stream; the events table is static;
+	// the stream copies `params` during the call.
+	let connected = unsafe {
+		(pw.pw_stream_add_listener)(
+			connection.stream,
+			connection.hook,
+			&raw const STREAM_EVENTS,
+			connection.listener.cast(),
+		);
+		(pw.pw_stream_connect)(
+			connection.stream,
+			pipewire::SPA_DIRECTION_INPUT,
+			node,
+			pipewire::PW_STREAM_FLAG_AUTOCONNECT | pipewire::PW_STREAM_FLAG_MAP_BUFFERS,
+			params.as_mut_ptr(),
+			params.len() as u32,
 		)
-	);
-	let values = spa::pod::serialize::PodSerializer::serialize(
-		std::io::Cursor::new(Vec::new()),
-		&spa::pod::Value::Object(object),
-	)
-	.map_err(|err| DesktopError::capture_failed(format!("PipeWire format serialization: {err}")))?
-	.0
-	.into_inner();
-	let param = spa::pod::Pod::from_bytes(&values)
-		.ok_or_else(|| DesktopError::capture_failed("PipeWire rejected format parameters"))?;
-	stream
-		.connect(
-			spa::utils::Direction::Input,
-			Some(node),
-			pw::stream::StreamFlags::AUTOCONNECT | pw::stream::StreamFlags::MAP_BUFFERS,
-			&mut [param],
-		)
-		.map_err(|err| DesktopError::capture_failed(format!("PipeWire connect: {err}")))?;
+	};
+	if connected < 0 {
+		return Err(DesktopError::capture_failed(format!(
+			"PipeWire connect: {}",
+			io::Error::from_raw_os_error(-connected)
+		)));
+	}
 	let deadline = Instant::now() + FRAME_TIMEOUT;
 	loop {
 		control::check()?;
-		if let Some(result) = result.borrow_mut().take() {
+		// SAFETY: the callbacks run only inside `pipewire::iterate`, so nothing
+		// else borrows the listener here.
+		if let Some(result) = unsafe { (*connection.listener).frame.take() } {
 			return result;
 		}
 		if Instant::now() >= deadline {
 			return Err(DesktopError::capture_failed("PipeWire frame timed out"));
 		}
-		if mainloop.loop_().iterate(Duration::from_millis(10)) < 0 {
+		// SAFETY: `pw_loop` belongs to this thread's live main loop.
+		if unsafe { pipewire::iterate(pw_loop, Duration::from_millis(10)) } < 0 {
 			return Err(DesktopError::capture_failed("PipeWire loop failed before producing a frame"));
 		}
 	}
 }
 
-fn capture_stream(pixels: bool) -> CoreResult<(CapturedFrame, super::PortalGeometry)> {
+fn capture_stream(
+	pw: pipewire::Loaded,
+	pixels: bool,
+) -> CoreResult<(CapturedFrame, super::PortalGeometry)> {
 	control::check()?;
+	let pw = pw.map_err(|reason| {
+		DesktopError::capture_failed(format!(
+			"Wayland capture needs PipeWire's client library: {reason}"
+		))
+	})?;
 	let runtime = super::portal::portal_runtime()?;
 	let ScreenCast { node, fd, position, size, session } = runtime.block_on(open_screencast())?;
-	let captured = grab_pipewire_frame(node, fd, pixels);
+	let captured = grab_pipewire_frame(pw, node, fd, pixels);
 	let _ = runtime.block_on(async {
 		tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await
 	});
@@ -334,16 +413,16 @@ fn capture_stream(pixels: bool) -> CoreResult<(CapturedFrame, super::PortalGeome
 	Ok((captured, geometry))
 }
 
-pub(super) fn capture() -> CoreResult<(RgbaImage, super::PortalGeometry)> {
-	let (frame, geometry) = capture_stream(true)?;
+pub(super) fn capture(pw: pipewire::Loaded) -> CoreResult<(RgbaImage, super::PortalGeometry)> {
+	let (frame, geometry) = capture_stream(pw, true)?;
 	let image = frame
 		.image
 		.ok_or_else(|| DesktopError::internal("PipeWire capture omitted pixels"))?;
 	Ok((image, geometry))
 }
 
-pub(super) fn geometry() -> CoreResult<super::PortalGeometry> {
-	capture_stream(false).map(|(_, geometry)| geometry)
+pub(super) fn geometry(pw: pipewire::Loaded) -> CoreResult<super::PortalGeometry> {
+	capture_stream(pw, false).map(|(_, geometry)| geometry)
 }
 
 #[cfg(test)]
@@ -355,7 +434,7 @@ mod tests {
 		let source = control::CancellationSource::default();
 		let token = source.token();
 		source.cancel();
-		let result = control::with_token_for_test(&token, geometry);
+		let result = control::with_token_for_test(&token, || geometry(Err("not loaded")));
 		assert_eq!(result.unwrap_err().code, token.check().unwrap_err().code);
 	}
 }

@@ -19,6 +19,8 @@ const JOURNAL_FILE = "changes.jsonl";
 const BLOB_DIR = "blobs";
 /** Larger snapshots are not stored; their file is treated as unrecorded. */
 const MAX_BLOB_BYTES = 8 * 1024 * 1024;
+/** Decodes snapshots byte for byte: a leading UTF-8 BOM stays part of the text, as it is on disk. */
+const UTF8 = new TextDecoder("utf-8", { ignoreBOM: true });
 
 /** Identity of the agent a record belongs to. */
 export interface JournalAgent {
@@ -55,17 +57,32 @@ export interface CallRecord extends JournalAgent {
 	end: number;
 	/** One-line description (command head, cell title). */
 	label: string;
+	/**
+	 * Command or code the call ran, capped at {@link CALL_SCRIPT_CHARS}. A deleted file leaves no
+	 * timestamp to match against the window, so drafts look for its path here instead. Absent in
+	 * journals written before scripts were recorded.
+	 */
+	script?: string;
 }
 
 /** Display cap for a call label. */
 const CALL_LABEL_CHARS = 80;
+/** Storage cap for a call script. */
+const CALL_SCRIPT_CHARS = 64 * 1024;
 
-/** One-line {@link CallRecord.label} from `bash`/`eval` arguments: the command's or cell's first line. */
-export function callLabel(args: unknown): string {
-	if (!isRecord(args)) return "";
-	const source = [args.title, args.command, args.code].find(value => typeof value === "string" && value.trim());
-	const line = typeof source === "string" ? (source.trim().split("\n", 1)[0] ?? "") : "";
-	return line.length > CALL_LABEL_CHARS ? `${line.slice(0, CALL_LABEL_CHARS)}…` : line;
+/**
+ * {@link CallRecord.label} (the cell title, else the command's or code's first line) and
+ * {@link CallRecord.script} from `bash`/`eval` arguments.
+ */
+export function callDetails(args: unknown): Pick<CallRecord, "label" | "script"> {
+	if (!isRecord(args)) return { label: "" };
+	const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : undefined);
+	const script = text(args.command) ?? text(args.code);
+	const line = (text(args.title) ?? script)?.trim().split("\n", 1)[0] ?? "";
+	return {
+		label: line.length > CALL_LABEL_CHARS ? `${line.slice(0, CALL_LABEL_CHARS)}…` : line,
+		script: script?.slice(0, CALL_SCRIPT_CHARS),
+	};
 }
 
 /** A commit created by the selective commit flow. */
@@ -99,8 +116,8 @@ export interface FileSnapshot {
 export async function readSnapshot(file: string): Promise<FileSnapshot | undefined> {
 	try {
 		const handle = Bun.file(file);
-		const [text, stat] = await Promise.all([handle.text(), handle.stat()]);
-		return { text, mtimeMs: stat.mtimeMs };
+		const [bytes, stat] = await Promise.all([handle.bytes(), handle.stat()]);
+		return { text: UTF8.decode(bytes), mtimeMs: stat.mtimeMs };
 	} catch (error) {
 		return isEnoent(error) ? { text: null } : undefined;
 	}
@@ -195,7 +212,7 @@ export class ChangeJournal {
 	async blob(key: string): Promise<string | undefined> {
 		try {
 			const bytes = await fs.readFile(path.join(this.dir, BLOB_DIR, key));
-			return new TextDecoder().decode(Bun.gunzipSync(bytes));
+			return UTF8.decode(Bun.gunzipSync(bytes));
 		} catch (error) {
 			if (isEnoent(error)) return undefined;
 			throw error;

@@ -10,8 +10,8 @@ use crate::host::Host;
 /// UTC.
 ///
 /// Read from the shell environment, never the host process's, so `TZ=… date`
-/// works at the prompt. Shared by `date`, `ls`, `touch`, `du --time`, and
-/// `uptime`.
+/// works at the prompt. Shared by builtins that format or parse shell-local
+/// times.
 pub(crate) fn shell_time_zone(host: &Host) -> TimeZone {
 	let Some(value) = host.var("TZ") else {
 		return TimeZone::system();
@@ -23,4 +23,20 @@ pub(crate) fn shell_time_zone(host: &Host) -> TimeZone {
 	TimeZone::get(value)
 		.or_else(|_| TimeZone::posix(value))
 		.unwrap_or(TimeZone::UTC)
+}
+
+/// `datetime` plus `nanos` as a `SystemTime`, or `None` where the platform
+/// cannot represent it (Windows `SystemTime` starts in 1601).
+#[cfg(test)]
+pub(crate) fn system_time_at(
+	datetime: chrono::DateTime<chrono::Utc>,
+	nanos: u64,
+) -> Option<std::time::SystemTime> {
+	let seconds = std::time::Duration::from_secs(datetime.timestamp().unsigned_abs());
+	let base = if datetime.timestamp() >= 0 {
+		std::time::SystemTime::UNIX_EPOCH.checked_add(seconds)
+	} else {
+		std::time::SystemTime::UNIX_EPOCH.checked_sub(seconds)
+	};
+	base?.checked_add(std::time::Duration::from_nanos(nanos))
 }

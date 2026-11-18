@@ -166,6 +166,9 @@ pub struct DesktopSessionOptions {
 	/// Sessions created with the same key share one physical-Escape stop
 	/// count, which `desktopEscapeStops` reads after they close.
 	pub escape_stop_key: Option<String>,
+	/// The registry id of the agent this session acts for, named to other
+	/// sessions that wait for its input/focus control.
+	pub agent_id:        Option<String>,
 }
 
 #[napi(object)]
@@ -228,18 +231,49 @@ pub struct HoldOptions {
 	pub refuse_menu:  Option<bool>,
 }
 
-/// Where focus ended after a takeover input call, as `WindowServer` reports
-/// it. Input calls resolve to it on macOS when they took over; other
-/// backends and background delivery resolve to `null`.
+/// Where focus ended after a takeover input call.
+///
+/// Input calls resolve to it on macOS and Windows when they took over, as
+/// the window server reports it; other backends and background delivery
+/// resolve to `null`.
 #[napi(object)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DesktopFocusReturn {
-	/// Whether the takeover handed focus back to the app front before it.
+	/// Whether the takeover handed the front back to the app front before it.
 	pub handed_back:  bool,
 	/// The process front before the takeover.
 	pub previous_pid: Option<u32>,
 	/// The process front once the takeover ended; absent when unreadable.
 	pub front_pid:    Option<u32>,
+	/// What a macOS takeover did with the user's keyboard; absent elsewhere and
+	/// when it did not reach the hand-back.
+	pub keyboard:     Option<DesktopKeyboardReturn>,
+}
+
+/// What a macOS takeover did to give the user back their keyboard. Nothing
+/// outside an app can see which of its windows is key, so these name what was
+/// sent, not a key state that was observed.
+#[napi(string_enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopKeyboardReturn {
+	/// The window that was key when the takeover began was made key again.
+	#[napi(value = "handedBack")]
+	HandedBack,
+	/// The user clicked, used a shortcut or switched during the takeover, so
+	/// nothing was sent over their choice.
+	#[napi(value = "leftAsChosen")]
+	LeftAsChosen,
+	/// The user's app never left the front (the target was another of its
+	/// windows) and still reported its key window, so nothing was sent.
+	#[napi(value = "kept")]
+	Kept,
+	/// The user's app showed no window: only its front status came back.
+	#[napi(value = "frontOnly")]
+	FrontOnly,
+	/// macOS refused the hand-back or the user's last input was still being
+	/// read, so their window was not made key.
+	#[napi(value = "notSent")]
+	NotSent,
 }
 
 /// What a drag call did: made a text selection, or posted input.

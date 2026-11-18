@@ -404,9 +404,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return value;
 	};
 
+	const WAIT_NOT_A_SLEEP =
+		"wait() takes agent or completion handles; it is not a sleep. Wait for page state with tab.waitFor*(…), or pause with await Bun.sleep(ms).";
 	const wait = async (handles, opts, ...rest) => {
 		const { timeout, raiseErrors = true } = optionsArg("wait", opts, rest, ["timeout", "raiseErrors"], "{ timeout, raiseErrors }");
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
+		// `Array.from(1800)` is `[]`: a number would otherwise return at once, silently, where a sleep was meant.
+		if (typeof handles === "number") throw new TypeError(WAIT_NOT_A_SLEEP);
 		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
 		const items = await Promise.all(raw);
 		for (const handle of items) {

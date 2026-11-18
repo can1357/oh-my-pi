@@ -202,6 +202,7 @@ it("agent:// marks a published output as the previous run while the agent stream
 	const wokenSession = {
 		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
 		isStreaming: true,
+		runStartedAt: Date.now(),
 	} as unknown as AgentSession;
 	const registry = AgentRegistry.global();
 	registry.register({

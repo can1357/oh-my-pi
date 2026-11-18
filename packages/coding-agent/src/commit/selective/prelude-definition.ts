@@ -36,6 +36,7 @@ const paramsSchema = type({ action: "'draft'", "agents?": "string | string[]", "
 		"body?": "string | string[]",
 		"fixes?": "(number | string)[]",
 		"amend?": "boolean",
+		"noVerify?": "boolean",
 		"+": "reject",
 	});
 
@@ -112,12 +113,13 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 		return entry;
 	};
 
+	const describe = (draft: Draft) => ({ id: draft.id, head: draft.head, scope: [...draft.scope] });
 	const invoke = async (params: CommitParams, signal?: AbortSignal) => {
 		if (params.action === "draft") {
 			const cwd = params.repo === undefined ? session.cwd : resolveToCwd(params.repo, session.cwd);
 			const draft = await draftFor(context(signal, cwd), params.agents);
 			remember(draft, params.agents);
-			return { text: draft.summary(), details: { id: draft.id, head: draft.head, scope: [...draft.scope] } };
+			return { text: draft.summary(), details: describe(draft) };
 		}
 		const { draft, scope } = lookup(params.draft);
 		switch (params.action) {
@@ -137,7 +139,13 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 				const { agent, artifactsDir } = context(signal);
 				const outcome = await commitSelection(
 					draft,
-					{ subject: params.subject, body: params.body, fixes: params.fixes, amend: params.amend },
+					{
+						subject: params.subject,
+						body: params.body,
+						fixes: params.fixes,
+						amend: params.amend,
+						noVerify: params.noVerify,
+					},
 					{
 						journal: artifactsDir ? ChangeJournal.at(artifactsDir) : null,
 						agent: { agent, parent: AgentRegistry.global().get(agent)?.parentId },
@@ -151,11 +159,11 @@ export function createCommitPrelude(session: ToolSession): EvalPreludeDefinition
 					`[${draft.branch ?? "HEAD"} ${outcome.sha.slice(0, 10)}] ${outcome.subject}`,
 					`${outcome.paths.length} path(s): ${outcome.paths.join(", ")}`,
 				];
-				if (outcome.parent !== draft.head) {
+				if (outcome.parent && outcome.parent !== draft.head) {
 					lines.push(`HEAD had moved to ${outcome.parent.slice(0, 10)}; the selection applied cleanly on top.`);
 				}
 				lines.push(...outcome.indexNotes, "", "Remaining:", remaining.summary());
-				return { text: lines.join("\n"), details: { ...outcome, remaining: remaining.id } };
+				return { text: lines.join("\n"), details: { ...outcome, remaining: describe(remaining) } };
 			}
 		}
 	};

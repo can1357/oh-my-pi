@@ -33,7 +33,7 @@
 		},
 		"colors": {
 			"type": "object",
-			"description": "Theme color definitions (all required except thinkingMax, assistantMessageText and mdExtensionLink)",
+			"description": "Theme color definitions (all required except thinkingMax, assistantMessageText, mdExtensionLink and subagent1-subagent6)",
 			"required": [
 				"accent",
 				"border",
@@ -378,6 +378,30 @@
 				"statusLineSubagents": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Status line subagents segment"
+				},
+				"subagent1": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Name colour of the first subagent to arrive, and of every sixth after it (optional; omitted lets omp pick a readable colour from the theme)"
+				},
+				"subagent2": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Name colour of the second subagent to arrive (optional)"
+				},
+				"subagent3": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Name colour of the third subagent to arrive (optional)"
+				},
+				"subagent4": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Name colour of the fourth subagent to arrive (optional)"
+				},
+				"subagent5": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Name colour of the fifth subagent to arrive (optional)"
+				},
+				"subagent6": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Name colour of the sixth subagent to arrive (optional)"
 				}
 			},
 			"additionalProperties": false

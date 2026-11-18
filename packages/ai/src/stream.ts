@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	defaultSupportedEffort,
+	GOOGLE_THINKING_BUDGETS,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
 	requireSupportedEffort,
@@ -28,6 +29,7 @@ import {
 	resolveNextAuthRetryKey,
 } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
+import { withProbedThinking } from "./thinking-probe";
 import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
@@ -36,6 +38,7 @@ import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-lim
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import { reachesOfficialEndpoint } from "./providers/anthropic-state";
 import type { AnthropicOptions } from "./providers/anthropic";
+import type { AntigravityCliOptions } from "./providers/antigravity-cli";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
@@ -47,12 +50,14 @@ import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { streamKimi } from "./providers/kimi";
+import type { KiroOptions } from "./providers/kiro/stream";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
 import { streamSynthetic } from "./providers/synthetic";
 import {
 	streamAnthropic,
+	streamAntigravityCli,
 	streamAppleFoundationModels,
 	streamAzureOpenAIResponses,
 	streamBedrock,
@@ -61,6 +66,7 @@ import {
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
+	streamKiro,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
@@ -84,6 +90,7 @@ import { getHeaderCaseInsensitive, resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
+import { withResolvedHeaders } from "./utils/model-headers";
 import { withThinkingLoopGuard } from "./utils/thinking-loop";
 import { withTransportFetch } from "./utils/transport-fetch";
 
@@ -840,15 +847,12 @@ function withResolvedModelHeaders<TApi extends Api>(
 	signal: AbortSignal | undefined,
 	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const resolveHeaders = model.resolveHeaders;
-	if (!resolveHeaders) return run(model);
+	if (!model.resolveHeaders) return run(model);
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
 		try {
-			const headers = await untilAborted(signal, () => resolveHeaders(signal));
-			signal?.throwIfAborted();
-			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			const inner = run(await withResolvedHeaders(model, signal));
 			for await (const event of inner) {
 				outer.push(event);
 				if (outer.done) return;
@@ -1018,11 +1022,21 @@ function streamDispatch<TApi extends Api>(
 		case "ollama-chat":
 			return streamOllama(providerModel as Model<"ollama-chat">, context, providerOptions as OllamaChatOptions);
 
+		case "kiro-api":
+			return streamKiro(providerModel as Model<"kiro-api">, context, providerOptions as KiroOptions);
+
 		case "cursor-agent":
 			return streamCursor(providerModel as Model<"cursor-agent">, context, providerOptions as CursorOptions);
 
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
+
+		case "antigravity-acp":
+			return streamAntigravityCli(
+				providerModel as Model<"antigravity-acp">,
+				context,
+				providerOptions as AntigravityCliOptions,
+			);
 
 		case "apple-foundation-models":
 			return streamAppleFoundationModels(
@@ -1206,8 +1220,7 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	const sessionOptions = withInferenceSessionId(options);
-	// Unverified thinking is opt-in: without a requested effort the request is
-	// byte-identical to a non-reasoning model's.
+	// Requests without an effort keep unknown thinking controls off the wire.
 	const effortRequested =
 		sessionOptions.reasoning !== undefined && !sessionOptions.disableReasoning && !sessionOptions.forceReasoningOff;
 	if (!effortRequested) model = withoutUnverifiedThinking(model);
@@ -1412,6 +1425,14 @@ function streamSimpleRequest<TApi extends Api>(
 		);
 	}
 
+	return withProbedThinking(model, context, requestOptions, streamSimpleDispatch);
+}
+
+function streamSimpleDispatch<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	requestOptions: SimpleStreamOptions,
+): AssistantMessageEventStream {
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't
 	// need an `apiKey` from `getEnvApiKey` here — `options.apiKey` carries
@@ -1587,15 +1608,6 @@ export const ANTHROPIC_THINKING: Record<Effort, number> = {
 	max: 32768,
 };
 
-const GOOGLE_THINKING: Record<Effort, number> = {
-	minimal: 1024,
-	low: 4096,
-	medium: 8192,
-	high: 16384,
-	xhigh: 24575,
-	max: 32768,
-};
-
 /**
  * Estimated thinking spend for an effort, used to size Google's
  * `maxOutputTokens` (Gemini counts thinking against it). Level mode and the
@@ -1606,7 +1618,7 @@ function googleThinkingHeadroom(model: Model<Api>, effort: Effort, customBudgets
 	const custom = customBudgets?.[effort];
 	if (custom !== undefined && custom > 0) return custom;
 	const catalog = model.thinking?.effortBudgets?.[effort];
-	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING[effort];
+	return catalog !== undefined && catalog > 0 ? catalog : GOOGLE_THINKING_BUDGETS[effort];
 }
 
 /**
@@ -1868,6 +1880,7 @@ function mapOptionsForApi<TApi extends Api>(
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		omitDemotedReasoning: options?.omitDemotedReasoning,
 		anthropicCompaction: options?.anthropicCompaction,
 		anthropicSlowMode: options?.anthropicSlowMode,
 		userProfileId: options?.userProfileId,
@@ -2233,7 +2246,9 @@ function mapOptionsForApi<TApi extends Api>(
 				}
 
 				let thinkingBudget =
-					options.thinkingBudgets?.[effort] ?? model.thinking?.effortBudgets?.[effort] ?? GOOGLE_THINKING[effort];
+					options.thinkingBudgets?.[effort] ??
+					model.thinking?.effortBudgets?.[effort] ??
+					GOOGLE_THINKING_BUDGETS[effort];
 
 				// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 				const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
@@ -2346,6 +2361,14 @@ function mapOptionsForApi<TApi extends Api>(
 				toolChoice: options?.toolChoice,
 			});
 
+		case "kiro-api":
+			return castApi<"kiro-api">({
+				...base,
+				reasoning: options?.reasoning,
+				disableReasoning: options?.disableReasoning,
+				hideThinkingSummary: options?.hideThinkingSummary,
+			});
+
 		case "cursor-agent": {
 			const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
 			const onToolResult = options?.cursorOnToolResult ?? execHandlers?.onToolResult;
@@ -2406,6 +2429,14 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
+		}
+		case "antigravity-acp": {
+			const agyModel = model as Model<"antigravity-acp">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff && agyModel.reasoning
+					? requireSupportedEffort(agyModel, options.reasoning)
+					: undefined;
+			return castApi<"antigravity-acp">({ ...base, cwd: options?.cwd, reasoning });
 		}
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API in mapOptionsForApi: ${model.api}`);

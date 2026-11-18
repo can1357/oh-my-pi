@@ -128,7 +128,7 @@ function lastAssistantText(messages: readonly AgentMessage[]): string | undefine
 	return undefined;
 }
 
-/** Whether `<id>`'s published output predates a turn the agent is streaming now. */
+/** Whether `<id>`'s published output predates the run the agent has open now. */
 function isSuperseded(registry: AgentRegistryApi, outputId: string): boolean {
 	const ref = registry.get(outputId);
 	return ref !== undefined && ref.kind !== "advisor" && registry.isRunning(ref);
@@ -367,9 +367,6 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	 * pre-existing global scan untouched.
 	 */
 	async #outputDirs(context: ResolveContext | undefined): Promise<string[]> {
-		// A seance reads the consulted source's agent outputs in place, nothing else.
-		const seanceDir = context?.session?.seanceSourceArtifactsDir;
-		if (seanceDir) return [seanceDir];
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(AgentRegistry.global(), context.sessionFile)
 			: undefined;

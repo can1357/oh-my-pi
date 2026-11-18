@@ -31,6 +31,7 @@ import type {
 	Extension,
 	ExtensionError,
 	ExtensionUIContext,
+	ExtensionUIDialogOptions,
 	InputEvent,
 	InputEventResult,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -2794,7 +2795,11 @@ describe("ExtensionRunner", () => {
 	describe("tool approval lifecycle", () => {
 		const initializeRunner = (
 			runner: ExtensionRunner,
-			select: (title: string, options: string[]) => Promise<string | undefined>,
+			select: (
+				title: string,
+				options: string[],
+				dialogOptions?: ExtensionUIDialogOptions,
+			) => Promise<string | undefined>,
 		) => {
 			runner.initialize(
 				{
@@ -2913,11 +2918,12 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
-				"Approve dangerous_tool for this session",
-				"Deny",
-			]);
+			// No abort signal reached the call, so the prompt gets no dialog options.
+			expect(select).toHaveBeenCalledWith(
+				expect.stringContaining("Allow tool: dangerous_tool"),
+				["Approve", "Approve dangerous_tool for this session", "Deny"],
+				undefined,
+			);
 			delete globalState.__approvalEvents;
 		});
 
@@ -2953,7 +2959,7 @@ describe("ExtensionRunner", () => {
 			const critical = { ...approvalTool, approval: () => ({ tier: "exec" as const, override: true }) };
 			select.mockImplementationOnce(async () => "Approve");
 			await run(critical, "call-critical");
-			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"]);
+			expect(select).toHaveBeenLastCalledWith(expect.any(String), ["Approve", "Deny"], undefined);
 			// A new session starts without the grant.
 			await sessionManager.newSession();
 			await run(approvalTool, "call-new-session");
@@ -3173,6 +3179,44 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_resolved", approved: false, reason: "dialog aborted" },
 			]);
 			delete globalState.__thrownApprovalEvents;
+		});
+		it("closes the open approval prompt and rejects when the tool call is aborted", async () => {
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
+			const shown = Promise.withResolvers<void>();
+			let promptClosed = false;
+			// Like a prompt hidden behind another surface: nothing answers it, only its signal closes it.
+			initializeRunner(runner, (_title, _options, dialogOptions) => {
+				const closed = Promise.withResolvers<string | undefined>();
+				dialogOptions?.signal?.addEventListener(
+					"abort",
+					() => {
+						promptClosed = true;
+						closed.resolve(undefined);
+					},
+					{ once: true },
+				);
+				shown.resolve();
+				return closed.promise;
+			});
+			const executed = vi.fn(approvalTool.execute);
+			const controller = new AbortController();
+			const execution = (
+				new ExtensionToolWrapper({ ...approvalTool, execute: executed }, runner) as ExtensionToolWrapper<any>
+			).execute("call-aborted", {}, controller.signal, undefined, {
+				sessionManager,
+				modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+			});
+			await shown.promise;
+			controller.abort();
+
+			await expect(execution).rejects.toThrow();
+			expect(promptClosed).toBe(true);
+			expect(executed).not.toHaveBeenCalled();
 		});
 		it("emits lifecycle events when partial context has no session manager", async () => {
 			const events: Array<{ type: string; approved?: boolean; reason?: string; sessionId?: string }> = [];

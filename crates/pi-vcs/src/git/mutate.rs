@@ -5,6 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
 	ffi::OsStr,
 	fs,
+	io::{self, Read, Write},
 	path::{Path, PathBuf},
 	process::{Command, Stdio},
 };
@@ -203,7 +204,28 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git commit read commit.gpgSign", err))?
 			.unwrap_or(false);
 		let index_path = options.index_path.as_deref();
-		run_commit_hook(self, "pre-commit", &[], index_path)?;
+		// An alternate index that does not exist is a caller error, never a
+		// silent fallback to the repository's index.
+		let load_index = || match index_path {
+			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
+				Error::backend("git commit", format!("index file not found: {}", path.display()))
+			}),
+			None => load_index_or_head(&repo, "git commit"),
+		};
+		// Refuse unresolved stages before hooks or HEAD updates. Omitting
+		// stages 1-3 while writing the tree deletes those paths from the
+		// commit; `git commit` rejects them in prepare_index and does not
+		// run hooks. A pathspec commit copies only the selected paths, so
+		// conflicts elsewhere in the index must be caught here, not by
+		// `write_index_tree`.
+		let mut index = load_index()?;
+		reject_unmerged_index(&index, "git commit")?;
+		if !options.no_verify {
+			run_commit_hook(self, "pre-commit", &[], index_path)?;
+			// The hook may have edited the index.
+			index = load_index()?;
+			reject_unmerged_index(&index, "git commit")?;
+		}
 		let mut head = repo
 			.head()
 			.map_err(|err| Error::backend("git commit", err))?;
@@ -223,14 +245,6 @@ impl GitRepo {
 				});
 			}
 		}
-		let index = match index_path {
-			// An alternate index that does not exist is a caller error, never a
-			// silent fallback to the repository's index.
-			Some(path) => load_index_at(&repo, Some(path))?.ok_or_else(|| {
-				Error::backend("git commit", format!("index file not found: {}", path.display()))
-			})?,
-			None => load_index_or_head(&repo, "git commit")?,
-		};
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
 		} else {
@@ -288,10 +302,16 @@ impl GitRepo {
 				.ok_or_else(|| Error::backend("git commit", "author identity is not configured"))?
 				.map_err(|err| Error::backend("git commit", err))?
 		};
-		let message_path = self.info().git_dir.join("COMMIT_EDITMSG");
-		fs::write(&message_path, message)?;
-		run_commit_hook(self, "commit-msg", &[message_path.as_os_str()], index_path)?;
-		let message = fs::read_to_string(&message_path)
+		// Not `.git/COMMIT_EDITMSG`: overlapping calls reread whichever message
+		// landed last, including when `no_verify` skips the hook.
+		let message_file = CommitMessageFile::create(&self.info().git_dir, message)?;
+		// Hooks that read `.git/COMMIT_EDITMSG` instead of `$1` still see this
+		// message, as under `git commit`; only the private copy is read back.
+		let _ = fs::write(self.info().git_dir.join("COMMIT_EDITMSG"), message);
+		if !options.no_verify {
+			run_commit_hook(self, "commit-msg", &[message_file.path.as_os_str()], index_path)?;
+		}
+		let message = fs::read_to_string(&message_file.path)
 			.map_err(|err| Error::backend("git commit read commit-msg result", err))?;
 		let id = if sign {
 			sign_commit(self, &message, tree, &parents, author, committer)?
@@ -608,6 +628,25 @@ impl GitRepo {
 		if let Some(path) = index_path {
 			index.set_path(path);
 		}
+		index
+			.write(INDEX_WRITE)
+			.map_err(|e| Error::backend("git read-tree", e))
+	}
+
+	/// Seed a private index from `treeish`, retaining the shared index's
+	/// sparse-checkout exclusions.
+	///
+	/// Hooks run against the private index; without skip-worktree bits they see
+	/// excluded paths as deletions.
+	pub fn read_tree_keeping_sparse(&self, treeish: &str, index_path: &Path) -> Result<()> {
+		let repo = self.gix()?;
+		let tree = resolve_tree(&repo, treeish)?;
+		let mut index = repo
+			.index_from_tree(&tree)
+			.map_err(|e| Error::backend("git read-tree", e))?;
+		let shared = load_index_or_head(&repo, "git read-tree")?;
+		mark_skipped_like(&mut index, &shared);
+		index.set_path(index_path);
 		index
 			.write(INDEX_WRITE)
 			.map_err(|e| Error::backend("git read-tree", e))
@@ -1028,55 +1067,131 @@ impl GitRepo {
 	}
 }
 
+/// One call's commit message. Dropped on every exit, including hook, signer,
+/// and ref-update failures.
+///
+/// `commit-msg` edits the path it is given. Sharing `.git/COMMIT_EDITMSG`
+/// lets an overlapping `commit_create` replace that file between the write
+/// and the reread, so both commits record the other call's subject and body.
+#[must_use = "dropping the guard deletes the commit message file"]
+struct CommitMessageFile {
+	path: PathBuf,
+}
+
+impl CommitMessageFile {
+	fn create(git_dir: &Path, message: &str) -> Result<Self> {
+		use std::sync::atomic::{AtomicU64, Ordering};
+		static NEXT: AtomicU64 = AtomicU64::new(0);
+		let n = NEXT.fetch_add(1, Ordering::Relaxed);
+		let tick = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.map_or(0, |elapsed| elapsed.as_nanos());
+		let path = git_dir.join(format!(".omp-commit-msg-{}-{tick}-{n}", std::process::id()));
+		// Close before the guard exists so a failed write can unlink the
+		// partial file on Windows, where an open handle blocks removal.
+		let mut file = fs::OpenOptions::new()
+			.write(true)
+			.create_new(true)
+			.open(&path)?;
+		let written = file.write_all(message.as_bytes());
+		drop(file);
+		let message_file = Self { path };
+		written?;
+		Ok(message_file)
+	}
+}
+
+impl Drop for CommitMessageFile {
+	fn drop(&mut self) {
+		let _ = fs::remove_file(&self.path);
+	}
+}
+
 /// Run a commit hook; `index_path` is exported as `GIT_INDEX_FILE` when the
 /// commit is built from an alternate index, as `git commit --only` does.
+///
+/// Like `git commit`, the hook's stdout goes to its stderr: a rejection
+/// carries both streams, interleaved, in the `stderr` of [`Error::Cli`], so
+/// hooks that report on stdout (the `pre-commit` framework) still explain the
+/// failure.
 fn run_commit_hook(
 	repository: &GitRepo,
 	name: &str,
 	args: &[&OsStr],
 	index_path: Option<&Path>,
 ) -> Result<()> {
-	let Some(hook) = repository.hook_path(name)? else {
-		return Ok(());
+	let configured = hook_configured(repository, name)?;
+	let mut command = match repository.hook_path(name)? {
+		// Windows CreateProcess cannot execute a shebang script directly.
+		Some(hook) if !configured && !cfg!(windows) => Command::new(hook),
+		None if !configured => return Ok(()),
+		// Only git runs config-defined hooks, together with the hooks-directory
+		// file in its own order, and through its own shell on Windows, exactly
+		// as `git commit` does.
+		_ => {
+			let mut command = Command::new("git");
+			command.args(["hook", "run", "--ignore-missing", name, "--"]);
+			command
+		},
 	};
-	// Windows CreateProcess cannot execute a shebang script directly. Let Git
-	// invoke the hook through its own shell, as `git commit` does.
-	#[cfg(windows)]
-	let mut command = {
-		let _ = hook;
-		let mut command = Command::new("git");
-		command.args(["hook", "run", "--ignore-missing", name, "--"]);
-		command
+	let command_name = || format!("git commit ({name} hook)");
+	let io_failed = |err: io::Error| Error::Cli {
+		command:   command_name(),
+		exit_code: 1,
+		stdout:    String::new(),
+		stderr:    err.to_string(),
 	};
-	#[cfg(not(windows))]
-	let mut command = Command::new(&hook);
 	super::cli::detach_from_terminal(&mut command);
 	if let Some(index_path) = index_path {
 		command.env("GIT_INDEX_FILE", index_path);
 	}
-	let output = command
+	let (mut reader, writer) = io::pipe().map_err(io_failed)?;
+	let stderr = writer.try_clone().map_err(io_failed)?;
+	let mut child = command
 		.args(args)
 		.current_dir(repository.root())
 		.env("GIT_DIR", &repository.info().git_dir)
 		.env("GIT_WORK_TREE", repository.root())
 		.env("GIT_TERMINAL_PROMPT", "0")
 		.stdin(Stdio::null())
-		.output()
-		.map_err(|err| Error::Cli {
-			command:   format!("git commit ({name} hook)"),
-			exit_code: 1,
-			stdout:    String::new(),
-			stderr:    err.to_string(),
-		})?;
-	if output.status.success() {
+		.stdout(writer)
+		.stderr(stderr)
+		.spawn()
+		.map_err(io_failed)?;
+	// `command` holds the parent's write ends; the read below sees EOF only
+	// once they are closed.
+	drop(command);
+	let mut output = Vec::new();
+	let read = reader.read_to_end(&mut output);
+	let status = child.wait().map_err(io_failed)?;
+	read.map_err(io_failed)?;
+	if status.success() {
 		return Ok(());
 	}
 	Err(Error::Cli {
-		command:   format!("git commit ({name} hook)"),
-		exit_code: output.status.code().unwrap_or(1),
-		stdout:    String::from_utf8_lossy_owned(output.stdout),
-		stderr:    String::from_utf8_lossy_owned(output.stderr),
+		command:   command_name(),
+		exit_code: status.code().unwrap_or(1),
+		stdout:    String::new(),
+		stderr:    String::from_utf8_lossy_owned(output),
 	})
+}
+
+/// Whether any `hook.<id>.event` names the hook `name`. Git (2.54+) runs such
+/// config-defined hooks in addition to the hooks-directory file; whether one is
+/// disabled or lacks a command is left to `git hook run`.
+fn hook_configured(repository: &GitRepo, name: &str) -> Result<bool> {
+	Ok(repository
+		.gix()?
+		.config_snapshot()
+		.sections_by_name("hook")
+		.into_iter()
+		.flatten()
+		.any(|section| {
+			section
+				.values("event")
+				.iter()
+				.any(|event| event.as_ref() == name)
+		}))
 }
 
 /// Write a signed commit object through `git commit-tree -S`, which runs the
@@ -1306,6 +1421,44 @@ fn resolve_tree(repo: &gix::Repository, spec: &str) -> Result<gix::hash::ObjectI
 		.peel_to_tree()
 		.map(|tree| tree.id)
 		.map_err(|_| Error::ObjectNotFound { spec: spec.to_owned() })
+}
+
+/// Match skipped files and sparse-directory prefixes from the shared index
+/// against the tree index.
+fn mark_skipped_like(index: &mut gix::index::State, shared: &gix::index::State) {
+	use gix::index::entry::{Flags, Mode};
+
+	let mut files = HashSet::new();
+	let mut dirs = Vec::new();
+	for entry in shared
+		.entries()
+		.iter()
+		.filter(|entry| entry.flags.contains(Flags::SKIP_WORKTREE))
+	{
+		let path = entry.path(shared);
+		if entry.mode == Mode::DIR {
+			// Sparse-directory paths end in `/`, keeping prefix matching on
+			// component boundaries.
+			debug_assert!(path.ends_with(b"/"));
+			dirs.push(path);
+		} else {
+			files.insert(path);
+		}
+	}
+	if files.is_empty() && dirs.is_empty() {
+		return;
+	}
+	// Sparse directories are maximal excluded subtrees, so they are sorted and
+	// never nested: only the last dir <= path can contain `path`.
+	for (entry, path) in index.entries_mut_with_paths() {
+		let enclosing = dirs
+			.partition_point(|dir| *dir <= path)
+			.checked_sub(1)
+			.map(|i| dirs[i]);
+		if files.contains(path) || enclosing.is_some_and(|dir| path.starts_with(dir)) {
+			entry.flags.insert(Flags::EXTENDED | Flags::SKIP_WORKTREE);
+		}
+	}
 }
 
 fn commit_tree(repo: &gix::Repository, id: &gix::hash::ObjectId) -> Result<gix::hash::ObjectId> {
@@ -1552,28 +1705,70 @@ struct TreeNode {
 	dirs:  BTreeMap<BString, Self>,
 }
 
+/// Refuse to serialize `index` while any entry is still at a conflict stage.
+/// A tree can store only stage 0; dropping stages 1-3 deletes that path.
+fn reject_unmerged_index(index: &gix::index::File, context: &'static str) -> Result<()> {
+	let mut paths = BTreeSet::new();
+	for entry in index.entries() {
+		if entry.stage() != gix::index::entry::Stage::Unconflicted {
+			paths.insert(entry.path(index).to_str_lossy().into_owned());
+		}
+	}
+	if paths.is_empty() {
+		return Ok(());
+	}
+	Err(Error::backend(
+		context,
+		format!(
+			"the index has unmerged entries: {}",
+			paths.into_iter().collect::<Vec<_>>().join(", ")
+		),
+	))
+}
+
 fn write_index_tree(
 	repo: &gix::Repository,
 	index: &gix::index::File,
 ) -> Result<gix::hash::ObjectId> {
+	// Filtering to stage 0 would omit a path that exists only as conflict
+	// stages and delete it from the tree. `git write-tree` refuses instead.
+	reject_unmerged_index(index, "git write-tree")?;
 	let mut root = TreeNode::default();
 	for entry in index
 		.entries()
 		.iter()
 		.filter(|e| e.stage() == gix::index::entry::Stage::Unconflicted)
 	{
-		let parts: Vec<&[u8]> = entry.path(index).split(|b| *b == b'/').collect();
-		let mut node = &mut root;
-		for part in &parts[..parts.len().saturating_sub(1)] {
-			node = node.dirs.entry(BString::from(*part)).or_default();
-		}
-		if let Some(name) = parts.last() {
-			node
-				.files
-				.push((BString::from(*name), entry.mode, entry.id));
+		let path = entry.path(index).as_bytes();
+		if entry.mode == gix::index::entry::Mode::DIR {
+			// A sparse-directory entry already carries the collapsed subtree
+			// object for its path (which ends in `/`). Insert that tree id as a
+			// single directory entry instead of expanding every out-of-cone
+			// leaf: expanding re-serializes the whole excluded tree on every
+			// commit and splits the path into an empty trailing filename.
+			let collapsed = path.strip_suffix(b"/").unwrap_or(path);
+			insert_tree_entry(&mut root, collapsed, entry.mode, entry.id);
+		} else {
+			insert_tree_entry(&mut root, path, entry.mode, entry.id);
 		}
 	}
 	write_tree_node(repo, root)
+}
+
+fn insert_tree_entry(
+	root: &mut TreeNode,
+	path: &[u8],
+	mode: gix::index::entry::Mode,
+	id: gix::hash::ObjectId,
+) {
+	let parts: Vec<&[u8]> = path.split(|b| *b == b'/').collect();
+	let mut node = root;
+	for part in &parts[..parts.len().saturating_sub(1)] {
+		node = node.dirs.entry(BString::from(*part)).or_default();
+	}
+	if let Some(name) = parts.last() {
+		node.files.push((BString::from(*name), mode, id));
+	}
 }
 
 fn write_tree_node(repo: &gix::Repository, node: TreeNode) -> Result<gix::hash::ObjectId> {
@@ -2428,6 +2623,84 @@ mod tests {
 			})
 			.unwrap();
 		assert_eq!(fs::read_to_string(&seen).unwrap(), alt.to_str().unwrap());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn commit_no_verify_skips_rejecting_hooks() {
+		use std::os::unix::fs::PermissionsExt;
+		let (temp, repo) = fixture();
+		let hooks = temp.path().join(".git").join("hooks");
+		fs::create_dir_all(&hooks).unwrap();
+		for name in ["pre-commit", "commit-msg"] {
+			let hook = hooks.join(name);
+			fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+			fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+		}
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		let options = CommitOptions { allow_empty: true, ..Default::default() };
+		repo.commit_create("verified", &options).unwrap_err();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), head);
+		let id = repo
+			.commit_create("unverified", &CommitOptions { no_verify: true, ..options })
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), id);
+	}
+
+	/// Config-defined hooks (`hook.<id>.event`, git 2.54+) run exactly when
+	/// `git commit` runs them; older git ignores them on both paths.
+	#[cfg(unix)]
+	#[test]
+	fn commit_runs_config_defined_hooks_like_git_commit() {
+		let (temp, repo) = fixture();
+		let options = CommitOptions { allow_empty: true, ..Default::default() };
+		git(temp.path(), &["config", "hook.trailer.event", "commit-msg"]);
+		git(temp.path(), &["config", "hook.trailer.command", "printf '\\nHook: ran\\n' >> \"$1\""]);
+		git(temp.path(), &["commit", "-q", "--allow-empty", "-m", "subject"]);
+		let expected = git(temp.path(), &["log", "-1", "--format=%B"]);
+		repo.commit_create("subject\n", &options).unwrap();
+		assert_eq!(git(temp.path(), &["log", "-1", "--format=%B"]), expected);
+
+		git(temp.path(), &["config", "hook.policy.event", "pre-commit"]);
+		git(temp.path(), &["config", "hook.policy.command", "exit 1"]);
+		let git_rejects = !Command::new("git")
+			.arg("-C")
+			.arg(temp.path())
+			.args(["commit", "-q", "--allow-empty", "-m", "policy"])
+			.status()
+			.unwrap()
+			.success();
+		let head = git(temp.path(), &["rev-parse", "HEAD"]);
+		// The cached gix handle snapshots config at first use.
+		let repo = GitRepo::require(temp.path()).unwrap();
+		assert_eq!(repo.commit_create("policy", &options).is_err(), git_rejects);
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]) == head, git_rejects);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn rejecting_hook_reports_stdout_and_stderr_in_order() {
+		use std::os::unix::fs::PermissionsExt;
+		let (temp, repo) = fixture();
+		let hooks = temp.path().join(".git").join("hooks");
+		fs::create_dir_all(&hooks).unwrap();
+		let hook = hooks.join("pre-commit");
+		fs::write(
+			&hook,
+			"#!/bin/sh\necho start >&2\necho 'some-hook....Failed'\necho 'files were modified' \
+			 >&2\nexit 3\n",
+		)
+		.unwrap();
+		fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+		let err = repo
+			.commit_create("rejected", &CommitOptions { allow_empty: true, ..Default::default() })
+			.unwrap_err();
+		let Error::Cli { exit_code, ref stderr, .. } = err else {
+			panic!("expected a hook failure, got {err:?}");
+		};
+		assert_eq!(exit_code, 3);
+		assert_eq!(stderr, "start\nsome-hook....Failed\nfiles were modified\n");
+		assert_eq!(err.to_string(), "start\nsome-hook....Failed\nfiles were modified");
 	}
 
 	#[cfg(unix)]
@@ -3602,5 +3875,59 @@ mod tests {
 		);
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);
+	}
+
+	#[test]
+	fn private_commit_index_keeps_sparse_checkout_paths_out_of_hook_diff() {
+		for sparse_index in [false, true] {
+			let (temp, repo) = fixture();
+			for path in
+				["kept/inside", "away-kept/inside", "awayfile", "away/outside", "away/deep/outside"]
+			{
+				let file = temp.path().join(path);
+				fs::create_dir_all(file.parent().unwrap()).unwrap();
+				fs::write(file, "content\n").unwrap();
+			}
+			git(temp.path(), &["add", "."]);
+			git(temp.path(), &["commit", "-qm", "sparse paths"]);
+			git(temp.path(), &[
+				"sparse-checkout",
+				"init",
+				"--cone",
+				if sparse_index {
+					"--sparse-index"
+				} else {
+					"--no-sparse-index"
+				},
+			]);
+			git(temp.path(), &["sparse-checkout", "set", "kept", "away-kept"]);
+			assert!(!temp.path().join("away").exists());
+
+			let shared = temp.path().join(".git/index");
+			let private = temp.path().join(".git/private.index");
+			repo.read_tree_keeping_sparse("HEAD", &private).unwrap();
+			let git_on = |index: &Path, args: &[&str]| {
+				let output = Command::new("git")
+					.arg("-C")
+					.arg(temp.path())
+					.env("GIT_INDEX_FILE", index)
+					.args(args)
+					.output()
+					.unwrap();
+				assert!(
+					output.status.success(),
+					"git {args:?}: {}",
+					String::from_utf8_lossy(&output.stderr)
+				);
+				String::from_utf8(output.stdout).unwrap()
+			};
+			assert_eq!(git_on(&private, &["diff", "--name-only"]), "", "sparse index: {sparse_index}");
+			assert_eq!(
+				git_on(&private, &["ls-files", "-t"]),
+				git_on(&shared, &["ls-files", "-t"]),
+				"sparse index: {sparse_index}; excluded paths must stay skipped without excluding \
+				 prefix neighbors"
+			);
+		}
 	}
 }

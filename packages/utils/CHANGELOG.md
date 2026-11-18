@@ -4,11 +4,35 @@
 
 ### Added
 
+- Added `readBoundedBody` and `readBoundedJson` for reading HTTP response bodies with a size limit, with an optional signal so a stalled peer cannot outlive the caller's deadline ([#18955](https://github.com/can1357/oh-my-pi/pull/18955) by [@Xytronix](https://github.com/Xytronix))
+
+## [18.21.0] - 2026-11-16
+
+### Fixed
+
+- Fixed bare URLs swallowing the following word when Korean, Japanese, or Chinese text follows a parenthesized URL without a space.
+
+## [18.20.3] - 2026-11-16
+
+### Fixed
+
+- Fixed HTML-to-Markdown conversion for fetched and pasted HTML to preserve whitespace in inline elements, maintain code indentation in preformatted blocks, and avoid inserting stray blank lines between block elements.
+
+## [18.20.2] - 2026-11-14
+
+### Added
+
+- Added a profile-aware data directory for managed Antigravity CLI installations and isolated account state.
+
+## [18.20.1] - 2026-11-14
+
+### Added
+
 - Added `mixHex` for blending two hexadecimal colors.
 
 ### Fixed
 
-- Improved retry-hint extraction for Cloud Code Assist quota reset information, including compound durations and reset timestamps.
+- Improved extraction of Cloud Code Assist quota reset information, including compound durations and reset timestamps, to provide more accurate retry guidance.
 
 ## [18.19.0] - 2026-11-12
 

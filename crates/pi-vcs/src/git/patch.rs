@@ -10,8 +10,9 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	fs,
+	fs, io,
 	path::{Component, Path, PathBuf},
+	time::Duration,
 };
 
 use gix::{
@@ -114,9 +115,12 @@ impl GitRepo {
 		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
 		if options.cached {
+			// Locked before the read: another git process writing the index in
+			// between would otherwise have its entries overwritten by this map.
+			let lock = lock_index(&repo, options.index_path.as_deref())?;
 			let mut state = index_map_at(&repo, options.index_path.as_deref())?;
 			apply_patches_to_map(&repo, &mut state, &patches, options)?;
-			return write_index_map_at(&repo, &state, options.index_path.as_deref());
+			return write_index_map_at(&repo, &state, options.index_path.as_deref(), lock);
 		}
 		let mut filter = apply_filter(&repo, &patches, options.reverse)?;
 		let mut state = patch_worktree_map(self, &repo, &mut filter, &patches, options.reverse)?;
@@ -561,17 +565,23 @@ fn parse_patch(text: &str) -> std::result::Result<Vec<FilePatch>, ApplyFailure> 
 }
 
 fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
-	let lines: Vec<&str> = raw.split_inclusive('\n').collect();
+	let lines: Vec<&str> = if raw.len() < 64 {
+		raw.split_inclusive('\n').collect()
+	} else {
+		xutf::lines_str(raw, xutf::LineEnds::Lf)
+			.map(|line| line.with_end())
+			.collect()
+	};
 	let first = lines
 		.first()
 		.map_or_default(|line| line.trim_end_matches('\n'));
 	let paths = first
 		.strip_prefix("diff --git ")
 		.ok_or_else(|| ApplyFailure::Invalid("invalid diff header".into()))?;
-	let (old_token, new_token) = split_diff_paths(paths)?;
+	let (old_path, new_path, ambiguous_header) = split_diff_paths(paths)?;
 	let mut patch = FilePatch {
-		old_path: Some(strip_side_path(old_token, 'a')),
-		new_path: Some(strip_side_path(new_token, 'b')),
+		old_path: Some(old_path),
+		new_path: Some(new_path),
 		old_mode: None,
 		new_mode: None,
 		old_oid:  None,
@@ -580,6 +590,10 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 		binary:   Vec::new(),
 		raw:      raw.to_owned(),
 	};
+	// Paths guessed from an ambiguous header stay untrusted until a record
+	// that carries a whole path (`---`/`+++`, `rename from`/`rename to`)
+	// confirms them; binary and mode-only patches have no such records.
+	let mut paths_confirmed = !ambiguous_header;
 	let mut index = 1;
 	while index < lines.len() {
 		let line = lines[index].trim_end_matches('\n');
@@ -594,9 +608,11 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 			patch.new_path = None;
 			patch.old_mode = parse_mode(value);
 		} else if let Some(value) = line.strip_prefix("rename from ") {
-			patch.old_path = Some(unquote_path(value));
+			patch.old_path = Some(decode_path(value)?);
+			paths_confirmed = true;
 		} else if let Some(value) = line.strip_prefix("rename to ") {
-			patch.new_path = Some(unquote_path(value));
+			patch.new_path = Some(decode_path(value)?);
+			paths_confirmed = true;
 		} else if let Some(value) = line.strip_prefix("index ") {
 			let ids = value.split_whitespace().next().unwrap_or_default();
 			if let Some((old, new)) = ids.split_once("..") {
@@ -608,9 +624,11 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 				patch.new_mode.get_or_insert(mode);
 			}
 		} else if let Some(value) = line.strip_prefix("--- ") {
-			patch.old_path = parse_marker_path(value, 'a');
+			patch.old_path = parse_marker_path(value, 'a')?;
+			paths_confirmed = true;
 		} else if let Some(value) = line.strip_prefix("+++ ") {
-			patch.new_path = parse_marker_path(value, 'b');
+			patch.new_path = parse_marker_path(value, 'b')?;
+			paths_confirmed = true;
 		} else if line.starts_with("@@") {
 			let (hunk, next) = parse_hunk(&lines, index)?;
 			patch.hunks.push(hunk);
@@ -643,6 +661,11 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 		}
 		index += 1;
 	}
+	if !paths_confirmed {
+		return Err(ApplyFailure::Invalid(
+			"diff --git header paths are ambiguous and no ---/+++/rename record confirms them".into(),
+		));
+	}
 	if patch.hunks.is_empty()
 		&& patch.binary.is_empty()
 		&& patch.old_path == patch.new_path
@@ -653,30 +676,222 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 	Ok(patch)
 }
 
-fn split_diff_paths(paths: &str) -> std::result::Result<(&str, &str), ApplyFailure> {
-	if paths.starts_with('"') {
-		return Err(ApplyFailure::Invalid("quoted paths in diff headers are unsupported".into()));
+/// Split the paths of a `diff --git a/<old> b/<new>` header into their
+/// side-stripped forms.
+///
+/// Unquoted paths are written verbatim, spaces included, so the header cannot
+/// always be split at one space. Quoted paths decode their C escapes; the
+/// third value flags a first-space guess that records carrying whole paths
+/// (`---`/`+++`, `rename from`/`rename to`) must confirm before applying.
+fn split_diff_paths(paths: &str) -> std::result::Result<(String, String, bool), ApplyFailure> {
+	if let Some(quoted) = paths.strip_prefix('"') {
+		// A quoted first name ends at its closing quote, so the remainder is
+		// the second name and the split cannot be ambiguous.
+		let (old, rest) = parse_quoted_path(quoted)?;
+		let rest = rest.trim_start_matches(' ');
+		let new = if let Some(quoted) = rest.strip_prefix('"') {
+			let (new, tail) = parse_quoted_path(quoted)?;
+			if !tail.is_empty() {
+				return Err(ApplyFailure::Invalid("trailing bytes after quoted path".into()));
+			}
+			new
+		} else if rest.is_empty() {
+			return Err(ApplyFailure::Invalid("diff header lacks the second path".into()));
+		} else {
+			rest.to_owned()
+		};
+		return Ok((strip_side_path(&old, 'a'), strip_side_path(&new, 'b'), false));
 	}
-	paths
+	if let Some(quote) = paths.find('"') {
+		// The first name is unquoted, so a quote can only open the second one.
+		let separator = quote
+			.checked_sub(1)
+			.filter(|separator| paths.as_bytes()[*separator] == b' ')
+			.ok_or_else(|| ApplyFailure::Invalid("quoted path lacks a separator".into()))?;
+		let (new, tail) = parse_quoted_path(&paths[quote + 1..])?;
+		if !tail.is_empty() {
+			return Err(ApplyFailure::Invalid("trailing bytes after quoted path".into()));
+		}
+		return Ok((strip_side_path(&paths[..separator], 'a'), strip_side_path(&new, 'b'), false));
+	}
+	if let Some((old, new)) = split_unquoted_paths(paths) {
+		return Ok((old, new, false));
+	}
+	let (old_token, new_token) = paths
 		.split_once(' ')
-		.ok_or_else(|| ApplyFailure::Invalid("invalid diff paths".into()))
+		.ok_or_else(|| ApplyFailure::Invalid("invalid diff paths".into()))?;
+	Ok((
+		strip_side_path(old_token, 'a'),
+		strip_side_path(new_token, 'b'),
+		// The first token ends at the first space, so only the remainder can
+		// still be ambiguous.
+		new_token.contains(' '),
+	))
 }
 
-fn unquote_path(path: &str) -> String {
-	path.trim_matches('"').to_owned()
+/// Split an unquoted `a/<old> b/<new>` payload at its separator space:
+/// prefer the split whose sides name the same path, then a lone ` b/`
+/// boundary. `None` when no split can be identified.
+pub(super) fn split_unquoted_paths(paths: &str) -> Option<(String, String)> {
+	let mut same_path = None;
+	let mut only = None;
+	let mut candidates = 0;
+	for (space, _) in paths.match_indices(' ') {
+		let (old_token, new_token) = (&paths[..space], &paths[space + 1..]);
+		if new_token.len() <= "b/".len() || !new_token.starts_with("b/") {
+			continue;
+		}
+		candidates += 1;
+		only = Some((old_token, new_token));
+		if same_path.is_none()
+			&& let (Some(old), Some(new)) =
+				(old_token.strip_prefix("a/"), new_token.strip_prefix("b/"))
+			&& old == new
+		{
+			same_path = Some((old.to_owned(), new.to_owned()));
+		}
+	}
+	if let Some(split) = same_path {
+		return Some(split);
+	}
+	if candidates == 1 {
+		let (old_token, new_token) = only?;
+		return Some((strip_side_path(old_token, 'a'), strip_side_path(new_token, 'b')));
+	}
+	None
 }
 
-fn strip_side_path(token: &str, side: char) -> String {
+/// Decode a quoted path (opening quote already consumed) and return it with
+/// the remainder after the closing quote. Non-UTF-8 octal escapes decode
+/// lossily, matching how the renderer treats filesystem paths.
+fn parse_quoted_path(quoted: &str) -> std::result::Result<(String, &str), ApplyFailure> {
+	let bytes = quoted.as_bytes();
+	let mut decoded = Vec::new();
+	let mut index = 0;
+	while index < bytes.len() {
+		match bytes[index] {
+			b'"' => {
+				let path = String::from_utf8_lossy(&decoded).into_owned();
+				return Ok((path, &quoted[index + 1..]));
+			},
+			b'\\' => {
+				index += 1;
+				let Some(escape) = bytes.get(index).copied() else {
+					return Err(ApplyFailure::Invalid("unterminated escape in quoted path".into()));
+				};
+				index += 1;
+				// Git's unquote_c_style accepts only a first octal digit 0-3
+				// followed by exactly two more octal digits.
+				let byte = match escape {
+					b'a' => 0x07,
+					b'b' => 0x08,
+					b'f' => 0x0c,
+					b'n' => b'\n',
+					b'r' => b'\r',
+					b't' => b'\t',
+					b'v' => 0x0b,
+					b'"' => b'"',
+					b'\\' => b'\\',
+					octet @ b'0'..=b'7' => {
+						if octet > b'3' {
+							return Err(ApplyFailure::Invalid(
+								"invalid octal escape in quoted path".into(),
+							));
+						}
+						let mut value = u32::from(octet - b'0');
+						for _ in 0..2 {
+							let Some(next) = bytes
+								.get(index)
+								.copied()
+								.filter(|next| matches!(next, b'0'..=b'7'))
+							else {
+								return Err(ApplyFailure::Invalid(
+									"invalid octal escape in quoted path".into(),
+								));
+							};
+							value = (value << 3) | u32::from(next - b'0');
+							index += 1;
+						}
+						value as u8
+					},
+					_ => {
+						return Err(ApplyFailure::Invalid(format!(
+							"invalid escape \\{} in quoted path",
+							escape as char
+						)));
+					},
+				};
+				decoded.push(byte);
+			},
+			byte => {
+				decoded.push(byte);
+				index += 1;
+			},
+		}
+	}
+	Err(ApplyFailure::Invalid("unterminated quoted path".into()))
+}
+
+/// Decode a single-path record value (`rename from/to`, `---`/`+++`): quoted
+/// tokens decode their escapes, anything else stays verbatim.
+fn decode_path(value: &str) -> std::result::Result<String, ApplyFailure> {
+	value
+		.strip_prefix('"')
+		.map_or_else(|| Ok(value.to_owned()), |quoted| Ok(parse_quoted_path(quoted)?.0))
+}
+
+/// Whether a path must be C-quoted in a diff record to survive parsing: a
+/// quote, a backslash, or a control byte would otherwise corrupt the record.
+pub(super) fn path_needs_quoting(path: &str) -> bool {
+	path
+		.bytes()
+		.any(|byte| matches!(byte, b'"' | b'\\') || byte < 0x20 || byte == 0x7f)
+}
+
+/// Write `path` as a C-quoted diff token with `prefix` inside the quotes,
+/// escaping bytes the way git does.
+pub(super) fn write_quoted_path(out: &mut String, prefix: &str, path: &str) {
+	out.push('"');
+	out.push_str(prefix);
+	for character in path.chars() {
+		match character {
+			'"' => out.push_str("\\\""),
+			'\\' => out.push_str("\\\\"),
+			'\u{7}' => out.push_str("\\a"),
+			'\u{8}' => out.push_str("\\b"),
+			'\u{c}' => out.push_str("\\f"),
+			'\n' => out.push_str("\\n"),
+			'\r' => out.push_str("\\r"),
+			'\t' => out.push_str("\\t"),
+			'\u{b}' => out.push_str("\\v"),
+			character if (character as u32) < 0x20 || character as u32 == 0x7f => {
+				let byte = character as u8;
+				out.push('\\');
+				out.push((b'0' + (byte >> 6)) as char);
+				out.push((b'0' + ((byte >> 3) & 7)) as char);
+				out.push((b'0' + (byte & 7)) as char);
+			},
+			character => out.push(character),
+		}
+	}
+	out.push('"');
+}
+
+fn strip_side_path(path: &str, side: char) -> String {
 	let prefix = format!("{side}/");
-	unquote_path(token.strip_prefix(&prefix).unwrap_or(token))
+	path.strip_prefix(&prefix).unwrap_or(path).to_owned()
 }
 
-fn parse_marker_path(value: &str, side: char) -> Option<String> {
-	let path = value.split('\t').next().unwrap_or(value);
-	if path == "/dev/null" {
-		None
+fn parse_marker_path(value: &str, side: char) -> std::result::Result<Option<String>, ApplyFailure> {
+	let path = if value.starts_with('"') {
+		decode_path(value)?
 	} else {
-		Some(strip_side_path(path, side))
+		value.split('\t').next().unwrap_or(value).to_owned()
+	};
+	if path == "/dev/null" {
+		Ok(None)
+	} else {
+		Ok(Some(strip_side_path(&path, side)))
 	}
 }
 
@@ -1568,13 +1783,31 @@ fn worktree_file_mode(_metadata: &fs::Metadata, index_mode: Mode) -> Mode {
 }
 
 fn write_index_map(repo: &gix::Repository, map: &BTreeMap<String, FileEntry>) -> Result<()> {
-	write_index_map_at(repo, map, None)
+	write_index_map_at(repo, map, None, lock_index(repo, None)?)
 }
 
+/// How long an index write waits for another git process (a prompt's or an
+/// editor's `git status`) to release `index.lock` before it fails.
+const INDEX_LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// Takes the lock of the index at `index_path` (the repository's without
+/// one), waiting up to [`INDEX_LOCK_WAIT`] for its holder.
+fn lock_index(repo: &gix::Repository, index_path: Option<&Path>) -> Result<gix::lock::File> {
+	gix::lock::File::acquire_to_update_resource(
+		index_path.map_or_else(|| repo.index_path(), Path::to_owned),
+		gix::lock::acquire::Fail::AfterDurationWithBackoff(INDEX_LOCK_WAIT),
+		None,
+	)
+	.map_err(|err| Error::backend("git lock index", err))
+}
+
+/// Writes `map` as the index at `index_path` through `lock`, which the
+/// caller took before reading the entries the map came from.
 fn write_index_map_at(
 	repo: &gix::Repository,
 	map: &BTreeMap<String, FileEntry>,
 	index_path: Option<&Path>,
+	lock: gix::lock::File,
 ) -> Result<()> {
 	// Entries the map leaves as they were keep their stat data and flags:
 	// zeroed stats make every later status re-hash each tracked file, and
@@ -1618,9 +1851,15 @@ fn write_index_map_at(
 		index_path.map_or_else(|| repo.index_path(), Path::to_owned),
 	);
 	index.remove_tree();
+	let mut out = io::BufWriter::with_capacity(64 * 1024, lock);
 	index
-		.write(gix::index::write::Options::default())
-		.map_err(|err| Error::backend("git write index", err))
+		.write_to(&mut out, gix::index::write::Options::default())
+		.map_err(|err| Error::backend("git write index", err))?;
+	out.into_inner()
+		.map_err(|err| Error::backend("git write index", err.into_error()))?
+		.commit()
+		.map_err(|err| Error::backend("git write index", err.error))?;
+	Ok(())
 }
 
 fn write_tree_map(
@@ -2165,6 +2404,18 @@ mod tests {
 		);
 		assert_eq!(git(temp.path(), &["show", "HEAD:tracked.txt"]), "updated\n");
 		assert_eq!(git(temp.path(), &["show", "HEAD~1:new-file.txt"]), "new\n");
+	}
+
+	#[test]
+	fn patch_lines_keep_crlf_and_unterminated_hunk_data() {
+		let raw = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\r\n+new\r\n\\ No newline \
+		           at end of file";
+		let file = parse_file_patch(raw).expect("parse patch");
+		assert_eq!(file.raw, raw);
+		assert_eq!(file.hunks.len(), 1);
+		assert_eq!(file.hunks[0].lines[0].data, b"old\r");
+		assert_eq!(file.hunks[0].lines[1].data, b"new\r");
+		assert!(file.hunks[0].lines[1].no_newline);
 	}
 
 	#[test]
@@ -2775,6 +3026,35 @@ mod tests {
 	}
 
 	#[test]
+	fn cached_apply_waits_for_another_process_to_release_the_index_lock() {
+		// Regression: the index write gave up at once on a held `index.lock`
+		// (a prompt's `git status`), leaving the entry at its old blob.
+		let temp = init(&[("file.txt", b"one\n")]);
+		fs::write(temp.path().join("file.txt"), b"two\n").expect("edit");
+		let patch = repo(temp.path())
+			.diff_text(&DiffOptions::default())
+			.expect("patch");
+		let lock = temp.path().join(".git/index.lock");
+		fs::write(&lock, b"").expect("hold the lock");
+		std::thread::scope(|scope| {
+			scope.spawn(|| {
+				std::thread::sleep(Duration::from_millis(150));
+				fs::remove_file(&lock).expect("release the lock");
+			});
+			repo(temp.path())
+				.apply_patch(&patch, &ApplyOptions {
+					cached:     true,
+					index_path: None,
+					reverse:    false,
+					three_way:  false,
+				})
+				.expect("apply once the lock is free");
+		});
+		assert_eq!(git(temp.path(), &["diff", "--cached", "--name-only"]).trim(), "file.txt");
+		assert_eq!(git(temp.path(), &["diff", "--name-only"]).trim(), "");
+	}
+
+	#[test]
 	fn worktree_apply_of_gitlink_patches_matches_git() {
 		// Regression: worktree application found no source for a submodule
 		// directory ("does not exist") and materialized added gitlinks as blobs.
@@ -2838,5 +3118,127 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// Apply `patches` to `ours` and to `oracle` through the git CLI, then
+	/// assert both indexes describe the same tree.
+	fn assert_cached_apply_matches_git(temp: &TempDir, repository: &GitRepo, patches: &[&str]) {
+		let ours_index = temp.path().join("ours-space.index");
+		let oracle_index = temp.path().join("oracle-space.index");
+		repository
+			.read_tree("HEAD", Some(&ours_index))
+			.expect("seed ours index");
+		git_with_index(temp.path(), &oracle_index, &["read-tree", "HEAD"]);
+		let options = ApplyOptions {
+			cached:     true,
+			index_path: Some(ours_index.clone()),
+			reverse:    false,
+			three_way:  false,
+		};
+		for (position, patch) in patches.iter().enumerate() {
+			repository
+				.apply_patch(patch, &options)
+				.unwrap_or_else(|err| panic!("apply patch {position}: {err}"));
+			let file = temp.path().join(format!("space-{position}.patch"));
+			fs::write(&file, patch).expect("write patch");
+			git_with_index(temp.path(), &oracle_index, &[
+				"apply",
+				"--cached",
+				"--binary",
+				&format!("space-{position}.patch"),
+			]);
+		}
+		let ours_tree = repository
+			.write_tree(Some(&ours_index))
+			.expect("write ours tree");
+		let oracle_tree = git_with_index(temp.path(), &oracle_index, &["write-tree"]);
+		assert_eq!(ours_tree, oracle_tree.trim());
+	}
+
+	#[test]
+	fn patch_round_trips_binary_changes_with_space_paths() {
+		let temp = init(&[("assets/old logo.png", b"\0PNG old\0")]);
+		fs::write(temp.path().join("assets/old logo.png"), b"\0PNG new\0").expect("edit binary");
+		let repository = repo(temp.path());
+		let modified = repository
+			.diff_text(&DiffOptions { binary: true, ..DiffOptions::default() })
+			.expect("render binary modify patch");
+		assert!(
+			modified.contains("diff --git a/assets/old logo.png b/assets/old logo.png"),
+			"{modified}"
+		);
+		fs::write(temp.path().join("assets/new logo.png"), b"\0PNG fresh\0")
+			.expect("write untracked");
+		let created = repository
+			.diff_no_index(Path::new("/dev/null"), Path::new("assets/new logo.png"), true)
+			.expect("render binary create patch");
+		assert!(created.contains("GIT binary patch"), "{created}");
+		assert_cached_apply_matches_git(&temp, &repository, &[&modified, &created]);
+	}
+
+	#[test]
+	fn patch_applies_rename_and_mode_changes_with_space_paths() {
+		let temp = init(&[("old name.txt", b"one\ntwo\n"), ("mode file.txt", b"content\n")]);
+		git(temp.path(), &["mv", "old name.txt", "new name.txt"]);
+		git(temp.path(), &["update-index", "--chmod=+x", "mode file.txt"]);
+		let repository = repo(temp.path());
+		let patch = repository
+			.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+			.expect("render staged rename and mode change");
+		assert!(patch.contains("rename from old name.txt"), "{patch}");
+		assert!(patch.contains("rename to new name.txt"), "{patch}");
+		assert!(patch.contains("old mode 100644"), "{patch}");
+		assert_cached_apply_matches_git(&temp, &repository, &[&patch]);
+	}
+
+	#[test]
+	fn patch_parses_quoted_paths_on_all_platforms() {
+		let raw = concat!(
+			"diff --git \"a/weird \\\"name\\\".bin\" \"b/weird \\\"name\\\".bin\"\n",
+			"old mode 100644\n",
+			"new mode 100755\n",
+		);
+		let patch = parse_file_patch(raw).expect("parse quoted header");
+		assert_eq!(patch.old_path.as_deref(), Some("weird \"name\".bin"));
+		assert_eq!(patch.new_path.as_deref(), Some("weird \"name\".bin"));
+	}
+
+	#[test]
+	fn patch_rejects_octal_escapes_git_rejects() {
+		for escape in ["\\7", "\\12", "\\777", "\\400"] {
+			let raw = format!(
+				"diff --git \"a/{escape}.txt\" \"b/{escape}.txt\"\nold mode 100644\nnew mode 100755\n"
+			);
+			let message = match parse_file_patch(&raw) {
+				Err(ApplyFailure::Invalid(message)) => message,
+				other => panic!("{escape}: {other:?}"),
+			};
+			assert!(message.contains("invalid octal escape"), "{escape}: {message}");
+		}
+		let raw =
+			"diff --git \"a/\\040name.txt\" \"b/\\040name.txt\"\nold mode 100644\nnew mode 100755\n";
+		let patch = parse_file_patch(raw).expect("three-digit octal space");
+		assert_eq!(patch.old_path.as_deref(), Some(" name.txt"));
+		assert_eq!(patch.new_path.as_deref(), Some(" name.txt"));
+	}
+
+	#[cfg(not(windows))]
+	#[test]
+	fn patch_quotes_paths_that_cannot_be_written_verbatim() {
+		let temp = init(&[("tracked.txt", b"base\n")]);
+		let weird = "weird \"name\".bin";
+		fs::write(temp.path().join(weird), b"\0binary\0").expect("write quoted-name binary");
+		let repository = repo(temp.path());
+		let created = repository
+			.diff_no_index(Path::new("/dev/null"), Path::new(weird), true)
+			.expect("render quoted create patch");
+		assert!(
+			created
+				.starts_with("diff --git \"a/weird \\\"name\\\".bin\" \"b/weird \\\"name\\\".bin\"\n"),
+			"{created}"
+		);
+		assert_cached_apply_matches_git(&temp, &repository, &[&created]);
+		let ours_index = temp.path().join("ours-space.index");
+		assert!(git_with_index(temp.path(), &ours_index, &["ls-files", "-z"]).contains(weird));
 	}
 }

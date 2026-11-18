@@ -27,7 +27,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.20.0"
+version = "18.22.1"
 edition = "2024"
 rust-version = "1.101"
 license = "MIT"
@@ -438,7 +438,7 @@ html-to-markdown-rs = { version = "3.18.3", default-features = false }
 # ──────────────────────────────────────────────────────────────────────────────
 # Tokenization
 # ──────────────────────────────────────────────────────────────────────────────
-xutf = "1.5"
+xutf = "2.3"
 zstd = "0.14"
 fancy-regex = "0.17"
 tiktoken-rs = "0.12"
@@ -507,6 +507,10 @@ tree-sitter-yaml = "0.7"
 # `tokenizers` with the `onig` C library.
 candle-core = "0.9.2"
 candle-nn = "0.9.2"
+# Phonon on-device TTS (pi-natives `tts`). `hf` reads the checkpoint's
+# tokenizer.json through `tokenizers` without its `onig` C library; downloads
+# stay in TypeScript, so no `hub`.
+ptts = { version = "0.7.1", default-features = false, features = ["hf"] }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Unsorted (added by `cargo add` - move into a section above)

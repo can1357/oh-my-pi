@@ -229,6 +229,24 @@ describe("eval tool description", () => {
 		expect(withoutRead.description).not.toContain("<fixture>");
 		expect(withoutRead.description).not.toContain("xd://eval/fixture");
 	});
+
+	it("keeps first-call guides out of a session without a guide delivery channel", () => {
+		const prelude: EvalPreludeDefinition = {
+			name: "fixture",
+			documentation: "Fixture summary line.\n\nFULL PRELUDE DOCUMENTATION",
+			firstCallDocumentation: "FIRST CALL GUIDE",
+			javascript: "",
+			python: "",
+			exports: [],
+			async invoke() {
+				return { content: [] };
+			},
+		};
+		const session = makeSession({ preludes: () => [prelude] });
+		expect(new EvalTool(session).description).not.toContain("No `read` needed");
+		session.noteEvalPreludeCall = () => {};
+		expect(new EvalTool(session).description).toContain("No `read` needed");
+	});
 });
 
 describe("eval tool dynamic schema", () => {

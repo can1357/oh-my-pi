@@ -92,6 +92,7 @@ function makeHarness() {
 	const controller = new ExtensionUiController(ctx);
 
 	return {
+		ctx,
 		editor,
 		requestRender,
 		addAutocompleteProvider,
@@ -394,6 +395,23 @@ describe("ExtensionUiController form dialog", () => {
 		expect(harness.editor.getText()).toBe("half typed!");
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 	});
+
+	it("owns the composer for a form only while its draft guard holds the keyboard", async () => {
+		const harness = makeHarness();
+		harness.editor.setText("half typed");
+		const pending = harness.controller.showFormDialog(html);
+		const dialog = harness.getFocused();
+		const owns = () => harness.ctx.composerOwner?.component === dialog && harness.ctx.composerOwner.owns();
+		dialog!.render(80);
+		expect(owns()).toBe(true);
+
+		harness.handleInput("\x1b[B");
+		expect(owns()).toBe(false);
+
+		harness.handleInput("\x1b");
+		await pending;
+		expect(harness.ctx.composerOwner).toBeUndefined();
+	});
 });
 
 describe("ExtensionUiController editor UI", () => {
@@ -480,6 +498,27 @@ describe("ExtensionUiController editor UI", () => {
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.getFocused()).toBe(harness.editor);
 		expect(harness.editor.getText()).toBe("half typed prompt");
+	});
+
+	it("owns the composer for an ask only while its draft guard blocks, and releases it when it settles", async () => {
+		const harness = makeHarness();
+		harness.editor.setText("half typed prompt");
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] },
+		];
+
+		const pending = harness.controller.showAskDialog(questions);
+		const ask = harness.editorContainer.children[0];
+		ask?.render?.(80);
+		expect(harness.ctx.composerOwner?.component).toBe(ask);
+		expect(harness.ctx.composerOwner?.owns()).toBe(true);
+
+		ask?.handleInput?.("\x1b[B");
+		expect(harness.ctx.composerOwner?.owns()).toBe(false);
+
+		ask?.handleInput?.("\r");
+		await pending;
+		expect(harness.ctx.composerOwner).toBeUndefined();
 	});
 
 	it("does not fire editor-slot shortcuts that would orphan the ask dialog (#6738)", () => {
@@ -714,6 +753,21 @@ describe("ExtensionUiController tool approval", () => {
 		} finally {
 			now.mockRestore();
 		}
+	});
+
+	it("owns the composer for image pastes while mounted and releases it when it settles", async () => {
+		const harness = makeHarness();
+		harness.editor.onSubmit = text => harness.queueSteer(text);
+		const pending = harness.controller.showCollabAwareApproval(prompt);
+		const [dialog] = harness.editorContainer.children;
+		expect(harness.ctx.composerOwner?.component).toBe(dialog);
+		expect(harness.ctx.composerOwner?.owns()).toBe(true);
+
+		for (const key of "stop") harness.handleInput(key);
+		harness.handleInput("\r");
+		await pending;
+
+		expect(harness.ctx.composerOwner).toBeUndefined();
 	});
 
 	it("lets the composer steer while a call waits: the queued message denies the call", async () => {

@@ -127,7 +127,11 @@ describe("tool path arrays", () => {
 
 	it("search finds a named NUL-containing file and sanitizes matches and context", async () => {
 		await Bun.write(path.join(tempDir, "nul-named.md"), "before\0\x07\nneedle\0\x1b[31m red\x1b[0m\nafter\0\n");
-		const tools = await createTools(createTestSession(tempDir));
+		const tools = await createTools(
+			createTestSession(tempDir, {
+				settings: Settings.isolated({ "grep.contextBefore": 1, "grep.contextAfter": 1 }),
+			}),
+		);
 		const tool = tools.find(entry => entry.name === "grep");
 		if (!tool) throw new Error("Missing grep tool");
 

@@ -67,11 +67,6 @@ export interface SessionHeader {
 	providerPromptCacheKey?: string;
 	/** Local-only Task candidate, gated by the actual request model's cache policy; omitted from shares and HTML. */
 	taskPromptCacheKey?: string;
-	/**
-	 * Source session file of a read-only seance fork. Its artifacts stay in the
-	 * source: `history://`, `artifact://`, and `agent://` read them from there.
-	 */
-	seanceSource?: string;
 }
 
 export interface NewSessionOptions {

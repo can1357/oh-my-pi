@@ -306,7 +306,7 @@ export interface ParsedAgentFields {
 	autoloadSkills?: string[];
 	readSummarize?: boolean;
 	blocking?: boolean;
-	/** `true` = keep `yield` and the output schema when `task.structured` is off. */
+	/** `true` = keep the output schema (and with it `yield`) when `task.structured` is off. */
 	structured?: boolean;
 	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
 	prewalk?: boolean | string;

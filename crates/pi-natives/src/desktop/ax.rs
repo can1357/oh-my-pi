@@ -4,6 +4,7 @@ use std::{
 	collections::{HashMap, HashSet},
 	fmt::Write as _,
 	hash::{DefaultHasher, Hash, Hasher},
+	sync::Arc,
 };
 
 use super::{
@@ -94,33 +95,44 @@ impl Hash for AxHandle {
 
 #[derive(Debug, Clone)]
 pub struct AxProps {
-	pub role:           String,
-	pub native_role:    String,
-	pub title:          Option<String>,
-	pub value:          Option<String>,
-	pub description:    Option<String>,
-	pub enabled:        bool,
-	pub focused:        bool,
-	pub bounds:         Option<AxBounds>,
-	pub actions:        Vec<String>,
-	pub child_count:    u32,
+	pub role:                String,
+	pub native_role:         String,
+	pub title:               Option<String>,
+	pub value:               Option<String>,
+	pub description:         Option<String>,
+	pub enabled:             bool,
+	pub focused:             bool,
+	pub bounds:              Option<AxBounds>,
+	pub actions:             Vec<String>,
+	pub child_count:         u32,
 	/// Hash of the fields that tell the element apart in its window, compared
 	/// to name the one element left with them once the app has destroyed it;
 	/// `None` where the backend reads none or could not read them all.
-	pub identity:       Option<u64>,
+	pub identity:            Option<u64>,
 	/// The backend failed to read an identifying field or the children of an
 	/// element that is still there, so a read that met it cannot tell whether
 	/// an identity is unique in the window.
-	pub partial:        bool,
+	pub partial:             bool,
 	/// The backend answered the role and every field needed to choose the
 	/// displayed label. Unrelated identity fields may still be unanswered.
-	pub label_complete: bool,
+	pub label_complete:      bool,
+	/// The read-as guard's fingerprint when it differs from the displayed
+	/// label's fingerprint. None uses the displayed fingerprint.
+	#[cfg(any(target_os = "macos", test))]
+	pub read_as_fingerprint: Option<u64>,
 	/// Whether a row, cell, button or file icon reports itself selected.
-	pub selected:       bool,
+	pub selected:            bool,
 	/// A name the platform derives when the element has neither title nor
 	/// description, such as a window's close button.
-	pub role_name:      Option<String>,
+	pub role_name:           Option<String>,
+	/// Children left unread; [`UNKNOWN_UNREAD_CHILDREN`] when their count
+	/// could not be read.
+	pub unread_children:     u32,
 }
+
+/// An unread child count that could not be determined; dominates saturating
+/// sums.
+pub(crate) const UNKNOWN_UNREAD_CHILDREN: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AxBounds {
@@ -168,6 +180,24 @@ struct Proof {
 	walk:     WholeWalk,
 }
 
+/// Where a ref's element sits in a table row that no other row of a walk of
+/// the whole window matched element for element. An app that rebuilds its
+/// rows as it refreshes, as Activity Monitor does every few seconds, draws
+/// the same row again from new elements; the ref follows it there
+/// ([`follow_row`]).
+#[derive(Clone)]
+struct RowProof {
+	/// The row's [`row_print`].
+	print:    u64,
+	/// Child indices from the row down to the element.
+	path:     Vec<usize>,
+	/// The element's own [`AxProps::identity`].
+	identity: u64,
+	walk:     WholeWalk,
+	/// What the row read, for the error that names a copy of the element.
+	text:     Arc<str>,
+}
+
 struct Registered {
 	handle:      AxHandle,
 	target_key:  String,
@@ -176,11 +206,11 @@ struct Registered {
 	/// role or label gets a new ref.
 	fingerprint: u64,
 	proof:       Option<Proof>,
-	/// Whether an action through the ref is held to the label it was read
-	/// with ([`require_read_as`]): not when its role or chosen label was
-	/// unanswered, nor for a window, whose title names its document.
+	row:         Option<RowProof>,
+	/// The fingerprint held by an action through this ref; not held when its
+	/// own label was unanswered, nor for a window naming its document.
 	#[cfg(any(target_os = "macos", test))]
-	held:        bool,
+	held:        Option<u64>,
 }
 
 pub struct AxRegistry {
@@ -270,15 +300,24 @@ impl AxRegistry {
 			}
 			id
 		});
+		// An earlier proof stands while the identity is unchanged, until a
+		// read that can tell decides it again.
+		let kept = |identity| props.identity == Some(identity);
+		let (earlier_proof, row) =
+			renewed
+				.and_then(|id| self.entries.remove(&id))
+				.map_or((None, None), |entry| {
+					(
+						entry.proof.filter(|proof| kept(proof.identity)),
+						entry.row.filter(|row| kept(row.identity)),
+					)
+				});
 		let proof = match uniqueness {
 			Uniqueness::Proven(walk) => props
 				.identity
 				.map(|identity| Proof { identity, walk: walk.clone() }),
 			Uniqueness::Shared => None,
-			Uniqueness::Unknown => renewed
-				.and_then(|id| self.entries.remove(&id))
-				.and_then(|entry| entry.proof)
-				.filter(|proof| props.identity == Some(proof.identity)),
+			Uniqueness::Unknown => earlier_proof,
 		};
 		self.entries.insert(id, Registered {
 			handle,
@@ -286,8 +325,10 @@ impl AxRegistry {
 			generation,
 			fingerprint,
 			proof,
+			row,
 			#[cfg(any(target_os = "macos", test))]
-			held: props.label_complete && props.role != "window",
+			held: (props.label_complete && props.role != "window")
+				.then(|| props.read_as_fingerprint.unwrap_or(fingerprint)),
 		});
 		self.enforce_cap();
 		format!("e{id}")
@@ -321,11 +362,7 @@ impl AxRegistry {
 	/// to its label.
 	#[cfg(any(target_os = "macos", test))]
 	pub(crate) fn expect_read_as(&self, reference: &str) -> Option<ReadAsScope> {
-		let fingerprint = self
-			.entry(reference)
-			.ok()
-			.filter(|entry| entry.held)?
-			.fingerprint;
+		let fingerprint = self.entry(reference).ok()?.held?;
 		READ_AS.with_borrow_mut(|read_as| {
 			*read_as = Some(ReadAs {
 				reference: reference.to_owned(),
@@ -335,6 +372,52 @@ impl AxRegistry {
 			});
 		});
 		Some(ReadAsScope(()))
+	}
+
+	/// Whether `reference` was read in a row no other row of the window
+	/// matched, so [`follow_row`] can follow the row's rebuilt copy.
+	pub(crate) fn has_row(&self, reference: &str) -> bool {
+		self.entry(reference).is_ok_and(|entry| entry.row.is_some())
+	}
+
+	/// What the rows `reference` and `found` were read in read, and whether
+	/// they read alike element for element.
+	pub(crate) fn rows_read(
+		&self,
+		reference: &str,
+		found: &str,
+	) -> Option<(Arc<str>, Arc<str>, bool)> {
+		let then = self.entry(reference).ok()?.row.as_ref()?;
+		let now = self.entry(found).ok()?.row.as_ref()?;
+		Some((then.text.clone(), now.text.clone(), then.print == now.print))
+	}
+
+	/// Decides, for a read of the whole window, whether `reference` can follow
+	/// its row.
+	fn set_row(&mut self, reference: &str, row: Option<RowProof>) {
+		if let Some(entry) = ref_id(reference).and_then(|id| self.entries.get_mut(&id)) {
+			entry.row = row;
+		}
+	}
+
+	/// Points `reference` at `handle`, the element in its place in a rebuilt
+	/// copy of its row. Another ref that already names `handle` keeps it.
+	fn repoint(&mut self, reference: &str, handle: AxHandle, row: RowProof) {
+		let Some(id) = ref_id(reference) else { return };
+		let Some(entry) = self.entries.get_mut(&id) else {
+			return;
+		};
+		let old = std::mem::replace(&mut entry.handle, handle.clone());
+		entry.row = Some(row);
+		let Some(refs) = self.refs.get_mut(&entry.target_key) else {
+			return;
+		};
+		if refs.get(&old) == Some(&id) {
+			refs.remove(&old);
+		}
+		if handle.identified() {
+			refs.entry(handle).or_insert(id);
+		}
 	}
 
 	/// Drops expired refs. An identity a newer ref took over keeps pointing at
@@ -383,7 +466,7 @@ fn ref_id(reference: &str) -> Option<u64> {
 
 /// The role and label a ref was read with, as [`AxRegistry::register`]
 /// compares them: an element read again with others gets a new ref.
-fn fingerprint(props: &AxProps) -> u64 {
+pub(crate) fn fingerprint(props: &AxProps) -> u64 {
 	label_fingerprint(&props.role, label(props))
 }
 
@@ -523,9 +606,10 @@ pub(crate) fn require_read_as(
 /// element: a write it confirmed while it reads as another control may have
 /// gone to that one, so it is unconfirmed. A read that fails after the write,
 /// as when the app rebuilt the element, cannot tell: the write's own
-/// read-back stands.
+/// read-back stands. `written` names what was written ("the text").
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn confirm_read_as(
+	written: &str,
 	props: impl FnOnce() -> CoreResult<Option<AxReadAs>>,
 ) -> CoreResult<()> {
 	if read_as_state() != Some(true) {
@@ -536,7 +620,7 @@ pub(crate) fn confirm_read_as(
 		Some(message) => Err(DesktopError::new(
 			ErrorCode::AxUnconfirmed,
 			format!(
-				"the text was written, but {message} after the write, so it may have gone to that \
+				"{written} was written, but {message} after the write, so it may have gone to that \
 				 control: read the window before retrying"
 			),
 		)),
@@ -573,6 +657,8 @@ struct WalkState {
 	max_nodes:   u32,
 	max_depth:   u32,
 	truncated:   bool,
+	/// Children left unread under elements with too many to read whole.
+	unread:      u32,
 	bounds:      WalkBounds,
 	/// Whether the walk stops when the current operation is cancelled.
 	cancellable: bool,
@@ -590,6 +676,7 @@ impl WalkState {
 			max_nodes,
 			max_depth,
 			truncated: false,
+			unread: 0,
 			bounds,
 			cancellable: false,
 			line_states: false,
@@ -639,7 +726,13 @@ fn walk_raw(
 		control::check()?;
 	}
 	state.visited += 1;
-	let (props, child_handles) = match backend.walk_node(&handle, state.bounds) {
+	// Children past the depth limit are never visited, so none is read.
+	let max_children = if depth < state.max_depth {
+		state.max_nodes - state.visited
+	} else {
+		0
+	};
+	let (props, child_handles) = match backend.walk_node(&handle, state.bounds, max_children) {
 		Ok(node) => node,
 		// An app that stops answering would make every node left wait it out,
 		// and every read after a cancel fails the same way.
@@ -655,6 +748,10 @@ fn walk_raw(
 		Err(error) => return Err(error),
 	};
 	state.partial |= props.partial;
+	if props.unread_children > 0 {
+		state.truncated = true;
+		state.unread = state.unread.saturating_add(props.unread_children);
+	}
 	let in_web = in_web || props.role == "webarea";
 	let writable = if state.line_states {
 		writable(backend, &handle, &props, in_web)
@@ -899,15 +996,40 @@ const MAX_SHOWN_ACTION: usize = 32;
 /// enough that no app can make a line arbitrarily long.
 const MAX_SHOWN_ACTIONS: usize = 16;
 
+/// The name `perform()` takes for `action`, one macOS action an element
+/// lists: lowercased past its `AX` prefix in any case. `None` for an
+/// app-defined custom action, which cannot be performed by name, and for a
+/// name that is not one ASCII word of at most [`MAX_SHOWN_ACTION`] characters,
+/// which an app could otherwise use to write its own lines into the tool's
+/// output.
+fn performable_name(action: &str) -> Option<String> {
+	let name = action
+		.get(..2)?
+		.eq_ignore_ascii_case("AX")
+		.then(|| &action[2..])?;
+	(!name.is_empty()
+		&& name.len() <= MAX_SHOWN_ACTION
+		&& name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+	.then(|| name.to_ascii_lowercase())
+}
+
+/// The names `perform()` takes, each once in the element's order.
+pub(crate) fn performable_names(actions: &[String]) -> Vec<String> {
+	let mut names = Vec::new();
+	for name in actions.iter().filter_map(|action| performable_name(action)) {
+		if !names.contains(&name) {
+			names.push(name);
+		}
+	}
+	names
+}
+
 /// What a line lists after `actions=`: the macOS actions an element offers
 /// beyond what its role implies. A control's press, a text field's confirm
 /// and cancel, and the actions nearly every element has (scroll into view,
 /// context menu, raise, page scrolls, hover variants) go unlisted, except on a
-/// control without press, which lists all it has. App-defined custom actions
-/// cannot be performed by name and stay unlisted, as does any other
-/// platform's vocabulary, and so does a name that is not one ASCII word of at
-/// most [`MAX_SHOWN_ACTION`] characters, which an app could otherwise use to
-/// write its own lines into the tree. Each name is listed once, and past
+/// control without press, which lists all it has. Only names
+/// [`performable_name`] keeps are listed. Each name is listed once, and past
 /// [`MAX_SHOWN_ACTIONS`] the list ends with how many it left out and the call
 /// that lists them all, so no app can make one line arbitrarily long.
 fn shown_actions(props: &AxProps, reference: &str) -> Option<String> {
@@ -917,23 +1039,7 @@ fn shown_actions(props: &AxProps, reference: &str) -> Option<String> {
 		return None;
 	}
 	let role = props.role.as_str();
-	let mut seen = HashSet::new();
-	// Lowercased past an `AX` prefix in any case, as `perform()` takes it.
-	let mut names: Vec<String> = props
-		.actions
-		.iter()
-		.filter_map(|action| {
-			let name = action
-				.get(..2)?
-				.eq_ignore_ascii_case("AX")
-				.then(|| &action[2..])?;
-			(!name.is_empty()
-				&& name.len() <= MAX_SHOWN_ACTION
-				&& name.bytes().all(|byte| byte.is_ascii_alphanumeric()))
-			.then(|| name.to_ascii_lowercase())
-		})
-		.filter(|name| seen.insert(name.clone()))
-		.collect();
+	let mut names = performable_names(&props.actions);
 	if !pressable(role) || names.iter().any(|name| name == "press") {
 		names.retain(|name| {
 			let implied = match name.as_str() {
@@ -1001,9 +1107,8 @@ fn format_tree(
 	} else {
 		(None, focus.holds(backend, &node.handle, &node.props))
 	};
-	let uniqueness = identities.of(&node.props);
 	let reference =
-		registry.register(backend, target, generation, node.handle, &node.props, uniqueness);
+		identities.register(backend, registry, target, generation, node.handle, &node.props);
 	if !text.is_empty() {
 		text.push('\n');
 	}
@@ -1129,6 +1234,11 @@ pub fn snapshot(
 			text.push('\n');
 		}
 		let _ = write!(text, "… truncated ({} nodes)", state.visited);
+		if state.unread == UNKNOWN_UNREAD_CHILDREN {
+			text.push_str("; some children not read");
+		} else if state.unread > 0 {
+			let _ = write!(text, "; {} children not read", state.unread);
+		}
 	}
 	if state.skipped > 0 {
 		if !text.is_empty() {
@@ -1199,11 +1309,10 @@ pub fn query(
 		}) && contains(label(&node.props), title.as_ref())
 			&& contains(node.props.value.as_deref(), value.as_ref())
 		{
-			let uniqueness = identities.of(&node.props);
 			let mut props = node.props;
 			props.focused = focus.holds(backend, &node.handle, &props);
 			let reference =
-				registry.register(backend, target, generation, node.handle, &props, uniqueness);
+				identities.register(backend, registry, target, generation, node.handle, &props);
 			result.push(node_to_napi(reference, props));
 			if result.len() >= limit {
 				break;
@@ -1284,6 +1393,9 @@ struct ReadIdentities {
 	shared: HashSet<u64>,
 	/// The walk, when it read the whole window.
 	whole:  Option<WholeWalk>,
+	/// Where each element of a row no other row matched sits in it, when the
+	/// walk read the whole window.
+	rows:   HashMap<AxHandle, RowProof>,
 }
 
 impl ReadIdentities {
@@ -1299,7 +1411,12 @@ impl ReadIdentities {
 				shared.insert(identity);
 			}
 		}
-		Self { shared, whole: state.whole(root) }
+		let whole = state.whole(root);
+		let rows = match (tree, &whole) {
+			(Some(tree), Some(walk)) => row_places(tree, walk),
+			_ => HashMap::new(),
+		};
+		Self { shared, whole, rows }
 	}
 
 	/// A twin anywhere in the walk rules naming out, but only a walk of the
@@ -1311,46 +1428,262 @@ impl ReadIdentities {
 			_ => Uniqueness::Unknown,
 		}
 	}
+
+	/// Registers `handle`'s element as `register` does, then records where it
+	/// sits in its row when the walk read the whole window: a partial walk
+	/// leaves an earlier decision standing.
+	fn register(
+		&self,
+		backend: &mut dyn AxBackend,
+		registry: &mut AxRegistry,
+		target: &str,
+		generation: u64,
+		handle: AxHandle,
+		props: &AxProps,
+	) -> String {
+		let row = self.rows.get(&handle).cloned();
+		let reference = registry.register(backend, target, generation, handle, props, self.of(props));
+		if self.whole.is_some() {
+			registry.set_row(&reference, row);
+		}
+		reference
+	}
+}
+
+/// Role of a table or outline row, after normalization.
+const ROW: &str = "row";
+
+/// A row's elements, each as its depth below the row and its identity, in
+/// walk order, hashed: two rows match when they hold the same elements in
+/// the same places. `None` when an element of the row has no identity.
+fn row_print(row: &WalkNode) -> Option<u64> {
+	fn add(node: &WalkNode, depth: u32, hasher: &mut DefaultHasher) -> Option<()> {
+		depth.hash(hasher);
+		node.props.identity?.hash(hasher);
+		for child in &node.children {
+			add(child, depth + 1, hasher)?;
+		}
+		Some(())
+	}
+	let mut hasher = DefaultHasher::new();
+	add(row, 0, &mut hasher)?;
+	Some(hasher.finish())
+}
+
+/// Every row of `tree`, outer before inner, with its [`row_print`].
+fn rows_of(tree: &WalkNode) -> Vec<(&WalkNode, Option<u64>)> {
+	let mut rows = Vec::new();
+	let mut stack = vec![tree];
+	while let Some(node) = stack.pop() {
+		if node.props.role == ROW {
+			rows.push((node, row_print(node)));
+		}
+		stack.extend(node.children.iter().rev());
+	}
+	rows
+}
+
+/// What a row reads, label and value of each element in order, as an error
+/// quotes it: its first [`ROW_FIELDS`] fields.
+fn row_reading(row: &WalkNode) -> String {
+	let mut text = String::new();
+	let mut stack = vec![row];
+	let mut fields = 0;
+	while let Some(node) = stack.pop() {
+		stack.extend(node.children.iter().rev());
+		for field in [label(&node.props), node.props.value.as_deref()]
+			.into_iter()
+			.flatten()
+			.filter(|field| !field.is_empty())
+		{
+			if fields == ROW_FIELDS {
+				text.push_str(", …");
+				return text;
+			}
+			if fields > 0 {
+				text.push_str(", ");
+			}
+			push_quoted_label(&mut text, field);
+			fields += 1;
+		}
+	}
+	text
+}
+
+/// How many fields of a row an error quotes.
+const ROW_FIELDS: usize = 16;
+
+/// Where each element of a row of `tree` that no other row matches sits in
+/// it. An element of a row inside a row is placed in the inner one.
+fn row_places(tree: &WalkNode, walk: &WholeWalk) -> HashMap<AxHandle, RowProof> {
+	fn place(
+		node: &WalkNode,
+		path: &mut Vec<usize>,
+		row: &(u64, Arc<str>),
+		walk: &WholeWalk,
+		places: &mut HashMap<AxHandle, RowProof>,
+	) {
+		// A row's elements all have an identity, or it has no print.
+		if let Some(identity) = node.props.identity {
+			places.insert(node.handle.clone(), RowProof {
+				print: row.0,
+				path: path.clone(),
+				identity,
+				walk: walk.clone(),
+				text: row.1.clone(),
+			});
+		}
+		for (index, child) in node.children.iter().enumerate() {
+			path.push(index);
+			place(child, path, row, walk, places);
+			path.pop();
+		}
+	}
+	let rows = rows_of(tree);
+	let mut counts: HashMap<u64, u32> = HashMap::new();
+	for print in rows.iter().filter_map(|(_, print)| *print) {
+		*counts.entry(print).or_default() += 1;
+	}
+	let mut places = HashMap::new();
+	for (row, print) in rows {
+		if let Some(print) = print.filter(|print| counts[print] == 1) {
+			let text = row_reading(row).into();
+			place(row, &mut Vec::new(), &(print, text), walk, &mut places);
+		}
+	}
+	places
+}
+
+/// A read of the whole window, from the root a ref's walk was taken from.
+pub struct WindowRead {
+	root: AxHandle,
+	tree: Option<WalkNode>,
+	walk: WholeWalk,
+}
+
+/// Reads the whole of `window`, as far as `bounds` did and at least as far as
+/// `find()` does. `None` when the window id now names another window than
+/// `bounds` read, or this walk could not read the whole window; it stops with
+/// `Cancelled` once the current operation is cancelled.
+fn read_whole(
+	backend: &mut dyn AxBackend,
+	window: &DesktopWindow,
+	bounds: &WholeWalk,
+) -> CoreResult<Option<WindowRead>> {
+	// Finding a sheet's, popover's or menu's root walks the app's tree too.
+	control::check()?;
+	let root = backend.window_root(window)?;
+	// The window id may now name another window, of this app or another.
+	if root != bounds.root {
+		return Ok(None);
+	}
+	let mut state = WalkState::new(
+		bounds.max_nodes.max(FIND_MAX_NODES),
+		bounds.max_depth.max(FIND_MAX_DEPTH),
+		WalkBounds::Skip,
+	)
+	.cancellable();
+	let tree = walk_raw(backend, root.clone(), 0, false, &mut state)?;
+	// A copy in a part the walk could not read would make a match ambiguous.
+	Ok(state
+		.whole(&root)
+		.map(|walk| WindowRead { root, tree, walk }))
+}
+
+/// Points `reference` at the element in its place in the one row of
+/// `window` that reads, element for element, as the ref's row did when read,
+/// once the app has rebuilt that row from new elements: Activity Monitor
+/// does so with its process table every few seconds. Nothing follows when
+/// the ref was not read in a row no other row of a walk of the whole window
+/// matched, the window id now names another window, this walk could not
+/// read the whole window, or no row or several rows read that way now: a
+/// row whose elements changed may be another one. Then the read of the
+/// window, when there was one, is returned for [`refind_in`]; `Ok(None)`
+/// otherwise, and once the ref followed its row.
+/// The walk reads as far as the one that placed the ref did, and at least as
+/// far as `find()` does; it stops with `Cancelled` once the current
+/// operation is cancelled.
+pub fn follow_row(
+	backend: &mut dyn AxBackend,
+	registry: &mut AxRegistry,
+	window: &DesktopWindow,
+	reference: &str,
+) -> CoreResult<Option<WindowRead>> {
+	let Some(row) = registry.entry(reference)?.row.clone() else {
+		return Ok(None);
+	};
+	let Some(read) = read_whole(backend, window, &row.walk)? else {
+		return Ok(None);
+	};
+	let Some(tree) = &read.tree else {
+		return Ok(Some(read));
+	};
+	let rows = rows_of(tree);
+	let mut same = rows.iter().filter(|(_, print)| *print == Some(row.print));
+	let (Some((copy, _)), None) = (same.next(), same.next()) else {
+		return Ok(Some(read));
+	};
+	let Some(element) = row
+		.path
+		.iter()
+		.try_fold(*copy, |node, &index| node.children.get(index))
+		.filter(|element| element.props.identity == Some(row.identity))
+	else {
+		return Ok(Some(read));
+	};
+	let handle = element.handle.clone();
+	registry.repoint(reference, handle, RowProof { walk: read.walk, ..row });
+	Ok(None)
 }
 
 /// The one element of `window` with the identity `reference` was read with,
 /// registered under the ref's target, for a `StaleRef` to name once the app
 /// has destroyed the ref's element, as apps do when they rebuild a row or a
 /// control in place. The ref itself keeps naming the destroyed element: equal
-/// fields do not prove the match is the same control. `None` when the ref's
-/// identity was not unique in a walk of the whole window, the window id now
-/// names another window, this walk could not read the whole window, zero or
-/// several elements match, or the registry cap evicted the match as it was
-/// registered. The walk reads as far as the one that proved the identity did,
-/// and at least as far as `find()` does; it stops with `Cancelled` once the
-/// current operation is cancelled.
+/// fields do not prove the match is the same control. For a ref read in a
+/// row, the match's row is recorded too, so the error can quote what it
+/// reads now. `None` when the ref's identity was not unique in a walk of the
+/// whole window, the window id now names another window, this walk could not
+/// read the whole window, zero or several elements match, or the registry
+/// cap evicted the match as it was registered. The walk reads as far as the
+/// one that proved the identity did, and at least as far as `find()` does;
+/// it stops with `Cancelled` once the current operation is cancelled.
+#[cfg(test)]
 pub fn refind(
 	backend: &mut dyn AxBackend,
 	registry: &mut AxRegistry,
 	window: &DesktopWindow,
 	reference: &str,
 ) -> CoreResult<Option<String>> {
+	refind_in(backend, registry, window, reference, None)
+}
+
+/// [`refind`], searching `read` instead of walking the window again when it
+/// read the whole window from the root the ref's identity was proved in, as
+/// a [`follow_row`] that found no row to follow did moments before.
+pub fn refind_in(
+	backend: &mut dyn AxBackend,
+	registry: &mut AxRegistry,
+	window: &DesktopWindow,
+	reference: &str,
+	read: Option<WindowRead>,
+) -> CoreResult<Option<String>> {
 	let entry = registry.entry(reference)?;
 	let (Some(proof), target) = (entry.proof.clone(), entry.target_key.clone()) else {
 		return Ok(None);
 	};
-	// Finding a sheet's, popover's or menu's root walks the app's tree too.
-	control::check()?;
-	let root = backend.window_root(window)?;
-	// The window id may now name another window, of this app or another.
-	if root != proof.walk.root {
-		return Ok(None);
-	}
-	let mut state = WalkState::new(
-		proof.walk.max_nodes.max(FIND_MAX_NODES),
-		proof.walk.max_depth.max(FIND_MAX_DEPTH),
-		WalkBounds::Skip,
-	)
-	.cancellable();
-	let tree = walk_raw(backend, root.clone(), 0, false, &mut state)?;
-	// A copy in a part the walk could not read would make the match ambiguous.
-	let Some(walk) = state.whole(&root) else {
-		return Ok(None);
+	let in_row = entry.row.is_some();
+	let read = match read.filter(|read| read.root == proof.walk.root) {
+		Some(read) => read,
+		None => match read_whole(backend, window, &proof.walk)? {
+			Some(read) => read,
+			None => return Ok(None),
+		},
+	};
+	let WindowRead { tree, walk, .. } = read;
+	let mut rows = match &tree {
+		Some(tree) if in_row => row_places(tree, &walk),
+		_ => HashMap::new(),
 	};
 	let mut matches = Vec::new();
 	let mut stack: Vec<_> = tree.into_iter().collect();
@@ -1363,9 +1696,11 @@ pub fn refind(
 	let Ok([(handle, props)]) = <[_; 1]>::try_from(matches) else {
 		return Ok(None);
 	};
+	let row = rows.remove(&handle);
 	let generation = registry.current_generation(&target);
 	let found =
 		registry.register(backend, &target, generation, handle, &props, Uniqueness::Proven(&walk));
+	registry.set_row(&found, row);
 	// At the registry cap, registering it can evict its own generation: name
 	// no ref that already expired.
 	Ok(registry.resolve(&found).is_ok().then_some(found))
@@ -1625,7 +1960,7 @@ fn connection_screen(
 		let Some((handle, depth, parent)) = pending.pop() else {
 			break;
 		};
-		let (props, children) = backend.walk_node(&handle, WalkBounds::Skip)?;
+		let (props, children) = backend.walk_node(&handle, WalkBounds::Skip, 64)?;
 		let label = props
 			.value
 			.or(props.title)
@@ -1714,6 +2049,9 @@ mod tests {
 		settable:       HashMap<u64, bool>,
 		/// Settability questions asked.
 		settable_reads: u32,
+		/// Nodes with more children than a walk reads whole: their child
+		/// count, of which a walk gets only the first `max_children` listed.
+		long:           HashMap<u64, u32>,
 	}
 	impl Mock {
 		fn handle(&self, id: u64) -> AxHandle {
@@ -1772,13 +2110,19 @@ mod tests {
 			&mut self,
 			h: &AxHandle,
 			bounds: WalkBounds,
+			max_children: u32,
 		) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 			let mut props = self.props(h)?;
 			match bounds {
 				WalkBounds::Read => self.bounds_reads += u32::from(props.bounds.is_some()),
 				WalkBounds::Skip => props.bounds = None,
 			}
-			Ok((props, self.children(h)?))
+			let mut children = self.children(h)?;
+			if let Some(&count) = self.long.get(&node(h)) {
+				children.truncate(max_children as usize);
+				props.unread_children = count - children.len() as u32;
+			}
+			Ok((props, children))
 		}
 
 		fn parent(&mut self, _: &AxHandle) -> CoreResult<Option<AxHandle>> {
@@ -1835,21 +2179,23 @@ mod tests {
 	}
 	fn p(role: &str, title: Option<&str>) -> AxProps {
 		AxProps {
-			role:           role.into(),
-			native_role:    role.into(),
-			title:          title.map(str::to_string),
-			value:          None,
-			description:    None,
-			enabled:        true,
-			focused:        false,
-			bounds:         None,
-			actions:        Vec::new(),
-			child_count:    0,
-			identity:       Some(test_identity((role, title))),
-			partial:        false,
-			label_complete: true,
-			selected:       false,
-			role_name:      None,
+			read_as_fingerprint: None,
+			role:                role.into(),
+			native_role:         role.into(),
+			title:               title.map(str::to_string),
+			value:               None,
+			description:         None,
+			enabled:             true,
+			focused:             false,
+			bounds:              None,
+			actions:             Vec::new(),
+			child_count:         0,
+			identity:            Some(test_identity((role, title))),
+			partial:             false,
+			label_complete:      true,
+			selected:            false,
+			role_name:           None,
+			unread_children:     0,
 		}
 	}
 	fn window() -> DesktopWindow {
@@ -2941,6 +3287,46 @@ mod tests {
 		.unwrap();
 		assert!(s.truncated);
 		assert!(s.text.ends_with("… truncated (1 nodes)"));
+	}
+	#[test]
+	fn a_long_table_is_read_up_to_the_node_budget_and_its_unread_children_counted() {
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, p("table", None))]
+				.into_iter()
+				.chain((3..10).map(|id| (id, p("cell", Some("c")))))
+				.collect(),
+			children: [(1, vec![2]), (2, (3..10).collect())].into(),
+			long: [(2, 1_000_000)].into(),
+			..Default::default()
+		};
+		let s = snapshot(&mut m, &mut AxRegistry::default(), &window(), &AxSnapshotOptions {
+			max_nodes: Some(4),
+			..Default::default()
+		})
+		.unwrap();
+		assert!(s.truncated);
+		assert_eq!(s.text.matches("- cell").count(), 2, "{}", s.text);
+		assert!(
+			s.text
+				.ends_with("… truncated (4 nodes); 999998 children not read"),
+			"{}",
+			s.text
+		);
+	}
+	#[test]
+	fn an_unknown_unread_count_is_not_printed_as_a_number() {
+		let mut unknown = p("table", None);
+		unknown.unread_children = u32::MAX;
+		let mut known = p("table", None);
+		known.unread_children = 8;
+		let mut m = Mock {
+			props: [(1, p("window", Some("Title"))), (2, unknown), (3, known)].into(),
+			children: [(1, vec![2, 3])].into(),
+			..Default::default()
+		};
+		let s = snapshot(&mut m, &mut AxRegistry::default(), &window(), &Default::default()).unwrap();
+		assert!(s.truncated);
+		assert!(s.text.ends_with("; some children not read"), "{}", s.text);
 	}
 	#[test]
 	fn unreadable_subtree_is_skipped_with_trailer() {

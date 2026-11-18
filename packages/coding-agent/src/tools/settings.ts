@@ -4,7 +4,6 @@ import { cfgBashEnabled } from "../exec/settings";
 import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
-import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
@@ -515,7 +514,7 @@ export const cfgGrepEnabled = register({
 export const cfgGrepContextBefore = register({
 	id: "grep.contextBefore",
 	type: "number",
-	default: 1,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -534,7 +533,7 @@ export const cfgGrepContextBefore = register({
 export const cfgGrepContextAfter = register({
 	id: "grep.contextAfter",
 	type: "number",
-	default: 3,
+	default: 0,
 	ui: {
 		tab: "tools",
 		group: "Grep & Browser",
@@ -673,7 +672,7 @@ export const cfgSpeechgenEnabled = register({
 		tab: "tools",
 		group: "Available Tools",
 		label: "Speech Generation",
-		description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
+		description: "Enable the tts tool for on-device (Phonon) or xAI Grok Voice speech-file synthesis",
 	},
 });
 
@@ -1224,7 +1223,6 @@ export const cfgBuiltinToolGates = combine({
 	github: cfgGithubEnabled,
 	glob: cfgGlobEnabled,
 	grep: cfgGrepEnabled,
-	ida: cfgIdaAvailable,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
 	security: cfgSecurityEnabled,

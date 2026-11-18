@@ -1859,6 +1859,38 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		},
 	);
 
+	test.each([
+		{ name: "drops the level a retry-fallback hop applied", userPick: undefined, expected: Effort.High },
+		{ name: "keeps a level the user picked during the fallback", userPick: Effort.Low, expected: Effort.Low },
+	])("resumes the primary after a retry fallback and $name", async ({ userPick, expected }) => {
+		const transcript = () => {
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendModelChange("anthropic/claude-sonnet-4-5");
+			sessionManager.appendThinkingLevelChange(Effort.High);
+			// A `:xhigh` chain entry: the hop records the fallback model, then the entry's level.
+			sessionManager.appendModelChange("openai-codex/gpt-5.6-sol", EPHEMERAL_MODEL_CHANGE_ROLE, true);
+			sessionManager.appendThinkingLevelChange(Effort.XHigh, Effort.XHigh);
+			if (userPick) sessionManager.appendThinkingLevelChange(userPick, userPick);
+			sessionManager.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+			return sessionManager;
+		};
+		// Bare resume, and a subagent revival that re-supplies its role selector.
+		for (const modelPattern of [undefined, "anthropic/claude-sonnet-4-5:high"]) {
+			const { session } = await createAgentSession({
+				...buildResumeOptions(),
+				sessionManager: transcript(),
+				settings: Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5:high" } }),
+				...(modelPattern ? { modelPattern } : {}),
+			});
+			try {
+				expect(`${session.model?.provider}/${session.model?.id}`).toBe("anthropic/claude-sonnet-4-5");
+				expect(session.configuredThinkingLevel()).toBe(expected);
+			} finally {
+				await session.dispose();
+			}
+		}
+	});
+
 	test("restores an extension-discovered session model before rejecting headless resume", async () => {
 		const options = buildResumeOptions();
 		options.sessionManager.appendModelChange("runtime-provider/cached-runtime-model");

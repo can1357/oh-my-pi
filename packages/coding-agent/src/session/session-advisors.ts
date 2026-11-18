@@ -1937,8 +1937,7 @@ export class SessionAdvisors {
 			// only user-driven turns converge on ask/resolve.
 			const planModePreservesAdvice = this.#host.planModeState()?.enabled === true;
 			const cannotAutoTrigger =
-				!this.#host.agent.state.isStreaming &&
-				this.#host.clientBridge()?.deferAgentInitiatedTurns === true;
+				!this.#host.agent.state.isStreaming && this.#host.clientBridge()?.deferAgentInitiatedTurns === true;
 			if (!planModePreservesAdvice && !cannotAutoTrigger) {
 				// Arm the post-interrupt immune window only now that a turn is actually
 				// being steered/triggered. A merely preserved card never interrupts, so
@@ -2193,7 +2192,7 @@ export class SessionAdvisors {
 			if (rotation.switched && this.#spendCredentialSwitch(advisor, currentModel.provider)) return true;
 		}
 
-		const retryAfterMs = extractProviderRetryHint(currentModel.provider, message);
+		const retryAfterMs = extractProviderRetryHint(currentModel.provider, message, currentModel.baseUrl);
 		const usageLimit =
 			AIError.is(errorId, AIError.Flag.UsageLimit) ||
 			isUsageLimitOutcome(extractHttpStatusFromError(error), message);

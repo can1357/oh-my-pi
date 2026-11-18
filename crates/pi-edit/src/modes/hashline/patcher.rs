@@ -1226,6 +1226,35 @@ mod lifecycle {
 		assert!(err.contains("never displayed"), "unexpected error: {err}");
 	}
 
+	/// Full read, two lines inserted after 5, then the top two lines cut: rows
+	/// from the old line 6 on are back at the numbers the read showed, but a
+	/// model that tracked only the insert numbers them two higher. Inserts and
+	/// cuts carry no payload to tell the two readings apart, so each op on a
+	/// restored row stays rejected and leaves the file unchanged. Each op gets
+	/// a fresh history because a rejection reveals the line.
+	#[tokio::test]
+	async fn ops_on_restored_row_stay_rejected() {
+		for op in ["CUT 22", "PUT <22:\n+// before", "PUT >22:\n+// after"] {
+			let ctx = Lifecycle::new("case-r1.ts", 30);
+			let tag0 = ctx.read("case-r1.ts", &all_seen(30));
+			ctx.edit(&format!("[case-r1.ts#{tag0}]\nPUT >5:\n+// ins a\n+// ins b\n"))
+				.await
+				.unwrap();
+			let tag1 = ctx.head_tag("case-r1.ts");
+			ctx.edit(&format!("[case-r1.ts#{tag1}]\nCUT 1.=2\n"))
+				.await
+				.unwrap();
+			let tag = ctx.head_tag("case-r1.ts");
+			let before = ctx.text("case-r1.ts");
+			let err = ctx
+				.edit(&format!("[case-r1.ts#{tag}]\n{op}\n"))
+				.await
+				.expect_err(op);
+			assert!(err.contains("never displayed"), "{op}: unexpected error: {err}");
+			assert_eq!(ctx.text("case-r1.ts"), before, "{op} changed the file");
+		}
+	}
+
 	/// Body evidence alone is not enough: with no shifting edit in the
 	/// file's history, an unseen anchor stays rejected even when the
 	/// payload guesses its content exactly.

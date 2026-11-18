@@ -15,6 +15,9 @@ export { DAEMON_BROKER_WORKER_ARG } from "../cli/worker-selectors";
 export const DAEMON_PTY_COLUMNS = 120;
 export const DAEMON_PTY_ROWS = 40;
 
+/** Readiness and wait regexes match line anchors within accumulated process output. */
+export const DAEMON_OUTPUT_PATTERN_FLAGS = "mu";
+
 /** Environment key carrying the broker's canonical project or synthetic global scope directory. */
 export const DAEMON_PROJECT_DIR_ENV = "OMP_DAEMON_PROJECT_DIR";
 

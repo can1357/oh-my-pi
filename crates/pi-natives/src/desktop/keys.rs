@@ -59,60 +59,6 @@ impl KeyName {
 	pub(crate) const fn is_modifier(self) -> bool {
 		matches!(self, Self::Ctrl | Self::Alt | Self::Shift | Self::Meta)
 	}
-
-	#[cfg(target_os = "windows")]
-	pub(crate) const fn to_enigo(self) -> enigo::Key {
-		use enigo::Key;
-		match self {
-			Self::Ctrl => Key::Control,
-			Self::Alt => Key::Alt,
-			Self::Shift => Key::Shift,
-			Self::Meta => Key::Meta,
-			Self::Enter => Key::Return,
-			Self::Escape => Key::Escape,
-			Self::Tab => Key::Tab,
-			Self::Space => Key::Space,
-			Self::Backspace => Key::Backspace,
-			Self::Delete => Key::Delete,
-			Self::Insert => Key::Insert,
-			Self::Home => Key::Home,
-			Self::End => Key::End,
-			Self::PageUp => Key::PageUp,
-			Self::PageDown => Key::PageDown,
-			Self::Up => Key::UpArrow,
-			Self::Down => Key::DownArrow,
-			Self::Left => Key::LeftArrow,
-			Self::Right => Key::RightArrow,
-			Self::CapsLock => Key::CapsLock,
-			Self::NumLock => Key::Numlock,
-			Self::PrintScreen => Key::PrintScr,
-			Self::F1 => Key::F1,
-			Self::F2 => Key::F2,
-			Self::F3 => Key::F3,
-			Self::F4 => Key::F4,
-			Self::F5 => Key::F5,
-			Self::F6 => Key::F6,
-			Self::F7 => Key::F7,
-			Self::F8 => Key::F8,
-			Self::F9 => Key::F9,
-			Self::F10 => Key::F10,
-			Self::F11 => Key::F11,
-			Self::F12 => Key::F12,
-			Self::F13 => Key::F13,
-			Self::F14 => Key::F14,
-			Self::F15 => Key::F15,
-			Self::F16 => Key::F16,
-			Self::F17 => Key::F17,
-			Self::F18 => Key::F18,
-			Self::F19 => Key::F19,
-			Self::F20 => Key::F20,
-			Self::F21 => Key::F21,
-			Self::F22 => Key::F22,
-			Self::F23 => Key::F23,
-			Self::F24 => Key::F24,
-			Self::Char(character) => Key::Unicode(character),
-		}
-	}
 }
 
 pub fn parse_key(value: &str) -> CoreResult<KeyName> {

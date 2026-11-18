@@ -2,11 +2,19 @@
 
 ## [Unreleased]
 
+## [18.22.1] - 2026-11-17
+
 ### Fixed
 
-- Fixed the Traces tab so background jobs end at their actual completion times, accurately displaying idle periods and turn durations.
-- Fixed the Frustration page's per-model message counts so all answered messages are included.
-- Improved dashboard responsiveness by keeping other pages and Live status available while the Spotlight view rebuilds.
+- Fixed the Gain tab undercounting savings for sessions that use snapcompact context compaction, including backfilling recent compaction history after upgrading.
+
+## [18.20.1] - 2026-11-14
+
+### Fixed
+
+- Fixed Traces tab timing so background jobs show their actual completion times, including accurate idle periods and turn durations.
+- Fixed per-model message counts on the Frustration page to include all answered messages.
+- Improved dashboard responsiveness by keeping other pages and Live status available while Spotlight rebuilds.
 - Fixed daily usage charts to group activity by the user's local calendar day instead of UTC.
 
 ## [18.20.0] - 2026-11-12

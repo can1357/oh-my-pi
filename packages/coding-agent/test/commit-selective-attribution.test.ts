@@ -78,22 +78,48 @@ describe("selective commit attribution", () => {
 		expect(content).toBe(work);
 	});
 
-	it("does not duplicate lines when HEAD already contains part of the recorded work", () => {
-		const firstAfter = CODE.replace("return 1", "return 10");
-		const head = firstAfter; // the first edit was committed meanwhile
-		const secondAfter = firstAfter.replace("return 10", "return 100");
+	describe("history that predates HEAD", () => {
+		const created = "package demo\n\nfunc a() error {\n\treturn nil\n}\n\nfunc c() int {\n\treturn 3\n}\n";
+		const withB = created.replace("\nfunc c", '\nfunc b() string {\n\treturn "b"\n}\n\nfunc c');
 
-		const { content } = commitFor(
-			head,
-			[
-				{ actor: "Main", before: CODE, after: firstAfter },
-				{ actor: "Main", before: firstAfter, after: secondAfter },
-			],
-			secondAfter,
-			["Main"],
-		);
+		it("keeps committed lines in place when HEAD equals a recorded snapshot", () => {
+			const work = withB.replace("\treturn 3\n", "\tlog()\n\treturn 3\n");
 
-		expect(content).toBe(secondAfter);
+			const { content, verdicts } = commitFor(
+				withB,
+				[
+					{ actor: "TxnFix", before: null, after: created },
+					{ actor: "TxnFix", before: created, after: withB },
+					{ actor: "Main", before: withB, after: work },
+				],
+				work,
+				["Main"],
+			);
+
+			expect(verdicts).toEqual(["own +\tlog()"]);
+			expect(content).toBe(work);
+		});
+
+		it("keeps a partial commit's lines in place and treats them as committed", () => {
+			const mainLine = created.replace("package demo\n", "package demo\n\nconst m = 1\n");
+			const subLines = mainLine.replace("\nfunc c", '\nfunc b() string {\n\treturn "b"\n}\n\nfunc c');
+			const work = subLines.replace("\treturn nil\n", "\treturn errA\n");
+
+			const { content, verdicts } = commitFor(
+				withB, // TxnFix's lines were committed without Main's `const m`
+				[
+					{ actor: "TxnFix", before: null, after: created },
+					{ actor: "Main", before: created, after: mainLine },
+					{ actor: "TxnFix", before: mainLine, after: subLines },
+					{ actor: "Main", before: subLines, after: work },
+				],
+				work,
+				["Main"],
+			);
+
+			expect(verdicts.filter(verdict => !verdict.startsWith("own "))).toEqual([]);
+			expect(content).toBe(work);
+		});
 	});
 
 	it("puts an edit of another actor's uncommitted line in review instead of committing it half", () => {

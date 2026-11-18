@@ -35,7 +35,9 @@ impl SortedWords {
 		let text = std::str::from_utf8(blob).context("web prior: words are not UTF-8")?;
 		let mut ends = Vec::with_capacity(count);
 		let mut joined = String::with_capacity(text.len());
-		for word in text.split_terminator('\n') {
+		for line in xutf::lines_str(text, xutf::LineEnds::Lf) {
+			let full = line.with_end();
+			let word = full.strip_suffix('\n').unwrap_or(full);
 			joined.push_str(word);
 			ends.push(joined.len() as u32);
 		}
@@ -356,4 +358,19 @@ pub fn web_prior() -> anyhow::Result<&'static WebPrior> {
 	static PRIOR: LazyLock<Result<WebPrior, String>> =
 		LazyLock::new(|| WebPrior::decode(ARTIFACT).map_err(|error| format!("{error:#}")));
 	PRIOR.as_ref().map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::SortedWords;
+
+	#[test]
+	fn word_list_preserves_cr_and_unterminated_last_word() {
+		let words = SortedWords::parse("a\r\n\n終".as_bytes(), 3).unwrap();
+		assert_eq!(words.get(0), "a\r");
+		assert_eq!(words.get(1), "");
+		assert_eq!(words.get(2), "終");
+		assert_eq!(SortedWords::parse(b"", 0).unwrap().len(), 0);
+		assert_eq!(SortedWords::parse(b"a\n", 1).unwrap().len(), 1);
+	}
 }

@@ -38,6 +38,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
+import type { MCPLoadResult } from "../mcp";
 import type { CacheWarmer } from "./cache-warmer";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
@@ -422,6 +423,12 @@ export interface AgentSessionConfig {
 	advisorConfigWarnings?: string[];
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * Reconnect the MCP manager owned by this session against the session's current cwd and
+	 * rebind its tools; serialized. Resolves `undefined` once the session is disposed. Absent
+	 * when the session borrows or disables MCP.
+	 */
+	reloadOwnedMcpServers?: () => Promise<MCPLoadResult | undefined>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 	/**
@@ -641,6 +648,9 @@ export interface ResetSessionContextResult {
 
 /** Queued user content restored to the editor. */
 export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+
+/** A queued message the dequeue key took back, tagged with the queue it left so the editor can restore its delivery. */
+export type DequeuedMessage = RestoredQueuedMessage & { queue: "steering" | "followUp" };
 
 /** Options for the same ephemeral side turn used by /btw. */
 export interface EphemeralTurnOptions {

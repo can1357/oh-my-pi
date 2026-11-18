@@ -187,7 +187,7 @@ describe("AgentSession.switchSession previous-context build", () => {
 		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
 	});
-	it("reports a target whose recorded directory is gone instead of resuming it here", async () => {
+	it("resumes a target whose recorded directory is gone in the current cwd", async () => {
 		const sourceDir = TempDir.createSync("@pi-switch-gone-source-");
 		const targetDir = TempDir.createSync("@pi-switch-gone-target-");
 		tempDirs.push(sourceDir, targetDir);
@@ -195,7 +195,6 @@ describe("AgentSession.switchSession previous-context build", () => {
 		const { session, sessionManager } = buildSession(sourceDir);
 		sessionManager.appendMessage({ role: "user", content: "source", timestamp: 1 });
 		await sessionManager.flush();
-		const previousSessionFile = sessionManager.getSessionFile();
 		const goneProject = path.join(targetDir.path(), "project");
 		await fs.mkdir(goneProject);
 		const targetManager = SessionManager.create(goneProject, targetDir.path());
@@ -207,11 +206,14 @@ describe("AgentSession.switchSession previous-context build", () => {
 		await fs.rm(goneProject, { recursive: true });
 
 		const onCwdChange = vi.fn(async () => true);
-		await expect(session.switchSession(targetSessionFile!, { onCwdChange })).rejects.toThrow(goneProject);
+		const switched = await session.switchSession(targetSessionFile!, { onCwdChange });
 
+		// The manager keeps the current cwd; callers detect the fallback via recorded ≠ runtime cwd.
+		expect(switched).toBe(true);
 		expect(onCwdChange).not.toHaveBeenCalled();
-		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
+		expect(sessionManager.getSessionFile()).toBe(targetSessionFile);
 		expect(sessionManager.getCwd()).toBe(sourceDir.path());
+		expect(sessionManager.getRecordedCwd()).toBe(goneProject);
 	});
 	it("rejects callback-free switches across project directories", async () => {
 		const sourceDir = TempDir.createSync("@pi-switch-no-callback-source-");

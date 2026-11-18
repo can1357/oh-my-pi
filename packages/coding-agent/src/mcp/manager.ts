@@ -486,6 +486,15 @@ export class MCPManager implements MCPManagerApi {
 	) {}
 
 	/**
+	 * Re-point project config discovery and the advertised `roots/list` at `cwd`
+	 * after the owning session moved. Connected servers keep the roots they were
+	 * given (roots are advertised without `listChanged`), so callers reconnect.
+	 */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+	}
+
+	/**
 	 * Register a listener for MCP connection lifecycle events
 	 * (`connecting` / `connected` / `failed`).
 	 *

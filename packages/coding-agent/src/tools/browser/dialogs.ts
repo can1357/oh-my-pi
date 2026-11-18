@@ -113,6 +113,11 @@ export class RuntimeDialogController {
 		await this.#settle(dialog, options.accept, options.text);
 	}
 
+	/** The browser closed the dialog: answered here, by the user's click, or by another CDP client. */
+	closed(): void {
+		this.#pending = undefined;
+	}
+
 	readonly #onDialog = (dialog: Dialog): void => {
 		const policy = this.#policy;
 		if (policy) {
