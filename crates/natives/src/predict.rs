@@ -3,7 +3,9 @@
 //! [`TextPredictor`] owns one [`omp_predict::Predictor`] on a dedicated engine
 //! thread, so inference, learning, and persistence never block the JS thread
 //! and each engine keeps a stable thread identity (required by `AppKit` for the
-//! `apple` method). The text-prediction daemon creates one per active method.
+//! `apple` method). The constructor only spawns the thread (the engine opens
+//! there); every working method returns a Promise. The omp daemon's `predict`
+//! module creates one per active method.
 
 use napi::{Error, Result, Status};
 use napi_derive::napi;
@@ -41,7 +43,8 @@ fn open_engine(options: &TextPredictorOptions) -> Engine {
 		#[allow(clippy::cast_possible_truncation, reason = "thresholds are probabilities")]
 		show_threshold: options.show_threshold.map(|value| value as f32),
 	};
-	let opened = Method::parse(&options.method).and_then(|method| omp_predict::open(method, &config));
+	let opened =
+		Method::parse(&options.method).and_then(|method| omp_predict::open(method, &config));
 	opened.map_err(|error| format!("{error:#}"))
 }
 

@@ -338,8 +338,8 @@ impl AddRequest {
 				.any(|entry| entry.branch.as_deref() == Some(full.as_str()))
 		};
 		let branch_exists = |branch: &str| repo.ref_exists(&format!("refs/heads/{branch}"));
-		// Whether creating a branch at `start` stays untracked, as omp-vcs creates
-		// it.
+		// Whether creating a branch at `start` stays untracked, as omp-vcs
+		// creates it.
 		let untracked = |start: &str| match self.track {
 			Some(false) => Ok(true),
 			_ => creates_untracked_branch(&repo, start),

@@ -9,11 +9,11 @@ use std::{
 };
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use omp_vfs::{
 	DirEntry, File, FileHandle, FileKind, FileSystem, FileType, Fs, Metadata, OpenOptions,
 	Permissions, ReadDir,
 };
+use parking_lot::Mutex;
 
 /// One node of a [`MemFs`] tree.
 #[derive(Debug)]

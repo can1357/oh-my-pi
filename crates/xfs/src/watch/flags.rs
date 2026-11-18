@@ -5,7 +5,8 @@ use std::{
 	ops::{BitAnd, BitOr, BitOrAssign, Not},
 };
 
-/// The changes one [`Event`](crate::watch::Event) reports, and what its path is.
+/// The changes one [`Event`](crate::watch::Event) reports, and what its path
+/// is.
 ///
 /// The bits are those of fswatch's `fsw_event_flag`, so a numeric rendering
 /// matches `fswatch --numeric`.

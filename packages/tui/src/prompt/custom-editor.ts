@@ -54,8 +54,8 @@ import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "
 import { type WordCompletionMethod, WordCompletionProvider } from "./word-completion";
 import { fgOrPlain, theme } from "../theme/theme";
 
-/** A shell-mode draft's sigil (`!`, `!!`, `$`, `$$`) with its surrounding blanks; the mode chip stands in for it natively. */
-const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?)[ \t]?/;
+/** A mode draft's sigil (`!`, `!!`, `$`, `$$`, `?`) with its surrounding blanks; the mode chip stands in for it natively. */
+const SHELL_SIGIL_RE = /^\s*(?:!!?|\$\$?|\?)[ \t]?/;
 
 /** The untitled session's TSP placeholder; the rotating ANSI hints (thinking effort, …) move into control tooltips. */
 const NATIVE_COMPOSER_PLACEHOLDER = "What are we cooking?";
@@ -64,8 +64,12 @@ const ASK_PLACEHOLDER = "Answer above, or type here to skip the questions";
 
 /** Live composer state the TSP layout shows; the interactive host wires {@link CustomEditor.composerState}. */
 export interface ComposerNativeState {
-	/** The draft runs as a shell command (`!`, `!!`) or Python (`$`, `$$`); `excluded` keeps it from the model. */
-	readonly shell?: { readonly kind: "bash" | "python"; readonly excluded: boolean };
+	/**
+	 * The draft runs as a shell command (`!`, `!!`), Python (`$`, `$$`) or a `/btw` side question (`?`);
+	 * `excluded` keeps it from the model. Role `omp.editor.<kind>`, except btw's `omp.editor.btw-ask`
+	 * (`omp.editor.btw` is the focused note's).
+	 */
+	readonly shell?: { readonly kind: "bash" | "python" | "btw"; readonly excluded: boolean };
 	/** Thinking effort word (`high`, `off`, `auto`); undefined when the model has no thinking. */
 	readonly thinking?: string;
 	/** The thinking level draws as the model chip's icon instead of its own chip (where the terminal has `effort`). */
@@ -1167,8 +1171,11 @@ export class CustomEditor extends Editor {
 		}
 		return this.#titlePlaceholder.text;
 	};
-	/** A shell-mode draft highlights as its language. */
-	override describeLanguage = (): string | undefined => this.composerState().shell?.kind;
+	/** A shell-mode draft highlights as its language; a btw draft is prose. */
+	override describeLanguage = (): string | undefined => {
+		const kind = this.composerState().shell?.kind;
+		return kind === "btw" ? undefined : kind;
+	};
 	/** Host-owned live state for the TSP composer (shell mode, effort chip, send/stop). */
 	composerState: () => ComposerNativeState = () => IDLE_COMPOSER;
 	/** The attachment band, described inside the composer on a TSP terminal (ANSI renders it above). */
@@ -1189,7 +1196,7 @@ export class CustomEditor extends Editor {
 		| undefined;
 
 	/**
-	 * The TSP composer: role `omp.editor[.bash|.python|.btw]` (tone `pending` while
+	 * The TSP composer: role `omp.editor[.bash|.python|.btw-ask|.btw]` (tone `pending` while
 	 * a turn runs) over the context hairline, the viewing header while a
 	 * subagent is focused, the attachment chips, a `line` row of the
 	 * shell-mode (or `btw`) chip and the input, and the `bar`: model chip, effort chip
@@ -1273,7 +1280,11 @@ export class CustomEditor extends Editor {
 			"line",
 		);
 		const layout: NativeEditorLayout = {
-			role: shell ? `omp.editor.${shell.kind}` : state.btw ? "omp.editor.btw" : "omp.editor",
+			role: shell
+				? `omp.editor.${shell.kind === "btw" ? "btw-ask" : shell.kind}`
+				: state.btw
+					? "omp.editor.btw"
+					: "omp.editor",
 			tone: state.running ? "pending" : undefined,
 			...(folded ? { folded: true } : {}),
 			children: compact([facts?.context, controls.focus, chips, line, bar]),
@@ -1519,7 +1530,12 @@ export class CustomEditor extends Editor {
 					: undefined;
 			return { focus, mode, model, effort, dictation, submit };
 		}
-		const runs = shell.kind === "bash" ? "Runs in your shell" : "Runs in Python";
+		const runs =
+			shell.kind === "bash"
+				? "Runs in your shell"
+				: shell.kind === "python"
+					? "Runs in Python"
+					: "Asks a /btw side question";
 		const mode = keyed(
 			row(
 				compact([
@@ -1527,7 +1543,7 @@ export class CustomEditor extends Editor {
 						node("icon", { name: "eye-off", title: "Not sent to the model" }, undefined, "excluded"),
 					node(
 						"text",
-						{ spans: [span(shell.kind, shell.kind === "bash" ? "bashMode" : "pythonMode")], wrap: "none" },
+						{ spans: [span(shell.kind, `${shell.kind}Mode`)], wrap: "none" },
 						undefined,
 						"label",
 					),

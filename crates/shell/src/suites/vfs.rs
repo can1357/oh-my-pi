@@ -16,11 +16,11 @@ use std::{
 
 use async_trait::async_trait;
 use bstr::{BStr, BString};
-use parking_lot::Mutex;
 use omp_vfs::{
 	CanonicalizeOptions, DirEntry, FileHandle, FileSystem, FileType, Metadata, OpenOptions,
 	Permissions, ReadDir,
 };
+use parking_lot::Mutex;
 use tokio::runtime::Runtime;
 
 use crate::{
