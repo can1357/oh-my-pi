@@ -323,6 +323,20 @@
 - Added excludeFromContext to pi.sendMessage payloads so extensions can display and save per-turn messages without sending them to the model.
 - Added a 30-second retry window for CLI and print-mode commands while the authentication broker restarts or is briefly unavailable.
 - Added a notify option to the bash tool for reporting matching output from background commands and named services, waking idle sessions or ending blocked waits.
+- Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
+- `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
+- Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
+- A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
+- In Tern, running subagents and background jobs show as a tray of live cards over the composer instead of the agents/jobs pill: each card shows what its agent or job is doing, a click looks closer (Open, Stop or Cancel, Dismiss), finished agents fold into one done card, and the agents-hub key moves focus into the tray
+- The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
+- Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session
+- `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
+- `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
+- Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+- CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
+- Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+- A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, a drag that leaves a web slider part-way names the value it reached, and a drag whose slider or scroll bar did not move now fails with `InputFailed` instead of reporting success ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
@@ -369,10 +383,6 @@
 - Fixed MCP OAuth reauthentication errors to expose registration endpoints, status details, and remedies, and fixed auth-broker shutdown so refreshed tokens are saved safely.
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
-
-### Fixed
-
-- A macOS background drag on a web page's slider that the page does not follow now moves the slider to the value under the drag's end, a drag that leaves a web slider part-way names the value it reached, and a drag whose slider or scroll bar did not move now fails with `InputFailed` instead of reporting success ([#19195](https://github.com/can1357/oh-my-pi/pull/19195) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 
