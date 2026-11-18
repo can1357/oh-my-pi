@@ -62,11 +62,12 @@ function createCompletedCodexSse(text: string): string {
 
 // A fixed replacement payload pins the outgoing wire body so the serialized
 // JSON is byte-deterministic across the compress/decompress round-trip, and
-// keeps it above the 1 KiB compression floor.
+// keeps it above the 1 KiB compression floor. Fields are in wire order:
+// routing fields lead (withCodexRoutingFieldsFirst).
 const PINNED_PAYLOAD: Record<string, unknown> = {
 	model: "gpt-5.3-codex-spark",
-	input: [{ role: "user", content: [{ type: "input_text", text: "Say hello" }] }],
 	stream: true,
+	input: [{ role: "user", content: [{ type: "input_text", text: "Say hello" }] }],
 	prompt_cache_key: "zstd-test-cache-key",
 	instructions: "Be helpful. ".repeat(100),
 };
