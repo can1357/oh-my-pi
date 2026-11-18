@@ -200,6 +200,10 @@ export class ResetCredits implements ResetsApi {
 			if (sameIdentityField(options.plannedOrgId, orgId) === false) {
 				return { ...identity, orgId, ok: false, code: "no_account" };
 			}
+			// Unresolved, the consume would resolve it again unchecked.
+			if (options.plannedOrgId !== undefined && orgId === undefined && list.credits.length > 0) {
+				return { ...identity, ok: false, code: "organization_unavailable" };
+			}
 			const selected = list.credits.find(credit => credit.id === list.nextCreditId);
 			if (creditId && creditId !== list.nextCreditId) {
 				return { ...identity, ok: false, code: "offer_changed", creditId };
@@ -251,7 +255,7 @@ export class ResetCredits implements ResetsApi {
 			const consumed = await consumeClaudeResetCredit({
 				...auth,
 				baseUrl: list.baseUrl ?? auth.baseUrl,
-				orgId: list.orgId ?? access.orgId,
+				orgId,
 				credit: selected,
 				redeemRequestId: requestId,
 			});
