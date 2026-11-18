@@ -185,7 +185,7 @@ fn a_hunk_line_mentioning_the_end_marker_keeps_the_rest_of_its_section() {
 		format!("*** Begin Patch\n{body}\n*** End Patch"),
 		format!("<<'EOF'\n*** Begin Patch\n{body}\n*** End Patch\nEOF\n"),
 	] {
-		let args = pi_edit::stream_json::ArgSnapshot {
+		let args = omp_edit::stream_json::ArgSnapshot {
 			input: Some(input),
 			complete: true,
 			..Default::default()
@@ -203,7 +203,7 @@ fn indented_header_text_inside_an_update_hunk_stays_in_its_section() {
 	let parsed = parse_apply_patch(&input).unwrap();
 	assert_eq!(parsed.len(), 1);
 	assert_eq!(parsed[0].path, "secrets.env");
-	let args = pi_edit::stream_json::ArgSnapshot {
+	let args = omp_edit::stream_json::ArgSnapshot {
 		input: Some(input),
 		complete: true,
 		..Default::default()
