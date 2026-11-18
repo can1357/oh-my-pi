@@ -1,7 +1,7 @@
 /**
  * Bash command execution with streaming support and cancellation.
  *
- * Uses the embedded bash engine (pi-shell) through native bindings for shell
+ * Uses the embedded bash engine through native bindings for shell
  * execution.
  */
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -88,7 +88,7 @@ export interface BashExecutorOptions {
 	 */
 	streams?: PipeStreams;
 	/**
-	 * Receives the embedded shell's live trace of the command (pi-shell's
+	 * Receives the embedded shell's live trace of the command (omp-shell's
 	 * `RunTrace` snapshot) every {@link TRACE_POLL_MS} while it changed, and
 	 * once more after the run settles. The PTY path never calls it.
 	 */
@@ -936,7 +936,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timeoutTimer = setTimeout(onDeadline, remainingMs);
 				return;
 			}
-			// Explicit timeouts are enforced inside pi-natives via `timeoutMs`.
+			// Explicit timeouts are enforced inside omp-natives via `timeoutMs`.
 			// Give native cancellation time to flush pipeline output and drain the
 			// N-API bridge before this result-only watchdog gives up on the run.
 			if (!nativeOwnsTimeout) {

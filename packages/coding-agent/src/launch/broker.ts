@@ -896,7 +896,7 @@ class DaemonBroker {
 		// resyncs later, all answered here. The one exception is its
 		// INHERIT_CURSOR handshake, the first `CSI 6 n` on the stream, which the
 		// PTY layer answers before the child owns stdin
-		// (crates/pi-natives/src/pty.rs). ConPTY consumes one report for it;
+		// (crates/natives/src/pty.rs). ConPTY consumes one report for it;
 		// replying again would put a second report on the program's stdin,
 		// where the console decodes it as a keypress.
 		const responder = new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });

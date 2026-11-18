@@ -84,7 +84,7 @@ export interface BashToolDetails {
 	/** Text the command wrote to `out://`, oldest first; transcripts draw each as a reply after the call. */
 	replies?: string[];
 	/**
-	 * The embedded shell's live trace of the command (pi-shell `RunTrace`): every frame carries the
+	 * The embedded shell's live trace of the command (omp-shell `RunTrace`): every frame carries the
 	 * latest snapshot and the final result the last one. Absent on the PTY and user-shell paths.
 	 */
 	trace?: ShellTrace;

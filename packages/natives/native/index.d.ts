@@ -659,7 +659,7 @@ export declare class RunTrace {
   present(options: ShellVizOptions): string
 }
 
-/** Persistent embedded bash engine (pi-shell) shell session. */
+/** Persistent embedded bash engine shell session. */
 export declare class Shell {
   /**
    * Create a new shell session from optional configuration.
@@ -2309,7 +2309,7 @@ export declare enum Encoding {
 export declare function execReplace(argv: Array<string>): void
 
 /**
- * Execute a command in the embedded bash engine (pi-shell).
+ * Execute a command in the embedded bash engine.
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
  * streamed stdout/stderr output. Returns the exit code when the command
@@ -2863,7 +2863,7 @@ export declare enum IsoChangeKind {
 /**
  * Capture the changes between `lower` and `merged`.
  *
- * Uses [`pi_iso::IsolationBackend::diff`]'s default implementation —
+ * Uses [`omp_iso::IsolationBackend::diff`]'s default implementation —
  * `git diff` when `merged/.git` exists, otherwise a mtime-skipped tree
  * walk. The backend selection only affects the lifecycle methods; diff
  * behaviour is uniform.
@@ -2923,7 +2923,7 @@ export interface IsoProbeResult {
 /**
  * Pick the best backend available right now.
  *
- * `preferred` is treated as a hint — see [`pi_iso::resolve`] for the exact
+ * `preferred` is treated as a hint — see [`omp_iso::resolve`] for the exact
  * priority rules. Backend probes may spawn CLIs, so they run on the native
  * blocking pool.
  */
@@ -3674,7 +3674,7 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
 export declare function renderSnapcompactPng(text: string, options: SnapcompactRenderOptions): Promise<string>
 
 /**
- * Run the pi-shell engine as a process shell in this process (`omp zsh`,
+ * Run the shell engine as a process shell in this process (`omp zsh`,
  * `omp bash`, `omp sh`).
  *
  * `argv` is the shell's whole command line,
@@ -3750,7 +3750,7 @@ export declare function shellBuiltins(sessionEnv?: Record<string, string>): Arra
 
 /**
  * Options for executing a shell command via the embedded bash engine
- * (pi-shell).
+ *.
  */
 export interface ShellExecuteOptions {
   /** Command string to execute in the shell. */

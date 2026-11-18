@@ -148,7 +148,7 @@ function encodeSegment(name: string): string {
 
 /**
  * `base` URL followed by a `/`-separated path of raw entry names (a native
- * walk's root-relative result), each name percent-encoded as `pi_vfs::child_path` does.
+ * walk's root-relative result), each name percent-encoded as `omp_vfs::child_path` does.
  */
 export function joinUrlPath(base: string, relative: string): string {
 	return appendSegments(
