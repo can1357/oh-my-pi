@@ -355,6 +355,53 @@ describe("selective commit flow", () => {
 		},
 	);
 
+	it.skipIf(process.platform === "win32")(
+		"syncs the shared index to what a formatting pre-commit hook committed",
+		async () => {
+			const { root, journal, write } = await emptyRepo();
+			await Bun.write(path.join(root, "fixture.txt"), "let value = 0\n");
+			await Bun.write(path.join(root, "other.txt"), "other\n");
+			await git(root, ["add", "."]);
+			await git(root, ["commit", "-q", "-m", "seed"]);
+			await Bun.write(path.join(root, "other.txt"), "staged by the user\n");
+			await git(root, ["add", "other.txt"]);
+			await git(root, ["config", "core.hooksPath", ".git/hooks"]);
+			// Formats the file in place and stages the result into the index the hook was handed.
+			const hook = path.join(root, ".git/hooks/pre-commit");
+			await Bun.write(
+				hook,
+				[
+					"#!/bin/sh",
+					"set -eu",
+					"sed 's/value=/value = /' fixture.txt > fixture.tmp",
+					"mv fixture.tmp fixture.txt",
+					"blob=$(git hash-object -w fixture.txt)",
+					'git update-index --cacheinfo "100644,$blob,fixture.txt"',
+				].join("\n") + "\n",
+			);
+			await fs.chmod(hook, 0o755);
+
+			for (const value of [1, 2]) {
+				await write("Main", undefined, "fixture.txt", `let value=${value}\n`);
+				await journal.flush();
+				const draft = await createDraft({ cwd: root, journal, caller: "Main" });
+				const outcome = await commitSelection(
+					draft,
+					{ subject: `fix: set value ${value}` },
+					{ journal, agent: { agent: "Main" } },
+				);
+
+				const formatted = `let value = ${value}\n`;
+				expect(outcome.indexNotes).toEqual([]);
+				expect(await git(root, ["show", "HEAD:fixture.txt"])).toBe(formatted);
+				expect(await git(root, ["show", ":fixture.txt"])).toBe(formatted);
+				expect(await Bun.file(path.join(root, "fixture.txt")).text()).toBe(formatted);
+				// The user's staged work is neither committed nor unstaged.
+				expect(await git(root, ["status", "--porcelain"])).toBe("M  other.txt\n");
+			}
+		},
+	);
+
 	it("commits only one subagent's changes when scoped to it", async () => {
 		const { root, journal } = await sharedWorkspace();
 

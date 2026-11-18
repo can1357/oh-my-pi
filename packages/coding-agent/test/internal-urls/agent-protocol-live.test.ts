@@ -59,9 +59,9 @@ async function readText(url: string): Promise<string> {
 		getSessionFile: () => rootSessionFile,
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => artifactsDir,
-		allocateOutputArtifact: async toolType => ({
+		allocateOutputArtifact: async () => ({
 			id: "agent-read",
-			path: path.join(artifactsDir, `agent-read.${toolType}.log`),
+			path: path.join(artifactsDir, `agent-read.log`),
 		}),
 		settings: Settings.isolated(),
 	};

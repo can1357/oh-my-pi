@@ -4,6 +4,7 @@ pub(super) mod open_menu;
 mod placement;
 mod popup;
 mod selection;
+pub(crate) mod type_ahead;
 
 use std::{
 	collections::VecDeque,
@@ -788,17 +789,29 @@ fn element_at_point(x: f64, y: f64) -> Option<(libc::pid_t, CFRetained<AXUIEleme
 
 /// Raises a known window for explicit takeover or restoration.
 pub(super) fn raise_window_id(pid: libc::pid_t, wid: u32) -> CoreResult<()> {
+	let window = window_by_id(pid, wid)?;
+	MacAx::new().perform(&AxHandle::Mac(window), "AXRaise")
+}
+
+/// Window `wid` of process `pid`, looked up through accessibility, which can
+/// block on a busy app; `WindowNotFound` when accessibility does not list it.
+pub(super) fn window_by_id(pid: libc::pid_t, wid: u32) -> CoreResult<CFRetained<AXUIElement>> {
 	let app = probe_application(pid).ok_or_else(|| {
 		DesktopError::ax_failed(format!("cannot inspect process {pid} for AXRaise"))
 	})?;
 	let windows = copy_elements(&app, "AXWindows")?;
-	let window = windows
+	windows
 		.into_iter()
 		.find(|window| window_id(window) == Some(wid))
 		.ok_or_else(|| {
 			DesktopError::window_not_found(format!("window {wid} is no longer available for AXRaise"))
-		})?;
-	MacAx::new().perform(&AxHandle::Mac(window), "AXRaise")
+		})
+}
+
+/// Sends `AXRaise` to a window from [`window_by_id`] and reads nothing first,
+/// so a check made right before it still holds when the request goes out.
+pub(super) fn raise(window: &AXUIElement) -> CoreResult<()> {
+	perform_action(window, "AXRaise")
 }
 
 fn probe_application(pid: libc::pid_t) -> Option<CFRetained<AXUIElement>> {
@@ -1101,6 +1114,7 @@ impl AxBackend for MacAx {
 
 	fn props(&mut self, h: &AxHandle) -> CoreResult<AxProps> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let values = NodeValues::read(element, NodeRead::Props);
 		let mut count: CFIndex = 0;
 		// SAFETY: `count` is writable and the retained element outlives the
@@ -1128,6 +1142,7 @@ impl AxBackend for MacAx {
 		_max_children: u32,
 	) -> CoreResult<(AxProps, Vec<AxHandle>)> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let read = match read_bounds {
 			WalkBounds::Read => NodeRead::WalkWithBounds,
 			WalkBounds::Skip => NodeRead::Walk,
@@ -1290,6 +1305,7 @@ impl AxBackend for MacAx {
 
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>> {
 		let element = mac_handle(h)?;
+		type_ahead::settle_read(element)?;
 		let names = copy_attribute_names(element)?;
 		let mut result = Vec::with_capacity(names.len());
 		for name in names {
@@ -1322,6 +1338,14 @@ impl AxBackend for MacAx {
 
 	fn value_settable(&mut self, h: &AxHandle) -> Option<bool> {
 		attribute_settable_answer(mac_handle(h).ok()?, "AXValue")
+	}
+
+	fn pending(&mut self, h: &AxHandle) -> bool {
+		mac_handle(h).is_ok_and(type_ahead::pending)
+	}
+
+	fn settle(&mut self, h: &AxHandle) -> CoreResult<()> {
+		type_ahead::settle_read(mac_handle(h)?)
 	}
 }
 

@@ -331,6 +331,25 @@ describe("html form", () => {
 			form.dispose();
 		});
 
+		it("opens each field on its preselected answer, so Enter keeps it (#19657)", () => {
+			const { form } = dialog(`<form>
+<fieldset><legend>Store</legend>
+<label><input type="radio" name="db" value="sqlite"> SQLite</label>
+<label><input type="radio" name="db" value="pg" checked> Postgres</label>
+</fieldset>
+<fieldset><legend>Cache</legend>
+<label><input type="radio" name="cache" value="none"> None</label>
+<label><input type="radio" name="cache" value="redis" checked> Redis</label>
+</fieldset></form>`);
+			expect(form.debugState().focus).toBe("db=pg");
+			form.handleInput(ENTER);
+			expect(form.debugState().focus).toBe("cache=redis");
+			form.handleInput(ENTER);
+			form.handleInput(ENTER);
+			expect(form.data()).toMatchObject({ db: "pg", cache: "redis" });
+			form.dispose();
+		});
+
 		it("keeps checkbox drafts across navigation and projects only finally selected options", () => {
 			const { form } = dialog(DB_FORM);
 			form.handleInput("n");
@@ -345,7 +364,8 @@ describe("html form", () => {
 			form.handleInput(ENTER);
 			expect(form.data().extras).toEqual(["ci"]);
 			form.handleInput(SPACE);
-			form.handleInput("\x1b[Z");
+			form.handleInput("\x1b[Z"); // back to Database, on its answer (Postgres)
+			form.handleInput("\x1b[A");
 			form.handleInput("n");
 			form.handleInput("\x05");
 			form.handleInput(" edited");
@@ -878,7 +898,8 @@ describe("html form", () => {
 				const screen = () => view.term.getViewport().join("\n");
 				expect(view.form.debugState()).toMatchObject({ focus: "ok=on" });
 				expect(view.form.debugState().scroll).toBeGreaterThan(0);
-				expect(screen()).toContain("▣ first");
+				// Nothing follows the option, so no offset clears the first picture: it is a frame naming it.
+				expect(screen()).toContain("│ │ ▣ first");
 				expect(screen()).not.toContain("[Image");
 				expect(view.term.graphicsPlacements()).toHaveLength(1);
 				// ↑ on the question's only option: its head (the first picture) is cut off, so the body scrolls up.
@@ -887,6 +908,16 @@ describe("html form", () => {
 				expect(view.form.debugState()).toMatchObject({ scroll: 0, focus: "ok=on" });
 				expect(screen()).toContain("▣ second");
 				expect(screen()).not.toContain("[Image");
+			});
+
+			it("scrolls past a picture the body would cut at its top while the focused row stays in view", async () => {
+				const more = ["a", "b", "c", "d"].map(name => `<label>${name} <input type="text" name="${name}"></label>`);
+				const view = await kittyForm(TWO_PICTURES.replace("</form>", `${more.join("")}</form>`), { pictures: 2 });
+				const screen = view.term.getViewport().join("\n");
+				expect(view.form.debugState()).toMatchObject({ focus: "ok=on" });
+				expect(screen).not.toContain("▣ first");
+				expect(screen).toContain("OK");
+				expect(view.term.graphicsPlacements()).toHaveLength(1);
 			});
 
 			it("deletes a picture the budget evicted and sent again when the form closes", async () => {

@@ -58,6 +58,7 @@ const themeColorsSchema = type({
 	"thinkingMax?": "string | number",
 	bashMode: "string | number",
 	pythonMode: "string | number",
+	btwMode: "string | number",
 	statusLineBg: "string | number",
 	statusLineSep: "string | number",
 	statusLineModel: "string | number",

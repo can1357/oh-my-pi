@@ -3702,6 +3702,13 @@
 			],
 			"type": "string"
 		},
+		"CacheWarmingMethod": {
+			"enum": [
+				"prewarm",
+				"replay"
+			],
+			"type": "string"
+		},
 		"CacheWarmingOutcome": {
 			"enum": [
 				"hit",
@@ -4130,6 +4137,9 @@
 				"phase": {
 					"$ref": "#/$defs/CacheWarmingPhase"
 				},
+				"method": {
+					"$ref": "#/$defs/CacheWarmingMethod"
+				},
 				"provider": {
 					"type": "string"
 				},
@@ -4140,6 +4150,7 @@
 			"required": [
 				"type",
 				"phase",
+				"method",
 				"provider",
 				"model"
 			],
@@ -4153,6 +4164,9 @@
 				},
 				"phase": {
 					"$ref": "#/$defs/CacheWarmingPhase"
+				},
+				"method": {
+					"$ref": "#/$defs/CacheWarmingMethod"
 				},
 				"provider": {
 					"type": "string"
@@ -4175,6 +4189,7 @@
 			"required": [
 				"type",
 				"phase",
+				"method",
 				"provider",
 				"model",
 				"outcome"

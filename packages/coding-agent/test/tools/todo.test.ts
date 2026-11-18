@@ -57,7 +57,7 @@ describe("resolveTodoMarkdownPath", () => {
 	it("rejects internal URL schemes", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
-		expect(() => resolveTodoMarkdownPath("artifact://todo", cwd)).toThrow("internal scheme");
+		expect(() => resolveTodoMarkdownPath("agent://todo", cwd)).toThrow("internal scheme");
 	});
 });
 

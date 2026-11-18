@@ -198,5 +198,5 @@ export const usageHelp = {
 } satisfies CommandMetadata;
 
 export const worktreeHelp = {
-	description: "Add, list, or clear git worktrees (clone-first when enabled)",
+	description: "List or clear managed Git and ovnfs worktrees, or add a linked Git worktree at a path",
 } satisfies CommandMetadata;

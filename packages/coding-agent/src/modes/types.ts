@@ -172,6 +172,8 @@ export interface AgentHubOpenOptions {
 	requireContent?: boolean;
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
+	/** The agents-hub key: on a native host showing tray cards, focus moves into the tray instead. */
+	trayFirst?: boolean;
 }
 
 export interface InteractiveModeContext {
@@ -367,6 +369,8 @@ export interface InteractiveModeContext {
 	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[];
 	pythonComponent: EvalExecutionComponent | undefined;
 	isPythonMode: boolean;
+	/** The draft starts with `?`, the `/btw` shortcut. */
+	isBtwMode: boolean;
 	streamingComponent: AssistantMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
 	/**
@@ -730,7 +734,8 @@ export interface InteractiveModeContext {
 	 */
 	showCommandReport(options: { title: string; head?: TspText; body: Component }): void;
 	/** The live background-jobs sheet (the jobs pill's). */
-	showJobsSheet(): void;
+	/** The jobs sheet, on job `selected` when it lists it. */
+	showJobsSheet(selected?: string): void;
 	/** Clear the docked command report; false when none was shown (Esc falls through). */
 	dismissCommandReport(): boolean;
 	/** Screen rows a report above the editor may take (all of them but the editor and the chrome under it). */

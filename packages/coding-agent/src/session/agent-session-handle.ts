@@ -106,6 +106,12 @@ export interface AgentSessionHandle {
 	readonly runStartedAt: number | undefined;
 	/** Whether the session still owes turns to IRC messages (held, queued, or awaiting compaction). */
 	readonly ircWakesPending: boolean;
+	/**
+	 * Whether the agent acts again without anyone messaging it: its turn is streaming or
+	 * continues, or something wakes it once the turn ends (queued input, or a background
+	 * job, live service or running subagent of its own that is not waiting on it).
+	 */
+	readonly hasPendingWake: boolean;
 	/** Full message list, including custom message types. */
 	readonly messages: AgentMessage[];
 	/** Current transcript path, or undefined when sessions are disabled. */
@@ -183,8 +189,6 @@ export interface AgentViewSessionManager extends AgentSessionManagerHandle {
 	putBlobSync(data: Buffer, options?: BlobPutOptions): BlobPutResult;
 	/** Path of a session artifact, or null when it is gone. */
 	getArtifactPath(id: string): Promise<string | null>;
-	/** In-memory content of a session artifact (non-persistent sessions), or null; a worker-homed session answers asynchronously. */
-	getArtifactContent(id: string): string | null | Promise<string | null>;
 }
 
 /** TTSR rule source the TUI's link resolver reads. */

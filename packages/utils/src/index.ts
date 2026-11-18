@@ -35,6 +35,7 @@ export * from "./runtime-install";
 export * from "./sanitize-text";
 export * from "./slugify";
 export * from "./snowflake";
+export * from "./spill-url";
 export * from "./sqlite";
 export * from "./stderr-guard";
 export * from "./stream";

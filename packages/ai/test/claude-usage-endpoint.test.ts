@@ -193,7 +193,9 @@ describe("claudeUsageProvider usage endpoint resolution", () => {
 
 describe("claudeUsageProvider subscription plan", () => {
 	const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
-	const profile = (type: string, tier: string) => ({ organization: { organization_type: type, rate_limit_tier: tier } });
+	const profile = (type: string, tier: string) => ({
+		organization: { organization_type: type, rate_limit_tier: tier },
+	});
 
 	it("labels Max plans by rate-limit tier and other plans by organization type", () => {
 		expect(claudeProfilePlan(profile("claude_max", "default_claude_max_20x"))).toBe("Max 20x");

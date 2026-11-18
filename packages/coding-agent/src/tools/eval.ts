@@ -190,7 +190,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 			continue;
 		}
 		const summary = evalPreludeSummary(prelude);
-		if (!summary) continue;
+		if (summary === undefined) continue;
 		// Without `read` every topic is inlined in full, so a first-call guide changes nothing there.
 		if (prelude.firstCallDocumentation?.trim() && options.firstCallGuides && !options.inlineTopics) {
 			firstCallPreludes.push({ name: prelude.name, summary });
@@ -862,7 +862,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 			const sessionFile = session.getSessionFile?.() ?? undefined;
 			const kernelOwnerId = session.getEvalKernelOwnerId?.() ?? undefined;
-			const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.("eval")) ?? {};
+			const { path: artifactPath, id: artifactId } = (await session.allocateOutputArtifact?.()) ?? {};
 			session.assertEvalExecutionAllowed?.();
 			outputSink = new OutputSink({
 				artifactPath,

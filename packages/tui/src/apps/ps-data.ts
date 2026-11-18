@@ -1,47 +1,36 @@
-import * as path from "node:path";
 import { formatDuration, SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { DaemonSnapshot, DaemonSpec, DaemonState } from "../tools/daemon";
+import type { DaemonState, ProcSpec, UnitScope, UnitSnapshot } from "../tools/daemon";
 
-/** One broker scope: a project runtime dir or a machine-global service dir. */
-export interface PsScope {
-	kind: "project" | "global";
-	runtimeDir: string;
-	/** Canonical project dir when known; used to connect and displayed as the scope label. */
-	projectDir?: string;
-	/** Global service name (`kind === "global"`). */
-	service?: string;
-	/** Live broker PID; undefined when no broker owns the scope. */
-	brokerPid?: number;
+/** The daemon answering the board, absent when the board was read from its store offline. */
+export interface PsDaemonInfo {
+	pid: number;
+	build: string;
+	startedAt: number;
 }
 
-/** One process snapshot and its table display metadata. */
-export interface PsDaemonRow {
-	snapshot: DaemonSnapshot;
-	/** Launch command from the persisted spec, when readable. */
-	command?: string;
-	cwd?: string;
-	/** False when the snapshot came from disk with no live broker supervising it. */
-	supervised: boolean;
-}
-
-/** Process rows grouped under their owning broker scope. */
+/** Units grouped under one scope. */
 export interface PsScopeReport {
-	scope: PsScope;
-	daemons: PsDaemonRow[];
+	scope: UnitScope;
+	units: UnitSnapshot[];
 }
 
-/** Scope selector shared by every ps action: current project, `--dir`, or `--global`. */
+/** The whole board: every selected unit, grouped global → projects → sessions. */
+export interface PsBoard {
+	daemon?: PsDaemonInfo;
+	reports: PsScopeReport[];
+}
+
+/** Project selector shared by every ps action: the current project or `--dir`. */
 export interface PsTarget {
 	dir?: string;
-	global?: string;
 }
 
-/** Process states without a running process or live uptime. */
+/** Unit states without a running process or live uptime. */
 export const TERMINAL_STATES: Partial<Record<DaemonState, true>> = { exited: true, failed: true };
 
 /** Combine an executable and its arguments for display; a shell process shows as the command it runs. */
-export function formatCommand(spec: DaemonSpec | undefined): string | undefined {
+export function formatCommand(spec: ProcSpec | undefined): string | undefined {
 	if (!spec) return undefined;
 	if (spec.args.includes(SHELL_PROCESS_SELECTOR)) return spec.args.at(-1);
 	return [spec.application, ...spec.args].join(" ");
@@ -52,67 +41,137 @@ export function collapseCommand(command: string | undefined): string {
 	return command ? command.replaceAll(/\s+/gu, " ").trim() : "";
 }
 
-/** One-line daemon summary used by action results and detail views. */
-export function daemonLabel(daemon: DaemonSnapshot): string {
-	const pid = daemon.pid === undefined ? "" : ` pid=${daemon.pid}`;
-	const exit = daemon.exitCode === undefined ? "" : ` exit=${daemon.exitCode}`;
-	return `${daemon.name}: ${daemon.state}${pid}${exit}`;
+/** Display name of a unit: its label, else its key. */
+export function unitName(unit: UnitSnapshot): string {
+	return unit.label || unit.key;
+}
+
+/** One-line unit summary used by action results and detail views. */
+export function unitLabel(unit: UnitSnapshot): string {
+	const pid = unit.pids.length === 0 || TERMINAL_STATES[unit.state] ? "" : ` pid=${unit.pids.join(",")}`;
+	const exit = unit.exitCode === undefined ? "" : ` exit=${unit.exitCode}`;
+	return `${unit.kind} ${unitName(unit)}: ${unit.state}${pid}${exit}`;
 }
 
 /** Colored STATE cell, e.g. `ready`, `exited(143)`. */
-export function stateCell(row: PsDaemonRow): string {
-	const { snapshot } = row;
-	let text: string = snapshot.state;
-	if (TERMINAL_STATES[snapshot.state] && snapshot.exitCode !== undefined) text += `(${snapshot.exitCode})`;
+export function stateCell(unit: UnitSnapshot): string {
+	let text: string = unit.state;
+	if (TERMINAL_STATES[unit.state] && unit.exitCode !== undefined) text += `(${unit.exitCode})`;
 	const paint =
-		snapshot.state === "ready" || snapshot.state === "running"
+		unit.state === "ready" || unit.state === "running"
 			? chalk.green
-			: snapshot.state === "failed"
+			: unit.state === "failed"
 				? chalk.red
-				: TERMINAL_STATES[snapshot.state]
+				: TERMINAL_STATES[unit.state]
 					? chalk.dim
 					: chalk.yellow;
 	return paint(text);
 }
 
-/** Display persistence and supervision flags for a process row. */
-export function flagsCell(row: PsDaemonRow): string {
+/** Display lifetime and supervision flags for a unit. */
+export function flagsCell(unit: UnitSnapshot): string {
 	const parts: string[] = [];
-	if (row.snapshot.detached) parts.push("detached");
-	else if (row.snapshot.persist) parts.push("persist");
-	if (!row.supervised && !TERMINAL_STATES[row.snapshot.state]) parts.push("unsupervised");
+	if (unit.policy.hold !== "leases") parts.push(unit.policy.hold);
+	if (!unit.supervised && !TERMINAL_STATES[unit.state]) parts.push("unsupervised");
 	return parts.join(",");
 }
 
-/** Display elapsed runtime, or a dash for a terminal process. */
-export function uptimeCell(snapshot: DaemonSnapshot): string {
-	if (TERMINAL_STATES[snapshot.state]) return "-";
-	return formatDuration(Date.now() - snapshot.startedAt);
+/** Display elapsed runtime, or a dash for a terminal unit. */
+export function uptimeCell(unit: UnitSnapshot): string {
+	if (TERMINAL_STATES[unit.state]) return "-";
+	return formatDuration(Date.now() - unit.startedAt);
 }
 
-/** Labels aligned with the process table's display cells. */
-export const TABLE_HEADER = ["NAME", "STATE", "PID", "UPTIME", "RESTARTS", "FLAGS", "COMMAND"];
+/** Countdown to the idle policy stopping the unit, or a dash while it is held. */
+export function idleCell(unit: UnitSnapshot): string {
+	if (unit.idleAt === undefined || TERMINAL_STATES[unit.state]) return "-";
+	return `in ${formatDuration(Math.max(0, unit.idleAt - Date.now()))}`;
+}
 
-/** Raw (possibly colored) cells for one daemon row, aligned with {@link TABLE_HEADER}. */
-export function tableCells(row: PsDaemonRow): string[] {
+/** Process ids of a live unit, or a dash. */
+export function pidsCell(unit: UnitSnapshot): string {
+	return unit.pids.length > 0 && !TERMINAL_STATES[unit.state] ? unit.pids.join(",") : "-";
+}
+
+/** Labels aligned with the board table's display cells. */
+export const TABLE_HEADER = [
+	"KIND",
+	"NAME",
+	"STATE",
+	"PID",
+	"UPTIME",
+	"LEASES",
+	"IDLE",
+	"RESTARTS",
+	"FLAGS",
+	"COMMAND",
+];
+
+/** Raw (possibly colored) cells for one unit, aligned with {@link TABLE_HEADER}. */
+export function tableCells(unit: UnitSnapshot): string[] {
 	return [
-		row.snapshot.name,
-		stateCell(row),
-		row.snapshot.pid !== undefined && !TERMINAL_STATES[row.snapshot.state] ? String(row.snapshot.pid) : "-",
-		uptimeCell(row.snapshot),
-		String(row.snapshot.restartCount),
-		flagsCell(row),
-		collapseCommand(row.command),
+		unit.kind,
+		unitName(unit),
+		stateCell(unit),
+		pidsCell(unit),
+		uptimeCell(unit),
+		String(unit.leases),
+		idleCell(unit),
+		String(unit.restartCount),
+		flagsCell(unit),
+		collapseCommand(unit.command),
 	];
 }
 
-/** Scope heading, e.g. `project /work/pi — broker pid 1234`. */
-export function scopeHeader(scope: PsScope): string {
-	const label =
-		scope.kind === "global"
-			? `global ${chalk.bold(scope.service ?? path.basename(scope.runtimeDir))}`
-			: `project ${chalk.bold(scope.projectDir ?? path.basename(scope.runtimeDir))}`;
-	const broker =
-		scope.brokerPid !== undefined ? chalk.green(`broker pid ${scope.brokerPid}`) : chalk.dim("broker not running");
-	return `${label} ${chalk.dim("—")} ${broker}`;
+/** Stable text form of a scope (matches `scopeKey` on the daemon wire). */
+export function scopeId(scope: UnitScope): string {
+	if (scope.kind === "global") return "global";
+	return scope.kind === "project" ? `project:${scope.dir}` : `session:${scope.id}`;
+}
+
+/** Plain scope label, e.g. `project /work/pi`. */
+export function scopeTitle(scope: UnitScope): { kind: string; name: string } {
+	if (scope.kind === "global") return { kind: "global", name: "" };
+	return scope.kind === "project" ? { kind: "project", name: scope.dir } : { kind: "session", name: scope.id };
+}
+
+/** Scope heading, e.g. `project /work/pi`. */
+export function scopeHeader(scope: UnitScope): string {
+	const { kind, name } = scopeTitle(scope);
+	return name ? `${kind} ${chalk.bold(name)}` : chalk.bold(kind);
+}
+
+/** Board heading naming the daemon, or that the rows come from its store. */
+export function daemonHeader(daemon: PsDaemonInfo | undefined): string {
+	if (!daemon) return chalk.dim("daemon not running — showing stored units");
+	return `${chalk.green(`daemon pid ${daemon.pid}`)} ${chalk.dim(`· ${daemon.build}`)}`;
+}
+
+const SCOPE_ORDER: Record<UnitScope["kind"], number> = { global: 0, project: 1, session: 2 };
+
+function compareUnits(a: UnitSnapshot, b: UnitSnapshot): number {
+	const aTerminal = TERMINAL_STATES[a.state] === true;
+	const bTerminal = TERMINAL_STATES[b.state] === true;
+	if (aTerminal !== bTerminal) return aTerminal ? 1 : -1;
+	return a.kind.localeCompare(b.kind) || unitName(a).localeCompare(unitName(b));
+}
+
+/** Group units by scope: global first, then projects, then sessions; live units before exited ones. */
+export function groupUnits(units: readonly UnitSnapshot[]): PsScopeReport[] {
+	const groups = new Map<string, PsScopeReport>();
+	for (const unit of units) {
+		const id = scopeId(unit.scope);
+		let group = groups.get(id);
+		if (!group) {
+			group = { scope: unit.scope, units: [] };
+			groups.set(id, group);
+		}
+		group.units.push(unit);
+	}
+	const reports = [...groups.values()];
+	for (const report of reports) report.units.sort(compareUnits);
+	return reports.sort(
+		(a, b) =>
+			SCOPE_ORDER[a.scope.kind] - SCOPE_ORDER[b.scope.kind] || scopeId(a.scope).localeCompare(scopeId(b.scope)),
+	);
 }

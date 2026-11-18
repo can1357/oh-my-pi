@@ -23,6 +23,7 @@ const OPTION_TIERS = {
 	repetitionPenalty: "client",
 	stopSequences: "client",
 	maxTokens: "client",
+	prewarm: "client",
 	reasoning: "client",
 	disableReasoning: "client",
 	forceReasoningOff: "client",

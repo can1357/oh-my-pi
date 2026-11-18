@@ -1,5 +1,5 @@
 import type { Component } from "../tui";
-import { getProjectDir, jsonContainerEnd, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getProjectDir, jsonContainerEnd, sanitizeText, spillUrl } from "@oh-my-pi/pi-utils";
 import { highlightCode, type Theme } from "../theme/theme";
 import { renderStatusLine } from "../render/status-line";
 import { framedToolCard, type ToolCardSnapshot } from "../render/tool-card";
@@ -387,7 +387,7 @@ function bashStatsParts(
 		);
 	}
 	if (artifactId) {
-		statsParts.push(`Artifact: ${artifactId}`);
+		statsParts.push(`Full output: ${spillUrl(artifactId)}`);
 	}
 	const minimized = details?.meta?.minimized;
 	if (minimized) {

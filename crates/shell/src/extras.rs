@@ -51,8 +51,8 @@ use std::{
 };
 
 use bstr::{BStr, BString, ByteSlice};
-use parking_lot::Mutex;
 use omp_builtins::extras::{ExtraKind, Fd, Invocation, SpeechHost};
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::{

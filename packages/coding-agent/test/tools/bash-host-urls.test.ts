@@ -9,16 +9,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as daemonClients from "@oh-my-pi/pi-coding-agent/daemon/client";
+import type { DaemonClient } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { runEvalShell } from "@oh-my-pi/pi-coding-agent/eval/shell-bridge";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import * as brokerClients from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { hostCommandUrls, type UrlBacking } from "@oh-my-pi/pi-coding-agent/tools/bash-host-urls";
 import { TUI } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { initTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { ProcSpec, UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import { SHELL_PROCESS_SELECTOR } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 
@@ -169,37 +170,40 @@ describe("bash internal URLs outside the embedded shell", () => {
 	});
 
 	it("starts a named service as a shell process that gets its command as written", async () => {
-		const daemon: DaemonSnapshot = {
-			name: "web",
+		const daemon: UnitSnapshot = {
 			id: "web-1",
+			kind: "proc",
+			scope: { kind: "project", dir: tempDir },
+			key: "web",
+			label: "web",
+			generation: "web-gen-1",
 			state: "running",
-			pid: 1,
+			pids: [1],
 			createdAt: 1,
 			startedAt: 1,
 			restartCount: 0,
 			outputBytes: 0,
 			owner: "bash-host-urls",
-			persist: false,
-			detached: false,
+			leases: 1,
+			policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "exec" },
+			supervised: true,
 		};
-		let started: DaemonSpec | undefined;
-		const client: brokerClients.DaemonBrokerClient = {
-			projectDir: tempDir,
+		let started: ProcSpec | undefined;
+		const client = {
 			onCompletion: () => () => {},
 			onNotify: () => () => {},
+			onReconnect: () => () => {},
 			close() {},
-			async request(operation) {
-				if (operation.op === "start") {
-					started = operation.spec;
-					return { op: "start", daemon, readyTimedOut: false, notifyArmed: false };
+			async request(operation: { op: string; proc?: ProcSpec }) {
+				if (operation.op === "open") {
+					started = operation.proc;
+					return { unit: daemon, lease: "lease-1", created: true };
 				}
-				if (operation.op === "logs") {
-					return { op: "logs", name: "web", text: "", cursor: 0, timedOut: false, state: "running" };
-				}
-				throw new Error(`Unexpected broker op ${operation.op}`);
+				if (operation.op === "logs") return { text: "", terminalOutput: "", cursor: 0, unit: daemon };
+				throw new Error(`Unexpected daemon op ${operation.op}`);
 			},
-		};
-		vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
+		} as unknown as DaemonClient;
+		vi.spyOn(daemonClients, "daemonClient").mockResolvedValue(client);
 
 		await new BashTool(session).execute("start-web", {
 			command: `SEED=local://data.txt uv run python local://serve.py --prompt "$(cat local://data.txt)" < local://data.txt; omp read local://data.txt:1-2`,
