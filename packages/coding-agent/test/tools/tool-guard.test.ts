@@ -296,6 +296,41 @@ describe("tool guard", () => {
 		}
 	});
 
+	it("judges date, hostname and file when they set the clock, rename the host or compile a magic file", () => {
+		for (const command of [
+			"date -s '2020-01-01'",
+			"date --set=2020-01-01",
+			"date --se 2020-01-01",
+			"date -us 2020-01-01",
+			"date 010112002020",
+			"date -d tomorrow 010112002020",
+			"hostname prod-db-2",
+			"hostname -F /etc/hostname",
+			"hostname -b prod-db-2",
+			"file -C -m magic",
+			"file -zC -m magic",
+			"file --compile -m magic",
+			"file --comp -m magic",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(false);
+		}
+		for (const command of [
+			"date",
+			"date +%s",
+			"date -u +%Y-%m-%d",
+			"date -d tomorrow +%F",
+			"date --date='2 days ago'",
+			"date -Iseconds",
+			"date -r notes.txt",
+			"hostname",
+			"hostname -f",
+			"file notes.txt",
+			"file -m magic notes.txt",
+		]) {
+			expect(isReadOnlyCommand(command)).toBe(true);
+		}
+	});
+
 	it("lets the call through when the judge fails or answers malformed", async () => {
 		const failing: GuardJudge = {
 			judge: async () => {

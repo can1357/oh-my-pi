@@ -257,8 +257,46 @@ function readOnlySet(args: string[]): boolean {
 
 /** `uniq` options whose value is the next word (`-f 1`, `-cw 3`, `--skip-chars 2`). */
 const UNIQ_VALUE_OPTION = /^(?:-[a-zA-Z]*[fsw]|--(?:skip-fields|skip-chars|check-chars))$/;
+/** `date` long options whose value may be the next word (`--date tomorrow`). */
+const DATE_VALUE_OPTIONS = ["--date", "--file", "--reference", "--rfc-3339"];
+/** `hostname` flags that only print a name or address; an operand, `-F FILE` and `-b` set the name. */
+const HOSTNAME_DISPLAY =
+	/^(?:-[aAdfhiIsvVy]+|--(?:alias|all-fqdns|all-ip-addresses|domain|fqdn|help|ip-address|long|nis|short|verbose|version|yp))$/;
+/** `file -C`, also inside a cluster (`-zC`): compiles each magic file into a `.mgc` beside it. */
+const FILE_COMPILE = /^-[^-]*C/;
 
-/** Whether a reading command's arguments keep it reading: `tree -o`/`-R` write files, `printf -v` assigns a variable, `uniq IN OUT` writes OUT. */
+/** Whether `date` only prints: no `-s`/`--set`, and every operand a `+FORMAT`, since a bare operand (`date 010112002020`) sets the clock. */
+function readOnlyDate(args: string[]): boolean {
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === "--") return args.slice(i + 1).every(operand => operand.startsWith("+"));
+		if (arg.startsWith("--")) {
+			// getopt accepts any unambiguous prefix of a long option (`--se` for `--set`).
+			const name = arg.split("=", 1)[0];
+			if ("--set".startsWith(name)) return false;
+			if (name === arg && DATE_VALUE_OPTIONS.some(option => option.startsWith(name))) i++;
+		} else if (arg.length > 1 && arg.startsWith("-")) {
+			for (let j = 1; j < arg.length; j++) {
+				const flag = arg[j];
+				if (flag === "s") return false;
+				// `-d`, `-f`, `-r` (and BSD `-v`) take the rest of the cluster or the next word; `-I` an attached format.
+				if ("dfrv".includes(flag)) {
+					if (j === arg.length - 1) i++;
+					break;
+				}
+				if (flag === "I") break;
+			}
+		} else if (!arg.startsWith("+")) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/**
+ * Whether a reading command's arguments keep it reading: `tree -o`/`-R` write files, `printf -v` assigns a variable,
+ * `uniq IN OUT` writes OUT, `file -C` compiles magic files, `date -s` and `hostname NAME` reconfigure the host.
+ */
 function readOnlyArguments(name: string, args: string[]): boolean {
 	switch (name) {
 		case "tree":
@@ -278,6 +316,13 @@ function readOnlyArguments(name: string, args: string[]): boolean {
 			}
 			return operands <= 1;
 		}
+		case "date":
+			return readOnlyDate(args);
+		case "hostname":
+			return args.every(arg => HOSTNAME_DISPLAY.test(arg));
+		case "file":
+			// `--co` is the shortest prefix getopt takes for `--compile`.
+			return !args.some(arg => FILE_COMPILE.test(arg) || (arg.length > 3 && "--compile".startsWith(arg)));
 		default:
 			return true;
 	}
