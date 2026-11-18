@@ -255,6 +255,9 @@ it("accepts a newer CLI and rejects prerelease or malformed versions", async () 
 	for (const [version, compatible] of [
 		["1.5.10", true],
 		["1.5.10+abc.def", true],
+		["01.5.10", false],
+		["1.05.10", false],
+		["1.5.010", false],
 		["1.5.9-rc.1", false],
 		["1.6.0-rc.1", false],
 		["1.5.10+.", false],
