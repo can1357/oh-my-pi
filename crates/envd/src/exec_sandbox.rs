@@ -1413,6 +1413,18 @@ fn policy_parts_with_approved_scope(
 			.map_err(|source| SandboxError::Canonicalize { path: path.clone(), source })?;
 		let resolved = resolve_write_path(path)
 			.map_err(|source| SandboxError::Canonicalize { path: literal.clone(), source })?;
+		// A location that contains a writable root cannot be denied without denying
+		// the workspace itself, which would refuse every in-process write the session
+		// needs. Admission already withholds CONTROL grants for it
+		// (`ProtectedLocationError::ContainsWritable`), so nothing relies on this deny.
+		let contains_writable_root = |location: &Path| {
+			writable
+				.iter()
+				.any(|root| root.as_path() != location && root.starts_with(location))
+		};
+		if contains_writable_root(&literal) || contains_writable_root(&resolved) {
+			continue;
+		}
 		record_write_deny(&mut spec, &writable, &mut denied, write, literal)?;
 		record_write_deny(&mut spec, &writable, &mut denied, write, resolved)?;
 	}
@@ -2892,6 +2904,41 @@ mod tests {
 			ExecSandbox::compile(&settings, &root, true, SandboxConsumer::Probe)
 				.expect("native policy with protected paths");
 		}
+	}
+
+	/// A protected location that contains the workspace cannot be denied without
+	/// denying every in-process write the workspace needs. Admission already
+	/// withholds control grants for it, so the file lane keeps the workspace
+	/// writable while a protected location inside the workspace stays denied.
+	#[test]
+	fn workspace_under_a_protected_path_keeps_in_process_writes() {
+		let dir = tempfile::tempdir().expect("base");
+		let base = fs::canonicalize(dir.path()).expect("canonical base");
+		let extension_root = base.join("config/agent/extensions");
+		let workspace = extension_root.join("my-extension");
+		let inner_store = workspace.join("data/ext");
+		fs::create_dir_all(&inner_store).expect("workspace under the protected root");
+		let settings = SandboxSettings {
+			protected_write_paths: vec![extension_root, inner_store.clone()],
+			..SandboxSettings::default()
+		};
+
+		let parts =
+			policy_parts(&settings, &workspace, WriteMode::Scoped, None, None).expect("policy");
+		assert!(
+			parts
+				.file_policy
+				.check_write(&workspace.join("src/lib.rs"))
+				.is_ok(),
+			"denied an ordinary write in a workspace under a protected path"
+		);
+		assert!(
+			parts
+				.file_policy
+				.check_write(&inner_store.join("grants.toml"))
+				.is_err(),
+			"a protected location inside the workspace must stay denied"
+		);
 	}
 	#[cfg(unix)]
 	#[test]

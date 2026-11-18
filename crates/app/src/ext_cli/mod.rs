@@ -2013,17 +2013,28 @@ fn ext_grant(state: &StatePaths, data_dir: &Path, args: ExtGrantArgs) -> miette:
 		.collect::<Vec<_>>();
 	let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
 	grant_with(state, data_dir, &home, &writable_roots, &args, |prompt| {
-		if args.yes {
-			return Ok(true);
-		}
-		if !interactive {
-			return Ok(false);
-		}
-		eprint!("{prompt} [y/N] ");
-		let mut answer = String::new();
-		std::io::stdin().read_line(&mut answer).into_diagnostic()?;
-		Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES"))
+		// The answer is read only when it can matter: `--yes` and a stdin that is not a
+		// terminal decide without a prompt.
+		let answer = if args.yes || !interactive {
+			None
+		} else {
+			eprint!("{prompt} [y/N] ");
+			let mut answer = String::new();
+			std::io::stdin().read_line(&mut answer).into_diagnostic()?;
+			Some(answer)
+		};
+		Ok(grant_consent(args.yes, interactive, answer.as_deref()))
 	})
+}
+
+/// Whether the operator consented to a control grant. `--yes` always does, a
+/// run without a terminal never does otherwise, and a terminal answer counts
+/// only when it is `y` or `yes` (`y`, `Y`, `yes` or `YES`) once trimmed.
+fn grant_consent(yes: bool, interactive: bool, answer: Option<&str>) -> bool {
+	if yes {
+		return true;
+	}
+	interactive && matches!(answer.map(str::trim), Some("y" | "Y" | "yes" | "YES"))
 }
 
 fn grant_with(
@@ -2058,7 +2069,7 @@ fn grant_with(
 			before - grants.grants.len()
 		})
 		.map_err(grants_update_failure)?;
-		println!("{}: removed {removed} control grant(s)", args.id);
+		println!("{}", revoke_report(&args.id, removed));
 		return Ok(());
 	}
 	let identity =
@@ -2109,6 +2120,16 @@ fn grant_with(
 	.map_err(grants_update_failure)?;
 	println!("{}: granted {capabilities}", args.id);
 	Ok(())
+}
+
+/// What `omp ext grant --revoke` reports: the records removed, and that a
+/// session already running keeps the capability it was admitted with until it
+/// restarts.
+fn revoke_report(id: &Str, removed: usize) -> String {
+	format!(
+		"{id}: removed {removed} control grant(s)\nrunning sessions keep this capability until they \
+		 restart"
+	)
 }
 
 fn trust(state: &StatePaths, data_dir: &Path, args: ExtTrustArgs) -> miette::Result<()> {
@@ -4593,7 +4614,9 @@ mod grant_tests {
 
 	use omp_core::Str;
 
-	use super::{ExtGrantArgs, GrantsFile, StatePaths, grant_with};
+	use super::{
+		ExtGrantArgs, Grant, GrantsFile, StatePaths, grant_consent, grant_with, revoke_report,
+	};
 
 	struct Fixture {
 		_tree:   tempfile::TempDir,
@@ -4699,9 +4722,14 @@ mod grant_tests {
 	#[test]
 	fn grant_refuses_non_user_layer() {
 		let f = fixture("test.user");
-		let workspace_ext = f.project.join(".omp/extensions/test.workspace");
-		std::fs::create_dir_all(&workspace_ext).expect("workspace ext");
-		std::fs::copy(f.root.join("omp.toml"), workspace_ext.join("omp.toml")).expect("copy");
+		workspace_copy(&f, "test.workspace");
+		let manifest =
+			std::fs::read_to_string(f.project.join(".omp/extensions/test.workspace/omp.toml"))
+				.expect("workspace manifest");
+		assert!(
+			manifest.contains("id = \"test.workspace\""),
+			"the workspace extension has an id of its own: {manifest}"
+		);
 		let error = run(&f, &args("test.workspace", false), true).expect_err("refused");
 		assert!(error.to_string().contains("user-layer only"), "{error}");
 		assert_eq!(stored(&f), 0);
@@ -4744,7 +4772,13 @@ mod grant_tests {
 		let writable: Vec<PathBuf> = vec![f.home.clone()];
 		let result =
 			grant_with(&state, &f.data, &f.home, &writable, &args("test.user", false), |_| Ok(true));
-		assert!(result.is_err(), "extension root inside a writable root must be refused");
+		let message = result
+			.expect_err("extension root inside a writable root must be refused")
+			.to_string();
+		assert!(
+			message.contains("inside writable root"),
+			"the refusal must name the writable-root overlap: {message}"
+		);
 		assert_eq!(stored(&f), 0);
 	}
 
@@ -4755,5 +4789,118 @@ mod grant_tests {
 		assert!(error.to_string().contains("consent"), "{error}");
 		assert_eq!(stored(&f), 0);
 		let _: &Path = &f.root;
+	}
+
+	/// Installs a copy of the fixture's extension in the workspace layer under
+	/// `id`.
+	fn workspace_copy(f: &Fixture, id: &str) {
+		let root = f.project.join(".omp/extensions").join(id);
+		std::fs::create_dir_all(root.join("src/demo")).expect("workspace extension");
+		std::fs::write(root.join("src/demo/__init__.py"), "# inert\n").expect("entry");
+		let manifest = std::fs::read_to_string(f.root.join("omp.toml")).expect("user manifest");
+		std::fs::write(root.join("omp.toml"), manifest.replace("test.user", id))
+			.expect("workspace manifest");
+	}
+
+	/// A workspace extension that shares the id of a user extension which is not
+	/// installed is still not a user-layer extension: the id alone grants
+	/// nothing.
+	#[test]
+	fn grant_refuses_workspace_extension_sharing_a_missing_user_id() {
+		let f = fixture("test.user");
+		workspace_copy(&f, "test.user");
+		std::fs::remove_dir_all(&f.root).expect("remove the user-layer extension");
+		let error = run(&f, &args("test.user", false), true).expect_err("refused");
+		assert!(error.to_string().contains("user-layer only"), "{error}");
+		assert_eq!(stored(&f), 0);
+	}
+
+	/// A grant record the CLI must neither replace nor remove.
+	fn seeded(id: &str, ship: &str) -> Grant {
+		Grant {
+			id:                Str::new(id),
+			publisher:         Str::new_static("unsigned:path:seeded"),
+			layer:             omp_ext::Layer::Client,
+			workspace:         None,
+			scope:             omp_ext::trust::GrantScope::Exact,
+			capability_digest: Str::new_static("b3:seeded"),
+			tier:              omp_ext::TrustTier::Sandboxed,
+			ship:              Str::new(ship),
+			granted_at:        Str::new_static("2026-11-17T00:00:00Z"),
+			granted_by:        Str::new_static("explicit-grant"),
+			duration:          omp_ext::trust::GrantDuration::Persistent,
+		}
+	}
+
+	fn stored_grants(f: &Fixture) -> Vec<Grant> {
+		GrantsFile::read(&omp_ext::trust::grants_path(&f.data))
+			.expect("grants")
+			.grants
+	}
+
+	/// Grant and revoke touch only the path grant of the named user extension: a
+	/// record of another extension, and one of the same id shipped another way,
+	/// stay.
+	#[test]
+	fn grant_and_revoke_leave_unrelated_records_alone() {
+		let f = fixture("test.user");
+		let other_extension = seeded("other.ext", "path");
+		let same_id_other_ship = seeded("test.user", "installed");
+		GrantsFile::update(&omp_ext::trust::grants_path(&f.data), |store| {
+			store.grants.push(other_extension.clone());
+			store.grants.push(same_id_other_ship.clone());
+		})
+		.expect("seed grants");
+
+		run(&f, &args("test.user", false), true).expect("grant");
+		let granted = stored_grants(&f);
+		assert_eq!(granted.len(), 3, "the grant adds exactly one record");
+		assert!(granted.contains(&other_extension));
+		assert!(granted.contains(&same_id_other_ship));
+
+		run(&f, &args("test.user", true), true).expect("revoke");
+		let revoked = stored_grants(&f);
+		assert_eq!(revoked.len(), 2, "the revoke removes exactly the path grant");
+		assert!(revoked.contains(&other_extension));
+		assert!(revoked.contains(&same_id_other_ship));
+	}
+
+	#[test]
+	fn the_yes_flag_consents_without_a_prompt() {
+		assert!(grant_consent(true, false, None));
+		assert!(grant_consent(true, true, None));
+		assert!(
+			grant_consent(true, true, Some("n")),
+			"an explicit --yes wins over a contrary answer"
+		);
+	}
+
+	#[test]
+	fn a_run_without_a_terminal_refuses_unless_yes_is_given() {
+		assert!(!grant_consent(false, false, None));
+		assert!(!grant_consent(false, false, Some("y")), "a non-terminal never reads an answer");
+	}
+
+	#[test]
+	fn a_terminal_answer_of_y_or_yes_consents() {
+		for answer in ["y", "Y", "yes", "YES", "y\n", " yes \r\n"] {
+			assert!(grant_consent(false, true, Some(answer)), "refused {answer:?}");
+		}
+	}
+
+	#[test]
+	fn any_other_terminal_answer_refuses() {
+		assert!(!grant_consent(false, true, None), "no answer is no consent");
+		for answer in ["", "\n", "n", "N", "no", "yess", "yes please", "sure", "1"] {
+			assert!(!grant_consent(false, true, Some(answer)), "accepted {answer:?}");
+		}
+	}
+
+	#[test]
+	fn revoke_report_says_running_sessions_keep_the_capability() {
+		let report = revoke_report(&Str::new_static("test.user"), 1);
+		assert!(report.contains("test.user: removed 1 control grant(s)"), "{report}");
+		assert!(report.contains("running sessions"), "{report}");
+		assert!(report.contains("restart"), "{report}");
 	}
 }

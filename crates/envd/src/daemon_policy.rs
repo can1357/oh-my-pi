@@ -245,4 +245,41 @@ mod tests {
 			of(&sandbox, &ToolSettings::from_con(&ctx), &ShellSettings::from_con(&ctx), trust)
 		);
 	}
+
+	/// `SandboxSettings::from_con` derives the host-protected paths for every
+	/// local session, so a session that passes those same paths resolves the
+	/// daemon `from_con` alone resolves, and does not split the shared daemon.
+	#[test]
+	fn session_paths_equal_to_the_host_defaults_keep_the_policy() {
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let host_defaults = SandboxSettings::from_con(&ctx).protected_write_paths;
+		assert!(!host_defaults.is_empty(), "a local session derives host-protected paths");
+
+		assert_eq!(
+			from_con_with_protected_write_paths(&ctx, trust, &host_defaults),
+			from_con(&ctx, trust)
+		);
+	}
+
+	/// A protected path that is not valid UTF-8 digests lossily instead of
+	/// panicking, and it still keys the daemon.
+	#[cfg(unix)]
+	#[test]
+	fn non_utf8_protected_paths_digest_without_panicking() {
+		use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _, path::PathBuf};
+
+		let ctx = Ctx::new();
+		let trust = WorkspaceTrust::Untrusted;
+		let mut sandbox = SandboxSettings::from_con(&ctx);
+		sandbox
+			.protected_write_paths
+			.push(PathBuf::from(OsStr::from_bytes(b"/srv/omp-\xff-store")));
+		let tools = ToolSettings::from_con(&ctx);
+		let shell = ShellSettings::from_con(&ctx);
+
+		let policy = of(&sandbox, &tools, &shell, trust);
+		assert_eq!(policy, of(&sandbox, &tools, &shell, trust), "the digest is deterministic");
+		assert_ne!(policy, from_con(&ctx, trust), "the path still keys the daemon");
+	}
 }

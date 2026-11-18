@@ -278,21 +278,25 @@ mod tests {
 		use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
 
 		let tree = tempfile::tempdir().expect("tree");
-		let store = tree.path().join("store");
-		fs::create_dir(&store).expect("store");
-		let c_path = CString::new(store.as_os_str().as_bytes()).expect("path has no nul");
-		// SAFETY: geteuid has no preconditions and cannot fail.
-
-		let uid = unsafe { libc::geteuid() };
-		let foreign_uid = if uid == 0 { 1 } else { 0 };
-		// SAFETY: c_path is NUL-terminated and the ids are plain integers.
-		if unsafe { libc::chown(c_path.as_ptr(), foreign_uid, u32::MAX) } != 0 {
-			eprintln!("skip: cannot create a foreign-owned fixture on this host");
-			return;
-		}
+		let location = if effective_uid() == 0 {
+			// Root can hand a fresh directory to another user.
+			let store = tree.path().join("store");
+			fs::create_dir(&store).expect("store");
+			let c_path = CString::new(store.as_os_str().as_bytes()).expect("path has no nul");
+			// SAFETY: c_path is NUL-terminated and the ids are plain integers.
+			if unsafe { libc::chown(c_path.as_ptr(), 1, u32::MAX) } != 0 {
+				eprintln!("skip: cannot create a foreign-owned fixture on this host");
+				return;
+			}
+			store
+		} else {
+			// Without root no directory can be handed to another user, but `/usr` is a
+			// real, symlink-free directory that root owns on every unix host.
+			PathBuf::from("/usr")
+		};
 
 		assert!(matches!(
-			check_protected_location(&store, &[]),
+			check_protected_location(&location, &[]),
 			Err(ProtectedLocationError::ForeignOwner { .. })
 		));
 	}

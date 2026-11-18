@@ -131,3 +131,7 @@ Replacing the extension's code at the same user-layer path while keeping the man
 - **Admission also withholds control grants when** (ruling, extending the owner's fail-closed decisions): a protected location *contains* an exec-writable root (the sandbox cannot deny it without denying the workspace), or no kernel-enforced exec sandbox is running (mode Off, or no sandbox backend on the host).
 - **Daemon policy digest.** The new protected-paths sandbox setting is skipped when empty, so daemon policy digests are unchanged for sessions without protected paths.
 
+
+### Amendments 3 (after the Task 3+4 security review, 2026-11-18)
+
+- **Daemon policy digest (supersedes the Amendments 2 bullet of the same name).** `SandboxSettings::from_con` (`crates/envd/src/exec_settings/sandbox.rs`) derives the host-protected paths, `<data>/ext` and `<config>/agent/extensions`, for every local session, so the protected-paths setting is no longer empty and session digests change versus pre-change builds. The Amendments 2 statement that digests are unchanged now holds only for settings built without host paths (`SandboxSettings::default()`, or a host whose data directory does not resolve). There is no `DOMAIN` bump: the socket name is the build generation plus the keyed digest, and stale owners are retired.

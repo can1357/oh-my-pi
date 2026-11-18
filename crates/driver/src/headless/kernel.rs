@@ -2632,6 +2632,10 @@ pub async fn compose_kernel(
 	};
 
 	let mut trusted_extensions = options.extensions.trusted.clone();
+	// Control grants come only from the operator's grant records, which native
+	// admission has already applied to the specs appended below; a spec the caller
+	// supplied never carries one.
+	crate::discovery::native::withhold_control_grants(&mut trusted_extensions);
 	for extension in &mut trusted_extensions {
 		omp_ext::config::apply_resolved_setting_overrides(
 			extension.key.extension().as_str(),
@@ -2679,9 +2683,7 @@ pub async fn compose_kernel(
 			"withholding extension CONTROL grants because the journaled class changed the exec \
 			 sandbox"
 		);
-		for spec in &mut trusted_extensions {
-			spec.control_grants.clear();
-		}
+		crate::discovery::native::withhold_control_grants(&mut trusted_extensions);
 	}
 	let environment_policy = omp_envd::daemon_policy::from_con_with_protected_write_paths(
 		&ctx,

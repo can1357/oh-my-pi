@@ -92,6 +92,15 @@ pub(crate) fn control_grant_sandbox_matches(
 		&& admitted.sandbox_available == sandbox_available
 }
 
+/// Drops every CONTROL grant from `specs`. A grant holds only under the sandbox
+/// facts it was admitted under, and a spec the caller supplied never carries
+/// one.
+pub(crate) fn withhold_control_grants(specs: &mut [ExtHostSpec]) {
+	for spec in specs {
+		spec.control_grants.clear();
+	}
+}
+
 /// An admitted extension and the source root that produced it.
 #[derive(Clone, Debug)]
 pub struct AdmittedNativeExtension {
@@ -1103,6 +1112,41 @@ default = false
 	}
 
 	#[test]
+	fn withhold_control_grants_clears_every_spec_and_changes_nothing_else() {
+		let tree = security_test_tree();
+		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
+		let report = user_control_admission(
+			&project,
+			&home,
+			&data_dir,
+			ExecSandboxMode::WorkspaceWrite,
+			true,
+			&[],
+		);
+		let granted = report
+			.extensions
+			.into_iter()
+			.find(|item| item.spec.key.extension().as_str() == "test.user")
+			.expect("user extension admitted")
+			.spec;
+		assert!(!granted.control_grants.is_empty(), "the fixture starts with a grant");
+		let mut ungranted = granted.clone();
+		ungranted.control_grants.clear();
+		let mut specs = vec![granted.clone(), ungranted, granted.clone()];
+
+		withhold_control_grants(&mut specs);
+
+		for spec in &specs {
+			assert!(spec.control_grants.is_empty());
+			assert_eq!(spec.key.layer(), granted.key.layer());
+			assert_eq!(spec.key.tier(), granted.key.tier());
+			assert_eq!(spec.key.extension(), granted.key.extension());
+		}
+		withhold_control_grants(&mut []);
+	}
+
+	#[test]
 	fn changed_manifest_voids_grant() {
 		let tree = security_test_tree();
 		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
@@ -1254,23 +1298,52 @@ default = false
 	fn unreadable_store_fails_closed() {
 		let tree = security_test_tree();
 		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
+		persist_control_grant(&data_dir, &root, &sf!("test.user"));
 		let grants_file = grants_path(&data_dir);
-		fs::create_dir_all(grants_file.parent().expect("grant parent")).expect("grant directory");
-		fs::create_dir(&grants_file).expect("unreadable grants path as a directory");
-		let report = user_control_admission(
-			&project,
-			&home,
-			&data_dir,
-			ExecSandboxMode::WorkspaceWrite,
-			true,
-			&[],
-		);
-		let extension = report
+		let admit = || {
+			user_control_admission(
+				&project,
+				&home,
+				&data_dir,
+				ExecSandboxMode::WorkspaceWrite,
+				true,
+				&[],
+			)
+		};
+
+		// The grant is valid: only an unreadable store may withhold it.
+		let granted = admit();
+		let extension = granted
 			.extensions
 			.iter()
 			.find(|item| item.spec.key.extension().as_str() == "test.user")
 			.expect("user extension admitted");
-		assert!(extension.spec.control_grants.is_empty());
+		assert_eq!(
+			extension.spec.control_grants,
+			BTreeSet::from([sf!("agents.continuation"), sf!("policy.write")])
+		);
+
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt as _;
+
+			// SAFETY: geteuid has no preconditions and cannot fail.
+			if unsafe { libc::geteuid() } == 0 {
+				eprintln!("skip: root reads a mode-000 grants file");
+			} else {
+				fs::set_permissions(&grants_file, fs::Permissions::from_mode(0o000))
+					.expect("make the grants file unreadable");
+				assert_no_control_grant(&admit(), "test.user");
+				fs::set_permissions(&grants_file, fs::Permissions::from_mode(0o600))
+					.expect("restore the grants file");
+			}
+		}
+
+		// A grants path that cannot be read as a file fails closed for every user,
+		// root included.
+		fs::remove_file(&grants_file).expect("remove the grants file");
+		fs::create_dir(&grants_file).expect("grants path as a directory");
+		assert_no_control_grant(&admit(), "test.user");
 		assert!(root.exists());
 	}
 
@@ -1380,14 +1453,24 @@ default = false
 	fn foreign_owned_extension_root_is_denied_during_admission() {
 		use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
 
+		// SAFETY: geteuid has no preconditions.
+		if unsafe { libc::geteuid() } != 0 {
+			// Only root can give the extension root to another user, and no symlink-free
+			// root-owned path can stand in for it, so assert the ownership check admission
+			// relies on against a root-owned system directory instead.
+			assert!(matches!(
+				crate::discovery::protected::check_protected_location(Path::new("/usr"), &[]),
+				Err(crate::discovery::protected::ProtectedLocationError::ForeignOwner { .. })
+			));
+			return;
+		}
+
 		let tree = security_test_tree();
 		let (home, project, data_dir, root) = user_fixture(tree.path(), "test.user");
 		persist_control_grant(&data_dir, &root, &sf!("test.user"));
 		let extension_root = home.join(".o2/agent/extensions");
 		let c_path = CString::new(extension_root.as_os_str().as_bytes()).expect("path has no nul");
-		// SAFETY: geteuid has no preconditions.
-		let uid = unsafe { libc::geteuid() };
-		let foreign_uid = if uid == 0 { 1 } else { 0 };
+		let foreign_uid = 1;
 		// SAFETY: c_path is NUL-terminated and both ids are plain integers.
 		if unsafe { libc::chown(c_path.as_ptr(), foreign_uid, u32::MAX) } != 0 {
 			eprintln!("skip: cannot create a foreign-owned extension root on this host");

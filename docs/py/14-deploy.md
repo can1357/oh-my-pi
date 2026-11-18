@@ -1651,6 +1651,8 @@ Invariants — these are the security core of the layering design:
    and the session continues. Exit code 5 only when consent was the point of the command
    (`omp ext install`).
 
+**Revoking a control grant does not reach running sessions.** `omp ext grant --revoke <id>` removes the record from `grants.toml`, but admission reads it when a session starts, so a session that is already running keeps the capability until it restarts.
+
 #### 3.9.4 `RECORD`-based ownership
 
 Because a host's site tree is shared by every extension in it, "does this module belong to
