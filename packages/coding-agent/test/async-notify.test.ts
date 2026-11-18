@@ -48,10 +48,10 @@ describe("OutputNotifier", () => {
 	});
 
 	/** A notifier over a tap the test appends to, and the batches it emitted. */
-	function watch(pattern: string) {
+	function watch(pattern: string, options?: { refill?: boolean }) {
 		const tap = new TextTap("out", "test output");
 		const batches: NotifyBatch[] = [];
-		const notifier = new OutputNotifier(compileNotifyPattern(pattern), tap, batch => batches.push(batch));
+		const notifier = new OutputNotifier(compileNotifyPattern(pattern), tap, batch => batches.push(batch), options);
 		const feed = (text: string): void => {
 			tap.append(text);
 			notifier.poll();
@@ -112,6 +112,30 @@ describe("OutputNotifier", () => {
 		}
 		expect(batches).toHaveLength(rounds);
 		expect(batches.some(batch => batch.stopped)).toBe(false);
+	});
+
+	it("stops a notifier without refill after one burst, however slowly its matches arrive", () => {
+		vi.useFakeTimers();
+		const { batches, feed } = watch("tick", { refill: false });
+		for (let index = 0; index < NOTIFY_BURST * 2; index++) {
+			feed(`tick ${index}\n`);
+			vi.advanceTimersByTime(20_000);
+		}
+		expect(batches).toHaveLength(NOTIFY_BURST);
+		expect(batches.at(-1)?.stopped).toBe(true);
+	});
+
+	it("sends the matches not sent yet at once on finish, the unterminated last line included", () => {
+		vi.useFakeTimers();
+		const { notifier, batches, feed } = watch("ERROR");
+		feed("ERROR in the window\nERROR fatal: no newline");
+		notifier.finish();
+		expect(batches).toEqual([
+			{ lines: ["ERROR in the window", "ERROR fatal: no newline"], omitted: 0, stopped: false },
+		]);
+		feed("ERROR after exit\n");
+		vi.advanceTimersByTime(1_000);
+		expect(batches).toHaveLength(1);
 	});
 
 	it("drops matches it has not sent yet once stopped", () => {
@@ -410,6 +434,47 @@ describe("notify delivery", () => {
 				},
 			],
 		]);
+	});
+
+	it("injects a service's last matches ahead of its exit notice when both arrive together", async () => {
+		const active = createSession();
+		const owner = active.sessionManager.getSessionId();
+		// The broker sends the matches first; the session's queue decides the order the model reads them in.
+		active.queueServiceNotify({
+			id: "web",
+			type: "service",
+			pattern: "ERROR",
+			running: () => false,
+			owner,
+			lines: ["ERROR fatal: boom"],
+			omitted: 0,
+			stopped: false,
+		});
+		const exited = active.queueLaunchCompletion({
+			event: "daemon-completed",
+			completionId: "web-exit",
+			owner,
+			daemon: {
+				name: "web",
+				id: "web-1",
+				state: "failed",
+				exitCode: 1,
+				createdAt: 1,
+				startedAt: 1,
+				exitedAt: 2,
+				restartCount: 0,
+				outputBytes: 0,
+				owner,
+				persist: false,
+				detached: false,
+			},
+		});
+		await exited;
+		await active.waitForIdle();
+		const kinds = active.agent.state.messages.flatMap(message =>
+			message.role === "custom" ? [message.customType] : [],
+		);
+		expect(kinds).toEqual(["async-notify", "launch-completion"]);
 	});
 
 	it("rejects an invalid regex without starting the command", async () => {

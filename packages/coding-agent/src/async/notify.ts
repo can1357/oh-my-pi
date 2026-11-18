@@ -7,8 +7,10 @@
  * on: a job's tool sends it to the session that started the job, the launch
  * broker to the session owning a service. Either delivers it like the process's
  * result. A process that matches too often loses its notices, not its run: once
- * the burst allowance is spent the notifier sends one last batch marked
- * `stopped`.
+ * the allowance of {@link NOTIFY_BURST} batches is spent the notifier sends one
+ * last batch marked `stopped`. A job's allowance refills over time, as the job
+ * ends at its deadline; a service, which has none, gets the burst once per
+ * start.
  *
  * ```ts
  * const pattern = compileNotifyPattern("ERROR|FAILED");
@@ -29,9 +31,9 @@ const NOTIFY_BATCH_MS = 200;
 export const NOTIFY_MAX_LINES = 50;
 /** Characters kept of one reported line. */
 const NOTIFY_MAX_LINE_CHARS = 400;
-/** Batches a process may send in quick succession before its notices stop. */
+/** Batches a process may send in quick succession before its notices stop; all a service ever gets per start. */
 export const NOTIFY_BURST = 30;
-/** How long it takes one batch of the burst allowance to come back. */
+/** How long it takes one batch of a refilling allowance to come back. */
 const NOTIFY_REFILL_MS = 20_000;
 
 /** A `notify` regex ready to match output lines. */
@@ -65,10 +67,21 @@ export interface NotifyBatch {
 	stopped: boolean;
 }
 
+/** How an {@link OutputNotifier} spends its allowance. */
+export interface OutputNotifierOptions {
+	/**
+	 * Spent allowance comes back, one batch per {@link NOTIFY_REFILL_MS}. Default true; false for a
+	 * process without a deadline, which would otherwise report for as long as it runs.
+	 */
+	refill?: boolean;
+}
+
 /**
  * Matches a growing {@link JobTextSource} against a {@link NotifyPattern} and
  * emits the matching lines in batches. The owner calls {@link poll} after each
- * append and {@link stop} once the process ends or is cancelled.
+ * append, then {@link finish} once the process exits with nothing else to report
+ * its last output, or {@link stop} once that output is reported elsewhere or the
+ * process is cancelled.
  */
 export class OutputNotifier {
 	readonly #matcher: LineMatcher;
@@ -81,26 +94,38 @@ export class OutputNotifier {
 	/** Batches still allowed before the notices stop, and when the allowance last grew. */
 	#allowance = NOTIFY_BURST;
 	#refilledAt = Date.now();
+	readonly #refill: boolean;
 	#stopped = false;
 
-	constructor(pattern: NotifyPattern, source: JobTextSource, emit: (batch: NotifyBatch) => void) {
+	constructor(
+		pattern: NotifyPattern,
+		source: JobTextSource,
+		emit: (batch: NotifyBatch) => void,
+		options: OutputNotifierOptions = {},
+	) {
 		this.#matcher = pattern.matcher;
 		this.#reader = new SourceLineReader(source);
 		this.#emit = emit;
+		this.#refill = options.refill ?? true;
 	}
 
 	/** Match the complete lines that arrived since the last call; blank lines never count. */
 	poll(): void {
 		if (this.#stopped) return;
-		const { lines } = this.#reader.read(false);
-		if (lines.length === 0) return;
-		for (const index of this.#matcher.matchLines(lines.join("\n")).lines) {
-			const line = lines[index];
-			if (line.trim().length === 0) continue;
-			if (this.#lines.length < NOTIFY_MAX_LINES) this.#lines.push(truncate(line, NOTIFY_MAX_LINE_CHARS));
-			else this.#omitted += 1;
-		}
+		this.#collect(this.#reader.read(false).lines);
 		if (this.#lines.length > 0) this.#timer ??= setTimeout(() => this.#flush(), NOTIFY_BATCH_MS);
+	}
+
+	/**
+	 * End the notices once the process exited: the matches not sent yet go out now, the line it
+	 * left unterminated included, without waiting for the batching window.
+	 */
+	finish(): void {
+		if (this.#stopped) return;
+		this.#collect(this.#reader.read(true).lines);
+		const batch: NotifyBatch = { lines: this.#lines, omitted: this.#omitted, stopped: false };
+		this.stop();
+		if (batch.lines.length > 0) this.#emit(batch);
 	}
 
 	/** End the notices: matches not sent yet are dropped and later output is ignored. */
@@ -112,9 +137,18 @@ export class OutputNotifier {
 		this.#omitted = 0;
 	}
 
+	#collect(lines: readonly string[]): void {
+		if (lines.length === 0) return;
+		for (const index of this.#matcher.matchLines(lines.join("\n")).lines) {
+			const line = lines[index];
+			if (line.trim().length === 0) continue;
+			if (this.#lines.length < NOTIFY_MAX_LINES) this.#lines.push(truncate(line, NOTIFY_MAX_LINE_CHARS));
+			else this.#omitted += 1;
+		}
+	}
+
 	#flush(): void {
-		const now = Date.now();
-		const refill = Math.floor((now - this.#refilledAt) / NOTIFY_REFILL_MS);
+		const refill = this.#refill ? Math.floor((Date.now() - this.#refilledAt) / NOTIFY_REFILL_MS) : 0;
 		if (refill > 0) {
 			this.#allowance = Math.min(NOTIFY_BURST, this.#allowance + refill);
 			this.#refilledAt += refill * NOTIFY_REFILL_MS;

@@ -1071,8 +1071,12 @@ class DaemonBroker {
 		if (pattern === undefined) return undefined;
 		try {
 			const tap = new TextTap("out", record.spec.name);
-			const notifier = new OutputNotifier(compileNotifyPattern(pattern), tap, batch =>
-				this.#publishNotify(record, pattern, batch),
+			// A service has no deadline: without refill its matches stop after one burst per start.
+			const notifier = new OutputNotifier(
+				compileNotifyPattern(pattern),
+				tap,
+				batch => this.#publishNotify(record, pattern, batch),
+				{ refill: false },
 			);
 			return { tap, notifier };
 		} catch (error) {
@@ -1116,6 +1120,27 @@ class DaemonBroker {
 		const processRef = record.snapshot.pid === undefined ? null : Process.fromPid(record.snapshot.pid);
 		if (processRef?.status() === "running") return;
 		await this.#settle(record, generation);
+	}
+
+	/**
+	 * Resume a detached daemon recovered from an earlier broker. Its saved offset
+	 * lags what that broker read and reported, so the log is read up to its end
+	 * before `notify` is armed: the output there is not reported a second time.
+	 */
+	async #resumeDetached(record: ManagedDaemon): Promise<void> {
+		const generation = record.generation;
+		try {
+			await this.#readDetachedOutput(record, generation);
+		} catch (error) {
+			logger.warn("Failed to read recovered detached daemon output", {
+				name: record.snapshot.name,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		if (generation === record.generation && !settledState(record.snapshot.state)) {
+			record.notify = this.#armNotify(record);
+		}
+		await this.#monitorDetached(record, generation);
 	}
 
 	/**
@@ -1175,8 +1200,9 @@ class DaemonBroker {
 		await this.#readDetachedOutput(record, generation);
 		// The output read yields, so a concurrent refresh may settle this generation first.
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
-		// Matches not sent yet are dropped: the completion that follows reports the exit.
-		record.notify?.notifier.stop();
+		// The exit notice carries no output: the last matches, the line the process left
+		// unterminated included, go out ahead of it. A stop already dropped them.
+		record.notify?.notifier.finish();
 		record.notify = undefined;
 		record.process = undefined;
 		record.input = undefined;
@@ -1628,7 +1654,6 @@ class DaemonBroker {
 						daemon: { ...snapshot },
 					});
 				}
-				if (detached) record.notify = this.#armNotify(record);
 				syncReadyPending(record);
 				this.#records.set(snapshot.name, record);
 				if (snapshot.owner && record.completionCapable && (detached || record.pendingCompletions.length > 0)) {
@@ -1641,7 +1666,7 @@ class DaemonBroker {
 					void this.#pollPort(record, record.generation, spec.ready);
 				}
 				if (detached) {
-					void this.#monitorDetached(record, record.generation).catch(error => {
+					void this.#resumeDetached(record).catch(error => {
 						logger.warn("Failed to monitor recovered detached daemon", {
 							name: record.snapshot.name,
 							error: error instanceof Error ? error.message : String(error),

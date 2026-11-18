@@ -184,6 +184,108 @@ describe("service notify", () => {
 		}
 	}, 20_000);
 
+	it.each([false, true])(
+		"reports a match printed right before the service exits, ahead of its exit notice (pty: %p)",
+		async pty => {
+			using tempDir = TempDir.createSync("@omp-service-notify-exit-");
+			const projectDir = path.join(tempDir.path(), "project");
+			const runtimeDir = path.join(tempDir.path(), "runtime");
+			await fs.mkdir(projectDir);
+			const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			const previousTitle = process.title;
+			const broker = await startBroker(projectDir, runtimeDir);
+			const events: string[] = [];
+			const completed = Promise.withResolvers<void>();
+			client.onCompletion("owner", completion => {
+				events.push(`exited ${completion.daemon.exitCode}`);
+				completed.resolve();
+			});
+			client.onNotify("owner", notification => events.push(`matched ${notification.lines.join("|")}`));
+			try {
+				// The crash line and the exit land well inside one batching window; the last line has no newline.
+				const spec: DaemonSpec = {
+					name: "crashing",
+					application: process.execPath,
+					args: ["-e", "process.stdout.write('ERROR fatal: boom\\nERROR no newline'); process.exit(1)"],
+					env: {},
+					cwd: projectDir,
+					pty,
+					notify: "ERROR",
+					restart: "no",
+					persist: false,
+					detached: false,
+				};
+				await client.request({ op: "start", spec, owner: "owner" });
+				await completed.promise;
+				expect(events).toEqual(["matched ERROR fatal: boom|ERROR no newline", "exited 1"]);
+			} finally {
+				await client.request({ op: "shutdown" }).catch(() => undefined);
+				client.close();
+				await broker.finished;
+				process.title = previousTitle;
+			}
+		},
+		20_000,
+	);
+
+	it("does not report a recovered detached service's earlier output again, only what it prints next", async () => {
+		using tempDir = TempDir.createSync("@omp-service-notify-recover-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const previousTitle = process.title;
+		const spec: DaemonSpec = {
+			name: "detached",
+			application: process.execPath,
+			// Prints once at start and once more after the test creates `go`. It outlives a broker by
+			// design, so it exits on its own should the test fail before stopping it.
+			args: [
+				"-e",
+				"console.log('ERROR one'); setTimeout(() => process.exit(0), 30_000); const t = setInterval(() => { if (require('fs').existsSync('go')) { console.log('ERROR two'); clearInterval(t); } }, 20)",
+			],
+			env: {},
+			cwd: projectDir,
+			pty: false,
+			notify: "ERROR",
+			restart: "no",
+			persist: true,
+			detached: true,
+		};
+		const firstClient = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const firstBroker = await startBroker(projectDir, runtimeDir);
+		const reported = Promise.withResolvers<void>();
+		firstClient.onCompletion("owner", () => undefined);
+		firstClient.onNotify("owner", () => reported.resolve());
+		await firstClient.request({ op: "start", spec, owner: "owner" });
+		await reported.promise;
+		// The detached service outlives the broker; the next one recovers it.
+		await firstClient.request({ op: "shutdown" }).catch(() => undefined);
+		firstClient.close();
+		await firstBroker.finished;
+
+		const secondBroker = await startBroker(projectDir, runtimeDir);
+		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const lines: string[] = [];
+		const next = Promise.withResolvers<void>();
+		client.onCompletion("owner", () => undefined);
+		client.onNotify("owner", notification => {
+			lines.push(...notification.lines);
+			next.resolve();
+		});
+		try {
+			await client.request({ op: "list" });
+			await Bun.write(path.join(projectDir, "go"), "");
+			await next.promise;
+			expect(lines).toEqual(["ERROR two"]);
+		} finally {
+			await client.request({ op: "stop", name: "detached", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await secondBroker.finished;
+			process.title = previousTitle;
+		}
+	}, 30_000);
+
 	it("never sends a match to a client that did not say it reads them", async () => {
 		using tempDir = TempDir.createSync("@omp-service-notify-legacy-");
 		const projectDir = path.join(tempDir.path(), "project");

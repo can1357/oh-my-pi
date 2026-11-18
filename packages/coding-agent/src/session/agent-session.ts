@@ -2619,13 +2619,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				);
 			},
 		});
-		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
-			isStale: entry =>
-				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
-			build: buildLaunchCompletionBatchMessage,
-		});
-		// Registered ahead of `async-result`: kinds drain in registration order, so a
-		// job's matches read before its result when both inject at one boundary.
+		// Registered ahead of `launch-completion` and `async-result`: kinds drain in
+		// registration order, so a service's last matches read before its exit notice,
+		// and a job's before its result, when both inject at one boundary.
 		// A service belongs to a session id, as its completion does: its matches
 		// are dropped while another session holds the transcript.
 		this.yieldQueue.register<AsyncNotifyEntry>(ASYNC_NOTIFY_MESSAGE_TYPE, {
@@ -2633,6 +2629,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#isDisposed ||
 				(entry.owner !== undefined && !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId())),
 			build: buildAsyncNotifyBatchMessage,
+		});
+		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
+			isStale: entry =>
+				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
+			build: buildLaunchCompletionBatchMessage,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
