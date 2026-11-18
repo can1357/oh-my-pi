@@ -5,6 +5,7 @@
 ### Added
 
 - `CustomMessage` and `custom_message` entries accept `excludeFromContext`: such a message is never sent to the model, and compaction and branch summaries skip it ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+- `Agent.continue()` delivers a queued steer or follow-up when only messages flagged `excludeFromContext` trail the last assistant reply; `isExcludedFromContext()`, `lastContextIndex()` and `lastContextMessage()` are exported ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 
 ## [18.22.1] - 2026-11-17
 

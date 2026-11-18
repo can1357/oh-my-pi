@@ -370,8 +370,10 @@ lines. The flag is persisted on the `custom_message` entry, so the row stays out
 of context after resume, compaction and branch summaries. Such a row never
 starts or extends a turn: `triggerTurn` and `"aside"` are ignored. Sent while a
 run is live, it is queued like a `!!` bash row and drawn and saved when the run
-ends or the next prompt starts. Like `!!` and `$$` runs, it leaves a shown
-composer prediction in place, since the model's view is unchanged.
+ends or the next prompt starts; a `/new` or session switch that interrupts the
+run saves it to the session being left. Like `!!` and `$$` runs, it leaves a
+shown composer prediction in place and does not hold back a queued follow-up,
+since the model's view is unchanged.
 
 ## 2) Handler context (`ExtensionContext`)
 

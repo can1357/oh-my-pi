@@ -59,8 +59,14 @@ describe("custom message excludeFromContext", () => {
 
 		const row = { customType: "plugin-stats", content: "[stats]", display: true, excludeFromContext: true };
 
-		/** A session whose model replies "ok", each reply held until `beforeReply` settles. */
-		function start(beforeReply: () => Promise<void> = async () => {}) {
+		/**
+		 * A session whose model replies "ok", each reply held until `beforeReply` settles; fields it
+		 * resolves to override that reply (an `error` stop fails the call).
+		 */
+		function start(
+			beforeReply: (call: number) => Promise<Partial<AssistantMessage> | void> = async () => {},
+			sessionManager = SessionManager.inMemory(tempDir.path()),
+		) {
 			const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 			const contexts: Context[] = [];
 			const agent = new Agent({
@@ -68,7 +74,7 @@ describe("custom message excludeFromContext", () => {
 				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 				convertToLlm,
 				streamFn: (_model, context) => {
-					contexts.push(context);
+					const call = contexts.push(context);
 					const message: AssistantMessage = {
 						role: "assistant",
 						content: [{ type: "text", text: "ok" }],
@@ -87,16 +93,22 @@ describe("custom message excludeFromContext", () => {
 						timestamp: Date.now(),
 					};
 					const stream = new AssistantMessageEventStream();
-					void beforeReply().then(() => {
-						stream.push({ type: "start", partial: message });
-						stream.push({ type: "done", reason: "stop", message });
+					void beforeReply(call).then(override => {
+						const reply: AssistantMessage = { ...message, ...override };
+						stream.push({ type: "start", partial: reply });
+						if (reply.stopReason === "error") stream.push({ type: "error", reason: "error", error: reply });
+						else stream.push({ type: "done", reason: "stop", message: reply });
 					});
 					return stream;
 				},
 			});
-			const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"todo.enabled": false,
+				"retry.enabled": true,
+				"retry.baseDelayMs": 0,
+			});
 			settings.setModelRole("default", `${model.provider}/${model.id}`);
-			const sessionManager = SessionManager.inMemory(tempDir.path());
 			session = new AgentSession({
 				agent,
 				sessionManager,
@@ -115,6 +127,27 @@ describe("custom message excludeFromContext", () => {
 					.map(entry => entry.excludeFromContext);
 			return { session, contexts, drawn, rows };
 		}
+
+		it("retries a failed follow-up turn when a row the model would not see was sent during it", async () => {
+			const { session, contexts, rows } = start(async call => {
+				if (call !== 2) return;
+				// Mid-run, so the row is queued and lands after the failed reply when the turn ends.
+				await session.sendCustomMessage(row);
+				return { content: [], stopReason: "error", errorMessage: "503 service unavailable: overloaded_error" };
+			});
+			const retried = Promise.withResolvers<boolean>();
+			session.subscribe(event => {
+				if (event.type === "auto_retry_end") retried.resolve(event.success);
+			});
+			await session.prompt("hi");
+			await session.followUp("next");
+
+			expect(await retried.promise).toBe(true);
+			await session.waitForIdle();
+			expect(contexts).toHaveLength(3);
+			expect(JSON.stringify(contexts[2]!.messages.at(-1))).toContain("next");
+			expect(rows()).toEqual([true]);
+		});
 
 		it("never starts a turn for a row the model would not see", async () => {
 			const { session, contexts, rows } = start();
@@ -170,6 +203,52 @@ describe("custom message excludeFromContext", () => {
 				expect(rows()).toEqual([true]);
 			} finally {
 				spy.mockRestore();
+			}
+		});
+
+		it("delivers a follow-up queued behind a row the model would not see", async () => {
+			const { session, contexts } = start();
+			await session.prompt("hi");
+			await session.sendCustomMessage(row);
+			await session.followUp("next");
+			await session.waitForIdle();
+
+			expect(contexts).toHaveLength(2);
+			expect(JSON.stringify(contexts[1]!.messages.at(-1))).toContain("next");
+		});
+
+		it("saves a row sent during a run to the session /new leaves", async () => {
+			const sessionDir = path.join(tempDir.path(), "sessions");
+			const replying = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const { session } = start(
+				async () => {
+					replying.resolve();
+					await release.promise;
+				},
+				SessionManager.create(tempDir.path(), sessionDir),
+			);
+			const run = session.prompt("hi").catch(() => {});
+			await replying.promise;
+			await session.sessionManager.ensureOnDisk();
+			const leftFile = session.sessionFile;
+			if (!leftFile) throw new Error("Expected the session to be on disk");
+			expect(await session.sendCustomMessage(row)).toBe(false);
+			// The mock reply ignores the abort signal: release it once /new is under way.
+			const leaving = session.newSession();
+			release.resolve();
+			await leaving;
+			await run;
+
+			const left = await SessionManager.open(leftFile, sessionDir, undefined, {
+				initialCwd: tempDir.path(),
+				suppressBreadcrumb: true,
+			});
+			try {
+				const saved = left.getBranch().filter(entry => entry.type === "custom_message");
+				expect(saved.map(entry => [entry.customType, entry.excludeFromContext])).toEqual([["plugin-stats", true]]);
+			} finally {
+				await left.close();
 			}
 		});
 	});

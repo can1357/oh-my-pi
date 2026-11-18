@@ -38,6 +38,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	lastContextMessage,
 	type QueuedMessagePreparation,
 	type QueuedMessageQueue,
 	resolveTelemetry,
@@ -1763,9 +1764,32 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	/** Draw and save the rows kept out of context that a live run queued (see {@link #pendingExcludedRows}). */
 	#flushExcludedRows(): void {
 		if (this.#pendingExcludedRows.length === 0) return;
+		const connected = this.#unsubscribeAgent !== undefined;
+		// Rows land only at a turn boundary: mid-stream, their message_start would replace the live stream message.
+		if (connected && this.agent.state.isStreaming) return;
 		const rows = this.#pendingExcludedRows;
 		this.#pendingExcludedRows = [];
-		this.#recordWithoutTurn(rows);
+		if (connected) {
+			this.#recordWithoutTurn(rows);
+			return;
+		}
+		// Disposal detaches last, after its drain: a row still queued then goes with the session.
+		if (this.#isDisposed) return;
+		// A transition (/new, a switch, /compact) disconnects before it aborts the run, so no handler would save
+		// or draw these events: record them directly in the transcript they were sent to, as bash rows are, so a
+		// transition that keeps it (compaction, a rolled-back switch) still shows them.
+		for (const row of rows) {
+			this.agent.appendMessage(row);
+			this.sessionManager.appendCustomMessageEntry(
+				row.customType,
+				row.content,
+				row.display,
+				row.details,
+				row.attribution,
+				row.timestamp,
+				true,
+			);
+		}
 	}
 
 	/** Re-validates a #sessionGeneration snapshot captured before an aside/SDK call's await.
@@ -10816,10 +10840,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		if (this.#advisors.autoResumeSuppressed) return false;
 		// Follow-up-only resume has no steer to inject, so Agent.continue() continues from the
 		// existing context tail — which must itself be a valid provider tail. An injected
-		// non-conversational tail (advisor card → `developer`, bash/python execution) would make
-		// the first model call invalid, so leave the follow-up queued for the next explicit resume.
-		const messages = this.agent.state.messages;
-		const last = messages[messages.length - 1];
+		// non-conversational tail (advisor card → `developer`, a `!` bash/python run sent to the model)
+		// would make the first model call invalid, so leave the follow-up queued for the next explicit
+		// resume. Rows kept out of context (`!!` runs, excluded extension rows) never reach the model,
+		// so they do not count as the tail.
+		const last = lastContextMessage(this.agent.state.messages);
 		return last?.role === "assistant" || last?.role === "toolResult";
 	}
 

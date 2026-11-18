@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, isExcludedFromContext } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { MeterProvider } from "@opentelemetry/api";
 import { logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -47,7 +47,7 @@ function predictionAnchor(session: AgentViewSession): AgentMessage | undefined {
 	const messages = session.messages;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
-		if (isAdvisorCard(message) || ("excludeFromContext" in message && message.excludeFromContext === true)) continue;
+		if (isAdvisorCard(message) || isExcludedFromContext(message)) continue;
 		return message;
 	}
 	return undefined;

@@ -2,7 +2,9 @@ import {
 	type Agent,
 	AgentBusyError,
 	type AgentMessage,
+	isExcludedFromContext,
 	isSyntheticToolResultMessage,
+	lastContextIndex,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -81,7 +83,7 @@ import {
 } from "./retry-fallback-chains";
 import { describeUsageFallback } from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
-import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import { type CustomMessageEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { isUserQueuedMessage } from "./queued-messages";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -144,15 +146,20 @@ function hasNonWhitespace(value: string): boolean {
 }
 
 /**
- * End of the conversation in `messages`, before trailing context-only custom
- * messages: eval runtime snapshots (appended at startup and on display-context
- * rebuilds) and deliveries folded in without a turn — e.g. an `async-result`
- * landing while a user interrupt suppresses auto-resume. They trail a failed
- * turn without ending it. A user-authored custom prompt is conversation.
+ * End of the conversation in `messages`, before trailing context-only messages:
+ * eval runtime snapshots (appended at startup and on display-context rebuilds),
+ * deliveries folded in without a turn — e.g. an `async-result` landing while a
+ * user interrupt suppresses auto-resume — and rows kept out of context (`!!`
+ * runs, excluded extension rows). They trail a failed turn without ending it.
+ * A user-authored custom prompt that reaches the model is conversation.
  */
 function conversationEnd(messages: readonly AgentMessage[]): number {
 	let end = messages.length;
-	while (end > 0 && messages[end - 1].role === "custom" && !isUserAuthoredMessage(messages[end - 1])) end--;
+	while (end > 0) {
+		const message = messages[end - 1];
+		if (!isExcludedFromContext(message) && (message.role !== "custom" || isUserAuthoredMessage(message))) break;
+		end--;
+	}
 	return end;
 }
 
@@ -1331,10 +1338,12 @@ export class TurnRecovery {
 		reason = "assistant-context-cleanup",
 	): void {
 		const messages = this.#host.agent.state.messages;
-		const lastMessage = messages[messages.length - 1];
+		// Rows kept out of context may trail the failed turn; they stay, the turn goes.
+		const index = lastContextIndex(messages);
+		const lastMessage = messages[index];
 		const lastAssistant: AssistantMessage | undefined = lastMessage?.role === "assistant" ? lastMessage : undefined;
 		if (lastAssistant !== undefined && this.#isSameAssistantMessage(lastAssistant, assistantMessage)) {
-			this.#host.agent.replaceMessages(messages.slice(0, -1));
+			this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
 			return;
 		}
 		// A miss means the failed turn is still in active context (or was never
@@ -1436,20 +1445,48 @@ export class TurnRecovery {
 		const prunePrompt = parentEntry?.type === "custom_message";
 
 		this.removeAssistantMessageFromActiveContext(assistantMessage, "accepted-terminal-empty-stop");
-		if (prunePrompt && this.#host.agent.state.messages.at(-1)?.role === "custom") {
-			this.#host.agent.replaceMessages(this.#host.agent.state.messages.slice(0, -1));
+		const messages = this.#host.agent.state.messages;
+		const promptIndex = lastContextIndex(messages);
+		if (prunePrompt && messages[promptIndex]?.role === "custom") {
+			this.#host.agent.replaceMessages(messages.toSpliced(promptIndex, 1));
 		}
 
 		if (!branchEntry) return;
-		const targetParentId = prunePrompt ? parentEntry.parentId : branchEntry.parentId;
+		this.#cutBranchBefore(branch, prunePrompt ? branchIndex - 1 : branchIndex);
+		this.#host.sessionManager.appendCustomEntry("accepted-terminal-empty-stop");
+	}
+
+	/**
+	 * Move the persisted leaf to the parent of `branch[cutIndex]`, dropping that entry and the rest of the
+	 * branch, then re-append the rows kept out of context that trailed it: they belong to the transcript,
+	 * not to the discarded turn, and active context keeps them too.
+	 */
+	#cutBranchBefore(branch: readonly SessionEntry[], cutIndex: number): void {
+		const parentId = branch[cutIndex]!.parentId;
+		const kept = branch
+			.slice(cutIndex + 1)
+			.filter(
+				(entry): entry is CustomMessageEntry =>
+					entry.type === "custom_message" && entry.excludeFromContext === true,
+			);
 		this.#host.withBashBranchTransition(() => {
-			if (targetParentId === null) {
+			if (parentId === null) {
 				this.#host.sessionManager.resetLeaf();
 			} else {
-				this.#host.sessionManager.branch(targetParentId);
+				this.#host.sessionManager.branch(parentId);
 			}
 		});
-		this.#host.sessionManager.appendCustomEntry("accepted-terminal-empty-stop");
+		for (const entry of kept) {
+			this.#host.sessionManager.appendCustomMessageEntry(
+				entry.customType,
+				entry.content,
+				entry.display,
+				entry.details,
+				entry.attribution,
+				new Date(entry.timestamp).getTime(),
+				true,
+			);
+		}
 	}
 
 	/**
@@ -1480,13 +1517,7 @@ export class TurnRecovery {
 		if (!branchEntry) {
 			return undefined;
 		}
-		this.#host.withBashBranchTransition(() => {
-			if (branchEntry.parentId === null) {
-				this.#host.sessionManager.resetLeaf();
-			} else {
-				this.#host.sessionManager.branch(branchEntry.parentId);
-			}
-		});
+		this.#cutBranchBefore(branch, branch.indexOf(branchEntry));
 		return branchEntry.id;
 	}
 
@@ -3377,14 +3408,15 @@ export class TurnRecovery {
 	 */
 	#stripFailedAssistantTail(): void {
 		const messages = this.#host.agent.state.messages;
-		const tail = messages[messages.length - 1];
+		const index = lastContextIndex(messages);
+		const tail = messages[index];
 		if (tail?.role !== "assistant") return;
 		if (tail.stopReason !== "error" && tail.stopReason !== "aborted") return;
 		logger.debug("agent active context failed assistant tail stripped positionally", {
 			stopReason: tail.stopReason,
 			timestamp: tail.timestamp,
 		});
-		this.#host.agent.replaceMessages(messages.slice(0, -1));
+		this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
 	}
 
 	/**
