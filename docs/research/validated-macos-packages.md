@@ -26,14 +26,14 @@ separate `-partial-` name and short retention.
 ## Evidence and reuse
 
 `scripts/package_macos_evidence.py` records the full checkout SHA, Actions run and
-attempt, compiler identity, release profile, selected Cargo/Rust environment
+producing attempt, compiler identity, release profile, selected Cargo/Rust environment
 overrides, release Python config path/hash, source-input hashes and exact package
 hashes. It rejects a dirty tracked checkout. Validation rejects source/run/attempt
 mismatch, unsafe filenames/symlinks, duplicate manifest keys, incomplete or extra
 asset sets, and changed package bytes. Tests use fixture package bytes and an
 actual temporary Git repository; they do not claim a native Mac build happened.
 
-The ordinary Actions artifact `omp-macos-arm64-<full-source-sha>` contains the
+The ordinary Actions artifact `omp-macos-arm64-<full-source-sha>-attempt-<producing-attempt>` contains the
 same validated package bytes and `package-provenance.json`, retained for 14 days.
 Consumers can download and install it without rebuilding. Its provenance is a
 workflow observation bound to that artifact, not a cryptographic signature,
@@ -49,6 +49,16 @@ and hashes, then uploads those existing bytes to a **draft** GitHub Release name
 Only that job receives `contents: write`; the package build retains read-only
 repository permissions and its existing BuildBuddy environment. Checkout credentials
 are not persisted in the publishing job.
+
+The successful provenance step exposes its producing attempt as a package-job
+output, along with the immutable artifact's name. The publisher validates against those outputs, rather than its own current
+`GITHUB_RUN_ATTEMPT`: retrying only a failed publisher therefore reuses the
+original immutable package artifact without rebuilding. Exact source/run/producing
+attempt checks remain mandatory. Native Cargo configuration `.cargo/config.toml`
+is included in the recorded input hashes alongside the release profile/toolchain.
+The previous ordinary artifact name ended at the source SHA; this slice adds the
+producing attempt to ordinary and partial names so a successful package rerun in
+the same workflow run does not collide with the earlier immutable artifact.
 
 Both workflow and helper restrict publication to `blyzer/oh-my-pi`, an `omp2`
 manual dispatch and actor `blyzer`. The helper refuses existing release tags and

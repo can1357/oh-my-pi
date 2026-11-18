@@ -71,7 +71,7 @@ class PackageEvidenceTests(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(root)
-                for name in ("Cargo.lock", "rust-toolchain.toml", "scripts/package-macos.sh",
+                for name in ("Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml", "scripts/package-macos.sh",
                              "scripts/install-smoke-macos.sh", "crates/py/requirements.txt",
                              "crates/py/scripts/fetch-python.sh", "vendor/python-release/pyo3-config.txt"):
                     path = Path(name)
@@ -147,10 +147,12 @@ class PackageEvidenceTests(unittest.TestCase):
             self.validate()
 
     def test_draft_publish_reuses_validated_bytes_without_compilation(self):
-        run = Mock(return_value=subprocess.CompletedProcess([], 1, stderr="HTTP 404"))
+        run = Mock(return_value=subprocess.CompletedProcess([], 1, stdout="HTTP/2.0 404 Not Found\n", stderr=""))
         env = {"GITHUB_REPOSITORY": "blyzer/oh-my-pi", "GITHUB_REF": "refs/heads/omp2",
-               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "blyzer"}
+               "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "blyzer",
+               "GITHUB_RUN_ATTEMPT": "3"}
         with patch.dict(os.environ, env, clear=True):
+            # A publisher-only retry still validates producing attempt 2.
             evidence.publish(self.directory, self.sha, 10, 2, run)
         create = run.call_args_list[-1].args[0]
         self.assertEqual(create[:3], ["gh", "release", "create"])
@@ -173,7 +175,9 @@ class PackageEvidenceTests(unittest.TestCase):
         env = {"GITHUB_REPOSITORY": "blyzer/oh-my-pi", "GITHUB_REF": "refs/heads/omp2",
                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_ACTOR": "blyzer"}
         for result in (subprocess.CompletedProcess([], 0, stderr=""),
-                       subprocess.CompletedProcess([], 1, stderr="HTTP 403")):
+                       subprocess.CompletedProcess([], 1, stdout="HTTP/2.0 403 Forbidden\n", stderr="URL/source/abc404def"),
+                       subprocess.CompletedProcess([], 1, stdout="HTTP/2.0 500 Internal Server Error\n404", stderr="404"),
+                       subprocess.CompletedProcess([], 1, stdout="", stderr="HTTP 404")):
             run = Mock(return_value=result)
             with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
                 evidence.publish(self.directory, self.sha, 10, 2, run)
@@ -202,12 +206,24 @@ class PackagingWorkflowTests(unittest.TestCase):
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         self.assertEqual(jobs["publish"]["permissions"], {"contents": "write"})
         self.assertEqual(jobs["publish"]["needs"], "package")
+        self.assertEqual(jobs["package"]["outputs"]["build_attempt"], '${{ steps.provenance.outputs.build_attempt }}')
+        self.assertEqual(jobs["package"]["outputs"]["artifact_name"], '${{ steps.provenance.outputs.artifact_name }}')
+        record = next(step for step in steps if step.get("id") == "provenance")
+        self.assertIn('"$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"', record["run"])
+        self.assertIn('artifact_name=omp-macos-arm64-%s-attempt-%s', record["run"])
+        self.assertEqual(upload["with"]["name"], '${{ steps.provenance.outputs.artifact_name }}')
         self.assertIn("inputs.publish_draft", jobs["publish"]["if"])
         self.assertIn("github.ref == 'refs/heads/omp2'", jobs["publish"]["if"])
+        self.assertIn("github.event_name == 'workflow_dispatch'", jobs["publish"]["if"])
         self.assertNotIn("BUILDBUDDY", str(jobs["publish"]))
         download = next(step for step in jobs["publish"]["steps"] if step.get("name", "").startswith("Download"))
         self.assertNotIn("run-id", download["with"])
         self.assertNotIn("github-token", download["with"])
+        self.assertEqual(download["with"]["name"], '${{ needs.package.outputs.artifact_name }}')
+        publish = next(step for step in jobs["publish"]["steps"] if step.get("name", "").startswith("Validate and publish"))
+        self.assertEqual(publish["env"]["BUILD_ATTEMPT"], '${{ needs.package.outputs.build_attempt }}')
+        self.assertIn('--run-attempt "$BUILD_ATTEMPT"', publish["run"])
+        self.assertNotIn('GITHUB_RUN_ATTEMPT', publish["run"])
 
 
 if __name__ == "__main__":

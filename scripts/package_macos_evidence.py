@@ -19,7 +19,7 @@ import tomllib
 MANIFEST = "package-provenance.json"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 COMMAND = ["cargo", "build", "-p", "omp-app", "--bin", "omp", "--release", "--locked"]
-INPUTS = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+INPUTS = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml",
           "scripts/package-macos.sh", "scripts/install-smoke-macos.sh",
           "crates/py/requirements.txt", "crates/py/scripts/fetch-python.sh",
           "vendor/python-release/pyo3-config.txt"]
@@ -139,9 +139,11 @@ def publish(directory, source_sha, run_id, run_attempt, run=subprocess.run):
         raise ValueError("draft publication requires an owner dispatch on omp2")
     tag = "omp-macos-" + source_sha
     # Never replace an existing tag/release or attach packages to another source.
-    existing = run(["gh", "api", "repos/blyzer/oh-my-pi/git/ref/tags/" + tag],
+    existing = run(["gh", "api", "--include", "repos/blyzer/oh-my-pi/git/ref/tags/" + tag],
                    capture_output=True, text=True)
-    if existing.returncode == 0 or "404" not in existing.stderr:
+    status = (existing.stdout or "").splitlines()
+    if (existing.returncode == 0 or not status
+            or not re.fullmatch(r"HTTP/(?:1\.[01]|2(?:\.0)?|3(?:\.0)?) 404(?: .*)?", status[0])):
         raise ValueError("release tag exists or its absence cannot be established")
     assets = [str(directory / name) for name in sorted(value["artifacts"])] + [str(directory / MANIFEST)]
     run(["gh", "release", "create", tag, "--repo", "blyzer/oh-my-pi", "--target", source_sha,
