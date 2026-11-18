@@ -36,7 +36,7 @@ jobs:
       build: 'bun install --frozen-lockfile && bun scripts/bazel-natives.ts host && PI_BUILD_IDENTITY="$FORK_TAG" bun --cwd=packages/coding-agent run build'
       artifact: packages/coding-agent/dist/omp
       smoke: '"$BIN" --version && "$BIN" --help'
-      tools: 'bun@1.4.4 rust'
+      tools: 'bun@1.4.4 rust@nightly-2026-11-08'
       targets: >-
         [{"target":"darwin-arm64","os":"macos-latest"},
          {"target":"linux-x64","os":"ubuntu-22.04"}]
