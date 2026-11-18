@@ -59,7 +59,7 @@ export async function warmUpSubagentWorker({ cwd, settings, modelRegistry }: Sub
 			enableLsp: false,
 			enableIrc: false,
 			hasUI: false,
-			cacheWarming: false,
+			cacheWarming: "off",
 		});
 		await session.dispose();
 	} catch (error) {

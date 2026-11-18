@@ -1,11 +1,11 @@
 /**
  * Session-facing image URL service.
  *
- * Owns policy and session state — provider gating, quarantine, the lazy-frame
- * producer registry, and the render-callback server — and delegates URL
- * minting to a {@link BlobBackend}: the project-shared blob daemon when
- * reachable, an in-process backend otherwise. Every failure at any layer
- * degrades to inline base64.
+ * Owns policy and session state — provider gating, quarantine, and the
+ * lazy-frame producer registry — and delegates URL minting to a
+ * {@link BlobBackend}: a `blob` unit in the omp daemon per configured
+ * destination when the daemon is reachable, in-process backends otherwise.
+ * Every failure at any layer degrades to inline base64.
  */
 
 import * as path from "node:path";
@@ -13,7 +13,11 @@ import type { Context, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
-import { type BlobBackend, LocalBlobBackend } from "./broker";
+import { daemonClient } from "../daemon/client";
+import { BLOB_APPEND_METHOD, BLOB_CALL_CHUNK_CHARS, BLOB_MODULE_VERSION } from "../daemon/modules/blob";
+import { canonicalProjectDir } from "../daemon/paths";
+import { type DaemonClient, type DaemonTunnel, projectScope } from "../daemon/protocol";
+import { type BlobBackend, isServeKind, LocalBlobBackend } from "./broker";
 import {
 	contextHasImages,
 	contextHasImageUrls,
@@ -22,15 +26,31 @@ import {
 	inlineContextImages,
 	supportsRemoteImageUrls,
 } from "./context-images";
-import { connectDaemonBlobBackend, type RenderCallbackHost } from "./daemon";
-import type { BlobBrokerWorkerConfig } from "./protocol";
-import { RENDER_CALLBACK_PATH, RENDER_CALLBACK_TOKEN_HEADER } from "./protocol";
+import {
+	BLOB_BROKER_KIND,
+	BLOB_RENDER_CHANNEL,
+	type BlobBrokerCalls,
+	type BlobBrokerDoctorRequest,
+	type BlobBrokerDoctorResponse,
+	type BlobBrokerProbeRequest,
+	type BlobBrokerProbeResponse,
+	type BlobBrokerPurgeRequest,
+	type BlobBrokerPurgeResponse,
+	type BlobBrokerStatus,
+	type BlobBrokerWorkerConfig,
+	type BlobRenderHello,
+	type BlobRenderRequest,
+	type BlobRenderResponse,
+	type BlobUnitParams,
+	blobBrokerConfigKey,
+	type EnsureBlobResponse,
+} from "./protocol";
 import { ProviderFileCache } from "./provider-file-types";
 import { type ProviderFileCredentialResolver, ProviderFileManager } from "./provider-files";
 import type { BlobPublication } from "./publication";
 import { BlobBrokerSavingsJournal, type BlobBrokerSavingsRecord, blobBrokerSavingsJournalPath } from "./savings";
 import type { LazyBlobFetcher } from "./store";
-import type { DestinationOptionValue } from "./uploader-runtime";
+import { type DestinationOptionValue, destinationSpawnContext } from "./uploader-runtime";
 
 import {
 	cfgImagesUrlsBackends,
@@ -76,6 +96,354 @@ function blockContentHash(block: ImageContent): string {
 	const hash = new Bun.CryptoHasher("sha256").update(block.mimeType).update("\n").update(block.data).digest("hex");
 	contentHashByBlock.set(block, { data: block.data, mimeType: block.mimeType, hash });
 	return hash;
+}
+
+type BlobCall = keyof BlobBrokerCalls;
+
+function callBlob<M extends BlobCall>(
+	client: DaemonClient,
+	unit: string,
+	method: M,
+	params: BlobBrokerCalls[M]["params"],
+): Promise<BlobBrokerCalls[M]["result"]> {
+	return client.call<BlobBrokerCalls[M]["result"]>(BLOB_BROKER_KIND, method, params, { unit });
+}
+
+/**
+ * Publish `data` through the unit's `blob` call. A payload over one control
+ * line's budget is staged in {@link BLOB_APPEND_METHOD} slices first.
+ */
+async function uploadBlob(
+	client: DaemonClient,
+	unit: string,
+	key: string,
+	mimeType: string,
+	data: string,
+): Promise<EnsureBlobResponse> {
+	if (data.length <= BLOB_CALL_CHUNK_CHARS) return callBlob(client, unit, "blob", { key, mimeType, data });
+	const upload = crypto.randomUUID();
+	for (let offset = 0; offset < data.length; offset += BLOB_CALL_CHUNK_CHARS) {
+		await client.call(
+			BLOB_BROKER_KIND,
+			BLOB_APPEND_METHOD,
+			{ upload, data: data.slice(offset, offset + BLOB_CALL_CHUNK_CHARS) },
+			{ unit },
+		);
+	}
+	return client.call<EnsureBlobResponse>(BLOB_BROKER_KIND, "blob", { key, mimeType, upload }, { unit });
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** Open (find-or-start) the project's `blob` unit for `config`, with a lease on this client's connection. */
+async function openBlobUnit(
+	client: DaemonClient,
+	projectDir: string,
+	config: BlobBrokerWorkerConfig,
+): Promise<{ unit: string; lease: string | undefined }> {
+	const params: BlobUnitParams = {
+		config,
+		spawn: { ...destinationSpawnContext(undefined), cwd: projectDir },
+	};
+	const opened = await client.open({
+		kind: BLOB_BROKER_KIND,
+		scope: projectScope(await canonicalProjectDir(projectDir)),
+		key: blobBrokerConfigKey(config),
+		label: `blob ${config.kind}`,
+		params,
+	});
+	return { unit: opened.unit.id, lease: opened.lease };
+}
+
+/** Client side of the `render` tunnel: answers the unit's lazy render requests from session producers. */
+class RenderTunnel {
+	readonly owner = crypto.randomUUID();
+	#tunnel: DaemonTunnel;
+	#producers: Map<string, { mimeType: string; fetcher: LazyBlobFetcher }>;
+	#closed = false;
+
+	constructor(tunnel: DaemonTunnel, producers: Map<string, { mimeType: string; fetcher: LazyBlobFetcher }>) {
+		this.#tunnel = tunnel;
+		this.#producers = producers;
+		let buffered = "";
+		const decoder = new TextDecoder();
+		tunnel.start(
+			chunk => {
+				buffered += decoder.decode(chunk, { stream: true });
+				let newline = buffered.indexOf("\n");
+				while (newline >= 0) {
+					const line = buffered.slice(0, newline).trim();
+					buffered = buffered.slice(newline + 1);
+					newline = buffered.indexOf("\n");
+					if (!line) continue;
+					try {
+						void this.#render(JSON.parse(line) as BlobRenderRequest);
+					} catch {
+						logger.debug("blob render tunnel: malformed request");
+					}
+				}
+			},
+			() => {
+				this.#closed = true;
+			},
+		);
+		const hello: BlobRenderHello = { owner: this.owner };
+		tunnel.send(`${JSON.stringify(hello)}\n`);
+	}
+
+	get closed(): boolean {
+		return this.#closed;
+	}
+
+	async #render(request: BlobRenderRequest): Promise<void> {
+		const producer = this.#producers.get(request.key);
+		let response: BlobRenderResponse;
+		if (!producer) {
+			response = { id: request.id, error: `unknown lazy blob ${request.key}` };
+		} else {
+			try {
+				const bytes = await producer.fetcher();
+				response = bytes
+					? { id: request.id, mime: producer.mimeType, base64: bytes.toBase64() }
+					: { id: request.id, error: `lazy blob ${request.key} source is gone` };
+			} catch (error) {
+				response = { id: request.id, error: errorMessage(error) };
+			}
+		}
+		if (this.#closed) return;
+		if (!this.#tunnel.send(`${JSON.stringify(response)}\n`)) await this.#tunnel.drained();
+	}
+
+	close(): void {
+		this.#closed = true;
+		this.#tunnel.close();
+	}
+}
+
+interface DaemonBlobSession {
+	unit: string;
+	lease: string | undefined;
+	render?: Promise<RenderTunnel>;
+}
+
+/**
+ * {@link BlobBackend} over one daemon `blob` unit. The unit is opened on first
+ * use and re-opened after the daemon restarts (leases die with it).
+ */
+class DaemonBlobBackend implements BlobBackend {
+	readonly supportsLazy: boolean;
+	#client: DaemonClient;
+	#projectDir: string;
+	#config: BlobBrokerWorkerConfig;
+	#session: Promise<DaemonBlobSession> | undefined;
+	#producers = new Map<string, { mimeType: string; fetcher: LazyBlobFetcher }>();
+	#unsubscribe: () => void;
+	#stopped = false;
+
+	constructor(client: DaemonClient, projectDir: string, config: BlobBrokerWorkerConfig) {
+		this.#client = client;
+		this.#projectDir = projectDir;
+		this.#config = config;
+		this.supportsLazy = isServeKind(config.kind);
+		this.#unsubscribe = client.onReconnect(() => {
+			const previous = this.#session;
+			this.#session = undefined;
+			void previous?.then(session => session.render?.then(render => render.close())).catch(() => {});
+		});
+	}
+
+	/**
+	 * Run `action` on the open unit. When it fails because the unit is gone
+	 * (its exposure died, it was stopped), forget the session and retry once on
+	 * a freshly opened unit; other failures propagate.
+	 */
+	async #withSession<T>(action: (session: DaemonBlobSession) => Promise<T>): Promise<T> {
+		const pending = this.#open();
+		const session = await pending;
+		try {
+			return await action(session);
+		} catch (error) {
+			if (this.#stopped || (await this.#unitLive(session.unit))) throw error;
+			if (this.#session === pending) {
+				this.#session = undefined;
+				this.#closeSession(session);
+			}
+			return action(await this.#open());
+		}
+	}
+
+	async #unitLive(unit: string): Promise<boolean> {
+		try {
+			const { unit: snapshot } = await this.#client.request({ op: "describe", unit });
+			return snapshot.state !== "exited" && snapshot.state !== "failed" && snapshot.state !== "stopping";
+		} catch {
+			return false;
+		}
+	}
+
+	#closeSession(session: DaemonBlobSession): void {
+		void (async () => {
+			const render = session.render ? await session.render.catch(() => undefined) : undefined;
+			render?.close();
+			if (session.lease) await this.#client.release(session.lease);
+		})().catch(() => {});
+	}
+
+	/** Start the unit (and its exposure) in the background. */
+	prewarm(): void {
+		void this.#open().catch(() => {});
+	}
+
+	#open(): Promise<DaemonBlobSession> {
+		if (this.#stopped) return Promise.reject(new Error("blob backend stopped"));
+		if (!this.#session) {
+			const pending = openBlobUnit(this.#client, this.#projectDir, this.#config);
+			this.#session = pending;
+			// A failed open is retried by the next request rather than cached.
+			pending.catch(() => {
+				if (this.#session === pending) this.#session = undefined;
+			});
+		}
+		return this.#session;
+	}
+
+	async #render(session: DaemonBlobSession): Promise<RenderTunnel> {
+		const current = session.render ? await session.render.catch(() => undefined) : undefined;
+		if (current && !current.closed) return current;
+		const pending = this.#client
+			.attach(session.unit, BLOB_RENDER_CHANNEL)
+			.then(tunnel => new RenderTunnel(tunnel, this.#producers));
+		session.render = pending;
+		return pending;
+	}
+
+	async ensureBlob(
+		key: string,
+		mimeType: string,
+		getBytes: () => Uint8Array,
+		getBase64?: () => string,
+	): Promise<BlobPublication | null> {
+		try {
+			return await this.#withSession(async ({ unit }) => {
+				// Probe first: persisted/live registrations answer without the bytes
+				// ever crossing the connection — the common case on every turn after
+				// the first, and on conversation resume.
+				const probe = await callBlob(this.#client, unit, "blob", { key, mimeType });
+				if (probe.publication) return probe.publication;
+				const data = getBase64?.() ?? getBytes().toBase64();
+				const { publication } = await uploadBlob(this.#client, unit, key, mimeType, data);
+				return publication ?? null;
+			});
+		} catch (error) {
+			logger.debug("blob daemon ensure failed", { destination: this.#config.kind, error: errorMessage(error) });
+			return null;
+		}
+	}
+
+	async ensureLazy(key: string, mimeType: string, fetcher: LazyBlobFetcher): Promise<BlobPublication | null> {
+		if (!this.supportsLazy) return null;
+		try {
+			this.#producers.set(key, { mimeType, fetcher });
+			return await this.#withSession(async session => {
+				const render = await this.#render(session);
+				const { publication } = await callBlob(this.#client, session.unit, "lazy", {
+					key,
+					mimeType,
+					owner: render.owner,
+				});
+				return publication ?? null;
+			});
+		} catch (error) {
+			logger.debug("blob daemon lazy ensure failed", { destination: this.#config.kind, error: errorMessage(error) });
+			return null;
+		}
+	}
+
+	stop(): void {
+		this.#stopped = true;
+		this.#unsubscribe();
+		const session = this.#session;
+		this.#session = undefined;
+		this.#producers.clear();
+		void session?.then(opened => this.#closeSession(opened)).catch(() => {});
+	}
+}
+
+/** The daemon, or `null` (after a debug log) when it is unreachable or lacks the `blob` module. */
+async function blobDaemon(): Promise<DaemonClient | null> {
+	try {
+		const client = await daemonClient();
+		if (client.welcome.caps[BLOB_BROKER_KIND] !== BLOB_MODULE_VERSION) {
+			logger.debug("omp daemon has no compatible blob module; using in-process image URL backends");
+			return null;
+		}
+		return client;
+	} catch (error) {
+		logger.debug("omp daemon unreachable; using in-process image URL backends", { error: errorMessage(error) });
+		return null;
+	}
+}
+
+/** Newest live `blob` unit of the project, without starting one. */
+async function liveBlobUnit(projectDir: string): Promise<{ client: DaemonClient; unit: string } | null> {
+	const client = await blobDaemon();
+	if (!client) return null;
+	const { units } = await client.request({
+		op: "list",
+		scope: projectScope(await canonicalProjectDir(projectDir)),
+		kind: BLOB_BROKER_KIND,
+	});
+	let newest: (typeof units)[number] | undefined;
+	for (const unit of units) {
+		if (unit.state !== "ready" && unit.state !== "running") continue;
+		if (!newest || unit.startedAt > newest.startedAt) newest = unit;
+	}
+	return newest ? { client, unit: newest.id } : null;
+}
+
+/** Status of the project's live blob unit; `null` when none runs. */
+export async function queryBlobBrokerStatus(projectDir: string): Promise<BlobBrokerStatus | null> {
+	const live = await liveBlobUnit(projectDir);
+	return live ? callBlob(live.client, live.unit, "status", {}) : null;
+}
+
+/** Diagnostics of the project's live blob unit; `null` when none runs. */
+export async function queryBlobBrokerDoctor(
+	projectDir: string,
+	request: BlobBrokerDoctorRequest = {},
+): Promise<BlobBrokerDoctorResponse | null> {
+	const live = await liveBlobUnit(projectDir);
+	return live ? callBlob(live.client, live.unit, "doctor", request) : null;
+}
+
+/**
+ * Open the unit for `config` (starting its exposure), then issue an actual
+ * public health request through it. `null` when the daemon is unreachable.
+ */
+export async function queryBlobBrokerProbe(
+	projectDir: string,
+	config: BlobBrokerWorkerConfig,
+	request: BlobBrokerProbeRequest = {},
+): Promise<BlobBrokerProbeResponse | null> {
+	const client = await blobDaemon();
+	if (!client) return null;
+	const { unit, lease } = await openBlobUnit(client, projectDir, config);
+	try {
+		return await callBlob(client, unit, "probe", request);
+	} finally {
+		if (lease) await client.release(lease);
+	}
+}
+
+/** Preview or apply cleanup on the project's live blob unit; `null` when none runs. */
+export async function queryBlobBrokerPurge(
+	projectDir: string,
+	request: BlobBrokerPurgeRequest = {},
+): Promise<BlobBrokerPurgeResponse | null> {
+	const live = await liveBlobUnit(projectDir);
+	return live ? callBlob(live.client, live.unit, "purge", request) : null;
 }
 
 /**
@@ -153,7 +521,6 @@ export class ImageUrlService {
 	#publicationByUrl = new Map<string, BlobPublication>();
 	/** Backend range and content key retained by URL for ordered fallback. */
 	#publicationSourceByUrl = new Map<string, { rangeStart: number; rangeEnd: number; hash: string }>();
-	#callback: { port: number; token: string; server: Bun.Server<undefined> } | null | undefined;
 	#daemonEnabled: boolean;
 	#providerFiles: ProviderFileManager | undefined;
 	#providerFilePosition: number;
@@ -177,7 +544,7 @@ export class ImageUrlService {
 		this.#savingsJournal = options?.savingsJournal;
 	}
 
-	/** Kick off daemon/exposure startup in the background to hide latency. */
+	/** Kick off unit/exposure startup in the background to hide latency. */
 	prewarm(): void {
 		const position = Math.min(this.#providerFilePosition, this.#configs.length);
 		const configs = position > 0 ? this.#configs.slice(0, position) : this.#configs.slice(position);
@@ -198,14 +565,13 @@ export class ImageUrlService {
 	}
 
 	async #resolveBackend(configs: readonly BlobBrokerWorkerConfig[]): Promise<BlobBackend | null> {
+		const daemon = this.#daemonEnabled ? await blobDaemon() : null;
 		const backends: BlobBackend[] = [];
-		const daemonConfig = configs[0];
-		const daemon =
-			this.#daemonEnabled && daemonConfig === this.#configs[0]
-				? await connectDaemonBlobBackend(this.#projectDir, daemonConfig, this.#callbackHost())
-				: null;
-		if (daemon) backends.push(daemon);
 		for (const config of configs) {
+			if (daemon) {
+				backends.push(new DaemonBlobBackend(daemon, this.#projectDir, config));
+				continue;
+			}
 			try {
 				backends.push(new LocalBlobBackend(config));
 			} catch (error) {
@@ -215,58 +581,10 @@ export class ImageUrlService {
 				});
 			}
 		}
+		const first = backends[0];
+		if (first instanceof DaemonBlobBackend) first.prewarm();
 		if (backends.length === 0) return null;
 		return backends.length === 1 ? backends[0] : new FallbackBlobBackend(backends);
-	}
-
-	#callbackHost(): RenderCallbackHost {
-		return {
-			ensure: async () => this.#ensureCallbackServer(),
-			register: (key, fetcher) => {
-				this.#producers.set(key, fetcher);
-			},
-		};
-	}
-
-	/**
-	 * Loopback server the daemon renders lazy blobs through. Started once, on
-	 * the first lazy registration against a daemon backend.
-	 */
-	#ensureCallbackServer(): { port: number; token: string } | null {
-		if (this.#callback !== undefined) return this.#callback;
-		try {
-			const token = crypto.randomUUID();
-			const server = Bun.serve({
-				hostname: "127.0.0.1",
-				port: 0,
-				fetch: async request => {
-					if (request.headers.get(RENDER_CALLBACK_TOKEN_HEADER) !== token) {
-						return new Response(null, { status: 403 });
-					}
-					const pathname = new URL(request.url).pathname;
-					if (!pathname.startsWith(RENDER_CALLBACK_PATH)) return new Response(null, { status: 404 });
-					const key = decodeURIComponent(pathname.slice(RENDER_CALLBACK_PATH.length));
-					const fetcher = this.#producers.get(key);
-					const bytes = fetcher ? await fetcher() : null;
-					if (!bytes) return new Response(null, { status: 404 });
-					return new Response(bytes, { status: 200, headers: { "content-type": "application/octet-stream" } });
-				},
-			});
-			server.unref();
-			const port = server.port;
-			if (port === undefined) {
-				server.stop(true);
-				this.#callback = null;
-				return null;
-			}
-			this.#callback = { port, token, server };
-		} catch (error) {
-			logger.warn("blob-broker: render callback server failed to start", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			this.#callback = null;
-		}
-		return this.#callback;
 	}
 
 	/**
@@ -578,8 +896,6 @@ export class ImageUrlService {
 	}
 
 	stop(): void {
-		this.#callback?.server.stop(true);
-		this.#callback = null;
 		for (const pending of this.#backendPromises.values()) void pending.then(backend => backend?.stop());
 		this.#backendPromises.clear();
 		this.#publicationByUrl.clear();

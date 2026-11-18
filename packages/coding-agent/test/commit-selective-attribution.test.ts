@@ -120,6 +120,32 @@ describe("selective commit attribution", () => {
 			expect(verdicts.filter(verdict => !verdict.startsWith("own "))).toEqual([]);
 			expect(content).toBe(work);
 		});
+
+		it("does not duplicate a committed block an edit re-added past a repeated line", () => {
+			const draft = "\nfn end() {\n\tif fill.is_none() {\n\t\treturn;\n\t}\n\tdone();\n}\n";
+			const final = draft
+				.replace("\tif fill.is_none() {\n", "\tlet Some(fill) = fill else {\n")
+				.replace("\t\treturn;\n\t}\n", "\t\treturn;\n\t};\n\tif fill.busy() {\n\t\treturn;\n\t}\n");
+			const own = (body: string) => `const X: u8 = 1;\n${body}`;
+			const work = own(final).replace("\tdone();\n", "\tdone();\n\ttrace();\n");
+
+			// `end` was committed without `const X`, so no snapshot equals HEAD. Replaying the history
+			// deletes HEAD's `return; }; if fill.busy() {` and re-adds `}; if fill.busy() { return;`
+			// one `return;` further down.
+			const { content, verdicts } = commitFor(
+				final,
+				[
+					{ actor: "Main", before: "", after: own(draft) },
+					{ actor: "Main", before: own(draft), after: own(final) },
+					{ actor: "Main", before: own(final), after: work },
+				],
+				work,
+				["Main"],
+			);
+
+			expect(verdicts).toEqual(["own +const X: u8 = 1;", "own +\ttrace();"]);
+			expect(content).toBe(work);
+		});
 	});
 
 	it("puts an edit of another actor's uncommitted line in review instead of committing it half", () => {

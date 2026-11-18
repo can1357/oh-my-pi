@@ -209,7 +209,7 @@ for (const mode of ["run", "commit"] as const) {
 				});
 				const text = result.content.find(block => block.type === "text")?.text ?? "";
 				const artifact = await Bun.file(path.join(session.cwd, "captured.github.log")).text();
-				expect(text).toContain(`${fixture.label}: artifact://captured`);
+				expect(text).toContain(`${fixture.label}: local://captured.log`);
 				if (fixture.label !== "Full failed-job logs") expect(text).not.toContain("Full failed-job logs:");
 				expect(result.details?.watch?.mode).toBe(mode);
 				expect(result.details?.watch?.state).toBe("completed");

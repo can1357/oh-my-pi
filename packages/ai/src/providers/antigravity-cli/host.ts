@@ -117,7 +117,12 @@ interface Conversation {
 	id: string;
 	systemKey: string;
 	loaded: boolean;
+	/** omp model id the conversation was last configured for. */
 	model?: string;
+	/** `model` value last sent to agy; differs from `model` for effort-suffixed rosters. */
+	agyModel?: string;
+	/** `model` values agy advertises; undefined when it reported none. */
+	agyModels?: string[];
 	effort?: string;
 	defaultEffort?: string;
 	requestedEffort?: string;
@@ -286,11 +291,12 @@ export class AgyHost implements ProviderSessionState {
 					id: created.sessionId,
 					systemKey,
 					loaded: true,
+					agyModels: modelValues(created.configOptions),
 					defaultEffort: thoughtLevel(created.configOptions),
 				};
 				this.#contextTokens = 0;
 			}
-			await this.#setup(this.#configure(model.id, options.reasoning));
+			await this.#setup(this.#configure(model, options.reasoning));
 			step.controller.signal.throwIfAborted();
 			if (plan.kind === "resume") {
 				const pending = this.#pending;
@@ -496,28 +502,38 @@ export class AgyHost implements ProviderSessionState {
 			});
 			if (this.#process !== agy || step !== this.#step || step?.controller.signal.aborted)
 				throw new Error("Antigravity CLI load was interrupted");
-			this.#conversation = { id, systemKey, loaded: true, defaultEffort: thoughtLevel(loaded.configOptions) };
+			this.#conversation = {
+				id,
+				systemKey,
+				loaded: true,
+				agyModels: modelValues(loaded.configOptions),
+				defaultEffort: thoughtLevel(loaded.configOptions),
+			};
 			this.#contextTokens = 0;
 		} finally {
 			if (this.#loading === loading) this.#loading = undefined;
 		}
 	}
 
-	async #configure(modelId: string, effort: string | undefined): Promise<void> {
+	async #configure(model: Model, effort: string | undefined): Promise<void> {
 		const conversation = this.#conversation;
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
 		const connection = this.#requireProcess().connection;
-		if (conversation.model !== modelId) {
+		const agyModel = agyModelValue(model, effort, conversation.agyModels);
+		if (conversation.agyModel !== agyModel) {
 			const response = await connection.setSessionConfigOption({
 				sessionId: conversation.id,
 				configId: "model",
-				value: modelId,
+				value: agyModel,
 			});
-			conversation.model = modelId;
+			conversation.agyModel = agyModel;
+			conversation.agyModels = modelValues(response.configOptions) ?? conversation.agyModels;
 			conversation.defaultEffort = thoughtLevel(response.configOptions) ?? conversation.defaultEffort;
 			conversation.effort = thoughtLevel(response.configOptions);
 		}
-		const desired = effort ?? conversation.defaultEffort;
+		conversation.model = model.id;
+		// An effort-suffixed model value already pins the thought level.
+		const desired = agyModel === model.id ? (effort ?? conversation.defaultEffort) : undefined;
 		if (desired && conversation.effort !== desired) {
 			await connection.setSessionConfigOption({
 				sessionId: conversation.id,
@@ -849,6 +865,26 @@ function systemMeta(system: string): Record<string, unknown> {
 function thoughtLevel(options: SessionConfigOption[] | null | undefined): string | undefined {
 	const option = options?.find(candidate => candidate.id === "thought_level");
 	return option?.type === "select" ? option.currentValue : undefined;
+}
+
+function modelValues(options: SessionConfigOption[] | null | undefined): string[] | undefined {
+	const option = options?.find(candidate => candidate.id === "model");
+	return option?.type === "select" ? option.options.map(choice => choice.value) : undefined;
+}
+
+/**
+ * agy's `model` value for an omp model. Depending on sign-in, agy advertises
+ * either bare ids with a separate `thought_level` or only effort-suffixed ids
+ * such as `gemini-4-hydrogen-high` (#19638). The bare id is kept when agy offers
+ * it; otherwise the requested effort's suffix, then the model's default level's,
+ * and the bare id only when agy advertises neither.
+ */
+function agyModelValue(model: Model, effort: string | undefined, advertised: string[] | undefined): string {
+	if (!advertised || advertised.includes(model.id)) return model.id;
+	for (const level of [effort, model.thinking?.defaultLevel]) {
+		if (level && advertised.includes(`${model.id}-${level}`)) return `${model.id}-${level}`;
+	}
+	return model.id;
 }
 
 /** Project a tool onto MCP `tools/list`; the official CLI owns any provider-specific schema conversion. */
