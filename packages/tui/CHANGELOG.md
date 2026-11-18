@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- In Tern, typing `->` or `=>` in the composer no longer moves the caret to a new line; the queued message continues on the same line
+
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
