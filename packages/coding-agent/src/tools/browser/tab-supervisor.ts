@@ -152,6 +152,15 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	/** omp created this page (headless, or a relay open without a target): closing the tab closes it. */
 	ownsPage: boolean;
 	/**
+	 * omp created this page on a CDP endpoint that keeps pages per connection (Lightpanda): the page closes with its
+	 * worker's connection, so a replacement worker opens a new page and loads the last URL instead of re-adopting it.
+	 */
+	connectionScoped?: boolean;
+	/** The tab was opened with an explicit `target`: a later open of its name without one keeps that page. */
+	adoptedByTarget?: boolean;
+	/** The URL the page was on before a recycle re-created it (see `connectionScoped`), for the result reporting it. */
+	recreatedFrom?: string;
+	/**
 	 * The tab's upload staging folder. It outlives the tab's workers, since Chrome reads a picked file only when the page
 	 * does, and goes with the page when omp closes it; a page left open in the user's browser keeps it until the sweep.
 	 */
@@ -323,6 +332,17 @@ function longerBudgetHint(timeoutMs: number): string {
 	return ` To give long page work more time, raise the Eval cell's \`timeout\` or pass \`timeout\` to \`tab.run\` (seconds, at most ${TOOL_TIMEOUTS.browser.max}); also raise or disable \`tools.maxTimeout\` if it caps that budget.`;
 }
 const RENDERER_RELOADED_NOTE = `This tab's renderer had crashed, so the tab was reattached to a new worker and its page reloaded. ${RECYCLE_RESETS}`;
+/** What a recycle of a connection-scoped tab (see `WorkerTabSession.connectionScoped`) did to its page. */
+function recreatedPageNote(tab: WorkerTabSession): string {
+	const from = tab.recreatedFrom;
+	const landed =
+		!from || from === "about:blank"
+			? "which starts on about:blank"
+			: tab.info.url === from
+				? `and loaded ${from} again`
+				: `but could not load ${from} again; it is on ${tab.info.url}`;
+	return `This CDP endpoint keeps each page on the connection that opened it, so the tab's page closed with its old worker: omp opened a new page for the tab on a new worker, ${landed}. The old page's JavaScript state, and the cookies and storage its connection held, are gone.`;
+}
 const DEBUGGER_DETACH_CAUSE =
 	"Chrome does this when another extension's frame loads in the tab, such as a password manager's inline autofill menu";
 const DEBUGGER_DETACH_REFUSAL =
@@ -552,7 +572,15 @@ async function acquireTabImpl(
 				await releaseTab(name, { kill: false });
 			} else if (
 				(opts.allowedDomains !== undefined && !sameAllowedDomains(opts.allowedDomains, existing.allowedDomains)) ||
-				(existing.backend === "tern" && opts.target !== undefined && !(await adoptsSameBlock(existing, opts)))
+				(existing.backend === "tern" && opts.target !== undefined && !(await adoptsSameBlock(existing, opts))) ||
+				// `browser.cdpNewTabs` changed since a connected tab opened: an open that wants omp's own page must not
+				// navigate an adopted one, and the reverse. A page adopted by an explicit `target` stays the tab's.
+				(existing.backend === "worker" &&
+					existing.kindTag === "connected" &&
+					opts.target === undefined &&
+					opts.newTab !== undefined &&
+					!existing.adoptedByTarget &&
+					existing.ownsPage !== opts.newTab)
 			) {
 				holdBrowser(browser);
 				tempHold = true;
@@ -728,6 +756,12 @@ async function acquireTabImpl(
 		}
 	}
 
+	// Probed before the abort check below, so an open cancelled meanwhile still leaves nothing behind.
+	const connectionScoped =
+		browser.kind.kind === "connected" &&
+		ownsPage(initPayload) &&
+		!(await targetVisibleAcrossConnections(browser, info.targetId));
+
 	// If the caller aborted while we were spawning/initializing the worker, tear
 	// the freshly-built worker down before publishing the tab so the browser
 	// refCount (which `holdBrowser` below would take) never grows for a tab
@@ -763,6 +797,8 @@ async function acquireTabImpl(
 		frozen: false,
 		uploadDir: initPayload.uploadDir,
 		insecure: opts.insecure,
+		connectionScoped,
+		adoptedByTarget: opts.target !== undefined,
 	};
 	attachTabWorker(tab, worker);
 	noteHiddenFrames(tab, info.hiddenFrames);
@@ -1538,7 +1574,7 @@ async function dispatchRun(
 				if (runTimedOut) {
 					throw new ToolError(
 						reattached
-							? `${error.message}. omp reattached the tab to a new worker without reloading its page. ${RECYCLE_RESETS}${longerBudgetHint(opts.timeoutMs)}`
+							? `${error.message}. ${tab.connectionScoped ? `${recreatedPageNote(tab)} ${WORKER_RESETS}.` : `omp reattached the tab to a new worker without reloading its page. ${RECYCLE_RESETS}`}${longerBudgetHint(opts.timeoutMs)}`
 							: `${error.message}. The tab could not be reattached and was released; open it again with browser.open().${longerBudgetHint(opts.timeoutMs)}`,
 					);
 				}
@@ -1804,15 +1840,17 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 	}
 	await tab.worker.terminate().catch(() => undefined);
 	// Decided after the worker is gone, so a close that joined meanwhile still closes the page by id below. A page
-	// kept open stays the user's: its staged uploads wait for the sweep like a borrowed page's.
-	const closesPage = tab.ownsPage && !opts.keepPage;
+	// kept open stays the user's: its staged uploads wait for the sweep like a borrowed page's. A connection-scoped
+	// page cannot be kept: it closed with its worker's connection.
+	const closesPage = tab.ownsPage && (!opts.keepPage || tab.connectionScoped === true);
 	// omp closes the pages it owns, and with them goes the last reader of their staged uploads.
 	if (closesPage) await removeUploadStaging(tab.uploadDir);
 	// Close a live tab's owned page by id as well, which confirms it is gone: a worker's own
 	// close can fail and still report `closed` (its CDP socket broke), and the relay retracts a
 	// target whose debugger the user dismissed, so the worker cannot close it at all. A dead
-	// tab's page was closed by the teardown that killed it.
-	if (closesPage && wasAlive) {
+	// tab's page was closed by the teardown that killed it. No other connection can see a connection-scoped page,
+	// which closed with the worker's connection.
+	if (closesPage && wasAlive && !tab.connectionScoped) {
 		try {
 			// `false` is "not confirmed closed" (the CDP session could not be
 			// created, or `Target.getTargets` failed) — the same unconfirmed
@@ -2536,7 +2574,9 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 		};
 		const reason = looping
 			? `${exited} again right after being replaced; tab closed`
-			: `${exited}; the tab is being reattached to a new worker on the same page. ${WORKER_RESETS}.`;
+			: tab.connectionScoped
+				? `${exited}; the tab's page closed with it, so omp is opening a new page for the tab on a new worker. ${WORKER_RESETS}.`
+				: `${exited}; the tab is being reattached to a new worker on the same page. ${WORKER_RESETS}.`;
 		const error = postmortem.markExpectedCleanupError(new ToolError(reason));
 		// Host tool calls the dead run started would otherwise keep running, and reply to a replacement worker.
 		const idle = tab.pending.size === 0;
@@ -2556,7 +2596,9 @@ function attachTabWorker(tab: WorkerTabSession, worker: WorkerHandle): void {
 			.then(reattached => {
 				// No run was in flight to report the reset, so the next call on the tab does.
 				if (reattached && idle) {
-					tab.workerExitNotice = `${exited} since the last call; omp reattached the tab to a new worker on the same page, without reloading it. ${WORKER_RESETS}.`;
+					tab.workerExitNotice = tab.connectionScoped
+						? `${exited} since the last call. ${recreatedPageNote(tab)} ${WORKER_RESETS}.`
+						: `${exited} since the last call; omp reattached the tab to a new worker on the same page, without reloading it. ${WORKER_RESETS}.`;
 				}
 				return reattached;
 			})
@@ -2580,12 +2622,22 @@ async function recycleTimedOutWorkerTab(
 	const oldWorker = tab.worker;
 	await oldWorker.terminate().catch(() => undefined);
 	const browserWSEndpoint = tab.browser.wsEndpoint;
+	// A connection-scoped page closed with the old worker's connection, and no other connection can adopt it: the
+	// new worker opens a new page and loads the old one's URL, within half the budget so its report still lands.
+	const lastUrl = tab.info.url;
+	if (tab.connectionScoped) tab.recreatedFrom = lastUrl;
+	const reload =
+		lastUrl && lastUrl !== "about:blank" ? { url: lastUrl, timeoutMs: Math.floor(timeoutMs / 2) } : undefined;
 	const payload: WorkerInitPayload = {
 		mode: "attach",
-		browserWSEndpoint: adoptEndpoint(browserWSEndpoint, tab.browser, tab.targetId),
+		browserWSEndpoint: tab.connectionScoped
+			? browserWSEndpoint
+			: adoptEndpoint(browserWSEndpoint, tab.browser, tab.targetId),
 		safeDir: getPuppeteerDir(),
 		uploadDir: tab.uploadDir,
-		page: { kind: tab.ownsPage ? "owned" : "borrowed", targetId: tab.targetId },
+		page: tab.connectionScoped
+			? { kind: "create", reload }
+			: { kind: tab.ownsPage ? "owned" : "borrowed", targetId: tab.targetId },
 		dialogs: tab.dialogPolicy,
 		allowedDomains: tab.allowedDomains,
 		// The override's CDP session died with the old worker.
@@ -2608,6 +2660,8 @@ async function recycleTimedOutWorkerTab(
 		}
 		tab.worker = replacement;
 		tab.info = info;
+		// A re-created connection-scoped page is a new target.
+		tab.targetId = info.targetId;
 		noteHiddenFrames(tab, info.hiddenFrames);
 		tab.state = "alive";
 		attachTabWorker(tab, replacement);
@@ -2697,7 +2751,8 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 	await tab.worker.terminate().catch(() => undefined);
 	if (tab.ownsPage) await removeUploadStaging(tab.uploadDir);
 	let targetClosed = true;
-	if (tab.ownsPage) {
+	// A connection-scoped page closed with the worker's connection, and no other connection can see it.
+	if (tab.ownsPage && !tab.connectionScoped) {
 		targetClosed = await waitForTabCleanup(
 			tab,
 			DEFAULT_TAB_CLOSE_TIMEOUT_MS,
@@ -2711,6 +2766,19 @@ async function forceKillTabTeardown(tab: WorkerTabSession): Promise<void> {
 	if (scope) {
 		if (targetClosed) void forgetSharedTarget(scope, tab.targetId);
 		else recheckSharedBrowser(scope);
+	}
+}
+
+/**
+ * Whether a connection other than the one that created `targetId` sees it. Chromium shares targets across CDP
+ * connections; engines such as Lightpanda keep each page on the connection that created it.
+ */
+async function targetVisibleAcrossConnections(browser: PuppeteerBrowserHandle, targetId: string): Promise<boolean> {
+	try {
+		await browserConnection(browser.browser).send("Target.getTargetInfo", { targetId });
+		return true;
+	} catch {
+		return false;
 	}
 }
 
