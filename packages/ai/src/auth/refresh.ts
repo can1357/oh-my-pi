@@ -923,7 +923,16 @@ export class OAuthRefresher {
 		reason?: OAuthRefreshReason,
 		rejectedAccess?: string,
 	): Promise<OAuthCredentials> {
-		if (this.#shuttingDown) return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		if (this.#shuttingDown) {
+			// Shutdown refuses new token exchanges, not tokens that need none: join one
+			// already under way (the drain waits for it) or serve a still-fresh token.
+			const inFlight =
+				credentialId === undefined ? undefined : this.#oauthCredentialRefreshInFlight.get(credentialId);
+			if (inFlight) return raceSignal(inFlight, signal, "credential refresh aborted");
+			const current = normalizeOAuthCredentialExpiry(provider, credential);
+			if (Date.now() + OAUTH_REFRESH_SKEW_MS < current.expires) return Promise.resolve(current);
+			return Promise.reject(new AIError.AbortError("OAuth refresh stopped during shutdown"));
+		}
 		const authRecovery = reason === "auth-recovery";
 		if (authRecovery && credentialId !== undefined && !this.#oauthCredentialRefreshInFlight.has(credentialId)) {
 			const recent = this.#recentMint(credentialId);

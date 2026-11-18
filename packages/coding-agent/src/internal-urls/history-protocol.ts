@@ -15,7 +15,8 @@
  * URL forms:
  * - history:// - Index of all registry + on-disk agents (id, status, kind, last activity)
  * - history://<agentId> - Concise markdown transcript of that agent
- * - history://current/full - Full, caller-bound current branch history (experimental)
+ * - history://current/full - Full, caller-bound current branch history (experimental);
+ *   bare history://current reads the same unless an agent is named `current`
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -74,14 +75,19 @@ interface RefLookup {
 	preferredArtifactDir?: string;
 }
 
-/** True for `history://current/<path>`; throws unless the route is exactly `current/full`. */
-function isCurrentFullRoute(url: InternalUrl): boolean {
+/**
+ * `full` for `history://current/full`, `bare` for `history://current` (which
+ * means the same unless an agent is named `current`), undefined for any other
+ * id; throws for any other `current/<path>`.
+ */
+function currentRoute(url: InternalUrl): "full" | "bare" | undefined {
 	const agentId = url.rawHost || url.hostname;
-	if (agentId.toLowerCase() !== "current" || !url.pathname || url.pathname === "/") return false;
+	if (agentId.toLowerCase() !== "current") return undefined;
+	if (!url.pathname || url.pathname === "/") return "bare";
 	if (url.pathname !== "/full" || url.search || url.hash) {
 		throw new Error("Invalid history://current route; use exactly history://current/full (selectors may follow it)");
 	}
-	return true;
+	return "full";
 }
 
 /** Humanize a last-activity timestamp as `Ns/Nm/Nh/Nd ago`. */
@@ -319,10 +325,12 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 * do live agents without a session file and unknown ids.
 	 */
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
-		if (isCurrentFullRoute(url)) return null;
+		const current = currentRoute(url);
+		if (current === "full") return null;
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) return null;
 		const { ref, preferredArtifactDir } = await this.#lookup(agentId, context);
+		if (!ref && current === "bare") return null;
 		if (ref?.sessionFile) return ref.sessionFile;
 		if (ref?.session) return null;
 		return (await this.#findOnDisk(ref?.id ?? agentId, preferredArtifactDir))?.file ?? null;
@@ -371,7 +379,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	#resolveCurrentFull(url: InternalUrl, context: ResolveContext | undefined): InternalResource {
 		if (!context?.experimentalContextManagement) {
 			throw new Error(
-				"history://current/full is available only when compaction.experimentalContextManagement is enabled",
+				"history://current/full is available only when compaction.experimentalContextManagement is enabled; " +
+					"list agent transcripts with history://",
 			);
 		}
 		const branch = context.getSessionBranch?.();
@@ -388,7 +397,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		};
 	}
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		if (isCurrentFullRoute(url)) return this.#resolveCurrentFull(url, context);
+		const current = currentRoute(url);
+		if (current === "full") return this.#resolveCurrentFull(url, context);
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) {
 			const { visible, preferredArtifactDir } = await this.#roster(context);
@@ -402,6 +412,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}
 
 		const { ref, visible, preferredArtifactDir } = await this.#lookup(agentId, context);
+		// No agent is named `current`: the caller means its own session's history.
+		if (!ref && current === "bare") return this.#resolveCurrentFull(url, context);
 		if (!ref) {
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.

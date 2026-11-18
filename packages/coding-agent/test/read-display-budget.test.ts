@@ -13,6 +13,7 @@ import {
 	cfgToolsArtifactSpillThreshold,
 	cfgToolsOutputMaxColumns,
 } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { hashlineFileHash } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const WIDE_LINE = "H".repeat(80_000);
@@ -98,7 +99,7 @@ describe("read charges column-cut lines their displayed width", () => {
 		});
 
 		it(`pages through the wide line of ${label}`, async () => {
-			const shown = rows(await read(createSession(dir), `${file()}:151`));
+			const shown = rows(await read(createSession(dir), `${file()}:151-`));
 			expect(shown.get(150)).toBe("r150");
 			expect(shown.get(151)).toBe(`${WIDE_LINE.slice(0, 768)}…`);
 			expect(shown.get(152)).toBe("r152");
@@ -122,12 +123,13 @@ describe("read charges column-cut lines their displayed width", () => {
 		expect(shown.get(35)).toBe(`${records[34]!.slice(0, 768)}…`);
 	});
 
-	it("emits no hashline tag for a streamed whole-file read built from cut-line heads", async () => {
-		// Past the snapshot cap a whole-file window would be hashed from its collected lines,
-		// which here hold only the heads of the cut lines: no tag beats a tag of the wrong text.
+	it("tags a streamed whole-file read with the whole file's hash, not its cut-line heads", async () => {
+		// Past the snapshot cap the collected lines hold only the heads of the cut lines;
+		// the tag hashes the file on disk.
 		const text = await read(createSession(dir), big);
 		expect(rows(text).size).toBe(300);
-		expect(text.split("\n")[0]).not.toMatch(/^\[[^\]]*#[0-9A-F]{4}\]$/);
+		const tag = hashlineFileHash(await Bun.file(big).text());
+		expect(text.split("\n")[0]).toMatch(new RegExp(`^\\[[^\\]]*#${tag}\\]$`));
 	});
 
 	it("still refuses an edit anchored on the cut line", async () => {
@@ -151,7 +153,7 @@ describe("read charges column-cut lines their displayed width", () => {
 		expect(shown.has(150)).toBe(true);
 		expect(shown.has(151)).toBe(false);
 		expect(text).toContain("Use");
-		expect(text).toContain(":151 to continue");
+		expect(text).toContain(":151- to continue");
 	});
 
 	it("shows a first line whose cut display alone exceeds the budget, then pages on", async () => {
@@ -164,7 +166,7 @@ describe("read charges column-cut lines their displayed width", () => {
 		const text = await read(createSession(dir, 30_000), file);
 		expect(rows(text).get(1)).toStartWith("z".repeat(8_500));
 		expect(text).not.toContain("Showing 0");
-		expect(text).toContain("Use :2 to continue");
+		expect(text).toContain("Use :2- to continue");
 	});
 
 	it("ends a sole line whose cut display overflows the budget without a continuation", async () => {
@@ -217,7 +219,8 @@ describe("read charges column-cut lines their displayed width", () => {
 		const shown = rows(text);
 		expect(shown.size).toBe(1_100);
 		expect(shown.get(1_100)).toBe(`${lines[1_099]!.slice(0, 768)}…`);
-		expect(text.split("\n")[0]).not.toMatch(/^\[[^\]]*#[0-9A-F]{4}\]$/);
+		const tag = hashlineFileHash(await Bun.file(file).text());
+		expect(text.split("\n")[0]).toMatch(new RegExp(`^\\[[^\\]]*#${tag}\\]$`));
 	});
 
 	it("drops a cut context line that leaves no room for the requested line", async () => {

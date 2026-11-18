@@ -174,6 +174,8 @@ export interface SegmentContext {
 	 * spinner + turn timer.
 	 */
 	turnElapsedMs: number | null;
+	/** The turn waits on the user's answer to an ask: the `pi` segment's spinner becomes a question mark. */
+	awaitingAnswer?: boolean;
 	/**
 	 * Sampled foreground ANSI for the `pi` brand segment — tweened between dim
 	 * gray (idle) and the accent (working) across turn edges (rust omp's

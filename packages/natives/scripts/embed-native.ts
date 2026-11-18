@@ -39,7 +39,7 @@ export interface EmbedOptions extends NativeEmbedTarget {
  * small.
  *
  * Nothing is written to disk. Bun.build shares the runtime's directory cache
- * and never re-reads it on a miss, so a process that imported pi-natives before
+ * and never re-reads it on a miss, so a process that imported omp-natives before
  * writing the frames cannot resolve them; in-memory files bypass that lookup.
  *
  * @throws when no addon exists for the target, or when an addon lacks the

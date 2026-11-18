@@ -169,7 +169,7 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 			return { ...describe(db, backend), lease: reference.lease, handle: reference.handle };
 		};
 		const openDatabases = async () => {
-			const databases = new Map((await listDatabases(session, backend)).map(db => [db.handle, db]));
+			const databases = new Map((await listDatabases(backend)).map(db => [db.handle, db]));
 			for (const entry of owner.references.values()) {
 				if (entry.backend !== backend || !entry.db.connected || databases.has(entry.db.handle)) continue;
 				await entry.db.refresh();
@@ -199,7 +199,7 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 						(entry.db.id === ref || entry.db.name === ref || entry.db.ref === ref),
 				);
 				if (owned) return remember(owned.db);
-				let db = await findOpenDatabase(session, backend, ref);
+				let db = await findOpenDatabase(backend, ref);
 				active(backend);
 				if (!db) {
 					const { path, arch } = splitSliceRef(ref);
@@ -209,7 +209,7 @@ export function createDsmPrelude(session: ToolSession): EvalPreludeDefinition {
 					if (!stat?.isFile()) throw notOpen();
 					const loc = await locateDatabase(DISASM_BACKENDS[backend], absolutePath, { arch });
 					active(backend);
-					db = await findOpenDatabase(session, backend, loc.id);
+					db = await findOpenDatabase(backend, loc.id);
 				}
 				if (!db) throw notOpen();
 				return remember(db);

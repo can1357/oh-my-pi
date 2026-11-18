@@ -8,7 +8,8 @@ import {
 	type TtsLocalModelKey,
 	ttsDurationDelta,
 } from "./models";
-import type { TtsTransport, TtsWorkerInbound } from "./tts-protocol";
+import { runFramedStdioWorker } from "../daemon/modules/speech-frames";
+import type { TtsTransport, TtsWorkerInbound, TtsWorkerOutbound } from "./tts-protocol";
 
 const TTS_TASK = "text-to-speech";
 
@@ -283,4 +284,9 @@ export function startTtsWorker(transport: TtsTransport): void {
 				return;
 		}
 	});
+}
+
+/** Process entry of `__omp_worker_tts`: serve the daemon `speech` module over stdio frames. */
+export function runTtsWorker(): Promise<void> {
+	return runFramedStdioWorker<TtsWorkerInbound, TtsWorkerOutbound>(startTtsWorker);
 }

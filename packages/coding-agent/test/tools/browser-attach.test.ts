@@ -28,6 +28,7 @@ import {
 import {
 	ensureChromiumExecutable,
 	loadPuppeteer,
+	privateTargetId,
 	RENDERER_PRIORITY_ARGS,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
@@ -219,7 +220,7 @@ describe("pickElectronTarget", () => {
 	});
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"waits for a real attached Chromium's first page before opening the managed tab",
+		"opens its own page on an attached Chromium that has none, and closes it with the tab",
 		async () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
@@ -247,7 +248,6 @@ describe("pickElectronTarget", () => {
 			const name = `page-readiness-${crypto.randomUUID()}`;
 			const controller = new AbortController();
 			let attached: BrowserHandle | undefined;
-			let restoreWait: (() => void) | undefined;
 			try {
 				const cdpUrl = `http://127.0.0.1:${port}`;
 				await waitForCdp(cdpUrl, 15_000);
@@ -255,48 +255,24 @@ describe("pickElectronTarget", () => {
 				if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
 				const browser = attached.browser;
 				expect(await browser.pages()).toHaveLength(0);
-				const waiting = Promise.withResolvers<void>();
-				const waitForTarget = browser.waitForTarget.bind(browser);
-				// Observe the real waiter starting, without replacing its CDP behavior.
-				// The first page is then created externally, not by browser.open.
-				const waitSpy = vi.spyOn(browser, "waitForTarget").mockImplementation((predicate, options) => {
-					waiting.resolve();
-					return waitForTarget(predicate, options);
-				});
-				restoreWait = () => waitSpy.mockRestore();
-				const opening = prelude
-					.invoke(
-						{
-							action: "open",
-							name,
-							url: "data:text/html,<title>First attached page</title>",
-							timeout: 15,
-							app: cdpUrl,
-						},
-						{ ...context, signal: controller.signal },
-					)
-					.then(
-						result => ({ result }),
-						(error: unknown) => ({ error }),
-					);
-				await Promise.race([
-					waiting.promise,
-					opening.then(outcome => {
-						if ("error" in outcome) throw outcome.error;
-						throw new Error("Attached open finished before an external page was created");
-					}),
-				]);
-				expect(await browser.pages()).toHaveLength(0);
-				await browser.newPage();
-				const outcome = await opening;
-				if ("error" in outcome) throw outcome.error;
+				// An endpoint with no page yet: the open makes its own instead of waiting for one.
+				await prelude.invoke(
+					{
+						action: "open",
+						name,
+						url: "data:text/html,<title>First attached page</title>",
+						timeout: 15,
+						app: cdpUrl,
+					},
+					{ ...context, signal: controller.signal },
+				);
 				const title = await prelude.invoke({ action: "run", name, code: "return await tab.title();" }, context);
 				expect(title.details).toMatchObject({ value: "First attached page" });
 				await prelude.invoke({ action: "close", name, kill: true }, context);
+				expect(await browser.pages()).toHaveLength(0);
 				expect(await probeCdpStatus(`${cdpUrl}/json/version`, { timeoutMs: 1500 })).toBe(200);
 			} finally {
 				controller.abort();
-				restoreWait?.();
 				await prelude.invoke({ action: "close", name }, context).catch(() => {});
 				if (attached) await releaseBrowser(attached, { kill: false });
 				await gracefulKillTreeOnce(child.pid);
@@ -336,29 +312,6 @@ describe("pickElectronTarget", () => {
 		await expect(pickElectronTarget(browser, { matcher: "PAGE_MISSING" })).rejects.toThrow(
 			'No page target matched "PAGE_MISSING". Available pages:\n- PAGE_AVAILABLE  Example  https://example.com/',
 		);
-	});
-
-	test("prefers the foreground tab when asked to, without disturbing default order", async () => {
-		const background = fakePage({ url: "https://example.com/", title: "Example" });
-		const foreground = fakePage({ url: "https://example.org/", title: "Example Org", visible: true });
-		const browser = {
-			targets: () => [fakeTarget("page", background), fakeTarget("page", foreground)],
-			pages: async () => [],
-		} as unknown as Browser;
-
-		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(foreground);
-		await expect(pickElectronTarget(browser)).resolves.toBe(background);
-	});
-
-	test("falls back to the first usable tab when no tab reports itself visible", async () => {
-		const first = fakePage({ url: "https://example.com/", title: "Example" });
-		const second = fakePage({ url: "https://example.org/", title: "Example Org" });
-		const browser = {
-			targets: () => [fakeTarget("page", first), fakeTarget("page", second)],
-			pages: async () => [],
-		} as unknown as Browser;
-
-		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(first);
 	});
 
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {
@@ -770,7 +723,7 @@ describe("pickElectronTarget", () => {
 
 	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"navigates a fresh attached tab and releases its handle without closing the target",
+		"opens its own page on a CDP endpoint, and borrows one only through target",
 		async () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
@@ -786,14 +739,26 @@ describe("pickElectronTarget", () => {
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
 			try {
+				// Without a target the open makes its own page, leaving the endpoint's page alone, and closing closes it.
+				await invokeBrowser({ action: "open", name: tabName, url: requested, app: `http://${endpoint.host}` });
+				opened = true;
+				expect(targetPage.url()).not.toBe(requested);
+				const owned = getTab(tabName)?.targetId;
+				await invokeBrowser({ action: "close", name: tabName });
+				opened = false;
+				expect(launched.browser.targets().some(target => privateTargetId(target) === owned)).toBe(false);
+
+				// `target` borrows the endpoint's page: navigated, then released without closing it.
+				const targetId = privateTargetId(targetPage.target());
+				if (!targetId) throw new Error("Expected the launched page's target id");
 				await invokeBrowser({
 					action: "open",
 					name: tabName,
 					url: requested,
 					app: `http://${endpoint.host}`,
+					target: targetId,
 				});
 				opened = true;
-
 				const closeResult = await invokeBrowser({ action: "close", name: tabName });
 				opened = false;
 				expect(closeResult.content).toEqual([{ type: "text", text: `Released managed tab "${tabName}"` }]);
@@ -814,7 +779,7 @@ describe("pickElectronTarget", () => {
 			// Page.navigate: under load the timeout could win before Chrome
 			// dispatched any HTTP request, and the request-count assertion read 0.
 			// Abort the navigation via request interception on the exact page
-			// attach adopts instead — the navigation fails deterministically on
+			// the attach borrows instead — the navigation fails deterministically on
 			// its first request, and a wrongly retried worker startup would
 			// navigate again and read 2.
 			const launched = sharedHeadless;
@@ -848,6 +813,8 @@ describe("pickElectronTarget", () => {
 				// `onRequest` and worker init times out instead.
 				const error = await rejectionOf(
 					acquireTab(tabName, attached, {
+						// The page the interception is on: an open without a target would make its own.
+						target: privateTargetId(targetPage.target()),
 						// Loopback keeps a hypothetical interception miss local and
 						// loud (instant connection refusal, count 0) instead of
 						// wandering into DNS or a proxy.
@@ -1176,9 +1143,9 @@ describe("pickElectronTarget relay path", () => {
 			title: async () => "Cart",
 		} as unknown as Page);
 
-		await expect(
-			pickElectronTarget(makeBrowser([other.target, unreadable.target]), { relayJson, preferVisible: true }),
-		).rejects.toThrow(/selected tab.*not ready/i);
+		await expect(pickElectronTarget(makeBrowser([other.target, unreadable.target]), { relayJson })).rejects.toThrow(
+			/selected tab.*not ready/i,
+		);
 		expect(other.pageSpy).not.toHaveBeenCalled();
 	});
 
@@ -1206,84 +1173,9 @@ describe("pickElectronTarget relay path", () => {
 		const skipped = makeTarget("PAGE_A", skippedPage);
 		const home = makeTarget("PAGE_B", homePage);
 		const browser = makeBrowser([skipped.target, home.target]);
-		expect(await pickElectronTarget(browser, { relayJson, preferVisible: true })).toBe(homePage);
+		expect(await pickElectronTarget(browser, { relayJson })).toBe(homePage);
 		expect(skipped.pageSpy).not.toHaveBeenCalled();
 		expect(await pickElectronTarget(browser, { relayJson, matcher: "Service Worker" })).toBe(skippedPage);
-	});
-
-	it("prefers the visible tab among active tabs in different windows", async () => {
-		relayEntries = [
-			{
-				id: "PAGE_A",
-				type: "page",
-				title: "Window A",
-				url: "https://example.com/a",
-				active: "true",
-				discarded: "false",
-			},
-			{
-				id: "PAGE_B",
-				type: "page",
-				title: "Window B",
-				url: "https://example.com/b",
-				active: "true",
-				discarded: "false",
-			},
-		];
-		const firstPage = {
-			url: () => relayEntries[0]!.url,
-			title: async () => "Window A",
-			evaluate: async () => false,
-		} as unknown as Page;
-		const visiblePage = {
-			url: () => relayEntries[1]!.url,
-			title: async () => "Window B",
-			evaluate: async () => true,
-		} as unknown as Page;
-		const first = makeTarget("PAGE_A", firstPage);
-		const second = makeTarget("PAGE_B", visiblePage);
-		const picked = await pickElectronTarget(makeBrowser([first.target, second.target]), {
-			relayJson,
-			preferVisible: true,
-		});
-		expect(picked).toBe(visiblePage);
-	});
-
-	it("does not choose a hidden window when another active tab is unreadable", async () => {
-		relayEntries = RELAY_ENTRIES.map(entry => (entry.id === "PAGE10" ? { ...entry, active: "true" } : entry));
-		const unreadable = makeTarget("PAGE10", {
-			url: () => {
-				throw new Error("Page frame unavailable");
-			},
-			title: async () => "Docs",
-		} as unknown as Page);
-		const hidden = makeTarget("PAGE11", {
-			url: () => relayEntries[1]!.url,
-			title: async () => "Cart",
-			evaluate: async () => false,
-		} as unknown as Page);
-
-		await expect(
-			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { relayJson, preferVisible: true }),
-		).rejects.toThrow(/tab.*not ready/i);
-	});
-
-	it("does not select a hidden page when another connected-browser page is unreadable", async () => {
-		const unreadable = makeTarget("PAGE_A", {
-			url: () => {
-				throw new Error("Page frame unavailable");
-			},
-			title: async () => "Active tab",
-		} as unknown as Page);
-		const hidden = makeTarget("PAGE_B", {
-			url: () => "https://example.com/hidden",
-			title: async () => "Background tab",
-			evaluate: async () => false,
-		} as unknown as Page);
-
-		await expect(
-			pickElectronTarget(makeBrowser([unreadable.target, hidden.target]), { preferVisible: true }),
-		).rejects.toThrow(/tab.*not ready/i);
 	});
 
 	it("does not satisfy a connected-browser matcher from another page when one is unreadable", async () => {
@@ -1305,7 +1197,7 @@ describe("pickElectronTarget relay path", () => {
 		const page = Promise.withResolvers<Page | null>();
 		const { target } = makeTarget("PAGE_CANCEL");
 		Object.assign(target, { page: () => page.promise });
-		const selection = pickElectronTarget(makeBrowser([target]), { preferVisible: true, signal: controller.signal });
+		const selection = pickElectronTarget(makeBrowser([target]), { signal: controller.signal });
 
 		controller.abort(new Error("user cancelled"));
 		page.resolve(null);

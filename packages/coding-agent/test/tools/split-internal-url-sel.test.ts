@@ -6,38 +6,38 @@ const peelWriteSelector = (input: string) => InternalUrlRouter.instance().peelWr
 
 describe("InternalUrlRouter.split", () => {
 	it("returns the input unchanged when there is no selector tail", () => {
-		expect(split("artifact://3")).toEqual({ path: "artifact://3" });
+		expect(split("local://3.log")).toEqual({ path: "local://3.log" });
 		expect(split("agent://reviewer_0")).toEqual({ path: "agent://reviewer_0" });
 		expect(split("memory://root")).toEqual({ path: "memory://root" });
 	});
 
 	it("peels a single line-range selector", () => {
-		expect(split("artifact://3:1-100")).toEqual({ path: "artifact://3", sel: "1-100" });
-		expect(split("artifact://3:50+150")).toEqual({ path: "artifact://3", sel: "50+150" });
-		expect(split("artifact://3:50-")).toEqual({ path: "artifact://3", sel: "50-" });
+		expect(split("local://3.log:1-100")).toEqual({ path: "local://3.log", sel: "1-100" });
+		expect(split("local://3.log:50+150")).toEqual({ path: "local://3.log", sel: "50+150" });
+		expect(split("local://3.log:50-")).toEqual({ path: "local://3.log", sel: "50-" });
 	});
 
 	it("peels a `raw` selector", () => {
-		expect(split("artifact://3:raw")).toEqual({ path: "artifact://3", sel: "raw" });
+		expect(split("local://3.log:raw")).toEqual({ path: "local://3.log", sel: "raw" });
 	});
 
 	it("peels compound `raw:range` selectors in either order", () => {
-		expect(split("artifact://3:raw:1-100")).toEqual({
-			path: "artifact://3",
+		expect(split("local://3.log:raw:1-100")).toEqual({
+			path: "local://3.log",
 			sel: "raw:1-100",
 		});
-		expect(split("artifact://3:1-100:raw")).toEqual({
-			path: "artifact://3",
+		expect(split("local://3.log:1-100:raw")).toEqual({
+			path: "local://3.log",
 			sel: "1-100:raw",
 		});
 	});
 
 	it("peels the malformed `:-N` selector that the strict splitter misses (the original bug)", () => {
-		expect(split("artifact://3:raw:-100")).toEqual({
-			path: "artifact://3",
+		expect(split("local://3.log:raw:-100")).toEqual({
+			path: "local://3.log",
 			sel: "raw:-100",
 		});
-		expect(split("artifact://3:-100")).toEqual({ path: "artifact://3", sel: "-100" });
+		expect(split("local://3.log:-100")).toEqual({ path: "local://3.log", sel: "-100" });
 	});
 
 	it("peels selectors from skill URLs with namespaced hosts", () => {
