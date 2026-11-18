@@ -206,14 +206,15 @@ describe("bash internal URLs outside the embedded shell", () => {
 			name: "web",
 		});
 
-		// The engine in that process resolves the URLs itself, through this session.
+		// The engine in that process resolves the URLs itself, to the files this session backs them with.
 		const args = started?.args ?? [];
 		expect(args.at(-1)).toBe(
 			`SEED=local://data.txt uv run python local://serve.py --prompt "$(cat local://data.txt)" < local://data.txt; omp read local://data.txt:1-2`,
 		);
 		expect(args.at(-2)).toBe("--");
 		expect(args).toContain(SHELL_PROCESS_SELECTOR);
-		expect(args[args.indexOf(SHELL_PROCESS_SELECTOR) + 1]).toBe("--urls");
+		expect(args[args.indexOf(SHELL_PROCESS_SELECTOR) + 1]).toBe("--paths");
+		expect(JSON.parse(args[args.indexOf(SHELL_PROCESS_SELECTOR) + 2])).toMatchObject({ local: localRoot });
 	});
 
 	it.skipIf(ptyUnavailable)("runs a pty command on the files its URLs alias", async () => {

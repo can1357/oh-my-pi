@@ -1,7 +1,7 @@
 /**
  * A named service runs as a shell process: the bash tool's shell in a process
- * of its own, started by the broker. A real broker socket, the worker entry
- * and the session's URL server drive these.
+ * of its own, started by the broker. A real broker socket and the worker entry
+ * drive these.
  */
 import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -9,7 +9,6 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { resolveLocalRoot } from "../../src/internal-urls";
-import { InternalUrlFilesystem } from "../../src/internal-urls/url-filesystem";
 import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import * as brokerClients from "../../src/launch/client";
 import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
@@ -64,8 +63,6 @@ describe("service shell process", () => {
 				getSessionId: () => "session",
 				queueLaunchCompletion: () => Promise.resolve(),
 			};
-			const urls = (): InternalUrlFilesystem =>
-				new InternalUrlFilesystem({ context: { localProtocolOptions }, tier: "exec" });
 			// No directory on the search path has a jq: the one that runs is omp's. The last
 			// line holds the service open until it is stopped.
 			const sum = `PATH='${empty}'; jq '.a | add' local://data.json; echo "status $?"`;
@@ -78,13 +75,13 @@ describe("service shell process", () => {
 					pty: false,
 					env: { GREETING: "hello" },
 					ready: { log: "on pipes", timeout: 60 },
-					urls: urls(),
+					paths: { local: localRoot },
 				});
 				const terminal = await startService(session, {
 					name: "terminal",
 					command: `${sum}; [ -t 0 ] && [ -t 1 ] && echo "on a terminal"; read hold`,
 					ready: { log: "on a terminal", timeout: 60 },
-					urls: urls(),
+					paths: { local: localRoot },
 					seed: "shopt -s expand_aliases\n",
 				});
 				const [pipedLogs, terminalLogs] = await Promise.all([

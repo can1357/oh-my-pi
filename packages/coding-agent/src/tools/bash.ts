@@ -30,7 +30,8 @@ import {
 	resolveAutoBackgroundWaitMs,
 } from "../async";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
-import { grantShellUrls, shellProcessCommand } from "../exec/shell-process";
+import { shellPathMap, shellProcessCommand } from "../exec/shell-process";
+import type { ShellPathMap } from "../exec/shell-process-protocol";
 import { InternalUrlRouter } from "../internal-urls";
 import { sessionResolveContext } from "../internal-urls/context";
 import {
@@ -1001,8 +1002,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	/**
 	 * Run `command` as a shell process on a pseudo-terminal the user drives: the session's shell
-	 * (its exports, functions, aliases and URL paths, served through `filesystem`) leading a
-	 * terminal of its own, so its programs own that terminal.
+	 * (its exports, functions and aliases, and the host files `paths` puts behind its URL paths)
+	 * leading a terminal of its own, so its programs own that terminal.
 	 */
 	async #runOnTerminal(
 		ui: Pick<NonNullable<AgentToolContext["ui"]>, "custom">,
@@ -1016,21 +1017,18 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			sessionEnv: Record<string, string>;
 			timeoutMs: number | undefined;
 			signal: AbortSignal | undefined;
-			filesystem: InternalUrlFilesystem;
+			paths: ShellPathMap;
 			artifactPath: string | undefined;
 			artifactId: string | undefined;
 		},
 	): Promise<BashInteractiveResult> {
-		const [seed, grant] = await Promise.all([
-			this.#sessionSeed(run.sessionId, run.hostCwd, run.signal),
-			grantShellUrls(run.filesystem),
-		]);
+		const seed = await this.#sessionSeed(run.sessionId, run.hostCwd, run.signal);
 		const source = seed.script ? path.join(os.tmpdir(), `omp-shell-seed-${crypto.randomUUID()}.sh`) : undefined;
 		try {
 			if (source !== undefined) await fs.promises.writeFile(source, seed.script, { mode: 0o600 });
 			return await runInteractiveBashPty(ui, {
 				command: run.command,
-				...shellProcessCommand({ command: run.command, urls: grant?.urls, source, cwd: run.urlCwd }),
+				...shellProcessCommand({ command: run.command, paths: run.paths, source, cwd: run.urlCwd }),
 				cwd: run.hostCwd,
 				env: { ...seed.env, ...run.sessionEnv },
 				timeoutMs: run.timeoutMs,
@@ -1039,7 +1037,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				artifactId: run.artifactId,
 			});
 		} finally {
-			grant?.revoke();
 			if (source !== undefined) await fs.promises.rm(source, { force: true });
 		}
 	}
@@ -1737,7 +1734,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		if (name !== undefined) {
 			// The service is the session's shell as a process of its own: it starts from this
-			// shell's exports, functions and aliases, and its URL paths are served here.
+			// shell's exports, functions and aliases, with the host files behind its URL paths.
 			const seed = await this.#sessionSeed(sessionId, hostCwd, signal);
 			// Only a readiness wait can outlast a steer; without `ready` the start
 			// returns once the process spawns.
@@ -1751,8 +1748,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					ready,
 					notify: notifySource,
 					env: { ...seed.env, ...sessionEnv },
-					// Not bound to this call's signal: the service outlives it.
-					urls: this.#urlFilesystem(undefined, { tier: approvalTier }),
+					paths: shellPathMap(sessionResolveContext(this.session), approvalTier),
 					seed: seed.script,
 				},
 				signal,
@@ -2271,15 +2267,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					sessionEnv,
 					timeoutMs,
 					signal,
-					filesystem: this.#urlFilesystem(signal, {
-						tier: approvalTier,
-						onReply: text => {
-							replies.push(text);
-							emitFrame?.();
-						},
-						onWrite: noticeUrlWrites(pendingNotices),
-						toolCallId,
-					}),
+					paths: shellPathMap(sessionResolveContext(this.session, { signal }), approvalTier),
 					artifactPath,
 					artifactId,
 				})

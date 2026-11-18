@@ -19,9 +19,8 @@ describe("formatCommand", () => {
 	it("shows a service by the command its shell process runs, not by the worker's command line", () => {
 		const service = spec("/usr/local/bin/omp", [
 			SHELL_PROCESS_SELECTOR,
-			"--urls",
-			"/run/shell/urls-1.sock",
-			"token",
+			"--paths",
+			'{"local":"/sessions/1/local"}',
 			"--",
 			"npm run dev -- --port 3000",
 		]);

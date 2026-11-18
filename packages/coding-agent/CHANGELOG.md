@@ -9,6 +9,7 @@
 ### Fixed
 
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
+- Session files record what jev and title requests asked and answered: `model_usage` entries carry the request time, a judgment's answers with the state id that joins `judgment-cache.db`, and a title request's prompt and reply (no prompt text is repeated); local-model titles now leave an entry and fork titles are journaled as `title-fork`
 - `ssh://` files can be edited with hashline edits; read now shows their `[PATH#TAG]` header
 - The shell's built-in `ast-grep`/`sg` supports `scan` (`--rule`, `--inline-rules`, `sgconfig.yml` rule and utility directories, `--filter`, `--json`, report styles, `-U` fixes), `outline`, `run --kind` and `--debug-query`, and `-l cpp` now searches C headers
 - Auto-QA reports record where the reported tool comes from (builtin, `eval:<namespace>`, `mcp:<server>`, extension, unknown)
@@ -50,7 +51,7 @@
 - A hashline header naming a missing working-tree path is rejected with the path its tag was issued for instead of being silently rebound to a same-named file (plan-sandbox files still rebind)
 - MCP tool calls default to a 10-minute deadline (handshakes and listings keep 30 s), never shorter than the wait the tool's own `timeout`/`timeout_ms`/`*_seconds` argument requests; without a configured timeout, progress notifications extend it up to one hour
 - A bare `:N` line selector now reads line N (with the usual 1-before/3-after context) in every read, grep and URL selector; `:N-` reads from line N onward, and every "Use :N- to continue" hint uses the open-ended form
-- Named services and `pty: true` commands now run in omp's own shell, as a process of their own, instead of your login shell: the in-process utilities (`jq`, `rg`, `sd`, `timeout`, `xargs`, …) resolve first, internal URLs (`local://…`, `skill://…`, a URL `cwd`) work as in every other bash call, and the command starts from the session shell's exports, functions and aliases. A pty command's programs still own a real terminal (`/dev/tty`, Ctrl-C, resize)
+- Named services and `pty: true` commands now run in omp's own shell, as a process of their own, instead of your login shell: the in-process utilities (`jq`, `rg`, `sd`, `timeout`, `xargs`, …) resolve first, `local://`, `skill://`, `artifact://` and `attachment://` paths (a URL `cwd` included) resolve to the session's files, and the command starts from the session shell's exports, functions and aliases. A pty command's programs still own a real terminal (`/dev/tty`, Ctrl-C, resize)
 - `sh`, `bash` and `zsh` run by bare name in the bash tool (`bash -c '…'`, `bash script.sh`, `… | bash`, `bash -s`, also under `env`, `xargs`, `find -exec` and `timeout`) are child shells of the embedded engine instead of the system shell, so omp's built-in utilities and internal URLs (`local://`, `skill://`, …) work inside them; `/bin/bash`, `exec bash`, `nohup bash …` and interactive (`-i`) shells still run the system shell
 
 ### Fixed
