@@ -84,8 +84,8 @@ use std::{
 };
 
 use bstr::{BStr, BString};
-use parking_lot::{Mutex, RwLock};
 use omp_vfs::FileKind as VfsKind;
+use parking_lot::{Mutex, RwLock};
 use tokio::{
 	runtime::Handle,
 	task::{JoinError, JoinHandle},

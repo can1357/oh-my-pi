@@ -594,11 +594,33 @@ export function describeEvictedJob(record: EvictedJob, now: number = Date.now())
  * it, which takes the agent id with a `-N` collision suffix. Undefined for any
  * other job, including a workpool batch, which runs on a pool worker it does not own.
  */
-function agentRunOf(job: AsyncJob): string | undefined {
+export function agentRunOf(job: AsyncJob): string | undefined {
 	const agentId = job.agentId;
 	if (job.type !== "task" || !agentId) return undefined;
 	if (job.id === agentId) return agentId;
 	return job.id.startsWith(`${agentId}-`) && /^\d+$/.test(job.id.slice(agentId.length + 1)) ? agentId : undefined;
+}
+
+/** What killing an agent registration reaches: the registry it lives in and the lifecycle that releases it. */
+export type AgentKillScope = Pick<ToolSession, "agentRegistry" | "agentLifecycle">;
+
+/**
+ * Stop agent `id` for good on its parent's behalf, as cancelling its task job
+ * does (see {@link executeCancel}): kill its registration so no queued message
+ * restarts it, then cancel the job that runs it, if one still runs.
+ */
+export async function stopAgentRun(
+	scope: AgentKillScope,
+	manager: AsyncJobManagerApi | undefined,
+	id: string,
+): Promise<CancelOutcome> {
+	const outcome = await cancelAgentRegistration(scope, scope.agentRegistry?.get(id)?.parentId, id);
+	let cancelledJob = false;
+	for (const job of manager?.getRunningJobs() ?? []) {
+		if (agentRunOf(job) === id && manager?.cancel(job.id, { ownerId: job.ownerId })) cancelledJob = true;
+	}
+	if (outcome.status === "cancelled" || !cancelledJob) return outcome;
+	return { id, status: "cancelled", message: `Cancelled the job running agent ${id}.` };
 }
 
 /**
@@ -613,7 +635,7 @@ function agentRunOf(job: AsyncJob): string | undefined {
  * only parentless subs. Never touches Main, the caller, or advisor transcripts.
  */
 export async function cancelAgentRegistration(
-	session: ToolSession,
+	session: AgentKillScope,
 	ownerId: string | undefined,
 	id: string,
 ): Promise<CancelOutcome> {

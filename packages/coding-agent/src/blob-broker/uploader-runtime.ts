@@ -1,3 +1,4 @@
+import { getSafeProjectCwd } from "@oh-my-pi/pi-utils";
 import type { BlobDestinationId } from "./destinations";
 import type { BlobPublication, BlobUploadRequest, RemoteDeleteAction } from "./publication";
 
@@ -18,6 +19,29 @@ export interface DestinationRuntimeConfig {
 	readonly credentials: Readonly<Record<string, string>>;
 	/** Optional request implementation, primarily for embedding and isolation. */
 	readonly fetch?: FetchImpl;
+	/** Environment and cwd for destination child processes; defaults to this process. */
+	readonly spawn?: DestinationProcessContext;
+}
+
+/**
+ * Environment and working directory of destination child processes (tunnels,
+ * upload commands). Inside the omp daemon these come from the client that
+ * opened the blob unit, never from the daemon's own environment.
+ */
+export interface DestinationProcessContext {
+	readonly env: Readonly<Record<string, string>>;
+	readonly cwd: string;
+}
+
+/** `context`, or this process's environment and safe project cwd. */
+export function destinationSpawnContext(context: DestinationProcessContext | undefined): DestinationProcessContext {
+	if (context) return context;
+	const env: Record<string, string> = {};
+	for (const name in Bun.env) {
+		const value = Bun.env[name];
+		if (value !== undefined) env[name] = value;
+	}
+	return { env, cwd: getSafeProjectCwd() };
 }
 
 /** Additional durable metadata exposed by a destination after upload. */

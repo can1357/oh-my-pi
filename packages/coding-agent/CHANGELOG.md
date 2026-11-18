@@ -4,24 +4,46 @@
 
 ### Breaking Changes
 
+- SDK: `createAgentSession`'s `cacheWarming` option is a mode cap (`"off" | "streaming" | "idle"`, the lower of it and `providers.cacheWarming` applies) instead of a boolean; pass `"off"` where you passed `false`
 - `artifact://N` is gone: truncated tool output and shaped originals are now `local://N.log` files at the session's `local://` root, readable, listable and completable like any other `local://` file. Old sessions' `artifact://` links are not migrated
 - SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
+- One per-user daemon now owns every shared background process (services, language servers, disassembler databases, blob exposure, local models, speech, text prediction) instead of a broker per project plus separate hosts; daemons and services started by older versions are not adopted
+- `omp ps` lists global, project and session units from that one daemon: `--global <service>` is gone, `--json` prints one `{daemon, reports}` object, and `dsm://` handles no longer carry `?project=`
 
 ### Added
 
 - `spotlight.ranker` (**Spotlight Ranker**) lets the Spotlight experiment rank shaped tool output with the `judge` role instead of Stencil, one `noul` question per line over chunks of 32 items, so shaping has a ranker without a Stencil credential ([#19281](https://github.com/can1357/oh-my-pi/pull/19281) by [@Xytronix](https://github.com/Xytronix))
+- Cache warming bridges long tool calls: it keeps refreshing while the refresh spend since the last request stays under the cheaper buy-out, then compacts a large prompt a minute before the cache expires (committed when the tool returns) or lets the entry expire, replacing the fixed one-hour cap. `providers.cacheWarmingStrategy` (`auto`, `keepalive`, `compact`) picks the policy; compaction needs a prompt of at least the lower of `providers.cacheWarmingCompactPercent` (60%) of the window and `providers.cacheWarmingCompactTokens` (150k)
+- `cache_warming_decision` carries the refresh `method`, `compactCost` and `spentCost`, and accepts a `"compact"` action; `cache_warming_start`/`cache_warming_end` events carry `method` (`prewarm` or `replay`)
+- Enable `task.crossInstance` (off by default) to list same-folder omp instances with `agent://peers` and read or message their agents by PID. While enabled, digit-only task names get an `Agent` prefix.
+- A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
+- In Tern, running subagents and background jobs show as a tray of live cards over the composer instead of the agents/jobs pill: each card shows what its agent or job is doing, a click looks closer (Open, Stop or Cancel, Dismiss), finished agents fold into one done card, and the agents-hub key moves focus into the tray
+- The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
+- Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session
+- `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
+- CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 
+- Cache warming refreshes first-party Anthropic entries with a `max_tokens: 0` pre-warm that bills no output, replaying for the rest of the session where the endpoint rejects it, and prices replays with the output this session's replays were actually billed
+- Task subagents keep their prompt cache warm through long tool calls (`streaming` mode; still off when `providers.cacheWarming` is `off`)
 - Switching models keeps your thinking level, moving it only as far as the new model's effort ladder requires; a model's own default level now applies only when no level is set, and picking a model no longer borrows the level of a role that names it (quick-role picks still apply their role's level)
+- A reply wait or a subagent's wait for its parent blocks up to the session's prompt-cache lifetime less a minute (4m to 30m) once it is back-to-back, instead of always 4m
 
 ### Fixed
 
+- An agent that promised another a later reply, or whose subagent waits for its next message, and ends its turn with nothing left to wake it gets one notice naming each waiter (what it asked, what was promised, for how long) instead of leaving it blocked until someone notices
+- `wait` returns at once, naming the agent, when one that promised the caller a reply (or the caller's parent) is idle with nothing to wake it, or when any agent it would block on (asked agent, parent, or subagent whose result it waits for) is itself waiting on the caller, with the chain it waits through (e.g. "`B` is waiting on you (via `C`)"); a top-level session's wait no longer says to end the turn while an agent is blocked on it and nothing else will wake it
+- Resuming a session with supervised process exits or `proc://` service results from before the unified daemon no longer crashes with `undefined is not an object (evaluating 'text.includes')`
+- The model switcher's thinking slider shows the level auto settled on (as the status line does) instead of `Auto`, in subagents and any session running on auto
+- `/tan` tells a running agent about the tangent at its next step, as a `<tangent-notice>` naming the tangent's handle and work, instead of only after its turn ends
+- The Tern jobs pill counts and lists background jobs only; a subagent's task job and its widget no longer show up as a running job beside the agents count
 - `urlmap` shell builtin maps a URL path onto a host directory or file for the shell and the programs it runs (`urlmap [-r] [-e] URL PATH`, `urlmap -d URL`, bare `urlmap` lists the mounts as commands); named services and `pty` commands get the session's `local://`, `skill://`, `artifact://` and `attachment://` paths through it
 - `tab.screenshot({path})` saves the capture to a chosen file and `format: "webp"` is supported on Chromium; unknown screenshot options are rejected
 - Session files now account for side-channel model calls such as compaction, recaps, memory extraction, commit drafts, image generation, and web search, with timing and compact replies where available
+- Compaction spend is journaled per method (`compaction:remote`, `compaction:soft`, `compaction:handoff`), and OpenAI remote compaction requests are now recorded too, so `omp stats` shows what each method costs and whether it read the prompt cache
 - Session files record what jev and title requests asked and answered: `model_usage` entries carry the request time, a judgment's answers with the state id that joins `judgment-cache.db`, and a title request's prompt and reply (no prompt text is repeated); local-model titles now leave an entry and fork titles are journaled as `title-fork`
 - `ssh://` files can be edited with hashline edits; read now shows their `[PATH#TAG]` header
 - The shell's built-in `ast-grep`/`sg` supports `scan` (`--rule`, `--inline-rules`, `sgconfig.yml` rule and utility directories, `--filter`, `--json`, report styles, `-U` fixes), `outline`, `run --kind` and `--debug-query`, and `-l cpp` now searches C headers
@@ -38,6 +60,12 @@
 - `watchexec` runs in the bash tool's own shell as a builtin with watchexec 2.3.2's options, messages and event formats (`-w`/`-W`/`-F`, `-e`/`-f`/`-i`, ignore files, `-r`, `-s`, `-o`, `--stop-signal`/`--stop-timeout`, `-d`, `-p`, `--poll`, `--emit-events-to`, `--only-emit-events`, …), so it works where the program is not installed, its command can use builtins and `scheme://` paths, and a stopped watcher leaves no process behind.
 - `fswatch` is a bash-tool builtin (fswatch 1.22 command line and output: `-0`, `-1`, `-o`, `-x`/`-n`, `-t`/`-u`/`-f`, `--format`, `--batch-marker`, `-e`/`-i`/`-E`/`-I`, `--filter-from`, `--event`, `-l`, `-r`, `-m`/`-M`, `--fire-idle-event`, …) on FSEvents, inotify and ReadDirectoryChangesW, so file watches work where fswatch is not installed and as background jobs or services; `fswatch -1 -o` exits after the first batch and a path that does not exist yet is reported once it appears
 - The shell's `entr` builtin (entr 5.9: `-a`, `-c`, `-d`, `-n`, `-p`, `-r`, `-s`, `-x`, `-z`, `/_`) runs its utility inside the shell on native change notification, so `ls *.rs | entr -r cmd` works where entr is not installed, without a terminal, with `scheme://` paths in the list, and as a background job or service
+- Fixed `/mcp reauth` hiding a rejected MCP dynamic client registration (e.g. Figma's remote MCP) behind "Please check your client credentials"; it now shows the registration endpoint, HTTP status, response detail, and the `oauth.clientId` remedy ([#19641](https://github.com/can1357/oh-my-pi/issues/19641))
+- Stopping `omp auth-broker serve` with SIGTERM or Ctrl-C no longer exits before a login refresh in flight saves its rotated token, which left the store with a spent refresh token and disabled the login; a requested stop now exits 0 ([#19599](https://github.com/can1357/oh-my-pi/pull/19599) by [@will-bogusz](https://github.com/will-bogusz))
+- `omp usage` judges an account's policy state and percent left by its account-wide windows, so a Claude account at 100% of its Fable weekly (or a Codex account with a spent Spark meter) with room left in its shared windows no longer shows as exhausted; the policy line names the spent row (`· Claude 7 Day (Fable) exhausted`) and `--json` lists its limit ids in `policy.scopedExhausted` ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the shell's `rm -r` failing with `Permission denied` on a Windows junction or directory symlink inside the tree; it is now removed without following it ([#19572](https://github.com/can1357/oh-my-pi/pull/19572) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- Fixed the shell's built-in `cat`, `grep`, `comm` and `diff` on Windows failing on process substitution (`cat <(echo x)` reported `/dev/fd/63: No such file or directory`) ([#19574](https://github.com/can1357/oh-my-pi/pull/19574) by [@zhivko-kocev](https://github.com/zhivko-kocev))
+- After a `computer` letter key on a macOS popup button, `ax()`, `find` and `value()` show the option the letters chose instead of the one from before the key ([#19516](https://github.com/can1357/oh-my-pi/pull/19516) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 

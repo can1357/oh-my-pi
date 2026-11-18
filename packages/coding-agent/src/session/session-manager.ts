@@ -1,3 +1,4 @@
+import type { Settings } from "../config/settings";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -4478,12 +4479,15 @@ export class SessionManager {
 		session: Pick<SessionInfo, "path" | "cwd">,
 		cwd: string,
 		sessionDir?: string,
+		settings?: Settings,
 	): Promise<boolean> {
 		if (!session.cwd || !(await directoryIsMissing(session.cwd))) return false;
 		const dir = path.resolve(sessionDir ?? SessionManager.getDefaultSessionDir(cwd));
 		const home = path.resolve(path.dirname(session.path));
 		if (home === dir) return resolveManagedSessionRoot(dir, cwd) !== undefined;
-		return (await worktreeSessionDirs(cwd, dir)).some(sibling => path.resolve(sibling) === home);
+		return (await worktreeSessionDirs(cwd, dir, { settings, stranded: true })).some(
+			sibling => path.resolve(sibling) === home,
+		);
 	}
 
 	/**
@@ -4727,7 +4731,7 @@ export class SessionManager {
 	 * untitled empties dropped. Titled empties stay — a title is user intent worth resuming.
 	 * Arrives in two passes: rows for history.db-indexed titles first, the full
 	 * scan in `complete` (see {@link listSessionsForPicker}).
-	 * By default includes the same folder in the repository's other git worktrees,
+	 * By default includes the same folder in the repository's Git and ovnfs worktrees,
 	 * so a session `/wt` moved stays reachable from the checkout it left.
 	 * The directory scope limits the picker to its own session bucket.
 	 */
@@ -4736,11 +4740,12 @@ export class SessionManager {
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
 		worktreeScope: "directory" | "repo" = "repo",
+		settings?: Settings,
 	): Promise<PickerListing> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const [pinned, siblingDirs] = await Promise.all([
 			loadPinnedSessionIds(),
-			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir) : [],
+			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir, { settings }) : [],
 		]);
 		return listSessionsForPicker(dir, storage, pinned, siblingDirs);
 	}

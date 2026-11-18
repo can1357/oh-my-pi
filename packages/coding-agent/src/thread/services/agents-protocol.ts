@@ -3,7 +3,8 @@
  * worker's proxies to the main thread's instances (see `./agents`).
  */
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { IrcWaitFilter } from "../../irc/bus";
+import type { IrcWaitFilter, UnansweredSend } from "../../irc/bus";
+import type { AwaitHoldOptions, AwaitWaiter } from "../../registry/agent-awaits";
 import type { AdoptOptions, AgentReleaseOptions } from "../../registry/agent-lifecycle";
 import type {
 	AgentHistorySummary,
@@ -50,8 +51,10 @@ export type AgentRegistryProtocol = {
 	isRunning: RpcMethod<[ref: AgentRef], boolean>;
 	/** One forwarding subscription per worker; returns a sync unsubscribe. */
 	subscribe: RpcMethod<[listener: RegistryListener], () => void>;
-	awaitsHold: RpcMethod<[waiter: string, awaited: readonly string[], options: { interruptible: boolean }], () => void>;
+	awaitsHold: RpcMethod<[waiter: string, awaited: readonly string[], options: AwaitHoldOptions], () => void>;
 	awaitsBlocksOn: RpcMethod<[agent: string, target: string, sentAt: number], boolean>;
+	awaitsBlockedVia: RpcMethod<[agent: string, target: string, sentAt: number], readonly string[] | undefined>;
+	awaitsWaitersOn: RpcMethod<[target: string], AwaitWaiter[]>;
 	/** One forwarding subscription per worker; returns a sync unsubscribe. */
 	awaitsSubscribe: RpcMethod<[listener: () => void], () => void>;
 };
@@ -68,18 +71,12 @@ export type AgentLifecycleProtocol = {
 	release: RpcMethod<[id: string, expected?: AgentRefExpectation, options?: AgentReleaseOptions], boolean>;
 };
 
-/** Result row of `IrcBusApi.unansweredSends`. */
-export interface UnansweredSend {
-	to: string;
-	sentAt: number;
-	promised: boolean;
-}
-
 /** `IrcBusApi` over the link. */
 export type IrcBusProtocol = {
 	send: RpcMethod<[msg: Omit<IrcMessage, "id" | "ts">], IrcDeliveryReceipt>;
 	sentSince: RpcMethod<[from: string, to: string, sinceTs: number], boolean>;
 	unansweredSends: RpcMethod<[from: string, sinceTs: number], UnansweredSend[]>;
+	lastMessageAt: RpcMethod<[from: string, to: string], number | undefined>;
 	wait: RpcMethod<
 		[
 			agentId: string,

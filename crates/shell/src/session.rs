@@ -70,8 +70,8 @@ use std::{
 };
 
 use bstr::{BString, ByteSlice};
-use parking_lot::Mutex;
 use omp_builtins::extras::SpeechHost;
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::{

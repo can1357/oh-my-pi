@@ -172,6 +172,8 @@ export interface AgentHubOpenOptions {
 	requireContent?: boolean;
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
+	/** The agents-hub key: on a native host showing tray cards, focus moves into the tray instead. */
+	trayFirst?: boolean;
 }
 
 export interface InteractiveModeContext {
@@ -367,6 +369,8 @@ export interface InteractiveModeContext {
 	pendingPythonComponents: PresentedBlock<EvalExecutionComponent>[];
 	pythonComponent: EvalExecutionComponent | undefined;
 	isPythonMode: boolean;
+	/** The draft starts with `?`, the `/btw` shortcut. */
+	isBtwMode: boolean;
 	streamingComponent: AssistantMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
 	/**

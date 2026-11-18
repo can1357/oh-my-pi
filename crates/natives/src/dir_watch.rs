@@ -2,10 +2,10 @@
 //!
 //! Bun's `fs.watch` on Windows goes through libuv, which reads changes into a
 //! 4 KiB buffer and re-arms only after every JS callback ran; bursts overflow
-//! it and cost a callback per change. This watcher is [`omp_xfs::watch`]'s: it reads
-//! on its own thread with overlapped I/O and a large buffer, waits briefly
-//! between reads so the kernel gathers changes, and hands JS one batch per
-//! read. Other platforms keep using `fs.watch`, which is lossless and cheap
+//! it and cost a callback per change. This watcher is [`omp_xfs::watch`]'s: it
+//! reads on its own thread with overlapped I/O and a large buffer, waits
+//! briefly between reads so the kernel gathers changes, and hands JS one batch
+//! per read. Other platforms keep using `fs.watch`, which is lossless and cheap
 //! there.
 
 use napi::{Status, bindgen_prelude::Unknown, threadsafe_function::ThreadsafeFunction};

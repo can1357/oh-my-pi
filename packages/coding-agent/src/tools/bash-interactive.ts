@@ -54,6 +54,8 @@ export async function runInteractiveBashPty(
 		env: Record<string, string>;
 		artifactPath?: string;
 		artifactId?: string;
+		/** Called with the program's pid once the terminal spawned it. */
+		onStart?: (pid: number) => void;
 	},
 ): Promise<BashInteractiveResult> {
 	const settings = await Settings.init();
@@ -141,6 +143,9 @@ export async function runInteractiveBashPty(
 							const clean = graphics.push(chunk);
 							if (clean) sink.push(clean.replace(/\r\n?/gu, "\n"));
 							tui.requestRender();
+						},
+						(err, pid) => {
+							if (!err) options.onStart?.(pid);
 						},
 					)
 					.then(finalize)

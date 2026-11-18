@@ -202,6 +202,11 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 				threadId,
 				manager.onJobSettled(() => ignoreSettle(listener())),
 			),
+		onJobsChanged: (manager, listener) =>
+			cleanups.track(
+				threadId,
+				manager.onJobsChanged(() => ignoreSettle(listener())),
+			),
 		register: (manager, type, label, run, options) => {
 			const feed = options?.feed ? new JobFeedMirror(options.feed) : undefined;
 			return manager.register(

@@ -993,7 +993,8 @@ A `compact` call refused before it starts (another compaction is running, or
 
 Each refresh handed to the provider stream emits one start and one matching end
 (a session disposed mid-refresh emits no end).
-Warm-or-stop decisions that do not send a request emit neither. These are
+Decisions that send no refresh (stop, or bridging the wait with compaction) emit
+neither. These are
 session events, so **both types must be listed in `set_event_filter` when a filter
 is active** to observe complete refresh lifecycles:
 
@@ -1001,12 +1002,14 @@ is active** to observe complete refresh lifecycles:
 {
   type: "cache_warming_start";
   phase: "streaming" | "idle";
+  method: "prewarm" | "replay"; // max_tokens 0 pre-warm, or a one-token replay
   provider: string;
   model: string; // model id
 }
 {
   type: "cache_warming_end";
   phase: "streaming" | "idle"; // same phase as the matching start
+  method: "prewarm" | "replay"; // same method as the matching start
   provider: string;
   model: string;
   outcome: "hit" | "miss" | "error" | "aborted";
@@ -1017,7 +1020,9 @@ is active** to observe complete refresh lifecycles:
 
 - `hit`: the refresh read cached tokens without writing a new cache entry.
 - `miss`: it read no cached tokens or wrote cache tokens; warming stops.
-- `error`: no response was available or the response reported an error; warming stops.
+- `error`: no response was available or the response reported an error; warming stops, except that
+  a `prewarm` the endpoint rejects (HTTP 400) is followed by a `replay` start/end pair in the same
+  slot, and the model is replayed for the rest of the session.
 - `aborted`: the run was cancelled or replaced while the refresh was in flight.
 
 `usage` is present only when the refresh was recorded as a `model_usage` entry
