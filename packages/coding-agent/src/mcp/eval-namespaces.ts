@@ -186,6 +186,7 @@ function hintRequest(namespace: MCPNamespace): RoutingHintRequest {
 		name: namespace.name,
 		description: request,
 		placeholder: "",
+		activity: `Optimizing MCP: ${namespace.servers.join(", ")}`,
 		render: () => request,
 	};
 }

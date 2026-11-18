@@ -24,6 +24,7 @@
 - Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session
 - `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
+- Skill descriptions and MCP namespace hints generated in the background show a progress row above the composer (`Optimizing skills 3/12`, `Optimizing MCP: github`), ending in `ready` or the reason it failed
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 - CLI and print-mode commands (`omp -p`, `omp login`, `omp models`, `omp commit`, `omp usage`, …) wait up to 30 s for an auth broker that is restarting or briefly unreachable, saying so on stderr; interactive omp still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
 

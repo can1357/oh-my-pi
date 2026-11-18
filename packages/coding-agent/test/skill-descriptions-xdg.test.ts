@@ -10,6 +10,7 @@ import { ModelRegistry } from "../src/config/model-registry";
 import { resolveRoleChain, resolveRoleSelection } from "../src/config/model-resolver";
 import { cfgDisabledProviders } from "../src/config/model-settings";
 import { Settings } from "../src/config/settings";
+import { type DownloadActivity, onDownloadActivity } from "../src/downloads/activity";
 import {
 	createSkillDescriptionCompressor,
 	previewSkillDescription,
@@ -401,6 +402,81 @@ describe("skill description failure caching and shutdown", () => {
 		expect(elapsed).toBeLessThan(5_000);
 		expect(storedDescriptions(store.path)).toEqual([]);
 	}, 6_000);
+
+	it("counts only the skills it sends to the model in the Optimizing skills activity", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const cached = skill("cached");
+		const warm = new SkillDescriptionCatalog({ store, compress: fast(async () => compressed) });
+		warm.render([cached]);
+		await warm.waitForPending();
+
+		const seen: DownloadActivity[] = [];
+		const stop = onDownloadActivity(activity => seen.push(activity));
+		try {
+			const modelless = new SkillDescriptionCatalog({
+				store,
+				compress: { modelKey: () => undefined, compress: async () => compressed },
+			});
+			modelless.render([skill("first")]);
+			await modelless.waitForPending();
+			expect(seen).toEqual([]);
+
+			const asked = Promise.withResolvers<void>();
+			const reply = Promise.withResolvers<string>();
+			let requests = 0;
+			const catalog = new SkillDescriptionCatalog({
+				store,
+				compress: fast(async () => {
+					if (++requests === 2) asked.resolve();
+					return reply.promise;
+				}),
+			});
+			catalog.render([
+				cached,
+				{ ...skill("short"), description: "Use for short things." },
+				skill("first"),
+				skill("second"),
+			]);
+			await asked.promise;
+			expect(seen.at(-1)).toMatchObject({
+				label: "Optimizing skills",
+				unit: "steps",
+				loaded: 0,
+				total: 2,
+				state: "running",
+			});
+
+			reply.resolve(compressed);
+			await catalog.waitForPending();
+			expect(seen.at(-1)).toMatchObject({ label: "Optimizing skills", state: "done" });
+		} finally {
+			stop();
+		}
+	});
+
+	it("ends the Optimizing skills activity as failed with the reason a request gave", async () => {
+		using store = SkillDescriptionStore.open(path.join(tempDir, "cache.db"));
+		const seen: DownloadActivity[] = [];
+		const stop = onDownloadActivity(activity => seen.push(activity));
+		try {
+			const catalog = new SkillDescriptionCatalog({
+				store,
+				compress: fast(async () => {
+					throw new Error("connection reset");
+				}),
+			});
+			catalog.render([skill()]);
+			await catalog.waitForPending();
+
+			expect(seen.at(-1)).toMatchObject({
+				label: "Optimizing skills",
+				state: "failed",
+				error: "connection reset",
+			});
+		} finally {
+			stop();
+		}
+	});
 });
 
 describe("previewSkillDescription", () => {

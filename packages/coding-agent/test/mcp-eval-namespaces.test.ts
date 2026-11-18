@@ -4,6 +4,7 @@ import * as path from "node:path";
 import * as vm from "node:vm";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { type DownloadActivity, onDownloadActivity } from "@oh-my-pi/pi-coding-agent/downloads/activity";
 import { SkillDescriptionStore } from "@oh-my-pi/pi-coding-agent/extensibility/skill-descriptions";
 import { groupMCPNamespaces, MCPEvalNamespaceCatalog } from "@oh-my-pi/pi-coding-agent/mcp/eval-namespaces";
 import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
@@ -90,6 +91,30 @@ describe("MCPEvalNamespaceCatalog", () => {
 			const changed = [...tools, mcpTool("github", "create_issue", "Open an issue.")];
 			expect(second.preludes(changed, new Set())[0].summary).toBe("");
 		} finally {
+			await store.close();
+		}
+	});
+
+	it("names the MCP server, not its namespace, in the activity shown while a hint is generated", async () => {
+		const dir = path.join(os.tmpdir(), `mcp-eval-ns-${Snowflake.next()}`);
+		dirs.push(dir);
+		const store = SkillDescriptionStore.open(path.join(dir, "hints.db"));
+		const seen: DownloadActivity[] = [];
+		const stop = onDownloadActivity(activity => seen.push(activity));
+		try {
+			const catalog = new MCPEvalNamespaceCatalog({
+				store,
+				compress: { modelKey: () => "test/fast", compress: async () => "Fetch web pages by URL" },
+			});
+			expect(catalog.preludes([mcpTool("fetch", "get")], new Set())[0].name).toBe("fetch_mcp");
+			await catalog.waitForPending();
+
+			expect(seen.map(activity => [activity.label, activity.state])).toEqual([
+				["Optimizing MCP: fetch", "running"],
+				["Optimizing MCP: fetch", "done"],
+			]);
+		} finally {
+			stop();
 			await store.close();
 		}
 	});

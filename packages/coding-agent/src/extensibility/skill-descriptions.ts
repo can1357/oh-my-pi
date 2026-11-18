@@ -12,6 +12,7 @@ import {
 	logger,
 	postmortem,
 	prompt,
+	toError,
 } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import {
@@ -21,6 +22,7 @@ import {
 	resolveRoleSelection,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { trackStep } from "../downloads/activity";
 import { CostCapError, type CostGateApi } from "../session/cost-gate";
 import { journalCompletion, type ModelUsageLedger } from "../session/model-usage-journal";
 import compressDescriptionPrompt from "../prompts/skills/compress-description.md" with { type: "text" };
@@ -403,6 +405,8 @@ export interface RoutingHintRequest {
 	readonly description: string;
 	/** Hint shown until the model answer is cached, and remembered for a model whose answer is unusable. */
 	readonly placeholder: string;
+	/** Download-HUD row that counts this hint while the model condenses it (`Optimizing skills`); none when omitted. */
+	readonly activity?: string;
 	/** The model request; rendered only when compression runs. */
 	render(): string;
 }
@@ -535,6 +539,7 @@ export class SkillDescriptionCatalog {
 						name: skill.name,
 						description: skill.description,
 						placeholder: previewSkillDescription(skill.description),
+						activity: "Optimizing skills",
 						render: () =>
 							prompt.render(compressDescriptionPrompt, { name: skill.name, description: skill.description }),
 					},
@@ -569,9 +574,13 @@ async function compressHint(
 	request: RoutingHintRequest,
 ): Promise<void> {
 	const { key, name } = request;
+	// A request that goes on to the model is counted in its `activity` row until it settles.
+	let settle: ((failure?: string) => void) | undefined;
+	let failure: string | undefined;
 	try {
 		const candidate = await batchModel;
 		if (candidate === undefined || store.isClosing || store.get(unusableKey(key, candidate)) !== undefined) return;
+		if (request.activity !== undefined) settle = trackStep(request.activity);
 		await compressionSlots.acquire();
 		try {
 			if (store.isClosing) return;
@@ -600,6 +609,9 @@ async function compressHint(
 			compressionSlots.release();
 		}
 	} catch (error) {
+		failure = toError(error).message;
 		logger.warn("Routing hint compression failed", { name, error: String(error) });
+	} finally {
+		settle?.(failure);
 	}
 }
