@@ -6,6 +6,7 @@
 
 - `/wt` (TUI, ACP, RPC and `worktree.onStart`) runs the new worktree's `post-checkout` hook as `git worktree add` does, with a spinner in the TUI, then loads the skills and commands it added; a failing hook keeps the worktree and shows a warning, and quitting while it runs keeps that worktree with a warning. In an ovnfs checkout only a `core.hooksPath` hook runs ([#20045](https://github.com/can1357/oh-my-pi/pull/20045) by [@Dangerboi](https://github.com/Dangerboi))
 - `OMP_MCP_SHUTDOWN_STEP_MS` sets how long a stdio MCP server gets to exit after its input closes before SIGTERM, and again before SIGKILL (default `1000`)
+- Every saved-reset spend attempt, automatic or from `/usage reset` and `omp usage reset`, is now recorded in the omp log, so it shows which process spent an account's reset and why ([#19626](https://github.com/can1357/oh-my-pi/pull/19626) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
@@ -208,11 +209,6 @@
 - Fixed MCP OAuth reauthentication errors to expose registration endpoints, status details, and remedies, and fixed auth-broker shutdown so refreshed tokens are saved safely.
 - Fixed Spotlight retry and account handling, including waitlisted accounts, rate limits, outages, and request identification.
 - Fixed cross-platform shell and desktop behavior, including macOS startup and redraw performance, Windows file operations and application lookup, speech output, and desktop opening.
-
-### Added
-
-- Every saved-reset spend attempt, automatic or from `/usage reset` and `omp usage reset`, now writes an info line `reset spend` to the omp log with the provider, account, credential and credit id, governing window, trigger (`blocked`, `sweep` or `manual`), planner reason and outcome code, so the log shows which process spent an account's reset and why
-- Every saved-reset spend attempt, automatic or from `/usage reset` and `omp usage reset`, now writes an info line `reset spend` to the omp log with the provider, account, credential and credit id, governing window, trigger (`blocked`, `sweep` or `manual`), planner reason and outcome code, so the log shows which process spent an account's reset and why ([#19626](https://github.com/can1357/oh-my-pi/pull/19626) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.22.2] - 2026-11-18
 

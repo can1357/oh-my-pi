@@ -11,7 +11,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, logger, setAgentDir, TempDir, withFileLock } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
 	annotateUsagePolicy,
@@ -2002,6 +2002,8 @@ describe("omp usage reset", () => {
 	let codexConsume: { status: number; body: unknown } | Error | "stall";
 	/** Codex listing faults by bearer: `unavailable` fails upstream, `stall` never answers. */
 	let codexListFaults: Record<string, "unavailable" | "stall">;
+	/** How many of its two credits `codex-team`'s listing shows. */
+	let codexTeamCredits: number;
 	/** Title Anthropic gives the Claude grant. */
 	let claudeGrantLabel: string;
 	let authStorage: AuthStorage;
@@ -2050,7 +2052,7 @@ describe("omp usage reset", () => {
 								expires_at: soon,
 								description: "Banked for dev@example.test",
 							},
-						]
+						].slice(0, bearer === "Bearer codex-team" ? codexTeamCredits : undefined)
 					: [];
 			return Response.json({ credits, available_count: credits.length });
 		}
@@ -2098,6 +2100,7 @@ describe("omp usage reset", () => {
 		setAgentDir(tempDir.path());
 		codexConsume = { status: 200, body: { code: "reset" } };
 		codexListFaults = {};
+		codexTeamCredits = 2;
 		claudeGrantLabel = "Reset for dev@example.test (Acme Corp)";
 		authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), { usageFetch });
 		await authStorage.credentials.set("openai-codex", [
@@ -2364,6 +2367,25 @@ describe("omp usage reset", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("records a Codex balance another process spent while it waited as balance_spent, spending nothing", async () => {
+		const { team } = credentialIds();
+		const info = vi.spyOn(logger, "info");
+		let run: Promise<void> | undefined;
+		await withFileLock(codexTeamLockPath(), async () => {
+			run = runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
+			await listed.promise;
+			codexTeamCredits = 1;
+		});
+		await run;
+
+		expect(consumes()).toEqual([]);
+		expect(process.exitCode).toBe(1);
+		expect(info).toHaveBeenCalledWith(
+			"reset spend",
+			expect.objectContaining({ trigger: "manual", code: "balance_spent" }),
+		);
+	});
+
 	it("spends the named Codex account's soonest-expiring credit", async () => {
 		const { team } = credentialIds();
 		await runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
@@ -2436,19 +2458,31 @@ describe("omp usage reset", () => {
 	});
 
 	it.each([
-		["the credit was already redeemed", { status: 200, body: { code: "already_redeemed" } }, "already redeemed"],
-		["nothing is constrained", { status: 200, body: { code: "nothing_to_reset" } }, "nothing to reset right now"],
-		["the provider errors", { status: 500, body: {} }, "reset was not confirmed (http_500)"],
-		["the connection drops", new Error("socket hang up"), "couldn't confirm whether the reset applied"],
-	])("exits nonzero when %s", async (_name, answer, message) => {
+		[
+			"the credit was already redeemed",
+			{ status: 200, body: { code: "already_redeemed" } },
+			"already redeemed",
+			"already_redeemed",
+		],
+		[
+			"nothing is constrained",
+			{ status: 200, body: { code: "nothing_to_reset" } },
+			"nothing to reset right now",
+			"nothing_to_reset",
+		],
+		["the provider errors", { status: 500, body: {} }, "reset was not confirmed (http_500)", "http_500"],
+		["the connection drops", new Error("socket hang up"), "couldn't confirm whether the reset applied", "error"],
+	])("exits nonzero when %s", async (_name, answer, message, recorded) => {
 		codexConsume = answer;
 		const { team } = credentialIds();
+		const info = vi.spyOn(logger, "info");
 		await runUsageCommand({ action: "reset", target: `codex/${team}`, noExtensions: true });
 
 		expect(stripVTControlCharacters(stderr)).toContain(message);
 		expect(stdout).toBe("");
 		expect(consumes()).toHaveLength(1);
 		expect(process.exitCode).toBe(1);
+		expect(info).toHaveBeenCalledWith("reset spend", expect.objectContaining({ trigger: "manual", code: recorded }));
 	});
 
 	it("stops waiting on a consume that never answers and reports the spend unconfirmed", async () => {

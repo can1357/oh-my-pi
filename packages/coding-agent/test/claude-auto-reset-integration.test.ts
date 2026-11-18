@@ -420,7 +420,6 @@ describe("Claude saved-reset trigger integration", () => {
 			"reset spend",
 			expect.objectContaining({
 				provider: "anthropic",
-				account: EMAIL,
 				credentialId: CREDENTIAL_ID,
 				creditId: "cedar-grant-1",
 				trigger: "blocked",
