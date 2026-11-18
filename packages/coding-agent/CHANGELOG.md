@@ -8,6 +8,7 @@
 
 ### Added
 
+- `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))
 
 ### Changed

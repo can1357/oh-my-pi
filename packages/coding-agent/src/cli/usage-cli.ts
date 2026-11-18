@@ -22,6 +22,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 	type UsageUnit,
+	usageSubscriptionPlan,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
 import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
@@ -351,7 +352,7 @@ function formatReportIdentity(
 	const metaOrgId = report.metadata?.orgId;
 	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
 	if (typeof org === "string" && org && org !== label) identity += chalk.dim(` · ${redaction?.get(org) ?? org}`);
-	const plan = report.metadata?.planType;
+	const plan = usageSubscriptionPlan(report) ?? report.metadata?.planType;
 	if (typeof plan === "string" && plan.trim()) identity += chalk.dim(` · plan: ${plan.trim()}`);
 	return identity;
 }

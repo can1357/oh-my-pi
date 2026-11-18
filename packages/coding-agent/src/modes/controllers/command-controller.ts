@@ -10,6 +10,7 @@ import {
 	resolveUsedFraction,
 	type UsageLimit,
 	type UsageReport,
+	usageSubscriptionPlan,
 } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
@@ -2391,12 +2392,13 @@ function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme):
 	return uiTheme.fg("dim", `(${windowLabel})`);
 }
 
-/** ` (org)` suffix for providers whose orgName is an organization. */
+/** ` (org · plan)` suffix for providers whose orgName is an organization. */
 function orgSuffix(report: UsageReport): string {
 	const orgName = report.metadata?.orgName;
 	const orgId = report.metadata?.orgId;
 	const org = typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-	return org ? ` (${org})` : "";
+	const detail = [org, usageSubscriptionPlan(report)].filter(Boolean).join(" · ");
+	return detail ? ` (${detail})` : "";
 }
 
 /** Keep the existing TUI `(plan)` layout while using the live Codex usage plan. */
