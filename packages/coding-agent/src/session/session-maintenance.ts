@@ -126,6 +126,7 @@ import {
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { HandoffGenerationOptions } from "./session-handoff";
 import type { SessionManager } from "./session-manager";
+import { isPersistenceTruncatedString } from "./session-persistence";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
@@ -608,6 +609,15 @@ function archiveReader(model: Model): ArchiveReader {
  */
 function mayHoldArchive(message: CompactionSummaryMessage): boolean {
 	return message.method === undefined || message.method === "snapcompact";
+}
+
+/**
+ * Tokens an imaged snapcompact archive in `shape` bills outside its frames: its
+ * two text edges (one frame's capacity each, ~4 chars per token with 15% for
+ * denser content) and about 2k for the summary template.
+ */
+function snapcompactTextReserveTokens(shape: snapcompact.Shape): number {
+	return Math.ceil((2 * snapcompact.geometry(shape).capacity * 1.15) / 4) + 2000;
 }
 
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
@@ -4284,10 +4294,7 @@ export class SessionMaintenance {
 		//   drift on denser content (e.g. dense JSON / tool-result blobs).
 		// - Summary template (intro + FILES section + grid notes) bills
 		//   ~2k tokens for typical sessions.
-		const edgeCap = snapcompact.geometry(shape).capacity;
-		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
-		const SUMMARY_TEMPLATE_TOKENS = 2000;
-		const capReserve = textEdgeTokens + SUMMARY_TEMPLATE_TOKENS;
+		const capReserve = snapcompactTextReserveTokens(shape);
 		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
 		// The trigger counts kept turns without opaque reasoning replay bytes and
 		// sees the pending prompt too; the window fit keeps the full count.
@@ -4959,10 +4966,7 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#host.settings.revision,
 		);
-		const edgeCap = snapcompact.geometry(shape).capacity;
-		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
-		const SUMMARY_TEMPLATE_TOKENS = 2000;
-		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
+		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - snapcompactTextReserveTokens(shape);
 		const frameCost = snapcompact.plannedFrameTokens(shape);
 		if (frameBudget < frameCost) return 0;
 		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
@@ -5167,8 +5171,8 @@ export class SessionMaintenance {
 		const model = this.#model;
 		if (!model) return;
 		const reader = archiveReader(model);
-		// The views a scan swapped in were fitted to this model's window (#viewWithoutFrames).
-		const scanKey = `${reader.key}|${model.provider}/${model.id}|${this.#archiveTextBudget(model)}`;
+		// The views a scan swapped in were fitted to this model's window (#viewWithoutFrames) and frame shape (#viewInShape).
+		const scanKey = `${reader.key}|${model.api}|${model.provider}/${model.id}|${this.#archiveTextBudget(model)}|${cfgSnapcompactShape.get(this.#host.settings)}`;
 		const lists = activeMessages
 			? [this.#host.agent.state.messages, activeMessages]
 			: [this.#host.agent.state.messages];
@@ -5487,12 +5491,13 @@ export class SessionMaintenance {
 	/**
 	 * `entry`'s archive re-rendered from its kept source in the frame shape
 	 * `model` reads best ({@link snapcompact.resolveShapeForText}), at most the
-	 * frames its budgets hold, when the frames it would otherwise read (`shown`,
-	 * else the original) are drawn in another shape. `undefined` when they are
-	 * not, when the archive keeps no whole source (written before
-	 * {@link snapcompact.Archive.text}; its edges alone would drop the imaged
-	 * middle), or when the render fails. Rendered once per shape, frame cap and
-	 * reasoning policy; decided once per reader model.
+	 * frames its budgets and its archive share of the window hold, when the
+	 * frames it would otherwise read (`shown`, else the original) are drawn in
+	 * another shape. `undefined` when they are not, when the archive keeps no
+	 * whole source (none, or one older persistence cut short: re-rendering it
+	 * would drop history the frames hold), or when the render fails. Rendered
+	 * once per shape, frame cap and reasoning policy; decided once per reader
+	 * model, wire API and budgets.
 	 */
 	async #viewInShape(
 		entry: CompactionEntry,
@@ -5501,29 +5506,37 @@ export class SessionMaintenance {
 	): Promise<snapcompact.ArchiveView | undefined> {
 		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
 		const textBudget = this.#archiveTextBudget(model);
+		const frameByteBudget = snapcompact.frameDataBytesBudget(model);
+		const frameCountBudget = snapcompact.providerFrameBudget(model);
 		let views = this.#shapedViews.get(entry);
 		if (!views) {
 			views = new Map();
 			this.#shapedViews.set(entry, views);
 		}
-		const readerKey = `reader|${model.provider}/${model.id}|${shapeSetting}|${textBudget}`;
+		const readerKey = `reader|${model.api}|${model.provider}/${model.id}|${shapeSetting}|${textBudget}|${frameByteBudget}|${frameCountBudget}`;
 		let view = views.get(readerKey);
 		if (!view) {
 			const archive = snapcompact.getPreservedArchive(entry.preserveData)!;
-			const archiveText = archive.text ? snapcompact.archiveSourceText(archive) : undefined;
+			// A source older persistence cut short lost its newest end, which the frames still hold.
+			const archiveText =
+				archive.text && !isPersistenceTruncatedString(archive.text)
+					? snapcompact.archiveSourceText(archive)
+					: undefined;
 			const shape = archiveText ? snapcompact.resolveShapeForText(archiveText, model, shapeSetting) : undefined;
-			if (!archiveText || !shape || snapcompact.archiveInShape(shown ?? archive, shape, model.api)) {
+			if (!archiveText || !shape || snapcompact.archiveInShape(shown ?? archive, shape, model)) {
 				view = Promise.resolve(null);
 			} else {
 				const maxFrames = Math.max(
 					1,
 					Math.min(
 						snapcompact.MAX_FRAMES_DEFAULT,
-						snapcompact.maxFramesForDataBudget(shape, snapcompact.frameDataBytesBudget(model)),
-						snapcompact.providerFrameBudget(model),
+						snapcompact.maxFramesForDataBudget(shape, frameByteBudget),
+						frameCountBudget,
 						textBudget === undefined
 							? Number.POSITIVE_INFINITY
-							: Math.floor(textBudget / snapcompact.plannedFrameTokens(shape)),
+							: Math.floor(
+									(textBudget - snapcompactTextReserveTokens(shape)) / snapcompact.plannedFrameTokens(shape),
+								),
 					),
 				);
 				const includeThinking = snapcompact.readerIncludesThinking(model);

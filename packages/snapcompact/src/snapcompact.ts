@@ -2136,12 +2136,12 @@ function denseCompanion(high: Shape, api: Api | undefined): Shape {
 
 /**
  * Whether every frame of `archive` is laid out as {@link compact} lays one out
- * in `shape` for a reader on `api`: the grid, font, ink and detail hint of
- * `shape` or of its dense companion for the foveated middle. Frames without
- * shape metadata (older renderers) are the legacy `5x8` sentence-ink grid.
+ * in `shape` for `reader`: the grid, font, ink and detail hint of `shape` or
+ * of its dense companion for the foveated middle. Frames without shape
+ * metadata (older renderers) are the legacy `5x8` sentence-ink grid.
  */
-export function archiveInShape(archive: Archive, shape: Shape, api: Api | undefined): boolean {
-	const tiers = [shape, denseCompanion(shape, api)].map(tier => ({ tier, ...geometry(tier) }));
+export function archiveInShape(archive: Archive, shape: Shape, reader: ShapeTarget | undefined): boolean {
+	const tiers = [shape, denseCompanion(shape, reader?.api)].map(tier => ({ tier, ...geometry(tier) }));
 	return archive.frames.every(frame =>
 		tiers.some(
 			({ tier, cols, rows }) =>
