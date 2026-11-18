@@ -165,6 +165,7 @@ describe("AgentSession peek at consumed background completions", () => {
 				return promise;
 			},
 			onCompletion: () => () => {},
+			onNotify: () => () => {},
 		} as unknown as DaemonBrokerClient;
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(broker);
 		const build = gatedJob("build", "bash");

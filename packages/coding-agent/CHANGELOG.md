@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
-
 ### Fixed
 
 - Fixed startup, typing and redraws crawling on macOS while a build or other heavy work keeps the machine busy
@@ -29,6 +25,9 @@
 ### Changed
 
 - Model registries in one process (SDK embedders, tests) now share discovered-model builds, so refreshing another registry skips rebuilding models an earlier one already built
+### Added
+
+- Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
 
 ### Fixed
 

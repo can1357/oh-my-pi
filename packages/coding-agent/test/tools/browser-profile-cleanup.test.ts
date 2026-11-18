@@ -82,6 +82,7 @@ function fakeSharedBroker(
 	const client = {
 		projectDir,
 		onCompletion: () => () => {},
+		onNotify: () => () => {},
 		close() {},
 		async request(operation: DaemonOperation): Promise<DaemonRpcResult> {
 			switch (operation.op) {
