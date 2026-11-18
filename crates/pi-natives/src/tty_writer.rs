@@ -1,25 +1,28 @@
 //! Off-thread terminal output pump.
 //!
-//! `write(2)` to a TTY from the JS thread blocks the event loop until the
-//! terminal drains, so a slow or occluded emulator froze the TUI for the
-//! length of a repaint. [`TtyWriter`] moves that work to a dedicated thread:
+//! A terminal write on the JS thread blocks the event loop until the terminal
+//! drains, so a slow or occluded emulator froze the TUI for the length of a
+//! repaint. [`TtyWriter`] moves that work to a dedicated thread:
 //!
 //! - JS copies each string's UTF-16 into a pooled batch ([`TtyWriter::write`]);
 //!   no UTF-8 sizing or transcoding happens on its thread.
-//! - The worker transcodes one bounded chunk at a time and writes it to an
-//!   independently opened, nonblocking handle to the same TTY, so stdout's own
-//!   file-status flags are never touched and a stalled write can be cancelled.
+//! - The worker transcodes one bounded chunk at a time and writes it through
+//!   its own handle to the terminal (see [`sys`]):
+//!   - unix: an independently opened, nonblocking descriptor for the same TTY,
+//!     so stdout's own file-status flags are never touched.
+//!   - Windows: a duplicate of the console handle. Each chunk is one
+//!     `WriteFile` of at most 16 KiB, below the size at which `ConPTY` hosts
+//!     lose viewport tracking, preceded by a repair of the UTF-8 console code
+//!     pages that console-sharing children flip.
 //! - [`TtyWriter::pending`] is a conservative UTF-8 bound (three bytes per
 //!   queued code unit), tightened as chunks are encoded and written. Crossing
 //!   the drain threshold, or a fatal write error, notifies JS.
-//! - [`TtyWriter::stop`] wakes both the queue wait and a `POLLOUT` wait, then
-//!   joins the worker: nothing is written after it returns.
+//! - [`TtyWriter::stop`] wakes the queue wait, cancels a blocked write (unix: a
+//!   `POLLOUT` wait; Windows: `CancelSynchronousIo`), and joins the worker:
+//!   nothing is written after it returns. The one exception is a Windows
+//!   console that refuses to abort a `WriteFile`; that single chunk completes
+//!   on the detached worker, like bytes a unix kernel had already accepted.
 
-#[cfg(unix)]
-use std::os::{
-	fd::{AsRawFd, FromRawFd, OwnedFd},
-	unix::net::UnixStream,
-};
 use std::{
 	sync::{
 		Arc,
@@ -29,33 +32,32 @@ use std::{
 	time::{Duration, Instant},
 };
 
-#[cfg(unix)]
-use napi::threadsafe_function::ThreadsafeFunctionCallMode;
-use napi::{Error, JsString, Result, Status, threadsafe_function::ThreadsafeFunction};
+use napi::{
+	Error, JsString, Result, Status,
+	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
+};
 use napi_derive::napi;
 use parking_lot::{Condvar, Mutex};
 
 use crate::js;
 
-#[cfg(unix)]
+/// Also the per-`WriteFile` cap for `ConPTY` hosts, which lose viewport
+/// tracking on larger writes (`MAX_CONPTY_WRITE_CHUNK_BYTES` in pi-tui's
+/// terminal.ts).
 const MAX_TTY_WRITE_CHUNK_BYTES: usize = 16 * 1024;
 // At most two normal-sized UTF-16 batches survive a drain. A large repaint or
 // a burst of tiny writes must not permanently enlarge either reusable buffer.
-#[cfg(unix)]
 const MAX_RETAINED_UNITS: usize = 256 * 1024;
-#[cfg(unix)]
 const MAX_RETAINED_FRAMES: usize = 4096;
 
 type DrainCallback = ThreadsafeFunction<(), (), (), Status, false, true>;
 
-#[cfg(unix)]
 enum DrainNotifier {
 	Js(DrainCallback),
 	#[cfg(test)]
 	Test(Arc<std::sync::atomic::AtomicUsize>),
 }
 
-#[cfg(unix)]
 impl DrainNotifier {
 	fn notify(&self) {
 		match self {
@@ -80,7 +82,6 @@ struct Batch {
 	ends:  Vec<usize>,
 }
 
-#[cfg(unix)]
 impl Batch {
 	fn clear(&mut self) {
 		self.units.clear();
@@ -107,11 +108,9 @@ struct Inner {
 	cv:              Condvar,
 	cancelled:       AtomicBool,
 	dead:            AtomicBool,
-	#[cfg(unix)]
 	drain_threshold: usize,
 }
 
-#[cfg(unix)]
 impl Inner {
 	fn new(drain_threshold: u32) -> Self {
 		Self {
@@ -170,7 +169,6 @@ const fn pending_number(bytes: usize) -> f64 {
 	}
 }
 
-#[cfg(unix)]
 #[derive(Default)]
 struct EncodeCursor {
 	unit:    usize,
@@ -182,7 +180,6 @@ struct EncodeCursor {
 /// Fill one bounded output buffer, coalescing independent small writes without
 /// coalescing their Unicode boundaries. Returns (UTF-16 units read, UTF-8
 /// bytes).
-#[cfg(unix)]
 fn encode_chunk(batch: &Batch, cursor: &mut EncodeCursor, output: &mut [u8]) -> (usize, usize) {
 	let start = cursor.unit;
 	let mut written = 0;
@@ -224,105 +221,10 @@ fn encode_chunk(batch: &Batch, cursor: &mut EncodeCursor, output: &mut [u8]) -> 
 	(cursor.unit - start, written)
 }
 
-#[cfg(unix)]
-fn reopen_tty(fd: i32) -> std::io::Result<OwnedFd> {
-	let mut original = std::mem::MaybeUninit::<libc::stat>::uninit();
-	// SAFETY: fd is only inspected; original is valid storage for fstat.
-	if unsafe { libc::fstat(fd, original.as_mut_ptr()) } != 0 {
-		return Err(std::io::Error::last_os_error());
-	}
-	// SAFETY: fstat succeeded.
-	let original = unsafe { original.assume_init() };
-	let mut name = [0 as libc::c_char; libc::PATH_MAX as usize];
-	// SAFETY: name is valid writable storage. ttyname_r rejects non-TTYs.
-	let rc = unsafe { libc::ttyname_r(fd, name.as_mut_ptr(), name.len()) };
-	if rc != 0 {
-		return Err(std::io::Error::from_raw_os_error(rc));
-	}
-	// SAFETY: successful ttyname_r NUL-terminates name.
-	let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
-	// Reopening a clone-device master would allocate a *different* PTY even
-	// though its stat identity matches. Only actual terminal destinations work.
-	if matches!(path.to_bytes(), b"/dev/ptmx" | b"/dev/pts/ptmx") {
-		return Err(std::io::Error::new(
-			std::io::ErrorKind::InvalidInput,
-			"PTY masters cannot be reopened",
-		));
-	}
-	// A dup shares O_NONBLOCK with stdout. Opening its actual TTY path gives
-	// this worker independent status flags; never substitute /dev/tty.
-	// SAFETY: name is a valid C string; flags require no variadic mode argument.
-	let opened = unsafe {
-		libc::open(
-			name.as_ptr(),
-			libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
-		)
-	};
-	if opened < 0 {
-		return Err(std::io::Error::last_os_error());
-	}
-	// SAFETY: open returned a new descriptor, uniquely owned here.
-	let owned = unsafe { OwnedFd::from_raw_fd(opened) };
-	let mut reopened = std::mem::MaybeUninit::<libc::stat>::uninit();
-	// SAFETY: owned is live and reopened is valid fstat storage.
-	if unsafe { libc::fstat(owned.as_raw_fd(), reopened.as_mut_ptr()) } != 0 {
-		return Err(std::io::Error::last_os_error());
-	}
-	// SAFETY: fstat succeeded.
-	let reopened = unsafe { reopened.assume_init() };
-	if original.st_dev != reopened.st_dev
-		|| original.st_ino != reopened.st_ino
-		|| original.st_rdev != reopened.st_rdev
-	{
-		return Err(std::io::Error::new(
-			std::io::ErrorKind::InvalidInput,
-			"TTY destination changed while reopening",
-		));
-	}
-	Ok(owned)
-}
-
-#[cfg(unix)]
 fn cancelled_error() -> std::io::Error {
 	std::io::ErrorKind::ConnectionAborted.into()
 }
 
-#[cfg(unix)]
-fn wait_writable(fd: i32, cancel_fd: i32, inner: &Inner) -> std::io::Result<()> {
-	let mut fds = [libc::pollfd { fd, events: libc::POLLOUT, revents: 0 }, libc::pollfd {
-		fd:      cancel_fd,
-		events:  libc::POLLIN,
-		revents: 0,
-	}];
-	loop {
-		if inner.cancelled.load(Ordering::Acquire) {
-			return Err(cancelled_error());
-		}
-		// SAFETY: fds contains two valid poll entries; the worker owns both.
-		let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
-		if result > 0 {
-			if fds[1].revents != 0 || inner.cancelled.load(Ordering::Acquire) {
-				return Err(cancelled_error());
-			}
-			if fds[0].revents & libc::POLLNVAL != 0 {
-				return Err(std::io::Error::from_raw_os_error(libc::EBADF));
-			}
-			if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
-				return Err(std::io::ErrorKind::BrokenPipe.into());
-			}
-			if fds[0].revents & libc::POLLOUT != 0 {
-				return Ok(());
-			}
-		} else if result < 0 {
-			let err = std::io::Error::last_os_error();
-			if err.kind() != std::io::ErrorKind::Interrupted {
-				return Err(err);
-			}
-		}
-	}
-}
-
-#[cfg(unix)]
 fn write_all_with(
 	mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
 	buf: &[u8],
@@ -344,41 +246,9 @@ fn write_all_with(
 	Ok(())
 }
 
-#[cfg(unix)]
-fn write_all(
-	fd: i32,
-	cancel_fd: i32,
-	inner: &Inner,
-	buf: &[u8],
-	notifier: &DrainNotifier,
-) -> std::io::Result<()> {
-	write_all_with(
-		|chunk| loop {
-			if inner.cancelled.load(Ordering::Acquire) {
-				return Err(cancelled_error());
-			}
-			// SAFETY: chunk is initialized storage and fd is worker-owned and
-			// nonblocking. No original stdout descriptor flags are shared.
-			let rc = unsafe { libc::write(fd, chunk.as_ptr().cast(), chunk.len()) };
-			if rc >= 0 {
-				return Ok(rc as usize);
-			}
-			let err = std::io::Error::last_os_error();
-			if err.kind() == std::io::ErrorKind::WouldBlock {
-				wait_writable(fd, cancel_fd, inner)?;
-				continue;
-			}
-			return Err(err);
-		},
-		buf,
-		|bytes| inner.progress(bytes, notifier),
-	)
-}
-
-#[cfg(unix)]
-fn pump_loop(fd: OwnedFd, cancel: UnixStream, inner: &Inner, notifier: DrainNotifier) {
+fn pump_loop(output: sys::Output, inner: &Inner, notifier: DrainNotifier) {
 	let mut front = Batch::default();
-	let mut output = [0u8; MAX_TTY_WRITE_CHUNK_BYTES];
+	let mut buf = [0u8; MAX_TTY_WRITE_CHUNK_BYTES];
 	loop {
 		{
 			let mut queue = inner.queue.lock();
@@ -398,13 +268,21 @@ fn pump_loop(fd: OwnedFd, cancel: UnixStream, inner: &Inner, notifier: DrainNoti
 				inner.finish(false, &notifier);
 				return;
 			}
-			let (units, bytes) = encode_chunk(&front, &mut cursor, &mut output);
+			let (units, bytes) = encode_chunk(&front, &mut cursor, &mut buf);
 			// UTF-16 needs at most three UTF-8 bytes per code unit. Once encoded,
 			// only actual bytes remain outstanding, including partial writes.
 			inner.progress(units * 3 - bytes, &notifier);
-			if write_all(fd.as_raw_fd(), cancel.as_raw_fd(), inner, &output[..bytes], &notifier)
-				.is_err()
-			{
+			let written = write_all_with(
+				|chunk| {
+					if inner.cancelled.load(Ordering::Acquire) {
+						return Err(cancelled_error());
+					}
+					output.write(chunk)
+				},
+				&buf[..bytes],
+				|bytes| inner.progress(bytes, &notifier),
+			);
+			if written.is_err() {
 				inner.finish(!inner.cancelled.load(Ordering::Acquire), &notifier);
 				return;
 			}
@@ -413,33 +291,345 @@ fn pump_loop(fd: OwnedFd, cancel: UnixStream, inner: &Inner, notifier: DrainNoti
 	}
 }
 
+/// Platform terminal handles. Each backend provides `open(fd)`, returning the
+/// worker's `Output` and the stopping side's `Cancel`; `Output::write` makes
+/// one write attempt that blocks until the terminal accepts bytes or
+/// `Cancel::stop` aborts it.
+#[cfg(unix)]
+mod sys {
+	use std::{
+		io,
+		os::{
+			fd::{AsRawFd, FromRawFd, OwnedFd},
+			unix::net::UnixStream,
+		},
+		thread::JoinHandle,
+	};
+
+	use super::cancelled_error;
+
+	/// Worker side: the reopened TTY and the cancellation socket's read end.
+	pub(super) struct Output {
+		tty:    OwnedFd,
+		cancel: UnixStream,
+	}
+
+	/// Stopping side: the cancellation socket's write end. Closing it wakes a
+	/// `POLLOUT` wait without writes, `SIGPIPE`, or a potentially full pipe.
+	pub(super) struct Cancel(pub(super) UnixStream);
+
+	pub(super) fn open(fd: i32) -> io::Result<(Output, Cancel)> {
+		let tty = reopen_tty(fd)?;
+		// UnixStream::pair owns close-on-exec endpoints.
+		let (cancel, stop) = UnixStream::pair()?;
+		Ok((Output { tty, cancel }, Cancel(stop)))
+	}
+
+	impl Output {
+		pub(super) fn write(&self, chunk: &[u8]) -> io::Result<usize> {
+			loop {
+				// SAFETY: chunk is initialized storage and the descriptor is
+				// worker-owned and nonblocking. No original stdout flags are
+				// shared.
+				let rc =
+					unsafe { libc::write(self.tty.as_raw_fd(), chunk.as_ptr().cast(), chunk.len()) };
+				if rc >= 0 {
+					return Ok(rc as usize);
+				}
+				let err = io::Error::last_os_error();
+				if err.kind() != io::ErrorKind::WouldBlock {
+					return Err(err);
+				}
+				self.wait_writable()?;
+			}
+		}
+
+		fn wait_writable(&self) -> io::Result<()> {
+			let mut fds = [
+				libc::pollfd { fd: self.tty.as_raw_fd(), events: libc::POLLOUT, revents: 0 },
+				libc::pollfd { fd: self.cancel.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+			];
+			loop {
+				// SAFETY: fds contains two valid poll entries; the worker owns
+				// both.
+				let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, -1) };
+				if result > 0 {
+					// The peer closes on stop: POLLHUP even if it raced this poll.
+					if fds[1].revents != 0 {
+						return Err(cancelled_error());
+					}
+					if fds[0].revents & libc::POLLNVAL != 0 {
+						return Err(io::Error::from_raw_os_error(libc::EBADF));
+					}
+					if fds[0].revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+						return Err(io::ErrorKind::BrokenPipe.into());
+					}
+					if fds[0].revents & libc::POLLOUT != 0 {
+						return Ok(());
+					}
+				} else if result < 0 {
+					let err = io::Error::last_os_error();
+					if err.kind() != io::ErrorKind::Interrupted {
+						return Err(err);
+					}
+				}
+			}
+		}
+	}
+
+	impl Cancel {
+		/// Abort a blocked write and join the worker.
+		pub(super) fn stop(self, thread: JoinHandle<()>) {
+			drop(self.0);
+			let _ = thread.join();
+		}
+	}
+
+	pub(super) fn reopen_tty(fd: i32) -> io::Result<OwnedFd> {
+		let mut original = std::mem::MaybeUninit::<libc::stat>::uninit();
+		// SAFETY: fd is only inspected; original is valid storage for fstat.
+		if unsafe { libc::fstat(fd, original.as_mut_ptr()) } != 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: fstat succeeded.
+		let original = unsafe { original.assume_init() };
+		let mut name = [0 as libc::c_char; libc::PATH_MAX as usize];
+		// SAFETY: name is valid writable storage. ttyname_r rejects non-TTYs.
+		let rc = unsafe { libc::ttyname_r(fd, name.as_mut_ptr(), name.len()) };
+		if rc != 0 {
+			return Err(io::Error::from_raw_os_error(rc));
+		}
+		// SAFETY: successful ttyname_r NUL-terminates name.
+		let path = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+		// Reopening a clone-device master would allocate a *different* PTY even
+		// though its stat identity matches. Only actual terminal destinations
+		// work.
+		if matches!(path.to_bytes(), b"/dev/ptmx" | b"/dev/pts/ptmx") {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "PTY masters cannot be reopened"));
+		}
+		// A dup shares O_NONBLOCK with stdout. Opening its actual TTY path gives
+		// this worker independent status flags; never substitute /dev/tty.
+		// SAFETY: name is a valid C string; flags require no variadic mode
+		// argument.
+		let opened = unsafe {
+			libc::open(
+				name.as_ptr(),
+				libc::O_WRONLY | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
+			)
+		};
+		if opened < 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: open returned a new descriptor, uniquely owned here.
+		let owned = unsafe { OwnedFd::from_raw_fd(opened) };
+		let mut reopened = std::mem::MaybeUninit::<libc::stat>::uninit();
+		// SAFETY: owned is live and reopened is valid fstat storage.
+		if unsafe { libc::fstat(owned.as_raw_fd(), reopened.as_mut_ptr()) } != 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: fstat succeeded.
+		let reopened = unsafe { reopened.assume_init() };
+		if original.st_dev != reopened.st_dev
+			|| original.st_ino != reopened.st_ino
+			|| original.st_rdev != reopened.st_rdev
+		{
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"TTY destination changed while reopening",
+			));
+		}
+		Ok(owned)
+	}
+}
+
+#[cfg(windows)]
+mod sys {
+	use std::{
+		io,
+		os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+		sync::atomic::{AtomicU32, Ordering},
+		thread::JoinHandle,
+		time::{Duration, Instant},
+	};
+
+	use windows_sys::Win32::{
+		Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, FALSE, INVALID_HANDLE_VALUE},
+		Storage::FileSystem::WriteFile,
+		System::{
+			Console::{
+				GetConsoleCP, GetConsoleMode, GetConsoleOutputCP, GetStdHandle, STD_ERROR_HANDLE,
+				STD_OUTPUT_HANDLE, SetConsoleCP, SetConsoleOutputCP,
+			},
+			IO::CancelSynchronousIo,
+			Threading::GetCurrentProcess,
+		},
+	};
+
+	const CP_UTF8: u32 = 65001;
+
+	/// How long `stop` keeps cancelling a `WriteFile` before detaching the
+	/// worker. It checks the cancelled flag before every write, so a write that
+	/// ignores cancellation is its last.
+	const CANCEL_TIMEOUT: Duration = Duration::from_millis(500);
+
+	/// Last foreign output code page reported, so a child that keeps flipping
+	/// it warns once.
+	static WARNED_CODE_PAGE: AtomicU32 = AtomicU32::new(0);
+
+	/// Worker side: a duplicate of the console handle, so closing or replacing
+	/// the process's stdout cannot invalidate a blocked write.
+	pub(super) struct Output(OwnedHandle);
+
+	/// Stopping side: synchronous writes are aborted through the worker's
+	/// thread handle, so there is nothing to hold.
+	pub(super) struct Cancel;
+
+	pub(super) fn open(fd: i32) -> io::Result<(Output, Cancel)> {
+		let which = match fd {
+			1 => STD_OUTPUT_HANDLE,
+			2 => STD_ERROR_HANDLE,
+			_ => {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"only fds 1 and 2 have console handles",
+				));
+			},
+		};
+		// SAFETY: plain query.
+		let handle = unsafe { GetStdHandle(which) };
+		if handle == INVALID_HANDLE_VALUE {
+			return Err(io::Error::last_os_error());
+		}
+		if handle.is_null() {
+			return Err(io::Error::new(io::ErrorKind::NotFound, "no standard handle"));
+		}
+		let mut mode = 0;
+		// Consoles only, as unix accepts only TTYs: pipes (mintty, redirection)
+		// and files are rejected.
+		// SAFETY: handle is a live standard handle and mode is valid storage.
+		if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		let mut owned = std::ptr::null_mut();
+		// SAFETY: both process handles are the current-process pseudo handle,
+		// and owned is valid storage for the new handle.
+		let ok = unsafe {
+			DuplicateHandle(
+				GetCurrentProcess(),
+				handle,
+				GetCurrentProcess(),
+				&mut owned,
+				0,
+				FALSE,
+				DUPLICATE_SAME_ACCESS,
+			)
+		};
+		if ok == 0 {
+			return Err(io::Error::last_os_error());
+		}
+		// SAFETY: DuplicateHandle returned a new handle, uniquely owned here.
+		Ok((Output(unsafe { OwnedHandle::from_raw_handle(owned) }), Cancel))
+	}
+
+	impl Output {
+		pub(super) fn write(&self, chunk: &[u8]) -> io::Result<usize> {
+			ensure_utf8_code_pages();
+			let mut written = 0;
+			// SAFETY: the handle is worker-owned and live; chunk is initialized
+			// and at most MAX_TTY_WRITE_CHUNK_BYTES long; no OVERLAPPED, so the
+			// write is synchronous and CancelSynchronousIo can abort it.
+			let ok = unsafe {
+				WriteFile(
+					self.0.as_raw_handle(),
+					chunk.as_ptr(),
+					chunk.len() as u32,
+					&mut written,
+					std::ptr::null_mut(),
+				)
+			};
+			if ok == 0 {
+				return Err(io::Error::last_os_error());
+			}
+			Ok(written as usize)
+		}
+	}
+
+	impl Cancel {
+		/// Abort a blocked write and join the worker. A cancel that lands just
+		/// before the worker's next `WriteFile` finds nothing to abort, so it
+		/// repeats until the worker sees the cancelled flag and exits.
+		#[expect(clippy::unused_self, reason = "the unix variant closes its wake socket")]
+		pub(super) fn stop(self, thread: JoinHandle<()>) {
+			let deadline = Instant::now() + CANCEL_TIMEOUT;
+			while !thread.is_finished() {
+				if Instant::now() >= deadline {
+					log::warn!("tty writer: console write ignored cancellation; detaching worker");
+					return;
+				}
+				// SAFETY: the thread handle stays live until join or drop. With no
+				// synchronous I/O pending, this fails harmlessly.
+				unsafe { CancelSynchronousIo(thread.as_raw_handle()) };
+				std::thread::sleep(Duration::from_millis(1));
+			}
+			let _ = thread.join();
+		}
+	}
+
+	/// Re-assert the UTF-8 console code pages before a write.
+	///
+	/// `WriteFile` bytes are decoded with the console's *current* output code
+	/// page. Children sharing the console (bash commands, MCP/LSP servers, eval
+	/// kernels) can change it: PHP >= 7.1 CLI switches it to match
+	/// `internal_encoding` and skips the restore when killed (php.net request
+	/// #73716). From then on every non-ASCII glyph renders as OEM mojibake
+	/// (`Γöé` for `│`). A reading of 0 means no console and is left alone.
+	fn ensure_utf8_code_pages() {
+		// SAFETY: plain console calls without pointers.
+		unsafe {
+			let output = GetConsoleOutputCP();
+			if output != 0 && output != CP_UTF8 {
+				SetConsoleOutputCP(CP_UTF8);
+				if WARNED_CODE_PAGE.swap(output, Ordering::Relaxed) != output {
+					log::warn!(
+						"console output code page {output} set by a child process; restored UTF-8"
+					);
+				}
+			}
+			let input = GetConsoleCP();
+			if input != 0 && input != CP_UTF8 {
+				SetConsoleCP(CP_UTF8);
+			}
+		}
+	}
+}
+
+struct Worker {
+	thread: JoinHandle<()>,
+	cancel: sys::Cancel,
+}
+
 /// Dedicated, cancellable terminal writer. The destination must be a TTY that
-/// can be independently reopened; pipes and files are deliberately rejected.
+/// can be independently reopened (unix) or a console (Windows); pipes and
+/// files are deliberately rejected.
 #[napi]
 pub struct TtyWriter {
 	inner:  Arc<Inner>,
-	thread: Option<JoinHandle<()>>,
-	#[cfg(unix)]
-	cancel: Option<UnixStream>,
+	/// `None` once stopped.
+	worker: Option<Worker>,
 }
 
 impl TtyWriter {
-	#[cfg(unix)]
 	fn start(fd: i32, drain_threshold: u32, notifier: DrainNotifier) -> Result<Self> {
-		let output = reopen_tty(fd)
+		let (output, cancel) = sys::open(fd)
 			.map_err(|err| Error::from_reason(format!("opening tty fd {fd} failed: {err}")))?;
-		// UnixStream::pair owns close-on-exec endpoints. Closing the sender
-		// wakes poll without writes, SIGPIPE, or a potentially full wake pipe.
-		let (cancel_read, cancel_write) = UnixStream::pair()
-			.map_err(|err| Error::from_reason(format!("tty cancellation socket failed: {err}")))?;
 		let inner = Arc::new(Inner::new(drain_threshold));
 		let thread_inner = Arc::clone(&inner);
 		let thread = std::thread::Builder::new()
 			.name("tty-writer".into())
-			.spawn(move || pump_loop(output, cancel_read, &thread_inner, notifier))
+			.spawn(move || pump_loop(output, &thread_inner, notifier))
 			.map_err(|err| Error::from_reason(format!("tty writer thread spawn failed: {err}")))?;
-		// Every descriptor is RAII-owned, including inside a failed spawn.
-		Ok(Self { inner, thread: Some(thread), cancel: Some(cancel_write) })
+		// Every handle is RAII-owned, including inside a failed spawn.
+		Ok(Self { inner, worker: Some(Worker { thread, cancel }) })
 	}
 
 	fn enqueue(&self, fill: impl FnOnce(&mut Vec<u16>) -> Result<()>) -> Result<f64> {
@@ -473,7 +663,7 @@ impl TtyWriter {
 
 #[napi]
 impl TtyWriter {
-	/// Start an independently opened terminal writer. onDrain runs when the
+	/// Start a writer on its own handle to the terminal. onDrain runs when the
 	/// pending bound crosses from above drainThreshold to at/below it, and on
 	/// fatal writes even below the threshold. It does not retain the event loop.
 	#[napi(constructor)]
@@ -482,15 +672,7 @@ impl TtyWriter {
 		drain_threshold: u32,
 		#[napi(ts_arg_type = "() => void")] on_drain: DrainCallback,
 	) -> Result<Self> {
-		#[cfg(unix)]
-		{
-			Self::start(fd, drain_threshold, DrainNotifier::Js(on_drain))
-		}
-		#[cfg(not(unix))]
-		{
-			let _ = (fd, drain_threshold, on_drain);
-			Err(Error::from_reason("TtyWriter is unix-only"))
-		}
+		Self::start(fd, drain_threshold, DrainNotifier::Js(on_drain))
 	}
 
 	/// Copy UTF-16 into pooled storage without UTF-8 sizing or transcoding on
@@ -527,12 +709,13 @@ impl TtyWriter {
 		queue.pending == 0 && !self.inner.dead.load(Ordering::Acquire)
 	}
 
-	/// Drain until the deadline, then cancel and join. Never detaches a writer
-	/// or leaves old output running after return. Already queued JS callbacks
-	/// may still run; callers must ignore callbacks from a stopped writer.
+	/// Drain until the deadline, then cancel and join. Nothing is written after
+	/// return, except one chunk a Windows console refused to abort. Already
+	/// queued JS callbacks may still run; callers must ignore callbacks from a
+	/// stopped writer.
 	#[napi]
 	pub fn stop(&mut self, flush_timeout_ms: u32) {
-		let Some(thread) = self.thread.take() else {
+		let Some(worker) = self.worker.take() else {
 			return;
 		};
 		self.flush_sync(flush_timeout_ms);
@@ -541,9 +724,7 @@ impl TtyWriter {
 			self.inner.cancelled.store(true, Ordering::Release);
 			self.inner.cv.notify_all();
 		}
-		#[cfg(unix)]
-		drop(self.cancel.take());
-		let _ = thread.join();
+		worker.cancel.stop(worker.thread);
 	}
 }
 
@@ -555,9 +736,15 @@ impl Drop for TtyWriter {
 
 #[cfg(all(test, unix))]
 mod tests {
-	use std::sync::atomic::AtomicUsize;
+	use std::{
+		os::{
+			fd::{AsRawFd, FromRawFd, OwnedFd},
+			unix::net::UnixStream,
+		},
+		sync::atomic::AtomicUsize,
+	};
 
-	use super::*;
+	use super::{sys::reopen_tty, *};
 
 	struct Pty {
 		master: OwnedFd,
@@ -697,7 +884,7 @@ mod tests {
 		assert_ne!(flags(output.as_raw_fd()) & libc::O_NONBLOCK, 0);
 		let (mut writer, _) = pty.writer(0);
 		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
-		let cancel = writer.cancel.as_ref().unwrap().as_raw_fd();
+		let cancel = writer.worker.as_ref().unwrap().cancel.0.as_raw_fd();
 		assert_ne!(unsafe { libc::fcntl(cancel, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
 		writer.stop(0);
 		assert_eq!(flags(pty.slave.as_raw_fd()), original_flags);
@@ -743,8 +930,7 @@ mod tests {
 		assert!(start.elapsed() < Duration::from_secs(1), "stop did not cancel a stalled PTY");
 		assert_eq!(writer.pending(), 0.0);
 		assert!(!writer.dead());
-		assert!(writer.thread.is_none());
-		assert!(writer.cancel.is_none());
+		assert!(writer.worker.is_none());
 
 		// Bytes already accepted by the kernel are allowed; a detached old
 		// worker would resume as soon as these bytes are read.
@@ -981,7 +1167,7 @@ mod tests {
 
 	#[test]
 	fn enqueue_failures_preserve_prior_frames_and_pending_bound() {
-		let writer = TtyWriter { inner: Arc::new(Inner::new(0)), thread: None, cancel: None };
+		let writer = TtyWriter { inner: Arc::new(Inner::new(0)), worker: None };
 		assert_eq!(push(&writer, &[b'a' as u16]), 3.0);
 		assert!(
 			writer

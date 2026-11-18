@@ -161,6 +161,38 @@ provider "openai-codex" {
 			cache-write 0
 		}
 	}
+	// GPT-6.2 Astra lists at $8/$40 with $0.40 cached input; GPT-6.2 Sol keeps
+	// GPT-6.1 Sol's $2/$10 with $0.10 cached input (OpenAI API docs, 2026-11-17,
+	// https://developers.openai.com/api/docs/models/gpt-6.2-astra).
+	// Both document 922K max input (1.05M total); the curated maximum applies
+	// only with extended context on, and a higher live maximum still wins.
+	models "gpt-6.2-astra" "gpt-6.2-astra-wm" {
+		cost-patch {
+			input 8.0
+			output 40.0
+			cache-read 0.4
+			cache-write 0
+		}
+		max-context-window 922000
+	}
+	models "gpt-6.2-sol" "gpt-6.2-sol-wm" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
+			cache-write 0
+		}
+		max-context-window 922000
+	}
+	// GPT-6.2 included usage bills Fast at 2x and Ultrafast at 6x Standard
+	// (https://learn.chatgpt.com/docs/pricing#speed-multipliers, 2026-11-17).
+	models "gpt-6.2-astra" "gpt-6.2-astra-wm" "gpt-6.2-sol" "gpt-6.2-sol-wm" {
+		service-tier-cost {
+			flex 0.5
+			priority 2
+			ultrafast 6
+		}
+	}
 	class "openai" {
 		revision ">=5.3 <5.7" {
 			thinking-mode "effort"

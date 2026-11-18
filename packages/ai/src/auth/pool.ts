@@ -29,6 +29,16 @@ const MAX_PENDING_DISABLED_EVENTS = 32;
 function fingerprintOAuthBearer(bearer: string): string {
 	return Bun.SHA256.hash(bearer, "base64url");
 }
+/**
+ * Strip broker-invisible secrets before a credential crosses the wire: the
+ * refresh token becomes the sentinel and the Kiro OIDC client secret is
+ * dropped. Every broker-bound path (snapshot, upsert, refresh reply) uses this.
+ */
+export function redactCredentialForWire(credential: AuthCredential): SnapshotCredential {
+	if (credential.type === "api_key") return credential;
+	const { kiroClientSecret: _kiroClientSecret, ...withoutSecrets } = credential;
+	return { ...withoutSecrets, refresh: REMOTE_REFRESH_SENTINEL };
+}
 
 /** One stored credential row as cached in memory. */
 export type StoredCredential = { id: number; credential: AuthCredential };
@@ -751,8 +761,7 @@ export class CredentialPool implements CredentialsApi {
 		for (const [provider, stored] of this.#data) {
 			for (const entry of stored) {
 				const credential = entry.credential;
-				const redacted: SnapshotCredential =
-					credential.type === "api_key" ? credential : { ...credential, refresh: REMOTE_REFRESH_SENTINEL };
+				const redacted = redactCredentialForWire(credential);
 				entries.push({
 					id: entry.id,
 					provider,
@@ -828,8 +837,7 @@ export class CredentialPool implements CredentialsApi {
 		this.reset(provider);
 		return stored.map(entry => {
 			const persisted = entry.credential;
-			const redacted: SnapshotCredential =
-				persisted.type === "api_key" ? persisted : { ...persisted, refresh: REMOTE_REFRESH_SENTINEL };
+			const redacted = redactCredentialForWire(persisted);
 			return {
 				id: entry.id,
 				provider: entry.provider,
