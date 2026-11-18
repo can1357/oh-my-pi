@@ -38,6 +38,7 @@ import { agyCredentialEnv } from "./credentials";
 import { type McpCallHandler, McpBridge, type McpToolDefinition, type McpToolOutput } from "./mcp-bridge";
 import { inputBlocks, type Ledger, lateToolResultPrompt, planTurn, replayPrompt, transcriptDigest } from "./reconcile";
 import type { StepWriter } from "./step-writer";
+import { peekMaxModelStepIdx, readModelStepsAfter } from "./usage-store";
 
 const AGENT_NAME = "bridge";
 const STARTUP_TIMEOUT_MS = 60_000;
@@ -121,6 +122,7 @@ interface Conversation {
 	effort?: string;
 	defaultEffort?: string;
 	requestedEffort?: string;
+	usageCursor?: number;
 }
 
 interface ActiveStep {
@@ -280,13 +282,15 @@ export class AgyHost implements ProviderSessionState {
 				const created = await this.#setup(
 					this.#requireProcess().connection.newSession({ cwd, mcpServers: [], _meta: systemMeta(system) }),
 				);
-				conversationStorePath(this.#geminiDir, created.sessionId);
+				const store = conversationStorePath(this.#geminiDir, created.sessionId);
+				const exists = await Bun.file(store).exists();
 				this.#ownedConversations.add(created.sessionId);
 				this.#conversation = {
 					id: created.sessionId,
 					systemKey,
 					loaded: true,
 					defaultEffort: thoughtLevel(created.configOptions),
+					usageCursor: exists ? this.#usageCursor(created.sessionId) : -1,
 				};
 				this.#contextTokens = 0;
 			}
@@ -496,7 +500,13 @@ export class AgyHost implements ProviderSessionState {
 			});
 			if (this.#process !== agy || step !== this.#step || step?.controller.signal.aborted)
 				throw new Error("Antigravity CLI load was interrupted");
-			this.#conversation = { id, systemKey, loaded: true, defaultEffort: thoughtLevel(loaded.configOptions) };
+			this.#conversation = {
+				id,
+				systemKey,
+				loaded: true,
+				defaultEffort: thoughtLevel(loaded.configOptions),
+				usageCursor: this.#usageCursor(id),
+			};
 			this.#contextTokens = 0;
 		} finally {
 			if (this.#loading === loading) this.#loading = undefined;
@@ -532,6 +542,7 @@ export class AgyHost implements ProviderSessionState {
 	#prompt(blocks: ContentBlock[]): void {
 		const conversation = this.#conversation;
 		if (!conversation) throw new Error("Antigravity CLI conversation is unavailable");
+		if (conversation.usageCursor === undefined) conversation.usageCursor = this.#usageCursor(conversation.id);
 		const turn: Turn = {
 			conversationId: conversation.id,
 			response: Promise.withResolvers<PromptResponse>(),
@@ -738,7 +749,7 @@ export class AgyHost implements ProviderSessionState {
 			this.#fail(new Error("Antigravity CLI ended the request without a usable response"));
 			return;
 		}
-		writer.usage(this.#contextTokens, response.usage);
+		writer.usage(this.#contextTokens, this.#turnUsage(turn, response));
 		const digest = transcriptDigest([...step.messages, writer.output]);
 		let checkpoint: AntigravityCliCheckpoint | undefined;
 		if (response.stopReason === "end_turn") {
@@ -756,6 +767,46 @@ export class AgyHost implements ProviderSessionState {
 		});
 		this.#ledger = { count: step.messages.length + 1, digest };
 		step.done.resolve();
+	}
+
+	/** Prefer native ACP totals; otherwise recover the turn's completed model steps from its store. */
+	#turnUsage(turn: Turn, response: PromptResponse): PromptResponse["usage"] {
+		const conversation = this.#conversation;
+		if (conversation?.id !== turn.conversationId) return response.usage;
+		if (response.usage) {
+			conversation.usageCursor = this.#usageCursor(turn.conversationId);
+			return response.usage;
+		}
+		let cursor = conversation.usageCursor;
+		if (cursor === undefined) {
+			cursor = this.#usageCursor(turn.conversationId);
+			if (cursor === undefined) return undefined;
+			conversation.usageCursor = cursor;
+		}
+		try {
+			const batch = readModelStepsAfter(conversationStorePath(this.#geminiDir, turn.conversationId), cursor);
+			if (!batch) return undefined;
+			conversation.usageCursor = batch.maxIdx;
+			const { inputTokens, outputTokens, cachedReadTokens, cachedWriteTokens, thoughtTokens } = batch.usage;
+			return {
+				totalTokens: inputTokens + outputTokens + cachedReadTokens + cachedWriteTokens,
+				inputTokens,
+				outputTokens,
+				cachedReadTokens,
+				cachedWriteTokens,
+				thoughtTokens,
+			};
+		} catch {
+			return undefined;
+		}
+	}
+
+	#usageCursor(id: string): number | undefined {
+		try {
+			return peekMaxModelStepIdx(conversationStorePath(this.#geminiDir, id));
+		} catch {
+			return undefined;
+		}
 	}
 
 	#fail(error: unknown): void {

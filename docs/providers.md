@@ -26,7 +26,7 @@ Invalid tool arguments are returned to the model with the failing paths and the 
 
 The transport retains agy's conversation between model steps, including while omp executes a tool. Edits, branches and changed context restore a matching saved turn boundary when possible; otherwise the retained transcript is supplied to a fresh conversation. Native conversations and credentials are local to the machine running inference. agy's three-minute MCP timeout means longer tool operations require cancelling its waiting turn and delivering the completed result as a subsequent message.
 
-The bundled roster follows agy 1.5.9's model picker; availability still depends on the signed-in account. ACP supports model and thinking-level selection, but not caller-specified temperature, stop sequences or output-token caps. Token totals arrive at native turn end; intermediate steps report occupied context rather than invented per-step billing. Google's account-policy warning is shown before sign-in.
+The bundled roster follows agy 1.5.9's model picker; availability still depends on the signed-in account. ACP supports model and thinking-level selection, but not caller-specified temperature, stop sequences or output-token caps. Token totals arrive at native turn end; intermediate steps report occupied context rather than invented per-step billing. When the ACP response omits token usage, omp reads completed model-step totals from the ACP conversation store; the store stays read-only. Google's account-policy warning is shown before sign-in.
 
 ## Factory Droid
 

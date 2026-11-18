@@ -62,6 +62,9 @@
 ### Added
 
 - Added automatic detection of thinking capabilities for previously unknown models, with persistent results and support for alternate effort and token-budget request formats.
+### Fixed
+
+- Antigravity CLI steps without native usage now recover completed model-step totals from the ACP conversation store instead of reporting zero tokens. ([#19422](https://github.com/can1357/oh-my-pi/pull/19422) by [@SenCha930511](https://github.com/SenCha930511))
 
 ## [18.20.3] - 2026-11-16
 
