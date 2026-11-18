@@ -58,8 +58,12 @@ export interface UsageHistoryResponse {
 	entries: UsageHistoryEntry[];
 }
 
-/** POST /v1/usage/observed request body — one client's batched observed usage. */
-export type ClientUsageReportRequest = ClientUsageReport;
+/**
+ * POST /v1/usage/observed request body — one client's batched observed usage.
+ * The version travels in {@link AUTH_BROKER_CLIENT_VERSION_HEADER}, never the
+ * body, so brokers with the strict pre-version schema keep accepting reports.
+ */
+export type ClientUsageReportRequest = Omit<ClientUsageReport, "version">;
 
 /** POST /v1/usage/observed response body. */
 export interface ClientUsageReportResponse {
@@ -173,6 +177,15 @@ export const AUTH_BROKER_CAPABILITIES_HEADER = "OMP-Auth-Broker-Capabilities";
 
 /** Client understands independent Codex `chat` and `spark` credential-block scopes. */
 export const AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES = "codex-meter-block-scopes";
+
+/**
+ * Request header carrying the client's omp version on every broker request
+ * except a usage report relayed for another client.
+ */
+export const AUTH_BROKER_CLIENT_VERSION_HEADER = "x-omp-version";
+
+/** Response header carrying the broker's omp version on every response. */
+export const AUTH_BROKER_VERSION_HEADER = "OMP-Auth-Broker-Version";
 
 /** Default port when none is configured. Loopback-only, no external exposure. */
 export const DEFAULT_AUTH_BROKER_BIND = "127.0.0.1:8765";

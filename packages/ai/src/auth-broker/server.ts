@@ -36,6 +36,8 @@ import type {
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CLIENT_VERSION_HEADER,
+	AUTH_BROKER_VERSION_HEADER,
 	DEFAULT_AUTH_BROKER_BIND,
 	DEFAULT_REFRESH_INTERVAL_MS,
 	DEFAULT_REFRESH_SKEW_MS,
@@ -66,7 +68,7 @@ export interface AuthBrokerServerOptions {
 	bearerTokens: string[];
 	/** Honor forwarded peer headers only when the connecting proxy is trusted. Default false. */
 	trustProxyHeaders?: boolean;
-	/** Broker version string surfaced on `/v1/healthz`. */
+	/** Broker version string surfaced on `/v1/healthz` and in every response's `OMP-Auth-Broker-Version` header. */
 	version?: string;
 	/** Refresh credentials expiring within this window. Default 5 min. */
 	refreshSkewMs?: number;
@@ -122,6 +124,23 @@ function supportsCodexMeterBlockScopes(req: Request): boolean {
 			?.split(",")
 			.some(capability => capability.trim() === AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES) ?? false
 	);
+}
+
+function clientVersion(req: Request): string | undefined {
+	return req.headers.get(AUTH_BROKER_CLIENT_VERSION_HEADER) ?? undefined;
+}
+
+/** Stamp the broker version on every response so clients can detect skew without polling `/v1/healthz`. */
+function withBrokerVersion<A extends unknown[]>(
+	version: string | undefined,
+	handler: (...args: A) => Promise<Response>,
+): (...args: A) => Promise<Response> {
+	if (!version) return handler;
+	return async (...args) => {
+		const response = await handler(...args);
+		response.headers.set(AUTH_BROKER_VERSION_HEADER, version);
+		return response;
+	};
 }
 
 /**
@@ -492,6 +511,7 @@ async function serveSnapshot(
 		const body = source.build(clientSupportsCodexMeterBlockScopes);
 		logger.info("auth-broker snapshot served", {
 			peer,
+			clientVersion: clientVersion(req),
 			credentials: body.credentials.length,
 			generation: body.generation,
 		});
@@ -787,7 +807,11 @@ function serveSnapshotStream(
 			hub.add(subscriber);
 			abortHandler = (): void => cleanup();
 			req.signal.addEventListener("abort", abortHandler);
-			logger.info("auth-broker stream opened", { peer, generation: initial.generation });
+			logger.info("auth-broker stream opened", {
+				peer,
+				clientVersion: clientVersion(req),
+				generation: initial.generation,
+			});
 		},
 		cancel() {
 			cleanup();
@@ -830,7 +854,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 		hostname: bind.hostname,
 		port: bind.port,
 		idleTimeout: DEFAULT_SERVER_IDLE_TIMEOUT_S,
-		fetch: async (req, server): Promise<Response> => {
+		fetch: withBrokerVersion(version, async (req: Request, server: Bun.Server<undefined>): Promise<Response> => {
 			const url = new URL(req.url);
 			const pathname = url.pathname;
 			const socketPeer = server.requestIP(req)?.address ?? "unknown";
@@ -893,13 +917,17 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					// Arktype's inferred union collides the `entries` field with
 					// Array.prototype.entries; the schema already validated the shape.
 					const report = parsed.data as ClientUsageReportRequest;
+					// The version header names the sending process, and only a report of its own
+					// carries it: an auth-gateway relays its callers' reports without one.
+					const reporterVersion = clientVersion(req);
 					try {
-						const recorded = opts.storage.usage.recordClient(report);
+						const recorded = opts.storage.usage.recordClient({ ...report, version: reporterVersion });
 						if (!recorded) return json(501, { error: "broker store does not persist client usage" });
 						logger.debug("auth-broker client usage recorded", {
 							peer,
 							installId: report.installId,
 							hostname: report.hostname,
+							version: reporterVersion,
 							entries: report.entries.length,
 						});
 						return json(200, { ok: true });
@@ -1085,7 +1113,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				});
 				return json(500, { error: "internal error" });
 			}
-		},
+		}),
 	});
 
 	const boundHost = server.hostname ?? bind.hostname;

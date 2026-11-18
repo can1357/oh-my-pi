@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added version exchange between auth-broker clients and the broker: clients log a warning when the broker runs a different omp version, and the broker logs each client's version and records it per client ([#19592](https://github.com/can1357/oh-my-pi/pull/19592) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added

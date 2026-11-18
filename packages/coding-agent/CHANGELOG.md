@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the local omp version to `omp auth-broker status`, flagging a broker that runs a different version ([#19592](https://github.com/can1357/oh-my-pi/pull/19592) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
