@@ -462,7 +462,40 @@ pub(super) fn geometry(pw: pipewire::Loaded) -> CoreResult<super::PortalGeometry
 
 #[cfg(test)]
 mod tests {
+	use futures::FutureExt;
+
 	use super::*;
+
+	/// A `ScreenCast` step that can show the picker waits until the call's
+	/// deadline and then names the picker, and passes a portal error through
+	/// as it is.
+	#[test]
+	fn a_picker_step_waits_until_the_deadline_and_passes_portal_errors_through() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap();
+		// The run leaves only the session-close budget, so the step gives up on
+		// its first poll; one bounded by `PORTAL_TIMEOUT` would still be pending.
+		let ending = control::CancellationSource::default();
+		ending.set_deadline(Some(std::time::Instant::now() + crate::desktop::CLOSE_TIMEOUT));
+		let (unanswered, failed) = control::with_token_for_test(&ending.token(), || {
+			runtime.block_on(async {
+				(
+					picker_request(std::future::pending::<Result<(), String>>()).now_or_never(),
+					picker_request(async { Err::<(), _>("x".to_owned()) }).now_or_never(),
+				)
+			})
+		});
+		let error = unanswered.expect("the wait must end at once").unwrap_err();
+		assert_eq!(error.code.as_str(), "Timeout");
+		assert_eq!(error.message, PICKER_UNANSWERED);
+		let error = failed
+			.expect("a portal error ends the step at once")
+			.unwrap_err();
+		assert_eq!(error.code.as_str(), "CaptureFailed");
+		assert_eq!(error.message, "x");
+	}
 
 	#[test]
 	fn cancelled_geometry_refresh_never_opens_a_portal_session() {
