@@ -1497,6 +1497,67 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 	});
 
+	/** Plan mode on opus-4-6 (1m) with tiers default=sonnet-4-5 (200k) and slow=opus-4-6, context sized at 300k tokens. */
+	async function openTieredPlanReview(): Promise<string> {
+		session.settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
+		session.settings.setModelRole("slow", "anthropic/claude-opus-4-6");
+		session.settings.setModelRole("plan", "anthropic/claude-opus-4-6");
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nKeep the large context.");
+		await mode.handlePlanModeCommand();
+		const tokens = 300_000;
+		vi.spyOn(session, "getContextUsage").mockImplementation(options => {
+			const contextWindow = options?.contextWindow ?? 0;
+			return { tokens, contextWindow, percent: (tokens / contextWindow) * 100 };
+		});
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		return planFilePath;
+	}
+
+	it("re-measures keep-context approval when the slider moves to a larger-context tier", async () => {
+		const planFilePath = await openTieredPlanReview();
+		let keptOnDefault: boolean | undefined;
+		let slowMeta: string | undefined;
+		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
+			const overlay = component as PlanReviewOverlay;
+			keptOnDefault = overlay.selectOption("keep");
+			overlay.handleInput("\x1b[C");
+			slowMeta = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
+			overlay.selectOption("keep");
+			return { hide: vi.fn() } as never;
+		});
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(keptOnDefault).toBe(false);
+		expect(slowMeta).toBe(`Approve and keep context (~${compactNumber(300_000)} / ${compactNumber(1_000_000)})`);
+		expect(session.model?.id).toBe("claude-opus-4-6");
+		expect(session.getPlanModeState()?.enabled).not.toBe(true);
+	});
+
+	it("judges a remote keep-context approval against the tier it names", async () => {
+		const planFilePath = await openTieredPlanReview();
+		const answers: boolean[] = [];
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answers.push(
+				ctx.resolvePlanReview(event.reviewId, "keep", { role: "default" }),
+				ctx.resolvePlanReview(event.reviewId, "keep", { role: "slow" }),
+			);
+		});
+		await loadExtensions(recorder.extension);
+
+		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const resolved = await recorder.resolved;
+
+		expect(answers).toEqual([false, true]);
+		expect(resolved).toMatchObject({ choice: "keep", by: "extension" });
+		expect(session.model?.id).toBe("claude-opus-4-6");
+	});
+
 	it("disables keep-context approval when execution context usage is above ninety-five percent", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
