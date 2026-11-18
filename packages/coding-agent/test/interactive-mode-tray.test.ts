@@ -9,6 +9,7 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { JobWidgetRegistry } from "@oh-my-pi/pi-coding-agent/job-widgets/types";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
 import { cfgDisplayPinnedAgents } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -22,7 +23,7 @@ import {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "@oh-my-pi/pi-coding-agent/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { type Component, Text } from "@oh-my-pi/pi-tui";
 import type { DescribeContext, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { JobsSheet } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
@@ -285,11 +286,11 @@ describe("InteractiveMode tray", () => {
 		expect(cards.map(card => [card.p && Reflect.get(card.p, "item"), card.p && Reflect.get(card.p, "ref")])).toEqual([
 			["agent", "TrayScan"],
 			["agent", "TrayReview"],
-			["done", "done"],
 			["job", "bg_1"],
 			["job", "bg_2"],
+			["done", "done"],
 		]);
-		const [scan, review, done, widgetJob, bareJob] = cards;
+		const [scan, review, widgetJob, bareJob, done] = cards;
 
 		expect(scan!.p).toMatchObject({
 			role: "omp.tray.card",
@@ -507,7 +508,7 @@ describe("InteractiveMode tray", () => {
 			expect(renders).toHaveBeenCalled();
 			const quiet = trayOf(cx).node;
 			expect(quiet.p).toEqual({ role: "omp.tray", quiet: true, main: "idle" });
-			// Nothing grouped: each finished agent is its own card, the most recently active first, no done card.
+			// Nothing grouped: each finished agent is its own card, in spawn order, no done card.
 			const cards = children(quiet);
 			expect(
 				cards.map(card => [card.p && Reflect.get(card.p, "item"), card.p && Reflect.get(card.p, "ref")]),
@@ -517,8 +518,12 @@ describe("InteractiveMode tray", () => {
 			]);
 			// The same agent keeps its card's key across the regrouping.
 			expect(cards[0]!.key).toBe(scanKey);
-			// No caption in the idle status row over a quiet tray.
-			expect(dock(cx).some(entry => role(entry.node ?? undefined) === "omp.hud.activity")).toBe(false);
+			// The idle status row stays, empty (no caption over a quiet tray): the host's seat for the tray.
+			expect(dock(cx).find(entry => role(entry.node ?? undefined) === "omp.hud.activity")?.node).toEqual({
+				k: "row",
+				p: { role: "omp.hud.activity", align: "center", gap: "sm" },
+				c: [],
+			});
 
 			// The hub key asks Tern to show it: a focus bump, not the hub.
 			mode.showAgentHub({ trayFirst: true });
@@ -539,14 +544,119 @@ describe("InteractiveMode tray", () => {
 			expect(renders).toHaveBeenCalled();
 			const back = trayOf(cx).node;
 			expect(back.p && Reflect.get(back.p, "quiet")).toBeUndefined();
+			// The new agent appends after the others' place; the done card is last.
 			expect(children(back).map(card => card.p && Reflect.get(card.p, "ref"))).toEqual(["TrayNext", "done"]);
 			const tray = trayOf(cx);
 			tray.component.handleNativeEvent?.({ type: "action", key: "", act: "tray.peek", value: "done", mods: [] });
 			const rows = children(children(children(trayOf(cx).node).at(-1))[1]);
-			expect(rows.map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["TrayScan", "TrayOld"]);
+			expect(rows.map(row => row.p && Reflect.get(row.p, "ref"))).toEqual(["TrayOld", "TrayScan"]);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("keeps every card in place and the tray quiet while the user opens finished agents, reviving them to view", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "TrayOld",
+			displayName: "m2",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: "/tmp/TrayOld.jsonl",
+			status: "parked",
+			createdAt: 1_000,
+		});
+		registry.register({
+			id: "TrayScan",
+			displayName: "m2",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile: "/tmp/TrayScan.jsonl",
+			status: "aborted",
+			createdAt: 2_000,
+		});
+		setNativeRendering(true);
+		const cx = context(true);
+		const shape = (): unknown => {
+			const node = trayOf(cx).node;
+			return {
+				quiet: node.p && Reflect.get(node.p, "quiet"),
+				cards: children(node).map(card => [
+					card.p && Reflect.get(card.p, "ref"),
+					card.p && Reflect.get(card.p, "status"),
+				]),
+			};
+		};
+		const before = shape();
+		expect(before).toEqual({
+			quiet: true,
+			cards: [
+				["TrayOld", "done"],
+				["TrayScan", "stopped"],
+			],
+		});
+
+		// Viewing revives the agent: a killed one comes back `parked`, and every revival passes
+		// through `running` before it settles `idle`, bumping its last activity each time.
+		let during: unknown;
+		spyOn(SessionFocusController.prototype, "focusAgent").mockImplementation(async (id: string) => {
+			registry.setStatus(id, "parked");
+			registry.setStatus(id, "running");
+			during = shape();
+			registry.setStatus(id, "idle");
+		});
+		const tray = trayOf(cx).component;
+		for (const ref of ["TrayScan", "TrayOld"]) {
+			tray.handleNativeEvent?.({ type: "action", key: "", act: "tray.peek", value: ref, mods: [] });
+			tray.handleNativeEvent?.({ type: "action", key: "", act: "tray.open", value: ref, mods: [] });
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(during).toEqual(before);
+			expect(shape()).toEqual(before);
+		}
+
+		// Real work wakes it: a message runs the agent again.
+		registry.setStatus("TrayOld", "running");
+		expect(shape()).toEqual({
+			quiet: undefined,
+			cards: [
+				["TrayOld", "running"],
+				["done", "done"],
+			],
+		});
+	});
+
+	it("keeps the status row as the tray's seat while it has cards, one row from working to idle and back", () => {
+		const registry = AgentRegistry.global();
+		const cx = context(true);
+		const working = [new Text("Working", 0, 0)];
+		// No items: no row.
+		expect(
+			mode.describeStatusHud([], cx).p && Reflect.get(mode.describeStatusHud([], cx).p!, "role"),
+		).toBeUndefined();
+
+		registry.register({
+			id: "TrayOld",
+			displayName: "m2",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			status: "idle",
+		});
+		const rows = [
+			mode.describeStatusHud(working, cx),
+			mode.describeStatusHud([], cx),
+			mode.describeStatusHud(working, cx),
+		];
+		// One row throughout (same kind and role, so the host keeps it); idle over a quiet tray it is empty.
+		expect(rows.map(node => [node.k, node.p && Reflect.get(node.p, "role")])).toEqual([
+			["row", "omp.hud.activity"],
+			["row", "omp.hud.activity"],
+			["row", "omp.hud.activity"],
+		]);
+		expect(rows[1]!.c).toEqual([]);
 	});
 
 	it("leaves the agents-hub key inert on a tray host with no cards, unless the tray's agents are turned off", () => {

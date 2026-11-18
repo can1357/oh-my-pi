@@ -54,7 +54,8 @@ function observed(
 	};
 }
 
-function ref(id: string, status: AgentRecordLike["status"], lastActivity = 0): AgentRecordLike {
+/** A registry ref spawned at `createdAt` (its place in the tray), last active then too. */
+function ref(id: string, status: AgentRecordLike["status"], createdAt = 0): AgentRecordLike {
 	return {
 		id,
 		displayName: id,
@@ -63,8 +64,8 @@ function ref(id: string, status: AgentRecordLike["status"], lastActivity = 0): A
 		status,
 		session: null,
 		sessionFile: null,
-		createdAt: 0,
-		lastActivity,
+		createdAt,
+		lastActivity: createdAt,
 	};
 }
 
@@ -101,6 +102,8 @@ interface Fixture {
 	unopenable: Set<string>;
 	/** Running jobs that draw a widget. */
 	widgets: Set<string>;
+	/** Agents being opened for viewing. */
+	reviving: Set<string>;
 	main: TrayMain;
 }
 
@@ -114,6 +117,7 @@ function fixture(): Fixture {
 		showAgents: true,
 		unopenable: new Set(),
 		widgets: new Set(),
+		reviving: new Set(),
 		main: "working",
 	};
 }
@@ -129,6 +133,7 @@ function input(f: Fixture, now = 60_000): TrayInput {
 		widget: candidate => (f.widgets.has(candidate.id) ? WIDGET : undefined),
 		showAgents: f.showAgents,
 		canOpen: candidate => !f.unopenable.has(candidate.id),
+		reviving: id => f.reviving.has(id),
 		now,
 	};
 }
@@ -178,12 +183,79 @@ describe("tray items", () => {
 		expect(items.map(item => `${item.item}:${item.ref}:${item.status}`)).toEqual([
 			"agent:Queued:queued",
 			"agent:Running:running",
-			"agent:Unread:done",
 			"agent:Woken:running",
+			"agent:Unread:done",
 			"done:done:done",
 		]);
-		// Finished agents without a card, newest first: the delivered one, then the synchronous one.
+		// Agents stand in spawn order; the done card lists its agents newest first.
 		expect(items.at(-1)).toMatchObject({ count: 2, names: "Delivered, Inline" });
+	});
+
+	it("keeps every card in its place: agents in spawn order, then jobs by start, the done card last", () => {
+		const f = fixture();
+		const memory = new TrayMemory();
+		f.sessions.push(
+			observed("Late", "active", { currentTool: "read", currentToolStartMs: 41_000 }),
+			observed("Early", "active", { currentTool: "read", currentToolStartMs: 40_000 }),
+		);
+		f.refs.push(ref("Late", "running", 200), ref("Early", "running", 100), ref("Old", "idle", 50));
+		f.jobs.push(job("bg_1", { startTime: 10 }));
+		expect(cards(f, memory)).toEqual([
+			"agent:Early:running",
+			"agent:Late:running",
+			"job:bg_1:running",
+			"done:done:done",
+		]);
+
+		// The earlier agent acts later, and its registry entry moves on: it stays where it is.
+		f.sessions[1] = observed("Early", "active", { currentTool: "grep", currentToolStartMs: 90_000 });
+		f.refs[1] = { ...ref("Early", "running", 100), lastActivity: 90_000 };
+		expect(cards(f, memory)).toEqual([
+			"agent:Early:running",
+			"agent:Late:running",
+			"job:bg_1:running",
+			"done:done:done",
+		]);
+
+		// A new agent appends after the agents, before the jobs.
+		f.refs.push(ref("New", "running", 300));
+		expect(cards(f, memory)).toEqual([
+			"agent:Early:running",
+			"agent:Late:running",
+			"agent:New:running",
+			"job:bg_1:running",
+			"done:done:done",
+		]);
+	});
+
+	it("reads an agent being revived to be viewed as still finished, and its dot as it ended", () => {
+		const f = fixture();
+		const memory = new TrayMemory();
+		f.refs.push(ref("Seen", "aborted", 1), ref("Kept", "idle", 2));
+		expect(buildTrayItems(input(f), memory)).toMatchObject({
+			quiet: true,
+			items: [
+				{ ref: "Seen", status: "stopped" },
+				{ ref: "Kept", status: "done" },
+			],
+		});
+		// Opened to view: reopened `parked`, then `running` while it revives, its last activity bumped.
+		f.reviving.add("Seen");
+		f.refs[0] = { ...ref("Seen", "running", 1), lastActivity: 99_000 };
+		expect(buildTrayItems(input(f), memory)).toMatchObject({
+			quiet: true,
+			items: [
+				{ ref: "Seen", status: "stopped" },
+				{ ref: "Kept", status: "done" },
+			],
+		});
+		// Revived and idle: unchanged still.
+		f.reviving.delete("Seen");
+		f.refs[0] = { ...ref("Seen", "idle", 1), lastActivity: 99_000 };
+		expect(buildTrayItems(input(f), memory).items.map(item => `${item.ref}:${item.status}`)).toEqual([
+			"Seen:stopped",
+			"Kept:done",
+		]);
 	});
 
 	it("keeps agents and jobs disjoint: a job that runs an agent is that agent's card, never a job card", () => {
@@ -221,7 +293,7 @@ describe("tray items", () => {
 		// Beside a running job it is not, and the finished agent folds into the done card.
 		f.jobs.push(job("bg_1"));
 		expect(quiet()).toBe(false);
-		expect(cards(f, memory)).toEqual(["done:done:done", "job:bg_1:running"]);
+		expect(cards(f, memory)).toEqual(["job:bg_1:running", "done:done:done"]);
 
 		// A settled agent whose result still waits keeps its card once the job is done and delivered.
 		f.sessions.push({ ...observed("Scout", "completed"), lastUpdate: 90_000 });
@@ -229,13 +301,13 @@ describe("tray items", () => {
 		f.agentJobs.set("Scout", job("Scout", { type: "task", agentId: "Scout", status: "completed" }));
 		f.jobs[0] = job("bg_1", { status: "completed", endTime: 95_000, resultText: "ok" });
 		f.consumed.add("bg_1");
-		expect(cards(f, memory)).toEqual(["agent:Scout:done", "agent:Old:done"]);
+		expect(cards(f, memory)).toEqual(["agent:Old:done", "agent:Scout:done"]);
 		expect(quiet()).toBe(true);
 
 		// A failure alone is worth the room.
 		f.jobs.push(job("bg_2", { status: "failed", endTime: 96_000, errorText: "boom" }));
 		expect(quiet()).toBe(false);
-		expect(cards(f, memory)).toEqual(["agent:Scout:done", "done:done:done", "job:bg_2:failed"]);
+		expect(cards(f, memory)).toEqual(["agent:Scout:done", "job:bg_2:failed", "done:done:done"]);
 		memory.dismissed.add("job:bg_2");
 		expect(quiet()).toBe(true);
 	});
@@ -275,11 +347,11 @@ describe("tray items", () => {
 		const build = buildTrayItems(input(f), new TrayMemory());
 		expect(build.quiet).toBe(true);
 		expect(build.items.map(item => `${item.item}:${item.ref}:${item.status}`)).toEqual([
-			"agent:Fresh:done",
-			"agent:Broke:failed",
 			"agent:Restored:done",
+			"agent:Broke:failed",
+			"agent:Fresh:done",
 		]);
-		const [fresh, broke, restored] = build.items;
+		const [restored, broke, fresh] = build.items;
 		expect(fresh).toMatchObject({
 			acted: 30,
 			text: "Checker: ✓ wrapper passes (exit 0)",
@@ -313,13 +385,15 @@ describe("tray items", () => {
 		expect(children(children(card)[0])[2]!.p).toMatchObject({ age: 95_000, stopped: 95_000 });
 	});
 
-	it("shows the first 48 finished agents as cards in a quiet tray, the done card standing for the rest", () => {
+	it("shows the newest 48 finished agents as cards in a quiet tray, the done card standing for the earlier ones", () => {
 		const f = fixture();
 		for (let i = 0; i < 60; i++) f.refs.push(ref(`Agent${i}`, "idle", i));
 		const { items, quiet } = buildTrayItems(input(f), new TrayMemory());
 		expect(quiet).toBe(true);
 		expect(items).toHaveLength(49);
-		expect(items.slice(0, 2).map(item => item.ref)).toEqual(["Agent59", "Agent58"]);
+		// In spawn order, the done card last.
+		expect(items.slice(0, 2).map(item => item.ref)).toEqual(["Agent12", "Agent13"]);
+		expect(items.at(-2)?.ref).toBe("Agent59");
 		const done = items.at(-1)!;
 		expect(done).toMatchObject({ item: "done", name: "12 more done", count: 12 });
 		expect(done.item === "done" && done.entries.map(entry => entry.id)).toEqual(
@@ -332,7 +406,7 @@ describe("tray items", () => {
 		f.jobs.push(job("bg_1"));
 		const said = (activity: string): string => {
 			f.refs.splice(0, f.refs.length, { ...ref("Done", "idle"), activity });
-			const done = buildTrayItems(input(f), new TrayMemory()).items[0];
+			const done = buildTrayItems(input(f), new TrayMemory()).items.at(-1);
 			return done?.item === "done" ? done.entries[0]!.line : "";
 		};
 		expect(said("**Checker:** `✓ wrapper passes` (exit 0)…")).toBe("Checker: ✓ wrapper passes (exit 0)…");
@@ -470,13 +544,13 @@ describe("Tray", () => {
 		expect(host.cancelJob).toHaveBeenCalledTimes(1);
 
 		// Dismissing a settled agent folds it into the done card; a settled job's card goes.
-		expect(refs(tray.describe())).toEqual(["Scout", "Review", "done", "bg_1", "bg_2"]);
+		expect(refs(tray.describe())).toEqual(["Scout", "Review", "bg_1", "bg_2", "done"]);
 		tray.handleNativeEvent(action("tray.dismiss", "Review"));
 		tray.handleNativeEvent(action("tray.dismiss", "bg_2"));
 		// A live card cannot be dismissed.
 		tray.handleNativeEvent(action("tray.dismiss", "bg_1"));
 		const after = tray.describe();
-		expect(refs(after)).toEqual(["Scout", "done", "bg_1"]);
+		expect(refs(after)).toEqual(["Scout", "bg_1", "done"]);
 		expect(JSON.stringify(children(after).find(node => node.p && Reflect.get(node.p, "ref") === "done"))).toContain(
 			'"2 done"',
 		);
@@ -559,7 +633,7 @@ describe("Tray", () => {
 		);
 		f.unopenable.add("Advisor");
 		const { host, tray } = setup(f);
-		expect(refs(tray.describe())).toEqual(["Openable", "Advisor"]);
+		expect(refs(tray.describe())).toEqual(["Advisor", "Openable"]);
 
 		tray.handleNativeEvent(action("tray.peek", "Openable"));
 		const look = children(tray.describe()).at(-1)!;
