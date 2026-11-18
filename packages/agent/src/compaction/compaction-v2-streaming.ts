@@ -755,6 +755,7 @@ export function parseResponsesCompactionUsage(usage: unknown): ResponsesCompacti
 		...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {}),
 		...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
 	};
+}
 function parseCompactionV2Usage(event: Record<string, unknown>, model: Model): CompactionV2Usage | undefined {
 	const response = isRecord(event.response) ? event.response : undefined;
 	return parseResponsesUsage(response?.usage, model);

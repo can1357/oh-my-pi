@@ -2694,6 +2694,7 @@ export class SessionAdvisors {
 							const message = await completeSimple(requestModel, requestContext, requestOptions);
 							journal?.(message);
 							return message;
+						},
 						// The advisor's overflow compaction bypasses the advisor
 						// `Agent`, so its spend reaches neither the advisor cost map
 						// nor the advisor transcript. Report it like any other
