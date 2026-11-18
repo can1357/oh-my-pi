@@ -6,6 +6,7 @@ commands. Its cache namespace never evicts another workflow's build state.
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 import platform
@@ -16,6 +17,75 @@ import subprocess
 import sys
 
 from macos_fallback_common import VerificationError
+
+
+PYTHON_INPUTS = [
+    "scripts/macos_worker_state.py", "crates/py/scripts/fetch-python.sh",
+    "crates/py/scripts/pack-pymodules.py", "crates/py/scripts/gen-py-notices.py",
+    "crates/py/requirements.txt",
+]
+PYTHON_MARKER = Path("vendor/.omp-python-ready.json")
+
+
+def python_identity():
+    return {"version": 1, "inputs": key(PYTHON_INPUTS), "workspace": str(Path.cwd().resolve())}
+
+
+def complete_python():
+    """Check restored structure and absolute linker paths, not cache authority."""
+    for name in ("python", "python-release"):
+        root = Path("vendor", name)
+        if root.is_symlink() or not root.is_dir():
+            return False
+        config = root / "pyo3-config.txt"
+        if config.is_symlink() or not config.is_file() or config.stat().st_size > 16384:
+            return False
+        fields = dict(line.split("=", 1) for line in config.read_text().splitlines() if "=" in line)
+        library_dir = Path(fields.get("lib_dir", ""))
+        executable = Path(fields.get("executable", ""))
+        lib_name = fields.get("lib_name", "")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", lib_name):
+            return False
+        library = library_dir / ("lib" + lib_name + ".a")
+        for path in (library, executable, root / "stdlib.bin", root / ".archive.stamp"):
+            if not path.resolve().is_relative_to(root.resolve()) or not path.is_file() or path.stat().st_size == 0:
+                return False
+        if not os.access(executable, os.X_OK):
+            return False
+        requirements = Path("crates/py/requirements.txt")
+        if any(line.strip() and not line.lstrip().startswith("#") for line in requirements.read_text().splitlines()):
+            stamp = root / "bundled/.requirements.stamp"
+            if not stamp.is_file() or stamp.read_bytes() != requirements.read_bytes():
+                return False
+    return True
+
+
+def prepare_hosted_python(env, run):
+    """Validate cache identity inside the guard; rebuild partial/stale restores."""
+    if Path("vendor").is_symlink():
+        raise VerificationError("worker vendor directory cannot be a symlink")
+    expected = python_identity()
+    try:
+        ready = (not PYTHON_MARKER.is_symlink() and PYTHON_MARKER.stat().st_size < 16384
+                 and json.loads(PYTHON_MARKER.read_text()) == expected and complete_python())
+    except (OSError, ValueError, UnicodeError, RuntimeError):
+        ready = False
+    if ready:
+        print("guarded Python cache: validated reuse", flush=True)
+        return
+    print("guarded Python cache: missing or invalid; preparing", flush=True)
+    for name in ("python", "python-release"):
+        path = Path("vendor", name)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.exists():
+            shutil.rmtree(path)
+    if PYTHON_MARKER.is_symlink() or PYTHON_MARKER.exists():
+        PYTHON_MARKER.unlink()
+    run(["bash", "crates/py/scripts/fetch-python.sh"], check=True, env=env)
+    if not complete_python():
+        raise VerificationError("hosted embedded Python state is incomplete")
+    PYTHON_MARKER.write_text(json.dumps(expected, sort_keys=True) + "\n")
 
 
 def directory(path):
@@ -91,7 +161,7 @@ def prepare(env=None, run=subprocess.run):
                 raise VerificationError("embedded Python state is incomplete")
             marker.touch()
     elif env.get("RUNNER_ENVIRONMENT") == "github-hosted":
-        run(["bash", "crates/py/scripts/fetch-python.sh"], check=True, env=env)
+        prepare_hosted_python(env, run)
     else:
         raise VerificationError("unrecognized native execution pool")
     if not Path("vendor/python/pyo3-config.txt").is_file():

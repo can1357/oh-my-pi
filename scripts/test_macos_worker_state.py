@@ -9,6 +9,26 @@ from unittest.mock import patch
 import macos_worker_state as state
 
 
+def python_inputs():
+    for name in state.PYTHON_INPUTS:
+        path = Path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("" if name.endswith("requirements.txt") else "fixture")
+
+
+def python_outputs():
+    for name in ("python", "python-release"):
+        root = Path("vendor", name).resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "libpython3.14t.a").write_bytes(b"fixture")
+        executable = root / "python3.14t"
+        executable.write_text("fixture")
+        executable.chmod(0o755)
+        (root / "stdlib.bin").write_bytes(b"fixture")
+        (root / ".archive.stamp").write_text("fixture")
+        (root / "pyo3-config.txt").write_text(f"lib_name=python3.14t\nlib_dir={root}\nexecutable={executable}\n")
+
+
 class StateTests(unittest.TestCase):
     def test_refuses_non_native_and_unguarded_invocation(self):
         with patch.object(state.platform, "system", return_value="Linux"):
@@ -23,15 +43,14 @@ class StateTests(unittest.TestCase):
             previous = Path.cwd()
             try:
                 os.chdir(temporary)
+                python_inputs()
                 calls = []
                 def run(command, **kwargs):
                     calls.append(command)
                     self.assertNotIn("GH_TOKEN", kwargs["env"])
                     self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
                     if command[:2] == ["bash", "crates/py/scripts/fetch-python.sh"]:
-                        config = Path("vendor/python/pyo3-config.txt")
-                        config.parent.mkdir(parents=True)
-                        config.write_text("fixture")
+                        python_outputs()
                     class Result:
                         stdout = "LLD 22.1.2\n"
                     return Result()
@@ -40,6 +59,55 @@ class StateTests(unittest.TestCase):
                                          "GH_TOKEN": "fixture", "GITHUB_TOKEN": "fixture"}, run)
                 self.assertEqual(calls[-1], ["bash", "crates/py/scripts/ld64.lld", "--version"])
                 self.assertNotIn("GH_TOKEN", env)
+            finally:
+                os.chdir(previous)
+
+    def test_hosted_cache_reuses_complete_matching_state_and_rebuilds_invalid_restores(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = Path.cwd()
+            try:
+                os.chdir(temporary)
+                python_inputs()
+                calls = []
+                def fetch(command, **kwargs):
+                    calls.append(command)
+                    python_outputs()
+                state.prepare_hosted_python({}, fetch)
+                state.prepare_hosted_python({}, fetch)
+                self.assertEqual(len(calls), 1)
+                Path("crates/py/requirements.txt").write_text("# changed inputs\n")
+                state.prepare_hosted_python({}, fetch)
+                self.assertEqual(len(calls), 2)
+                Path("vendor/python-release/stdlib.bin").unlink()
+                state.prepare_hosted_python({}, fetch)
+                self.assertEqual(len(calls), 3)
+                config = Path("vendor/python/pyo3-config.txt")
+                config.write_text(config.read_text().replace(str(Path.cwd()), "/different-workspace"))
+                state.prepare_hosted_python({}, fetch)
+                self.assertEqual(len(calls), 4)
+                loop = Path("vendor/python/loop")
+                loop.symlink_to("loop")
+                config.write_text(config.read_text().replace("executable=", "ignored=") + f"executable={loop.absolute()}\n")
+                state.prepare_hosted_python({}, fetch)
+                self.assertEqual(len(calls), 5)
+                state.PYTHON_MARKER.write_text("not JSON")
+                state.prepare_hosted_python({}, fetch)
+                self.assertEqual(len(calls), 6)
+            finally:
+                os.chdir(previous)
+
+    def test_hosted_incomplete_preparation_cannot_publish_ready_marker(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            previous = Path.cwd()
+            try:
+                os.chdir(temporary)
+                python_inputs()
+                with self.assertRaises(state.VerificationError):
+                    state.prepare_hosted_python({}, lambda *args, **kwargs: None)
+                self.assertFalse(state.PYTHON_MARKER.exists())
+                Path("vendor").symlink_to(Path(temporary).parent, target_is_directory=True)
+                with self.assertRaises(state.VerificationError):
+                    state.prepare_hosted_python({}, lambda *args, **kwargs: None)
             finally:
                 os.chdir(previous)
 
