@@ -2,12 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AuthAccountPolicy` takes `autoRedeem5h`, `autoRedeemWeekly` and `autoRedeemFable` (`yes` or `no`), and auth-broker gateway configs accept them ([#19701](https://github.com/can1357/oh-my-pi/pull/19701) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - With several Devin logins, omp now prefers a login with daily or weekly quota left; a login past its quota that its on-demand balance still funds comes next, and one with no balance is skipped until its quota resets ([#19929](https://github.com/can1357/oh-my-pi/pull/19929) by [@will-bogusz](https://github.com/will-bogusz))
 - Devin logins now store the account's email, user id and organization, so two organizations under one email show as two accounts in `omp usage` and `auth.accountPolicies` can name each; sign in again to identify an existing login ([#19928](https://github.com/can1357/oh-my-pi/pull/19928) by [@will-bogusz](https://github.com/will-bogusz))
 - Anthropic requests with no messages now fail locally with the model, provider, and how many messages arrived, instead of a bare `400 "messages is required"` ([#19881](https://github.com/can1357/oh-my-pi/pull/19881) by [@FnSGit](https://github.com/FnSGit))
 - Usage reports of a provider an extension registers now survive across omp processes. Registering a provider's first usage adapter no longer discards the reports another process cached for it, so each new session stops re-probing the provider's usage endpoint; replacing an existing adapter still invalidates them ([#20030](https://github.com/can1357/oh-my-pi/pull/20030) by [@ahsanatha](https://github.com/ahsanatha))
+- A saved-reset spend planned for one account no longer lands on another account that a replaced credential store keeps under the same row id ([#19701](https://github.com/can1357/oh-my-pi/pull/19701) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [19.1.0] - 2026-11-21
 
@@ -21,10 +26,6 @@
 - The Cursor provider forwards `bash` instead of `write` so staged previews can be finalized
 - Increased provider stream watchdog defaults from 5 to 15 minutes, preventing slow one-shot completions from being interrupted prematurely.
 - Extended Gemini reasoning-stream protection to allow longer planning sequences before interruption.
-- `prewarm` stream option: Anthropic Messages sends the request as built, non-streaming with `max_tokens: 0`, to refresh its prompt cache without billing output; it refuses budget thinking, forced tool choice and structured output before sending
-- Claude usage reports now carry the account's subscription plan (`Max 5x`, `Max 20x`, `Pro`, `Team`, `Enterprise`) in `metadata.subscriptionPlan`, read from the OAuth profile on every fetch, so an auth broker serves it to its clients with the rest of the report. Added `usageSubscriptionPlan` and `claudeProfilePlan`
-- Added `retryUnreachableBroker` (default on) and `onBrokerRetry` to `discoverAuthStorage`, so a host chooses whether startup retries an unreachable broker and can show that it is waiting ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-- `AuthAccountPolicy` takes `autoRedeem5h`, `autoRedeemWeekly` and `autoRedeemFable` (`yes` or `no`), and auth-broker gateway configs accept them
 
 ### Fixed
 
@@ -66,12 +67,6 @@
 - Improved authentication broker compatibility across client and broker versions by tolerating unknown credential, usage, and observed-usage fields and values.
 - Fixed Codex Spark usage meters so reports that identify the meter only by `metered_feature` remain correctly scoped to the Spark model.
 - Fixed Antigravity CLI requests for models whose available IDs include effort suffixes, such as resolving `gemini-4-hydrogen` when only `gemini-4-hydrogen-high` is offered.
-- Fixed a Claude account staying blocked for Fable and Mythos after the shared weekly limit behind their 429 recovered, when `/usage` reported only that weekly window, so failover could not return to it ([#19600](https://github.com/can1357/oh-my-pi/pull/19600) by [@will-bogusz](https://github.com/will-bogusz))
-- Startup with an auth broker and no fresh snapshot cache no longer fails when the broker is restarting or briefly unreachable, including a connection dropped mid-response; it retries for up to 30 seconds, while a rejected token or a malformed snapshot still fails at once ([#19598](https://github.com/can1357/oh-my-pi/pull/19598) by [@will-bogusz](https://github.com/will-bogusz))
-- A Codex additional meter (Spark) reported with only a `metered_feature` now carries that codename as `scope.modelId`, as it already did with a `limit_name`, so it stays scoped to its own model ([#19606](https://github.com/can1357/oh-my-pi/pull/19606) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed auth-broker clients failing to read credentials or usage from a newer broker that adds a field or a usage unit or status; unknown fields are ignored and unknown values read as `unknown`. The broker likewise accepts observed-usage reports carrying fields from newer clients ([#19602](https://github.com/can1357/oh-my-pi/pull/19602) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed Antigravity CLI requests failing with `Unknown model ID` (e.g. `gemini-4-hydrogen`) when `agy` only offers effort-suffixed models such as `gemini-4-hydrogen-high` ([#19638](https://github.com/can1357/oh-my-pi/issues/19638))
-- A saved-reset spend planned for one account no longer lands on another account that a replaced credential store keeps under the same row id
 
 ## [18.22.2] - 2026-11-18
 
