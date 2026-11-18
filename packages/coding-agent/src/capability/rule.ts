@@ -311,7 +311,8 @@ export function parseRuleConditionAndScope(
 }
 
 function parseRuleEnum<T extends string>(key: string, value: unknown, values: readonly T[]): T | undefined {
-	if (value === undefined || values.includes(value as T)) return value as T | undefined;
+	const match = values.find(candidate => candidate === value);
+	if (value === undefined || match !== undefined) return match;
 	logger.warn(`Rules: unsupported \`${key}\` value, ignoring it`, { value, supported: values });
 	return undefined;
 }
