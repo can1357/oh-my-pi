@@ -1570,26 +1570,31 @@ describe("formatUsageBreakdown", () => {
 			]);
 			return { ...report, metadata: { ...report.metadata, orgId } };
 		});
-		// Stored before its organization was known, with the email case the selector names; reports lowercase it.
-		const stored = { position: 0, credentialId: 7, accountId: "claude-account", email: "Claude@Example.Test" };
-		const policy = { provider: "anthropic", account: { email: stored.email }, autoRedeemWeekly: "no" } as const;
-		const getAccountPolicy = (_provider: string, identity: { email?: string }) =>
-			identity.email === stored.email ? policy : undefined;
+		// Stored before its organization was known. The selector names the account id, which the reports carry too,
+		// so only attribution, not the report's own identity, can decide whose consent applies.
+		const stored = { position: 0, credentialId: 7, accountId: "claude-account", email: "claude@example.test" };
+		const policy = {
+			provider: "anthropic",
+			account: { accountId: stored.accountId },
+			autoRedeemWeekly: "no",
+		} as const;
+		const getAccountPolicy = (_provider: string, identity: { accountId?: string }) =>
+			identity.accountId === stored.accountId ? policy : undefined;
+		const accounts = [
+			{ provider: "anthropic", type: "oauth" as const, accountId: stored.accountId, email: stored.email },
+		];
+		const policyOptions = { globalReservePct: 10, getAccountPolicy, accounts: () => [{ ...stored, active: false }] };
 		const text = stripVTControlCharacters(
-			formatUsageBreakdown(
-				reports,
-				[{ provider: "anthropic", type: "oauth", accountId: stored.accountId, email: stored.email }],
-				now,
-				undefined,
-				[],
-				{ globalReservePct: 10, getAccountPolicy, accounts: () => [{ ...stored, active: false }] },
-				{
-					...resetExpiryOptions({ "claudeResets.autoRedeemWeekly": "yes" }),
-					accounts: () => [{ ...stored, active: false }],
-					getAccountPolicy,
-				},
-			),
+			formatUsageBreakdown(reports, accounts, now, undefined, [], policyOptions, {
+				...resetExpiryOptions({ "claudeResets.autoRedeemWeekly": "yes" }),
+				accounts: () => [{ ...stored, active: false }],
+				getAccountPolicy,
+			}),
 		);
+		const json = annotateUsagePolicy(reports, [], accounts, policyOptions).reports.map(
+			report => report.policy?.autoRedeemWeekly,
+		);
+		expect(json).toEqual(orgs.map(() => (owned ? "no" : undefined)));
 		// The report's own policy line (the stored row's "no usage data" line always shows its policy).
 		expect(text.includes("auto-redeem weekly no · eligible")).toBe(owned);
 		expect(text.includes("→ not spent automatically  (account policy autoRedeemWeekly: no)")).toBe(owned);
