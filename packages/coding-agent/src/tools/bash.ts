@@ -34,8 +34,8 @@ import { type BoardEntry, registerOnBoard } from "../daemon/client";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
 import { shellMounts, shellProcessCommand } from "../exec/shell-process";
 import { createToolCommandHandler, toolCommandNames } from "../exec/tool-command-host";
-import { InternalUrlRouter } from "../internal-urls";
-import { sessionResolveContext } from "../internal-urls/context";
+import { InternalUrlRouter, LocalProtocolHandler, resolveLocalRoot } from "../internal-urls";
+import { contextLocalProtocolOptions, sessionResolveContext } from "../internal-urls/context";
 import {
 	InternalUrlFilesystem,
 	type InternalUrlFilesystemOptions,
@@ -1104,9 +1104,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	 * omp process, since an env overlay cannot unset.
 	 */
 	#sessionEnv(toolCallId: string): Record<string, string> {
+		// Where this call's `local://` paths resolve, for programs that take plain paths.
+		const local = LocalProtocolHandler.resolveOptions({
+			localProtocolOptions: contextLocalProtocolOptions(this.session),
+		});
 		return {
 			PI_SESSION_ID: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? "",
 			PI_SESSION_FILE: this.session.getSessionFile() ?? "",
+			PI_LOCAL_DIR: local ? resolveLocalRoot(local) : "",
 			PI_TOOL_CALL_ID: toolCallId,
 		};
 	}

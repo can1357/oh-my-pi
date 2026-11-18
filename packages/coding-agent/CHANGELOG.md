@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `!`/`!!` commands and `bash` tool commands get the session's `local://` directory as `$PI_LOCAL_DIR`, so user shells such as fish or zsh, and programs that take plain paths, can reach the files the agent keeps there ([#19779](https://github.com/can1357/oh-my-pi/pull/19779) by [@farnoy](https://github.com/farnoy))
+
 ### Fixed
 
 - Fixed the bash tool treating leading `cd` targets with active glob, brace, or named-user home expansion as literal working directories; these commands now stay with the shell ([#20024](https://github.com/can1357/oh-my-pi/pull/20024) by [@eggpeat](https://github.com/eggpeat))
