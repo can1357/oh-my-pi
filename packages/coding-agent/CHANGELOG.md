@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
+
 ## [18.22.2] - 2026-11-18
 
 ### Added
