@@ -452,7 +452,17 @@ export class SelectorController {
 					usageModelSelectors,
 					unavailableAccounts,
 				),
-			loadActivity: loadDailyActivity,
+			// A rejection leaves the dashboard up with "History unavailable" in place of the heatmap.
+			loadActivity: async (push, signal) => {
+				try {
+					await loadDailyActivity(push, signal);
+				} catch (error) {
+					logger.warn("Usage activity history unavailable", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+					throw error;
+				}
+			},
 			refresh: () => this.ctx.session.fetchUsageReports(),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,

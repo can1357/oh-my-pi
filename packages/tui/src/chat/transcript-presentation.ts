@@ -12,7 +12,7 @@ import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleEx
 import { Memo } from "../native/memo";
 import { plainLine, plainText, spansLine } from "../native/spans";
 import type { AnimationFrame, CompactTranscriptBlock } from "../chrome/transcript-container";
-import type { DaemonSnapshot } from "../tools/daemon";
+import type { UnitSnapshot } from "../tools/daemon";
 import type { TranscriptBlock, TranscriptPresentation, TranscriptPresenter } from "./extension-types";
 import type { LateDiagnosticsFile } from "./late-diagnostics-message";
 import {
@@ -482,11 +482,11 @@ function blockHead(block: WrappedTranscriptBlock): BlockHead {
 			};
 		}
 		case LAUNCH_COMPLETION_MESSAGE_TYPE: {
-			const daemons = (message.details as { daemons?: DaemonSnapshot[] } | undefined)?.daemons ?? [];
+			const daemons = (message.details as { daemons?: UnitSnapshot[] } | undefined)?.daemons ?? [];
 			const failed = daemons.some(
 				daemon => daemon.state === "failed" || (daemon.exitCode !== undefined && daemon.exitCode !== 0),
 			);
-			const names = daemons.map(daemon => daemon.name).join(", ");
+			const names = daemons.map(daemon => daemon.key).join(", ");
 			const title = failed ? "Supervised process failed" : "Supervised process completed";
 			return {
 				...plainHead(

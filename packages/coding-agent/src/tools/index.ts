@@ -22,7 +22,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
-import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { DaemonCompletionEvent } from "../daemon/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManagerApi, MCPToolScope } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
@@ -570,8 +570,8 @@ export interface ToolSession {
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
-	/** Queue a broker supervised-process completion for the owning session. */
-	queueLaunchCompletion?(notification: DaemonCompletionNotification): Promise<void>;
+	/** Queue a daemon service completion for the owning session. */
+	queueLaunchCompletion?(notification: DaemonCompletionEvent): Promise<void>;
 	/**
 	 * Opens the channel for the `notify` matches of a background job this session started: each batch
 	 * sent through it reaches the session as a notice, delivered like the job's result. Absent where
@@ -580,7 +580,7 @@ export interface ToolSession {
 	openAsyncNotify?(job: AsyncNotifySource): (batch: NotifyBatch) => void;
 	/**
 	 * Queue one batch of `notify` matches from a supervised service this session owns (`entry.owner`),
-	 * as it arrives from the launch broker. Absent where no session can take the notices; `bash` then
+	 * as it arrives from the daemon. Absent where no session can take the notices; `bash` then
 	 * refuses `notify` on a service.
 	 */
 	queueServiceNotify?(entry: AsyncNotifyEntry): void;

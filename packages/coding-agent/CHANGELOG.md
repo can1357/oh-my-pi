@@ -6,10 +6,14 @@
 
 - `artifact://N` is gone: truncated tool output and shaped originals are now `local://N.log` files at the session's `local://` root, readable, listable and completable like any other `local://` file. Old sessions' `artifact://` links are not migrated
 - SDK: use `session.compact(focus, { mode: "handoff" })` instead of `session.handoff(focus)`, and cancel it with `abortCompaction()`.
+- One per-user daemon now owns every shared background process (services, language servers, disassembler databases, blob exposure, local models, speech, text prediction) instead of a broker per project plus separate hosts; daemons and services started by older versions are not adopted
+- `omp ps` lists global, project and session units from that one daemon: `--global <service>` is gone, `--json` prints one `{daemon, reports}` object, and `dsm://` handles no longer carry `?project=`
 
 ### Added
 
 - A draft starting with `?` enters btw mode (its own `btwMode` border and chip) and submits as `/btw <question>`
+- The daemon survives updates: a newer omp re-execs it in place, keeping running services, PTYs and language servers; `OMP_DAEMON_TCP=host:port` serves it over TCP instead of the local socket
+- Speech-to-text and text-to-speech models are loaded once per machine and unloaded after 15 minutes idle instead of once per session
 - `/wt` uses ovnfs when available with `isolation.backend: auto`. The project resume picker and `omp worktree list` and `clear` handle both Git and ovnfs worktrees, even after switching backends. Sessions remain resumable from the source repository after their managed checkout is removed.
 - `omp usage` and `/usage` show each Claude account's subscription plan (e.g. `Max 20x`) beside its organization
 - Extensions can mark a `pi.sendMessage` payload `excludeFromContext: true`: like a `!!` bash row it is drawn and saved but never sent to the model, and the composer prediction survives it, so an extension's per-turn stats row no longer hides the suggested next prompt ([#19550](https://github.com/can1357/oh-my-pi/pull/19550) by [@materemias](https://github.com/materemias))

@@ -21,23 +21,23 @@ import type { NativeChild, NativeNode } from "../native/node";
 import { errorText, noteText, toolHead } from "./native-view";
 import type { AgentActivitySnapshot, CoordinationDetails, JobSnapshot } from "./wait";
 import type { IrcDeliveryReceipt } from "./irc";
-import type { DaemonSnapshot } from "./daemon";
+import type { UnitSnapshot } from "./daemon";
 import { styleTerminalRow } from "./terminal-output";
 import { card, type CardToolResult as ToolResult, firstText, safe } from "./result-card";
 
 export interface ProcReadDetails {
 	jobs?: JobSnapshot[];
 	agents?: AgentActivitySnapshot[];
-	daemons?: DaemonSnapshot[];
+	daemons?: UnitSnapshot[];
 	job?: JobSnapshot;
-	daemon?: DaemonSnapshot;
+	daemon?: UnitSnapshot;
 	log?: string;
 	terminalRows?: string[];
 }
 
 export type ProcWriteDetails =
 	| CoordinationDetails
-	| { action: "stop" | "stdin" | "mode"; daemon: DaemonSnapshot; input?: string; mode?: string };
+	| { action: "stop" | "stdin" | "mode"; daemon: UnitSnapshot; input?: string; mode?: string };
 
 /** Process operation selected by a write URL, independent of its content. */
 export type ProcWriteAction = "stdin" | "mode" | "kill";
@@ -146,7 +146,7 @@ export function renderAgentWrite(
 	}, options);
 }
 
-function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
+function daemonMeta(daemon: UnitSnapshot, theme: Theme): string[] {
 	const stateColor =
 		daemon.state === "ready" || daemon.state === "running"
 			? "success"
@@ -154,12 +154,12 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 				? "error"
 				: "warning";
 	const meta = [theme.fg(stateColor, daemon.state)];
-	if (daemon.pid !== undefined) meta.push(`pid ${daemon.pid}`);
+	if (daemon.pids.length > 0) meta.push(`pid ${daemon.pids[0]}`);
 	meta.push(
 		`${daemon.exitedAt === undefined ? "up" : "ran"} ${formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt))}`,
 	);
-	if (daemon.detached) meta.push("detached");
-	else if (daemon.persist) meta.push("persistent");
+	if (daemon.policy.hold === "detached") meta.push("detached");
+	else if (daemon.policy.hold === "persist") meta.push("persistent");
 	return meta;
 }
 
@@ -283,7 +283,7 @@ export function renderProcRead(
 		const items = [
 			...jobs.map(job => ({ label: jobRow(job, theme) })),
 			...services.map(service => ({
-				label: `${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.name))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${daemonMeta(service, theme).slice(1).join(theme.sep.dot)}`,
+				label: `${formatBadge("service", "accent", theme)} ${theme.fg("toolOutput", safe(service.key))} ${formatBadge(service.state, service.state === "failed" ? "error" : service.state === "ready" || service.state === "running" ? "success" : "warning", theme)} ${daemonMeta(service, theme).slice(1).join(theme.sep.dot)}`,
 			})),
 			...agents.map(agent => ({
 				label: `${formatBadge("agent", agent.live ? "accent" : "warning", theme)} ${theme.fg("toolOutput", safe(agent.id))} ${theme.fg("dim", formatDuration(agent.ageMs))}`,
@@ -310,14 +310,14 @@ export function renderProcRead(
 // Native (TSP) views
 // =============================================================================
 
-function daemonMetaText(daemon: DaemonSnapshot): string {
+function daemonMetaText(daemon: UnitSnapshot): string {
 	const meta: string[] = [daemon.state];
-	if (daemon.pid !== undefined) meta.push(`pid ${daemon.pid}`);
+	if (daemon.pids.length > 0) meta.push(`pid ${daemon.pids[0]}`);
 	meta.push(
 		`${daemon.exitedAt === undefined ? "up" : "ran"} ${formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt))}`,
 	);
-	if (daemon.detached) meta.push("detached");
-	else if (daemon.persist) meta.push("persistent");
+	if (daemon.policy.hold === "detached") meta.push("detached");
+	else if (daemon.policy.hold === "persist") meta.push("persistent");
 	return meta.join(" · ");
 }
 
@@ -489,7 +489,7 @@ export function describeProcRead(
 			node(
 				"item",
 				{
-					label: [span("service", "accent"), span(" "), span(safe(service.name), "toolOutput")],
+					label: [span("service", "accent"), span(" "), span(safe(service.key), "toolOutput")],
 					detail: [span(daemonMetaText(service), "muted")],
 					tone:
 						service.state === "failed"
@@ -499,7 +499,7 @@ export function describeProcRead(
 								: "warning",
 				},
 				undefined,
-				`service:${service.name}`,
+				`service:${service.key}`,
 			),
 		),
 		...agents.map(agent =>

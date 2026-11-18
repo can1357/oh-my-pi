@@ -22,16 +22,15 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Browser, CDPSession, Connection } from "puppeteer-core";
-import { daemonRuntimeDir } from "../../launch/paths";
 import { browserConnection } from "./launch";
 
 /** Identifies one shared-browser daemon's target registry. */
 export interface SharedTargetScope {
-	/** Canonical project directory owning the broker (as stamped on the handle). */
+	/** Canonical project directory whose scope holds the browser unit (as stamped on the handle). */
 	projectDir: string;
-	/** Broker daemon name, e.g. `omp.browser.headless`. */
+	/** Key of the browser's `proc` unit, e.g. `omp.browser.headless`. */
 	daemonName: string;
 }
 
@@ -66,7 +65,7 @@ const unclosedRetries = new Map<string, Promise<number>>();
 const writeChains = new Map<string, Promise<void>>();
 
 function registryDir(scope: SharedTargetScope): string {
-	return path.join(daemonRuntimeDir(scope.projectDir), `${scope.daemonName}.targets`);
+	return path.join(getDaemonRuntimeDir(scope.projectDir), `${scope.daemonName}.targets`);
 }
 
 /** Serialize a write against others for the same registry dir. */

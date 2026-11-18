@@ -1,0 +1,191 @@
+/**
+ * What keeps a unit — and the daemon — alive, against a real daemon isolated
+ * in a temp dir: explicit release, lease loss on disconnect and its reconnect
+ * grace, `hold: "persist"`, per-scope caps, idle daemon exit, and the unit env.
+ */
+import { afterEach, describe, expect, it } from "bun:test";
+import { DAEMON_RESUME_LEASE_GRACE_MS } from "../../src/daemon/protocol";
+import { type DaemonConn, pidAlive, shProc, TestDaemon, until } from "../fixtures/daemon-proc-harness";
+
+const TEST_TIMEOUT_MS = 30_000;
+/** `IDLE_EXIT_GRACE_MS` of `src/daemon/server.ts`: how long an idle daemon lingers. */
+const DAEMON_IDLE_EXIT_GRACE_MS = 3_000;
+
+let daemon: TestDaemon | undefined;
+
+afterEach(async () => {
+	await daemon?.dispose();
+	daemon = undefined;
+});
+
+async function startDaemon(
+	env?: Record<string, string>,
+): Promise<{ daemon: TestDaemon; conn: DaemonConn; root: string }> {
+	const started = await TestDaemon.start({ env });
+	daemon = started.daemon;
+	return { ...started, root: started.daemon.root };
+}
+
+async function liveKeys(conn: DaemonConn): Promise<string[]> {
+	const { units } = await conn.request({ op: "list" });
+	return units
+		.filter(unit => unit.state !== "exited" && unit.state !== "failed")
+		.map(unit => unit.key)
+		.sort();
+}
+
+describe.skipIf(process.platform === "win32")("daemon unit lifecycle", () => {
+	it(
+		"releasing the last lease of an idleMs 0 unit stops it right away instead of leaking the process",
+		async () => {
+			const { conn, root } = await startDaemon();
+			const opened = await conn.openProc("leased", shProc("exec sleep 30", root), { policy: { idleMs: 0 } });
+			expect(opened.lease).toBeDefined();
+
+			await conn.request({ op: "release", lease: opened.lease! });
+			const exit = await conn.request({ op: "wait", unit: "leased", for: "exit", timeoutMs: 5_000 });
+
+			expect(exit.matched).toBe(true);
+			expect(exit.unit.state).toBe("exited");
+			expect(exit.unit.exitReason).toBe("idle");
+			await until(() => (pidAlive(opened.unit.pids[0]) ? undefined : true), "released process to exit");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a lease lost to a dropped connection keeps the unit for the reconnect grace, then the idle policy stops it",
+		async () => {
+			const { daemon: d, conn: holder, root } = await startDaemon();
+			const observer = await d.connect();
+			await holder.openProc("graced", shProc("exec sleep 60", root), { policy: { idleMs: 0 } });
+
+			const closedAt = Date.now();
+			await holder.close();
+			const held = await until(async () => {
+				const unit = await observer.describe("graced");
+				return unit.leases === 0 ? unit : undefined;
+			}, "the dropped lease");
+			expect(held.state).toBe("running");
+			expect(held.idleAt).toBeGreaterThanOrEqual(closedAt + DAEMON_RESUME_LEASE_GRACE_MS);
+
+			const exit = await observer.request({
+				op: "wait",
+				unit: "graced",
+				for: "exit",
+				timeoutMs: DAEMON_RESUME_LEASE_GRACE_MS + 10_000,
+			});
+			expect(exit.matched).toBe(true);
+			expect(exit.unit.exitedAt! - closedAt).toBeGreaterThanOrEqual(DAEMON_RESUME_LEASE_GRACE_MS);
+		},
+		DAEMON_RESUME_LEASE_GRACE_MS + TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a client reconnecting within the grace adopts the same process instead of starting a new one",
+		async () => {
+			const { daemon: d, conn: first, root } = await startDaemon();
+			const proc = shProc("exec sleep 60", root);
+			const opened = await first.openProc("rejoin", proc, { policy: { idleMs: 0 } });
+			await first.close();
+
+			const second = await d.connect();
+			const again = await second.openProc("rejoin", proc, { policy: { idleMs: 0 } });
+
+			expect(again.created).toBe(false);
+			expect(again.unit.pids).toEqual(opened.unit.pids);
+			expect(again.unit.generation).toBe(opened.unit.generation);
+			expect(again.unit.leases).toBe(1);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a hold: persist unit outlives every client and keeps the daemon up past its idle grace; once it stops the idle daemon exits",
+		async () => {
+			const { daemon: d, conn, root } = await startDaemon();
+			const opened = await conn.openProc("keeper", shProc("exec sleep 60", root), { policy: { hold: "persist" } });
+			await conn.close();
+
+			// Negative contract: nothing may stop the unit or the daemon once the idle grace has passed.
+			await Bun.sleep(DAEMON_IDLE_EXIT_GRACE_MS + 1_500);
+			expect(d.running).toBe(true);
+			const back = await d.connect();
+			const unit = await back.describe("keeper");
+			expect(unit.state).toBe("running");
+			expect(unit.pids).toEqual(opened.unit.pids);
+			expect(unit.leases).toBe(0);
+			expect(unit.idleAt).toBeUndefined();
+
+			await back.request({ op: "stop", unit: "keeper", timeoutMs: 1_000 });
+			await back.close();
+			const exited = await Promise.race([d.exited.then(() => true), Bun.sleep(15_000).then(() => false)]);
+			expect(exited).toBe(true);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"cap evicts the least recently used unleased unit of the scope, not merely the oldest one",
+		async () => {
+			const { conn, root } = await startDaemon();
+			const proc = shProc("exec sleep 60", root);
+			const policy = { cap: 2, hold: "persist" as const };
+			// The daemon (another process) orders use by millisecond `Date.now()`: the short sleeps keep the opens distinct.
+			await conn.openProc("old", proc, { lease: false, policy });
+			await Bun.sleep(10);
+			await conn.openProc("newer", proc, { lease: false, policy });
+			await Bun.sleep(10);
+			// Using `old` again makes `newer` the least recently used.
+			expect((await conn.openProc("old", proc, { lease: false, policy })).created).toBe(false);
+			await Bun.sleep(10);
+
+			await conn.openProc("third", proc, { lease: false, policy });
+
+			expect(await liveKeys(conn)).toEqual(["old", "third"]);
+			const evicted = await conn.describe("newer");
+			expect(evicted.state).toBe("exited");
+			expect(evicted.exitReason).toBe("evicted");
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"cap never evicts a leased unit, even when that leaves the scope over the cap",
+		async () => {
+			const { conn, root } = await startDaemon();
+			const proc = shProc("exec sleep 60", root);
+			for (const key of ["pinned-a", "pinned-b", "pinned-c"]) {
+				const opened = await conn.openProc(key, proc, { policy: { cap: 2 } });
+				expect(opened.lease).toBeDefined();
+			}
+
+			expect(await liveKeys(conn)).toEqual(["pinned-a", "pinned-b", "pinned-c"]);
+		},
+		TEST_TIMEOUT_MS,
+	);
+
+	it(
+		"a unit runs with exactly the env of its open request, never inheriting the daemon's env",
+		async () => {
+			const { conn, root } = await startDaemon({ OMP_UNIT_MARKER: "daemon", OMP_DAEMON_ONLY: "leak" });
+			await conn.openProc(
+				"env",
+				// oxlint-disable-next-line no-template-curly-in-string -- shell parameter expansion, not a JS template
+				shProc('echo "marker=$OMP_UNIT_MARKER only=${OMP_DAEMON_ONLY-unset}"; read hold', root, {
+					env: { OMP_UNIT_MARKER: "request" },
+				}),
+			);
+
+			const printed = await conn.request({
+				op: "wait",
+				unit: "env",
+				for: "ready",
+				pattern: "^marker=.*$",
+				timeoutMs: 5_000,
+			});
+			expect(printed.match).toBe("marker=request only=unset");
+		},
+		TEST_TIMEOUT_MS,
+	);
+});

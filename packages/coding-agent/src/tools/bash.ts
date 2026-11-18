@@ -508,7 +508,7 @@ const bashSchemaWithAsyncAndService = type({
 });
 
 // Without an interactive UI a finite command's `pty` can only fall back, so those sessions are not
-// offered it; services keep it, since the broker gives them a terminal of their own.
+// offered it; services keep it, since the daemon gives them a terminal of their own.
 const bashSchemaBaseNoPty = bashSchemaBase.omit("pty");
 const bashSchemaWithAsyncNoPty = bashSchemaWithAsync.omit("pty");
 
@@ -1755,27 +1755,23 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				ready === undefined ? undefined : ctx?.toolCall?.steeringSignal,
 			);
 			const daemon = service.daemon;
-			// A broker from an older omp starts the service and ignores the regex.
-			const notifyLine = service.notifyArmed
-				? notifyNotice
-				: notifySource === undefined
-					? undefined
-					: `Ignored notify: this project's service broker is from an older omp, so ${name}'s output is not reported; read proc://${name} for it.`;
+			const pid = daemon.pids[0];
+			const notifyLine = service.notifyArmed ? notifyNotice : undefined;
 			if (service.readyInterrupted) {
 				// A queued message arrived mid-wait: return so it injects promptly.
-				// The broker keeps starting the service, inspectable via proc://.
+				// The daemon keeps starting the service, inspectable via proc://.
 				return {
 					content: [
 						{
 							type: "text",
-							text: `${name}: starting${daemon.pid === undefined ? "" : ` pid=${daemon.pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.${notifyLine ? `\n${notifyLine}` : ""}`,
+							text: `${name}: starting${pid === undefined ? "" : ` pid=${pid}`}\nReadiness wait interrupted early to handle an incoming message; the service is still starting and keeps running. Read proc://${name} for status.${notifyLine ? `\n${notifyLine}` : ""}`,
 						},
 					],
-					details: { service: { name, state: daemon.state, ready: false, timedOut: false, pid: daemon.pid } },
+					details: { service: { name, state: daemon.state, ready: false, timedOut: false, pid } },
 				};
 			}
 			const lines = [
-				`${daemon.name}: ${daemon.state}${daemon.pid === undefined ? "" : ` pid=${daemon.pid}`}${daemon.readyAt === undefined ? "" : " ready"}`,
+				`${daemon.key}: ${daemon.state}${pid === undefined ? "" : ` pid=${pid}`}${daemon.readyAt === undefined ? "" : " ready"}`,
 			];
 			if (service.readyTimedOut)
 				lines.push(
@@ -1794,7 +1790,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						state: daemon.state,
 						ready: daemon.readyAt !== undefined || daemon.state === "running",
 						timedOut: service.readyTimedOut,
-						pid: daemon.pid,
+						pid,
 					},
 				},
 			};

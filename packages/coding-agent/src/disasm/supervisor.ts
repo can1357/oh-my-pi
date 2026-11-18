@@ -1,23 +1,25 @@
 /**
- * Supervisor for one disassembler Python worker, run inside its broker-supervised
- * host daemon (`host.ts`).
+ * Supervisor for one disassembler Python worker, run inside the daemon's `disasm` module
+ * (`daemon/modules/disasm.ts`).
  *
  * Each backend keeps one analysis database per Python process, so each database gets its own
- * worker. The worker speaks NDJSON over stdin/stdout; requests are serialized, dirty databases
- * autosave when idle, and idle databases save and close themselves.
+ * worker. The worker runs detached in its own session with output to the unit log, listens on
+ * a Unix socket (Windows: a loopback TCP port written to a file), and speaks NDJSON over it, so
+ * it outlives a daemon crash and is re-adopted by pid and start time ({@link DisasmWorker.adopt}).
+ * Requests are serialized; dirty databases autosave when idle.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type FileLockHandle, logger, readLines, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
+import { IpcConnection, Process, reapChild } from "@oh-my-pi/pi-natives";
+import { type FileLockHandle, logger, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { Subprocess } from "bun";
 import { hostHasInheritableConsole, shouldHideKernelWindow } from "../eval/py/spawn-options";
 import { stageRunnerScript } from "../eval/runner-cache";
 import type { DisasmBackend, WorkerRuntime } from "./backend";
-import { type FatSelection, type DatabaseLocation, databaseRef } from "./store";
-import { errorMessage } from "./protocol";
+import { errorMessage, type WorkerState } from "./protocol";
+import { type DatabaseLocation, databaseRef, type FatSelection } from "./store";
 
-/** How long a worker gets to answer after SIGINT before it is killed. */
+/** How long a worker gets to answer after an interrupt before it is killed. */
 const INTERRUPT_GRACE_MS = 5_000;
 /** Budget for the worker's `close` (including the final save). */
 const CLOSE_TIMEOUT_MS = 120_000;
@@ -25,14 +27,20 @@ const CLOSE_TIMEOUT_MS = 120_000;
 const AUTOSAVE_IDLE_MS = 10_000;
 /** How long to wait for the worker to exit after answering `close`. */
 const EXIT_GRACE_MS = 10_000;
-/** How long the exit handler waits for stdout/stderr to drain before failing pending requests. */
+/** How long the exit handler waits for the socket to drain before failing pending requests. */
 const STREAM_DRAIN_MS = 1_000;
-const STDERR_TAIL_CHARS = 64 * 1024;
-const STDERR_TAIL_LINES = 20;
+/** How long a starting or re-adopted worker may take to accept the protocol connection. */
+const CONNECT_TIMEOUT_MS = 30_000;
+const CONNECT_RETRY_MS = 100;
+const LOG_TAIL_BYTES = 64 * 1024;
+const LOG_TAIL_LINES = 20;
+/** Environment key carrying the token the worker requires as the first line of every connection. */
+const WORKER_TOKEN_ENV = "OMP_DISASM_WORKER_TOKEN";
 
 /** RPC methods shared by disassembler workers. */
 export type WorkerMethod =
 	| "open"
+	| "status"
 	| "view"
 	| "exec"
 	| "rename"
@@ -50,15 +58,24 @@ export interface DatabaseInfo {
 	bitness: number;
 }
 
-/** Per-request cancellation and deadline; either one interrupts a running request (SIGINT, then SIGKILL). */
+/** Per-request cancellation and deadline; either one interrupts a running request. */
 export interface WorkerRequestOptions {
 	signal?: AbortSignal;
 	timeoutMs?: number;
 }
 
+/** Where a worker listens and logs; chosen by the module per unit. */
+export interface WorkerFiles {
+	/** Unix socket path; on Windows the file the worker writes its TCP port to. */
+	endpoint: string;
+	logPath: string;
+}
+
 interface OpenResult extends DatabaseInfo {
 	idb: string;
 }
+
+type StatusResult = { open: false } | ({ open: true } & OpenResult);
 
 /** The request a worker is currently executing. */
 export interface RunningRequest {
@@ -97,7 +114,35 @@ function parseWorkerResponse(frame: unknown, label: string): WorkerResponse | nu
 	return { id: frame.id, ok: false, message };
 }
 
-/** One open disassembler database backed by a dedicated Python worker process. */
+/** Dial the worker's listener once; undefined while it is not listening yet. */
+async function dial(endpoint: string): Promise<IpcConnection | undefined> {
+	try {
+		if (process.platform === "win32") {
+			const port = Number.parseInt(await Bun.file(endpoint).text(), 10);
+			if (!Number.isInteger(port)) return undefined;
+			return await IpcConnection.connectTcp("127.0.0.1", port, {
+				framing: "lines",
+				timeoutMs: CONNECT_RETRY_MS * 10,
+			});
+		}
+		return await IpcConnection.connect(endpoint, { framing: "lines", timeoutMs: CONNECT_RETRY_MS * 10 });
+	} catch {
+		return undefined;
+	}
+}
+
+/** Last lines of the worker log, for exit errors. */
+async function logTail(logPath: string): Promise<string> {
+	try {
+		const file = Bun.file(logPath);
+		const text = await file.slice(Math.max(0, file.size - LOG_TAIL_BYTES)).text();
+		return text.trimEnd().split("\n").slice(-LOG_TAIL_LINES).join("\n");
+	} catch {
+		return "";
+	}
+}
+
+/** One open disassembler database backed by a dedicated, detached Python worker process. */
 export class DisasmWorker {
 	/** Registry key from `locateDatabase`. */
 	readonly id: string;
@@ -108,17 +153,27 @@ export class DisasmWorker {
 	readonly fat?: FatSelection;
 	/** Worker process id. */
 	readonly pid: number;
+	readonly #startedAt: number | null;
+	readonly #endpoint: string;
+	readonly #token: string;
+	readonly #logPath: string;
+	readonly #aliasDir: string | undefined;
+	readonly #lock: FileLockHandle;
+	readonly #exited: Promise<number | null>;
 	#idbPath: string;
 	#info: DatabaseInfo = { module: "", format: "", arch: "", bitness: 0 };
-	readonly #proc: Subprocess<"pipe", "pipe", "pipe">;
-	readonly #lock: FileLockHandle;
-	readonly #streamsDrained: Promise<unknown>;
+	/** Resolves once a protocol connection is up; replaced while reconnecting. */
+	#connection: Promise<IpcConnection>;
+	/** Settles when the current connection closes. */
+	#connectionClosed: Promise<void> = Promise.resolve();
 	#queue: Promise<void> = Promise.resolve();
 	#pending = new Map<number, PromiseWithResolvers<unknown>>();
-	#nextId = 1;
-	#stderrTail = "";
+	/** Unique across daemon restarts, so a late answer from a previous incarnation never matches. */
+	#nextId = Date.now() * 1000;
+	#logTail = "";
+	#gone = false;
 	#exitCode: number | null = null;
-	/** Set once `open` succeeded; from then on the worker's exit releases the lock. */
+	/** Set once `open` (or a re-adopted worker's `status`) succeeded. */
 	#opened = false;
 	#closing: Promise<void> | null = null;
 	/** Whether the worker reported unsaved changes in its last successful response. */
@@ -129,100 +184,233 @@ export class DisasmWorker {
 	#active = 0;
 	#current: RunningRequest | null = null;
 	#lastUsed = Date.now();
-	/** Idle time after which the database is saved and closed; 0 disables. */
-	readonly #idleCloseMs: number;
-	#references = 0;
 	#autosaveTimer: Timer | undefined;
-	#idleTimer: Timer | undefined;
+	#onActivity: () => void = () => {};
 
-	constructor(
+	private constructor(
 		backend: DisasmBackend,
 		loc: DatabaseLocation,
-		proc: Subprocess<"pipe", "pipe", "pipe">,
 		lock: FileLockHandle,
-		idleCloseMs: number,
+		child: { pid: number; startedAt: number | null; exited: Promise<number | null> },
+		files: WorkerFiles & { token: string; aliasDir?: string },
 	) {
 		this.#backend = backend;
 		this.id = loc.id;
 		this.sourcePath = loc.sourcePath;
 		this.fat = loc.fat;
-		this.pid = proc.pid;
+		this.pid = child.pid;
+		this.#startedAt = child.startedAt;
 		this.#idbPath = loc.openPath;
-		this.#proc = proc;
 		this.#lock = lock;
-		this.#idleCloseMs = idleCloseMs;
-		this.#streamsDrained = Promise.all([this.#readStdout(proc.stdout), this.#drainStderr(proc.stderr)]);
-		void proc.exited.then(code => this.#onExit(code));
+		this.#endpoint = files.endpoint;
+		this.#token = files.token;
+		this.#logPath = files.logPath;
+		this.#aliasDir = files.aliasDir;
+		this.#exited = child.exited;
+		this.#connection = this.#connect();
+		// Connection failures surface on the first request.
+		this.#connection.catch(() => undefined);
+		void child.exited.then(code => this.#onExit(code));
 	}
 
 	/**
-	 * Spawn a worker for `loc` and open its database. The caller holds `lock` and has run
-	 * `prepareStoreDir`; on failure the worker is killed, a half-created store database is removed,
-	 * and the lock stays with the caller. Opens cannot be cancelled; killing initial analysis
-	 * could leave an incomplete database.
+	 * Spawn a detached worker for `loc` and connect to it; call {@link open} next. The caller
+	 * holds `lock` and has run `prepareStoreDir`; the worker releases the lock once it exits.
 	 */
-	static async start(
+	static async spawn(
 		backend: DisasmBackend,
 		loc: DatabaseLocation,
 		runtime: WorkerRuntime,
 		lock: FileLockHandle,
-		idleCloseMs: number,
+		files: WorkerFiles,
 	): Promise<DisasmWorker> {
 		const script = await stageRunnerScript(backend.workerStageDir, "py", backend.workerScript);
-		const alias = backend.projectAlias ? await TempDir.create(`@omp-${backend.id}-project-`) : undefined;
-		const project = alias?.join("project") ?? loc.dir;
-		let proc: Subprocess<"pipe", "pipe", "pipe">;
+		const token = crypto.randomUUID();
+		await fs.promises.mkdir(path.dirname(files.logPath), { recursive: true });
+		// `ipcEndpoint` may fall back to `/tmp/omp-<euid>/` when the state dir is too long for `sun_path`.
+		await fs.promises.mkdir(path.dirname(files.endpoint), { recursive: true, mode: 0o700 });
+		await fs.promises.rm(files.endpoint, { force: true });
+		let pid: number;
+		let exited: Promise<number>;
+		const log = fs.openSync(files.logPath, "a");
+		let alias: TempDir | undefined;
 		try {
+			alias = backend.projectAlias ? await TempDir.create(`@omp-${backend.id}-project-`) : undefined;
 			if (alias) {
-				await fs.promises.symlink(loc.dir, project, process.platform === "win32" ? "junction" : "dir");
+				await fs.promises.symlink(
+					loc.dir,
+					alias.join("project"),
+					process.platform === "win32" ? "junction" : "dir",
+				);
 			}
-			proc = Bun.spawn([runtime.pythonPath, "-u", script], {
+			const listen = process.platform === "win32" ? "--port-file" : "--socket";
+			const proc = Bun.spawn([runtime.pythonPath, "-u", script, listen, files.endpoint], {
 				cwd: loc.dir,
-				env: runtime.env,
-				stdin: "pipe",
-				stdout: "pipe",
-				stderr: "pipe",
-				// Stay in the host's process group: the broker's stop/kill signals the whole group.
-				// worker.py ignores SIGTERM so the host can save and close it first.
-				detached: false,
+				env: { ...runtime.env, [WORKER_TOKEN_ENV]: token },
+				stdin: "ignore",
+				stdout: log,
+				stderr: log,
+				// Own session: the worker outlives a daemon crash and is re-adopted; the module
+				// saves and closes it with a `close` request instead of a group signal.
+				detached: true,
 				windowsHide: shouldHideKernelWindow({
 					platform: process.platform,
 					hostHasInheritableConsole: hostHasInheritableConsole(),
 				}),
 			});
+			pid = proc.pid;
+			exited = proc.exited;
 		} catch (error) {
 			await alias?.remove();
 			throw error;
+		} finally {
+			fs.closeSync(log);
 		}
-		void proc.exited
-			.then(() => alias?.remove())
-			.catch(error => {
-				logger.warn(`${backend.label} project alias cleanup failed`, { id: loc.id, error: errorMessage(error) });
-			});
-		const db = new DisasmWorker(backend, loc, proc, lock, idleCloseMs);
+		const startedAt = Process.fromPid(pid)?.startTime() ?? null;
+		return new DisasmWorker(
+			backend,
+			loc,
+			lock,
+			{ pid, startedAt, exited },
+			{ ...files, token, aliasDir: alias?.path() },
+		);
+	}
+
+	/**
+	 * Re-attach to a worker that survived a daemon restart; undefined when it is gone or its pid
+	 * was reused. Call {@link resume} next.
+	 */
+	static adopt(
+		backend: DisasmBackend,
+		loc: DatabaseLocation,
+		state: WorkerState,
+		lock: FileLockHandle,
+	): DisasmWorker | undefined {
+		const proc = Process.fromPid(state.pid);
+		if (!proc || (state.startedAt !== null && proc.startTime() !== state.startedAt)) return undefined;
+		// Still our child after an in-place re-exec; re-parented to init after a crash.
+		const exited = reapChild(state.pid).then(
+			result => result.exitCode,
+			async () => {
+				await proc.waitForExit();
+				return null;
+			},
+		);
+		const worker = new DisasmWorker(
+			backend,
+			loc,
+			lock,
+			{ pid: state.pid, startedAt: state.startedAt, exited },
+			{ endpoint: state.endpoint, logPath: state.logPath, token: state.token, aliasDir: state.aliasDir },
+		);
+		worker.#idbPath = state.idbPath;
+		worker.#info = state.info;
+		return worker;
+	}
+
+	/**
+	 * Clean up after a worker that cannot be re-adopted: with `kill` (its database lock was taken
+	 * by someone else meanwhile) SIGKILL it without saving while it is still the same process; then
+	 * remove its endpoint and alias dir.
+	 */
+	static async discard(state: WorkerState, options: { kill: boolean }): Promise<void> {
+		const proc = options.kill ? Process.fromPid(state.pid) : null;
+		if (proc && (state.startedAt === null || proc.startTime() === state.startedAt)) {
+			try {
+				if (process.platform === "win32") process.kill(state.pid, "SIGKILL");
+				else process.kill(-state.pid, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+			// Still our child after an in-place re-exec (reap it); re-parented to init after a crash.
+			await reapChild(state.pid).then(
+				() => undefined,
+				() => proc.waitForExit({ timeoutMs: EXIT_GRACE_MS }),
+			);
+		}
+		await Promise.all([
+			fs.promises.rm(state.endpoint, { force: true }),
+			state.aliasDir ? fs.promises.rm(state.aliasDir, { recursive: true, force: true }) : undefined,
+		]).catch(error =>
+			logger.warn("Disassembler worker cleanup failed", { pid: state.pid, error: errorMessage(error) }),
+		);
+	}
+
+	/**
+	 * Open (or create) the database. Opens cannot be cancelled; killing initial analysis could
+	 * leave an incomplete database. On failure the worker is killed and a half-created store
+	 * database is removed.
+	 */
+	async open(loc: DatabaseLocation): Promise<void> {
 		try {
-			const opened = await db.request<OpenResult>("open", {
+			const opened = await this.request<OpenResult>("open", {
 				path: loc.openPath,
 				new: loc.isNew,
 				binary: loc.stagedPath,
-				project,
+				project: this.#aliasDir ? path.join(this.#aliasDir, "project") : loc.dir,
 			});
-			if (db.#exitCode !== null) throw db.#exitError();
-			db.#idbPath = opened.idb;
-			db.#info = { module: opened.module, format: opened.format, arch: opened.arch, bitness: opened.bitness };
-			db.#opened = true;
-			db.#scheduleIdleWork();
-			return db;
+			if (this.#gone) throw this.#exitError();
+			this.#markOpen(opened);
 		} catch (error) {
-			await db.#kill();
-			if (loc.kind === "store" && loc.isNew) await removeCreationLeftovers(backend, loc);
+			await this.kill();
+			if (loc.kind === "store" && loc.isNew) await removeCreationLeftovers(this.#backend, loc);
 			throw error;
 		}
+	}
+
+	/**
+	 * Recover a re-adopted worker's state: `status` queues behind whatever it is still running
+	 * (possibly the initial open). Unsaved `exec` edits cannot be ruled out, so a close saves.
+	 */
+	async resume(): Promise<void> {
+		const status = await this.request<StatusResult>("status", {});
+		if (!status.open) {
+			await this.kill();
+			throw new ToolError(`${this.#backend.label} worker for ${this.id} lost its database across a daemon restart`);
+		}
+		this.#execSinceSave = true;
+		this.#markOpen(status);
+	}
+
+	#markOpen(opened: OpenResult): void {
+		this.#idbPath = opened.idb;
+		this.#info = { module: opened.module, format: opened.format, arch: opened.arch, bitness: opened.bitness };
+		this.#opened = true;
+		this.#scheduleAutosave();
+	}
+
+	/** Serializable handle for {@link adopt}. */
+	state(): WorkerState {
+		return {
+			pid: this.pid,
+			startedAt: this.#startedAt,
+			endpoint: this.#endpoint,
+			token: this.#token,
+			logPath: this.#logPath,
+			aliasDir: this.#aliasDir,
+			idbPath: this.#idbPath,
+			info: this.#info,
+		};
+	}
+
+	/** Called whenever the worker turns busy or idle. */
+	onActivity(listener: () => void): void {
+		this.#onActivity = listener;
 	}
 
 	/** Reference `read` and the backend tool resolve back to this database (see {@link databaseRef}). */
 	get ref(): string {
 		return databaseRef(this);
+	}
+
+	/** Whether the database finished opening. */
+	get opened(): boolean {
+		return this.#opened;
+	}
+
+	/** Whether the worker process has not been seen exiting yet. */
+	get running(): boolean {
+		return !this.#gone;
 	}
 
 	/** Database path reported by the backend. */
@@ -240,25 +428,19 @@ export class DisasmWorker {
 		return this.#dirty || this.#execSinceSave;
 	}
 
-	/** Resolves with the worker's exit code once the process is gone. */
-	get exited(): Promise<number> {
-		return this.#proc.exited;
+	/** Resolves with the worker's exit code (null when unknown: a re-adopted orphan) once it is gone. */
+	get exited(): Promise<number | null> {
+		return this.#exited;
 	}
 
-	/** When the last request was issued (epoch ms); LRU eviction closes the oldest idle database first. */
+	/** When the last request was issued (epoch ms). */
 	get lastUsed(): number {
 		return this.#lastUsed;
 	}
 
-	/** Whether requests are queued or in flight; busy databases are never evicted. */
+	/** Whether requests are queued or in flight. */
 	get busy(): boolean {
 		return this.#active > 0;
-	}
-
-	/** Pin idle-close while host-owned database references exist; autosave stays enabled. */
-	setReferenceCount(count: number): void {
-		this.#references = count;
-		this.#scheduleIdleWork();
 	}
 
 	/** The request the worker is executing now, if any. */
@@ -270,17 +452,17 @@ export class DisasmWorker {
 	 * Send one request to the worker, serialized behind earlier requests. `timeoutMs` covers the
 	 * queue wait too: a request still queued at its deadline fails with a {@link ToolError} naming
 	 * the running request, without interrupting it (it belongs to another caller). A timeout or
-	 * abort while executing interrupts it (SIGINT; on Windows an `interrupt` frame on stdin) and
-	 * waits {@link INTERRUPT_GRACE_MS} for the answer; a worker that does not answer is killed.
-	 * Worker-side failures surface as {@link ToolError}.
+	 * abort while executing interrupts it (SIGINT, or an `interrupt` frame for Windows and frame
+	 * backends) and waits {@link INTERRUPT_GRACE_MS} for the answer; a worker that does not
+	 * answer is killed. Worker-side failures surface as {@link ToolError}.
 	 */
 	async request<T>(method: WorkerMethod, params: object, options: WorkerRequestOptions = {}): Promise<T> {
-		if (this.#exitCode !== null) throw this.#exitError();
+		if (this.#gone) throw this.#exitError();
 		const { signal, timeoutMs } = options;
 		const deadline = timeoutMs === undefined ? undefined : Date.now() + timeoutMs;
-		this.#active++;
+		if (this.#active++ === 0) this.#onActivity();
 		this.#lastUsed = Date.now();
-		this.#clearIdleTimers();
+		this.#clearAutosave();
 		const previous = this.#queue;
 		const turn = Promise.withResolvers<void>();
 		this.#queue = previous.then(() => turn.promise);
@@ -294,8 +476,10 @@ export class DisasmWorker {
 			return value as T;
 		} finally {
 			turn.resolve();
-			this.#active--;
-			if (this.#active === 0) this.#scheduleIdleWork();
+			if (--this.#active === 0) {
+				this.#scheduleAutosave();
+				this.#onActivity();
+			}
 		}
 	}
 
@@ -322,38 +506,25 @@ export class DisasmWorker {
 		);
 	}
 
-	/** Arm the idle autosave (when dirty) and idle close (when enabled); any request disarms both. */
-	#scheduleIdleWork(): void {
-		this.#clearIdleTimers();
-		if (!this.#opened || this.#closing || this.#exitCode !== null) return;
-		if (this.#dirty) {
-			this.#autosaveTimer = setTimeout(() => {
-				if (this.#active > 0 || this.#closing) return;
-				this.request("save", {}, { timeoutMs: CLOSE_TIMEOUT_MS }).catch(error => {
-					logger.warn(`${this.#backend.label} autosave failed`, { id: this.id, error: errorMessage(error) });
-				});
-			}, AUTOSAVE_IDLE_MS);
-			this.#autosaveTimer.unref();
-		}
-		if (this.#idleCloseMs > 0 && this.#references === 0) {
-			this.#idleTimer = setTimeout(() => {
-				if (this.#active > 0 || this.#closing || this.#references > 0) return;
-				this.close({ save: true }).catch(error => {
-					logger.warn(`${this.#backend.label} idle close failed`, { id: this.id, error: errorMessage(error) });
-				});
-			}, this.#idleCloseMs);
-			this.#idleTimer.unref();
-		}
+	/** Arm the idle autosave when dirty; any request disarms it. */
+	#scheduleAutosave(): void {
+		this.#clearAutosave();
+		if (!this.#opened || this.#closing || this.#gone || !this.#dirty) return;
+		this.#autosaveTimer = setTimeout(() => {
+			if (this.#active > 0 || this.#closing) return;
+			this.request("save", {}, { timeoutMs: CLOSE_TIMEOUT_MS }).catch(error => {
+				logger.warn(`${this.#backend.label} autosave failed`, { id: this.id, error: errorMessage(error) });
+			});
+		}, AUTOSAVE_IDLE_MS);
+		this.#autosaveTimer.unref();
 	}
 
-	#clearIdleTimers(): void {
+	#clearAutosave(): void {
 		clearTimeout(this.#autosaveTimer);
-		clearTimeout(this.#idleTimer);
 		this.#autosaveTimer = undefined;
-		this.#idleTimer = undefined;
 	}
 
-	/** Close the worker (saving first when `save`), wait for it to exit, then release the lock and unregister. */
+	/** Close the worker (saving first when `save`) and wait for it to exit; the lock is released on exit. */
 	close(options: { save: boolean }): Promise<void> {
 		this.#closing ??= this.#close(options.save);
 		return this.#closing;
@@ -363,39 +534,79 @@ export class DisasmWorker {
 		try {
 			await this.request("close", { save }, { timeoutMs: CLOSE_TIMEOUT_MS });
 			const grace = delay(EXIT_GRACE_MS);
-			const exited = await Promise.race([this.#proc.exited.then(() => true), grace.promise.then(() => false)]);
+			const exited = await Promise.race([this.#exited.then(() => true), grace.promise.then(() => false)]);
 			grace.cancel();
-			if (!exited) await this.#kill();
+			if (!exited) await this.kill();
 		} catch (error) {
-			await this.#kill();
+			await this.kill();
 			throw error;
-		} finally {
-			this.#release();
 		}
 	}
 
-	async #writeFrame(line: string): Promise<void> {
-		const write = Promise.resolve(this.#proc.stdin.write(line));
-		void write.catch(() => {});
-		await Promise.all([write, this.#proc.stdin.flush()]);
+	/** Connect to the worker's listener and authenticate; retries until it listens, exits, or times out. */
+	async #connect(): Promise<IpcConnection> {
+		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
+		for (;;) {
+			if (this.#gone) throw this.#exitError();
+			const conn = await dial(this.#endpoint);
+			if (conn) {
+				if (this.#gone) {
+					conn.destroy();
+					throw this.#exitError();
+				}
+				this.#attach(conn);
+				return conn;
+			}
+			if (Date.now() > deadline) {
+				await this.kill();
+				throw new ToolError(
+					`${this.#backend.label} worker for ${this.id} did not accept a connection within ${CONNECT_TIMEOUT_MS / 1000}s; see ${this.#logPath}`,
+				);
+			}
+			await Bun.sleep(CONNECT_RETRY_MS);
+		}
+	}
+
+	#attach(conn: IpcConnection): void {
+		const closed = Promise.withResolvers<void>();
+		this.#connectionClosed = closed.promise;
+		conn.start(
+			line => this.#onLine(line),
+			reason => {
+				closed.resolve();
+				if (this.#gone) return;
+				// The worker keeps its database across a dropped connection: fail what was in flight
+				// (its answers are lost) and reconnect.
+				logger.warn(`${this.#backend.label} worker connection dropped`, { id: this.id, reason });
+				const error = new ToolError(`${this.#backend.label} worker connection for ${this.id} dropped`);
+				for (const entry of this.#pending.values()) entry.reject(error);
+				this.#pending.clear();
+				this.#connection = this.#connect();
+				this.#connection.catch(() => undefined);
+			},
+		);
+		conn.send(JSON.stringify({ token: this.#token }));
+	}
+
+	async #writeFrame(frame: string): Promise<void> {
+		const conn = await this.#connection;
+		if (!conn.send(frame)) await conn.drained();
 	}
 
 	async #send(method: WorkerMethod, params: object, options: WorkerRequestOptions): Promise<unknown> {
-		if (this.#exitCode !== null) throw this.#exitError();
+		if (this.#gone) throw this.#exitError();
 		const id = this.#nextId++;
 		const response = Promise.withResolvers<unknown>();
 		this.#pending.set(id, response);
 		this.#current = { method, startedAt: Date.now() };
 		try {
 			// Serialize first: a non-serializable request is the caller's error and must not kill the worker.
-			const line = `${JSON.stringify({ id, method, params })}\n`;
+			const frame = JSON.stringify({ id, method, params });
 			try {
-				await this.#writeFrame(line);
+				await this.#writeFrame(frame);
 			} catch (error) {
-				if (this.#exitCode !== null) throw this.#exitError();
-				// A broken stdin pipe is terminal; killing the worker runs the normal exit path and frees the lock.
+				if (this.#gone) throw this.#exitError();
 				this.#pending.delete(id);
-				await this.#kill();
 				throw new ToolError(
 					`Failed to send ${method} to the ${this.#backend.label} worker for ${this.id}: ${errorMessage(error)}`,
 				);
@@ -421,10 +632,10 @@ export class DisasmWorker {
 
 			try {
 				if (process.platform === "win32" || this.#backend.interrupt === "frame") {
-					// Windows has no per-process SIGINT (kill terminates); worker.py reads this frame on its stdin thread.
-					await this.#writeFrame(`${JSON.stringify({ interrupt: id })}\n`);
+					// Windows has no per-process SIGINT (kill terminates); the worker's reader thread handles this frame.
+					await this.#writeFrame(JSON.stringify({ interrupt: id }));
 				} else {
-					this.#proc.kill("SIGINT");
+					process.kill(this.pid, "SIGINT");
 				}
 			} catch {
 				// Already gone: the exit handler rejects the pending response.
@@ -440,7 +651,7 @@ export class DisasmWorker {
 				grace.cancel();
 			}
 			this.#pending.delete(id);
-			await this.#kill();
+			await this.kill();
 			throw new ToolError(
 				`${this.#backend.label} ${method} did not stop after interrupt; worker killed, changes since the last save are lost`,
 			);
@@ -450,102 +661,82 @@ export class DisasmWorker {
 		}
 	}
 
-	async #readStdout(stream: ReadableStream<Uint8Array>): Promise<void> {
-		const decoder = new TextDecoder();
+	#onLine(line: string): void {
+		let frame: unknown;
 		try {
-			for await (const bytes of readLines(stream)) {
-				const line = decoder.decode(bytes).trim();
-				if (!line) continue;
-				let frame: unknown;
-				try {
-					frame = JSON.parse(line);
-				} catch {
-					logger.warn(`${this.#backend.label} worker wrote non-JSON to its protocol stream`, {
-						id: this.id,
-						line: line.slice(0, 200),
-					});
-					continue;
-				}
-				const response = parseWorkerResponse(frame, this.#backend.label);
-				const entry = response ? this.#pending.get(response.id) : undefined;
-				if (!response || !entry) {
-					logger.warn(`${this.#backend.label} worker sent an unmatched response`, {
-						id: this.id,
-						line: line.slice(0, 200),
-					});
-					continue;
-				}
-				this.#pending.delete(response.id);
-				if (response.ok) {
-					if (response.dirty !== undefined) this.#dirty = response.dirty;
-					entry.resolve(response.result);
-				} else {
-					entry.reject(new ToolError(response.message));
-				}
-			}
-		} catch (error) {
-			logger.warn(`${this.#backend.label} worker stdout reader failed`, { id: this.id, error: errorMessage(error) });
-		}
-	}
-
-	async #drainStderr(stream: ReadableStream<Uint8Array>): Promise<void> {
-		const decoder = new TextDecoder();
-		try {
-			for await (const chunk of stream) {
-				this.#appendStderr(decoder.decode(chunk, { stream: true }));
-			}
-			this.#appendStderr(decoder.decode());
-		} catch (error) {
-			logger.debug(`${this.#backend.label} worker stderr reader failed`, {
+			frame = JSON.parse(line);
+		} catch {
+			logger.warn(`${this.#backend.label} worker wrote non-JSON to its protocol socket`, {
 				id: this.id,
-				error: errorMessage(error),
+				line: line.slice(0, 200),
 			});
+			return;
+		}
+		const response = parseWorkerResponse(frame, this.#backend.label);
+		const entry = response ? this.#pending.get(response.id) : undefined;
+		if (!response || !entry) {
+			// Includes late answers to requests a previous daemon incarnation sent.
+			logger.debug(`${this.#backend.label} worker sent an unmatched response`, {
+				id: this.id,
+				line: line.slice(0, 200),
+			});
+			return;
+		}
+		this.#pending.delete(response.id);
+		if (response.ok) {
+			if (response.dirty !== undefined) this.#dirty = response.dirty;
+			entry.resolve(response.result);
+		} else {
+			entry.reject(new ToolError(response.message));
 		}
 	}
 
-	#appendStderr(text: string): void {
-		if (!text) return;
-		// The host's output is the daemon log (`omp ps logs`).
-		process.stderr.write(text);
-		const tail = this.#stderrTail + text;
-		this.#stderrTail = tail.length > STDERR_TAIL_CHARS ? tail.slice(-STDERR_TAIL_CHARS) : tail;
-	}
-
-	async #onExit(code: number): Promise<void> {
+	async #onExit(code: number | null): Promise<void> {
+		this.#gone = true;
 		this.#exitCode = code;
-		this.#clearIdleTimers();
-		if (this.#opened) this.#release();
+		this.#clearAutosave();
+		this.#lock.release();
 		// A response written right before exit (e.g. `close`) must settle before pending requests fail.
 		const drain = delay(STREAM_DRAIN_MS);
-		await Promise.race([this.#streamsDrained, drain.promise]);
+		await Promise.race([this.#connectionClosed, drain.promise]);
 		drain.cancel();
+		this.#logTail = await logTail(this.#logPath);
 		const error = this.#exitError();
 		for (const entry of this.#pending.values()) entry.reject(error);
 		this.#pending.clear();
+		void this.#connection.then(
+			conn => conn.destroy(),
+			() => undefined,
+		);
+		await Promise.all([
+			fs.promises.rm(this.#endpoint, { force: true }),
+			this.#aliasDir ? fs.promises.rm(this.#aliasDir, { recursive: true, force: true }) : undefined,
+		]).catch(error => {
+			logger.warn(`${this.#backend.label} worker cleanup failed`, { id: this.id, error: errorMessage(error) });
+		});
 	}
 
 	#exitError(): ToolError {
-		const tail = this.#stderrTail.trimEnd();
-		const lines = tail ? tail.split("\n").slice(-STDERR_TAIL_LINES).join("\n") : "";
-		return new ToolError(
-			`${this.#backend.label} worker for ${this.id} exited (code ${this.#exitCode})${lines ? `: ${lines}` : ""}`,
-		);
+		const tail = this.#logTail;
+		const code = this.#exitCode === null ? "unknown code" : `code ${this.#exitCode}`;
+		return new ToolError(`${this.#backend.label} worker for ${this.id} exited (${code})${tail ? `: ${tail}` : ""}`);
 	}
 
-	/** SIGKILL the worker and wait for it to exit. */
-	async #kill(): Promise<void> {
-		if (this.#exitCode === null) {
+	/** SIGKILL the worker's session and wait for it to exit. */
+	async kill(): Promise<void> {
+		if (!this.#gone) {
 			try {
-				this.#proc.kill("SIGKILL");
+				if (process.platform === "win32") process.kill(this.pid, "SIGKILL");
+				else process.kill(-this.pid, "SIGKILL");
 			} catch {
-				// Already gone.
+				try {
+					process.kill(this.pid, "SIGKILL");
+				} catch {
+					// Already gone.
+				}
 			}
 		}
-		await this.#proc.exited;
-	}
-
-	#release(): void {
-		this.#lock.release();
+		await this.#exited;
 	}
 }
 

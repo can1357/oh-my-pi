@@ -263,7 +263,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			return interruptedResult();
 		}
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
-		// broker must not turn every wait into an error.
+		// daemon must not turn every wait into an error.
 		if (cfgLaunchEnabled.get(this.session.settings)) {
 			try {
 				await listServicesTolerant(this.session, signal);

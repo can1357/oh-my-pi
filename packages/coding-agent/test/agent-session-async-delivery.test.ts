@@ -14,10 +14,10 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { DaemonCompletionEvent } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
-import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -1031,13 +1031,18 @@ describe("AgentSession owner-routed async delivery", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 		});
 		const completion = {
-			event: "daemon-completed",
+			ev: "completed",
 			completionId: "advisor-completion",
 			owner,
-			daemon: {
-				name: "advisor-worker",
-				id: "daemon-id",
+			unit: {
+				id: "unit-id",
+				kind: "proc",
+				scope: { kind: "session", id: sessionManager.getSessionId() },
+				key: "advisor-worker",
+				label: "advisor-worker",
+				generation: "generation-1",
 				state: "exited",
+				pids: [],
 				createdAt: 1,
 				startedAt: 1,
 				exitedAt: 2,
@@ -1045,10 +1050,11 @@ describe("AgentSession owner-routed async delivery", () => {
 				restartCount: 0,
 				outputBytes: 0,
 				owner,
-				persist: false,
-				detached: false,
+				leases: 0,
+				policy: { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "exec" },
+				supervised: true,
 			},
-		} satisfies DaemonCompletionNotification;
+		} satisfies DaemonCompletionEvent;
 
 		await session.queueLaunchCompletion(completion);
 		await session.waitForIdle();
