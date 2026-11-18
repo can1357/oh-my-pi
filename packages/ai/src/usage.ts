@@ -391,6 +391,8 @@ export interface UsageCredential {
 	activeOrganizationId?: string;
 	metadata?: Record<string, unknown>;
 	apiEndpoint?: string;
+	/** Kiro profile ARN the login routes by (see OAuthCredentials.kiroProfileArn). */
+	kiroProfileArn?: string;
 }
 
 /** Parameters provided to a usage fetcher. */
