@@ -163,6 +163,14 @@ class FakeAgy implements AgyTransport {
 			update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
 		});
 	}
+
+	thinking(text: string): void {
+		this.options.onUpdate({
+			sessionId: this.currentId,
+			update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text } },
+		});
+	}
+
 	call(name = "read", args: Record<string, unknown> = { path: "a.txt" }, id = this.currentId): Promise<McpToolOutput> {
 		this.options.onUpdate({
 			sessionId: id,
@@ -329,6 +337,28 @@ describe("AgyHost stateful steps", () => {
 		continuation.response.resolve({ stopReason: "end_turn" });
 		await next.done;
 		expect(next.writer.output.stopReason).toBe("stop");
+	});
+	it("reports an empty max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([]);
+	});
+
+	it("reports a thinking-only max_turn_requests stop as length", async () => {
+		const state = await fixture();
+		const run = step(state.host, [user("count to one hundred")]);
+		const fake = await state.started.next();
+		const prompt = await fake.prompts.next();
+		fake.thinking("still thinking");
+		prompt.response.resolve({ stopReason: "max_turn_requests" });
+		await run.done;
+		expect(run.writer.output.stopReason).toBe("length");
+		expect(run.writer.output.content).toEqual([{ type: "thinking", thinking: "still thinking" }]);
 	});
 	it("keeps an end_turn stop as a normal stop", async () => {
 		const state = await fixture();

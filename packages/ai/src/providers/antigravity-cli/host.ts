@@ -734,7 +734,9 @@ export class AgyHost implements ProviderSessionState {
 			return;
 		}
 		const writer = step.writer;
+		const truncated = response.stopReason === "max_tokens" || response.stopReason === "max_turn_requests";
 		if (
+			!truncated &&
 			!writer.output.content.some(
 				block => (block.type === "text" && block.text.trim().length > 0) || block.type === "toolCall",
 			)
@@ -752,7 +754,6 @@ export class AgyHost implements ProviderSessionState {
 				logger.debug("Antigravity CLI has no durable turn checkpoint; live continuation remains available");
 			}
 		}
-		const truncated = response.stopReason === "max_tokens" || response.stopReason === "max_turn_requests";
 		writer.finish(truncated ? "length" : "stop", {
 			type: "antigravityCli",
 			conversationId: turn.conversationId,
