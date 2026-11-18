@@ -100,16 +100,24 @@ on a Linux PTY). Every proof in `crates/e2e/tests` is gated in CI: P1-P12, P14 a
 `tool_sources` (P13 is not, and is the one gap) (`ci.yml` says which job runs which; keep it and `just e2e` in
 step). P12 needs Seatbelt, so it gates on the macOS job: it skips off macOS,
 and on macOS a failed Seatbelt probe fails it.
+CI job selection uses `.github/ci-job-paths.json` and `scripts/ci_scope.py`:
+complete PR files and safe push endpoint diffs select declared consumers;
+unknown/incomplete inputs stay conservative. Required contexts remain declared.
+Manual/merge-group runs stay complete. CodeQL selects push analysis by language,
+and P8 selects push recordings by platform; their scheduled/manual runs stay full.
+See `docs/research/ci-job-scopes.md`. This does not reverse macOS runner priority.
 P8 remains a non-gating recorder: only its metric schema/arithmetic test
-gates. The measured performance baseline is recorded per omp2 push by
+gates. The measured performance baseline is recorded for relevant omp2 pushes by
 `.github/workflows/p8-baseline.yml` (non-gating, artifact named by commit),
 never in a PR. Native CI defaults to standard GitHub-hosted `ubuntu-24.04` or
-`macos-15`. The two required macOS jobs can opt into hosted-first Ubuntu
-controllers using `CI_MACOS_WORKER_REF` plus immutable `CI_MACOS_WORKER_SHA`;
-external PRs stay direct-hosted. Mac fallback additionally requires explicit
-accepted trust, a reviewed parent-workflow digest and confirmed runner labels;
-see `docs/research/ci-macos-queue-fallback/implementation.md`. It is disabled by
-default; never repurpose `MACOS_RUNNER` to enable it. Manual packaging remains
+`macos-15`. The two required macOS jobs use hosted-first Ubuntu controllers for
+eligible same-repository omp2 requests, including CI changes. Admission/transport
+is pinned by workflow `CI_MACOS_WORKER_REF`/`CI_MACOS_WORKER_SHA`; native actions
+and commands come from the exact admitted source. Owner-only fallback defaults
+to the existing Mac's labels/trust; `CI_MACOS_FALLBACK_ENABLED=false` disables it.
+External PRs stay direct-hosted. See
+`docs/research/ci-macos-queue-fallback/source-bound.md`; never repurpose
+`MACOS_RUNNER` to enable it. Manual packaging remains
 hosted. The BuildBuddy-capable `lintx_ratchet`, `runtime_spec`,
 `remote_linux` and `remote_seed` jobs retain their existing variable-based
 launcher routing, fork protections, keys and remote execution; BuildBuddy caches

@@ -18,18 +18,19 @@ permissions:
 jobs:
   native:
     name: Native macOS objective
-    runs-on: ${{ inputs.pool == 'self-hosted' && fromJSON(vars.CI_MACOS_FALLBACK_LABELS || '["macos-15"]') || 'macos-15' }}
+    runs-on: ${{ inputs.pool == 'self-hosted' && fromJSON(vars.CI_MACOS_FALLBACK_LABELS || '["self-hosted","macOS","ARM64"]') || 'macos-15' }}
     timeout-minutes: ${{ fromJSON(inputs.request_json).objective == 'rust' && 120 || 45 }}
     env:
       REQUEST_JSON: ${{ inputs.request_json }}
       GH_TOKEN: ${{ github.token }}
       CI_MACOS_POOL: ${{ inputs.pool }}
       CI_MACOS_WORKER_REF: ${{ vars.CI_MACOS_WORKER_REF }}
-      CI_MACOS_WORKER_SHA: ${{ vars.CI_MACOS_WORKER_SHA }}
+      CI_MACOS_WORKER_SHA: ${{ github.workflow_sha }}
+      CI_MACOS_CONTROL_POLICY: source-bound
       CI_MACOS_PARENT_WORKFLOW_SHA256: ${{ vars.CI_MACOS_PARENT_WORKFLOW_SHA256 }}
-      CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED }}
-      CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST }}
-      CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS }}
+      CI_MACOS_FALLBACK_ENABLED: ${{ vars.CI_MACOS_FALLBACK_ENABLED || 'true' }}
+      CI_MACOS_FALLBACK_TRUST: ${{ vars.CI_MACOS_FALLBACK_TRUST || 'repository-writers' }}
+      CI_MACOS_FALLBACK_LABELS: ${{ vars.CI_MACOS_FALLBACK_LABELS || '["self-hosted","macOS","ARM64"]' }}
       SCCACHE_GHA_ENABLED: 'true'
       RUSTC_WRAPPER: sccache
       CARGO_INCREMENTAL: '0'
@@ -50,14 +51,19 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ steps.admit.outputs.source_sha }}
-          path: .ci-source
+          persist-credentials: false
+      - name: Restore pinned admission control separately
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci-control
           persist-credentials: false
       - name: Run native objective
         uses: ./.github/actions/macos-native-objective
         with:
           objective: ${{ fromJSON(inputs.request_json).objective }}
-          source-directory: .ci-source
-          control-directory: .
+          source-directory: .
+          control-directory: .ci-control
           guarded: 'true'
           min-free-gb: ${{ vars.CI_MIN_FREE_GB || '60' }}
       - name: Upload settled native result

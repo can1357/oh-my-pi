@@ -136,6 +136,7 @@ class ProtocolTests(unittest.TestCase):
         api = FakeAPI({f"repos/{req['repository']}/contents/.github/workflows/ci.yml?ref={req['source_sha']}": {
             "content": base64.b64encode(code).decode(), "encoding": "base64"}})
         env = {"CI_MACOS_FALLBACK_ENABLED": "true", "CI_MACOS_FALLBACK_TRUST": "repository-writers",
+               "CI_MACOS_CONTROL_POLICY": "",
                "CI_MACOS_PARENT_WORKFLOW_SHA256": hashlib.sha256(code).hexdigest()}
         with patch.dict(os.environ, env):
             common.verify_mac_configuration(api, req)
@@ -151,6 +152,27 @@ class ProtocolTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(common.VerificationError):
                 common.resolve_worker_ref(FakeAPI({}), "blyzer/oh-my-pi", name)
 
+    def test_source_bound_policy_admits_changed_workflow_only_for_current_owner_source(self):
+        req = request()
+        env = {"CI_MACOS_FALLBACK_ENABLED": "true", "CI_MACOS_FALLBACK_TRUST": "repository-writers",
+               "CI_MACOS_CONTROL_POLICY": "source-bound", "CI_MACOS_PARENT_WORKFLOW_SHA256": "outdated"}
+        data = observations(req)
+        with patch.dict(os.environ, env):
+            common.verify_mac_configuration(FakeAPI(data), req)
+            for mutation in ("actor", "triggering_actor", "fork", "stale", "cancelled"):
+                bad = copy.deepcopy(data)
+                run = bad["repos/blyzer/oh-my-pi/actions/runs/20"]
+                if mutation in ("actor", "triggering_actor"):
+                    run[mutation]["login"] = "someone-else"
+                elif mutation == "fork":
+                    run["head_repository"]["full_name"] = "outside/fork"
+                elif mutation == "stale":
+                    bad["repos/blyzer/oh-my-pi/pulls/42"]["head"]["sha"] = "0" * 40
+                else:
+                    run["status"] = "completed"
+                with self.subTest(mutation=mutation), self.assertRaises(common.VerificationError):
+                    common.verify_mac_configuration(FakeAPI(bad), req)
+
     def test_artifact_redirect_does_not_forward_the_job_token(self):
         calls = []
         class Opener:
@@ -163,6 +185,9 @@ class ProtocolTests(unittest.TestCase):
         api.opener = Opener()
         self.assertEqual(api.get_bytes("repos/blyzer/oh-my-pi/actions/artifacts/1/zip"), b"zip bytes")
         self.assertIsNotNone(calls[0].get_header("Authorization"))
+        # The newer API removes merge_commit_sha; source fences depend on the
+        # explicit stable contract, not the server's default version.
+        self.assertEqual(calls[0].get_header("X-github-api-version"), "2022-11-28")
         self.assertIsNone(calls[1].get_header("Authorization"))
 
     def test_only_safe_reads_retry_and_honor_retry_budget(self):

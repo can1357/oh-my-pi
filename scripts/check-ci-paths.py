@@ -3,17 +3,13 @@
 
 CI is one workflow, ci.yml. A pull request is never filtered out of it by a
 path filter (a filtered workflow reports nothing, so its required checks stay
-pending). Instead the `changes` job matches the pull request's files against
-.github/ci-paths.txt and the other jobs skip themselves, which a required check
-counts as passing. This script verifies the pieces that must agree:
+pending). Instead the `changes` job delegates to scripts/ci_scope.py and its
+.github/ci-job-paths.json policy. Each scoped job uses its own fail-closed gate.
+This script checks those declarations, unfiltered push/PR triggers and the
+merge-group trigger. Event diff and full fallback behavior is tested directly
+in test_ci_scope.py. The historical text path lists are not policy inputs.
 
-* ci.yml's `push.paths` list equals .github/ci-paths.txt;
-* every path in .github/ci-rust-paths.txt (the paths that run the heavy Rust jobs on
-  a pull request) is also in .github/ci-paths.txt, and exactly the jobs in RUST_JOBS
-  gate on the `rust` output of the `changes` job, never on `ci` alone;
-* ci.yml's `pull_request` trigger carries no `paths` or `paths-ignore` filter;
-* ci.yml triggers on `merge_group` (`checks_requested`), and its `changes` job runs everything
-  when the event has no pull request number, so a merge queue gets every required check;
+It also checks:
 * every required status check in .github/rulesets/omp2-protected.json is the
   `name:` of a job in ci.yml, because a required check is matched by name;
 * in every workflow a pull request can start, a job whose `runs-on` could name
@@ -33,9 +29,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CI = ROOT / ".github/workflows/ci.yml"
-PATHS = ROOT / ".github/ci-paths.txt"
-RUST_PATHS = ROOT / ".github/ci-rust-paths.txt"
-RUST_JOBS = {"rust", "lint_macos", "lint_linux", "p9_p10_linux", "p7_linux", "remote_linux", "affected"}
+SCOPED_JOBS = {
+    "format", "protobuf", "lintx_ratchet", "runtime_spec", "extensions_conformance",
+    "licenses", "rust", "lint_macos", "lint_linux", "p9_p10_linux", "p7_linux",
+    "remote_linux", "affected",
+}
 RULESET = ROOT / ".github/rulesets/omp2-protected.json"
 WORKFLOWS = ROOT / ".github/workflows"
 TRUST_ACTION = ROOT / ".github/actions/buildbuddy-remote/action.yml"
@@ -52,7 +50,7 @@ HOSTED = r"(?:ubuntu|macos|windows)-[0-9A-Za-z.-]+"
 # This expression can select only standard hosted labels; it never accepts a
 # runner label from a variable. Keep the event boundary explicit and audited.
 MACOS_ELIGIBLE = (
-    "vars.CI_MACOS_WORKER_REF != '' && vars.CI_MACOS_WORKER_SHA != '' && "
+    "github.repository == 'blyzer/oh-my-pi' && "
     "((github.event_name == 'pull_request' && "
     "github.event.pull_request.head.repo.full_name == github.repository && github.base_ref == 'omp2') || "
     "(github.event_name == 'push' && github.ref == 'refs/heads/omp2') || "
@@ -198,57 +196,37 @@ def main() -> int:
     on = block(ci, "on", 0)
     ok = True
 
-    push = [
-        unquote(line.strip()[2:])
-        for line in block(block(on, "push", 2), "paths", 4)
-        if line.strip().startswith("- ")
-    ]
-    listed = [
-        line.strip()
-        for line in PATHS.read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    if not push or not listed:
-        print("could not read the path lists", file=sys.stderr)
-        return 1
-    if set(push) != set(listed):
-        ok = False
-        for item in sorted(set(push) - set(listed)):
-            print(f"in ci.yml push.paths but not .github/ci-paths.txt: {item}")
-        for item in sorted(set(listed) - set(push)):
-            print(f"in .github/ci-paths.txt but not ci.yml push.paths: {item}")
-
-    rust_listed = [
-        line.strip()
-        for line in RUST_PATHS.read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    if not rust_listed:
-        print("could not read .github/ci-rust-paths.txt", file=sys.stderr)
-        return 1
-    for item in sorted(set(rust_listed) - set(listed)):
-        ok = False
-        print(f"in .github/ci-rust-paths.txt but not .github/ci-paths.txt: {item}")
-
     jobs = block(ci, "jobs", 0)
     job_ids = [m.group(1) for line in jobs if (m := re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line))]
-    for name in sorted(RUST_JOBS - set(job_ids)):
+    for name in sorted(SCOPED_JOBS - set(job_ids)):
         ok = False
-        print(f"RUST_JOBS names a job that is not in ci.yml: {name}")
-    for name in job_ids:
-        gated = "needs.changes.outputs.rust" in "\n".join(block(jobs, name, 2))
-        if name in RUST_JOBS and not gated:
+        print(f"SCOPED_JOBS names a job that is not in ci.yml: {name}")
+    changes = block(jobs, "changes", 2)
+    outputs = "\n".join(block(changes, "outputs", 4))
+    for name in sorted(SCOPED_JOBS):
+        gate = "\n".join(line for line in block(jobs, name, 2) if line.startswith("    if:"))
+        scopes = set(re.findall(r"needs\.changes\.outputs\.([A-Za-z0-9_]+)\b", gate))
+        if scopes != {name} or f"needs.changes.outputs.{name} != 'false'" not in gate or "!cancelled()" not in gate:
             ok = False
-            print(f"job {name} runs heavy Rust work but does not gate on needs.changes.outputs.rust")
-        if name not in RUST_JOBS and gated:
+            print(f"job {name} must fail closed with !cancelled() and its own needs.changes.outputs.{name} != 'false' gate")
+    for name in sorted(SCOPED_JOBS | {"ci", "format_rust", "macos_controls"}):
+        if not re.search(r"^      " + re.escape(name) + r": \$\{\{ steps\.paths\.outputs\." + re.escape(name) + r" \}\}$", outputs, re.M):
             ok = False
-            print(f"job {name} gates on the rust output but is not in RUST_JOBS")
+            print(f"changes must declare the {name} scope output from steps.paths.outputs.{name}")
 
-    pull_request = block(on, "pull_request", 2)
-    for key in ("paths", "paths-ignore"):
-        if block(pull_request, key, 4):
+    format_job = "\n".join(block(jobs, "format", 2))
+    for step in ("Select pinned Rust toolchain", "Check formatting"):
+        pattern = (r"^      - name: " + re.escape(step) +
+                   r"\n        if: needs\.changes\.outputs\.format_rust != 'false'$")
+        if not re.search(pattern, format_job, re.M):
             ok = False
-            print(f"ci.yml pull_request must not filter on `{key}`: required checks would stay pending")
+            print(f"format step {step!r} must use the fail-closed format_rust gate")
+
+    for event in ("pull_request", "push"):
+        for line in block(on, event, 2):
+            if re.match(r"^    paths(?:-ignore)?:", line):
+                ok = False
+                print(f"ci.yml {event} must not filter paths: required checks would stay pending")
 
     affected_gate = "\n".join(line for line in block(jobs, "affected", 2) if line.startswith("    if:"))
     for needle in ("vars.CI_AFFECTED_ONLY == 'true'", "github.event_name == 'pull_request'"):
@@ -260,10 +238,13 @@ def main() -> int:
         ok = False
         print("ci.yml must trigger on merge_group with types: [checks_requested]: a merge queue waits for every required check")
     changes_job = "\n".join(block(jobs, "changes", 2))
-    for needle in ('[ -z "$PULL_REQUEST" ]', 'echo "ci=true"', 'echo "rust=true"'):
+    for needle in ('python3 scripts/ci_scope.py --workflow ci --github-output "$GITHUB_OUTPUT"',):
         if needle not in changes_job:
             ok = False
-            print(f"the changes job must run everything when there is no pull request number: missing {needle}")
+            print(f"the changes job must delegate PR/push diffs and manual/merge-group full fallback to the selector: missing {needle}")
+    if not (ROOT / 'scripts/ci_scope.py').is_file() or not (ROOT / '.github/ci-job-paths.json').is_file():
+        ok = False
+        print("the changes selector and .github/ci-job-paths.json must exist")
 
     objective = (ROOT / 'scripts/ci-macos-objective.sh').read_text()
     for needle in ('"${AFFECTED_SCOPE:-full}" != subset', '"${AFFECTED_SCOPE:-full}" != none', '"${MACOS_WORKER:-false}" != true'):
@@ -290,7 +271,7 @@ def main() -> int:
 
     if ok:
         print(
-            f"ok: {len(listed)} paths match, {len(required)} required checks are ci.yml jobs, "
+            f"ok: {len(SCOPED_JOBS)} job scopes checked, {len(required)} required checks are ci.yml jobs, "
             f"{guarded} self-hosted-capable runs-on route forks to a hosted runner"
         )
         return 0

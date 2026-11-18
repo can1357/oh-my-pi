@@ -58,7 +58,7 @@ runs:
         control="$GITHUB_WORKSPACE/$CONTROL_DIRECTORY"
         if [ "$GUARDED" = true ]; then
           export MACOS_WORKER=true
-          python3 "$control/scripts/macos_worker_guard.py" run --request-file "$RUNNER_TEMP/macos-request.json" --result-file "$RUNNER_TEMP/macos-result.json" -- python3 "$control/scripts/macos_worker_state.py" -- bash "$control/scripts/ci-macos-objective.sh" "$OBJECTIVE"
+          python3 "$control/scripts/macos_worker_guard.py" run --request-file "$RUNNER_TEMP/macos-request.json" --result-file "$RUNNER_TEMP/macos-result.json" -- python3 scripts/macos_worker_state.py -- bash scripts/ci-macos-objective.sh "$OBJECTIVE"
         else
           bash "$control/scripts/ci-macos-objective.sh" "$OBJECTIVE"
         fi
