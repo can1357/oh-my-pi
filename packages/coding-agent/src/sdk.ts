@@ -2764,6 +2764,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			emitBeforeSubagentSpawn: (event, signal) =>
 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
+			openAsyncNotify: job => session?.openAsyncNotify(job) ?? (() => {}),
+			queueServiceNotify: entry => session?.queueServiceNotify(entry),
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
@@ -5272,6 +5274,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
+			// An advisor's job or service is not the primary's: its matches have no transcript to land in.
+			openAsyncNotify: undefined,
+			queueServiceNotify: undefined,
 			getAgentId: () => advisorAgent.id,
 			// The primary's availability signals are wrong for advisors: their tool
 			// slate is filtered separately at runtime (default read/grep/glob, no

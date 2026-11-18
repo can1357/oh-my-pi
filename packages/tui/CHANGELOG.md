@@ -7,6 +7,7 @@
 ### Added
 
 - `ui.loop-blocked` log records now name what held the event loop (`cause`, `causeShare`, `top`), sampled by an always-on profiler; `PI_LOOP_SAMPLER=0` turns it off
+- Added the `async-notify` transcript block, which shows the output lines a running background job or service reported
 
 ### Changed
 

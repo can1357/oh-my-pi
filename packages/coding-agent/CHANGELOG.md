@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `notify` to the `bash` tool: a regex whose matching output lines are reported to the agent while a background command or a named service runs, waking an idle session or ending a blocked `wait`; the command's result or the service's exit notice still follows
+
 ### Fixed
 
 - Fixed the Spotlight experiment re-asking Stencil Cloud on every tool call for an account without Cloud access (waitlisted): omp now warns once and pauses Spotlight for that account for a few hours, honors `Retry-After` on rate limits and outages, and sends its `omp/<version>` User-Agent on every Spotlight request
