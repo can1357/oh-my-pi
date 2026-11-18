@@ -3,6 +3,52 @@ var EXTENSION_RELOAD_PROTOCOL_VERSION = 1;
 var FOREIGN_FRAME_REFUSAL = /chrome-extension:\/\/ URL of different extension/i;
 var DOWNLOADS_PROTOCOL_VERSION = 1;
 
+// ../coding-agent/src/tools/browser/relay/orphan-sweep.ts
+var DEFAULT_TIMERS = {
+  setTimeout: (run, ms) => setTimeout(run, ms),
+  clearTimeout: (handle) => clearTimeout(handle)
+};
+var ORPHAN_SWEEP_GRACE_MS = 15000;
+
+class OrphanSweep {
+  #sweep;
+  #timers;
+  #graceMs;
+  #timer = null;
+  #generation = 0;
+  constructor(sweep, graceMs = ORPHAN_SWEEP_GRACE_MS, timers = DEFAULT_TIMERS) {
+    this.#sweep = sweep;
+    this.#graceMs = graceMs;
+    this.#timers = timers;
+  }
+  connected() {
+    this.#generation++;
+    this.#clear();
+  }
+  disconnected() {
+    if (this.#timer !== null)
+      return;
+    const generation = this.#generation;
+    this.#timer = this.#timers.setTimeout(() => {
+      this.#timer = null;
+      if (generation !== this.#generation)
+        return;
+      this.#sweep();
+    }, this.#graceMs);
+  }
+  async suspend() {
+    this.#generation++;
+    this.#clear();
+    await this.#sweep();
+  }
+  #clear() {
+    if (this.#timer === null)
+      return;
+    this.#timers.clearTimeout(this.#timer);
+    this.#timer = null;
+  }
+}
+
 // extension/debugger-ownership.ts
 async function ownedDebuggerTabs(targets, probe) {
   const owned = await Promise.all(targets.map(async (target) => {
@@ -452,6 +498,7 @@ async function connect() {
   const socket = new WebSocket(url);
   ws = socket;
   socket.onopen = () => {
+    orphanSweep.connected();
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
     buildHello().then((hello) => post(hello));
@@ -472,12 +519,34 @@ async function connect() {
     }
     setBadge(false);
     restoreGroups();
+    orphanSweep.disconnected();
     scheduleReconnect();
   };
   socket.onerror = () => {
     socket.close();
   };
 }
+async function sweepOrphanedAttachments() {
+  if (ws?.readyState === WebSocket.OPEN)
+    return;
+  let targets;
+  try {
+    targets = await chrome.debugger.getTargets();
+  } catch {
+    return;
+  }
+  const owned = await ownedDebuggerTabs(targets, (tabId) => chrome.debugger.sendCommand({ tabId }, "Target.getTargetInfo"));
+  await Promise.allSettled(owned.map(async (tabId) => {
+    relayInitiatedDetachTabs.add(tabId);
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch (error) {
+      relayInitiatedDetachTabs.delete(tabId);
+      throw error;
+    }
+  }));
+}
+var orphanSweep = new OrphanSweep(sweepOrphanedAttachments);
 var downloads = new DownloadPairing;
 chrome.downloads.onCreated.addListener((item) => downloads.created(item.id, item.finalUrl));
 chrome.downloads.onChanged.addListener((delta) => {
@@ -534,4 +603,5 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
 chrome.runtime.onInstalled.addListener(() => void connect());
 chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onSuspend.addListener(() => void orphanSweep.suspend());
 connect();

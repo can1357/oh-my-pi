@@ -149,5 +149,7 @@ declare const chrome: {
 		openOptionsPage(): Promise<void>;
 		onInstalled: ChromeEvent<() => void>;
 		onStartup: ChromeEvent<() => void>;
+		/** Runs as the worker is torn down (idle reap or browser shutdown). */
+		onSuspend: ChromeEvent<() => void>;
 	};
 };

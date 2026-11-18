@@ -21,7 +21,7 @@ import { expandPath } from "../path-utils";
 import { CELL_BUDGET_SLACK_MS } from "../run-scope";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { gracefulKillTreeOnce, isChromiumBrowserExecutable, pickElectronTarget } from "./attach";
+import { gracefulKillTreeOnce, isChromiumBrowserExecutable, pickElectronTarget, pickRelayTargetId } from "./attach";
 import type * as Cmux from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { browserConnection, DEFAULT_VIEWPORT } from "./launch";
@@ -2301,10 +2301,17 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
 	let page: AttachPage;
-	if (browser.kind.kind === "relay" && !opts.target) {
-		// A relay open without a target gets its own background tab, leaving the user's
-		// selected tab alone, in the browser of the tab omp used last on this relay.
-		page = { kind: "create", nearTargetId: lastUsedTargetOn(browser) };
+	if (browser.kind.kind === "relay") {
+		// Relay tabs are chosen from the relay's `/json` metadata: attaching each candidate to enumerate it
+		// would raise Chrome's debugger infobar on tabs omp never uses. The tab worker attaches the one it claims.
+		page = opts.target
+			? {
+					kind: "borrowed",
+					targetId: await pickRelayTargetId(browser.kind.cdpUrl, { matcher: opts.target, signal: opts.signal }),
+				}
+			: // A relay open without a target gets its own background tab, leaving the user's selected tab
+				// alone, in the browser of the tab omp used last on this relay.
+				{ kind: "create", nearTargetId: lastUsedTargetOn(browser) };
 	} else if (browser.kind.kind === "spawned" && !opts.target && isChromiumBrowserExecutable(browser.kind.path)) {
 		// A dedicated Chrome profile can start with no pages; never navigate its
 		// welcome tab (or another user's tab on a reused endpoint).
@@ -2315,7 +2322,6 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		const picked = await pickElectronTarget(browser.browser, {
 			matcher: opts.target,
 			preferVisible: userDriven && !opts.target,
-			relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
 			signal: opts.signal,
 		});
 		page = { kind: "borrowed", targetId: await targetIdForPage(picked) };

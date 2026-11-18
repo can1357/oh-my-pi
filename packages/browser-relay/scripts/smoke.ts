@@ -31,33 +31,33 @@ step("supervisor: connect via browserURL");
 const supervisor = await puppeteer.connect({ browserURL: relayUrl, defaultViewport: null, protocolTimeout: 20_000 });
 console.log("version:", await supervisor.version());
 
-step("supervisor: discover targets");
-const pages = (
-	await Promise.all(
-		supervisor
-			.targets()
-			.map(async target => (String(target.type()) === "page" ? await target.page().catch(() => null) : null)),
-	)
-).filter(page => page !== null);
+step("supervisor: pick a tab from the relay's /json metadata");
+// The supervisor must not attach tabs: Chrome shows its debugger infobar for every attachment.
+// A tab worker claims the chosen tab, and the relay attaches only claimed tabs.
+const entries = (await (await fetch(`${relayUrl.replace(/\/+$/, "")}/json/list`)).json()) as Array<{
+	id: string;
+	type?: string;
+	title?: string;
+	url: string;
+}>;
 console.log(
 	"pages:",
-	pages.map(page => page.url()),
+	entries.map(entry => entry.url),
 );
-if (pages.length === 0) throw new Error("no page targets discovered");
-
-let picked = null;
-for (const page of pages) {
-	const title = await page.title().catch(() => "");
-	if (page.url().includes(matcher) || title.includes(matcher)) picked = page;
-}
+const picked = entries.find(
+	entry =>
+		(entry.type === undefined || entry.type === "page") &&
+		(entry.url.includes(matcher) || (entry.title ?? "").includes(matcher)),
+);
 if (!picked) throw new Error(`no page matching ${JSON.stringify(matcher)}`);
-const targetId = targetIdOf(picked.target());
-const wsEndpoint = supervisor.wsEndpoint();
-console.log("picked target:", targetId, "ws:", wsEndpoint);
+const targetId = picked.id;
+const wsEndpoint = new URL(supervisor.wsEndpoint());
+wsEndpoint.searchParams.set("claim", targetId);
+console.log("picked target:", targetId, "ws:", wsEndpoint.toString());
 
 step("worker: second connection via browserWSEndpoint");
 const worker = await puppeteer.connect({
-	browserWSEndpoint: wsEndpoint,
+	browserWSEndpoint: wsEndpoint.toString(),
 	defaultViewport: null,
 	protocolTimeout: 20_000,
 });
